@@ -1610,6 +1610,7 @@ describe('isTool', () => {
     const resumeOptions = {
       [approvalResumeSymbol]: {
         approvedAction: paused.action,
+        approvedPolicyPauseTier: 'tool' as const,
         proposedArguments: toolCall.arguments,
         reason: paused.pendingApproval.reason,
         satisfiedPauses: [],

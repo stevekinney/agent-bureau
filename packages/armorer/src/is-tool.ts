@@ -6,6 +6,7 @@ import type { ToolErrorCategory } from './core/errors';
 import type { JsonObject } from './core/serialization/json';
 import type { ToolAvailabilityHook, ToolDefinition } from './core/tool-definition';
 import type { ToolEventMap } from './events';
+import type { EffectiveToolExecutionContext, ToolRequestContext } from './execution-context';
 import type { ExecutionHandle, ExecutionLifecycle } from './execution-lifecycle';
 import { policyPauseDecisionsSymbol, policyPauseTierSymbol } from './internal/approval-resume';
 import type { PolicyPauseTier, ToolCall, ToolExecutionResult } from './types';
@@ -98,6 +99,8 @@ export type ToolMetadata = JsonObject & {
 };
 
 export type ToolPolicyDecision = {
+  /** A policy may only reduce the caller's capabilities. */
+  capabilities?: readonly string[];
   [policyPauseDecisionsSymbol]?: readonly ToolPolicyDecision[];
   [policyPauseTierSymbol]?: PolicyPauseTier;
   /**
@@ -283,6 +286,8 @@ export type ToolElicitationRequester = (
  * Context passed to tool execute functions.
  */
 export interface RuntimeToolContext extends CoreToolContext {
+  requestContext?: Readonly<ToolRequestContext>;
+  effectiveContext?: Readonly<EffectiveToolExecutionContext>;
   dispatch: (event: Event) => boolean;
   meta?: { toolName: string; callId?: string };
   toolCall: ToolCallWithArguments;
@@ -301,6 +306,8 @@ export interface RuntimeToolContext extends CoreToolContext {
 export type ToolContext<_E extends ToolEventsMap = DefaultToolEvents> = RuntimeToolContext;
 
 export interface ToolExecuteOptions {
+  requestContext?: ToolRequestContext;
+  effectiveContext?: EffectiveToolExecutionContext;
   clearTimeoutFunction?: ClearScheduledTimeout;
   durableOperationKey?: string;
   now?: () => number;

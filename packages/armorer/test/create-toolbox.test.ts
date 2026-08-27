@@ -4,6 +4,7 @@ import { z } from 'zod';
 
 import {
   createMiddleware,
+  createProcessLocalApprovalStateStore,
   createTool,
   createToolbox,
   createToolCall,
@@ -29,6 +30,21 @@ const makeConfiguration = (overrides?: Partial<ToolConfiguration>): ToolConfigur
   },
   ...overrides,
 });
+
+const approvalRequestContext = {
+  authority: {
+    principalId: 'principal-a',
+    tenantId: 'tenant-a',
+    ownerId: 'owner-a',
+    capabilities: ['tools:execute'],
+    authorizationRevision: 'authorization:1',
+  },
+  audience: 'tenant' as const,
+  agentId: 'agent-a',
+  runId: 'run-a',
+};
+
+const approvalExecutionOptions = { requestContext: approvalRequestContext };
 
 describe('createToolbox', () => {
   it('hydrates from serialized configurations and executes tools', async () => {
@@ -323,18 +339,22 @@ describe('createToolbox', () => {
 
     const toolbox = createChargeToolbox('test-secret');
 
-    const paused = await toolbox.execute({
-      id: 'tool-call-1',
-      name: 'charge-card',
-      arguments: { cents: 100 },
-    });
+    const paused = await toolbox.execute(
+      {
+        id: 'tool-call-1',
+        name: 'charge-card',
+        arguments: { cents: 100 },
+      },
+      approvalExecutionOptions,
+    );
 
     expect(paused.outcome).toBe('action_required');
-    expect(paused.pendingApproval).toEqual({
+    const { approvalToken, ...approvalDescriptor } = paused.pendingApproval!;
+    expect(typeof approvalToken).toBe('string');
+    expect(approvalDescriptor).toMatchObject({
       callId: 'tool-call-1',
       toolName: 'charge-card',
       arguments: { cents: 100 },
-      approvalToken: expect.any(String),
       action: {
         type: 'approval',
         message: 'Approve charge',
@@ -342,9 +362,20 @@ describe('createToolbox', () => {
       reason: 'Operator approval required',
       metadata: { mutates: true },
       policyPauseTier: 'registry',
+      approvalBinding: {
+        version: 1,
+        principalId: 'principal-a',
+        tenantId: 'tenant-a',
+        runId: 'run-a',
+      },
     });
     expect(Object.hasOwn(paused.pendingApproval!.action, 'schema')).toBe(false);
-    expect(JSON.parse(JSON.stringify(paused.pendingApproval))).toEqual(paused.pendingApproval);
+    const serializedApproval = JSON.parse(JSON.stringify(paused.pendingApproval)) as Record<
+      string,
+      unknown
+    >;
+    expect(serializedApproval['approvalToken']).toBe(approvalToken);
+    expect(serializedApproval['approvalBinding']).toEqual(paused.pendingApproval?.approvalBinding);
     const signedApproval = paused.pendingApproval as SignedPendingToolApproval;
 
     expect(() =>
@@ -413,34 +444,41 @@ describe('createToolbox', () => {
 
     const unconfirmedEdit = await toolbox.resumeApproval(signedApproval, {
       arguments: { cents: 125 },
+      ...approvalExecutionOptions,
     });
 
     expect(unconfirmedEdit.outcome).toBe('action_required');
     expect(unconfirmedEdit.pendingApproval?.approvalToken).toEqual(expect.any(String));
     expect(charges).toEqual([]);
 
-    const resumed = await toolbox.resumeApproval(signedApproval, {
-      arguments: { cents: 125, confirmed: true },
-    });
+    const resumed = await toolbox.resumeApproval(
+      unconfirmedEdit.pendingApproval as SignedPendingToolApproval,
+      {
+        arguments: { cents: 125, confirmed: true },
+        ...approvalExecutionOptions,
+      },
+    );
 
     expect(resumed.outcome).toBe('success');
     expect(resumed.result).toEqual({ charged: 125 });
     expect(resumed.executedArgumentsEdited).toBe(true);
 
-    const equivalentToolbox = createChargeToolbox('test-secret');
-    const resumedOriginal = await equivalentToolbox.resumeApproval(signedApproval);
+    await expect(toolbox.resumeApproval(signedApproval, approvalExecutionOptions)).rejects.toThrow(
+      'already been consumed',
+    );
 
-    expect(resumedOriginal.outcome).toBe('success');
-    expect(resumedOriginal.result).toEqual({ charged: 100 });
-    expect(resumedOriginal.executedArgumentsEdited).toBe(false);
-
-    const invalidResume = await toolbox.resumeApproval(signedApproval, {
-      arguments: { cents: '125' },
-    });
+    const invalidPaused = await toolbox.execute(
+      { id: 'tool-call-invalid', name: 'charge-card', arguments: { cents: 100 } },
+      approvalExecutionOptions,
+    );
+    const invalidResume = await toolbox.resumeApproval(
+      invalidPaused.pendingApproval as SignedPendingToolApproval,
+      { arguments: { cents: '125' }, ...approvalExecutionOptions },
+    );
 
     expect(invalidResume.outcome).toBe('error');
     expect(invalidResume.errorCategory).toBe('validation');
-    expect(charges).toEqual([125, 100]);
+    expect(charges).toEqual([125]);
   });
 
   it('requires an approval secret before signing or resuming pending approvals', async () => {
@@ -483,6 +521,62 @@ describe('createToolbox', () => {
     ).toThrow('approvalSecret is required');
   });
 
+  it('requires request authority for signed approvals and supports revocation', async () => {
+    const toolbox = createToolbox(
+      [
+        createTool({
+          name: 'revoke-me',
+          description: 'Requires approval',
+          input: z.object({}),
+          execute: () => 'unexpected',
+        }),
+      ],
+      {
+        approvalSecret: 'revocation-secret',
+        policy: { beforeExecute: () => ({ status: 'needs_approval' }) },
+      },
+    );
+
+    const missingAuthority = await toolbox.execute({
+      id: 'missing-authority',
+      name: 'revoke-me',
+      arguments: {},
+    });
+    expect(missingAuthority.outcome).toBe('error');
+    expect(missingAuthority.error?.message).toContain('requires request principal');
+
+    const paused = await toolbox.execute(
+      { id: 'revoked-approval', name: 'revoke-me', arguments: {} },
+      approvalExecutionOptions,
+    );
+    await expect(
+      toolbox.resumeApproval(paused.pendingApproval as SignedPendingToolApproval),
+    ).rejects.toThrow('Request context and approval binding are required');
+    await toolbox.revokeApproval(paused.pendingApproval as SignedPendingToolApproval);
+    await expect(
+      toolbox.resumeApproval(
+        paused.pendingApproval as SignedPendingToolApproval,
+        approvalExecutionOptions,
+      ),
+    ).rejects.toThrow('revoked');
+
+    const {
+      approvalBinding: _approvalBinding,
+      approvalToken: _approvalToken,
+      ...unboundDescriptor
+    } = paused.pendingApproval!;
+    const unboundApproval = {
+      ...unboundDescriptor,
+      approvalToken: hmacSha256HexSync(
+        'revocation-secret',
+        stableStringifyJson(JSON.parse(JSON.stringify(unboundDescriptor))),
+      ),
+    } as SignedPendingToolApproval;
+    await expect(toolbox.revokeApproval(unboundApproval)).rejects.toThrow(
+      'Approval state store and binding are required',
+    );
+  });
+
   it('resumes signed input requests with unchanged arguments', async () => {
     const toolbox = createToolbox(
       [
@@ -510,13 +604,13 @@ describe('createToolbox', () => {
       },
     );
 
-    const paused = await toolbox.execute({
-      id: 'input-request',
-      name: 'collect-name',
-      arguments: { name: 'Ada' },
-    });
+    const paused = await toolbox.execute(
+      { id: 'input-request', name: 'collect-name', arguments: { name: 'Ada' } },
+      approvalExecutionOptions,
+    );
     const resumed = await toolbox.resumeApproval(
       paused.pendingApproval! as SignedPendingToolApproval,
+      approvalExecutionOptions,
     );
 
     expect(paused.outcome).toBe('action_required');
@@ -536,8 +630,10 @@ describe('createToolbox', () => {
       },
     });
 
+    const approvalStateStore = createProcessLocalApprovalStateStore();
     const approvingToolbox = createToolbox([tool], {
       approvalSecret: 'shared-secret',
+      approvalStateStore,
       policy: {
         beforeExecute() {
           return {
@@ -550,6 +646,7 @@ describe('createToolbox', () => {
     });
     const denyingToolbox = createToolbox([tool], {
       approvalSecret: 'shared-secret',
+      approvalStateStore,
       policy: {
         beforeExecute() {
           return {
@@ -561,13 +658,13 @@ describe('createToolbox', () => {
       },
     });
 
-    const paused = await approvingToolbox.execute({
-      id: 'policy-change',
-      name: 'charge-card',
-      arguments: { cents: 100 },
-    });
+    const paused = await approvingToolbox.execute(
+      { id: 'policy-change', name: 'charge-card', arguments: { cents: 100 } },
+      approvalExecutionOptions,
+    );
     const resumed = await denyingToolbox.resumeApproval(
       paused.pendingApproval! as SignedPendingToolApproval,
+      approvalExecutionOptions,
     );
 
     expect(resumed.outcome).toBe('error');
@@ -585,8 +682,10 @@ describe('createToolbox', () => {
       },
     });
 
+    const approvalStateStore = createProcessLocalApprovalStateStore();
     const originalToolbox = createToolbox([tool], {
       approvalSecret: 'shared-secret',
+      approvalStateStore,
       policy: {
         beforeExecute() {
           return {
@@ -600,6 +699,7 @@ describe('createToolbox', () => {
     });
     const changedToolbox = createToolbox([tool], {
       approvalSecret: 'shared-secret',
+      approvalStateStore,
       policy: {
         beforeExecute() {
           return {
@@ -612,13 +712,13 @@ describe('createToolbox', () => {
       },
     });
 
-    const paused = await originalToolbox.execute({
-      id: 'changed-prompt',
-      name: 'charge-card',
-      arguments: { cents: 100 },
-    });
+    const paused = await originalToolbox.execute(
+      { id: 'changed-prompt', name: 'charge-card', arguments: { cents: 100 } },
+      approvalExecutionOptions,
+    );
     const resumed = await changedToolbox.resumeApproval(
       paused.pendingApproval! as SignedPendingToolApproval,
+      approvalExecutionOptions,
     );
 
     expect(resumed.outcome).toBe('action_required');
@@ -662,13 +762,17 @@ describe('createToolbox', () => {
       },
     );
 
-    const paused = await toolbox.execute({
-      id: 'schema-approval',
-      name: 'create-ticket',
-      arguments: { title: 'Investigate approval schema' },
-    });
+    const paused = await toolbox.execute(
+      {
+        id: 'schema-approval',
+        name: 'create-ticket',
+        arguments: { title: 'Investigate approval schema' },
+      },
+      approvalExecutionOptions,
+    );
     const resumed = await toolbox.resumeApproval(
       paused.pendingApproval! as SignedPendingToolApproval,
+      approvalExecutionOptions,
     );
 
     expect(paused.pendingApproval?.action.schema).toEqual({
@@ -710,15 +814,15 @@ describe('createToolbox', () => {
       },
     );
 
-    const paused = await toolbox.execute({
-      id: 'typed-value',
-      name: 'persist-value',
-      arguments: { value: '1' },
-    });
+    const paused = await toolbox.execute(
+      { id: 'typed-value', name: 'persist-value', arguments: { value: '1' } },
+      approvalExecutionOptions,
+    );
     const resumed = await toolbox.resumeApproval(
       paused.pendingApproval! as SignedPendingToolApproval,
       {
         arguments: { value: 1 },
+        ...approvalExecutionOptions,
       },
     );
 
@@ -732,6 +836,7 @@ describe('createToolbox', () => {
     // process or worker that persisted and reloaded the descriptor).
     const charges: number[] = [];
     const sharedSecret = 'cross-process-secret';
+    const sharedApprovalState = createProcessLocalApprovalStateStore();
 
     function buildToolbox(approvalSecret = sharedSecret) {
       return createToolbox(
@@ -748,6 +853,7 @@ describe('createToolbox', () => {
         ],
         {
           approvalSecret,
+          approvalStateStore: sharedApprovalState,
           policy: {
             beforeExecute(context) {
               if (
@@ -772,11 +878,10 @@ describe('createToolbox', () => {
 
     // "Process A": originates the tool call and pauses for approval.
     const processAToolbox = buildToolbox();
-    const paused = await processAToolbox.execute({
-      id: 'cross-proc-call',
-      name: 'charge-card',
-      arguments: { cents: 250 },
-    });
+    const paused = await processAToolbox.execute(
+      { id: 'cross-proc-call', name: 'charge-card', arguments: { cents: 250 } },
+      approvalExecutionOptions,
+    );
 
     expect(paused.outcome).toBe('action_required');
     expect(paused.pendingApproval?.approvalToken).toBeDefined();
@@ -792,6 +897,7 @@ describe('createToolbox', () => {
     // Resume with the original arguments — the token must still be valid.
     const resumed = await processBToolbox.resumeApproval(deserialized, {
       arguments: { cents: 250, confirmed: true },
+      ...approvalExecutionOptions,
     });
 
     expect(resumed.outcome).toBe('success');
@@ -3976,16 +4082,17 @@ describe('createToolbox', () => {
         },
       );
 
-      const registryPaused = await toolbox.execute({
-        id: 'call-multi-pause',
-        name: 'multi-pause-operation',
-        arguments: {},
-      });
+      const registryPaused = await toolbox.execute(
+        { id: 'call-multi-pause', name: 'multi-pause-operation', arguments: {} },
+        approvalExecutionOptions,
+      );
       const toolPaused = await toolbox.resumeApproval(
         registryPaused.pendingApproval! as SignedPendingToolApproval,
+        approvalExecutionOptions,
       );
       const resumed = await toolbox.resumeApproval(
         toolPaused.pendingApproval! as SignedPendingToolApproval,
+        approvalExecutionOptions,
       );
 
       expect(registryPaused.outcome).toBe('action_required');
@@ -4056,13 +4163,13 @@ describe('createToolbox', () => {
         },
       );
 
-      const registryPaused = await toolbox.execute({
-        id: 'call-tier-bound-pause',
-        name: 'tier-bound-pause',
-        arguments: {},
-      });
+      const registryPaused = await toolbox.execute(
+        { id: 'call-tier-bound-pause', name: 'tier-bound-pause', arguments: {} },
+        approvalExecutionOptions,
+      );
       const toolPaused = await toolbox.resumeApproval(
         registryPaused.pendingApproval! as SignedPendingToolApproval,
+        approvalExecutionOptions,
       );
 
       expect(registryPaused.pendingApproval?.policyPauseTier).toBe('registry');
@@ -4095,132 +4202,36 @@ describe('createToolbox', () => {
           return 'completed';
         },
       });
+      const approvalStateStore = createProcessLocalApprovalStateStore();
       const originalToolbox = createToolbox([tool], {
         approvalSecret: 'stale-capability-pause-secret',
+        approvalStateStore,
         approvalPolicy: { mode: 'always' },
         policy,
       });
       const updatedToolbox = createToolbox([tool], {
         approvalSecret: 'stale-capability-pause-secret',
+        approvalStateStore,
         policy,
       });
 
-      const capabilityPaused = await originalToolbox.execute({
-        id: 'call-stale-capability-pause',
-        name: 'stale-capability-pause',
-        arguments: {},
-      });
+      const capabilityPaused = await originalToolbox.execute(
+        { id: 'call-stale-capability-pause', name: 'stale-capability-pause', arguments: {} },
+        approvalExecutionOptions,
+      );
       const registryPaused = await updatedToolbox.resumeApproval(
         capabilityPaused.pendingApproval! as SignedPendingToolApproval,
+        approvalExecutionOptions,
       );
       const toolPaused = await updatedToolbox.resumeApproval(
         registryPaused.pendingApproval! as SignedPendingToolApproval,
+        approvalExecutionOptions,
       );
 
       expect(capabilityPaused.pendingApproval?.policyPauseTier).toBe('capability');
       expect(registryPaused.pendingApproval?.policyPauseTier).toBe('registry');
       expect(toolPaused.outcome).toBe('action_required');
       expect(toolPaused.pendingApproval?.policyPauseTier).toBe('tool');
-    });
-
-    it('resumes a uniquely matching approval issued before policy pause tiers existed', async () => {
-      const approvalSecret = 'legacy-tierless-pause-secret';
-      const policy = {
-        beforeExecute: () => ({
-          status: 'needs_approval' as const,
-          reason: 'Approval required',
-          action: { message: 'Approve operation' },
-        }),
-      };
-      const toolbox = createToolbox(
-        [
-          createTool({
-            name: 'legacy-tierless-pause',
-            description: 'requires approval',
-            input: z.object({}),
-            async execute() {
-              return 'completed';
-            },
-          }),
-        ],
-        { approvalSecret, policy },
-      );
-
-      const paused = await toolbox.execute({
-        id: 'call-legacy-tierless-pause',
-        name: 'legacy-tierless-pause',
-        arguments: {},
-      });
-      const {
-        approvalToken: _approvalToken,
-        policyPauseTier: _tier,
-        ...legacyApproval
-      } = paused.pendingApproval!;
-      const legacyApprovalToken = hmacSha256HexSync(
-        approvalSecret,
-        stableStringifyJson(JSON.parse(JSON.stringify(legacyApproval))),
-      );
-      const resumed = await toolbox.resumeApproval({
-        ...legacyApproval,
-        approvalToken: legacyApprovalToken,
-      } as SignedPendingToolApproval);
-
-      expect(resumed.outcome).toBe('success');
-      expect(resumed.result).toBe('completed');
-    });
-
-    it('does not resume a legacy tierless approval when its descriptor now matches more than one pending pause', async () => {
-      const approvalSecret = 'ambiguous-tierless-pause-secret';
-      const ambiguousDecision = {
-        status: 'needs_approval' as const,
-        reason: 'Ambiguous approval required',
-        action: { message: 'Approve ambiguous action' },
-      };
-      const toolbox = createToolbox(
-        [
-          createTool({
-            name: 'ambiguous-tierless-pause',
-            description: 'requires approval from two tiers with an identical descriptor',
-            input: z.object({}),
-            policy: {
-              beforeExecute: () => ambiguousDecision,
-            },
-            async execute() {
-              return 'completed';
-            },
-          }),
-        ],
-        {
-          approvalSecret,
-          policy: {
-            beforeExecute: () => ambiguousDecision,
-          },
-        },
-      );
-
-      const registryPaused = await toolbox.execute({
-        id: 'call-ambiguous-tierless-pause',
-        name: 'ambiguous-tierless-pause',
-        arguments: {},
-      });
-      expect(registryPaused.pendingApproval?.policyPauseTier).toBe('registry');
-
-      const {
-        approvalToken: _approvalToken,
-        policyPauseTier: _tier,
-        ...legacyApproval
-      } = registryPaused.pendingApproval!;
-      const legacyApprovalToken = hmacSha256HexSync(
-        approvalSecret,
-        stableStringifyJson(JSON.parse(JSON.stringify(legacyApproval))),
-      );
-      const resumed = await toolbox.resumeApproval({
-        ...legacyApproval,
-        approvalToken: legacyApprovalToken,
-      } as SignedPendingToolApproval);
-
-      expect(resumed.outcome).toBe('action_required');
-      expect(resumed.pendingApproval?.policyPauseTier).toBe('registry');
     });
 
     for (const status of ['needs_approval', 'needs_input'] as const) {
@@ -4295,13 +4306,13 @@ describe('createToolbox', () => {
           },
         );
 
-        const paused = await toolbox.execute({
-          id: `call-resume-${status}`,
-          name: `resume-${status}`,
-          arguments: {},
-        });
+        const paused = await toolbox.execute(
+          { id: `call-resume-${status}`, name: `resume-${status}`, arguments: {} },
+          approvalExecutionOptions,
+        );
         const resumed = await toolbox.resumeApproval(
           paused.pendingApproval! as SignedPendingToolApproval,
+          approvalExecutionOptions,
         );
 
         expect(paused.outcome).toBe('action_required');
@@ -4330,11 +4341,10 @@ describe('createToolbox', () => {
         { approvalSecret: 'status-only-secret' },
       );
 
-      const result = await toolbox.execute({
-        id: 'call-status-1',
-        name: 'sensitive-op',
-        arguments: { value: 'x' },
-      });
+      const result = await toolbox.execute(
+        { id: 'call-status-1', name: 'sensitive-op', arguments: { value: 'x' } },
+        approvalExecutionOptions,
+      );
 
       expect(result.outcome).toBe('action_required');
       expect(result.action?.type).toBe('approval');

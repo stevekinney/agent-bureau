@@ -1,8 +1,9 @@
 import type { AnyToolbox } from '../create-toolbox';
+import type { ToolRequestContext } from '../execution-context';
 import type { ToolCallInput, ToolExecutionResult } from '../types';
 import { claimCacheStarted, getCacheEntry } from './cache-operations';
 import { fullInputKey, namespacedKey } from './key-generators';
-import type { CachedToolResult, ToolResultCache } from './types';
+import type { CachedToolResult, IdempotencyResolutionReceipt, ToolResultCache } from './types';
 
 const DEFAULT_TTL = 300_000;
 
@@ -19,11 +20,22 @@ export type WithToolboxIdempotencyOptions = {
    * When false, tools without an `idempotencyKey` are wrapped using `fullInputKey` as the default.
    */
   requireExplicitKey?: boolean;
+  tenantId: string;
+  toolRevision?: string;
+  policyRevision?: string;
+  leaseDurationMs?: number;
+  maximumExecutionDurationMs?: number;
+  verifyResolutionReceipt?: (receipt: IdempotencyResolutionReceipt) => boolean | Promise<boolean>;
+  now?: () => number;
+  createAttemptId?: () => string;
 };
 
 type ToolboxExecuteOptionsWithIdempotencyKey = {
   idempotencyKey?: string | ((call: ToolCallInput) => string | undefined);
-  retryUnknownOutcome?: boolean;
+  resolutionReceipt?: IdempotencyResolutionReceipt;
+  requestContext?: ToolRequestContext;
+  mode?: 'parallel' | 'sequential';
+  concurrency?: number;
 };
 
 const PRE_EXECUTION_CONFLICT_CODES = new Set(['BUDGET_EXCEEDED', 'LOOP_BLOCKED']);
@@ -88,7 +100,25 @@ export function withToolboxIdempotency(
   toolbox: AnyToolbox,
   options: WithToolboxIdempotencyOptions,
 ): AnyToolbox {
-  const { cache, defaultTTL = DEFAULT_TTL, requireExplicitKey = true } = options;
+  const {
+    cache,
+    defaultTTL = DEFAULT_TTL,
+    requireExplicitKey = true,
+    tenantId,
+    toolRevision,
+    policyRevision = 'policy:1',
+    leaseDurationMs = 30_000,
+    maximumExecutionDurationMs = defaultTTL,
+    verifyResolutionReceipt,
+    now = Date.now,
+    createAttemptId = () => crypto.randomUUID(),
+  } = options;
+
+  if (!tenantId) throw new Error('Idempotency requires a non-empty tenantId.');
+  if (!policyRevision) throw new Error('Idempotency requires a non-empty policyRevision.');
+  if (leaseDurationMs <= 0 || maximumExecutionDurationMs <= 0) {
+    throw new Error('Idempotency lease and execution durations must be positive.');
+  }
 
   function getKeyFn(toolName: string): ((input: unknown) => string) | undefined {
     const tool = toolbox.getTool(toolName);
@@ -181,42 +211,75 @@ export function withToolboxIdempotency(
       return originalExecute(call, executeOptions);
     }
 
-    const cacheKey = namespacedKey(fields.name, externalKey ?? keyFn!(fields.arguments));
+    const tool = toolbox.getTool(fields.name);
+    const revision = toolRevision ?? formatToolRevision(tool);
+    const baseKey = namespacedKey(fields.name, externalKey ?? keyFn!(fields.arguments));
+    if (!revision) {
+      throw new Error(`Idempotency requires a complete revision for tool ${fields.name}.`);
+    }
+    const executionIdempotencyOptions = executeOptions as
+      ToolboxExecuteOptionsWithIdempotencyKey | undefined;
+    const requestContext = executionIdempotencyOptions?.requestContext;
+    if (!requestContext) {
+      throw new Error('Idempotency requires request-scoped execution authority.');
+    }
+    if (requestContext.authority.tenantId !== tenantId) {
+      throw new Error('Idempotency tenantId must match the request authority tenantId.');
+    }
+    const authority = requestContext.authority;
+    const cacheKey = `${tenantId}:${authority.principalId}:${authority.authorizationRevision}:${policyRevision}:${revision}:${baseKey}`;
     const cached = await getCacheEntry(cache, cacheKey);
 
-    const retryUnknownOutcome = (
-      executeOptions as ToolboxExecuteOptionsWithIdempotencyKey | undefined
-    )?.retryUnknownOutcome;
+    const receipt = executionIdempotencyOptions?.resolutionReceipt;
 
-    if (cached?.status === 'started') {
-      if (retryUnknownOutcome) {
-        await cache.delete(cacheKey);
-      } else {
-        return createUnknownOutcomeResult(fields, cacheKey, cached.toolName);
-      }
-    } else if (cached) {
+    if (cached && cached.status !== 'started') {
       return createDedupedResult(fields, cacheKey, cached);
     }
 
-    let started = await claimCacheStarted(cache, cacheKey, {
+    const startedAt = now();
+    const execution: import('./types').StartedToolExecution = {
       status: 'started',
       toolName: fields.name,
-      startedAt: Date.now(),
+      startedAt,
       ttl: defaultTTL,
-    });
-
-    if (
-      started.outcome === 'existing' &&
-      started.entry.status === 'started' &&
-      retryUnknownOutcome
-    ) {
-      await cache.delete(cacheKey);
-      started = await claimCacheStarted(cache, cacheKey, {
-        status: 'started',
-        toolName: fields.name,
-        startedAt: Date.now(),
-        ttl: defaultTTL,
-      });
+      attemptId: createAttemptId(),
+      leaseExpiresAt: Math.min(startedAt + leaseDurationMs, startedAt + maximumExecutionDurationMs),
+      absoluteDeadline: startedAt + maximumExecutionDurationMs,
+    };
+    let started;
+    if (cached?.status === 'started') {
+      const validReceipt =
+        receipt?.version === 1 &&
+        receipt.key === cacheKey &&
+        receipt.attemptId === cached.attemptId &&
+        receipt.tenantId === tenantId &&
+        receipt.toolRevision === revision &&
+        receipt.decision === 'retry' &&
+        Boolean(
+          receipt.evidence && receipt.authorizedBy && receipt.nonce && receipt.authorization,
+        ) &&
+        Boolean(verifyResolutionReceipt && (await verifyResolutionReceipt(receipt)));
+      if (!validReceipt || !cached.attemptId) {
+        return createUnknownOutcomeResult(fields, cacheKey, cached.toolName);
+      }
+      if (cached.leaseExpiresAt !== undefined && startedAt < cached.leaseExpiresAt) {
+        return createUnknownOutcomeResult(fields, cacheKey, cached.toolName);
+      }
+      const replaced = await cache.replaceUnknownStarted(
+        cacheKey,
+        cached.attemptId,
+        execution,
+        startedAt,
+      );
+      if (!replaced) {
+        const current = await cache.getState(cacheKey);
+        return current?.status === 'completed'
+          ? createDedupedResult(fields, cacheKey, current)
+          : createUnknownOutcomeResult(fields, cacheKey, current?.toolName ?? cached.toolName);
+      }
+      started = { outcome: 'claimed' } as const;
+    } else {
+      started = await claimCacheStarted(cache, cacheKey, execution);
     }
 
     if (started.outcome === 'existing') {
@@ -229,30 +292,63 @@ export function withToolboxIdempotency(
     }
 
     let result: ToolExecutionResult;
+    let leaseOwned = true;
+    let pendingRenewal = Promise.resolve();
+    const renewalInterval = setInterval(
+      () => {
+        const renewalTime = now();
+        if (renewalTime >= execution.absoluteDeadline!) return;
+        pendingRenewal = pendingRenewal
+          .then(async () => {
+            leaseOwned =
+              leaseOwned &&
+              (await cache.renewStarted(
+                cacheKey,
+                execution.attemptId!,
+                Math.min(renewalTime + leaseDurationMs, execution.absoluteDeadline!),
+                renewalTime,
+              ));
+          })
+          .catch(() => {
+            leaseOwned = false;
+          });
+      },
+      Math.max(1, Math.floor(leaseDurationMs / 2)),
+    );
     try {
       result = await originalExecute(call, executeOptions);
     } catch (error) {
       if (shouldClearStartedStateForThrownError(error)) {
-        await cache.delete(cacheKey);
+        await cache.deleteStarted(cacheKey, execution.attemptId!);
       }
       throw error;
+    } finally {
+      clearInterval(renewalInterval);
+      await pendingRenewal;
     }
 
     // Only cache successful results
-    if (result.outcome === 'success' && !result.error) {
+    if (result.outcome === 'success' && !result.error && leaseOwned) {
       const entry: CachedToolResult = {
         result: result.result,
         toolName: result.toolName,
         executedAt: Date.now(),
         ttl: defaultTTL,
       };
-      await cache.set(cacheKey, entry, defaultTTL);
+      const completed = await cache.completeStarted(
+        cacheKey,
+        execution.attemptId!,
+        entry,
+        defaultTTL,
+        now(),
+      );
+      if (!completed) return result;
       result.idempotency = {
         key: cacheKey,
         outcome: 'fresh',
       };
     } else if (shouldClearStartedState(result)) {
-      await cache.delete(cacheKey);
+      await cache.deleteStarted(cacheKey, execution.attemptId!);
     }
 
     return result;
@@ -272,6 +368,32 @@ export function withToolboxIdempotency(
           ) => Promise<ToolExecutionResult>;
 
           if (Array.isArray(input)) {
+            const controls = executeOptions as ToolboxExecuteOptionsWithIdempotencyKey | undefined;
+            if (controls?.mode === 'sequential') {
+              const results: ToolExecutionResult[] = [];
+              for (const call of input) {
+                results.push(await executeWithCache(call, originalExecute, executeOptions));
+              }
+              return results;
+            }
+            const concurrency = controls?.concurrency;
+            if (concurrency !== undefined && concurrency > 0 && concurrency < input.length) {
+              const results = new Array<ToolExecutionResult>(input.length);
+              let nextIndex = 0;
+              await Promise.all(
+                Array.from({ length: concurrency }, async () => {
+                  while (nextIndex < input.length) {
+                    const index = nextIndex++;
+                    results[index] = await executeWithCache(
+                      input[index]!,
+                      originalExecute,
+                      executeOptions,
+                    );
+                  }
+                }),
+              );
+              return results;
+            }
             return Promise.all(
               input.map((call) => executeWithCache(call, originalExecute, executeOptions)),
             );
@@ -283,4 +405,16 @@ export function withToolboxIdempotency(
       return Reflect.get(target, prop, receiver as object) as unknown;
     },
   });
+}
+
+function formatToolRevision(tool: unknown): string {
+  const candidate = tool as
+    | {
+        id?: string;
+        identity?: { namespace?: string; name?: string; version?: string };
+        configuration?: { identity?: { namespace?: string; name?: string; version?: string } };
+      }
+    | undefined;
+  const identity = candidate?.identity ?? candidate?.configuration?.identity;
+  return identity?.version ?? candidate?.id ?? '';
 }

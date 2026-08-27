@@ -1,0 +1,97 @@
+import { describe, expect, it } from 'bun:test';
+
+import {
+  APPROVAL_BINDING_VERSION,
+  ApprovalBindingError,
+  createProcessLocalApprovalStateStore,
+  validateApprovalBinding,
+} from '../src/approval-binding';
+
+const binding = {
+  version: APPROVAL_BINDING_VERSION,
+  principalId: 'principal',
+  tenantId: 'tenant',
+  audience: 'audience',
+  agentId: 'agent',
+  runId: 'run',
+  toolboxRevision: 'toolbox-1',
+  toolDefinitionRevision: 'tools-1',
+  policyRevision: 'policy-1',
+  issuedAt: 10_000_000_000_000,
+  expiresAt: 10_000_000_000_200,
+  nonce: 'nonce',
+  replayScope: 'run',
+} as const;
+
+describe('approval binding state', () => {
+  it('validates expiry and binding context', () => {
+    expect(() =>
+      validateApprovalBinding(binding, { tenantId: 'other' }, 10_000_000_000_150),
+    ).toThrow('tenantId does not match');
+    expect(() => validateApprovalBinding(binding, undefined, 10_000_000_000_200)).toThrow(
+      'expired',
+    );
+    expect(() => validateApprovalBinding({ ...binding, issuedAt: 10_000_000_000_200 })).toThrow(
+      'Invalid approval binding',
+    );
+    expect(() => validateApprovalBinding({ ...binding, version: 2 as never })).toThrow(
+      ApprovalBindingError,
+    );
+  });
+
+  it('issues, atomically consumes once, and tracks revocation', async () => {
+    const store = createProcessLocalApprovalStateStore();
+    await store.issue(binding);
+    await expect(store.state(binding)).resolves.toBe('issued');
+    await store.consume(binding, { runId: 'run' }, 10_000_000_000_150);
+    await expect(store.state(binding)).resolves.toBe('consumed');
+    await expect(store.consume(binding, undefined, 10_000_000_000_150)).rejects.toMatchObject({
+      code: 'already-consumed',
+    });
+    await expect(store.issue(binding)).rejects.toMatchObject({ code: 'already-consumed' });
+  });
+
+  it('rejects unknown and revoked bindings', async () => {
+    const store = createProcessLocalApprovalStateStore();
+    await expect(store.consume(binding, undefined, 10_000_000_000_150)).rejects.toMatchObject({
+      code: 'not-found',
+    });
+    await store.issue(binding);
+    await store.revoke(binding);
+    await expect(store.state(binding)).resolves.toBe('revoked');
+    await expect(store.consume(binding, undefined, 10_000_000_000_150)).rejects.toMatchObject({
+      code: 'revoked',
+    });
+    await store.revoke(binding);
+    await expect(store.state(binding)).resolves.toBe('revoked');
+  });
+
+  it('rejects a payload that differs from the issued binding', async () => {
+    const store = createProcessLocalApprovalStateStore();
+    await store.issue(binding);
+    await expect(
+      store.consume({ ...binding, agentId: 'other-agent' }, undefined, 10_000_000_000_150),
+    ).rejects.toMatchObject({
+      code: 'mismatch',
+    });
+  });
+
+  it('rejects cross-principal and cross-tenant replay and consumes concurrently once', async () => {
+    const store = createProcessLocalApprovalStateStore();
+    await store.issue(binding);
+
+    await expect(
+      store.consume(binding, { principalId: 'principal-b' }, 10_000_000_000_150),
+    ).rejects.toMatchObject({ code: 'mismatch' });
+    await expect(
+      store.consume(binding, { tenantId: 'tenant-b' }, 10_000_000_000_150),
+    ).rejects.toMatchObject({ code: 'mismatch' });
+
+    const attempts = await Promise.allSettled([
+      store.consume(binding, { principalId: 'principal' }, 10_000_000_000_150),
+      store.consume(binding, { principalId: 'principal' }, 10_000_000_000_150),
+    ]);
+    expect(attempts.filter(({ status }) => status === 'fulfilled')).toHaveLength(1);
+    expect(attempts.filter(({ status }) => status === 'rejected')).toHaveLength(1);
+  });
+});

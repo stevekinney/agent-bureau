@@ -4,6 +4,7 @@ export { compositeKey, fieldKey, fullInputKey, namespacedKey } from './key-gener
 export type {
   CachedToolResult,
   IdempotencyOptions,
+  IdempotencyResolutionReceipt,
   StartedToolExecution,
   ToolResultCache,
   ToolResultCacheEntry,

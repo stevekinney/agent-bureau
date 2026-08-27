@@ -17,6 +17,7 @@ type KeyValueStoreLike = {
 };
 
 const RESULT_UNDEFINED_SENTINEL = '__armorerResultUndefined';
+const sharedLocks = new WeakMap<object, Map<string, Promise<unknown>>>();
 
 /**
  * Options for creating a tool result cache.
@@ -31,17 +32,20 @@ export type CreateToolResultCacheOptions = {
 };
 
 /**
- * Creates a ToolResultCache backed by a KeyValueStore.
+ * Creates a process-local ToolResultCache backed by a KeyValueStore.
  *
  * Serializes CachedToolResult objects as JSON strings. Entries are checked for
  * TTL expiration on read — expired entries are treated as cache misses and
- * cleaned up lazily.
+ * cleaned up lazily. Atomicity is provided only among cache instances in this
+ * JavaScript process that share the same store object. Distributed hosts must
+ * implement ToolResultCache with storage-native compare-and-set operations.
  */
 export function createToolResultCache(options: CreateToolResultCacheOptions): ToolResultCache {
   const { store, defaultTTL, namespace } = options;
 
   const prefix = namespace ? `${namespace}:` : '';
-  const pendingClaims = new Map<string, Promise<unknown>>();
+  const locksByStore = sharedLocks.get(store) ?? new Map<string, Promise<unknown>>();
+  sharedLocks.set(store, locksByStore);
 
   function resolveKey(key: string): string {
     return `${prefix}${key}`;
@@ -71,6 +75,13 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
         toolName: value['toolName'],
         startedAt: value['startedAt'],
         ttl: typeof value['ttl'] === 'number' ? value['ttl'] : (defaultTTL ?? 0),
+        ...(typeof value['attemptId'] === 'string' ? { attemptId: value['attemptId'] } : {}),
+        ...(typeof value['leaseExpiresAt'] === 'number'
+          ? { leaseExpiresAt: value['leaseExpiresAt'] }
+          : {}),
+        ...(typeof value['absoluteDeadline'] === 'number'
+          ? { absoluteDeadline: value['absoluteDeadline'] }
+          : {}),
       };
     }
 
@@ -94,6 +105,10 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
   }
 
   function isExpired(entry: ToolResultCacheEntry): boolean {
+    // A started marker becoming old never proves that its side effect did not
+    // happen. It remains an unknown outcome until an authorized receipt
+    // atomically replaces it.
+    if (entry.status === 'started') return false;
     if (entry.ttl === 0) return false;
     return Date.now() > getEntryTime(entry) + entry.ttl;
   }
@@ -126,18 +141,18 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
   }
 
   async function withKeyClaimLock<T>(key: string, operation: () => Promise<T>): Promise<T> {
-    const previous = pendingClaims.get(key);
+    const previous = locksByStore.get(key);
     if (previous) {
       await previous.catch(() => undefined);
     }
 
     const current = operation();
-    pendingClaims.set(key, current);
+    locksByStore.set(key, current);
     try {
       return await current;
     } finally {
-      if (pendingClaims.get(key) === current) {
-        pendingClaims.delete(key);
+      if (locksByStore.get(key) === current) {
+        locksByStore.delete(key);
       }
     }
   }
@@ -194,10 +209,79 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
       await store.set(resolveKey(key), JSON.stringify(encodeEntry(entry)));
     },
 
-    async markStarted(key: string, execution: StartedToolExecution, ttl?: number): Promise<void> {
-      const effectiveTTL = ttl ?? (execution.ttl !== undefined ? execution.ttl : defaultTTL);
-      const entry = effectiveTTL !== undefined ? { ...execution, ttl: effectiveTTL } : execution;
-      await store.set(resolveKey(key), JSON.stringify(encodeEntry(entry)));
+    async renewStarted(
+      key: string,
+      attemptId: string,
+      leaseExpiresAt: number,
+      observedAt: number,
+    ): Promise<boolean> {
+      return withKeyClaimLock(key, async () => {
+        const existing = await getEntry(key);
+        if (existing?.status !== 'started' || existing.attemptId !== attemptId) return false;
+        if (existing.absoluteDeadline !== undefined && observedAt >= existing.absoluteDeadline) {
+          return false;
+        }
+        if (existing.absoluteDeadline !== undefined && leaseExpiresAt > existing.absoluteDeadline) {
+          leaseExpiresAt = existing.absoluteDeadline;
+        }
+        await store.set(
+          resolveKey(key),
+          JSON.stringify(encodeEntry({ ...existing, leaseExpiresAt })),
+        );
+        return true;
+      });
+    },
+
+    async completeStarted(
+      key: string,
+      attemptId: string,
+      result: CachedToolResult,
+      ttl?: number,
+      observedAt = Date.now(),
+    ): Promise<boolean> {
+      return withKeyClaimLock(key, async () => {
+        const existing = await getEntry(key);
+        if (existing?.status !== 'started' || existing.attemptId !== attemptId) return false;
+        if (existing.absoluteDeadline !== undefined && observedAt >= existing.absoluteDeadline) {
+          return false;
+        }
+        const effectiveTTL = ttl ?? result.ttl ?? defaultTTL;
+        const entry = {
+          ...result,
+          status: 'completed' as const,
+          ...(effectiveTTL !== undefined ? { ttl: effectiveTTL } : {}),
+        };
+        await store.set(resolveKey(key), JSON.stringify(encodeEntry(entry)));
+        return true;
+      });
+    },
+
+    async replaceUnknownStarted(
+      key: string,
+      expectedAttemptId: string,
+      execution: StartedToolExecution,
+      observedAt: number,
+    ): Promise<boolean> {
+      return withKeyClaimLock(key, async () => {
+        const existing = await getEntry(key);
+        if (existing?.status !== 'started' || existing.attemptId !== expectedAttemptId) {
+          return false;
+        }
+        if (existing.leaseExpiresAt !== undefined && observedAt < existing.leaseExpiresAt) {
+          return false;
+        }
+        await store.set(resolveKey(key), JSON.stringify(encodeEntry(execution)));
+        return true;
+      });
+    },
+
+    async deleteStarted(key: string, attemptId: string): Promise<boolean> {
+      return withKeyClaimLock(key, async () => {
+        const existing = await getEntry(key);
+        if (existing?.status !== 'started' || existing.attemptId !== attemptId) return false;
+        await store.delete(resolveKey(key));
+        return true;
+      });
     },
 
     async delete(key: string): Promise<void> {

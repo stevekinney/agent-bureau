@@ -67,7 +67,10 @@ describe('withIdempotency', () => {
 
   it('executes normally on the first call', async () => {
     const tool = createTestTool();
-    const wrapped = withIdempotency(tool, { cache });
+    const wrapped = withIdempotency(tool, {
+      cache,
+      tenantId: 'tenant-a',
+    });
 
     const result = await wrapped({ a: 1, b: 2 });
     expect(result).toBe(3);
@@ -76,7 +79,10 @@ describe('withIdempotency', () => {
 
   it('returns cached result on duplicate call', async () => {
     const tool = createTestTool();
-    const wrapped = withIdempotency(tool, { cache });
+    const wrapped = withIdempotency(tool, {
+      cache,
+      tenantId: 'tenant-a',
+    });
 
     const result1 = await wrapped({ a: 1, b: 2 });
     const result2 = await wrapped({ a: 1, b: 2 });
@@ -88,7 +94,7 @@ describe('withIdempotency', () => {
 
   it('executes again for different inputs', async () => {
     const tool = createTestTool();
-    const wrapped = withIdempotency(tool, { cache });
+    const wrapped = withIdempotency(tool, { cache, tenantId: 'tenant-a' });
 
     await wrapped({ a: 1, b: 2 });
     await wrapped({ a: 3, b: 4 });
@@ -98,7 +104,7 @@ describe('withIdempotency', () => {
 
   it('preserves tool name and description', () => {
     const tool = createTestTool();
-    const wrapped = withIdempotency(tool, { cache });
+    const wrapped = withIdempotency(tool, { cache, tenantId: 'tenant-a' });
 
     expect(wrapped.name).toBe('add');
     expect(wrapped.description).toBe('Adds two numbers');
@@ -106,7 +112,7 @@ describe('withIdempotency', () => {
 
   it('preserves tool input schema', () => {
     const tool = createTestTool();
-    const wrapped = withIdempotency(tool, { cache });
+    const wrapped = withIdempotency(tool, { cache, tenantId: 'tenant-a' });
 
     expect(wrapped.input).toBe(tool.input);
   });
@@ -114,7 +120,7 @@ describe('withIdempotency', () => {
   it('calls onCacheHit when returning a cached result', async () => {
     const tool = createTestTool();
     const onCacheHit = mock((key: string, result: CachedToolResult) => {});
-    const wrapped = withIdempotency(tool, { cache, onCacheHit });
+    const wrapped = withIdempotency(tool, { cache, tenantId: 'tenant-a', onCacheHit });
 
     await wrapped({ a: 1, b: 2 });
     await wrapped({ a: 1, b: 2 });
@@ -139,8 +145,8 @@ describe('withIdempotency', () => {
     });
 
     const onUnknownOutcome = mock(() => {});
-    const wrapped = withIdempotency(tool, { cache, onUnknownOutcome });
-    const key = `charge:${fullInputKey({ cents: 100 })}`;
+    const wrapped = withIdempotency(tool, { cache, tenantId: 'tenant-a', onUnknownOutcome });
+    const key = `tenant-a:default:charge:charge:${fullInputKey({ cents: 100 })}`;
 
     await expect(wrapped({ cents: 100 })).rejects.toThrow('provider timeout after charge');
     expect(callCount).toBe(1);
@@ -166,7 +172,7 @@ describe('withIdempotency', () => {
         return x * 2;
       },
     });
-    const wrapped = withIdempotency(tool, { cache });
+    const wrapped = withIdempotency(tool, { cache, tenantId: 'tenant-a' });
     const key = `typed-input:${fullInputKey({ x: '5' })}`;
 
     await expect(wrapped({ x: '5' })).rejects.toThrow();
@@ -192,7 +198,11 @@ describe('withIdempotency', () => {
         },
       },
     ) as unknown as Tool & { idempotencyKey: (input: unknown) => string };
-    const wrapped = withIdempotency(tool, { cache });
+    const wrapped = withIdempotency(tool, {
+      cache,
+      tenantId: 'tenant-a',
+      toolRevision: 'json-schema-input:1',
+    });
 
     await expect(wrapped({ x: 5 })).resolves.toBe(10);
     await expect(wrapped({ x: 5 })).resolves.toBe(10);
@@ -210,8 +220,8 @@ describe('withIdempotency', () => {
         return x * 2;
       },
     });
-    const key = `flaky:${fullInputKey({ x: 5 })}`;
-    await cache.markStarted!(key, {
+    const key = `tenant-a:default:flaky:flaky:${fullInputKey({ x: 5 })}`;
+    await cache.claimStarted(key, {
       status: 'started',
       toolName: 'flaky',
       startedAt: Date.now(),
@@ -219,7 +229,7 @@ describe('withIdempotency', () => {
     });
 
     const onUnknownOutcome = mock(() => {});
-    const wrapped = withIdempotency(tool, { cache, onUnknownOutcome });
+    const wrapped = withIdempotency(tool, { cache, tenantId: 'tenant-a', onUnknownOutcome });
 
     await expect(wrapped({ x: 5 })).rejects.toThrow('unknown outcome');
     expect(onUnknownOutcome).toHaveBeenCalledWith(
@@ -239,104 +249,57 @@ describe('withIdempotency', () => {
       },
     });
 
-    expect(() => withIdempotency(tool, { cache })).toThrow();
+    expect(() => withIdempotency(tool, { cache, tenantId: 'tenant-a' })).toThrow();
   });
 
-  it('supports caches that only implement the original completed-result API', async () => {
-    const completedResults = new Map<string, CachedToolResult>();
-    const legacyCache: ToolResultCache = {
-      async get(key) {
-        return completedResults.get(key);
-      },
-      async set(key, result) {
-        completedResults.set(key, result);
-      },
-      async delete(key) {
-        completedResults.delete(key);
-      },
-      async clear() {
-        completedResults.clear();
-      },
-    };
+  it('requires a tenant and complete tool revision', () => {
     const tool = createTestTool();
-    const wrapped = withIdempotency(tool, { cache: legacyCache });
-
-    await expect(wrapped({ a: 1, b: 2 })).resolves.toBe(3);
-    await expect(wrapped({ a: 1, b: 2 })).resolves.toBe(3);
-
-    expect(callCount).toBe(1);
+    expect(() => withIdempotency(tool, { cache, tenantId: '' })).toThrow(
+      'requires tenantId and toolRevision',
+    );
+    expect(() => withIdempotency(tool, { cache, tenantId: 'tenant-a', toolRevision: '' })).toThrow(
+      'requires tenantId and toolRevision',
+    );
   });
 
-  it('uses an existing completed result returned while claiming a key', async () => {
+  it('honors atomic claim races and rejects a lost completion fence', async () => {
+    const tool = createTestTool();
     const completed: CachedToolResult = {
       result: 99,
       toolName: 'add',
       executedAt: Date.now(),
       ttl: 60_000,
     };
-    let reads = 0;
-    const racingCache: ToolResultCache = {
-      async get() {
-        reads++;
-        return reads === 1 ? undefined : completed;
-      },
-      async set() {
-        throw new Error('set should not be called');
-      },
-      async delete() {
-        throw new Error('delete should not be called');
-      },
-      async clear() {},
+    const completedRace: ToolResultCache = {
+      ...cache,
+      getState: async () => undefined,
+      claimStarted: async () => ({ outcome: 'existing', entry: completed }),
     };
-    const onCacheHit = mock(() => {});
-    const tool = createTestTool();
-    const wrapped = withIdempotency(tool, { cache: racingCache, onCacheHit });
-    const key = `add:${fullInputKey({ a: 1, b: 2 })}`;
+    await expect(
+      withIdempotency(tool, { cache: completedRace, tenantId: 'tenant-a' })({ a: 1, b: 2 }),
+    ).resolves.toBe(99);
 
-    await expect(wrapped({ a: 1, b: 2 })).resolves.toBe(99);
-
-    expect(callCount).toBe(0);
-    expect(onCacheHit).toHaveBeenCalledWith(key, completed);
-  });
-
-  it('surfaces an existing started state returned while claiming a key', async () => {
-    const started = {
-      status: 'started' as const,
-      toolName: 'add',
-      startedAt: Date.now(),
-      ttl: 60_000,
+    const startedRace: ToolResultCache = {
+      ...cache,
+      getState: async () => undefined,
+      claimStarted: async (_key, execution) => ({ outcome: 'existing', entry: execution }),
     };
-    let reads = 0;
-    const racingCache: ToolResultCache = {
-      async getState() {
-        reads++;
-        return reads === 1 ? undefined : started;
-      },
-      async get() {
-        return undefined;
-      },
-      async set() {
-        throw new Error('set should not be called');
-      },
-      async delete() {
-        throw new Error('delete should not be called');
-      },
-      async clear() {},
+    await expect(
+      withIdempotency(tool, { cache: startedRace, tenantId: 'tenant-a' })({ a: 1, b: 2 }),
+    ).rejects.toThrow('unknown outcome');
+
+    const lostFence: ToolResultCache = {
+      ...cache,
+      completeStarted: async () => false,
     };
-    const onUnknownOutcome = mock(() => {});
-    const tool = createTestTool();
-    const wrapped = withIdempotency(tool, { cache: racingCache, onUnknownOutcome });
-    const key = `add:${fullInputKey({ a: 1, b: 2 })}`;
-
-    await expect(wrapped({ a: 1, b: 2 })).rejects.toThrow('unknown outcome');
-
-    expect(callCount).toBe(0);
-    expect(onUnknownOutcome).toHaveBeenCalledWith(key, started);
+    await expect(
+      withIdempotency(tool, { cache: lostFence, tenantId: 'tenant-a' })({ a: 3, b: 4 }),
+    ).rejects.toThrow('lost its execution fence');
   });
 
   it('uses custom TTL when provided', async () => {
     const tool = createTestTool();
-    const wrapped = withIdempotency(tool, { cache, ttl: 1000 });
+    const wrapped = withIdempotency(tool, { cache, tenantId: 'tenant-a', ttl: 1000 });
 
     await wrapped({ a: 1, b: 2 });
 
@@ -349,7 +312,7 @@ describe('withIdempotency', () => {
 
   it('supports execute() for both raw params and ToolCall inputs', async () => {
     const tool = createTestTool();
-    const wrapped = withIdempotency(tool, { cache });
+    const wrapped = withIdempotency(tool, { cache, tenantId: 'tenant-a' });
 
     const directResult = await wrapped.execute({ a: 1, b: 2 });
     const cachedDirectResult = await wrapped.execute({ a: 1, b: 2 });
@@ -366,7 +329,7 @@ describe('withIdempotency', () => {
 
   it('passes direct ToolCall-style invocations through the original tool path', async () => {
     const tool = createTestTool();
-    const wrapped = withIdempotency(tool, { cache });
+    const wrapped = withIdempotency(tool, { cache, tenantId: 'tenant-a' });
 
     await expect(
       (wrapped as unknown as (input: unknown) => Promise<unknown>)({
@@ -380,7 +343,7 @@ describe('withIdempotency', () => {
 
   it('preserves the tool configuration', () => {
     const tool = createTestTool();
-    const wrapped = withIdempotency(tool, { cache });
+    const wrapped = withIdempotency(tool, { cache, tenantId: 'tenant-a' });
 
     expect(wrapped.configuration).toBeDefined();
     expect(wrapped.configuration.identity.name).toBe('add');
@@ -404,7 +367,7 @@ describe('withIdempotency', () => {
         return `hello, ${params.name}`;
       },
     });
-    const wrapped = withIdempotency(tool, { cache });
+    const wrapped = withIdempotency(tool, { cache, tenantId: 'tenant-a' });
 
     const result = await wrapped({ name: 'ada' });
     expect(result).toBe('hello, ada');

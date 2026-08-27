@@ -50,7 +50,7 @@ import {
   type ScheduleSpec,
 } from '@lostgradient/weft';
 import { KEYS } from '@lostgradient/weft/storage';
-import { combineToolboxes, createTool, createToolbox } from 'armorer';
+import { combineToolboxes, createTool, createToolbox, type ToolRequestContext } from 'armorer';
 import {
   Conversation,
   type ConversationHistory,
@@ -595,6 +595,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   const runSessionIdentifiers = new WeakMap<ActiveRun, string>();
   const activeRuns = new Set<ActiveRun>();
   const runToolboxes = new Set<BureauToolbox>();
+  const runToolboxesByRunId = new Map<string, BureauToolbox>();
   let disposePromise: Promise<void> | undefined;
   // Ids of PendingReview items already resolved via resolveReview() (AB-20).
   // Neither resolution path (resumeApproval, signalSession) mutates the live
@@ -971,6 +972,20 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         sessionId,
         runId,
       });
+      const requestContext =
+        request.requestContext ??
+        ({
+          authority: {
+            principalId: request.principal ?? `run:${runId}`,
+            tenantId: 'bureau',
+            ownerId: agentName,
+            capabilities: ['tools:execute'],
+            authorizationRevision: 'bureau:1',
+          },
+          audience: 'operator',
+          agentId: agentName,
+          runId,
+        } as const);
 
       const disposeStreamListeners: Array<() => void> = [];
       const streamEventTarget = runRuntime.streamEventTarget;
@@ -1075,6 +1090,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
           stopWhen: options.stopWhen,
           prepareStep: runRuntime.prepareStep,
           onStep: runRuntime.onStep,
+          executeOptions: { requestContext },
           validateResponse: runRuntime.validateResponse,
           // Thread agentName and runId so curated tool.* bubble events are stamped
           // with {agentName, runId, step} metadata (C3) and durable launch input
@@ -1105,6 +1121,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       );
       activeRuns.add(activeRun);
       runToolboxes.add(runToolbox);
+      runToolboxesByRunId.set(runId, runToolbox);
 
       // AB-96 — the versioned run-lifecycle frame stream. Registered before
       // `store.register` so `run-started` is the first frame a live subscriber
@@ -1951,6 +1968,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
 
     runSessionIdentifiers.delete(runState.activeRun);
     runAttribution.delete(id);
+    runToolboxesByRunId.delete(id);
     store.removeRun(id);
     // AB-96 — drop the cached terminal RunReport too, or a long-lived bureau
     // that creates/deletes many runs would retain one forever per run id.
@@ -2163,11 +2181,29 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
               'approval',
             );
           }
-          result = await runtime.baseToolbox.resumeApproval(
+          const approvalToolbox = runToolboxesByRunId.get(review.runId) ?? runtime.baseToolbox;
+          const approvalRequestContext: ToolRequestContext | undefined = approval.approvalBinding
+            ? {
+                authority: {
+                  principalId: approval.approvalBinding.principalId,
+                  tenantId: approval.approvalBinding.tenantId,
+                  ownerId: approval.approvalBinding.agentId,
+                  capabilities: ['tools:execute'],
+                  authorizationRevision: 'bureau:1',
+                },
+                audience: approval.approvalBinding.audience,
+                agentId: approval.approvalBinding.agentId,
+                runId: approval.approvalBinding.runId,
+              }
+            : undefined;
+          result = await approvalToolbox.resumeApproval(
             { ...approval, approvalToken: approval.approvalToken },
-            Object.prototype.hasOwnProperty.call(input, 'arguments')
-              ? { arguments: input.arguments }
-              : undefined,
+            {
+              ...(Object.prototype.hasOwnProperty.call(input, 'arguments')
+                ? { arguments: input.arguments }
+                : {}),
+              ...(approvalRequestContext ? { requestContext: approvalRequestContext } : {}),
+            },
           );
 
           // `resumeApproval` re-runs the tool's `beforeExecute` policy from
@@ -2325,7 +2361,9 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       runtime.baseToolbox.closeAdmission();
       for (const toolbox of runToolboxes) toolbox.closeAdmission();
       for (const activeRun of activeRuns) activeRun.abort('Bureau disposed');
-      const toolboxes = [runtime.baseToolbox, ...runToolboxes];
+      const toolboxes = [
+        ...new Set([runtime.baseToolbox, ...runToolboxes, ...runToolboxesByRunId.values()]),
+      ];
       const toolboxShutdownResults = await Promise.allSettled(
         toolboxes.map((toolbox) =>
           toolbox.shutdown({ policy: 'abort', reason: 'Bureau disposed' }),

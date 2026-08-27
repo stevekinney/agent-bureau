@@ -43,6 +43,7 @@ import {
   ToolValidateErrorEvent,
   ToolValidateSuccessEvent,
 } from './events';
+import { freezeToolRequestContext, narrowToolAuthority } from './execution-context';
 import { createExecutionLifecycle, type ExecutionHandle } from './execution-lifecycle';
 import {
   type ApprovalResumeState,
@@ -673,6 +674,7 @@ export function createTool<
       now: nowFunction,
       ...(limiter ? { capacity: limiter.capacity } : {}),
       ...(options?.setTimeoutFunction ? { setTimeoutFunction: options.setTimeoutFunction } : {}),
+      ...(options?.effectiveContext ? { privilegedContext: options.effectiveContext } : {}),
     });
     const executeOptions: InternalToolExecuteOptions = {
       ...options,
@@ -837,14 +839,33 @@ export function createTool<
         return handleCancellation(options.signal.reason);
       }
       const policyContext = buildPolicyContext(typedToolCall, parsed, inputDigest);
+      if (options.requestContext) {
+        policyContext.policyContext = {
+          ...(policyContext.policyContext ?? {}),
+          requestContext: freezeToolRequestContext(options.requestContext),
+        };
+      }
       if (policyContextProvider) {
         const injected = await policyContextProvider(policyContext);
         if (injected && typeof injected === 'object' && !Array.isArray(injected)) {
           policyContext.policyContext = injected;
         }
       }
+      // The host owns identity and tenancy. A provider may add policy facts,
+      // but can never replace the host request context.
+      if (options.requestContext) {
+        policyContext.policyContext = {
+          ...(policyContext.policyContext ?? {}),
+          requestContext: freezeToolRequestContext(options.requestContext),
+          capabilities: options.requestContext.authority.capabilities,
+        };
+      }
       const approvalResume = options[approvalResumeSymbol];
       let decision = await resolvePolicyDecision(policyContext);
+      const effectiveRequestContext =
+        options.requestContext && decision?.capabilities
+          ? narrowToolAuthority(options.requestContext, decision.capabilities)
+          : options.requestContext;
       const parsedArgumentsDigest = stableStringifyJson(normalizeToolContent(parsed));
       const proposedArgumentsDigest =
         approvalResume === undefined
@@ -863,7 +884,7 @@ export function createTool<
         for (const pauseDecision of policyPauseDecisions) {
           if (
             approvalResume.satisfiedPauses.some((satisfiedPause) =>
-              policyPauseMatchesSatisfiedPause(pauseDecision, satisfiedPause, policyPauseDecisions),
+              policyPauseMatchesSatisfiedPause(pauseDecision, satisfiedPause),
             )
           ) {
             continue;
@@ -880,18 +901,9 @@ export function createTool<
         const action = createToolAction(type, decision, reason);
         const resumedArgumentsMatchApproval = proposedArgumentsDigest === parsedArgumentsDigest;
         const approvedPolicyPauseTierMatches =
-          approvalResume === undefined
-            ? false
-            : approvalResume.approvedPolicyPauseTier === undefined
-              ? policyPauseDecisions === undefined ||
-                policyPauseDecisions.filter((pauseDecision) =>
-                  policyPauseMatchesDescriptor(
-                    pauseDecision,
-                    approvalResume.approvedAction,
-                    approvalResume.reason,
-                  ),
-                ).length === 1
-              : approvalResume.approvedPolicyPauseTier === decision[policyPauseTierSymbol];
+          approvalResume !== undefined &&
+          approvalResume.approvedPolicyPauseTier !== undefined &&
+          approvalResume.approvedPolicyPauseTier === (decision[policyPauseTierSymbol] ?? 'tool');
         resumedApprovalIsSatisfied =
           approvalResume !== undefined &&
           approvedPolicyPauseTierMatches &&
@@ -928,9 +940,7 @@ export function createTool<
               action,
               reason,
               metadata: normalizeToolContent(configuration.metadata ?? {}),
-              ...(decision[policyPauseTierSymbol] !== undefined
-                ? { policyPauseTier: decision[policyPauseTierSymbol] }
-                : {}),
+              policyPauseTier: decision[policyPauseTierSymbol] ?? 'tool',
               ...(approvalResume !== undefined && !executedArgumentsEdited
                 ? { satisfiedPolicyPauses: approvalResume.satisfiedPauses }
                 : {}),
@@ -994,6 +1004,19 @@ export function createTool<
         meta,
         toolCall: typedToolCall,
         configuration,
+        ...(effectiveRequestContext
+          ? { requestContext: freezeToolRequestContext(effectiveRequestContext) }
+          : {}),
+        ...(options.effectiveContext
+          ? {
+              effectiveContext: {
+                ...options.effectiveContext,
+                ...(effectiveRequestContext
+                  ? { ...effectiveRequestContext, revisions: options.effectiveContext.revisions }
+                  : {}),
+              },
+            }
+          : {}),
         ...(options.durableOperationKey !== undefined
           ? { durableOperationKey: options.durableOperationKey }
           : {}),
@@ -1326,6 +1349,13 @@ export function createTool<
         if (injected && typeof injected === 'object' && !Array.isArray(injected)) {
           errorPolicyContext.policyContext = injected;
         }
+      }
+      if (options.requestContext) {
+        errorPolicyContext.policyContext = {
+          ...(errorPolicyContext.policyContext ?? {}),
+          requestContext: freezeToolRequestContext(options.requestContext),
+          capabilities: options.requestContext.authority.capabilities,
+        };
       }
       await runPolicyAfter({
         ...errorPolicyContext,
@@ -1893,18 +1923,12 @@ function createToolAction(
 function policyPauseMatchesSatisfiedPause(
   decision: ToolPolicyDecision,
   satisfiedPause: SatisfiedPolicyPause,
-  policyPauseDecisions: readonly ToolPolicyDecision[],
 ): boolean {
   if (!policyPauseMatchesDescriptor(decision, satisfiedPause.action, satisfiedPause.reason)) {
     return false;
   }
-  if (satisfiedPause.tier !== undefined) {
-    return satisfiedPause.tier === decision[policyPauseTierSymbol];
-  }
   return (
-    policyPauseDecisions.filter((pauseDecision) =>
-      policyPauseMatchesDescriptor(pauseDecision, satisfiedPause.action, satisfiedPause.reason),
-    ).length === 1
+    satisfiedPause.tier !== undefined && satisfiedPause.tier === decision[policyPauseTierSymbol]
   );
 }
 

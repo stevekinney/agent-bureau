@@ -32,7 +32,12 @@ import type {
 import type { ObservabilityOptions } from '@lostgradient/weft/observability';
 import type { Storage, StorageConfiguration, TextValueStore } from '@lostgradient/weft/storage';
 import type { ConditionalTextValueStore } from '@lostgradient/weft/storage/text-value-store';
-import type { AnyToolbox, PendingToolApproval, SignedPendingToolApproval } from 'armorer';
+import type {
+  AnyToolbox,
+  PendingToolApproval,
+  SignedPendingToolApproval,
+  ToolRequestContext,
+} from 'armorer';
 import type { ConversationSnapshot } from 'conversationalist';
 import type { ToolPolicy } from 'interoperability';
 import type {
@@ -846,6 +851,8 @@ export interface CreateRunRequest {
    * field verbatim from an untrusted request body.
    */
   principal?: string;
+  /** Authenticated, request-scoped authority forwarded to Armorer tool execution. */
+  requestContext?: ToolRequestContext;
 }
 
 export interface SubmitSchedulerTaskRequest {

@@ -7,8 +7,37 @@ import { claimCacheStarted } from '../../src/idempotency/cache-operations';
 import { createToolResultCache } from '../../src/idempotency/create-tool-result-cache';
 import { fullInputKey } from '../../src/idempotency/key-generators';
 import type { ToolResultCache } from '../../src/idempotency/types';
-import { withToolboxIdempotency } from '../../src/idempotency/with-toolbox-idempotency';
+import { withToolboxIdempotency as createIdempotentToolbox } from '../../src/idempotency/with-toolbox-idempotency';
 import type { SignedPendingToolApproval, ToolCallInput } from '../../src/types';
+
+const createTestRequestContext = (tenantId: string) => ({
+  authority: {
+    principalId: 'principal-a',
+    tenantId,
+    capabilities: ['tools:execute'],
+    authorizationRevision: 'authorization:1',
+  },
+  audience: 'tenant' as const,
+  agentId: 'agent-a',
+  runId: 'run-a',
+});
+
+const withToolboxIdempotency = (
+  ...arguments_: Parameters<typeof createIdempotentToolbox>
+): ReturnType<typeof createIdempotentToolbox> => {
+  const toolbox = createIdempotentToolbox(...arguments_);
+  const requestContext = createTestRequestContext(arguments_[1].tenantId);
+  return new Proxy(toolbox, {
+    get(target, property, receiver) {
+      if (property !== 'execute') return Reflect.get(target, property, receiver);
+      return (input: unknown, options?: Record<string, unknown>) =>
+        target.execute(input as ToolCallInput, {
+          ...options,
+          requestContext,
+        });
+    },
+  });
+};
 
 function createTestStore() {
   const map = new Map<string, string>();
@@ -65,7 +94,7 @@ describe('withToolboxIdempotency', () => {
 
   it('wraps tools that have idempotencyKey by default', async () => {
     const toolbox = createToolbox([createToolWithKey(), createToolWithoutKey()]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     // Execute add twice with same args
     const result1 = await idempotentToolbox.execute({ name: 'add', arguments: { a: 1, b: 2 } });
@@ -76,7 +105,11 @@ describe('withToolboxIdempotency', () => {
     expect(result1.idempotency?.outcome).toBe('fresh');
     expect(result2.idempotency?.outcome).toBe('deduped');
     expect(addCallCount).toBe(1); // Cached on second call
-    expect(await cache.getState!(`add:${fullInputKey({ a: 1, b: 2 })}`)).toEqual(
+    expect(
+      await cache.getState!(
+        `tenant-a:principal-a:authorization:1:policy:1:default:add:add:${fullInputKey({ a: 1, b: 2 })}`,
+      ),
+    ).toEqual(
       expect.objectContaining({
         status: 'completed',
         toolName: 'add',
@@ -87,7 +120,7 @@ describe('withToolboxIdempotency', () => {
 
   it('accepts an externally supplied idempotency key', async () => {
     const toolbox = createToolbox([createToolWithKey()]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     const result1 = await idempotentToolbox.execute(
       { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
@@ -101,7 +134,7 @@ describe('withToolboxIdempotency', () => {
     expect(result1.result).toBe(3);
     expect(result2.result).toBe(3);
     expect(result2.idempotency).toEqual({
-      key: 'add:temporal-tool-call-id',
+      key: 'tenant-a:principal-a:authorization:1:policy:1:default:add:add:temporal-tool-call-id',
       outcome: 'deduped',
     });
     expect(addCallCount).toBe(1);
@@ -109,7 +142,7 @@ describe('withToolboxIdempotency', () => {
 
   it('uses externally supplied idempotency keys for tools without their own key', async () => {
     const toolbox = createToolbox([createToolWithoutKey()]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     const result1 = await idempotentToolbox.execute(
       { id: 'call-1', name: 'multiply', arguments: { a: 2, b: 3 } },
@@ -123,7 +156,7 @@ describe('withToolboxIdempotency', () => {
     expect(result1.result).toBe(6);
     expect(result2.result).toBe(6);
     expect(result2.idempotency).toEqual({
-      key: 'multiply:orchestrator-tool-call-id',
+      key: 'tenant-a:principal-a:authorization:1:policy:1:default:multiply:multiply:orchestrator-tool-call-id',
       outcome: 'deduped',
     });
     expect(mulCallCount).toBe(1);
@@ -133,6 +166,7 @@ describe('withToolboxIdempotency', () => {
     const toolbox = createToolbox([createToolWithKey(), createToolWithoutKey()]);
     const idempotentToolbox = withToolboxIdempotency(toolbox, {
       cache,
+      tenantId: 'tenant-a',
       requireExplicitKey: false,
     });
 
@@ -147,22 +181,29 @@ describe('withToolboxIdempotency', () => {
 
     expect(addResult.result).toBe(3);
     expect(multiplyResult.result).toBe(12);
-    expect(addResult.idempotency?.key).toBe('add:shared-key');
-    expect(multiplyResult.idempotency?.key).toBe('multiply:shared-key');
+    expect(addResult.idempotency?.key).toBe(
+      'tenant-a:principal-a:authorization:1:policy:1:default:add:add:shared-key',
+    );
+    expect(multiplyResult.idempotency?.key).toBe(
+      'tenant-a:principal-a:authorization:1:policy:1:default:multiply:multiply:shared-key',
+    );
     expect(addCallCount).toBe(1);
     expect(mulCallCount).toBe(1);
   });
 
   it('returns unknown-outcome when a key was started without a recorded result', async () => {
     const toolbox = createToolbox([createToolWithKey()]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
-    await cache.markStarted!('add:started-key', {
-      status: 'started',
-      toolName: 'add',
-      startedAt: Date.now(),
-      ttl: 60_000,
-    });
+    await cache.claimStarted(
+      'tenant-a:principal-a:authorization:1:policy:1:default:add:add:started-key',
+      {
+        status: 'started',
+        toolName: 'add',
+        startedAt: Date.now(),
+        ttl: 60_000,
+      },
+    );
 
     const result = await idempotentToolbox.execute(
       { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
@@ -171,7 +212,7 @@ describe('withToolboxIdempotency', () => {
 
     expect(result.outcome).toBe('action_required');
     expect(result.idempotency).toEqual({
-      key: 'add:started-key',
+      key: 'tenant-a:principal-a:authorization:1:policy:1:default:add:add:started-key',
       outcome: 'unknown-outcome',
     });
     expect(addCallCount).toBe(0);
@@ -179,14 +220,22 @@ describe('withToolboxIdempotency', () => {
 
   it('retries an unknown outcome only after explicit approval', async () => {
     const toolbox = createToolbox([createToolWithKey()]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
-
-    await cache.markStarted!('add:retry-after-review', {
-      status: 'started',
-      toolName: 'add',
-      startedAt: Date.now(),
-      ttl: 60_000,
+    const idempotentToolbox = withToolboxIdempotency(toolbox, {
+      cache,
+      tenantId: 'tenant-a',
+      verifyResolutionReceipt: (receipt) => receipt.authorization === 'authorized-signature',
     });
+
+    await cache.claimStarted(
+      'tenant-a:principal-a:authorization:1:policy:1:default:add:add:retry-after-review',
+      {
+        status: 'started',
+        toolName: 'add',
+        startedAt: Date.now(),
+        ttl: 60_000,
+        attemptId: 'original-attempt',
+      },
+    );
 
     const pause = await idempotentToolbox.execute(
       { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
@@ -194,18 +243,37 @@ describe('withToolboxIdempotency', () => {
     );
     const retry = await idempotentToolbox.execute(
       { id: 'call-2', name: 'add', arguments: { a: 1, b: 2 } },
-      { idempotencyKey: 'retry-after-review', retryUnknownOutcome: true },
+      {
+        idempotencyKey: 'retry-after-review',
+        resolutionReceipt: {
+          version: 1,
+          key: 'tenant-a:principal-a:authorization:1:policy:1:default:add:add:retry-after-review',
+          attemptId: 'original-attempt',
+          tenantId: 'tenant-a',
+          toolRevision: 'default:add',
+          decision: 'retry',
+          evidence: 'Operator confirmed the original side effect did not occur.',
+          authorizedAt: Date.now(),
+          authorizedBy: 'operator-1',
+          nonce: 'receipt-1',
+          authorization: 'authorized-signature',
+        },
+      },
     );
 
     expect(pause.outcome).toBe('action_required');
     expect(retry.outcome).toBe('success');
     expect(retry.result).toBe(3);
     expect(retry.idempotency).toEqual({
-      key: 'add:retry-after-review',
+      key: 'tenant-a:principal-a:authorization:1:policy:1:default:add:add:retry-after-review',
       outcome: 'fresh',
     });
     expect(addCallCount).toBe(1);
-    expect(await cache.getState!('add:retry-after-review')).toEqual(
+    expect(
+      await cache.getState!(
+        'tenant-a:principal-a:authorization:1:policy:1:default:add:add:retry-after-review',
+      ),
+    ).toEqual(
       expect.objectContaining({
         status: 'completed',
         toolName: 'add',
@@ -214,54 +282,9 @@ describe('withToolboxIdempotency', () => {
     );
   });
 
-  it('retries an unknown outcome returned by an atomic claim only after explicit approval', async () => {
-    const started = {
-      status: 'started' as const,
-      toolName: 'add',
-      startedAt: Date.now(),
-      ttl: 60_000,
-    };
-    let claims = 0;
-    let deletes = 0;
-    const atomicCache: ToolResultCache = {
-      async get() {
-        return undefined;
-      },
-      async claimStarted(_key, execution) {
-        claims++;
-        if (claims === 1) {
-          return { outcome: 'existing', entry: started };
-        }
-        return { outcome: 'claimed' };
-      },
-      async set() {},
-      async delete() {
-        deletes++;
-      },
-      async clear() {},
-    };
-    const toolbox = createToolbox([createToolWithKey()]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache: atomicCache });
-
-    const result = await idempotentToolbox.execute(
-      { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
-      { idempotencyKey: 'atomic-retry', retryUnknownOutcome: true },
-    );
-
-    expect(result.outcome).toBe('success');
-    expect(result.result).toBe(3);
-    expect(result.idempotency).toEqual({
-      key: 'add:atomic-retry',
-      outcome: 'fresh',
-    });
-    expect(claims).toBe(2);
-    expect(deletes).toBe(1);
-    expect(addCallCount).toBe(1);
-  });
-
   it('does not keep started state for validation failures', async () => {
     const toolbox = createToolbox([createToolWithKey()]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     const result = await idempotentToolbox.execute(
       { name: 'add', arguments: { a: '1', b: 2 } },
@@ -270,13 +293,17 @@ describe('withToolboxIdempotency', () => {
 
     expect(result.outcome).toBe('error');
     expect(result.idempotency).toBeUndefined();
-    expect(await cache.getState!('add:invalid-input')).toBeUndefined();
+    expect(
+      await cache.getState!(
+        'tenant-a:principal-a:authorization:1:policy:1:default:add:add:invalid-input',
+      ),
+    ).toBeUndefined();
     expect(addCallCount).toBe(0);
   });
 
   it('does not keep started state when fail-fast validation throws', async () => {
     const toolbox = createToolbox([createToolWithKey()]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     await expect(
       idempotentToolbox.execute(
@@ -285,7 +312,11 @@ describe('withToolboxIdempotency', () => {
       ),
     ).rejects.toMatchObject({ category: 'validation' });
 
-    expect(await cache.getState!('add:invalid-input')).toBeUndefined();
+    expect(
+      await cache.getState!(
+        'tenant-a:principal-a:authorization:1:policy:1:default:add:add:invalid-input',
+      ),
+    ).toBeUndefined();
 
     const retry = await idempotentToolbox.execute(
       { name: 'add', arguments: { a: '1', b: 2 } },
@@ -294,7 +325,11 @@ describe('withToolboxIdempotency', () => {
 
     expect(retry.outcome).toBe('error');
     expect(retry.idempotency).toBeUndefined();
-    expect(await cache.getState!('add:invalid-input')).toBeUndefined();
+    expect(
+      await cache.getState!(
+        'tenant-a:principal-a:authorization:1:policy:1:default:add:add:invalid-input',
+      ),
+    ).toBeUndefined();
     expect(addCallCount).toBe(0);
   });
 
@@ -312,7 +347,7 @@ describe('withToolboxIdempotency', () => {
       },
     });
     const toolbox = createToolbox([tool]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     const first = await idempotentToolbox.execute(
       { name: 'add', arguments: { a: 1, b: 2 } },
@@ -327,7 +362,11 @@ describe('withToolboxIdempotency', () => {
     expect(first.outcome).toBe('error');
     expect(first.error?.category).toBe('unavailable');
     expect(first.idempotency).toBeUndefined();
-    expect(await cache.getState!('add:unavailable-now')).toEqual(
+    expect(
+      await cache.getState!(
+        'tenant-a:principal-a:authorization:1:policy:1:default:add:add:unavailable-now',
+      ),
+    ).toEqual(
       expect.objectContaining({
         status: 'completed',
         toolName: 'add',
@@ -337,7 +376,7 @@ describe('withToolboxIdempotency', () => {
     expect(second.outcome).toBe('success');
     expect(second.result).toBe(3);
     expect(second.idempotency).toEqual({
-      key: 'add:unavailable-now',
+      key: 'tenant-a:principal-a:authorization:1:policy:1:default:add:add:unavailable-now',
       outcome: 'fresh',
     });
     expect(addCallCount).toBe(1);
@@ -355,7 +394,7 @@ describe('withToolboxIdempotency', () => {
         },
       },
     });
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     const first = await idempotentToolbox.execute(
       { name: 'add', arguments: { a: 1, b: 2 } },
@@ -370,7 +409,11 @@ describe('withToolboxIdempotency', () => {
     expect(second.outcome).toBe('action_required');
     expect(first.idempotency).toBeUndefined();
     expect(second.idempotency).toBeUndefined();
-    expect(await cache.getState!('add:approval-pause')).toBeUndefined();
+    expect(
+      await cache.getState!(
+        'tenant-a:principal-a:authorization:1:policy:1:default:add:add:approval-pause',
+      ),
+    ).toBeUndefined();
     expect(addCallCount).toBe(0);
   });
 
@@ -378,7 +421,7 @@ describe('withToolboxIdempotency', () => {
     const toolbox = createToolbox([createToolWithKey()], {
       budget: { maxCalls: 0 },
     });
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     const first = await idempotentToolbox.execute(
       { name: 'add', arguments: { a: 1, b: 2 } },
@@ -394,7 +437,11 @@ describe('withToolboxIdempotency', () => {
     expect(first.error?.code).toBe('BUDGET_EXCEEDED');
     expect(second.outcome).toBe('error');
     expect(second.idempotency).toBeUndefined();
-    expect(await cache.getState!('add:budget-block')).toBeUndefined();
+    expect(
+      await cache.getState!(
+        'tenant-a:principal-a:authorization:1:policy:1:default:add:add:budget-block',
+      ),
+    ).toBeUndefined();
     expect(addCallCount).toBe(0);
   });
 
@@ -402,7 +449,7 @@ describe('withToolboxIdempotency', () => {
     const toolbox = createToolbox([createToolWithKey()], {
       budget: { maxCalls: 0 },
     });
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     await expect(
       idempotentToolbox.execute(
@@ -411,7 +458,11 @@ describe('withToolboxIdempotency', () => {
       ),
     ).rejects.toMatchObject({ category: 'conflict', code: 'BUDGET_EXCEEDED' });
 
-    expect(await cache.getState!('add:budget-block')).toBeUndefined();
+    expect(
+      await cache.getState!(
+        'tenant-a:principal-a:authorization:1:policy:1:default:add:add:budget-block',
+      ),
+    ).toBeUndefined();
 
     const retry = await idempotentToolbox.execute(
       { name: 'add', arguments: { a: 1, b: 2 } },
@@ -420,7 +471,11 @@ describe('withToolboxIdempotency', () => {
 
     expect(retry.outcome).toBe('error');
     expect(retry.idempotency).toBeUndefined();
-    expect(await cache.getState!('add:budget-block')).toBeUndefined();
+    expect(
+      await cache.getState!(
+        'tenant-a:principal-a:authorization:1:policy:1:default:add:add:budget-block',
+      ),
+    ).toBeUndefined();
     expect(addCallCount).toBe(0);
   });
 
@@ -448,30 +503,39 @@ describe('withToolboxIdempotency', () => {
         },
       },
     });
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
+    const requestContext = {
+      authority: {
+        principalId: 'principal-a',
+        tenantId: 'tenant-a',
+        ownerId: 'owner-a',
+        capabilities: ['payments:charge'],
+        authorizationRevision: 'authorization:1',
+      },
+      audience: 'tenant' as const,
+      agentId: 'agent-a',
+      runId: 'run-a',
+    };
     const paused = await idempotentToolbox.execute(
       { id: 'charge-call', name: 'charge', arguments: { cents: 100 } },
-      { idempotencyKey: 'charge-once' },
+      { idempotencyKey: 'charge-once', requestContext },
     );
 
     const firstResume = await idempotentToolbox.resumeApproval(
       paused.pendingApproval! as SignedPendingToolApproval,
-      { idempotencyKey: 'charge-once' },
+      { idempotencyKey: 'charge-once', requestContext },
     );
-    const secondResume = await idempotentToolbox.resumeApproval(
-      paused.pendingApproval! as SignedPendingToolApproval,
-      { idempotencyKey: 'charge-once' },
-    );
+    await expect(
+      idempotentToolbox.resumeApproval(paused.pendingApproval! as SignedPendingToolApproval, {
+        idempotencyKey: 'charge-once',
+        requestContext,
+      }),
+    ).rejects.toThrow('already been consumed');
 
     expect(firstResume.result).toEqual({ charged: 100 });
     expect(firstResume.idempotency).toEqual({
-      key: 'charge:charge-once',
+      key: 'tenant-a:principal-a:authorization:1:policy:1:default:charge:charge:charge-once',
       outcome: 'fresh',
-    });
-    expect(secondResume.result).toEqual({ charged: 100 });
-    expect(secondResume.idempotency).toEqual({
-      key: 'charge:charge-once',
-      outcome: 'deduped',
     });
     expect(charges).toEqual([100]);
   });
@@ -493,7 +557,7 @@ describe('withToolboxIdempotency', () => {
         };
       },
     } as Toolbox;
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     const first = await idempotentToolbox.execute(
       { name: 'add', arguments: { a: 1, b: 2 } },
@@ -508,7 +572,11 @@ describe('withToolboxIdempotency', () => {
     expect(second.outcome).toBe('denied');
     expect(first.idempotency).toBeUndefined();
     expect(second.idempotency).toBeUndefined();
-    expect(await cache.getState!('add:policy-denied')).toBeUndefined();
+    expect(
+      await cache.getState!(
+        'tenant-a:principal-a:authorization:1:policy:1:default:add:add:policy-denied',
+      ),
+    ).toBeUndefined();
     expect(addCallCount).toBe(0);
   });
 
@@ -525,7 +593,7 @@ describe('withToolboxIdempotency', () => {
       },
     });
     const toolbox = createToolbox([chargeTool]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     const first = await idempotentToolbox.execute(
       { id: 'call-1', name: 'charge', arguments: { cents: 100 } },
@@ -540,13 +608,15 @@ describe('withToolboxIdempotency', () => {
     expect(first.idempotency).toBeUndefined();
     expect(second.outcome).toBe('action_required');
     expect(second.idempotency).toEqual({
-      key: 'charge:charge-once',
+      key: 'tenant-a:principal-a:authorization:1:policy:1:default:charge:charge:charge-once',
       outcome: 'unknown-outcome',
     });
     expect(sideEffects).toEqual([100]);
-    expect(await cache.getState!('charge:charge-once')).toEqual(
-      expect.objectContaining({ status: 'started', toolName: 'charge' }),
-    );
+    expect(
+      await cache.getState!(
+        'tenant-a:principal-a:authorization:1:policy:1:default:charge:charge:charge-once',
+      ),
+    ).toEqual(expect.objectContaining({ status: 'started', toolName: 'charge' }));
   });
 
   it('keeps started state when execution throws an unknown primitive error', async () => {
@@ -559,7 +629,7 @@ describe('withToolboxIdempotency', () => {
         throw 'provider timeout after side effect';
       },
     } as Toolbox;
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     await expect(
       idempotentToolbox.execute(
@@ -575,12 +645,14 @@ describe('withToolboxIdempotency', () => {
 
     expect(retry.outcome).toBe('action_required');
     expect(retry.idempotency).toEqual({
-      key: 'add:primitive-error',
+      key: 'tenant-a:principal-a:authorization:1:policy:1:default:add:add:primitive-error',
       outcome: 'unknown-outcome',
     });
-    expect(await cache.getState!('add:primitive-error')).toEqual(
-      expect.objectContaining({ status: 'started', toolName: 'add' }),
-    );
+    expect(
+      await cache.getState!(
+        'tenant-a:principal-a:authorization:1:policy:1:default:add:add:primitive-error',
+      ),
+    ).toEqual(expect.objectContaining({ status: 'started', toolName: 'add' }));
   });
 
   it('keeps started state for error results without an error object', async () => {
@@ -601,7 +673,7 @@ describe('withToolboxIdempotency', () => {
         };
       },
     } as Toolbox;
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     const first = await idempotentToolbox.execute(
       { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
@@ -615,18 +687,21 @@ describe('withToolboxIdempotency', () => {
     expect(first.outcome).toBe('error');
     expect(second.outcome).toBe('action_required');
     expect(second.idempotency).toEqual({
-      key: 'add:error-without-object',
+      key: 'tenant-a:principal-a:authorization:1:policy:1:default:add:add:error-without-object',
       outcome: 'unknown-outcome',
     });
-    expect(await cache.getState!('add:error-without-object')).toEqual(
-      expect.objectContaining({ status: 'started', toolName: 'add' }),
-    );
+    expect(
+      await cache.getState!(
+        'tenant-a:principal-a:authorization:1:policy:1:default:add:add:error-without-object',
+      ),
+    ).toEqual(expect.objectContaining({ status: 'started', toolName: 'add' }));
   });
 
   it('does not wrap tools without idempotencyKey by default (requireExplicitKey: true)', async () => {
     const toolbox = createToolbox([createToolWithKey(), createToolWithoutKey()]);
     const idempotentToolbox = withToolboxIdempotency(toolbox, {
       cache,
+      tenantId: 'tenant-a',
       requireExplicitKey: true,
     });
 
@@ -637,118 +712,11 @@ describe('withToolboxIdempotency', () => {
     expect(mulCallCount).toBe(2); // Not cached
   });
 
-  it('supports caches that only implement the original completed-result API', async () => {
-    const completedResults = new Map<string, Awaited<ReturnType<ToolResultCache['get']>>>();
-    const legacyCache: ToolResultCache = {
-      async get(key) {
-        return completedResults.get(key);
-      },
-      async set(key, result) {
-        completedResults.set(key, result);
-      },
-      async delete(key) {
-        completedResults.delete(key);
-      },
-      async clear() {
-        completedResults.clear();
-      },
-    };
-    const toolbox = createToolbox([createToolWithKey()]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache: legacyCache });
-
-    const first = await idempotentToolbox.execute({ name: 'add', arguments: { a: 1, b: 2 } });
-    const second = await idempotentToolbox.execute({ name: 'add', arguments: { a: 1, b: 2 } });
-
-    expect(first.result).toBe(3);
-    expect(second.idempotency?.outcome).toBe('deduped');
-    expect(addCallCount).toBe(1);
-  });
-
-  it('uses an existing completed result returned while claiming a toolbox key', async () => {
-    const completed = {
-      result: 99,
-      toolName: 'add',
-      executedAt: Date.now(),
-      ttl: 60_000,
-    };
-    let reads = 0;
-    const racingCache: ToolResultCache = {
-      async get() {
-        reads++;
-        return reads === 1 ? undefined : completed;
-      },
-      async set() {
-        throw new Error('set should not be called');
-      },
-      async delete() {
-        throw new Error('delete should not be called');
-      },
-      async clear() {},
-    };
-    const toolbox = createToolbox([createToolWithKey()]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache: racingCache });
-    const key = `add:${fullInputKey({ a: 1, b: 2 })}`;
-
-    const result = await idempotentToolbox.execute({ name: 'add', arguments: { a: 1, b: 2 } });
-
-    expect(result).toMatchObject({
-      outcome: 'success',
-      result: 99,
-      idempotency: {
-        key,
-        outcome: 'deduped',
-      },
-    });
-    expect(addCallCount).toBe(0);
-  });
-
-  it('surfaces an existing started result returned while claiming a toolbox key', async () => {
-    const started = {
-      status: 'started' as const,
-      toolName: 'add',
-      startedAt: Date.now(),
-      ttl: 60_000,
-    };
-    let reads = 0;
-    const racingCache: ToolResultCache = {
-      async getState() {
-        reads++;
-        return reads === 1 ? undefined : started;
-      },
-      async get() {
-        return undefined;
-      },
-      async set() {
-        throw new Error('set should not be called');
-      },
-      async delete() {
-        throw new Error('delete should not be called');
-      },
-      async clear() {},
-    };
-    const toolbox = createToolbox([createToolWithKey()]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache: racingCache });
-    const key = `add:${fullInputKey({ a: 1, b: 2 })}`;
-
-    const result = await idempotentToolbox.execute({ name: 'add', arguments: { a: 1, b: 2 } });
-
-    expect(result).toMatchObject({
-      outcome: 'action_required',
-      idempotency: {
-        key,
-        outcome: 'unknown-outcome',
-      },
-      action: {
-        type: 'approval',
-      },
-    });
-    expect(addCallCount).toBe(0);
-  });
-
   it('wraps all tools with fullInputKey when requireExplicitKey is false', async () => {
     const toolbox = createToolbox([createToolWithKey(), createToolWithoutKey()]);
     const idempotentToolbox = withToolboxIdempotency(toolbox, {
       cache,
+      tenantId: 'tenant-a',
       requireExplicitKey: false,
     });
 
@@ -763,14 +731,14 @@ describe('withToolboxIdempotency', () => {
 
   it('returns a new toolbox without mutating the original', () => {
     const toolbox = createToolbox([createToolWithKey()]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     expect(idempotentToolbox).not.toBe(toolbox);
   });
 
   it('preserves all tools in the toolbox', () => {
     const toolbox = createToolbox([createToolWithKey(), createToolWithoutKey()]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     const originalTools = toolbox.tools();
     const wrappedTools = idempotentToolbox.tools();
@@ -783,6 +751,7 @@ describe('withToolboxIdempotency', () => {
     const toolbox = createToolbox([createToolWithKey()]);
     const idempotentToolbox = withToolboxIdempotency(toolbox, {
       cache,
+      tenantId: 'tenant-a',
       defaultTTL: 1000,
     });
 
@@ -794,7 +763,7 @@ describe('withToolboxIdempotency', () => {
 
   it('passes unnamed calls through to the original toolbox execution', async () => {
     const toolbox = createToolbox([createToolWithKey()]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     const result = await idempotentToolbox.execute({ name: '', arguments: { a: 1, b: 2 } } as any);
 
@@ -805,7 +774,7 @@ describe('withToolboxIdempotency', () => {
 
   it('supports array execution when wrapping toolbox calls with idempotency', async () => {
     const toolbox = createToolbox([createToolWithKey(), createToolWithoutKey()]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     const results = await idempotentToolbox.execute([
       { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
@@ -821,7 +790,7 @@ describe('withToolboxIdempotency', () => {
 
   it('handles empty toolbox gracefully', () => {
     const toolbox = createToolbox([]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     expect(idempotentToolbox.tools()).toHaveLength(0);
   });
@@ -848,10 +817,10 @@ describe('withToolboxIdempotency', () => {
     });
     // Note: chargeTool has NO idempotencyKey; the caller supplies one externally.
     const toolbox = createToolbox([chargeTool]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     const callerKey = 'orchestrator-tool-call-id-abc123';
-    const cacheKey = `charge:${callerKey}`;
+    const cacheKey = `tenant-a:principal-a:authorization:1:policy:1:default:charge:charge:${callerKey}`;
 
     // Simulate a previous attempt that claimed the started entry and then died
     // before recording any result — the orphaned "started" state.
@@ -905,7 +874,7 @@ describe('withToolboxIdempotency', () => {
       },
     });
     const toolbox = createToolbox([chargeTool]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     const callerKey = 'orchestrator-tool-call-id-xyz789';
 
@@ -925,8 +894,301 @@ describe('withToolboxIdempotency', () => {
     expect(sideEffects).toEqual([500]);
     expect(second.outcome).toBe('action_required');
     expect(second.idempotency).toEqual({
-      key: 'charge:orchestrator-tool-call-id-xyz789',
+      key: 'tenant-a:principal-a:authorization:1:policy:1:default:charge:charge:orchestrator-tool-call-id-xyz789',
       outcome: 'unknown-outcome',
     });
+  });
+
+  it('validates idempotency scope and duration options', () => {
+    const toolbox = createToolbox([createToolWithKey()]);
+    expect(() => withToolboxIdempotency(toolbox, { cache, tenantId: '' })).toThrow(
+      'non-empty tenantId',
+    );
+    expect(() =>
+      withToolboxIdempotency(toolbox, {
+        cache,
+        tenantId: 'tenant-a',
+        leaseDurationMs: 0,
+      }),
+    ).toThrow('durations must be positive');
+    const unversioned = withToolboxIdempotency(toolbox, {
+      cache,
+      tenantId: 'tenant-a',
+      toolRevision: '',
+    });
+    expect(
+      unversioned.execute(
+        { name: 'add', arguments: { a: 1, b: 2 } },
+        { idempotencyKey: 'unversioned' },
+      ),
+    ).rejects.toThrow('complete revision');
+  });
+
+  it('uses atomic claim results that arrive after the initial read', async () => {
+    const toolbox = createToolbox([createToolWithKey()]);
+    const completed = {
+      result: 99,
+      toolName: 'add',
+      executedAt: Date.now(),
+      ttl: 60_000,
+    };
+    const completedRace: ToolResultCache = {
+      ...cache,
+      getState: async () => undefined,
+      claimStarted: async () => ({ outcome: 'existing', entry: completed }),
+    };
+    const completedResult = await withToolboxIdempotency(toolbox, {
+      cache: completedRace,
+      tenantId: 'tenant-a',
+    }).execute({ name: 'add', arguments: { a: 1, b: 2 } });
+    expect(completedResult.result).toBe(99);
+
+    const startedRace: ToolResultCache = {
+      ...cache,
+      getState: async () => undefined,
+      claimStarted: async (_key, execution) => ({ outcome: 'existing', entry: execution }),
+    };
+    const startedResult = await withToolboxIdempotency(toolbox, {
+      cache: startedRace,
+      tenantId: 'tenant-a',
+    }).execute({ name: 'add', arguments: { a: 1, b: 2 } });
+    expect(startedResult.outcome).toBe('action_required');
+  });
+
+  it('renews active leases and stops completion after losing a fence', async () => {
+    let renewals = 0;
+    const slowTool = createTool({
+      name: 'slow-add',
+      description: 'Waits before adding',
+      input: z.object({ value: z.number() }),
+      idempotencyKey: (input: unknown) => fullInputKey(input),
+      async execute({ value }) {
+        await new Promise((resolve) => setTimeout(resolve, 12));
+        return value + 1;
+      },
+    });
+    const renewingCache: ToolResultCache = {
+      ...cache,
+      async renewStarted(key, attemptId, leaseExpiresAt) {
+        renewals += 1;
+        return cache.renewStarted(key, attemptId, leaseExpiresAt);
+      },
+    };
+    const result = await withToolboxIdempotency(createToolbox([slowTool]), {
+      cache: renewingCache,
+      tenantId: 'tenant-a',
+      leaseDurationMs: 4,
+      maximumExecutionDurationMs: 100,
+    }).execute({ name: 'slow-add', arguments: { value: 1 } });
+    expect(result.result).toBe(2);
+    expect(renewals).toBeGreaterThan(0);
+
+    const lostFenceCache: ToolResultCache = {
+      ...cache,
+      completeStarted: async () => false,
+    };
+    const unfenced = await withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache: lostFenceCache,
+      tenantId: 'tenant-b',
+    }).execute({ name: 'add', arguments: { a: 2, b: 3 } });
+    expect(unfenced.result).toBe(5);
+    expect(unfenced.idempotency).toBeUndefined();
+
+    const failedRenewalCache: ToolResultCache = {
+      ...cache,
+      renewStarted: async () => {
+        throw new Error('lease storage unavailable');
+      },
+    };
+    const renewalFailure = await withToolboxIdempotency(createToolbox([slowTool]), {
+      cache: failedRenewalCache,
+      tenantId: 'tenant-c',
+      leaseDurationMs: 4,
+      maximumExecutionDurationMs: 100,
+    }).execute({ name: 'slow-add', arguments: { value: 2 } });
+    expect(renewalFailure.result).toBe(3);
+    expect(renewalFailure.idempotency).toBeUndefined();
+  });
+
+  it('rechecks cache state when authorized unknown replacement loses its race', async () => {
+    const toolbox = createToolbox([createToolWithKey()]);
+    const key = 'tenant-a:principal-a:authorization:1:policy:1:default:add:add:replacement-race';
+    const started = {
+      status: 'started' as const,
+      toolName: 'add',
+      startedAt: Date.now(),
+      ttl: 60_000,
+      attemptId: 'original-attempt',
+    };
+    const completed = {
+      status: 'completed' as const,
+      result: 42,
+      toolName: 'add',
+      executedAt: Date.now(),
+      ttl: 60_000,
+    };
+    let reads = 0;
+    const racingCache: ToolResultCache = {
+      ...cache,
+      getState: async () => (reads++ === 0 ? started : completed),
+      replaceUnknownStarted: async () => false,
+    };
+    const idempotent = withToolboxIdempotency(toolbox, {
+      cache: racingCache,
+      tenantId: 'tenant-a',
+      verifyResolutionReceipt: async () => true,
+    });
+    const result = await idempotent.execute(
+      { name: 'add', arguments: { a: 1, b: 2 } },
+      {
+        idempotencyKey: 'replacement-race',
+        resolutionReceipt: {
+          version: 1,
+          key,
+          attemptId: 'original-attempt',
+          tenantId: 'tenant-a',
+          toolRevision: 'default:add',
+          decision: 'retry',
+          evidence: 'Provider ledger proves no side effect occurred.',
+          authorizedAt: Date.now(),
+          authorizedBy: 'operator-a',
+          nonce: 'receipt-race',
+          authorization: 'signed-receipt',
+        },
+      },
+    );
+    expect(result.result).toBe(42);
+    expect(result.idempotency?.outcome).toBe('deduped');
+
+    reads = 0;
+    const missingRaceCache: ToolResultCache = {
+      ...racingCache,
+      getState: async () => (reads++ === 0 ? started : undefined),
+    };
+    const missingResult = await withToolboxIdempotency(toolbox, {
+      cache: missingRaceCache,
+      tenantId: 'tenant-a',
+      verifyResolutionReceipt: async () => true,
+    }).execute(
+      { name: 'add', arguments: { a: 1, b: 2 } },
+      {
+        idempotencyKey: 'replacement-race',
+        resolutionReceipt: {
+          version: 1,
+          key,
+          attemptId: 'original-attempt',
+          tenantId: 'tenant-a',
+          toolRevision: 'default:add',
+          decision: 'retry',
+          evidence: 'Provider ledger proves no side effect occurred.',
+          authorizedAt: Date.now(),
+          authorizedBy: 'operator-a',
+          nonce: 'receipt-race-2',
+          authorization: 'signed-receipt',
+        },
+      },
+    );
+    expect(missingResult.outcome).toBe('action_required');
+  });
+
+  it('requires current request authority and rejects a mismatched tenant', async () => {
+    const toolbox = createIdempotentToolbox(createToolbox([createToolWithKey()]), {
+      cache,
+      tenantId: 'tenant-a',
+    });
+    await expect(toolbox.execute({ name: 'add', arguments: { a: 1, b: 2 } })).rejects.toThrow(
+      'request-scoped execution authority',
+    );
+    await expect(
+      toolbox.execute(
+        { name: 'add', arguments: { a: 1, b: 2 } },
+        { requestContext: createTestRequestContext('tenant-b') },
+      ),
+    ).rejects.toThrow('tenantId must match');
+  });
+
+  it('does not replace an active lease even with an authorized receipt', async () => {
+    const key = 'tenant-a:principal-a:authorization:1:policy:1:default:add:add:active-lease';
+    await cache.claimStarted(key, {
+      status: 'started',
+      toolName: 'add',
+      startedAt: 100,
+      ttl: 60_000,
+      attemptId: 'active-attempt',
+      leaseExpiresAt: 500,
+      absoluteDeadline: 1_000,
+    });
+    const toolbox = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache,
+      tenantId: 'tenant-a',
+      now: () => 200,
+      verifyResolutionReceipt: () => true,
+    });
+    const result = await toolbox.execute(
+      { id: 'retry', name: 'add', arguments: { a: 1, b: 2 } },
+      {
+        idempotencyKey: 'active-lease',
+        resolutionReceipt: {
+          version: 1,
+          key,
+          attemptId: 'active-attempt',
+          tenantId: 'tenant-a',
+          toolRevision: 'default:add',
+          decision: 'retry',
+          evidence: 'operator verified the external effect',
+          authorizedAt: 200,
+          authorizedBy: 'operator-a',
+          nonce: 'active-lease-receipt',
+          authorization: 'signed',
+        },
+      },
+    );
+    expect(result.idempotency?.outcome).toBe('unknown-outcome');
+    expect(addCallCount).toBe(0);
+  });
+
+  it('preserves sequential and bounded-concurrency batch controls', async () => {
+    let active = 0;
+    let maximumActive = 0;
+    const order: number[] = [];
+    const tool = createTool({
+      name: 'controlled',
+      description: 'records execution order',
+      input: z.object({ value: z.number() }),
+      idempotencyKey: ({ value }: { value: number }) => String(value),
+      async execute({ value }) {
+        active += 1;
+        maximumActive = Math.max(maximumActive, active);
+        await Promise.resolve();
+        order.push(value);
+        active -= 1;
+        return value;
+      },
+    });
+    const toolbox = withToolboxIdempotency(createToolbox([tool]), {
+      cache,
+      tenantId: 'tenant-a',
+    });
+    const calls = [1, 2, 3].map((value) => ({
+      id: `call-${value}`,
+      name: 'controlled',
+      arguments: { value },
+    }));
+    await toolbox.execute(calls, { mode: 'sequential' });
+    expect(order).toEqual([1, 2, 3]);
+    expect(maximumActive).toBe(1);
+
+    order.length = 0;
+    maximumActive = 0;
+    await toolbox.execute(
+      calls.map((call, index) => ({
+        ...call,
+        id: `bounded-${index}`,
+        arguments: { value: index + 4 },
+      })),
+      { concurrency: 2 },
+    );
+    expect(order).toHaveLength(3);
+    expect(maximumActive).toBe(2);
   });
 });

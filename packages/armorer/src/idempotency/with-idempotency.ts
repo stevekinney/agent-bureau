@@ -52,7 +52,17 @@ async function inputMatchesToolSchema(tool: Tool, params: unknown): Promise<bool
  * @returns A new tool with the same interface but idempotent execution.
  */
 export function withIdempotency<T extends Tool>(tool: T, options: IdempotencyOptions): T {
-  const { cache, ttl = DEFAULT_TTL, onCacheHit, onUnknownOutcome } = options;
+  const {
+    cache,
+    tenantId,
+    toolRevision = tool.id,
+    ttl = DEFAULT_TTL,
+    onCacheHit,
+    onUnknownOutcome,
+  } = options;
+  if (!tenantId || !toolRevision) {
+    throw new Error('Idempotency requires tenantId and toolRevision.');
+  }
 
   // Access the idempotencyKey from the tool (set via createTool options).
   // Tools store this as an own property set by createTool when configured.
@@ -69,7 +79,7 @@ export function withIdempotency<T extends Tool>(tool: T, options: IdempotencyOpt
   }
 
   async function executeWithCache(params: unknown): Promise<unknown> {
-    const key = namespacedKey(tool.name, idempotencyKey!(params));
+    const key = `${tenantId}:${toolRevision}:${namespacedKey(tool.name, idempotencyKey!(params))}`;
 
     if (!(await inputMatchesToolSchema(tool, params))) {
       return tool(params);
@@ -85,11 +95,13 @@ export function withIdempotency<T extends Tool>(tool: T, options: IdempotencyOpt
       return cached.result;
     }
 
+    const attemptId = crypto.randomUUID();
     const started = await claimCacheStarted(cache, key, {
       status: 'started',
       toolName: tool.name,
       startedAt: Date.now(),
       ttl,
+      attemptId,
     });
 
     if (started.outcome === 'existing') {
@@ -111,7 +123,9 @@ export function withIdempotency<T extends Tool>(tool: T, options: IdempotencyOpt
       ttl,
     };
 
-    await cache.set(key, entry, ttl);
+    if (!(await cache.completeStarted(key, attemptId, entry, ttl))) {
+      throw new Error(`Idempotency key "${key}" lost its execution fence before completion.`);
+    }
 
     return result;
   }

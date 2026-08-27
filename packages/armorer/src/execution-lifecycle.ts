@@ -1,3 +1,5 @@
+import type { EffectiveToolExecutionContext } from './execution-context';
+
 export type ExecutionState =
   | 'queued'
   | 'active'
@@ -65,6 +67,7 @@ export interface ExecutionHandle {
   readonly id: string;
   readonly signal: AbortSignal;
   snapshot(): ExecutionSnapshot;
+  privilegedSnapshot(): PrivilegedExecutionSnapshot;
   queued(position: number, capacity?: number): void;
   activate(): void;
   waiting(declaredWait: string): void;
@@ -92,6 +95,12 @@ export interface BeginExecutionOptions {
   setTimeoutFunction?: (callback: () => void, milliseconds: number) => unknown;
   clearTimeoutFunction?: (handle: unknown) => void;
   scheduleDeadline?: boolean;
+  privilegedContext?: EffectiveToolExecutionContext;
+}
+
+export interface PrivilegedExecutionSnapshot {
+  snapshot: ExecutionSnapshot;
+  context?: EffectiveToolExecutionContext;
 }
 
 export interface ExecutionLifecycle {
@@ -102,6 +111,7 @@ export interface ExecutionLifecycle {
   begin(options: BeginExecutionOptions): ExecutionHandle;
   start(): () => void;
   inspect(selector?: ExecutionSelector): readonly ExecutionSnapshot[];
+  inspectPrivileged(selector?: ExecutionSelector): readonly PrivilegedExecutionSnapshot[];
   locate(executionId: string): ExecutionHandle | undefined;
   subscribe(listener: (event: ExecutionLifecycleEvent) => void): () => void;
   closeAdmission(): void;
@@ -119,6 +129,7 @@ type RecordState = {
   controller: AbortController;
   settled: Promise<ExecutionSnapshot>;
   resolveSettled: (snapshot: ExecutionSnapshot) => void;
+  privilegedContext?: EffectiveToolExecutionContext;
 };
 
 let nextExecutionId = 0;
@@ -190,6 +201,7 @@ export function createExecutionLifecycle(defaultOwnerId = 'anonymous'): Executio
         controller,
         settled,
         resolveSettled,
+        ...(options.privilegedContext ? { privilegedContext: options.privilegedContext } : {}),
         snapshot: freeze({
           executionId,
           toolName: options.toolName,
@@ -243,6 +255,11 @@ export function createExecutionLifecycle(defaultOwnerId = 'anonymous'): Executio
         id: executionId,
         signal: controller.signal,
         snapshot: () => record.snapshot,
+        privilegedSnapshot: () =>
+          Object.freeze({
+            snapshot: record.snapshot,
+            ...(record.privilegedContext ? { context: record.privilegedContext } : {}),
+          }),
         queued: (queuePosition, capacity) => {
           if (record.snapshot.state !== 'queued') return;
           transition({ queuePosition, ...(capacity === undefined ? {} : { capacity }) });
@@ -326,6 +343,18 @@ export function createExecutionLifecycle(defaultOwnerId = 'anonymous'): Executio
         [...records.values()]
           .map(({ snapshot }) => snapshot)
           .filter((snapshot) => matches(snapshot, selector)),
+      );
+    },
+    inspectPrivileged(selector) {
+      return Object.freeze(
+        [...records.values()]
+          .filter(({ snapshot }) => matches(snapshot, selector))
+          .map(({ snapshot, privilegedContext }) =>
+            Object.freeze({
+              snapshot,
+              ...(privilegedContext ? { context: privilegedContext } : {}),
+            }),
+          ),
       );
     },
     locate: (executionId) => handles.get(executionId),

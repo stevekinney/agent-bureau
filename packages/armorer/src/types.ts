@@ -11,6 +11,8 @@ import type {
   ToolResultInput as SharedToolResultInput,
 } from 'interoperability';
 
+import type { ApprovalBindingPayload } from './approval-binding';
+
 export type JSONValue = SharedJSONValue;
 export type ToolProvider = 'openai' | 'anthropic' | 'gemini';
 export type ToolError = SharedToolError;
@@ -68,6 +70,7 @@ export type PendingToolApproval = {
   policyPauseTier?: PolicyPauseTier;
   satisfiedPolicyPauses?: readonly SatisfiedPolicyPause[];
   approvalToken?: string;
+  approvalBinding?: ApprovalBindingPayload;
 };
 
 export type SignedPendingToolApproval = PendingToolApproval & {
@@ -77,6 +80,12 @@ export type SignedPendingToolApproval = PendingToolApproval & {
 export type ToolExecutionIdempotency = {
   key: string;
   outcome: 'fresh' | 'deduped' | 'unknown-outcome';
+  resolutionReceipt?: {
+    key: string;
+    attemptId: string;
+    authorizedAt: number;
+    authorizedBy?: string;
+  };
 };
 
 /**
