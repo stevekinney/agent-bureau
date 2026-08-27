@@ -444,4 +444,23 @@ describe('createPublicConversationProjection', () => {
     expect(Object.isFrozen(projection)).toBe(true);
     expect(Object.isFrozen(projection.messages[projection.ids[0]!]!)).toBe(true);
   });
+
+  it('applies domain redaction in addition to mandatory default redaction', () => {
+    const conversation = appendMessages(
+      createSeed(),
+      {
+        role: 'assistant',
+        content: 'Email person@example.com about account 123-456.',
+      },
+      createTestEnvironment(),
+    );
+
+    const projection = createPublicConversationProjection(conversation, {
+      redactText: (text) => text.replace('123-456', '[ACCOUNT_REDACTED]'),
+    });
+
+    expect(projection.messages[projection.ids[0]!]!.content).toBe(
+      'Email [EMAIL_REDACTED] about account [ACCOUNT_REDACTED].',
+    );
+  });
 });

@@ -82,7 +82,7 @@ export type Projection<Event> = {
 };
 
 export type PublicConversationProjectionOptions = {
-  /** Replaces personal data and credentials in visible text. Defaults to the package PII rules. */
+  /** Applies additional domain-specific redaction after the package's mandatory default rules. */
   redactText?: ((text: string) => string) | undefined;
 };
 
@@ -111,7 +111,10 @@ export function createPublicConversationProjection(
   conversation: ConversationHistory,
   options: PublicConversationProjectionOptions = {},
 ): ConversationHistory {
-  const redactText = options.redactText ?? createPIIRedaction();
+  const redactByDefault = createPIIRedaction();
+  const redactText = options.redactText
+    ? (text: string) => options.redactText!(redactByDefault(text))
+    : redactByDefault;
   const messages: Record<string, Message> = {};
   const ids: string[] = [];
 

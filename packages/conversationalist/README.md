@@ -58,7 +58,7 @@ The package manifest is the machine-readable support contract. Conversationalist
 
 The Markdown and export subpaths are server-only because their `gray-matter` parser needs Node-compatible Buffer behavior. The other 17 subpaths are built and executed from the exact package tarball with `process` and `Bun` absent. Provider adapters remain outside the root and conversation runtime and declaration closure until their explicit subpath is loaded; `@anthropic-ai/sdk` is an optional peer for its adapter declarations.
 
-Use `createPublicConversationProjection()` before serializing a transcript into an SSR response or browser payload. It intentionally removes hidden messages, metadata, provider-private reasoning, tool input and results, token usage, citations, document and image references, container identifiers, and managed-asset grants. It retains only visible text and applies the package's default personal-data and credential redaction rules. Supply `redactText` when your application has stricter domain-specific redaction requirements.
+Use `createPublicConversationProjection()` before serializing a transcript into an SSR response or browser payload. It intentionally removes hidden messages, internal instruction roles, metadata, provider-private reasoning, tool input and results, token usage, citations, document and image references, container identifiers, and managed-asset grants. It retains only user and assistant text and always applies the package's default personal-data and credential redaction rules. Supply `redactText` to apply stricter domain-specific redaction after those defaults.
 
 ```typescript
 import { createPublicConversationProjection } from 'conversationalist';
