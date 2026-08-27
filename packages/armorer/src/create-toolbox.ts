@@ -1279,6 +1279,11 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
                 'Approval authorization requires request principal, tenant, audience, agentId, and runId.',
               );
             }
+            if (!tool.identity.version) {
+              throw new Error(
+                `Approval authorization requires a versioned tool definition for "${tool.name}".`,
+              );
+            }
             const issuedAt = approvalNow();
             result.pendingApproval.approvalBinding = {
               version: 1,

@@ -2700,6 +2700,16 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     return reviews;
   }
 
+  function releaseTerminalRunReviewState(runId: string): void {
+    const runState = store.getRun(runId);
+    if (!runState || runState.status === 'running') return;
+    for (const review of listPendingReviews()) {
+      if (review.runId === runId) return;
+    }
+    runRequestContexts.delete(runId);
+    runToolboxesByRunId.delete(runId);
+  }
+
   async function resolveReview(input: ResolveReviewInput): Promise<ResolveReviewResult> {
     const review = listPendingReviews().find((candidate) => candidate.id === input.id);
     if (!review) {
@@ -2806,6 +2816,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     resolvingReviewIds.delete(review.id);
     if (!keepPending) {
       resolvedReviewIds.add(review.id);
+      if (review.kind === 'tool-approval') pendingApprovalOverrides.delete(review.id);
       if (review.kind === 'tool-approval') {
         try {
           await prunePersistedPendingApprovalOverride(review.sessionId, review.id);
@@ -2829,6 +2840,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
           cause: error,
         });
       }
+      releaseTerminalRunReviewState(review.runId);
     }
 
     const decisionType =

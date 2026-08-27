@@ -772,6 +772,7 @@ describe('createAgent — park-on-approval', () => {
       [
         createTool({
           name: 'charge-card',
+          version: '1.0.0',
           description: 'Charge a payment card',
           input: z.object({ cents: z.number() }),
           metadata: { mutates: true },

@@ -3990,6 +3990,7 @@ function createNeedsApprovalToolbox(approvalSecret: string, charges: number[]) {
     [
       createTool({
         name: 'charge-card',
+        version: '1.0.0',
         description: 'Charge a payment card',
         input: z.object({ cents: z.number() }),
         async execute({ cents }) {
@@ -4026,6 +4027,7 @@ function createRegatingApprovalToolbox(approvalSecret: string, charges: number[]
     [
       createTool({
         name: 'charge-card',
+        version: '1.0.0',
         description: 'Charge a payment card',
         input: z.object({ cents: z.number() }),
         async execute({ cents }) {

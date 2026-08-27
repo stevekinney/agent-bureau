@@ -682,12 +682,13 @@ export function createTool<
     options: ToolExecuteOptions | undefined,
     resolvedTimeout: number | undefined,
     nowFunction: () => number,
-  ): ExecutionHandle =>
-    executionLifecycle.begin({
+  ): ExecutionHandle => {
+    const ownerId = options?.ownerId ?? options?.requestContext?.authority.ownerId;
+    return executionLifecycle.begin({
       ...(options?.executionId ? { executionId: options.executionId } : {}),
       toolName: name,
       callId,
-      ...(options?.ownerId ? { ownerId: options.ownerId } : {}),
+      ...(ownerId !== undefined ? { ownerId } : {}),
       ...(options?.parentExecutionId ? { parentExecutionId: options.parentExecutionId } : {}),
       ...(isAbortSignalLike(options?.signal) ? { signal: options.signal } : {}),
       ...(resolvedTimeout !== undefined ? { deadline: nowFunction() + resolvedTimeout } : {}),
@@ -697,6 +698,7 @@ export function createTool<
       ...(options?.setTimeoutFunction ? { setTimeoutFunction: options.setTimeoutFunction } : {}),
       ...(options?.effectiveContext ? { privilegedContext: options.effectiveContext } : {}),
     });
+  };
 
   const executeCall = (
     toolCall: ToolCallWithArguments,

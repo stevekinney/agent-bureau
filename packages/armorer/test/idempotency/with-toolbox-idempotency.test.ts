@@ -485,6 +485,7 @@ describe('withToolboxIdempotency', () => {
     const chargeTool = createTool({
       name: 'charge',
       description: 'Charges a payment method',
+      version: '1.0.0',
       input: z.object({ cents: z.number() }),
       idempotencyKey: (input: unknown) => fullInputKey(input),
       async execute({ cents }) {
@@ -535,7 +536,12 @@ describe('withToolboxIdempotency', () => {
 
     expect(firstResume.result).toEqual({ charged: 100 });
     expect(firstResume.idempotency).toEqual({
-      key: expectedCacheKey('tenant-a', 'default:charge', 'charge:charge-once', requestContext),
+      key: expectedCacheKey(
+        'tenant-a',
+        'default:charge@1.0.0',
+        'charge:charge-once',
+        requestContext,
+      ),
       outcome: 'fresh',
     });
     expect(charges).toEqual([100]);

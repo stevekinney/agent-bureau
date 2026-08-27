@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
-import type { EffectiveToolExecutionContext, ToolExecuteOptions } from '../src';
+import type { EffectiveToolExecutionContext, ToolExecuteOptions, ToolRequestContext } from '../src';
 import { createTool, createToolCall, isTool, lazy, withContext } from '../src';
 import { type ApprovalResumeState, approvalResumeSymbol } from '../src/internal/approval-resume';
 import { createConcurrencyLimiter } from '../src/utilities/concurrency';
@@ -85,6 +85,22 @@ function createEffectiveContext(): EffectiveToolExecutionContext {
       approval: 'approval:1',
       redaction: 'redaction:1',
     },
+  };
+}
+
+function createRequestContext(ownerId = 'owner-a'): ToolRequestContext {
+  const context = createEffectiveContext();
+  return {
+    authority: {
+      ...context.authority,
+      ownerId,
+    },
+    audience: context.audience,
+    agentId: context.agentId,
+    runId: context.runId,
+    requestId: context.requestId,
+    credentials: context.credentials,
+    traceContext: context.traceContext,
   };
 }
 
@@ -1584,6 +1600,100 @@ describe('isTool', () => {
     expect(result.outcome).toBe('error');
     expect(snapshot?.snapshot.state).toBe('terminal');
     expectTerminalAuditContext(snapshot?.context);
+  });
+
+  it('uses request authority owner for executeCall lifecycle inspection', async () => {
+    const requestContext = createRequestContext('request-owner');
+    const tool = createTool({
+      name: 'execute-call-request-owner',
+      description: 'records request authority owner',
+      input: z.object({}),
+      async execute() {
+        return 'ok';
+      },
+    });
+
+    const result = await tool.execute(createToolCall('execute-call-request-owner', {}), {
+      requestContext,
+    });
+
+    expect(result).toMatchObject({ outcome: 'success' });
+    expect(tool.executions.inspect({ ownerId: 'request-owner' })).toEqual([
+      expect.objectContaining({
+        callId: expect.any(String),
+        ownerId: 'request-owner',
+        state: 'terminal',
+      }),
+    ]);
+    expect(tool.executions.inspect({ ownerId: 'anonymous' })).toHaveLength(0);
+  });
+
+  it('uses request authority owner for executeWith owner-scoped abort', async () => {
+    let observedSignal: AbortSignal | undefined;
+    const requestContext = createRequestContext('request-owner');
+    const tool = createTool({
+      name: 'execute-with-request-owner-abort',
+      description: 'aborts by request authority owner',
+      input: z.object({}),
+      async execute(_params, context) {
+        observedSignal = context.signal;
+        await new Promise<void>((resolve) => {
+          context.signal?.addEventListener('abort', () => resolve(), { once: true });
+        });
+        return 'settled after abort';
+      },
+    });
+
+    const pending = tool.executeWith({
+      params: {},
+      callId: 'request-owner-abort-call',
+      requestContext,
+    });
+    while (!observedSignal) await Promise.resolve();
+
+    expect(tool.executions.abort({ ownerId: 'other-owner' }, 'wrong owner')).toBe(0);
+    expect(tool.executions.abort({ ownerId: 'request-owner' }, 'request owner stopped')).toBe(1);
+
+    const result = await pending;
+    expect(result).toMatchObject({
+      outcome: 'error',
+      errorCategory: 'cancelled',
+      errorMessage: 'request owner stopped',
+    });
+    await drainMicrotasks();
+    expect(tool.executions.inspect({ callId: 'request-owner-abort-call' })[0]).toMatchObject({
+      ownerId: 'request-owner',
+      state: 'terminal',
+      abortSource: 'owner',
+    });
+  });
+
+  it('keeps explicit ownerId over request authority owner', async () => {
+    const tool = createTool({
+      name: 'explicit-owner-over-request-owner',
+      description: 'keeps explicit execution owner',
+      input: z.object({}),
+      async execute() {
+        return 'ok';
+      },
+    });
+
+    const result = await tool.executeWith({
+      params: {},
+      callId: 'explicit-owner-call',
+      ownerId: 'explicit-owner',
+      requestContext: createRequestContext('request-owner'),
+    });
+
+    expect(result).toMatchObject({ outcome: 'success' });
+    expect(tool.executions.inspect({ ownerId: 'explicit-owner' })).toEqual([
+      expect.objectContaining({
+        callId: 'explicit-owner-call',
+        ownerId: 'explicit-owner',
+        state: 'terminal',
+      }),
+    ]);
+    expect(tool.executions.inspect({ ownerId: 'request-owner' })).toHaveLength(0);
   });
 
   it('direct call emits validate-error and settled on parse failure', async () => {

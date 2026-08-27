@@ -306,6 +306,7 @@ describe('createToolbox', () => {
           createTool({
             name: 'charge-card',
             description: 'Charge a payment card',
+            version: '1.0.0',
             input: z.object({ cents: z.number(), confirmed: z.boolean().optional() }),
             metadata: { mutates: true },
             async execute({ cents }) {
@@ -539,11 +540,67 @@ describe('createToolbox', () => {
     ).toThrow('approvalSecret is required');
   });
 
+  it('requires versioned tool definitions for durable approvals and invalidates revisions', async () => {
+    const approvalStateStore = createProcessLocalApprovalStateStore();
+    const makeTool = (version?: string) =>
+      createTool({
+        name: 'versioned-charge',
+        description: 'Requires approval',
+        ...(version !== undefined ? { version } : {}),
+        input: z.object({ cents: z.number() }),
+        async execute({ cents }) {
+          return { charged: cents };
+        },
+      });
+    const policy = {
+      beforeExecute: () => ({
+        allow: false as const,
+        status: 'needs_approval' as const,
+        reason: 'approval required',
+      }),
+    };
+    const unversioned = createToolbox([makeTool()], {
+      approvalSecret: 'version-secret',
+      approvalStateStore,
+      policy,
+    });
+
+    const unversionedResult = await unversioned.execute(
+      { id: 'unversioned-approval', name: 'versioned-charge', arguments: { cents: 100 } },
+      approvalExecutionOptions,
+    );
+    expect(unversionedResult.outcome).toBe('error');
+    expect(unversionedResult.error?.message).toContain('versioned tool definition');
+
+    const versionOne = createToolbox([makeTool('1.0.0')], {
+      approvalSecret: 'version-secret',
+      approvalStateStore,
+      policy,
+    });
+    const versionTwo = createToolbox([makeTool('2.0.0')], {
+      approvalSecret: 'version-secret',
+      approvalStateStore,
+      policy,
+    });
+    const paused = await versionOne.execute(
+      { id: 'versioned-approval', name: 'versioned-charge', arguments: { cents: 100 } },
+      approvalExecutionOptions,
+    );
+
+    await expect(
+      versionTwo.resumeApproval(
+        paused.pendingApproval! as SignedPendingToolApproval,
+        approvalExecutionOptions,
+      ),
+    ).rejects.toThrow('toolDefinitionRevision does not match');
+  });
+
   it('requires request authority for signed approvals and supports revocation', async () => {
     const toolbox = createToolbox(
       [
         createTool({
           name: 'revoke-me',
+          version: '1.0.0',
           description: 'Requires approval',
           input: z.object({}),
           execute: () => 'unexpected',
@@ -604,6 +661,7 @@ describe('createToolbox', () => {
       [
         createTool({
           name: 'authority-bound-action',
+          version: '1.0.0',
           description: 'Executes only under the approved authority',
           input: z.object({}),
           execute: () => {
@@ -644,6 +702,7 @@ describe('createToolbox', () => {
   it('restores persisted signed approval bindings without reviving terminal bindings', async () => {
     const tool = createTool({
       name: 'restore-me',
+      version: '1.0.0',
       description: 'Requires approval across process recovery',
       input: z.object({}),
       execute: () => 'restored',
@@ -683,6 +742,7 @@ describe('createToolbox', () => {
       [
         createTool({
           name: 'collect-name',
+          version: '1.0.0',
           description: 'Collect a name',
           input: z.object({ name: z.string() }),
           async execute({ name }) {
@@ -724,6 +784,7 @@ describe('createToolbox', () => {
   it('re-runs policy when resuming an approval with unchanged arguments', async () => {
     const tool = createTool({
       name: 'charge-card',
+      version: '1.0.0',
       description: 'Charge a payment card',
       input: z.object({ cents: z.number() }),
       async execute({ cents }) {
@@ -776,6 +837,7 @@ describe('createToolbox', () => {
   it('requires the current approval prompt to match the signed approval before resuming', async () => {
     const tool = createTool({
       name: 'charge-card',
+      version: '1.0.0',
       description: 'Charge a payment card',
       input: z.object({ cents: z.number() }),
       async execute({ cents }) {
@@ -832,6 +894,7 @@ describe('createToolbox', () => {
       [
         createTool({
           name: 'create-ticket',
+          version: '1.0.0',
           description: 'Create a ticket',
           input: z.object({ title: z.string() }),
           async execute({ title }) {
@@ -893,6 +956,7 @@ describe('createToolbox', () => {
       [
         createTool({
           name: 'persist-value',
+          version: '1.0.0',
           description: 'Persist a value',
           input: z.object({ value: z.union([z.string(), z.number()]) }),
           async execute({ value }) {
@@ -944,6 +1008,7 @@ describe('createToolbox', () => {
         [
           createTool({
             name: 'charge-card',
+            version: '1.0.0',
             description: 'Charge a payment card',
             input: z.object({ cents: z.number(), confirmed: z.boolean().optional() }),
             async execute({ cents }) {
@@ -1542,6 +1607,7 @@ describe('createToolbox', () => {
       [
         createTool({
           name: 'approved-action',
+          version: '1.0.0',
           description: 'Requires approval',
           input: z.object({}),
           execute: async () => 'approved',
@@ -4603,6 +4669,7 @@ describe('createToolbox', () => {
         [
           createTool({
             name: 'multi-pause-operation',
+            version: '1.0.0',
             description: 'requires approval and input',
             input: z.object({}),
             policy: {
@@ -4679,6 +4746,7 @@ describe('createToolbox', () => {
         [
           createTool({
             name: 'tier-bound-pause',
+            version: '1.0.0',
             description: 'requires a tool-level approval',
             input: z.object({}),
             policy: {
@@ -4743,6 +4811,7 @@ describe('createToolbox', () => {
       };
       const tool = createTool({
         name: 'stale-capability-pause',
+        version: '1.0.0',
         description: 'requires layered approval',
         input: z.object({}),
         policy,
@@ -4830,6 +4899,7 @@ describe('createToolbox', () => {
           [
             createTool({
               name: `resume-${status}`,
+              version: '1.0.0',
               description: 'must recheck every policy tier on resume',
               input: z.object({}),
               policy: {
@@ -4876,6 +4946,7 @@ describe('createToolbox', () => {
         [
           createTool({
             name: 'sensitive-op',
+            version: '1.0.0',
             description: 'requires sign-off',
             input: z.object({ value: z.string() }),
             policy: {
