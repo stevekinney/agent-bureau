@@ -1,4 +1,5 @@
 import { rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'bun:test';
@@ -6,7 +7,7 @@ import { afterEach, describe, expect, it } from 'bun:test';
 import { listEvaluationReports } from './reports';
 import type { EvaluationReport } from './types';
 
-const fixturesDirectory = join(import.meta.dir, '__reports-fixtures__');
+const fixturesDirectory = join(tmpdir(), 'agent-bureau-evaluation-reports', String(process.pid));
 
 function fixturePath(name: string): string {
   return join(fixturesDirectory, name);

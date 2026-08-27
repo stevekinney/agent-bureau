@@ -707,7 +707,7 @@ export interface Bureau {
   readonly completed: boolean;
   readonly signal: AbortSignal;
 
-  dispose(): void;
+  dispose(): Promise<void>;
 
   readonly sessionStore: SessionStore | undefined;
   readonly kv: ConditionalTextValueStore | undefined;

@@ -543,6 +543,7 @@ export interface RecoveredRunHandle {
 
 export interface RecoveredRunEventSurface {
   emitter: OperativeEventEmitter;
+  abort: (reason?: string) => void;
   stopToolboxForward: () => void;
 }
 
@@ -556,6 +557,13 @@ export function createRecoveredRunEventSurface(
   agentName: string,
 ): RecoveredRunEventSurface {
   const emitter = new CompletableEventTarget<CombinedOperativeEventMap>();
+  const abortController = new AbortController();
+  services.options = {
+    ...services.options,
+    signal: services.options.signal
+      ? AbortSignal.any([services.options.signal, abortController.signal])
+      : abortController.signal,
+  };
   services.emitter = emitter;
   const cleanups: Array<(() => void) | undefined> = [];
   const toolboxForward = forwardEvents(services.toolbox, emitter, 'toolbox');
@@ -652,6 +660,7 @@ export function createRecoveredRunEventSurface(
     stopToolboxForward: () => {
       for (const cleanup of cleanups) cleanup?.();
     },
+    abort: (reason?: string) => abortController.abort(reason),
   };
 }
 
@@ -700,6 +709,7 @@ export function reattachDurableActiveRun(
      * Reattach owns it and runs it when the recovered run completes.
      */
     stopToolboxForward?: () => void;
+    abort?: (reason?: string) => void;
   },
 ): ActiveRun {
   const { runId, handle } = reattach;
@@ -749,6 +759,7 @@ export function reattachDurableActiveRun(
   // resolver/teardown failure that merely raced an abort() call. Idempotent via
   // `abortCancelled ??=`, so a later dispose() that also aborts is a no-op.
   function abort(): void {
+    reattach.abort?.('Aborted durable run');
     abortCancelled ??= context.engine.cancel(runId).then(cancelSucceeded, cancelFailed);
   }
 

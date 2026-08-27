@@ -947,6 +947,24 @@ tool.addEventListener('progress', (event) => {
 });
 ```
 
+### Execution Lifetime
+
+Tools and toolboxes expose the lifetime of work they own. `activeExecutions` counts admitted calls, `executionSignal` aborts that work when the owner completes, and `whenIdle()` resolves once all admitted calls have reached a terminal or explicitly unknown-effect state. `complete()` is idempotent, closes admission, requests cancellation for active work, and returns a promise you can await during shutdown:
+
+```typescript
+const pending = toolbox.execute({ name: 'my-tool', arguments: {} });
+await toolbox.complete();
+await toolbox.whenIdle();
+console.log(toolbox.completed, toolbox.activeExecutions); // true, 0
+await pending; // resolves with the normal cancelled ToolResult
+```
+
+`executions` exposes immutable, monotonically revisioned snapshots for queued, active, waiting, streaming, abort-requested, cleanup-pending, terminal, and unknown-effect work. Each snapshot includes stable execution, call, tool, and owner identifiers plus queue, capacity, deadline, activity, result, and cleanup details when available. Use `inspect()` or `subscribe()` for observation, `locate()` for a stable execution handle, and toolbox `abort()` for scoped cancellation.
+
+Caller cancellation, execution deadlines, and owner shutdown are composed into the signal exposed through `context.signal`; Armorer never aborts the caller-owned signal itself. Cancellation is a request, not proof that an external effect stopped. If a callback ignores cancellation, the execution remains `cleanup-pending` until the callback settles. A cleanup outcome of `unresolved` becomes `unknown-effect` so shutdown reports do not claim an unverified cleanup.
+
+For controlled shutdown, call `closeAdmission()` to reject new toolbox work, then `shutdown({ policy: 'drain' })` to await admitted executions or `shutdown({ policy: 'abort' })` to request cancellation before awaiting them. The returned cleanup report distinguishes terminal executions, unknown effects, and cleanup failures.
+
 ### Streaming Output
 
 Tools that return an `AsyncIterable` support two execution modes:

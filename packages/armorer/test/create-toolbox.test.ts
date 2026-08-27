@@ -2065,7 +2065,9 @@ describe('createToolbox', () => {
     controller.abort();
 
     toolbox.register(makeConfiguration({ name: 'adder' }));
-    await toolbox.execute({ id: 'adder', name: 'adder', arguments: { a: 1, b: 2 } });
+    await expect(
+      toolbox.execute({ id: 'adder', name: 'adder', arguments: { a: 1, b: 2 } }),
+    ).rejects.toThrow('Execution admission is closed');
     expect(calls).toBe(0);
   });
 
@@ -2078,6 +2080,210 @@ describe('createToolbox', () => {
       removeEventListener() {},
     };
     expect(() => createToolbox([], { signal: signal as any })).not.toThrow();
+  });
+
+  it('completion aborts active calls and waits for the toolbox to become idle', async () => {
+    let observedSignal: AbortSignal | undefined;
+    const toolbox = createToolbox([
+      createTool({
+        name: 'lifecycle-abort',
+        description: 'abort on completion',
+        input: z.object({}),
+        async execute(_params, context) {
+          observedSignal = context.signal;
+          await new Promise<void>((resolve) => {
+            context.signal?.addEventListener('abort', () => resolve(), { once: true });
+          });
+          return 'unreachable';
+        },
+      }),
+    ]);
+
+    const pending = toolbox.execute({ name: 'lifecycle-abort', arguments: {} });
+    while (!observedSignal) await Promise.resolve();
+    const completion = toolbox.complete();
+    expect(toolbox.executionSignal.aborted).toBe(true);
+    expect(toolbox.activeExecutions).toBe(1);
+    await completion;
+    const result = await pending;
+    expect(result.errorCategory).toBe('cancelled');
+    expect(observedSignal?.aborted).toBe(true);
+    expect(toolbox.activeExecutions).toBe(0);
+    expect(toolbox.completed).toBe(true);
+    await toolbox.whenIdle();
+    await expect(toolbox.execute({ name: 'lifecycle-abort', arguments: {} })).rejects.toThrow(
+      'Execution admission is closed',
+    );
+  });
+
+  it('supports explicit admission closure, scoped abort, and shutdown reporting', async () => {
+    let release!: () => void;
+    const toolbox = createToolbox([
+      createTool({
+        name: 'managed-lifecycle',
+        description: 'managed lifecycle',
+        input: z.object({}),
+        async execute(_params, context) {
+          await new Promise<void>((resolve) => {
+            release = resolve;
+            context.signal?.addEventListener('abort', resolve, { once: true });
+          });
+          return 'released';
+        },
+      }),
+    ]);
+
+    const pending = toolbox.execute({
+      id: 'managed-call',
+      name: 'managed-lifecycle',
+      arguments: {},
+    });
+    while (!release) await Promise.resolve();
+    expect(toolbox.abort({ callId: 'managed-call' }, 'stop managed call')).toBe(1);
+    release();
+    await pending;
+
+    const report = await toolbox.shutdown({ policy: 'drain' });
+    expect(report).toMatchObject({ admissionClosed: true, policy: 'drain', terminal: 1 });
+
+    const closed = createToolbox([]);
+    closed.closeAdmission();
+    await expect(closed.execute({ name: 'missing', arguments: {} })).rejects.toThrow(
+      'Execution admission is closed',
+    );
+  });
+
+  it('returns unconsumed child streams before toolbox shutdown resolves', async () => {
+    let returned = 0;
+    const toolbox = createToolbox([
+      createTool({
+        name: 'toolbox-stream-shutdown',
+        description: 'stream owned by a toolbox',
+        input: z.object({}),
+        async execute() {
+          return {
+            [Symbol.asyncIterator]() {
+              return {
+                async next() {
+                  return new Promise<IteratorResult<string>>(() => {});
+                },
+                async return() {
+                  returned += 1;
+                  return { done: true as const, value: undefined };
+                },
+              };
+            },
+          };
+        },
+      }),
+    ]);
+
+    const result = await toolbox.execute(
+      { id: 'toolbox-stream', name: 'toolbox-stream-shutdown', arguments: {} },
+      { stream: true },
+    );
+    expect(result.stream).toBeDefined();
+    expect(toolbox.activeExecutions).toBe(1);
+
+    const report = await toolbox.shutdown();
+    expect(returned).toBe(1);
+    expect(report).toMatchObject({ terminal: 1, unknownEffects: 0 });
+    expect(toolbox.activeExecutions).toBe(0);
+  });
+
+  it('reports raw toolbox streams that cannot acknowledge return', async () => {
+    const toolbox = createToolbox([], {
+      toolFactory(configuration, { buildDefaultTool }) {
+        const tool = buildDefaultTool(configuration);
+        return new Proxy(tool, {
+          get(target, property, receiver) {
+            if (property !== 'execute') return Reflect.get(target, property, receiver);
+            return async () => {
+              const stream = {
+                [Symbol.asyncIterator]() {
+                  return {
+                    async next() {
+                      return new Promise<IteratorResult<string>>(() => {});
+                    },
+                  };
+                },
+              };
+              return {
+                callId: 'raw-unreturnable',
+                toolCallId: 'raw-unreturnable',
+                toolName: target.name,
+                outcome: 'success' as const,
+                content: '[stream]',
+                result: stream,
+                stream,
+              };
+            };
+          },
+        });
+      },
+    });
+    toolbox.register({
+      name: 'raw-unreturnable-stream',
+      description: 'raw stream without return',
+      input: z.object({}),
+      async execute() {},
+    });
+    await toolbox.execute(
+      { id: 'raw-unreturnable', name: 'raw-unreturnable-stream', arguments: {} },
+      { stream: true },
+    );
+
+    const report = await toolbox.shutdown();
+    expect(report).toMatchObject({ terminal: 0, unknownEffects: 1 });
+  });
+
+  it('reports raw toolbox stream return failures', async () => {
+    const toolbox = createToolbox([], {
+      toolFactory(configuration, { buildDefaultTool }) {
+        const tool = buildDefaultTool(configuration);
+        return new Proxy(tool, {
+          get(target, property, receiver) {
+            if (property !== 'execute') return Reflect.get(target, property, receiver);
+            return async () => {
+              const stream = {
+                [Symbol.asyncIterator]() {
+                  return {
+                    async next() {
+                      return new Promise<IteratorResult<string>>(() => {});
+                    },
+                    async return() {
+                      throw new Error('raw stream return failed');
+                    },
+                  };
+                },
+              };
+              return {
+                callId: 'raw-failing',
+                toolCallId: 'raw-failing',
+                toolName: target.name,
+                outcome: 'success' as const,
+                content: '[stream]',
+                result: stream,
+                stream,
+              };
+            };
+          },
+        });
+      },
+    });
+    toolbox.register({
+      name: 'raw-failing-stream',
+      description: 'raw stream with failing return',
+      input: z.object({}),
+      async execute() {},
+    });
+    await toolbox.execute(
+      { id: 'raw-failing', name: 'raw-failing-stream', arguments: {} },
+      { stream: true },
+    );
+
+    const report = await toolbox.shutdown();
+    expect(report.cleanupFailures).toBe(1);
   });
 
   it('allows tools to dispatch status:update events via context.dispatchEvent', async () => {
@@ -3092,17 +3298,24 @@ describe('createToolbox', () => {
         async execute(_params, context) {
           observed.signal = context?.signal;
           observed.timeout = context?.timeout;
+          await new Promise<void>((resolve) => {
+            context?.signal?.addEventListener('abort', () => resolve(), { once: true });
+          });
           return 'ok';
         },
       });
 
       const controller = new AbortController();
-      await toolbox.execute(
+      const pending = toolbox.execute(
         { name: 'capture', arguments: {} },
         { signal: controller.signal, timeout: 42 },
       );
-
-      expect(observed.signal).toBe(controller.signal);
+      while (!observed.signal) await Promise.resolve();
+      expect(observed.signal).toBeDefined();
+      expect(observed.signal).not.toBe(controller.signal);
+      controller.abort('caller stopped');
+      expect(observed.signal?.aborted).toBe(true);
+      await expect(pending).resolves.toMatchObject({ errorCategory: 'cancelled' });
       expect(observed.timeout).toBe(42);
     });
 
