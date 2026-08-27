@@ -290,4 +290,173 @@ describe('Conversation lifecycle and observation', () => {
         }),
     ).toThrow('requires an explicit id and revision');
   });
+
+  it('makes the committed snapshot visible inside transition event callbacks', () => {
+    const conversation = new Conversation(createConversationHistory({ id: 'event-snapshot' }));
+    const snapshots: Array<{ revision: number; eventRevision: number; sameState: boolean }> = [];
+    conversation.getSnapshot();
+    conversation.addEventListener('change', (event) => {
+      const snapshot = conversation.getSnapshot();
+      snapshots.push({
+        revision: snapshot.revision,
+        eventRevision: event.revision,
+        sameState: snapshot.conversation === event.conversation,
+      });
+    });
+
+    conversation.appendUserMessage('current during dispatch');
+
+    expect(snapshots).toEqual([{ revision: 1, eventRevision: 1, sameState: true }]);
+  });
+
+  it('delivers disposed after closed through the lifecycle event channel', async () => {
+    const conversation = new Conversation(createConversationHistory({ id: 'lifecycle-events' }));
+    const events: string[] = [];
+    conversation.addEventListener('controller.closed', (event) => events.push(event.type));
+    conversation.addEventListener('controller.disposed', (event) => events.push(event.type));
+
+    conversation.close();
+    await conversation.dispose();
+
+    expect(events).toEqual(['controller.closed', 'controller.disposed']);
+  });
+
+  it('keeps plugin lifecycle events isolated to a fork', () => {
+    const plugin = defineMessagePlugin({ id: 'fork-policy', revision: 1 }, (input) => input);
+    const parent = new Conversation(createConversationHistory({ id: 'plugin-parent' }), {
+      plugins: [plugin],
+    });
+    const child = parent.fork();
+    const parentEvents: string[] = [];
+    const childEvents: string[] = [];
+    parent.addEventListener('plugin.activated', (event) => parentEvents.push(event.type));
+    child.addEventListener('plugin.activated', (event) => childEvents.push(event.type));
+
+    child.appendUserMessage('child only');
+    child.appendUserMessage('activation remains one-time');
+
+    expect(parentEvents).toEqual([]);
+    expect(childEvents).toEqual(['plugin.activated']);
+  });
+
+  it('uses distinct sequences and one correlation for paired transitions', () => {
+    const conversation = new Conversation(createConversationHistory({ id: 'paired-events' }));
+    conversation.appendUserMessage('undo target');
+    const events: Array<{ type: string; sequence: number; correlationId: string }> = [];
+    conversation.addEventListener('change', (event) => events.push(event));
+    conversation.addEventListener('undo', (event) => events.push(event));
+
+    conversation.undo();
+
+    expect(events.map(({ type }) => type)).toEqual(['change', 'undo']);
+    expect(events[0]!.sequence).not.toBe(events[1]!.sequence);
+    expect(events[0]!.correlationId).toBe(events[1]!.correlationId);
+
+    const forkEvents: Array<{ sequence: number; correlationId: string }> = [];
+    conversation.addEventListener('session.forked', (event) => forkEvents.push(event));
+    conversation.addEventListener('change', (event) => forkEvents.push(event));
+    conversation.fork();
+    expect(forkEvents[0]!.sequence).not.toBe(forkEvents[1]!.sequence);
+    expect(forkEvents[0]!.correlationId).toBe(forkEvents[1]!.correlationId);
+  });
+
+  it('preserves stream sequence counters across history navigation', () => {
+    const conversation = new Conversation(createConversationHistory({ id: 'stream-revival' }));
+    const sequences: number[] = [];
+    conversation.addEventListener('stream.updated', (event) =>
+      sequences.push(event.streamSequence!),
+    );
+    const messageId = conversation.appendStreamingMessage('assistant');
+    conversation.updateStreamingMessage(messageId, 'first');
+    conversation.finalizeStreamingMessage(messageId);
+    conversation.undo();
+    conversation.updateStreamingMessage(messageId, 'second');
+
+    expect(sequences).toEqual([1, 2]);
+  });
+
+  it('honors caller cancellation when an async tool-result stream is blocked', async () => {
+    const conversation = new Conversation(createConversationHistory({ id: 'caller-abort' }));
+    const controller = new AbortController();
+    let iteratorClosed = false;
+    const append = conversation.appendToolResultAsync(
+      {
+        callId: 'call-1',
+        outcome: 'success',
+        content: [],
+        stream: {
+          [Symbol.asyncIterator]() {
+            return {
+              next: () => new Promise<IteratorResult<unknown>>(() => {}),
+              async return() {
+                iteratorClosed = true;
+                return { done: true, value: undefined };
+              },
+            };
+          },
+        },
+      },
+      { signal: controller.signal },
+    );
+    await Promise.resolve();
+    controller.abort('caller stopped');
+
+    await expect(append).rejects.toMatchObject({ name: 'AbortError' });
+    expect(iteratorClosed).toBe(true);
+  });
+
+  it('rejects malformed external histories without throwing', () => {
+    const conversation = new Conversation(createConversationHistory({ id: 'external-shape' }));
+    const malformed = {
+      ...conversation.current,
+      ids: ['missing-message'],
+    };
+
+    expect(
+      conversation.reconcileExternalSnapshot({
+        conversation: malformed,
+        revision: 1,
+        lifecycle: 'open',
+      }),
+    ).toEqual({ accepted: false, revision: 0, reason: 'invalid-external-snapshot' });
+  });
+
+  it('reports truthful compaction outcomes and honors caller cancellation after summary', async () => {
+    const conversation = new Conversation(createConversationHistory({ id: 'compact-outcomes' }));
+    for (let index = 0; index < 8; index++) conversation.appendUserMessage(`message ${index}`);
+    const outcomes: Array<[string, string]> = [];
+    conversation.addEventListener('compaction.started', (event) =>
+      outcomes.push([event.type, event.outcome]),
+    );
+    conversation.addEventListener('compaction.cancelled', (event) =>
+      outcomes.push([event.type, event.outcome]),
+    );
+    const controller = new AbortController();
+
+    const compacting = conversation.compact(
+      async () => {
+        controller.abort('caller stopped');
+        return 'summary despite cancellation';
+      },
+      { signal: controller.signal },
+    );
+
+    await expect(compacting).rejects.toMatchObject({ code: 'error:operation-cancelled' });
+    expect(outcomes).toEqual([
+      ['compaction.started', 'started'],
+      ['compaction.cancelled', 'cancelled'],
+    ]);
+  });
+
+  it('delivers snapshot.restored after callers can subscribe', async () => {
+    const source = new Conversation(createConversationHistory({ id: 'restored-event' }));
+    source.appendUserMessage('persisted');
+    const restored = Conversation.from(source.snapshot());
+    const events: string[] = [];
+    restored.addEventListener('snapshot.restored', (event) => events.push(event.type));
+
+    await Promise.resolve();
+
+    expect(events).toEqual(['snapshot.restored']);
+  });
 });

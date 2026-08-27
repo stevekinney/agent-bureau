@@ -103,6 +103,7 @@ import type {
   JSONValue,
   Message,
   MessageInput,
+  MessagePlugin,
   MessagePluginIdentity,
   TokenUsage,
 } from './types';
@@ -271,12 +272,14 @@ export class Conversation {
   private readonly inFlightOperations = new Set<Promise<unknown>>();
   private readonly streamSequences = new Map<string, number>();
   private readonly pluginIdentityList: readonly MessagePluginIdentity[];
+  private readonly sourcePlugins: readonly MessagePlugin[];
 
   constructor(
     initial: ConversationHistory = createConversationHistory(),
     environment?: Partial<ConversationEnvironment>,
   ) {
     this.environment = resolveConversationEnvironment(environment);
+    this.sourcePlugins = Object.freeze([...this.environment.plugins]);
     this.pluginIdentityList = Object.freeze(
       this.environment.plugins.map((plugin, index) => {
         if (
@@ -362,6 +365,9 @@ export class Conversation {
         >
       > = {},
   ): ConversationEventDetail {
+    // Event listeners observe the state described by the event, never the
+    // previously cached external-store snapshot.
+    this.cachedStoreSnapshot = undefined;
     this.eventSequence += 1;
     return {
       action,
@@ -659,7 +665,6 @@ export class Conversation {
       }),
     );
     this.publishStoreSnapshot();
-    this.emitter.complete();
   }
 
   complete(): void {
@@ -772,7 +777,28 @@ export class Conversation {
         reason: 'stale-external-event',
       });
     }
-    this.commit(snapshot.conversation, 'push', ['push'], {
+    let safeExternalConversation: ConversationHistory;
+    try {
+      safeExternalConversation = ensureConversationSafe(structuredClone(snapshot.conversation));
+    } catch {
+      const previous = this.current;
+      this.emitConversationEvent(
+        'mutation.rejected',
+        this.buildEventDetail('mutation.rejected', previous, {
+          ...(options.correlationId ? { correlationId: options.correlationId } : {}),
+          ...(options.actor ? { actor: options.actor } : {}),
+          durability: 'external',
+          outcome: 'rejected',
+          reason: 'invalid-external-snapshot',
+        }),
+      );
+      return Object.freeze({
+        accepted: false,
+        revision: this.controllerRevision,
+        reason: 'invalid-external-snapshot',
+      });
+    }
+    this.commit(safeExternalConversation, 'push', ['push'], {
       ...(options.correlationId ? { correlationId: options.correlationId } : {}),
       ...(options.actor ? { actor: options.actor } : {}),
       durability: 'external',
@@ -897,8 +923,15 @@ export class Conversation {
       const previousConversation = this.current;
       this.currentNode = this.currentNode.parent;
       this.controllerRevision += 1;
-      this.emitConversationEvent('change', this.buildEventDetail('undo', previousConversation));
-      this.emitConversationEvent('undo', this.buildEventDetail('undo', previousConversation));
+      const correlationId = `${this.current.id}:revision:${this.controllerRevision}`;
+      this.emitConversationEvent(
+        'change',
+        this.buildEventDetail('undo', previousConversation, { correlationId }),
+      );
+      this.emitConversationEvent(
+        'undo',
+        this.buildEventDetail('undo', previousConversation, { correlationId }),
+      );
       this.publishStoreSnapshot();
       return this.current;
     }
@@ -917,8 +950,15 @@ export class Conversation {
       const previousConversation = this.current;
       this.currentNode = next;
       this.controllerRevision += 1;
-      this.emitConversationEvent('change', this.buildEventDetail('redo', previousConversation));
-      this.emitConversationEvent('redo', this.buildEventDetail('redo', previousConversation));
+      const correlationId = `${this.current.id}:revision:${this.controllerRevision}`;
+      this.emitConversationEvent(
+        'change',
+        this.buildEventDetail('redo', previousConversation, { correlationId }),
+      );
+      this.emitConversationEvent(
+        'redo',
+        this.buildEventDetail('redo', previousConversation, { correlationId }),
+      );
       this.publishStoreSnapshot();
       return this.current;
     }
@@ -938,8 +978,15 @@ export class Conversation {
         const previousConversation = this.current;
         this.currentNode = target;
         this.controllerRevision += 1;
-        this.emitConversationEvent('change', this.buildEventDetail('switch', previousConversation));
-        this.emitConversationEvent('switch', this.buildEventDetail('switch', previousConversation));
+        const correlationId = `${this.current.id}:revision:${this.controllerRevision}`;
+        this.emitConversationEvent(
+          'change',
+          this.buildEventDetail('switch', previousConversation, { correlationId }),
+        );
+        this.emitConversationEvent(
+          'switch',
+          this.buildEventDetail('switch', previousConversation, { correlationId }),
+        );
         this.publishStoreSnapshot();
         return this.current;
       }
@@ -979,18 +1026,30 @@ export class Conversation {
       };
     }
 
-    const forked = new Conversation(forkedHistory, this.environment);
+    const forked = new Conversation(forkedHistory, {
+      ...this.environment,
+      plugins: [...this.sourcePlugins],
+    });
     forked.forkLineage = {
       parentConversationId: this.current.id,
       ...(messageId ? { forkPointMessageId: messageId } : {}),
       sourceRevision: this.controllerRevision,
     };
+    const correlationId = `${this.current.id}:fork:${forked.current.id}`;
     const detail = this.buildEventDetail('session.forked', previous, {
       childConversationId: forked.current.id,
       durability: 'snapshot',
+      correlationId,
     });
     this.emitConversationEvent('session.forked', detail);
-    this.emitConversationEvent('change', detail);
+    this.emitConversationEvent(
+      'change',
+      this.buildEventDetail('session.forked', previous, {
+        childConversationId: forked.current.id,
+        durability: 'snapshot',
+        correlationId,
+      }),
+    );
     return forked;
   }
 
@@ -1350,7 +1409,7 @@ export class Conversation {
     const startingRevision = this.controllerRevision;
     this.emitConversationEvent(
       'compaction.started',
-      this.buildEventDetail('compaction.started', previous),
+      this.buildEventDetail('compaction.started', previous, { outcome: 'started' }),
     );
     const operationSignal = options?.signal
       ? AbortSignal.any([this.operationAbortController.signal, options.signal])
@@ -1385,6 +1444,18 @@ export class Conversation {
     } finally {
       this.inFlightOperations.delete(operation);
     }
+    if (operationSignal.aborted) {
+      if (this.lifecycleState === 'open') {
+        this.emitConversationEvent(
+          'compaction.cancelled',
+          this.buildEventDetail('compaction.cancelled', previous, {
+            outcome: 'cancelled',
+            reason: String(operationSignal.reason),
+          }),
+        );
+      }
+      throw createOperationCancelledError(this.current.id, 'compaction');
+    }
     if (this.lifecycleState !== 'open') {
       throw createOperationCancelledError(this.current.id, 'compaction');
     }
@@ -1400,15 +1471,14 @@ export class Conversation {
     }
     const { conversation, result } = compacted;
     if (result.compacted) {
-      this.pushWithEvents(
-        conversation,
-        'compaction.completed',
-        this.createChangeContext(previous, conversation, 'messages.removed'),
-      );
+      this.pushWithEvents(conversation, 'compaction.completed', {
+        ...this.createChangeContext(previous, conversation, 'messages.removed'),
+        outcome: 'completed',
+      });
     } else {
       this.emitConversationEvent(
         'compaction.completed',
-        this.buildEventDetail('compaction.completed', previous),
+        this.buildEventDetail('compaction.completed', previous, { outcome: 'completed' }),
       );
     }
     return result;
@@ -1475,7 +1545,6 @@ export class Conversation {
       ['push', 'messages.updated', 'stream.finalized'],
       { messageIds: [messageId] },
     );
-    this.streamSequences.delete(messageId);
   }
 
   /**
@@ -1490,7 +1559,6 @@ export class Conversation {
       ['push', 'messages.removed', 'stream.cancelled'],
       { messageIds: [messageId] },
     );
-    this.streamSequences.delete(messageId);
   }
 
   appendToolCall(
@@ -1572,7 +1640,16 @@ export class Conversation {
     const nextConversation = await this.runOwnedOperation(
       'resolveToolResultAsync',
       async (signal) =>
-        resolveToolResultAsync(this.current, callId, toolResult, { ...options, signal }, this.env),
+        resolveToolResultAsync(
+          this.current,
+          callId,
+          toolResult,
+          {
+            ...options,
+            signal: options?.signal ? AbortSignal.any([signal, options.signal]) : signal,
+          },
+          this.env,
+        ),
     );
     this.pushWithEvents(
       nextConversation,
@@ -1601,7 +1678,15 @@ export class Conversation {
     options?: Parameters<typeof appendToolResultAsync>[2],
   ): Promise<void> {
     const nextConversation = await this.runOwnedOperation('appendToolResultAsync', async (signal) =>
-      appendToolResultAsync(this.current, toolResult, { ...options, signal }, this.env),
+      appendToolResultAsync(
+        this.current,
+        toolResult,
+        {
+          ...options,
+          signal: options?.signal ? AbortSignal.any([signal, options.signal]) : signal,
+        },
+        this.env,
+      ),
     );
     const context = this.createChangeContext(this.current, nextConversation, 'messages.appended');
     this.commit(
@@ -1838,13 +1923,16 @@ export class Conversation {
       throw createSerializationError('failed to restore snapshot: current identity mismatch');
     }
     conversation.currentNode = current;
-    conversation.emitConversationEvent(
-      'snapshot.restored',
-      conversation.buildEventDetail('snapshot.restored', conversation.current, {
-        durability: 'snapshot',
-        outcome: 'completed',
-      }),
-    );
+    queueMicrotask(() => {
+      if (conversation.lifecycleState !== 'open') return;
+      conversation.emitConversationEvent(
+        'snapshot.restored',
+        conversation.buildEventDetail('snapshot.restored', conversation.current, {
+          durability: 'snapshot',
+          outcome: 'completed',
+        }),
+      );
+    });
 
     return conversation;
   }
@@ -1954,7 +2042,6 @@ export class Conversation {
         }),
       );
       this.publishStoreSnapshot();
-      this.emitter.complete();
     } else {
       this.lifecycleState = 'disposed';
       this.emitConversationEvent(
@@ -1967,6 +2054,7 @@ export class Conversation {
       this.publishStoreSnapshot();
     }
     await Promise.allSettled([...this.inFlightOperations]);
+    this.emitter.complete();
     this.storeListeners.clear();
   }
 

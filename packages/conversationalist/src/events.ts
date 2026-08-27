@@ -1,4 +1,4 @@
-import type { ConversationHistory } from './types';
+import type { ConversationHistory, MessagePluginIdentity } from './types';
 
 /**
  * The set of possible conversation action types.
@@ -51,7 +51,7 @@ export interface ConversationEventDetail {
   outcome: 'accepted' | 'rejected' | 'started' | 'completed' | 'failed' | 'cancelled' | 'discarded';
   streamSequence?: number | undefined;
   childConversationId?: string | undefined;
-  plugin?: { id: string; revision: number } | undefined;
+  plugin?: MessagePluginIdentity | undefined;
   reason?: string | undefined;
 }
 
