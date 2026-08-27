@@ -5,7 +5,11 @@ import { z } from 'zod';
 import { createTool } from '../../src/create-tool';
 import { createToolResultCache } from '../../src/idempotency/create-tool-result-cache';
 import { fullInputKey } from '../../src/idempotency/key-generators';
-import type { CachedToolResult, ToolResultCache } from '../../src/idempotency/types';
+import type {
+  CachedToolResult,
+  IdempotencyResolutionReceipt,
+  ToolResultCache,
+} from '../../src/idempotency/types';
 import { withIdempotency } from '../../src/idempotency/with-idempotency';
 import type { Tool } from '../../src/is-tool';
 
@@ -189,6 +193,126 @@ describe('withIdempotency', () => {
       key,
       expect.objectContaining({ status: 'started', toolName: 'charge' }),
     );
+  });
+
+  it('replaces a fenced started marker with an authorized resolution receipt', async () => {
+    const tool = createTool({
+      name: 'charge',
+      description: 'Charges a payment method',
+      version: '1.0.0',
+      input: z.object({ cents: z.number() }),
+      idempotencyKey: (input: unknown) => fullInputKey(input),
+      async execute({ cents }) {
+        callCount++;
+        if (callCount === 1) throw new Error('provider timeout after charge');
+        return cents;
+      },
+    });
+    let now = 100;
+    const wrapped = withIdempotency(tool, {
+      cache,
+      tenantId: 'tenant-a',
+      toolRevision: 'charge:1',
+      leaseDurationMs: 10,
+      maximumExecutionDurationMs: 100,
+      now: () => now,
+      verifyResolutionReceipt: async () => true,
+    });
+    const key = JSON.stringify(['tenant-a', 'charge:1', 'charge', fullInputKey({ cents: 100 })]);
+
+    await expect(wrapped({ cents: 100 })).rejects.toThrow('provider timeout after charge');
+    const started = await cache.getState(key);
+    expect(started?.status).toBe('started');
+    expect(started?.attemptId).toBeString();
+
+    now = 110;
+    const receipt: IdempotencyResolutionReceipt = {
+      version: 1,
+      key,
+      attemptId: started!.attemptId!,
+      tenantId: 'tenant-a',
+      toolRevision: 'charge:1',
+      decision: 'retry',
+      evidence: 'provider confirmed no duplicate charge',
+      authorizedAt: now,
+      authorizedBy: 'operator-a',
+      nonce: 'nonce-a',
+      authorization: 'signed-approval',
+    };
+    const result = await wrapped.execute(
+      { cents: 100 },
+      { requestContext, resolutionReceipt: receipt },
+    );
+
+    expect(result).toBe(100);
+    expect(callCount).toBe(2);
+    const completed = await cache.getState(key);
+    expect(completed?.status).toBe('completed');
+  });
+
+  it('rejects invalid direct idempotency lease durations', () => {
+    const tool = createTestTool();
+
+    expect(() =>
+      withIdempotency(tool, {
+        cache,
+        tenantId: 'tenant-a',
+        leaseDurationMs: 0,
+      }),
+    ).toThrow('Idempotency lease and execution durations must be finite and positive.');
+  });
+
+  it('preserves unknown outcome when authorized replacement loses its race', async () => {
+    const tool = createTool({
+      name: 'charge',
+      description: 'Charges a payment method',
+      version: '1.0.0',
+      input: z.object({ cents: z.number() }),
+      idempotencyKey: (input: unknown) => fullInputKey(input),
+      async execute() {
+        throw new Error('provider timeout after charge');
+      },
+    });
+    let now = 100;
+    const onUnknownOutcome = mock(() => {});
+    const replacementLosingCache: ToolResultCache = {
+      ...cache,
+      replaceUnknownStarted: async () => false,
+    };
+    const wrapped = withIdempotency(tool, {
+      cache: replacementLosingCache,
+      tenantId: 'tenant-a',
+      toolRevision: 'charge:1',
+      leaseDurationMs: 10,
+      maximumExecutionDurationMs: 100,
+      now: () => now,
+      onUnknownOutcome,
+      verifyResolutionReceipt: async () => true,
+    });
+    const key = JSON.stringify(['tenant-a', 'charge:1', 'charge', fullInputKey({ cents: 100 })]);
+
+    await expect(wrapped({ cents: 100 })).rejects.toThrow('provider timeout after charge');
+    const started = await cache.getState(key);
+    expect(started?.status).toBe('started');
+    now = 110;
+    const receipt: IdempotencyResolutionReceipt = {
+      version: 1,
+      key,
+      attemptId: started!.attemptId!,
+      tenantId: 'tenant-a',
+      toolRevision: 'charge:1',
+      decision: 'retry',
+      evidence: 'provider confirmed no duplicate charge',
+      authorizedAt: now,
+      authorizedBy: 'operator-a',
+      nonce: 'nonce-a',
+      authorization: 'signed-approval',
+    };
+
+    await expect(
+      wrapped.execute({ cents: 100 }, { requestContext, resolutionReceipt: receipt }),
+    ).rejects.toThrow('unknown outcome');
+    expect(onUnknownOutcome).toHaveBeenCalledWith(key, started);
   });
 
   it('does not mark invalid inputs as started', async () => {

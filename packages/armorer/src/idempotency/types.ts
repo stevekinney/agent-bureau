@@ -126,5 +126,9 @@ export type IdempotencyOptions = {
   ttl?: number;
   onCacheHit?: (key: string, result: CachedToolResult) => void;
   onUnknownOutcome?: (key: string, execution: StartedToolExecution) => void;
+  /** Authorizes replacing an expired fenced started marker before retrying. */
+  verifyResolutionReceipt?: (receipt: IdempotencyResolutionReceipt) => boolean | Promise<boolean>;
+  leaseDurationMs?: number;
+  maximumExecutionDurationMs?: number;
   now?: () => number;
 };

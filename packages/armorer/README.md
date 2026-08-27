@@ -715,6 +715,21 @@ await idempotentToolbox.execute(call, {
 });
 ```
 
+The direct `withIdempotency()` wrapper uses the same fenced recovery rule. Configure `verifyResolutionReceipt`, then pass the signed receipt through the wrapped tool's typed `execute()` options after the lease expires. The cache atomically replaces only the attempt named by the verified receipt:
+
+```ts
+const idempotentCharge = withIdempotency(chargeCardTool, {
+  cache,
+  tenantId: currentTenant.id,
+  verifyResolutionReceipt,
+});
+
+await idempotentCharge.execute(call.arguments, {
+  requestContext,
+  resolutionReceipt: signedOperatorReceipt,
+});
+```
+
 If you do not pass `idempotencyKey`, `withToolboxIdempotency()` uses each tool's configured `idempotencyKey` function. Tools without an `idempotencyKey` are not deduped by default; set `requireExplicitKey: false` to use `fullInputKey` for those tools. Every cache key includes the tenant, full tool revision, tool name, and caller or derived key, so one tenant or tool revision cannot consume another's result.
 
 The operation cache key intentionally excludes request-instance authority fields such as principal, owner, run ID, authorization revision, audience, agent, and capabilities. Those fields can change across a legitimate logical retry. Cache access still requires current request authority, and Armorer rejects request contexts whose tenant does not match the idempotency tenant before reading or returning cached state. Completed toolbox cache hits are also bound to the `policyRevision` that authorized recording the result. If the current policy revision matches, Armorer re-runs the current `beforeExecute` policy before returning the cached result. If the current policy revision differs, Armorer returns `authorization-required` without repeating the side effect.

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
+import { createProcessLocalApprovalStateStore } from '../../src/approval-binding';
 import { createTool } from '../../src/create-tool';
 import { createToolbox, type Toolbox } from '../../src/create-toolbox';
 import { claimCacheStarted } from '../../src/idempotency/cache-operations';
@@ -1135,13 +1136,6 @@ describe('withToolboxIdempotency', () => {
       paused.pendingApproval! as SignedPendingToolApproval,
       { idempotencyKey: 'charge-once', requestContext },
     );
-    const repeatedResume = await idempotentToolbox.resumeApproval(
-      paused.pendingApproval! as SignedPendingToolApproval,
-      {
-        idempotencyKey: 'charge-once',
-        requestContext,
-      },
-    );
 
     expect(firstResume.result).toEqual({ charged: 100 });
     expect(firstResume.idempotency).toEqual({
@@ -1153,9 +1147,107 @@ describe('withToolboxIdempotency', () => {
       ),
       outcome: 'fresh',
     });
-    expect(repeatedResume.idempotency?.outcome).toBe('deduped');
-    expect(repeatedResume.result).toEqual({ charged: 100 });
+    await expect(
+      idempotentToolbox.resumeApproval(paused.pendingApproval! as SignedPendingToolApproval, {
+        idempotencyKey: 'charge-once',
+        requestContext,
+      }),
+    ).rejects.toThrow('already been consumed');
     expect(charges).toEqual([100]);
+  });
+
+  it('requires and consumes signed approval before returning cached results guarded by current policy', async () => {
+    const reads: string[] = [];
+    const secretTool = createTool({
+      name: 'read-secret',
+      description: 'Reads sensitive data',
+      version: '1.0.0',
+      input: z.object({ recordId: z.string() }),
+      idempotencyKey: (input: unknown) => fullInputKey(input),
+      async execute({ recordId }) {
+        reads.push(recordId);
+        return { recordId, secret: 'classified' };
+      },
+    });
+    const requestContext = {
+      authority: {
+        principalId: 'principal-a',
+        tenantId: 'tenant-a',
+        ownerId: 'owner-a',
+        capabilities: ['records:read'],
+        authorizationRevision: 'authorization:1',
+      },
+      audience: 'tenant' as const,
+      agentId: 'agent-a',
+      runId: 'run-a',
+    };
+    const call = {
+      id: 'read-secret-call',
+      name: 'read-secret',
+      arguments: { recordId: 'record-1' },
+    };
+    const idempotencyKey = 'read-secret-once';
+    const initialToolbox = withToolboxIdempotency(createToolbox([secretTool]), {
+      cache,
+      tenantId: 'tenant-a',
+    });
+    const initialResult = await initialToolbox.execute(call, { idempotencyKey, requestContext });
+    expect(initialResult.idempotency?.outcome).toBe('fresh');
+    expect(initialResult.result).toEqual({ recordId: 'record-1', secret: 'classified' });
+    expect(reads).toEqual(['record-1']);
+
+    const approvalStateStore = createProcessLocalApprovalStateStore();
+    const guardedToolbox = createToolbox([secretTool], {
+      approvalSecret: 'cached-result-approval-secret',
+      approvalStateStore,
+      policy: {
+        beforeExecute() {
+          return {
+            allow: false,
+            status: 'needs_approval',
+            reason: 'cached result access requires approval',
+          };
+        },
+      },
+    });
+    const idempotentGuardedToolbox = withToolboxIdempotency(guardedToolbox, {
+      cache,
+      tenantId: 'tenant-a',
+    });
+
+    const approvalRequired = await idempotentGuardedToolbox.execute(call, {
+      idempotencyKey,
+      requestContext,
+    });
+    expect(approvalRequired.outcome).toBe('action_required');
+    expect(approvalRequired.pendingApproval?.approvalToken).toEqual(expect.any(String));
+    expect(reads).toEqual(['record-1']);
+
+    const approval = approvalRequired.pendingApproval! as SignedPendingToolApproval;
+    expect(approval.approvalBinding).toBeDefined();
+    expect(await approvalStateStore.state(approval.approvalBinding!)).toBe('issued');
+
+    const resumed = await idempotentGuardedToolbox.resumeApproval(approval, {
+      idempotencyKey,
+      requestContext,
+    });
+    expect(resumed.outcome).toBe('success');
+    expect(resumed.result).toEqual({ recordId: 'record-1', secret: 'classified' });
+    expect(resumed.idempotency).toEqual({
+      key: expectedCacheKey(
+        'tenant-a',
+        'default:read-secret@1.0.0',
+        `read-secret:${idempotencyKey}`,
+      ),
+      outcome: 'deduped',
+    });
+    expect(reads).toEqual(['record-1']);
+    expect(await approvalStateStore.state(approval.approvalBinding!)).toBe('consumed');
+
+    await expect(
+      idempotentGuardedToolbox.resumeApproval(approval, { idempotencyKey, requestContext }),
+    ).rejects.toThrow('already been consumed');
+    expect(reads).toEqual(['record-1']);
   });
 
   it('does not keep started state for denied results before execution', async () => {

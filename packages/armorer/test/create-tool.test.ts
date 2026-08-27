@@ -5,7 +5,12 @@ import { z } from 'zod';
 
 import type { EffectiveToolExecutionContext, ToolExecuteOptions, ToolRequestContext } from '../src';
 import { createTool, createToolCall, isTool, lazy, withContext } from '../src';
-import { type ApprovalResumeState, approvalResumeSymbol } from '../src/internal/approval-resume';
+import {
+  approvalConsumeSymbol,
+  type ApprovalResumeState,
+  approvalResumeSymbol,
+  policyAuthorizationOnlySymbol,
+} from '../src/internal/approval-resume';
 import { createConcurrencyLimiter } from '../src/utilities/concurrency';
 
 async function drainMicrotasks(): Promise<void> {
@@ -376,6 +381,31 @@ describe('createTool', () => {
 
     const result = await tool.execute(createToolCall('lazy-reject', { value: 'x' }));
     expect(result.error?.message).toContain('lazy load failed');
+  });
+
+  it('does not consume approval admission when a lazy executor rejects', async () => {
+    let consumeCount = 0;
+    const tool = createTool({
+      name: 'lazy-reject-before-approval',
+      description: 'fails before approval admission',
+      input: z.object({ value: z.string() }),
+      execute: Promise.resolve().then(() => {
+        throw new Error('lazy load failed before approval');
+      }),
+    });
+
+    const result = await tool.execute(
+      createToolCall('lazy-reject-before-approval', { value: 'x' }),
+      {
+        [approvalConsumeSymbol]: async () => {
+          consumeCount += 1;
+          return async () => {};
+        },
+      },
+    );
+
+    expect(result.error?.message).toContain('lazy load failed before approval');
+    expect(consumeCount).toBe(0);
   });
 
   it('returns an error when lazy execute resolves to non-function', async () => {
@@ -2023,6 +2053,47 @@ describe('isTool', () => {
     expect(out).toBe('X');
     expect(started).toBe(1);
     expect(finished).toBe(1);
+  });
+
+  it('finishes telemetry for authorization-only executions', async () => {
+    const tool = createTool({
+      name: 'authorization-only-telemetry',
+      description: 'checks authorization without executing',
+      input: z.object({ value: z.string() }),
+      telemetry: true,
+      async execute() {
+        throw new Error('authorization-only execution must not run');
+      },
+    });
+
+    let started = 0;
+    let finished = 0;
+    let succeeded = 0;
+    let settled = 0;
+    tool.addEventListener('tool.started' as any, () => {
+      started += 1;
+    });
+    tool.addEventListener('tool.finished' as any, (event) => {
+      finished += 1;
+      expect((event as any).status).toBe('success');
+    });
+    tool.addEventListener('execute-success' as any, () => {
+      succeeded += 1;
+    });
+    tool.addEventListener('settled' as any, () => {
+      settled += 1;
+    });
+
+    const result = await tool.execute(
+      createToolCall('authorization-only-telemetry', { value: 'x' }),
+      { [policyAuthorizationOnlySymbol]: true },
+    );
+
+    expect(result.outcome).toBe('success');
+    expect(started).toBe(1);
+    expect(finished).toBe(1);
+    expect(succeeded).toBe(1);
+    expect(settled).toBe(1);
   });
 
   it('computes input and output digests when enabled', async () => {

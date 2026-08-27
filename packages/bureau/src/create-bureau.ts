@@ -1149,6 +1149,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     sessionId: string,
     reviewId: string,
     removePendingApproval: boolean,
+    runId: string,
   ): Promise<void> {
     if (!runtime.sessionStore) return;
     await runtime.sessionStore.update(sessionId, (session) => {
@@ -1171,6 +1172,28 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         const { [reviewId]: _removed, ...remaining } = currentPending as Record<string, JSONValue>;
         pendingApprovalOverrides = remaining;
       }
+      const run = store.getRun(runId);
+      let hasRemainingReviews = false;
+      for (const review of listPendingReviews()) {
+        if (review.runId !== runId) continue;
+        hasRemainingReviews = true;
+        break;
+      }
+      let lastRequestAuthorities = session.metadata['lastRequestAuthorities'];
+      if (
+        run &&
+        run.status !== 'running' &&
+        !hasRemainingReviews &&
+        typeof lastRequestAuthorities === 'object' &&
+        lastRequestAuthorities !== null &&
+        !Array.isArray(lastRequestAuthorities)
+      ) {
+        const { [runId]: _removed, ...remainingAuthorities } = lastRequestAuthorities as Record<
+          string,
+          JSONValue
+        >;
+        lastRequestAuthorities = remainingAuthorities;
+      }
       return {
         ...session,
         metadata: {
@@ -1179,6 +1202,9 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
             ? resolvedReviewIds
             : [...resolvedReviewIds, reviewId],
           ...(removePendingApproval ? { pendingApprovalOverrides } : {}),
+          ...(lastRequestAuthorities !== session.metadata['lastRequestAuthorities']
+            ? { lastRequestAuthorities }
+            : {}),
         },
       };
     });
@@ -1188,11 +1214,12 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     sessionId: string,
     reviewId: string,
     removePendingApproval: boolean,
+    runId: string,
   ): Promise<void> {
     let lastError: unknown;
     for (let attempt = 1; attempt <= SESSION_PERSISTENCE_MAXIMUM_ATTEMPTS; attempt += 1) {
       try {
-        await persistReviewResolution(sessionId, reviewId, removePendingApproval);
+        await persistReviewResolution(sessionId, reviewId, removePendingApproval, runId);
         return;
       } catch (error) {
         lastError = error;
@@ -2912,6 +2939,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
           review.sessionId,
           review.id,
           review.kind === 'tool-approval',
+          review.runId,
         );
       } catch (error) {
         resolvedReviewIds.delete(review.id);
@@ -3310,6 +3338,10 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     try {
       const sessions = await runtime.sessionStore.list();
       hasDeferredGatewayAuthority = sessions.some((session) => {
+        const requiresTransportValidator = (revision: unknown): boolean =>
+          typeof revision === 'string' &&
+          revision !== 'bureau:1' &&
+          revision !== 'bureau:scheduler:1';
         const legacyAuthority = session.metadata['lastRequestAuthority'];
         if (
           legacyAuthority &&
@@ -3317,7 +3349,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
           !Array.isArray(legacyAuthority)
         ) {
           const revision = (legacyAuthority as Record<string, JSONValue>)['authorizationRevision'];
-          if (typeof revision === 'string' && revision.startsWith('gateway:')) return true;
+          if (requiresTransportValidator(revision)) return true;
         }
         const authorities = session.metadata['lastRequestAuthorities'];
         if (!authorities || typeof authorities !== 'object' || Array.isArray(authorities)) {
@@ -3326,7 +3358,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         return Object.values(authorities as Record<string, JSONValue>).some((value) => {
           if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
           const revision = (value as Record<string, JSONValue>)['authorizationRevision'];
-          return typeof revision === 'string' && revision.startsWith('gateway:');
+          return requiresTransportValidator(revision);
         });
       });
     } catch (error) {

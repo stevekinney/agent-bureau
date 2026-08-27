@@ -1,7 +1,11 @@
 import { stableStringifyJson } from '../core/serialization/json';
 import type { AnyToolbox } from '../create-toolbox';
 import type { ToolRequestContext } from '../execution-context';
-import { approvalConsumeSymbol, policyAuthorizationOnlySymbol } from '../internal/approval-resume';
+import {
+  approvalConsumeSymbol,
+  approvalResumeSymbol,
+  policyAuthorizationOnlySymbol,
+} from '../internal/approval-resume';
 import type { ToolCallInput, ToolExecutionResult } from '../types';
 import { claimCacheStarted, getCacheEntry } from './cache-operations';
 import { fullInputKey, namespacedKey } from './key-generators';
@@ -217,12 +221,19 @@ export function withToolboxIdempotency(
   }
 
   function createPolicyAuthorizationOnlyOptions(executeOptions: unknown): unknown {
+    const hasApprovalResume =
+      executeOptions !== undefined &&
+      executeOptions !== null &&
+      typeof executeOptions === 'object' &&
+      approvalResumeSymbol in executeOptions;
     const authorizationOnlyOptions: Record<PropertyKey, unknown> =
       executeOptions && typeof executeOptions === 'object'
         ? { ...(executeOptions as Record<PropertyKey, unknown>) }
         : {};
     authorizationOnlyOptions[policyAuthorizationOnlySymbol] = true;
-    delete authorizationOnlyOptions[approvalConsumeSymbol];
+    if (!hasApprovalResume) {
+      delete authorizationOnlyOptions[approvalConsumeSymbol];
+    }
     return authorizationOnlyOptions;
   }
 

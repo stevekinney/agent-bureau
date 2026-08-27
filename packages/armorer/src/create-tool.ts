@@ -1067,6 +1067,10 @@ export function createTool<
         meta.callId = typedToolCall.id;
       }
 
+      // Resolve lazy executors before consuming an approval. A rejected
+      // executor cannot execute, so its approval must remain available for a
+      // later retry after the executor is repaired or replaced.
+      const resolvedExecute = await resolveExecute();
       let rollbackApprovalAdmission: ApprovalAdmissionRollback | undefined;
       if (options[approvalConsumeSymbol]) {
         rollbackApprovalAdmission = await options[approvalConsumeSymbol]();
@@ -1076,6 +1080,14 @@ export function createTool<
         return handleCancellation(options.signal.reason);
       }
       if (options[policyAuthorizationOnlySymbol]) {
+        emit('execute-success', { ...parsedDetail, result: undefined });
+        emit('settled', { ...parsedDetail, result: undefined });
+        await runPolicyAfter({
+          ...policyContext,
+          outcome: 'success',
+          result: undefined,
+        });
+        finishTelemetry('success');
         const callId = typedToolCall.id;
         return {
           callId,
@@ -1088,8 +1100,6 @@ export function createTool<
           inputDigest,
         };
       }
-
-      const resolvedExecute = await resolveExecute();
 
       const toolContext: ToolContext<E> = {
         dispatch,

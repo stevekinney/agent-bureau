@@ -1,9 +1,23 @@
 import { stableStringifyJson } from '../core/serialization/json';
 import type { Tool, ToolCallWithArguments, ToolExecuteOptions } from '../is-tool';
 import { claimCacheStarted, getCacheEntry } from './cache-operations';
-import type { CachedToolResult, IdempotencyOptions } from './types';
+import type {
+  CachedToolResult,
+  IdempotencyOptions,
+  IdempotencyResolutionReceipt,
+  StartedToolExecution,
+} from './types';
 
 const DEFAULT_TTL = 300_000;
+const DEFAULT_LEASE_DURATION = 30_000;
+
+export type DirectIdempotencyExecuteOptions = ToolExecuteOptions & {
+  resolutionReceipt?: IdempotencyResolutionReceipt;
+};
+
+export type IdempotentTool<T extends Tool> = T & {
+  execute: (params: unknown, options?: DirectIdempotencyExecuteOptions) => Promise<unknown>;
+};
 
 /**
  * Checks whether a value is a ToolCall rather than raw tool input params.
@@ -51,7 +65,10 @@ async function inputMatchesToolSchema(tool: Tool, params: unknown): Promise<bool
  * @param options - Idempotency configuration including cache, TTL, and callbacks.
  * @returns A new tool with the same interface but idempotent execution.
  */
-export function withIdempotency<T extends Tool>(tool: T, options: IdempotencyOptions): T {
+export function withIdempotency<T extends Tool>(
+  tool: T,
+  options: IdempotencyOptions,
+): IdempotentTool<T> {
   const {
     cache,
     tenantId,
@@ -60,12 +77,23 @@ export function withIdempotency<T extends Tool>(tool: T, options: IdempotencyOpt
     now = Date.now,
     onCacheHit,
     onUnknownOutcome,
+    verifyResolutionReceipt,
+    leaseDurationMs = DEFAULT_LEASE_DURATION,
+    maximumExecutionDurationMs = Math.max(ttl, DEFAULT_TTL),
   } = options;
   const toolRevision = configuredToolRevision ?? (tool.identity.version ? tool.id : undefined);
   if (!tenantId || !toolRevision) {
     throw new Error('Idempotency requires tenantId and a versioned tool definition revision.');
   }
   const completeToolRevision = toolRevision;
+  if (
+    !Number.isFinite(leaseDurationMs) ||
+    !Number.isFinite(maximumExecutionDurationMs) ||
+    leaseDurationMs <= 0 ||
+    maximumExecutionDurationMs <= 0
+  ) {
+    throw new Error('Idempotency lease and execution durations must be finite and positive.');
+  }
 
   // Access the idempotencyKey from the tool (set via createTool options).
   // Tools store this as an own property set by createTool when configured.
@@ -83,7 +111,7 @@ export function withIdempotency<T extends Tool>(tool: T, options: IdempotencyOpt
 
   async function executeWithCache(
     params: unknown,
-    executeOptions?: ToolExecuteOptions,
+    executeOptions?: DirectIdempotencyExecuteOptions,
   ): Promise<unknown> {
     const requestContext = executeOptions?.requestContext;
     if (executeOptions !== undefined && !requestContext) {
@@ -104,44 +132,94 @@ export function withIdempotency<T extends Tool>(tool: T, options: IdempotencyOpt
     }
 
     const cached = await getCacheEntry(cache, key);
+    let startedExecution: StartedToolExecution;
     if (cached?.status === 'started') {
-      onUnknownOutcome?.(key, cached);
-      throw new Error(`Idempotency key "${key}" has an unknown outcome.`);
-    }
-    if (cached) {
-      onCacheHit?.(key, cached);
-      return cached.result;
-    }
-
-    const attemptId = crypto.randomUUID();
-    const started = await claimCacheStarted(cache, key, {
-      status: 'started',
-      toolName: tool.name,
-      startedAt: now(),
-      ttl,
-      attemptId,
-    });
-
-    if (started.outcome === 'existing') {
-      if (started.entry.status === 'started') {
-        onUnknownOutcome?.(key, started.entry);
+      const receipt = executeOptions?.resolutionReceipt;
+      const validReceipt =
+        cached.attemptId !== undefined &&
+        receipt?.version === 1 &&
+        receipt.key === key &&
+        receipt.attemptId === cached.attemptId &&
+        receipt.tenantId === tenantId &&
+        receipt.toolRevision === completeToolRevision &&
+        receipt.decision === 'retry' &&
+        Boolean(
+          receipt.evidence &&
+          receipt.authorizedAt !== undefined &&
+          receipt.authorizedBy &&
+          receipt.nonce &&
+          receipt.authorization &&
+          verifyResolutionReceipt &&
+          (await verifyResolutionReceipt(receipt)),
+        );
+      const replacementTime = now();
+      if (
+        !validReceipt ||
+        (cached.leaseExpiresAt !== undefined && replacementTime < cached.leaseExpiresAt)
+      ) {
+        onUnknownOutcome?.(key, cached);
         throw new Error(`Idempotency key "${key}" has an unknown outcome.`);
       }
-      onCacheHit?.(key, started.entry);
-      return started.entry.result;
+      startedExecution = {
+        status: 'started',
+        toolName: tool.name,
+        startedAt: replacementTime,
+        ttl,
+        attemptId: crypto.randomUUID(),
+        leaseExpiresAt: Math.min(
+          replacementTime + leaseDurationMs,
+          replacementTime + maximumExecutionDurationMs,
+        ),
+        absoluteDeadline: replacementTime + maximumExecutionDurationMs,
+      };
+      if (
+        !(await cache.replaceUnknownStarted(
+          key,
+          cached.attemptId!,
+          startedExecution,
+          replacementTime,
+        ))
+      ) {
+        onUnknownOutcome?.(key, cached);
+        throw new Error(`Idempotency key "${key}" has an unknown outcome.`);
+      }
+    } else {
+      const startedAt = now();
+      startedExecution = {
+        status: 'started',
+        toolName: tool.name,
+        startedAt,
+        ttl,
+        attemptId: crypto.randomUUID(),
+        leaseExpiresAt: Math.min(
+          startedAt + leaseDurationMs,
+          startedAt + maximumExecutionDurationMs,
+        ),
+        absoluteDeadline: startedAt + maximumExecutionDurationMs,
+      };
+      const started = await claimCacheStarted(cache, key, startedExecution);
+      if (started.outcome === 'existing') {
+        if (started.entry.status === 'started') {
+          onUnknownOutcome?.(key, started.entry);
+          throw new Error(`Idempotency key "${key}" has an unknown outcome.`);
+        }
+        onCacheHit?.(key, started.entry);
+        return started.entry.result;
+      }
     }
-
     // Execute the tool via its callable interface (params → result)
-    const execution = executeOptions ? await tool.executeWith({ params, ...executeOptions }) : null;
-    const result = execution ? execution.result : await tool(params);
-    if (execution && execution.outcome !== 'success') {
-      if (isPreExecutionResult(execution)) {
-        await cache.deleteStarted(key, attemptId);
+    const toolExecution = executeOptions
+      ? await tool.executeWith({ params, ...executeOptions })
+      : null;
+    const result = toolExecution ? toolExecution.result : await tool(params);
+    if (toolExecution && toolExecution.outcome !== 'success') {
+      if (isPreExecutionResult(toolExecution)) {
+        await cache.deleteStarted(key, startedExecution.attemptId!);
       }
       const message =
-        execution.error?.message ??
-        execution.errorMessage ??
-        execution.pendingApproval?.reason ??
+        toolExecution.error?.message ??
+        toolExecution.errorMessage ??
+        toolExecution.pendingApproval?.reason ??
         'Tool execution failed.';
       throw new Error(message);
     }
@@ -153,7 +231,7 @@ export function withIdempotency<T extends Tool>(tool: T, options: IdempotencyOpt
       ttl,
     };
 
-    if (!(await cache.completeStarted(key, attemptId, entry, ttl))) {
+    if (!(await cache.completeStarted(key, startedExecution.attemptId!, entry, ttl, now()))) {
       throw new Error(`Idempotency key "${key}" lost its execution fence before completion.`);
     }
 
@@ -177,7 +255,10 @@ export function withIdempotency<T extends Tool>(tool: T, options: IdempotencyOpt
           if (isToolCall(input)) {
             return target.execute(input, execOptions as Record<string, unknown>);
           }
-          return executeWithCache(input, execOptions as ToolExecuteOptions | undefined);
+          return executeWithCache(
+            input,
+            execOptions as DirectIdempotencyExecuteOptions | undefined,
+          );
         };
       }
       return Reflect.get(target, prop, receiver as object) as unknown;

@@ -102,8 +102,10 @@ export { createMiddleware, createToolbox, isToolbox } from './create-toolbox';
 export type {
   CachedToolResult,
   CreateToolResultCacheOptions,
+  DirectIdempotencyExecuteOptions,
   IdempotencyOptions,
   IdempotencyResolutionReceipt,
+  IdempotentTool,
   LegacyIdempotencyResolutionReceipt,
   ToolResultCache,
   WithToolboxIdempotencyOptions,
