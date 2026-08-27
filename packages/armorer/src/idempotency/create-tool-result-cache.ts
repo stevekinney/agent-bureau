@@ -142,11 +142,7 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
 
   async function withKeyClaimLock<T>(key: string, operation: () => Promise<T>): Promise<T> {
     const previous = locksByStore.get(key);
-    if (previous) {
-      await previous.catch(() => undefined);
-    }
-
-    const current = operation();
+    const current = (previous ?? Promise.resolve()).catch(() => undefined).then(operation);
     locksByStore.set(key, current);
     try {
       return await current;

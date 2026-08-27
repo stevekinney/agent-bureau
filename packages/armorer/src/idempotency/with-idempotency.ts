@@ -1,6 +1,6 @@
+import { stableStringifyJson } from '../core/serialization/json';
 import type { Tool, ToolCallWithArguments } from '../is-tool';
 import { claimCacheStarted, getCacheEntry } from './cache-operations';
-import { namespacedKey } from './key-generators';
 import type { CachedToolResult, IdempotencyOptions } from './types';
 
 const DEFAULT_TTL = 300_000;
@@ -79,7 +79,12 @@ export function withIdempotency<T extends Tool>(tool: T, options: IdempotencyOpt
   }
 
   async function executeWithCache(params: unknown): Promise<unknown> {
-    const key = `${tenantId}:${toolRevision}:${namespacedKey(tool.name, idempotencyKey!(params))}`;
+    const key = stableStringifyJson([
+      tenantId,
+      toolRevision,
+      tool.name,
+      idempotencyKey!(params),
+    ] as never);
 
     if (!(await inputMatchesToolSchema(tool, params))) {
       return tool(params);

@@ -50,7 +50,13 @@ import {
   type ScheduleSpec,
 } from '@lostgradient/weft';
 import { KEYS } from '@lostgradient/weft/storage';
-import { combineToolboxes, createTool, createToolbox, type ToolRequestContext } from 'armorer';
+import {
+  combineToolboxes,
+  createTool,
+  createToolbox,
+  type SignedPendingToolApproval,
+  type ToolRequestContext,
+} from 'armorer';
 import {
   Conversation,
   type ConversationHistory,
@@ -123,13 +129,17 @@ function normalizeRunRequestContext(
       authorizationRevision: 'bureau:1',
     },
   };
-  return {
+  const authority = Object.freeze({
+    ...context.authority,
+    capabilities: Object.freeze([...context.authority.capabilities]),
+  });
+  return Object.freeze({
     ...context,
-    authority: context.authority,
+    authority,
     audience: context.audience ?? 'operator',
     agentId: agentName,
     runId,
-  };
+  });
 }
 
 export function defaultSessionPersistenceSleep(milliseconds: number): Promise<void> {
@@ -629,6 +639,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   // authoritative "already handled" marker so a resolved review disappears
   // from the queue immediately, and is never accidentally resolved twice.
   const resolvedReviewIds = new Set<string>();
+  const resolvingReviewIds = new Set<string>();
   const pendingApprovalOverrides = new Map<
     string,
     Extract<PendingReview, { kind: 'tool-approval' }>['approval']
@@ -2245,13 +2256,16 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       throw new BureauError(`No pending review with id "${input.id}"`, 'NOT_FOUND');
     }
 
-    // Mark resolved BEFORE acting so a concurrent resolveReview() for the same
-    // id (e.g. a double-click) cannot resume/signal twice.
-    resolvedReviewIds.add(review.id);
+    if (resolvingReviewIds.has(review.id)) {
+      throw new BureauError(`Review with id "${review.id}" is already being resolved`, 'CONFLICT');
+    }
+    resolvingReviewIds.add(review.id);
 
     let result: unknown;
+    let keepPending = false;
     try {
       if (review.kind === 'tool-approval') {
+        const approvalToolbox = runToolboxesByRunId.get(review.runId) ?? runtime.baseToolbox;
         if (input.decision === 'approve') {
           const { approval } = review;
           if (approval.approvalToken === undefined) {
@@ -2262,7 +2276,6 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
               'approval',
             );
           }
-          const approvalToolbox = runToolboxesByRunId.get(review.runId) ?? runtime.baseToolbox;
           const approvalRequestContext = runRequestContexts.get(review.runId);
           result = await approvalToolbox.resumeApproval(
             { ...approval, approvalToken: approval.approvalToken },
@@ -2295,8 +2308,10 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
                 nextApproval as Extract<PendingReview, { kind: 'tool-approval' }>['approval'],
               );
             }
-            resolvedReviewIds.delete(review.id);
+            keepPending = true;
           }
+        } else if (review.approval.approvalBinding && review.approval.approvalToken !== undefined) {
+          await approvalToolbox.revokeApproval(review.approval as SignedPendingToolApproval);
         }
       } else if (input.decision === 'approve') {
         // Route through the public `bureau.signalSession` (rather than the
@@ -2306,9 +2321,12 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         await bureau.signalSession(review.sessionId, review.signalName, input.payload);
       }
     } catch (error) {
-      resolvedReviewIds.delete(review.id);
+      resolvingReviewIds.delete(review.id);
       throw error;
     }
+
+    resolvingReviewIds.delete(review.id);
+    if (!keepPending) resolvedReviewIds.add(review.id);
 
     const decisionType =
       review.kind === 'tool-approval'

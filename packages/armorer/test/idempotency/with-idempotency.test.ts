@@ -146,7 +146,7 @@ describe('withIdempotency', () => {
 
     const onUnknownOutcome = mock(() => {});
     const wrapped = withIdempotency(tool, { cache, tenantId: 'tenant-a', onUnknownOutcome });
-    const key = `tenant-a:default:charge:charge:${fullInputKey({ cents: 100 })}`;
+    const key = `["tenant-a","default:charge","charge",${JSON.stringify(fullInputKey({ cents: 100 }))}]`;
 
     await expect(wrapped({ cents: 100 })).rejects.toThrow('provider timeout after charge');
     expect(callCount).toBe(1);
@@ -220,7 +220,7 @@ describe('withIdempotency', () => {
         return x * 2;
       },
     });
-    const key = `tenant-a:default:flaky:flaky:${fullInputKey({ x: 5 })}`;
+    const key = `["tenant-a","default:flaky","flaky",${JSON.stringify(fullInputKey({ x: 5 }))}]`;
     await cache.claimStarted(key, {
       status: 'started',
       toolName: 'flaky',
@@ -260,6 +260,28 @@ describe('withIdempotency', () => {
     expect(() => withIdempotency(tool, { cache, tenantId: 'tenant-a', toolRevision: '' })).toThrow(
       'requires tenantId and toolRevision',
     );
+  });
+
+  it('keeps delimiter-bearing tenant and revision tuples in distinct cache scopes', async () => {
+    const first = withIdempotency(createTestTool(), {
+      cache,
+      tenantId: 'tenant:a',
+      toolRevision: 'revision',
+    });
+    const second = withIdempotency(createTestTool(), {
+      cache,
+      tenantId: 'tenant',
+      toolRevision: 'a:revision',
+    });
+
+    await expect(first({ a: 1, b: 2 })).resolves.toBe(3);
+    await expect(second({ a: 1, b: 2 })).resolves.toBe(3);
+
+    const firstKey = `["tenant:a","revision","add",${JSON.stringify(fullInputKey({ a: 1, b: 2 }))}]`;
+    const secondKey = `["tenant","a:revision","add",${JSON.stringify(fullInputKey({ a: 1, b: 2 }))}]`;
+    expect(firstKey).not.toBe(secondKey);
+    expect(await cache.getState(firstKey)).toBeDefined();
+    expect(await cache.getState(secondKey)).toBeDefined();
   });
 
   it('honors atomic claim races and rejects a lost completion fence', async () => {

@@ -164,10 +164,12 @@ export function createProcessLocalApprovalStateStore(nowFunction = Date.now): Ap
       });
     },
     state(binding) {
-      const now = Date.now();
-      purgeExpired(now);
-      const key = keyOf(binding);
-      return Promise.resolve(issued.has(key) ? 'issued' : terminal.get(key)?.state);
+      return Promise.resolve().then(() => {
+        const now = nowFunction();
+        purgeExpired(now);
+        const key = keyOf(binding);
+        return issued.has(key) ? 'issued' : terminal.get(key)?.state;
+      });
     },
   };
 }

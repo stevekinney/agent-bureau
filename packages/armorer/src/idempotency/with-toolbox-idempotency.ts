@@ -1,3 +1,4 @@
+import { stableStringifyJson } from '../core/serialization/json';
 import type { AnyToolbox } from '../create-toolbox';
 import type { ToolRequestContext } from '../execution-context';
 import type { ToolCallInput, ToolExecutionResult } from '../types';
@@ -227,12 +228,13 @@ export function withToolboxIdempotency(
       throw new Error('Idempotency tenantId must match the request authority tenantId.');
     }
     const authority = requestContext.authority;
-    const authorityScope = JSON.stringify([
+    const authorityScope = stableStringifyJson([
       tenantId,
       authority.principalId,
       authority.authorizationRevision,
+      [...authority.capabilities].sort(),
       policyRevision,
-    ]);
+    ] as never);
     const cacheKey = `${authorityScope}:${revision}:${baseKey}`;
     const cached = await getCacheEntry(cache, cacheKey);
 
