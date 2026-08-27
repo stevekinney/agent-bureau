@@ -80,7 +80,11 @@ import {
   createRunFrameForwarder,
 } from './run-envelope';
 import type { BureauToolbox } from './runtime-composition';
-import { createRuntimeComposition, decodeScheduleRunMarker } from './runtime-composition';
+import {
+  createRuntimeComposition,
+  createSchedulerServiceRequestContext,
+  decodeScheduleRunMarker,
+} from './runtime-composition';
 import {
   findRunAgentName,
   resolveDiagnosticSink,
@@ -715,6 +719,10 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     string,
     Extract<PendingReview, { kind: 'tool-approval' }>['approval']
   >();
+  // A persisted approval can be stale by the time a process restarts. Keep
+  // that failure scoped to its review rather than preventing the bureau from
+  // recovering unrelated runs.
+  const invalidApprovalReviewIds = new Set<string>();
   // AB-54 usage analytics: agentName/principal resolved deterministically at
   // `createRun` time, keyed by runId. Layer A only (in-memory, like the rest
   // of RunSummary) — a durably recovered run (process restart) has no entry
@@ -833,6 +841,9 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         runToolboxesByRunId.delete(removedRunId);
         for (const id of pendingApprovalOverrides.keys()) {
           if (id.startsWith(`approval:${removedRunId}:`)) pendingApprovalOverrides.delete(id);
+        }
+        for (const id of invalidApprovalReviewIds) {
+          if (id.startsWith(`approval:${removedRunId}:`)) invalidApprovalReviewIds.delete(id);
         }
         emitter.dispatch(new RunRemovedEvent(removedRunId));
         // Prune this run's entries from `resolvedReviewIds` — the review ids
@@ -1006,13 +1017,26 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
           >;
           mergedMetadata['lastRequestAuthorities'] = remainingAuthorities;
         }
-        const approvals = mergedMetadata['pendingApprovalOverrides'];
-        if (typeof approvals === 'object' && approvals !== null && !Array.isArray(approvals)) {
-          const remainingApprovals = omitKeysWithPrefix(
-            approvals as Record<string, JSONValue>,
-            `approval:${terminalRunId}:`,
-          );
-          mergedMetadata['pendingApprovalOverrides'] = remainingApprovals;
+        // Completed action-required runs remain reviewable until their
+        // approval is explicitly resolved. Removing the signed descriptor at
+        // the terminal transition would make a restart lose the only binding
+        // that can resume that review.
+        const terminalRun = store.getRun(terminalRunId);
+        const hasPendingApproval = terminalRun?.steps.some((step) =>
+          step.results.some(
+            (result) =>
+              result.outcome === 'action_required' && result.pendingApproval !== undefined,
+          ),
+        );
+        if (!hasPendingApproval) {
+          const approvals = mergedMetadata['pendingApprovalOverrides'];
+          if (typeof approvals === 'object' && approvals !== null && !Array.isArray(approvals)) {
+            const remainingApprovals = omitKeysWithPrefix(
+              approvals as Record<string, JSONValue>,
+              `approval:${terminalRunId}:`,
+            );
+            mergedMetadata['pendingApprovalOverrides'] = remainingApprovals;
+          }
         }
       }
 
@@ -1097,6 +1121,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     if (typeof overrides !== 'object' || overrides === null || Array.isArray(overrides)) return;
     for (const [reviewId, approval] of Object.entries(overrides as Record<string, unknown>)) {
       if (!reviewId.startsWith(`approval:${runId}:`)) continue;
+      if (invalidApprovalReviewIds.has(reviewId)) continue;
       if (approval && typeof approval === 'object' && !Array.isArray(approval)) {
         pendingApprovalOverrides.set(
           reviewId,
@@ -1126,7 +1151,20 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     for (const [reviewId, approval] of Object.entries(overrides as Record<string, unknown>)) {
       if (!reviewId.startsWith(`approval:${runId}:`)) continue;
       if (approval && typeof approval === 'object' && !Array.isArray(approval)) {
-        await restoreApproval(approval as SignedPendingToolApproval);
+        try {
+          await restoreApproval(approval as SignedPendingToolApproval);
+        } catch (error) {
+          invalidApprovalReviewIds.add(reviewId);
+          pendingApprovalOverrides.delete(reviewId);
+          diagnose({
+            level: 'warn',
+            scope: 'approval-recovery',
+            message:
+              `[bureau] Failed to restore approval binding for "${reviewId}"; ` +
+              'the affected review will remain unavailable while other runs recover.',
+            cause: error,
+          });
+        }
       }
     }
   }
@@ -2206,6 +2244,8 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
 
     const taskId = `scheduler-task-${crypto.randomUUID()}`;
     const priority = request.priority ?? 'scheduled';
+    const metadataAgentName = request.metadata?.['agentName'];
+    const agentName = typeof metadataAgentName === 'string' ? metadataAgentName : BUREAU_AGENT_NAME;
 
     // AB-13 — same admission gate as `createRun`, applied to the
     // scheduler-originated surface. `taskId` doubles as the flow-control run
@@ -2216,9 +2256,6 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     // grouping key falls back to `metadata.agentName` (when the caller set
     // one) and otherwise the house default — matching `createRun`'s default.
     if (flowController) {
-      const metadataAgentName = request.metadata?.['agentName'];
-      const agentName =
-        typeof metadataAgentName === 'string' ? metadataAgentName : BUREAU_AGENT_NAME;
       const decision = flowController.admit({
         runId: taskId,
         agentName,
@@ -2246,6 +2283,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
             maximumSteps: request.maximumSteps,
             systemPrompt: request.systemPrompt,
             sessionId: taskId,
+            requestContext: createSchedulerServiceRequestContext(taskId, agentName),
           },
           { liveStreaming: false },
         );
@@ -2350,6 +2388,9 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     runRequestContexts.delete(id);
     for (const reviewId of pendingApprovalOverrides.keys()) {
       if (reviewId.startsWith(`approval:${id}:`)) pendingApprovalOverrides.delete(reviewId);
+    }
+    for (const reviewId of invalidApprovalReviewIds) {
+      if (reviewId.startsWith(`approval:${id}:`)) invalidApprovalReviewIds.delete(reviewId);
     }
     runToolboxesByRunId.delete(id);
     store.removeRun(id);
@@ -2473,7 +2514,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         for (const result of step.results) {
           if (result.outcome !== 'action_required' || !result.pendingApproval) continue;
           const id = `approval:${runId}:${result.pendingApproval.callId}`;
-          if (resolvedReviewIds.has(id)) continue;
+          if (resolvedReviewIds.has(id) || invalidApprovalReviewIds.has(id)) continue;
           const requestedAt = stepCompletedTimestamps[stepIndex] ?? now;
           reviews.push({
             kind: 'tool-approval',

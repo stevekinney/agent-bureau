@@ -2,6 +2,7 @@ import type { ToolRequestContext } from 'armorer';
 import type { Context } from 'hono';
 import { createMiddleware } from 'hono/factory';
 import { HTTPException } from 'hono/http-exception';
+import { sha256HexSync } from 'interoperability';
 
 import type { ApiKeyStore } from '../keys/types';
 
@@ -9,6 +10,8 @@ const QUERY_TOKEN_PATH_ALLOW_LIST = new Set(['/api/v1/events']);
 const DEFAULT_BUREAU_AGENT_NAME = 'bureau';
 const TOOL_EXECUTION_CAPABILITY = 'tools:execute';
 const UNRESTRICTED_CAPABILITY = '*';
+const AUTHORIZATION_REVISION_HEADER = 'x-auth-authorization-revision';
+const STATIC_TOKEN_REVISION_NAMESPACE = 'agent-bureau.gateway.static-token.authorization-revision';
 
 function gatewayAuthorityOwnerId(agentName: string | undefined): string {
   const trimmed = agentName?.trim();
@@ -21,6 +24,29 @@ function parseGatewayScopes(scopesHeader: string | undefined): string[] {
     .split(',')
     .map((scope) => scope.trim())
     .filter((scope) => scope.length > 0);
+}
+
+export function normalizeGatewayScopes(scopes: readonly string[]): string[] {
+  return Array.from(
+    new Set(scopes.map((scope) => scope.trim()).filter((scope) => scope.length > 0)),
+  );
+}
+
+export function gatewayCapabilitiesForScopes(scopes: readonly string[]): string[] {
+  const normalizedScopes = normalizeGatewayScopes(scopes);
+  return normalizedScopes.length === 0
+    ? [UNRESTRICTED_CAPABILITY]
+    : Array.from(new Set([TOOL_EXECUTION_CAPABILITY, ...normalizedScopes]));
+}
+
+export function gatewayAuthorizationRevisionForApiKey(apiKeyId: string): string {
+  return `gateway:api-key:${apiKeyId}`;
+}
+
+export function staticTokenAuthorizationRevision(authToken: string): string {
+  return `gateway:static-token:${sha256HexSync(
+    `${STATIC_TOKEN_REVISION_NAMESPACE}:${authToken}`,
+  ).slice(0, 32)}`;
 }
 
 /**
@@ -49,13 +75,12 @@ export function resolveTrustedRequestContext(
   const principal = context.req.header('x-auth-principal');
   if (!principal) return undefined;
 
-  const apiKeyId = context.req.header('x-api-key-id');
+  const authorizationRevision = context.req.header(AUTHORIZATION_REVISION_HEADER);
+  if (!authorizationRevision) return undefined;
+
   const scopesHeader = context.req.header('x-api-key-scopes');
-  const scopes = parseGatewayScopes(scopesHeader);
-  const capabilities =
-    scopesHeader === undefined || scopes.length === 0
-      ? [UNRESTRICTED_CAPABILITY]
-      : Array.from(new Set([TOOL_EXECUTION_CAPABILITY, ...scopes]));
+  const scopes = scopesHeader === undefined ? [] : parseGatewayScopes(scopesHeader);
+  const capabilities = gatewayCapabilitiesForScopes(scopes);
   const ownerId = gatewayAuthorityOwnerId(agentName);
 
   return {
@@ -64,8 +89,7 @@ export function resolveTrustedRequestContext(
       tenantId: 'bureau',
       ownerId,
       capabilities,
-      authorizationRevision:
-        apiKeyId === undefined ? `gateway:${principal}` : `gateway:api-key:${apiKeyId}`,
+      authorizationRevision,
     },
     audience: 'operator',
   };
@@ -96,6 +120,7 @@ export function createAuthentication(authToken: string | undefined, apiKeyStore?
     headers.delete('x-api-key-id');
     headers.delete('x-api-key-scopes');
     headers.delete('x-auth-principal');
+    headers.delete(AUTHORIZATION_REVISION_HEADER);
 
     /** Replaces context.req.raw with a new Request carrying the current headers. */
     function commitHeaders(): void {
@@ -148,9 +173,11 @@ export function createAuthentication(authToken: string | undefined, apiKeyStore?
       const key = await apiKeyStore.verify(token);
       if (key) {
         // Inject key metadata as headers for downstream middleware
+        const normalizedScopes = normalizeGatewayScopes(key.scopes);
         headers.set('x-api-key-id', key.id);
         headers.set('x-auth-principal', `api-key:${key.id}`);
-        headers.set('x-api-key-scopes', key.scopes.join(','));
+        headers.set('x-api-key-scopes', normalizedScopes.join(','));
+        headers.set(AUTHORIZATION_REVISION_HEADER, gatewayAuthorizationRevisionForApiKey(key.id));
         commitHeaders();
         await next();
         return;
@@ -160,6 +187,7 @@ export function createAuthentication(authToken: string | undefined, apiKeyStore?
     // Fall back to static token comparison
     if (authToken && token === authToken) {
       headers.set('x-auth-principal', 'static-token');
+      headers.set(AUTHORIZATION_REVISION_HEADER, staticTokenAuthorizationRevision(authToken));
       commitHeaders();
       await next();
       return;

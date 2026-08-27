@@ -1118,7 +1118,19 @@ describe('createRuntimeComposition durable execution', () => {
     const runRuntime = await runtime.createRunRuntime(
       {
         message: 'capture context',
-        sessionId: 'scheduler-task-live',
+        sessionId: 'caller-chosen-scheduler-task-live',
+        requestContext: {
+          authority: {
+            principalId: 'service:scheduler',
+            tenantId: 'bureau',
+            ownerId: 'bureau',
+            capabilities: ['tools:execute'],
+            authorizationRevision: 'bureau:scheduler:1',
+          },
+          audience: 'operator',
+          agentId: 'bureau',
+          runId: 'scheduler-task-live',
+        },
       },
       { liveStreaming: false },
     );
@@ -1142,6 +1154,20 @@ describe('createRuntimeComposition durable execution', () => {
         authorizationRevision: 'bureau:scheduler:1',
       },
     });
+
+    const spoofedRuntime = await runtime.createRunRuntime(
+      {
+        message: 'do not infer context',
+        sessionId: 'scheduler-task-spoofed',
+      },
+      { liveStreaming: false },
+    );
+    const spoofedResult = await spoofedRuntime.toolbox.execute({
+      name: 'capture_scheduler_task_context',
+      arguments: {},
+    });
+    expect(spoofedResult.result).toBe(null);
+    expect(observedRequestContexts).toHaveLength(1);
   });
 
   it('uses an explicit scheduled session id as proof for markerless recovered fires', async () => {

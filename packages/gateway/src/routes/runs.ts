@@ -20,21 +20,28 @@ function publicCreateRunRequest(
   return request;
 }
 
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
 export function createRunsRoutes(bureau: Bureau) {
   const app = new Hono();
 
   app.post('/', async (context) => {
-    let body: CreateRunRequest;
+    let body: unknown;
     try {
-      body = await context.req.json<CreateRunRequest>();
+      body = await context.req.json<unknown>();
     } catch {
       throw new HTTPException(400, { message: 'Invalid JSON body' });
+    }
+    if (!isJsonObject(body)) {
+      throw new HTTPException(400, { message: 'Run request body must be a JSON object' });
     }
     try {
       // Overwrite any caller-supplied `principal` with the authenticated
       // principal from the verified request header — never trust it from an
       // untrusted request body (AB-54 usage analytics attribution).
-      const request = publicCreateRunRequest(body);
+      const request = publicCreateRunRequest(body as unknown as CreateRunRequest);
       const requestContext = resolveTrustedRequestContext(context, request.agentName);
       const summary = await bureau.createRun({
         ...request,

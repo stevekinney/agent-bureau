@@ -5,6 +5,10 @@ import { createBureau } from 'bureau';
 import { createGateway } from '../create-gateway';
 import { createApiKeyStore } from '../keys/create-api-key-store';
 import type { ApiKey, CreateApiKeyOptions } from '../keys/types';
+import {
+  gatewayAuthorizationRevisionForApiKey,
+  gatewayCapabilitiesForScopes,
+} from '../middleware/authentication';
 import type { Gateway, GatewayOptions } from '../types';
 
 export { waitForCondition, waitForRunState };
@@ -32,8 +36,8 @@ export function expectedPersistedApiKeyAuthority(
     principalId: `api-key:${key.id}`,
     tenantId: 'bureau',
     ownerId,
-    capabilities: key.scopes.length === 0 ? ['*'] : ['tools:execute', ...key.scopes],
-    authorizationRevision: `gateway:api-key:${key.id}`,
+    capabilities: gatewayCapabilitiesForScopes(key.scopes),
+    authorizationRevision: gatewayAuthorizationRevisionForApiKey(key.id),
     audience: 'operator',
   };
 }

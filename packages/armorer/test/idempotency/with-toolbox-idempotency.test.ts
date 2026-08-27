@@ -23,8 +23,12 @@ const createTestRequestContext = (tenantId: string) => ({
   runId: 'run-a',
 });
 
-function expectedCacheKey(tenantId: string, revision: string, baseKey: string): string {
-  const requestContext = createTestRequestContext(tenantId);
+function expectedCacheKey(
+  tenantId: string,
+  revision: string,
+  baseKey: string,
+  requestContext = createTestRequestContext(tenantId),
+): string {
   return JSON.stringify([
     tenantId,
     requestContext.authority.principalId,
@@ -51,7 +55,7 @@ const withToolboxIdempotency = (
       return (input: unknown, options?: Record<string, unknown>) =>
         target.execute(input as ToolCallInput, {
           ...options,
-          requestContext,
+          requestContext: options?.['requestContext'] ?? requestContext,
         });
     },
   });
@@ -531,7 +535,7 @@ describe('withToolboxIdempotency', () => {
 
     expect(firstResume.result).toEqual({ charged: 100 });
     expect(firstResume.idempotency).toEqual({
-      key: expectedCacheKey('tenant-a', 'default:charge', 'charge:charge-once'),
+      key: expectedCacheKey('tenant-a', 'default:charge', 'charge:charge-once', requestContext),
       outcome: 'fresh',
     });
     expect(charges).toEqual([100]);

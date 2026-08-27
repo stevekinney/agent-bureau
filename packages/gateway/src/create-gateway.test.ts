@@ -9,6 +9,7 @@ import {
   createGateway,
 } from './create-gateway';
 import type { ApiKey, ApiKeyStore } from './keys/types';
+import { staticTokenAuthorizationRevision } from './middleware/authentication';
 import { DEFAULT_PORT } from './types';
 
 describe('createGateway', () => {
@@ -335,56 +336,92 @@ describe('buildRequestAuthorityValidator', () => {
   }
 
   it('accepts only a current managed-key authority snapshot', async () => {
-    expect(
-      await buildRequestAuthorityValidator(undefined, makeStore(makeKey()))(requestContext),
-    ).toBe(true);
-    expect(
-      await buildRequestAuthorityValidator(
-        undefined,
-        makeStore(makeKey({ active: false })),
-      )(requestContext),
-    ).toBe(false);
-    expect(
-      await buildRequestAuthorityValidator(
-        undefined,
-        makeStore(makeKey({ expiresAt: new Date(0).toISOString() })),
-      )(requestContext),
-    ).toBe(false);
-    expect(
-      await buildRequestAuthorityValidator(
-        undefined,
-        makeStore(makeKey({ scopes: ['runs:read'] })),
-      )(requestContext),
-    ).toBe(false);
-    expect(await buildRequestAuthorityValidator(undefined, undefined)(requestContext)).toBe(false);
+    const currentValidator = buildRequestAuthorityValidator(undefined, makeStore(makeKey()));
+    const inactiveValidator = buildRequestAuthorityValidator(
+      undefined,
+      makeStore(makeKey({ active: false })),
+    );
+    const expiredValidator = buildRequestAuthorityValidator(
+      undefined,
+      makeStore(makeKey({ expiresAt: new Date(0).toISOString() })),
+    );
+    const changedScopeValidator = buildRequestAuthorityValidator(
+      undefined,
+      makeStore(makeKey({ scopes: ['runs:read'] })),
+    );
+
+    expect(currentValidator).toBeDefined();
+    expect(inactiveValidator).toBeDefined();
+    expect(expiredValidator).toBeDefined();
+    expect(changedScopeValidator).toBeDefined();
+    expect(await currentValidator!(requestContext)).toBe(true);
+    expect(await inactiveValidator!(requestContext)).toBe(false);
+    expect(await expiredValidator!(requestContext)).toBe(false);
+    expect(await changedScopeValidator!(requestContext)).toBe(false);
+  });
+
+  it('leaves the authority validator unset when no credential mechanism exists', () => {
+    expect(buildRequestAuthorityValidator(undefined, undefined)).toBeUndefined();
+  });
+
+  it('normalizes managed scopes before comparing captured capabilities', async () => {
+    const validator = buildRequestAuthorityValidator(
+      undefined,
+      makeStore(makeKey({ scopes: ['runs:write', 'tools:execute', 'runs:write'] })),
+    );
+
+    expect(validator).toBeDefined();
+    expect(await validator!(requestContext)).toBe(true);
   });
 
   it('accepts only the configured unrestricted static authority', async () => {
     const validator = buildRequestAuthorityValidator('secret', undefined);
+    expect(validator).toBeDefined();
     expect(
-      await validator({
+      await validator!({
         ...requestContext,
         authority: {
           ...requestContext.authority,
           principalId: 'static-token',
           capabilities: ['*'],
-          authorizationRevision: 'gateway:static-token',
+          authorizationRevision: staticTokenAuthorizationRevision('secret'),
         },
       }),
     ).toBe(true);
     expect(
-      await buildRequestAuthorityValidator(
-        undefined,
-        undefined,
-      )({
+      await validator!({
         ...requestContext,
         authority: {
           ...requestContext.authority,
           principalId: 'static-token',
           capabilities: ['*'],
-          authorizationRevision: 'gateway:static-token',
+          authorizationRevision: staticTokenAuthorizationRevision('wrong-secret'),
         },
       }),
     ).toBe(false);
+  });
+
+  it('invalidates static-token authority snapshots after credential rotation', async () => {
+    const originalRevision = staticTokenAuthorizationRevision('original-secret');
+    const rotatedRevision = staticTokenAuthorizationRevision('rotated-secret');
+    const originalAuthority = {
+      ...requestContext,
+      authority: {
+        ...requestContext.authority,
+        principalId: 'static-token',
+        capabilities: ['*'],
+        authorizationRevision: originalRevision,
+      },
+    };
+    const originalValidator = buildRequestAuthorityValidator('original-secret', undefined);
+    const rotatedValidator = buildRequestAuthorityValidator('rotated-secret', undefined);
+
+    expect(originalRevision).not.toBe(rotatedRevision);
+    expect(originalRevision).not.toContain('original-secret');
+    expect(rotatedRevision).not.toContain('rotated-secret');
+    expect(originalValidator).toBeDefined();
+    expect(rotatedValidator).toBeDefined();
+    expect(await originalValidator!(originalAuthority)).toBe(true);
+    expect(await rotatedValidator!(originalAuthority)).toBe(false);
   });
 });

@@ -118,7 +118,6 @@ export type BureauToolbox = AnyToolbox;
 const requestAuthorityMetadataKey = 'lastRequestAuthority';
 const requestAuthoritiesMetadataKey = 'lastRequestAuthorities';
 const defaultBureauAgentName = 'bureau';
-const schedulerTaskIdPrefix = 'scheduler-task-';
 const schedulerServicePrincipalId = 'service:scheduler';
 const schedulerServiceAuthorizationRevision = 'bureau:scheduler:1';
 const toolExecutionCapability = 'tools:execute';
@@ -185,7 +184,7 @@ function normalizedServiceAgentName(agentName: string | undefined): string {
   return trimmed && trimmed.length > 0 ? trimmed : defaultBureauAgentName;
 }
 
-function createSchedulerServiceRequestContext(runId: string, agentName: string | undefined) {
+export function createSchedulerServiceRequestContext(runId: string, agentName: string | undefined) {
   const ownerId = normalizedServiceAgentName(agentName);
   return {
     authority: {
@@ -199,20 +198,6 @@ function createSchedulerServiceRequestContext(runId: string, agentName: string |
     agentId: ownerId,
     runId,
   } satisfies ToolRequestContext;
-}
-
-function schedulerServiceRequestContextForRuntime(
-  request: CreateRunRequest & { sessionId: string; runId?: string },
-): ToolRequestContext | undefined {
-  const schedulerRunId =
-    request.runId?.startsWith(SCHEDULER_RUN_ID_PREFIX) === true
-      ? request.runId
-      : request.sessionId.startsWith(schedulerTaskIdPrefix)
-        ? (request.runId ?? request.sessionId)
-        : undefined;
-  return schedulerRunId === undefined
-    ? undefined
-    : createSchedulerServiceRequestContext(schedulerRunId, request.agentName);
 }
 
 function withDefaultToolboxRequestContext(
@@ -1490,8 +1475,7 @@ export async function createRuntimeComposition(
     },
   ) {
     const liveStreaming = runtimeOptions?.liveStreaming ?? true;
-    const requestContext =
-      request.requestContext ?? schedulerServiceRequestContextForRuntime(request);
+    const requestContext = request.requestContext;
     // AB-40 — the auto-wired default guardrail preset (`options.guardrails ===
     // undefined`) runs its output PII validator in `mode: 'tripwire'` against
     // the FULL response content in `validateResponse`, which only runs after

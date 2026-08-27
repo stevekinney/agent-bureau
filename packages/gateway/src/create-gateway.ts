@@ -14,6 +14,11 @@ import {
   errorHandler,
   requestIdentifier,
 } from './middleware';
+import {
+  gatewayAuthorizationRevisionForApiKey,
+  gatewayCapabilitiesForScopes,
+  staticTokenAuthorizationRevision,
+} from './middleware/authentication';
 import { createRoutes } from './routes';
 import { createPages } from './server/pages';
 import type { Gateway, GatewayOptions } from './types';
@@ -93,20 +98,18 @@ export function buildWsAuthenticate(
   };
 }
 
-function expectedGatewayCapabilities(scopes: readonly string[]): string[] {
-  return scopes.length === 0 ? ['*'] : ['tools:execute', ...scopes];
-}
-
 export function buildRequestAuthorityValidator(
   authToken: string | undefined,
   store: ApiKeyStore | undefined,
-): (context: ToolRequestContext) => Promise<boolean> {
+): ((context: ToolRequestContext) => Promise<boolean>) | undefined {
+  if (!authToken && !store) return undefined;
+
   return async (context) => {
     const { authority } = context;
     if (authority.principalId === 'static-token') {
       return (
         authToken !== undefined &&
-        authority.authorizationRevision === 'gateway:static-token' &&
+        authority.authorizationRevision === staticTokenAuthorizationRevision(authToken) &&
         authority.capabilities.length === 1 &&
         authority.capabilities[0] === '*'
       );
@@ -118,9 +121,11 @@ export function buildRequestAuthorityValidator(
     const key = keys.find((candidate) => candidate.id === keyId);
     if (!key?.active) return false;
     if (key.expiresAt !== undefined && Date.parse(key.expiresAt) <= Date.now()) return false;
-    if (authority.authorizationRevision !== `gateway:api-key:${key.id}`) return false;
+    if (authority.authorizationRevision !== gatewayAuthorizationRevisionForApiKey(key.id)) {
+      return false;
+    }
 
-    const currentCapabilities = [...expectedGatewayCapabilities(key.scopes)].sort();
+    const currentCapabilities = [...gatewayCapabilitiesForScopes(key.scopes)].sort();
     const capturedCapabilities = [...authority.capabilities].sort();
     return (
       currentCapabilities.length === capturedCapabilities.length &&

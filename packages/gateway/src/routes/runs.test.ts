@@ -40,6 +40,21 @@ describe('runs routes', () => {
     expect(response.status).toBe(400);
   });
 
+  it('POST /api/v1/runs returns 400 when the JSON body is not an object', async () => {
+    const gateway = await createTestGateway({ generate: createMockGenerate() });
+
+    for (const body of ['null', '"message"', '[]']) {
+      const response = await requestJSON(gateway, '/api/v1/runs', {
+        method: 'POST',
+        body,
+      });
+      const responseBody = await response.json();
+
+      expect(response.status).toBe(400);
+      expect(responseBody.error.message).toBe('Run request body must be a JSON object');
+    }
+  });
+
   it('POST /api/v1/runs creates a run and returns 201', async () => {
     const gateway = await createTestGateway({
       generate: createMockGenerate(),

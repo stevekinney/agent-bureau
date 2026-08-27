@@ -598,6 +598,49 @@ describe('createToolbox', () => {
     );
   });
 
+  it('binds approval consumption to the complete captured authority', async () => {
+    const executions: string[] = [];
+    const toolbox = createToolbox(
+      [
+        createTool({
+          name: 'authority-bound-action',
+          description: 'Executes only under the approved authority',
+          input: z.object({}),
+          execute: () => {
+            executions.push('executed');
+            return 'ok';
+          },
+        }),
+      ],
+      {
+        approvalSecret: 'authority-binding-secret',
+        policy: { beforeExecute: () => ({ status: 'needs_approval' }) },
+      },
+    );
+    const paused = await toolbox.execute(
+      { id: 'authority-bound-call', name: 'authority-bound-action', arguments: {} },
+      approvalExecutionOptions,
+    );
+    const approval = paused.pendingApproval as SignedPendingToolApproval;
+
+    for (const authority of [
+      { ...approvalRequestContext.authority, ownerId: 'owner-b' },
+      { ...approvalRequestContext.authority, authorizationRevision: 'authorization:2' },
+      { ...approvalRequestContext.authority, capabilities: ['tools:execute', 'payments:charge'] },
+    ]) {
+      await expect(
+        toolbox.resumeApproval(approval, {
+          requestContext: { ...approvalRequestContext, authority },
+        }),
+      ).rejects.toMatchObject({ code: 'mismatch' });
+    }
+
+    expect(executions).toEqual([]);
+    const resumed = await toolbox.resumeApproval(approval, approvalExecutionOptions);
+    expect(resumed.outcome).toBe('success');
+    expect(executions).toEqual(['executed']);
+  });
+
   it('restores persisted signed approval bindings without reviving terminal bindings', async () => {
     const tool = createTool({
       name: 'restore-me',

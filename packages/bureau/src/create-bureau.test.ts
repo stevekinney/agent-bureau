@@ -4023,6 +4023,7 @@ function createRegatingApprovalToolbox(approvalSecret: string, charges: number[]
 describe('createBureau review queue (AB-20)', () => {
   it('listPendingReviews surfaces a tool call parked on needs_approval', async () => {
     const charges: number[] = [];
+    const persistence = textValueStore(new MemoryStorage());
     const bureau = await createBureau({
       generate: createSequentialGenerate([
         {
@@ -4032,6 +4033,7 @@ describe('createBureau review queue (AB-20)', () => {
       ]),
       toolbox: createNeedsApprovalToolbox('test-secret', charges),
       stopWhen: stopWhen.toolOutcome('action_required'),
+      persistence,
     });
 
     const run = await bureau.createRun({ message: 'Charge the customer' });
@@ -4047,6 +4049,10 @@ describe('createBureau review queue (AB-20)', () => {
     expect(review!.approval.toolName).toBe('charge-card');
     expect(review!.approval.arguments).toEqual({ cents: 500 });
     expect(review!.approval.approvalToken).toEqual(expect.any(String));
+    const persistedSession = await bureau.getSession(run.sessionId);
+    expect(persistedSession?.metadata['pendingApprovalOverrides']).toMatchObject({
+      [review!.id]: expect.objectContaining({ approvalToken: review!.approval.approvalToken }),
+    });
     expect(review!.ageMilliseconds).toBeGreaterThanOrEqual(0);
     expect(charges).toEqual([]); // not yet executed
 

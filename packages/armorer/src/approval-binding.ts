@@ -7,6 +7,9 @@ export type ApprovalBindingPayload = {
   version: typeof APPROVAL_BINDING_VERSION;
   principalId: string;
   tenantId: string;
+  ownerId: string;
+  authorizationRevision: string;
+  capabilitiesRevision: string;
   audience: NonNullable<ToolRequestContext['audience']>;
   agentId: string;
   runId: string;
@@ -23,6 +26,9 @@ export type ApprovalBindingContext = Pick<
   ApprovalBindingPayload,
   | 'principalId'
   | 'tenantId'
+  | 'ownerId'
+  | 'authorizationRevision'
+  | 'capabilitiesRevision'
   | 'audience'
   | 'agentId'
   | 'runId'

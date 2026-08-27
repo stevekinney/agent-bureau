@@ -1284,6 +1284,11 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
               version: 1,
               principalId: requestContext.authority.principalId,
               tenantId: requestContext.authority.tenantId,
+              ownerId: requestContext.authority.ownerId,
+              authorizationRevision: requestContext.authority.authorizationRevision,
+              capabilitiesRevision: stableStringifyJson(
+                [...requestContext.authority.capabilities].sort(),
+              ),
               audience: requestContext.audience,
               agentId: requestContext.agentId,
               runId: requestContext.runId,
@@ -1424,6 +1429,11 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       await approvalStateStore.consume(approval.approvalBinding, {
         principalId: requestContext.authority.principalId,
         tenantId: requestContext.authority.tenantId,
+        ownerId: requestContext.authority.ownerId,
+        authorizationRevision: requestContext.authority.authorizationRevision,
+        capabilitiesRevision: stableStringifyJson(
+          [...requestContext.authority.capabilities].sort(),
+        ),
         audience: requestContext.audience,
         agentId: requestContext.agentId,
         runId: requestContext.runId,
