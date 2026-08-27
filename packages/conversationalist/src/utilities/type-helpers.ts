@@ -9,10 +9,22 @@ export function hasOwnProperty<X extends object, Y extends PropertyKey>(
   return Object.prototype.hasOwnProperty.call(obj, prop);
 }
 
+/** Deeply freezes a JSON-compatible public value. */
+export function deepFreeze<T>(value: T): Readonly<T> {
+  if (value === null || typeof value !== 'object' || Object.isFrozen(value)) {
+    return value;
+  }
+
+  for (const nested of Object.values(value)) {
+    deepFreeze(nested);
+  }
+
+  return Object.freeze(value);
+}
+
 /**
- * Casts a value to its readonly variant.
- * Used to enforce immutability at the type level.
+ * Converts a value to its readonly variant at both the type and runtime levels.
  */
 export function toReadonly<T>(value: T): Readonly<T> {
-  return value;
+  return deepFreeze(value);
 }

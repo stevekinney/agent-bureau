@@ -58,8 +58,14 @@ import {
   searchConversationMessages,
   toChatMessages,
 } from './conversation/index';
+import {
+  CURRENT_SNAPSHOT_FORMAT_VERSION,
+  finalizeSnapshot,
+  validateSnapshot,
+} from './conversation/snapshot-integrity';
 import { ensureConversationSafe } from './conversation/validation';
 import { type ConversationEnvironment, resolveConversationEnvironment } from './environment';
+import { createSerializationError } from './errors';
 import type {
   ConversationActionType,
   ConversationEventDetail,
@@ -86,6 +92,7 @@ import type {
   MessageInput,
   TokenUsage,
 } from './types';
+import { CURRENT_SCHEMA_VERSION } from './types';
 
 export type {
   ConversationActionType,
@@ -103,6 +110,8 @@ export type {
 export type { ConversationEventMap as ConversationEvents } from './events';
 
 interface HistoryNode {
+  id: string;
+  revision: number;
   conversation: ConversationHistory;
   parent: HistoryNode | null;
   children: HistoryNode[];
@@ -202,6 +211,13 @@ async function loadConversationAdapter(
  */
 export class Conversation {
   private currentNode: HistoryNode;
+  private controllerRevision = 0;
+  private forkLineage?: {
+    parentConversationId: string;
+    forkPointMessageId?: string;
+    sourceRevision: number;
+  };
+  private readonly removedNodeIds = new Set<string>();
   private environment: ConversationEnvironment;
   private readonly emitter = new CompletableEventTarget<ConversationEventMap>();
 
@@ -210,8 +226,10 @@ export class Conversation {
     environment?: Partial<ConversationEnvironment>,
   ) {
     this.environment = resolveConversationEnvironment(environment);
-    const safeInitial = ensureConversationSafe(initial);
+    const safeInitial = ensureConversationSafe(structuredClone(initial));
     this.currentNode = {
+      id: `${safeInitial.id}:0`,
+      revision: 0,
       conversation: safeInitial,
       parent: null,
       children: [],
@@ -250,8 +268,12 @@ export class Conversation {
     context?: ConversationChangeContext,
   ): void {
     const previousConversation = this.current;
+    const safeNext = ensureConversationSafe(structuredClone(next));
+    this.controllerRevision += 1;
     const newNode: HistoryNode = {
-      conversation: next,
+      id: `${next.id}:${this.controllerRevision}`,
+      revision: this.controllerRevision,
+      conversation: safeNext,
       parent: this.currentNode,
       children: [],
     };
@@ -308,6 +330,12 @@ export class Conversation {
       });
 
       if (!childOnPath) break;
+
+      const collectRemoved = (candidate: HistoryNode): void => {
+        if (candidate !== childOnPath) this.removedNodeIds.add(candidate.id);
+        for (const child of candidate.children) collectRemoved(child);
+      };
+      collectRemoved(root);
 
       // Detach the child from the old root
       childOnPath.parent = null;
@@ -421,6 +449,11 @@ export class Conversation {
     return this.current;
   }
 
+  /** Monotonic revision for accepted controller state transitions. */
+  get revision(): number {
+    return this.controllerRevision;
+  }
+
   /**
    * The current conversation state.
    */
@@ -527,6 +560,7 @@ export class Conversation {
     if (this.currentNode.parent) {
       const previousConversation = this.current;
       this.currentNode = this.currentNode.parent;
+      this.controllerRevision += 1;
       this.emitConversationEvent('change', this.buildEventDetail('undo', previousConversation));
       this.emitConversationEvent('undo', this.buildEventDetail('undo', previousConversation));
       return this.current;
@@ -544,6 +578,7 @@ export class Conversation {
     if (next) {
       const previousConversation = this.current;
       this.currentNode = next;
+      this.controllerRevision += 1;
       this.emitConversationEvent('change', this.buildEventDetail('redo', previousConversation));
       this.emitConversationEvent('redo', this.buildEventDetail('redo', previousConversation));
       return this.current;
@@ -562,6 +597,7 @@ export class Conversation {
       if (target) {
         const previousConversation = this.current;
         this.currentNode = target;
+        this.controllerRevision += 1;
         this.emitConversationEvent('change', this.buildEventDetail('switch', previousConversation));
         this.emitConversationEvent('switch', this.buildEventDetail('switch', previousConversation));
         return this.current;
@@ -605,7 +641,13 @@ export class Conversation {
     this.emitConversationEvent('session.forked', detail);
     this.emitConversationEvent('change', detail);
 
-    return new Conversation(forkedHistory, this.environment);
+    const forked = new Conversation(forkedHistory, this.environment);
+    forked.forkLineage = {
+      parentConversationId: this.current.id,
+      ...(messageId ? { forkPointMessageId: messageId } : {}),
+      sourceRevision: this.controllerRevision,
+    };
+    return forked;
   }
 
   tag(label: string): void {
@@ -1247,6 +1289,9 @@ export class Conversation {
     };
 
     const serializeNode = (node: HistoryNode): ConversationNodeSnapshot => ({
+      id: node.id,
+      revision: node.revision,
+      parentId: node.parent?.id ?? null,
       conversation: node.conversation,
       children: node.children.map(serializeNode),
     });
@@ -1256,10 +1301,21 @@ export class Conversation {
       root = root.parent;
     }
 
-    return {
+    return finalizeSnapshot({
+      snapshotFormatVersion: CURRENT_SNAPSHOT_FORMAT_VERSION,
+      conversationSchemaVersion: CURRENT_SCHEMA_VERSION,
+      controllerRevision: this.controllerRevision,
+      conversationId: this.current.id,
+      currentBranchId: this.currentNode.id,
       root: serializeNode(root),
       currentPath: getPath(this.currentNode),
-    };
+      createdAt: this.environment.now(),
+      lineage: {
+        ...this.forkLineage,
+        retainedFloorNodeId: root.id,
+        removedNodeIds: [...this.removedNodeIds].sort(),
+      },
+    });
   }
 
   /**
@@ -1269,8 +1325,22 @@ export class Conversation {
     json: ConversationSnapshot,
     environment?: Partial<ConversationEnvironment>,
   ): Conversation {
-    const rootConv = deserializeConversationHistory(json.root.conversation);
+    const snapshot = validateSnapshot(json);
+    const rootConv = deserializeConversationHistory(snapshot.root.conversation);
     const conversation = new Conversation(rootConv, environment);
+    conversation.controllerRevision = snapshot.controllerRevision;
+    if (snapshot.lineage.parentConversationId && snapshot.lineage.sourceRevision !== undefined) {
+      conversation.forkLineage = {
+        parentConversationId: snapshot.lineage.parentConversationId,
+        ...(snapshot.lineage.forkPointMessageId
+          ? { forkPointMessageId: snapshot.lineage.forkPointMessageId }
+          : {}),
+        sourceRevision: snapshot.lineage.sourceRevision,
+      };
+    }
+    for (const removedNodeId of snapshot.lineage.removedNodeIds) {
+      conversation.removedNodeIds.add(removedNodeId);
+    }
 
     // Recursive function to build the tree
     const buildTree = (
@@ -1279,6 +1349,8 @@ export class Conversation {
     ): HistoryNode => {
       const nodeConv = deserializeConversationHistory(nodeJSON.conversation);
       const node: HistoryNode = {
+        id: nodeJSON.id,
+        revision: nodeJSON.revision,
         conversation: nodeConv,
         parent: parentNode,
         children: [],
@@ -1288,15 +1360,54 @@ export class Conversation {
     };
 
     const rootNode = conversation.currentNode;
-    rootNode.children = json.root.children.map((child) => buildTree(child, rootNode));
+    rootNode.id = snapshot.root.id;
+    rootNode.revision = snapshot.root.revision;
+    if (snapshot.root.parentId !== null) {
+      throw createSerializationError('failed to restore snapshot: root parent must be null');
+    }
+    if (snapshot.lineage.retainedFloorNodeId !== rootNode.id) {
+      throw createSerializationError(
+        'failed to restore snapshot: retained floor identity mismatch',
+      );
+    }
+    const seenIds = new Set<string>([rootNode.id]);
+    const validateNode = (node: ConversationNodeSnapshot, expectedParentId: string): void => {
+      if (seenIds.has(node.id))
+        throw createSerializationError(`failed to restore snapshot: duplicate node id ${node.id}`);
+      seenIds.add(node.id);
+      if (node.parentId !== expectedParentId)
+        throw createSerializationError(
+          `failed to restore snapshot: inconsistent parent for ${node.id}`,
+        );
+      if (
+        !Number.isSafeInteger(node.revision) ||
+        node.revision < 0 ||
+        node.revision > snapshot.controllerRevision
+      ) {
+        throw createSerializationError(
+          `failed to restore snapshot: invalid node revision ${node.id}`,
+        );
+      }
+      for (const child of node.children) validateNode(child, node.id);
+    };
+    for (const child of snapshot.root.children) validateNode(child, rootNode.id);
+    rootNode.children = snapshot.root.children.map((child) => buildTree(child, rootNode));
 
     // Traverse to find the current node
     let current: HistoryNode = rootNode;
-    for (const index of json.currentPath) {
+    for (const index of snapshot.currentPath) {
       const target = current.children[index];
-      if (target) {
-        current = target;
-      }
+      if (!target)
+        throw createSerializationError(
+          `failed to restore snapshot: current path index ${index} is out of range`,
+        );
+      current = target;
+    }
+    if (
+      current.id !== snapshot.currentBranchId ||
+      current.conversation.id !== snapshot.conversationId
+    ) {
+      throw createSerializationError('failed to restore snapshot: current identity mismatch');
     }
     conversation.currentNode = current;
 

@@ -50,9 +50,14 @@ describe('createCheckpointStore', () => {
       const loaded = await store.loadConversation('run-1');
 
       expect(loaded).not.toBeNull();
-      // Rehydrate and re-snapshot: the round-trip must be structurally identical.
+      // Rehydrate and re-snapshot: the tree and lineage must survive even though
+      // a new envelope gets its own creation time and integrity digest.
       const rehydrated = Conversation.from(loaded!);
-      expect(rehydrated.snapshot()).toEqual(original);
+      const restored = rehydrated.snapshot();
+      expect(restored.root).toEqual(original.root);
+      expect(restored.currentPath).toEqual(original.currentPath);
+      expect(restored.controllerRevision).toBe(original.controllerRevision);
+      expect(restored.lineage).toEqual(original.lineage);
       expect(rehydrated.getMessages()).toEqual(conversation.getMessages());
     });
 

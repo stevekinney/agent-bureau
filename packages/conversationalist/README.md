@@ -14,6 +14,10 @@
 
 Pure helper functions transform `ConversationHistory` values without side effects. The `Conversation` class wraps those helpers with evented runtime behavior for applications that need stateful history management. Provider adapters sit at the edges so the internal message model stays stable even when an external provider expects a different message shape.
 
+Public conversation values are deeply frozen when they enter the runtime. `current`, `getSnapshot()`, history paths, events, forks, and serialized trees therefore expose the same cached object until a committed transition replaces it, without exposing a mutable alias. Validation, freezing, and snapshot serialization remain separate boundaries so callers can measure their costs independently.
+
+`Conversation.snapshot()` returns snapshot format version 1: an integrity-protected envelope containing the conversation schema version, monotonic controller revision, tree and branch identities, strict current path, creation time, and fork/prune lineage. `Conversation.from()` accepts only this version, verifies its digest and every identity/path/revision invariant, and rejects unsupported or partial data with `error:serialization`. Version 1 is the migration floor, so there are no implicit historical snapshot migrations; a future format must add an explicit, version-pinned migration before its fixtures become supported.
+
 ## Project Role
 
 `conversationalist` is the conversation state layer for Agent Bureau. `operative` uses it during the agent loop and to build provider payloads through its own provider adapters, `gateway` persists sessions around it, and `armorer` shares its tool-call model through `interoperability`.

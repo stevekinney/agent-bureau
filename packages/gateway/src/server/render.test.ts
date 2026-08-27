@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test';
+import { Conversation, createConversationHistory } from 'conversationalist';
 
 import { assembleRunTimeline, type RunDetailResponse } from '../routes/runs';
 import type { UsageResponse } from '../routes/usage';
@@ -252,22 +253,9 @@ describe('renderPage with a populated run-detail page', () => {
         results: [],
       },
     ],
-    latestSnapshot: {
-      root: {
-        conversation: {
-          schemaVersion: 5,
-          id: 'conversation-1',
-          status: 'active',
-          metadata: {},
-          ids: [],
-          messages: {},
-          createdAt: '2026-01-01T00:00:00.000Z',
-          updatedAt: '2026-01-01T00:00:00.000Z',
-        },
-        children: [],
-      },
-      currentPath: [],
-    },
+    latestSnapshot: new Conversation(createConversationHistory({ id: 'conversation-1' }), {
+      now: () => '2026-01-01T00:00:00.000Z',
+    }).snapshot(),
     events: populatedRunEvents,
     timeline: assembleRunTimeline(populatedRunEvents),
   };

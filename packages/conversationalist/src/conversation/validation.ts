@@ -1,6 +1,7 @@
 import { createValidationError } from '../errors';
 import { conversationSchema, messageSchema } from '../schemas';
 import type { ConversationHistory, Message } from '../types';
+import { deepFreeze } from '../utilities/type-helpers';
 import { assertConversationHistoryIntegrity } from './integrity';
 
 /**
@@ -20,7 +21,7 @@ export function assertConversationSafe(conversation: ConversationHistory): void 
 
 export function ensureConversationSafe(conversation: ConversationHistory): ConversationHistory {
   assertConversationSafe(conversation);
-  return conversation;
+  return deepFreeze(conversation);
 }
 
 /**
