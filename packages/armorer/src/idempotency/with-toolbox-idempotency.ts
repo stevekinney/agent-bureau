@@ -249,16 +249,7 @@ export function withToolboxIdempotency(
       return createDedupedResult(fields, cacheKey, cached);
     }
 
-    const startedAt = now();
-    const execution: import('./types').StartedToolExecution = {
-      status: 'started',
-      toolName: fields.name,
-      startedAt,
-      ttl: defaultTTL,
-      attemptId: createAttemptId(),
-      leaseExpiresAt: Math.min(startedAt + leaseDurationMs, startedAt + maximumExecutionDurationMs),
-      absoluteDeadline: startedAt + maximumExecutionDurationMs,
-    };
+    let execution: import('./types').StartedToolExecution;
     let started;
     if (cached?.status === 'started') {
       const validReceipt =
@@ -275,9 +266,22 @@ export function withToolboxIdempotency(
       if (!validReceipt || !cached.attemptId) {
         return createUnknownOutcomeResult(fields, cacheKey, cached.toolName);
       }
+      const startedAt = now();
       if (cached.leaseExpiresAt !== undefined && startedAt < cached.leaseExpiresAt) {
         return createUnknownOutcomeResult(fields, cacheKey, cached.toolName);
       }
+      execution = {
+        status: 'started',
+        toolName: fields.name,
+        startedAt,
+        ttl: defaultTTL,
+        attemptId: createAttemptId(),
+        leaseExpiresAt: Math.min(
+          startedAt + leaseDurationMs,
+          startedAt + maximumExecutionDurationMs,
+        ),
+        absoluteDeadline: startedAt + maximumExecutionDurationMs,
+      };
       const replaced = await cache.replaceUnknownStarted(
         cacheKey,
         cached.attemptId,
@@ -292,6 +296,19 @@ export function withToolboxIdempotency(
       }
       started = { outcome: 'claimed' } as const;
     } else {
+      const startedAt = now();
+      execution = {
+        status: 'started',
+        toolName: fields.name,
+        startedAt,
+        ttl: defaultTTL,
+        attemptId: createAttemptId(),
+        leaseExpiresAt: Math.min(
+          startedAt + leaseDurationMs,
+          startedAt + maximumExecutionDurationMs,
+        ),
+        absoluteDeadline: startedAt + maximumExecutionDurationMs,
+      };
       started = await claimCacheStarted(cache, cacheKey, execution);
     }
 
@@ -345,7 +362,7 @@ export function withToolboxIdempotency(
       const entry: CachedToolResult = {
         result: result.result,
         toolName: result.toolName,
-        executedAt: Date.now(),
+        executedAt: now(),
         ttl: defaultTTL,
       };
       const completed = await cache.completeStarted(

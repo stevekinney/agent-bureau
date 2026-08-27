@@ -1098,6 +1098,71 @@ describe('withToolboxIdempotency', () => {
     expect(missingResult.outcome).toBe('action_required');
   });
 
+  it('starts replacement leases after receipt verification and uses the injected completion clock', async () => {
+    const key = expectedCacheKey('tenant-a', 'default:add', 'add:fresh-retry-clock');
+    await cache.claimStarted(key, {
+      status: 'started',
+      toolName: 'add',
+      startedAt: 100,
+      ttl: 60_000,
+      attemptId: 'expired-attempt',
+      leaseExpiresAt: 500,
+      absoluteDeadline: 900,
+    });
+    let clock = 1_000;
+    let replacementStartedAt: number | undefined;
+    let replacementLeaseExpiresAt: number | undefined;
+    let completedAt: number | undefined;
+    const observingCache: ToolResultCache = {
+      ...cache,
+      async replaceUnknownStarted(cacheKey, expectedAttemptId, replacement, currentTime) {
+        replacementStartedAt = replacement.startedAt;
+        replacementLeaseExpiresAt = replacement.leaseExpiresAt;
+        return cache.replaceUnknownStarted!(cacheKey, expectedAttemptId, replacement, currentTime);
+      },
+      async completeStarted(cacheKey, attemptId, result, ttl, currentTime) {
+        completedAt = result.executedAt;
+        return cache.completeStarted!(cacheKey, attemptId, result, ttl, currentTime);
+      },
+    };
+    const toolbox = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache: observingCache,
+      tenantId: 'tenant-a',
+      leaseDurationMs: 200,
+      maximumExecutionDurationMs: 1_000,
+      now: () => clock,
+      verifyResolutionReceipt: async () => {
+        clock = 2_000;
+        return true;
+      },
+    });
+
+    const result = await toolbox.execute(
+      { name: 'add', arguments: { a: 1, b: 2 } },
+      {
+        idempotencyKey: 'fresh-retry-clock',
+        resolutionReceipt: {
+          version: 1,
+          key,
+          attemptId: 'expired-attempt',
+          tenantId: 'tenant-a',
+          toolRevision: 'default:add',
+          decision: 'retry',
+          evidence: 'the original attempt did not produce an external effect',
+          authorizedAt: 1_000,
+          authorizedBy: 'operator-a',
+          nonce: 'fresh-clock-receipt',
+          authorization: 'signed',
+        },
+      },
+    );
+
+    expect(result.result).toBe(3);
+    expect(replacementStartedAt).toBe(2_000);
+    expect(replacementLeaseExpiresAt).toBe(2_200);
+    expect(completedAt).toBe(2_000);
+  });
+
   it('requires current request authority and rejects a mismatched tenant', async () => {
     const toolbox = createIdempotentToolbox(createToolbox([createToolWithKey()]), {
       cache,

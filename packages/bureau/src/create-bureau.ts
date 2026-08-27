@@ -2615,7 +2615,15 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     if (!keepPending) {
       resolvedReviewIds.add(review.id);
       if (review.kind === 'tool-approval') {
-        await prunePersistedPendingApprovalOverride(review.sessionId, review.id);
+        try {
+          await prunePersistedPendingApprovalOverride(review.sessionId, review.id);
+        } catch (error) {
+          diagnose({
+            level: 'warn',
+            scope: 'approval',
+            message: `[bureau] Resolved approval "${review.id}" but could not prune its persisted override: ${serializeUnknownError(error)}`,
+          });
+        }
       }
     }
 

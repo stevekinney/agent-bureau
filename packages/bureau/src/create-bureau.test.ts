@@ -4179,6 +4179,56 @@ describe('createBureau review queue (AB-20)', () => {
     bureau.dispose();
   });
 
+  it('returns an applied approval when persisted override cleanup fails', async () => {
+    const backingStore = textValueStore(new MemoryStorage());
+    let failNextSessionUpdate = false;
+    const persistence = createTextStoreProxy(backingStore, {
+      async conditionalBatch(conditions, operations) {
+        if (
+          failNextSessionUpdate &&
+          (conditions.some((condition) => condition.key.startsWith('agent-session:')) ||
+            operations.some((operation) => operation.key.startsWith('agent-session:')))
+        ) {
+          failNextSessionUpdate = false;
+          throw new Error('override cleanup unavailable');
+        }
+        return backingStore.conditionalBatch(conditions, operations);
+      },
+    });
+    const diagnostics: string[] = [];
+    const charges: number[] = [];
+    const bureau = await createBureau({
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [{ id: 'cleanup-call', name: 'charge-card', arguments: { cents: 425 } }],
+        },
+      ]),
+      toolbox: createNeedsApprovalToolbox('cleanup-secret', charges),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+      persistence,
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.message),
+    });
+
+    const run = await bureau.createRun({ message: 'Charge despite cleanup storage failure' });
+    await waitForRunCompletion(bureau, run.id);
+    const [review] = bureau.listPendingReviews();
+    expect(review).toBeDefined();
+    failNextSessionUpdate = true;
+
+    const outcome = await bureau.resolveReview({
+      id: review!.id,
+      decision: 'approve',
+      principal: 'api-key:reviewer-cleanup',
+    });
+
+    expect(outcome.decision).toBe('approve');
+    expect(charges).toEqual([425]);
+    expect(bureau.listPendingReviews()).toHaveLength(0);
+    expect(diagnostics).toContainEqual(expect.stringContaining('could not prune'));
+    bureau.dispose();
+  });
+
   it('resolveReview approve keeps a review pending when the policy gates it again', async () => {
     // `createRegatingApprovalToolbox`'s policy returns a DIFFERENT reason on
     // its second evaluation, so `resumeApproval`'s re-run of `beforeExecute`
