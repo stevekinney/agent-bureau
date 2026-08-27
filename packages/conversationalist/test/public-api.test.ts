@@ -6,10 +6,44 @@ import * as root from '../src';
 
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
   exports?: Record<string, unknown>;
+  engines?: Record<string, string>;
+  conversationalistSupport?: {
+    module: string;
+    browserGlobals: string[];
+    svelteKit: { adapter: string; runtime: string };
+    subpaths: Record<string, { browser: boolean; node: boolean; bun: boolean; ssr: boolean }>;
+  };
 };
 
 describe('public API export map', () => {
   const exportsMap = pkg.exports ?? {};
+
+  it('declares one complete host matrix for every public subpath', () => {
+    const support = pkg.conversationalistSupport;
+    expect(support?.module).toBe('esm');
+    expect(support?.browserGlobals).toEqual([]);
+    expect(support?.svelteKit).toEqual({
+      adapter: '@sveltejs/adapter-vercel',
+      runtime: 'nodejs22.x',
+    });
+    expect(Object.keys(exportsMap)).toHaveLength(19);
+    expect(Object.keys(support?.subpaths ?? {}).sort()).toEqual(Object.keys(exportsMap).sort());
+    for (const subpath of Object.keys(exportsMap)) {
+      const browser = subpath !== './markdown' && subpath !== './export';
+      expect(support?.subpaths[subpath]).toEqual({
+        browser,
+        node: true,
+        bun: true,
+        ssr: true,
+      });
+      const browserTarget = (exportsMap[subpath] as Record<string, unknown>).browser;
+      expect(browser ? typeof browserTarget === 'string' : browserTarget === null).toBe(true);
+    }
+  });
+
+  it('declares exact supported runtime boundaries', () => {
+    expect(pkg.engines).toEqual({ bun: '>=1.3.13', node: '^20.19.0 || ^22.12.0 || >=24' });
+  });
 
   it('includes the canonical subpaths', () => {
     expect(exportsMap['./conversation']).toBeDefined();
@@ -53,6 +87,7 @@ describe('public API export map', () => {
     expect(root.withConversationHistory).toBeDefined();
     expect(root.pipeConversationHistory).toBeDefined();
     expect(root.createProjection).toBeDefined();
+    expect(root.createPublicConversationProjection).toBeDefined();
     expect(root.isProjectionPrefixExtension).toBeDefined();
 
     expect('ConversationHistory' in root).toBeFalse();
