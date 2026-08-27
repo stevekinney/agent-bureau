@@ -159,6 +159,40 @@ describe('withIdempotency', () => {
     expect(onCacheHit.mock.calls[0]![1]!.toolName).toBe('add');
   });
 
+  it('re-runs current policy before returning a completed cache hit', async () => {
+    const tool = createTool({
+      name: 'policy-cached',
+      description: 'Policy-protected cached tool',
+      version: '1.0.0',
+      input: z.object({ value: z.string() }),
+      idempotencyKey: (input: unknown) => fullInputKey(input),
+      policy: {
+        beforeExecute(context) {
+          const currentContext = context.policyContext as
+            { requestContext?: typeof requestContext } | undefined;
+          return currentContext?.requestContext?.authority.principalId === 'principal-a'
+            ? { allow: true }
+            : { allow: false, reason: 'principal denied' };
+        },
+      },
+      async execute({ value }) {
+        callCount++;
+        return value;
+      },
+    });
+    const wrapped = withIdempotency(tool, { cache, tenantId: 'tenant-a' });
+    const deniedContext = {
+      ...requestContext,
+      authority: { ...requestContext.authority, principalId: 'principal-b' },
+    };
+
+    await expect(wrapped.execute({ value: 'cached' }, { requestContext })).resolves.toBe('cached');
+    await expect(
+      wrapped.execute({ value: 'cached' }, { requestContext: deniedContext }),
+    ).rejects.toThrow('principal denied');
+    expect(callCount).toBe(1);
+  });
+
   it('keeps started state when execution throws after claiming a key', async () => {
     const sideEffects: number[] = [];
     const tool = createTool({
@@ -248,6 +282,144 @@ describe('withIdempotency', () => {
     expect(callCount).toBe(2);
     const completed = await cache.getState(key);
     expect(completed?.status).toBe('completed');
+  });
+
+  it('renews an active lease and rejects completion after losing the fence', async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tool = createTool({
+      name: 'slow-fenced',
+      description: 'Slow fenced execution',
+      version: '1.0.0',
+      input: z.object({ value: z.number() }),
+      idempotencyKey: (input: unknown) => fullInputKey(input),
+      async execute({ value }) {
+        await blocked;
+        return value;
+      },
+    });
+    let renewals = 0;
+    const renewingCache: ToolResultCache = {
+      ...cache,
+      async renewStarted(key, attemptId, leaseExpiresAt, observedAt) {
+        renewals++;
+        return cache.renewStarted(key, attemptId, leaseExpiresAt, observedAt);
+      },
+    };
+    const wrapped = withIdempotency(tool, {
+      cache: renewingCache,
+      tenantId: 'tenant-a',
+      leaseDurationMs: 10,
+      maximumExecutionDurationMs: 100,
+    });
+    const execution = wrapped.execute({ value: 7 }, { requestContext });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(renewals).toBeGreaterThan(0);
+    release();
+    await expect(execution).resolves.toBe(7);
+
+    let releaseLostFence!: () => void;
+    const blockedLostFence = new Promise<void>((resolve) => {
+      releaseLostFence = resolve;
+    });
+    const lostFenceCache: ToolResultCache = {
+      ...cache,
+      async renewStarted() {
+        return false;
+      },
+    };
+    const lostFenceTool = createTool({
+      name: 'lost-fence',
+      description: 'Loses its fence',
+      version: '1.0.0',
+      input: z.object({ value: z.number() }),
+      idempotencyKey: (input: unknown) => fullInputKey(input),
+      async execute({ value }) {
+        await blockedLostFence;
+        return value;
+      },
+    });
+    const lostFence = withIdempotency(lostFenceTool, {
+      cache: lostFenceCache,
+      tenantId: 'tenant-a',
+      leaseDurationMs: 10,
+      maximumExecutionDurationMs: 100,
+    });
+    const lostExecution = lostFence.execute({ value: 8 }, { requestContext });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    releaseLostFence();
+    await expect(lostExecution).rejects.toThrow('lost its execution fence');
+  });
+
+  it('stops renewing at the absolute deadline and rejects renewal failures', async () => {
+    const createSlowTool = (name: string) =>
+      createTool({
+        name,
+        description: 'Slow direct idempotency execution',
+        version: '1.0.0',
+        input: z.object({ value: z.number() }),
+        idempotencyKey: (input: unknown) => fullInputKey(input),
+        async execute({ value }) {
+          await new Promise((resolve) => setTimeout(resolve, 12));
+          return value;
+        },
+      });
+
+    let clockReads = 0;
+    const deadlineTool = withIdempotency(createSlowTool('deadline-fence'), {
+      cache,
+      tenantId: 'tenant-a',
+      leaseDurationMs: 4,
+      maximumExecutionDurationMs: 5,
+      now: () => (clockReads++ === 0 ? 100 : 105),
+    });
+    const deadlineExecution = deadlineTool.execute({ value: 9 }, { requestContext });
+    await expect(deadlineExecution).rejects.toThrow('lost its execution fence');
+
+    const rejectingRenewalCache: ToolResultCache = {
+      ...cache,
+      async renewStarted() {
+        throw new Error('renewal store unavailable');
+      },
+    };
+    const renewalFailureTool = withIdempotency(createSlowTool('renewal-failure'), {
+      cache: rejectingRenewalCache,
+      tenantId: 'tenant-a',
+      leaseDurationMs: 4,
+      maximumExecutionDurationMs: 100,
+    });
+
+    await expect(renewalFailureTool.execute({ value: 10 }, { requestContext })).rejects.toThrow(
+      'lost its execution fence',
+    );
+  });
+
+  it('clears a direct idempotency claim when execution throws a pre-execution error', async () => {
+    const tool = createTestTool();
+    const throwingTool = new Proxy(tool, {
+      get(target, property, receiver) {
+        if (property === 'executeWith') {
+          return async () => {
+            throw Object.assign(new Error('current authority denied'), {
+              category: 'permission',
+            });
+          };
+        }
+        return Reflect.get(target, property, receiver) as unknown;
+      },
+    });
+    const wrapped = withIdempotency(throwingTool, {
+      cache,
+      tenantId: 'tenant-a',
+    });
+    const key = JSON.stringify(['tenant-a', tool.id, 'add', fullInputKey({ a: 1, b: 2 })]);
+
+    await expect(wrapped.execute({ a: 1, b: 2 }, { requestContext })).rejects.toThrow(
+      'current authority denied',
+    );
+    expect(await cache.getState(key)).toBeUndefined();
   });
 
   it('rejects invalid direct idempotency lease durations', () => {

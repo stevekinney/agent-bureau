@@ -1,4 +1,9 @@
 import { stableStringifyJson } from '../core/serialization/json';
+import {
+  approvalConsumeSymbol,
+  approvalResumeSymbol,
+  policyAuthorizationOnlySymbol,
+} from '../internal/approval-resume';
 import type { Tool, ToolCallWithArguments, ToolExecuteOptions } from '../is-tool';
 import { claimCacheStarted, getCacheEntry } from './cache-operations';
 import type {
@@ -132,6 +137,26 @@ export function withIdempotency<T extends Tool>(
     }
 
     const cached = await getCacheEntry(cache, key);
+    if (cached && cached.status !== 'started') {
+      if (typeof tool.executeWith === 'function') {
+        const authorizationOptions = createPolicyAuthorizationOnlyOptions(executeOptions);
+        const authorizationResult = await tool.executeWith({
+          params,
+          ...(authorizationOptions as ToolExecuteOptions),
+        });
+        if (authorizationResult.outcome !== 'success' || authorizationResult.error) {
+          throw new Error(
+            authorizationResult.error?.message ??
+              authorizationResult.errorMessage ??
+              authorizationResult.pendingApproval?.reason ??
+              'Tool execution failed.',
+          );
+        }
+      }
+      onCacheHit?.(key, cached);
+      return cached.result;
+    }
+
     let startedExecution: StartedToolExecution;
     if (cached?.status === 'started') {
       const receipt = executeOptions?.resolutionReceipt;
@@ -207,11 +232,54 @@ export function withIdempotency<T extends Tool>(
         return started.entry.result;
       }
     }
-    // Execute the tool via its callable interface (params → result)
-    const toolExecution = executeOptions
-      ? await tool.executeWith({ params, ...executeOptions })
-      : null;
-    const result = toolExecution ? toolExecution.result : await tool(params);
+    let leaseOwned = true;
+    let pendingRenewal = Promise.resolve();
+    const renewalInterval = setInterval(
+      () => {
+        pendingRenewal = pendingRenewal
+          .then(async () => {
+            const renewalTime = now();
+            if (
+              startedExecution.absoluteDeadline !== undefined &&
+              renewalTime >= startedExecution.absoluteDeadline
+            ) {
+              return;
+            }
+            leaseOwned =
+              leaseOwned &&
+              (await cache.renewStarted(
+                key,
+                startedExecution.attemptId!,
+                Math.min(
+                  renewalTime + leaseDurationMs,
+                  startedExecution.absoluteDeadline ?? renewalTime + leaseDurationMs,
+                ),
+                renewalTime,
+              ));
+          })
+          .catch(() => {
+            leaseOwned = false;
+          });
+      },
+      Math.max(1, Math.floor(leaseDurationMs / 2)),
+    );
+
+    let toolExecution: Awaited<ReturnType<Tool['executeWith']>> | null;
+    let result: unknown;
+    try {
+      // Execute the tool via its callable interface (params → result)
+      toolExecution = executeOptions ? await tool.executeWith({ params, ...executeOptions }) : null;
+      result = toolExecution ? toolExecution.result : await tool(params);
+    } catch (error) {
+      if (isPreExecutionThrownError(error)) {
+        await cache.deleteStarted(key, startedExecution.attemptId!);
+      }
+      throw error;
+    } finally {
+      clearInterval(renewalInterval);
+      await pendingRenewal;
+    }
+
     if (toolExecution && toolExecution.outcome !== 'success') {
       if (isPreExecutionResult(toolExecution)) {
         await cache.deleteStarted(key, startedExecution.attemptId!);
@@ -231,7 +299,10 @@ export function withIdempotency<T extends Tool>(
       ttl,
     };
 
-    if (!(await cache.completeStarted(key, startedExecution.attemptId!, entry, ttl, now()))) {
+    if (
+      !leaseOwned ||
+      !(await cache.completeStarted(key, startedExecution.attemptId!, entry, ttl, now()))
+    ) {
       throw new Error(`Idempotency key "${key}" lost its execution fence before completion.`);
     }
 
@@ -264,6 +335,33 @@ export function withIdempotency<T extends Tool>(
       return Reflect.get(target, prop, receiver as object) as unknown;
     },
   });
+}
+
+function createPolicyAuthorizationOnlyOptions(
+  executeOptions: DirectIdempotencyExecuteOptions | undefined,
+): DirectIdempotencyExecuteOptions {
+  const authorizationOnlyOptions: DirectIdempotencyExecuteOptions = {
+    ...(executeOptions ?? {}),
+  };
+  const options = authorizationOnlyOptions as DirectIdempotencyExecuteOptions &
+    Record<PropertyKey, unknown>;
+  const hasApprovalResume = approvalResumeSymbol in options;
+  options[policyAuthorizationOnlySymbol] = true;
+  if (!hasApprovalResume) {
+    delete options[approvalConsumeSymbol];
+  }
+  return authorizationOnlyOptions;
+}
+
+function isPreExecutionThrownError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const category = (error as { category?: unknown }).category;
+  return (
+    category === 'validation' ||
+    category === 'permission' ||
+    category === 'not_found' ||
+    category === 'unavailable'
+  );
 }
 
 function isPreExecutionResult(result: unknown): boolean {
