@@ -75,7 +75,7 @@ function redactJSONValue(value: unknown, redact: (text: string) => string): unkn
 export function createPIIRedactionPlugin(options: PIIRedactionOptions = {}): MessagePlugin {
   const redact = createPIIRedaction(options);
 
-  return (input: MessageInput): MessageInput => {
+  const transform = (input: MessageInput): MessageInput => {
     let result: MessageInput;
 
     if (typeof input.content === 'string') {
@@ -163,6 +163,7 @@ export function createPIIRedactionPlugin(options: PIIRedactionOptions = {}): Mes
 
     return result;
   };
+  return Object.assign(transform, { id: 'pii-redaction', revision: 1 });
 }
 
 /**

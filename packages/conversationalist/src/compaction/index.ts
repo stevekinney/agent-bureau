@@ -11,7 +11,7 @@ import { toReadonly } from '../utilities';
 
 export type Summarizer = (
   messages: Message[],
-  options?: { maxTokens?: number | undefined },
+  options?: { maxTokens?: number | undefined; signal?: AbortSignal | undefined },
 ) => Promise<string>;
 
 /**
@@ -36,6 +36,7 @@ export interface CompactionPreservePolicy {
 }
 
 export interface CompactionOptions {
+  signal?: AbortSignal | undefined;
   preserveRecentCount?: number | undefined;
   preserveSystemMessages?: boolean | undefined;
   preserveToolPairs?: boolean | undefined;
@@ -343,6 +344,7 @@ export async function compactConversation(
   for (const chunk of chunks) {
     const summary = await summarizer(chunk, {
       maxTokens: options?.maxSummaryTokens,
+      signal: options?.signal,
     });
     summaries.push(summary);
   }

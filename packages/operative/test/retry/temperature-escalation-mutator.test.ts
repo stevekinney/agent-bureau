@@ -23,11 +23,15 @@ describe('createTemperatureEscalationMutator', () => {
 
     const result1 = await mutator(context, new Error('fail'), 1);
     expect(result1).toBeDefined();
-    expect(result1!.conversation.getSnapshot().metadata[RETRY_TEMPERATURE_KEY]).toBe(0.2);
+    expect(result1!.conversation.getSnapshot().conversation.metadata[RETRY_TEMPERATURE_KEY]).toBe(
+      0.2,
+    );
 
     const result2 = await mutator(context, new Error('fail'), 2);
     expect(result2).toBeDefined();
-    expect(result2!.conversation.getSnapshot().metadata[RETRY_TEMPERATURE_KEY]).toBe(0.4);
+    expect(result2!.conversation.getSnapshot().conversation.metadata[RETRY_TEMPERATURE_KEY]).toBe(
+      0.4,
+    );
   });
 
   it('respects custom increment', async () => {
@@ -36,7 +40,9 @@ describe('createTemperatureEscalationMutator', () => {
 
     const result = await mutator(context, new Error('fail'), 1);
     expect(result).toBeDefined();
-    expect(result!.conversation.getSnapshot().metadata[RETRY_TEMPERATURE_KEY]).toBe(0.1);
+    expect(result!.conversation.getSnapshot().conversation.metadata[RETRY_TEMPERATURE_KEY]).toBe(
+      0.1,
+    );
   });
 
   it('caps temperature at max', async () => {
@@ -44,13 +50,19 @@ describe('createTemperatureEscalationMutator', () => {
     const context = makeContext();
 
     const result1 = await mutator(context, new Error('fail'), 1);
-    expect(result1!.conversation.getSnapshot().metadata[RETRY_TEMPERATURE_KEY]).toBe(0.5);
+    expect(result1!.conversation.getSnapshot().conversation.metadata[RETRY_TEMPERATURE_KEY]).toBe(
+      0.5,
+    );
 
     const result2 = await mutator(context, new Error('fail'), 2);
-    expect(result2!.conversation.getSnapshot().metadata[RETRY_TEMPERATURE_KEY]).toBe(0.8);
+    expect(result2!.conversation.getSnapshot().conversation.metadata[RETRY_TEMPERATURE_KEY]).toBe(
+      0.8,
+    );
 
     const result3 = await mutator(context, new Error('fail'), 3);
-    expect(result3!.conversation.getSnapshot().metadata[RETRY_TEMPERATURE_KEY]).toBe(0.8);
+    expect(result3!.conversation.getSnapshot().conversation.metadata[RETRY_TEMPERATURE_KEY]).toBe(
+      0.8,
+    );
   });
 
   it('defaults max to 1.0', async () => {
@@ -58,17 +70,21 @@ describe('createTemperatureEscalationMutator', () => {
     const context = makeContext();
 
     const result1 = await mutator(context, new Error('fail'), 1);
-    expect(result1!.conversation.getSnapshot().metadata[RETRY_TEMPERATURE_KEY]).toBe(0.6);
+    expect(result1!.conversation.getSnapshot().conversation.metadata[RETRY_TEMPERATURE_KEY]).toBe(
+      0.6,
+    );
 
     const result2 = await mutator(context, new Error('fail'), 2);
-    expect(result2!.conversation.getSnapshot().metadata[RETRY_TEMPERATURE_KEY]).toBe(1.0);
+    expect(result2!.conversation.getSnapshot().conversation.metadata[RETRY_TEMPERATURE_KEY]).toBe(
+      1.0,
+    );
   });
 
   it('does not mutate the original conversation', async () => {
     const mutator = createTemperatureEscalationMutator();
     const context = makeContext();
-    const originalMetadata = { ...context.conversation.getSnapshot().metadata };
+    const originalMetadata = { ...context.conversation.getSnapshot().conversation.metadata };
     await mutator(context, new Error('fail'), 1);
-    expect(context.conversation.getSnapshot().metadata).toEqual(originalMetadata);
+    expect(context.conversation.getSnapshot().conversation.metadata).toEqual(originalMetadata);
   });
 });

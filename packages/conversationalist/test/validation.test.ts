@@ -13,16 +13,16 @@ describe('Conversation state integrity', () => {
     const first = conversation.getSnapshot();
 
     expect(Object.isFrozen(first)).toBe(true);
-    expect(Object.isFrozen(first.metadata)).toBe(true);
-    expect(Object.isFrozen(first.metadata['nested'])).toBe(true);
+    expect(Object.isFrozen(first.conversation.metadata)).toBe(true);
+    expect(Object.isFrozen(first.conversation.metadata['nested'])).toBe(true);
     expect(() => {
-      (first.metadata['nested'] as { enabled: boolean }).enabled = false;
+      (first.conversation.metadata['nested'] as { enabled: boolean }).enabled = false;
     }).toThrow();
     expect(conversation.getSnapshot()).toBe(first);
 
     conversation.appendUserMessage([{ type: 'text', text: 'hello' }]);
     const second = conversation.getSnapshot();
-    const message = second.messages[second.ids[0]!]!;
+    const message = second.conversation.messages[second.conversation.ids[0]!]!;
     expect(second).not.toBe(first);
     expect(Object.isFrozen(message)).toBe(true);
     expect(Object.isFrozen(message.content)).toBe(true);

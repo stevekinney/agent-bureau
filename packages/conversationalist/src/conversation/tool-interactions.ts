@@ -55,6 +55,7 @@ export interface AppendToolResultOptions {
   metadata?: Record<string, JSONValue>;
   hidden?: boolean;
   tokenUsage?: TokenUsage;
+  signal?: AbortSignal;
 }
 
 export interface ToolInteraction {
@@ -156,7 +157,9 @@ export async function appendToolResultAsync(
   environment?: Partial<ConversationEnvironment>,
 ): Promise<Conversation> {
   const resolvedOptions = isConversationEnvironmentParameter(options) ? undefined : options;
-  const normalizedToolResult = await materializeToolResultAsync(toolResult);
+  const normalizedToolResult = await materializeToolResultAsync(toolResult, {
+    signal: resolvedOptions?.signal,
+  });
 
   return appendMessages(
     conversation,
@@ -172,12 +175,13 @@ export async function appendToolResultsAsync(
   conversation: Conversation,
   toolResults: ReadonlyArray<AppendableToolResult>,
   environment?: Partial<ConversationEnvironment>,
+  signal?: AbortSignal,
 ): Promise<Conversation> {
   if (toolResults.length === 0) {
     return conversation;
   }
 
-  const normalizedToolResults = await materializeToolResultsAsync(toolResults);
+  const normalizedToolResults = await materializeToolResultsAsync(toolResults, { signal });
 
   const messageInputs = normalizedToolResults.map((toolResult) =>
     createToolResultMessageInput(toolResult, undefined),
@@ -368,7 +372,9 @@ export async function resolveToolResultAsync(
     : environment;
 
   const original = findToolResultMessageToReplace(conversation, callId);
-  const normalizedToolResult = await materializeToolResultAsync(toolResult);
+  const normalizedToolResult = await materializeToolResultAsync(toolResult, {
+    signal: resolvedOptions?.signal,
+  });
   assertMatchingCallId(callId, normalizedToolResult);
 
   const resolvedEnvironment = resolveConversationEnvironment(resolvedEnvironmentInput);

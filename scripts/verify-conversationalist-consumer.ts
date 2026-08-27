@@ -178,11 +178,14 @@ async function verifyStrictTypeConsumer(directory: string, tarballPath: string):
   await Bun.write(
     join(directory, 'src', 'index.ts'),
     `import {
+  Conversation,
+  defineMessagePlugin,
   removeMessage,
   replaceToolResult,
   setMessageHidden,
   updateMessage,
   validateConversationHistoryIntegrity,
+  type ConversationStoreSnapshot,
   type MessageUpdate,
 } from 'conversationalist';
 import {
@@ -212,6 +215,13 @@ export const conversationHelpers = {
 
 export const rootUpdate: MessageUpdate = {};
 export const conversationUpdate: ConversationMessageUpdate = {};
+const controller = new Conversation();
+export const externalStoreSnapshot: ConversationStoreSnapshot = controller.getSnapshot();
+export const unsubscribe = controller.subscribe(() => controller.getSnapshot());
+export const plugin = defineMessagePlugin(
+  { id: 'consumer-policy', revision: 1 },
+  (input) => input,
+);
 `,
   );
 
@@ -351,7 +361,9 @@ export {};
   await Bun.write(
     join(directory, 'src', 'routes', '+page.svelte'),
     `<script lang="ts">
+  import { onDestroy } from 'svelte';
   import {
+    Conversation,
     removeMessage,
     replaceToolResult,
     setMessageHidden,
@@ -374,9 +386,18 @@ export {};
     conversationReplaceToolResult,
     conversationRemoveMessage,
   ];
+  const conversation = new Conversation();
+  let snapshot = conversation.getServerSnapshot();
+  const unsubscribe = conversation.subscribe(() => {
+    snapshot = conversation.getSnapshot();
+  });
+  onDestroy(() => {
+    unsubscribe();
+    void conversation.dispose();
+  });
 </script>
 
-<p>{helpers.length} Conversationalist mutation helpers loaded.</p>
+<p>{helpers.length} Conversationalist mutation helpers loaded at revision {snapshot.revision}.</p>
 `,
   );
 
@@ -431,6 +452,7 @@ async function verifyRuntimeConsumer(directory: string, tarballPath: string): Pr
 
 const RUNTIME_CONSUMER_SCRIPT = `import assert from 'node:assert/strict';
 
+import { Conversation, createConversationHistory as createControllerHistory } from 'conversationalist';
 import {
   appendToolCall,
   appendToolResult,
@@ -504,6 +526,24 @@ assert.strictEqual(setMessageHidden(history, 'unknown-id', true), history);
 assert.strictEqual(replaceToolResult(history, 'unknown-call', replacedResult), history);
 assert.strictEqual(removeMessage(history, 'unknown-id'), history);
 assertBaselineUnchanged();
+
+const controller = new Conversation(createControllerHistory({ id: 'runtime-controller' }));
+const initialStoreSnapshot = controller.getServerSnapshot();
+let notifications = 0;
+const unsubscribe = controller.subscribe(() => notifications++);
+controller.appendUserMessage('observed');
+assert.equal(notifications, 1);
+assert.equal(controller.getSnapshot().revision, 1);
+assert.notStrictEqual(controller.getSnapshot(), initialStoreSnapshot);
+unsubscribe();
+controller.complete();
+assert.equal(controller.lifecycle, 'closed');
+assert.throws(
+  () => controller.appendAssistantMessage('rejected'),
+  (error) => error?.code === 'error:conversation-closed',
+);
+await controller.dispose();
+assert.equal(controller.lifecycle, 'disposed');
 
 console.log('conversationalist runtime consumer: all assertions passed');
 `;

@@ -943,15 +943,39 @@ Shared tool types and materializers are provided by `interoperability` and re-ex
 
 ## Events
 
-`Conversation` uses the same event-emission model as `armorer` tools and toolboxes:
+`Conversation` is both a framework-neutral external store and a typed event source. Store subscriptions never start work or invoke the listener during setup, so the standard read-subscribe-read pattern closes the setup race and React Strict Mode setup-cleanup-setup remains safe:
+
+```typescript
+const conversation = new Conversation(initialHistory);
+const before = conversation.getSnapshot();
+const unsubscribe = conversation.subscribe(() => {
+  const next = conversation.getSnapshot();
+  render(next.conversation, next.revision, next.lifecycle);
+});
+const after = conversation.getSnapshot();
+if (after !== before) render(after.conversation, after.revision, after.lifecycle);
+
+const serverSnapshot = conversation.getServerSnapshot();
+JSON.stringify(serverSnapshot);
+
+unsubscribe();
+conversation.complete();
+await conversation.dispose();
+```
+
+`getSnapshot()` and `getServerSnapshot()` return the same cached, immutable, serializable `{ conversation, revision, lifecycle }` value until a transition commits. `complete()` and `close()` idempotently close the controller: later writes throw a typed `ConversationalistError` with `error:conversation-closed`, while reads remain available. `dispose()` aborts owned work, awaits final quiescence, releases subscriptions, and changes the lifecycle to `disposed`. Synchronous `Symbol.dispose` starts that cleanup; `Symbol.asyncDispose` awaits it.
+
+Expected-revision clients can use `applyMutation(...)`; external projections can use `reconcileExternalSnapshot(...)`. Both return frozen accepted or rejected results without hidden mutation. Stale external revisions and stale compaction results are discarded.
+
+The typed event surface remains available independently:
 
 - DOM-style `addEventListener(...)` and `removeEventListener(...)`
 - `on(...)`
 - `once(...)`
-- `subscribe(type, ...)`
+- `subscribe(type, ...)` for typed events, or `subscribe(onStoreChange)` for the external store
 - `toObservable()`
 - `events(type)`
-- `complete()` and `completed`
+- `close()`, `complete()`, `dispose()`, `lifecycle`, and `completed`
 - `watch(...)` for current-state observation
 
 Event types include:
@@ -972,9 +996,23 @@ Event types include:
 - `stream.cancelled`
 - `compaction.started`
 - `compaction.completed`
+- `compaction.failed`
+- `compaction.cancelled`
+- `compaction.stale-discarded`
+- `mutation.rejected`
+- `snapshot.restored`
+- `branch.pruned`
+- `controller.closed`
+- `controller.disposed`
+- `plugin.activated`
+- `plugin.failed`
 - `session.forked`
 - `session.renamed`
 - `session.tagged`
+
+Every mutation event carries the resulting controller `revision`, a monotonic event `sequence`, `correlationId`, `durability`, and `outcome`, plus an `actor` when supplied. Stream updates also carry a per-message monotonic `streamSequence`. Fork events identify the child conversation.
+
+Message plugins remain transcript transformations only. Use `defineMessagePlugin({ id, revision }, transform)` to give a plugin stable identity. Duplicate identities are rejected, and activation or failure events include the plugin identity and fixed `transcript-transform` authority; plugins cannot register Bureau, Agent, run, or authorization hooks.
 
 Streaming messages (those with `metadata.__streaming === true`) are automatically protected from compaction, truncation, and adapter export. They are preserved in `partitionMessages`, locked in `truncateToTokenLimit` and `truncateFromPosition`, and excluded from provider adapters so that incomplete content is never sent to an API.
 
