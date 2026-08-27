@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.0.0
+
+### Major Changes
+
+- ed70acf: Define an explicit runtime/export support matrix for Armorer public subpaths, remove misleading browser conditions from server-only integrations, and add packed-consumer verification across Bun, Node, TypeScript, and browser bundlers.
+
+### Minor Changes
+
+- aff071a: Add stable, revisioned execution handles and lifecycle snapshots for queued, active, waiting, streaming, abort-requested, cleanup-pending, terminal, and unknown-effect work. Compose caller, deadline, and owner cancellation, remove cancelled calls from concurrency queues, expose scoped abort and admission closure, and make tool and toolbox shutdown awaitable with explicit cleanup reports.
+
+### Patch Changes
+
+- 22de20a: Declare `"node": "^20.16.0 || >=22.3.0"` in `engines`. Armorer's `sha256HexSync`, `hmacSha256HexSync`, `timingSafeEqualHex`, and `createIncrementalHash` usage (via `interoperability`) now requires `process.getBuiltinModule`, which Node.js added in 20.16.0 on the 20.x line and in 22.3.0 (not earlier 22.x releases), in exchange for eliminating a bundler-injected `createRequire`/`node:module` shim from the published output (see the paired `conversationalist` changeset for the AB-31 context). This documents the real floor rather than narrowing it silently.
+
 ## 0.14.0
 
 ### Minor Changes
