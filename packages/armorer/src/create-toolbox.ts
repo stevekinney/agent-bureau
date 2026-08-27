@@ -1518,7 +1518,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
         policyRevision,
         approvalRevision,
       };
-      validateApprovalBinding(approval.approvalBinding, approvalContext);
+      validateApprovalBinding(approval.approvalBinding, approvalContext, approvalNow());
       const state = await approvalStateStore.state(approval.approvalBinding);
       if (state === undefined) {
         throw new ApprovalBindingError('Approval binding was not found.', 'not-found');

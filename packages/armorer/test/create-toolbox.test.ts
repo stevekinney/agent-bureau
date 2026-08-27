@@ -871,6 +871,37 @@ describe('createToolbox', () => {
     ).rejects.toThrow('approvalRevision does not match');
   });
 
+  it('validates resumed approvals with the configured approval clock', async () => {
+    const toolbox = createToolbox(
+      [
+        createTool({
+          name: 'clock-bound-approval',
+          version: '1.0.0',
+          description: 'Uses a deterministic approval clock',
+          input: z.object({}),
+          execute: async () => 'executed',
+        }),
+      ],
+      {
+        approvalSecret: 'clock-bound-secret',
+        approvalNow: () => 1_000,
+        policy: { beforeExecute: () => ({ status: 'needs_approval' as const }) },
+      },
+    );
+    const paused = await toolbox.execute(
+      { id: 'clock-bound-call', name: 'clock-bound-approval', arguments: {} },
+      approvalExecutionOptions,
+    );
+
+    const resumed = await toolbox.resumeApproval(
+      paused.pendingApproval as SignedPendingToolApproval,
+      approvalExecutionOptions,
+    );
+
+    expect(resumed.outcome).toBe('success');
+    expect(resumed.result).toBe('executed');
+  });
+
   it('requires request authority for signed approvals and supports revocation', async () => {
     const toolbox = createToolbox(
       [
