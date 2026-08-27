@@ -91,6 +91,47 @@ describe('createRuntimeComposition', () => {
     );
   });
 
+  it('validates and restores persisted request authority for durable recovery', async () => {
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+    });
+    const recover = getRuntimeCompositionTestingSeams(runtime).recoveredRequestContext;
+    const metadata = {
+      lastRequestAuthority: {
+        principalId: 'principal-a',
+        tenantId: 'tenant-a',
+        ownerId: 'owner-a',
+        capabilities: ['tools:execute'],
+        authorizationRevision: 'authorization:1',
+        audience: 'tenant',
+      },
+    };
+    expect(recover(metadata, 'run-a', 'agent-a')).toMatchObject({
+      audience: 'tenant',
+      agentId: 'agent-a',
+      runId: 'run-a',
+      authority: {
+        principalId: 'principal-a',
+        tenantId: 'tenant-a',
+        ownerId: 'owner-a',
+        capabilities: ['tools:execute'],
+        authorizationRevision: 'authorization:1',
+      },
+    });
+    expect(
+      recover(
+        {
+          lastRequestAuthority: {
+            ...metadata.lastRequestAuthority,
+            audience: 'invalid-audience',
+          },
+        },
+        'run-a',
+        'agent-a',
+      ),
+    ).toBeUndefined();
+  });
+
   it('provides an unavailable toolbox that accepts empty calls and rejects tool calls', async () => {
     const runtime = await createRuntimeComposition({
       generate: async () => ({ content: 'ok', toolCalls: [] }),
@@ -960,7 +1001,17 @@ describe('createRuntimeComposition durable execution', () => {
           id: 'explicit-scheduled-session',
           agentName: 'agent',
           conversationHistory: createConversationHistory({ id: 'explicit-scheduled-session' }),
-          metadata: { lastScheduledFireRunId: 'scheduled-run' },
+          metadata: {
+            lastScheduledFireRunId: 'scheduled-run',
+            lastRequestAuthority: {
+              principalId: 'principal-a',
+              tenantId: 'tenant-a',
+              ownerId: 'owner-a',
+              capabilities: ['tools:execute'],
+              authorizationRevision: 'authorization:1',
+              audience: 'invalid-audience',
+            },
+          },
         }),
       );
 

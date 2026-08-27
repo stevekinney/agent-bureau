@@ -43,7 +43,11 @@ import {
   ToolValidateErrorEvent,
   ToolValidateSuccessEvent,
 } from './events';
-import { freezeToolRequestContext, narrowToolAuthority } from './execution-context';
+import {
+  freezeEffectiveToolExecutionContext,
+  freezeToolRequestContext,
+  narrowToolAuthority,
+} from './execution-context';
 import { createExecutionLifecycle, type ExecutionHandle } from './execution-lifecycle';
 import {
   type ApprovalResumeState,
@@ -1009,7 +1013,7 @@ export function createTool<
           : {}),
         ...(options.effectiveContext
           ? {
-              effectiveContext: Object.freeze({
+              effectiveContext: freezeEffectiveToolExecutionContext({
                 ...options.effectiveContext,
                 ...(effectiveRequestContext
                   ? {

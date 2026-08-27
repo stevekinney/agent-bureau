@@ -227,7 +227,13 @@ export function withToolboxIdempotency(
       throw new Error('Idempotency tenantId must match the request authority tenantId.');
     }
     const authority = requestContext.authority;
-    const cacheKey = `${tenantId}:${authority.principalId}:${authority.authorizationRevision}:${policyRevision}:${revision}:${baseKey}`;
+    const authorityScope = JSON.stringify([
+      tenantId,
+      authority.principalId,
+      authority.authorizationRevision,
+      policyRevision,
+    ]);
+    const cacheKey = `${authorityScope}:${revision}:${baseKey}`;
     const cached = await getCacheEntry(cache, cacheKey);
 
     const receipt = executionIdempotencyOptions?.resolutionReceipt;
@@ -347,7 +353,7 @@ export function withToolboxIdempotency(
         key: cacheKey,
         outcome: 'fresh',
       };
-    } else if (shouldClearStartedState(result)) {
+    } else if (leaseOwned && shouldClearStartedState(result)) {
       await cache.deleteStarted(cacheKey, execution.attemptId!);
     }
 

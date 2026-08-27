@@ -1436,6 +1436,46 @@ describe('createToolbox', () => {
     expect(extendedResult.result).toBe('extended');
   });
 
+  it('extend() preserves the configured approval state store', async () => {
+    const base = createToolbox(
+      [
+        createTool({
+          name: 'approved-action',
+          description: 'Requires approval',
+          input: z.object({}),
+          execute: async () => 'approved',
+        }),
+      ],
+      {
+        approvalSecret: 'extend-approval-secret',
+        approvalStateStore: createProcessLocalApprovalStateStore(),
+        policy: {
+          beforeExecute: () => ({
+            allow: false,
+            status: 'needs_approval',
+            reason: 'approval required',
+          }),
+        },
+      },
+    );
+    const extended = base.extend({
+      name: 'additional-tool',
+      description: 'Additional tool',
+      input: z.object({}),
+      execute: async () => 'additional',
+    });
+    const paused = await base.execute(
+      { id: 'extend-approval', name: 'approved-action', arguments: {} },
+      approvalExecutionOptions,
+    );
+    const resumed = await extended.resumeApproval(
+      paused.pendingApproval! as SignedPendingToolApproval,
+      approvalExecutionOptions,
+    );
+    expect(resumed.outcome).toBe('success');
+    expect(resumed.result).toBe('approved');
+  });
+
   it('extend() can compose another toolbox and merges context (last wins)', async () => {
     const first = createToolbox(
       [
@@ -3375,6 +3415,44 @@ describe('createToolbox', () => {
   });
 
   describe('configuration edges', () => {
+    it('forwards and intersects request capabilities across toolbox policies', async () => {
+      let observedCapabilities: readonly string[] = [];
+      const toolbox = createToolbox(
+        [
+          createTool({
+            name: 'authority-capture',
+            description: 'captures narrowed authority',
+            input: z.object({}),
+            policy: { beforeExecute: () => ({ allow: true, capabilities: ['read', 'write'] }) },
+            async execute(_input, context) {
+              observedCapabilities = context.requestContext?.authority.capabilities ?? [];
+              expect(Object.isFrozen(context.effectiveContext)).toBe(true);
+              expect(Object.isFrozen(context.effectiveContext?.authority)).toBe(true);
+              return 'ok';
+            },
+          }),
+        ],
+        {
+          policy: { beforeExecute: () => ({ allow: true, capabilities: ['read', 'admin'] }) },
+        },
+      );
+      await toolbox.execute(
+        { name: 'authority-capture', arguments: {} },
+        {
+          requestContext: {
+            authority: {
+              principalId: 'principal-a',
+              tenantId: 'tenant-a',
+              ownerId: 'owner-a',
+              capabilities: ['read', 'write', 'admin'],
+              authorizationRevision: 'authorization:1',
+            },
+          },
+        },
+      );
+      expect(observedCapabilities).toEqual(['read']);
+    });
+
     it('createTool applies optional configuration fields', () => {
       const toolbox = createToolbox([], { telemetry: true });
       const tool = toolbox.createTool({

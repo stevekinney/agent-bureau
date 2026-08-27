@@ -74,7 +74,7 @@ import {
   ToolboxValidateErrorEvent,
   ToolboxValidateSuccessEvent,
 } from './events';
-import { freezeToolRequestContext } from './execution-context';
+import { freezeEffectiveToolExecutionContext, freezeToolRequestContext } from './execution-context';
 import type {
   ExecutionCleanupReport,
   ExecutionHandle,
@@ -879,6 +879,10 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     input: ToolCallInput | ToolCallInput[],
     options?: InternalToolboxExecuteOptions,
   ): Promise<ToolExecutionResult | ToolExecutionResult[]> {
+    const requestContext = options?.requestContext
+      ? freezeToolRequestContext(options.requestContext)
+      : undefined;
+    options = requestContext ? { ...options, requestContext } : options;
     const firstCall = Array.isArray(input) ? input[0] : input;
     const nowFunction = options?.now ?? Date.now;
     const executionHandle = executionLifecycle.begin({
@@ -893,8 +897,8 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       ...(options?.setTimeoutFunction ? { setTimeoutFunction: options.setTimeoutFunction } : {}),
       ...(options?.requestContext
         ? {
-            privilegedContext: Object.freeze({
-              ...freezeToolRequestContext(options.requestContext),
+            privilegedContext: freezeEffectiveToolExecutionContext({
+              ...options.requestContext,
               revisions: Object.freeze({
                 catalog: catalogRevision,
                 toolbox: toolboxRevision,
@@ -1185,8 +1189,8 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
                   ...(options?.requestContext
                     ? {
                         requestContext: freezeToolRequestContext(options.requestContext),
-                        effectiveContext: Object.freeze({
-                          ...freezeToolRequestContext(options.requestContext),
+                        effectiveContext: freezeEffectiveToolExecutionContext({
+                          ...options.requestContext,
                           revisions: Object.freeze({
                             catalog: catalogRevision,
                             toolbox: toolboxRevision,
@@ -1446,6 +1450,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
 
     return createToolboxBase(mergedEntries, {
       ...options,
+      ...(approvalStateStore ? { approvalStateStore } : {}),
       context,
     });
   }
@@ -1793,6 +1798,10 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
           toolCall: toolContext.toolCall,
           ...(toolContext.durableOperationKey !== undefined
             ? { durableOperationKey: toolContext.durableOperationKey }
+            : {}),
+          ...(toolContext.requestContext ? { requestContext: toolContext.requestContext } : {}),
+          ...(toolContext.effectiveContext
+            ? { effectiveContext: toolContext.effectiveContext }
             : {}),
           signal: toolContext.signal,
           timeout: toolContext.timeout,
@@ -2287,14 +2296,28 @@ function mergePolicies(
       } else if (toolDecision?.allow === false) {
         return toolDecision;
       }
+      const capabilitySets = [registryDecision?.capabilities, toolDecision?.capabilities].filter(
+        (capabilities): capabilities is readonly string[] => capabilities !== undefined,
+      );
+      const capabilities = capabilitySets.reduce<readonly string[] | undefined>(
+        (current, next) =>
+          current === undefined
+            ? [...next]
+            : current.filter((capability) => next.includes(capability)),
+        undefined,
+      );
       const firstPauseDecision = pendingPauseDecisions[0];
       if (firstPauseDecision) {
         return {
           ...firstPauseDecision,
+          ...(capabilities ? { capabilities } : {}),
           [policyPauseDecisionsSymbol]: pendingPauseDecisions,
         };
       }
-      return { allow: true } satisfies ToolPolicyDecision;
+      return {
+        allow: true,
+        ...(capabilities ? { capabilities } : {}),
+      } satisfies ToolPolicyDecision;
     },
     async afterExecute(context) {
       if (toolPolicy?.afterExecute) {

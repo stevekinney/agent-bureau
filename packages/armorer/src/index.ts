@@ -33,6 +33,7 @@ export type {
 } from './execution-context';
 export {
   EXTERNAL_PROJECTION_VERSION,
+  freezeEffectiveToolExecutionContext,
   freezeToolRequestContext,
   narrowToolAuthority,
   privilegedExecutionSnapshot,

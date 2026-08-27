@@ -82,61 +82,91 @@ export function validateApprovalBinding(
 
 /** Process-local, atomic single-use approval state. */
 export function createProcessLocalApprovalStateStore(): ApprovalStateStore {
-  const states = new Map<string, { binding: ApprovalBindingPayload; state: ApprovalState }>();
+  const issued = new Map<string, ApprovalBindingPayload>();
+  const terminal = new Map<
+    string,
+    { state: Exclude<ApprovalState, 'issued'>; expiresAt: number }
+  >();
   const keyOf = (binding: Pick<ApprovalBindingPayload, 'nonce' | 'replayScope'>) =>
     `${binding.replayScope}\u0000${binding.nonce}`;
+  const purgeExpired = (now: number) => {
+    for (const [key, binding] of issued) {
+      if (now >= binding.expiresAt) issued.delete(key);
+    }
+    for (const [key, entry] of terminal) {
+      if (now >= entry.expiresAt) terminal.delete(key);
+    }
+  };
 
   return {
     issue(binding) {
       return Promise.resolve().then(() => {
-        validateApprovalBinding(binding);
+        const now = Date.now();
+        purgeExpired(now);
+        validateApprovalBinding(binding, undefined, now);
         const key = keyOf(binding);
-        if (states.has(key)) {
+        if (issued.has(key) || terminal.has(key)) {
           throw new ApprovalBindingError(
             'Approval binding nonce has already been issued.',
             'already-consumed',
           );
         }
-        states.set(key, { binding, state: 'issued' });
+        issued.set(key, binding);
       });
     },
     consume(binding, context, now = Date.now()) {
       return Promise.resolve().then(() => {
         validateApprovalBinding(binding, context, now);
-        const entry = states.get(keyOf(binding));
-        if (!entry) throw new ApprovalBindingError('Approval binding was not found.', 'not-found');
-        if (entry.state === 'revoked')
+        purgeExpired(now);
+        const key = keyOf(binding);
+        const terminalEntry = terminal.get(key);
+        if (terminalEntry?.state === 'revoked')
           throw new ApprovalBindingError('Approval binding was revoked.', 'revoked');
-        if (entry.state === 'consumed') {
+        if (terminalEntry?.state === 'consumed') {
           throw new ApprovalBindingError(
             'Approval binding has already been consumed.',
             'already-consumed',
           );
         }
-        if (JSON.stringify(entry.binding) !== JSON.stringify(binding)) {
+        const issuedBinding = issued.get(key);
+        if (!issuedBinding)
+          throw new ApprovalBindingError('Approval binding was not found.', 'not-found');
+        if (JSON.stringify(issuedBinding) !== JSON.stringify(binding)) {
           throw new ApprovalBindingError(
             'Approval binding does not match the issued payload.',
             'mismatch',
           );
         }
-        entry.state = 'consumed';
+        issued.delete(key);
+        terminal.set(key, { state: 'consumed', expiresAt: binding.expiresAt });
       });
     },
     revoke(binding) {
       return Promise.resolve().then(() => {
-        const entry = states.get(keyOf(binding));
-        if (!entry) throw new ApprovalBindingError('Approval binding was not found.', 'not-found');
-        if (entry.state === 'consumed') {
+        const now = Date.now();
+        purgeExpired(now);
+        const key = keyOf(binding);
+        const terminalEntry = terminal.get(key);
+        if (terminalEntry?.state === 'consumed') {
           throw new ApprovalBindingError(
             'Approval binding has already been consumed.',
             'already-consumed',
           );
         }
-        entry.state = 'revoked';
+        const issuedBinding = issued.get(key);
+        if (!issuedBinding) {
+          if (terminalEntry?.state === 'revoked') return;
+          throw new ApprovalBindingError('Approval binding was not found.', 'not-found');
+        }
+        issued.delete(key);
+        terminal.set(key, { state: 'revoked', expiresAt: issuedBinding.expiresAt });
       });
     },
     state(binding) {
-      return Promise.resolve(states.get(keyOf(binding))?.state);
+      const now = Date.now();
+      purgeExpired(now);
+      const key = keyOf(binding);
+      return Promise.resolve(issued.has(key) ? 'issued' : terminal.get(key)?.state);
     },
   };
 }

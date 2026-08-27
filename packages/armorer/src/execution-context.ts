@@ -104,6 +104,15 @@ export function freezeToolRequestContext(
   });
 }
 
+export function freezeEffectiveToolExecutionContext(
+  context: EffectiveToolExecutionContext,
+): Readonly<EffectiveToolExecutionContext> {
+  return Object.freeze({
+    ...freezeToolRequestContext(context),
+    revisions: Object.freeze({ ...context.revisions }),
+  });
+}
+
 export function projectExecutionSnapshot(
   value: unknown,
   options: ExternalProjectionOptions,

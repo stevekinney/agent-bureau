@@ -77,6 +77,7 @@ import {
   createTool,
   createToolbox,
   type ToolCallInput,
+  type ToolRequestContext,
 } from 'armorer';
 import {
   Conversation,
@@ -112,6 +113,46 @@ import type {
 } from './types';
 
 export type BureauToolbox = AnyToolbox;
+
+const requestAuthorityMetadataKey = 'lastRequestAuthority';
+
+function recoveredRequestContext(
+  metadata: Record<string, JSONValue>,
+  runId: string | undefined,
+  agentName: string | undefined,
+): ToolRequestContext | undefined {
+  const value = metadata[requestAuthorityMetadataKey];
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const authority = value as Record<string, JSONValue>;
+  const capabilities = authority['capabilities'];
+  const audience = authority['audience'];
+  if (
+    typeof authority['principalId'] !== 'string' ||
+    typeof authority['tenantId'] !== 'string' ||
+    typeof authority['ownerId'] !== 'string' ||
+    typeof authority['authorizationRevision'] !== 'string' ||
+    !Array.isArray(capabilities) ||
+    !capabilities.every((capability) => typeof capability === 'string') ||
+    (audience !== undefined &&
+      audience !== 'public' &&
+      audience !== 'tenant' &&
+      audience !== 'operator')
+  ) {
+    return undefined;
+  }
+  return {
+    authority: {
+      principalId: authority['principalId'],
+      tenantId: authority['tenantId'],
+      ownerId: authority['ownerId'],
+      capabilities: Object.freeze([...capabilities] as string[]),
+      authorizationRevision: authority['authorizationRevision'],
+    },
+    ...(audience !== undefined ? { audience } : {}),
+    ...(agentName !== undefined ? { agentId: agentName } : {}),
+    ...(runId !== undefined ? { runId } : {}),
+  };
+}
 
 /**
  * AB-40 — the enabled-by-default guardrail preset. Wired whenever
@@ -568,6 +609,7 @@ const defaultRuntimeCompositionDependencies: RuntimeCompositionDependencies = {
 };
 
 export type RuntimeCompositionTestingSeams = {
+  recoveredRequestContext: typeof recoveredRequestContext;
   resolveRunServices(info: WorkflowServicesResolverInfo): Promise<WorkflowServicesResolution>;
   buildScheduledRunServices(
     info: WorkflowServicesResolverInfo,
@@ -1555,6 +1597,7 @@ export async function createRuntimeComposition(
     const initialActiveSkills = isActiveSkillEntryArray(lastActiveSkillsRaw)
       ? lastActiveSkillsRaw
       : undefined;
+    const requestContext = recoveredRequestContext(session.metadata, runId, agentName);
     const runRuntime = await createRunRuntime(
       {
         message: typeof message === 'string' ? message : '',
@@ -1564,6 +1607,7 @@ export async function createRuntimeComposition(
         // recovery path is exactly where the at-least-once re-fire happens.
         ...(runId !== undefined ? { runId } : {}),
         ...(agentName !== undefined ? { agentName } : {}),
+        ...(requestContext ? { requestContext } : {}),
       },
       { liveStreaming: false, initialActiveSkills },
     );
@@ -1581,6 +1625,7 @@ export async function createRuntimeComposition(
         prepareStep: runRuntime.prepareStep,
         onStep: runRuntime.onStep,
         validateResponse: runRuntime.validateResponse,
+        ...(requestContext ? { executeOptions: { requestContext } } : {}),
         // Thread agentName and runId so curated tool.* bubble events stamped by
         // the resumed run carry the same {agentName, runId, step} metadata as the
         // pre-crash run (C3 parity). Without them, recovered runs emit blank ids.
@@ -2143,6 +2188,7 @@ export async function createRuntimeComposition(
   };
 
   runtimeCompositionTestingSeams.set(composition, {
+    recoveredRequestContext,
     resolveRunServices,
     buildScheduledRunServices(info, store, recoveredScheduleMarker) {
       return buildScheduledRunServices(

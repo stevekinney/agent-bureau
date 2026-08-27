@@ -613,6 +613,10 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   // never persisted durably. Entries are removed on `deleteRun` so this map
   // does not outlive the run it describes.
   const runAttribution = new Map<string, RunAttribution>();
+  // Keep the exact host-supplied (or bureau-derived) context for approval
+  // resumption. Approval bindings identify the original caller, but are not a
+  // substitute for the complete request context and must not mint authority.
+  const runRequestContexts = new Map<string, ToolRequestContext>();
   const liveFrameListeners = new Set<(frame: ServerFrame) => void>();
   // AB-96 — terminal RunReports, cached at the moment each run's lifecycle
   // event fires so `getRunReport` never needs to re-derive them.
@@ -713,6 +717,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       case 'run.removed': {
         const removedRunId = (event as StoreRunRemovedEvent).runId;
         runSequenceCounters.delete(removedRunId);
+        runRequestContexts.delete(removedRunId);
         emitter.dispatch(new RunRemovedEvent(removedRunId));
         // Prune this run's entries from `resolvedReviewIds` — the review ids
         // it tracks (`approval:${runId}:...`, `human-wait:${runId}:...`) can
@@ -986,6 +991,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
           agentId: agentName,
           runId,
         } as const);
+      runRequestContexts.set(runId, requestContext);
 
       const disposeStreamListeners: Array<() => void> = [];
       const streamEventTarget = runRuntime.streamEventTarget;
@@ -1024,6 +1030,17 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
           // null → initialActiveSkills undefined → the recovered run starts empty,
           // exactly as a fresh run would (PRRT_kwDORvupsc6Mddv3).
           lastActiveSkills: null,
+          // Durable recovery needs the authority that was safe to persist at
+          // dispatch time. Credentials, tracing, and other request-local data
+          // intentionally never cross the session boundary.
+          lastRequestAuthority: {
+            principalId: requestContext.authority.principalId,
+            tenantId: requestContext.authority.tenantId,
+            ownerId: requestContext.authority.ownerId,
+            capabilities: [...requestContext.authority.capabilities],
+            authorizationRevision: requestContext.authority.authorizationRevision,
+            ...(requestContext.audience !== undefined ? { audience: requestContext.audience } : {}),
+          },
         },
         // Stamp the session with the dispatched agent (PRRT_kwDORvupsc6MbUsN) so it
         // is not always recorded as the house default 'bureau'.
@@ -1968,6 +1985,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
 
     runSessionIdentifiers.delete(runState.activeRun);
     runAttribution.delete(id);
+    runRequestContexts.delete(id);
     runToolboxesByRunId.delete(id);
     store.removeRun(id);
     // AB-96 — drop the cached terminal RunReport too, or a long-lived bureau
@@ -2182,20 +2200,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
             );
           }
           const approvalToolbox = runToolboxesByRunId.get(review.runId) ?? runtime.baseToolbox;
-          const approvalRequestContext: ToolRequestContext | undefined = approval.approvalBinding
-            ? {
-                authority: {
-                  principalId: approval.approvalBinding.principalId,
-                  tenantId: approval.approvalBinding.tenantId,
-                  ownerId: approval.approvalBinding.agentId,
-                  capabilities: ['tools:execute'],
-                  authorizationRevision: 'bureau:1',
-                },
-                audience: approval.approvalBinding.audience,
-                agentId: approval.approvalBinding.agentId,
-                runId: approval.approvalBinding.runId,
-              }
-            : undefined;
+          const approvalRequestContext = runRequestContexts.get(review.runId);
           result = await approvalToolbox.resumeApproval(
             { ...approval, approvalToken: approval.approvalToken },
             {

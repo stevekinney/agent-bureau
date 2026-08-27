@@ -11,7 +11,7 @@ const binding = {
   version: APPROVAL_BINDING_VERSION,
   principalId: 'principal',
   tenantId: 'tenant',
-  audience: 'audience',
+  audience: 'tenant',
   agentId: 'agent',
   runId: 'run',
   toolboxRevision: 'toolbox-1',
@@ -93,5 +93,27 @@ describe('approval binding state', () => {
     ]);
     expect(attempts.filter(({ status }) => status === 'fulfilled')).toHaveLength(1);
     expect(attempts.filter(({ status }) => status === 'rejected')).toHaveLength(1);
+  });
+
+  it('evicts expired issued and terminal records', async () => {
+    const store = createProcessLocalApprovalStateStore();
+    const now = Date.now();
+    const expiringBinding = {
+      ...binding,
+      issuedAt: now - 1,
+      expiresAt: now + 10,
+      nonce: 'expiring',
+    };
+    await store.issue(expiringBinding);
+    await store.consume(expiringBinding, undefined, now);
+    await new Promise((resolve) => setTimeout(resolve, 12));
+    await expect(store.state(expiringBinding)).resolves.toBeUndefined();
+
+    const replacement = {
+      ...expiringBinding,
+      issuedAt: Date.now(),
+      expiresAt: Date.now() + 1_000,
+    };
+    await expect(store.issue(replacement)).resolves.toBeUndefined();
   });
 });

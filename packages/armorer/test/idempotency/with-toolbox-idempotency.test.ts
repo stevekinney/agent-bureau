@@ -107,7 +107,7 @@ describe('withToolboxIdempotency', () => {
     expect(addCallCount).toBe(1); // Cached on second call
     expect(
       await cache.getState!(
-        `tenant-a:principal-a:authorization:1:policy:1:default:add:add:${fullInputKey({ a: 1, b: 2 })}`,
+        `["tenant-a","principal-a","authorization:1","policy:1"]:default:add:add:${fullInputKey({ a: 1, b: 2 })}`,
       ),
     ).toEqual(
       expect.objectContaining({
@@ -134,7 +134,7 @@ describe('withToolboxIdempotency', () => {
     expect(result1.result).toBe(3);
     expect(result2.result).toBe(3);
     expect(result2.idempotency).toEqual({
-      key: 'tenant-a:principal-a:authorization:1:policy:1:default:add:add:temporal-tool-call-id',
+      key: '["tenant-a","principal-a","authorization:1","policy:1"]:default:add:add:temporal-tool-call-id',
       outcome: 'deduped',
     });
     expect(addCallCount).toBe(1);
@@ -156,7 +156,7 @@ describe('withToolboxIdempotency', () => {
     expect(result1.result).toBe(6);
     expect(result2.result).toBe(6);
     expect(result2.idempotency).toEqual({
-      key: 'tenant-a:principal-a:authorization:1:policy:1:default:multiply:multiply:orchestrator-tool-call-id',
+      key: '["tenant-a","principal-a","authorization:1","policy:1"]:default:multiply:multiply:orchestrator-tool-call-id',
       outcome: 'deduped',
     });
     expect(mulCallCount).toBe(1);
@@ -182,10 +182,10 @@ describe('withToolboxIdempotency', () => {
     expect(addResult.result).toBe(3);
     expect(multiplyResult.result).toBe(12);
     expect(addResult.idempotency?.key).toBe(
-      'tenant-a:principal-a:authorization:1:policy:1:default:add:add:shared-key',
+      '["tenant-a","principal-a","authorization:1","policy:1"]:default:add:add:shared-key',
     );
     expect(multiplyResult.idempotency?.key).toBe(
-      'tenant-a:principal-a:authorization:1:policy:1:default:multiply:multiply:shared-key',
+      '["tenant-a","principal-a","authorization:1","policy:1"]:default:multiply:multiply:shared-key',
     );
     expect(addCallCount).toBe(1);
     expect(mulCallCount).toBe(1);
@@ -196,7 +196,7 @@ describe('withToolboxIdempotency', () => {
     const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     await cache.claimStarted(
-      'tenant-a:principal-a:authorization:1:policy:1:default:add:add:started-key',
+      '["tenant-a","principal-a","authorization:1","policy:1"]:default:add:add:started-key',
       {
         status: 'started',
         toolName: 'add',
@@ -212,7 +212,7 @@ describe('withToolboxIdempotency', () => {
 
     expect(result.outcome).toBe('action_required');
     expect(result.idempotency).toEqual({
-      key: 'tenant-a:principal-a:authorization:1:policy:1:default:add:add:started-key',
+      key: '["tenant-a","principal-a","authorization:1","policy:1"]:default:add:add:started-key',
       outcome: 'unknown-outcome',
     });
     expect(addCallCount).toBe(0);
@@ -227,7 +227,7 @@ describe('withToolboxIdempotency', () => {
     });
 
     await cache.claimStarted(
-      'tenant-a:principal-a:authorization:1:policy:1:default:add:add:retry-after-review',
+      '["tenant-a","principal-a","authorization:1","policy:1"]:default:add:add:retry-after-review',
       {
         status: 'started',
         toolName: 'add',
@@ -247,7 +247,7 @@ describe('withToolboxIdempotency', () => {
         idempotencyKey: 'retry-after-review',
         resolutionReceipt: {
           version: 1,
-          key: 'tenant-a:principal-a:authorization:1:policy:1:default:add:add:retry-after-review',
+          key: '["tenant-a","principal-a","authorization:1","policy:1"]:default:add:add:retry-after-review',
           attemptId: 'original-attempt',
           tenantId: 'tenant-a',
           toolRevision: 'default:add',
@@ -265,13 +265,13 @@ describe('withToolboxIdempotency', () => {
     expect(retry.outcome).toBe('success');
     expect(retry.result).toBe(3);
     expect(retry.idempotency).toEqual({
-      key: 'tenant-a:principal-a:authorization:1:policy:1:default:add:add:retry-after-review',
+      key: '["tenant-a","principal-a","authorization:1","policy:1"]:default:add:add:retry-after-review',
       outcome: 'fresh',
     });
     expect(addCallCount).toBe(1);
     expect(
       await cache.getState!(
-        'tenant-a:principal-a:authorization:1:policy:1:default:add:add:retry-after-review',
+        '["tenant-a","principal-a","authorization:1","policy:1"]:default:add:add:retry-after-review',
       ),
     ).toEqual(
       expect.objectContaining({
@@ -295,7 +295,7 @@ describe('withToolboxIdempotency', () => {
     expect(result.idempotency).toBeUndefined();
     expect(
       await cache.getState!(
-        'tenant-a:principal-a:authorization:1:policy:1:default:add:add:invalid-input',
+        '["tenant-a","principal-a","authorization:1","policy:1"]:default:add:add:invalid-input',
       ),
     ).toBeUndefined();
     expect(addCallCount).toBe(0);
@@ -314,7 +314,7 @@ describe('withToolboxIdempotency', () => {
 
     expect(
       await cache.getState!(
-        'tenant-a:principal-a:authorization:1:policy:1:default:add:add:invalid-input',
+        '["tenant-a","principal-a","authorization:1","policy:1"]:default:add:add:invalid-input',
       ),
     ).toBeUndefined();
 
@@ -327,7 +327,7 @@ describe('withToolboxIdempotency', () => {
     expect(retry.idempotency).toBeUndefined();
     expect(
       await cache.getState!(
-        'tenant-a:principal-a:authorization:1:policy:1:default:add:add:invalid-input',
+        '["tenant-a","principal-a","authorization:1","policy:1"]:default:add:add:invalid-input',
       ),
     ).toBeUndefined();
     expect(addCallCount).toBe(0);
@@ -364,7 +364,7 @@ describe('withToolboxIdempotency', () => {
     expect(first.idempotency).toBeUndefined();
     expect(
       await cache.getState!(
-        'tenant-a:principal-a:authorization:1:policy:1:default:add:add:unavailable-now',
+        '["tenant-a","principal-a","authorization:1","policy:1"]:default:add:add:unavailable-now',
       ),
     ).toEqual(
       expect.objectContaining({
@@ -376,7 +376,7 @@ describe('withToolboxIdempotency', () => {
     expect(second.outcome).toBe('success');
     expect(second.result).toBe(3);
     expect(second.idempotency).toEqual({
-      key: 'tenant-a:principal-a:authorization:1:policy:1:default:add:add:unavailable-now',
+      key: '["tenant-a","principal-a","authorization:1","policy:1"]:default:add:add:unavailable-now',
       outcome: 'fresh',
     });
     expect(addCallCount).toBe(1);
@@ -411,7 +411,7 @@ describe('withToolboxIdempotency', () => {
     expect(second.idempotency).toBeUndefined();
     expect(
       await cache.getState!(
-        'tenant-a:principal-a:authorization:1:policy:1:default:add:add:approval-pause',
+        '["tenant-a","principal-a","authorization:1","policy:1"]:default:add:add:approval-pause',
       ),
     ).toBeUndefined();
     expect(addCallCount).toBe(0);
@@ -439,7 +439,7 @@ describe('withToolboxIdempotency', () => {
     expect(second.idempotency).toBeUndefined();
     expect(
       await cache.getState!(
-        'tenant-a:principal-a:authorization:1:policy:1:default:add:add:budget-block',
+        '["tenant-a","principal-a","authorization:1","policy:1"]:default:add:add:budget-block',
       ),
     ).toBeUndefined();
     expect(addCallCount).toBe(0);
@@ -460,7 +460,7 @@ describe('withToolboxIdempotency', () => {
 
     expect(
       await cache.getState!(
-        'tenant-a:principal-a:authorization:1:policy:1:default:add:add:budget-block',
+        '["tenant-a","principal-a","authorization:1","policy:1"]:default:add:add:budget-block',
       ),
     ).toBeUndefined();
 
@@ -473,7 +473,7 @@ describe('withToolboxIdempotency', () => {
     expect(retry.idempotency).toBeUndefined();
     expect(
       await cache.getState!(
-        'tenant-a:principal-a:authorization:1:policy:1:default:add:add:budget-block',
+        '["tenant-a","principal-a","authorization:1","policy:1"]:default:add:add:budget-block',
       ),
     ).toBeUndefined();
     expect(addCallCount).toBe(0);
@@ -534,7 +534,7 @@ describe('withToolboxIdempotency', () => {
 
     expect(firstResume.result).toEqual({ charged: 100 });
     expect(firstResume.idempotency).toEqual({
-      key: 'tenant-a:principal-a:authorization:1:policy:1:default:charge:charge:charge-once',
+      key: '["tenant-a","principal-a","authorization:1","policy:1"]:default:charge:charge:charge-once',
       outcome: 'fresh',
     });
     expect(charges).toEqual([100]);
@@ -574,7 +574,7 @@ describe('withToolboxIdempotency', () => {
     expect(second.idempotency).toBeUndefined();
     expect(
       await cache.getState!(
-        'tenant-a:principal-a:authorization:1:policy:1:default:add:add:policy-denied',
+        '["tenant-a","principal-a","authorization:1","policy:1"]:default:add:add:policy-denied',
       ),
     ).toBeUndefined();
     expect(addCallCount).toBe(0);
@@ -608,13 +608,13 @@ describe('withToolboxIdempotency', () => {
     expect(first.idempotency).toBeUndefined();
     expect(second.outcome).toBe('action_required');
     expect(second.idempotency).toEqual({
-      key: 'tenant-a:principal-a:authorization:1:policy:1:default:charge:charge:charge-once',
+      key: '["tenant-a","principal-a","authorization:1","policy:1"]:default:charge:charge:charge-once',
       outcome: 'unknown-outcome',
     });
     expect(sideEffects).toEqual([100]);
     expect(
       await cache.getState!(
-        'tenant-a:principal-a:authorization:1:policy:1:default:charge:charge:charge-once',
+        '["tenant-a","principal-a","authorization:1","policy:1"]:default:charge:charge:charge-once',
       ),
     ).toEqual(expect.objectContaining({ status: 'started', toolName: 'charge' }));
   });
@@ -645,12 +645,12 @@ describe('withToolboxIdempotency', () => {
 
     expect(retry.outcome).toBe('action_required');
     expect(retry.idempotency).toEqual({
-      key: 'tenant-a:principal-a:authorization:1:policy:1:default:add:add:primitive-error',
+      key: '["tenant-a","principal-a","authorization:1","policy:1"]:default:add:add:primitive-error',
       outcome: 'unknown-outcome',
     });
     expect(
       await cache.getState!(
-        'tenant-a:principal-a:authorization:1:policy:1:default:add:add:primitive-error',
+        '["tenant-a","principal-a","authorization:1","policy:1"]:default:add:add:primitive-error',
       ),
     ).toEqual(expect.objectContaining({ status: 'started', toolName: 'add' }));
   });
@@ -687,12 +687,12 @@ describe('withToolboxIdempotency', () => {
     expect(first.outcome).toBe('error');
     expect(second.outcome).toBe('action_required');
     expect(second.idempotency).toEqual({
-      key: 'tenant-a:principal-a:authorization:1:policy:1:default:add:add:error-without-object',
+      key: '["tenant-a","principal-a","authorization:1","policy:1"]:default:add:add:error-without-object',
       outcome: 'unknown-outcome',
     });
     expect(
       await cache.getState!(
-        'tenant-a:principal-a:authorization:1:policy:1:default:add:add:error-without-object',
+        '["tenant-a","principal-a","authorization:1","policy:1"]:default:add:add:error-without-object',
       ),
     ).toEqual(expect.objectContaining({ status: 'started', toolName: 'add' }));
   });
@@ -820,7 +820,7 @@ describe('withToolboxIdempotency', () => {
     const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     const callerKey = 'orchestrator-tool-call-id-abc123';
-    const cacheKey = `tenant-a:principal-a:authorization:1:policy:1:default:charge:charge:${callerKey}`;
+    const cacheKey = `["tenant-a","principal-a","authorization:1","policy:1"]:default:charge:charge:${callerKey}`;
 
     // Simulate a previous attempt that claimed the started entry and then died
     // before recording any result — the orphaned "started" state.
@@ -894,7 +894,7 @@ describe('withToolboxIdempotency', () => {
     expect(sideEffects).toEqual([500]);
     expect(second.outcome).toBe('action_required');
     expect(second.idempotency).toEqual({
-      key: 'tenant-a:principal-a:authorization:1:policy:1:default:charge:charge:orchestrator-tool-call-id-xyz789',
+      key: '["tenant-a","principal-a","authorization:1","policy:1"]:default:charge:charge:orchestrator-tool-call-id-xyz789',
       outcome: 'unknown-outcome',
     });
   });
@@ -993,6 +993,14 @@ describe('withToolboxIdempotency', () => {
     }).execute({ name: 'add', arguments: { a: 2, b: 3 } });
     expect(unfenced.result).toBe(5);
     expect(unfenced.idempotency).toBeUndefined();
+    const lostFenceKey = `["tenant-b","principal-a","authorization:1","policy:1"]:default:add:add:${fullInputKey({ a: 2, b: 3 })}`;
+    await expect(cache.getState(lostFenceKey)).resolves.toMatchObject({ status: 'started' });
+    const unknown = await withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache,
+      tenantId: 'tenant-b',
+    }).execute({ name: 'add', arguments: { a: 2, b: 3 } });
+    expect(unknown.outcome).toBe('action_required');
+    expect(addCallCount).toBe(1);
 
     const failedRenewalCache: ToolResultCache = {
       ...cache,
@@ -1012,7 +1020,8 @@ describe('withToolboxIdempotency', () => {
 
   it('rechecks cache state when authorized unknown replacement loses its race', async () => {
     const toolbox = createToolbox([createToolWithKey()]);
-    const key = 'tenant-a:principal-a:authorization:1:policy:1:default:add:add:replacement-race';
+    const key =
+      '["tenant-a","principal-a","authorization:1","policy:1"]:default:add:add:replacement-race';
     const started = {
       status: 'started' as const,
       toolName: 'add',
@@ -1108,7 +1117,8 @@ describe('withToolboxIdempotency', () => {
   });
 
   it('does not replace an active lease even with an authorized receipt', async () => {
-    const key = 'tenant-a:principal-a:authorization:1:policy:1:default:add:add:active-lease';
+    const key =
+      '["tenant-a","principal-a","authorization:1","policy:1"]:default:add:add:active-lease';
     await cache.claimStarted(key, {
       status: 'started',
       toolName: 'add',
