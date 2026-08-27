@@ -836,6 +836,8 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         break;
       case 'run.removed': {
         const removedRunId = (event as StoreRunRemovedEvent).runId;
+        const removedRun = store.getRun(removedRunId);
+        const removedSessionId = removedRun ? getRunSessionIdentifier(removedRun) : '';
         runSequenceCounters.delete(removedRunId);
         runRequestContexts.delete(removedRunId);
         runToolboxesByRunId.delete(removedRunId);
@@ -845,6 +847,17 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         for (const id of invalidApprovalReviewIds) {
           if (id.startsWith(`approval:${removedRunId}:`)) invalidApprovalReviewIds.delete(id);
         }
+        if (removedSessionId) {
+          detachBestEffortPromise(
+            prunePersistedPendingApprovalOverrides(removedSessionId, `approval:${removedRunId}:`),
+          );
+          detachBestEffortPromise(
+            prunePersistedResolvedReviewIds(removedSessionId, `approval:${removedRunId}:`),
+          );
+          detachBestEffortPromise(
+            prunePersistedResolvedReviewIds(removedSessionId, `human-wait:${removedRunId}:`),
+          );
+        }
         emitter.dispatch(new RunRemovedEvent(removedRunId));
         // Prune this run's entries from `resolvedReviewIds` — the review ids
         // it tracks (`approval:${runId}:...`, `human-wait:${runId}:...`) can
@@ -852,9 +865,11 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         // itself is gone from the store, so keeping them around forever
         // would be an unbounded per-run leak on a long-lived gateway with
         // frequent approvals/denials.
-        const runReviewPrefixes = [`approval:${removedRunId}:`, `human-wait:${removedRunId}:`];
         for (const id of resolvedReviewIds) {
-          if (runReviewPrefixes.some((prefix) => id.startsWith(prefix))) {
+          if (
+            id.startsWith(`approval:${removedRunId}:`) ||
+            id.startsWith(`human-wait:${removedRunId}:`)
+          ) {
             resolvedReviewIds.delete(id);
           }
         }
@@ -1114,6 +1129,70 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         metadata: { ...session.metadata, pendingApprovalOverrides: remaining },
       };
     });
+  }
+
+  async function persistResolvedReviewId(sessionId: string, reviewId: string): Promise<void> {
+    if (!runtime.sessionStore) return;
+    await runtime.sessionStore.update(sessionId, (session) => {
+      if (!session) return session;
+      const current = session.metadata['resolvedReviewIds'];
+      const resolvedReviewIds: string[] = [];
+      if (Array.isArray(current)) {
+        for (const id of current) {
+          if (typeof id === 'string') resolvedReviewIds.push(id);
+        }
+      }
+      if (resolvedReviewIds.includes(reviewId)) return session;
+      return {
+        ...session,
+        metadata: {
+          ...session.metadata,
+          resolvedReviewIds: [...resolvedReviewIds, reviewId],
+        },
+      };
+    });
+  }
+
+  async function prunePersistedResolvedReviewIds(
+    sessionId: string,
+    reviewIdPrefix: string,
+  ): Promise<void> {
+    if (!runtime.sessionStore) return;
+    await runtime.sessionStore.update(sessionId, (session) => {
+      if (!session) return session;
+      const current = session.metadata['resolvedReviewIds'];
+      if (!Array.isArray(current)) return session;
+      const remainingReviewIds: string[] = [];
+      for (const id of current) {
+        if (typeof id === 'string' && !id.startsWith(reviewIdPrefix)) {
+          remainingReviewIds.push(id);
+        }
+      }
+      return {
+        ...session,
+        metadata: {
+          ...session.metadata,
+          resolvedReviewIds: remainingReviewIds,
+        },
+      };
+    });
+  }
+
+  function restoreResolvedReviewIds(metadata: unknown, runId: string): void {
+    const metadataRecord =
+      metadata && typeof metadata === 'object' && !Array.isArray(metadata)
+        ? (metadata as Record<string, unknown>)
+        : undefined;
+    const persistedIds = metadataRecord?.['resolvedReviewIds'];
+    if (!Array.isArray(persistedIds)) return;
+    for (const reviewId of persistedIds) {
+      if (typeof reviewId === 'string' && reviewId.startsWith(`approval:${runId}:`)) {
+        resolvedReviewIds.add(reviewId);
+      }
+      if (typeof reviewId === 'string' && reviewId.startsWith(`human-wait:${runId}:`)) {
+        resolvedReviewIds.add(reviewId);
+      }
+    }
   }
 
   function restorePendingApprovalOverrides(metadata: unknown, runId: string): void {
@@ -1670,6 +1749,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       if (recoveredRequestContext) runRequestContexts.set(runId, recoveredRequestContext);
       runToolboxesByRunId.set(runId, recoveredServices.toolbox);
     }
+    restoreResolvedReviewIds(sessionMetadata, runId);
     restorePendingApprovalOverrides(sessionMetadata, runId);
 
     // AB-96 — wire the same versioned run-envelope forwarder the live-run path
@@ -2397,10 +2477,17 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     for (const reviewId of invalidApprovalReviewIds) {
       if (reviewId.startsWith(`approval:${id}:`)) invalidApprovalReviewIds.delete(reviewId);
     }
+    for (const reviewId of resolvedReviewIds) {
+      if (reviewId.startsWith(`approval:${id}:`) || reviewId.startsWith(`human-wait:${id}:`)) {
+        resolvedReviewIds.delete(reviewId);
+      }
+    }
     runToolboxesByRunId.delete(id);
     store.removeRun(id);
     if (sessionId) {
       detachBestEffortPromise(prunePersistedPendingApprovalOverrides(sessionId, `approval:${id}:`));
+      detachBestEffortPromise(prunePersistedResolvedReviewIds(sessionId, `approval:${id}:`));
+      detachBestEffortPromise(prunePersistedResolvedReviewIds(sessionId, `human-wait:${id}:`));
     }
     // AB-96 — drop the cached terminal RunReport too, or a long-lived bureau
     // that creates/deletes many runs would retain one forever per run id.
@@ -2441,7 +2528,30 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   }
 
   async function deleteSession(id: string): Promise<void> {
-    await requireSessionStore().delete(id);
+    const sessionStore = requireSessionStore();
+    const session = await sessionStore.load(id);
+    if (session) {
+      const runId = session.metadata['lastRunId'];
+      if (typeof runId === 'string') {
+        for (const reviewId of resolvedReviewIds) {
+          if (
+            reviewId.startsWith(`approval:${runId}:`) ||
+            reviewId.startsWith(`human-wait:${runId}:`)
+          ) {
+            resolvedReviewIds.delete(reviewId);
+          }
+        }
+        for (const reviewId of pendingApprovalOverrides.keys()) {
+          if (reviewId.startsWith(`approval:${runId}:`)) pendingApprovalOverrides.delete(reviewId);
+        }
+        for (const reviewId of invalidApprovalReviewIds) {
+          if (reviewId.startsWith(`approval:${runId}:`)) invalidApprovalReviewIds.delete(reviewId);
+        }
+        runRequestContexts.delete(runId);
+        runToolboxesByRunId.delete(runId);
+      }
+    }
+    await sessionStore.delete(id);
   }
 
   /**
@@ -2706,6 +2816,18 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
             message: `[bureau] Resolved approval "${review.id}" but could not prune its persisted override: ${serializeUnknownError(error)}`,
           });
         }
+      }
+      try {
+        await persistResolvedReviewId(review.sessionId, review.id);
+      } catch (error) {
+        diagnose({
+          level: 'error',
+          scope: 'session-persistence',
+          message:
+            `[bureau] Resolved review "${review.id}" in memory but could not persist its ` +
+            `resolved state: ${serializeUnknownError(error)}`,
+          cause: error,
+        });
       }
     }
 

@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
-import type { ToolExecuteOptions } from '../src';
+import type { EffectiveToolExecutionContext, ToolExecuteOptions } from '../src';
 import { createTool, createToolCall, isTool, lazy, withContext } from '../src';
 import { type ApprovalResumeState, approvalResumeSymbol } from '../src/internal/approval-resume';
 import { createConcurrencyLimiter } from '../src/utilities/concurrency';
@@ -60,6 +60,58 @@ function createManualExecutionTiming(initialNow = 0): {
       },
     } as ToolExecuteOptions,
   };
+}
+
+function createEffectiveContext(): EffectiveToolExecutionContext {
+  return {
+    authority: {
+      principalId: 'principal-a',
+      tenantId: 'tenant-a',
+      ownerId: 'owner-a',
+      capabilities: ['tools:execute', 'runs:write'],
+      authorizationRevision: 'authorization:1',
+    },
+    audience: 'operator',
+    agentId: 'agent-a',
+    runId: 'run-a',
+    requestId: 'request-a',
+    credentials: { token: 'secret' },
+    traceContext: { traceparent: 'secret-trace' },
+    revisions: {
+      catalog: 'catalog:1',
+      toolbox: 'toolbox:1',
+      toolDefinition: 'tool:1',
+      policy: 'policy:1',
+      approval: 'approval:1',
+      redaction: 'redaction:1',
+    },
+  };
+}
+
+function expectTerminalAuditContext(context: EffectiveToolExecutionContext | undefined): void {
+  expect(context).toEqual({
+    authority: {
+      principalId: 'principal-a',
+      tenantId: 'tenant-a',
+      ownerId: 'owner-a',
+      capabilities: ['tools:execute', 'runs:write'],
+      authorizationRevision: 'authorization:1',
+    },
+    audience: 'operator',
+    agentId: 'agent-a',
+    runId: 'run-a',
+    requestId: 'request-a',
+    revisions: {
+      catalog: 'catalog:1',
+      toolbox: 'toolbox:1',
+      toolDefinition: 'tool:1',
+      policy: 'policy:1',
+      approval: 'approval:1',
+      redaction: 'redaction:1',
+    },
+  });
+  expect(context).not.toHaveProperty('credentials');
+  expect(context).not.toHaveProperty('traceContext');
 }
 
 describe('createTool', () => {
@@ -1439,6 +1491,99 @@ describe('isTool', () => {
     expect(tool.executions.inspect({ callId: 'synchronous-call' })).toEqual([
       expect.objectContaining({ state: 'terminal', result }),
     ]);
+  });
+
+  it('seeds executeWith privileged lifecycle context at queued admission', async () => {
+    let releaseFirst!: () => void;
+    let executionCount = 0;
+    const effectiveContext = createEffectiveContext();
+    const tool = createTool({
+      name: 'execute-with-queued-authority',
+      description: 'captures queued authority',
+      input: z.object({}),
+      concurrency: 1,
+      async execute() {
+        executionCount += 1;
+        if (executionCount === 1) {
+          await new Promise<void>((resolve) => {
+            releaseFirst = resolve;
+          });
+        }
+        return executionCount;
+      },
+    });
+
+    const first = tool.executeWith({ params: {}, callId: 'active-call' });
+    while (executionCount === 0) await Promise.resolve();
+    const queued = tool.executeWith({
+      params: {},
+      callId: 'queued-authority-call',
+      effectiveContext,
+    });
+    const [queuedSnapshot] = tool.executions.inspectPrivileged({
+      callId: 'queued-authority-call',
+    });
+
+    expect(queuedSnapshot?.snapshot.state).toBe('queued');
+    expect(queuedSnapshot?.context?.authority).toEqual(effectiveContext.authority);
+    expect(queuedSnapshot?.context?.revisions).toEqual(effectiveContext.revisions);
+    expect(queuedSnapshot?.context?.credentials).toBe(effectiveContext.credentials);
+    expect(queuedSnapshot?.context?.traceContext).toBe(effectiveContext.traceContext);
+
+    releaseFirst();
+    await Promise.all([first, queued]);
+  });
+
+  it('retains executeWith authority audit fields after validation failure', async () => {
+    const tool = createTool({
+      name: 'execute-with-validation-authority',
+      description: 'validation failure still keeps audit context',
+      input: z.object({ value: z.string() }),
+      async execute() {
+        return 'unreachable';
+      },
+    });
+
+    const result = await tool.executeWith({
+      params: { value: 42 },
+      callId: 'validation-authority-call',
+      effectiveContext: createEffectiveContext(),
+    });
+    const [snapshot] = tool.executions.inspectPrivileged({
+      callId: 'validation-authority-call',
+    });
+
+    expect(result.outcome).toBe('error');
+    expect(result.errorCategory).toBe('validation');
+    expect(snapshot?.snapshot.state).toBe('terminal');
+    expectTerminalAuditContext(snapshot?.context);
+  });
+
+  it('retains executeWith authority audit fields when policy context provider throws', async () => {
+    const tool = createTool({
+      name: 'execute-with-policy-context-authority',
+      description: 'policy context provider failure still keeps audit context',
+      input: z.object({ value: z.string() }),
+      policyContext() {
+        throw new Error('policy context failed');
+      },
+      async execute() {
+        return 'unreachable';
+      },
+    });
+
+    const result = await tool.executeWith({
+      params: { value: 'ok' },
+      callId: 'policy-context-authority-call',
+      effectiveContext: createEffectiveContext(),
+    });
+    const [snapshot] = tool.executions.inspectPrivileged({
+      callId: 'policy-context-authority-call',
+    });
+
+    expect(result.outcome).toBe('error');
+    expect(snapshot?.snapshot.state).toBe('terminal');
+    expectTerminalAuditContext(snapshot?.context);
   });
 
   it('direct call emits validate-error and settled on parse failure', async () => {

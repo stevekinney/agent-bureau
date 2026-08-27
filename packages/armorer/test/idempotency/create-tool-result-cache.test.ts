@@ -398,6 +398,27 @@ describe('createToolResultCache', () => {
     );
   });
 
+  it('shares claim fencing by resolved backing key across namespaces', async () => {
+    const namespaced = createToolResultCache({ store, namespace: 'a' });
+    const unnamespaced = createToolResultCache({ store });
+    const execution = {
+      status: 'started' as const,
+      toolName: 'charge',
+      startedAt: Date.now(),
+      ttl: 60_000,
+    };
+
+    const [left, right] = await Promise.all([
+      namespaced.claimStarted!('x', { ...execution, attemptId: 'namespaced' }),
+      unnamespaced.claimStarted!('a:x', { ...execution, attemptId: 'unnamespaced' }),
+    ]);
+
+    expect([left.outcome, right.outcome].filter((outcome) => outcome === 'claimed')).toHaveLength(
+      1,
+    );
+    expect(await store.get('a:x')).toBeString();
+  });
+
   it('renews and completes only for the current fencing token', async () => {
     await cache.claimStarted!('fenced', {
       status: 'started',

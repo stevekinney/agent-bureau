@@ -1608,6 +1608,16 @@ describe('createBureau', () => {
 
       const run = await bureauA.createRun({ message: 'Recover into the audit trail' });
       await pollUntil(() => bureauAReachedStep1);
+      await bureauA.sessionStore!.update(run.sessionId, (session) => ({
+        ...session!,
+        metadata: {
+          ...session!.metadata,
+          resolvedReviewIds: [
+            `approval:${run.id}:recovered-approval`,
+            `human-wait:${run.id}:recovered-signal`,
+          ],
+        },
+      }));
       bureauA.dispose();
 
       // Observe boot ordering via a spy on `createAuditTrail`. Recovery REATTACHES
@@ -2700,6 +2710,27 @@ describe('createBureau', () => {
     });
 
     expect(bureau.getTools()).toEqual([]);
+  });
+
+  it('returns run reports for unknown, active, and completed runs', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    expect(bureau.getRunReport('missing-report-run')).toBeUndefined();
+
+    const active = createParkedActiveRun();
+    bureau.store.register(active.activeRun, 'active-report-run');
+    expect(bureau.getRunReport('active-report-run')).toMatchObject({
+      runId: 'active-report-run',
+    });
+
+    const completed = await bureau.createRun({ message: 'Completed report' });
+    await waitForRunCompletion(bureau, completed.id);
+    expect(bureau.getRunReport(completed.id)?.runId).toBe(completed.id);
+
+    bureau.dispose();
   });
 
   it('does not abort run setup when a subscribeLiveFrames listener throws (regression PRRT_kwDORvupsc6PxP_w)', async () => {
@@ -4351,6 +4382,10 @@ describe('createBureau review queue (AB-20)', () => {
 
     const [review] = bureau.listPendingReviews();
     expect(review).toBeDefined();
+    await bureau.sessionStore!.update(run.sessionId, (session) => ({
+      ...session!,
+      metadata: { ...session!.metadata, resolvedReviewIds: [review!.id] },
+    }));
 
     const outcome = await bureau.resolveReview({
       id: review!.id,
@@ -4458,6 +4493,16 @@ describe('createBureau review queue (AB-20)', () => {
     expect((denyRecord!.detail as { reason?: string }).reason).toBe('Amount looks fraudulent');
 
     expect(bureau.listPendingReviews()).toHaveLength(0);
+    const persistedSession = await bureau.getSession(run.sessionId);
+    expect(persistedSession?.metadata['resolvedReviewIds']).toContain(review!.id);
+
+    await bureau.deleteSession(run.sessionId);
+    bureau.deleteRun(run.id);
+    await pollUntil(async () => {
+      const session = await bureau.getSession(run.sessionId);
+      const resolved = session?.metadata['resolvedReviewIds'];
+      return !Array.isArray(resolved) || !resolved.includes(review!.id);
+    });
 
     bureau.dispose();
   });

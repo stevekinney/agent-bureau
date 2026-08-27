@@ -677,16 +677,16 @@ export function createTool<
     };
   };
 
-  const executeCall = (
-    toolCall: ToolCallWithArguments,
-    options?: InternalToolExecuteOptions,
-  ): Promise<ToolExecutionResult> => {
-    const resolvedTimeout = options?.timeout ?? timeout;
-    const nowFunction = options?.now ?? Date.now;
-    const executionHandle = executionLifecycle.begin({
+  const beginExecutionLifecycle = (
+    callId: string,
+    options: ToolExecuteOptions | undefined,
+    resolvedTimeout: number | undefined,
+    nowFunction: () => number,
+  ): ExecutionHandle =>
+    executionLifecycle.begin({
       ...(options?.executionId ? { executionId: options.executionId } : {}),
       toolName: name,
-      callId: toolCall.id,
+      callId,
       ...(options?.ownerId ? { ownerId: options.ownerId } : {}),
       ...(options?.parentExecutionId ? { parentExecutionId: options.parentExecutionId } : {}),
       ...(isAbortSignalLike(options?.signal) ? { signal: options.signal } : {}),
@@ -697,6 +697,19 @@ export function createTool<
       ...(options?.setTimeoutFunction ? { setTimeoutFunction: options.setTimeoutFunction } : {}),
       ...(options?.effectiveContext ? { privilegedContext: options.effectiveContext } : {}),
     });
+
+  const executeCall = (
+    toolCall: ToolCallWithArguments,
+    options?: InternalToolExecuteOptions,
+  ): Promise<ToolExecutionResult> => {
+    const resolvedTimeout = options?.timeout ?? timeout;
+    const nowFunction = options?.now ?? Date.now;
+    const executionHandle = beginExecutionLifecycle(
+      toolCall.id,
+      options,
+      resolvedTimeout,
+      nowFunction,
+    );
     const executeOptions: InternalToolExecuteOptions = {
       ...options,
       ...(resolvedTimeout !== undefined ? { timeout: resolvedTimeout } : {}),
@@ -1569,19 +1582,12 @@ export function createTool<
       ...(resolvedTimeout !== undefined ? { timeout: resolvedTimeout } : {}),
     };
     const nowFunction = options.now ?? Date.now;
-    const executionHandle = executionLifecycle.begin({
-      ...(options.executionId ? { executionId: options.executionId } : {}),
-      toolName: name,
-      callId: toolCall.id,
-      ...(options.ownerId ? { ownerId: options.ownerId } : {}),
-      ...(options.parentExecutionId ? { parentExecutionId: options.parentExecutionId } : {}),
-      ...(isAbortSignalLike(options.signal) ? { signal: options.signal } : {}),
-      ...(resolvedTimeout !== undefined ? { deadline: nowFunction() + resolvedTimeout } : {}),
-      scheduleDeadline: false,
-      now: nowFunction,
-      ...(limiter ? { capacity: limiter.capacity } : {}),
-      ...(options.setTimeoutFunction ? { setTimeoutFunction: options.setTimeoutFunction } : {}),
-    });
+    const executionHandle = beginExecutionLifecycle(
+      toolCall.id,
+      options,
+      resolvedTimeout,
+      nowFunction,
+    );
     const execution = runWithConcurrency(
       () => (
         executionHandle.activate(),

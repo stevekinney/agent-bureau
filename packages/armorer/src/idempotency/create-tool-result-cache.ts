@@ -182,7 +182,7 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
       execution: StartedToolExecution,
       ttl?: number,
     ): Promise<{ outcome: 'claimed' } | { outcome: 'existing'; entry: ToolResultCacheEntry }> {
-      return withKeyClaimLock(key, async () => {
+      return withKeyClaimLock(resolveKey(key), async () => {
         const existing = await getEntry(key);
         if (existing) {
           return { outcome: 'existing', entry: existing };
@@ -211,7 +211,7 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
       leaseExpiresAt: number,
       observedAt: number,
     ): Promise<boolean> {
-      return withKeyClaimLock(key, async () => {
+      return withKeyClaimLock(resolveKey(key), async () => {
         const existing = await getEntry(key);
         if (existing?.status !== 'started' || existing.attemptId !== attemptId) return false;
         if (existing.absoluteDeadline !== undefined && observedAt >= existing.absoluteDeadline) {
@@ -235,7 +235,7 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
       ttl?: number,
       observedAt = Date.now(),
     ): Promise<boolean> {
-      return withKeyClaimLock(key, async () => {
+      return withKeyClaimLock(resolveKey(key), async () => {
         const existing = await getEntry(key);
         if (existing?.status !== 'started' || existing.attemptId !== attemptId) return false;
         if (existing.absoluteDeadline !== undefined && observedAt >= existing.absoluteDeadline) {
@@ -258,7 +258,7 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
       execution: StartedToolExecution,
       observedAt: number,
     ): Promise<boolean> {
-      return withKeyClaimLock(key, async () => {
+      return withKeyClaimLock(resolveKey(key), async () => {
         const existing = await getEntry(key);
         if (existing?.status !== 'started' || existing.attemptId !== expectedAttemptId) {
           return false;
@@ -272,7 +272,7 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
     },
 
     async deleteStarted(key: string, attemptId: string): Promise<boolean> {
-      return withKeyClaimLock(key, async () => {
+      return withKeyClaimLock(resolveKey(key), async () => {
         const existing = await getEntry(key);
         if (existing?.status !== 'started' || existing.attemptId !== attemptId) return false;
         await store.delete(resolveKey(key));
