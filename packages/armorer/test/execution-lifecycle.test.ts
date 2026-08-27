@@ -1,9 +1,40 @@
 import { describe, expect, it } from 'bun:test';
 
-import { createExecutionLifecycle } from '../src';
+import { createExecutionLifecycle, type EffectiveToolExecutionContext } from '../src';
 import { createConcurrencyLimiter } from '../src/utilities/concurrency';
 
 describe('execution lifecycle', () => {
+  function createPrivilegedContext(): EffectiveToolExecutionContext & {
+    debugGraph: { nested: { value: string } };
+  } {
+    return {
+      authority: {
+        principalId: 'principal-a',
+        tenantId: 'tenant-a',
+        ownerId: 'owner-a',
+        capabilities: ['tools:execute', 'runs:write'],
+        authorizationRevision: 'authorization:1',
+      },
+      audience: 'operator',
+      agentId: 'agent-a',
+      runId: 'run-a',
+      requestId: 'request-a',
+      locale: 'en-US',
+      deadline: 5000,
+      credentials: { token: 'secret' },
+      traceContext: { traceparent: 'secret-trace' },
+      debugGraph: { nested: { value: 'must-not-retain' } },
+      revisions: {
+        catalog: 'catalog:1',
+        toolbox: 'toolbox:1',
+        toolDefinition: 'tool:1',
+        policy: 'policy:1',
+        approval: 'approval:1',
+        redaction: 'redaction:1',
+      },
+    };
+  }
+
   it('publishes immutable monotonically revisioned snapshots and stable locators', async () => {
     let now = 10;
     const lifecycle = createExecutionLifecycle('owner-1');
@@ -41,6 +72,79 @@ describe('execution lifecycle', () => {
     expect(revisions).toEqual([1, 2, 3, 4, 5, 6]);
     await expect(handle.whenSettled()).resolves.toEqual(handle.snapshot());
     unsubscribe();
+  });
+
+  it('retains full privileged context while live and releases payload graphs after settlement', async () => {
+    const lifecycle = createExecutionLifecycle();
+    const privilegedContext = createPrivilegedContext();
+    const handle = lifecycle.begin({
+      toolName: 'sensitive-tool',
+      callId: 'sensitive-call',
+      privilegedContext,
+    });
+
+    handle.activate();
+    const liveContext = handle.privilegedSnapshot().context as
+      (EffectiveToolExecutionContext & { debugGraph?: unknown }) | undefined;
+
+    expect(liveContext?.credentials).toBe(privilegedContext.credentials);
+    expect(liveContext?.traceContext).toBe(privilegedContext.traceContext);
+    expect(liveContext?.debugGraph).toBe(privilegedContext.debugGraph);
+
+    handle.settle({ ok: true });
+    await lifecycle.shutdown({ policy: 'drain' });
+
+    const terminalContext = handle.privilegedSnapshot().context as
+      (EffectiveToolExecutionContext & { debugGraph?: unknown }) | undefined;
+    const [inspected] = lifecycle.inspectPrivileged({ callId: 'sensitive-call' });
+
+    expect(terminalContext).toEqual({
+      authority: {
+        principalId: 'principal-a',
+        tenantId: 'tenant-a',
+        ownerId: 'owner-a',
+        capabilities: ['tools:execute', 'runs:write'],
+        authorizationRevision: 'authorization:1',
+      },
+      audience: 'operator',
+      agentId: 'agent-a',
+      runId: 'run-a',
+      requestId: 'request-a',
+      locale: 'en-US',
+      deadline: 5000,
+      revisions: {
+        catalog: 'catalog:1',
+        toolbox: 'toolbox:1',
+        toolDefinition: 'tool:1',
+        policy: 'policy:1',
+        approval: 'approval:1',
+        redaction: 'redaction:1',
+      },
+    });
+    expect(terminalContext).not.toHaveProperty('credentials');
+    expect(terminalContext).not.toHaveProperty('traceContext');
+    expect(terminalContext).not.toHaveProperty('debugGraph');
+    expect(inspected?.context).toEqual(terminalContext);
+  });
+
+  it('releases privileged payload graphs after unresolved cleanup', () => {
+    const lifecycle = createExecutionLifecycle();
+    const handle = lifecycle.begin({
+      toolName: 'uncertain-sensitive-tool',
+      callId: 'uncertain-sensitive-call',
+      privilegedContext: createPrivilegedContext(),
+    });
+
+    handle.cleanup({ status: 'unresolved' });
+
+    const context = handle.privilegedSnapshot().context as
+      (EffectiveToolExecutionContext & { debugGraph?: unknown }) | undefined;
+    expect(handle.snapshot().state).toBe('unknown-effect');
+    expect(context?.authority.principalId).toBe('principal-a');
+    expect(context?.revisions.toolDefinition).toBe('tool:1');
+    expect(context).not.toHaveProperty('credentials');
+    expect(context).not.toHaveProperty('traceContext');
+    expect(context).not.toHaveProperty('debugGraph');
   });
 
   it('composes caller and deadline cancellation without claiming ignored work stopped', () => {

@@ -1005,8 +1005,19 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
           terminalStatus === 'aborted' ||
           terminalStatus === 'error')
       ) {
+        // Approval reviews can outlive the run's terminal transition. Keep the
+        // authority alongside the signed approval until that review resolves;
+        // otherwise recovery cannot reconstruct the exact execution context.
+        const terminalRun = store.getRun(terminalRunId);
+        const hasPendingApproval = terminalRun?.steps.some((step) =>
+          step.results.some(
+            (result) =>
+              result.outcome === 'action_required' && result.pendingApproval !== undefined,
+          ),
+        );
         const authorities = mergedMetadata['lastRequestAuthorities'];
         if (
+          !hasPendingApproval &&
           typeof authorities === 'object' &&
           authorities !== null &&
           !Array.isArray(authorities)
@@ -1021,13 +1032,6 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         // approval is explicitly resolved. Removing the signed descriptor at
         // the terminal transition would make a restart lose the only binding
         // that can resume that review.
-        const terminalRun = store.getRun(terminalRunId);
-        const hasPendingApproval = terminalRun?.steps.some((step) =>
-          step.results.some(
-            (result) =>
-              result.outcome === 'action_required' && result.pendingApproval !== undefined,
-          ),
-        );
         if (!hasPendingApproval) {
           const approvals = mergedMetadata['pendingApprovalOverrides'];
           if (typeof approvals === 'object' && approvals !== null && !Array.isArray(approvals)) {
@@ -1154,6 +1158,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         try {
           await restoreApproval(approval as SignedPendingToolApproval);
         } catch (error) {
+          if (!isTerminalApprovalBindingError(error)) throw error;
           invalidApprovalReviewIds.add(reviewId);
           pendingApprovalOverrides.delete(reviewId);
           diagnose({

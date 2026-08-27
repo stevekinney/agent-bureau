@@ -138,6 +138,35 @@ type RecordState = {
 
 let nextExecutionId = 0;
 
+function retainTerminalPrivilegedContext(
+  context: EffectiveToolExecutionContext | undefined,
+): EffectiveToolExecutionContext | undefined {
+  if (!context) return undefined;
+  return freezeEffectiveToolExecutionContext({
+    authority: {
+      principalId: context.authority.principalId,
+      tenantId: context.authority.tenantId,
+      ownerId: context.authority.ownerId,
+      capabilities: [...context.authority.capabilities],
+      authorizationRevision: context.authority.authorizationRevision,
+    },
+    ...(context.audience !== undefined ? { audience: context.audience } : {}),
+    ...(context.agentId !== undefined ? { agentId: context.agentId } : {}),
+    ...(context.runId !== undefined ? { runId: context.runId } : {}),
+    ...(context.requestId !== undefined ? { requestId: context.requestId } : {}),
+    ...(context.locale !== undefined ? { locale: context.locale } : {}),
+    ...(context.deadline !== undefined ? { deadline: context.deadline } : {}),
+    revisions: {
+      catalog: context.revisions.catalog,
+      toolbox: context.revisions.toolbox,
+      toolDefinition: context.revisions.toolDefinition,
+      policy: context.revisions.policy,
+      approval: context.revisions.approval,
+      redaction: context.revisions.redaction,
+    },
+  });
+}
+
 export function createExecutionLifecycle(defaultOwnerId = 'anonymous'): ExecutionLifecycle {
   const ownerController = new AbortController();
   const records = new Map<string, RecordState>();
@@ -242,6 +271,9 @@ export function createExecutionLifecycle(defaultOwnerId = 'anonymous'): Executio
         if (record.snapshot.state === 'terminal') return;
         removeAbortListeners();
         clearDeadline?.();
+        if (patch.state === 'terminal' || patch.state === 'unknown-effect') {
+          record.privilegedContext = retainTerminalPrivilegedContext(record.privilegedContext);
+        }
         if (record.snapshot.state === 'unknown-effect') {
           if (Object.prototype.hasOwnProperty.call(patch, 'result')) {
             transition({ result: patch.result });

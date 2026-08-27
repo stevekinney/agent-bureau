@@ -609,22 +609,33 @@ import { createToolResultCache, withToolboxIdempotency } from 'armorer/idempoten
 // This adapter is atomic only among instances sharing this store object in one process.
 const cache = createToolResultCache({ store: processLocalKeyValueStore });
 const toolbox = createToolbox([chargeCardTool]);
+const requestContext = {
+  authority: {
+    principalId: operator.principalId,
+    tenantId: currentTenant.id,
+    ownerId: operator.ownerId,
+    capabilities: ['tools:execute'],
+    authorizationRevision: operator.authorizationRevision,
+  },
+  audience: 'operator',
+  agentId: 'billing-agent',
+  runId: temporalWorkflowRunId,
+};
 const idempotentToolbox = withToolboxIdempotency(toolbox, {
   cache,
   tenantId: currentTenant.id,
   verifyResolutionReceipt: (receipt) => verifyOperatorSignature(receipt),
 });
 
-const result = await idempotentToolbox.execute(
-  {
-    id: 'provider-call-1',
-    name: 'charge-card',
-    arguments: { cents: 2500 },
-  },
-  {
-    idempotencyKey: temporalToolCallId,
-  },
-);
+const call = {
+  id: 'provider-call-1',
+  name: 'charge-card',
+  arguments: { cents: 2500 },
+};
+const result = await idempotentToolbox.execute(call, {
+  idempotencyKey: temporalToolCallId,
+  requestContext,
+});
 
 if (result.idempotency?.outcome === 'unknown-outcome') {
   // Do not replay blindly. Ask for review before retrying.
@@ -637,6 +648,7 @@ An expired lease is still an unknown outcome—it is never evidence that the sid
 await idempotentToolbox.execute(call, {
   idempotencyKey: temporalToolCallId,
   resolutionReceipt: signedOperatorReceipt,
+  requestContext,
 });
 ```
 

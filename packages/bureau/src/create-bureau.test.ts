@@ -4053,6 +4053,13 @@ describe('createBureau review queue (AB-20)', () => {
     expect(persistedSession?.metadata['pendingApprovalOverrides']).toMatchObject({
       [review!.id]: expect.objectContaining({ approvalToken: review!.approval.approvalToken }),
     });
+    expect(persistedSession?.metadata['lastRequestAuthorities']).toMatchObject({
+      [run.id]: expect.objectContaining({
+        principalId: expect.any(String),
+        tenantId: expect.any(String),
+        ownerId: expect.any(String),
+      }),
+    });
     expect(review!.ageMilliseconds).toBeGreaterThanOrEqual(0);
     expect(charges).toEqual([]); // not yet executed
 
