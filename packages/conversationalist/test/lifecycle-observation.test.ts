@@ -459,4 +459,58 @@ describe('Conversation lifecycle and observation', () => {
 
     expect(events).toEqual(['snapshot.restored']);
   });
+
+  it('announces plugin activation only after the owning mutation commits', () => {
+    const plugin = defineMessagePlugin({ id: 'reentrant-plugin', revision: 1 }, (input) => input);
+    const conversation = new Conversation(createConversationHistory({ id: 'plugin-order' }), {
+      plugins: [plugin],
+    });
+    conversation.addEventListener('plugin.activated', () => {
+      conversation.appendAssistantMessage('listener write');
+    });
+
+    conversation.appendUserMessage('outer write');
+
+    expect(conversation.current.ids.map((id) => conversation.current.messages[id]!.role)).toEqual([
+      'user',
+      'assistant',
+    ]);
+  });
+
+  it('registers compaction as owned work before announcing it', async () => {
+    const conversation = new Conversation(createConversationHistory({ id: 'compact-order' }));
+    for (let index = 0; index < 8; index++) conversation.appendUserMessage(`message ${index}`);
+    let release!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let disposal!: Promise<void>;
+    conversation.addEventListener('compaction.started', () => {
+      disposal = conversation.dispose();
+    });
+    const compacting = conversation.compact(async () => {
+      await waiting;
+      return 'late summary';
+    });
+
+    expect(conversation.inFlightOperationCount).toBe(1);
+    release();
+    await expect(compacting).rejects.toMatchObject({ code: 'error:operation-cancelled' });
+    await disposal;
+    expect(conversation.inFlightOperationCount).toBe(0);
+  });
+
+  it('rejects a mutation result when its callback writes reentrantly', () => {
+    const conversation = new Conversation(createConversationHistory({ id: 'mutation-reentrant' }));
+
+    const result = conversation.applyMutation({ expectedRevision: 0 }, (state) => {
+      conversation.appendAssistantMessage('reentrant write');
+      return appendUserMessage(state, 'stale callback result');
+    });
+
+    expect(result).toEqual({ accepted: false, revision: 1, reason: 'revision-conflict' });
+    expect(conversation.current.ids.map((id) => conversation.current.messages[id]!.role)).toEqual([
+      'assistant',
+    ]);
+  });
 });

@@ -273,6 +273,7 @@ export class Conversation {
   private readonly streamSequences = new Map<string, number>();
   private readonly pluginIdentityList: readonly MessagePluginIdentity[];
   private readonly sourcePlugins: readonly MessagePlugin[];
+  private readonly pendingPluginActivations: MessagePluginIdentity[] = [];
 
   constructor(
     initial: ConversationHistory = createConversationHistory(),
@@ -311,17 +312,22 @@ export class Conversation {
           (input: MessageInput): MessageInput => {
             if (!activated) {
               activated = true;
-              this.emitConversationEvent(
-                'plugin.activated',
-                this.buildEventDetail('plugin.activated', this.current, {
-                  outcome: 'completed',
-                  plugin: identity,
-                }),
-              );
+              this.pendingPluginActivations.push(identity);
             }
             try {
               return plugin(input);
             } catch (error) {
+              const pendingActivationIndex = this.pendingPluginActivations.indexOf(identity);
+              if (pendingActivationIndex !== -1) {
+                this.pendingPluginActivations.splice(pendingActivationIndex, 1);
+                this.emitConversationEvent(
+                  'plugin.activated',
+                  this.buildEventDetail('plugin.activated', this.current, {
+                    outcome: 'completed',
+                    plugin: identity,
+                  }),
+                );
+              }
               this.emitConversationEvent(
                 'plugin.failed',
                 this.buildEventDetail('plugin.failed', this.current, {
@@ -468,6 +474,16 @@ export class Conversation {
         this.buildEventDetail('branch.pruned', previousConversation, {
           durability: 'snapshot',
           outcome: 'completed',
+        }),
+      );
+    }
+
+    for (const identity of this.pendingPluginActivations.splice(0)) {
+      this.emitConversationEvent(
+        'plugin.activated',
+        this.buildEventDetail('plugin.activated', previousConversation, {
+          outcome: 'completed',
+          plugin: identity,
         }),
       );
     }
@@ -723,7 +739,27 @@ export class Conversation {
         reason: 'revision-conflict',
       });
     }
-    this.commit(mutation(this.current), 'push', ['push'], {
+    const startingRevision = this.controllerRevision;
+    const nextConversation = mutation(this.current);
+    if (this.controllerRevision !== startingRevision) {
+      const previous = this.current;
+      this.emitConversationEvent(
+        'mutation.rejected',
+        this.buildEventDetail('mutation.rejected', previous, {
+          ...(options.correlationId ? { correlationId: options.correlationId } : {}),
+          ...(options.actor ? { actor: options.actor } : {}),
+          durability: options.durability ?? 'ephemeral',
+          outcome: 'rejected',
+          reason: 'revision-conflict',
+        }),
+      );
+      return Object.freeze({
+        accepted: false,
+        revision: this.controllerRevision,
+        reason: 'revision-conflict',
+      });
+    }
+    this.commit(nextConversation, 'push', ['push'], {
       ...(options.correlationId ? { correlationId: options.correlationId } : {}),
       ...(options.actor ? { actor: options.actor } : {}),
       ...(options.durability ? { durability: options.durability } : {}),
@@ -1407,10 +1443,6 @@ export class Conversation {
     this.assertOpen();
     const previous = this.current;
     const startingRevision = this.controllerRevision;
-    this.emitConversationEvent(
-      'compaction.started',
-      this.buildEventDetail('compaction.started', previous, { outcome: 'started' }),
-    );
     const operationSignal = options?.signal
       ? AbortSignal.any([this.operationAbortController.signal, options.signal])
       : this.operationAbortController.signal;
@@ -1424,6 +1456,10 @@ export class Conversation {
       this.env,
     );
     this.inFlightOperations.add(operation);
+    this.emitConversationEvent(
+      'compaction.started',
+      this.buildEventDetail('compaction.started', previous, { outcome: 'started' }),
+    );
     let compacted;
     try {
       compacted = await operation;
