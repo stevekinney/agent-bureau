@@ -1,5 +1,5 @@
 import { stableStringifyJson } from '../core/serialization/json';
-import type { Tool, ToolCallWithArguments } from '../is-tool';
+import type { Tool, ToolCallWithArguments, ToolExecuteOptions } from '../is-tool';
 import { claimCacheStarted, getCacheEntry } from './cache-operations';
 import type { CachedToolResult, IdempotencyOptions } from './types';
 
@@ -78,9 +78,28 @@ export function withIdempotency<T extends Tool>(tool: T, options: IdempotencyOpt
     );
   }
 
-  async function executeWithCache(params: unknown): Promise<unknown> {
+  async function executeWithCache(
+    params: unknown,
+    executeOptions?: ToolExecuteOptions,
+  ): Promise<unknown> {
+    const requestContext = executeOptions?.requestContext;
+    if (executeOptions !== undefined && !requestContext) {
+      throw new Error('Idempotency requires request-scoped execution authority.');
+    }
+    if (requestContext && requestContext.authority.tenantId !== tenantId) {
+      throw new Error('Idempotency tenantId must match request authority tenantId.');
+    }
+    const authorityScope = requestContext
+      ? [
+          tenantId,
+          requestContext.authority.principalId,
+          requestContext.authority.authorizationRevision,
+          [...requestContext.authority.capabilities].sort(),
+          requestContext.agentId ?? null,
+        ]
+      : [tenantId];
     const key = stableStringifyJson([
-      tenantId,
+      ...(requestContext ? [authorityScope] : [tenantId]),
       toolRevision,
       tool.name,
       idempotencyKey!(params),
@@ -119,7 +138,9 @@ export function withIdempotency<T extends Tool>(tool: T, options: IdempotencyOpt
     }
 
     // Execute the tool via its callable interface (params → result)
-    const result = await tool(params);
+    const result = executeOptions
+      ? await tool.executeWith({ params, ...executeOptions })
+      : await tool(params);
 
     const entry: CachedToolResult = {
       result,
@@ -152,7 +173,7 @@ export function withIdempotency<T extends Tool>(tool: T, options: IdempotencyOpt
           if (isToolCall(input)) {
             return target.execute(input, execOptions as Record<string, unknown>);
           }
-          return executeWithCache(input);
+          return executeWithCache(input, execOptions as ToolExecuteOptions | undefined);
         };
       }
       return Reflect.get(target, prop, receiver as object) as unknown;

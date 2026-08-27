@@ -100,4 +100,5 @@ export type IdempotencyOptions = {
   ttl?: number;
   onCacheHit?: (key: string, result: CachedToolResult) => void;
   onUnknownOutcome?: (key: string, execution: StartedToolExecution) => void;
+  now?: () => number;
 };

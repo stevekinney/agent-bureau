@@ -757,6 +757,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         const removedRunId = (event as StoreRunRemovedEvent).runId;
         runSequenceCounters.delete(removedRunId);
         runRequestContexts.delete(removedRunId);
+        runToolboxesByRunId.delete(removedRunId);
         for (const id of pendingApprovalOverrides.keys()) {
           if (id.startsWith(`approval:${removedRunId}:`)) pendingApprovalOverrides.delete(id);
         }
@@ -924,6 +925,47 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         },
       };
     });
+  }
+
+  async function persistPendingApprovalOverride(
+    sessionId: string,
+    reviewId: string,
+    approval: Extract<PendingReview, { kind: 'tool-approval' }>['approval'],
+  ): Promise<void> {
+    if (!runtime.sessionStore) return;
+    const serializedApproval = JSON.parse(JSON.stringify(approval)) as JSONValue;
+    await runtime.sessionStore.update(sessionId, (session) => ({
+      ...session!,
+      metadata: {
+        ...session!.metadata,
+        pendingApprovalOverrides: {
+          ...(typeof session!.metadata['pendingApprovalOverrides'] === 'object' &&
+          session!.metadata['pendingApprovalOverrides'] !== null &&
+          !Array.isArray(session!.metadata['pendingApprovalOverrides'])
+            ? session!.metadata['pendingApprovalOverrides']
+            : {}),
+          [reviewId]: serializedApproval,
+        },
+      },
+    }));
+  }
+
+  function restorePendingApprovalOverrides(metadata: unknown, runId: string): void {
+    const metadataRecord =
+      metadata && typeof metadata === 'object' && !Array.isArray(metadata)
+        ? (metadata as Record<string, unknown>)
+        : undefined;
+    const overrides = metadataRecord?.['pendingApprovalOverrides'];
+    if (typeof overrides !== 'object' || overrides === null || Array.isArray(overrides)) return;
+    for (const [reviewId, approval] of Object.entries(overrides as Record<string, unknown>)) {
+      if (!reviewId.startsWith(`approval:${runId}:`)) continue;
+      if (approval && typeof approval === 'object' && !Array.isArray(approval)) {
+        pendingApprovalOverrides.set(
+          reviewId,
+          approval as Extract<PendingReview, { kind: 'tool-approval' }>['approval'],
+        );
+      }
+    }
   }
 
   function persistSessionUpdate(
@@ -1370,6 +1412,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     handle: RecoveredRunHandle,
     eventSurface?: ReturnType<typeof createRecoveredRunEventSurface>,
     recoveredServices?: DurableRunDeps,
+    sessionMetadata?: unknown,
   ): void {
     // At-most-once registration per runId (guards double-recover / a runId already
     // started live on this process — neither should reach here, but a silent
@@ -1397,6 +1440,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       if (recoveredRequestContext) runRequestContexts.set(runId, recoveredRequestContext);
       runToolboxesByRunId.set(runId, recoveredServices.toolbox);
     }
+    restorePendingApprovalOverrides(sessionMetadata, runId);
 
     // AB-96 — wire the same versioned run-envelope forwarder the live-run path
     // uses. The recovered run's event surface is installed during Weft's awaited
@@ -1707,6 +1751,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       info.handle,
       eventSurface,
       info.services as DurableRunDeps,
+      sessionLoad.session,
     );
   }
 
@@ -1869,7 +1914,14 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         // A mocked/custom engine that does not invoke Weft's recovery hook can
         // still reattach terminal visibility here. Real Weft recovery has
         // already taken the hook path above, including live event forwarding.
-        reattachRecoveredRun(handle.id, ownedSessionId!, handle);
+        reattachRecoveredRun(
+          handle.id,
+          ownedSessionId!,
+          handle,
+          undefined,
+          undefined,
+          sessionLoad.ok ? sessionLoad.session : null,
+        );
       } else if (verdict === 'monitor') {
         // Scheduled fires have no ActiveRun surface, but the recovered Weft handle
         // still needs a detached result monitor so failures are visible.
@@ -2307,11 +2359,28 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
                 review.id,
                 nextApproval as Extract<PendingReview, { kind: 'tool-approval' }>['approval'],
               );
+              await persistPendingApprovalOverride(
+                review.sessionId,
+                review.id,
+                nextApproval as Extract<PendingReview, { kind: 'tool-approval' }>['approval'],
+              );
             }
             keepPending = true;
           }
         } else if (review.approval.approvalBinding && review.approval.approvalToken !== undefined) {
-          await approvalToolbox.revokeApproval(review.approval as SignedPendingToolApproval);
+          try {
+            await approvalToolbox.revokeApproval(review.approval as SignedPendingToolApproval);
+          } catch (error) {
+            // A denial is still authoritative when the binding has expired or
+            // was already consumed. Only an issued, revocable binding needs
+            // revocation; failure to revoke stale state must not lose the
+            // operator's denial decision.
+            diagnose({
+              level: 'warn',
+              scope: 'approval',
+              message: `[bureau] Could not revoke denied approval "${review.id}": ${serializeUnknownError(error)}`,
+            });
+          }
         }
       } else if (input.decision === 'approve') {
         // Route through the public `bureau.signalSession` (rather than the

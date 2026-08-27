@@ -9,6 +9,17 @@ import type { CachedToolResult, ToolResultCache } from '../../src/idempotency/ty
 import { withIdempotency } from '../../src/idempotency/with-idempotency';
 import type { Tool } from '../../src/is-tool';
 
+const requestContext = {
+  runId: 'run-a',
+  agentId: 'agent-a',
+  authority: {
+    tenantId: 'tenant-a',
+    principalId: 'principal-a',
+    capabilities: ['tools:execute'],
+    authorizationRevision: 'authorization:1',
+  },
+} as const;
+
 /** A minimal hand-rolled Standard Schema V1 validator — no vendor dependency required. */
 function greetingSchema(): StandardSchemaV1<unknown, { name: string }> {
   return {
@@ -260,6 +271,46 @@ describe('withIdempotency', () => {
     expect(() => withIdempotency(tool, { cache, tenantId: 'tenant-a', toolRevision: '' })).toThrow(
       'requires tenantId and toolRevision',
     );
+  });
+
+  it('requires matching request authority and scopes direct execution by identity', async () => {
+    const wrapped = withIdempotency(createTestTool(), { cache, tenantId: 'tenant-a' });
+
+    await expect(wrapped.execute({ a: 1, b: 2 }, {})).rejects.toThrow(
+      'requires request-scoped execution authority',
+    );
+    await expect(
+      wrapped.execute(
+        { a: 1, b: 2 },
+        {
+          requestContext: {
+            ...requestContext,
+            authority: { ...requestContext.authority, tenantId: 'tenant-b' },
+          },
+        },
+      ),
+    ).rejects.toThrow('tenantId must match request authority tenantId');
+
+    await expect(wrapped.execute({ a: 1, b: 2 }, { requestContext })).resolves.toMatchObject({
+      result: 3,
+    });
+    await expect(wrapped.execute({ a: 1, b: 2 }, { requestContext })).resolves.toMatchObject({
+      result: 3,
+    });
+    expect(callCount).toBe(1);
+
+    await expect(
+      wrapped.execute(
+        { a: 1, b: 2 },
+        {
+          requestContext: {
+            ...requestContext,
+            agentId: 'agent-b',
+          },
+        },
+      ),
+    ).resolves.toMatchObject({ result: 3 });
+    expect(callCount).toBe(2);
   });
 
   it('keeps delimiter-bearing tenant and revision tuples in distinct cache scopes', async () => {

@@ -14,7 +14,7 @@ import {
 import { createCheckpoint, encode, serializeCheckpoint } from '@lostgradient/weft';
 import { KEYS, MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
-import { createToolbox } from 'armorer';
+import { createTool, createToolbox, type ToolRequestContext } from 'armorer';
 import { afterEach, describe, expect, it } from 'bun:test';
 import { Conversation, createConversationHistory, getMessages } from 'conversationalist';
 import { TypedEventTarget } from 'lifecycle';
@@ -130,6 +130,47 @@ describe('createRuntimeComposition', () => {
         'agent-a',
       ),
     ).toBeUndefined();
+  });
+
+  it('does not restore legacy request authority when a per-run map exists without the recovered run', async () => {
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+    });
+    const recover = getRuntimeCompositionTestingSeams(runtime).recoveredRequestContext;
+    const metadata = {
+      lastRequestAuthority: {
+        principalId: 'legacy-principal',
+        tenantId: 'legacy-tenant',
+        ownerId: 'legacy-owner',
+        capabilities: ['legacy:execute'],
+        authorizationRevision: 'legacy:1',
+        audience: 'tenant',
+      },
+      lastRequestAuthorities: {
+        'run-b': {
+          principalId: 'principal-b',
+          tenantId: 'tenant-b',
+          ownerId: 'owner-b',
+          capabilities: ['tools:execute'],
+          authorizationRevision: 'authorization:2',
+          audience: 'operator',
+        },
+      },
+    };
+
+    expect(recover(metadata, 'run-a', 'agent-a')).toBeUndefined();
+    expect(recover(metadata, 'run-b', 'agent-b')).toMatchObject({
+      audience: 'operator',
+      agentId: 'agent-b',
+      runId: 'run-b',
+      authority: {
+        principalId: 'principal-b',
+        tenantId: 'tenant-b',
+        ownerId: 'owner-b',
+        capabilities: ['tools:execute'],
+        authorizationRevision: 'authorization:2',
+      },
+    });
   });
 
   it('provides an unavailable toolbox that accepts empty calls and rejects tool calls', async () => {
@@ -984,6 +1025,123 @@ describe('createRuntimeComposition durable execution', () => {
     } finally {
       runtime.durable?.engine[Symbol.dispose]?.();
     }
+  });
+
+  it('binds service request authority to scheduled fire toolbox execution and durable options', async () => {
+    const { z } = await import('zod');
+    const observedRequestContexts: ToolRequestContext[] = [];
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      toolbox: createToolbox([
+        createTool({
+          name: 'capture_request_context',
+          description: 'Capture the request context supplied to a scheduled tool call.',
+          input: z.object({}),
+          async execute(_input, context) {
+            if (context.requestContext) observedRequestContexts.push(context.requestContext);
+            return context.requestContext?.authority.principalId ?? null;
+          },
+        }),
+      ]),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    try {
+      expect(runtime.sessionStore).toBeDefined();
+      const resolution = await getRuntimeCompositionTestingSeams(runtime).buildScheduledRunServices(
+        {
+          workflowId: 'scheduled-authority-run',
+          workflowType: 'agentRun',
+          input: {
+            agentName: 'researcher',
+            input: 'capture context',
+            scheduleId: 'nightly-digest',
+          },
+          schedule: { id: 'nightly-digest' },
+        },
+        runtime.sessionStore!,
+      );
+
+      expect(resolution.status).toBe('available');
+      if (resolution.status !== 'available') {
+        throw new Error(`Expected scheduled services to be available: ${resolution.reason}`);
+      }
+      const services = resolution.services as DurableRunDeps;
+
+      expect(services.options.executeOptions?.requestContext).toMatchObject({
+        audience: 'operator',
+        agentId: 'researcher',
+        runId: 'scheduled-authority-run',
+        authority: {
+          principalId: 'service:scheduler',
+          tenantId: 'bureau',
+          ownerId: 'researcher',
+          capabilities: ['tools:execute'],
+          authorizationRevision: 'bureau:scheduler:1',
+        },
+      });
+
+      const result = await services.toolbox.execute({
+        name: 'capture_request_context',
+        arguments: {},
+      });
+
+      expect(result.result).toBe('service:scheduler');
+      expect(observedRequestContexts).toHaveLength(1);
+      expect(observedRequestContexts[0]).toMatchObject(
+        services.options.executeOptions!.requestContext!,
+      );
+    } finally {
+      runtime.durable?.engine[Symbol.dispose]?.();
+    }
+  });
+
+  it('binds service request authority when creating a scheduler task runtime', async () => {
+    const { z } = await import('zod');
+    const observedRequestContexts: ToolRequestContext[] = [];
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      toolbox: createToolbox([
+        createTool({
+          name: 'capture_scheduler_task_context',
+          description: 'Capture the request context supplied to a scheduler task tool call.',
+          input: z.object({}),
+          async execute(_input, context) {
+            if (context.requestContext) observedRequestContexts.push(context.requestContext);
+            return context.requestContext?.authority.principalId ?? null;
+          },
+        }),
+      ]),
+    });
+
+    const runRuntime = await runtime.createRunRuntime(
+      {
+        message: 'capture context',
+        sessionId: 'scheduler-task-live',
+      },
+      { liveStreaming: false },
+    );
+
+    const result = await runRuntime.toolbox.execute({
+      name: 'capture_scheduler_task_context',
+      arguments: {},
+    });
+
+    expect(result.result).toBe('service:scheduler');
+    expect(observedRequestContexts).toHaveLength(1);
+    expect(observedRequestContexts[0]).toMatchObject({
+      audience: 'operator',
+      agentId: 'bureau',
+      runId: 'scheduler-task-live',
+      authority: {
+        principalId: 'service:scheduler',
+        tenantId: 'bureau',
+        ownerId: 'bureau',
+        capabilities: ['tools:execute'],
+        authorizationRevision: 'bureau:scheduler:1',
+      },
+    });
   });
 
   it('uses an explicit scheduled session id as proof for markerless recovered fires', async () => {

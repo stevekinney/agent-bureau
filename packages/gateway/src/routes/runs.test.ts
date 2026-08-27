@@ -1,5 +1,5 @@
 import type { GenerateFunction, Toolbox } from '@lostgradient/operative';
-import { createToolbox } from 'armorer';
+import { createTool, createToolbox, type ToolRequestContext } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 
 import { createTestGateway, requestJSON, waitForRunState } from '../test';
@@ -48,6 +48,106 @@ describe('runs routes', () => {
     const body = await response.json();
     expect(body.id).toBeString();
     expect(body.status).toBe('running');
+  });
+
+  it('POST /api/v1/runs strips caller-supplied request authority when no verified authentication metadata exists', async () => {
+    const { z } = await import('zod');
+    let step = 0;
+    const observedRequestContexts: ToolRequestContext[] = [];
+    const gateway = await createTestGateway({
+      generate: async () =>
+        step++ === 0
+          ? {
+              content: '',
+              toolCalls: [{ name: 'capture_request_context', arguments: {} }],
+            }
+          : { content: 'Done.', toolCalls: [] },
+      toolbox: createToolbox([
+        createTool({
+          name: 'capture_request_context',
+          description: 'Capture the request context supplied to a run tool call.',
+          input: z.object({}),
+          async execute(_input, context) {
+            if (context.requestContext) observedRequestContexts.push(context.requestContext);
+            return context.requestContext?.authority.principalId ?? null;
+          },
+        }),
+      ]),
+    });
+
+    const response = await requestJSON(gateway, '/api/v1/runs', {
+      method: 'POST',
+      body: JSON.stringify({
+        message: 'Hello',
+        requestContext: {
+          authority: {
+            principalId: 'attacker',
+            tenantId: 'attacker-tenant',
+            ownerId: 'attacker-owner',
+            capabilities: ['admin'],
+            authorizationRevision: 'attacker:1',
+          },
+          audience: 'operator',
+        },
+      }),
+    });
+    expect(response.status).toBe(201);
+
+    const body = (await response.json()) as { id: string };
+    await waitForRunState(gateway.bureau, body.id);
+
+    expect(observedRequestContexts).toHaveLength(1);
+    expect(observedRequestContexts[0]).toMatchObject({
+      audience: 'operator',
+      authority: {
+        principalId: 'anonymous',
+        tenantId: 'bureau',
+        ownerId: 'bureau',
+        capabilities: ['tools:execute'],
+        authorizationRevision: 'bureau:1',
+      },
+    });
+  });
+
+  it('POST /api/v1/runs derives request authority from verified gateway authentication metadata', async () => {
+    const gateway = await createTestGateway({
+      authToken: 'gateway-secret',
+      generate: createMockGenerate(),
+      storage: { type: 'memory' },
+      toolbox: createEmptyToolbox(),
+    });
+
+    const response = await requestJSON(gateway, '/api/v1/runs', {
+      method: 'POST',
+      headers: { authorization: 'Bearer gateway-secret' },
+      body: JSON.stringify({
+        agentName: 'writer',
+        message: 'Hello',
+        requestContext: {
+          authority: {
+            principalId: 'attacker',
+            tenantId: 'attacker-tenant',
+            ownerId: 'attacker-owner',
+            capabilities: ['admin'],
+            authorizationRevision: 'attacker:1',
+          },
+          audience: 'operator',
+        },
+      }),
+    });
+    expect(response.status).toBe(201);
+
+    const body = (await response.json()) as { sessionId: string };
+    const session = await gateway.bureau.getSession(body.sessionId);
+
+    expect(session?.metadata['lastRequestAuthority']).toEqual({
+      principalId: 'static-token',
+      tenantId: 'bureau',
+      ownerId: 'writer',
+      capabilities: ['tools:execute'],
+      authorizationRevision: 'gateway:static-token',
+      audience: 'operator',
+    });
   });
 
   it('POST /api/v1/runs returns 429 when a flow-control policy rejects admission (AB-13)', async () => {

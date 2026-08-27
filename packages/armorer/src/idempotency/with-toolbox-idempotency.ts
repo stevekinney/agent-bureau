@@ -233,6 +233,7 @@ export function withToolboxIdempotency(
       authority.principalId,
       authority.authorizationRevision,
       [...authority.capabilities].sort(),
+      requestContext.agentId ?? null,
       policyRevision,
     ] as never);
     const cacheKey = `${authorityScope}:${revision}:${baseKey}`;

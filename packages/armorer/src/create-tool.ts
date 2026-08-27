@@ -847,6 +847,7 @@ export function createTool<
         policyContext.policyContext = {
           ...(policyContext.policyContext ?? {}),
           requestContext: freezeToolRequestContext(options.requestContext),
+          capabilities: options.requestContext.authority.capabilities,
         };
       }
       if (policyContextProvider) {

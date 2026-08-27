@@ -76,6 +76,7 @@ import {
   combineToolboxes,
   createTool,
   createToolbox,
+  type ToolboxExecuteOptions,
   type ToolCallInput,
   type ToolRequestContext,
 } from 'armorer';
@@ -116,18 +117,21 @@ export type BureauToolbox = AnyToolbox;
 
 const requestAuthorityMetadataKey = 'lastRequestAuthority';
 const requestAuthoritiesMetadataKey = 'lastRequestAuthorities';
+const defaultBureauAgentName = 'bureau';
+const schedulerTaskIdPrefix = 'scheduler-task-';
+const schedulerServicePrincipalId = 'service:scheduler';
+const schedulerServiceAuthorizationRevision = 'bureau:scheduler:1';
+const toolExecutionCapability = 'tools:execute';
 
-function recoveredRequestContext(
-  metadata: Record<string, JSONValue>,
+function isJsonRecord(value: JSONValue | undefined): value is Record<string, JSONValue> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function requestContextFromAuthorityValue(
+  value: JSONValue | undefined,
   runId: string | undefined,
   agentName: string | undefined,
 ): ToolRequestContext | undefined {
-  const authorities = metadata[requestAuthoritiesMetadataKey];
-  const perRun =
-    runId !== undefined && typeof authorities === 'object' && authorities !== null
-      ? (authorities as Record<string, JSONValue>)[runId]
-      : undefined;
-  const value = perRun ?? metadata[requestAuthorityMetadataKey];
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
   const authority = value as Record<string, JSONValue>;
   const capabilities = authority['capabilities'];
@@ -158,6 +162,82 @@ function recoveredRequestContext(
     ...(agentName !== undefined ? { agentId: agentName } : {}),
     ...(runId !== undefined ? { runId } : {}),
   };
+}
+
+function recoveredRequestContext(
+  metadata: Record<string, JSONValue>,
+  runId: string | undefined,
+  agentName: string | undefined,
+): ToolRequestContext | undefined {
+  const authorities = metadata[requestAuthoritiesMetadataKey];
+  if (isJsonRecord(authorities)) {
+    return requestContextFromAuthorityValue(
+      runId === undefined ? undefined : authorities[runId],
+      runId,
+      agentName,
+    );
+  }
+  return requestContextFromAuthorityValue(metadata[requestAuthorityMetadataKey], runId, agentName);
+}
+
+function normalizedServiceAgentName(agentName: string | undefined): string {
+  const trimmed = agentName?.trim();
+  return trimmed && trimmed.length > 0 ? trimmed : defaultBureauAgentName;
+}
+
+function createSchedulerServiceRequestContext(runId: string, agentName: string | undefined) {
+  const ownerId = normalizedServiceAgentName(agentName);
+  return {
+    authority: {
+      principalId: schedulerServicePrincipalId,
+      tenantId: 'bureau',
+      ownerId,
+      capabilities: Object.freeze([toolExecutionCapability]),
+      authorizationRevision: schedulerServiceAuthorizationRevision,
+    },
+    audience: 'operator',
+    agentId: ownerId,
+    runId,
+  } satisfies ToolRequestContext;
+}
+
+function schedulerServiceRequestContextForRuntime(
+  request: CreateRunRequest & { sessionId: string; runId?: string },
+): ToolRequestContext | undefined {
+  const schedulerRunId =
+    request.runId?.startsWith(SCHEDULER_RUN_ID_PREFIX) === true
+      ? request.runId
+      : request.sessionId.startsWith(schedulerTaskIdPrefix)
+        ? (request.runId ?? request.sessionId)
+        : undefined;
+  return schedulerRunId === undefined
+    ? undefined
+    : createSchedulerServiceRequestContext(schedulerRunId, request.agentName);
+}
+
+function withDefaultToolboxRequestContext(
+  toolbox: AnyToolbox,
+  requestContext: ToolRequestContext | undefined,
+): AnyToolbox {
+  if (!requestContext) return toolbox;
+
+  const executeWithDefaultRequestContext = ((
+    input: ToolCallInput | ToolCallInput[],
+    executeOptions?: ToolboxExecuteOptions,
+  ) => {
+    const options =
+      executeOptions?.requestContext === undefined
+        ? { ...(executeOptions ?? {}), requestContext }
+        : executeOptions;
+    return Array.isArray(input) ? toolbox.execute(input, options) : toolbox.execute(input, options);
+  }) as AnyToolbox['execute'];
+
+  return new Proxy(toolbox, {
+    get(target, property, receiver) {
+      if (property === 'execute') return executeWithDefaultRequestContext;
+      return Reflect.get(target, property, receiver) as unknown;
+    },
+  });
 }
 
 /**
@@ -1410,6 +1490,8 @@ export async function createRuntimeComposition(
     },
   ) {
     const liveStreaming = runtimeOptions?.liveStreaming ?? true;
+    const requestContext =
+      request.requestContext ?? schedulerServiceRequestContextForRuntime(request);
     // AB-40 — the auto-wired default guardrail preset (`options.guardrails ===
     // undefined`) runs its output PII validator in `mode: 'tripwire'` against
     // the FULL response content in `validateResponse`, which only runs after
@@ -1551,9 +1633,10 @@ export async function createRuntimeComposition(
       validateResponse.push(guardrails.validateResponse);
     }
 
+    const runToolbox = withDefaultToolboxRequestContext(toolbox, requestContext);
     return Promise.resolve({
       generate,
-      toolbox,
+      toolbox: runToolbox,
       prepareStep,
       onStep,
       validateResponse,
@@ -1928,9 +2011,10 @@ export async function createRuntimeComposition(
       runId,
       isRecoveredFireReplay,
     );
+    const requestContext = createSchedulerServiceRequestContext(runId, agentName);
 
     const runRuntime = await createRunRuntime(
-      { message: scheduledInput.input, sessionId, runId, agentName },
+      { message: scheduledInput.input, sessionId, runId, agentName, requestContext },
       { liveStreaming: false, initialActiveSkills },
     );
 
@@ -1961,6 +2045,7 @@ export async function createRuntimeComposition(
           ),
         ],
         validateResponse: runRuntime.validateResponse,
+        executeOptions: { requestContext },
         agentName,
         runId,
       },

@@ -1,4 +1,6 @@
+import type { ToolRequestContext } from 'armorer';
 import { BureauError } from 'bureau';
+import type { Context } from 'hono';
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 
@@ -7,6 +9,63 @@ import { assembleRunTimeline } from '../timeline';
 import type { Bureau, CreateRunRequest, PendingReview, RunDetail } from '../types';
 
 export { assembleRunTimeline, type RunTimelineEntry, type RunTimelineEntryKind } from '../timeline';
+
+const defaultBureauAgentName = 'bureau';
+const toolExecutionCapability = 'tools:execute';
+
+function publicCreateRunRequest(
+  body: CreateRunRequest,
+): Omit<CreateRunRequest, 'principal' | 'requestContext'> {
+  const request: Omit<CreateRunRequest, 'principal' | 'requestContext'> = { message: body.message };
+  if (body.sessionId !== undefined) request.sessionId = body.sessionId;
+  if (body.systemPrompt !== undefined) request.systemPrompt = body.systemPrompt;
+  if (body.maximumSteps !== undefined) request.maximumSteps = body.maximumSteps;
+  if (body.maximumTokens !== undefined) request.maximumTokens = body.maximumTokens;
+  if (body.agentName !== undefined) request.agentName = body.agentName;
+  return request;
+}
+
+function gatewayAuthorityOwnerId(agentName: string | undefined): string {
+  const trimmed = agentName?.trim();
+  return trimmed && trimmed.length > 0 ? trimmed : defaultBureauAgentName;
+}
+
+function parseGatewayScopes(scopesHeader: string | undefined): string[] {
+  if (scopesHeader === undefined) return [];
+  return scopesHeader
+    .split(',')
+    .map((scope) => scope.trim())
+    .filter((scope) => scope.length > 0);
+}
+
+function trustedGatewayRequestContext(
+  context: Context,
+  agentName: string | undefined,
+): ToolRequestContext | undefined {
+  const principal = context.req.header('x-auth-principal');
+  if (!principal) return undefined;
+
+  const apiKeyId = context.req.header('x-api-key-id');
+  const capabilities = Array.from(
+    new Set([
+      toolExecutionCapability,
+      ...parseGatewayScopes(context.req.header('x-api-key-scopes')),
+    ]),
+  );
+  const ownerId = gatewayAuthorityOwnerId(agentName);
+
+  return {
+    authority: {
+      principalId: principal,
+      tenantId: 'bureau',
+      ownerId,
+      capabilities,
+      authorizationRevision:
+        apiKeyId === undefined ? `gateway:${principal}` : `gateway:api-key:${apiKeyId}`,
+    },
+    audience: 'operator',
+  };
+}
 
 export function createRunsRoutes(bureau: Bureau) {
   const app = new Hono();
@@ -22,7 +81,13 @@ export function createRunsRoutes(bureau: Bureau) {
       // Overwrite any caller-supplied `principal` with the authenticated
       // principal from the verified request header — never trust it from an
       // untrusted request body (AB-54 usage analytics attribution).
-      const summary = await bureau.createRun({ ...body, principal: resolvePrincipal(context) });
+      const request = publicCreateRunRequest(body);
+      const requestContext = trustedGatewayRequestContext(context, request.agentName);
+      const summary = await bureau.createRun({
+        ...request,
+        principal: resolvePrincipal(context),
+        ...(requestContext ? { requestContext } : {}),
+      });
       return context.json(summary, 201);
     } catch (error) {
       if (error instanceof BureauError) {

@@ -4112,6 +4112,7 @@ describe('createBureau review queue (AB-20)', () => {
       ]),
       toolbox: createRegatingApprovalToolbox('test-secret-3', charges),
       stopWhen: stopWhen.toolOutcome('action_required'),
+      storage: { type: 'memory' },
     });
 
     const run = await bureau.createRun({ message: 'Charge the customer' });
@@ -4133,6 +4134,10 @@ describe('createBureau review queue (AB-20)', () => {
     const stillPending = bureau.listPendingReviews();
     expect(stillPending).toHaveLength(1);
     expect(stillPending[0]!.id).toBe(review!.id);
+    const persistedSession = await bureau.getSession(run.sessionId);
+    expect(persistedSession?.metadata['pendingApprovalOverrides']).toMatchObject({
+      [review!.id]: expect.objectContaining({ approvalToken: expect.any(String) }),
+    });
 
     bureau.dispose();
   });
