@@ -1067,19 +1067,15 @@ export function createTool<
         meta.callId = typedToolCall.id;
       }
 
-      // Resolve lazy executors before consuming an approval. A rejected
-      // executor cannot execute, so its approval must remain available for a
-      // later retry after the executor is repaired or replaced.
-      const resolvedExecute = await resolveExecute();
-      let rollbackApprovalAdmission: ApprovalAdmissionRollback | undefined;
-      if (options[approvalConsumeSymbol]) {
-        rollbackApprovalAdmission = await options[approvalConsumeSymbol]();
-      }
-      if (options.signal?.aborted) {
-        if (rollbackApprovalAdmission) await rollbackApprovalAdmission();
-        return handleCancellation(options.signal.reason);
-      }
       if (options[policyAuthorizationOnlySymbol]) {
+        let rollbackApprovalAdmission: ApprovalAdmissionRollback | undefined;
+        if (options[approvalConsumeSymbol]) {
+          rollbackApprovalAdmission = await options[approvalConsumeSymbol]();
+        }
+        if (options.signal?.aborted) {
+          if (rollbackApprovalAdmission) await rollbackApprovalAdmission();
+          return handleCancellation(options.signal.reason);
+        }
         emit('execute-success', { ...parsedDetail, result: undefined });
         emit('settled', { ...parsedDetail, result: undefined });
         await runPolicyAfter({
@@ -1099,6 +1095,20 @@ export function createTool<
           executedArgumentsEdited,
           inputDigest,
         };
+      }
+
+      // Resolve lazy executors before consuming an approval. A rejected
+      // executor cannot execute, so its approval must remain available for a
+      // later retry after the executor is repaired or replaced. Authorization
+      // checks return above without resolving the executor at all.
+      const resolvedExecute = await resolveExecute();
+      let rollbackApprovalAdmission: ApprovalAdmissionRollback | undefined;
+      if (options[approvalConsumeSymbol]) {
+        rollbackApprovalAdmission = await options[approvalConsumeSymbol]();
+      }
+      if (options.signal?.aborted) {
+        if (rollbackApprovalAdmission) await rollbackApprovalAdmission();
+        return handleCancellation(options.signal.reason);
       }
 
       const toolContext: ToolContext<E> = {

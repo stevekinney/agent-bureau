@@ -14,6 +14,7 @@ import {
   ApprovalBindingError,
   type ApprovalStateStore,
   createProcessLocalApprovalStateStore,
+  validateApprovalBinding,
 } from './approval-binding';
 import type { ApprovalPolicyConfiguration } from './approval-policy';
 import { approvalStatusToDecision, evaluateCapabilityApproval } from './approval-policy';
@@ -1475,12 +1476,22 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     if (!currentTool) {
       throw new Error(`Tool not found: ${approval.toolName}`);
     }
-    const parsedArguments = await currentTool.input.safeParseAsync(executeArguments);
-    if (!parsedArguments.success) {
-      throw parsedArguments.error;
-    }
-    let consumeApproval: (() => Promise<ApprovalAdmissionRollback>) | undefined;
-    let consumeError: unknown;
+    let approvalContext:
+      | {
+          principalId: string;
+          tenantId: string;
+          ownerId: string;
+          authorizationRevision: string;
+          capabilitiesRevision: string;
+          audience: NonNullable<ToolRequestContext['audience']>;
+          agentId: string;
+          runId: string;
+          toolboxRevision: string;
+          toolDefinitionRevision: string;
+          policyRevision: string;
+          approvalRevision: string;
+        }
+      | undefined;
     if (approvalStateStore) {
       const requestContext = resumeOptions?.requestContext;
       if (
@@ -1489,9 +1500,9 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
         !requestContext.audience ||
         !approval.approvalBinding
       ) {
-        return Promise.reject(new Error('Request context and approval binding are required.'));
+        throw new Error('Request context and approval binding are required.');
       }
-      const approvalContext = {
+      approvalContext = {
         principalId: requestContext.authority.principalId,
         tenantId: requestContext.authority.tenantId,
         ownerId: requestContext.authority.ownerId,
@@ -1507,6 +1518,28 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
         policyRevision,
         approvalRevision,
       };
+      validateApprovalBinding(approval.approvalBinding, approvalContext);
+      const state = await approvalStateStore.state(approval.approvalBinding);
+      if (state === undefined) {
+        throw new ApprovalBindingError('Approval binding was not found.', 'not-found');
+      }
+      if (state === 'revoked') {
+        throw new ApprovalBindingError('Approval binding was revoked.', 'revoked');
+      }
+      if (state === 'consumed') {
+        throw new ApprovalBindingError(
+          'Approval binding has already been consumed.',
+          'already-consumed',
+        );
+      }
+    }
+    const parsedArguments = await currentTool.input.safeParseAsync(executeArguments);
+    if (!parsedArguments.success) {
+      throw parsedArguments.error;
+    }
+    let consumeApproval: (() => Promise<ApprovalAdmissionRollback>) | undefined;
+    let consumeError: unknown;
+    if (approvalStateStore && approvalContext) {
       consumeApproval = async () => {
         let reserved = false;
         try {

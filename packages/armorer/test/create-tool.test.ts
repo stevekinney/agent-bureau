@@ -2096,6 +2096,61 @@ describe('isTool', () => {
     expect(settled).toBe(1);
   });
 
+  it('does not resolve lazy executors for authorization-only executions', async () => {
+    let resolveExecutor:
+      ((executor: (params: { value: string }) => Promise<string>) => void) | undefined;
+    let executorResolved = false;
+    const executePromise = new Promise<(params: { value: string }) => Promise<string>>(
+      (resolve) => {
+        resolveExecutor = (executor) => {
+          executorResolved = true;
+          resolve(executor);
+        };
+      },
+    );
+    const tool = createTool({
+      name: 'authorization-only-lazy-executor',
+      description: 'checks authorization without loading execution',
+      input: z.object({ value: z.string() }),
+      execute: executePromise,
+    });
+
+    const result = await tool.execute(
+      createToolCall('authorization-only-lazy-executor', { value: 'x' }),
+      { [policyAuthorizationOnlySymbol]: true },
+    );
+
+    expect(result.outcome).toBe('success');
+    expect(executorResolved).toBe(false);
+    resolveExecutor?.(async ({ value }) => value);
+  });
+
+  it('rolls back approval admission when authorization-only execution is aborted', async () => {
+    const controller = new AbortController();
+    let rollbackCount = 0;
+    const tool = createTool({
+      name: 'authorization-only-abort',
+      description: 'checks cancellation after approval admission',
+      input: z.object({}),
+      execute: async () => 'unexpected',
+    });
+
+    const result = await tool.execute(createToolCall('authorization-only-abort', {}), {
+      signal: controller.signal,
+      [policyAuthorizationOnlySymbol]: true,
+      [approvalConsumeSymbol]: async () => {
+        controller.abort('authorization cancelled');
+        return async () => {
+          rollbackCount += 1;
+        };
+      },
+    });
+
+    expect(result.outcome).toBe('error');
+    expect(result.errorMessage).toBe('authorization cancelled');
+    expect(rollbackCount).toBe(1);
+  });
+
   it('computes input and output digests when enabled', async () => {
     const tool = createTool({
       name: 'digest',

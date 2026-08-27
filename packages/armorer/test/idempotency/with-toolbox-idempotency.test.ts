@@ -1810,6 +1810,7 @@ describe('withToolboxIdempotency', () => {
       { name: 'add', arguments: { a: 1, b: 2 } },
       {
         idempotencyKey: 'replacement-race',
+        requestContext: createTestRequestContext('tenant-a'),
         resolutionReceipt: {
           version: 1,
           key,
@@ -1841,6 +1842,7 @@ describe('withToolboxIdempotency', () => {
       { name: 'add', arguments: { a: 1, b: 2 } },
       {
         idempotencyKey: 'replacement-race',
+        requestContext: createTestRequestContext('tenant-a'),
         resolutionReceipt: {
           version: 1,
           key,
@@ -1875,6 +1877,7 @@ describe('withToolboxIdempotency', () => {
       { name: 'add', arguments: { a: 1, b: 2 } },
       {
         idempotencyKey: 'replacement-race',
+        requestContext: createTestRequestContext('tenant-a'),
         resolutionReceipt: {
           version: 1,
           key,
@@ -1941,6 +1944,7 @@ describe('withToolboxIdempotency', () => {
       { name: 'add', arguments: { a: 1, b: 2 } },
       {
         idempotencyKey: 'fresh-retry-clock',
+        requestContext: createTestRequestContext('tenant-a'),
         resolutionReceipt: {
           version: 1,
           key,
@@ -2014,6 +2018,7 @@ describe('withToolboxIdempotency', () => {
       { id: 'retry', name: 'add', arguments: { a: 1, b: 2 } },
       {
         idempotencyKey: 'active-lease',
+        requestContext: createTestRequestContext('tenant-a'),
         resolutionReceipt: {
           version: 1,
           key,

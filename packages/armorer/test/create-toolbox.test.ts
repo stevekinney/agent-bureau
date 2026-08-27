@@ -764,6 +764,43 @@ describe('createToolbox', () => {
       ),
     ).rejects.toThrow('already been consumed');
     expect(policyStore.consumeCount).toBe(1);
+
+    const missingBaseStore = createProcessLocalApprovalStateStore();
+    const missingStateToolbox = createApprovalToolbox({
+      ...missingBaseStore,
+      state: async () => undefined,
+    });
+    const missingStateApproval = await missingStateToolbox.execute(
+      { id: 'missing-state-admission', name: 'admission-gated-action', arguments: {} },
+      approvalExecutionOptions,
+    );
+    await expect(
+      missingStateToolbox.resumeApproval(
+        missingStateApproval.pendingApproval as SignedPendingToolApproval,
+        approvalExecutionOptions,
+      ),
+    ).rejects.toThrow('not found');
+
+    const failedCommitBaseStore = createProcessLocalApprovalStateStore();
+    const failedCommitToolbox = createApprovalToolbox({
+      ...failedCommitBaseStore,
+      commit: async () => {
+        throw new Error('approval commit race');
+      },
+    });
+    const failedCommitApproval = await failedCommitToolbox.execute(
+      { id: 'failed-commit-admission', name: 'admission-gated-action', arguments: {} },
+      approvalExecutionOptions,
+    );
+    await expect(
+      failedCommitToolbox.resumeApproval(
+        failedCommitApproval.pendingApproval as SignedPendingToolApproval,
+        approvalExecutionOptions,
+      ),
+    ).rejects.toThrow('approval commit race');
+    expect(
+      await failedCommitBaseStore.state(failedCommitApproval.pendingApproval!.approvalBinding!),
+    ).toBe('issued');
   });
 
   it('requires versioned tool definitions for durable approvals and invalidates revisions', async () => {
@@ -867,6 +904,12 @@ describe('createToolbox', () => {
       toolbox.resumeApproval(paused.pendingApproval as SignedPendingToolApproval),
     ).rejects.toThrow('Request context and approval binding are required');
     await toolbox.revokeApproval(paused.pendingApproval as SignedPendingToolApproval);
+    await expect(
+      toolbox.resumeApproval(paused.pendingApproval as SignedPendingToolApproval, {
+        arguments: { unexpected: true },
+        ...approvalExecutionOptions,
+      }),
+    ).rejects.toThrow('revoked');
     await expect(
       toolbox.resumeApproval(
         paused.pendingApproval as SignedPendingToolApproval,
