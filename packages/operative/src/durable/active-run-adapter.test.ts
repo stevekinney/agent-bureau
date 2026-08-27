@@ -1232,6 +1232,7 @@ describe('createRun with durable routing', () => {
 
 describe('createRecoveredRunEventSurface', () => {
   it('rebuilds curated and forwarded toolbox events with recovery stamps and cleanup', () => {
+    const callerAbortController = new AbortController();
     const tool = createTool({
       name: 'recovered-tool',
       description: 'A recovered-run event source',
@@ -1243,6 +1244,7 @@ describe('createRecoveredRunEventSurface', () => {
     const toolbox = createToolbox([tool]);
     const options = {
       ...runOptions(async () => ({ content: 'unused', toolCalls: [] })),
+      signal: callerAbortController.signal,
       toolbox: toolbox as unknown as RunOptions['toolbox'],
     };
     const services = { options, toolbox };
@@ -1285,6 +1287,11 @@ describe('createRecoveredRunEventSurface', () => {
     toolbox.dispatchEvent(new ToolboxSettledEvent({ tool, call, error: failure }));
 
     expect(services.options.toolbox).toBe(toolbox);
+    expect(services.options.signal).not.toBe(callerAbortController.signal);
+    expect(services.options.signal?.aborted).toBe(false);
+    surface.abort('recovered run stopped');
+    expect(services.options.signal?.aborted).toBe(true);
+    expect(services.options.signal?.reason).toBe('recovered run stopped');
     expect(services).toMatchObject({ emitter: surface.emitter });
     expect(forwardedTypes).toEqual(
       expect.arrayContaining([

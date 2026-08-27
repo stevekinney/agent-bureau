@@ -23,6 +23,20 @@ export {
 } from './approval-policy';
 export { combineToolboxes } from './combine-toolboxes';
 export type { ToolError, ToolErrorCategory } from './core/errors';
+export type {
+  BeginExecutionOptions,
+  ExecutionAbortSource,
+  ExecutionCleanupOutcome,
+  ExecutionCleanupReport,
+  ExecutionHandle,
+  ExecutionIdentity,
+  ExecutionLifecycle,
+  ExecutionLifecycleEvent,
+  ExecutionSelector,
+  ExecutionSnapshot,
+  ExecutionState,
+} from './execution-lifecycle';
+export { createExecutionLifecycle } from './execution-lifecycle';
 // `ToolDefinition` is part of the public `Tool` type's structure, so downstream
 // packages must be able to name it to emit their own declarations (TS2883).
 export type {

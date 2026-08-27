@@ -6,6 +6,7 @@ import { z } from 'zod';
 import type { ToolExecuteOptions } from '../src';
 import { createTool, createToolCall, isTool, lazy, withContext } from '../src';
 import { type ApprovalResumeState, approvalResumeSymbol } from '../src/internal/approval-resume';
+import { createConcurrencyLimiter } from '../src/utilities/concurrency';
 
 async function drainMicrotasks(): Promise<void> {
   for (let index = 0; index < 5; index++) {
@@ -100,6 +101,7 @@ describe('createTool', () => {
     expect(tool.input).toBeDefined();
     // String representations
     expect(tool.toString()).toContain('example');
+    expect(tool[Symbol.toPrimitive]('string')).toBe('example');
     expect(`${tool}`).toBe('example');
 
     // execute() validates then calls underlying fn
@@ -806,6 +808,8 @@ describe('createTool', () => {
     expect(result.stream).toBeDefined();
     expect(result.content).toBe('[stream]');
     expect(result.result).toBe(result.stream);
+    expect(tool.activeExecutions).toBe(1);
+    expect(tool.executions.inspect({ callId: 's1' })[0]?.state).toBe('streaming');
 
     const chunks: string[] = [];
     for await (const chunk of result.stream!) {
@@ -813,6 +817,103 @@ describe('createTool', () => {
     }
     expect(chunks).toEqual(['a', 'b']);
     expect(executeSuccess).toEqual([['a', 'b']]);
+    expect(tool.activeExecutions).toBe(0);
+    expect(tool.executions.inspect({ callId: 's1' })[0]?.state).toBe('terminal');
+  });
+
+  it('returns an unconsumed stream during owner shutdown', async () => {
+    let returned = 0;
+    const tool = createTool({
+      name: 'unconsumed-stream',
+      description: 'owns an unconsumed stream',
+      input: z.object({}),
+      async execute() {
+        return {
+          [Symbol.asyncIterator]() {
+            return {
+              async next() {
+                return new Promise<IteratorResult<string>>(() => {});
+              },
+              async return() {
+                returned += 1;
+                return { done: true as const, value: undefined };
+              },
+            };
+          },
+        };
+      },
+    });
+
+    const result = await tool.execute(
+      { id: 'unconsumed', name: tool.name, arguments: {} },
+      { stream: true },
+    );
+    expect(result.stream).toBeDefined();
+    await tool.complete();
+
+    expect(returned).toBe(1);
+    expect(tool.activeExecutions).toBe(0);
+    expect(tool.executions.inspect({ callId: 'unconsumed' })[0]).toMatchObject({
+      state: 'terminal',
+      cleanup: { status: 'completed' },
+    });
+  });
+
+  it('reports an unreturnable stream as an unknown effect during shutdown', async () => {
+    const tool = createTool({
+      name: 'unreturnable-stream',
+      description: 'has no iterator return method',
+      input: z.object({}),
+      async execute() {
+        return {
+          [Symbol.asyncIterator]() {
+            return {
+              async next() {
+                return new Promise<IteratorResult<string>>(() => {});
+              },
+            };
+          },
+        };
+      },
+    });
+
+    await tool.execute({ id: 'unreturnable', name: tool.name, arguments: {} }, { stream: true });
+    await tool.complete();
+
+    expect(tool.executions.inspect({ callId: 'unreturnable' })[0]).toMatchObject({
+      state: 'unknown-effect',
+      cleanup: { status: 'unresolved' },
+    });
+  });
+
+  it('reports stream return failures during shutdown', async () => {
+    const tool = createTool({
+      name: 'failing-stream-return',
+      description: 'fails iterator cleanup',
+      input: z.object({}),
+      async execute() {
+        return {
+          [Symbol.asyncIterator]() {
+            return {
+              async next() {
+                return new Promise<IteratorResult<string>>(() => {});
+              },
+              async return() {
+                throw new Error('stream return failed');
+              },
+            };
+          },
+        };
+      },
+    });
+
+    await tool.execute({ id: 'failing-return', name: tool.name, arguments: {} }, { stream: true });
+    await tool.complete();
+
+    expect(tool.executions.inspect({ callId: 'failing-return' })[0]).toMatchObject({
+      state: 'terminal',
+      cleanup: { status: 'failed' },
+    });
   });
 
   it('digests streams incrementally in collect mode', async () => {
@@ -1292,6 +1393,52 @@ describe('isTool', () => {
     // but native EventTarget still dispatches to active listeners.
     // The key assertion is that completed is true.
     expect(tool.completed).toBe(true);
+  });
+
+  it('completion aborts active execution and can be awaited until idle', async () => {
+    let observedSignal: AbortSignal | undefined;
+    const tool = createTool({
+      name: 'lifecycle-abort',
+      description: 'abort on completion',
+      input: z.object({}),
+      async execute(_params, context) {
+        observedSignal = context.signal;
+        await new Promise<void>((resolve) => {
+          context.signal?.addEventListener('abort', () => resolve(), { once: true });
+        });
+        return 'unreachable';
+      },
+    });
+
+    const pending = tool.executeWith({ params: {}, callId: 'lifecycle-1' });
+    while (!observedSignal) await Promise.resolve();
+    expect(tool.executionSignal.aborted).toBe(false);
+    const completion = tool.complete();
+    expect(tool.executionSignal.aborted).toBe(true);
+    expect(tool.activeExecutions).toBe(1);
+    await completion;
+    const result = await pending;
+    expect(result.errorCategory).toBe('cancelled');
+    expect(observedSignal?.aborted).toBe(true);
+    expect(tool.activeExecutions).toBe(0);
+    await tool.whenIdle();
+    await tool.complete();
+  });
+
+  it('tracks synchronous callback results through the execution lifecycle', async () => {
+    const tool = createTool({
+      name: 'synchronous-lifecycle',
+      description: 'returns without creating a promise',
+      input: z.object({}),
+      execute: () => 'synchronous result',
+    });
+
+    const result = await tool.executeWith({ params: {}, callId: 'synchronous-call' });
+
+    expect(result.result).toBe('synchronous result');
+    expect(tool.executions.inspect({ callId: 'synchronous-call' })).toEqual([
+      expect.objectContaining({ state: 'terminal', result }),
+    ]);
   });
 
   it('direct call emits validate-error and settled on parse failure', async () => {
@@ -1867,6 +2014,77 @@ describe('isTool', () => {
     expect(max).toBe(1);
   });
 
+  it('releases a concurrency slot when an admitted task throws synchronously', async () => {
+    const limiter = createConcurrencyLimiter(1)!;
+    const failure = limiter.run(() => {
+      throw new Error('synchronous failure');
+    });
+    await expect(failure).rejects.toThrow('synchronous failure');
+    await expect(limiter.run(async () => 'available')).resolves.toBe('available');
+  });
+
+  it('removes an aborted queued execution without consuming a concurrency slot', async () => {
+    let releaseFirst!: () => void;
+    let runs = 0;
+    const tool = createTool({
+      name: 'queued-abort',
+      description: 'queued cancellation',
+      input: z.object({}),
+      concurrency: 1,
+      async execute() {
+        runs += 1;
+        if (runs === 1) await new Promise<void>((resolve) => (releaseFirst = resolve));
+        return runs;
+      },
+    });
+    const first = tool.executeWith({ params: {}, callId: 'active-call' });
+    while (runs === 0) await Promise.resolve();
+    const controller = new AbortController();
+    const queued = tool.executeWith({
+      params: {},
+      callId: 'queued-call',
+      signal: controller.signal,
+    });
+    controller.abort('cancelled while queued');
+
+    await expect(queued).resolves.toMatchObject({ errorCategory: 'cancelled' });
+    expect(runs).toBe(1);
+    expect(tool.executions.inspect({ callId: 'queued-call' })[0]).toMatchObject({
+      state: 'terminal',
+      abortSource: 'caller',
+    });
+    releaseFirst();
+    await first;
+  });
+
+  it('normalizes cancellation for a queued execute call', async () => {
+    let releaseFirst!: () => void;
+    let runs = 0;
+    const tool = createTool({
+      name: 'queued-execute-abort',
+      description: 'queued execute cancellation',
+      input: z.object({}),
+      concurrency: 1,
+      async execute() {
+        runs += 1;
+        if (runs === 1) await new Promise<void>((resolve) => (releaseFirst = resolve));
+        return runs;
+      },
+    });
+    const first = tool.execute({ id: 'first', name: tool.name, arguments: {} });
+    while (runs === 0) await Promise.resolve();
+    const controller = new AbortController();
+    const queued = tool.execute(
+      { id: 'second', name: tool.name, arguments: {} },
+      { signal: controller.signal },
+    );
+    controller.abort('cancelled while queued');
+
+    await expect(queued).resolves.toMatchObject({ errorCategory: 'cancelled' });
+    releaseFirst();
+    await first;
+  });
+
   it('executeWith supports timeouts and normalizes timeout error', async () => {
     const timing = createManualExecutionTiming();
     const tool = createTool({
@@ -1888,6 +2106,43 @@ describe('isTool', () => {
     const res = await pending;
     expect(res.error?.category).toBe('timeout');
     expect(res.error?.code).toBe('TIMEOUT');
+  });
+
+  it('keeps an ignored timeout abort observable until the callback actually settles', async () => {
+    const timing = createManualExecutionTiming();
+    let releaseCallback!: () => void;
+    let observedSignal: AbortSignal | undefined;
+    const tool = createTool({
+      name: 'ignored-timeout',
+      description: 'ignores abort until released',
+      input: z.object({}),
+      async execute(_params, context) {
+        observedSignal = context.signal;
+        await new Promise<void>((resolve) => (releaseCallback = resolve));
+        return 'late effect';
+      },
+    });
+    const pending = tool.executeWith({
+      params: {},
+      callId: 'ignored-timeout-call',
+      timeout: 1,
+      ...timing.options,
+    });
+    await drainMicrotasks();
+    timing.fireTimeout();
+    await expect(pending).resolves.toMatchObject({ errorCategory: 'timeout' });
+    expect(observedSignal?.aborted).toBe(true);
+    expect(tool.executions.inspect({ callId: 'ignored-timeout-call' })[0]?.state).toBe(
+      'cleanup-pending',
+    );
+    expect(tool.activeExecutions).toBe(1);
+    releaseCallback();
+    await drainMicrotasks();
+    expect(tool.executions.inspect({ callId: 'ignored-timeout-call' })[0]).toMatchObject({
+      state: 'terminal',
+      result: 'late effect',
+    });
+    expect(tool.activeExecutions).toBe(0);
   });
 
   it('executeWith clears the timeout when execution succeeds', async () => {

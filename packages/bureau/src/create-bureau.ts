@@ -584,9 +584,6 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   const ownsStore = !options.store;
   const store: Store = options.store ?? createStore();
   const emitter = new CompletableEventTarget<BureauEventMap>();
-  // Tracks whether dispose() has run, so a second call is a safe no-op (closing
-  // an already-closed SQLite handle is runtime-dependent).
-  let disposed = false;
   const runtime = await createRuntimeComposition(options);
   // AB-13 — declarative flow control (concurrency/rate-limit/singleton). One
   // controller instance shared across BOTH `createRun` (API-triggered) and
@@ -596,6 +593,9 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     ? createFlowController(options.flowControl)
     : undefined;
   const runSessionIdentifiers = new WeakMap<ActiveRun, string>();
+  const activeRuns = new Set<ActiveRun>();
+  const runToolboxes = new Set<BureauToolbox>();
+  let disposePromise: Promise<void> | undefined;
   // Ids of PendingReview items already resolved via resolveReview() (AB-20).
   // Neither resolution path (resumeApproval, signalSession) mutates the live
   // store in a way listPendingReviews() can detect on its own — resumeApproval
@@ -1103,6 +1103,8 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
             }
           : undefined,
       );
+      activeRuns.add(activeRun);
+      runToolboxes.add(runToolbox);
 
       // AB-96 — the versioned run-lifecycle frame stream. Registered before
       // `store.register` so `run-started` is the first frame a live subscriber
@@ -1135,6 +1137,8 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       }
 
       activeRun.once('run.completed', (event) => {
+        activeRuns.delete(activeRun);
+        runToolboxes.delete(runToolbox);
         disposeRegisteredStreamListeners(disposeStreamListeners);
         flowController?.settle(runId);
 
@@ -1174,6 +1178,8 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       });
 
       activeRun.once('run.aborted', (event) => {
+        activeRuns.delete(activeRun);
+        runToolboxes.delete(runToolbox);
         disposeRegisteredStreamListeners(disposeStreamListeners);
         flowController?.settle(runId);
 
@@ -1229,6 +1235,8 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       });
 
       activeRun.once('run.error', (_event) => {
+        activeRuns.delete(activeRun);
+        runToolboxes.delete(runToolbox);
         disposeRegisteredStreamListeners(disposeStreamListeners);
         flowController?.settle(runId);
       });
@@ -1285,6 +1293,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
           ? {
               emitter: eventSurface.emitter,
               stopToolboxForward: eventSurface.stopToolboxForward,
+              abort: eventSurface.abort,
             }
           : {}),
       },
@@ -1315,6 +1324,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     // adapter stays write-free for those and the resolver/teardown owns the
     // session status; so these listeners only run for a genuinely settled run.
     recoveredRun.once('run.completed', (event) => {
+      activeRuns.delete(recoveredRun);
       disposeRecoveredRunFrameForwarder();
       const completedConversation = event.conversation;
       const finishReason = event.finishReason;
@@ -1344,6 +1354,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     });
 
     recoveredRun.once('run.aborted', (event) => {
+      activeRuns.delete(recoveredRun);
       disposeRecoveredRunFrameForwarder();
       const abortedConversation = event.conversation;
 
@@ -1381,6 +1392,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     // subscription that starts stamping frames — see `seedRunSeqGeneration`.
     seedRunSeqGeneration(runId);
     store.register(recoveredRun, runId);
+    activeRuns.add(recoveredRun);
     runSessionIdentifiers.set(recoveredRun, sessionId);
 
     // AB-12 — stamp a `workflow.reattached` marker into this run's action
@@ -2299,103 +2311,127 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     };
   }
 
-  function dispose(): void {
+  function dispose(): Promise<void> {
     // Idempotency guard: dispose() may be called more than once (the harness
     // does in tests, and `[Symbol.dispose]` may re-enter). Disposing the engine
     // and especially the raw Storage twice can close an already-closed SQLite
     // connection; a second pass is a no-op.
-    if (disposed) return;
-    disposed = true;
+    if (disposePromise) return disposePromise;
 
-    // All pre-teardown is BEST-EFFORT, and the whole body is under an OUTER
-    // try/finally so the critical backend teardown (engine → storage → store)
-    // ALWAYS runs. The async steps (`scheduler.stop`, `memory.close`) are
-    // already `.catch`'d; the synchronous steps below are equally fallible —
-    // `emitter.dispatch`/`emitter.complete` route through
-    // `CompletableEventTarget.dispatchEvent`, which loops over `toObservable()`
-    // subscribers WITHOUT a try/catch, so a subscriber whose `next`/`complete`
-    // throws propagates straight back here. That path is reachable through the
-    // public Bureau surface (`toObservable()`), so the synchronous pre-teardown
-    // is wrapped to swallow-and-log: a throwing subscriber must not strand the
-    // SQLite/LMDB handle behind the now-`true` `disposed` guard (a second
-    // dispose no-ops), leaking it permanently. Covered by the
-    // "toObservable subscriber throws during dispose" regression test.
-    try {
-      if (runtime.scheduler) {
-        detachBestEffortPromise(runtime.scheduler.stop());
-      }
-
-      if (runtime.memory) {
-        detachBestEffortPromise(runtime.memory.close());
-      }
-
-      try {
-        // Dispose the audit trail and webhook notifier before emitting
-        // bureau.disposed so any in-flight write/delivery callbacks are
-        // unsubscribed cleanly (the notifier also abandons in-flight backoff
-        // waits so a disposed bureau never fires a webhook late).
-        auditTrailInstance?.dispose();
-        webhookNotifierInstance?.dispose();
-        onlineEvalSamplerInstance?.dispose();
-        emitter.dispatch(new BureauDisposedEvent());
-        storeSubscription.unsubscribe();
-        for (const disposeListener of schedulerCleanup) {
-          disposeListener();
+    disposePromise = (async () => {
+      // Stop admission before cancelling runs. The canonical toolbox is the
+      // owner of local execution lifecycle; await its shutdown as the
+      // quiescence fence before releasing durable resources.
+      runtime.baseToolbox.closeAdmission();
+      for (const toolbox of runToolboxes) toolbox.closeAdmission();
+      for (const activeRun of activeRuns) activeRun.abort('Bureau disposed');
+      const toolboxes = [runtime.baseToolbox, ...runToolboxes];
+      const toolboxShutdownResults = await Promise.allSettled(
+        toolboxes.map((toolbox) =>
+          toolbox.shutdown({ policy: 'abort', reason: 'Bureau disposed' }),
+        ),
+      );
+      for (const result of toolboxShutdownResults) {
+        if (result.status === 'rejected') {
+          diagnose({
+            level: 'error',
+            scope: 'dispose',
+            message: `[bureau] Error during toolbox shutdown: ${serializeUnknownError(result.reason)}`,
+          });
         }
-        for (const disposeListener of flowControlSchedulerCleanup) {
-          disposeListener();
-        }
-        emitter.complete();
-      } catch (error) {
-        diagnose({
-          level: 'error',
-          scope: 'dispose',
-          message: `[bureau] Error during dispose pre-teardown: ${serializeUnknownError(error)}`,
-        });
       }
-    } finally {
-      // The per-run `resolveWorkflowServices` resolver is engine-scoped and is
-      // released when the engine is disposed below — there is no module-global
-      // reconstructor to clear here anymore.
-      //
-      // Dispose the durable run engine, then the raw Storage, then the store —
-      // each guarded so a throw in one stage does not skip the next (engine
-      // dispose is synchronous and can throw in a degraded environment; the
-      // SQLite/LMDB handle must still be released).
-      //
-      // Durable execution is ON BY DEFAULT for a persistent storage backend, so
-      // most sqlite/lmdb bureaus now own an engine. The engine dispose does NOT
-      // close the raw Storage, and the KV/checkpoint views were created with
-      // `disposeUnderlyingStorage: false` — so the explicit `disposeStorage` is
-      // what actually releases the file handle (even when no engine was built,
-      // e.g. `durableExecution: false` with sqlite).
+
+      // All pre-teardown is BEST-EFFORT, and the whole body is under an OUTER
+      // try/finally so the critical backend teardown (engine → storage → store)
+      // ALWAYS runs. The async steps (`scheduler.stop`, `memory.close`) are
+      // already `.catch`'d; the synchronous steps below are equally fallible —
+      // `emitter.dispatch`/`emitter.complete` route through
+      // `CompletableEventTarget.dispatchEvent`, which loops over `toObservable()`
+      // subscribers WITHOUT a try/catch, so a subscriber whose `next`/`complete`
+      // throws propagates straight back here. That path is reachable through the
+      // public Bureau surface (`toObservable()`), so the synchronous pre-teardown
+      // is wrapped to swallow-and-log: a throwing subscriber must not strand the
+      // SQLite/LMDB handle behind the now-`true` `disposed` guard (a second
+      // dispose no-ops), leaking it permanently. Covered by the
+      // "toObservable subscriber throws during dispose" regression test.
       try {
-        // Observability dispose runs BEFORE engine dispose: it ends still-open
-        // spans and unsubscribes the engine lifecycle listeners. If the engine
-        // were disposed first, those listeners would already be gone, so the spans
-        // they would have closed in response to the engine's terminal-disposal
-        // events would leak instead. Best-effort — a throw here must not skip the
-        // backend teardown below.
+        if (runtime.scheduler) {
+          detachBestEffortPromise(runtime.scheduler.stop());
+        }
+
+        if (runtime.memory) {
+          detachBestEffortPromise(runtime.memory.close());
+        }
+
         try {
-          runtime.durable?.observability?.dispose();
+          // Dispose the audit trail and webhook notifier before emitting
+          // bureau.disposed so any in-flight write/delivery callbacks are
+          // unsubscribed cleanly (the notifier also abandons in-flight backoff
+          // waits so a disposed bureau never fires a webhook late).
+          auditTrailInstance?.dispose();
+          webhookNotifierInstance?.dispose();
+          onlineEvalSamplerInstance?.dispose();
+          emitter.dispatch(new BureauDisposedEvent());
+          storeSubscription.unsubscribe();
+          for (const disposeListener of schedulerCleanup) {
+            disposeListener();
+          }
+          for (const disposeListener of flowControlSchedulerCleanup) {
+            disposeListener();
+          }
+          emitter.complete();
         } catch (error) {
           diagnose({
             level: 'error',
             scope: 'dispose',
-            message: `[bureau] Error disposing durable observability: ${serializeUnknownError(error)}`,
+            message: `[bureau] Error during dispose pre-teardown: ${serializeUnknownError(error)}`,
           });
         }
-        runtime.durable?.engine[Symbol.dispose]?.();
       } finally {
+        // The per-run `resolveWorkflowServices` resolver is engine-scoped and is
+        // released when the engine is disposed below — there is no module-global
+        // reconstructor to clear here anymore.
+        //
+        // Dispose the durable run engine, then the raw Storage, then the store —
+        // each guarded so a throw in one stage does not skip the next (engine
+        // dispose is synchronous and can throw in a degraded environment; the
+        // SQLite/LMDB handle must still be released).
+        //
+        // Durable execution is ON BY DEFAULT for a persistent storage backend, so
+        // most sqlite/lmdb bureaus now own an engine. The engine dispose does NOT
+        // close the raw Storage, and the KV/checkpoint views were created with
+        // `disposeUnderlyingStorage: false` — so the explicit `disposeStorage` is
+        // what actually releases the file handle (even when no engine was built,
+        // e.g. `durableExecution: false` with sqlite).
         try {
-          runtime.disposeStorage?.();
+          // Observability dispose runs BEFORE engine dispose: it ends still-open
+          // spans and unsubscribes the engine lifecycle listeners. If the engine
+          // were disposed first, those listeners would already be gone, so the spans
+          // they would have closed in response to the engine's terminal-disposal
+          // events would leak instead. Best-effort — a throw here must not skip the
+          // backend teardown below.
+          try {
+            runtime.durable?.observability?.dispose();
+          } catch (error) {
+            diagnose({
+              level: 'error',
+              scope: 'dispose',
+              message: `[bureau] Error disposing durable observability: ${serializeUnknownError(error)}`,
+            });
+          }
+          runtime.durable?.engine[Symbol.dispose]?.();
         } finally {
-          if (ownsStore) {
-            store.dispose();
+          try {
+            runtime.disposeStorage?.();
+          } finally {
+            if (ownsStore) {
+              store.dispose();
+            }
           }
         }
       }
-    }
+    })();
+    return disposePromise;
   }
 
   // Build the bureau object first so the audit trail (and webhook notifier)

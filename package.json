@@ -16,7 +16,7 @@
     "test:scripts": "bun test scripts",
     "verify:armorer:consumer": "bun run scripts/verify-armorer-consumer.ts --mode local",
     "prepare": "lefthook install",
-    "validate": "bun run check-changesets && turbo run format:check lint check-types test && bun run test:scripts",
+    "validate": "bun run check-changesets && turbo run format:check lint check-types test --concurrency=2 && bun run test:scripts",
     "changeset": "changeset",
     "version": "changeset version",
     "release": "bun run scripts/release.ts",

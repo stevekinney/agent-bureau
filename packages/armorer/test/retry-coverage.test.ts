@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
-import { retry } from '../src/utilities/retry';
+import { internalRetryTestUtilities, retry } from '../src/utilities/retry';
 
 describe('retry coverage edges', () => {
   const makeRawTool = (execute: (input: unknown) => Promise<unknown>) => {
@@ -120,5 +120,22 @@ describe('retry coverage edges', () => {
     await expect(
       (wrapped as any).execute({ value: 1 }, { signal: controller.signal }),
     ).rejects.toThrow('delay-stop');
+  });
+
+  it('uses the default delay before a successful retry', async () => {
+    let attempts = 0;
+    const flaky = makeRawTool(async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('retry once');
+      return 'ok';
+    });
+    const wrapped = retry(flaky, { attempts: 2, delayMs: 1 });
+
+    await expect(wrapped({ value: 1 })).resolves.toBe('ok');
+    expect(attempts).toBe(2);
+  });
+
+  it('supports the retry wait helper without a cancellation signal', async () => {
+    await expect(internalRetryTestUtilities.wait(0)).resolves.toBeUndefined();
   });
 });
