@@ -1347,10 +1347,26 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
               nonce: approvalNonce(),
               replayScope: `${requestContext.authority.tenantId}:${requestContext.runId}`,
             };
-            await approvalStateStore.issue(result.pendingApproval.approvalBinding);
           }
           if (result.pendingApproval && approvalSecret) {
             result.pendingApproval.approvalToken = signPendingApproval(result.pendingApproval);
+          }
+          if (
+            result.pendingApproval?.approvalBinding &&
+            result.pendingApproval.satisfiedPolicyPauses?.length &&
+            approvalStateStore &&
+            approvalConsumeSymbol in executeOptions
+          ) {
+            const consumeApproval = executeOptions[approvalConsumeSymbol];
+            const rollbackApprovalAdmission = consumeApproval ? await consumeApproval() : undefined;
+            try {
+              await approvalStateStore.issue(result.pendingApproval.approvalBinding);
+            } catch (error) {
+              if (rollbackApprovalAdmission) await rollbackApprovalAdmission();
+              throw error;
+            }
+          } else if (result.pendingApproval?.approvalBinding && approvalStateStore) {
+            await approvalStateStore.issue(result.pendingApproval.approvalBinding);
           }
           let hasLiveStream = false;
           const stream = resolveResultStream(result);

@@ -4987,6 +4987,18 @@ describe('createToolbox', () => {
   describe('status-only policy decisions', () => {
     it('requires distinct registry and tool pauses to be satisfied in policy order', async () => {
       let executed = false;
+      const baseApprovalStateStore = createProcessLocalApprovalStateStore();
+      let approvalIssueCount = 0;
+      const approvalStateStore: typeof baseApprovalStateStore = {
+        ...baseApprovalStateStore,
+        async issue(binding) {
+          approvalIssueCount += 1;
+          if (approvalIssueCount === 2) {
+            throw new Error('replacement approval issue failed');
+          }
+          await baseApprovalStateStore.issue(binding);
+        },
+      };
       const toolbox = createToolbox(
         [
           createTool({
@@ -5009,6 +5021,7 @@ describe('createToolbox', () => {
         ],
         {
           approvalSecret: 'multi-pause-secret',
+          approvalStateStore,
           policy: {
             beforeExecute: () => ({
               status: 'needs_approval',
@@ -5023,6 +5036,13 @@ describe('createToolbox', () => {
         { id: 'call-multi-pause', name: 'multi-pause-operation', arguments: {} },
         approvalExecutionOptions,
       );
+      expect(approvalIssueCount).toBe(1);
+      const failedTransition = await toolbox.resumeApproval(
+        registryPaused.pendingApproval! as SignedPendingToolApproval,
+        approvalExecutionOptions,
+      );
+      expect(approvalIssueCount).toBe(2);
+      expect(failedTransition.errorMessage).toContain('replacement approval issue failed');
       const toolPaused = await toolbox.resumeApproval(
         registryPaused.pendingApproval! as SignedPendingToolApproval,
         approvalExecutionOptions,
@@ -5056,6 +5076,12 @@ describe('createToolbox', () => {
           satisfiedPolicyPauses: [],
         }),
       ).toThrow('invalid approval token');
+      await expect(
+        toolbox.resumeApproval(
+          registryPaused.pendingApproval! as SignedPendingToolApproval,
+          approvalExecutionOptions,
+        ),
+      ).rejects.toThrow('already been consumed');
       expect(resumed.outcome).toBe('success');
       expect(resumed.result).toBe('completed');
       expect(executed).toBe(true);
