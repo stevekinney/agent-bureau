@@ -6,7 +6,7 @@
     "build": "turbo run build",
     "check-changesets": "bun run scripts/check-changesets.ts",
     "check-types": "turbo run check-types",
-    "coverage:check": "turbo run coverage:check --concurrency=2 --filter=armorer --filter=conversationalist --filter=evaluation --filter=interoperability --filter=lifecycle --filter=memory --filter=@lostgradient/operative --filter=skills --filter=bureau --filter=cloudflare",
+    "coverage:check": "turbo run coverage:check --concurrency=1 --filter=armorer --filter=conversationalist --filter=evaluation --filter=interoperability --filter=lifecycle --filter=memory --filter=@lostgradient/operative --filter=skills --filter=bureau --filter=cloudflare",
     "dev": "turbo run dev",
     "format": "prettier --write \"**/*.{ts,tsx,md}\"",
     "format:check": "turbo run format:check",
