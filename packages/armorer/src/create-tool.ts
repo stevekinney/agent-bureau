@@ -51,6 +51,7 @@ import {
 } from './execution-context';
 import { createExecutionLifecycle, type ExecutionHandle } from './execution-lifecycle';
 import {
+  approvalConsumeSymbol,
   type ApprovalResumeState,
   approvalResumeSymbol,
   policyPauseDecisionsSymbol,
@@ -92,6 +93,7 @@ function isAbortSignalLike(signal: MinimalAbortSignal | undefined): signal is Ab
 }
 
 type InternalToolExecuteOptions = ToolExecuteOptions & {
+  [approvalConsumeSymbol]?: () => Promise<void>;
   [approvalResumeSymbol]?: ApprovalResumeState;
   executionHandle?: ExecutionHandle;
   privilegedContextMirrorHandle?: ExecutionHandle;
@@ -1070,6 +1072,9 @@ export function createTool<
       // At runtime we can only guarantee the base ToolContext shape, so we cast to
       // avoid `exactOptionalPropertyTypes` assignability issues.
 
+      if (options[approvalConsumeSymbol]) {
+        await options[approvalConsumeSymbol]();
+      }
       const runner = Promise.resolve(resolvedExecute(parsed, toolContext as unknown as TContext));
       if (options.executionHandle) {
         void runner.then(

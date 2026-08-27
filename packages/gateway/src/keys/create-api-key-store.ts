@@ -5,6 +5,8 @@ import type { ApiKey, ApiKeyStore, CreateApiKeyOptions } from './types';
 
 const KEY_PREFIX = 'api-key:';
 const INVALID_SCOPE_ENTRY_MESSAGE = 'API key scope entries must be non-blank strings';
+const SCOPE_DELIMITER = ',';
+const INVALID_SCOPE_DELIMITER_MESSAGE = 'API key scope entries must not contain ","';
 
 export function normalizeApiKeyScopes(scopes: unknown): string[] {
   if (scopes === undefined) return [];
@@ -19,6 +21,9 @@ export function normalizeApiKeyScopes(scopes: unknown): string[] {
     const normalizedScope = scope.trim();
     if (normalizedScope.length === 0) {
       throw new Error(INVALID_SCOPE_ENTRY_MESSAGE);
+    }
+    if (normalizedScope.includes(SCOPE_DELIMITER)) {
+      throw new Error(INVALID_SCOPE_DELIMITER_MESSAGE);
     }
     normalizedScopes.push(normalizedScope);
   }
@@ -60,9 +65,9 @@ function parseApiKey(raw: string): ApiKey | undefined {
  */
 export function createApiKeyStore(kv: TextValueStore): ApiKeyStore {
   async function create(options: CreateApiKeyOptions): Promise<{ key: ApiKey; plaintext: string }> {
+    const scopes = normalizeApiKeyScopes(options.scopes);
     const plaintext = generateApiKey();
     const id = extractKeyId(plaintext);
-    const scopes = normalizeApiKeyScopes(options.scopes);
 
     // Guard against ID collision (extremely unlikely with 16 hex chars)
     const existing = await kv.get(`${KEY_PREFIX}${id}`);

@@ -58,6 +58,20 @@ describe('approval binding state', () => {
     }
   });
 
+  it('rejects bindings with missing or incorrectly typed required fields', () => {
+    const missingApprovalRevision = { ...binding } as Record<string, unknown>;
+    delete missingApprovalRevision['approvalRevision'];
+    expect(() => validateApprovalBinding(missingApprovalRevision as never)).toThrow(
+      'Invalid approval binding',
+    );
+    expect(() => validateApprovalBinding({ ...binding, audience: 'internal' as never })).toThrow(
+      'Invalid approval binding',
+    );
+    expect(() => validateApprovalBinding({ ...binding, nonce: 123 as never })).toThrow(
+      'Invalid approval binding',
+    );
+  });
+
   it('rejects non-finite process-local store clocks before reading or mutating state', async () => {
     const store = createProcessLocalApprovalStateStore(() => Number.POSITIVE_INFINITY);
 

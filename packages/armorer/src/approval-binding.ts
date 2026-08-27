@@ -84,9 +84,32 @@ export function validateApprovalBinding(
   context?: Partial<ApprovalBindingContext>,
   now = Date.now(),
 ): void {
+  const requiredStringFields = [
+    'principalId',
+    'tenantId',
+    'ownerId',
+    'authorizationRevision',
+    'capabilitiesRevision',
+    'agentId',
+    'runId',
+    'toolboxRevision',
+    'toolDefinitionRevision',
+    'policyRevision',
+    'approvalRevision',
+    'nonce',
+    'replayScope',
+  ] as const;
+  if (binding.version !== APPROVAL_BINDING_VERSION) {
+    throw new ApprovalBindingError('Invalid approval binding payload.', 'invalid-binding');
+  }
+  const candidate = binding as unknown as Record<string, unknown>;
   if (
-    binding.version !== APPROVAL_BINDING_VERSION ||
-    !Object.values(binding).every((value) => typeof value === 'number' || typeof value === 'string')
+    requiredStringFields.some(
+      (field) => typeof candidate[field] !== 'string' || candidate[field] === '',
+    ) ||
+    !['public', 'tenant', 'operator'].includes(candidate['audience'] as string) ||
+    typeof candidate['issuedAt'] !== 'number' ||
+    typeof candidate['expiresAt'] !== 'number'
   ) {
     throw new ApprovalBindingError('Invalid approval binding payload.', 'invalid-binding');
   }

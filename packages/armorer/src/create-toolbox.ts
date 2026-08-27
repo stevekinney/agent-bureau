@@ -93,6 +93,7 @@ import type {
 } from './execution-lifecycle';
 import { createExecutionLifecycle } from './execution-lifecycle';
 import {
+  approvalConsumeSymbol,
   type ApprovalResumeState,
   approvalResumeSymbol,
   policyPauseDecisionsSymbol,
@@ -388,6 +389,7 @@ type InternalToolboxExecuteOptions = ToolboxExecuteOptions & {
 };
 
 type InternalToolExecuteOptionsWithMirror = ToolboxExecuteOptions & {
+  [approvalConsumeSymbol]?: () => Promise<void>;
   [approvalResumeSymbol]?: ApprovalResumeState;
   executionHandle?: ExecutionHandle;
   privilegedContextMirrorHandle?: ExecutionHandle;
@@ -1245,7 +1247,8 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
             options?.elicit ||
             options?.requestContext ||
             durableOperationKey !== undefined ||
-            (options !== undefined && approvalResumeSymbol in options)
+            (options !== undefined && approvalResumeSymbol in options) ||
+            (options !== undefined && approvalConsumeSymbol in options)
               ? {
                   ...(durableOperationKey !== undefined ? { durableOperationKey } : {}),
                   ...(options?.signal ? { signal: options.signal } : {}),
@@ -1267,6 +1270,12 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
                   ...(hasSingleChild ? { executionHandle } : {}),
                   ...(options !== undefined && approvalResumeSymbol in options
                     ? { [approvalResumeSymbol]: options[approvalResumeSymbol] }
+                    : {}),
+                  ...(options !== undefined && approvalConsumeSymbol in options
+                    ? {
+                        [approvalConsumeSymbol]: options[approvalConsumeSymbol] as
+                          (() => Promise<void>) | undefined,
+                      }
                     : {}),
                 }
               : {};
@@ -1422,6 +1431,8 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     if (!parsedArguments.success) {
       throw parsedArguments.error;
     }
+    let consumeApproval: (() => Promise<void>) | undefined;
+    let consumeError: unknown;
     if (approvalStateStore) {
       const requestContext = resumeOptions?.requestContext;
       if (
@@ -1432,7 +1443,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       ) {
         return Promise.reject(new Error('Request context and approval binding are required.'));
       }
-      await approvalStateStore.consume(approval.approvalBinding, {
+      const approvalContext = {
         principalId: requestContext.authority.principalId,
         tenantId: requestContext.authority.tenantId,
         ownerId: requestContext.authority.ownerId,
@@ -1447,12 +1458,19 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
         toolDefinitionRevision: currentTool.id,
         policyRevision,
         approvalRevision,
-      });
+      };
+      consumeApproval = async () => {
+        try {
+          await approvalStateStore.consume(approval.approvalBinding!, approvalContext);
+        } catch (error) {
+          consumeError = error;
+          throw error;
+        }
+      };
     }
     const executeForResume =
       this && typeof this === 'object' && 'execute' in this ? this.execute.bind(this) : execute;
-
-    return executeForResume(
+    const result = await executeForResume(
       {
         id: approval.callId,
         name: approval.toolName,
@@ -1460,6 +1478,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       } as ToolCallInput,
       {
         ...executeOptions,
+        ...(consumeApproval ? { [approvalConsumeSymbol]: consumeApproval } : {}),
         [approvalResumeSymbol]: {
           approvedAction: approval.action,
           approvedPolicyPauseTier: approval.policyPauseTier,
@@ -1476,6 +1495,10 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
         },
       } as InternalToolboxExecuteOptions,
     );
+    if (consumeError !== undefined) {
+      throw consumeError instanceof Error ? consumeError : new Error(String(consumeError));
+    }
+    return result;
   }
 
   async function revokeApproval(approval: SignedPendingToolApproval): Promise<void> {

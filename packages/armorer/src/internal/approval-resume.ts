@@ -1,6 +1,7 @@
 import type { PolicyPauseTier, SatisfiedPolicyPause, ToolAction } from '../types';
 
 export const approvalResumeSymbol: unique symbol = Symbol('armorer.approvalResume');
+export const approvalConsumeSymbol: unique symbol = Symbol('armorer.approvalConsume');
 export const policyPauseDecisionsSymbol: unique symbol = Symbol('armorer.policyPauseDecisions');
 export const policyPauseTierSymbol: unique symbol = Symbol('armorer.policyPauseTier');
 

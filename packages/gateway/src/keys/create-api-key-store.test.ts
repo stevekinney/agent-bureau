@@ -48,6 +48,18 @@ describe('create', () => {
     expect((rejection as Error).message).toBe('API key scope entries must be non-blank strings');
   });
 
+  it('rejects delimiter-bearing scope entries instead of splitting them downstream', async () => {
+    let rejection: unknown;
+    try {
+      await store.create({ name: 'delimiter-scoped', scopes: ['runs:read,runs:write'] });
+    } catch (error) {
+      rejection = error;
+    }
+    expect(rejection).toBeInstanceOf(Error);
+    expect((rejection as Error).message).toBe('API key scope entries must not contain ","');
+    expect(await store.list()).toEqual([]);
+  });
+
   it('respects expiresAt', async () => {
     const expires = new Date(Date.now() + 86400000).toISOString();
     const result = await store.create({ name: 'expiring', expiresAt: expires });

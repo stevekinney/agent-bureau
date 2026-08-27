@@ -554,12 +554,13 @@ describe('withToolboxIdempotency', () => {
       paused.pendingApproval! as SignedPendingToolApproval,
       { idempotencyKey: 'charge-once', requestContext },
     );
-    await expect(
-      idempotentToolbox.resumeApproval(paused.pendingApproval! as SignedPendingToolApproval, {
+    const repeatedResume = await idempotentToolbox.resumeApproval(
+      paused.pendingApproval! as SignedPendingToolApproval,
+      {
         idempotencyKey: 'charge-once',
         requestContext,
-      }),
-    ).rejects.toThrow('already been consumed');
+      },
+    );
 
     expect(firstResume.result).toEqual({ charged: 100 });
     expect(firstResume.idempotency).toEqual({
@@ -571,6 +572,8 @@ describe('withToolboxIdempotency', () => {
       ),
       outcome: 'fresh',
     });
+    expect(repeatedResume.idempotency?.outcome).toBe('deduped');
+    expect(repeatedResume.result).toEqual({ charged: 100 });
     expect(charges).toEqual([100]);
   });
 

@@ -469,9 +469,12 @@ describe('createToolbox', () => {
     expect(resumed.result).toEqual({ charged: 125 });
     expect(resumed.executedArgumentsEdited).toBe(true);
 
-    await expect(toolbox.resumeApproval(signedApproval, approvalExecutionOptions)).rejects.toThrow(
-      'already been consumed',
+    const originalApprovalResumed = await toolbox.resumeApproval(
+      signedApproval,
+      approvalExecutionOptions,
     );
+    expect(originalApprovalResumed.outcome).toBe('success');
+    expect(originalApprovalResumed.result).toEqual({ charged: 100 });
 
     const invalidPaused = await toolbox.execute(
       { id: 'tool-call-invalid', name: 'charge-card', arguments: { cents: 100 } },
@@ -491,7 +494,7 @@ describe('createToolbox', () => {
 
     expect(correctedResume.outcome).toBe('success');
     expect(correctedResume.result).toEqual({ charged: 100 });
-    expect(charges).toEqual([125, 100]);
+    expect(charges).toEqual([125, 100, 100]);
     await expect(
       toolbox.resumeApproval(invalidPaused.pendingApproval as SignedPendingToolApproval, {
         arguments: { cents: 100, confirmed: true },
@@ -538,6 +541,118 @@ describe('createToolbox', () => {
         approvalToken: 'token',
       }),
     ).toThrow('approvalSecret is required');
+  });
+
+  it('consumes approval bindings only after execution admission succeeds', async () => {
+    const createApprovalToolbox = (
+      store: ReturnType<typeof createProcessLocalApprovalStateStore>,
+      policyContext?: () => Record<string, unknown>,
+    ) =>
+      createToolbox(
+        [
+          createTool({
+            name: 'admission-gated-action',
+            description: 'Requires approval',
+            version: '1.0.0',
+            input: z.object({}),
+            execute: () => 'executed',
+          }),
+        ],
+        {
+          approvalSecret: 'admission-secret',
+          approvalStateStore: store,
+          policy: { beforeExecute: () => ({ status: 'needs_approval' as const }) },
+          ...(policyContext ? { policyContext } : {}),
+        },
+      );
+
+    const createStore = () => {
+      const baseStore = createProcessLocalApprovalStateStore();
+      let consumeCount = 0;
+      return {
+        store: {
+          issue: baseStore.issue,
+          consume: async (...args: Parameters<typeof baseStore.consume>) => {
+            consumeCount += 1;
+            return baseStore.consume(...args);
+          },
+          revoke: baseStore.revoke,
+          state: baseStore.state,
+        },
+        get consumeCount() {
+          return consumeCount;
+        },
+      };
+    };
+
+    const abortedStore = createStore();
+    const abortedToolbox = createApprovalToolbox(abortedStore.store);
+    const abortedApproval = await abortedToolbox.execute(
+      { id: 'aborted-admission', name: 'admission-gated-action', arguments: {} },
+      approvalExecutionOptions,
+    );
+    const abortedController = new AbortController();
+    abortedController.abort('already aborted');
+    const abortedResult = await abortedToolbox.resumeApproval(
+      abortedApproval.pendingApproval as SignedPendingToolApproval,
+      { ...approvalExecutionOptions, signal: abortedController.signal },
+    );
+    expect(abortedResult.outcome).toBe('error');
+    expect(abortedStore.consumeCount).toBe(0);
+    const admittedAfterAbort = await abortedToolbox.resumeApproval(
+      abortedApproval.pendingApproval as SignedPendingToolApproval,
+      approvalExecutionOptions,
+    );
+    expect(admittedAfterAbort.outcome).toBe('success');
+    expect(abortedStore.consumeCount).toBe(1);
+
+    const closedStore = createStore();
+    const closedToolbox = createApprovalToolbox(closedStore.store);
+    const closedApproval = await closedToolbox.execute(
+      { id: 'closed-admission', name: 'admission-gated-action', arguments: {} },
+      approvalExecutionOptions,
+    );
+    closedToolbox.closeAdmission();
+    await expect(
+      closedToolbox.resumeApproval(
+        closedApproval.pendingApproval as SignedPendingToolApproval,
+        approvalExecutionOptions,
+      ),
+    ).rejects.toThrow('Execution admission is closed');
+    expect(closedStore.consumeCount).toBe(0);
+
+    let failPolicyContext = false;
+    const policyStore = createStore();
+    const policyToolbox = createApprovalToolbox(policyStore.store, () => {
+      if (failPolicyContext) throw new Error('policy context unavailable');
+      return {};
+    });
+    const policyApproval = await policyToolbox.execute(
+      { id: 'policy-admission', name: 'admission-gated-action', arguments: {} },
+      approvalExecutionOptions,
+    );
+    failPolicyContext = true;
+    const failedPolicyResult = await policyToolbox.resumeApproval(
+      policyApproval.pendingApproval as SignedPendingToolApproval,
+      approvalExecutionOptions,
+    );
+    expect(failedPolicyResult.outcome).toBe('error');
+    expect(policyStore.consumeCount).toBe(0);
+    failPolicyContext = false;
+    const admittedAfterPolicyRecovery = await policyToolbox.resumeApproval(
+      policyApproval.pendingApproval as SignedPendingToolApproval,
+      approvalExecutionOptions,
+    );
+    expect(admittedAfterPolicyRecovery.outcome).toBe('success');
+    expect(policyStore.consumeCount).toBe(1);
+
+    await expect(
+      policyToolbox.resumeApproval(
+        policyApproval.pendingApproval as SignedPendingToolApproval,
+        approvalExecutionOptions,
+      ),
+    ).rejects.toThrow('already been consumed');
+    expect(policyStore.consumeCount).toBe(2);
   });
 
   it('requires versioned tool definitions for durable approvals and invalidates revisions', async () => {
