@@ -31,6 +31,7 @@ import { z } from 'zod';
 
 import { isZodSchema } from '../../core/schema-utilities';
 import { createTool } from '../../create-tool';
+import { createExecutionLifecycle, type ExecutionHandle } from '../../execution-lifecycle';
 import type {
   Tool,
   ToolElicitationRequest,
@@ -105,6 +106,8 @@ export type ToMCPToolsOptions = {
    * (always expose `elicit`) when omitted.
    */
   supportsElicitation?: () => boolean;
+  /** Internal server-owned lifecycle used by createMCP. */
+  executionLifecycle?: ReturnType<typeof createExecutionLifecycle>;
 };
 
 export type FromMCPToolsOptions = {
@@ -121,6 +124,11 @@ export type CreateMCPOptions = ServerOptions & {
   formatResult?: ToMCPToolsOptions['formatResult'];
   resources?: MCPResourceRegistrar | MCPResourceRegistrar[];
   prompts?: MCPPromptRegistrar | MCPPromptRegistrar[];
+};
+
+export type MCPServer = McpServer & {
+  /** Closes admission, aborts and settles executions, and returns cleanup evidence. */
+  shutdown: () => Promise<import('../../execution-lifecycle').ExecutionCleanupReport>;
 };
 
 const DEFAULT_SERVER_INFO: Implementation = {
@@ -145,7 +153,7 @@ const DEFAULT_SERVER_INFO: Implementation = {
 export async function createMCP(
   toolbox: ToolboxLike,
   options: CreateMCPOptions = {},
-): Promise<McpServer> {
+): Promise<MCPServer> {
   const { serverInfo, toolConfiguration, formatResult, resources, prompts, ...serverOptions } =
     options;
 
@@ -160,6 +168,8 @@ export async function createMCP(
   );
 
   const taskAbortControllers = new Map<string, AbortController>();
+  const executionLifecycle = createExecutionLifecycle('mcp-server');
+  const taskRuns = new Set<Promise<void>>();
   let resolvedServerOptions = serverOptions;
   if (hasTaskTools) {
     const { InMemoryTaskStore } = await requireMcpTasks();
@@ -191,9 +201,7 @@ export async function createMCP(
                   name: tool.name,
                   arguments: params ?? {},
                 },
-                signal || elicit
-                  ? { ...(signal ? { signal } : {}), ...(elicit ? { elicit } : {}) }
-                  : undefined,
+                { ...(signal ? { signal } : {}), ...(elicit ? { elicit } : {}) },
               )
             : tool.executeWith({
                 params: params ?? {},
@@ -210,6 +218,7 @@ export async function createMCP(
     formatResult,
     executeTool,
     supportsElicitation,
+    executionLifecycle,
   };
 
   for (const { tool, configuration } of toolEntries) {
@@ -228,6 +237,8 @@ export async function createMCP(
         configuration.execution,
         toolOptions,
         taskAbortControllers,
+        executionLifecycle,
+        taskRuns,
       );
     } else {
       const definition = buildMcpToolDefinitionFromConfiguration(tool, configuration, toolOptions);
@@ -244,7 +255,34 @@ export async function createMCP(
   applyRegistrars(server, resources);
   applyRegistrars(server, prompts);
 
-  return server;
+  // MCP's SDK close only tears down the transport. The server owns execution
+  // admission, so close must first stop and settle every tool invocation.
+  const sdkClose = server.close.bind(server);
+  let shutdownPromise:
+    Promise<import('../../execution-lifecycle').ExecutionCleanupReport> | undefined;
+  let closePromise: Promise<void> | undefined;
+  const shutdown = async () => {
+    const report = await executionLifecycle.shutdown({
+      policy: 'abort',
+      reason: 'MCP server shut down',
+    });
+    await Promise.all(taskRuns);
+    return report;
+  };
+  server.close = () => {
+    shutdownPromise ??= shutdown();
+    closePromise ??= (async () => {
+      await shutdownPromise;
+      await sdkClose();
+    })();
+    return closePromise;
+  };
+  (server as MCPServer).shutdown = () => {
+    shutdownPromise ??= shutdown();
+    return shutdownPromise;
+  };
+
+  return server as MCPServer;
 }
 
 export function toMcpTools(
@@ -361,6 +399,12 @@ function buildMcpToolDefinitionFromConfiguration(
     inputSchema: shape.inputSchema,
     handler: async (args, extra) => {
       const params = args ?? {};
+      const execution = options.executionLifecycle?.begin({
+        toolName: tool.name,
+        callId: extra?.requestId !== undefined ? String(extra.requestId) : `mcp-${tool.name}`,
+        signal: extra?.signal,
+      });
+      execution?.activate();
       let result: ToolResultLike;
       try {
         const callId = extra?.requestId !== undefined ? String(extra.requestId) : undefined;
@@ -370,7 +414,13 @@ function buildMcpToolDefinitionFromConfiguration(
         const elicit =
           extra && clientSupportsElicitation ? createMcpToolElicitationRequester(extra) : undefined;
         if (options.executeTool) {
-          result = await options.executeTool(tool, params, callId, extra?.signal, elicit);
+          result = await options.executeTool(
+            tool,
+            params,
+            callId,
+            execution?.signal ?? extra?.signal,
+            elicit,
+          );
         } else {
           const runnable = tool as unknown as {
             executeWith: (options: ToolExecuteWithOptions) => Promise<ToolResultLike>;
@@ -379,8 +429,9 @@ function buildMcpToolDefinitionFromConfiguration(
           if (callId !== undefined) {
             executeOptions.callId = callId;
           }
-          if (extra?.signal) {
-            executeOptions.signal = extra.signal;
+          const signal = execution?.signal ?? extra?.signal;
+          if (signal) {
+            executeOptions.signal = signal;
           }
           if (elicit) {
             executeOptions.elicit = elicit;
@@ -388,12 +439,14 @@ function buildMcpToolDefinitionFromConfiguration(
           result = await runnable.executeWith(executeOptions);
         }
       } catch (error) {
+        execution?.settle();
         const message = error instanceof Error ? error.message : String(error);
         return {
           content: toTextContent(message),
           isError: true,
         };
       }
+      execution?.settle(result);
       return options.formatResult ? options.formatResult(result) : toCallToolResult(result);
     },
   };
@@ -429,6 +482,8 @@ function registerMcpTaskTool(
   execution: TaskToolExecution,
   options: ToMCPToolsOptions,
   taskAbortControllers: Map<string, AbortController>,
+  executionLifecycle: ReturnType<typeof createExecutionLifecycle>,
+  taskRuns: Set<Promise<void>>,
 ): RegisteredTool {
   const shape = resolveMcpToolShape(tool, configuration);
 
@@ -457,7 +512,13 @@ function registerMcpTaskTool(
   return server.experimental.tasks.registerToolTask(
     tool.name,
     taskConfig,
-    createMcpTaskToolHandler(tool, options, taskAbortControllers),
+    createMcpTaskToolHandler(
+      tool,
+      { ...options, executionLifecycle: undefined },
+      taskAbortControllers,
+      executionLifecycle,
+      taskRuns,
+    ),
   );
 }
 
@@ -489,6 +550,8 @@ function createMcpTaskToolHandler(
   tool: Tool,
   options: ToMCPToolsOptions,
   taskAbortControllers: Map<string, AbortController>,
+  executionLifecycle: ReturnType<typeof createExecutionLifecycle>,
+  taskRuns: Set<Promise<void>>,
 ): ToolTaskHandler<AnySchema> {
   return {
     async createTask(args, extra: CreateTaskRequestHandlerExtra) {
@@ -506,6 +569,11 @@ function createMcpTaskToolHandler(
         });
       }
       taskAbortControllers.set(task.taskId, controller);
+      const execution = executionLifecycle.begin({
+        toolName: tool.name,
+        callId: task.taskId,
+        signal: controller.signal,
+      });
 
       const clientSupportsElicitation = options.supportsElicitation
         ? options.supportsElicitation()
@@ -514,7 +582,7 @@ function createMcpTaskToolHandler(
         ? createMcpToolElicitationRequester(extra)
         : undefined;
 
-      void runMcpTaskTool(
+      const run = runMcpTaskTool(
         tool,
         args,
         extra.taskStore,
@@ -522,9 +590,12 @@ function createMcpTaskToolHandler(
         controller,
         elicit,
         options,
+        execution,
       ).finally(() => {
         taskAbortControllers.delete(task.taskId);
+        taskRuns.delete(run);
       });
+      taskRuns.add(run);
       return { task };
     },
     async getTask(_args, extra: TaskRequestHandlerExtra) {
@@ -558,11 +629,13 @@ async function runMcpTaskTool(
   controller: AbortController,
   elicit: ToolElicitationRequester | undefined,
   options: Pick<ToMCPToolsOptions, 'executeTool' | 'formatResult'>,
+  execution: ExecutionHandle,
 ): Promise<void> {
+  execution.activate();
   let outcome: { ok: true; result: ToolResultLike } | { ok: false; error: unknown };
   try {
     const result = options.executeTool
-      ? await options.executeTool(tool, params, taskId, controller.signal, elicit)
+      ? await options.executeTool(tool, params, taskId, execution.signal, elicit)
       : await (
           tool as unknown as {
             executeWith: (options: ToolExecuteWithOptions) => Promise<ToolResultLike>;
@@ -570,7 +643,7 @@ async function runMcpTaskTool(
         ).executeWith({
           params: params ?? {},
           callId: taskId,
-          signal: controller.signal,
+          signal: execution.signal,
           ...(elicit ? { elicit } : {}),
         });
     outcome = { ok: true, result };
@@ -579,14 +652,21 @@ async function runMcpTaskTool(
   }
 
   if (controller.signal.aborted) {
+    execution.cleanup();
     return;
   }
 
-  const callResult = outcome.ok
-    ? options.formatResult
-      ? options.formatResult(outcome.result)
-      : toCallToolResult(outcome.result)
-    : toErrorCallToolResult(outcome.error);
+  let callResult: CallToolResult;
+  try {
+    callResult = outcome.ok
+      ? options.formatResult
+        ? options.formatResult(outcome.result)
+        : toCallToolResult(outcome.result)
+      : toErrorCallToolResult(outcome.error);
+  } catch (error) {
+    execution.cleanup({ status: 'failed', error });
+    return;
+  }
 
   try {
     await taskStore.storeTaskResult(
@@ -594,11 +674,12 @@ async function runMcpTaskTool(
       callResult.isError ? 'failed' : 'completed',
       callResult,
     );
-  } catch {
-    // The task was cancelled or its TTL elapsed while the tool was finishing
-    // (or a session-scoped store otherwise rejected the write) — the store
-    // has already finalized or removed the task, so there is nothing left
-    // to record.
+    execution.cleanup();
+  } catch (error) {
+    // A failed terminal write is an observable cleanup failure. It must not be
+    // turned into an unhandled rejection, but it also cannot be reported as a
+    // successful execution.
+    execution.cleanup({ status: 'failed', error });
   }
 }
 

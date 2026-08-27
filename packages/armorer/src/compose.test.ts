@@ -607,7 +607,9 @@ describe('tap()', () => {
       timeout: 99,
     });
 
-    expect(observed.signal).toBe(controller.signal);
+    expect(observed.signal).not.toBe(controller.signal);
+    controller.abort('caller stopped');
+    expect(observed.signal?.aborted).toBe(true);
     expect(observed.timeout).toBe(99);
   });
 
@@ -690,7 +692,9 @@ describe('when()', () => {
       timeout: 55,
     });
 
-    expect(observed.signal).toBe(controller.signal);
+    expect(observed.signal).not.toBe(controller.signal);
+    controller.abort('caller stopped');
+    expect(observed.signal?.aborted).toBe(true);
     expect(observed.timeout).toBe(55);
   });
 
@@ -793,9 +797,11 @@ describe('parallel()', () => {
 
     expect(observed).toHaveLength(2);
     for (const entry of observed) {
-      expect(entry.signal).toBe(controller.signal);
+      expect(entry.signal).not.toBe(controller.signal);
       expect(entry.timeout).toBe(25);
     }
+    controller.abort('caller stopped');
+    for (const entry of observed) expect(entry.signal?.aborted).toBe(true);
   });
 
   it('forwards stream to each parallel branch', async () => {

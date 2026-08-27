@@ -73,6 +73,13 @@ import {
   ToolboxValidateErrorEvent,
   ToolboxValidateSuccessEvent,
 } from './events';
+import type {
+  ExecutionCleanupReport,
+  ExecutionHandle,
+  ExecutionLifecycle,
+  ExecutionSelector,
+} from './execution-lifecycle';
+import { createExecutionLifecycle } from './execution-lifecycle';
 import {
   type ApprovalResumeState,
   approvalResumeSymbol,
@@ -517,8 +524,18 @@ export interface Toolbox<TTools extends readonly Tool[] = readonly Tool[]> {
   ) => AsyncIterableIterator<ToolboxEventMap[K]>;
 
   // Lifecycle methods
-  complete: () => void;
+  complete: () => Promise<void>;
   readonly completed: boolean;
+  readonly activeExecutions: number;
+  readonly executionSignal: AbortSignal;
+  readonly executions: ExecutionLifecycle;
+  whenIdle: () => Promise<void>;
+  closeAdmission: () => void;
+  abort: (selector?: ExecutionSelector, reason?: unknown) => number;
+  shutdown: (options?: {
+    policy?: 'abort' | 'drain';
+    reason?: unknown;
+  }) => Promise<ExecutionCleanupReport>;
 
   // Internal method to get toolbox context.
   getContext?: () => ToolboxContext;
@@ -693,6 +710,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
 
   const storedConfigurations = new Map<string, ToolConfiguration>();
   const emitter = new CompletableEventTarget<ToolboxEventMap>();
+  const executionLifecycle = createExecutionLifecycle();
 
   const toolboxEventClassMap: Record<string, new (detail: any) => Event> = {
     [ToolboxCallEvent.type]: ToolboxCallEvent,
@@ -758,9 +776,10 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     return () => emitter.removeEventListener(type, wrapped, options);
   };
 
-  function complete() {
+  async function complete() {
     loopDetectors.clear();
     emitter.complete();
+    await executionLifecycle.shutdown();
   }
   const baseContext = options.context ? { ...options.context } : {};
   const readOnly = options.readOnly ?? false;
@@ -806,11 +825,11 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
   if (options.signal) {
     const signal = options.signal;
     const onAbort = () => {
-      complete();
+      void complete();
       signal.removeEventListener('abort', onAbort);
     };
     if (signal.aborted) {
-      complete();
+      void complete();
     } else {
       signal.addEventListener('abort', onAbort);
     }
@@ -840,149 +859,78 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     input: ToolCallInput | ToolCallInput[],
     options?: InternalToolboxExecuteOptions,
   ): Promise<ToolExecutionResult | ToolExecutionResult[]> {
-    const calls = Array.isArray(input) ? input : [input];
-    const isMultiple = Array.isArray(input);
-    const mode = options?.mode ?? 'parallel';
-    const errorMode = options?.errorMode ?? 'collect';
-    const globalConcurrency = options?.concurrency;
+    const firstCall = Array.isArray(input) ? input[0] : input;
+    const nowFunction = options?.now ?? Date.now;
+    const executionHandle = executionLifecycle.begin({
+      ...(options?.executionId ? { executionId: options.executionId } : {}),
+      toolName: Array.isArray(input) ? 'toolbox.batch' : (firstCall?.name ?? 'toolbox.unknown'),
+      callId: firstCall?.id ?? `toolbox-call-${nowFunction()}`,
+      ...(options?.ownerId ? { ownerId: options.ownerId } : {}),
+      ...(options?.parentExecutionId ? { parentExecutionId: options.parentExecutionId } : {}),
+      ...(options?.signal instanceof AbortSignal ? { signal: options.signal } : {}),
+      ...(options?.timeout !== undefined ? { deadline: nowFunction() + options.timeout } : {}),
+      now: nowFunction,
+      ...(options?.setTimeoutFunction ? { setTimeoutFunction: options.setTimeoutFunction } : {}),
+    });
+    executionHandle.activate();
+    options = { ...options, signal: executionHandle.signal };
+    try {
+      const calls = Array.isArray(input) ? input : [input];
+      const isMultiple = Array.isArray(input);
+      const mode = options?.mode ?? 'parallel';
+      const errorMode = options?.errorMode ?? 'collect';
+      const globalConcurrency = options?.concurrency;
 
-    // Resolve limiter
-    const limit = mode === 'sequential' ? 1 : globalConcurrency;
-    const limiter = createConcurrencyLimiter(limit);
-    const runTask = <T>(task: () => Promise<T>) => (limiter ? limiter.run(task) : task());
-
-    // Map calls to tasks
-    const tasks = calls.map((call, callIndex) => async () => {
-      let toolCall = normalizeToolCall(call);
-      let tool = getTool(toolCall.name) as Tool | undefined; // toolCall.name might be ID
-      if (!tool && resolutionEnabled) {
-        const allNames = [...toolsByName.keys()];
-        const result = resolveFuzzyToolName(toolCall.name, allNames);
-        if (result.resolved) {
-          const resolved = getTool(result.resolved);
-          if (resolved) {
-            tool = resolved;
-            emit('name-resolved', {
-              originalName: toolCall.name,
-              resolvedName: result.resolved,
-              tier: result.tier,
-            });
-            // Patch toolCall name so the tool's execute recognises it as a tool call
-            toolCall = { ...toolCall, name: result.resolved };
+      // Resolve limiter
+      const limit = mode === 'sequential' ? 1 : globalConcurrency;
+      const limiter = createConcurrencyLimiter(limit);
+      const runTask = <T>(task: () => Promise<T>) => (limiter ? limiter.run(task) : task());
+      let liveStreams = 0;
+      let executionReturned = false;
+      let executionOutput: ToolExecutionResult | ToolExecutionResult[] | undefined;
+      const finalizeParentStream = () => {
+        liveStreams -= 1;
+        if (executionReturned && liveStreams === 0) {
+          if (
+            executionHandle.snapshot().state === 'abort-requested' ||
+            executionHandle.snapshot().state === 'cleanup-pending'
+          ) {
+            executionHandle.cleanup();
+          } else {
+            executionHandle.settle(executionOutput);
           }
         }
-      }
-      if (!tool) {
-        const toolError = createToolError(
-          'not_found',
-          `Tool not found: ${toolCall.name}`,
-          'NOT_FOUND',
-          false,
-        );
-        const notFound: ToolExecutionResult = {
-          callId: toolCall.id,
-          outcome: 'error',
-          content: toolError.message,
-          toolCallId: toolCall.id,
-          toolName: toolCall.name,
-          result: undefined,
-          error: toolError,
-          errorMessage: toolError.message,
-          errorCategory: toolError.category,
-        };
-        emit('not-found', toolCall);
-        if (errorMode === 'failFast') {
-          // eslint-disable-next-line @typescript-eslint/only-throw-error
-          throw toolError;
+      };
+
+      // Map calls to tasks
+      const tasks = calls.map((call, callIndex) => async () => {
+        let toolCall = normalizeToolCall(call);
+        let tool = getTool(toolCall.name) as Tool | undefined; // toolCall.name might be ID
+        if (!tool && resolutionEnabled) {
+          const allNames = [...toolsByName.keys()];
+          const result = resolveFuzzyToolName(toolCall.name, allNames);
+          if (result.resolved) {
+            const resolved = getTool(result.resolved);
+            if (resolved) {
+              tool = resolved;
+              emit('name-resolved', {
+                originalName: toolCall.name,
+                resolvedName: result.resolved,
+                tier: result.tier,
+              });
+              // Patch toolCall name so the tool's execute recognises it as a tool call
+              toolCall = { ...toolCall, name: result.resolved };
+            }
+          }
         }
-        return notFound;
-      }
-
-      if (!(await isToolAvailable(tool))) {
-        const toolError = createToolError(
-          'unavailable',
-          `Tool unavailable: ${toolCall.name}`,
-          'TOOL_UNAVAILABLE',
-          false,
-        );
-        const unavailable: ToolExecutionResult = {
-          callId: toolCall.id,
-          outcome: 'error',
-          content: toolError.message,
-          toolCallId: toolCall.id,
-          toolName: toolCall.name,
-          result: undefined,
-          error: toolError,
-          errorMessage: toolError.message,
-          errorCategory: toolError.category,
-        };
-        emit('error', { tool, result: unavailable });
-        if (errorMode === 'failFast') {
-          // eslint-disable-next-line @typescript-eslint/only-throw-error
-          throw toolError;
-        }
-        return unavailable;
-      }
-
-      emit('call', {
-        tool,
-        call: toolCall,
-        ...(options?.parentContext ? { parentContext: options.parentContext } : {}),
-        ...(options?.spanLinks ? { spanLinks: options.spanLinks } : {}),
-      });
-
-      // Notify if a deprecated tool is being called
-      if (onDeprecatedToolCalled) {
-        const config = storedConfigurations.get(tool.id);
-        if (config?.lifecycle?.deprecated) {
-          onDeprecatedToolCalled(config, { name: toolCall.name, id: toolCall.id });
-        }
-      }
-
-      // Track call for loop detection
-      for (const detector of loopDetectors.values()) {
-        detector.recordCall(toolCall.name, toolCall.arguments ?? {});
-      }
-
-      const budgetReason = checkBudget(budget, budgetStart, budgetCalls);
-      if (budgetReason) {
-        const toolError = createToolError('conflict', budgetReason, 'BUDGET_EXCEEDED', false);
-        const denied: ToolExecutionResult = {
-          callId: toolCall.id,
-          outcome: 'error',
-          content: toolError.message,
-          toolCallId: toolCall.id,
-          toolName: toolCall.name,
-          result: undefined,
-          error: toolError,
-          errorMessage: toolError.message,
-          errorCategory: toolError.category,
-        };
-        emit('budget-exceeded', { tool, call: toolCall, reason: budgetReason });
-        emit('error', { tool, result: denied });
-        if (errorMode === 'failFast') {
-          // eslint-disable-next-line @typescript-eslint/only-throw-error
-          throw toolError;
-        }
-        return denied;
-      }
-
-      budgetCalls += 1;
-
-      // Loop detection
-      if (autoLoopDetector) {
-        autoLoopDetector.recordCall(toolCall.name, toolCall.arguments ?? {});
-        const loopResult = autoLoopDetector.detectLoop();
-        if (loopResult.detected && loopResult.level === 'blocked') {
-          emit('loop-blocked', {
-            tool,
-            call: toolCall,
-            detector: loopResult.detector ?? 'simple-repeat',
-            count: loopResult.count,
-            message: loopResult.message,
-          });
-          const toolError = createToolError('conflict', loopResult.message, 'LOOP_BLOCKED', false);
-          const blocked: ToolExecutionResult = {
+        if (!tool) {
+          const toolError = createToolError(
+            'not_found',
+            `Tool not found: ${toolCall.name}`,
+            'NOT_FOUND',
+            false,
+          );
+          const notFound: ToolExecutionResult = {
             callId: toolCall.id,
             outcome: 'error',
             content: toolError.message,
@@ -993,167 +941,298 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
             errorMessage: toolError.message,
             errorCategory: toolError.category,
           };
-          return blocked;
+          emit('not-found', toolCall);
+          if (errorMode === 'failFast') {
+            // eslint-disable-next-line @typescript-eslint/only-throw-error
+            throw toolError;
+          }
+          return notFound;
         }
-        if (loopResult.detected) {
-          emit('loop-warning', {
-            tool,
-            call: toolCall,
-            detector: loopResult.detector ?? 'simple-repeat',
-            count: loopResult.count,
-            message: loopResult.message,
-          });
+
+        if (!(await isToolAvailable(tool))) {
+          const toolError = createToolError(
+            'unavailable',
+            `Tool unavailable: ${toolCall.name}`,
+            'TOOL_UNAVAILABLE',
+            false,
+          );
+          const unavailable: ToolExecutionResult = {
+            callId: toolCall.id,
+            outcome: 'error',
+            content: toolError.message,
+            toolCallId: toolCall.id,
+            toolName: toolCall.name,
+            result: undefined,
+            error: toolError,
+            errorMessage: toolError.message,
+            errorCategory: toolError.category,
+          };
+          emit('error', { tool, result: unavailable });
+          if (errorMode === 'failFast') {
+            // eslint-disable-next-line @typescript-eslint/only-throw-error
+            throw toolError;
+          }
+          return unavailable;
         }
-      }
 
-      // Bubble up events
-      const cleanup: (() => void)[] = [];
-      // Always bubble up events for consistency
-      const toolEventTypes: (keyof DefaultToolEvents)[] = [
-        'tool.started',
-        'tool.finished',
-        'execute-start',
-        'validate-success',
-        'validate-error',
-        'execute-success',
-        'execute-error',
-        'settled',
-        'policy-denied',
-        'progress',
-        'stream-start',
-        'stream-chunk',
-        'stream-end',
-        'stream-error',
-        'output-chunk',
-        'log',
-        'cancelled',
-        'status-update',
-      ];
+        emit('call', {
+          tool,
+          call: toolCall,
+          ...(options?.parentContext ? { parentContext: options.parentContext } : {}),
+          ...(options?.spanLinks ? { spanLinks: options.spanLinks } : {}),
+        });
 
-      // Tool events and toolbox events use different naming conventions in some cases.
-      // Map tool-level event types to toolbox-level event types where they differ.
-      const toolToToolboxEventType: Partial<Record<keyof DefaultToolEvents, keyof ToolboxEvents>> =
-        {
+        // Notify if a deprecated tool is being called
+        if (onDeprecatedToolCalled) {
+          const config = storedConfigurations.get(tool.id);
+          if (config?.lifecycle?.deprecated) {
+            onDeprecatedToolCalled(config, { name: toolCall.name, id: toolCall.id });
+          }
+        }
+
+        // Track call for loop detection
+        for (const detector of loopDetectors.values()) {
+          detector.recordCall(toolCall.name, toolCall.arguments ?? {});
+        }
+
+        const budgetReason = checkBudget(budget, budgetStart, budgetCalls);
+        if (budgetReason) {
+          const toolError = createToolError('conflict', budgetReason, 'BUDGET_EXCEEDED', false);
+          const denied: ToolExecutionResult = {
+            callId: toolCall.id,
+            outcome: 'error',
+            content: toolError.message,
+            toolCallId: toolCall.id,
+            toolName: toolCall.name,
+            result: undefined,
+            error: toolError,
+            errorMessage: toolError.message,
+            errorCategory: toolError.category,
+          };
+          emit('budget-exceeded', { tool, call: toolCall, reason: budgetReason });
+          emit('error', { tool, result: denied });
+          if (errorMode === 'failFast') {
+            // eslint-disable-next-line @typescript-eslint/only-throw-error
+            throw toolError;
+          }
+          return denied;
+        }
+
+        budgetCalls += 1;
+
+        // Loop detection
+        if (autoLoopDetector) {
+          autoLoopDetector.recordCall(toolCall.name, toolCall.arguments ?? {});
+          const loopResult = autoLoopDetector.detectLoop();
+          if (loopResult.detected && loopResult.level === 'blocked') {
+            emit('loop-blocked', {
+              tool,
+              call: toolCall,
+              detector: loopResult.detector ?? 'simple-repeat',
+              count: loopResult.count,
+              message: loopResult.message,
+            });
+            const toolError = createToolError(
+              'conflict',
+              loopResult.message,
+              'LOOP_BLOCKED',
+              false,
+            );
+            const blocked: ToolExecutionResult = {
+              callId: toolCall.id,
+              outcome: 'error',
+              content: toolError.message,
+              toolCallId: toolCall.id,
+              toolName: toolCall.name,
+              result: undefined,
+              error: toolError,
+              errorMessage: toolError.message,
+              errorCategory: toolError.category,
+            };
+            return blocked;
+          }
+          if (loopResult.detected) {
+            emit('loop-warning', {
+              tool,
+              call: toolCall,
+              detector: loopResult.detector ?? 'simple-repeat',
+              count: loopResult.count,
+              message: loopResult.message,
+            });
+          }
+        }
+
+        // Bubble up events
+        const cleanup: (() => void)[] = [];
+        // Always bubble up events for consistency
+        const toolEventTypes: (keyof DefaultToolEvents)[] = [
+          'tool.started',
+          'tool.finished',
+          'execute-start',
+          'validate-success',
+          'validate-error',
+          'execute-success',
+          'execute-error',
+          'settled',
+          'policy-denied',
+          'progress',
+          'stream-start',
+          'stream-chunk',
+          'stream-end',
+          'stream-error',
+          'output-chunk',
+          'log',
+          'cancelled',
+          'status-update',
+        ];
+
+        // Tool events and toolbox events use different naming conventions in some cases.
+        // Map tool-level event types to toolbox-level event types where they differ.
+        const toolToToolboxEventType: Partial<
+          Record<keyof DefaultToolEvents, keyof ToolboxEvents>
+        > = {
           'status-update': 'status:update',
         };
 
-      for (const eventType of toolEventTypes) {
-        const unsubscribe = tool.addEventListener(eventType, (toolEvent: Event) => {
-          // Extract event properties (excluding standard Event fields)
-          const eventProps: Record<string, unknown> = {};
-          for (const key of Object.getOwnPropertyNames(toolEvent)) {
-            if (key !== 'type' && key !== 'isTrusted') {
-              eventProps[key] = (toolEvent as unknown as Record<string, unknown>)[key];
+        for (const eventType of toolEventTypes) {
+          const unsubscribe = tool.addEventListener(eventType, (toolEvent: Event) => {
+            // Extract event properties (excluding standard Event fields)
+            const eventProps: Record<string, unknown> = {};
+            for (const key of Object.getOwnPropertyNames(toolEvent)) {
+              if (key !== 'type' && key !== 'isTrusted') {
+                eventProps[key] = (toolEvent as unknown as Record<string, unknown>)[key];
+              }
+            }
+            // Bubble up the event with tool and call context.
+            // Include callId and name so that remapped events (e.g. status-update → status:update)
+            // carry the identity fields that the toolbox-level Event class expects.
+            const bubbledDetail = {
+              ...eventProps,
+              callId: toolCall.id,
+              name: toolCall.name,
+              tool,
+              call: toolCall,
+            };
+            // Resolve the toolbox-level event type (may differ from the tool-level name)
+            const toolboxEventType = toolToToolboxEventType[eventType] ?? eventType;
+            // Use emit helper which handles the type conversion
+            emit(
+              toolboxEventType as keyof ToolboxEvents,
+              bubbledDetail as ToolboxEvents[keyof ToolboxEvents],
+            );
+          });
+          cleanup.push(unsubscribe);
+        }
+
+        try {
+          const durableOperationKey =
+            typeof options?.durableOperationKey === 'function'
+              ? options.durableOperationKey(toolCall, callIndex)
+              : options?.durableOperationKey;
+          const executeOptions: ToolExecuteOptions =
+            options?.signal ||
+            options?.timeout !== undefined ||
+            options?.stream !== undefined ||
+            options?.elicit ||
+            durableOperationKey !== undefined ||
+            (options !== undefined && approvalResumeSymbol in options)
+              ? {
+                  ...(durableOperationKey !== undefined ? { durableOperationKey } : {}),
+                  ...(options?.signal ? { signal: options.signal } : {}),
+                  ...(options?.timeout !== undefined ? { timeout: options.timeout } : {}),
+                  ...(options?.stream !== undefined ? { stream: options.stream } : {}),
+                  ...(options?.elicit ? { elicit: options.elicit } : {}),
+                  ownerId: executionHandle.snapshot().ownerId,
+                  parentExecutionId: executionHandle.id,
+                  ...(options !== undefined && approvalResumeSymbol in options
+                    ? { [approvalResumeSymbol]: options[approvalResumeSymbol] }
+                    : {}),
+                }
+              : {};
+
+          const result = await tool.execute(toolCall, executeOptions);
+          if (result.pendingApproval && approvalSecret) {
+            result.pendingApproval.approvalToken = signPendingApproval(result.pendingApproval);
+          }
+          let hasLiveStream = false;
+          const stream = resolveResultStream(result);
+          if (stream) {
+            hasLiveStream = true;
+            liveStreams += 1;
+            executionHandle.streaming();
+            const wrapped = wrapAsyncIterable(
+              stream,
+              () => {
+                cleanup.forEach((fn) => fn());
+                finalizeParentStream();
+              },
+              executionHandle,
+            );
+            if (result.stream === stream) {
+              result.stream = wrapped;
+            }
+            if (result.result === stream) {
+              result.result = wrapped;
             }
           }
-          // Bubble up the event with tool and call context.
-          // Include callId and name so that remapped events (e.g. status-update → status:update)
-          // carry the identity fields that the toolbox-level Event class expects.
-          const bubbledDetail = {
-            ...eventProps,
-            callId: toolCall.id,
-            name: toolCall.name,
-            tool,
-            call: toolCall,
-          };
-          // Resolve the toolbox-level event type (may differ from the tool-level name)
-          const toolboxEventType = toolToToolboxEventType[eventType] ?? eventType;
-          // Use emit helper which handles the type conversion
-          emit(
-            toolboxEventType as keyof ToolboxEvents,
-            bubbledDetail as ToolboxEvents[keyof ToolboxEvents],
-          );
-        });
-        cleanup.push(unsubscribe);
-      }
-
-      try {
-        const durableOperationKey =
-          typeof options?.durableOperationKey === 'function'
-            ? options.durableOperationKey(toolCall, callIndex)
-            : options?.durableOperationKey;
-        const executeOptions: ToolExecuteOptions =
-          options?.signal ||
-          options?.timeout !== undefined ||
-          options?.stream !== undefined ||
-          options?.elicit ||
-          durableOperationKey !== undefined ||
-          (options !== undefined && approvalResumeSymbol in options)
-            ? {
-                ...(durableOperationKey !== undefined ? { durableOperationKey } : {}),
-                ...(options?.signal ? { signal: options.signal } : {}),
-                ...(options?.timeout !== undefined ? { timeout: options.timeout } : {}),
-                ...(options?.stream !== undefined ? { stream: options.stream } : {}),
-                ...(options?.elicit ? { elicit: options.elicit } : {}),
-                ...(options !== undefined && approvalResumeSymbol in options
-                  ? { [approvalResumeSymbol]: options[approvalResumeSymbol] }
-                  : {}),
-              }
-            : {};
-
-        const result = await tool.execute(toolCall, executeOptions);
-        if (result.pendingApproval && approvalSecret) {
-          result.pendingApproval.approvalToken = signPendingApproval(result.pendingApproval);
-        }
-        let hasLiveStream = false;
-        const stream = resolveResultStream(result);
-        if (stream) {
-          hasLiveStream = true;
-          const wrapped = wrapAsyncIterable(stream, () => {
+          if (result.error) {
+            emit('error', { tool, result });
             cleanup.forEach((fn) => fn());
-          });
-          if (result.stream === stream) {
-            result.stream = wrapped;
+            if (errorMode === 'failFast') {
+              // eslint-disable-next-line @typescript-eslint/only-throw-error
+              throw result.error;
+            }
+          } else {
+            emit('complete', { tool, result });
+            if (!hasLiveStream) {
+              cleanup.forEach((fn) => fn());
+            }
           }
-          if (result.result === stream) {
-            result.result = wrapped;
-          }
-        }
-        if (result.error) {
-          emit('error', { tool, result });
+          return result;
+        } catch (error) {
           cleanup.forEach((fn) => fn());
           if (errorMode === 'failFast') {
-            // eslint-disable-next-line @typescript-eslint/only-throw-error
-            throw result.error;
+            throw error;
           }
-        } else {
-          emit('complete', { tool, result });
-          if (!hasLiveStream) {
-            cleanup.forEach((fn) => fn());
-          }
+          const message = error instanceof Error ? error.message : String(error);
+          const toolError = createToolError(
+            'internal',
+            message,
+            extractErrorCode(error) ?? 'EXECUTION_ERROR',
+            false,
+          );
+          const errResult: ToolExecutionResult = {
+            callId: toolCall.id,
+            outcome: 'error',
+            content: toolError.message,
+            toolCallId: toolCall.id,
+            toolName: tool.name,
+            result: undefined,
+            error: toolError,
+            errorMessage: toolError.message,
+            errorCategory: toolError.category,
+          };
+          emit('error', { tool, result: errResult });
+          return errResult;
         }
-        return result;
-      } catch (error) {
-        cleanup.forEach((fn) => fn());
-        if (errorMode === 'failFast') {
-          throw error;
-        }
-        const message = error instanceof Error ? error.message : String(error);
-        const toolError = createToolError(
-          'internal',
-          message,
-          extractErrorCode(error) ?? 'EXECUTION_ERROR',
-          false,
-        );
-        const errResult: ToolExecutionResult = {
-          callId: toolCall.id,
-          outcome: 'error',
-          content: toolError.message,
-          toolCallId: toolCall.id,
-          toolName: tool.name,
-          result: undefined,
-          error: toolError,
-          errorMessage: toolError.message,
-          errorCategory: toolError.category,
-        };
-        emit('error', { tool, result: errResult });
-        return errResult;
-      }
-    });
+      });
 
-    const promises = tasks.map((task) => runTask(task));
-    const results = await Promise.all(promises);
-    return isMultiple ? results : results[0]!;
+      const promises = tasks.map((task) => runTask(task));
+      const results = await Promise.all(promises);
+      const output = isMultiple ? results : results[0]!;
+      executionOutput = output;
+      executionReturned = true;
+      if (liveStreams === 0) executionHandle.settle(output);
+      return output;
+    } finally {
+      if (
+        executionHandle.snapshot().state !== 'terminal' &&
+        executionHandle.snapshot().state !== 'cleanup-pending' &&
+        executionHandle.snapshot().state !== 'streaming'
+      ) {
+        executionHandle.settle();
+      }
+    }
   }
 
   function resumeApproval(
@@ -1272,18 +1351,37 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
   function wrapAsyncIterable(
     stream: AsyncIterable<unknown>,
     onFinalize: () => void,
+    executionHandle?: ExecutionHandle,
   ): AsyncIterable<unknown> {
     let finalized = false;
+    const iterator = stream[Symbol.asyncIterator]();
     const finalize = () => {
       if (!finalized) {
         finalized = true;
+        executionHandle?.signal.removeEventListener('abort', onAbort);
         onFinalize();
       }
     };
+    const onAbort = () => {
+      executionHandle?.cleanupPending('stream return requested');
+      if (!iterator.return) {
+        executionHandle?.unknownEffect('stream iterator has no return method');
+        finalize();
+        return;
+      }
+      void Promise.resolve(iterator.return()).then(
+        () => finalize(),
+        (error) => {
+          executionHandle?.cleanup({ status: 'failed', error });
+          finalize();
+        },
+      );
+    };
+    executionHandle?.signal.addEventListener('abort', onAbort, { once: true });
     return {
       async *[Symbol.asyncIterator]() {
         try {
-          for await (const chunk of stream) {
+          for await (const chunk of { [Symbol.asyncIterator]: () => iterator }) {
             yield chunk;
           }
         } finally {
@@ -1436,7 +1534,23 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     // Lifecycle methods
     complete,
     get completed() {
-      return emitter.completed;
+      return executionLifecycle.completed;
+    },
+    get activeExecutions() {
+      return executionLifecycle.activeExecutions;
+    },
+    get executionSignal() {
+      return executionLifecycle.signal;
+    },
+    executions: executionLifecycle,
+    whenIdle: () => executionLifecycle.whenIdle(),
+    closeAdmission: () => executionLifecycle.closeAdmission(),
+    abort: (selector?: ExecutionSelector, reason?: unknown) =>
+      executionLifecycle.abort(selector, reason, 'toolbox'),
+    shutdown: (shutdownOptions?: { policy?: 'abort' | 'drain'; reason?: unknown }) => {
+      loopDetectors.clear();
+      emitter.complete();
+      return executionLifecycle.shutdown(shutdownOptions);
     },
     // Internal method to get toolbox context
     getContext: () => baseContext,

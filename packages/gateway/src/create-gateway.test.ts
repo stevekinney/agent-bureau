@@ -61,9 +61,9 @@ describe('createGateway', () => {
     const bureau = await createBureau();
     let disposed = false;
     const originalDispose = bureau.dispose.bind(bureau);
-    bureau.dispose = () => {
+    bureau.dispose = async () => {
       disposed = true;
-      originalDispose();
+      await originalDispose();
     };
     const gateway = await createGateway(bureau);
     // Verify the gateway holds a reference to the passed bureau
@@ -71,7 +71,7 @@ describe('createGateway', () => {
     // The caller owns the bureau lifecycle.
     expect(gateway.bureau).toBe(bureau);
     expect(disposed).toBe(false);
-    bureau.dispose();
+    await bureau.dispose();
   });
 });
 

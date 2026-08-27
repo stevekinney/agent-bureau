@@ -611,7 +611,7 @@ describe('createSubagentTool', () => {
       expect(result).toEqual({ text: 'SUMMARIZED' });
     });
 
-    it('passes the tool call abort signal through to the summarizer context', async () => {
+    it('propagates tool call cancellation to the summarizer context', async () => {
       const controller = new AbortController();
       let observedSignal: AbortSignal | undefined;
 
@@ -633,7 +633,11 @@ describe('createSubagentTool', () => {
         }
       ).execute({ topic: 'AI' }, { signal: controller.signal });
 
-      expect(observedSignal).toBe(controller.signal);
+      expect(observedSignal).not.toBe(controller.signal);
+      expect(observedSignal?.aborted).toBe(false);
+      controller.abort('stop summarizer');
+      expect(observedSignal?.aborted).toBe(true);
+      expect(observedSignal?.reason).toBe('stop summarizer');
     });
 
     it('does not invoke the summarizer once the signal has been aborted', async () => {

@@ -6,6 +6,7 @@ import type { ToolErrorCategory } from './core/errors';
 import type { JsonObject } from './core/serialization/json';
 import type { ToolAvailabilityHook, ToolDefinition } from './core/tool-definition';
 import type { ToolEventMap } from './events';
+import type { ExecutionHandle, ExecutionLifecycle } from './execution-lifecycle';
 import { policyPauseDecisionsSymbol, policyPauseTierSymbol } from './internal/approval-resume';
 import type { PolicyPauseTier, ToolCall, ToolExecutionResult } from './types';
 
@@ -293,6 +294,8 @@ export interface RuntimeToolContext extends CoreToolContext {
   stream?: boolean;
   /** Requests elicitation (approval/human input) from the calling MCP client, when available. */
   elicit?: ToolElicitationRequester;
+  /** Stable locator for this execution and its revisioned state. */
+  execution?: ExecutionHandle;
 }
 
 export type ToolContext<_E extends ToolEventsMap = DefaultToolEvents> = RuntimeToolContext;
@@ -312,6 +315,12 @@ export interface ToolExecuteOptions {
   stream?: boolean;
   /** Requests elicitation (approval/human input) from the calling MCP client, when available. */
   elicit?: ToolElicitationRequester;
+  /** Stable identity supplied by an owning runtime or durable projection. */
+  executionId?: string;
+  /** Identity of the runtime that owns this execution. */
+  ownerId?: string;
+  /** Parent execution used to correlate nested toolbox and tool calls. */
+  parentExecutionId?: string;
 }
 
 /**
@@ -419,8 +428,12 @@ export type Tool<
   ) => AsyncIterableIterator<K extends keyof ToolEventMap ? ToolEventMap[K] : Event>;
 
   // Lifecycle methods
-  complete: () => void;
+  complete: () => Promise<void>;
   readonly completed: boolean;
+  readonly activeExecutions: number;
+  readonly executionSignal: AbortSignal;
+  readonly executions: ExecutionLifecycle;
+  whenIdle: () => Promise<void>;
 
   // Tool execution methods
   execute: {

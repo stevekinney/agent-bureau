@@ -43,6 +43,7 @@ import {
   ToolValidateErrorEvent,
   ToolValidateSuccessEvent,
 } from './events';
+import { createExecutionLifecycle, type ExecutionHandle } from './execution-lifecycle';
 import {
   type ApprovalResumeState,
   approvalResumeSymbol,
@@ -77,6 +78,7 @@ import { createConcurrencyLimiter, normalizeConcurrency } from './utilities/conc
 
 type InternalToolExecuteOptions = ToolExecuteOptions & {
   [approvalResumeSymbol]?: ApprovalResumeState;
+  executionHandle?: ExecutionHandle;
 };
 
 // Map from event type strings to their Event subclass constructors.
@@ -507,6 +509,7 @@ export function createTool<
   // would incorrectly reject that pipe as "not a Zod object schema".
 
   const emitter = new CompletableEventTarget<ToolEventMap>();
+  const executionLifecycle = createExecutionLifecycle();
 
   // Convenience wrapper to dispatch a pre-constructed Event.
   const dispatch = (event: Event) => emitter.dispatchEvent(event);
@@ -538,7 +541,10 @@ export function createTool<
     typeof metadataValue?.concurrency === 'number' ? metadataValue.concurrency : concurrency,
   );
   const limiter = createConcurrencyLimiter(concurrencyLimit);
-  const runWithConcurrency = <T>(task: () => Promise<T>) => (limiter ? limiter.run(task) : task());
+  const runWithConcurrency = <T>(
+    task: () => Promise<T>,
+    options: { signal?: AbortSignal; onQueuePosition?: (position: number) => void } = {},
+  ) => (limiter ? limiter.run(task, options) : task());
 
   const resolveExecute = createLazyExecuteResolver(fn);
   const policyHooks = policy;
@@ -618,16 +624,79 @@ export function createTool<
     }
   };
 
-  const executeCall = async (
+  const queuedCancellationResult = (
+    toolCall: ToolCallWithArguments,
+    reason: unknown,
+  ): ToolExecutionResult => {
+    const message = reason instanceof Error ? reason.message : String(reason ?? 'Cancelled');
+    const toolError = createToolError('cancelled', message, {
+      code: 'CANCELLED',
+      retryable: false,
+    });
+    return {
+      callId: toolCall.id,
+      outcome: 'error',
+      content: message,
+      toolCallId: toolCall.id,
+      toolName: name,
+      result: undefined,
+      error: toolError,
+      errorMessage: message,
+      errorCategory: 'cancelled',
+    };
+  };
+
+  const executeCall = (
     toolCall: ToolCallWithArguments,
     options?: InternalToolExecuteOptions,
   ): Promise<ToolExecutionResult> => {
     const resolvedTimeout = options?.timeout ?? timeout;
+    const nowFunction = options?.now ?? Date.now;
+    const executionHandle = executionLifecycle.begin({
+      ...(options?.executionId ? { executionId: options.executionId } : {}),
+      toolName: name,
+      callId: toolCall.id,
+      ...(options?.ownerId ? { ownerId: options.ownerId } : {}),
+      ...(options?.parentExecutionId ? { parentExecutionId: options.parentExecutionId } : {}),
+      ...(options?.signal instanceof AbortSignal ? { signal: options.signal } : {}),
+      ...(resolvedTimeout !== undefined ? { deadline: nowFunction() + resolvedTimeout } : {}),
+      scheduleDeadline: false,
+      now: nowFunction,
+      ...(limiter ? { capacity: limiter.capacity } : {}),
+      ...(options?.setTimeoutFunction ? { setTimeoutFunction: options.setTimeoutFunction } : {}),
+    });
     const executeOptions: InternalToolExecuteOptions = {
       ...options,
       ...(resolvedTimeout !== undefined ? { timeout: resolvedTimeout } : {}),
+      executionHandle,
     };
-    return runWithConcurrency(() => executeInner(normalizeToolCall(toolCall), executeOptions));
+    const execution = runWithConcurrency(
+      () => (
+        executionHandle.activate(),
+        executeInner(normalizeToolCall(toolCall), {
+          ...executeOptions,
+          signal: executionHandle.signal,
+        })
+      ),
+      {
+        signal: executionHandle.signal,
+        ...(limiter
+          ? {
+              onQueuePosition: (position: number) =>
+                executionHandle.queued(position, limiter.capacity),
+            }
+          : {}),
+      },
+    ).catch((error) => queuedCancellationResult(toolCall, error));
+    void execution.then((result) => {
+      if (
+        !result.stream &&
+        executionHandle.snapshot().state !== 'cleanup-pending' &&
+        executionHandle.snapshot().state !== 'streaming'
+      )
+        executionHandle.settle(result);
+    });
+    return execution;
   };
 
   const executeParams = async (params: TInput, options?: ToolExecuteOptions): Promise<TReturn> => {
@@ -923,13 +992,30 @@ export function createTool<
         ...(options.timeout !== undefined ? { timeout: options.timeout } : {}),
         ...(options.stream !== undefined ? { stream: options.stream } : {}),
         ...(options.elicit ? { elicit: options.elicit } : {}),
+        ...(options.executionHandle ? { execution: options.executionHandle } : {}),
       };
 
       // `TContext` may be a subtype of `ToolContext<E>` (e.g. with extra fields).
       // At runtime we can only guarantee the base ToolContext shape, so we cast to
       // avoid `exactOptionalPropertyTypes` assignability issues.
 
-      const runner = resolvedExecute(parsed, toolContext as unknown as TContext);
+      const runner = Promise.resolve(resolvedExecute(parsed, toolContext as unknown as TContext));
+      if (options.executionHandle) {
+        void runner.then(
+          (result) => {
+            const state = options.executionHandle?.snapshot().state;
+            if (state === 'abort-requested' || state === 'cleanup-pending') {
+              options.executionHandle?.settle(result);
+            }
+          },
+          (error) => {
+            const state = options.executionHandle?.snapshot().state;
+            if (state === 'abort-requested' || state === 'cleanup-pending') {
+              options.executionHandle?.settle(error);
+            }
+          },
+        );
+      }
 
       const timed =
         typeof options.timeout === 'number'
@@ -987,15 +1073,35 @@ export function createTool<
         if (options.stream === true) {
           emit('stream-start', { mode: 'stream' });
           const streamSource = value;
+          const streamIterator = streamSource[Symbol.asyncIterator]();
           const accumulator = createStreamingAccumulator();
+          options.executionHandle?.streaming();
+          const onExecutionAbort = () => {
+            const executionHandle = options.executionHandle;
+            if (!executionHandle) return;
+            executionHandle.cleanupPending('stream return requested');
+            if (!streamIterator.return) {
+              executionHandle.unknownEffect('stream iterator has no return method');
+              return;
+            }
+            void Promise.resolve(streamIterator.return()).then(
+              () => executionHandle.cleanup(),
+              (error) => executionHandle.cleanup({ status: 'failed', error }),
+            );
+          };
+          options.executionHandle?.signal.addEventListener('abort', onExecutionAbort, {
+            once: true,
+          });
           const stream: AsyncIterable<unknown> = {
             async *[Symbol.asyncIterator]() {
               let streamError: unknown;
               try {
-                for await (const chunk of streamSource) {
+                for await (const chunk of { [Symbol.asyncIterator]: () => streamIterator }) {
                   assertStreamingWindow();
                   processStreamingChunk(chunk, accumulator);
+                  options.executionHandle?.activity();
                   yield chunk;
+                  assertStreamingWindow();
                 }
                 accumulator.completed = true;
               } catch (error) {
@@ -1003,6 +1109,7 @@ export function createTool<
                 emit('stream-error', { error, index: accumulator.index });
                 throw error;
               } finally {
+                options.executionHandle?.signal.removeEventListener('abort', onExecutionAbort);
                 const finalized = finalizeStreamingAccumulator(accumulator);
                 emit('stream-end', {
                   chunks: accumulator.index,
@@ -1038,6 +1145,7 @@ export function createTool<
                     successDetails.outputDigest = finalized.outputDigest;
                   }
                   finishTelemetry('success', successDetails);
+                  options.executionHandle?.settle(finalized.collected);
                 } else {
                   emit('execute-error', {
                     ...parsedDetail,
@@ -1066,6 +1174,7 @@ export function createTool<
                     errorDetails.inputDigest = inputDigest;
                   }
                   finishTelemetry('error', errorDetails);
+                  options.executionHandle?.settle(streamError);
                 }
               }
             },
@@ -1141,10 +1250,21 @@ export function createTool<
         outputDigest,
       };
     } catch (error) {
-      if (isAbortRejection(error)) {
+      if (options.executionHandle && (isTimeoutError(error) || options.signal?.aborted)) {
+        options.executionHandle.cleanupPending(error);
+      }
+      if (
+        isAbortRejection(error) &&
+        options.executionHandle?.snapshot().abortSource !== 'deadline'
+      ) {
         return handleCancellation(error.reason);
       }
-      const isZod = error instanceof z.ZodError;
+      const reportedError =
+        isAbortRejection(error) && options.executionHandle?.snapshot().abortSource === 'deadline'
+          ? new Error('TIMEOUT')
+          : error;
+      const zodError = reportedError instanceof z.ZodError ? reportedError : undefined;
+      const isZod = zodError !== undefined;
       if (isZod) {
         let report: ToolValidationReport | undefined;
         let repairHints: ToolRepairHint[] | undefined;
@@ -1158,7 +1278,7 @@ export function createTool<
             );
             report = diagnosticsResult.report;
             if (diagnostics?.createRepairHints) {
-              const hintError = diagnosticsResult.success ? error : diagnosticsResult.error;
+              const hintError = diagnosticsResult.success ? reportedError : diagnosticsResult.error;
               repairHints = diagnostics.createRepairHints(hintError, {
                 rootLabel: 'arguments',
               });
@@ -1170,7 +1290,7 @@ export function createTool<
 
         if (!repairHints && diagnostics?.createRepairHints) {
           try {
-            repairHints = diagnostics.createRepairHints(error, {
+            repairHints = diagnostics.createRepairHints(reportedError, {
               rootLabel: 'arguments',
             });
           } catch {
@@ -1181,16 +1301,16 @@ export function createTool<
         emit('validate-error', {
           ...baseDetail,
           params: toolCall.arguments,
-          error,
+          error: reportedError,
           report,
           repairHints,
         });
       } else {
-        emit('execute-error', { ...baseDetail, error });
+        emit('execute-error', { ...baseDetail, error: reportedError });
       }
-      emit('settled', { ...baseDetail, error });
+      emit('settled', { ...baseDetail, error: reportedError });
       const callId = toolCall.id;
-      const errorCategory = classifyErrorCategory(error);
+      const errorCategory = classifyErrorCategory(reportedError);
       const errorPolicyContext = buildPolicyContext(toolCall, toolCall.arguments, inputDigest);
       if (policyContextProvider) {
         const injected = await policyContextProvider(errorPolicyContext);
@@ -1202,25 +1322,28 @@ export function createTool<
         ...errorPolicyContext,
         outcome: 'error',
         errorCategory,
-        error,
+        error: reportedError,
       });
       const errorDetails: {
         error?: unknown;
         errorCategory?: ToolErrorCategory;
         inputDigest?: string;
-      } = { error, errorCategory };
+      } = { error: reportedError, errorCategory };
       if (inputDigest !== undefined) {
         errorDetails.inputDigest = inputDigest;
       }
       finishTelemetry('error', errorDetails);
       const message = errorString(
-        normalizeError(error, isTimeoutError(error) ? { code: 'TIMEOUT' } : undefined),
+        normalizeError(
+          reportedError,
+          isTimeoutError(reportedError) ? { code: 'TIMEOUT' } : undefined,
+        ),
       );
       const toolError = isZod
         ? createToolError('validation', message, {
             code: 'VALIDATION_ERROR',
             retryable: false,
-            details: { issues: serializeZodIssues(error.issues ?? []) },
+            details: { issues: serializeZodIssues(zodError?.issues ?? []) },
           })
         : createToolError(errorCategory, message, {
             code: extractErrorCode(error) ?? defaultErrorCode(errorCategory),
@@ -1322,10 +1445,21 @@ export function createTool<
     // Async iteration
     events: emitter.events.bind(emitter),
     // Lifecycle methods
-    complete: emitter.complete.bind(emitter),
-    get completed() {
-      return emitter.completed;
+    complete: async () => {
+      emitter.complete();
+      await executionLifecycle.complete();
     },
+    get completed() {
+      return executionLifecycle.completed;
+    },
+    get activeExecutions() {
+      return executionLifecycle.activeExecutions;
+    },
+    get executionSignal() {
+      return executionLifecycle.signal;
+    },
+    executions: executionLifecycle,
+    whenIdle: () => executionLifecycle.whenIdle(),
     toJSON,
     toString: () => `**${configuration.identity.name}**: ${configuration.display.description}`,
     [Symbol.toPrimitive]: () => configuration.identity.name,
@@ -1366,6 +1500,7 @@ export function createTool<
   // Provide [Symbol.dispose] to complete the event target (clears listeners and marks complete)
   bag[Symbol.dispose] = () => {
     emitter.complete();
+    void executionLifecycle.complete();
   };
 
   bag['executeWith'] = (options: ToolExecuteWithOptions) => {
@@ -1375,7 +1510,48 @@ export function createTool<
       ...options,
       ...(resolvedTimeout !== undefined ? { timeout: resolvedTimeout } : {}),
     };
-    return runWithConcurrency(() => executeInner(toolCall, executeOptions));
+    const nowFunction = options.now ?? Date.now;
+    const executionHandle = executionLifecycle.begin({
+      ...(options.executionId ? { executionId: options.executionId } : {}),
+      toolName: name,
+      callId: toolCall.id,
+      ...(options.ownerId ? { ownerId: options.ownerId } : {}),
+      ...(options.parentExecutionId ? { parentExecutionId: options.parentExecutionId } : {}),
+      ...(options.signal instanceof AbortSignal ? { signal: options.signal } : {}),
+      ...(resolvedTimeout !== undefined ? { deadline: nowFunction() + resolvedTimeout } : {}),
+      scheduleDeadline: false,
+      now: nowFunction,
+      ...(limiter ? { capacity: limiter.capacity } : {}),
+      ...(options.setTimeoutFunction ? { setTimeoutFunction: options.setTimeoutFunction } : {}),
+    });
+    const execution = runWithConcurrency(
+      () => (
+        executionHandle.activate(),
+        executeInner(toolCall, {
+          ...executeOptions,
+          signal: executionHandle.signal,
+          executionHandle,
+        })
+      ),
+      {
+        signal: executionHandle.signal,
+        ...(limiter
+          ? {
+              onQueuePosition: (position: number) =>
+                executionHandle.queued(position, limiter.capacity),
+            }
+          : {}),
+      },
+    ).catch((error) => queuedCancellationResult(toolCall, error));
+    void execution.then((result) => {
+      if (
+        !result.stream &&
+        executionHandle.snapshot().state !== 'cleanup-pending' &&
+        executionHandle.snapshot().state !== 'streaming'
+      )
+        executionHandle.settle(result);
+    });
+    return execution;
   };
 
   const finalTool = tool;
@@ -1411,7 +1587,15 @@ export function createTool<
       const clearTimeoutFunction =
         options.clearTimeoutFunction ??
         ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
-      const id = setTimeoutFunction(() => reject(new Error('TIMEOUT')), timeout);
+      const id = setTimeoutFunction(() => {
+        if ('executionHandle' in options) {
+          (options as InternalToolExecuteOptions).executionHandle?.abort(
+            'deadline',
+            'Execution deadline exceeded',
+          );
+        }
+        reject(new Error('TIMEOUT'));
+      }, timeout);
       void promise.then(
         (v) => {
           clearTimeoutFunction(id);

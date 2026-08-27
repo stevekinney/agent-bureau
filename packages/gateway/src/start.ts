@@ -226,16 +226,16 @@ async function main(): Promise<void> {
   console.log(`[gateway] listening on port ${gateway.port}`);
 
   let shuttingDown = false;
-  const shutdown = (signal: string) => {
+  const shutdown = async (signal: string) => {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(`[gateway] received ${signal}, shutting down`);
     server.stop();
-    gateway.bureau.dispose();
+    await gateway.bureau.dispose();
     process.exit(0);
   };
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
-  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => void shutdown('SIGTERM'));
+  process.on('SIGINT', () => void shutdown('SIGINT'));
 }
 
 if (import.meta.main) {

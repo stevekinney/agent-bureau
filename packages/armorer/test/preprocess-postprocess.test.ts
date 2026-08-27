@@ -114,7 +114,9 @@ describe('preprocess', () => {
       timeout: 123,
     });
 
-    expect(observed.signal).toBe(controller.signal);
+    expect(observed.signal).not.toBe(controller.signal);
+    controller.abort('caller stopped');
+    expect(observed.signal?.aborted).toBe(true);
     expect(observed.timeout).toBe(123);
   });
 
@@ -262,7 +264,9 @@ describe('postprocess', () => {
       timeout: 321,
     });
 
-    expect(observed.signal).toBe(controller.signal);
+    expect(observed.signal).not.toBe(controller.signal);
+    controller.abort('caller stopped');
+    expect(observed.signal?.aborted).toBe(true);
     expect(observed.timeout).toBe(321);
   });
 

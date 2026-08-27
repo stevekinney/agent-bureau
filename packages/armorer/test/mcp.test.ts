@@ -100,6 +100,167 @@ const connect = async (toolbox: Parameters<typeof createMCP>[0], options = {}) =
 };
 
 describe('createMCP', () => {
+  it('aborts and awaits an in-flight plain call, then rejects admission after shutdown', async () => {
+    const started = createDeferred<void>();
+    const aborted = createDeferred<void>();
+    const toolbox = createToolbox();
+    createTool(
+      {
+        name: 'shutdown-plain',
+        description: 'plain call held open for shutdown',
+        input: z.object({}),
+        async execute(_params, context) {
+          started.resolve();
+          return new Promise((_resolve, reject) => {
+            context.signal?.addEventListener('abort', () => {
+              aborted.resolve();
+              reject(context.signal?.reason ?? new Error('aborted'));
+            });
+          });
+        },
+      },
+      toolbox,
+    );
+    const { client, server } = await connect(toolbox);
+    try {
+      const call = client.callTool({ name: 'shutdown-plain', arguments: {} });
+      await started.promise;
+      const reportPromise = server.shutdown();
+      await aborted.promise;
+      const report = await reportPromise;
+      expect(report.admissionClosed).toBe(true);
+      expect(report.terminal + report.unknownEffects).toBe(report.snapshots.length);
+      expect(report.snapshots.every((snapshot) => snapshot.state !== 'active')).toBe(true);
+      expect(() => server.shutdown()).not.toThrow();
+      await expect(call).resolves.toMatchObject({ isError: true });
+
+      const afterShutdown = await client.callTool({ name: 'shutdown-plain', arguments: {} });
+      expect(afterShutdown.isError).toBe(true);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it('aborts and awaits an in-flight task during server shutdown', async () => {
+    const started = createDeferred<void>();
+    const aborted = createDeferred<void>();
+    const toolbox = createToolbox();
+    createTool(
+      {
+        name: 'shutdown-task',
+        description: 'task held open for shutdown',
+        input: z.object({}),
+        metadata: { mcp: { execution: { taskSupport: 'required' } } },
+        async execute(_params, context) {
+          started.resolve();
+          return new Promise((_resolve, reject) => {
+            context.signal?.addEventListener('abort', () => {
+              aborted.resolve();
+              reject(context.signal?.reason ?? new Error('aborted'));
+            });
+          });
+        },
+      },
+      toolbox,
+    );
+    const { client, server } = await connect(toolbox);
+    try {
+      await client.request(
+        { method: 'tools/call', params: { name: 'shutdown-task', arguments: {}, task: {} } },
+        CreateTaskResultSchema,
+      );
+      await started.promise;
+      const first = server.shutdown();
+      const second = server.shutdown();
+      expect(first).toBe(second);
+      await aborted.promise;
+      const report = await first;
+      expect(report.admissionClosed).toBe(true);
+      expect(report.snapshots).toHaveLength(1);
+      expect(report.terminal + report.unknownEffects).toBe(1);
+      expect(report.snapshots.every((snapshot) => snapshot.state !== 'active')).toBe(true);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it('reports terminal task-store write failures in shutdown cleanup evidence', async () => {
+    const toolbox = createToolbox();
+    createTool(
+      {
+        name: 'shutdown-store-failure',
+        description: 'task whose result cannot be stored',
+        input: z.object({}),
+        metadata: { mcp: { execution: { taskSupport: 'required' } } },
+        async execute() {
+          return { ok: true };
+        },
+      },
+      toolbox,
+    );
+    const taskStore = createDelegatingTaskStore({
+      async storeTaskResult() {
+        throw new Error('deterministic store failure');
+      },
+    });
+    const { client, server } = await connect(toolbox, { taskStore });
+    try {
+      await client.request(
+        {
+          method: 'tools/call',
+          params: { name: 'shutdown-store-failure', arguments: {}, task: {} },
+        },
+        CreateTaskResultSchema,
+      );
+      await flushMicrotasks(20);
+      const report = await server.shutdown();
+      expect(report.cleanupFailures).toBe(1);
+      expect(report.snapshots[0]?.cleanup?.status).toBe('failed');
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it('reports task result formatting failures in shutdown cleanup evidence', async () => {
+    const toolbox = createToolbox();
+    createTool(
+      {
+        name: 'shutdown-format-failure',
+        description: 'task whose result cannot be formatted',
+        input: z.object({}),
+        metadata: { mcp: { execution: { taskSupport: 'required' } } },
+        async execute() {
+          return { ok: true };
+        },
+      },
+      toolbox,
+    );
+    const { client, server } = await connect(toolbox, {
+      formatResult() {
+        throw new Error('deterministic format failure');
+      },
+    });
+    try {
+      await client.request(
+        {
+          method: 'tools/call',
+          params: { name: 'shutdown-format-failure', arguments: {}, task: {} },
+        },
+        CreateTaskResultSchema,
+      );
+      await flushMicrotasks(20);
+      const report = await server.shutdown();
+      expect(report.cleanupFailures).toBe(1);
+      expect(report.snapshots[0]?.cleanup?.status).toBe('failed');
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
   it('converts toolbox tools into MCP tool definitions', async () => {
     const toolbox = createToolbox();
     createTool(
@@ -1965,6 +2126,7 @@ describe('task-based tools (MCP Tasks extension)', () => {
     let capturedPlainHandler: ((args: unknown, extra?: unknown) => Promise<unknown>) | undefined;
     class CapturingMcpServer {
       readonly server = { getClientCapabilities: () => ({}) };
+      async close() {}
       readonly experimental = {
         tasks: {
           registerToolTask: (
