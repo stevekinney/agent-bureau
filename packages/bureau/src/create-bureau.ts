@@ -1117,6 +1117,26 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     });
   }
 
+  async function persistPendingApprovalOverrideWithRetry(
+    sessionId: string,
+    reviewId: string,
+    approval: Extract<PendingReview, { kind: 'tool-approval' }>['approval'],
+  ): Promise<void> {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= SESSION_PERSISTENCE_MAXIMUM_ATTEMPTS; attempt += 1) {
+      try {
+        await persistPendingApprovalOverride(sessionId, reviewId, approval);
+        return;
+      } catch (error) {
+        lastError = error;
+        if (attempt < SESSION_PERSISTENCE_MAXIMUM_ATTEMPTS) {
+          await sessionPersistenceSleep(sessionPersistenceRetryDelayMilliseconds);
+        }
+      }
+    }
+    throw lastError;
+  }
+
   async function persistReviewResolution(
     sessionId: string,
     reviewId: string,
@@ -1515,7 +1535,26 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
           maximumTokens: request.maximumTokens,
           stopWhen: options.stopWhen,
           prepareStep: runRuntime.prepareStep,
-          onStep: runRuntime.onStep,
+          onStep: [
+            ...runRuntime.onStep,
+            async (stepResult) => {
+              for (const stepResultItem of stepResult.results) {
+                if (
+                  stepResultItem.outcome !== 'action_required' ||
+                  !stepResultItem.pendingApproval
+                ) {
+                  continue;
+                }
+                const reviewId = `approval:${runId}:${stepResultItem.pendingApproval.callId}`;
+                pendingApprovalOverrides.set(reviewId, stepResultItem.pendingApproval);
+                await persistPendingApprovalOverrideWithRetry(
+                  sessionId,
+                  reviewId,
+                  stepResultItem.pendingApproval,
+                );
+              }
+            },
+          ],
           executeOptions: { requestContext },
           validateResponse: runRuntime.validateResponse,
           // Thread agentName and runId so curated tool.* bubble events are stamped
@@ -1548,31 +1587,6 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       activeRuns.add(activeRun);
       runToolboxes.add(runToolbox);
       runToolboxesByRunId.set(runId, runToolbox);
-      activeRun.addEventListener('step.completed', (event) => {
-        const step = event as Event & {
-          results?: readonly {
-            outcome?: string;
-            pendingApproval?: Extract<PendingReview, { kind: 'tool-approval' }>['approval'];
-          }[];
-        };
-        for (const stepResult of step.results ?? []) {
-          if (stepResult.outcome !== 'action_required' || !stepResult.pendingApproval) continue;
-          const reviewId = `approval:${runId}:${stepResult.pendingApproval.callId}`;
-          pendingApprovalOverrides.set(reviewId, stepResult.pendingApproval);
-          void persistPendingApprovalOverride(
-            sessionId,
-            reviewId,
-            stepResult.pendingApproval,
-          ).catch((error) =>
-            diagnose({
-              level: 'error',
-              scope: 'session-persistence',
-              message: `[bureau] Failed to persist approval binding for "${reviewId}": ${serializeUnknownError(error)}`,
-            }),
-          );
-        }
-      });
-
       // AB-96 — the versioned run-lifecycle frame stream. Registered before
       // `store.register` so `run-started` is the first frame a live subscriber
       // ever sees for this run.
@@ -3157,6 +3171,9 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     resolveReview,
     setRequestAuthorityValidator(validator) {
       requestAuthorityValidator = validator;
+    },
+    getRequestAuthorityValidator() {
+      return requestAuthorityValidator;
     },
     createSchedule,
     getSchedule,

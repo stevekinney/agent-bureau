@@ -572,8 +572,13 @@ describe('createToolbox', () => {
       return {
         store: {
           issue: baseStore.issue,
-          consume: async (...args: Parameters<typeof baseStore.consume>) => {
+          reserve: baseStore.reserve,
+          commit: async (...args: Parameters<typeof baseStore.commit>) => {
             consumeCount += 1;
+            return baseStore.commit(...args);
+          },
+          release: baseStore.release,
+          consume: async (...args: Parameters<typeof baseStore.consume>) => {
             return baseStore.consume(...args);
           },
           revoke: baseStore.revoke,
@@ -605,6 +610,55 @@ describe('createToolbox', () => {
     );
     expect(admittedAfterAbort.outcome).toBe('success');
     expect(abortedStore.consumeCount).toBe(1);
+
+    const deferredBaseStore = createProcessLocalApprovalStateStore();
+    const deferredApprovalReference: { current?: SignedPendingToolApproval } = {};
+    let deferCommit = true;
+    let resolveCommitStarted: (() => void) | undefined;
+    const commitStarted = new Promise<void>((resolve) => {
+      resolveCommitStarted = resolve;
+    });
+    let resolveDeferredCommit: (() => void) | undefined;
+    const deferredStore = {
+      issue: deferredBaseStore.issue,
+      reserve: deferredBaseStore.reserve,
+      commit: () => {
+        const deferredApproval = deferredApprovalReference.current!;
+        if (!deferCommit) return deferredBaseStore.commit(deferredApproval.approvalBinding!);
+        return new Promise<void>((resolve) => {
+          resolveCommitStarted?.();
+          resolveDeferredCommit = () => {
+            void deferredBaseStore.commit(deferredApproval.approvalBinding!).then(resolve);
+          };
+        });
+      },
+      release: deferredBaseStore.release,
+      consume: deferredBaseStore.consume,
+      state: deferredBaseStore.state,
+    };
+    const deferredToolbox = createApprovalToolbox(deferredStore);
+    const deferredApprovalResult = await deferredToolbox.execute(
+      { id: 'deferred-admission', name: 'admission-gated-action', arguments: {} },
+      approvalExecutionOptions,
+    );
+    const deferredApproval = deferredApprovalResult.pendingApproval as SignedPendingToolApproval;
+    deferredApprovalReference.current = deferredApproval;
+    const deferredController = new AbortController();
+    const deferredResume = deferredToolbox.resumeApproval(deferredApproval, {
+      ...approvalExecutionOptions,
+      signal: deferredController.signal,
+    });
+    await commitStarted;
+    deferredController.abort('aborted while reserving approval');
+    resolveDeferredCommit?.();
+    const deferredResult = await deferredResume;
+    expect(deferredResult.outcome).toBe('error');
+    deferCommit = false;
+    const admittedAfterDeferredAbort = await deferredToolbox.resumeApproval(
+      deferredApproval,
+      approvalExecutionOptions,
+    );
+    expect(admittedAfterDeferredAbort.outcome).toBe('success');
 
     const closedStore = createStore();
     const closedToolbox = createApprovalToolbox(closedStore.store);
@@ -652,7 +706,7 @@ describe('createToolbox', () => {
         approvalExecutionOptions,
       ),
     ).rejects.toThrow('already been consumed');
-    expect(policyStore.consumeCount).toBe(2);
+    expect(policyStore.consumeCount).toBe(1);
   });
 
   it('requires versioned tool definitions for durable approvals and invalidates revisions', async () => {

@@ -4267,6 +4267,22 @@ describe('createBureau review queue (AB-20)', () => {
     bureau.dispose();
   });
 
+  it('exposes the construction-time request authority validator for transport composition', async () => {
+    const constructionValidator = () => true;
+    const replacementValidator = () => false;
+    const bureau = await createBureau({ requestAuthorityValidator: constructionValidator });
+
+    try {
+      expect(bureau.getRequestAuthorityValidator()).toBe(constructionValidator);
+
+      bureau.setRequestAuthorityValidator(replacementValidator);
+
+      expect(bureau.getRequestAuthorityValidator()).toBe(replacementValidator);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
   it('retries approval resolution persistence after a transient cleanup failure', async () => {
     const backingStore = textValueStore(new MemoryStorage());
     let failNextSessionUpdate = false;
@@ -4320,7 +4336,7 @@ describe('createBureau review queue (AB-20)', () => {
     bureau.dispose();
   });
 
-  it('reports an initial approval binding persistence failure without dropping the live review', async () => {
+  it('retries an initial approval binding persistence failure before exposing the live review', async () => {
     const backingStore = textValueStore(new MemoryStorage());
     let failedApprovalPersistence = false;
     const persistence = createTextStoreProxy(backingStore, {
@@ -4347,6 +4363,7 @@ describe('createBureau review queue (AB-20)', () => {
       stopWhen: stopWhen.toolOutcome('action_required'),
       persistence,
       onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.message),
+      sessionPersistenceSleep: async () => {},
     });
 
     const run = await bureau.createRun({
@@ -4356,9 +4373,11 @@ describe('createBureau review queue (AB-20)', () => {
 
     expect(failedApprovalPersistence).toBe(true);
     expect(bureau.listPendingReviews()).toHaveLength(1);
-    expect(diagnostics).toContainEqual(
-      expect.stringContaining('Failed to persist approval binding'),
+    const persistedSession = await bureau.getSession(run.sessionId);
+    expect(persistedSession?.metadata['pendingApprovalOverrides']).toHaveProperty(
+      bureau.listPendingReviews()[0]!.id,
     );
+    expect(diagnostics).toEqual([]);
     bureau.dispose();
   });
 

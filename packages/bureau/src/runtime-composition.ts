@@ -2181,8 +2181,13 @@ export async function createRuntimeComposition(
       info.workflowId,
       info.input.agentName,
     );
+    if (!recoveredAuthority) {
+      return {
+        status: 'unavailable',
+        reason: `run ${info.workflowId} request authority is unavailable during recovery`,
+      };
+    }
     if (
-      recoveredAuthority &&
       options.requestAuthorityValidator === undefined &&
       recoveredAuthority.authority.authorizationRevision !== 'bureau:1'
     ) {
@@ -2192,7 +2197,6 @@ export async function createRuntimeComposition(
       };
     }
     if (
-      recoveredAuthority &&
       options.requestAuthorityValidator &&
       !(await options.requestAuthorityValidator(recoveredAuthority))
     ) {

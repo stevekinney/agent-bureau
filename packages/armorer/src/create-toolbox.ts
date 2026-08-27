@@ -93,6 +93,7 @@ import type {
 } from './execution-lifecycle';
 import { createExecutionLifecycle } from './execution-lifecycle';
 import {
+  type ApprovalAdmissionRollback,
   approvalConsumeSymbol,
   type ApprovalResumeState,
   approvalResumeSymbol,
@@ -389,7 +390,7 @@ type InternalToolboxExecuteOptions = ToolboxExecuteOptions & {
 };
 
 type InternalToolExecuteOptionsWithMirror = ToolboxExecuteOptions & {
-  [approvalConsumeSymbol]?: () => Promise<void>;
+  [approvalConsumeSymbol]?: () => Promise<ApprovalAdmissionRollback>;
   [approvalResumeSymbol]?: ApprovalResumeState;
   executionHandle?: ExecutionHandle;
   privilegedContextMirrorHandle?: ExecutionHandle;
@@ -1274,7 +1275,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
                   ...(options !== undefined && approvalConsumeSymbol in options
                     ? {
                         [approvalConsumeSymbol]: options[approvalConsumeSymbol] as
-                          (() => Promise<void>) | undefined,
+                          (() => Promise<ApprovalAdmissionRollback>) | undefined,
                       }
                     : {}),
                 }
@@ -1431,7 +1432,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     if (!parsedArguments.success) {
       throw parsedArguments.error;
     }
-    let consumeApproval: (() => Promise<void>) | undefined;
+    let consumeApproval: (() => Promise<ApprovalAdmissionRollback>) | undefined;
     let consumeError: unknown;
     if (approvalStateStore) {
       const requestContext = resumeOptions?.requestContext;
@@ -1460,12 +1461,22 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
         approvalRevision,
       };
       consumeApproval = async () => {
+        let reserved = false;
         try {
-          await approvalStateStore.consume(approval.approvalBinding!, approvalContext);
+          await approvalStateStore.reserve(approval.approvalBinding!, approvalContext);
+          reserved = true;
+          await approvalStateStore.commit(approval.approvalBinding!);
         } catch (error) {
+          if (reserved) await approvalStateStore.release(approval.approvalBinding!);
           consumeError = error;
           throw error;
         }
+        let rolledBack = false;
+        return async () => {
+          if (rolledBack) return;
+          rolledBack = true;
+          await approvalStateStore.release(approval.approvalBinding!);
+        };
       };
     }
     const executeForResume =

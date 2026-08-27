@@ -79,6 +79,14 @@ async function saveRecoverableSession(sessionStore: SessionStore, runId: string)
         lastRunId: runId,
         lastRunStatus: 'running',
         lastUserMessage: 'recover this session if it is not scheduler-origin',
+        lastRequestAuthority: {
+          principalId: `run:${runId}`,
+          tenantId: 'bureau',
+          ownerId: 'test-agent',
+          capabilities: ['tools:execute'],
+          authorizationRevision: 'bureau:1',
+          audience: 'operator',
+        },
       },
     }),
   );
@@ -1262,7 +1270,19 @@ describe('createRuntimeComposition durable execution', () => {
       id: 'session-owned',
       agentName: 'agent',
       conversationHistory: createConversationHistory({ id: 'session-owned' }),
-      metadata: { lastRunId: 'run-owned', lastRunStatus: 'running', lastUserMessage: 'resume' },
+      metadata: {
+        lastRunId: 'run-owned',
+        lastRunStatus: 'running',
+        lastUserMessage: 'resume',
+        lastRequestAuthority: {
+          principalId: 'run:run-owned',
+          tenantId: 'bureau',
+          ownerId: 'agent',
+          capabilities: ['tools:execute'],
+          authorizationRevision: 'bureau:1',
+          audience: 'operator',
+        },
+      },
     });
     const runtime = await createRuntimeComposition({
       generate: async () => ({ content: 'x', toolCalls: [] }),
@@ -1329,6 +1349,50 @@ describe('createRuntimeComposition durable execution', () => {
           input: { runId: 'run-owned', sessionId: 'session-owned', agentName: 'agent' },
         }),
       ).toMatchObject({ status: 'unavailable', reason: 'run run-owned not reconstructable' });
+    } finally {
+      runtime.durable?.engine[Symbol.dispose]?.();
+    }
+  });
+
+  it('fails closed when recovered request authority is missing', async () => {
+    const session = createAgentSession({
+      id: 'session-missing-authority',
+      agentName: 'agent',
+      conversationHistory: createConversationHistory({ id: 'session-missing-authority' }),
+      metadata: {
+        lastRunId: 'run-missing-authority',
+        lastRunStatus: 'running',
+        lastUserMessage: 'resume',
+      },
+    });
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    try {
+      getRuntimeCompositionTestingSeams(runtime).setSessionStore({
+        async load() {
+          return session;
+        },
+      } as unknown as SessionStore);
+
+      expect(
+        await getRuntimeCompositionTestingSeams(runtime).resolveRunServices({
+          workflowId: 'run-missing-authority',
+          workflowType: 'agentRun',
+          input: {
+            runId: 'run-missing-authority',
+            sessionId: 'session-missing-authority',
+            agentName: 'agent',
+          },
+        }),
+      ).toMatchObject({
+        status: 'unavailable',
+        reason: 'run run-missing-authority request authority is unavailable during recovery',
+      });
     } finally {
       runtime.durable?.engine[Symbol.dispose]?.();
     }
@@ -1819,6 +1883,14 @@ describe('createRuntimeComposition durable execution', () => {
               lastRunStatus: 'running',
               lastUserMessage: 'recover this session',
               lastMaximumTokens: expectedMaximumTokens,
+              lastRequestAuthority: {
+                principalId: `run:${runId}`,
+                tenantId: 'bureau',
+                ownerId: 'test-agent',
+                capabilities: ['tools:execute'],
+                authorizationRevision: 'bureau:1',
+                audience: 'operator',
+              },
             },
           }),
         );

@@ -25,6 +25,11 @@ import type { Gateway, GatewayOptions } from './types';
 import { DEFAULT_PORT, SCOPE } from './types';
 import { createWebSocketHandler } from './websocket';
 
+type RequestAuthorityValidator = (context: ToolRequestContext) => boolean | Promise<boolean>;
+type BureauRequestAuthorityValidatorAccess = {
+  readonly getRequestAuthorityValidator?: () => RequestAuthorityValidator | undefined;
+};
+
 /**
  * Detects the current server runtime. Returns `'bun'` when running
  * inside the Bun runtime, `'node'` otherwise.
@@ -134,6 +139,19 @@ export function buildRequestAuthorityValidator(
   };
 }
 
+function composeRequestAuthorityValidators(
+  hostValidator: RequestAuthorityValidator | undefined,
+  gatewayValidator: RequestAuthorityValidator | undefined,
+): RequestAuthorityValidator | undefined {
+  if (!hostValidator) return gatewayValidator;
+  if (!gatewayValidator) return hostValidator;
+
+  return async (context) => {
+    if (!(await hostValidator(context))) return false;
+    return gatewayValidator(context);
+  };
+}
+
 /**
  * Creates a new Gateway (HTTP door) over an already-constructed Bureau (brain).
  *
@@ -174,9 +192,15 @@ export async function createGateway(
     apiKeyStore = createApiKeyStore(bureau.kv);
     await bootstrapApiKey(apiKeyStore);
   }
-  bureau.setRequestAuthorityValidator(
+  const authorityValidatorAccess = bureau as Bureau & BureauRequestAuthorityValidatorAccess;
+  const hostRequestAuthorityValidator = authorityValidatorAccess.getRequestAuthorityValidator?.();
+  const requestAuthorityValidator = composeRequestAuthorityValidators(
+    hostRequestAuthorityValidator,
     buildRequestAuthorityValidator(options.authToken, apiKeyStore),
   );
+  if (requestAuthorityValidator !== hostRequestAuthorityValidator) {
+    bureau.setRequestAuthorityValidator(requestAuthorityValidator);
+  }
 
   const app = new Hono();
 

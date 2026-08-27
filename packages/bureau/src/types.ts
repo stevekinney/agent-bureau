@@ -641,6 +641,14 @@ export interface Bureau {
   ): void;
 
   /**
+   * Returns the current host-owned authority freshness check so transports can
+   * compose their own revocation checks without replacing construction-time
+   * host validation.
+   */
+  getRequestAuthorityValidator():
+    ((context: ToolRequestContext) => boolean | Promise<boolean>) | undefined;
+
+  /**
    * Register a durable recurring schedule via `engine.schedule(...)`.
    * Returns `null` when the schedule was created but could not be immediately
    * retrieved. Returns `undefined` when no durable engine is composed.

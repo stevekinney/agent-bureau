@@ -68,6 +68,13 @@ function validateApprovalClock(now: number): number {
 
 export interface ApprovalStateStore {
   issue(binding: ApprovalBindingPayload): Promise<void>;
+  reserve(
+    binding: ApprovalBindingPayload,
+    context?: Partial<ApprovalBindingContext>,
+    now?: number,
+  ): Promise<void>;
+  commit(binding: Pick<ApprovalBindingPayload, 'nonce' | 'replayScope'>): Promise<void>;
+  release(binding: ApprovalBindingPayload): Promise<void>;
   consume(
     binding: ApprovalBindingPayload,
     context?: Partial<ApprovalBindingContext>,
@@ -132,6 +139,7 @@ export function validateApprovalBinding(
 /** Process-local, atomic single-use approval state. */
 export function createProcessLocalApprovalStateStore(nowFunction = Date.now): ApprovalStateStore {
   const issued = new Map<string, ApprovalBindingPayload>();
+  const reserved = new Map<string, ApprovalBindingPayload>();
   const terminal = new Map<
     string,
     { state: Exclude<ApprovalState, 'issued'>; expiresAt: number }
@@ -160,10 +168,16 @@ export function createProcessLocalApprovalStateStore(nowFunction = Date.now): Ap
             'already-consumed',
           );
         }
+        if (reserved.has(key)) {
+          throw new ApprovalBindingError(
+            'Approval binding nonce has already been issued.',
+            'already-consumed',
+          );
+        }
         issued.set(key, binding);
       });
     },
-    consume(binding, context, now = nowFunction()) {
+    reserve(binding, context, now = nowFunction()) {
       return Promise.resolve().then(() => {
         const validationTime = validateApprovalClock(now);
         validateApprovalBinding(binding, context, validationTime);
@@ -188,7 +202,47 @@ export function createProcessLocalApprovalStateStore(nowFunction = Date.now): Ap
           );
         }
         issued.delete(key);
-        terminal.set(key, { state: 'consumed', expiresAt: binding.expiresAt });
+        reserved.set(key, binding);
+      });
+    },
+    commit(binding) {
+      return Promise.resolve().then(() => {
+        const key = keyOf(binding);
+        const reservedBinding = reserved.get(key);
+        if (!reservedBinding) {
+          const terminalEntry = terminal.get(key);
+          if (terminalEntry?.state === 'consumed') {
+            throw new ApprovalBindingError(
+              'Approval binding has already been consumed.',
+              'already-consumed',
+            );
+          }
+          throw new ApprovalBindingError('Approval binding was not found.', 'not-found');
+        }
+        reserved.delete(key);
+        terminal.set(key, { state: 'consumed', expiresAt: reservedBinding.expiresAt });
+      });
+    },
+    release(binding) {
+      return Promise.resolve().then(() => {
+        const key = keyOf(binding);
+        const reservedBinding = reserved.get(key);
+        if (reservedBinding) {
+          reserved.delete(key);
+          issued.set(key, reservedBinding);
+          return;
+        }
+        const terminalEntry = terminal.get(key);
+        if (terminalEntry?.state === 'consumed') {
+          terminal.delete(key);
+          issued.set(key, binding);
+        }
+      });
+    },
+    consume(binding, context, now = nowFunction()) {
+      return Promise.resolve().then(async () => {
+        await this.reserve(binding, context, now);
+        await this.commit(binding);
       });
     },
     revoke(binding) {

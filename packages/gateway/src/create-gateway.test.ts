@@ -1,4 +1,5 @@
 import { createStore } from '@lostgradient/operative/store';
+import type { ToolRequestContext } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import { createBureau } from 'bureau';
 
@@ -13,6 +14,55 @@ import { staticTokenAuthorizationRevision } from './middleware/authentication';
 import { DEFAULT_PORT } from './types';
 
 describe('createGateway', () => {
+  type RequestAuthorityValidator = (context: ToolRequestContext) => boolean | Promise<boolean>;
+
+  function staticTokenRequestContext(authToken: string, ownerId = 'bureau'): ToolRequestContext {
+    return {
+      authority: {
+        principalId: 'static-token',
+        tenantId: 'bureau',
+        ownerId,
+        capabilities: ['*'],
+        authorizationRevision: staticTokenAuthorizationRevision(authToken),
+      },
+      audience: 'operator',
+    };
+  }
+
+  function createGatewayBureauStub(hostValidator?: RequestAuthorityValidator) {
+    let requestAuthorityValidator = hostValidator;
+    const bureau = {
+      store: createStore(),
+      memory: undefined,
+      scheduler: undefined,
+      ready: true,
+      kv: undefined,
+      subscribeLiveFrames: () => () => undefined,
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+      setRequestAuthorityValidator(validator: RequestAuthorityValidator | undefined) {
+        requestAuthorityValidator = validator;
+      },
+      getRequestAuthorityValidator() {
+        return requestAuthorityValidator;
+      },
+      getConfiguration() {
+        return {
+          provider: undefined,
+          providers: [],
+          maximumSteps: 3,
+          systemPrompt: undefined,
+          tools: [],
+        };
+      },
+    } as unknown as Parameters<typeof createGateway>[0];
+
+    return {
+      bureau,
+      getRequestAuthorityValidator: () => requestAuthorityValidator,
+    };
+  }
+
   it('creates a gateway with default options', async () => {
     const bureau = await createBureau();
     const gateway = await createGateway(bureau);
@@ -77,6 +127,57 @@ describe('createGateway', () => {
     expect(gateway.bureau).toBe(bureau);
     expect(disposed).toBe(false);
     await bureau.dispose();
+  });
+
+  it('preserves the host authority validator when gateway has no credential mechanism', async () => {
+    const hostValidator = (context: ToolRequestContext) =>
+      context.authority.tenantId === 'host-tenant';
+    const { bureau, getRequestAuthorityValidator } = createGatewayBureauStub(hostValidator);
+
+    expect(getRequestAuthorityValidator()).toBe(hostValidator);
+    await createGateway(bureau);
+
+    const validator = getRequestAuthorityValidator();
+    const allowedContext = staticTokenRequestContext('unused');
+    expect(validator).toBe(hostValidator);
+    expect(
+      await validator!({
+        ...allowedContext,
+        authority: {
+          ...allowedContext.authority,
+          tenantId: 'host-tenant',
+        },
+      }),
+    ).toBe(true);
+    expect(await validator!(staticTokenRequestContext('unused'))).toBe(false);
+  });
+
+  it('installs gateway authority freshness validation when gateway owns credentials', async () => {
+    const { bureau, getRequestAuthorityValidator } = createGatewayBureauStub();
+
+    await createGateway(bureau, { authToken: 'secret' });
+
+    const validator = getRequestAuthorityValidator();
+    expect(validator).toBeDefined();
+    expect(await validator!(staticTokenRequestContext('secret'))).toBe(true);
+    expect(await validator!(staticTokenRequestContext('rotated-secret'))).toBe(false);
+  });
+
+  it('composes host and gateway authority validators so both must pass', async () => {
+    const hostValidator = (context: ToolRequestContext) =>
+      context.authority.ownerId === 'allowed-owner';
+    const { bureau, getRequestAuthorityValidator } = createGatewayBureauStub(hostValidator);
+
+    await createGateway(bureau, { authToken: 'secret' });
+
+    const validator = getRequestAuthorityValidator();
+    expect(validator).toBeDefined();
+    expect(validator).not.toBe(hostValidator);
+    expect(await validator!(staticTokenRequestContext('secret', 'allowed-owner'))).toBe(true);
+    expect(await validator!(staticTokenRequestContext('secret', 'blocked-owner'))).toBe(false);
+    expect(await validator!(staticTokenRequestContext('rotated-secret', 'allowed-owner'))).toBe(
+      false,
+    );
   });
 });
 

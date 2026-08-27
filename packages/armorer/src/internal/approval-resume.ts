@@ -5,6 +5,8 @@ export const approvalConsumeSymbol: unique symbol = Symbol('armorer.approvalCons
 export const policyPauseDecisionsSymbol: unique symbol = Symbol('armorer.policyPauseDecisions');
 export const policyPauseTierSymbol: unique symbol = Symbol('armorer.policyPauseTier');
 
+export type ApprovalAdmissionRollback = () => Promise<void>;
+
 export type ApprovalResumeState = {
   approvedAction: ToolAction;
   approvedPolicyPauseTier?: PolicyPauseTier;
