@@ -204,16 +204,36 @@ export type MessagePlugin = (input: MessageInput) => MessageInput;
  * Serialized form of a single node in the conversation tree.
  */
 export interface ConversationNodeSnapshot {
+  id: string;
+  revision: number;
+  parentId: string | null;
   conversation: ConversationHistory;
-  children: ConversationNodeSnapshot[];
+  children: readonly ConversationNodeSnapshot[];
 }
 
 /**
  * Serialized form of the entire conversation tree.
  */
 export interface ConversationSnapshot {
+  snapshotFormatVersion: 1;
+  conversationSchemaVersion: number;
+  controllerRevision: number;
+  conversationId: string;
+  currentBranchId: string;
   root: ConversationNodeSnapshot;
-  currentPath: number[];
+  currentPath: readonly number[];
+  createdAt: string;
+  lineage: {
+    parentConversationId?: string;
+    forkPointMessageId?: string;
+    sourceRevision?: number;
+    retainedFloorNodeId: string;
+    removedNodeIds: readonly string[];
+  };
+  integrity: {
+    algorithm: 'fnv1a-64';
+    digest: string;
+  };
 }
 
 /**

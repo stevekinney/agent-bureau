@@ -33,7 +33,8 @@ describe('Conversation', () => {
   it('should initialize with a conversation', () => {
     const conversation = createConversation({ title: 'Test' });
     const history = new ConversationHistory(conversation);
-    expect(history.current).toBe(conversation);
+    expect(history.current).toEqual(conversation);
+    expect(history.current).not.toBe(conversation);
     expect(history.canUndo).toBe(false);
     expect(history.canRedo).toBe(false);
   });
@@ -52,17 +53,17 @@ describe('Conversation', () => {
     const v2 = appendUserMessage(v1, 'Hello');
     history.push(v2);
 
-    expect(history.current).toBe(v2);
+    expect(history.current).toEqual(v2);
     expect(history.canUndo).toBe(true);
 
     const undone = history.undo();
-    expect(undone).toBe(v1);
-    expect(history.current).toBe(v1);
+    expect(undone).toEqual(v1);
+    expect(history.current).toEqual(v1);
     expect(history.canRedo).toBe(true);
 
     const redone = history.redo();
-    expect(redone).toBe(v2);
-    expect(history.current).toBe(v2);
+    expect(redone).toEqual(v2);
+    expect(history.current).toEqual(v2);
   });
 
   it('should support branching and switching between branches', () => {
@@ -77,17 +78,17 @@ describe('Conversation', () => {
     const v3 = appendUserMessage(v1, 'Message 3');
     history.push(v3); // Creates a second branch from v1
 
-    expect(history.current).toBe(v3);
+    expect(history.current).toEqual(v3);
     expect(history.branchCount).toBe(2);
     expect(history.branchIndex).toBe(1);
 
     history.switchToBranch(0);
-    expect(history.current).toBe(v2);
+    expect(history.current).toEqual(v2);
     expect(history.branchIndex).toBe(0);
 
     history.undo();
-    expect(history.current).toBe(v1);
-    expect(history.redo(1)).toBe(v3);
+    expect(history.current).toEqual(v1);
+    expect(history.redo(1)).toEqual(v3);
   });
 
   it('should return path to current state', () => {
@@ -112,12 +113,12 @@ describe('Conversation', () => {
     const v3 = appendUserMessage(v1, 'V3');
     history.push(v3);
 
-    expect(history.current).toBe(v3);
+    expect(history.current).toEqual(v3);
     expect(history.branchCount).toBe(2);
 
     history.undo();
     expect(history.canRedo).toBe(true);
-    expect(history.redo(0)).toBe(v2);
+    expect(history.redo(0)).toEqual(v2);
   });
 
   it('should bind functions and automatically push updates', () => {
@@ -527,7 +528,9 @@ describe('Conversation', () => {
     it('should support getSnapshot for React useSyncExternalStore', () => {
       const conversation = createConversation();
       const history = new ConversationHistory(conversation);
-      expect(history.getSnapshot()).toBe(conversation);
+      expect(history.getSnapshot()).toEqual(conversation);
+      expect(history.getSnapshot()).not.toBe(conversation);
+      expect(history.getSnapshot()).toBe(history.getSnapshot());
     });
 
     it('should expose the environment via env getter', () => {

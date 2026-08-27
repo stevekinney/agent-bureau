@@ -666,7 +666,7 @@ describe('createAgent — conversation resume', () => {
       stopWhen: noToolCalls(),
     });
 
-    const history = buildHistory('earlier turn');
+    const history = structuredClone(buildHistory('earlier turn'));
     await agent.run({ conversation: history }).result();
 
     expect(receivedMessages).toHaveLength(1);
@@ -710,7 +710,7 @@ describe('createAgent — conversation resume', () => {
     expect(history).toEqual(beforeSnapshot);
   });
 
-  it("is not aliased to the caller's history object — mutating it after run() does not affect the in-flight run", async () => {
+  it('does not expose a mutable caller alias after a history enters a run', async () => {
     let receivedMessages: unknown[] = [];
     let resolveGenerate!: () => void;
     const generateGate = new Promise<void>((resolve) => {
@@ -733,16 +733,16 @@ describe('createAgent — conversation resume', () => {
     const history = buildHistory('earlier turn');
     const run = agent.run({ conversation: history });
 
-    // Mutate the caller's OWN history object directly (not through the
-    // Conversation class's immutable helpers) while the run is in flight.
+    // Once accepted by the run boundary, the public value is runtime immutable.
     const mutableHistory = history as { ids: string[] };
-    mutableHistory.ids = [...mutableHistory.ids, 'injected-id'];
+    expect(() => {
+      mutableHistory.ids = [...mutableHistory.ids, 'injected-id'];
+    }).toThrow();
 
     resolveGenerate();
     await run.result();
 
-    // The run's conversation never saw the injected id — it was cloned
-    // before the mutation happened.
+    // The run's conversation remains unchanged.
     expect(receivedMessages).toHaveLength(1);
     expect((receivedMessages[0] as { content: string }).content).toBe('earlier turn');
   });

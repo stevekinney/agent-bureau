@@ -129,7 +129,7 @@ describe('createOverflowMutator', () => {
       summarize: async () => 'summary',
       retainRecentMessages: 4,
     });
-    const conversation = new Conversation();
+    let conversation = new Conversation();
 
     conversation.appendUserMessage('Older 1');
     conversation.appendAssistantMessage('Older 2');
@@ -144,12 +144,14 @@ describe('createOverflowMutator', () => {
       },
     ]);
 
-    const toolResultMessage = conversation.getMessages().at(-1);
+    const mutableState = structuredClone(conversation.current);
+    const toolResultMessage = mutableState.messages[mutableState.ids.at(-1)!];
     if (toolResultMessage) {
       toolResultMessage.content = [
         { type: 'text', text: 'structured tool output' },
         { type: 'image', url: 'https://example.com/tool-output.png' },
       ] as never;
+      conversation = new Conversation(mutableState);
     }
 
     const result = await mutator(

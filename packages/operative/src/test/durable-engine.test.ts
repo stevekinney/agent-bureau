@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test';
+import { Conversation, createConversationHistory } from 'conversationalist';
 
 import type { AnyRunEngine } from '../durable/create-run-engine';
 import {
@@ -94,22 +95,15 @@ describe('durable engine test helpers', () => {
     expect(await store.saveCursor('run-1', {} as never)).toBeUndefined();
     expect(await store.loadCursor('run-1')).toBeNull();
     expect(
-      await store.saveConversation('run-1', {
-        root: {
-          conversation: {
-            schemaVersion: 1,
+      await store.saveConversation(
+        'run-1',
+        new Conversation(
+          createConversationHistory({
             id: 'conversation-1',
-            status: 'active',
-            metadata: {},
-            ids: [],
-            messages: {},
-            createdAt: '2026-01-01T00:00:00.000Z',
-            updatedAt: '2026-01-01T00:00:00.000Z',
-          },
-          children: [],
-        },
-        currentPath: [],
-      }),
+          }),
+          { now: () => '2026-01-01T00:00:00.000Z' },
+        ).snapshot(),
+      ),
     ).toBeUndefined();
     expect(await store.loadConversation('run-1')).toBeNull();
     expect(await store.saveStep('run-1', {} as never)).toBeUndefined();
