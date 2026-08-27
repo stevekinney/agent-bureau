@@ -870,6 +870,12 @@ export function createTool<
         options.requestContext && decision?.capabilities
           ? narrowToolAuthority(options.requestContext, decision.capabilities)
           : options.requestContext;
+      if (effectiveRequestContext && options.executionHandle && options.effectiveContext) {
+        options.executionHandle.updatePrivilegedContext({
+          ...effectiveRequestContext,
+          revisions: options.effectiveContext.revisions,
+        });
+      }
       const parsedArgumentsDigest = stableStringifyJson(normalizeToolContent(parsed));
       const proposedArgumentsDigest =
         approvalResume === undefined

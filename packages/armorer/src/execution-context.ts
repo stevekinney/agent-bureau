@@ -65,6 +65,7 @@ const fieldClasses: Readonly<Record<string, ExternalFieldClass>> = Object.freeze
   status: 'public',
   ownerId: 'tenant-private',
   parentExecutionId: 'tenant-private',
+  authority: 'operator-private',
   tenantId: 'tenant-private',
   requestId: 'tenant-private',
   agentId: 'tenant-private',

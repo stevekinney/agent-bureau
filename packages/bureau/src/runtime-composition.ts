@@ -115,13 +115,19 @@ import type {
 export type BureauToolbox = AnyToolbox;
 
 const requestAuthorityMetadataKey = 'lastRequestAuthority';
+const requestAuthoritiesMetadataKey = 'lastRequestAuthorities';
 
 function recoveredRequestContext(
   metadata: Record<string, JSONValue>,
   runId: string | undefined,
   agentName: string | undefined,
 ): ToolRequestContext | undefined {
-  const value = metadata[requestAuthorityMetadataKey];
+  const authorities = metadata[requestAuthoritiesMetadataKey];
+  const perRun =
+    runId !== undefined && typeof authorities === 'object' && authorities !== null
+      ? (authorities as Record<string, JSONValue>)[runId]
+      : undefined;
+  const value = perRun ?? metadata[requestAuthorityMetadataKey];
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
   const authority = value as Record<string, JSONValue>;
   const capabilities = authority['capabilities'];

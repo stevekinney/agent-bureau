@@ -1,4 +1,7 @@
-import type { EffectiveToolExecutionContext } from './execution-context';
+import {
+  type EffectiveToolExecutionContext,
+  freezeEffectiveToolExecutionContext,
+} from './execution-context';
 
 export type ExecutionState =
   | 'queued'
@@ -68,6 +71,7 @@ export interface ExecutionHandle {
   readonly signal: AbortSignal;
   snapshot(): ExecutionSnapshot;
   privilegedSnapshot(): PrivilegedExecutionSnapshot;
+  updatePrivilegedContext(context: EffectiveToolExecutionContext): void;
   queued(position: number, capacity?: number): void;
   activate(): void;
   waiting(declaredWait: string): void;
@@ -201,7 +205,9 @@ export function createExecutionLifecycle(defaultOwnerId = 'anonymous'): Executio
         controller,
         settled,
         resolveSettled,
-        ...(options.privilegedContext ? { privilegedContext: options.privilegedContext } : {}),
+        ...(options.privilegedContext
+          ? { privilegedContext: freezeEffectiveToolExecutionContext(options.privilegedContext) }
+          : {}),
         snapshot: freeze({
           executionId,
           toolName: options.toolName,
@@ -260,6 +266,11 @@ export function createExecutionLifecycle(defaultOwnerId = 'anonymous'): Executio
             snapshot: record.snapshot,
             ...(record.privilegedContext ? { context: record.privilegedContext } : {}),
           }),
+        updatePrivilegedContext: (context) => {
+          if (record.snapshot.state === 'terminal' || record.snapshot.state === 'unknown-effect')
+            return;
+          record.privilegedContext = freezeEffectiveToolExecutionContext(context);
+        },
         queued: (queuePosition, capacity) => {
           if (record.snapshot.state !== 'queued') return;
           transition({ queuePosition, ...(capacity === undefined ? {} : { capacity }) });

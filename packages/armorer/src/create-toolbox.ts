@@ -819,12 +819,12 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
   // Loop detection: instances are created on demand and stored
   const loopDetectors = new Map<string, LoopDetector>();
   let loopDetectorIdCounter = 0;
+  const approvalNow = options.approvalNow ?? Date.now;
   const approvalSecret = options.approvalSecret;
   const approvalStateStore =
     options.approvalStateStore ??
-    (approvalSecret ? createProcessLocalApprovalStateStore() : undefined);
+    (approvalSecret ? createProcessLocalApprovalStateStore(approvalNow) : undefined);
   const approvalBindingTtlMs = options.approvalBindingTtlMs ?? 5 * 60_000;
-  const approvalNow = options.approvalNow ?? Date.now;
   const approvalNonce = options.approvalNonce ?? (() => crypto.randomUUID());
   const catalogRevision = options.catalogRevision ?? 'catalog:1';
   const toolboxRevision = options.toolboxRevision ?? 'toolbox:1';

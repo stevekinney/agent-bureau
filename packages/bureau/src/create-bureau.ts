@@ -108,6 +108,30 @@ const SESSION_PERSISTENCE_MAXIMUM_ATTEMPTS = 3;
 const SESSION_PERSISTENCE_RETRY_DELAY_MILLISECONDS = 10;
 const SCHEDULER_PRIORITIES = ['immediate', 'scheduled', 'background', 'ambient'] as const;
 
+function normalizeRunRequestContext(
+  requestContext: ToolRequestContext | undefined,
+  runId: string,
+  agentName: string,
+  principal: string | undefined,
+): ToolRequestContext {
+  const context = requestContext ?? {
+    authority: {
+      principalId: principal ?? `run:${runId}`,
+      tenantId: 'bureau',
+      ownerId: agentName,
+      capabilities: ['tools:execute'],
+      authorizationRevision: 'bureau:1',
+    },
+  };
+  return {
+    ...context,
+    authority: context.authority,
+    audience: context.audience ?? 'operator',
+    agentId: agentName,
+    runId,
+  };
+}
+
 export function defaultSessionPersistenceSleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
@@ -605,6 +629,10 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   // authoritative "already handled" marker so a resolved review disappears
   // from the queue immediately, and is never accidentally resolved twice.
   const resolvedReviewIds = new Set<string>();
+  const pendingApprovalOverrides = new Map<
+    string,
+    Extract<PendingReview, { kind: 'tool-approval' }>['approval']
+  >();
   // AB-54 usage analytics: agentName/principal resolved deterministically at
   // `createRun` time, keyed by runId. Layer A only (in-memory, like the rest
   // of RunSummary) — a durably recovered run (process restart) has no entry
@@ -718,6 +746,9 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         const removedRunId = (event as StoreRunRemovedEvent).runId;
         runSequenceCounters.delete(removedRunId);
         runRequestContexts.delete(removedRunId);
+        for (const id of pendingApprovalOverrides.keys()) {
+          if (id.startsWith(`approval:${removedRunId}:`)) pendingApprovalOverrides.delete(id);
+        }
         emitter.dispatch(new RunRemovedEvent(removedRunId));
         // Prune this run's entries from `resolvedReviewIds` — the review ids
         // it tracks (`approval:${runId}:...`, `human-wait:${runId}:...`) can
@@ -867,6 +898,18 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         metadata: {
           ...nextSession.metadata,
           ...metadata,
+          ...(metadata['lastRequestAuthorities'] !== undefined
+            ? {
+                lastRequestAuthorities: {
+                  ...(typeof nextSession.metadata['lastRequestAuthorities'] === 'object' &&
+                  nextSession.metadata['lastRequestAuthorities'] !== null &&
+                  !Array.isArray(nextSession.metadata['lastRequestAuthorities'])
+                    ? nextSession.metadata['lastRequestAuthorities']
+                    : {}),
+                  ...(metadata['lastRequestAuthorities'] as Record<string, JSONValue>),
+                },
+              }
+            : {}),
         },
       };
     });
@@ -972,25 +1015,18 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         agentName,
         ...(request.principal !== undefined ? { principal: request.principal } : {}),
       });
+      const requestContext = normalizeRunRequestContext(
+        request.requestContext,
+        runId,
+        agentName,
+        request.principal,
+      );
       const runRuntime = await runtime.createRunRuntime({
         ...request,
         sessionId,
         runId,
+        requestContext,
       });
-      const requestContext =
-        request.requestContext ??
-        ({
-          authority: {
-            principalId: request.principal ?? `run:${runId}`,
-            tenantId: 'bureau',
-            ownerId: agentName,
-            capabilities: ['tools:execute'],
-            authorizationRevision: 'bureau:1',
-          },
-          audience: 'operator',
-          agentId: agentName,
-          runId,
-        } as const);
       runRequestContexts.set(runId, requestContext);
 
       const disposeStreamListeners: Array<() => void> = [];
@@ -1040,6 +1076,18 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
             capabilities: [...requestContext.authority.capabilities],
             authorizationRevision: requestContext.authority.authorizationRevision,
             ...(requestContext.audience !== undefined ? { audience: requestContext.audience } : {}),
+          },
+          lastRequestAuthorities: {
+            [runId]: {
+              principalId: requestContext.authority.principalId,
+              tenantId: requestContext.authority.tenantId,
+              ownerId: requestContext.authority.ownerId,
+              capabilities: [...requestContext.authority.capabilities],
+              authorizationRevision: requestContext.authority.authorizationRevision,
+              ...(requestContext.audience !== undefined
+                ? { audience: requestContext.audience }
+                : {}),
+            },
           },
         },
         // Stamp the session with the dispatched agent (PRRT_kwDORvupsc6MbUsN) so it
@@ -1310,6 +1358,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     sessionId: string,
     handle: RecoveredRunHandle,
     eventSurface?: ReturnType<typeof createRecoveredRunEventSurface>,
+    recoveredServices?: DurableRunDeps,
   ): void {
     // At-most-once registration per runId (guards double-recover / a runId already
     // started live on this process — neither should reach here, but a silent
@@ -1332,6 +1381,11 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
           : {}),
       },
     );
+    if (recoveredServices) {
+      const recoveredRequestContext = recoveredServices.options.executeOptions?.requestContext;
+      if (recoveredRequestContext) runRequestContexts.set(runId, recoveredRequestContext);
+      runToolboxesByRunId.set(runId, recoveredServices.toolbox);
+    }
 
     // AB-96 — wire the same versioned run-envelope forwarder the live-run path
     // uses. The recovered run's event surface is installed during Weft's awaited
@@ -1636,7 +1690,13 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       info.workflowId,
       info.input.agentName,
     );
-    reattachRecoveredRun(info.workflowId, info.input.sessionId, info.handle, eventSurface);
+    reattachRecoveredRun(
+      info.workflowId,
+      info.input.sessionId,
+      info.handle,
+      eventSurface,
+      info.services as DurableRunDeps,
+    );
   }
 
   async function recoverDurableRuns(): Promise<void> {
@@ -1986,6 +2046,9 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     runSessionIdentifiers.delete(runState.activeRun);
     runAttribution.delete(id);
     runRequestContexts.delete(id);
+    for (const reviewId of pendingApprovalOverrides.keys()) {
+      if (reviewId.startsWith(`approval:${id}:`)) pendingApprovalOverrides.delete(reviewId);
+    }
     runToolboxesByRunId.delete(id);
     store.removeRun(id);
     // AB-96 — drop the cached terminal RunReport too, or a long-lived bureau
@@ -2113,7 +2176,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
             runId,
             sessionId,
             agentName,
-            approval: result.pendingApproval,
+            approval: pendingApprovalOverrides.get(id) ?? result.pendingApproval,
             requestedAt,
             ageMilliseconds: now - requestedAt,
           });
@@ -2225,6 +2288,13 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
             'outcome' in result &&
             result.outcome === 'action_required'
           ) {
+            const nextApproval = (result as Record<string, unknown>)['pendingApproval'];
+            if (nextApproval && typeof nextApproval === 'object') {
+              pendingApprovalOverrides.set(
+                review.id,
+                nextApproval as Extract<PendingReview, { kind: 'tool-approval' }>['approval'],
+              );
+            }
             resolvedReviewIds.delete(review.id);
           }
         }

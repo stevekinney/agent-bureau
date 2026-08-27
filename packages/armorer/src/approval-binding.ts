@@ -1,3 +1,4 @@
+import { stableStringifyJson } from './core/serialization/json';
 import type { ToolRequestContext } from './execution-context';
 
 export const APPROVAL_BINDING_VERSION = 1 as const;
@@ -81,7 +82,7 @@ export function validateApprovalBinding(
 }
 
 /** Process-local, atomic single-use approval state. */
-export function createProcessLocalApprovalStateStore(): ApprovalStateStore {
+export function createProcessLocalApprovalStateStore(nowFunction = Date.now): ApprovalStateStore {
   const issued = new Map<string, ApprovalBindingPayload>();
   const terminal = new Map<
     string,
@@ -101,7 +102,7 @@ export function createProcessLocalApprovalStateStore(): ApprovalStateStore {
   return {
     issue(binding) {
       return Promise.resolve().then(() => {
-        const now = Date.now();
+        const now = nowFunction();
         purgeExpired(now);
         validateApprovalBinding(binding, undefined, now);
         const key = keyOf(binding);
@@ -114,7 +115,7 @@ export function createProcessLocalApprovalStateStore(): ApprovalStateStore {
         issued.set(key, binding);
       });
     },
-    consume(binding, context, now = Date.now()) {
+    consume(binding, context, now = nowFunction()) {
       return Promise.resolve().then(() => {
         validateApprovalBinding(binding, context, now);
         purgeExpired(now);
@@ -131,7 +132,7 @@ export function createProcessLocalApprovalStateStore(): ApprovalStateStore {
         const issuedBinding = issued.get(key);
         if (!issuedBinding)
           throw new ApprovalBindingError('Approval binding was not found.', 'not-found');
-        if (JSON.stringify(issuedBinding) !== JSON.stringify(binding)) {
+        if (stableStringifyJson(issuedBinding) !== stableStringifyJson(binding)) {
           throw new ApprovalBindingError(
             'Approval binding does not match the issued payload.',
             'mismatch',
@@ -143,7 +144,7 @@ export function createProcessLocalApprovalStateStore(): ApprovalStateStore {
     },
     revoke(binding) {
       return Promise.resolve().then(() => {
-        const now = Date.now();
+        const now = nowFunction();
         purgeExpired(now);
         const key = keyOf(binding);
         const terminalEntry = terminal.get(key);
