@@ -22,8 +22,10 @@ export function isPromise<T>(value: unknown): value is PromiseLike<T> {
  * Returns true when the current process is running inside a test runner.
  */
 export function isTestRuntime(): boolean {
-  const nodeEnvIsTest = process.env.NODE_ENV === 'test';
-  const entry = process.argv[1] ?? '';
+  // The `typeof` guard keeps browser execution safe while retaining the direct
+  // expression bundlers replace when they inline `process.env.NODE_ENV`.
+  const nodeEnvIsTest = typeof process !== 'undefined' && process.env?.NODE_ENV === 'test';
+  const entry = typeof process !== 'undefined' ? (process.argv?.[1] ?? '') : '';
   const testEntrypoint = /\.(test|spec)\.[cm]?[jt]sx?$/.test(entry);
   return nodeEnvIsTest || testEntrypoint;
 }

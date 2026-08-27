@@ -6,10 +6,48 @@ import * as root from '../src';
 
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
   exports?: Record<string, unknown>;
+  engines?: Record<string, string>;
 };
 
 describe('public API export map', () => {
   const exportsMap = pkg.exports ?? {};
+
+  it('declares the supported runtime conditions for every public subpath', () => {
+    const browserSubpaths = [
+      '.',
+      './core',
+      './query',
+      './inspect',
+      './adapters/openai',
+      './adapters/anthropic',
+      './adapters/gemini',
+      './utilities',
+      './lazy',
+      './registry',
+      './tools',
+      './instrumentation',
+      './middleware',
+      './test',
+      './truncation',
+      './idempotency',
+      './openapi',
+    ];
+    const serverOnlySubpaths = ['./mcp', './coding', './adapters/open-ai/agents'];
+
+    expect(Object.keys(exportsMap).sort()).toEqual(
+      [...browserSubpaths, ...serverOnlySubpaths].sort(),
+    );
+    for (const subpath of browserSubpaths) {
+      expect((exportsMap[subpath] as Record<string, unknown>).browser).toBeDefined();
+    }
+    for (const subpath of serverOnlySubpaths) {
+      expect((exportsMap[subpath] as Record<string, unknown>).browser).toBeUndefined();
+    }
+  });
+
+  it('keeps the minimum supported runtime boundaries explicit', () => {
+    expect(pkg.engines).toEqual({ bun: '>=1.3.13', node: '^20.16.0 || >=22.3.0' });
+  });
 
   it('includes the canonical adapter subpaths', () => {
     expect(exportsMap['./adapters/openai']).toBeDefined();

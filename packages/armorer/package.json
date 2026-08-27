@@ -111,7 +111,6 @@
     },
     "./mcp": {
       "bun": "./dist/integrations/mcp/index.js",
-      "browser": "./dist/integrations/mcp/index.js",
       "import": "./dist/integrations/mcp/index.js",
       "require": "./dist/integrations/mcp/index.cjs",
       "default": "./dist/integrations/mcp/index.js",
@@ -119,7 +118,6 @@
     },
     "./adapters/open-ai/agents": {
       "bun": "./dist/adapters/open-ai/agents/index.js",
-      "browser": "./dist/adapters/open-ai/agents/index.js",
       "import": "./dist/adapters/open-ai/agents/index.js",
       "require": "./dist/adapters/open-ai/agents/index.cjs",
       "default": "./dist/adapters/open-ai/agents/index.js",
@@ -175,7 +173,6 @@
     },
     "./coding": {
       "bun": "./dist/coding/index.js",
-      "browser": "./dist/coding/index.js",
       "import": "./dist/coding/index.js",
       "require": "./dist/coding/index.cjs",
       "default": "./dist/coding/index.js",
