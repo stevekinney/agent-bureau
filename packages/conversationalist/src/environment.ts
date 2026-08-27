@@ -1,4 +1,11 @@
-import type { ConversationHistory, Message, MessagePlugin, TokenEstimator } from './types';
+import type {
+  ConversationHistory,
+  Message,
+  MessageInput,
+  MessagePlugin,
+  MessagePluginIdentity,
+  TokenEstimator,
+} from './types';
 import { messageParts } from './utilities';
 
 export interface SessionInfo {
@@ -35,6 +42,33 @@ export interface ConversationEnvironment {
   plugins: MessagePlugin[];
   /** Maximum depth of the undo/redo history tree. When exceeded, the oldest ancestor is pruned. */
   maxHistoryDepth?: number;
+}
+
+export function getMessagePluginIdentity(
+  plugin: MessagePlugin,
+  index: number,
+): MessagePluginIdentity {
+  return Object.freeze({
+    id: plugin.id ?? plugin.name ?? `plugin-${index + 1}`,
+    revision: plugin.revision ?? 1,
+    authority: 'transcript-transform',
+  });
+}
+
+export function defineMessagePlugin(
+  identity: { id: string; revision: number },
+  transform: (input: MessageInput) => MessageInput,
+): MessagePlugin {
+  if (
+    identity.id.trim().length === 0 ||
+    !Number.isSafeInteger(identity.revision) ||
+    identity.revision < 1
+  ) {
+    throw new TypeError(
+      'Message plugin identity requires a non-empty id and a positive integer revision',
+    );
+  }
+  return Object.assign(transform, Object.freeze({ ...identity }));
 }
 
 /**

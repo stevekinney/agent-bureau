@@ -43,7 +43,7 @@ export function createSchemaErrorMutator(): RetryMutator {
     const message = `Your previous response failed schema validation: ${error.message}${issueDetails}\n\nPlease correct your response to match the required schema.`;
 
     // Create a new conversation with the error feedback appended
-    const snapshot = context.conversation.getSnapshot();
+    const snapshot = context.conversation.getSnapshot().conversation;
     const newConversation = new Conversation(snapshot);
     newConversation.appendUserMessage(message);
 

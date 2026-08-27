@@ -19,6 +19,17 @@ export type ConversationActionType =
   | 'stream.cancelled'
   | 'compaction.started'
   | 'compaction.completed'
+  | 'compaction.failed'
+  | 'compaction.cancelled'
+  | 'compaction.stale-discarded'
+  | 'mutation.rejected'
+  | 'snapshot.restored'
+  | 'snapshot.migrated'
+  | 'branch.pruned'
+  | 'controller.closed'
+  | 'controller.disposed'
+  | 'plugin.activated'
+  | 'plugin.failed'
   | 'session.forked'
   | 'session.tagged'
   | 'session.renamed';
@@ -32,6 +43,16 @@ export interface ConversationEventDetail {
   previousConversation: ConversationHistory;
   messageIds?: readonly string[];
   toolCallIds?: readonly string[];
+  revision: number;
+  sequence: number;
+  correlationId: string;
+  actor?: string | undefined;
+  durability: 'ephemeral' | 'snapshot' | 'external';
+  outcome: 'accepted' | 'rejected' | 'started' | 'completed' | 'failed' | 'cancelled' | 'discarded';
+  streamSequence?: number | undefined;
+  childConversationId?: string | undefined;
+  plugin?: { id: string; revision: number } | undefined;
+  reason?: string | undefined;
 }
 
 /**
@@ -44,6 +65,16 @@ export class ConversationEvent extends Event {
   readonly previousConversation: ConversationHistory;
   readonly messageIds?: readonly string[] | undefined;
   readonly toolCallIds?: readonly string[] | undefined;
+  readonly revision: number;
+  readonly sequence: number;
+  readonly correlationId: string;
+  readonly actor?: string | undefined;
+  readonly durability: ConversationEventDetail['durability'];
+  readonly outcome: ConversationEventDetail['outcome'];
+  readonly streamSequence?: number | undefined;
+  readonly childConversationId?: string | undefined;
+  readonly plugin?: ConversationEventDetail['plugin'];
+  readonly reason?: string | undefined;
 
   constructor(type: string, detail: ConversationEventDetail) {
     super(type);
@@ -52,6 +83,16 @@ export class ConversationEvent extends Event {
     this.previousConversation = detail.previousConversation;
     if (detail.messageIds !== undefined) this.messageIds = detail.messageIds;
     if (detail.toolCallIds !== undefined) this.toolCallIds = detail.toolCallIds;
+    this.revision = detail.revision;
+    this.sequence = detail.sequence;
+    this.correlationId = detail.correlationId;
+    this.actor = detail.actor;
+    this.durability = detail.durability;
+    this.outcome = detail.outcome;
+    this.streamSequence = detail.streamSequence;
+    this.childConversationId = detail.childConversationId;
+    this.plugin = detail.plugin;
+    this.reason = detail.reason;
   }
 }
 
@@ -212,6 +253,17 @@ export interface ConversationEventMap {
   [SessionForkedEvent.type]: SessionForkedEvent;
   [SessionTaggedEvent.type]: SessionTaggedEvent;
   [SessionRenamedEvent.type]: SessionRenamedEvent;
+  'compaction.failed': ConversationEvent;
+  'compaction.cancelled': ConversationEvent;
+  'compaction.stale-discarded': ConversationEvent;
+  'mutation.rejected': ConversationEvent;
+  'snapshot.restored': ConversationEvent;
+  'snapshot.migrated': ConversationEvent;
+  'branch.pruned': ConversationEvent;
+  'controller.closed': ConversationEvent;
+  'controller.disposed': ConversationEvent;
+  'plugin.activated': ConversationEvent;
+  'plugin.failed': ConversationEvent;
 }
 
 export type ConversationEventType = Extract<keyof ConversationEventMap, string>;

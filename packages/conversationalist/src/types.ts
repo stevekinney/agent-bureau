@@ -198,7 +198,17 @@ export type AsyncConversationTokenEstimator = (messages: ReadonlyArray<Message>)
  * before it is appended or immutably updated. Plugins used by transcript
  * mutation helpers must also be idempotent.
  */
-export type MessagePlugin = (input: MessageInput) => MessageInput;
+export interface MessagePlugin {
+  (input: MessageInput): MessageInput;
+  readonly id?: string | undefined;
+  readonly revision?: number | undefined;
+}
+
+export interface MessagePluginIdentity {
+  readonly id: string;
+  readonly revision: number;
+  readonly authority: 'transcript-transform';
+}
 
 /**
  * Serialized form of a single node in the conversation tree.

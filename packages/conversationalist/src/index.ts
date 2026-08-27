@@ -92,16 +92,19 @@ export {
   validateConversationHistoryIntegrity,
 } from './conversation/index';
 export type { SessionInfo } from './environment';
-export { toSessionInfo } from './environment';
+export { defineMessagePlugin, getMessagePluginIdentity, toSessionInfo } from './environment';
 export type { ConversationalistErrorCode } from './errors';
 export {
   ConversationalistError,
+  createConversationLifecycleError,
   createDuplicateIdError,
   createInvalidInputError,
   createInvalidPositionError,
   createInvalidToolReferenceError,
   createLockedError,
   createNotFoundError,
+  createOperationCancelledError,
+  createRevisionConflictError,
   createSerializationError,
   createToolResultNotFoundError,
   createValidationError,
@@ -147,6 +150,10 @@ export type {
   ConversationEventDetail,
   ConversationEvents,
   ConversationEventType,
+  ConversationLifecycle,
+  ConversationMutationOptions,
+  ConversationMutationResult,
+  ConversationStoreSnapshot,
 } from './history';
 export { Conversation } from './history';
 export type {
@@ -186,6 +193,8 @@ export type {
   JSONValue,
   Message,
   MessageInput,
+  MessagePlugin,
+  MessagePluginIdentity,
   MessageRole,
   TokenUsage,
   ToolAction,
