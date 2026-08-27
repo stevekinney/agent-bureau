@@ -290,6 +290,114 @@ describe('createMCP', () => {
     }
   });
 
+  it('accepts a structural AbortSignal from another realm', async () => {
+    const tool = createTool({
+      name: 'cross-realm-signal',
+      description: 'accepts signal-like cancellation',
+      input: z.object({}),
+      async execute() {
+        return { reached: true };
+      },
+    });
+    const signal = {
+      aborted: true,
+      reason: new Error('foreign cancellation'),
+      addEventListener() {},
+      removeEventListener() {},
+    } as unknown as AbortSignal;
+    const result = await tool.executeWith({ params: {}, signal });
+    expect(result.outcome).toBe('error');
+    expect(result.errorCategory).toBe('cancelled');
+    expect(result.errorMessage).toBe('foreign cancellation');
+  });
+
+  it('checks task admission before persisting a task after shutdown', async () => {
+    const toolbox = createToolbox();
+    createTool(
+      {
+        name: 'closed-task',
+        description: 'task rejected after shutdown',
+        input: z.object({}),
+        metadata: { mcp: { execution: { taskSupport: 'required' } } },
+        async execute() {
+          return { reached: true };
+        },
+      },
+      toolbox,
+    );
+    let createCount = 0;
+    const taskStore = createDelegatingTaskStore({
+      createTask: async (...args) => {
+        createCount += 1;
+        return new InMemoryTaskStore().createTask(...args);
+      },
+    });
+    const { client, server } = await connect(toolbox, { taskStore });
+    try {
+      await server.shutdown();
+      await expect(
+        client.request(
+          { method: 'tools/call', params: { name: 'closed-task', arguments: {}, task: {} } },
+          CreateTaskResultSchema,
+        ),
+      ).rejects.toThrow();
+      expect(createCount).toBe(0);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it('rolls back a task when shutdown races with task persistence', async () => {
+    const toolbox = createToolbox();
+    createTool(
+      {
+        name: 'racing-task',
+        description: 'task whose persistence races shutdown',
+        input: z.object({}),
+        metadata: { mcp: { execution: { taskSupport: 'required' } } },
+        async execute() {
+          return { reached: true };
+        },
+      },
+      toolbox,
+    );
+    let createCount = 0;
+    let admissionClosedInsideStore = false;
+    let createdTaskId: string | undefined;
+    const serverHolder: { current?: ConnectedMcp['server'] } = {};
+    const backingStore = new InMemoryTaskStore();
+    const taskStore = createDelegatingTaskStore({
+      createTask: async (...args) => {
+        createCount += 1;
+        serverHolder.current!.executionLifecycle.closeAdmission();
+        admissionClosedInsideStore = serverHolder.current!.executionLifecycle.admissionClosed;
+        const task = await backingStore.createTask(...args);
+        createdTaskId = task.taskId;
+        return task;
+      },
+      getTask: (...args) => backingStore.getTask(...args),
+      updateTaskStatus: (...args) => backingStore.updateTaskStatus(...args),
+    });
+    const connected = await connect(toolbox, { taskStore });
+    serverHolder.current = connected.server;
+    try {
+      const result = await connected.client.request(
+        { method: 'tools/call', params: { name: 'racing-task', arguments: {}, task: {} } },
+        CreateTaskResultSchema,
+      );
+      expect(createCount).toBe(1);
+      expect(admissionClosedInsideStore).toBe(true);
+      expect(createdTaskId).toBeDefined();
+      expect(result.task.status).toBe('cancelled');
+      const storedTask = await backingStore.getTask(createdTaskId!);
+      expect(storedTask.status).toBe('cancelled');
+    } finally {
+      await connected.client.close();
+      await connected.server.close();
+    }
+  });
+
   it('converts toolbox tools into MCP tool definitions', async () => {
     const toolbox = createToolbox();
     createTool(

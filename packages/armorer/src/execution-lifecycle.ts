@@ -90,6 +90,7 @@ export interface BeginExecutionOptions {
   queuePosition?: number;
   now?: () => number;
   setTimeoutFunction?: (callback: () => void, milliseconds: number) => unknown;
+  clearTimeoutFunction?: (handle: unknown) => void;
   scheduleDeadline?: boolean;
 }
 
@@ -206,8 +207,13 @@ export function createExecutionLifecycle(defaultOwnerId = 'anonymous'): Executio
       };
       records.set(executionId, record);
       const transition = (patch: Partial<ExecutionSnapshot>) => publish(record, patch, now());
+      let clearDeadline: (() => void) | undefined;
       const abort = (source: ExecutionAbortSource = 'owner', reason?: unknown) => {
-        if (record.snapshot.state === 'terminal' || record.snapshot.state === 'unknown-effect')
+        if (
+          record.snapshot.state === 'terminal' ||
+          record.snapshot.state === 'unknown-effect' ||
+          record.snapshot.state === 'cleanup-pending'
+        )
           return false;
         if (record.snapshot.state === 'abort-requested') return false;
         transition({ state: 'abort-requested', abortSource: source, abortReason: reason });
@@ -217,6 +223,7 @@ export function createExecutionLifecycle(defaultOwnerId = 'anonymous'): Executio
       const finish = (patch: Partial<ExecutionSnapshot>) => {
         if (record.snapshot.state === 'terminal') return;
         removeAbortListeners();
+        clearDeadline?.();
         if (record.snapshot.state === 'unknown-effect') {
           if (Object.prototype.hasOwnProperty.call(patch, 'result')) {
             transition({ result: patch.result });
@@ -289,10 +296,17 @@ export function createExecutionLifecycle(defaultOwnerId = 'anonymous'): Executio
         const schedule =
           options.setTimeoutFunction ??
           ((callback, milliseconds) => setTimeout(callback, milliseconds));
-        schedule(
+        const timeoutHandle = schedule(
           () => abort('deadline', 'Execution deadline exceeded'),
           Math.max(0, options.deadline - now()),
         );
+        const clear =
+          options.clearTimeoutFunction ??
+          ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+        clearDeadline = () => {
+          clear(timeoutHandle);
+          clearDeadline = undefined;
+        };
       }
       ownerController.signal.addEventListener('abort', onOwnerAbort, { once: true });
       for (const listener of listeners)

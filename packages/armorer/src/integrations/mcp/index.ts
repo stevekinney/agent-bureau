@@ -127,6 +127,8 @@ export type CreateMCPOptions = ServerOptions & {
 };
 
 export type MCPServer = McpServer & {
+  /** Inspects and controls request-scoped executions owned by this server. */
+  executionLifecycle: ReturnType<typeof createExecutionLifecycle>;
   /** Closes admission, aborts and settles executions, and returns cleanup evidence. */
   shutdown: () => Promise<import('../../execution-lifecycle').ExecutionCleanupReport>;
 };
@@ -281,6 +283,7 @@ export async function createMCP(
     shutdownPromise ??= shutdown();
     return shutdownPromise;
   };
+  (server as MCPServer).executionLifecycle = executionLifecycle;
 
   return server as MCPServer;
 }
@@ -559,12 +562,36 @@ function createMcpTaskToolHandler(
 ): ToolTaskHandler<AnySchema> {
   return {
     async createTask(args, extra: CreateTaskRequestHandlerExtra) {
+      if (executionLifecycle.admissionClosed) {
+        throw new Error('Execution admission is closed');
+      }
+      const controller = new AbortController();
       const task = await extra.taskStore.createTask({
         ...(extra.taskRequestedTtl !== undefined ? { ttl: extra.taskRequestedTtl } : {}),
         pollInterval: DEFAULT_TASK_POLL_INTERVAL_MS,
       });
 
-      const controller = new AbortController();
+      if (executionLifecycle.admissionClosed) {
+        controller.abort(new Error('Execution admission is closed'));
+        try {
+          await extra.taskStore.updateTaskStatus(
+            task.taskId,
+            'cancelled',
+            'Execution admission closed before task start.',
+          );
+        } catch {
+          // The response below remains terminal even when the backing task
+          // store cannot apply the best-effort rollback.
+        }
+        return {
+          task: {
+            ...task,
+            status: 'cancelled',
+            statusMessage: 'Execution admission closed before task start.',
+          },
+        };
+      }
+
       if (extra.signal.aborted) {
         controller.abort(extra.signal.reason);
       } else {

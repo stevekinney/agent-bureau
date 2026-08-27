@@ -102,8 +102,9 @@ export function createConcurrencyLimiter(limit?: number): ConcurrencyLimiter | u
         },
       };
       queue.push(entry);
-      updateQueuePositions();
       options.signal?.addEventListener('abort', onAbort, { once: true });
+      if (options.signal?.aborted) onAbort();
+      else updateQueuePositions();
     });
   };
   return { capacity: resolved, run };

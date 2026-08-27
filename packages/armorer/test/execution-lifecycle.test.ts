@@ -73,6 +73,43 @@ describe('execution lifecycle', () => {
     caller.abort('late caller abort');
   });
 
+  it('preserves abort provenance while cleanup is pending', () => {
+    const lifecycle = createExecutionLifecycle();
+    const handle = lifecycle.begin({ toolName: 'cleanup-race', callId: 'cleanup-race' });
+    expect(handle.abort('deadline', 'deadline won')).toBe(true);
+    handle.cleanupPending('effect may still be running');
+    expect(handle.abort('shutdown', 'owner stopped')).toBe(false);
+    expect(handle.snapshot()).toMatchObject({
+      state: 'cleanup-pending',
+      abortSource: 'deadline',
+      abortReason: 'deadline won',
+    });
+    handle.unknownEffect('effect may have committed');
+  });
+
+  it('clears an outstanding deadline timer when execution settles', () => {
+    const lifecycle = createExecutionLifecycle();
+    const scheduled: Array<() => void> = [];
+    const cleared: unknown[] = [];
+    const handle = lifecycle.begin({
+      toolName: 'timer-cleanup',
+      callId: 'timer-cleanup',
+      deadline: 10,
+      now: () => 0,
+      setTimeoutFunction(callback) {
+        scheduled.push(callback);
+        return 'timer-token';
+      },
+      clearTimeoutFunction(timer) {
+        cleared.push(timer);
+      },
+    });
+    handle.settle('done');
+    expect(cleared).toEqual(['timer-token']);
+    scheduled[0]!();
+    expect(handle.snapshot().state).toBe('terminal');
+  });
+
   it('closes admission, scopes abort, and returns one idempotent shutdown report', async () => {
     const lifecycle = createExecutionLifecycle('owner-3');
     const first = lifecycle.begin({ toolName: 'alpha', callId: 'a' });
@@ -259,5 +296,19 @@ describe('execution lifecycle', () => {
     release();
     await Promise.all([first, second, third]);
     expect(started).toEqual(['second', 'third']);
+  });
+
+  it('removes a queued task when its position observer aborts synchronously', async () => {
+    const limiter = createConcurrencyLimiter(1)!;
+    let release!: () => void;
+    const first = limiter.run(() => new Promise<void>((resolve) => (release = resolve)));
+    const controller = new AbortController();
+    const queued = limiter.run(async () => 'should not run', {
+      signal: controller.signal,
+      onQueuePosition: () => controller.abort('observer cancelled'),
+    });
+    await expect(queued).rejects.toThrow('observer cancelled');
+    release();
+    await first;
   });
 });

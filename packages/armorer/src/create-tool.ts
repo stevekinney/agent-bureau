@@ -76,6 +76,15 @@ import { isAsyncIterable, isPromise, isTestRuntime } from './type-guards';
 import type { SatisfiedPolicyPause, ToolAction, ToolCall, ToolExecutionResult } from './types';
 import { createConcurrencyLimiter, normalizeConcurrency } from './utilities/concurrency';
 
+function isAbortSignalLike(signal: MinimalAbortSignal | undefined): signal is AbortSignal {
+  return (
+    signal !== undefined &&
+    typeof signal === 'object' &&
+    typeof signal.aborted === 'boolean' &&
+    typeof signal.addEventListener === 'function'
+  );
+}
+
 type InternalToolExecuteOptions = ToolExecuteOptions & {
   [approvalResumeSymbol]?: ApprovalResumeState;
   executionHandle?: ExecutionHandle;
@@ -658,7 +667,7 @@ export function createTool<
       callId: toolCall.id,
       ...(options?.ownerId ? { ownerId: options.ownerId } : {}),
       ...(options?.parentExecutionId ? { parentExecutionId: options.parentExecutionId } : {}),
-      ...(options?.signal instanceof AbortSignal ? { signal: options.signal } : {}),
+      ...(isAbortSignalLike(options?.signal) ? { signal: options.signal } : {}),
       ...(resolvedTimeout !== undefined ? { deadline: nowFunction() + resolvedTimeout } : {}),
       scheduleDeadline: false,
       now: nowFunction,
@@ -1517,7 +1526,7 @@ export function createTool<
       callId: toolCall.id,
       ...(options.ownerId ? { ownerId: options.ownerId } : {}),
       ...(options.parentExecutionId ? { parentExecutionId: options.parentExecutionId } : {}),
-      ...(options.signal instanceof AbortSignal ? { signal: options.signal } : {}),
+      ...(isAbortSignalLike(options.signal) ? { signal: options.signal } : {}),
       ...(resolvedTimeout !== undefined ? { deadline: nowFunction() + resolvedTimeout } : {}),
       scheduleDeadline: false,
       now: nowFunction,

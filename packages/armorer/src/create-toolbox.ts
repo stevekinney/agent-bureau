@@ -367,6 +367,7 @@ export interface ToolboxExecuteOptions extends Omit<ToolExecuteOptions, 'durable
 
 type InternalToolboxExecuteOptions = ToolboxExecuteOptions & {
   [approvalResumeSymbol]?: ApprovalResumeState;
+  executionHandle?: ExecutionHandle;
 };
 
 export type ToolboxEntry = ToolConfiguration | Tool;
@@ -874,9 +875,11 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     });
     executionHandle.activate();
     options = { ...options, signal: executionHandle.signal };
+    let hasSingleChild = false;
     try {
       const calls = Array.isArray(input) ? input : [input];
       const isMultiple = Array.isArray(input);
+      hasSingleChild = calls.length === 1;
       const mode = options?.mode ?? 'parallel';
       const errorMode = options?.errorMode ?? 'collect';
       const globalConcurrency = options?.concurrency;
@@ -1129,7 +1132,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
             typeof options?.durableOperationKey === 'function'
               ? options.durableOperationKey(toolCall, callIndex)
               : options?.durableOperationKey;
-          const executeOptions: ToolExecuteOptions =
+          const executeOptions: ToolboxExecuteOptions & { executionHandle?: ExecutionHandle } =
             options?.signal ||
             options?.timeout !== undefined ||
             options?.stream !== undefined ||
@@ -1144,13 +1147,17 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
                   ...(options?.elicit ? { elicit: options.elicit } : {}),
                   ownerId: executionHandle.snapshot().ownerId,
                   parentExecutionId: executionHandle.id,
+                  // A single tool call can use the parent as its completion
+                  // callback. This matters during shutdown: the tool promise
+                  // may race its abort signal while the callback continues.
+                  ...(hasSingleChild ? { executionHandle } : {}),
                   ...(options !== undefined && approvalResumeSymbol in options
                     ? { [approvalResumeSymbol]: options[approvalResumeSymbol] }
                     : {}),
                 }
               : {};
 
-          const result = await tool.execute(toolCall, executeOptions);
+          const result = await tool.execute(toolCall, executeOptions as ToolExecuteOptions);
           if (result.pendingApproval && approvalSecret) {
             result.pendingApproval.approvalToken = signPendingApproval(result.pendingApproval);
           }
@@ -1228,7 +1235,11 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       if (
         executionHandle.snapshot().state !== 'terminal' &&
         executionHandle.snapshot().state !== 'cleanup-pending' &&
-        executionHandle.snapshot().state !== 'streaming'
+        executionHandle.snapshot().state !== 'streaming' &&
+        // For a single child, createTool settles this parent only when the
+        // underlying callback actually returns (including cancellation-ignoring
+        // callbacks). Do not mark it terminal from the raced toolbox promise.
+        !(hasSingleChild && executionHandle.snapshot().state === 'abort-requested')
       ) {
         executionHandle.settle();
       }
