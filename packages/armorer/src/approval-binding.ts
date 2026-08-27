@@ -16,6 +16,7 @@ export type ApprovalBindingPayload = {
   toolboxRevision: string;
   toolDefinitionRevision: string;
   policyRevision: string;
+  approvalRevision: string;
   issuedAt: number;
   expiresAt: number;
   nonce: string;
@@ -35,6 +36,7 @@ export type ApprovalBindingContext = Pick<
   | 'toolboxRevision'
   | 'toolDefinitionRevision'
   | 'policyRevision'
+  | 'approvalRevision'
 >;
 
 export type ApprovalState = 'issued' | 'consumed' | 'revoked';

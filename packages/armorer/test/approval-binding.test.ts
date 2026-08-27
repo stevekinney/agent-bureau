@@ -20,6 +20,7 @@ const binding = {
   toolboxRevision: 'toolbox-1',
   toolDefinitionRevision: 'tools-1',
   policyRevision: 'policy-1',
+  approvalRevision: 'approval-1',
   issuedAt: 10_000_000_000_000,
   expiresAt: 10_000_000_000_200,
   nonce: 'nonce',

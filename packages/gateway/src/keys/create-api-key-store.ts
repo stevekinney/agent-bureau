@@ -4,6 +4,26 @@ import { extractKeyId, generateApiKey, hashApiKey, verifyApiKey } from './key-ut
 import type { ApiKey, ApiKeyStore, CreateApiKeyOptions } from './types';
 
 const KEY_PREFIX = 'api-key:';
+const INVALID_SCOPE_ENTRY_MESSAGE = 'API key scope entries must be non-blank strings';
+
+export function normalizeApiKeyScopes(scopes: unknown): string[] {
+  if (scopes === undefined) return [];
+  if (!Array.isArray(scopes)) {
+    throw new Error('API key scopes must be an array of strings');
+  }
+  const normalizedScopes: string[] = [];
+  for (const scope of scopes) {
+    if (typeof scope !== 'string') {
+      throw new Error(INVALID_SCOPE_ENTRY_MESSAGE);
+    }
+    const normalizedScope = scope.trim();
+    if (normalizedScope.length === 0) {
+      throw new Error(INVALID_SCOPE_ENTRY_MESSAGE);
+    }
+    normalizedScopes.push(normalizedScope);
+  }
+  return Array.from(new Set(normalizedScopes));
+}
 
 /** Returns true if the value is a string that parses to a valid Date. */
 function isValidDate(value: unknown): boolean {
@@ -22,7 +42,8 @@ function parseApiKey(raw: string): ApiKey | undefined {
       'keyHash' in parsed &&
       'active' in parsed &&
       'createdAt' in parsed &&
-      isValidDate((parsed as Record<string, unknown>)['createdAt'])
+      isValidDate((parsed as Record<string, unknown>)['createdAt']) &&
+      Array.isArray((parsed as Record<string, unknown>)['scopes'])
     ) {
       return parsed as ApiKey;
     }
@@ -41,6 +62,7 @@ export function createApiKeyStore(kv: TextValueStore): ApiKeyStore {
   async function create(options: CreateApiKeyOptions): Promise<{ key: ApiKey; plaintext: string }> {
     const plaintext = generateApiKey();
     const id = extractKeyId(plaintext);
+    const scopes = normalizeApiKeyScopes(options.scopes);
 
     // Guard against ID collision (extremely unlikely with 16 hex chars)
     const existing = await kv.get(`${KEY_PREFIX}${id}`);
@@ -54,7 +76,7 @@ export function createApiKeyStore(kv: TextValueStore): ApiKeyStore {
       id,
       name: options.name,
       keyHash,
-      scopes: options.scopes ?? [],
+      scopes,
       createdAt: new Date().toISOString(),
       expiresAt: options.expiresAt,
       active: true,

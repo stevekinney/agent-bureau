@@ -582,6 +582,12 @@ describe('createToolbox', () => {
       approvalStateStore,
       policy,
     });
+    const approvalRevisionTwo = createToolbox([makeTool('1.0.0')], {
+      approvalSecret: 'version-secret',
+      approvalStateStore,
+      approvalRevision: 'approval:2',
+      policy,
+    });
     const paused = await versionOne.execute(
       { id: 'versioned-approval', name: 'versioned-charge', arguments: { cents: 100 } },
       approvalExecutionOptions,
@@ -593,6 +599,13 @@ describe('createToolbox', () => {
         approvalExecutionOptions,
       ),
     ).rejects.toThrow('toolDefinitionRevision does not match');
+
+    await expect(
+      approvalRevisionTwo.resumeApproval(
+        paused.pendingApproval! as SignedPendingToolApproval,
+        approvalExecutionOptions,
+      ),
+    ).rejects.toThrow('approvalRevision does not match');
   });
 
   it('requires request authority for signed approvals and supports revocation', async () => {

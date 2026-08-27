@@ -37,6 +37,17 @@ describe('create', () => {
     expect(result.key.scopes).toEqual(['runs:read', 'runs:write']);
   });
 
+  it('rejects blank scope entries instead of creating an admin key', async () => {
+    let rejection: unknown;
+    try {
+      await store.create({ name: 'blank-scoped', scopes: ['   '] });
+    } catch (error) {
+      rejection = error;
+    }
+    expect(rejection).toBeInstanceOf(Error);
+    expect((rejection as Error).message).toBe('API key scope entries must be non-blank strings');
+  });
+
   it('respects expiresAt', async () => {
     const expires = new Date(Date.now() + 86400000).toISOString();
     const result = await store.create({ name: 'expiring', expiresAt: expires });

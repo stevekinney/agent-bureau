@@ -198,7 +198,19 @@ export function withIdempotency<T extends Tool>(tool: T, options: IdempotencyOpt
 
 function isPreExecutionResult(result: unknown): boolean {
   if (!result || typeof result !== 'object') return false;
-  const candidate = result as { outcome?: unknown; errorCategory?: unknown; error?: unknown };
+  const candidate = result as {
+    outcome?: unknown;
+    errorCategory?: unknown;
+    error?: { category?: unknown };
+  };
   if (candidate.outcome !== 'error' && candidate.outcome !== 'action_required') return false;
-  return candidate.outcome === 'action_required';
+  if (candidate.outcome === 'action_required') return true;
+
+  const category = candidate.error?.category ?? candidate.errorCategory;
+  return (
+    category === 'validation' ||
+    category === 'permission' ||
+    category === 'not_found' ||
+    category === 'unavailable'
+  );
 }

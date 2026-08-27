@@ -406,6 +406,36 @@ describe('withIdempotency', () => {
     expect(executions).toBe(0);
   });
 
+  it('clears claims when policy denies execution before the callback runs', async () => {
+    let executions = 0;
+    const tool = createTool({
+      name: 'policy-denied',
+      description: 'Is denied before execution',
+      input: z.object({ value: z.string() }),
+      idempotencyKey: (input: unknown) => fullInputKey(input),
+      policy: {
+        beforeExecute: () => ({ allow: false, reason: 'Execution denied' }),
+      },
+      async execute({ value }) {
+        executions += 1;
+        return value;
+      },
+    });
+    const wrapped = withIdempotency(tool, {
+      cache,
+      tenantId: 'tenant-a',
+      toolRevision: 'policy-denied:1',
+    });
+
+    await expect(wrapped.execute({ value: 'one' }, { requestContext })).rejects.toThrow(
+      'Execution denied',
+    );
+    await expect(wrapped.execute({ value: 'one' }, { requestContext })).rejects.toThrow(
+      'Execution denied',
+    );
+    expect(executions).toBe(0);
+  });
+
   it('keeps delimiter-bearing tenant and revision tuples in distinct cache scopes', async () => {
     const first = withIdempotency(createTestTool(), {
       cache,

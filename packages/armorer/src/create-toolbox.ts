@@ -1300,6 +1300,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
               toolboxRevision,
               toolDefinitionRevision: tool.id,
               policyRevision,
+              approvalRevision,
               issuedAt,
               expiresAt: issuedAt + approvalBindingTtlMs,
               nonce: approvalNonce(),
@@ -1445,6 +1446,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
         toolboxRevision,
         toolDefinitionRevision: currentTool.id,
         policyRevision,
+        approvalRevision,
       });
     }
     const executeForResume =

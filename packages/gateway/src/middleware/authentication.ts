@@ -4,6 +4,7 @@ import { createMiddleware } from 'hono/factory';
 import { HTTPException } from 'hono/http-exception';
 import { sha256HexSync } from 'interoperability';
 
+import { normalizeApiKeyScopes } from '../keys/create-api-key-store';
 import type { ApiKeyStore } from '../keys/types';
 
 const QUERY_TOKEN_PATH_ALLOW_LIST = new Set(['/api/v1/events']);
@@ -19,17 +20,12 @@ function gatewayAuthorityOwnerId(agentName: string | undefined): string {
 }
 
 function parseGatewayScopes(scopesHeader: string | undefined): string[] {
-  if (scopesHeader === undefined) return [];
-  return scopesHeader
-    .split(',')
-    .map((scope) => scope.trim())
-    .filter((scope) => scope.length > 0);
+  if (scopesHeader === undefined || scopesHeader === '') return [];
+  return normalizeGatewayScopes(scopesHeader.split(','));
 }
 
 export function normalizeGatewayScopes(scopes: readonly string[]): string[] {
-  return Array.from(
-    new Set(scopes.map((scope) => scope.trim()).filter((scope) => scope.length > 0)),
-  );
+  return normalizeApiKeyScopes(scopes);
 }
 
 export function gatewayCapabilitiesForScopes(scopes: readonly string[]): string[] {
@@ -173,7 +169,12 @@ export function createAuthentication(authToken: string | undefined, apiKeyStore?
       const key = await apiKeyStore.verify(token);
       if (key) {
         // Inject key metadata as headers for downstream middleware
-        const normalizedScopes = normalizeGatewayScopes(key.scopes);
+        let normalizedScopes: string[];
+        try {
+          normalizedScopes = normalizeGatewayScopes(key.scopes);
+        } catch {
+          throw new HTTPException(401, { message: 'Invalid authorization token' });
+        }
         headers.set('x-api-key-id', key.id);
         headers.set('x-auth-principal', `api-key:${key.id}`);
         headers.set('x-api-key-scopes', normalizedScopes.join(','));

@@ -1153,6 +1153,26 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     });
   }
 
+  async function persistReviewResolutionWithRetry(
+    sessionId: string,
+    reviewId: string,
+    removePendingApproval: boolean,
+  ): Promise<void> {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= SESSION_PERSISTENCE_MAXIMUM_ATTEMPTS; attempt += 1) {
+      try {
+        await persistReviewResolution(sessionId, reviewId, removePendingApproval);
+        return;
+      } catch (error) {
+        lastError = error;
+        if (attempt < SESSION_PERSISTENCE_MAXIMUM_ATTEMPTS) {
+          await sessionPersistenceSleep(sessionPersistenceRetryDelayMilliseconds);
+        }
+      }
+    }
+    throw lastError;
+  }
+
   async function prunePersistedResolvedReviewIds(
     sessionId: string,
     reviewIdPrefix: string,
@@ -2818,7 +2838,11 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       resolvedReviewIds.add(review.id);
       if (review.kind === 'tool-approval') pendingApprovalOverrides.delete(review.id);
       try {
-        await persistReviewResolution(review.sessionId, review.id, review.kind === 'tool-approval');
+        await persistReviewResolutionWithRetry(
+          review.sessionId,
+          review.id,
+          review.kind === 'tool-approval',
+        );
       } catch (error) {
         diagnose({
           level: 'warn',

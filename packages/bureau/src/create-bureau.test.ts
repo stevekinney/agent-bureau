@@ -4267,7 +4267,7 @@ describe('createBureau review queue (AB-20)', () => {
     bureau.dispose();
   });
 
-  it('returns an applied approval when persisted override cleanup fails', async () => {
+  it('retries approval resolution persistence after a transient cleanup failure', async () => {
     const backingStore = textValueStore(new MemoryStorage());
     let failNextSessionUpdate = false;
     const persistence = createTextStoreProxy(backingStore, {
@@ -4313,7 +4313,10 @@ describe('createBureau review queue (AB-20)', () => {
     expect(outcome.decision).toBe('approve');
     expect(charges).toEqual([425]);
     expect(bureau.listPendingReviews()).toHaveLength(0);
-    expect(diagnostics).toContainEqual(expect.stringContaining('could not prune'));
+    const persistedSession = await bureau.getSession(run.sessionId);
+    expect(persistedSession?.metadata['resolvedReviewIds']).toContain(review!.id);
+    expect(persistedSession?.metadata['pendingApprovalOverrides']).not.toHaveProperty(review!.id);
+    expect(diagnostics).toEqual([]);
     bureau.dispose();
   });
 

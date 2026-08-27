@@ -192,6 +192,32 @@ describe('authentication with api key store', () => {
     );
   });
 
+  it('rejects malformed stored scopes instead of promoting them to unrestricted authority', async () => {
+    const kv = textValueStore(new MemoryStorage());
+    const apiKeyStore = createApiKeyStore(kv);
+    const { key, plaintext } = await apiKeyStore.create({
+      name: 'tampered-scope-key',
+      scopes: ['runs:write'],
+    });
+    const raw = await kv.get(`api-key:${key.id}`);
+    expect(raw).not.toBeNull();
+    const stored = JSON.parse(raw!);
+    stored.scopes = ['   '];
+    await kv.set(`api-key:${key.id}`, JSON.stringify(stored));
+
+    const app = createApp(undefined, apiKeyStore);
+    const response = await app.request('/protected', {
+      headers: { authorization: `Bearer ${plaintext}` },
+    });
+
+    expect(response.status).toBe(401);
+    const body = await response.json();
+    expect(body.error.message).toBe('Invalid authorization token');
+    expect(() => gatewayCapabilitiesForScopes(['   '])).toThrow(
+      'API key scope entries must be non-blank strings',
+    );
+  });
+
   it('accepts a valid managed API key', async () => {
     const kv = textValueStore(new MemoryStorage());
     const apiKeyStore = createApiKeyStore(kv);

@@ -54,6 +54,23 @@ describe('key management routes', () => {
       expect(body.key.expiresAt).toBe(expires);
     });
 
+    it('rejects blank scope entries instead of creating an admin key', async () => {
+      const { app, store } = createApp();
+      const response = await app.request('/api/v1/keys', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          name: 'blank-scoped-key',
+          scopes: ['   '],
+        }),
+      });
+
+      expect(response.status).toBe(400);
+      const body = await response.json();
+      expect(body.error.message).toBe('API key scope entries must be non-blank strings');
+      expect(await store.list()).toEqual([]);
+    });
+
     it('rejects missing name', async () => {
       const { app } = createApp();
       const response = await app.request('/api/v1/keys', {
