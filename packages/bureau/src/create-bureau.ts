@@ -196,6 +196,29 @@ export function recoveredRequestContextFromMetadata(
   );
 }
 
+/**
+ * Returns whether a persisted session can still resume under transport-issued
+ * authority. Terminal sessions retain their authority for auditability, but
+ * must not defer boot recovery because no user code can resume from them.
+ */
+export function hasRecoverableTransportAuthority(metadata: Record<string, JSONValue>): boolean {
+  if (metadata['lastRunStatus'] !== 'running') return false;
+  const requiresTransportValidator = (revision: unknown): boolean =>
+    typeof revision === 'string' && revision !== 'bureau:1' && revision !== 'bureau:scheduler:1';
+  const legacyAuthority = metadata['lastRequestAuthority'];
+  if (legacyAuthority && typeof legacyAuthority === 'object' && !Array.isArray(legacyAuthority)) {
+    const revision = (legacyAuthority as Record<string, JSONValue>)['authorizationRevision'];
+    if (requiresTransportValidator(revision)) return true;
+  }
+  const authorities = metadata['lastRequestAuthorities'];
+  if (!authorities || typeof authorities !== 'object' || Array.isArray(authorities)) return false;
+  return Object.values(authorities as Record<string, JSONValue>).some((value) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    const revision = (value as Record<string, JSONValue>)['authorizationRevision'];
+    return requiresTransportValidator(revision);
+  });
+}
+
 export function isTerminalApprovalBindingError(error: unknown): boolean {
   if (!error || typeof error !== 'object') return false;
   const code = (error as Record<string, unknown>)['code'];
@@ -747,6 +770,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     options.requestAuthorityValidator;
   let durableRecoveryDeferred = false;
   let durableRecoveryStarted = false;
+  let durableRecoveryBarrier: Promise<void> = Promise.resolve();
   const liveFrameListeners = new Set<(frame: ServerFrame) => void>();
   // AB-96 — terminal RunReports, cached at the moment each run's lifecycle
   // event fires so `getRunReport` never needs to re-derive them.
@@ -1125,6 +1149,85 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     });
   }
 
+  async function prunePersistedInvalidApprovalReviewState(
+    sessionId: string,
+    runId: string,
+    reviewId: string,
+  ): Promise<void> {
+    if (!runtime.sessionStore) return;
+    await runtime.sessionStore.update(sessionId, (session) => {
+      if (!session) return session;
+      const currentPending = session.metadata['pendingApprovalOverrides'];
+      let pendingApprovalOverrides = currentPending;
+      if (
+        typeof currentPending === 'object' &&
+        currentPending !== null &&
+        !Array.isArray(currentPending)
+      ) {
+        const { [reviewId]: _removed, ...remaining } = currentPending as Record<string, JSONValue>;
+        pendingApprovalOverrides = remaining;
+      }
+
+      let hasRemainingApprovalForRun = false;
+      if (
+        typeof pendingApprovalOverrides === 'object' &&
+        pendingApprovalOverrides !== null &&
+        !Array.isArray(pendingApprovalOverrides)
+      ) {
+        for (const id of Object.keys(pendingApprovalOverrides)) {
+          if (id.startsWith(`approval:${runId}:`)) {
+            hasRemainingApprovalForRun = true;
+            break;
+          }
+        }
+      }
+      let lastRequestAuthorities = session.metadata['lastRequestAuthorities'];
+      if (
+        !hasRemainingApprovalForRun &&
+        typeof lastRequestAuthorities === 'object' &&
+        lastRequestAuthorities !== null &&
+        !Array.isArray(lastRequestAuthorities)
+      ) {
+        const { [runId]: _removed, ...remainingAuthorities } = lastRequestAuthorities as Record<
+          string,
+          JSONValue
+        >;
+        lastRequestAuthorities = remainingAuthorities;
+      }
+
+      return {
+        ...session,
+        metadata: {
+          ...session.metadata,
+          ...(pendingApprovalOverrides !== currentPending ? { pendingApprovalOverrides } : {}),
+          ...(lastRequestAuthorities !== session.metadata['lastRequestAuthorities']
+            ? { lastRequestAuthorities }
+            : {}),
+        },
+      };
+    });
+  }
+
+  async function prunePersistedInvalidApprovalReviewStateWithRetry(
+    sessionId: string,
+    runId: string,
+    reviewId: string,
+  ): Promise<void> {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= SESSION_PERSISTENCE_MAXIMUM_ATTEMPTS; attempt += 1) {
+      try {
+        await prunePersistedInvalidApprovalReviewState(sessionId, runId, reviewId);
+        return;
+      } catch (error) {
+        lastError = error;
+        if (attempt < SESSION_PERSISTENCE_MAXIMUM_ATTEMPTS) {
+          await sessionPersistenceSleep(sessionPersistenceRetryDelayMilliseconds);
+        }
+      }
+    }
+    throw lastError;
+  }
+
   async function persistPendingApprovalOverrideWithRetry(
     sessionId: string,
     reviewId: string,
@@ -1296,6 +1399,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     toolbox: BureauToolbox,
     metadata: unknown,
     runId: string,
+    sessionId: string,
   ): Promise<void> {
     const restoreApproval = (
       toolbox as unknown as {
@@ -1318,6 +1422,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
           if (!isTerminalApprovalBindingError(error)) throw error;
           invalidApprovalReviewIds.add(reviewId);
           pendingApprovalOverrides.delete(reviewId);
+          await prunePersistedInvalidApprovalReviewStateWithRetry(sessionId, runId, reviewId);
           diagnose({
             level: 'warn',
             scope: 'approval-recovery',
@@ -2139,7 +2244,12 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       info.workflowId,
       info.input.agentName,
     );
-    await restorePendingApprovalStates(services.toolbox, sessionLoad.session, info.workflowId);
+    await restorePendingApprovalStates(
+      services.toolbox,
+      sessionLoad.session,
+      info.workflowId,
+      info.input.sessionId,
+    );
     reattachRecoveredRun(
       info.workflowId,
       info.input.sessionId,
@@ -2357,6 +2467,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
             recoveredServices.toolbox,
             fullSession?.metadata,
             handle.id,
+            ownedSessionId!,
           );
         }
         reattachRecoveredRun(
@@ -3239,7 +3350,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       if (validator && durableRecoveryDeferred && !durableRecoveryStarted) {
         durableRecoveryDeferred = false;
         durableRecoveryStarted = true;
-        void recoverDurableRuns().catch((error) => {
+        durableRecoveryBarrier = recoverDurableRuns().catch((error) => {
           diagnose({
             level: 'error',
             scope: 'recovery',
@@ -3250,6 +3361,9 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     },
     getRequestAuthorityValidator() {
       return requestAuthorityValidator;
+    },
+    waitForRecovery() {
+      return durableRecoveryBarrier;
     },
     createSchedule,
     getSchedule,
@@ -3337,30 +3451,9 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   if (!requestAuthorityValidator && runtime.durable && runtime.sessionStore) {
     try {
       const sessions = await runtime.sessionStore.list();
-      hasDeferredGatewayAuthority = sessions.some((session) => {
-        const requiresTransportValidator = (revision: unknown): boolean =>
-          typeof revision === 'string' &&
-          revision !== 'bureau:1' &&
-          revision !== 'bureau:scheduler:1';
-        const legacyAuthority = session.metadata['lastRequestAuthority'];
-        if (
-          legacyAuthority &&
-          typeof legacyAuthority === 'object' &&
-          !Array.isArray(legacyAuthority)
-        ) {
-          const revision = (legacyAuthority as Record<string, JSONValue>)['authorizationRevision'];
-          if (requiresTransportValidator(revision)) return true;
-        }
-        const authorities = session.metadata['lastRequestAuthorities'];
-        if (!authorities || typeof authorities !== 'object' || Array.isArray(authorities)) {
-          return false;
-        }
-        return Object.values(authorities as Record<string, JSONValue>).some((value) => {
-          if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-          const revision = (value as Record<string, JSONValue>)['authorizationRevision'];
-          return requiresTransportValidator(revision);
-        });
-      });
+      hasDeferredGatewayAuthority = sessions.some((session) =>
+        hasRecoverableTransportAuthority(session.metadata),
+      );
     } catch (error) {
       hasDeferredGatewayAuthority = true;
       diagnose({
@@ -3372,17 +3465,17 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   }
   if (hasDeferredGatewayAuthority) {
     durableRecoveryDeferred = true;
+    durableRecoveryBarrier = new Promise<void>(() => {});
   } else {
     durableRecoveryStarted = true;
-    try {
-      await recoverDurableRuns();
-    } catch (error) {
+    durableRecoveryBarrier = recoverDurableRuns().catch((error) => {
       diagnose({
         level: 'error',
         scope: 'recovery',
         message: `[bureau] Durable run recovery failed during boot: ${serializeUnknownError(error)}`,
       });
-    }
+    });
+    await durableRecoveryBarrier;
   }
 
   return bureau;

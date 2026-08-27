@@ -28,6 +28,7 @@ import { createWebSocketHandler } from './websocket';
 type RequestAuthorityValidator = (context: ToolRequestContext) => boolean | Promise<boolean>;
 type BureauRequestAuthorityValidatorAccess = {
   readonly getRequestAuthorityValidator?: () => RequestAuthorityValidator | undefined;
+  readonly waitForRecovery?: () => Promise<void>;
 };
 
 const gatewayValidatorState = new WeakMap<
@@ -211,6 +212,7 @@ export async function createGateway(
   if (requestAuthorityValidator !== hostRequestAuthorityValidator) {
     bureau.setRequestAuthorityValidator(requestAuthorityValidator);
   }
+  await authorityValidatorAccess.waitForRecovery?.();
 
   const app = new Hono();
 

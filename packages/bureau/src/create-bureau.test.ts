@@ -56,6 +56,7 @@ import {
   defaultSessionPersistenceSleep,
   detachBestEffortPromise,
   emptyRecoveredStepMetadata,
+  hasRecoverableTransportAuthority,
   isRecoverableScheduledFireInput,
   isTerminalApprovalBindingError,
   loadExistingScheduledSessionId,
@@ -522,6 +523,29 @@ describe('createBureau', () => {
         'billing-agent',
       ),
     ).toBeUndefined();
+  });
+
+  it('does not defer recovery for terminal sessions with transport authority', () => {
+    const authority = {
+      principalId: 'api-key:terminal',
+      tenantId: 'tenant-1',
+      ownerId: 'owner-1',
+      capabilities: ['tools:execute'],
+      authorizationRevision: 'gateway:api-key:terminal',
+    };
+
+    expect(
+      hasRecoverableTransportAuthority({
+        lastRunStatus: 'completed',
+        lastRequestAuthority: authority,
+      }),
+    ).toBe(false);
+    expect(
+      hasRecoverableTransportAuthority({
+        lastRunStatus: 'running',
+        lastRequestAuthorities: { 'run-active': authority },
+      }),
+    ).toBe(true);
   });
 
   it('classifies only terminal approval binding failures as safe to suppress', () => {
@@ -4396,6 +4420,7 @@ describe('createBureau review queue (AB-20)', () => {
         agentName: 'bureau',
         conversationHistory: createConversationHistory({ id: 'deferred-authority-recovery' }),
         metadata: {
+          lastRunStatus: 'running',
           lastRequestAuthorities: {
             'run-deferred-authority': {
               principalId: 'api-key:deferred',
@@ -4436,7 +4461,7 @@ describe('createBureau review queue (AB-20)', () => {
       try {
         expect(recoverAllSpy).not.toHaveBeenCalled();
         bureau.setRequestAuthorityValidator(() => true);
-        await pollUntil(() => diagnostics.some((message) => message.includes('Deferred durable')));
+        await bureau.waitForRecovery?.();
         expect(diagnostics).toContainEqual(
           expect.stringContaining(
             'Deferred durable run recovery failed: deferred recovery unavailable',
@@ -4447,6 +4472,149 @@ describe('createBureau review queue (AB-20)', () => {
       }
     } finally {
       recoverAllSpy.mockRestore();
+    }
+  });
+
+  it('reports durable recovery failures during Bureau-origin boot', async () => {
+    const probe = await createRuntimeComposition({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+    const enginePrototype = Object.getPrototypeOf(probe.durable!.engine) as {
+      recoverAll: () => Promise<unknown[]>;
+    };
+    probe.durable!.engine[Symbol.dispose]?.();
+    probe.disposeStorage?.();
+    const recoverAllSpy = spyOn(enginePrototype, 'recoverAll').mockRejectedValue(
+      new Error('boot recovery unavailable'),
+    );
+    const diagnostics: string[] = [];
+
+    try {
+      const bureau = await createBureau({
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'memory' },
+        durableExecution: true,
+        onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.message),
+      });
+
+      try {
+        expect(diagnostics).toContainEqual(
+          expect.stringContaining(
+            'Durable run recovery failed during boot: boot recovery unavailable',
+          ),
+        );
+      } finally {
+        await bureau.dispose();
+      }
+    } finally {
+      recoverAllSpy.mockRestore();
+    }
+  });
+
+  it('durably prunes approvals and request authority when approval restoration is permanently invalid', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-stale-approval-recovery-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const approvalSecret = 'expired-recovery-approval-secret';
+    const charges: number[] = [];
+    try {
+      let bureauAReachedStep1 = false;
+      const bureauA = await createBureau({
+        generate: async ({ step }) => {
+          if (step === 0) {
+            return {
+              content: '',
+              toolCalls: [
+                { id: 'expired-recovery-call', name: 'charge-card', arguments: { cents: 875 } },
+              ],
+            };
+          }
+          bureauAReachedStep1 = true;
+          return new Promise<never>(() => {});
+        },
+        toolbox: createNeedsApprovalToolbox(approvalSecret, charges),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      const run = await bureauA.createRun({ message: 'Persist an approval that will expire' });
+      await pollUntil(() => bureauAReachedStep1);
+      const reviewId = `approval:${run.id}:expired-recovery-call`;
+      const beforeRecovery = await bureauA.getSession(run.sessionId);
+      expect(beforeRecovery?.metadata['pendingApprovalOverrides']).toMatchObject({
+        [reviewId]: expect.objectContaining({ approvalToken: expect.any(String) }),
+      });
+      expect(beforeRecovery?.metadata['lastRequestAuthorities']).toMatchObject({
+        [run.id]: expect.objectContaining({ authorizationRevision: 'bureau:1' }),
+      });
+
+      bureauA.dispose();
+
+      const diagnostics: string[] = [];
+      const bureauB = await createBureau({
+        generate: async () => ({
+          content: 'Recovered after stale approval pruning',
+          toolCalls: [],
+        }),
+        toolbox: createToolbox(
+          [
+            createTool({
+              name: 'charge-card',
+              version: '1.0.0',
+              description: 'Charge a payment card',
+              input: z.object({ cents: z.number() }),
+              async execute({ cents }) {
+                charges.push(cents);
+                return { charged: cents };
+              },
+            }),
+          ],
+          {
+            approvalSecret,
+            approvalNow: () => Date.now() + 10 * 60_000,
+            policy: {
+              beforeExecute() {
+                return {
+                  allow: false,
+                  status: 'needs_approval',
+                  reason: 'Operator approval required',
+                  action: { message: 'Approve charge' },
+                };
+              },
+            },
+          },
+        ) as unknown as Toolbox,
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+        onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.message),
+      });
+
+      try {
+        const restoredInvalidApproval = await pollUntil(() =>
+          diagnostics.some((message) =>
+            message.includes(`Failed to restore approval binding for "${reviewId}"`),
+          ),
+        );
+        expect(restoredInvalidApproval).toBe(true);
+        const afterRecovery = await bureauB.getSession(run.sessionId);
+        expect(afterRecovery?.metadata['pendingApprovalOverrides']).not.toHaveProperty(reviewId);
+        expect(afterRecovery?.metadata['lastRequestAuthorities']).not.toHaveProperty(run.id);
+        expect(bureauB.listPendingReviews()).toHaveLength(0);
+        expect(charges).toEqual([]);
+      } finally {
+        bureauB.dispose();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
     }
   });
 

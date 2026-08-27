@@ -640,6 +640,9 @@ export interface Bureau {
     validator: ((context: ToolRequestContext) => boolean | Promise<boolean>) | undefined,
   ): void;
 
+  /** Waits for any deferred durable recovery released by validator attachment. */
+  waitForRecovery?(): Promise<void>;
+
   /**
    * Returns the current host-owned authority freshness check so transports can
    * compose their own revocation checks without replacing construction-time
