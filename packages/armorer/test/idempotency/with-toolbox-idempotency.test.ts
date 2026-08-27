@@ -14,6 +14,7 @@ const createTestRequestContext = (tenantId: string) => ({
   authority: {
     principalId: 'principal-a',
     tenantId,
+    ownerId: 'owner-a',
     capabilities: ['tools:execute'],
     authorizationRevision: 'authorization:1',
   },
@@ -27,6 +28,7 @@ function expectedCacheKey(tenantId: string, revision: string, baseKey: string): 
   return JSON.stringify([
     tenantId,
     requestContext.authority.principalId,
+    requestContext.authority.ownerId,
     requestContext.authority.authorizationRevision,
     [...requestContext.authority.capabilities].sort(),
     requestContext.agentId,

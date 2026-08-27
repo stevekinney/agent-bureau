@@ -831,6 +831,12 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
   const policyRevision = options.policyRevision ?? 'policy:1';
   const approvalRevision = options.approvalRevision ?? 'approval:1';
   const redactionRevision = options.redactionRevision ?? 'redaction:1';
+  function toolDefinitionRevisionForCall(call: ToolCallInput | undefined): string {
+    if (!call?.name) {
+      return 'unknown';
+    }
+    return getTool(call.name)?.id ?? call.name;
+  }
   const buildTool =
     typeof options.toolFactory === 'function'
       ? (configuration: ToolConfiguration) =>
@@ -902,7 +908,9 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
               revisions: Object.freeze({
                 catalog: catalogRevision,
                 toolbox: toolboxRevision,
-                toolDefinition: Array.isArray(input) ? 'batch' : (firstCall?.name ?? 'unknown'),
+                toolDefinition: Array.isArray(input)
+                  ? 'batch'
+                  : toolDefinitionRevisionForCall(firstCall),
                 policy: policyRevision,
                 approval: approvalRevision,
                 redaction: redactionRevision,
@@ -1194,7 +1202,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
                           revisions: Object.freeze({
                             catalog: catalogRevision,
                             toolbox: toolboxRevision,
-                            toolDefinition: tool.configuration.identity.version ?? tool.id,
+                            toolDefinition: tool.id,
                             policy: policyRevision,
                             approval: approvalRevision,
                             redaction: redactionRevision,

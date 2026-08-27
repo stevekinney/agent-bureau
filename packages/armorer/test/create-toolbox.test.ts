@@ -3453,6 +3453,106 @@ describe('createToolbox', () => {
       expect(observedCapabilities).toEqual(['read']);
     });
 
+    it('reports narrowed request capabilities to afterExecute policy hooks', async () => {
+      const observed = {
+        registryCapabilities: [] as readonly string[],
+        registryRequestCapabilities: [] as readonly string[],
+        toolCapabilities: [] as readonly string[],
+        toolRequestCapabilities: [] as readonly string[],
+      };
+      const readCapabilities = (context: { policyContext?: unknown }) => {
+        const policyContext = context.policyContext as
+          | {
+              capabilities?: readonly string[];
+              requestContext?: { authority?: { capabilities?: readonly string[] } };
+            }
+          | undefined;
+        return {
+          capabilities: policyContext?.capabilities ?? [],
+          requestCapabilities: policyContext?.requestContext?.authority?.capabilities ?? [],
+        };
+      };
+      const toolbox = createToolbox(
+        [
+          createTool({
+            name: 'after-authority-capture',
+            description: 'captures narrowed authority in afterExecute',
+            input: z.object({}),
+            policy: {
+              beforeExecute: () => ({ allow: true, capabilities: ['read', 'write'] }),
+              afterExecute(context) {
+                const capabilities = readCapabilities(context);
+                observed.toolCapabilities = capabilities.capabilities;
+                observed.toolRequestCapabilities = capabilities.requestCapabilities;
+              },
+            },
+            async execute() {
+              return 'ok';
+            },
+          }),
+        ],
+        {
+          policy: {
+            beforeExecute: () => ({ allow: true, capabilities: ['read', 'admin'] }),
+            afterExecute(context) {
+              const capabilities = readCapabilities(context);
+              observed.registryCapabilities = capabilities.capabilities;
+              observed.registryRequestCapabilities = capabilities.requestCapabilities;
+            },
+          },
+        },
+      );
+
+      const result = await toolbox.execute(
+        { name: 'after-authority-capture', arguments: {} },
+        {
+          requestContext: {
+            authority: {
+              principalId: 'principal-a',
+              tenantId: 'tenant-a',
+              ownerId: 'owner-a',
+              capabilities: ['read', 'write', 'admin'],
+              authorizationRevision: 'authorization:1',
+            },
+          },
+        },
+      );
+
+      expect(result.result).toBe('ok');
+      expect(observed.toolCapabilities).toEqual(['read']);
+      expect(observed.toolRequestCapabilities).toEqual(['read']);
+      expect(observed.registryCapabilities).toEqual(['read']);
+      expect(observed.registryRequestCapabilities).toEqual(['read']);
+    });
+
+    it('records the full tool id in effective execution context revisions', async () => {
+      let observedToolDefinitionRevision: string | undefined;
+      const toolbox = createToolbox([
+        createTool({
+          namespace: 'payments',
+          name: 'charge-card',
+          version: '2026-08-27',
+          description: 'charges a card',
+          input: z.object({}),
+          async execute(_input, context) {
+            observedToolDefinitionRevision = context.effectiveContext?.revisions.toolDefinition;
+            return 'ok';
+          },
+        }),
+      ]);
+      const tool = toolbox.getTool('charge-card');
+
+      const result = await toolbox.execute(
+        { name: 'charge-card', arguments: {} },
+        { requestContext: approvalRequestContext },
+      );
+
+      expect(result.result).toBe('ok');
+      expect(tool).toBeDefined();
+      expect(observedToolDefinitionRevision).toBe(tool?.id);
+      expect(observedToolDefinitionRevision).toBe('payments:charge-card@2026-08-27');
+    });
+
     it('createTool applies optional configuration fields', () => {
       const toolbox = createToolbox([], { telemetry: true });
       const tool = toolbox.createTool({

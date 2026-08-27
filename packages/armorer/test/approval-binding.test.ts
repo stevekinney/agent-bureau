@@ -39,6 +39,30 @@ describe('approval binding state', () => {
     );
   });
 
+  it('rejects non-finite binding timestamps and validation time', () => {
+    const nonFiniteValues = [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY];
+    for (const issuedAt of nonFiniteValues) {
+      expect(() => validateApprovalBinding({ ...binding, issuedAt })).toThrow(ApprovalBindingError);
+    }
+    for (const expiresAt of nonFiniteValues) {
+      expect(() => validateApprovalBinding({ ...binding, expiresAt })).toThrow(
+        ApprovalBindingError,
+      );
+    }
+    for (const now of nonFiniteValues) {
+      expect(() => validateApprovalBinding(binding, undefined, now)).toThrow(ApprovalBindingError);
+    }
+  });
+
+  it('rejects non-finite process-local store clocks before reading or mutating state', async () => {
+    const store = createProcessLocalApprovalStateStore(() => Number.POSITIVE_INFINITY);
+
+    await expect(store.issue(binding)).rejects.toMatchObject({ code: 'invalid-binding' });
+    await expect(store.consume(binding)).rejects.toMatchObject({ code: 'invalid-binding' });
+    await expect(store.revoke(binding)).rejects.toMatchObject({ code: 'invalid-binding' });
+    await expect(store.state(binding)).rejects.toMatchObject({ code: 'invalid-binding' });
+  });
+
   it('issues, atomically consumes once, and tracks revocation', async () => {
     const store = createProcessLocalApprovalStateStore();
     await store.issue(binding);

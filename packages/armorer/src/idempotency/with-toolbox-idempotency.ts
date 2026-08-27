@@ -231,6 +231,7 @@ export function withToolboxIdempotency(
     const cacheKey = stableStringifyJson([
       tenantId,
       authority.principalId,
+      authority.ownerId,
       authority.authorizationRevision,
       [...authority.capabilities].sort(),
       requestContext.agentId ?? null,

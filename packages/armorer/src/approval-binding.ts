@@ -44,6 +44,20 @@ export class ApprovalBindingError extends Error {
   }
 }
 
+function assertFiniteTimestamp(value: unknown, label: string): asserts value is number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new ApprovalBindingError(
+      `Approval binding ${label} must be a finite number.`,
+      'invalid-binding',
+    );
+  }
+}
+
+function validateApprovalClock(now: number): number {
+  assertFiniteTimestamp(now, 'validation time');
+  return now;
+}
+
 export interface ApprovalStateStore {
   issue(binding: ApprovalBindingPayload): Promise<void>;
   consume(
@@ -64,14 +78,17 @@ export function validateApprovalBinding(
 ): void {
   if (
     binding.version !== APPROVAL_BINDING_VERSION ||
-    !Object.values(binding).every(
-      (value) => typeof value === 'number' || typeof value === 'string',
-    ) ||
-    binding.issuedAt >= binding.expiresAt
+    !Object.values(binding).every((value) => typeof value === 'number' || typeof value === 'string')
   ) {
     throw new ApprovalBindingError('Invalid approval binding payload.', 'invalid-binding');
   }
-  if (now >= binding.expiresAt) {
+  assertFiniteTimestamp(binding.issuedAt, 'issuedAt');
+  assertFiniteTimestamp(binding.expiresAt, 'expiresAt');
+  const validationTime = validateApprovalClock(now);
+  if (binding.issuedAt >= binding.expiresAt) {
+    throw new ApprovalBindingError('Invalid approval binding payload.', 'invalid-binding');
+  }
+  if (validationTime >= binding.expiresAt) {
     throw new ApprovalBindingError('Approval binding has expired.', 'expired');
   }
   for (const key of Object.keys(context ?? {}) as Array<keyof ApprovalBindingContext>) {
@@ -102,7 +119,7 @@ export function createProcessLocalApprovalStateStore(nowFunction = Date.now): Ap
   return {
     issue(binding) {
       return Promise.resolve().then(() => {
-        const now = nowFunction();
+        const now = validateApprovalClock(nowFunction());
         purgeExpired(now);
         validateApprovalBinding(binding, undefined, now);
         const key = keyOf(binding);
@@ -117,8 +134,9 @@ export function createProcessLocalApprovalStateStore(nowFunction = Date.now): Ap
     },
     consume(binding, context, now = nowFunction()) {
       return Promise.resolve().then(() => {
-        validateApprovalBinding(binding, context, now);
-        purgeExpired(now);
+        const validationTime = validateApprovalClock(now);
+        validateApprovalBinding(binding, context, validationTime);
+        purgeExpired(validationTime);
         const key = keyOf(binding);
         const terminalEntry = terminal.get(key);
         if (terminalEntry?.state === 'revoked')
@@ -144,7 +162,7 @@ export function createProcessLocalApprovalStateStore(nowFunction = Date.now): Ap
     },
     revoke(binding) {
       return Promise.resolve().then(() => {
-        const now = nowFunction();
+        const now = validateApprovalClock(nowFunction());
         purgeExpired(now);
         const key = keyOf(binding);
         const terminalEntry = terminal.get(key);
@@ -165,7 +183,7 @@ export function createProcessLocalApprovalStateStore(nowFunction = Date.now): Ap
     },
     state(binding) {
       return Promise.resolve().then(() => {
-        const now = nowFunction();
+        const now = validateApprovalClock(nowFunction());
         purgeExpired(now);
         const key = keyOf(binding);
         return issued.has(key) ? 'issued' : terminal.get(key)?.state;

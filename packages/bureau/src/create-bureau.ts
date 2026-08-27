@@ -202,6 +202,17 @@ export function emptyRecoveredStepMetadata(): Record<string, never> {
   return {};
 }
 
+export function omitKeysWithPrefix(
+  record: Record<string, JSONValue>,
+  prefix: string,
+): Record<string, JSONValue> {
+  const remaining: Record<string, JSONValue> = {};
+  for (const [key, value] of Object.entries(record)) {
+    if (!key.startsWith(prefix)) remaining[key] = value;
+  }
+  return remaining;
+}
+
 export function defaultSessionPersistenceSleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
@@ -993,6 +1004,14 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
           >;
           mergedMetadata['lastRequestAuthorities'] = remainingAuthorities;
         }
+        const approvals = mergedMetadata['pendingApprovalOverrides'];
+        if (typeof approvals === 'object' && approvals !== null && !Array.isArray(approvals)) {
+          const remainingApprovals = omitKeysWithPrefix(
+            approvals as Record<string, JSONValue>,
+            `approval:${terminalRunId}:`,
+          );
+          mergedMetadata['pendingApprovalOverrides'] = remainingApprovals;
+        }
       }
 
       return {
@@ -1031,6 +1050,23 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         },
       },
     }));
+  }
+
+  async function prunePersistedPendingApprovalOverrides(
+    sessionId: string,
+    reviewIdPrefix: string,
+  ): Promise<void> {
+    if (!runtime.sessionStore) return;
+    await runtime.sessionStore.update(sessionId, (session) => {
+      if (!session) return session;
+      const current = session.metadata['pendingApprovalOverrides'];
+      if (typeof current !== 'object' || current === null || Array.isArray(current)) return session;
+      const remaining = omitKeysWithPrefix(current as Record<string, JSONValue>, reviewIdPrefix);
+      return {
+        ...session,
+        metadata: { ...session.metadata, pendingApprovalOverrides: remaining },
+      };
+    });
   }
 
   function restorePendingApprovalOverrides(metadata: unknown, runId: string): void {
@@ -2231,6 +2267,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       throw new BureauError('Cannot delete a running run', 'CONFLICT');
     }
 
+    const sessionId = getRunSessionIdentifier(runState);
     runSessionIdentifiers.delete(runState.activeRun);
     runAttribution.delete(id);
     runRequestContexts.delete(id);
@@ -2239,6 +2276,9 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     }
     runToolboxesByRunId.delete(id);
     store.removeRun(id);
+    if (sessionId) {
+      detachBestEffortPromise(prunePersistedPendingApprovalOverrides(sessionId, `approval:${id}:`));
+    }
     // AB-96 — drop the cached terminal RunReport too, or a long-lived bureau
     // that creates/deletes many runs would retain one forever per run id.
     runReports.delete(id);
@@ -2521,7 +2561,12 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     }
 
     resolvingReviewIds.delete(review.id);
-    if (!keepPending) resolvedReviewIds.add(review.id);
+    if (!keepPending) {
+      resolvedReviewIds.add(review.id);
+      if (review.kind === 'tool-approval') {
+        await prunePersistedPendingApprovalOverrides(review.sessionId, `${review.id}`);
+      }
+    }
 
     const decisionType =
       review.kind === 'tool-approval'

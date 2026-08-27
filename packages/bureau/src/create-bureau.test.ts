@@ -60,6 +60,7 @@ import {
   isTerminalApprovalBindingError,
   loadExistingScheduledSessionId,
   monitorRecoveredScheduledFire,
+  omitKeysWithPrefix,
   recoveredRequestContextFromMetadata,
   wireFlowControlSchedulerEvents,
   wireStreamEventTargetFrames,
@@ -471,6 +472,12 @@ describe('createBureau', () => {
     ).toBe(false);
     expect(isTerminalApprovalBindingError(undefined)).toBe(false);
     expect(emptyRecoveredStepMetadata()).toEqual({});
+    expect(
+      omitKeysWithPrefix(
+        { 'approval:run-a:call-a': 'remove', 'approval:run-b:call-b': 'keep' },
+        'approval:run-a:',
+      ),
+    ).toEqual({ 'approval:run-b:call-b': 'keep' });
   });
 
   it('is not ready when no generate function is configured', async () => {
@@ -2517,6 +2524,8 @@ describe('createBureau', () => {
 
     const session = await bureau.getSession(run.sessionId);
     expect(session?.id).toBe(run.sessionId);
+
+    bureau.deleteRun(run.id);
 
     await bureau.deleteSession(run.sessionId);
     const deleted = await bureau.getSession(run.sessionId);

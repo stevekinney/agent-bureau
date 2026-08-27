@@ -47,6 +47,7 @@ import {
   freezeEffectiveToolExecutionContext,
   freezeToolRequestContext,
   narrowToolAuthority,
+  type ToolRequestContext,
 } from './execution-context';
 import { createExecutionLifecycle, type ExecutionHandle } from './execution-lifecycle';
 import {
@@ -607,6 +608,21 @@ export function createTool<
     return context;
   };
 
+  const attachRequestContextPolicyFacts = (
+    context: ToolPolicyContext,
+    requestContext: ToolRequestContext | undefined,
+  ): void => {
+    if (!requestContext) {
+      return;
+    }
+    const frozenRequestContext = freezeToolRequestContext(requestContext);
+    context.policyContext = {
+      ...(context.policyContext ?? {}),
+      requestContext: frozenRequestContext,
+      capabilities: frozenRequestContext.authority.capabilities,
+    };
+  };
+
   const resolvePolicyDecision = async (
     context: ToolPolicyContext,
   ): Promise<ToolPolicyDecision | undefined> => {
@@ -823,6 +839,7 @@ export function createTool<
     if (options.signal?.aborted) {
       return handleCancellation(options.signal.reason);
     }
+    let policyRequestContext = options.requestContext;
 
     try {
       emit('execute-start', {
@@ -843,13 +860,7 @@ export function createTool<
         return handleCancellation(options.signal.reason);
       }
       const policyContext = buildPolicyContext(typedToolCall, parsed, inputDigest);
-      if (options.requestContext) {
-        policyContext.policyContext = {
-          ...(policyContext.policyContext ?? {}),
-          requestContext: freezeToolRequestContext(options.requestContext),
-          capabilities: options.requestContext.authority.capabilities,
-        };
-      }
+      attachRequestContextPolicyFacts(policyContext, options.requestContext);
       if (policyContextProvider) {
         const injected = await policyContextProvider(policyContext);
         if (injected && typeof injected === 'object' && !Array.isArray(injected)) {
@@ -858,19 +869,15 @@ export function createTool<
       }
       // The host owns identity and tenancy. A provider may add policy facts,
       // but can never replace the host request context.
-      if (options.requestContext) {
-        policyContext.policyContext = {
-          ...(policyContext.policyContext ?? {}),
-          requestContext: freezeToolRequestContext(options.requestContext),
-          capabilities: options.requestContext.authority.capabilities,
-        };
-      }
+      attachRequestContextPolicyFacts(policyContext, options.requestContext);
       const approvalResume = options[approvalResumeSymbol];
       let decision = await resolvePolicyDecision(policyContext);
       const effectiveRequestContext =
         options.requestContext && decision?.capabilities
           ? narrowToolAuthority(options.requestContext, decision.capabilities)
           : options.requestContext;
+      policyRequestContext = effectiveRequestContext;
+      attachRequestContextPolicyFacts(policyContext, effectiveRequestContext);
       if (effectiveRequestContext && options.executionHandle && options.effectiveContext) {
         options.executionHandle.updatePrivilegedContext({
           ...effectiveRequestContext,
@@ -1358,19 +1365,14 @@ export function createTool<
       const callId = toolCall.id;
       const errorCategory = classifyErrorCategory(reportedError);
       const errorPolicyContext = buildPolicyContext(toolCall, toolCall.arguments, inputDigest);
+      attachRequestContextPolicyFacts(errorPolicyContext, policyRequestContext);
       if (policyContextProvider) {
         const injected = await policyContextProvider(errorPolicyContext);
         if (injected && typeof injected === 'object' && !Array.isArray(injected)) {
           errorPolicyContext.policyContext = injected;
         }
       }
-      if (options.requestContext) {
-        errorPolicyContext.policyContext = {
-          ...(errorPolicyContext.policyContext ?? {}),
-          requestContext: freezeToolRequestContext(options.requestContext),
-          capabilities: options.requestContext.authority.capabilities,
-        };
-      }
+      attachRequestContextPolicyFacts(errorPolicyContext, policyRequestContext);
       await runPolicyAfter({
         ...errorPolicyContext,
         outcome: 'error',
