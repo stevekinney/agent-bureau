@@ -1,8 +1,9 @@
 /**
  * External consumer verifier for Conversationalist (AB-31).
  *
- * Builds Conversationalist from the repository root, packs `packages/conversationalist` with
- * `npm pack --json --ignore-scripts`, and installs that exact tarball into three fresh temporary
+ * In `local` mode, builds Conversationalist from the repository root and packs the workspace
+ * package. In `published` mode, downloads the requested registry version with `npm pack`. It then
+ * installs that exact tarball into three fresh temporary
  * consumers created OUTSIDE the workspace (under the OS temp directory, never under this repo),
  * so none of them can resolve anything through Bun/npm workspace linking:
  *
@@ -16,7 +17,9 @@
  *      history and exercises the four mutation helpers against it, asserting behavior and
  *      immutability with `node:assert`.
  *
- * Usage: `bun run scripts/verify-conversationalist-consumer.ts --mode local`
+ * Usage:
+ *   `bun run scripts/verify-conversationalist-consumer.ts --mode local`
+ *   `bun run scripts/verify-conversationalist-consumer.ts --mode published --version <version>`
  * Exit code 0 = every consumer passed; 1 = any build/pack/install/typecheck/check/build/runtime
  * command failed, or any output assertion failed.
  */
@@ -95,12 +98,19 @@ async function runStep(
   return { command: command.join(' '), exitCode: result.exitCode, output };
 }
 
-/** Packs Conversationalist and returns the absolute path to the produced tarball. */
-async function packConversationalist(stagingRoot: string): Promise<string> {
-  const packResult = await $`npm pack --json --ignore-scripts --pack-destination ${stagingRoot}`
-    .cwd(CONVERSATIONALIST_DIRECTORY)
-    .nothrow()
-    .quiet();
+/** Packs a local or published Conversationalist package and returns its absolute tarball path. */
+async function packConversationalist(
+  stagingRoot: string,
+  publishedVersion?: string,
+): Promise<string> {
+  const packageSpecifier = publishedVersion
+    ? `conversationalist@${publishedVersion}`
+    : CONVERSATIONALIST_DIRECTORY;
+  const packResult =
+    await $`npm pack ${packageSpecifier} --json --ignore-scripts --pack-destination ${stagingRoot}`
+      .cwd(REPO_ROOT)
+      .nothrow()
+      .quiet();
   if (packResult.exitCode !== 0) {
     throw new VerificationFailure(
       'pack',
@@ -411,28 +421,37 @@ async function main(): Promise<void> {
   const args = Bun.argv.slice(2);
   const modeIndex = args.indexOf('--mode');
   const mode = modeIndex === -1 ? undefined : args[modeIndex + 1];
+  const versionIndex = args.indexOf('--version');
+  const publishedVersion = versionIndex === -1 ? undefined : args[versionIndex + 1];
   const deployVercelPreview = args.includes('--vercel-preview');
 
-  if (mode !== 'local') {
+  if ((mode !== 'local' && mode !== 'published') || (mode === 'published' && !publishedVersion)) {
     console.error(
-      'Usage: bun run scripts/verify-conversationalist-consumer.ts --mode local [--vercel-preview]',
+      'Usage: bun run scripts/verify-conversationalist-consumer.ts --mode local [--vercel-preview]\n' +
+        '   or: bun run scripts/verify-conversationalist-consumer.ts --mode published --version <version> [--vercel-preview]',
     );
     process.exit(1);
   }
 
-  console.log('Building conversationalist from the repository root...');
-  await runStep('build', 'turbo run build', REPO_ROOT, [
-    'turbo',
-    'run',
-    'build',
-    '--filter=conversationalist',
-  ]);
+  if (mode === 'local') {
+    console.log('Building conversationalist from the repository root...');
+    await runStep('build', 'turbo run build', REPO_ROOT, [
+      'turbo',
+      'run',
+      'build',
+      '--filter=conversationalist',
+    ]);
+  }
 
   const stagingRoot = await mkdtemp(join(tmpdir(), 'conversationalist-consumer-'));
 
   try {
-    console.log('Packing conversationalist...');
-    const tarballPath = await packConversationalist(stagingRoot);
+    console.log(
+      mode === 'published'
+        ? `Downloading conversationalist@${publishedVersion} from the npm registry...`
+        : 'Packing conversationalist...',
+    );
+    const tarballPath = await packConversationalist(stagingRoot, publishedVersion);
     console.log(`Packed tarball: ${tarballPath}`);
 
     const strictTypeDirectory = await mkdtemp(join(tmpdir(), 'conversationalist-strict-type-'));
