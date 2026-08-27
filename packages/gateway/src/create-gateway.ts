@@ -30,6 +30,11 @@ type BureauRequestAuthorityValidatorAccess = {
   readonly getRequestAuthorityValidator?: () => RequestAuthorityValidator | undefined;
 };
 
+const gatewayValidatorState = new WeakMap<
+  object,
+  { readonly hostValidator: RequestAuthorityValidator | undefined }
+>();
+
 /**
  * Detects the current server runtime. Returns `'bun'` when running
  * inside the Bun runtime, `'node'` otherwise.
@@ -193,7 +198,10 @@ export async function createGateway(
     await bootstrapApiKey(apiKeyStore);
   }
   const authorityValidatorAccess = bureau as Bureau & BureauRequestAuthorityValidatorAccess;
-  const hostRequestAuthorityValidator = authorityValidatorAccess.getRequestAuthorityValidator?.();
+  const existingValidator = authorityValidatorAccess.getRequestAuthorityValidator?.();
+  const hostRequestAuthorityValidator =
+    gatewayValidatorState.get(bureau)?.hostValidator ?? existingValidator;
+  gatewayValidatorState.set(bureau, { hostValidator: hostRequestAuthorityValidator });
   const requestAuthorityValidator = composeRequestAuthorityValidators(
     hostRequestAuthorityValidator,
     buildRequestAuthorityValidator(options.authToken, apiKeyStore),

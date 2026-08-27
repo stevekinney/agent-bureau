@@ -8,6 +8,8 @@ const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url),
   exports?: Record<string, unknown>;
   engines?: Record<string, string>;
 };
+const rootSource = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
+const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
 
 describe('public API export map', () => {
   const exportsMap = pkg.exports ?? {};
@@ -75,6 +77,32 @@ describe('public API export map', () => {
     expect(root.materializeToolCalls).toBeDefined();
     expect(root.materializeToolResult).toBeDefined();
     expect(root.materializeToolResultsAsync).toBeDefined();
+  });
+
+  it('exports the external execution projection type from the root surface', () => {
+    expect(rootSource).toContain('ExternalExecutionProjection');
+  });
+
+  it('documents the complete durable approval state store contract', () => {
+    const approvalSection = readme.slice(
+      readme.indexOf('## Approval Flows'),
+      readme.indexOf('### Request Authority and Execution Projections'),
+    );
+
+    expect(approvalSection).toContain('approvalStateStore');
+    expect(approvalSection).toContain('sharedDurableApprovalStore');
+    expect(approvalSection).toContain('recoveredToolbox.resumeApproval');
+    for (const method of [
+      'issue(binding)',
+      'reserve(binding, context, now)',
+      'commit(binding)',
+      'release(binding)',
+      'consume(binding, context, now)',
+      'revoke(binding)',
+      'state(binding)',
+    ]) {
+      expect(approvalSection).toContain(method);
+    }
   });
 
   it('uses dynamic imports for provider adapters in createToolbox', () => {

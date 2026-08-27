@@ -330,21 +330,30 @@ whenever `status` is present — it is derived from the status (`'allow'` →
 `true`; `'deny'`, `'needs_approval'`, `'needs_input'` → `false`).
 
 ```ts
-const toolbox = createToolbox([], {
-  // Use the same secret anywhere pending approvals may be resumed.
-  approvalSecret: process.env.ARMORER_APPROVAL_SECRET,
-  policy: {
-    async beforeExecute(context) {
-      if (context.metadata?.sensitive) {
-        return {
-          status: 'needs_approval',
-          reason: 'Sensitive action requires confirmation',
-        };
-      }
-      return { allow: true };
+const sharedDurableApprovalStore = openSharedDurableApprovalStore();
+const approvalStateStore = createDurableApprovalStateStore(sharedDurableApprovalStore);
+const approvalDescriptors = sharedDurableApprovalStore.collection('approval-descriptors');
+
+function buildToolbox() {
+  return createToolbox([], {
+    // Use the same secret and durable approval state anywhere pending approvals may be resumed.
+    approvalSecret: process.env.ARMORER_APPROVAL_SECRET,
+    approvalStateStore,
+    policy: {
+      async beforeExecute(context) {
+        if (context.metadata?.sensitive) {
+          return {
+            status: 'needs_approval',
+            reason: 'Sensitive action requires confirmation',
+          };
+        }
+        return { allow: true };
+      },
     },
-  },
-});
+  });
+}
+
+const toolbox = buildToolbox();
 
 const requestContext = {
   authority: {
@@ -362,12 +371,13 @@ const requestContext = {
 const result = await toolbox.execute(sensitiveCall, { requestContext });
 if (result.outcome === 'action_required') {
   // Persist the descriptor and show the approval UI to the user.
-  await durableStore.set(result.pendingApproval!.callId, result.pendingApproval);
+  await approvalDescriptors.set(result.pendingApproval!.callId, result.pendingApproval);
 }
 
-// Later, possibly in another process, rebuild the same toolbox and resume.
-const approved = await durableStore.get('tool-call-id');
-const resumed = await toolbox.resumeApproval(approved, { requestContext });
+// Later, possibly in another process, rebuild the same toolbox over the same durable store.
+const recoveredToolbox = buildToolbox();
+const approved = await approvalDescriptors.get('tool-call-id');
+const resumed = await recoveredToolbox.resumeApproval(approved, { requestContext });
 
 if (resumed.executedArgumentsEdited) {
   // Record both the proposed and executed arguments in your transcript.
@@ -376,7 +386,17 @@ if (resumed.executedArgumentsEdited) {
 
 `pendingApproval` is JSON-serializable and includes the proposed call plus a signed, versioned binding to the principal, tenant, audience, agent, run, toolbox revision, tool-definition revision, policy revision, issue time, expiry, nonce, and replay scope. A valid signature proves descriptor integrity; it does not authorize whoever presents it. `resumeApproval()` also requires the current `requestContext`, consumes the binding once, re-validates the original or edited arguments, and re-runs policy. Expired, revoked, replayed, cross-tenant, cross-principal, and revision-mismatched approvals fail closed.
 
-The built-in approval state store is explicitly process-local. Pass the same storage-backed `ApprovalStateStore` to every toolbox instance that issues or resumes approvals across processes, and implement its `issue()`, `consume()`, and `revoke()` operations with storage-native atomicity. Call `revokeApproval()` to invalidate an issued approval before it is consumed. Without `approvalSecret`, pending approvals are unsigned and cannot be resumed.
+The built-in approval state store is explicitly process-local. Pass the same storage-backed `ApprovalStateStore` configuration to every toolbox instance that issues, restores, revokes, or resumes approvals across processes, and back it with the same durable database, queue, or key-value store as the approval descriptors themselves. `createDurableApprovalStateStore()` in the example is host code: Armorer defines the contract, but your process owns the durable storage implementation. Without `approvalSecret`, pending approvals are unsigned and cannot be resumed.
+
+A complete `ApprovalStateStore` implementation must implement every method used by `resumeApproval()`, `restoreApproval()`, and `revokeApproval()`:
+
+- `issue(binding)`: validate and record a newly issued binding keyed by `replayScope` and `nonce`; fail if that binding is already issued, reserved, consumed, or revoked.
+- `reserve(binding, context, now)`: atomically validate the binding, match the supplied principal, tenant, owner, authorization, capability, audience, agent, run, toolbox, tool-definition, policy, and approval revisions, then move the binding from `issued` to an in-flight reserved state; fail closed for expired, missing, consumed, revoked, or mismatched bindings.
+- `commit(binding)`: atomically mark a reserved binding as `consumed` after the resumed execution has been admitted, so later replay attempts fail with `already-consumed`.
+- `release(binding)`: return a reserved binding to `issued` when admission is rolled back or the resumed execution does not actually start; if your implementation supports rollback after a just-committed admission, it must restore that same binding rather than minting a new one.
+- `consume(binding, context, now)`: keep this shortcut only where it is still applicable; it must be equivalent to `reserve(binding, context, now)` followed by `commit(binding)` with storage-native atomicity.
+- `revoke(binding)`: atomically move an issued binding to `revoked`; revoking an already consumed binding must fail, and revoking an already revoked binding may be idempotent.
+- `state(binding)`: return `issued`, `consumed`, `revoked`, or `undefined` for the binding key; recovery uses this to restore missing issued bindings without reviving consumed or revoked approvals.
 
 ### Request Authority and Execution Projections
 

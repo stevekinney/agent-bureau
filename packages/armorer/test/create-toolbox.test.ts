@@ -3802,6 +3802,54 @@ describe('createToolbox', () => {
       expect(observedCapabilities).toEqual(['read']);
     });
 
+    it('treats wildcard policy capabilities as the unrestricted intersection identity', async () => {
+      const requestContext = {
+        authority: {
+          principalId: 'principal-a',
+          tenantId: 'tenant-a',
+          ownerId: 'owner-a',
+          capabilities: ['read', 'write'],
+          authorizationRevision: 'authorization:1',
+        },
+      };
+      const observedCapabilities: readonly string[][] = [];
+
+      const createCapabilityToolbox = (
+        registryCapabilities: readonly string[],
+        toolCapabilities: readonly string[],
+      ) =>
+        createToolbox(
+          [
+            createTool({
+              name: 'wildcard-capability-capture',
+              description: 'captures wildcard capability intersection',
+              input: z.object({}),
+              policy: { beforeExecute: () => ({ allow: true, capabilities: toolCapabilities }) },
+              async execute(_input, context) {
+                observedCapabilities.push([
+                  ...(context.requestContext?.authority.capabilities ?? []),
+                ]);
+                return 'ok';
+              },
+            }),
+          ],
+          {
+            policy: { beforeExecute: () => ({ allow: true, capabilities: registryCapabilities }) },
+          },
+        );
+
+      await createCapabilityToolbox(['*'], ['read']).execute(
+        { name: 'wildcard-capability-capture', arguments: {} },
+        { requestContext },
+      );
+      await createCapabilityToolbox(['read'], ['*']).execute(
+        { name: 'wildcard-capability-capture', arguments: {} },
+        { requestContext },
+      );
+
+      expect(observedCapabilities).toEqual([['read'], ['read']]);
+    });
+
     it('evaluates tool policy against registry-narrowed request capabilities', async () => {
       let executed = false;
       let observedToolPolicyCapabilities: readonly string[] = [];

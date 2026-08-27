@@ -25,6 +25,7 @@ export { combineToolboxes } from './combine-toolboxes';
 export type { ToolError, ToolErrorCategory } from './core/errors';
 export type {
   EffectiveToolExecutionContext,
+  ExternalExecutionProjection,
   ExternalFieldClass,
   ExternalProjectionAudience,
   ExternalProjectionOptions,

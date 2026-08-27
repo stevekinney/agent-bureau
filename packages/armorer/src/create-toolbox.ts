@@ -2451,7 +2451,11 @@ function mergePolicies(
         (current, next) =>
           current === undefined
             ? [...next]
-            : current.filter((capability) => next.includes(capability)),
+            : current.includes('*')
+              ? [...next]
+              : next.includes('*')
+                ? current
+                : current.filter((capability) => next.includes(capability)),
         undefined,
       );
       const firstPauseDecision = pendingPauseDecisions[0];
