@@ -4,6 +4,7 @@ import { validateSnapshot } from '../src/conversation/snapshot-integrity';
 import { Conversation } from '../src/history';
 import { createConversationHistory } from '../src/index';
 import type { ConversationSnapshot } from '../src/types';
+import { deepFreeze } from '../src/utilities/type-helpers';
 
 describe('Conversation state integrity', () => {
   it('deeply freezes public state and preserves cached snapshot identity until a commit', () => {
@@ -26,6 +27,15 @@ describe('Conversation state integrity', () => {
     expect(Object.isFrozen(message)).toBe(true);
     expect(Object.isFrozen(message.content)).toBe(true);
     expect(conversation.revision).toBe(1);
+  });
+
+  it('descends into shallow-frozen containers', () => {
+    const nested = { enabled: true };
+    const shallow = Object.freeze({ nested });
+
+    deepFreeze(shallow);
+
+    expect(Object.isFrozen(nested)).toBe(true);
   });
 
   it('returns a deeply frozen, integrity-protected versioned snapshot', () => {
@@ -72,6 +82,10 @@ describe('Conversation state integrity', () => {
     const invalidRevision = structuredClone(snapshot);
     invalidRevision.root.children[0]!.revision = snapshot.controllerRevision + 1;
     expect(() => Conversation.from(resign(invalidRevision))).toThrow('invalid node revision');
+
+    const invalidRootRevision = structuredClone(snapshot);
+    invalidRootRevision.root.revision = snapshot.controllerRevision + 1;
+    expect(() => Conversation.from(resign(invalidRootRevision))).toThrow('invalid node revision');
   });
 
   it('preserves fork and prune lineage in round trips', () => {
@@ -94,7 +108,24 @@ describe('Conversation state integrity', () => {
     const pruned = source.snapshot();
     expect(pruned.lineage.removedNodeIds.length).toBeGreaterThan(0);
     expect(pruned.lineage.retainedFloorNodeId).toBe(pruned.root.id);
+    expect(pruned.lineage.removedNodeIds).not.toContain(pruned.currentBranchId);
     expect(Conversation.from(pruned).snapshot().lineage).toEqual(pruned.lineage);
+
+    const branched = new Conversation(createConversationHistory(), { maxHistoryDepth: 3 });
+    branched.appendUserMessage('discarded branch');
+    const discardedBranchId = branched.snapshot().currentBranchId;
+    branched.appendAssistantMessage('discarded descendant');
+    const discardedDescendantId = branched.snapshot().currentBranchId;
+    branched.undo();
+    branched.undo();
+    branched.appendUserMessage('retained one');
+    branched.appendAssistantMessage('retained two');
+    branched.appendUserMessage('retained three');
+    const branchedSnapshot = branched.snapshot();
+
+    expect(branchedSnapshot.lineage.removedNodeIds).toContain(discardedBranchId);
+    expect(branchedSnapshot.lineage.removedNodeIds).toContain(discardedDescendantId);
+    expect(branchedSnapshot.lineage.removedNodeIds).not.toContain(branchedSnapshot.currentBranchId);
   });
 
   it('rejects every malformed snapshot envelope boundary', () => {
@@ -104,21 +135,44 @@ describe('Conversation state integrity', () => {
       1,
       { ...structuredClone(snapshot), conversationSchemaVersion: 999 },
       { ...structuredClone(snapshot), controllerRevision: -1 },
+      { ...structuredClone(snapshot), conversationId: '' },
+      { ...structuredClone(snapshot), currentBranchId: 1 },
+      { ...structuredClone(snapshot), createdAt: 'not-a-date' },
       { ...structuredClone(snapshot), currentPath: [-1] },
       { ...structuredClone(snapshot), currentPath: 'root' },
       { ...structuredClone(snapshot), lineage: undefined },
+      {
+        ...structuredClone(snapshot),
+        lineage: { ...structuredClone(snapshot.lineage), parentConversationId: 'parent' },
+      },
+      {
+        ...structuredClone(snapshot),
+        lineage: { ...structuredClone(snapshot.lineage), sourceRevision: 'one' },
+      },
+      {
+        ...structuredClone(snapshot),
+        lineage: { ...structuredClone(snapshot.lineage), forkPointMessageId: 1 },
+      },
       { ...structuredClone(snapshot), lineage: { retainedFloorNodeId: 1, removedNodeIds: [] } },
       {
         ...structuredClone(snapshot),
         lineage: { retainedFloorNodeId: 'root', removedNodeIds: [1] },
       },
       { ...structuredClone(snapshot), integrity: undefined },
+      { ...structuredClone(snapshot), integrity: { algorithm: 'fnv1a-64', digest: 1 } },
       { ...structuredClone(snapshot), integrity: { algorithm: 'sha256', digest: 'nope' } },
       { ...structuredClone(snapshot), root: null },
       { ...structuredClone(snapshot), root: { id: 1 } },
       {
         ...structuredClone(snapshot),
         root: { ...structuredClone(snapshot.root), children: [null] },
+      },
+      {
+        ...structuredClone(snapshot),
+        root: {
+          ...structuredClone(snapshot.root),
+          conversation: { ...structuredClone(snapshot.root.conversation), schemaVersion: 1 },
+        },
       },
     ];
 
@@ -137,7 +191,7 @@ function resign(snapshot: ConversationSnapshot): ConversationSnapshot {
     if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`;
     return `{${Object.entries(value)
       .filter(([, nested]) => nested !== undefined)
-      .sort(([left], [right]) => left.localeCompare(right))
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
       .map(([key, nested]) => `${JSON.stringify(key)}:${stable(nested)}`)
       .join(',')}}`;
   };

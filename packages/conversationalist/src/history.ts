@@ -332,10 +332,13 @@ export class Conversation {
       if (!childOnPath) break;
 
       const collectRemoved = (candidate: HistoryNode): void => {
-        if (candidate !== childOnPath) this.removedNodeIds.add(candidate.id);
+        this.removedNodeIds.add(candidate.id);
         for (const child of candidate.children) collectRemoved(child);
       };
-      collectRemoved(root);
+      this.removedNodeIds.add(root.id);
+      for (const discardedChild of root.children) {
+        if (discardedChild !== childOnPath) collectRemoved(discardedChild);
+      }
 
       // Detach the child from the old root
       childOnPath.parent = null;
@@ -1368,6 +1371,15 @@ export class Conversation {
     if (snapshot.lineage.retainedFloorNodeId !== rootNode.id) {
       throw createSerializationError(
         'failed to restore snapshot: retained floor identity mismatch',
+      );
+    }
+    if (
+      !Number.isSafeInteger(rootNode.revision) ||
+      rootNode.revision < 0 ||
+      rootNode.revision > snapshot.controllerRevision
+    ) {
+      throw createSerializationError(
+        `failed to restore snapshot: invalid node revision ${rootNode.id}`,
       );
     }
     const seenIds = new Set<string>([rootNode.id]);

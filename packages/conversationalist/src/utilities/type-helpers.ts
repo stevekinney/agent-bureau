@@ -11,7 +11,7 @@ export function hasOwnProperty<X extends object, Y extends PropertyKey>(
 
 /** Deeply freezes a JSON-compatible public value. */
 export function deepFreeze<T>(value: T): Readonly<T> {
-  if (value === null || typeof value !== 'object' || Object.isFrozen(value)) {
+  if (value === null || typeof value !== 'object') {
     return value;
   }
 
@@ -19,7 +19,7 @@ export function deepFreeze<T>(value: T): Readonly<T> {
     deepFreeze(nested);
   }
 
-  return Object.freeze(value);
+  return Object.isFrozen(value) ? value : Object.freeze(value);
 }
 
 /**
