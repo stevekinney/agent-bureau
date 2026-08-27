@@ -30,6 +30,9 @@ const browserSubpaths = [
   './openapi',
 ];
 const serverOnlySubpaths = ['./mcp', './coding', './adapters/open-ai/agents'];
+const allSubpaths = [...browserSubpaths, ...serverOnlySubpaths];
+const packageSpecifier = (subpath: string): string =>
+  subpath === '.' ? 'armorer' : `armorer/${subpath.slice(2)}`;
 const svelteKitVersions = {
   adapterAuto: '7.0.1',
   kit: '2.70.3',
@@ -107,13 +110,19 @@ async function verifyTypeSurface(directory: string, tarball: string): Promise<vo
   );
   await Bun.write(
     join(directory, 'index.ts'),
-    `
+    `${browserSubpaths
+      .map(
+        (subpath, index) =>
+          `import * as browserSurface${index} from '${packageSpecifier(subpath)}';`,
+      )
+      .join('\n')}
 import { createTool, createToolbox } from 'armorer';
 import { toOpenAITools } from 'armorer/adapters/openai';
 import { pipe } from 'armorer/utilities';
 import { truncateText } from 'armorer/truncation';
 createToolbox(); createTool({ name: 'x', description: 'x', execute: async () => 1 });
 toOpenAITools([]); pipe; truncateText('x', 1);
+export const browserSurfaces = [${browserSubpaths.map((_, index) => `browserSurface${index}`).join(', ')}];
 `,
   );
   await run(['npx', 'tsc', '--noEmit'], directory);
@@ -126,36 +135,55 @@ toOpenAITools([]); pipe; truncateText('x', 1);
 
 async function verifyRuntime(directory: string, tarball: string): Promise<void> {
   await installConsumer(directory, tarball);
+  const browserSpecifiers = browserSubpaths.map(packageSpecifier);
+  const allSpecifiers = allSubpaths.map(packageSpecifier);
   await Bun.write(
-    join(directory, 'run.mjs'),
+    join(directory, 'browser-globals.mjs'),
     `
 import assert from 'node:assert/strict';
 globalThis.process = undefined; globalThis.Buffer = undefined; globalThis.Bun = undefined;
-const armorer = await import('armorer');
+const surfaces = await Promise.all(${JSON.stringify(browserSpecifiers)}.map((specifier) => import(specifier)));
+const armorer = surfaces[0];
 const tool = armorer.createTool({ name: 'browser-safe', description: 'x', execute: () => 'ok' });
 assert.equal(await tool.execute({}), 'ok');
-assert.equal(typeof (await import('armorer/adapters/openai')).toOpenAITools, 'function');
-const isolated = await import('armorer/core');
+assert.equal(typeof surfaces[4].toOpenAITools, 'function');
+const isolated = surfaces[1];
 assert.equal(typeof isolated.createRegistry, 'function');
 isolated.createRegistry();
-console.log('armorer runtime consumer: all assertions passed');
+console.log('armorer browser-global consumer: all assertions passed');
 `,
   );
-  const nodeResult = await $`${nodeBinary} run.mjs`
+  const browserGlobalResult = await $`${nodeBinary} browser-globals.mjs`
     .cwd(directory)
     .env({ ...process.env, ...(realNodePath ? { PATH: realNodePath } : {}) })
     .nothrow()
     .quiet();
-  if (nodeResult.exitCode !== 0)
-    throw new Error(`node run.mjs failed:\n${nodeResult.stdout}${nodeResult.stderr}`);
+  if (browserGlobalResult.exitCode !== 0)
+    throw new Error(
+      `node browser-globals.mjs failed:\n${browserGlobalResult.stdout}${browserGlobalResult.stderr}`,
+    );
+
+  await Bun.write(
+    join(directory, 'esm.mjs'),
+    `const surfaces = await Promise.all(${JSON.stringify(allSpecifiers)}.map((specifier) => import(specifier)));
+if (surfaces.length !== ${allSpecifiers.length}) process.exit(1);`,
+  );
+  await run([nodeBinary, 'esm.mjs'], directory);
+  await run(['npx', '--yes', 'node@20.16.0', 'esm.mjs'], directory);
+
   await Bun.write(
     join(directory, 'bun.mjs'),
-    `import { createTool } from 'armorer'; const tool = createTool({ name: 'bun', description: 'x', execute: async () => 'ok' }); if (await tool.execute({}) !== 'ok') process.exit(1);`,
+    `const surfaces = await Promise.all(${JSON.stringify(allSpecifiers)}.map((specifier) => import(specifier)));
+const tool = surfaces[0].createTool({ name: 'bun', description: 'x', execute: async () => 'ok' });
+if (surfaces.length !== ${allSpecifiers.length} || await tool.execute({}) !== 'ok') process.exit(1);`,
   );
   await run(['bun', 'bun.mjs'], directory);
+  await run(['npx', '--yes', 'bun@1.3.13', 'bun.mjs'], directory);
+
   await Bun.write(
     join(directory, 'cjs.cjs'),
-    `const armorer = require('armorer'); if (typeof armorer.createTool !== 'function') process.exit(1);`,
+    `const surfaces = ${JSON.stringify(allSpecifiers)}.map((specifier) => require(specifier));
+if (surfaces.length !== ${allSpecifiers.length} || typeof surfaces[0].createTool !== 'function') process.exit(1);`,
   );
   const cjsResult = await $`${nodeBinary} cjs.cjs`
     .cwd(directory)
@@ -179,12 +207,14 @@ async function verifyBrowser(directory: string, tarball: string): Promise<void> 
   const imports = browserSubpaths
     .map(
       (subpath) =>
-        `import * as ${subpath === '.' ? 'root' : `subpath${browserSubpaths.indexOf(subpath)}`} from 'armorer${subpath === '.' ? '' : subpath}';`,
+        `import * as ${subpath === '.' ? 'root' : `subpath${browserSubpaths.indexOf(subpath)}`} from '${packageSpecifier(subpath)}';`,
     )
     .join('\n');
   await Bun.write(
     join(directory, 'entry.ts'),
-    `${imports}\nroot.createToolbox();\nconsole.log('browser exports loaded');\n`,
+    `${imports}\nroot.createToolbox();\nconsole.log([${browserSubpaths
+      .map((subpath) => (subpath === '.' ? 'root' : `subpath${browserSubpaths.indexOf(subpath)}`))
+      .join(', ')}].map(Object.keys));\n`,
   );
   await run(
     ['npx', 'esbuild', './entry.ts', '--bundle', '--platform=browser', '--outfile=browser.js'],
@@ -268,6 +298,17 @@ async function verifyManifest(directory: string, tarball: string): Promise<void>
       throw new Error(`${subpath} must not declare browser support`);
   if (manifest.engines.bun !== '>=1.3.13' || manifest.engines.node !== '^20.16.0 || >=22.3.0')
     throw new Error('engine boundaries changed unexpectedly');
+
+  const installedPackage = join(directory, 'node_modules', 'armorer');
+  for (const subpath of allSubpaths) {
+    const conditions = manifest.exports[subpath];
+    for (const condition of ['bun', 'import', 'require', 'default', 'types']) {
+      const target = conditions?.[condition];
+      if (!target) throw new Error(`${subpath} must declare ${condition} support`);
+      if (!(await Bun.file(join(installedPackage, target)).exists()))
+        throw new Error(`${subpath} ${condition} target ${target} is missing from the tarball`);
+    }
+  }
 
   const expectedNodeSupport = new Map([
     ['20.15.1', false],
