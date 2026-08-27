@@ -247,7 +247,7 @@ export const plugin = defineMessagePlugin(
   await runStep(consumer, 'bunx tsc --noEmit', directory, ['bunx', 'tsc', '--noEmit']);
 }
 
-/** Consumer 2: minimal SvelteKit app proving a clean browser build. */
+/** Packed Node.js and Bun runtime consumer. */
 async function verifyRuntimeConsumer(directory: string, tarballPath: string): Promise<void> {
   const consumer = 'runtime';
 
@@ -324,12 +324,13 @@ async function verifyManifestConsumer(directory: string, tarballPath: string): P
       'engine boundaries changed unexpectedly',
     );
   }
-  if (JSON.stringify(Object.keys(manifest.exports)) !== JSON.stringify(PUBLIC_SUBPATHS)) {
+  const expectedSubpaths = [...PUBLIC_SUBPATHS].sort();
+  if (JSON.stringify(Object.keys(manifest.exports).sort()) !== JSON.stringify(expectedSubpaths)) {
     throw new VerificationFailure(consumer, 'support matrix', 'public subpath inventory changed');
   }
   if (
-    JSON.stringify(Object.keys(manifest.conversationalistSupport.subpaths)) !==
-    JSON.stringify(PUBLIC_SUBPATHS)
+    JSON.stringify(Object.keys(manifest.conversationalistSupport.subpaths).sort()) !==
+    JSON.stringify(expectedSubpaths)
   ) {
     throw new VerificationFailure(
       consumer,

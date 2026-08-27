@@ -373,5 +373,3 @@ console.log('browser-global consumer passed');
     }
   }
 }
-
-/** Consumer 3: plain Node.js runtime proving the mutation helpers behave and stay immutable. */
