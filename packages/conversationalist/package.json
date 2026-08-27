@@ -87,14 +87,12 @@
     },
     "./markdown": {
       "bun": "./dist/markdown/index.js",
-      "browser": "./dist/markdown/index.js",
       "import": "./dist/markdown/index.js",
       "default": "./dist/markdown/index.js",
       "types": "./dist/markdown/index.d.ts"
     },
     "./export": {
       "bun": "./dist/export/index.js",
-      "browser": "./dist/export/index.js",
       "import": "./dist/export/index.js",
       "default": "./dist/export/index.js",
       "types": "./dist/export/index.d.ts"
@@ -218,7 +216,140 @@
     }
   },
   "engines": {
-    "bun": ">=1.3.13"
+    "bun": ">=1.3.13",
+    "node": "^20.19.0 || ^22.12.0 || >=24"
+  },
+  "conversationalistSupport": {
+    "module": "esm",
+    "browserGlobals": [],
+    "optionalProviderPeers": [
+      "@anthropic-ai/sdk"
+    ],
+    "svelteKit": {
+      "adapter": "@sveltejs/adapter-vercel",
+      "runtime": "nodejs22.x"
+    },
+    "limitations": [
+      "Controllers are request-local or client-ephemeral and are not durable storage.",
+      "Edge runtimes are supported only for browser-safe plain-data exports; the verified Vercel adapter target is Node.js 22.x.",
+      "Provider adapters load only from their explicit subpaths."
+    ],
+    "subpaths": {
+      ".": {
+        "browser": true,
+        "node": true,
+        "bun": true,
+        "ssr": true
+      },
+      "./conversation": {
+        "browser": true,
+        "node": true,
+        "bun": true,
+        "ssr": true
+      },
+      "./context": {
+        "browser": true,
+        "node": true,
+        "bun": true,
+        "ssr": true
+      },
+      "./streaming": {
+        "browser": true,
+        "node": true,
+        "bun": true,
+        "ssr": true
+      },
+      "./projection": {
+        "browser": true,
+        "node": true,
+        "bun": true,
+        "ssr": true
+      },
+      "./history": {
+        "browser": true,
+        "node": true,
+        "bun": true,
+        "ssr": true
+      },
+      "./message": {
+        "browser": true,
+        "node": true,
+        "bun": true,
+        "ssr": true
+      },
+      "./utilities": {
+        "browser": true,
+        "node": true,
+        "bun": true,
+        "ssr": true
+      },
+      "./test": {
+        "browser": true,
+        "node": true,
+        "bun": true,
+        "ssr": true
+      },
+      "./markdown": {
+        "browser": false,
+        "node": true,
+        "bun": true,
+        "ssr": true
+      },
+      "./export": {
+        "browser": false,
+        "node": true,
+        "bun": true,
+        "ssr": true
+      },
+      "./schemas": {
+        "browser": true,
+        "node": true,
+        "bun": true,
+        "ssr": true
+      },
+      "./adapters/openai": {
+        "browser": true,
+        "node": true,
+        "bun": true,
+        "ssr": true
+      },
+      "./adapters/anthropic": {
+        "browser": true,
+        "node": true,
+        "bun": true,
+        "ssr": true
+      },
+      "./adapters/gemini": {
+        "browser": true,
+        "node": true,
+        "bun": true,
+        "ssr": true
+      },
+      "./redaction": {
+        "browser": true,
+        "node": true,
+        "bun": true,
+        "ssr": true
+      },
+      "./versioning": {
+        "browser": true,
+        "node": true,
+        "bun": true,
+        "ssr": true
+      },
+      "./sort": {
+        "browser": true,
+        "node": true,
+        "bun": true,
+        "ssr": true
+      },
+      "./composition": {
+        "browser": true,
+        "node": true,
+        "bun": true,
+        "ssr": true
+      }
+    }
   },
   "publishConfig": {
     "access": "public",

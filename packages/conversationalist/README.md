@@ -30,6 +30,45 @@ bun add conversationalist zod
 
 This package is ESM-only. `zod` is a peer dependency.
 
+## Host Support
+
+The package manifest is the machine-readable support contract. Conversationalist supports Bun `>=1.3.13` and Node.js `^20.19.0 || ^22.12.0 || >=24`. The verified SvelteKit deployment target is `@sveltejs/adapter-vercel` on Vercel's `nodejs22.x` runtime. Controllers on servers are request-local and are not durable storage; client controllers are ephemeral projections that must reconcile with an authorized source.
+
+| Public subpath                         | Bun | Node.js | Browser | SSR |
+| -------------------------------------- | --- | ------- | ------- | --- |
+| `conversationalist`                    | Yes | Yes     | Yes     | Yes |
+| `conversationalist/conversation`       | Yes | Yes     | Yes     | Yes |
+| `conversationalist/context`            | Yes | Yes     | Yes     | Yes |
+| `conversationalist/streaming`          | Yes | Yes     | Yes     | Yes |
+| `conversationalist/projection`         | Yes | Yes     | Yes     | Yes |
+| `conversationalist/history`            | Yes | Yes     | Yes     | Yes |
+| `conversationalist/message`            | Yes | Yes     | Yes     | Yes |
+| `conversationalist/utilities`          | Yes | Yes     | Yes     | Yes |
+| `conversationalist/test`               | Yes | Yes     | Yes     | Yes |
+| `conversationalist/markdown`           | Yes | Yes     | No      | Yes |
+| `conversationalist/export`             | Yes | Yes     | No      | Yes |
+| `conversationalist/schemas`            | Yes | Yes     | Yes     | Yes |
+| `conversationalist/adapters/openai`    | Yes | Yes     | Yes     | Yes |
+| `conversationalist/adapters/anthropic` | Yes | Yes     | Yes     | Yes |
+| `conversationalist/adapters/gemini`    | Yes | Yes     | Yes     | Yes |
+| `conversationalist/redaction`          | Yes | Yes     | Yes     | Yes |
+| `conversationalist/versioning`         | Yes | Yes     | Yes     | Yes |
+| `conversationalist/sort`               | Yes | Yes     | Yes     | Yes |
+| `conversationalist/composition`        | Yes | Yes     | Yes     | Yes |
+
+The Markdown and export subpaths are server-only because their `gray-matter` parser needs Node-compatible Buffer behavior. The other 17 subpaths are built and executed from the exact package tarball with `process` and `Bun` absent. Provider adapters remain outside the root and conversation runtime and declaration closure until their explicit subpath is loaded; `@anthropic-ai/sdk` is an optional peer for its adapter declarations.
+
+Use `createPublicConversationProjection()` before serializing a transcript into an SSR response or browser payload. It intentionally removes hidden messages, metadata, provider-private reasoning, tool input and results, token usage, citations, document and image references, container identifiers, and managed-asset grants. It retains only visible text and applies the package's default personal-data and credential redaction rules. Supply `redactText` when your application has stricter domain-specific redaction requirements.
+
+```typescript
+import { createPublicConversationProjection } from 'conversationalist';
+
+const browserHistory = createPublicConversationProjection(authoritativeConversation.current);
+const serialized = JSON.stringify(browserHistory);
+```
+
+The packed consumer gate is `bun run scripts/verify-conversationalist-consumer.ts --mode local`. It verifies the manifest and tarball closure, strict TypeScript without optional provider peers, all browser-advertised exports, a full controller on Bun and Node.js, SvelteKit SSR and client build through the Vercel adapter, production preview rendering, concurrent tenant isolation, hydration primitives, and security projection exclusions.
+
 ## Quick Start
 
 ```typescript

@@ -177,8 +177,13 @@ export type {
   ProjectionReducer,
   ProjectionReducerContext,
   ProjectionReducerResult,
+  PublicConversationProjectionOptions,
 } from './projection';
-export { createProjection, isProjectionPrefixExtension } from './projection';
+export {
+  createProjection,
+  createPublicConversationProjection,
+  isProjectionPrefixExtension,
+} from './projection';
 export type {
   AppendableToolAction,
   AppendableToolCallInput,

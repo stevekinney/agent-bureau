@@ -1,5 +1,7 @@
 import { createConversationHistory } from './conversation/index';
-import type { ConversationHistory } from './types';
+import { ensureConversationSafe } from './conversation/validation';
+import { createPIIRedaction } from './plugins/pii-redaction';
+import type { ConversationHistory, Message, MessageInput } from './types';
 
 export type ProjectionEventIdentity = string | number;
 
@@ -78,6 +80,75 @@ export type Projection<Event> = {
   /** Number of events from the latest accepted log that have been processed. */
   readonly processedCount: number;
 };
+
+export type PublicConversationProjectionOptions = {
+  /** Replaces personal data and credentials in visible text. Defaults to the package PII rules. */
+  redactText?: ((text: string) => string) | undefined;
+};
+
+function projectPublicContent(
+  content: Message['content'],
+  redactText: (text: string) => string,
+): MessageInput['content'] {
+  if (typeof content === 'string') return redactText(content);
+
+  return content.flatMap((part) => {
+    if (part.type !== 'text') return [];
+    return [{ type: 'text' as const, text: redactText(part.text) }];
+  });
+}
+
+/**
+ * Creates a browser- and SSR-safe transcript projection.
+ *
+ * The projection is deliberately lossy: hidden messages, conversation and message metadata,
+ * provider-private reasoning, tool calls and results, citations, token usage, document/image
+ * references, container ids, and managed-asset grants are excluded. Only visible role and text
+ * content cross the server-to-client boundary, with common personal data and credentials redacted.
+ */
+export function createPublicConversationProjection(
+  conversation: ConversationHistory,
+  options: PublicConversationProjectionOptions = {},
+): ConversationHistory {
+  const redactText = options.redactText ?? createPIIRedaction();
+  const messages: Record<string, Message> = {};
+  const ids: string[] = [];
+
+  for (const id of conversation.ids) {
+    const message = conversation.messages[id];
+    if (
+      !message ||
+      message.hidden ||
+      message.role === 'tool-call' ||
+      message.role === 'tool-result'
+    ) {
+      continue;
+    }
+
+    ids.push(id);
+    messages[id] = {
+      id: message.id,
+      role: message.role,
+      content: projectPublicContent(message.content, redactText),
+      position: ids.length - 1,
+      createdAt: message.createdAt,
+      metadata: {},
+      hidden: false,
+    };
+  }
+
+  return ensureConversationSafe({
+    schemaVersion: conversation.schemaVersion,
+    id: conversation.id,
+    ...(conversation.title !== undefined ? { title: redactText(conversation.title) } : {}),
+    status: conversation.status,
+    metadata: {},
+    ids,
+    messages,
+    createdAt: conversation.createdAt,
+    updatedAt: conversation.updatedAt,
+  });
+}
 
 function createInitialState<State>(initialState: State | (() => State) | undefined): State {
   if (typeof initialState === 'function') {
