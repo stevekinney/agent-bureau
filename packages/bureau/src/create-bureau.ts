@@ -1114,40 +1114,40 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     });
   }
 
-  async function prunePersistedPendingApprovalOverride(
+  async function persistReviewResolution(
     sessionId: string,
     reviewId: string,
+    removePendingApproval: boolean,
   ): Promise<void> {
     if (!runtime.sessionStore) return;
     await runtime.sessionStore.update(sessionId, (session) => {
       if (!session) return session;
-      const current = session.metadata['pendingApprovalOverrides'];
-      if (typeof current !== 'object' || current === null || Array.isArray(current)) return session;
-      const { [reviewId]: _removed, ...remaining } = current as Record<string, JSONValue>;
-      return {
-        ...session,
-        metadata: { ...session.metadata, pendingApprovalOverrides: remaining },
-      };
-    });
-  }
-
-  async function persistResolvedReviewId(sessionId: string, reviewId: string): Promise<void> {
-    if (!runtime.sessionStore) return;
-    await runtime.sessionStore.update(sessionId, (session) => {
-      if (!session) return session;
-      const current = session.metadata['resolvedReviewIds'];
+      const currentResolved = session.metadata['resolvedReviewIds'];
       const resolvedReviewIds: string[] = [];
-      if (Array.isArray(current)) {
-        for (const id of current) {
+      if (Array.isArray(currentResolved)) {
+        for (const id of currentResolved) {
           if (typeof id === 'string') resolvedReviewIds.push(id);
         }
       }
-      if (resolvedReviewIds.includes(reviewId)) return session;
+      const currentPending = session.metadata['pendingApprovalOverrides'];
+      let pendingApprovalOverrides = currentPending;
+      if (
+        removePendingApproval &&
+        typeof currentPending === 'object' &&
+        currentPending !== null &&
+        !Array.isArray(currentPending)
+      ) {
+        const { [reviewId]: _removed, ...remaining } = currentPending as Record<string, JSONValue>;
+        pendingApprovalOverrides = remaining;
+      }
       return {
         ...session,
         metadata: {
           ...session.metadata,
-          resolvedReviewIds: [...resolvedReviewIds, reviewId],
+          resolvedReviewIds: resolvedReviewIds.includes(reviewId)
+            ? resolvedReviewIds
+            : [...resolvedReviewIds, reviewId],
+          ...(removePendingApproval ? { pendingApprovalOverrides } : {}),
         },
       };
     });
@@ -2817,26 +2817,13 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     if (!keepPending) {
       resolvedReviewIds.add(review.id);
       if (review.kind === 'tool-approval') pendingApprovalOverrides.delete(review.id);
-      if (review.kind === 'tool-approval') {
-        try {
-          await prunePersistedPendingApprovalOverride(review.sessionId, review.id);
-        } catch (error) {
-          diagnose({
-            level: 'warn',
-            scope: 'approval',
-            message: `[bureau] Resolved approval "${review.id}" but could not prune its persisted override: ${serializeUnknownError(error)}`,
-          });
-        }
-      }
       try {
-        await persistResolvedReviewId(review.sessionId, review.id);
+        await persistReviewResolution(review.sessionId, review.id, review.kind === 'tool-approval');
       } catch (error) {
         diagnose({
-          level: 'error',
-          scope: 'session-persistence',
-          message:
-            `[bureau] Resolved review "${review.id}" in memory but could not persist its ` +
-            `resolved state: ${serializeUnknownError(error)}`,
+          level: 'warn',
+          scope: 'approval',
+          message: `[bureau] Resolved approval "${review.id}" but could not prune its persisted override or atomically persist its resolution: ${serializeUnknownError(error)}`,
           cause: error,
         });
       }

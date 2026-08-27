@@ -178,11 +178,14 @@ export function narrowToolAuthority(
   capabilities: readonly string[],
 ): ToolRequestContext {
   const allowed = new Set(capabilities);
+  const narrowedCapabilities = context.authority.capabilities.includes('*')
+    ? capabilities
+    : context.authority.capabilities.filter((capability) => allowed.has(capability));
   return freezeToolRequestContext({
     ...context,
     authority: {
       ...context.authority,
-      capabilities: context.authority.capabilities.filter((capability) => allowed.has(capability)),
+      capabilities: narrowedCapabilities,
     },
   });
 }

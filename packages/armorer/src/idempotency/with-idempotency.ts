@@ -55,14 +55,15 @@ export function withIdempotency<T extends Tool>(tool: T, options: IdempotencyOpt
   const {
     cache,
     tenantId,
-    toolRevision = tool.id,
+    toolRevision: configuredToolRevision,
     ttl = DEFAULT_TTL,
     now = Date.now,
     onCacheHit,
     onUnknownOutcome,
   } = options;
+  const toolRevision = configuredToolRevision ?? (tool.identity.version ? tool.id : undefined);
   if (!tenantId || !toolRevision) {
-    throw new Error('Idempotency requires tenantId and toolRevision.');
+    throw new Error('Idempotency requires tenantId and a versioned tool definition revision.');
   }
 
   // Access the idempotencyKey from the tool (set via createTool options).
@@ -142,13 +143,18 @@ export function withIdempotency<T extends Tool>(tool: T, options: IdempotencyOpt
     }
 
     // Execute the tool via its callable interface (params → result)
-    const result = executeOptions
-      ? await tool.executeWith({ params, ...executeOptions })
-      : await tool(params);
-
-    if (isPreExecutionResult(result)) {
-      await cache.deleteStarted(key, attemptId);
-      return result;
+    const execution = executeOptions ? await tool.executeWith({ params, ...executeOptions }) : null;
+    const result = execution ? execution.result : await tool(params);
+    if (execution && execution.outcome !== 'success') {
+      if (isPreExecutionResult(execution)) {
+        await cache.deleteStarted(key, attemptId);
+      }
+      const message =
+        execution.error?.message ??
+        execution.errorMessage ??
+        execution.pendingApproval?.reason ??
+        'Tool execution failed.';
+      throw new Error(message);
     }
 
     const entry: CachedToolResult = {
