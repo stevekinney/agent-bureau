@@ -8,6 +8,7 @@ import type { ApiKeyStore } from '../keys/types';
 const QUERY_TOKEN_PATH_ALLOW_LIST = new Set(['/api/v1/events']);
 const DEFAULT_BUREAU_AGENT_NAME = 'bureau';
 const TOOL_EXECUTION_CAPABILITY = 'tools:execute';
+const UNRESTRICTED_CAPABILITY = '*';
 
 function gatewayAuthorityOwnerId(agentName: string | undefined): string {
   const trimmed = agentName?.trim();
@@ -49,12 +50,12 @@ export function resolveTrustedRequestContext(
   if (!principal) return undefined;
 
   const apiKeyId = context.req.header('x-api-key-id');
-  const capabilities = Array.from(
-    new Set([
-      TOOL_EXECUTION_CAPABILITY,
-      ...parseGatewayScopes(context.req.header('x-api-key-scopes')),
-    ]),
-  );
+  const scopesHeader = context.req.header('x-api-key-scopes');
+  const scopes = parseGatewayScopes(scopesHeader);
+  const capabilities =
+    scopesHeader === undefined || scopes.length === 0
+      ? [UNRESTRICTED_CAPABILITY]
+      : Array.from(new Set([TOOL_EXECUTION_CAPABILITY, ...scopes]));
   const ownerId = gatewayAuthorityOwnerId(agentName);
 
   return {

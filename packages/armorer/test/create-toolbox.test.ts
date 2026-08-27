@@ -575,6 +575,46 @@ describe('createToolbox', () => {
     await expect(toolbox.revokeApproval(unboundApproval)).rejects.toThrow(
       'Approval state store and binding are required',
     );
+    await expect(toolbox.restoreApproval(unboundApproval)).rejects.toThrow(
+      'Approval state store and binding are required',
+    );
+  });
+
+  it('restores persisted signed approval bindings without reviving terminal bindings', async () => {
+    const tool = createTool({
+      name: 'restore-me',
+      description: 'Requires approval across process recovery',
+      input: z.object({}),
+      execute: () => 'restored',
+    });
+    const options = {
+      approvalSecret: 'restore-secret',
+      policy: { beforeExecute: () => ({ status: 'needs_approval' as const }) },
+    };
+    const source = createToolbox([tool], options);
+    const paused = await source.execute(
+      { id: 'restored-approval', name: tool.name, arguments: {} },
+      approvalExecutionOptions,
+    );
+    const approval = paused.pendingApproval as SignedPendingToolApproval;
+    const recovered = createToolbox([tool], options);
+
+    await recovered.restoreApproval(approval);
+    await recovered.restoreApproval(approval);
+    const resumed = await recovered.resumeApproval(approval, approvalExecutionOptions);
+    expect(resumed.result).toBe('restored');
+    await expect(recovered.restoreApproval(approval)).rejects.toThrow('consumed');
+
+    const revokedSource = createToolbox([tool], options);
+    const revokedPause = await revokedSource.execute(
+      { id: 'revoked-after-restore', name: tool.name, arguments: {} },
+      approvalExecutionOptions,
+    );
+    const revokedApproval = revokedPause.pendingApproval as SignedPendingToolApproval;
+    const revokedRecovery = createToolbox([tool], options);
+    await revokedRecovery.restoreApproval(revokedApproval);
+    await revokedRecovery.revokeApproval(revokedApproval);
+    await expect(revokedRecovery.restoreApproval(revokedApproval)).rejects.toThrow('revoked');
   });
 
   it('resumes signed input requests with unchanged arguments', async () => {
@@ -3551,6 +3591,179 @@ describe('createToolbox', () => {
       expect(tool).toBeDefined();
       expect(observedToolDefinitionRevision).toBe(tool?.id);
       expect(observedToolDefinitionRevision).toBe('payments:charge-card@2026-08-27');
+    });
+
+    it('records narrowed effective authority in toolbox privileged lifecycle snapshots for single calls', async () => {
+      const tool = createTool({
+        name: 'single-lifecycle-authority',
+        description: 'narrows authority for a single lifecycle snapshot',
+        input: z.object({}),
+        policy: { beforeExecute: () => ({ allow: true, capabilities: ['read', 'write'] }) },
+        async execute() {
+          return 'ok';
+        },
+      });
+      const toolbox = createToolbox([tool], {
+        policy: { beforeExecute: () => ({ allow: true, capabilities: ['read', 'admin'] }) },
+      });
+
+      const result = await toolbox.execute(
+        { id: 'single-lifecycle-call', name: 'single-lifecycle-authority', arguments: {} },
+        {
+          requestContext: {
+            authority: {
+              principalId: 'principal-a',
+              tenantId: 'tenant-a',
+              ownerId: 'owner-a',
+              capabilities: ['read', 'write', 'admin'],
+              authorizationRevision: 'authorization:1',
+            },
+          },
+        },
+      );
+
+      const [snapshot] = toolbox.executions.inspectPrivileged({
+        callId: 'single-lifecycle-call',
+      });
+      expect(result.result).toBe('ok');
+      expect(snapshot?.snapshot.toolName).toBe('single-lifecycle-authority');
+      expect(snapshot?.context?.authority.capabilities).toEqual(['read']);
+      expect(snapshot?.context?.revisions.toolDefinition).toBe(tool.id);
+    });
+
+    it('exposes per-child effective contexts in toolbox privileged lifecycle snapshots for batches', async () => {
+      const readTool = createTool({
+        name: 'batch-lifecycle-read',
+        description: 'narrows batch authority to read',
+        input: z.object({}),
+        policy: { beforeExecute: () => ({ allow: true, capabilities: ['read'] }) },
+        async execute() {
+          return 'read';
+        },
+      });
+      const writeTool = createTool({
+        name: 'batch-lifecycle-write',
+        description: 'narrows batch authority to write',
+        input: z.object({}),
+        policy: { beforeExecute: () => ({ allow: true, capabilities: ['write'] }) },
+        async execute() {
+          return 'write';
+        },
+      });
+      const toolbox = createToolbox([readTool, writeTool], {
+        policy: { beforeExecute: () => ({ allow: true, capabilities: ['read', 'write'] }) },
+      });
+
+      const result = await toolbox.execute(
+        [
+          { id: 'batch-read-call', name: 'batch-lifecycle-read', arguments: {} },
+          { id: 'batch-write-call', name: 'batch-lifecycle-write', arguments: {} },
+        ],
+        {
+          requestContext: {
+            authority: {
+              principalId: 'principal-a',
+              tenantId: 'tenant-a',
+              ownerId: 'owner-a',
+              capabilities: ['read', 'write', 'admin'],
+              authorizationRevision: 'authorization:1',
+            },
+          },
+        },
+      );
+
+      const [batchSnapshot] = toolbox.executions.inspectPrivileged({ toolName: 'toolbox.batch' });
+      const childSnapshots = toolbox.executions
+        .inspectPrivileged()
+        .filter(
+          ({ snapshot }) => snapshot.parentExecutionId === batchSnapshot?.snapshot.executionId,
+        )
+        .sort((left, right) => left.snapshot.callId.localeCompare(right.snapshot.callId));
+
+      expect(result.map(({ result }) => result)).toEqual(['read', 'write']);
+      expect(childSnapshots).toHaveLength(2);
+      expect(
+        childSnapshots.map(({ context, snapshot }) => ({
+          callId: snapshot.callId,
+          capabilities: context?.authority.capabilities,
+          toolDefinition: context?.revisions.toolDefinition,
+        })),
+      ).toEqual([
+        {
+          callId: 'batch-read-call',
+          capabilities: ['read'],
+          toolDefinition: readTool.id,
+        },
+        {
+          callId: 'batch-write-call',
+          capabilities: ['write'],
+          toolDefinition: writeTool.id,
+        },
+      ]);
+    });
+
+    it('completes cleanup for aborted per-child batch lifecycle records', async () => {
+      const controller = new AbortController();
+      let startedCount = 0;
+      let resolveStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        resolveStarted = resolve;
+      });
+      const tool = createTool({
+        name: 'batch-lifecycle-abort',
+        description: 'observes abort cleanup for batch children',
+        input: z.object({}),
+        async execute(_input, context) {
+          startedCount += 1;
+          if (startedCount === 2) resolveStarted();
+          await new Promise<void>((resolve) => {
+            if (context.signal?.aborted) resolve();
+            else context.signal?.addEventListener('abort', () => resolve(), { once: true });
+          });
+          return 'stopped';
+        },
+      });
+      const toolbox = createToolbox([tool]);
+      const execution = toolbox.execute(
+        [
+          { id: 'batch-abort-one', name: tool.name, arguments: {} },
+          { id: 'batch-abort-two', name: tool.name, arguments: {} },
+        ],
+        { requestContext: approvalRequestContext, signal: controller.signal },
+      );
+
+      await started;
+      const [activeBatchSnapshot] = toolbox.executions.inspectPrivileged({
+        toolName: 'toolbox.batch',
+      });
+      const activeChildren = toolbox.executions
+        .inspectPrivileged()
+        .filter(
+          ({ snapshot }) =>
+            snapshot.parentExecutionId === activeBatchSnapshot?.snapshot.executionId,
+        );
+      for (const { snapshot } of activeChildren) {
+        toolbox.executions.abort({ executionId: snapshot.executionId }, 'stop child');
+      }
+      controller.abort('stop batch');
+      await execution;
+
+      const [batchSnapshot] = toolbox.executions.inspectPrivileged({ toolName: 'toolbox.batch' });
+      const childSnapshots = toolbox.executions
+        .inspectPrivileged()
+        .filter(
+          ({ snapshot }) => snapshot.parentExecutionId === batchSnapshot?.snapshot.executionId,
+        );
+      expect(childSnapshots).toHaveLength(2);
+      expect(
+        childSnapshots.map(({ snapshot }) => ({
+          state: snapshot.state,
+          cleanup: snapshot.cleanup.status,
+        })),
+      ).toEqual([
+        { state: 'terminal', cleanup: 'completed' },
+        { state: 'terminal', cleanup: 'completed' },
+      ]);
     });
 
     it('createTool applies optional configuration fields', () => {

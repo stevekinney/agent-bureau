@@ -32,7 +32,7 @@ export function expectedPersistedApiKeyAuthority(
     principalId: `api-key:${key.id}`,
     tenantId: 'bureau',
     ownerId,
-    capabilities: ['tools:execute', ...key.scopes],
+    capabilities: key.scopes.length === 0 ? ['*'] : ['tools:execute', ...key.scopes],
     authorizationRevision: `gateway:api-key:${key.id}`,
     audience: 'operator',
   };

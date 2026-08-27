@@ -1069,6 +1069,23 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     });
   }
 
+  async function prunePersistedPendingApprovalOverride(
+    sessionId: string,
+    reviewId: string,
+  ): Promise<void> {
+    if (!runtime.sessionStore) return;
+    await runtime.sessionStore.update(sessionId, (session) => {
+      if (!session) return session;
+      const current = session.metadata['pendingApprovalOverrides'];
+      if (typeof current !== 'object' || current === null || Array.isArray(current)) return session;
+      const { [reviewId]: _removed, ...remaining } = current as Record<string, JSONValue>;
+      return {
+        ...session,
+        metadata: { ...session.metadata, pendingApprovalOverrides: remaining },
+      };
+    });
+  }
+
   function restorePendingApprovalOverrides(metadata: unknown, runId: string): void {
     const metadataRecord =
       metadata && typeof metadata === 'object' && !Array.isArray(metadata)
@@ -1083,6 +1100,31 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
           reviewId,
           approval as Extract<PendingReview, { kind: 'tool-approval' }>['approval'],
         );
+      }
+    }
+  }
+
+  async function restorePendingApprovalStates(
+    toolbox: BureauToolbox,
+    metadata: unknown,
+    runId: string,
+  ): Promise<void> {
+    const restoreApproval = (
+      toolbox as unknown as {
+        restoreApproval?: (approval: SignedPendingToolApproval) => Promise<void>;
+      }
+    ).restoreApproval;
+    if (!restoreApproval) return;
+    const metadataRecord =
+      metadata && typeof metadata === 'object' && !Array.isArray(metadata)
+        ? (metadata as Record<string, unknown>)
+        : undefined;
+    const overrides = metadataRecord?.['pendingApprovalOverrides'];
+    if (typeof overrides !== 'object' || overrides === null || Array.isArray(overrides)) return;
+    for (const [reviewId, approval] of Object.entries(overrides as Record<string, unknown>)) {
+      if (!reviewId.startsWith(`approval:${runId}:`)) continue;
+      if (approval && typeof approval === 'object' && !Array.isArray(approval)) {
+        await restoreApproval(approval as SignedPendingToolApproval);
       }
     }
   }
@@ -1864,6 +1906,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       info.workflowId,
       info.input.agentName,
     );
+    await restorePendingApprovalStates(services.toolbox, sessionLoad.session, info.workflowId);
     reattachRecoveredRun(
       info.workflowId,
       info.input.sessionId,
@@ -2074,6 +2117,14 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
               },
             };
           }
+        }
+        if (recoveredServices) {
+          const fullSession = await sessionStore?.load(ownedSessionId!);
+          await restorePendingApprovalStates(
+            recoveredServices.toolbox,
+            fullSession?.metadata,
+            handle.id,
+          );
         }
         reattachRecoveredRun(
           handle.id,
@@ -2564,7 +2615,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     if (!keepPending) {
       resolvedReviewIds.add(review.id);
       if (review.kind === 'tool-approval') {
-        await prunePersistedPendingApprovalOverrides(review.sessionId, `${review.id}`);
+        await prunePersistedPendingApprovalOverride(review.sessionId, review.id);
       }
     }
 

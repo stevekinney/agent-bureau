@@ -94,8 +94,10 @@ export function withIdempotency<T extends Tool>(tool: T, options: IdempotencyOpt
       ? [
           tenantId,
           requestContext.authority.principalId,
+          requestContext.authority.ownerId,
           requestContext.authority.authorizationRevision,
           [...requestContext.authority.capabilities].sort(),
+          requestContext.audience ?? null,
           requestContext.agentId ?? null,
           requestContext.runId ?? null,
         ]

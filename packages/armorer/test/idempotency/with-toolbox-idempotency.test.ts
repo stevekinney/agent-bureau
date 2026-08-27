@@ -31,6 +31,7 @@ function expectedCacheKey(tenantId: string, revision: string, baseKey: string): 
     requestContext.authority.ownerId,
     requestContext.authority.authorizationRevision,
     [...requestContext.authority.capabilities].sort(),
+    requestContext.audience,
     requestContext.agentId,
     requestContext.runId,
     'policy:1',

@@ -4,7 +4,7 @@ import { Hono } from 'hono';
 
 import { createApiKeyStore } from '../keys/create-api-key-store';
 import type { ApiKeyStore } from '../keys/types';
-import { createAuthentication } from './authentication';
+import { createAuthentication, resolveTrustedRequestContext } from './authentication';
 import { errorHandler } from './error-handler';
 import { requestIdentifier } from './request-identifier';
 
@@ -114,6 +114,27 @@ describe('authentication', () => {
 });
 
 describe('authentication with api key store', () => {
+  it('represents managed and static admin credentials as unrestricted authority', async () => {
+    const kv = textValueStore(new MemoryStorage());
+    const apiKeyStore = createApiKeyStore(kv);
+    const { plaintext } = await apiKeyStore.create({ name: 'admin-key', scopes: [] });
+
+    const app = new Hono();
+    app.use('*', createAuthentication('static-secret', apiKeyStore));
+    app.get('/authority', (context) =>
+      context.json(resolveTrustedRequestContext(context, 'billing-agent')),
+    );
+
+    for (const token of [plaintext, 'static-secret']) {
+      const response = await app.request('/authority', {
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.authority.capabilities).toEqual(['*']);
+    }
+  });
+
   it('accepts a valid managed API key', async () => {
     const kv = textValueStore(new MemoryStorage());
     const apiKeyStore = createApiKeyStore(kv);

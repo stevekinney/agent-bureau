@@ -10,7 +10,11 @@ import { z } from 'zod';
 import type { AnthropicTool } from './adapters/anthropic/types';
 import type { GeminiTool } from './adapters/gemini/types';
 import type { OpenAITool } from './adapters/openai/types';
-import { type ApprovalStateStore, createProcessLocalApprovalStateStore } from './approval-binding';
+import {
+  ApprovalBindingError,
+  type ApprovalStateStore,
+  createProcessLocalApprovalStateStore,
+} from './approval-binding';
 import type { ApprovalPolicyConfiguration } from './approval-policy';
 import { approvalStatusToDecision, evaluateCapabilityApproval } from './approval-policy';
 import type { ToolError, ToolErrorCategory } from './core/errors';
@@ -74,7 +78,11 @@ import {
   ToolboxValidateErrorEvent,
   ToolboxValidateSuccessEvent,
 } from './events';
-import { freezeEffectiveToolExecutionContext, freezeToolRequestContext } from './execution-context';
+import {
+  type EffectiveToolExecutionContext,
+  freezeEffectiveToolExecutionContext,
+  freezeToolRequestContext,
+} from './execution-context';
 import type {
   ExecutionCleanupReport,
   ExecutionHandle,
@@ -377,6 +385,12 @@ type InternalToolboxExecuteOptions = ToolboxExecuteOptions & {
   executionHandle?: ExecutionHandle;
 };
 
+type InternalToolExecuteOptionsWithMirror = ToolboxExecuteOptions & {
+  [approvalResumeSymbol]?: ApprovalResumeState;
+  executionHandle?: ExecutionHandle;
+  privilegedContextMirrorHandle?: ExecutionHandle;
+};
+
 export type ToolboxEntry = ToolConfiguration | Tool;
 export type ToolboxEntries = readonly ToolboxEntry[];
 
@@ -459,6 +473,7 @@ export interface Toolbox<TTools extends readonly Tool[] = readonly Tool[]> {
     approval: SignedPendingToolApproval,
     options?: ToolboxExecuteOptions & { arguments?: unknown },
   ): Promise<ToolExecutionResult>;
+  restoreApproval(approval: SignedPendingToolApproval): Promise<void>;
   revokeApproval(approval: SignedPendingToolApproval): Promise<void>;
   extend<const TEntries extends ToolboxEntries>(
     ...entries: TEntries
@@ -831,6 +846,22 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
   const policyRevision = options.policyRevision ?? 'policy:1';
   const approvalRevision = options.approvalRevision ?? 'approval:1';
   const redactionRevision = options.redactionRevision ?? 'redaction:1';
+  function createEffectiveExecutionContext(
+    requestContext: NonNullable<ToolboxExecuteOptions['requestContext']>,
+    toolDefinitionRevision: string,
+  ): EffectiveToolExecutionContext {
+    return freezeEffectiveToolExecutionContext({
+      ...requestContext,
+      revisions: Object.freeze({
+        catalog: catalogRevision,
+        toolbox: toolboxRevision,
+        toolDefinition: toolDefinitionRevision,
+        policy: policyRevision,
+        approval: approvalRevision,
+        redaction: redactionRevision,
+      }),
+    });
+  }
   function toolDefinitionRevisionForCall(call: ToolCallInput | undefined): string {
     if (!call?.name) {
       return 'unknown';
@@ -903,19 +934,10 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       ...(options?.setTimeoutFunction ? { setTimeoutFunction: options.setTimeoutFunction } : {}),
       ...(options?.requestContext
         ? {
-            privilegedContext: freezeEffectiveToolExecutionContext({
-              ...options.requestContext,
-              revisions: Object.freeze({
-                catalog: catalogRevision,
-                toolbox: toolboxRevision,
-                toolDefinition: Array.isArray(input)
-                  ? 'batch'
-                  : toolDefinitionRevisionForCall(firstCall),
-                policy: policyRevision,
-                approval: approvalRevision,
-                redaction: redactionRevision,
-              }),
-            }),
+            privilegedContext: createEffectiveExecutionContext(
+              options.requestContext,
+              Array.isArray(input) ? 'batch' : toolDefinitionRevisionForCall(firstCall),
+            ),
           }
         : {}),
     });
@@ -1113,6 +1135,42 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
 
         // Bubble up events
         const cleanup: (() => void)[] = [];
+        const initialEffectiveContext = options?.requestContext
+          ? createEffectiveExecutionContext(options.requestContext, tool.id)
+          : undefined;
+        const childExecutionHandle =
+          !hasSingleChild && initialEffectiveContext
+            ? executionLifecycle.begin({
+                executionId: `${executionHandle.id}:child:${callIndex + 1}`,
+                toolName: tool.name,
+                callId: toolCall.id,
+                ownerId: executionHandle.snapshot().ownerId,
+                parentExecutionId: executionHandle.id,
+                ...(options?.signal instanceof AbortSignal ? { signal: options.signal } : {}),
+                ...(options?.timeout !== undefined
+                  ? { deadline: nowFunction() + options.timeout }
+                  : {}),
+                scheduleDeadline: false,
+                now: nowFunction,
+                privilegedContext: initialEffectiveContext,
+              })
+            : undefined;
+        const privilegedContextMirrorHandle = hasSingleChild
+          ? executionHandle
+          : childExecutionHandle;
+        const settleChildExecution = (result?: unknown) => {
+          if (!childExecutionHandle) {
+            return;
+          }
+          const state = childExecutionHandle.snapshot().state;
+          if (state === 'abort-requested') {
+            childExecutionHandle.cleanupPending(result);
+            childExecutionHandle.cleanup();
+            return;
+          }
+          childExecutionHandle.settle(result);
+        };
+        childExecutionHandle?.activate();
         // Always bubble up events for consistency
         const toolEventTypes: (keyof DefaultToolEvents)[] = [
           'tool.started',
@@ -1178,7 +1236,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
             typeof options?.durableOperationKey === 'function'
               ? options.durableOperationKey(toolCall, callIndex)
               : options?.durableOperationKey;
-          const executeOptions: ToolboxExecuteOptions & { executionHandle?: ExecutionHandle } =
+          const executeOptions: InternalToolExecuteOptionsWithMirror =
             options?.signal ||
             options?.timeout !== undefined ||
             options?.stream !== undefined ||
@@ -1194,20 +1252,11 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
                   ...(options?.elicit ? { elicit: options.elicit } : {}),
                   ownerId: executionHandle.snapshot().ownerId,
                   parentExecutionId: executionHandle.id,
-                  ...(options?.requestContext
+                  ...(privilegedContextMirrorHandle ? { privilegedContextMirrorHandle } : {}),
+                  ...(options?.requestContext && initialEffectiveContext
                     ? {
                         requestContext: freezeToolRequestContext(options.requestContext),
-                        effectiveContext: freezeEffectiveToolExecutionContext({
-                          ...options.requestContext,
-                          revisions: Object.freeze({
-                            catalog: catalogRevision,
-                            toolbox: toolboxRevision,
-                            toolDefinition: tool.id,
-                            policy: policyRevision,
-                            approval: approvalRevision,
-                            redaction: redactionRevision,
-                          }),
-                        }),
+                        effectiveContext: initialEffectiveContext,
                       }
                     : {}),
                   // A single tool call can use the parent as its completion
@@ -1254,11 +1303,13 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
           if (stream) {
             hasLiveStream = true;
             liveStreams += 1;
+            childExecutionHandle?.streaming();
             executionHandle.streaming();
             const wrapped = wrapAsyncIterable(
               stream,
               () => {
                 cleanup.forEach((fn) => fn());
+                settleChildExecution(result);
                 finalizeParentStream();
               },
               executionHandle,
@@ -1273,6 +1324,9 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
           if (result.error) {
             emit('error', { tool, result });
             cleanup.forEach((fn) => fn());
+            if (!hasLiveStream) {
+              settleChildExecution(result);
+            }
             if (errorMode === 'failFast') {
               // eslint-disable-next-line @typescript-eslint/only-throw-error
               throw result.error;
@@ -1281,12 +1335,14 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
             emit('complete', { tool, result });
             if (!hasLiveStream) {
               cleanup.forEach((fn) => fn());
+              settleChildExecution(result);
             }
           }
           return result;
         } catch (error) {
           cleanup.forEach((fn) => fn());
           if (errorMode === 'failFast') {
+            settleChildExecution(error);
             throw error;
           }
           const message = error instanceof Error ? error.message : String(error);
@@ -1308,6 +1364,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
             errorCategory: toolError.category,
           };
           emit('error', { tool, result: errResult });
+          settleChildExecution(errResult);
           return errResult;
         }
       });
@@ -1402,6 +1459,22 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       throw new Error('Approval state store and binding are required to revoke an approval.');
     }
     await approvalStateStore.revoke(approval.approvalBinding);
+  }
+
+  async function restoreApproval(approval: SignedPendingToolApproval): Promise<void> {
+    verifyPendingApproval(approval);
+    if (!approvalStateStore || !approval.approvalBinding) {
+      throw new Error('Approval state store and binding are required to restore approvals.');
+    }
+    const state = await approvalStateStore.state(approval.approvalBinding);
+    if (state === undefined) {
+      await approvalStateStore.issue(approval.approvalBinding);
+      return;
+    }
+    if (state !== 'issued') {
+      const errorCode = state === 'consumed' ? 'already-consumed' : 'revoked';
+      throw new ApprovalBindingError(`Cannot restore ${state} approval binding.`, errorCode);
+    }
   }
 
   function approvalTokenPayload(
@@ -1639,6 +1712,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
   const api: Toolbox<ToolsFromEntries<TEntries>> = {
     execute,
     resumeApproval,
+    restoreApproval,
     revokeApproval,
     extend,
     tools,

@@ -94,6 +94,7 @@ function isAbortSignalLike(signal: MinimalAbortSignal | undefined): signal is Ab
 type InternalToolExecuteOptions = ToolExecuteOptions & {
   [approvalResumeSymbol]?: ApprovalResumeState;
   executionHandle?: ExecutionHandle;
+  privilegedContextMirrorHandle?: ExecutionHandle;
 };
 
 // Map from event type strings to their Event subclass constructors.
@@ -878,11 +879,13 @@ export function createTool<
           : options.requestContext;
       policyRequestContext = effectiveRequestContext;
       attachRequestContextPolicyFacts(policyContext, effectiveRequestContext);
-      if (effectiveRequestContext && options.executionHandle && options.effectiveContext) {
-        options.executionHandle.updatePrivilegedContext({
+      if (effectiveRequestContext && options.effectiveContext) {
+        const effectiveExecutionContext = freezeEffectiveToolExecutionContext({
           ...effectiveRequestContext,
           revisions: options.effectiveContext.revisions,
         });
+        options.executionHandle?.updatePrivilegedContext(effectiveExecutionContext);
+        options.privilegedContextMirrorHandle?.updatePrivilegedContext(effectiveExecutionContext);
       }
       const parsedArgumentsDigest = stableStringifyJson(normalizeToolContent(parsed));
       const proposedArgumentsDigest =

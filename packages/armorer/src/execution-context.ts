@@ -81,6 +81,8 @@ const fieldClasses: Readonly<Record<string, ExternalFieldClass>> = Object.freeze
   policy: 'operator-private',
   approval: 'operator-private',
   redaction: 'operator-private',
+  snapshot: 'public',
+  context: 'public',
   arguments: 'never-exported',
   params: 'never-exported',
   result: 'never-exported',
