@@ -3,7 +3,11 @@ import { describe, expect, it } from 'bun:test';
 import { createBureau } from 'bureau';
 
 import { createBunAdapter, handleWsUpgrade } from './adapters/bun-adapter';
-import { buildWsAuthenticate, createGateway } from './create-gateway';
+import {
+  buildRequestAuthorityValidator,
+  buildWsAuthenticate,
+  createGateway,
+} from './create-gateway';
 import type { ApiKey, ApiKeyStore } from './keys/types';
 import { DEFAULT_PORT } from './types';
 
@@ -293,5 +297,94 @@ describe('buildWsAuthenticate', () => {
     const verifier = buildWsAuthenticate('fallback-token', store);
     const request = makeWsRequest({ authorization: 'Bearer ab_live_token' });
     expect(await verifier!(request)).toBe(true);
+  });
+});
+
+describe('buildRequestAuthorityValidator', () => {
+  const requestContext = {
+    authority: {
+      principalId: 'api-key:key-1',
+      tenantId: 'bureau',
+      ownerId: 'bureau',
+      capabilities: ['tools:execute', 'runs:write'],
+      authorizationRevision: 'gateway:api-key:key-1',
+    },
+    audience: 'operator' as const,
+  };
+
+  function makeKey(overrides: Partial<ApiKey> = {}): ApiKey {
+    return {
+      id: 'key-1',
+      name: 'test',
+      keyHash: 'hash',
+      scopes: ['runs:write'],
+      createdAt: new Date().toISOString(),
+      active: true,
+      ...overrides,
+    };
+  }
+
+  function makeStore(key: ApiKey | undefined): ApiKeyStore {
+    return {
+      verify: async () => null,
+      create: async () => ({ key: key!, plaintext: 'unused' }),
+      revoke: async () => undefined,
+      list: async () => (key ? [key] : []),
+      rotate: async () => ({ key: key!, plaintext: 'unused' }),
+    };
+  }
+
+  it('accepts only a current managed-key authority snapshot', async () => {
+    expect(
+      await buildRequestAuthorityValidator(undefined, makeStore(makeKey()))(requestContext),
+    ).toBe(true);
+    expect(
+      await buildRequestAuthorityValidator(
+        undefined,
+        makeStore(makeKey({ active: false })),
+      )(requestContext),
+    ).toBe(false);
+    expect(
+      await buildRequestAuthorityValidator(
+        undefined,
+        makeStore(makeKey({ expiresAt: new Date(0).toISOString() })),
+      )(requestContext),
+    ).toBe(false);
+    expect(
+      await buildRequestAuthorityValidator(
+        undefined,
+        makeStore(makeKey({ scopes: ['runs:read'] })),
+      )(requestContext),
+    ).toBe(false);
+    expect(await buildRequestAuthorityValidator(undefined, undefined)(requestContext)).toBe(false);
+  });
+
+  it('accepts only the configured unrestricted static authority', async () => {
+    const validator = buildRequestAuthorityValidator('secret', undefined);
+    expect(
+      await validator({
+        ...requestContext,
+        authority: {
+          ...requestContext.authority,
+          principalId: 'static-token',
+          capabilities: ['*'],
+          authorizationRevision: 'gateway:static-token',
+        },
+      }),
+    ).toBe(true);
+    expect(
+      await buildRequestAuthorityValidator(
+        undefined,
+        undefined,
+      )({
+        ...requestContext,
+        authority: {
+          ...requestContext.authority,
+          principalId: 'static-token',
+          capabilities: ['*'],
+          authorizationRevision: 'gateway:static-token',
+        },
+      }),
+    ).toBe(false);
   });
 });

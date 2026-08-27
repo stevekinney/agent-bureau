@@ -4179,6 +4179,48 @@ describe('createBureau review queue (AB-20)', () => {
     bureau.dispose();
   });
 
+  it('revalidates captured request authority before approving a delayed tool call', async () => {
+    const charges: number[] = [];
+    const bureau = await createBureau({
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [
+            { id: 'stale-authority-call', name: 'charge-card', arguments: { cents: 500 } },
+          ],
+        },
+      ]),
+      toolbox: createNeedsApprovalToolbox('stale-authority-secret', charges),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+    });
+    bureau.setRequestAuthorityValidator(() => false);
+    const run = await bureau.createRun({
+      message: 'Charge with authority that will be revoked',
+      requestContext: {
+        authority: {
+          principalId: 'api-key:revoked',
+          tenantId: 'bureau',
+          ownerId: 'bureau',
+          capabilities: ['tools:execute'],
+          authorizationRevision: 'gateway:api-key:revoked',
+        },
+        audience: 'operator',
+      },
+    });
+    await waitForRunCompletion(bureau, run.id);
+    const [review] = bureau.listPendingReviews();
+
+    const resolution = bureau.resolveReview({
+      id: review!.id,
+      decision: 'approve',
+      principal: 'api-key:reviewer',
+    });
+    expect(resolution).rejects.toThrow('no longer current');
+    expect(charges).toEqual([]);
+    expect(bureau.listPendingReviews()).toHaveLength(1);
+    bureau.dispose();
+  });
+
   it('returns an applied approval when persisted override cleanup fails', async () => {
     const backingStore = textValueStore(new MemoryStorage());
     let failNextSessionUpdate = false;
@@ -4226,6 +4268,48 @@ describe('createBureau review queue (AB-20)', () => {
     expect(charges).toEqual([425]);
     expect(bureau.listPendingReviews()).toHaveLength(0);
     expect(diagnostics).toContainEqual(expect.stringContaining('could not prune'));
+    bureau.dispose();
+  });
+
+  it('reports an initial approval binding persistence failure without dropping the live review', async () => {
+    const backingStore = textValueStore(new MemoryStorage());
+    let failedApprovalPersistence = false;
+    const persistence = createTextStoreProxy(backingStore, {
+      async conditionalBatch(conditions, operations) {
+        if (
+          !failedApprovalPersistence &&
+          JSON.stringify(operations).includes('pendingApprovalOverrides')
+        ) {
+          failedApprovalPersistence = true;
+          throw new Error('approval binding persistence unavailable');
+        }
+        return backingStore.conditionalBatch(conditions, operations);
+      },
+    });
+    const diagnostics: string[] = [];
+    const bureau = await createBureau({
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [{ id: 'persist-call', name: 'charge-card', arguments: { cents: 725 } }],
+        },
+      ]),
+      toolbox: createNeedsApprovalToolbox('persist-secret', []),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+      persistence,
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.message),
+    });
+
+    const run = await bureau.createRun({
+      message: 'Keep the live approval after persistence fails',
+    });
+    await waitForRunCompletion(bureau, run.id);
+
+    expect(failedApprovalPersistence).toBe(true);
+    expect(bureau.listPendingReviews()).toHaveLength(1);
+    expect(diagnostics).toContainEqual(
+      expect.stringContaining('Failed to persist approval binding'),
+    );
     bureau.dispose();
   });
 

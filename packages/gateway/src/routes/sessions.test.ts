@@ -232,6 +232,7 @@ describe('sessions routes', () => {
         subscribeLiveFrames: () => () => undefined,
         addEventListener: () => undefined,
         removeEventListener: () => undefined,
+        setRequestAuthorityValidator: () => undefined,
         getConfiguration: () => ({
           provider: undefined,
           maximumSteps: 10,

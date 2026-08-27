@@ -905,7 +905,7 @@ describe('withToolboxIdempotency', () => {
         tenantId: 'tenant-a',
         leaseDurationMs: 0,
       }),
-    ).toThrow('durations must be positive');
+    ).toThrow('durations must be finite and positive');
     const unversioned = withToolboxIdempotency(toolbox, {
       cache,
       tenantId: 'tenant-a',
@@ -1177,6 +1177,20 @@ describe('withToolboxIdempotency', () => {
         { requestContext: createTestRequestContext('tenant-b') },
       ),
     ).rejects.toThrow('tenantId must match');
+  });
+
+  it('rejects non-finite lease and execution durations', () => {
+    const toolbox = createToolbox([createToolWithKey()]);
+    for (const options of [
+      { leaseDurationMs: Number.NaN },
+      { leaseDurationMs: Number.POSITIVE_INFINITY },
+      { maximumExecutionDurationMs: Number.NaN },
+      { maximumExecutionDurationMs: Number.POSITIVE_INFINITY },
+    ]) {
+      expect(() =>
+        withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a', ...options }),
+      ).toThrow('finite and positive');
+    }
   });
 
   it('does not replace an active lease even with an authorized receipt', async () => {

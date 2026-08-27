@@ -442,6 +442,11 @@ describe('createToolbox', () => {
       'invalid approval token',
     );
 
+    const missingToolbox = createToolbox([], { approvalSecret: 'test-secret' });
+    await expect(missingToolbox.resumeApproval(signedApproval)).rejects.toThrow(
+      'Tool not found: charge-card',
+    );
+
     const unconfirmedEdit = await toolbox.resumeApproval(signedApproval, {
       arguments: { cents: 125 },
       ...approvalExecutionOptions,
@@ -471,14 +476,27 @@ describe('createToolbox', () => {
       { id: 'tool-call-invalid', name: 'charge-card', arguments: { cents: 100 } },
       approvalExecutionOptions,
     );
-    const invalidResume = await toolbox.resumeApproval(
+    await expect(
+      toolbox.resumeApproval(invalidPaused.pendingApproval as SignedPendingToolApproval, {
+        arguments: { cents: '125' },
+        ...approvalExecutionOptions,
+      }),
+    ).rejects.toBeInstanceOf(z.ZodError);
+
+    const correctedResume = await toolbox.resumeApproval(
       invalidPaused.pendingApproval as SignedPendingToolApproval,
-      { arguments: { cents: '125' }, ...approvalExecutionOptions },
+      { arguments: { cents: 100, confirmed: true }, ...approvalExecutionOptions },
     );
 
-    expect(invalidResume.outcome).toBe('error');
-    expect(invalidResume.errorCategory).toBe('validation');
-    expect(charges).toEqual([125]);
+    expect(correctedResume.outcome).toBe('success');
+    expect(correctedResume.result).toEqual({ charged: 100 });
+    expect(charges).toEqual([125, 100]);
+    await expect(
+      toolbox.resumeApproval(invalidPaused.pendingApproval as SignedPendingToolApproval, {
+        arguments: { cents: 100, confirmed: true },
+        ...approvalExecutionOptions,
+      }),
+    ).rejects.toThrow('already been consumed');
   });
 
   it('requires an approval secret before signing or resuming pending approvals', async () => {
@@ -3491,6 +3509,102 @@ describe('createToolbox', () => {
         },
       );
       expect(observedCapabilities).toEqual(['read']);
+    });
+
+    it('evaluates tool policy against registry-narrowed request capabilities', async () => {
+      let executed = false;
+      let observedToolPolicyCapabilities: readonly string[] = [];
+      const toolbox = createToolbox(
+        [
+          createTool({
+            name: 'registry-narrowed-tool-policy',
+            description: 'authorizes from policy context capabilities',
+            input: z.object({}),
+            policy: {
+              beforeExecute(context) {
+                const policyContext = context.policyContext as
+                  { capabilities?: readonly string[] } | undefined;
+                observedToolPolicyCapabilities = policyContext?.capabilities ?? [];
+                if (observedToolPolicyCapabilities.includes('payments:charge')) {
+                  return { allow: true, capabilities: ['payments:charge'] };
+                }
+                return {
+                  allow: false,
+                  reason: 'Registry removed charge capability',
+                };
+              },
+            },
+            async execute() {
+              executed = true;
+              return 'charged';
+            },
+          }),
+        ],
+        {
+          policy: {
+            beforeExecute: () => ({ allow: true, capabilities: ['reports:read'] }),
+          },
+        },
+      );
+
+      const result = await toolbox.execute(
+        { name: 'registry-narrowed-tool-policy', arguments: {} },
+        {
+          requestContext: {
+            authority: {
+              principalId: 'principal-a',
+              tenantId: 'tenant-a',
+              ownerId: 'owner-a',
+              capabilities: ['reports:read', 'payments:charge'],
+              authorizationRevision: 'authorization:1',
+            },
+          },
+        },
+      );
+
+      expect(observedToolPolicyCapabilities).toEqual(['reports:read']);
+      expect(executed).toBe(false);
+      expect(result.outcome).toBe('error');
+      expect(result.error?.message).toBe('Registry removed charge capability');
+    });
+
+    it('leaves policy context unchanged when it has no valid request authority', async () => {
+      const malformedRequestContexts = ['not-an-object', { authority: 'not-an-object' }];
+
+      for (const requestContext of malformedRequestContexts) {
+        let observedRequestContext: unknown;
+        const toolbox = createToolbox(
+          [
+            createTool({
+              name: 'malformed-policy-context',
+              description: 'observes malformed request authority',
+              input: z.object({}),
+              policyContext: { requestContext },
+              policy: {
+                beforeExecute(context) {
+                  observedRequestContext = (
+                    context.policyContext as { requestContext?: unknown } | undefined
+                  )?.requestContext;
+                  return { allow: true };
+                },
+              },
+              async execute() {
+                return 'ok';
+              },
+            }),
+          ],
+          {
+            policy: {
+              beforeExecute: () => ({ allow: true, capabilities: ['reports:read'] }),
+            },
+          },
+        );
+
+        const result = await toolbox.execute({ name: 'malformed-policy-context', arguments: {} });
+
+        expect(result.outcome).toBe('success');
+        expect(observedRequestContext).toEqual(requestContext);
+      }
     });
 
     it('reports narrowed request capabilities to afterExecute policy hooks', async () => {

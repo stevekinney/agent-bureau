@@ -630,6 +630,15 @@ export interface Bureau {
   resolveReview(input: ResolveReviewInput): Promise<ResolveReviewResult>;
 
   /**
+   * Installs the host-owned authority freshness check used immediately before
+   * a delayed tool approval is resumed. Transports that issue revocable
+   * credentials should configure this when they attach to the bureau.
+   */
+  setRequestAuthorityValidator(
+    validator: ((context: ToolRequestContext) => boolean | Promise<boolean>) | undefined,
+  ): void;
+
+  /**
    * Register a durable recurring schedule via `engine.schedule(...)`.
    * Returns `null` when the schedule was created but could not be immediately
    * retrieved. Returns `undefined` when no durable engine is composed.

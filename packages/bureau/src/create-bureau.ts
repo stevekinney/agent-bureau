@@ -727,6 +727,8 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   // resumption. Approval bindings identify the original caller, but are not a
   // substitute for the complete request context and must not mint authority.
   const runRequestContexts = new Map<string, ToolRequestContext>();
+  let requestAuthorityValidator:
+    ((context: ToolRequestContext) => boolean | Promise<boolean>) | undefined;
   const liveFrameListeners = new Set<(frame: ServerFrame) => void>();
   // AB-96 — terminal RunReports, cached at the moment each run's lifecycle
   // event fires so `getRunReport` never needs to re-derive them.
@@ -1401,6 +1403,30 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       activeRuns.add(activeRun);
       runToolboxes.add(runToolbox);
       runToolboxesByRunId.set(runId, runToolbox);
+      activeRun.addEventListener('step.completed', (event) => {
+        const step = event as Event & {
+          results?: readonly {
+            outcome?: string;
+            pendingApproval?: Extract<PendingReview, { kind: 'tool-approval' }>['approval'];
+          }[];
+        };
+        for (const stepResult of step.results ?? []) {
+          if (stepResult.outcome !== 'action_required' || !stepResult.pendingApproval) continue;
+          const reviewId = `approval:${runId}:${stepResult.pendingApproval.callId}`;
+          pendingApprovalOverrides.set(reviewId, stepResult.pendingApproval);
+          void persistPendingApprovalOverride(
+            sessionId,
+            reviewId,
+            stepResult.pendingApproval,
+          ).catch((error) =>
+            diagnose({
+              level: 'error',
+              scope: 'session-persistence',
+              message: `[bureau] Failed to persist approval binding for "${reviewId}": ${serializeUnknownError(error)}`,
+            }),
+          );
+        }
+      });
 
       // AB-96 — the versioned run-lifecycle frame stream. Registered before
       // `store.register` so `run-started` is the first frame a live subscriber
@@ -2545,6 +2571,16 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
             );
           }
           const approvalRequestContext = runRequestContexts.get(review.runId);
+          if (
+            approvalRequestContext &&
+            requestAuthorityValidator &&
+            !(await requestAuthorityValidator(approvalRequestContext))
+          ) {
+            throw new BureauError(
+              'Cannot approve: the request authority is no longer current.',
+              'CONFLICT',
+            );
+          }
           result = await approvalToolbox.resumeApproval(
             { ...approval, approvalToken: approval.approvalToken },
             {
@@ -2908,6 +2944,9 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     querySession,
     listPendingReviews,
     resolveReview,
+    setRequestAuthorityValidator(validator) {
+      requestAuthorityValidator = validator;
+    },
     createSchedule,
     getSchedule,
     listSchedules,

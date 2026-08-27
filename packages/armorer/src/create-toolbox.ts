@@ -82,6 +82,8 @@ import {
   type EffectiveToolExecutionContext,
   freezeEffectiveToolExecutionContext,
   freezeToolRequestContext,
+  narrowToolAuthority,
+  type ToolRequestContext,
 } from './execution-context';
 import type {
   ExecutionCleanupReport,
@@ -1397,6 +1399,18 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     resumeOptions?: ToolboxExecuteOptions & { arguments?: unknown },
   ): Promise<ToolExecutionResult> {
     verifyPendingApproval(approval);
+    const { arguments: overrideArguments, ...executeOptions } = resumeOptions ?? {};
+    const executeArguments = Object.prototype.hasOwnProperty.call(resumeOptions ?? {}, 'arguments')
+      ? overrideArguments
+      : approval.arguments;
+    const currentTool = this.getTool(approval.toolName);
+    if (!currentTool) {
+      throw new Error(`Tool not found: ${approval.toolName}`);
+    }
+    const parsedArguments = await currentTool.input.safeParseAsync(executeArguments);
+    if (!parsedArguments.success) {
+      throw parsedArguments.error;
+    }
     if (approvalStateStore) {
       const requestContext = resumeOptions?.requestContext;
       if (
@@ -1414,16 +1428,10 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
         agentId: requestContext.agentId,
         runId: requestContext.runId,
         toolboxRevision,
-        toolDefinitionRevision:
-          this.getTool(approval.toolName)?.id ?? approval.approvalBinding.toolDefinitionRevision,
+        toolDefinitionRevision: currentTool.id,
         policyRevision,
       });
     }
-    const { arguments: overrideArguments, ...executeOptions } = resumeOptions ?? {};
-    const executeArguments = Object.prototype.hasOwnProperty.call(resumeOptions ?? {}, 'arguments')
-      ? overrideArguments
-      : approval.arguments;
-
     const executeForResume =
       this && typeof this === 'object' && 'execute' in this ? this.execute.bind(this) : execute;
 
@@ -2372,7 +2380,14 @@ function mergePolicies(
       } else if (registryDecision?.allow === false) {
         return registryDecision;
       }
-      const toolDecision = await resolvePolicyDecision(toolPolicy?.beforeExecute, context);
+      const toolDecisionContext =
+        registryDecision?.capabilities === undefined
+          ? context
+          : withNarrowedPolicyContextCapabilities(context, registryDecision.capabilities);
+      const toolDecision = await resolvePolicyDecision(
+        toolPolicy?.beforeExecute,
+        toolDecisionContext,
+      );
       if (isPausePolicyDecision(toolDecision)) {
         pendingPauseDecisions.push({ ...toolDecision, [policyPauseTierSymbol]: 'tool' });
       } else if (toolDecision?.allow === false) {
@@ -2410,6 +2425,56 @@ function mergePolicies(
       }
     },
   };
+}
+
+function withNarrowedPolicyContextCapabilities(
+  context: ToolPolicyContext,
+  capabilities: readonly string[],
+): ToolPolicyContext {
+  const requestContext = readPolicyRequestContext(context);
+  if (!requestContext) {
+    return context;
+  }
+  const narrowedRequestContext = narrowToolAuthority(requestContext, capabilities);
+  return {
+    ...context,
+    policyContext: {
+      ...(context.policyContext ?? {}),
+      requestContext: narrowedRequestContext,
+      capabilities: narrowedRequestContext.authority.capabilities,
+    },
+  };
+}
+
+function readPolicyRequestContext(context: ToolPolicyContext): ToolRequestContext | undefined {
+  const requestContext = context.policyContext?.['requestContext'];
+  return isToolRequestContext(requestContext) ? requestContext : undefined;
+}
+
+function isToolRequestContext(value: unknown): value is ToolRequestContext {
+  if (!isRecord(value)) {
+    return false;
+  }
+  const authority = value['authority'];
+  if (!isRecord(authority)) {
+    return false;
+  }
+  const capabilities = authority['capabilities'];
+  return (
+    typeof authority['principalId'] === 'string' &&
+    typeof authority['tenantId'] === 'string' &&
+    typeof authority['ownerId'] === 'string' &&
+    typeof authority['authorizationRevision'] === 'string' &&
+    isStringArray(capabilities)
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isStringArray(value: unknown): value is readonly string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string');
 }
 
 function isPausePolicyDecision(

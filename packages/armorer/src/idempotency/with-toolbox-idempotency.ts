@@ -117,8 +117,13 @@ export function withToolboxIdempotency(
 
   if (!tenantId) throw new Error('Idempotency requires a non-empty tenantId.');
   if (!policyRevision) throw new Error('Idempotency requires a non-empty policyRevision.');
-  if (leaseDurationMs <= 0 || maximumExecutionDurationMs <= 0) {
-    throw new Error('Idempotency lease and execution durations must be positive.');
+  if (
+    !Number.isFinite(leaseDurationMs) ||
+    !Number.isFinite(maximumExecutionDurationMs) ||
+    leaseDurationMs <= 0 ||
+    maximumExecutionDurationMs <= 0
+  ) {
+    throw new Error('Idempotency lease and execution durations must be finite and positive.');
   }
 
   function getKeyFn(toolName: string): ((input: unknown) => string) | undefined {
