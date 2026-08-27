@@ -598,6 +598,35 @@ describe('createToolResultCache', () => {
     expect(completed?.result).toBe('ok');
   });
 
+  it('uses the configured cache clock as the default completion observation time', async () => {
+    const clockedCache = createToolResultCache({
+      store: createTestStore(),
+      defaultTTL: 60_000,
+      now: () => 1_000,
+    });
+    await clockedCache.claimStarted('clocked-completion', {
+      status: 'started',
+      toolName: 'charge',
+      startedAt: 500,
+      ttl: 60_000,
+      attemptId: 'clocked-attempt',
+      absoluteDeadline: 1_500,
+    });
+
+    await expect(
+      clockedCache.completeStarted('clocked-completion', 'clocked-attempt', {
+        result: 'ok',
+        toolName: 'charge',
+        executedAt: 1_000,
+        ttl: 60_000,
+      }),
+    ).resolves.toBe(true);
+    await expect(clockedCache.get('clocked-completion')).resolves.toMatchObject({
+      status: 'completed',
+      result: 'ok',
+    });
+  });
+
   it('enforces absolute deadlines and unknown-attempt replacement fences', async () => {
     await cache.claimStarted('expired-fence', {
       status: 'started',

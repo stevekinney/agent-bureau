@@ -163,7 +163,7 @@ describe('createGateway', () => {
     expect(await validator!(staticTokenRequestContext('rotated-secret'))).toBe(false);
   });
 
-  it('composes host and gateway authority validators so both must pass', async () => {
+  it('dispatches authority validation by issuer without requiring both validators', async () => {
     const hostValidator = (context: ToolRequestContext) =>
       context.authority.ownerId === 'allowed-owner';
     const { bureau, getRequestAuthorityValidator } = createGatewayBureauStub(hostValidator);
@@ -174,10 +174,32 @@ describe('createGateway', () => {
     expect(validator).toBeDefined();
     expect(validator).not.toBe(hostValidator);
     expect(await validator!(staticTokenRequestContext('secret', 'allowed-owner'))).toBe(true);
-    expect(await validator!(staticTokenRequestContext('secret', 'blocked-owner'))).toBe(false);
+    expect(await validator!(staticTokenRequestContext('secret', 'blocked-owner'))).toBe(true);
     expect(await validator!(staticTokenRequestContext('rotated-secret', 'allowed-owner'))).toBe(
       false,
     );
+    expect(
+      await validator!({
+        ...staticTokenRequestContext('unrelated-secret'),
+        authority: {
+          ...staticTokenRequestContext('unrelated-secret').authority,
+          principalId: 'host-principal',
+          tenantId: 'host-tenant',
+          ownerId: 'allowed-owner',
+        },
+      }),
+    ).toBe(true);
+    expect(
+      await validator!({
+        ...staticTokenRequestContext('unrelated-secret'),
+        authority: {
+          ...staticTokenRequestContext('unrelated-secret').authority,
+          principalId: 'host-principal',
+          tenantId: 'other-tenant',
+          ownerId: 'blocked-owner',
+        },
+      }),
+    ).toBe(false);
   });
 
   it('replaces a previous gateway validator while preserving the host validator', async () => {
@@ -191,9 +213,7 @@ describe('createGateway', () => {
     const validator = getRequestAuthorityValidator()!;
     expect(await validator(staticTokenRequestContext('first-secret', 'allowed-owner'))).toBe(false);
     expect(await validator(staticTokenRequestContext('second-secret', 'allowed-owner'))).toBe(true);
-    expect(await validator(staticTokenRequestContext('second-secret', 'blocked-owner'))).toBe(
-      false,
-    );
+    expect(await validator(staticTokenRequestContext('second-secret', 'blocked-owner'))).toBe(true);
   });
 });
 

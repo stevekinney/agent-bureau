@@ -108,6 +108,18 @@ describe('approval binding state', () => {
     await expect(store.state(binding)).resolves.toBe('revoked');
   });
 
+  it('atomically revokes a reserved approval before it can commit', async () => {
+    const store = createProcessLocalApprovalStateStore();
+    await store.issue(binding);
+    await Promise.all([
+      store.reserve(binding, undefined, 10_000_000_000_150),
+      store.revoke(binding),
+    ]);
+
+    await expect(store.state(binding)).resolves.toBe('revoked');
+    await expect(store.commit(binding)).rejects.toMatchObject({ code: 'revoked' });
+  });
+
   it('rejects a payload that differs from the issued binding', async () => {
     const store = createProcessLocalApprovalStateStore();
     await store.issue(binding);

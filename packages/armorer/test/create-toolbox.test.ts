@@ -503,6 +503,63 @@ describe('createToolbox', () => {
     ).rejects.toThrow('already been consumed');
   });
 
+  it('supports destructured resumeApproval calls', async () => {
+    let executedValue: string | undefined;
+    const toolbox = createToolbox(
+      [
+        createTool({
+          name: 'destructured-approval',
+          description: 'Requires approval before execution',
+          version: '1.0.0',
+          input: z.object({ value: z.string(), confirmed: z.boolean().optional() }),
+          async execute({ value }) {
+            executedValue = value;
+            return value;
+          },
+        }),
+      ],
+      {
+        approvalSecret: 'destructured-secret',
+        policy: {
+          beforeExecute(context) {
+            if (
+              context.params &&
+              typeof context.params === 'object' &&
+              'confirmed' in context.params &&
+              context.params.confirmed === true
+            ) {
+              return { allow: true };
+            }
+            return {
+              allow: false,
+              status: 'needs_approval',
+              reason: 'approval required',
+              action: { message: 'Approve destructured execution' },
+            };
+          },
+        },
+      },
+    );
+    const paused = await toolbox.execute(
+      {
+        id: 'destructured-call',
+        name: 'destructured-approval',
+        arguments: { value: 'approved' },
+      },
+      approvalExecutionOptions,
+    );
+    const { resumeApproval } = toolbox;
+
+    const resumed = await resumeApproval(paused.pendingApproval as SignedPendingToolApproval, {
+      arguments: { value: 'approved', confirmed: true },
+      ...approvalExecutionOptions,
+    });
+
+    expect(resumed.outcome).toBe('success');
+    expect(resumed.result).toBe('approved');
+    expect(executedValue).toBe('approved');
+  });
+
   it('requires an approval secret before signing or resuming pending approvals', async () => {
     const toolbox = createToolbox(
       [

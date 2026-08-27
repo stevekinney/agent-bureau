@@ -6,7 +6,7 @@ import { createToolbox, type Toolbox } from '../../src/create-toolbox';
 import { claimCacheStarted } from '../../src/idempotency/cache-operations';
 import { createToolResultCache } from '../../src/idempotency/create-tool-result-cache';
 import { fullInputKey } from '../../src/idempotency/key-generators';
-import type { ToolResultCache } from '../../src/idempotency/types';
+import type { CachedToolResult, ToolResultCache } from '../../src/idempotency/types';
 import { withToolboxIdempotency as createIdempotentToolbox } from '../../src/idempotency/with-toolbox-idempotency';
 import type { SignedPendingToolApproval, ToolCallInput } from '../../src/types';
 
@@ -146,6 +146,7 @@ describe('withToolboxIdempotency', () => {
         status: 'completed',
         toolName: 'add',
         result: 3,
+        policyRevision: 'policy:1',
       }),
     );
   });
@@ -208,6 +209,75 @@ describe('withToolboxIdempotency', () => {
     });
     expect(retry.result).toBe(3);
     expect(addCallCount).toBe(1);
+  });
+
+  it('binds completed cache-hit access to the current policy revision without changing the operation key', async () => {
+    const toolbox = createToolbox([createToolWithKey()]);
+    const revisionOneToolbox = withToolboxIdempotency(toolbox, {
+      cache,
+      tenantId: 'tenant-a',
+      policyRevision: 'policy:1',
+    });
+    const revisionTwoToolbox = withToolboxIdempotency(toolbox, {
+      cache,
+      tenantId: 'tenant-a',
+      policyRevision: 'policy:2',
+    });
+    const expectedKey = expectedCacheKey('tenant-a', 'default:add', 'add:policy-bound-key');
+
+    const first = await revisionOneToolbox.execute(
+      { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
+      { idempotencyKey: 'policy-bound-key' },
+    );
+    const sameRevisionRetry = await revisionOneToolbox.execute(
+      { id: 'call-2', name: 'add', arguments: { a: 9, b: 9 } },
+      { idempotencyKey: 'policy-bound-key' },
+    );
+    const changedRevisionRetry = await revisionTwoToolbox.execute(
+      { id: 'call-3', name: 'add', arguments: { a: 9, b: 9 } },
+      { idempotencyKey: 'policy-bound-key' },
+    );
+
+    expect(first.idempotency).toEqual({ key: expectedKey, outcome: 'fresh' });
+    expect(sameRevisionRetry.idempotency).toEqual({ key: expectedKey, outcome: 'deduped' });
+    expect(changedRevisionRetry.outcome).toBe('action_required');
+    expect(changedRevisionRetry.result).toBeUndefined();
+    expect(changedRevisionRetry.idempotency).toEqual({
+      key: expectedKey,
+      outcome: 'authorization-required',
+    });
+    expect(changedRevisionRetry.action?.message).toContain('policy revision');
+    expect(addCallCount).toBe(1);
+  });
+
+  it('does not return legacy completed cache entries that lack a policy revision', async () => {
+    const toolbox = createToolbox([createToolWithKey()]);
+    const idempotentToolbox = withToolboxIdempotency(toolbox, {
+      cache,
+      tenantId: 'tenant-a',
+      policyRevision: 'policy:1',
+    });
+    const key = expectedCacheKey('tenant-a', 'default:add', 'add:legacy-completed-key');
+    const legacyCompleted: CachedToolResult = {
+      result: 99,
+      toolName: 'add',
+      executedAt: Date.now(),
+      ttl: 60_000,
+    };
+    await cache.set(key, legacyCompleted);
+
+    const result = await idempotentToolbox.execute(
+      { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
+      { idempotencyKey: 'legacy-completed-key' },
+    );
+
+    expect(result.outcome).toBe('action_required');
+    expect(result.result).toBeUndefined();
+    expect(result.idempotency).toEqual({
+      key,
+      outcome: 'authorization-required',
+    });
+    expect(addCallCount).toBe(0);
   });
 
   it('keeps cached results tenant-isolated after operation-key dedupe', async () => {
@@ -1339,6 +1409,7 @@ describe('withToolboxIdempotency', () => {
       toolName: 'add',
       executedAt: Date.now(),
       ttl: 60_000,
+      policyRevision: 'policy:1',
     };
     const completedRace: ToolResultCache = {
       ...cache,
@@ -1485,6 +1556,7 @@ describe('withToolboxIdempotency', () => {
       toolName: 'add',
       executedAt: Date.now(),
       ttl: 60_000,
+      policyRevision: 'policy:1',
     };
     let reads = 0;
     const racingCache: ToolResultCache = {

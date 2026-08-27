@@ -616,11 +616,12 @@ The middleware leaves unflagged tools unchanged. For flagged tools, string resul
 
 ## Idempotency
 
-Use `armorer/idempotency` when a tool might be retried by an at-least-once executor. The cache records three outcomes:
+Use `armorer/idempotency` when a tool might be retried by an at-least-once executor. The cache records four outcomes:
 
 - `fresh`: this process executed the tool and recorded the result.
 - `deduped`: a completed result already existed and was returned.
 - `unknown-outcome`: execution started earlier, but no result was recorded.
+- `authorization-required`: a completed result exists, but it was recorded under another policy revision and must not be returned without reauthorization.
 
 ```ts
 import { createToolbox } from 'armorer';
@@ -716,7 +717,7 @@ await idempotentToolbox.execute(call, {
 
 If you do not pass `idempotencyKey`, `withToolboxIdempotency()` uses each tool's configured `idempotencyKey` function. Tools without an `idempotencyKey` are not deduped by default; set `requireExplicitKey: false` to use `fullInputKey` for those tools. Every cache key includes the tenant, full tool revision, tool name, and caller or derived key, so one tenant or tool revision cannot consume another's result.
 
-The operation cache key intentionally excludes request-instance authority fields such as principal, owner, run ID, authorization revision, audience, agent, and capabilities. Those fields can change across a legitimate logical retry. Cache access still requires current request authority, and Armorer rejects request contexts whose tenant does not match the idempotency tenant before reading or returning cached state.
+The operation cache key intentionally excludes request-instance authority fields such as principal, owner, run ID, authorization revision, audience, agent, and capabilities. Those fields can change across a legitimate logical retry. Cache access still requires current request authority, and Armorer rejects request contexts whose tenant does not match the idempotency tenant before reading or returning cached state. Completed toolbox cache hits are also bound to the `policyRevision` that authorized recording the result; if the current policy revision differs, Armorer returns `authorization-required` without repeating the side effect.
 
 Legacy stores may contain `started` entries that predate attempt fencing. Those entries surface as `unknown-outcome` with `legacyStartedAt` instead of `attemptId`. Resolve them only with `legacyResolutionReceipt`, verified by `verifyLegacyResolutionReceipt`; the receipt is bound to the same key, tenant, full tool revision, tool name, and decoded legacy `startedAt`, so a stale legacy receipt cannot replay against a later marker. A normal fenced `resolutionReceipt` never authorizes legacy migration, and a legacy receipt never replaces a fenced current entry.
 

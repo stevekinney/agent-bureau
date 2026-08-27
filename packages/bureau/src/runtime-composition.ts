@@ -1129,6 +1129,9 @@ export interface RuntimeComposition {
    * that produced the pending approval.
    */
   baseToolbox: BureauToolbox;
+  setRequestAuthorityValidator(
+    validator: ((context: ToolRequestContext) => boolean | Promise<boolean>) | undefined,
+  ): void;
   ready: boolean;
   provider: RedactedProviderConfiguration | undefined;
   providers: RedactedProviderRouteConfiguration[];
@@ -1168,6 +1171,7 @@ export async function createRuntimeComposition(
   // This flag lets the resolver bail out cleanly until composition is ready. Manual
   // mode has no background poller, but shares the same gate for consistency.
   let compositionReady = false;
+  let requestAuthorityValidator = options.requestAuthorityValidator;
 
   // AB-10: run ids the durable engine flags as version-mismatched during boot
   // recovery — see RuntimeComposition.workflowVersionMismatches.
@@ -2192,7 +2196,7 @@ export async function createRuntimeComposition(
       };
     }
     if (
-      options.requestAuthorityValidator === undefined &&
+      requestAuthorityValidator === undefined &&
       recoveredAuthority.authority.authorizationRevision !== 'bureau:1'
     ) {
       return {
@@ -2200,10 +2204,7 @@ export async function createRuntimeComposition(
         reason: `run ${info.workflowId} authority cannot be revalidated during recovery`,
       };
     }
-    if (
-      options.requestAuthorityValidator &&
-      !(await options.requestAuthorityValidator(recoveredAuthority))
-    ) {
+    if (requestAuthorityValidator && !(await requestAuthorityValidator(recoveredAuthority))) {
       return {
         status: 'unavailable',
         reason: `run ${info.workflowId} authority is no longer current`,
@@ -2281,6 +2282,9 @@ export async function createRuntimeComposition(
     // so any toolbox sharing this instance's `approvalSecret` and tool set can
     // resume a signed pending approval, not only the specific per-run clone.
     baseToolbox,
+    setRequestAuthorityValidator(validator) {
+      requestAuthorityValidator = validator;
+    },
     ready:
       options.generate !== undefined ||
       options.provider !== undefined ||

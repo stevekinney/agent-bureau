@@ -155,7 +155,7 @@ export function recoveredRequestContextFromMetadata(
   const candidate =
     authorities && typeof authorities === 'object' && !Array.isArray(authorities)
       ? (authorities as Record<string, JSONValue>)[runId]
-      : undefined;
+      : metadata['lastRequestAuthority'];
   if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
     return undefined;
   }
@@ -1634,7 +1634,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         runToolboxes.delete(runToolbox);
         disposeRegisteredStreamListeners(disposeStreamListeners);
         flowController?.settle(runId);
-        releaseTerminalRunReviewState(runId);
+        queueMicrotask(() => releaseTerminalRunReviewState(runId));
 
         const finishReason = event.finishReason;
         const lastRunStatus = isRunFailureFinishReason(finishReason) ? 'error' : 'completed';
@@ -1676,7 +1676,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         runToolboxes.delete(runToolbox);
         disposeRegisteredStreamListeners(disposeStreamListeners);
         flowController?.settle(runId);
-        releaseTerminalRunReviewState(runId);
+        queueMicrotask(() => releaseTerminalRunReviewState(runId));
 
         const report = buildTerminalReportFromAbortedEvent(runId, {
           usage: event.usage,
@@ -1734,7 +1734,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         runToolboxes.delete(runToolbox);
         disposeRegisteredStreamListeners(disposeStreamListeners);
         flowController?.settle(runId);
-        releaseTerminalRunReviewState(runId);
+        queueMicrotask(() => releaseTerminalRunReviewState(runId));
       });
 
       store.register(activeRun, runId);
@@ -2640,6 +2640,17 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     if (!runtime.durable)
       throw new BureauError('Durable engine not configured', 'NOT_CONFIGURED', 'durable');
     const runId = await requireSessionRunId(sessionId);
+    const requestContext = runRequestContexts.get(runId);
+    if (
+      requestContext &&
+      ((recoveredRunIds.has(runId) && !requestAuthorityValidator) ||
+        (requestAuthorityValidator && !(await requestAuthorityValidator(requestContext))))
+    ) {
+      throw new BureauError(
+        'Cannot signal: the request authority is no longer current.',
+        'CONFLICT',
+      );
+    }
     await runtime.durable.engine.signal(runId, name, payload);
     // AB-13 — a signal is how a human-wait park is released (directly, or via
     // `resolveReview`'s human-wait approve path). Reacquire the concurrency
@@ -2903,12 +2914,12 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
           review.kind === 'tool-approval',
         );
       } catch (error) {
-        diagnose({
-          level: 'warn',
-          scope: 'approval',
-          message: `[bureau] Resolved approval "${review.id}" but could not prune its persisted override or atomically persist its resolution: ${serializeUnknownError(error)}`,
-          cause: error,
-        });
+        resolvedReviewIds.delete(review.id);
+        if (review.kind === 'tool-approval') {
+          pendingApprovalOverrides.set(review.id, review.approval);
+        }
+        resolvingReviewIds.delete(review.id);
+        throw error;
       }
       releaseTerminalRunReviewState(review.runId);
     }
@@ -3196,7 +3207,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     resolveReview,
     setRequestAuthorityValidator(validator) {
       requestAuthorityValidator = validator;
-      options.requestAuthorityValidator = validator;
+      runtime.setRequestAuthorityValidator(validator);
       if (validator && durableRecoveryDeferred && !durableRecoveryStarted) {
         durableRecoveryDeferred = false;
         durableRecoveryStarted = true;
@@ -3299,6 +3310,15 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     try {
       const sessions = await runtime.sessionStore.list();
       hasDeferredGatewayAuthority = sessions.some((session) => {
+        const legacyAuthority = session.metadata['lastRequestAuthority'];
+        if (
+          legacyAuthority &&
+          typeof legacyAuthority === 'object' &&
+          !Array.isArray(legacyAuthority)
+        ) {
+          const revision = (legacyAuthority as Record<string, JSONValue>)['authorizationRevision'];
+          if (typeof revision === 'string' && revision.startsWith('gateway:')) return true;
+        }
         const authorities = session.metadata['lastRequestAuthorities'];
         if (!authorities || typeof authorities !== 'object' || Array.isArray(authorities)) {
           return false;

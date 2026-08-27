@@ -102,6 +102,9 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
         executedAt: value['executedAt'],
         ttl: typeof value['ttl'] === 'number' ? value['ttl'] : (defaultTTL ?? 0),
         ...(typeof value['expiresAt'] === 'number' ? { expiresAt: value['expiresAt'] } : {}),
+        ...(typeof value['policyRevision'] === 'string'
+          ? { policyRevision: value['policyRevision'] }
+          : {}),
       };
     }
 
@@ -242,7 +245,7 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
       attemptId: string,
       result: CachedToolResult,
       ttl?: number,
-      observedAt = Date.now(),
+      observedAt = now(),
     ): Promise<boolean> {
       return withKeyClaimLock(resolveKey(key), async () => {
         const existing = await getEntry(key);

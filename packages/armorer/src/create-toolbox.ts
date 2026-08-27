@@ -1448,7 +1448,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     const executeArguments = Object.prototype.hasOwnProperty.call(resumeOptions ?? {}, 'arguments')
       ? overrideArguments
       : approval.arguments;
-    const currentTool = this.getTool(approval.toolName);
+    const currentTool = getTool(approval.toolName);
     if (!currentTool) {
       throw new Error(`Tool not found: ${approval.toolName}`);
     }

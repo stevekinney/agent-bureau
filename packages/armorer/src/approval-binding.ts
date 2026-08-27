@@ -217,6 +217,9 @@ export function createProcessLocalApprovalStateStore(nowFunction = Date.now): Ap
               'already-consumed',
             );
           }
+          if (terminalEntry?.state === 'revoked') {
+            throw new ApprovalBindingError('Approval binding was revoked.', 'revoked');
+          }
           throw new ApprovalBindingError('Approval binding was not found.', 'not-found');
         }
         reserved.delete(key);
@@ -260,6 +263,12 @@ export function createProcessLocalApprovalStateStore(nowFunction = Date.now): Ap
         const issuedBinding = issued.get(key);
         if (!issuedBinding) {
           if (terminalEntry?.state === 'revoked') return;
+          const reservedBinding = reserved.get(key);
+          if (reservedBinding) {
+            reserved.delete(key);
+            terminal.set(key, { state: 'revoked', expiresAt: reservedBinding.expiresAt });
+            return;
+          }
           throw new ApprovalBindingError('Approval binding was not found.', 'not-found');
         }
         issued.delete(key);

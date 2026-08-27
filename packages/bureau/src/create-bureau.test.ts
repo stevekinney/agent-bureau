@@ -440,6 +440,33 @@ describe('createBureau', () => {
         'billing-agent',
       ),
     ).toBeUndefined();
+
+    expect(
+      recoveredRequestContextFromMetadata(
+        {
+          lastRequestAuthority: {
+            principalId: 'api-key:legacy',
+            tenantId: 'tenant-1',
+            ownerId: 'owner-1',
+            capabilities: ['tools:execute'],
+            authorizationRevision: 'gateway:api-key:legacy',
+          },
+        },
+        'legacy-run',
+        'billing-agent',
+      ),
+    ).toEqual({
+      authority: {
+        principalId: 'api-key:legacy',
+        tenantId: 'tenant-1',
+        ownerId: 'owner-1',
+        capabilities: ['tools:execute'],
+        authorizationRevision: 'gateway:api-key:legacy',
+      },
+      audience: 'operator',
+      agentId: 'billing-agent',
+      runId: 'legacy-run',
+    });
     expect(
       recoveredRequestContextFromMetadata(
         {
@@ -3979,6 +4006,45 @@ describe('createBureau session signal/update/query with terminal sessions', () =
     expect(error).toBeInstanceOf(BureauError);
     expect((error as BureauError).code).toBe('NOT_FOUND');
 
+    bureau.dispose();
+  });
+});
+
+describe('createBureau session signal authority revalidation', () => {
+  it('revalidates captured authority before delivering a direct session signal', async () => {
+    const bureau = await createBureau({
+      generate: () => new Promise<never>(() => {}),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+      requestAuthorityValidator: () => false,
+    });
+    const run = await bureau.createRun({
+      message: 'Wait for a signal',
+      requestContext: {
+        authority: {
+          principalId: 'api-key:revoked',
+          tenantId: 'tenant-a',
+          ownerId: 'owner-a',
+          capabilities: ['tools:execute'],
+          authorizationRevision: 'gateway:api-key:revoked',
+        },
+        audience: 'tenant',
+      },
+    });
+
+    await pollUntil(async () => {
+      const session = await bureau.getSession(run.sessionId);
+      return session?.metadata['lastRunStatus'] === 'running';
+    });
+    const error = await bureau.signalSession(run.sessionId, 'human-response').then(
+      () => undefined,
+      (rejection) => rejection,
+    );
+
+    expect(error).toBeInstanceOf(BureauError);
+    expect((error as BureauError).code).toBe('CONFLICT');
+    bureau.abortRun(run.id);
     bureau.dispose();
   });
 });

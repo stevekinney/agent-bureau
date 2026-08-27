@@ -9,6 +9,8 @@ export type CachedToolResult = {
   ttl: number;
   /** Cache-clock expiration timestamp. Older persisted entries may omit it. */
   expiresAt?: number;
+  /** Policy revision that authorized access to this completed result. Older entries may omit it. */
+  policyRevision?: string;
 };
 
 export type StartedToolExecution = {

@@ -191,6 +191,42 @@ export function withToolboxIdempotency(
     };
   }
 
+  function createPolicyAuthorizationRequiredResult(
+    fields: { id: string },
+    cacheKey: string,
+    cached: CachedToolResult,
+  ): ToolExecutionResult {
+    return {
+      callId: fields.id,
+      outcome: 'action_required',
+      content: 'Cached tool result was recorded under a different policy revision.',
+      toolCallId: fields.id,
+      toolName: cached.toolName,
+      result: undefined,
+      idempotency: {
+        key: cacheKey,
+        outcome: 'authorization-required',
+      },
+      action: {
+        type: 'approval',
+        message:
+          'This idempotency key has a completed result recorded under a different policy revision. Re-authorize cached-result access before returning it.',
+      },
+    };
+  }
+
+  function createCompletedCacheHitResult(
+    fields: { id: string },
+    cacheKey: string,
+    cached: CachedToolResult,
+  ): ToolExecutionResult {
+    if (cached.policyRevision !== policyRevision) {
+      return createPolicyAuthorizationRequiredResult(fields, cacheKey, cached);
+    }
+
+    return createDedupedResult(fields, cacheKey, cached);
+  }
+
   function hasReceiptAuthorization(
     receipt: IdempotencyResolutionReceipt | LegacyIdempotencyResolutionReceipt | undefined,
   ): boolean {
@@ -217,7 +253,9 @@ export function withToolboxIdempotency(
     fallbackToolName: string,
   ): Promise<ToolExecutionResult> {
     const current = await cache.getState(cacheKey);
-    if (current?.status === 'completed') return createDedupedResult(fields, cacheKey, current);
+    if (current?.status === 'completed') {
+      return createCompletedCacheHitResult(fields, cacheKey, current);
+    }
     const currentAttemptId = current?.status === 'started' ? current.attemptId : undefined;
     const legacyStartedAt =
       current?.status === 'started' && current.attemptId === undefined
@@ -293,7 +331,7 @@ export function withToolboxIdempotency(
     const legacyReceipt = executionIdempotencyOptions?.legacyResolutionReceipt;
 
     if (cached && cached.status !== 'started') {
-      return createDedupedResult(fields, cacheKey, cached);
+      return createCompletedCacheHitResult(fields, cacheKey, cached);
     }
 
     let execution: StartedToolExecution;
@@ -382,7 +420,7 @@ export function withToolboxIdempotency(
         });
       }
 
-      return createDedupedResult(fields, cacheKey, entry);
+      return createCompletedCacheHitResult(fields, cacheKey, entry);
     }
 
     let result: ToolExecutionResult;
@@ -428,6 +466,7 @@ export function withToolboxIdempotency(
         toolName: result.toolName,
         executedAt: now(),
         ttl: defaultTTL,
+        policyRevision,
       };
       const completed = await cache.completeStarted(
         cacheKey,
