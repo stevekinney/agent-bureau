@@ -4,6 +4,14 @@ import type { ConversationHistory, Message } from '../types';
 import { deepFreeze } from '../utilities/type-helpers';
 import { assertConversationHistoryIntegrity } from './integrity';
 
+function detachMutableValue<T>(value: T): T {
+  if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return value;
+  if (Array.isArray(value)) return value.map(detachMutableValue) as T;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, nested]) => [key, detachMutableValue(nested)]),
+  ) as T;
+}
+
 /**
  * Ensures a conversation conforms to the schema (JSON-safe) and integrity rules.
  * Internal helper for public API enforcement points.
@@ -21,7 +29,7 @@ export function assertConversationSafe(conversation: ConversationHistory): void 
 
 export function ensureConversationSafe(conversation: ConversationHistory): ConversationHistory {
   assertConversationSafe(conversation);
-  return deepFreeze(conversation);
+  return deepFreeze(detachMutableValue(conversation));
 }
 
 /**
@@ -39,5 +47,5 @@ export function assertMessageSafe(message: Message): void {
 
 export function ensureMessageSafe(message: Message): Message {
   assertMessageSafe(message);
-  return message;
+  return deepFreeze(detachMutableValue(message));
 }

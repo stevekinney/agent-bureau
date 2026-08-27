@@ -76,9 +76,7 @@ export function validateSnapshot(value: unknown): ConversationSnapshot {
   }
   if (
     typeof snapshot.conversationId !== 'string' ||
-    snapshot.conversationId.length === 0 ||
     typeof snapshot.currentBranchId !== 'string' ||
-    snapshot.currentBranchId.length === 0 ||
     typeof snapshot.createdAt !== 'string' ||
     !Number.isFinite(Date.parse(snapshot.createdAt))
   ) {
@@ -102,12 +100,9 @@ export function validateSnapshot(value: unknown): ConversationSnapshot {
   const hasSourceRevision = snapshot.lineage.sourceRevision !== undefined;
   if (
     hasParentConversation !== hasSourceRevision ||
-    (hasParentConversation &&
-      (typeof snapshot.lineage.parentConversationId !== 'string' ||
-        snapshot.lineage.parentConversationId.length === 0)) ||
+    (hasParentConversation && typeof snapshot.lineage.parentConversationId !== 'string') ||
     (snapshot.lineage.forkPointMessageId !== undefined &&
-      (typeof snapshot.lineage.forkPointMessageId !== 'string' ||
-        snapshot.lineage.forkPointMessageId.length === 0)) ||
+      typeof snapshot.lineage.forkPointMessageId !== 'string') ||
     (hasSourceRevision &&
       (!Number.isSafeInteger(snapshot.lineage.sourceRevision) ||
         snapshot.lineage.sourceRevision! < 0))

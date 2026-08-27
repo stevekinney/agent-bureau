@@ -29,5 +29,11 @@ describe('type helpers', () => {
       const readonly = toReadonly(obj);
       expect(readonly).toBe(obj);
     });
+
+    test('accepts typed arrays without freezing their backing view', () => {
+      const bytes = new Uint8Array([1]);
+
+      expect(toReadonly(bytes)).toBe(bytes);
+    });
   });
 });

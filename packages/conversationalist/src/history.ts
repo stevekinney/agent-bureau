@@ -1341,10 +1341,6 @@ export class Conversation {
         sourceRevision: snapshot.lineage.sourceRevision,
       };
     }
-    for (const removedNodeId of snapshot.lineage.removedNodeIds) {
-      conversation.removedNodeIds.add(removedNodeId);
-    }
-
     // Recursive function to build the tree
     const buildTree = (
       nodeJSON: ConversationNodeSnapshot,
@@ -1403,6 +1399,14 @@ export class Conversation {
       for (const child of node.children) validateNode(child, node.id);
     };
     for (const child of snapshot.root.children) validateNode(child, rootNode.id);
+    for (const removedNodeId of snapshot.lineage.removedNodeIds) {
+      if (seenIds.has(removedNodeId)) {
+        throw createSerializationError(
+          `failed to restore snapshot: removed node ${removedNodeId} is still retained`,
+        );
+      }
+      conversation.removedNodeIds.add(removedNodeId);
+    }
     rootNode.children = snapshot.root.children.map((child) => buildTree(child, rootNode));
 
     // Traverse to find the current node

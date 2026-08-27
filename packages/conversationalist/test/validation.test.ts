@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test';
 
 import { validateSnapshot } from '../src/conversation/snapshot-integrity';
 import { Conversation } from '../src/history';
-import { createConversationHistory } from '../src/index';
+import { appendUserMessage, createConversationHistory } from '../src/index';
 import type { ConversationSnapshot } from '../src/types';
 import { deepFreeze } from '../src/utilities/type-helpers';
 
@@ -36,6 +36,18 @@ describe('Conversation state integrity', () => {
     deepFreeze(shallow);
 
     expect(Object.isFrozen(nested)).toBe(true);
+  });
+
+  it('detaches pure-helper output before enforcing runtime immutability', () => {
+    const metadata = { mutable: true };
+    const input = structuredClone(createConversationHistory({ metadata })) as ReturnType<
+      typeof createConversationHistory
+    >;
+    const result = appendUserMessage(input, 'hello');
+
+    expect(Object.isFrozen(result)).toBe(true);
+    expect(Object.isFrozen(result.metadata)).toBe(true);
+    expect(Object.isFrozen(input.metadata)).toBe(false);
   });
 
   it('returns a deeply frozen, integrity-protected versioned snapshot', () => {
@@ -135,7 +147,6 @@ describe('Conversation state integrity', () => {
       1,
       { ...structuredClone(snapshot), conversationSchemaVersion: 999 },
       { ...structuredClone(snapshot), controllerRevision: -1 },
-      { ...structuredClone(snapshot), conversationId: '' },
       { ...structuredClone(snapshot), currentBranchId: 1 },
       { ...structuredClone(snapshot), createdAt: 'not-a-date' },
       { ...structuredClone(snapshot), currentPath: [-1] },
@@ -179,6 +190,19 @@ describe('Conversation state integrity', () => {
     for (const invalid of invalidValues) {
       expect(() => validateSnapshot(invalid)).toThrow('failed to restore snapshot');
     }
+  });
+
+  it('round-trips schema-valid empty conversation identities', () => {
+    const conversation = new Conversation(createConversationHistory({ id: '' }));
+
+    expect(Conversation.from(conversation.snapshot()).current.id).toBe('');
+  });
+
+  it('rejects removed-node evidence that names a retained node', () => {
+    const snapshot = structuredClone(new Conversation(createConversationHistory()).snapshot());
+    snapshot.lineage.removedNodeIds = [snapshot.root.id];
+
+    expect(() => Conversation.from(resign(snapshot))).toThrow('is still retained');
   });
 });
 

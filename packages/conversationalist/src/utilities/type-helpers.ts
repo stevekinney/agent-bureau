@@ -22,9 +22,7 @@ export function deepFreeze<T>(value: T): Readonly<T> {
   return Object.isFrozen(value) ? value : Object.freeze(value);
 }
 
-/**
- * Converts a value to its readonly variant at both the type and runtime levels.
- */
+/** Converts a value to its readonly type without changing runtime ownership. */
 export function toReadonly<T>(value: T): Readonly<T> {
-  return deepFreeze(value);
+  return value;
 }
