@@ -1,8 +1,9 @@
 /**
  * External consumer verifier for Conversationalist (AB-31).
  *
- * Builds Conversationalist from the repository root, packs `packages/conversationalist` with
- * `npm pack --json --ignore-scripts`, and installs that exact tarball into three fresh temporary
+ * In `local` mode, builds Conversationalist from the repository root and packs the workspace
+ * package. In `published` mode, downloads the requested registry version with `npm pack`. It then
+ * installs that exact tarball into three fresh temporary
  * consumers created OUTSIDE the workspace (under the OS temp directory, never under this repo),
  * so none of them can resolve anything through Bun/npm workspace linking:
  *
@@ -16,7 +17,9 @@
  *      history and exercises the four mutation helpers against it, asserting behavior and
  *      immutability with `node:assert`.
  *
- * Usage: `bun run scripts/verify-conversationalist-consumer.ts --mode local`
+ * Usage:
+ *   `bun run scripts/verify-conversationalist-consumer.ts --mode local`
+ *   `bun run scripts/verify-conversationalist-consumer.ts --mode published --version <version>`
  * Exit code 0 = every consumer passed; 1 = any build/pack/install/typecheck/check/build/runtime
  * command failed, or any output assertion failed.
  */
@@ -25,6 +28,15 @@ import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 
 import { $ } from 'bun';
+
+import { verifyBrowserConsumer } from './conversationalist-browser-consumer';
+import {
+  NODE_RANGE,
+  PUBLIC_SUBPATHS,
+  TYPESCRIPT_VERSION,
+  ZOD_VERSION,
+} from './conversationalist-consumer-contract';
+import { RUNTIME_CONSUMER_SCRIPT } from './conversationalist-runtime-consumer';
 
 const REPO_ROOT = join(import.meta.dir, '..');
 const CONVERSATIONALIST_DIRECTORY = join(REPO_ROOT, 'packages', 'conversationalist');
@@ -50,18 +62,6 @@ if (!resolvedNodeBinary) {
   throw new Error('Could not locate a "node" executable on PATH (after filtering Bun\'s shim).');
 }
 const NODE_BINARY: string = resolvedNodeBinary;
-
-const ZOD_VERSION = '4.4.3';
-const TYPESCRIPT_VERSION = '6.0.3';
-const SVELTEKIT_VERSIONS = {
-  adapterAuto: '7.0.1',
-  kit: '2.70.3',
-  viteSveltePlugin: '7.3.0',
-  svelte: '5.56.9',
-  vite: '8.2.1',
-};
-
-const FORBIDDEN_BROWSER_OUTPUT = ['node:module', 'externalized for browser compatibility'];
 
 type StepResult = { command: string; exitCode: number; output: string };
 
@@ -98,12 +98,19 @@ async function runStep(
   return { command: command.join(' '), exitCode: result.exitCode, output };
 }
 
-/** Packs Conversationalist and returns the absolute path to the produced tarball. */
-async function packConversationalist(stagingRoot: string): Promise<string> {
-  const packResult = await $`npm pack --json --ignore-scripts --pack-destination ${stagingRoot}`
-    .cwd(CONVERSATIONALIST_DIRECTORY)
-    .nothrow()
-    .quiet();
+/** Packs a local or published Conversationalist package and returns its absolute tarball path. */
+async function packConversationalist(
+  stagingRoot: string,
+  publishedVersion?: string,
+): Promise<string> {
+  const packageSpecifier = publishedVersion
+    ? `conversationalist@${publishedVersion}`
+    : CONVERSATIONALIST_DIRECTORY;
+  const packResult =
+    await $`npm pack ${packageSpecifier} --json --ignore-scripts --pack-destination ${stagingRoot}`
+      .cwd(REPO_ROOT)
+      .nothrow()
+      .quiet();
   if (packResult.exitCode !== 0) {
     throw new VerificationFailure(
       'pack',
@@ -250,179 +257,7 @@ export const plugin = defineMessagePlugin(
   await runStep(consumer, 'bunx tsc --noEmit', directory, ['bunx', 'tsc', '--noEmit']);
 }
 
-/** Consumer 2: minimal SvelteKit app proving a clean browser build. */
-async function verifyBrowserConsumer(directory: string, tarballPath: string): Promise<void> {
-  const consumer = 'browser';
-
-  await Bun.write(
-    join(directory, 'package.json'),
-    JSON.stringify(
-      {
-        name: 'conversationalist-browser-consumer',
-        private: true,
-        version: '0.0.0',
-        type: 'module',
-        scripts: {
-          dev: 'vite dev',
-          build: 'vite build',
-          check: 'svelte-kit sync && svelte-check --tsconfig ./tsconfig.json',
-        },
-        dependencies: {
-          conversationalist: `file:${tarballPath}`,
-          zod: ZOD_VERSION,
-        },
-        devDependencies: {
-          '@sveltejs/adapter-auto': SVELTEKIT_VERSIONS.adapterAuto,
-          '@sveltejs/kit': SVELTEKIT_VERSIONS.kit,
-          '@sveltejs/vite-plugin-svelte': SVELTEKIT_VERSIONS.viteSveltePlugin,
-          svelte: SVELTEKIT_VERSIONS.svelte,
-          'svelte-check': '^4.3.3',
-          typescript: TYPESCRIPT_VERSION,
-          vite: SVELTEKIT_VERSIONS.vite,
-        },
-      },
-      null,
-      2,
-    ),
-  );
-
-  await Bun.write(
-    join(directory, 'svelte.config.js'),
-    `import adapter from '@sveltejs/adapter-auto';
-import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
-
-export default {
-  preprocess: vitePreprocess(),
-  kit: {
-    adapter: adapter(),
-  },
-};
-`,
-  );
-
-  await Bun.write(
-    join(directory, 'vite.config.ts'),
-    `import { sveltekit } from '@sveltejs/kit/vite';
-import { defineConfig } from 'vite';
-
-export default defineConfig({
-  plugins: [sveltekit()],
-});
-`,
-  );
-
-  await Bun.write(
-    join(directory, 'tsconfig.json'),
-    JSON.stringify(
-      {
-        extends: './.svelte-kit/tsconfig.json',
-        compilerOptions: {
-          allowJs: true,
-          checkJs: true,
-          esModuleInterop: true,
-          forceConsistentCasingInFileNames: true,
-          resolveJsonModule: true,
-          skipLibCheck: true,
-          sourceMap: true,
-          strict: true,
-          moduleResolution: 'bundler',
-        },
-      },
-      null,
-      2,
-    ),
-  );
-
-  await Bun.write(
-    join(directory, 'src', 'app.d.ts'),
-    `declare global {
-  namespace App {}
-}
-
-export {};
-`,
-  );
-
-  await Bun.write(
-    join(directory, 'src', 'app.html'),
-    `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    %sveltekit.head%
-  </head>
-  <body data-sveltekit-preload-data="hover">
-    <div style="display: contents">%sveltekit.body%</div>
-  </body>
-</html>
-`,
-  );
-
-  await Bun.write(
-    join(directory, 'src', 'routes', '+page.svelte'),
-    `<script lang="ts">
-  import { onDestroy } from 'svelte';
-  import {
-    Conversation,
-    removeMessage,
-    replaceToolResult,
-    setMessageHidden,
-    updateMessage,
-  } from 'conversationalist';
-  import {
-    removeMessage as conversationRemoveMessage,
-    replaceToolResult as conversationReplaceToolResult,
-    setMessageHidden as conversationSetMessageHidden,
-    updateMessage as conversationUpdateMessage,
-  } from 'conversationalist/conversation';
-
-  const helpers = [
-    updateMessage,
-    setMessageHidden,
-    replaceToolResult,
-    removeMessage,
-    conversationUpdateMessage,
-    conversationSetMessageHidden,
-    conversationReplaceToolResult,
-    conversationRemoveMessage,
-  ];
-  const conversation = new Conversation();
-  let snapshot = conversation.getServerSnapshot();
-  const unsubscribe = conversation.subscribe(() => {
-    snapshot = conversation.getSnapshot();
-  });
-  onDestroy(() => {
-    unsubscribe();
-    void conversation.dispose();
-  });
-</script>
-
-<p>{helpers.length} Conversationalist mutation helpers loaded at revision {snapshot.revision}.</p>
-`,
-  );
-
-  await runStep(consumer, 'npm install', directory, ['npm', 'install', '--no-audit', '--no-fund']);
-
-  const checkResult = await runStep(consumer, 'bun run check', directory, ['bun', 'run', 'check']);
-  const buildResult = await runStep(consumer, 'bun run build', directory, ['bun', 'run', 'build']);
-
-  for (const [step, result] of [
-    ['bun run check', checkResult],
-    ['bun run build', buildResult],
-  ] as const) {
-    for (const forbidden of FORBIDDEN_BROWSER_OUTPUT) {
-      if (result.output.includes(forbidden)) {
-        throw new VerificationFailure(
-          consumer,
-          step,
-          `output contains forbidden string "${forbidden}"\n${result.output}`,
-        );
-      }
-    }
-  }
-}
-
-/** Consumer 3: plain Node.js runtime proving the mutation helpers behave and stay immutable. */
+/** Packed Node.js and Bun runtime consumer. */
 async function verifyRuntimeConsumer(directory: string, tarballPath: string): Promise<void> {
   const consumer = 'runtime';
 
@@ -448,134 +283,184 @@ async function verifyRuntimeConsumer(directory: string, tarballPath: string): Pr
 
   await runStep(consumer, 'npm install', directory, ['npm', 'install', '--no-audit', '--no-fund']);
   await runStep(consumer, 'node run.mjs', directory, [NODE_BINARY, 'run.mjs'], REAL_NODE_ENV);
+  for (const nodeVersion of ['20.19.0', '22.12.0', '24.0.0']) {
+    await runStep(consumer, `Node ${nodeVersion} run.mjs`, directory, [
+      'npx',
+      '--yes',
+      `node@${nodeVersion}`,
+      'run.mjs',
+    ]);
+  }
+  await runStep(consumer, 'bun run.mjs', directory, ['bun', 'run.mjs']);
 }
 
-const RUNTIME_CONSUMER_SCRIPT = `import assert from 'node:assert/strict';
-
-import { Conversation, createConversationHistory as createControllerHistory } from 'conversationalist';
-import {
-  appendToolCall,
-  appendToolResult,
-  appendUserMessage,
-  createConversationHistory,
-  removeMessage,
-  replaceToolResult,
-  setMessageHidden,
-  updateMessage,
-  validateConversationHistoryIntegrity,
-} from 'conversationalist/conversation';
-
-let history = createConversationHistory();
-history = appendUserMessage(history, 'Hello');
-history = appendToolCall(history, { id: 'external-call', name: 'external_call', arguments: {} });
-history = appendToolResult(history, {
-  callId: 'external-call',
-  outcome: 'action_required',
-  content: { pending: true },
-  action: { type: 'approval', message: 'Approve?' },
-});
-
-assert.equal(history.ids.length, 3, 'expected one user, one tool-call, one tool-result message');
-
-const snapshot = structuredClone(history);
-const [userMessageId, , toolResultMessageId] = history.ids;
-assert.ok(userMessageId, 'expected a user message id');
-assert.ok(toolResultMessageId, 'expected a tool-result message id');
-
-function assertBaselineUnchanged() {
-  assert.deepStrictEqual(history, snapshot, 'baseline history mutated in place');
-  for (const id of history.ids) {
-    assert.deepStrictEqual(history.messages[id], snapshot.messages[id], \`message \${id} mutated in place\`);
+async function verifyManifestConsumer(directory: string, tarballPath: string): Promise<void> {
+  const consumer = 'manifest';
+  await Bun.write(
+    join(directory, 'package.json'),
+    JSON.stringify(
+      {
+        name: 'conversationalist-manifest-consumer',
+        private: true,
+        dependencies: { conversationalist: `file:${tarballPath}`, zod: ZOD_VERSION },
+      },
+      null,
+      2,
+    ),
+  );
+  await runStep(consumer, 'npm install', directory, ['npm', 'install', '--no-audit', '--no-fund']);
+  const installedPackage = join(directory, 'node_modules', 'conversationalist');
+  const manifest = JSON.parse(await Bun.file(join(installedPackage, 'package.json')).text()) as {
+    type: string;
+    exports: Record<string, Record<string, string | null>>;
+    engines: { bun: string; node: string };
+    peerDependencies: Record<string, string>;
+    peerDependenciesMeta: Record<string, { optional?: boolean }>;
+    conversationalistSupport: {
+      module: string;
+      browserGlobals: string[];
+      optionalProviderPeers: string[];
+      svelteKit: { adapter: string; runtime: string };
+      subpaths: Record<string, { browser: boolean; node: boolean; bun: boolean; ssr: boolean }>;
+    };
+  };
+  if (manifest.type !== 'module' || manifest.conversationalistSupport.module !== 'esm') {
+    throw new VerificationFailure(consumer, 'support matrix', 'package must be ESM-only');
+  }
+  if (manifest.engines.bun !== '>=1.3.13' || manifest.engines.node !== NODE_RANGE) {
+    throw new VerificationFailure(
+      consumer,
+      'support matrix',
+      'engine boundaries changed unexpectedly',
+    );
+  }
+  const expectedSubpaths = [...PUBLIC_SUBPATHS].sort();
+  if (JSON.stringify(Object.keys(manifest.exports).sort()) !== JSON.stringify(expectedSubpaths)) {
+    throw new VerificationFailure(consumer, 'support matrix', 'public subpath inventory changed');
+  }
+  if (
+    JSON.stringify(Object.keys(manifest.conversationalistSupport.subpaths).sort()) !==
+    JSON.stringify(expectedSubpaths)
+  ) {
+    throw new VerificationFailure(
+      consumer,
+      'support matrix',
+      'support matrix does not match exports',
+    );
+  }
+  for (const subpath of PUBLIC_SUBPATHS) {
+    const conditions = manifest.exports[subpath];
+    const support = manifest.conversationalistSupport.subpaths[subpath];
+    if (!conditions || !support || !support.node || !support.bun || !support.ssr) {
+      throw new VerificationFailure(
+        consumer,
+        'support matrix',
+        `${subpath} is missing required host support`,
+      );
+    }
+    if (
+      (support.browser && typeof conditions.browser !== 'string') ||
+      (!support.browser && conditions.browser !== null)
+    ) {
+      throw new VerificationFailure(
+        consumer,
+        'support matrix',
+        `${subpath} browser condition disagrees with the matrix`,
+      );
+    }
+    for (const condition of [
+      'bun',
+      ...(support.browser ? ['browser'] : []),
+      'import',
+      'default',
+      'types',
+    ]) {
+      const target = conditions[condition];
+      if (!target || !(await Bun.file(join(installedPackage, target)).exists())) {
+        throw new VerificationFailure(
+          consumer,
+          'tarball exports',
+          `${subpath} ${condition} target is missing`,
+        );
+      }
+    }
+  }
+  if (
+    manifest.peerDependenciesMeta['@anthropic-ai/sdk']?.optional !== true ||
+    !manifest.conversationalistSupport.optionalProviderPeers.includes('@anthropic-ai/sdk')
+  ) {
+    throw new VerificationFailure(
+      consumer,
+      'optional peers',
+      '@anthropic-ai/sdk must remain optional and explicit',
+    );
+  }
+  for (const [version, expected] of new Map([
+    ['20.18.9', false],
+    ['20.19.0', true],
+    ['21.7.3', false],
+    ['22.11.0', false],
+    ['22.12.0', true],
+    ['23.11.1', false],
+    ['24.0.0', true],
+  ])) {
+    if (Bun.semver.satisfies(version, manifest.engines.node) !== expected) {
+      throw new VerificationFailure(
+        consumer,
+        'Node range',
+        `Node ${version} support must be ${expected}`,
+      );
+    }
+  }
+  if (
+    !Bun.semver.satisfies('1.3.13', manifest.engines.bun) ||
+    Bun.semver.satisfies('1.3.12', manifest.engines.bun)
+  ) {
+    throw new VerificationFailure(consumer, 'Bun floor', 'Bun boundary is not exact');
   }
 }
-
-// updateMessage
-const updated = updateMessage(history, userMessageId, { content: 'Updated' });
-assert.equal(updated.messages[userMessageId].content, 'Updated');
-assertBaselineUnchanged();
-assert.deepStrictEqual(validateConversationHistoryIntegrity(updated), []);
-
-// setMessageHidden
-const hidden = setMessageHidden(history, userMessageId, true);
-assert.equal(hidden.messages[userMessageId].hidden, true);
-assertBaselineUnchanged();
-assert.deepStrictEqual(validateConversationHistoryIntegrity(hidden), []);
-
-// replaceToolResult
-const replacedResult = { callId: 'external-call', outcome: 'success', content: { verified: true } };
-const replaced = replaceToolResult(history, 'external-call', replacedResult);
-const replacedMessage = Object.values(replaced.messages).find(
-  (message) => message.toolResult?.callId === 'external-call',
-);
-assert.ok(replacedMessage, 'expected a message carrying the replaced tool result');
-assert.deepStrictEqual(replacedMessage.toolResult, replacedResult);
-assertBaselineUnchanged();
-assert.deepStrictEqual(validateConversationHistoryIntegrity(replaced), []);
-
-// removeMessage
-const removed = removeMessage(history, toolResultMessageId);
-assert.equal(removed.ids.length, 2, 'expected exactly two messages after removal');
-assert.equal(removed.messages[removed.ids[0]].position, 0);
-assert.equal(removed.messages[removed.ids[1]].position, 1);
-assertBaselineUnchanged();
-assert.deepStrictEqual(validateConversationHistoryIntegrity(removed), []);
-
-// Unknown identifiers: every helper returns the exact input object unchanged.
-assert.strictEqual(updateMessage(history, 'unknown-id', { content: 'x' }), history);
-assert.strictEqual(setMessageHidden(history, 'unknown-id', true), history);
-assert.strictEqual(replaceToolResult(history, 'unknown-call', replacedResult), history);
-assert.strictEqual(removeMessage(history, 'unknown-id'), history);
-assertBaselineUnchanged();
-
-const controller = new Conversation(createControllerHistory({ id: 'runtime-controller' }));
-const initialStoreSnapshot = controller.getServerSnapshot();
-let notifications = 0;
-const unsubscribe = controller.subscribe(() => notifications++);
-controller.appendUserMessage('observed');
-assert.equal(notifications, 1);
-assert.equal(controller.getSnapshot().revision, 1);
-assert.notStrictEqual(controller.getSnapshot(), initialStoreSnapshot);
-unsubscribe();
-controller.complete();
-assert.equal(controller.lifecycle, 'closed');
-assert.throws(
-  () => controller.appendAssistantMessage('rejected'),
-  (error) => error?.code === 'error:conversation-closed',
-);
-await controller.dispose();
-assert.equal(controller.lifecycle, 'disposed');
-
-console.log('conversationalist runtime consumer: all assertions passed');
-`;
 
 async function main(): Promise<void> {
   const args = Bun.argv.slice(2);
   const modeIndex = args.indexOf('--mode');
   const mode = modeIndex === -1 ? undefined : args[modeIndex + 1];
+  const versionIndex = args.indexOf('--version');
+  const publishedVersion = versionIndex === -1 ? undefined : args[versionIndex + 1];
+  const deployVercelPreview = args.includes('--vercel-preview');
 
-  if (mode !== 'local') {
-    console.error('Usage: bun run scripts/verify-conversationalist-consumer.ts --mode local');
+  if ((mode !== 'local' && mode !== 'published') || (mode === 'published' && !publishedVersion)) {
+    console.error(
+      'Usage: bun run scripts/verify-conversationalist-consumer.ts --mode local [--vercel-preview]\n' +
+        '   or: bun run scripts/verify-conversationalist-consumer.ts --mode published --version <version> [--vercel-preview]',
+    );
     process.exit(1);
   }
 
-  console.log('Building conversationalist from the repository root...');
-  await runStep('build', 'turbo run build', REPO_ROOT, [
-    'turbo',
-    'run',
-    'build',
-    '--filter=conversationalist',
-  ]);
+  if (mode === 'local') {
+    console.log('Building conversationalist from the repository root...');
+    await runStep('build', 'turbo run build', REPO_ROOT, [
+      'turbo',
+      'run',
+      'build',
+      '--filter=conversationalist',
+    ]);
+  }
 
   const stagingRoot = await mkdtemp(join(tmpdir(), 'conversationalist-consumer-'));
 
   try {
-    console.log('Packing conversationalist...');
-    const tarballPath = await packConversationalist(stagingRoot);
+    console.log(
+      mode === 'published'
+        ? `Downloading conversationalist@${publishedVersion} from the npm registry...`
+        : 'Packing conversationalist...',
+    );
+    const tarballPath = await packConversationalist(stagingRoot, publishedVersion);
     console.log(`Packed tarball: ${tarballPath}`);
 
     const strictTypeDirectory = await mkdtemp(join(tmpdir(), 'conversationalist-strict-type-'));
     const browserDirectory = await mkdtemp(join(tmpdir(), 'conversationalist-browser-'));
     const runtimeDirectory = await mkdtemp(join(tmpdir(), 'conversationalist-runtime-'));
+    const manifestDirectory = await mkdtemp(join(tmpdir(), 'conversationalist-manifest-'));
 
     try {
       console.log('Verifying strict-type consumer...');
@@ -583,16 +468,25 @@ async function main(): Promise<void> {
       console.log('✓ strict-type consumer passed');
 
       console.log('Verifying browser (SvelteKit) consumer...');
-      await verifyBrowserConsumer(browserDirectory, tarballPath);
+      await verifyBrowserConsumer(browserDirectory, tarballPath, {
+        nodeBinary: NODE_BINARY,
+        realNodeEnvironment: REAL_NODE_ENV,
+        deployVercelPreview,
+      });
       console.log('✓ browser consumer passed');
 
       console.log('Verifying packed runtime consumer...');
       await verifyRuntimeConsumer(runtimeDirectory, tarballPath);
       console.log('✓ runtime consumer passed');
+
+      console.log('Verifying manifest and host support matrix...');
+      await verifyManifestConsumer(manifestDirectory, tarballPath);
+      console.log('✓ manifest and host support matrix passed');
     } finally {
       await rm(strictTypeDirectory, { recursive: true, force: true });
       await rm(browserDirectory, { recursive: true, force: true });
       await rm(runtimeDirectory, { recursive: true, force: true });
+      await rm(manifestDirectory, { recursive: true, force: true });
     }
   } finally {
     await rm(stagingRoot, { recursive: true, force: true });
