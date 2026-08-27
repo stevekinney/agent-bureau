@@ -401,6 +401,8 @@ describe('createPublicConversationProjection', () => {
     const conversation = appendMessages(
       withVisibleMessage,
       { role: 'assistant', content: 'hidden secret', hidden: true },
+      { role: 'system', content: 'server-only system instruction' },
+      { role: 'developer', content: 'server-only developer instruction' },
       {
         role: 'tool-call',
         content: '',
@@ -431,6 +433,8 @@ describe('createPublicConversationProjection', () => {
       'privileged-tool-input',
       'https://assets.example/private-grant',
       'hidden secret',
+      'server-only system instruction',
+      'server-only developer instruction',
       'argument',
       'private result',
       'signature',

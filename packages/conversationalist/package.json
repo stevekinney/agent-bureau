@@ -86,12 +86,14 @@
       "types": "./dist/test/index.d.ts"
     },
     "./markdown": {
+      "browser": null,
       "bun": "./dist/markdown/index.js",
       "import": "./dist/markdown/index.js",
       "default": "./dist/markdown/index.js",
       "types": "./dist/markdown/index.d.ts"
     },
     "./export": {
+      "browser": null,
       "bun": "./dist/export/index.js",
       "import": "./dist/export/index.js",
       "default": "./dist/export/index.js",

@@ -103,8 +103,9 @@ function projectPublicContent(
  *
  * The projection is deliberately lossy: hidden messages, conversation and message metadata,
  * provider-private reasoning, tool calls and results, citations, token usage, document/image
- * references, container ids, and managed-asset grants are excluded. Only visible role and text
- * content cross the server-to-client boundary, with common personal data and credentials redacted.
+ * references, container ids, managed-asset grants, and internal instruction roles are excluded.
+ * Only user and assistant text cross the server-to-client boundary, with common personal data and
+ * credentials redacted.
  */
 export function createPublicConversationProjection(
   conversation: ConversationHistory,
@@ -116,12 +117,7 @@ export function createPublicConversationProjection(
 
   for (const id of conversation.ids) {
     const message = conversation.messages[id];
-    if (
-      !message ||
-      message.hidden ||
-      message.role === 'tool-call' ||
-      message.role === 'tool-result'
-    ) {
+    if (!message || message.hidden || (message.role !== 'user' && message.role !== 'assistant')) {
       continue;
     }
 

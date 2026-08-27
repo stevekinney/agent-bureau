@@ -5,6 +5,7 @@ import {
   BROWSER_SUBPATHS,
   FORBIDDEN_BROWSER_OUTPUT,
   packageSpecifier,
+  SERVER_ONLY_SUBPATHS,
   SVELTEKIT_VERSIONS,
   TYPESCRIPT_VERSION,
   ZOD_VERSION,
@@ -255,6 +256,23 @@ export const publicSurfaces = [${BROWSER_SUBPATHS.map((_, index) => `surface${in
   );
 
   await runStep(consumer, 'npm install', directory, ['npm', 'install', '--no-audit', '--no-fund']);
+
+  for (const subpath of SERVER_ONLY_SUBPATHS) {
+    const specifier = packageSpecifier(subpath);
+    const blockedImport =
+      await Bun.$`${context.nodeBinary} --conditions=browser --input-type=module --eval ${`import(${JSON.stringify(specifier)})`}`
+        .cwd(directory)
+        .env(context.realNodeEnvironment)
+        .nothrow()
+        .quiet();
+    if (blockedImport.exitCode === 0) {
+      throw new VerificationFailure(
+        consumer,
+        'server-only browser resolution',
+        `${specifier} resolved under the browser condition`,
+      );
+    }
+  }
 
   const checkResult = await runStep(consumer, 'bun run check', directory, ['bun', 'run', 'check']);
   const buildResult = await runStep(consumer, 'bun run build', directory, ['bun', 'run', 'build']);

@@ -30,9 +30,10 @@ export const PUBLIC_SUBPATHS = [
   './sort',
   './composition',
 ] as const;
+export const SERVER_ONLY_SUBPATHS = ['./markdown', './export'] as const;
 export const NODE_RANGE = '^20.19.0 || ^22.12.0 || >=24';
 export const BROWSER_SUBPATHS = PUBLIC_SUBPATHS.filter(
-  (subpath) => subpath !== './markdown' && subpath !== './export',
+  (subpath) => !SERVER_ONLY_SUBPATHS.some((serverOnly) => serverOnly === subpath),
 );
 
 export function packageSpecifier(subpath: (typeof PUBLIC_SUBPATHS)[number]): string {

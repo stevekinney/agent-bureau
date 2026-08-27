@@ -312,7 +312,7 @@ async function verifyManifestConsumer(directory: string, tarballPath: string): P
   const installedPackage = join(directory, 'node_modules', 'conversationalist');
   const manifest = JSON.parse(await Bun.file(join(installedPackage, 'package.json')).text()) as {
     type: string;
-    exports: Record<string, Record<string, string>>;
+    exports: Record<string, Record<string, string | null>>;
     engines: { bun: string; node: string };
     peerDependencies: Record<string, string>;
     peerDependenciesMeta: Record<string, { optional?: boolean }>;
@@ -358,7 +358,10 @@ async function verifyManifestConsumer(directory: string, tarballPath: string): P
         `${subpath} is missing required host support`,
       );
     }
-    if ((conditions.browser !== undefined) !== support.browser) {
+    if (
+      (support.browser && typeof conditions.browser !== 'string') ||
+      (!support.browser && conditions.browser !== null)
+    ) {
       throw new VerificationFailure(
         consumer,
         'support matrix',

@@ -36,7 +36,8 @@ describe('public API export map', () => {
         bun: true,
         ssr: true,
       });
-      expect((exportsMap[subpath] as Record<string, unknown>).browser !== undefined).toBe(browser);
+      const browserTarget = (exportsMap[subpath] as Record<string, unknown>).browser;
+      expect(browser ? typeof browserTarget === 'string' : browserTarget === null).toBe(true);
     }
   });
 
