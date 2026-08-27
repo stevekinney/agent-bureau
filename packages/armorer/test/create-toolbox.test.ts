@@ -4269,6 +4269,41 @@ describe('createToolbox', () => {
       expect(observed.timeout).toBe(42);
     });
 
+    it('uses request authority owner and deadline for toolbox lifecycle admission', async () => {
+      let executions = 0;
+      const toolbox = createToolbox([
+        createTool({
+          name: 'expired-toolbox-deadline',
+          description: 'rejects expired toolbox deadlines',
+          input: z.object({}),
+          async execute() {
+            executions += 1;
+            return 'unreachable';
+          },
+        }),
+      ]);
+      const requestContext = {
+        ...approvalRequestContext,
+        deadline: 99,
+        authority: { ...approvalRequestContext.authority, ownerId: 'request-owner' },
+      };
+
+      const result = await toolbox.execute(
+        { id: 'expired-toolbox-deadline-call', name: 'expired-toolbox-deadline', arguments: {} },
+        { now: () => 100, requestContext },
+      );
+
+      expect(result).toMatchObject({ outcome: 'error', errorCategory: 'timeout' });
+      expect(executions).toBe(0);
+      expect(toolbox.executions.inspect({ ownerId: 'request-owner' })).toEqual([
+        expect.objectContaining({
+          callId: 'expired-toolbox-deadline-call',
+          state: 'terminal',
+          abortSource: 'deadline',
+        }),
+      ]);
+    });
+
     it('uses metadata concurrency when provided', async () => {
       const toolbox = createToolbox([], { concurrency: 10 });
       toolbox.register({

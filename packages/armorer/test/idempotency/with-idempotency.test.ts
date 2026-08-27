@@ -15,6 +15,7 @@ const requestContext = {
   authority: {
     tenantId: 'tenant-a',
     principalId: 'principal-a',
+    ownerId: 'owner-a',
     capabilities: ['tools:execute'],
     authorizationRevision: 'authorization:1',
   },
@@ -319,7 +320,7 @@ describe('withIdempotency', () => {
     );
   });
 
-  it('requires matching request authority and scopes direct execution by identity', async () => {
+  it('requires matching request authority and dedupes logical retries across request identity', async () => {
     const wrapped = withIdempotency(createTestTool(), { cache, tenantId: 'tenant-a' });
 
     await expect(wrapped.execute({ a: 1, b: 2 }, {})).rejects.toThrow(
@@ -338,7 +339,25 @@ describe('withIdempotency', () => {
     ).rejects.toThrow('tenantId must match request authority tenantId');
 
     await expect(wrapped.execute({ a: 1, b: 2 }, { requestContext })).resolves.toBe(3);
-    await expect(wrapped.execute({ a: 1, b: 2 }, { requestContext })).resolves.toBe(3);
+    await expect(
+      wrapped.execute(
+        { a: 1, b: 2 },
+        {
+          requestContext: {
+            ...requestContext,
+            runId: 'run-b',
+            agentId: 'agent-b',
+            authority: {
+              ...requestContext.authority,
+              principalId: 'principal-b',
+              ownerId: 'owner-b',
+              capabilities: ['payments:charge', 'tools:execute'],
+              authorizationRevision: 'authorization:2',
+            },
+          },
+        },
+      ),
+    ).resolves.toBe(3);
     expect(callCount).toBe(1);
 
     await expect(
@@ -347,11 +366,35 @@ describe('withIdempotency', () => {
         {
           requestContext: {
             ...requestContext,
-            agentId: 'agent-b',
+            authority: { ...requestContext.authority, tenantId: 'tenant-b' },
           },
         },
       ),
-    ).resolves.toBe(3);
+    ).rejects.toThrow('tenantId must match request authority tenantId');
+    expect(callCount).toBe(1);
+  });
+
+  it('keeps direct cached results tenant-isolated when request identity fields change', async () => {
+    const tenantA = withIdempotency(createTestTool(), { cache, tenantId: 'tenant-a' });
+    const tenantB = withIdempotency(createTestTool(), { cache, tenantId: 'tenant-b' });
+    const tenantBRequestContext = {
+      ...requestContext,
+      runId: 'run-b',
+      agentId: 'agent-b',
+      authority: {
+        ...requestContext.authority,
+        tenantId: 'tenant-b',
+        principalId: 'principal-b',
+        ownerId: 'owner-b',
+        authorizationRevision: 'authorization:2',
+      },
+    };
+
+    await expect(tenantA.execute({ a: 1, b: 2 }, { requestContext })).resolves.toBe(3);
+    await expect(
+      tenantB.execute({ a: 9, b: 9 }, { requestContext: tenantBRequestContext }),
+    ).resolves.toBe(18);
+
     expect(callCount).toBe(2);
   });
 

@@ -80,6 +80,8 @@ export type SignedPendingToolApproval = PendingToolApproval & {
 export type ToolExecutionIdempotency = {
   key: string;
   outcome: 'fresh' | 'deduped' | 'unknown-outcome';
+  /** Fencing token for an unknown started attempt. Present when the durable cache recorded one. */
+  attemptId?: string;
   resolutionReceipt?: {
     key: string;
     attemptId: string;

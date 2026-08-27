@@ -680,10 +680,29 @@ export function createTool<
     };
   };
 
+  const deadlineCancellationResult = (toolCall: ToolCallWithArguments): ToolExecutionResult => {
+    const message = 'TIMEOUT';
+    const toolError = createToolError('timeout', message, {
+      code: 'TIMEOUT',
+      retryable: false,
+    });
+    return {
+      callId: toolCall.id,
+      outcome: 'error',
+      content: message,
+      toolCallId: toolCall.id,
+      toolName: name,
+      result: undefined,
+      error: toolError,
+      errorMessage: message,
+      errorCategory: 'timeout',
+    };
+  };
+
   const beginExecutionLifecycle = (
     callId: string,
     options: ToolExecuteOptions | undefined,
-    resolvedTimeout: number | undefined,
+    deadline: number | undefined,
     nowFunction: () => number,
   ): ExecutionHandle => {
     const ownerId = options?.ownerId ?? options?.requestContext?.authority.ownerId;
@@ -694,8 +713,8 @@ export function createTool<
       ...(ownerId !== undefined ? { ownerId } : {}),
       ...(options?.parentExecutionId ? { parentExecutionId: options.parentExecutionId } : {}),
       ...(isAbortSignalLike(options?.signal) ? { signal: options.signal } : {}),
-      ...(resolvedTimeout !== undefined ? { deadline: nowFunction() + resolvedTimeout } : {}),
-      scheduleDeadline: false,
+      ...(deadline !== undefined ? { deadline } : {}),
+      scheduleDeadline: options?.requestContext?.deadline !== undefined,
       now: nowFunction,
       ...(limiter ? { capacity: limiter.capacity } : {}),
       ...(options?.setTimeoutFunction ? { setTimeoutFunction: options.setTimeoutFunction } : {}),
@@ -709,12 +728,22 @@ export function createTool<
   ): Promise<ToolExecutionResult> => {
     const resolvedTimeout = options?.timeout ?? timeout;
     const nowFunction = options?.now ?? Date.now;
-    const executionHandle = beginExecutionLifecycle(
-      toolCall.id,
-      options,
-      resolvedTimeout,
-      nowFunction,
-    );
+    const timeoutDeadline =
+      resolvedTimeout !== undefined ? nowFunction() + resolvedTimeout : undefined;
+    const requestDeadline = options?.requestContext?.deadline;
+    const deadline =
+      timeoutDeadline === undefined
+        ? requestDeadline
+        : requestDeadline === undefined
+          ? timeoutDeadline
+          : Math.min(timeoutDeadline, requestDeadline);
+    const executionHandle = beginExecutionLifecycle(toolCall.id, options, deadline, nowFunction);
+    if (deadline !== undefined && deadline <= nowFunction()) {
+      executionHandle.abort('deadline', 'Execution deadline exceeded');
+      const result = deadlineCancellationResult(toolCall);
+      executionHandle.settle(result);
+      return Promise.resolve(result);
+    }
     const executeOptions: InternalToolExecuteOptions = {
       ...options,
       ...(resolvedTimeout !== undefined ? { timeout: resolvedTimeout } : {}),
@@ -855,7 +884,7 @@ export function createTool<
       };
     };
 
-    if (options.signal?.aborted) {
+    if (options.signal?.aborted && options.executionHandle?.snapshot().abortSource !== 'deadline') {
       return handleCancellation(options.signal.reason);
     }
     let policyRequestContext = options.requestContext;
@@ -866,6 +895,9 @@ export function createTool<
         params: toolCall.arguments,
       });
       if (options.signal?.aborted) {
+        if (options.executionHandle?.snapshot().abortSource === 'deadline') {
+          throw createAbortRejection(options.signal.reason);
+        }
         return handleCancellation(options.signal.reason);
       }
       // `parseAsync` (not `parse`) because a wrapped non-Zod Standard Schema
@@ -1595,12 +1627,22 @@ export function createTool<
       ...(resolvedTimeout !== undefined ? { timeout: resolvedTimeout } : {}),
     };
     const nowFunction = options.now ?? Date.now;
-    const executionHandle = beginExecutionLifecycle(
-      toolCall.id,
-      options,
-      resolvedTimeout,
-      nowFunction,
-    );
+    const timeoutDeadline =
+      resolvedTimeout !== undefined ? nowFunction() + resolvedTimeout : undefined;
+    const requestDeadline = options.requestContext?.deadline;
+    const deadline =
+      timeoutDeadline === undefined
+        ? requestDeadline
+        : requestDeadline === undefined
+          ? timeoutDeadline
+          : Math.min(timeoutDeadline, requestDeadline);
+    const executionHandle = beginExecutionLifecycle(toolCall.id, options, deadline, nowFunction);
+    if (deadline !== undefined && deadline <= nowFunction()) {
+      executionHandle.abort('deadline', 'Execution deadline exceeded');
+      const result = deadlineCancellationResult(toolCall);
+      executionHandle.settle(result);
+      return Promise.resolve(result);
+    }
     const execution = runWithConcurrency(
       () => (
         executionHandle.activate(),

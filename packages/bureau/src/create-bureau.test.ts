@@ -5019,4 +5019,57 @@ describe('createBureau human input wiring — real durable park (F3)', () => {
       bureau.dispose();
     }
   });
+
+  it('revalidates captured request authority before approving a human wait', async () => {
+    const bureau = await createBureau({
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [
+            {
+              id: 'human-wait-authority-call',
+              name: 'requestHumanInput',
+              arguments: { signalName: 'human-response', prompt: 'Approve this refund?' },
+            },
+          ],
+        },
+      ]),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+      humanInput: true,
+      stopWhen: stopWhen.toolCalled('requestHumanInput'),
+    });
+    try {
+      const signalSpy = spyOn(bureau, 'signalSession').mockImplementation(async () => {});
+      bureau.setRequestAuthorityValidator(() => false);
+      const run = await bureau.createRun({
+        message: 'Please refund this order',
+        requestContext: {
+          authority: {
+            principalId: 'api-key:revoked',
+            tenantId: 'bureau',
+            ownerId: 'bureau',
+            capabilities: ['tools:execute'],
+            authorizationRevision: 'gateway:api-key:revoked',
+          },
+          audience: 'operator',
+        },
+      });
+
+      await pollUntil(() => bureau.listPendingReviews().some((review) => review.runId === run.id));
+      const [review] = bureau.listPendingReviews();
+      expect(
+        bureau.resolveReview({
+          id: review!.id,
+          decision: 'approve',
+          principal: 'test-operator',
+        }),
+      ).rejects.toThrow('no longer current');
+      expect(signalSpy).not.toHaveBeenCalled();
+      expect(bureau.listPendingReviews()).toHaveLength(1);
+    } finally {
+      bureau.dispose();
+    }
+  });
 });

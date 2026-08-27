@@ -581,6 +581,33 @@ describe('createTool', () => {
     expect(result.error?.message).toContain('abort after start');
   });
 
+  it('reports a deadline abort raised during execute-start listeners as a timeout', async () => {
+    let runs = 0;
+    const tool = createTool({
+      name: 'deadline-abort-during-start',
+      description: 'reports deadline aborts during admission',
+      input: z.object({}),
+      async execute() {
+        runs += 1;
+        return 'unreachable';
+      },
+    });
+    const removeListener = tool.addEventListener('execute-start', () => {
+      const snapshot = tool.executions.inspect({ callId: 'deadline-start-call' })[0];
+      tool.executions.locate(snapshot!.executionId)?.abort('deadline', 'deadline during admission');
+    });
+
+    const result = await tool.execute({
+      id: 'deadline-start-call',
+      name: 'deadline-abort-during-start',
+      arguments: {},
+    });
+    removeListener();
+
+    expect(result).toMatchObject({ outcome: 'error', errorCategory: 'timeout' });
+    expect(runs).toBe(0);
+  });
+
   it('cancels if the signal aborts after validation succeeds', async () => {
     let runs = 0;
     const tool = createTool({
@@ -1694,6 +1721,98 @@ describe('isTool', () => {
       }),
     ]);
     expect(tool.executions.inspect({ ownerId: 'request-owner' })).toHaveLength(0);
+  });
+
+  it('rejects an expired request deadline before admitting the callback', async () => {
+    let executions = 0;
+    const tool = createTool({
+      name: 'expired-request-deadline',
+      description: 'rejects expired request deadlines',
+      input: z.object({}),
+      async execute() {
+        executions += 1;
+        return 'unreachable';
+      },
+    });
+
+    const result = await tool.executeWith({
+      params: {},
+      callId: 'expired-request-deadline-call',
+      now: () => 100,
+      requestContext: { ...createRequestContext(), deadline: 99 },
+    });
+
+    expect(result).toMatchObject({ outcome: 'error', errorCategory: 'timeout' });
+    expect(executions).toBe(0);
+    expect(tool.executions.inspect({ callId: 'expired-request-deadline-call' })[0]).toMatchObject({
+      state: 'terminal',
+      abortSource: 'deadline',
+    });
+  });
+
+  it('expires a queued request before its callback is admitted', async () => {
+    let releaseFirst!: () => void;
+    let executions = 0;
+    const timing = createManualExecutionTiming();
+    const tool = createTool({
+      name: 'queued-request-deadline',
+      description: 'expires queued request deadlines',
+      concurrency: 1,
+      input: z.object({}),
+      async execute() {
+        executions += 1;
+        if (executions === 1) await new Promise<void>((resolve) => (releaseFirst = resolve));
+        return executions;
+      },
+    });
+
+    const first = tool.executeWith({ params: {}, callId: 'first-deadline-call' });
+    while (executions === 0) await Promise.resolve();
+    const queued = tool.executeWith({
+      params: {},
+      callId: 'queued-deadline-call',
+      requestContext: { ...createRequestContext(), deadline: 10 },
+      ...timing.options,
+    });
+
+    timing.fireTimeout();
+    await expect(queued).resolves.toMatchObject({ outcome: 'error' });
+    expect(executions).toBe(1);
+    expect(tool.executions.inspect({ callId: 'queued-deadline-call' })[0]).toMatchObject({
+      state: 'terminal',
+      abortSource: 'deadline',
+    });
+    releaseFirst();
+    await first;
+  });
+
+  it('uses the earlier request deadline when it is sooner than the execution timeout', async () => {
+    const timing = createManualExecutionTiming();
+    const tool = createTool({
+      name: 'combined-request-deadline',
+      description: 'combines request and execution deadlines',
+      input: z.object({}),
+      async execute() {
+        return new Promise<string>(() => {});
+      },
+    });
+
+    const pending = tool.executeWith({
+      params: {},
+      callId: 'combined-request-deadline-call',
+      timeout: 100,
+      requestContext: { ...createRequestContext(), deadline: 10 },
+      ...timing.options,
+    });
+    await drainMicrotasks();
+    timing.fireTimeout();
+
+    await expect(pending).resolves.toMatchObject({ outcome: 'error', errorCategory: 'timeout' });
+    expect(tool.executions.inspect({ callId: 'combined-request-deadline-call' })[0]).toMatchObject({
+      deadline: 10,
+      state: 'cleanup-pending',
+      abortSource: 'deadline',
+    });
   });
 
   it('direct call emits validate-error and settled on parse failure', async () => {

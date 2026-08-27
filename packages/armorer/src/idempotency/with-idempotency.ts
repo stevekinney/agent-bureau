@@ -65,6 +65,7 @@ export function withIdempotency<T extends Tool>(tool: T, options: IdempotencyOpt
   if (!tenantId || !toolRevision) {
     throw new Error('Idempotency requires tenantId and a versioned tool definition revision.');
   }
+  const completeToolRevision = toolRevision;
 
   // Access the idempotencyKey from the tool (set via createTool options).
   // Tools store this as an own property set by createTool when configured.
@@ -91,24 +92,12 @@ export function withIdempotency<T extends Tool>(tool: T, options: IdempotencyOpt
     if (requestContext && requestContext.authority.tenantId !== tenantId) {
       throw new Error('Idempotency tenantId must match request authority tenantId.');
     }
-    const authorityScope = requestContext
-      ? [
-          tenantId,
-          requestContext.authority.principalId,
-          requestContext.authority.ownerId,
-          requestContext.authority.authorizationRevision,
-          [...requestContext.authority.capabilities].sort(),
-          requestContext.audience ?? null,
-          requestContext.agentId ?? null,
-          requestContext.runId ?? null,
-        ]
-      : [tenantId];
     const key = stableStringifyJson([
-      ...(requestContext ? [authorityScope] : [tenantId]),
-      toolRevision,
+      tenantId,
+      completeToolRevision,
       tool.name,
       idempotencyKey!(params),
-    ] as never);
+    ]);
 
     if (!(await inputMatchesToolSchema(tool, params))) {
       return tool(params);

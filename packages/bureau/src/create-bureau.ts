@@ -2856,6 +2856,17 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
           }
         }
       } else if (input.decision === 'approve') {
+        const requestContext = runRequestContexts.get(review.runId);
+        if (
+          requestContext &&
+          requestAuthorityValidator &&
+          !(await requestAuthorityValidator(requestContext))
+        ) {
+          throw new BureauError(
+            'Cannot approve: the request authority is no longer current.',
+            'CONFLICT',
+          );
+        }
         // Route through the public `bureau.signalSession` (rather than the
         // local closure function) so this is the exact same call surface a
         // caller could make directly — one seam, not two ways to do the same

@@ -23,25 +23,8 @@ const createTestRequestContext = (tenantId: string) => ({
   runId: 'run-a',
 });
 
-function expectedCacheKey(
-  tenantId: string,
-  revision: string,
-  baseKey: string,
-  requestContext = createTestRequestContext(tenantId),
-): string {
-  return JSON.stringify([
-    tenantId,
-    requestContext.authority.principalId,
-    requestContext.authority.ownerId,
-    requestContext.authority.authorizationRevision,
-    [...requestContext.authority.capabilities].sort(),
-    requestContext.audience,
-    requestContext.agentId,
-    requestContext.runId,
-    'policy:1',
-    revision,
-    baseKey,
-  ]);
+function expectedCacheKey(tenantId: string, revision: string, baseKey: string): string {
+  return JSON.stringify([tenantId, revision, baseKey]);
 }
 
 const withToolboxIdempotency = (
@@ -189,6 +172,67 @@ describe('withToolboxIdempotency', () => {
     expect(addCallCount).toBe(1);
   });
 
+  it('keeps operation keys stable across logical retries with new request authority', async () => {
+    const toolbox = createToolbox([createToolWithKey()]);
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
+    const firstRequestContext = createTestRequestContext('tenant-a');
+    const retryRequestContext = {
+      ...firstRequestContext,
+      agentId: 'agent-b',
+      runId: 'run-b',
+      authority: {
+        ...firstRequestContext.authority,
+        principalId: 'principal-b',
+        ownerId: 'owner-b',
+        capabilities: ['payments:charge', 'tools:execute'],
+        authorizationRevision: 'authorization:2',
+      },
+    };
+
+    const first = await idempotentToolbox.execute(
+      { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
+      { idempotencyKey: 'logical-operation-id', requestContext: firstRequestContext },
+    );
+    const retry = await idempotentToolbox.execute(
+      { id: 'call-2', name: 'add', arguments: { a: 9, b: 9 } },
+      { idempotencyKey: 'logical-operation-id', requestContext: retryRequestContext },
+    );
+
+    expect(first.idempotency).toEqual({
+      key: expectedCacheKey('tenant-a', 'default:add', 'add:logical-operation-id'),
+      outcome: 'fresh',
+    });
+    expect(retry.idempotency).toEqual({
+      key: expectedCacheKey('tenant-a', 'default:add', 'add:logical-operation-id'),
+      outcome: 'deduped',
+    });
+    expect(retry.result).toBe(3);
+    expect(addCallCount).toBe(1);
+  });
+
+  it('keeps cached results tenant-isolated after operation-key dedupe', async () => {
+    const toolbox = createToolbox([createToolWithKey()]);
+    const tenantA = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
+    const tenantB = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-b' });
+
+    const tenantAResult = await tenantA.execute(
+      { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
+      { idempotencyKey: 'shared-logical-id' },
+    );
+    const tenantBResult = await tenantB.execute(
+      { id: 'call-2', name: 'add', arguments: { a: 9, b: 9 } },
+      { idempotencyKey: 'shared-logical-id' },
+    );
+
+    expect(tenantAResult.result).toBe(3);
+    expect(tenantBResult.result).toBe(18);
+    expect(tenantBResult.idempotency).toEqual({
+      key: expectedCacheKey('tenant-b', 'default:add', 'add:shared-logical-id'),
+      outcome: 'fresh',
+    });
+    expect(addCallCount).toBe(2);
+  });
+
   it('uses externally supplied idempotency keys for tools without their own key', async () => {
     const toolbox = createToolbox([createToolWithoutKey()]);
     const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
@@ -287,14 +331,21 @@ describe('withToolboxIdempotency', () => {
       { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
       { idempotencyKey: 'retry-after-review' },
     );
+    expect(pause.idempotency).toEqual({
+      key: expectedCacheKey('tenant-a', 'default:add', 'add:retry-after-review'),
+      outcome: 'unknown-outcome',
+      attemptId: 'original-attempt',
+    });
+    const receiptAttemptId = pause.idempotency?.attemptId;
+    if (!receiptAttemptId) throw new Error('Expected unknown outcome to expose attemptId.');
     const retry = await idempotentToolbox.execute(
       { id: 'call-2', name: 'add', arguments: { a: 1, b: 2 } },
       {
         idempotencyKey: 'retry-after-review',
         resolutionReceipt: {
           version: 1,
-          key: expectedCacheKey('tenant-a', 'default:add', 'add:retry-after-review'),
-          attemptId: 'original-attempt',
+          key: pause.idempotency.key,
+          attemptId: receiptAttemptId,
           tenantId: 'tenant-a',
           toolRevision: 'default:add',
           decision: 'retry',
@@ -645,6 +696,7 @@ describe('withToolboxIdempotency', () => {
     expect(second.idempotency).toEqual({
       key: expectedCacheKey('tenant-a', 'default:charge', 'charge:charge-once'),
       outcome: 'unknown-outcome',
+      attemptId: expect.any(String),
     });
     expect(sideEffects).toEqual([100]);
     expect(
@@ -680,6 +732,7 @@ describe('withToolboxIdempotency', () => {
     expect(retry.idempotency).toEqual({
       key: expectedCacheKey('tenant-a', 'default:add', 'add:primitive-error'),
       outcome: 'unknown-outcome',
+      attemptId: expect.any(String),
     });
     expect(
       await cache.getState!(expectedCacheKey('tenant-a', 'default:add', 'add:primitive-error')),
@@ -720,6 +773,7 @@ describe('withToolboxIdempotency', () => {
     expect(second.idempotency).toEqual({
       key: expectedCacheKey('tenant-a', 'default:add', 'add:error-without-object'),
       outcome: 'unknown-outcome',
+      attemptId: expect.any(String),
     });
     expect(
       await cache.getState!(
@@ -816,6 +870,7 @@ describe('withToolboxIdempotency', () => {
     expect(results[0]?.result).toBe(3);
     expect(results[1]?.outcome).toBe('action_required');
     expect(results[1]?.idempotency?.outcome).toBe('unknown-outcome');
+    expect(results[1]?.idempotency?.attemptId).toEqual(expect.any(String));
     expect(addCallCount).toBe(1);
   });
 
@@ -931,6 +986,7 @@ describe('withToolboxIdempotency', () => {
         'charge:orchestrator-tool-call-id-xyz789',
       ),
       outcome: 'unknown-outcome',
+      attemptId: expect.any(String),
     });
   });
 
@@ -1175,6 +1231,45 @@ describe('withToolboxIdempotency', () => {
       },
     );
     expect(missingResult.outcome).toBe('action_required');
+
+    reads = 0;
+    const malformedCurrent = {
+      status: 'reserved',
+      toolName: 'add',
+    } as unknown as Awaited<ReturnType<ToolResultCache['getState']>>;
+    const malformedRaceCache: ToolResultCache = {
+      ...racingCache,
+      getState: async () => (reads++ === 0 ? started : malformedCurrent),
+    };
+    const malformedResult = await withToolboxIdempotency(toolbox, {
+      cache: malformedRaceCache,
+      tenantId: 'tenant-a',
+      verifyResolutionReceipt: async () => true,
+    }).execute(
+      { name: 'add', arguments: { a: 1, b: 2 } },
+      {
+        idempotencyKey: 'replacement-race',
+        resolutionReceipt: {
+          version: 1,
+          key,
+          attemptId: 'original-attempt',
+          tenantId: 'tenant-a',
+          toolRevision: 'default:add',
+          decision: 'retry',
+          evidence: 'Provider ledger proves no side effect occurred.',
+          authorizedAt: Date.now(),
+          authorizedBy: 'operator-a',
+          nonce: 'receipt-race-3',
+          authorization: 'signed-receipt',
+        },
+      },
+    );
+    expect(malformedResult.outcome).toBe('action_required');
+    expect(malformedResult.idempotency).toEqual({
+      key,
+      outcome: 'unknown-outcome',
+    });
+    expect(malformedResult.idempotency).not.toHaveProperty('attemptId');
   });
 
   it('starts replacement leases after receipt verification and uses the injected completion clock', async () => {
@@ -1309,6 +1404,7 @@ describe('withToolboxIdempotency', () => {
       },
     );
     expect(result.idempotency?.outcome).toBe('unknown-outcome');
+    expect(result.idempotency?.attemptId).toBe('active-attempt');
     expect(addCallCount).toBe(0);
   });
 

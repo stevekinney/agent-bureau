@@ -658,7 +658,25 @@ const result = await idempotentToolbox.execute(call, {
 });
 
 if (result.idempotency?.outcome === 'unknown-outcome') {
-  // Do not replay blindly. Ask for review before retrying.
+  if (!result.idempotency.attemptId) throw new Error('Cannot resolve an unfenced attempt.');
+  const signedOperatorReceipt = signResolutionReceipt({
+    version: 1,
+    key: result.idempotency.key,
+    attemptId: result.idempotency.attemptId,
+    tenantId: currentTenant.id,
+    toolRevision: chargeCardTool.id,
+    decision: 'retry',
+    evidence: 'Operator confirmed the provider did not perform the side effect.',
+    authorizedAt: Date.now(),
+    authorizedBy: operator.principalId,
+    nonce: crypto.randomUUID(),
+  });
+
+  await idempotentToolbox.execute(call, {
+    idempotencyKey: temporalToolCallId,
+    resolutionReceipt: signedOperatorReceipt,
+    requestContext,
+  });
 }
 ```
 
@@ -673,6 +691,8 @@ await idempotentToolbox.execute(call, {
 ```
 
 If you do not pass `idempotencyKey`, `withToolboxIdempotency()` uses each tool's configured `idempotencyKey` function. Tools without an `idempotencyKey` are not deduped by default; set `requireExplicitKey: false` to use `fullInputKey` for those tools. Every cache key includes the tenant, full tool revision, tool name, and caller or derived key, so one tenant or tool revision cannot consume another's result.
+
+The operation cache key intentionally excludes request-instance authority fields such as principal, owner, run ID, authorization revision, audience, agent, and capabilities. Those fields can change across a legitimate logical retry. Cache access still requires current request authority, and Armorer rejects request contexts whose tenant does not match the idempotency tenant before reading or returning cached state.
 
 `createToolResultCache()` is deliberately process-local: it serializes claims only among cache instances in the same JavaScript process that share one store object. Distributed hosts must implement the complete `ToolResultCache` contract with storage-native compare-and-set operations for `claimStarted()`, `renewStarted()`, `completeStarted()`, `deleteStarted()`, and `replaceUnknownStarted()`. Attempt identifiers fence late completions and cleanup, active work renews a bounded lease up to an absolute deadline, and an authorized retry atomically replaces only the exact unknown attempt named by its receipt.
 

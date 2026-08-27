@@ -927,14 +927,25 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     options = requestContext ? { ...options, requestContext } : options;
     const firstCall = Array.isArray(input) ? input[0] : input;
     const nowFunction = options?.now ?? Date.now;
+    const timeoutDeadline =
+      options?.timeout !== undefined ? nowFunction() + options.timeout : undefined;
+    const requestDeadline = options?.requestContext?.deadline;
+    const deadline =
+      timeoutDeadline === undefined
+        ? requestDeadline
+        : requestDeadline === undefined
+          ? timeoutDeadline
+          : Math.min(timeoutDeadline, requestDeadline);
     const executionHandle = executionLifecycle.begin({
       ...(options?.executionId ? { executionId: options.executionId } : {}),
       toolName: Array.isArray(input) ? 'toolbox.batch' : (firstCall?.name ?? 'toolbox.unknown'),
       callId: firstCall?.id ?? `toolbox-call-${nowFunction()}`,
-      ...(options?.ownerId ? { ownerId: options.ownerId } : {}),
+      ...((options?.ownerId ?? requestContext?.authority.ownerId) !== undefined
+        ? { ownerId: options?.ownerId ?? requestContext?.authority.ownerId }
+        : {}),
       ...(options?.parentExecutionId ? { parentExecutionId: options.parentExecutionId } : {}),
       ...(options?.signal instanceof AbortSignal ? { signal: options.signal } : {}),
-      ...(options?.timeout !== undefined ? { deadline: nowFunction() + options.timeout } : {}),
+      ...(deadline !== undefined ? { deadline } : {}),
       now: nowFunction,
       ...(options?.setTimeoutFunction ? { setTimeoutFunction: options.setTimeoutFunction } : {}),
       ...(options?.requestContext
@@ -946,6 +957,9 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
           }
         : {}),
     });
+    if (deadline !== undefined && deadline <= nowFunction()) {
+      executionHandle.abort('deadline', 'Execution deadline exceeded');
+    }
     executionHandle.activate();
     options = { ...options, signal: executionHandle.signal };
     let hasSingleChild = false;
@@ -1247,6 +1261,9 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
             options?.stream !== undefined ||
             options?.elicit ||
             options?.requestContext ||
+            options?.now !== undefined ||
+            options?.setTimeoutFunction !== undefined ||
+            options?.clearTimeoutFunction !== undefined ||
             durableOperationKey !== undefined ||
             (options !== undefined && approvalResumeSymbol in options) ||
             (options !== undefined && approvalConsumeSymbol in options)
@@ -1256,6 +1273,13 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
                   ...(options?.timeout !== undefined ? { timeout: options.timeout } : {}),
                   ...(options?.stream !== undefined ? { stream: options.stream } : {}),
                   ...(options?.elicit ? { elicit: options.elicit } : {}),
+                  ...(options?.now ? { now: options.now } : {}),
+                  ...(options?.setTimeoutFunction
+                    ? { setTimeoutFunction: options.setTimeoutFunction }
+                    : {}),
+                  ...(options?.clearTimeoutFunction
+                    ? { clearTimeoutFunction: options.clearTimeoutFunction }
+                    : {}),
                   ownerId: executionHandle.snapshot().ownerId,
                   parentExecutionId: executionHandle.id,
                   ...(privilegedContextMirrorHandle ? { privilegedContextMirrorHandle } : {}),

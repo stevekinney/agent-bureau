@@ -155,6 +155,7 @@ export function withToolboxIdempotency(
     fields: { id: string },
     cacheKey: string,
     toolName: string,
+    attemptId?: string,
   ): ToolExecutionResult {
     return {
       callId: fields.id,
@@ -166,6 +167,7 @@ export function withToolboxIdempotency(
       idempotency: {
         key: cacheKey,
         outcome: 'unknown-outcome',
+        ...(attemptId ? { attemptId } : {}),
       },
       action: {
         type: 'approval',
@@ -232,20 +234,7 @@ export function withToolboxIdempotency(
     if (requestContext.authority.tenantId !== tenantId) {
       throw new Error('Idempotency tenantId must match the request authority tenantId.');
     }
-    const authority = requestContext.authority;
-    const cacheKey = stableStringifyJson([
-      tenantId,
-      authority.principalId,
-      authority.ownerId,
-      authority.authorizationRevision,
-      [...authority.capabilities].sort(),
-      requestContext.audience ?? null,
-      requestContext.agentId ?? null,
-      requestContext.runId,
-      policyRevision,
-      revision,
-      baseKey,
-    ] as never);
+    const cacheKey = stableStringifyJson([tenantId, revision, baseKey]);
     const cached = await getCacheEntry(cache, cacheKey);
 
     const receipt = executionIdempotencyOptions?.resolutionReceipt;
@@ -269,11 +258,11 @@ export function withToolboxIdempotency(
         ) &&
         Boolean(verifyResolutionReceipt && (await verifyResolutionReceipt(receipt)));
       if (!validReceipt || !cached.attemptId) {
-        return createUnknownOutcomeResult(fields, cacheKey, cached.toolName);
+        return createUnknownOutcomeResult(fields, cacheKey, cached.toolName, cached.attemptId);
       }
       const startedAt = now();
       if (cached.leaseExpiresAt !== undefined && startedAt < cached.leaseExpiresAt) {
-        return createUnknownOutcomeResult(fields, cacheKey, cached.toolName);
+        return createUnknownOutcomeResult(fields, cacheKey, cached.toolName, cached.attemptId);
       }
       execution = {
         status: 'started',
@@ -295,9 +284,15 @@ export function withToolboxIdempotency(
       );
       if (!replaced) {
         const current = await cache.getState(cacheKey);
+        const currentAttemptId = current?.status === 'started' ? current.attemptId : undefined;
         return current?.status === 'completed'
           ? createDedupedResult(fields, cacheKey, current)
-          : createUnknownOutcomeResult(fields, cacheKey, current?.toolName ?? cached.toolName);
+          : createUnknownOutcomeResult(
+              fields,
+              cacheKey,
+              current?.toolName ?? cached.toolName,
+              currentAttemptId,
+            );
       }
       started = { outcome: 'claimed' } as const;
     } else {
@@ -320,7 +315,7 @@ export function withToolboxIdempotency(
     if (started.outcome === 'existing') {
       const entry = started.entry;
       if (entry.status === 'started') {
-        return createUnknownOutcomeResult(fields, cacheKey, entry.toolName);
+        return createUnknownOutcomeResult(fields, cacheKey, entry.toolName, entry.attemptId);
       }
 
       return createDedupedResult(fields, cacheKey, entry);
