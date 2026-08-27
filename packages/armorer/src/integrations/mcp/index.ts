@@ -439,15 +439,19 @@ function buildMcpToolDefinitionFromConfiguration(
           result = await runnable.executeWith(executeOptions);
         }
       } catch (error) {
-        execution?.settle();
         const message = error instanceof Error ? error.message : String(error);
-        return {
+        const errorResult = {
           content: toTextContent(message),
           isError: true,
         };
+        execution?.settle(errorResult);
+        return errorResult;
       }
-      execution?.settle(result);
-      return options.formatResult ? options.formatResult(result) : toCallToolResult(result);
+      const callResult = options.formatResult
+        ? options.formatResult(result)
+        : toCallToolResult(result);
+      execution?.settle(callResult);
+      return callResult;
     },
   };
 

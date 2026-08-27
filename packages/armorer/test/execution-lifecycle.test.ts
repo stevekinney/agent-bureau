@@ -198,6 +198,21 @@ describe('execution lifecycle', () => {
     ).toThrow('Execution already exists: stable-execution');
   });
 
+  it('does not abort a settled handle or retain owner abort listeners', async () => {
+    const lifecycle = createExecutionLifecycle();
+    const settled = lifecycle.begin({ toolName: 'settled', callId: 'settled' });
+    settled.settle('done');
+    expect(settled.abort('shutdown', 'late')).toBe(false);
+    expect(settled.signal.aborted).toBe(false);
+
+    const inFlight = lifecycle.begin({ toolName: 'in-flight', callId: 'in-flight' });
+    inFlight.activate();
+    inFlight.settle('done');
+    await lifecycle.shutdown();
+    expect(inFlight.signal.aborted).toBe(false);
+    expect(lifecycle.completed).toBe(true);
+  });
+
   it('reports FIFO queue positions without running cancelled work', async () => {
     const limiter = createConcurrencyLimiter(1)!;
     let release!: () => void;
@@ -220,5 +235,29 @@ describe('execution lifecycle', () => {
     await expect(third).rejects.toThrow('remove third');
     release();
     await Promise.all([first, second]);
+  });
+
+  it('continues promoting queued work when a position observer throws', async () => {
+    const limiter = createConcurrencyLimiter(1)!;
+    let release!: () => void;
+    const first = limiter.run(() => new Promise<void>((resolve) => (release = resolve)));
+    const started: string[] = [];
+    const second = limiter.run(
+      async () => {
+        started.push('second');
+      },
+      {
+        onQueuePosition: () => {
+          throw new Error('observer failed');
+        },
+      },
+    );
+    const third = limiter.run(async () => {
+      started.push('third');
+    });
+
+    release();
+    await Promise.all([first, second, third]);
+    expect(started).toEqual(['second', 'third']);
   });
 });

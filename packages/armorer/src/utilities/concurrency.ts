@@ -87,7 +87,12 @@ export function createConcurrencyLimiter(limit?: number): ConcurrencyLimiter | u
         updatePosition: (position: number) => {
           if (position === lastPosition) return;
           lastPosition = position;
-          options.onQueuePosition?.(position);
+          try {
+            options.onQueuePosition?.(position);
+          } catch {
+            // Queue-position observers are informational. A consumer failure
+            // must not reject admission or interrupt queue bookkeeping.
+          }
         },
         promote: () => {
           if (!queued) return promoteNext();

@@ -261,6 +261,35 @@ describe('createMCP', () => {
     }
   });
 
+  it('retains the plain-call error result in lifecycle inspection', async () => {
+    const toolbox = createToolbox();
+    createTool(
+      {
+        name: 'plain-error-outcome',
+        description: 'plain tool with a deterministic failure',
+        input: z.object({}),
+        async execute() {
+          throw new Error('plain execution failed');
+        },
+      },
+      toolbox,
+    );
+    const { client, server } = await connect(toolbox);
+    try {
+      const result = await client.callTool({ name: 'plain-error-outcome', arguments: {} });
+      expect(result).toMatchObject({
+        isError: true,
+        content: [{ type: 'text', text: 'plain execution failed' }],
+      });
+      const report = await server.shutdown();
+      expect(report.snapshots).toHaveLength(1);
+      expect(report.snapshots[0]?.result).toEqual(result);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
   it('converts toolbox tools into MCP tool definitions', async () => {
     const toolbox = createToolbox();
     createTool(

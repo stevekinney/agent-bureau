@@ -2326,11 +2326,20 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       for (const toolbox of runToolboxes) toolbox.closeAdmission();
       for (const activeRun of activeRuns) activeRun.abort('Bureau disposed');
       const toolboxes = [runtime.baseToolbox, ...runToolboxes];
-      await Promise.all(
+      const toolboxShutdownResults = await Promise.allSettled(
         toolboxes.map((toolbox) =>
           toolbox.shutdown({ policy: 'abort', reason: 'Bureau disposed' }),
         ),
       );
+      for (const result of toolboxShutdownResults) {
+        if (result.status === 'rejected') {
+          diagnose({
+            level: 'error',
+            scope: 'dispose',
+            message: `[bureau] Error during toolbox shutdown: ${serializeUnknownError(result.reason)}`,
+          });
+        }
+      }
 
       // All pre-teardown is BEST-EFFORT, and the whole body is under an OUTER
       // try/finally so the critical backend teardown (engine → storage → store)

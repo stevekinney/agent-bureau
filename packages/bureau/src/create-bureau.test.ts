@@ -2817,8 +2817,25 @@ describe('createBureau', () => {
 
   it('disposes cleanly more than once', async () => {
     const bureau = await createBureau();
-    bureau.dispose();
-    bureau.dispose();
+    await bureau.dispose();
+    await bureau.dispose();
+  });
+
+  it('continues disposal when toolbox shutdown rejects', async () => {
+    const toolbox = createEmptyToolbox();
+    const diagnostics: string[] = [];
+    const bureau = await createBureau({
+      toolbox,
+      onDiagnostic: (event) => diagnostics.push(event.message),
+    });
+    toolbox.shutdown = async () => {
+      throw new Error('toolbox shutdown failed');
+    };
+
+    const disposal = bureau.dispose();
+    expect(bureau.dispose()).toBe(disposal);
+    await disposal;
+    expect(diagnostics).toContainEqual(expect.stringContaining('Error during toolbox shutdown'));
   });
 
   it('disposes a sqlite-backed durable bureau cleanly more than once', async () => {

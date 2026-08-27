@@ -207,18 +207,16 @@ export function createExecutionLifecycle(defaultOwnerId = 'anonymous'): Executio
       records.set(executionId, record);
       const transition = (patch: Partial<ExecutionSnapshot>) => publish(record, patch, now());
       const abort = (source: ExecutionAbortSource = 'owner', reason?: unknown) => {
-        if (!controller.signal.aborted) controller.abort(reason);
-        if (
-          record.snapshot.state === 'terminal' ||
-          record.snapshot.state === 'unknown-effect' ||
-          record.snapshot.state === 'abort-requested'
-        )
+        if (record.snapshot.state === 'terminal' || record.snapshot.state === 'unknown-effect')
           return false;
+        if (record.snapshot.state === 'abort-requested') return false;
         transition({ state: 'abort-requested', abortSource: source, abortReason: reason });
+        if (!controller.signal.aborted) controller.abort(reason);
         return true;
       };
       const finish = (patch: Partial<ExecutionSnapshot>) => {
         if (record.snapshot.state === 'terminal') return;
+        removeAbortListeners();
         if (record.snapshot.state === 'unknown-effect') {
           if (Object.prototype.hasOwnProperty.call(patch, 'result')) {
             transition({ result: patch.result });
@@ -265,11 +263,26 @@ export function createExecutionLifecycle(defaultOwnerId = 'anonymous'): Executio
         whenSettled: () => record.settled,
       };
       handles.set(executionId, handle);
+      const removeCallerAbortListener = () => {
+        options.signal?.removeEventListener('abort', onCallerAbort);
+      };
+      const removeOwnerAbortListener = () => {
+        ownerController.signal.removeEventListener('abort', onOwnerAbort);
+      };
+      const removeAbortListeners = () => {
+        removeCallerAbortListener();
+        removeOwnerAbortListener();
+      };
+      function onCallerAbort() {
+        abort('caller', options.signal?.reason);
+      }
+      function onOwnerAbort() {
+        abort('owner', ownerController.signal.reason);
+      }
       if (options.signal) {
-        const onAbort = () => abort('caller', options.signal?.reason);
-        if (options.signal.aborted) onAbort();
+        if (options.signal.aborted) onCallerAbort();
         else {
-          options.signal.addEventListener('abort', onAbort, { once: true });
+          options.signal.addEventListener('abort', onCallerAbort, { once: true });
         }
       }
       if (options.deadline !== undefined && options.scheduleDeadline !== false) {
@@ -281,11 +294,7 @@ export function createExecutionLifecycle(defaultOwnerId = 'anonymous'): Executio
           Math.max(0, options.deadline - now()),
         );
       }
-      ownerController.signal.addEventListener(
-        'abort',
-        () => abort('owner', ownerController.signal.reason),
-        { once: true },
-      );
+      ownerController.signal.addEventListener('abort', onOwnerAbort, { once: true });
       for (const listener of listeners)
         listener(Object.freeze({ type: 'execution.lifecycle', snapshot: record.snapshot }));
       return handle;

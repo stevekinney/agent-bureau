@@ -583,7 +583,7 @@ describe('tap()', () => {
     expect((tapped as any).metadata).toMatchObject({ tier: 'premium' });
   });
 
-  it('forwards signal and timeout to the wrapped tool', async () => {
+  it('forwards timeout and an execution-scoped signal to the wrapped tool', async () => {
     const observed: {
       signal?: MinimalAbortSignal | undefined;
       timeout?: number | undefined;
@@ -609,7 +609,7 @@ describe('tap()', () => {
 
     expect(observed.signal).not.toBe(controller.signal);
     controller.abort('caller stopped');
-    expect(observed.signal?.aborted).toBe(true);
+    expect(observed.signal?.aborted).toBe(false);
     expect(observed.timeout).toBe(99);
   });
 
@@ -668,7 +668,7 @@ describe('when()', () => {
     expect(result).toMatchObject({ value: 0 });
   });
 
-  it('forwards execution options to branch tools', async () => {
+  it('forwards execution options without aborting a settled branch', async () => {
     const observed: {
       signal?: MinimalAbortSignal | undefined;
       timeout?: number | undefined;
@@ -694,7 +694,7 @@ describe('when()', () => {
 
     expect(observed.signal).not.toBe(controller.signal);
     controller.abort('caller stopped');
-    expect(observed.signal?.aborted).toBe(true);
+    expect(observed.signal?.aborted).toBe(false);
     expect(observed.timeout).toBe(55);
   });
 
@@ -772,7 +772,7 @@ describe('parallel()', () => {
     expect(errors).toEqual([{ stepIndex: 1, stepName: 'fail' }]);
   });
 
-  it('forwards signal and timeout to each tool', async () => {
+  it('forwards timeout and execution-scoped signals to each tool', async () => {
     const observed: Array<{
       signal?: MinimalAbortSignal | undefined;
       timeout?: number | undefined;
@@ -801,7 +801,7 @@ describe('parallel()', () => {
       expect(entry.timeout).toBe(25);
     }
     controller.abort('caller stopped');
-    for (const entry of observed) expect(entry.signal?.aborted).toBe(true);
+    for (const entry of observed) expect(entry.signal?.aborted).toBe(false);
   });
 
   it('forwards stream to each parallel branch', async () => {

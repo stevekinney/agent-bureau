@@ -93,7 +93,7 @@ describe('preprocess', () => {
     expect(preprocessed.tags).toBeUndefined();
   });
 
-  it('forwards signal and timeout to the wrapped tool', async () => {
+  it('forwards timeout and an execution-scoped signal through preprocess', async () => {
     const observed: { signal?: AbortSignal; timeout?: number } = {};
     const tool = createTool({
       name: 'context-forward',
@@ -116,7 +116,7 @@ describe('preprocess', () => {
 
     expect(observed.signal).not.toBe(controller.signal);
     controller.abort('caller stopped');
-    expect(observed.signal?.aborted).toBe(true);
+    expect(observed.signal?.aborted).toBe(false);
     expect(observed.timeout).toBe(123);
   });
 
@@ -243,7 +243,7 @@ describe('postprocess', () => {
     expect(postprocessed.input).toBe(input);
   });
 
-  it('forwards signal and timeout to the wrapped tool', async () => {
+  it('forwards timeout and an execution-scoped signal through postprocess', async () => {
     const observed: { signal?: AbortSignal; timeout?: number } = {};
     const tool = createTool({
       name: 'context-forward',
@@ -266,7 +266,7 @@ describe('postprocess', () => {
 
     expect(observed.signal).not.toBe(controller.signal);
     controller.abort('caller stopped');
-    expect(observed.signal?.aborted).toBe(true);
+    expect(observed.signal?.aborted).toBe(false);
     expect(observed.timeout).toBe(321);
   });
 
