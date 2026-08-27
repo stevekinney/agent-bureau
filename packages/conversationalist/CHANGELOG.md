@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.0.0
+
+### Major Changes
+
+- d229843: Make public conversation state deeply immutable at runtime and replace the permissive history snapshot shape with a versioned, revisioned, integrity-protected envelope that restores strictly.
+- 8bddca2: Make controller close and disposal behavior truthful, add an immutable framework-neutral external-store snapshot contract, revision-aware commands and reconciliation, abortable compaction cleanup, sequenced mutation and lifecycle events, and identity-bound transcript plugins.
+
+### Minor Changes
+
+- d947aad: Declare and verify Conversationalist's Bun, Node.js, browser, SvelteKit SSR, and Vercel host matrix, and add a lossy redacted projection for authorized browser and hydration payloads.
+
+### Patch Changes
+
+- 22de20a: Fix the published root and `conversation` entry points so they no longer leak a `node:module`/`createRequire` shim into browser bundles or a required `@anthropic-ai/sdk` type reference into strict consumers that have not installed the optional peer dependency. `AnthropicConversation` and its constituent block types now live in a dependency-free `adapters/anthropic/types` module that `history.ts` imports directly, and `interoperability`'s Node-crypto fallback reads `node:crypto` via `process.getBuiltinModule` instead of a bare `require(...)` call. This narrows the synchronous hashing helpers used internally by `interoperability` (and by `armorer`, which now declares `"node": "^20.16.0 || >=22.3.0"`) to Bun or Node.js versions with `process.getBuiltinModule`; the async `sha256Hex` remains universal via Web Crypto.
+
 ## 0.7.0
 
 ### Minor Changes
