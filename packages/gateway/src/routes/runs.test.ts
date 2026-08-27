@@ -2,7 +2,14 @@ import type { GenerateFunction, Toolbox } from '@lostgradient/operative';
 import { createTool, createToolbox, type ToolRequestContext } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 
-import { createTestGateway, requestJSON, waitForRunState } from '../test';
+import {
+  attackerRequestContextFixture,
+  createGatewayAuthorityTestApiKey,
+  createTestGateway,
+  expectedPersistedApiKeyAuthority,
+  requestJSON,
+  waitForRunState,
+} from '../test';
 import type { PendingReview, PendingToolApprovalReview, RunEventRecord } from '../types';
 import { assembleRunTimeline, findParkedReview } from './runs';
 
@@ -79,16 +86,7 @@ describe('runs routes', () => {
       method: 'POST',
       body: JSON.stringify({
         message: 'Hello',
-        requestContext: {
-          authority: {
-            principalId: 'attacker',
-            tenantId: 'attacker-tenant',
-            ownerId: 'attacker-owner',
-            capabilities: ['admin'],
-            authorizationRevision: 'attacker:1',
-          },
-          audience: 'operator',
-        },
+        requestContext: attackerRequestContextFixture(),
       }),
     });
     expect(response.status).toBe(201);
@@ -109,30 +107,21 @@ describe('runs routes', () => {
     });
   });
 
-  it('POST /api/v1/runs derives request authority from verified gateway authentication metadata', async () => {
+  it('POST /api/v1/runs derives request authority from the verified API key and ignores caller context', async () => {
     const gateway = await createTestGateway({
-      authToken: 'gateway-secret',
       generate: createMockGenerate(),
       storage: { type: 'memory' },
       toolbox: createEmptyToolbox(),
     });
+    const { key, plaintext } = await createGatewayAuthorityTestApiKey(gateway);
 
     const response = await requestJSON(gateway, '/api/v1/runs', {
       method: 'POST',
-      headers: { authorization: 'Bearer gateway-secret' },
+      headers: { authorization: `Bearer ${plaintext}` },
       body: JSON.stringify({
         agentName: 'writer',
         message: 'Hello',
-        requestContext: {
-          authority: {
-            principalId: 'attacker',
-            tenantId: 'attacker-tenant',
-            ownerId: 'attacker-owner',
-            capabilities: ['admin'],
-            authorizationRevision: 'attacker:1',
-          },
-          audience: 'operator',
-        },
+        requestContext: attackerRequestContextFixture(),
       }),
     });
     expect(response.status).toBe(201);
@@ -140,14 +129,9 @@ describe('runs routes', () => {
     const body = (await response.json()) as { sessionId: string };
     const session = await gateway.bureau.getSession(body.sessionId);
 
-    expect(session?.metadata['lastRequestAuthority']).toEqual({
-      principalId: 'static-token',
-      tenantId: 'bureau',
-      ownerId: 'writer',
-      capabilities: ['tools:execute'],
-      authorizationRevision: 'gateway:static-token',
-      audience: 'operator',
-    });
+    expect(session?.metadata['lastRequestAuthority']).toEqual(
+      expectedPersistedApiKeyAuthority(key, 'writer'),
+    );
   });
 
   it('POST /api/v1/runs returns 429 when a flow-control policy rejects admission (AB-13)', async () => {

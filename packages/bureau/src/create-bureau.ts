@@ -142,6 +142,66 @@ function normalizeRunRequestContext(
   });
 }
 
+export function recoveredRequestContextFromMetadata(
+  metadata: Record<string, JSONValue>,
+  runId: string,
+  agentName: string,
+): ToolRequestContext | undefined {
+  const authorities = metadata['lastRequestAuthorities'];
+  const candidate =
+    authorities && typeof authorities === 'object' && !Array.isArray(authorities)
+      ? (authorities as Record<string, JSONValue>)[runId]
+      : undefined;
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+    return undefined;
+  }
+  const value = candidate as Record<string, JSONValue>;
+  const capabilities = value['capabilities'];
+  if (
+    typeof value['principalId'] !== 'string' ||
+    typeof value['tenantId'] !== 'string' ||
+    typeof value['ownerId'] !== 'string' ||
+    typeof value['authorizationRevision'] !== 'string' ||
+    !Array.isArray(capabilities) ||
+    !capabilities.every((capability) => typeof capability === 'string')
+  ) {
+    return undefined;
+  }
+  return normalizeRunRequestContext(
+    {
+      authority: {
+        principalId: value['principalId'],
+        tenantId: value['tenantId'],
+        ownerId: value['ownerId'],
+        capabilities: capabilities,
+        authorizationRevision: value['authorizationRevision'],
+      },
+      ...(value['audience'] !== undefined
+        ? { audience: value['audience'] as ToolRequestContext['audience'] }
+        : {}),
+    },
+    runId,
+    agentName,
+    undefined,
+  );
+}
+
+export function isTerminalApprovalBindingError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const code = (error as Record<string, unknown>)['code'];
+  return (
+    code === 'expired' ||
+    code === 'revoked' ||
+    code === 'already-consumed' ||
+    code === 'not-found' ||
+    code === 'invalid-binding'
+  );
+}
+
+export function emptyRecoveredStepMetadata(): Record<string, never> {
+  return {};
+}
+
 export function defaultSessionPersistenceSleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
@@ -897,6 +957,44 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
           ? agentName
           : nextSession.agentName;
 
+      const mergedMetadata: Record<string, JSONValue> = {
+        ...nextSession.metadata,
+        ...metadata,
+        ...(metadata['lastRequestAuthorities'] !== undefined
+          ? {
+              lastRequestAuthorities: {
+                ...(typeof nextSession.metadata['lastRequestAuthorities'] === 'object' &&
+                nextSession.metadata['lastRequestAuthorities'] !== null &&
+                !Array.isArray(nextSession.metadata['lastRequestAuthorities'])
+                  ? nextSession.metadata['lastRequestAuthorities']
+                  : {}),
+                ...(metadata['lastRequestAuthorities'] as Record<string, JSONValue>),
+              },
+            }
+          : {}),
+      };
+      const terminalRunId = mergedMetadata['lastRunId'];
+      const terminalStatus = mergedMetadata['lastRunStatus'];
+      if (
+        typeof terminalRunId === 'string' &&
+        (terminalStatus === 'completed' ||
+          terminalStatus === 'aborted' ||
+          terminalStatus === 'error')
+      ) {
+        const authorities = mergedMetadata['lastRequestAuthorities'];
+        if (
+          typeof authorities === 'object' &&
+          authorities !== null &&
+          !Array.isArray(authorities)
+        ) {
+          const { [terminalRunId]: _removed, ...remainingAuthorities } = authorities as Record<
+            string,
+            JSONValue
+          >;
+          mergedMetadata['lastRequestAuthorities'] = remainingAuthorities;
+        }
+      }
+
       return {
         ...nextSession,
         agentName: resolvedAgentName,
@@ -907,22 +1005,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
               baseConversationHistory,
             )
           : conversation.current,
-        metadata: {
-          ...nextSession.metadata,
-          ...metadata,
-          ...(metadata['lastRequestAuthorities'] !== undefined
-            ? {
-                lastRequestAuthorities: {
-                  ...(typeof nextSession.metadata['lastRequestAuthorities'] === 'object' &&
-                  nextSession.metadata['lastRequestAuthorities'] !== null &&
-                  !Array.isArray(nextSession.metadata['lastRequestAuthorities'])
-                    ? nextSession.metadata['lastRequestAuthorities']
-                    : {}),
-                  ...(metadata['lastRequestAuthorities'] as Record<string, JSONValue>),
-                },
-              }
-            : {}),
-        },
+        metadata: mergedMetadata,
       };
     });
   }
@@ -1914,12 +1997,54 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         // A mocked/custom engine that does not invoke Weft's recovery hook can
         // still reattach terminal visibility here. Real Weft recovery has
         // already taken the hook path above, including live event forwarding.
+        let recoveredServices: DurableRunDeps | undefined;
+        if (sessionStore && ownedSessionId) {
+          const fullSession = await sessionStore.load(ownedSessionId);
+          if (fullSession) {
+            const recoveredAgentName = isAgentRunWorkflowInput(metadata?.input)
+              ? metadata.input.agentName
+              : BUREAU_AGENT_NAME;
+            const requestContext = recoveredRequestContextFromMetadata(
+              fullSession.metadata,
+              handle.id,
+              recoveredAgentName,
+            );
+            const runRuntime = await runtime.createRunRuntime(
+              {
+                message:
+                  typeof fullSession.metadata['lastUserMessage'] === 'string'
+                    ? fullSession.metadata['lastUserMessage']
+                    : '',
+                sessionId: ownedSessionId,
+                runId: handle.id,
+                agentName: recoveredAgentName,
+                requestContext,
+              },
+              { liveStreaming: false },
+            );
+            recoveredServices = {
+              toolbox: runRuntime.toolbox,
+              getStepMetadata: emptyRecoveredStepMetadata,
+              options: {
+                generate: runRuntime.generate,
+                toolbox: runRuntime.toolbox,
+                conversation: new Conversation(fullSession.conversationHistory),
+                prepareStep: runRuntime.prepareStep,
+                onStep: runRuntime.onStep,
+                validateResponse: runRuntime.validateResponse,
+                executeOptions: { requestContext },
+                agentName: recoveredAgentName,
+                runId: handle.id,
+              },
+            };
+          }
+        }
         reattachRecoveredRun(
           handle.id,
           ownedSessionId!,
           handle,
           undefined,
-          undefined,
+          recoveredServices,
           sessionLoad.ok ? sessionLoad.session : null,
         );
       } else if (verdict === 'monitor') {
@@ -2375,10 +2500,11 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
             // was already consumed. Only an issued, revocable binding needs
             // revocation; failure to revoke stale state must not lose the
             // operator's denial decision.
+            if (!isTerminalApprovalBindingError(error)) throw error;
             diagnose({
               level: 'warn',
               scope: 'approval',
-              message: `[bureau] Could not revoke denied approval "${review.id}": ${serializeUnknownError(error)}`,
+              message: `[bureau] Denied approval "${review.id}" was already terminal or absent: ${serializeUnknownError(error)}`,
             });
           }
         }

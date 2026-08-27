@@ -76,11 +76,12 @@
  * environment) — that suite, and multi-transport (gRPC/REST) parity, are the
  * checks that still need the live reference implementation.
  */
+import type { ToolRequestContext } from 'armorer';
 import { BureauError } from 'bureau';
 import { Hono } from 'hono';
 import { z } from 'zod';
 
-import { resolvePrincipal } from '../middleware/authentication';
+import { resolvePrincipal, resolveTrustedRequestContext } from '../middleware/authentication';
 import { isRunFailure } from '../run-outcome';
 import type { Bureau, CreateRunRequest, PendingHumanWaitReview, RunDetail } from '../types';
 
@@ -348,6 +349,7 @@ async function handleSendMessage(
   bureau: Bureau,
   params: unknown,
   principal: string,
+  requestContext: ToolRequestContext | undefined,
 ): Promise<{ task: A2ATask }> {
   const { message, configuration } = parseParams(params, SendMessageParamsSchema);
   const text = flattenMessageText(message);
@@ -385,7 +387,11 @@ async function handleSendMessage(
     return { task: buildTask(bureau, resumed, { historyLength: configuration?.historyLength }) };
   }
 
-  const request: CreateRunRequest = { message: text, principal };
+  const request: CreateRunRequest = {
+    message: text,
+    principal,
+    ...(requestContext ? { requestContext } : {}),
+  };
   let summary;
   try {
     summary = await bureau.createRun(request);
@@ -432,10 +438,11 @@ async function dispatch(
   method: string,
   params: unknown,
   principal: string,
+  requestContext: ToolRequestContext | undefined,
 ): Promise<unknown> {
   switch (method) {
     case 'SendMessage':
-      return handleSendMessage(bureau, params, principal);
+      return handleSendMessage(bureau, params, principal, requestContext);
     case 'GetTask':
       return handleGetTask(bureau, params);
     case 'CancelTask':
@@ -482,7 +489,13 @@ export function createA2ARoutes(bureau: Bureau) {
     const { id = null, method, params } = envelope.data;
 
     try {
-      const result = await dispatch(bureau, method, params, resolvePrincipal(context));
+      const result = await dispatch(
+        bureau,
+        method,
+        params,
+        resolvePrincipal(context),
+        resolveTrustedRequestContext(context, undefined),
+      );
       return context.json(jsonRpcResult(id, result), 200);
     } catch (error) {
       return context.json(jsonRpcError(id, toJsonRpcError(error)), 200);

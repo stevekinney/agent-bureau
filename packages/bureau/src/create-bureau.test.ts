@@ -37,7 +37,7 @@ import { encode } from '@lostgradient/weft';
 import { KEYS, MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import type { ConditionalTextValueStore } from '@lostgradient/weft/storage/text-value-store';
 import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
-import { createTool, createToolbox } from 'armorer';
+import { ApprovalBindingError, createTool, createToolbox } from 'armorer';
 import { createMockTool, createTestToolbox } from 'armorer/test';
 import { afterEach, describe, expect, it, mock, spyOn } from 'bun:test';
 import { Conversation, createConversationHistory, getMessages } from 'conversationalist';
@@ -55,9 +55,12 @@ import {
   createHumanWaitContext,
   defaultSessionPersistenceSleep,
   detachBestEffortPromise,
+  emptyRecoveredStepMetadata,
   isRecoverableScheduledFireInput,
+  isTerminalApprovalBindingError,
   loadExistingScheduledSessionId,
   monitorRecoveredScheduledFire,
+  recoveredRequestContextFromMetadata,
   wireFlowControlSchedulerEvents,
   wireStreamEventTargetFrames,
 } from './create-bureau';
@@ -398,6 +401,78 @@ describe('create-bureau helper coverage', () => {
 });
 
 describe('createBureau', () => {
+  it('rebuilds only valid persisted request authority for recovered runs', () => {
+    expect(
+      recoveredRequestContextFromMetadata(
+        {
+          lastRequestAuthorities: {
+            'run-authorized': {
+              principalId: 'principal-1',
+              tenantId: 'tenant-1',
+              ownerId: 'owner-1',
+              capabilities: ['tools:execute', 'payments:charge'],
+              authorizationRevision: 'authorization-7',
+              audience: 'operator',
+            },
+          },
+        },
+        'run-authorized',
+        'billing-agent',
+      ),
+    ).toEqual({
+      authority: {
+        principalId: 'principal-1',
+        tenantId: 'tenant-1',
+        ownerId: 'owner-1',
+        capabilities: ['tools:execute', 'payments:charge'],
+        authorizationRevision: 'authorization-7',
+      },
+      audience: 'operator',
+      agentId: 'billing-agent',
+      runId: 'run-authorized',
+    });
+
+    expect(
+      recoveredRequestContextFromMetadata(
+        { lastRequestAuthorities: { 'other-run': {} } },
+        'run-missing',
+        'billing-agent',
+      ),
+    ).toBeUndefined();
+    expect(
+      recoveredRequestContextFromMetadata(
+        {
+          lastRequestAuthorities: {
+            'run-malformed': {
+              principalId: 'principal-1',
+              tenantId: 'tenant-1',
+              ownerId: 'owner-1',
+              capabilities: [42],
+              authorizationRevision: 'authorization-7',
+            },
+          },
+        },
+        'run-malformed',
+        'billing-agent',
+      ),
+    ).toBeUndefined();
+  });
+
+  it('classifies only terminal approval binding failures as safe to suppress', () => {
+    expect(
+      isTerminalApprovalBindingError(
+        new ApprovalBindingError('Approval binding was revoked.', 'revoked'),
+      ),
+    ).toBe(true);
+    expect(
+      isTerminalApprovalBindingError(
+        new ApprovalBindingError('Approval binding does not match.', 'mismatch'),
+      ),
+    ).toBe(false);
+    expect(isTerminalApprovalBindingError(undefined)).toBe(false);
+    expect(emptyRecoveredStepMetadata()).toEqual({});
+  });
+
   it('is not ready when no generate function is configured', async () => {
     const bureau = await createBureau();
     expect(bureau.ready).toBe(false);

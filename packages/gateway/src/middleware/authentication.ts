@@ -1,3 +1,4 @@
+import type { ToolRequestContext } from 'armorer';
 import type { Context } from 'hono';
 import { createMiddleware } from 'hono/factory';
 import { HTTPException } from 'hono/http-exception';
@@ -5,6 +6,21 @@ import { HTTPException } from 'hono/http-exception';
 import type { ApiKeyStore } from '../keys/types';
 
 const QUERY_TOKEN_PATH_ALLOW_LIST = new Set(['/api/v1/events']);
+const DEFAULT_BUREAU_AGENT_NAME = 'bureau';
+const TOOL_EXECUTION_CAPABILITY = 'tools:execute';
+
+function gatewayAuthorityOwnerId(agentName: string | undefined): string {
+  const trimmed = agentName?.trim();
+  return trimmed && trimmed.length > 0 ? trimmed : DEFAULT_BUREAU_AGENT_NAME;
+}
+
+function parseGatewayScopes(scopesHeader: string | undefined): string[] {
+  if (scopesHeader === undefined) return [];
+  return scopesHeader
+    .split(',')
+    .map((scope) => scope.trim())
+    .filter((scope) => scope.length > 0);
+}
 
 /**
  * Resolves the authenticated principal for the current request from the
@@ -18,6 +34,40 @@ const QUERY_TOKEN_PATH_ALLOW_LIST = new Set(['/api/v1/events']);
  */
 export function resolvePrincipal(context: Context): string {
   return context.req.header('x-auth-principal') ?? 'anonymous';
+}
+
+/**
+ * Builds the trusted Armorer request context from authentication metadata
+ * injected by `createAuthentication`. Caller-supplied request bodies and
+ * client-injected auth headers are intentionally ignored.
+ */
+export function resolveTrustedRequestContext(
+  context: Context,
+  agentName: string | undefined,
+): ToolRequestContext | undefined {
+  const principal = context.req.header('x-auth-principal');
+  if (!principal) return undefined;
+
+  const apiKeyId = context.req.header('x-api-key-id');
+  const capabilities = Array.from(
+    new Set([
+      TOOL_EXECUTION_CAPABILITY,
+      ...parseGatewayScopes(context.req.header('x-api-key-scopes')),
+    ]),
+  );
+  const ownerId = gatewayAuthorityOwnerId(agentName);
+
+  return {
+    authority: {
+      principalId: principal,
+      tenantId: 'bureau',
+      ownerId,
+      capabilities,
+      authorizationRevision:
+        apiKeyId === undefined ? `gateway:${principal}` : `gateway:api-key:${apiKeyId}`,
+    },
+    audience: 'operator',
+  };
 }
 
 /**

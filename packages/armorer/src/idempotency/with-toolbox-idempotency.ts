@@ -228,15 +228,17 @@ export function withToolboxIdempotency(
       throw new Error('Idempotency tenantId must match the request authority tenantId.');
     }
     const authority = requestContext.authority;
-    const authorityScope = stableStringifyJson([
+    const cacheKey = stableStringifyJson([
       tenantId,
       authority.principalId,
       authority.authorizationRevision,
       [...authority.capabilities].sort(),
       requestContext.agentId ?? null,
+      requestContext.runId,
       policyRevision,
+      revision,
+      baseKey,
     ] as never);
-    const cacheKey = `${authorityScope}:${revision}:${baseKey}`;
     const cached = await getCacheEntry(cache, cacheKey);
 
     const receipt = executionIdempotencyOptions?.resolutionReceipt;
@@ -425,5 +427,5 @@ function formatToolRevision(tool: unknown): string {
       }
     | undefined;
   const identity = candidate?.identity ?? candidate?.configuration?.identity;
-  return identity?.version ?? candidate?.id ?? '';
+  return candidate?.id ?? identity?.version ?? '';
 }

@@ -57,6 +57,7 @@ export function withIdempotency<T extends Tool>(tool: T, options: IdempotencyOpt
     tenantId,
     toolRevision = tool.id,
     ttl = DEFAULT_TTL,
+    now = Date.now,
     onCacheHit,
     onUnknownOutcome,
   } = options;
@@ -123,7 +124,7 @@ export function withIdempotency<T extends Tool>(tool: T, options: IdempotencyOpt
     const started = await claimCacheStarted(cache, key, {
       status: 'started',
       toolName: tool.name,
-      startedAt: Date.now(),
+      startedAt: now(),
       ttl,
       attemptId,
     });
@@ -138,14 +139,25 @@ export function withIdempotency<T extends Tool>(tool: T, options: IdempotencyOpt
     }
 
     // Execute the tool via its callable interface (params → result)
-    const result = executeOptions
-      ? await tool.executeWith({ params, ...executeOptions })
-      : await tool(params);
+    let result: unknown;
+    try {
+      result = executeOptions
+        ? await tool.executeWith({ params, ...executeOptions })
+        : await tool(params);
+    } catch (error) {
+      if (isPreExecutionFailure(error)) await cache.deleteStarted(key, attemptId);
+      throw error;
+    }
+
+    if (isPreExecutionResult(result)) {
+      await cache.deleteStarted(key, attemptId);
+      return result;
+    }
 
     const entry: CachedToolResult = {
       result,
       toolName: tool.name,
-      executedAt: Date.now(),
+      executedAt: now(),
       ttl,
     };
 
@@ -179,4 +191,28 @@ export function withIdempotency<T extends Tool>(tool: T, options: IdempotencyOpt
       return Reflect.get(target, prop, receiver as object) as unknown;
     },
   });
+}
+
+function isPreExecutionFailure(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const candidate = error as { category?: unknown; code?: unknown };
+  return (
+    ['validation', 'permission', 'unavailable', 'not_found'].includes(String(candidate.category)) ||
+    ['VALIDATION_ERROR', 'PERMISSION_DENIED', 'TOOL_UNAVAILABLE', 'NOT_FOUND'].includes(
+      String(candidate.code),
+    )
+  );
+}
+
+function isPreExecutionResult(result: unknown): boolean {
+  if (!result || typeof result !== 'object') return false;
+  const candidate = result as { outcome?: unknown; errorCategory?: unknown; error?: unknown };
+  if (candidate.outcome !== 'error' && candidate.outcome !== 'action_required') return false;
+  return (
+    candidate.outcome === 'action_required' ||
+    isPreExecutionFailure(candidate.error) ||
+    ['validation', 'permission', 'unavailable', 'not_found'].includes(
+      String(candidate.errorCategory),
+    )
+  );
 }

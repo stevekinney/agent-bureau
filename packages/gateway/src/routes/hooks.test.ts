@@ -1,7 +1,14 @@
 import type { GenerateFunction } from '@lostgradient/operative';
 import { describe, expect, it } from 'bun:test';
 
-import { createTestGateway, requestJSON } from '../test';
+import {
+  attackerRequestContextFixture,
+  createGatewayAuthorityTestApiKey,
+  createTestGateway,
+  expectedPersistedApiKeyAuthority,
+  requestJSON,
+  waitForRunState,
+} from '../test';
 
 function createMockGenerate(): GenerateFunction {
   return async () => ({ content: 'Done.', toolCalls: [] });
@@ -66,6 +73,32 @@ describe('webhook ingress routes (POST /hooks/*)', () => {
     const body = await response.json();
     expect(body.id).toBeString();
     expect(body.status).toBe('running');
+  });
+
+  it('derives request authority from the verified API key and ignores caller context', async () => {
+    const gateway = await createTestGateway({
+      generate: createMockGenerate(),
+      storage: { type: 'memory' },
+    });
+    const { key, plaintext } = await createGatewayAuthorityTestApiKey(gateway);
+
+    const response = await requestJSON(gateway, '/hooks/event?agent=hook-agent', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${plaintext}` },
+      body: JSON.stringify({
+        message: 'Trigger an event.',
+        requestContext: attackerRequestContextFixture(),
+      }),
+    });
+    expect(response.status).toBe(202);
+
+    const body = (await response.json()) as { id: string; sessionId: string };
+    await waitForRunState(gateway.bureau, body.id);
+    const session = await gateway.bureau.getSession(body.sessionId);
+
+    expect(session?.metadata['lastRequestAuthority']).toEqual(
+      expectedPersistedApiKeyAuthority(key, 'hook-agent'),
+    );
   });
 
   it('accepts optional session parameter from query string', async () => {

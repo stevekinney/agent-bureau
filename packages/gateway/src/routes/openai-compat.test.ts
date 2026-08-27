@@ -8,7 +8,13 @@ import { createTool, createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
-import { createTestGateway, requestJSON } from '../test';
+import {
+  attackerRequestContextFixture,
+  createGatewayAuthorityTestApiKey,
+  createTestGateway,
+  expectedPersistedApiKeyAuthority,
+  requestJSON,
+} from '../test';
 
 function createMockGenerate(): GenerateFunction {
   return async () => ({ content: 'Done.', toolCalls: [] });
@@ -85,6 +91,33 @@ describe('OpenAI-compat route (POST /v1/chat/completions)', () => {
     expect(body.choices[0].message.role).toBe('assistant');
     expect(body.id).toBeString();
     expect(body.created).toBeNumber();
+  });
+
+  it('derives request authority from the verified API key and ignores caller context', async () => {
+    const gateway = await createTestGateway({
+      generate: createMockGenerate(),
+      storage: { type: 'memory' },
+    });
+    const { key, plaintext } = await createGatewayAuthorityTestApiKey(gateway);
+
+    const response = await requestJSON(gateway, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${plaintext}` },
+      body: JSON.stringify({
+        model: 'openai-agent',
+        messages: [{ role: 'user', content: 'Hello' }],
+        requestContext: attackerRequestContextFixture(),
+      }),
+    });
+    expect(response.status).toBe(200);
+
+    const sessions = await gateway.bureau.listSessions();
+    expect(sessions).toHaveLength(1);
+    const session = await gateway.bureau.getSession(sessions[0]!.id);
+
+    expect(session?.metadata['lastRequestAuthority']).toEqual(
+      expectedPersistedApiKeyAuthority(key, 'openai-agent'),
+    );
   });
 
   it('returns SSE stream when stream: true is set', async () => {

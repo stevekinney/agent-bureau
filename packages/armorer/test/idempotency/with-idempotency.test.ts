@@ -313,6 +313,52 @@ describe('withIdempotency', () => {
     expect(callCount).toBe(2);
   });
 
+  it('uses the injected clock for started and completed cache timestamps', async () => {
+    const cacheHits: CachedToolResult[] = [];
+    const timestamp = Date.now();
+    const wrapped = withIdempotency(createTestTool(), {
+      cache,
+      tenantId: 'tenant-a',
+      now: () => timestamp,
+      onCacheHit: (_key, entry) => cacheHits.push(entry),
+    });
+
+    await wrapped({ a: 1, b: 2 });
+    await wrapped({ a: 1, b: 2 });
+
+    expect(cacheHits).toHaveLength(1);
+    expect(cacheHits[0]?.executedAt).toBe(timestamp);
+  });
+
+  it('clears claims when policy stops execution before the callback runs', async () => {
+    let executions = 0;
+    const tool = createTool({
+      name: 'approval-gated',
+      description: 'Requires approval before execution',
+      input: z.object({ value: z.string() }),
+      idempotencyKey: (input: unknown) => fullInputKey(input),
+      policy: {
+        beforeExecute: () => ({
+          status: 'needs_approval' as const,
+          reason: 'Operator approval required',
+          action: { message: 'Approve execution' },
+        }),
+      },
+      async execute({ value }) {
+        executions += 1;
+        return value;
+      },
+    });
+    const wrapped = withIdempotency(tool, { cache, tenantId: 'tenant-a' });
+
+    const first = await wrapped.execute({ value: 'one' }, { requestContext });
+    const second = await wrapped.execute({ value: 'one' }, { requestContext });
+
+    expect(first).toMatchObject({ outcome: 'action_required' });
+    expect(second).toMatchObject({ outcome: 'action_required' });
+    expect(executions).toBe(0);
+  });
+
   it('keeps delimiter-bearing tenant and revision tuples in distinct cache scopes', async () => {
     const first = withIdempotency(createTestTool(), {
       cache,
