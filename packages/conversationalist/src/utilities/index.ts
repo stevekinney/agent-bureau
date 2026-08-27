@@ -34,4 +34,4 @@ export { pairToolCallsWithResults } from './tool-calls';
 export { isTransientKey, stripTransientFromRecord, stripTransientMetadata } from './transient';
 
 // Type helpers
-export { hasOwnProperty, toReadonly } from './type-helpers';
+export { deepFreeze, hasOwnProperty, toReadonly } from './type-helpers';

@@ -49,6 +49,12 @@ function summaryIndexPayload(id: string): string {
   });
 }
 
+function persistedConversationHistory(
+  conversationHistory: ReturnType<typeof createConversationHistory>,
+) {
+  return JSON.parse(JSON.stringify(conversationHistory));
+}
+
 describe('createSessionStore', () => {
   it('exposes a specific error for repeated session save conflicts', () => {
     const error = new SessionConflictError('session-1');
@@ -69,7 +75,9 @@ describe('createSessionStore', () => {
     expect(loaded).toBeDefined();
     expect(loaded!.id).toBe(session.id);
     expect(loaded!.agentName).toBe('round-trip-agent');
-    expect(loaded!.conversationHistory).toEqual(session.conversationHistory);
+    expect(loaded!.conversationHistory).toEqual(
+      persistedConversationHistory(session.conversationHistory),
+    );
     expect(loaded!.revision).toBe(1);
   });
 
@@ -1129,7 +1137,9 @@ describe('createSessionStore', () => {
     expect(loaded).toBeDefined();
     expect(loaded!.metadata).toEqual({ existing: 'value', newKey: 'newValue' });
     // Conversation should be untouched
-    expect(loaded!.conversationHistory).toEqual(session.conversationHistory);
+    expect(loaded!.conversationHistory).toEqual(
+      persistedConversationHistory(session.conversationHistory),
+    );
   });
 
   it('updateMetadata is a no-op for nonexistent session', async () => {
