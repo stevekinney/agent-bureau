@@ -1816,6 +1816,38 @@ describe('isTool', () => {
     await first;
   });
 
+  it('starts a relative execution timeout after queued admission', async () => {
+    let releaseFirst!: () => void;
+    let executions = 0;
+    const tool = createTool({
+      name: 'queued-relative-timeout',
+      description: 'does not spend execution timeout while queued',
+      concurrency: 1,
+      input: z.object({}),
+      async execute() {
+        executions += 1;
+        if (executions === 1) await new Promise<void>((resolve) => (releaseFirst = resolve));
+        return executions;
+      },
+    });
+
+    const first = tool.executeWith({ params: {}, callId: 'relative-timeout-first' });
+    while (executions === 0) await Promise.resolve();
+    const queued = tool.executeWith({
+      params: {},
+      callId: 'relative-timeout-queued',
+      timeout: 10,
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    releaseFirst();
+
+    await expect(first).resolves.toMatchObject({ outcome: 'success' });
+    await expect(queued).resolves.toMatchObject({ outcome: 'success', result: 2 });
+    expect(tool.executions.inspect({ callId: 'relative-timeout-queued' })[0]).toMatchObject({
+      state: 'terminal',
+    });
+  });
+
   it('uses the earlier request deadline when it is sooner than the execution timeout', async () => {
     const timing = createManualExecutionTiming();
     const tool = createTool({

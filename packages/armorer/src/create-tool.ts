@@ -730,15 +730,11 @@ export function createTool<
   ): Promise<ToolExecutionResult> => {
     const resolvedTimeout = options?.timeout ?? timeout;
     const nowFunction = options?.now ?? Date.now;
-    const timeoutDeadline =
-      resolvedTimeout !== undefined ? nowFunction() + resolvedTimeout : undefined;
     const requestDeadline = options?.requestContext?.deadline;
-    const deadline =
-      timeoutDeadline === undefined
-        ? requestDeadline
-        : requestDeadline === undefined
-          ? timeoutDeadline
-          : Math.min(timeoutDeadline, requestDeadline);
+    // Request deadlines are absolute and govern the whole lifecycle,
+    // including queueing. Execution timeouts are relative and begin only
+    // after admission, in withTimeout inside executeInner.
+    const deadline = requestDeadline;
     const executionHandle = beginExecutionLifecycle(toolCall.id, options, deadline, nowFunction);
     if (deadline !== undefined && deadline <= nowFunction()) {
       executionHandle.abort('deadline', 'Execution deadline exceeded');
@@ -1660,15 +1656,11 @@ export function createTool<
       ...(resolvedTimeout !== undefined ? { timeout: resolvedTimeout } : {}),
     };
     const nowFunction = options.now ?? Date.now;
-    const timeoutDeadline =
-      resolvedTimeout !== undefined ? nowFunction() + resolvedTimeout : undefined;
     const requestDeadline = options.requestContext?.deadline;
-    const deadline =
-      timeoutDeadline === undefined
-        ? requestDeadline
-        : requestDeadline === undefined
-          ? timeoutDeadline
-          : Math.min(timeoutDeadline, requestDeadline);
+    // Request deadlines are absolute and govern the whole lifecycle,
+    // including queueing. Execution timeouts are relative and begin only
+    // after admission, in withTimeout inside executeInner.
+    const deadline = requestDeadline;
     const executionHandle = beginExecutionLifecycle(toolCall.id, options, deadline, nowFunction);
     if (deadline !== undefined && deadline <= nowFunction()) {
       executionHandle.abort('deadline', 'Execution deadline exceeded');

@@ -537,15 +537,26 @@ describe('createBureau', () => {
     expect(
       hasRecoverableTransportAuthority({
         lastRunStatus: 'completed',
+        lastRunId: 'run-terminal',
         lastRequestAuthority: authority,
       }),
     ).toBe(false);
     expect(
       hasRecoverableTransportAuthority({
         lastRunStatus: 'running',
+        lastRunId: 'run-active',
         lastRequestAuthorities: { 'run-active': authority },
       }),
     ).toBe(true);
+    expect(
+      hasRecoverableTransportAuthority({
+        lastRunStatus: 'running',
+        lastRunId: 'run-active',
+        lastRequestAuthorities: {
+          'run-stale': authority,
+        },
+      }),
+    ).toBe(false);
   });
 
   it('classifies only terminal approval binding failures as safe to suppress', () => {
@@ -4420,6 +4431,7 @@ describe('createBureau review queue (AB-20)', () => {
         agentName: 'bureau',
         conversationHistory: createConversationHistory({ id: 'deferred-authority-recovery' }),
         metadata: {
+          lastRunId: 'run-deferred-authority',
           lastRunStatus: 'running',
           lastRequestAuthorities: {
             'run-deferred-authority': {
@@ -4460,8 +4472,18 @@ describe('createBureau review queue (AB-20)', () => {
 
       try {
         expect(recoverAllSpy).not.toHaveBeenCalled();
+        const recoveryBarrier = bureau.waitForRecovery?.();
+        expect(recoveryBarrier).toBeDefined();
+        expect(bureau.waitForRecovery?.()).toBe(recoveryBarrier);
+        let recoverySettled = false;
+        void recoveryBarrier!.then(() => {
+          recoverySettled = true;
+        });
+        await Promise.resolve();
+        expect(recoverySettled).toBe(false);
         bureau.setRequestAuthorityValidator(() => true);
-        await bureau.waitForRecovery?.();
+        await recoveryBarrier;
+        expect(recoverySettled).toBe(true);
         expect(diagnostics).toContainEqual(
           expect.stringContaining(
             'Deferred durable run recovery failed: deferred recovery unavailable',

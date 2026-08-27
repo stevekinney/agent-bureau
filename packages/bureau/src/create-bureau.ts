@@ -205,18 +205,25 @@ export function hasRecoverableTransportAuthority(metadata: Record<string, JSONVa
   if (metadata['lastRunStatus'] !== 'running') return false;
   const requiresTransportValidator = (revision: unknown): boolean =>
     typeof revision === 'string' && revision !== 'bureau:1' && revision !== 'bureau:scheduler:1';
-  const legacyAuthority = metadata['lastRequestAuthority'];
-  if (legacyAuthority && typeof legacyAuthority === 'object' && !Array.isArray(legacyAuthority)) {
-    const revision = (legacyAuthority as Record<string, JSONValue>)['authorizationRevision'];
-    if (requiresTransportValidator(revision)) return true;
-  }
+  const lastRunId = metadata['lastRunId'];
+  if (typeof lastRunId !== 'string' || !lastRunId) return false;
   const authorities = metadata['lastRequestAuthorities'];
-  if (!authorities || typeof authorities !== 'object' || Array.isArray(authorities)) return false;
-  return Object.values(authorities as Record<string, JSONValue>).some((value) => {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-    const revision = (value as Record<string, JSONValue>)['authorizationRevision'];
-    return requiresTransportValidator(revision);
-  });
+  if (authorities && typeof authorities === 'object' && !Array.isArray(authorities)) {
+    const activeAuthority = (authorities as Record<string, JSONValue>)[lastRunId];
+    if (!activeAuthority || typeof activeAuthority !== 'object' || Array.isArray(activeAuthority)) {
+      return false;
+    }
+    return requiresTransportValidator(
+      (activeAuthority as Record<string, JSONValue>)['authorizationRevision'],
+    );
+  }
+  const legacyAuthority = metadata['lastRequestAuthority'];
+  if (!legacyAuthority || typeof legacyAuthority !== 'object' || Array.isArray(legacyAuthority)) {
+    return false;
+  }
+  return requiresTransportValidator(
+    (legacyAuthority as Record<string, JSONValue>)['authorizationRevision'],
+  );
 }
 
 export function isTerminalApprovalBindingError(error: unknown): boolean {
@@ -771,6 +778,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   let durableRecoveryDeferred = false;
   let durableRecoveryStarted = false;
   let durableRecoveryBarrier: Promise<void> = Promise.resolve();
+  let resolveDurableRecoveryBarrier: (() => void) | undefined;
   const liveFrameListeners = new Set<(frame: ServerFrame) => void>();
   // AB-96 — terminal RunReports, cached at the moment each run's lifecycle
   // event fires so `getRunReport` never needs to re-derive them.
@@ -3350,13 +3358,14 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       if (validator && durableRecoveryDeferred && !durableRecoveryStarted) {
         durableRecoveryDeferred = false;
         durableRecoveryStarted = true;
-        durableRecoveryBarrier = recoverDurableRuns().catch((error) => {
+        const recovery = recoverDurableRuns().catch((error) => {
           diagnose({
             level: 'error',
             scope: 'recovery',
             message: `[bureau] Deferred durable run recovery failed: ${serializeUnknownError(error)}`,
           });
         });
+        void recovery.then(() => resolveDurableRecoveryBarrier?.());
       }
     },
     getRequestAuthorityValidator() {
@@ -3465,7 +3474,9 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   }
   if (hasDeferredGatewayAuthority) {
     durableRecoveryDeferred = true;
-    durableRecoveryBarrier = new Promise<void>(() => {});
+    durableRecoveryBarrier = new Promise<void>((resolve) => {
+      resolveDurableRecoveryBarrier = resolve;
+    });
   } else {
     durableRecoveryStarted = true;
     durableRecoveryBarrier = recoverDurableRuns().catch((error) => {
