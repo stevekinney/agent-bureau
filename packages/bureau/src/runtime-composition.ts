@@ -2176,6 +2176,32 @@ export async function createRuntimeComposition(
       };
     }
 
+    const recoveredAuthority = recoveredRequestContext(
+      session.metadata,
+      info.workflowId,
+      info.input.agentName,
+    );
+    if (
+      recoveredAuthority &&
+      options.requestAuthorityValidator === undefined &&
+      recoveredAuthority.authority.authorizationRevision !== 'bureau:1'
+    ) {
+      return {
+        status: 'unavailable',
+        reason: `run ${info.workflowId} authority cannot be revalidated during recovery`,
+      };
+    }
+    if (
+      recoveredAuthority &&
+      options.requestAuthorityValidator &&
+      !(await options.requestAuthorityValidator(recoveredAuthority))
+    ) {
+      return {
+        status: 'unavailable',
+        reason: `run ${info.workflowId} authority is no longer current`,
+      };
+    }
+
     let services: DurableRunDeps | null;
     try {
       // info.workflowId === the run id (pinned at engine.start) — thread it so the

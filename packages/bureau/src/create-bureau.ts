@@ -735,8 +735,10 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   // resumption. Approval bindings identify the original caller, but are not a
   // substitute for the complete request context and must not mint authority.
   const runRequestContexts = new Map<string, ToolRequestContext>();
+  const recoveredRunIds = new Set<string>();
   let requestAuthorityValidator:
-    ((context: ToolRequestContext) => boolean | Promise<boolean>) | undefined;
+    ((context: ToolRequestContext) => boolean | Promise<boolean>) | undefined =
+    options.requestAuthorityValidator;
   const liveFrameListeners = new Set<(frame: ServerFrame) => void>();
   // AB-96 — terminal RunReports, cached at the moment each run's lifecycle
   // event fires so `getRunReport` never needs to re-derive them.
@@ -840,6 +842,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         const removedSessionId = removedRun ? getRunSessionIdentifier(removedRun) : '';
         runSequenceCounters.delete(removedRunId);
         runRequestContexts.delete(removedRunId);
+        recoveredRunIds.delete(removedRunId);
         runToolboxesByRunId.delete(removedRunId);
         for (const id of pendingApprovalOverrides.keys()) {
           if (id.startsWith(`approval:${removedRunId}:`)) pendingApprovalOverrides.delete(id);
@@ -1605,6 +1608,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         runToolboxes.delete(runToolbox);
         disposeRegisteredStreamListeners(disposeStreamListeners);
         flowController?.settle(runId);
+        releaseTerminalRunReviewState(runId);
 
         const finishReason = event.finishReason;
         const lastRunStatus = isRunFailureFinishReason(finishReason) ? 'error' : 'completed';
@@ -1646,6 +1650,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         runToolboxes.delete(runToolbox);
         disposeRegisteredStreamListeners(disposeStreamListeners);
         flowController?.settle(runId);
+        releaseTerminalRunReviewState(runId);
 
         const report = buildTerminalReportFromAbortedEvent(runId, {
           usage: event.usage,
@@ -1703,6 +1708,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         runToolboxes.delete(runToolbox);
         disposeRegisteredStreamListeners(disposeStreamListeners);
         flowController?.settle(runId);
+        releaseTerminalRunReviewState(runId);
       });
 
       store.register(activeRun, runId);
@@ -1766,7 +1772,10 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     );
     if (recoveredServices) {
       const recoveredRequestContext = recoveredServices.options.executeOptions?.requestContext;
-      if (recoveredRequestContext) runRequestContexts.set(runId, recoveredRequestContext);
+      if (recoveredRequestContext) {
+        runRequestContexts.set(runId, recoveredRequestContext);
+        recoveredRunIds.add(runId);
+      }
       runToolboxesByRunId.set(runId, recoveredServices.toolbox);
     }
     restoreResolvedReviewIds(sessionMetadata, runId);
@@ -2728,6 +2737,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     }
     runRequestContexts.delete(runId);
     runToolboxesByRunId.delete(runId);
+    recoveredRunIds.delete(runId);
   }
 
   async function resolveReview(input: ResolveReviewInput): Promise<ResolveReviewResult> {
@@ -2757,6 +2767,16 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
             );
           }
           const approvalRequestContext = runRequestContexts.get(review.runId);
+          if (
+            approvalRequestContext &&
+            recoveredRunIds.has(review.runId) &&
+            !requestAuthorityValidator
+          ) {
+            throw new BureauError(
+              'Cannot approve: the recovered request authority cannot be revalidated.',
+              'CONFLICT',
+            );
+          }
           if (
             approvalRequestContext &&
             requestAuthorityValidator &&

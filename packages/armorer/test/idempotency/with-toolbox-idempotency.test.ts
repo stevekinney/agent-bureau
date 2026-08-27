@@ -114,6 +114,33 @@ describe('withToolboxIdempotency', () => {
     });
   }
 
+  it('uses the cache wall clock for TTL expiration when execution uses another clock', async () => {
+    let cacheClock = 1_000;
+    const wallClockCache = createToolResultCache({
+      store: createTestStore(),
+      defaultTTL: 100,
+      now: () => cacheClock,
+    });
+    const toolbox = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache: wallClockCache,
+      tenantId: 'tenant-a',
+      defaultTTL: 100,
+      now: () => 10_000_000,
+    });
+    const call = { name: 'add', arguments: { a: 1, b: 2 } };
+
+    const firstResult = await toolbox.execute(call);
+    const secondResult = await toolbox.execute(call);
+    expect(firstResult.result).toBe(3);
+    expect(secondResult.result).toBe(3);
+    expect(addCallCount).toBe(1);
+
+    cacheClock = 1_101;
+    const expiredResult = await toolbox.execute(call);
+    expect(expiredResult.result).toBe(3);
+    expect(addCallCount).toBe(2);
+  });
+
   it('wraps tools that have idempotencyKey by default', async () => {
     const toolbox = createToolbox([createToolWithKey(), createToolWithoutKey()]);
     const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
@@ -1025,6 +1052,45 @@ describe('withToolboxIdempotency', () => {
     }).execute({ name: 'slow-add', arguments: { value: 2 } });
     expect(renewalFailure.result).toBe(3);
     expect(renewalFailure.idempotency).toBeUndefined();
+  });
+
+  it('checks the deadline after queued renewal wait', async () => {
+    let renewals = 0;
+    let clockIndex = 0;
+    let releaseFirstRenewal!: () => void;
+    const firstRenewalReleased = new Promise<void>((resolve) => {
+      releaseFirstRenewal = resolve;
+    });
+    const slowTool = createTool({
+      name: 'queued-renewal',
+      description: 'Waits for queued lease renewal',
+      input: z.object({ value: z.number() }),
+      idempotencyKey: (input: unknown) => fullInputKey(input),
+      async execute({ value }) {
+        await new Promise((resolve) => setTimeout(resolve, 8));
+        releaseFirstRenewal();
+        return value;
+      },
+    });
+    const renewalCache: ToolResultCache = {
+      ...cache,
+      async renewStarted(key, attemptId, leaseExpiresAt, observedAt) {
+        renewals += 1;
+        if (renewals === 1) await firstRenewalReleased;
+        return cache.renewStarted(key, attemptId, leaseExpiresAt, observedAt);
+      },
+    };
+
+    const result = await withToolboxIdempotency(createToolbox([slowTool]), {
+      cache: renewalCache,
+      tenantId: 'tenant-a',
+      leaseDurationMs: 4,
+      maximumExecutionDurationMs: 10,
+      now: () => [0, 0, 100][clockIndex++] ?? 100,
+    }).execute({ name: 'queued-renewal', arguments: { value: 7 } });
+
+    expect(result.result).toBe(7);
+    expect(renewals).toBe(1);
   });
 
   it('rechecks cache state when authorized unknown replacement loses its race', async () => {

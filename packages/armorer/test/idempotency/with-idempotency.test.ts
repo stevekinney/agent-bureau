@@ -372,6 +372,29 @@ describe('withIdempotency', () => {
     expect(cacheHits[0]?.executedAt).toBe(timestamp);
   });
 
+  it('uses the cache wall clock for TTL expiration when execution uses another clock', async () => {
+    let cacheClock = 1_000;
+    const wallClockCache = createToolResultCache({
+      store: createTestStore(),
+      defaultTTL: 100,
+      now: () => cacheClock,
+    });
+    const wrapped = withIdempotency(createTestTool(), {
+      cache: wallClockCache,
+      tenantId: 'tenant-a',
+      ttl: 100,
+      now: () => 10_000_000,
+    });
+
+    await expect(wrapped({ a: 1, b: 2 })).resolves.toBe(3);
+    await expect(wrapped({ a: 1, b: 2 })).resolves.toBe(3);
+    expect(callCount).toBe(1);
+
+    cacheClock = 1_101;
+    await expect(wrapped({ a: 1, b: 2 })).resolves.toBe(3);
+    expect(callCount).toBe(2);
+  });
+
   it('clears claims when policy stops execution before the callback runs', async () => {
     let executions = 0;
     const tool = createTool({

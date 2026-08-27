@@ -29,6 +29,8 @@ export type CreateToolResultCacheOptions = {
   defaultTTL?: number;
   /** Optional key prefix applied to all cache keys. */
   namespace?: string;
+  /** Cache wall clock used to stamp and evaluate expiration. Defaults to Date.now. */
+  now?: () => number;
 };
 
 /**
@@ -41,7 +43,7 @@ export type CreateToolResultCacheOptions = {
  * implement ToolResultCache with storage-native compare-and-set operations.
  */
 export function createToolResultCache(options: CreateToolResultCacheOptions): ToolResultCache {
-  const { store, defaultTTL, namespace } = options;
+  const { store, defaultTTL, namespace, now = Date.now } = options;
 
   const prefix = namespace ? `${namespace}:` : '';
   const locksByStore = sharedLocks.get(store) ?? new Map<string, Promise<unknown>>();
@@ -98,6 +100,7 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
         toolName: value['toolName'],
         executedAt: value['executedAt'],
         ttl: typeof value['ttl'] === 'number' ? value['ttl'] : (defaultTTL ?? 0),
+        ...(typeof value['expiresAt'] === 'number' ? { expiresAt: value['expiresAt'] } : {}),
       };
     }
 
@@ -110,7 +113,7 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
     // atomically replaces it.
     if (entry.status === 'started') return false;
     if (entry.ttl === 0) return false;
-    return Date.now() > getEntryTime(entry) + entry.ttl;
+    return now() > (entry.expiresAt ?? getEntryTime(entry) + entry.ttl);
   }
 
   async function getEntry(key: string): Promise<ToolResultCacheEntry | undefined> {
@@ -200,7 +203,12 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
       const effectiveTTL = ttl ?? (result.ttl !== undefined ? result.ttl : defaultTTL);
       const entry =
         effectiveTTL !== undefined
-          ? { ...result, status: 'completed' as const, ttl: effectiveTTL }
+          ? {
+              ...result,
+              status: 'completed' as const,
+              ttl: effectiveTTL,
+              ...(effectiveTTL === 0 ? {} : { expiresAt: now() + effectiveTTL }),
+            }
           : { ...result, status: 'completed' as const };
       await store.set(resolveKey(key), JSON.stringify(encodeEntry(entry)));
     },
@@ -246,6 +254,9 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
           ...result,
           status: 'completed' as const,
           ...(effectiveTTL !== undefined ? { ttl: effectiveTTL } : {}),
+          ...(effectiveTTL !== undefined && effectiveTTL !== 0
+            ? { expiresAt: now() + effectiveTTL }
+            : {}),
         };
         await store.set(resolveKey(key), JSON.stringify(encodeEntry(entry)));
         return true;

@@ -95,6 +95,9 @@ const fieldClasses: Readonly<Record<string, ExternalFieldClass>> = Object.freeze
   abortReason: 'never-exported',
 });
 
+const containerFields = new Set(['authority', 'cleanup', 'context', 'revisions', 'snapshot']);
+const primitiveArrayLeafFields = new Set(['capabilities']);
+
 export function freezeToolRequestContext(
   context: ToolRequestContext,
 ): Readonly<ToolRequestContext> {
@@ -128,10 +131,14 @@ export function projectExecutionSnapshot(
       throw new Error('Tenant projection cannot cross tenant boundaries');
     }
   }
+  const data = redact(value, options, undefined);
+  if (data === undefined) {
+    throw new Error('External projection root must be an object or array');
+  }
   return Object.freeze({
     version: EXTERNAL_PROJECTION_VERSION,
     audience: options.audience,
-    data: redact(value, options, undefined) as JSONValue,
+    data: data as JSONValue,
   });
 }
 
@@ -154,17 +161,30 @@ function redact(
   options: ExternalProjectionOptions,
   key: string | undefined,
 ): unknown {
-  if (key) {
+  if (key !== undefined) {
     const fieldClass = fieldClasses[key] ?? 'never-exported';
     if (fieldClass === 'never-exported') return undefined;
     if (fieldClass === 'tenant-private' && options.audience === 'public') return undefined;
     if (fieldClass === 'operator-private' && options.audience !== 'operator') return undefined;
   }
-  if (Array.isArray(value))
+
+  if (Array.isArray(value)) {
+    if (key !== undefined && primitiveArrayLeafFields.has(key)) {
+      return value.filter((item) => item === null || typeof item !== 'object');
+    }
+    if (key !== undefined) return undefined;
     return value
       .map((item) => redact(item, options, undefined))
       .filter((item) => item !== undefined);
-  if (!value || typeof value !== 'object') return value;
+  }
+
+  if (!value || typeof value !== 'object') {
+    if (key !== undefined && !containerFields.has(key)) return value;
+    return undefined;
+  }
+
+  if (key !== undefined && !containerFields.has(key)) return undefined;
+
   const result: Record<string, unknown> = {};
   for (const [field, child] of Object.entries(value)) {
     const projected = redact(child, options, field);

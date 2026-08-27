@@ -78,11 +78,11 @@ describe('createToolResultCache', () => {
 
       await cache.set('undefined-result', result);
 
-      expect(await cache.get('undefined-result')).toEqual({
+      expect(await cache.get('undefined-result')).toMatchObject({
         ...result,
         status: 'completed',
       });
-      expect(await cache.getState!('undefined-result')).toEqual({
+      expect(await cache.getState!('undefined-result')).toMatchObject({
         ...result,
         status: 'completed',
       });
@@ -91,15 +91,18 @@ describe('createToolResultCache', () => {
 
   describe('TTL expiration', () => {
     it('returns undefined for an expired entry', async () => {
+      let clock = 1_000;
+      const expiringCache = createToolResultCache({ store, now: () => clock });
       const result: CachedToolResult = {
         result: 'stale',
         toolName: 'old-tool',
-        executedAt: Date.now() - 120_000, // 2 minutes ago
+        executedAt: 10_000_000,
         ttl: 60_000, // 1 minute TTL
       };
 
-      await cache.set('expired-key', result);
-      const retrieved = await cache.get('expired-key');
+      await expiringCache.set('expired-key', result);
+      clock = 61_001;
+      const retrieved = await expiringCache.get('expired-key');
 
       expect(retrieved).toBeUndefined();
     });
@@ -212,14 +215,14 @@ describe('createToolResultCache', () => {
       };
       await cache.set('completed-key', completed);
 
-      await expect(
-        cache.claimStarted!('completed-key', {
+      expect(
+        await cache.claimStarted!('completed-key', {
           status: 'started',
           toolName: 'charge-card',
           startedAt: Date.now(),
           ttl: 60_000,
         }),
-      ).resolves.toEqual({ outcome: 'existing', entry: { ...completed, status: 'completed' } });
+      ).toMatchObject({ outcome: 'existing', entry: { ...completed, status: 'completed' } });
     });
 
     it('serializes concurrent claims for the same key within a cache instance', async () => {
@@ -364,16 +367,18 @@ describe('createToolResultCache', () => {
       expect(retrieved).toMatchObject(result);
     });
 
-    it('treats an entry as expired when executedAt + ttl is in the past', async () => {
-      const defaultCache = createToolResultCache({ store });
+    it('expires an entry from its cache-clock insertion timestamp', async () => {
+      let clock = 1_000;
+      const defaultCache = createToolResultCache({ store, now: () => clock });
       const result: CachedToolResult = {
         result: 'expired',
         toolName: 'tool',
-        executedAt: Date.now() - 400_000, // 400 seconds ago, beyond 300s default
+        executedAt: 10_000_000,
         ttl: 300_000,
       };
 
       await defaultCache.set('ttl-expired', result);
+      clock = 301_001;
       const retrieved = await defaultCache.get('ttl-expired');
       expect(retrieved).toBeUndefined();
     });

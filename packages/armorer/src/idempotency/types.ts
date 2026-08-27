@@ -7,6 +7,8 @@ export type CachedToolResult = {
   toolName: string;
   executedAt: number;
   ttl: number;
+  /** Cache-clock expiration timestamp. Older persisted entries may omit it. */
+  expiresAt?: number;
 };
 
 export type StartedToolExecution = {

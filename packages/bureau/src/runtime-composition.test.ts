@@ -1334,6 +1334,120 @@ describe('createRuntimeComposition durable execution', () => {
     }
   });
 
+  it('fails closed when recovered request authority cannot be revalidated', async () => {
+    const session = createAgentSession({
+      id: 'session-custom-authority',
+      agentName: 'agent',
+      conversationHistory: createConversationHistory({ id: 'session-custom-authority' }),
+      metadata: {
+        lastRunId: 'run-custom-authority',
+        lastRunStatus: 'running',
+        lastUserMessage: 'resume',
+        lastRequestAuthority: {
+          principalId: 'principal-a',
+          tenantId: 'tenant-a',
+          ownerId: 'owner-a',
+          capabilities: ['tools:execute'],
+          authorizationRevision: 'authorization:1',
+          audience: 'tenant',
+        },
+      },
+    });
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    try {
+      getRuntimeCompositionTestingSeams(runtime).setSessionStore({
+        async load() {
+          return session;
+        },
+      } as unknown as SessionStore);
+
+      expect(
+        await getRuntimeCompositionTestingSeams(runtime).resolveRunServices({
+          workflowId: 'run-custom-authority',
+          workflowType: 'agentRun',
+          input: {
+            runId: 'run-custom-authority',
+            sessionId: 'session-custom-authority',
+            agentName: 'agent',
+          },
+        }),
+      ).toMatchObject({
+        status: 'unavailable',
+        reason: 'run run-custom-authority authority cannot be revalidated during recovery',
+      });
+    } finally {
+      runtime.durable?.engine[Symbol.dispose]?.();
+    }
+  });
+
+  it('fails closed when recovered request authority is no longer current', async () => {
+    const session = createAgentSession({
+      id: 'session-revoked-authority',
+      agentName: 'agent',
+      conversationHistory: createConversationHistory({ id: 'session-revoked-authority' }),
+      metadata: {
+        lastRunId: 'run-revoked-authority',
+        lastRunStatus: 'running',
+        lastUserMessage: 'resume',
+        lastRequestAuthority: {
+          principalId: 'principal-a',
+          tenantId: 'tenant-a',
+          ownerId: 'owner-a',
+          capabilities: ['tools:execute'],
+          authorizationRevision: 'authorization:1',
+          audience: 'tenant',
+        },
+      },
+    });
+    const validatedContexts: ToolRequestContext[] = [];
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+      storage: { type: 'memory' },
+      durableExecution: true,
+      requestAuthorityValidator(context) {
+        validatedContexts.push(context);
+        return false;
+      },
+    });
+
+    try {
+      getRuntimeCompositionTestingSeams(runtime).setSessionStore({
+        async load() {
+          return session;
+        },
+      } as unknown as SessionStore);
+
+      expect(
+        await getRuntimeCompositionTestingSeams(runtime).resolveRunServices({
+          workflowId: 'run-revoked-authority',
+          workflowType: 'agentRun',
+          input: {
+            runId: 'run-revoked-authority',
+            sessionId: 'session-revoked-authority',
+            agentName: 'agent',
+          },
+        }),
+      ).toMatchObject({
+        status: 'unavailable',
+        reason: 'run run-revoked-authority authority is no longer current',
+      });
+      expect(validatedContexts).toHaveLength(1);
+      expect(validatedContexts[0]).toMatchObject({
+        runId: 'run-revoked-authority',
+        authority: { authorizationRevision: 'authorization:1' },
+      });
+    } finally {
+      runtime.durable?.engine[Symbol.dispose]?.();
+    }
+  });
+
   it('logs and skips committed scheduled active skills when checkpoint verification throws', async () => {
     const logs: string[] = [];
     const runtime = await createRuntimeComposition({

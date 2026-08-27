@@ -317,6 +317,8 @@ export interface BureauOptions {
    */
   guardrails?: GuardrailsOptions | false;
   identity?: IdentityConfiguration;
+  /** Host-owned authority check used before durable recovery resumes user code. */
+  requestAuthorityValidator?: (context: ToolRequestContext) => boolean | Promise<boolean>;
   skills?: SkillRuntimeConfiguration;
   streaming?: StreamingConfiguration;
   scheduler?: SchedulerConfiguration;

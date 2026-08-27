@@ -331,10 +331,10 @@ export function withToolboxIdempotency(
     let pendingRenewal = Promise.resolve();
     const renewalInterval = setInterval(
       () => {
-        const renewalTime = now();
-        if (renewalTime >= execution.absoluteDeadline!) return;
         pendingRenewal = pendingRenewal
           .then(async () => {
+            const renewalTime = now();
+            if (renewalTime >= execution.absoluteDeadline!) return;
             leaseOwned =
               leaseOwned &&
               (await cache.renewStarted(

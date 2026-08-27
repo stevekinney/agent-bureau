@@ -106,6 +106,21 @@ describe('execution authority and projections', () => {
     ).toEqual([{ executionId: 'execution-1' }, {}]);
   });
 
+  it('rejects unclassified primitive projection roots', () => {
+    expect(() => projectExecutionSnapshot('must-not-leak', { audience: 'public' })).toThrow(
+      'External projection root must be an object or array',
+    );
+  });
+
+  it('redacts unclassified primitive array elements while preserving supported snapshots', () => {
+    expect(
+      projectExecutionSnapshot(
+        ['must-not-leak', 123, false, null, { executionId: 'execution-1' }, { result: 'secret' }],
+        { audience: 'public' },
+      ).data,
+    ).toEqual([{ executionId: 'execution-1' }, {}]);
+  });
+
   it('projects privileged lifecycle snapshot containers through deny-by-default redaction', () => {
     const projection = projectExecutionSnapshot(
       {
