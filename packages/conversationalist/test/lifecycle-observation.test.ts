@@ -218,6 +218,38 @@ describe('Conversation lifecycle and observation', () => {
     expect(conversation.getPendingToolCalls()).toHaveLength(1);
   });
 
+  it('actively closes owned tool-result iterators during disposal', async () => {
+    const conversation = new Conversation(createConversationHistory({ id: 'tool-abort' }));
+    let iteratorClosed = false;
+    let nextCalled = false;
+    const append = conversation.appendToolResultAsync({
+      callId: 'call-1',
+      outcome: 'success',
+      content: [],
+      stream: {
+        [Symbol.asyncIterator]() {
+          return {
+            next() {
+              nextCalled = true;
+              return new Promise<IteratorResult<unknown>>(() => {});
+            },
+            async return() {
+              iteratorClosed = true;
+              return { done: true, value: undefined };
+            },
+          };
+        },
+      },
+    });
+    await Promise.resolve();
+    expect(nextCalled).toBe(true);
+
+    await conversation.dispose();
+
+    await expect(append).rejects.toMatchObject({ code: 'error:operation-cancelled' });
+    expect(iteratorClosed).toBe(true);
+  });
+
   it('gives plugins stable identity, fixed authority, and activation and failure events', () => {
     const failing = defineMessagePlugin({ id: 'policy', revision: 3 }, () => {
       throw new Error('blocked');
@@ -250,6 +282,12 @@ describe('Conversation lifecycle and observation', () => {
     );
     expect(
       () => new Conversation(createConversationHistory(), { plugins: [(input) => input] }),
+    ).toThrow('requires an explicit id and revision');
+    expect(
+      () =>
+        new Conversation(createConversationHistory(), {
+          plugins: [Object.assign((input) => input, { id: 'invalid', revision: 0 })],
+        }),
     ).toThrow('requires an explicit id and revision');
   });
 });

@@ -279,7 +279,12 @@ export class Conversation {
     this.environment = resolveConversationEnvironment(environment);
     this.pluginIdentityList = Object.freeze(
       this.environment.plugins.map((plugin, index) => {
-        if (!plugin.id || plugin.revision === undefined) {
+        if (
+          !plugin.id ||
+          plugin.id.trim().length === 0 ||
+          !Number.isSafeInteger(plugin.revision) ||
+          (plugin.revision ?? 0) < 1
+        ) {
           throw new TypeError(
             `Message plugin at index ${index} requires an explicit id and revision; use defineMessagePlugin()`,
           );
@@ -1564,8 +1569,10 @@ export class Conversation {
     options?: Parameters<typeof resolveToolResultAsync>[3],
   ): Promise<void> {
     const previousConversation = this.current;
-    const nextConversation = await this.runOwnedOperation('resolveToolResultAsync', async () =>
-      resolveToolResultAsync(this.current, callId, toolResult, options, this.env),
+    const nextConversation = await this.runOwnedOperation(
+      'resolveToolResultAsync',
+      async (signal) =>
+        resolveToolResultAsync(this.current, callId, toolResult, { ...options, signal }, this.env),
     );
     this.pushWithEvents(
       nextConversation,
@@ -1593,8 +1600,8 @@ export class Conversation {
     toolResult: AppendableToolResult,
     options?: Parameters<typeof appendToolResultAsync>[2],
   ): Promise<void> {
-    const nextConversation = await this.runOwnedOperation('appendToolResultAsync', async () =>
-      appendToolResultAsync(this.current, toolResult, options, this.env),
+    const nextConversation = await this.runOwnedOperation('appendToolResultAsync', async (signal) =>
+      appendToolResultAsync(this.current, toolResult, { ...options, signal }, this.env),
     );
     const context = this.createChangeContext(this.current, nextConversation, 'messages.appended');
     this.commit(
@@ -1606,8 +1613,9 @@ export class Conversation {
   }
 
   async appendToolResultsAsync(toolResults: ReadonlyArray<AppendableToolResult>): Promise<void> {
-    const nextConversation = await this.runOwnedOperation('appendToolResultsAsync', async () =>
-      appendToolResultsAsync(this.current, toolResults, this.env),
+    const nextConversation = await this.runOwnedOperation(
+      'appendToolResultsAsync',
+      async (signal) => appendToolResultsAsync(this.current, toolResults, this.env, signal),
     );
     if (nextConversation === this.current) {
       return;

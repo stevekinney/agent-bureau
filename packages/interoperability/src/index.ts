@@ -13,7 +13,7 @@ export {
   sha256HexSync,
   timingSafeEqualHex,
 } from './hash';
-export type { MaterializeToolCallOptions } from './materialization';
+export type { MaterializeToolCallOptions, MaterializeToolResultOptions } from './materialization';
 export {
   materializeToolCall,
   materializeToolCalls,

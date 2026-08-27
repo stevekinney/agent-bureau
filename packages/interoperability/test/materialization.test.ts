@@ -146,6 +146,90 @@ describe('interoperability materialization', () => {
     ]);
   });
 
+  test('closes a streaming iterator when materialization is aborted', async () => {
+    const controller = new AbortController();
+    let closed = false;
+    const materialization = materializeToolResultAsync(
+      {
+        callId: 'call-1',
+        outcome: 'success',
+        content: [],
+        stream: {
+          [Symbol.asyncIterator]() {
+            return {
+              next: () => new Promise<IteratorResult<unknown>>(() => {}),
+              async return() {
+                closed = true;
+                return { done: true, value: undefined };
+              },
+            };
+          },
+        },
+      },
+      { signal: controller.signal },
+    );
+
+    controller.abort(new DOMException('cancelled', 'AbortError'));
+
+    await expect(materialization).rejects.toMatchObject({ name: 'AbortError' });
+    expect(closed).toBe(true);
+  });
+
+  test('materializes a stream successfully while an abort signal remains active', async () => {
+    const controller = new AbortController();
+
+    await expect(
+      materializeToolResultAsync(
+        {
+          callId: 'call-1',
+          outcome: 'success',
+          content: [],
+          stream: {
+            async *[Symbol.asyncIterator]() {
+              yield 'complete';
+            },
+          },
+        },
+        { signal: controller.signal },
+      ),
+    ).resolves.toMatchObject({ content: ['complete'] });
+  });
+
+  test('normalizes non-Error abort reasons and iterator rejections', async () => {
+    const controller = new AbortController();
+    const aborted = materializeToolResultAsync(
+      {
+        callId: 'call-1',
+        outcome: 'success',
+        content: [],
+        stream: {
+          [Symbol.asyncIterator]() {
+            return { next: () => new Promise<IteratorResult<unknown>>(() => {}) };
+          },
+        },
+      },
+      { signal: controller.signal },
+    );
+    controller.abort('stop');
+
+    await expect(aborted).rejects.toMatchObject({ name: 'AbortError' });
+    await expect(
+      materializeToolResultAsync(
+        {
+          callId: 'call-2',
+          outcome: 'success',
+          content: [],
+          stream: {
+            [Symbol.asyncIterator]() {
+              return { next: () => Promise.reject('stream failed') };
+            },
+          },
+        },
+        { signal: new AbortController().signal },
+      ),
+    ).rejects.toThrow('stream failed');
+  });
+
   test('materializeToolCall falls back to a random identifier when needed', () => {
     const call = materializeToolCall({
       name: 'search',
