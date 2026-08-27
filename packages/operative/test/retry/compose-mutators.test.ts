@@ -20,7 +20,7 @@ describe('composeMutators', () => {
 
     const mutatorA: RetryMutator = async (context, _error, _attempt) => {
       log.push('A');
-      const snapshot = context.conversation.getSnapshot();
+      const snapshot = context.conversation.getSnapshot().conversation;
       const conv = new Conversation({
         ...snapshot,
         metadata: { ...snapshot.metadata, a: true },
@@ -30,7 +30,7 @@ describe('composeMutators', () => {
 
     const mutatorB: RetryMutator = async (context, _error, _attempt) => {
       log.push('B');
-      const snapshot = context.conversation.getSnapshot();
+      const snapshot = context.conversation.getSnapshot().conversation;
       const conv = new Conversation({
         ...snapshot,
         metadata: { ...snapshot.metadata, b: true },
@@ -44,8 +44,8 @@ describe('composeMutators', () => {
 
     expect(log).toEqual(['A', 'B']);
     expect(result).toBeDefined();
-    expect(result!.conversation.getSnapshot().metadata['a']).toBe(true);
-    expect(result!.conversation.getSnapshot().metadata['b']).toBe(true);
+    expect(result!.conversation.getSnapshot().conversation.metadata['a']).toBe(true);
+    expect(result!.conversation.getSnapshot().conversation.metadata['b']).toBe(true);
   });
 
   it('passes the modified context from one mutator to the next', async () => {

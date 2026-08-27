@@ -528,7 +528,11 @@ describe('Conversation', () => {
     it('should support getSnapshot for React useSyncExternalStore', () => {
       const conversation = createConversation();
       const history = new ConversationHistory(conversation);
-      expect(history.getSnapshot()).toEqual(conversation);
+      expect(history.getSnapshot()).toEqual({
+        conversation,
+        revision: 0,
+        lifecycle: 'open',
+      });
       expect(history.getSnapshot()).not.toBe(conversation);
       expect(history.getSnapshot()).toBe(history.getSnapshot());
     });

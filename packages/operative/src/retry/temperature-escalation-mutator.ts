@@ -6,7 +6,7 @@ import type { RetryMutator } from './types';
 /**
  * Metadata key used to store the escalated temperature value in the
  * conversation snapshot. Generate function implementations can read
- * this key from `context.conversation.getSnapshot().metadata` to
+ * this key from `context.conversation.getSnapshot().conversation.metadata` to
  * apply the temperature to the LLM request.
  */
 export const RETRY_TEMPERATURE_KEY = 'retryTemperature';
@@ -37,7 +37,7 @@ export function createTemperatureEscalationMutator(
     const temperature = Math.min(increment * attempt, max);
 
     // Build a new conversation with the temperature in metadata
-    const snapshot = context.conversation.getSnapshot();
+    const snapshot = context.conversation.getSnapshot().conversation;
     const updatedHistory = {
       ...snapshot,
       metadata: {

@@ -11,6 +11,10 @@ export interface MaterializeToolCallOptions {
   generateId?: () => string;
 }
 
+export interface MaterializeToolResultOptions {
+  signal?: AbortSignal | undefined;
+}
+
 export function materializeToolCall(
   toolCall: ToolCallInput,
   options: MaterializeToolCallOptions = {},
@@ -43,20 +47,26 @@ export function materializeToolResults(toolResults: ReadonlyArray<ToolResultInpu
   return toolResults.map((toolResult) => materializeToolResult(toolResult));
 }
 
-export async function materializeToolResultAsync(toolResult: ToolResultInput): Promise<ToolResult> {
+export async function materializeToolResultAsync(
+  toolResult: ToolResultInput,
+  options: MaterializeToolResultOptions = {},
+): Promise<ToolResult> {
   const streamingPayload = getStreamingPayload(toolResult);
   if (!streamingPayload) {
     return stripRuntimeToolResultFields(toolResult, normalizeJSONValue(toolResult.content));
   }
 
-  const chunks = await collectAsyncIterable(streamingPayload);
+  const chunks = await collectAsyncIterable(streamingPayload, options.signal);
   return stripRuntimeToolResultFields(toolResult, normalizeJSONValue(chunks));
 }
 
 export async function materializeToolResultsAsync(
   toolResults: ReadonlyArray<ToolResultInput>,
+  options: MaterializeToolResultOptions = {},
 ): Promise<ToolResult[]> {
-  return Promise.all(toolResults.map((toolResult) => materializeToolResultAsync(toolResult)));
+  return Promise.all(
+    toolResults.map((toolResult) => materializeToolResultAsync(toolResult, options)),
+  );
 }
 
 function stripRuntimeToolResultFields(toolResult: ToolResultInput, content: JSONValue): ToolResult {
@@ -204,12 +214,52 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return prototype === Object.prototype || prototype === null;
 }
 
-async function collectAsyncIterable(stream: AsyncIterable<unknown>): Promise<unknown[]> {
+async function collectAsyncIterable(
+  stream: AsyncIterable<unknown>,
+  signal?: AbortSignal,
+): Promise<unknown[]> {
   const chunks: unknown[] = [];
+  const iterator = stream[Symbol.asyncIterator]();
 
-  for await (const chunk of stream) {
-    chunks.push(chunk);
+  try {
+    while (true) {
+      signal?.throwIfAborted();
+      const result = await nextWithSignal(iterator, signal);
+      if (result.done) break;
+      chunks.push(result.value);
+    }
+  } finally {
+    if (signal?.aborted) await iterator.return?.();
   }
 
   return chunks;
+}
+
+async function nextWithSignal<T>(
+  iterator: AsyncIterator<T>,
+  signal?: AbortSignal,
+): Promise<IteratorResult<T>> {
+  if (!signal) return iterator.next();
+
+  return new Promise<IteratorResult<T>>((resolve, reject) => {
+    const onAbort = () => {
+      signal.removeEventListener('abort', onAbort);
+      reject(
+        signal.reason instanceof Error
+          ? signal.reason
+          : new DOMException('The operation was aborted', 'AbortError'),
+      );
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    void iterator.next().then(
+      (result) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(result);
+      },
+      (error) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      },
+    );
+  });
 }

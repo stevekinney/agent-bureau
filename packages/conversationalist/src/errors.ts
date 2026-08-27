@@ -10,7 +10,11 @@ export type ConversationalistErrorCode =
   | 'error:not-found'
   | 'error:serialization'
   | 'error:validation'
-  | 'error:integrity';
+  | 'error:integrity'
+  | 'error:conversation-closed'
+  | 'error:conversation-disposed'
+  | 'error:revision-conflict'
+  | 'error:operation-cancelled';
 
 /**
  * Base error class for all Conversationalist errors.
@@ -181,4 +185,38 @@ export function createIntegrityError(
   context?: Record<string, unknown>,
 ): ConversationalistError {
   return new ConversationalistError('error:integrity', message, { context });
+}
+
+export function createConversationLifecycleError(
+  conversationId: string,
+  lifecycle: 'closed' | 'disposed',
+): ConversationalistError {
+  return new ConversationalistError(
+    lifecycle === 'closed' ? 'error:conversation-closed' : 'error:conversation-disposed',
+    `conversation ${conversationId} is ${lifecycle}`,
+    { context: { conversationId, lifecycle } },
+  );
+}
+
+export function createOperationCancelledError(
+  conversationId: string,
+  operation: string,
+): ConversationalistError {
+  return new ConversationalistError(
+    'error:operation-cancelled',
+    `${operation} was cancelled because conversation ${conversationId} is closing`,
+    { context: { conversationId, operation } },
+  );
+}
+
+export function createRevisionConflictError(
+  conversationId: string,
+  expectedRevision: number,
+  actualRevision: number,
+): ConversationalistError {
+  return new ConversationalistError(
+    'error:revision-conflict',
+    `conversation ${conversationId} expected revision ${expectedRevision}, received ${actualRevision}`,
+    { context: { conversationId, expectedRevision, actualRevision } },
+  );
 }
