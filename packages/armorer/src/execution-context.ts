@@ -124,10 +124,14 @@ export function projectExecutionSnapshot(
   options: ExternalProjectionOptions,
 ): ExternalExecutionProjection {
   if (options.audience === 'tenant') {
-    if (!options.tenantId || !options.sourceTenantId) {
-      throw new Error('Tenant projection requires tenantId and sourceTenantId');
+    const sourceTenantId = trustedProjectionTenantId(value);
+    if (!options.tenantId || !sourceTenantId) {
+      throw new Error('Tenant projection requires tenantId and a trusted source tenant');
     }
-    if (options.tenantId !== options.sourceTenantId) {
+    if (
+      (options.sourceTenantId !== undefined && options.sourceTenantId !== sourceTenantId) ||
+      options.tenantId !== sourceTenantId
+    ) {
       throw new Error('Tenant projection cannot cross tenant boundaries');
     }
   }
@@ -140,6 +144,19 @@ export function projectExecutionSnapshot(
     audience: options.audience,
     data: data as JSONValue,
   });
+}
+
+function trustedProjectionTenantId(value: unknown): string | undefined {
+  if (!isRecord(value)) return undefined;
+  const context = value['context'];
+  if (!isRecord(context)) return undefined;
+  const authority = context['authority'];
+  if (!isRecord(authority) || typeof authority['tenantId'] !== 'string') return undefined;
+  return authority['tenantId'];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 /** Full-fidelity operator view; callers must keep this behind an operator gate. */

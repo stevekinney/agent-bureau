@@ -1,6 +1,7 @@
 import { stableStringifyJson } from '../core/serialization/json';
 import type { AnyToolbox } from '../create-toolbox';
 import type { ToolRequestContext } from '../execution-context';
+import { approvalConsumeSymbol, policyAuthorizationOnlySymbol } from '../internal/approval-resume';
 import type { ToolCallInput, ToolExecutionResult } from '../types';
 import { claimCacheStarted, getCacheEntry } from './cache-operations';
 import { fullInputKey, namespacedKey } from './key-generators';
@@ -215,13 +216,34 @@ export function withToolboxIdempotency(
     };
   }
 
-  function createCompletedCacheHitResult(
+  function createPolicyAuthorizationOnlyOptions(executeOptions: unknown): unknown {
+    const authorizationOnlyOptions: Record<PropertyKey, unknown> =
+      executeOptions && typeof executeOptions === 'object'
+        ? { ...(executeOptions as Record<PropertyKey, unknown>) }
+        : {};
+    authorizationOnlyOptions[policyAuthorizationOnlySymbol] = true;
+    delete authorizationOnlyOptions[approvalConsumeSymbol];
+    return authorizationOnlyOptions;
+  }
+
+  async function createCompletedCacheHitResult(
     fields: { id: string },
     cacheKey: string,
     cached: CachedToolResult,
-  ): ToolExecutionResult {
+    call: ToolCallInput,
+    originalExecute: (call: ToolCallInput, options?: unknown) => Promise<ToolExecutionResult>,
+    executeOptions?: unknown,
+  ): Promise<ToolExecutionResult> {
     if (cached.policyRevision !== policyRevision) {
       return createPolicyAuthorizationRequiredResult(fields, cacheKey, cached);
+    }
+
+    const authorizationResult = await originalExecute(
+      call,
+      createPolicyAuthorizationOnlyOptions(executeOptions),
+    );
+    if (authorizationResult.outcome !== 'success' || authorizationResult.error) {
+      return authorizationResult;
     }
 
     return createDedupedResult(fields, cacheKey, cached);
@@ -251,10 +273,20 @@ export function withToolboxIdempotency(
     fields: { id: string },
     cacheKey: string,
     fallbackToolName: string,
+    call: ToolCallInput,
+    originalExecute: (call: ToolCallInput, options?: unknown) => Promise<ToolExecutionResult>,
+    executeOptions?: unknown,
   ): Promise<ToolExecutionResult> {
     const current = await cache.getState(cacheKey);
     if (current?.status === 'completed') {
-      return createCompletedCacheHitResult(fields, cacheKey, current);
+      return createCompletedCacheHitResult(
+        fields,
+        cacheKey,
+        current,
+        call,
+        originalExecute,
+        executeOptions,
+      );
     }
     const currentAttemptId = current?.status === 'started' ? current.attemptId : undefined;
     const legacyStartedAt =
@@ -331,7 +363,14 @@ export function withToolboxIdempotency(
     const legacyReceipt = executionIdempotencyOptions?.legacyResolutionReceipt;
 
     if (cached && cached.status !== 'started') {
-      return createCompletedCacheHitResult(fields, cacheKey, cached);
+      return createCompletedCacheHitResult(
+        fields,
+        cacheKey,
+        cached,
+        call,
+        originalExecute,
+        executeOptions,
+      );
     }
 
     let execution: StartedToolExecution;
@@ -369,7 +408,14 @@ export function withToolboxIdempotency(
           startedAt,
         );
         if (!replaced) {
-          return createUnknownOutcomeAfterReplacementRace(fields, cacheKey, cached.toolName);
+          return createUnknownOutcomeAfterReplacementRace(
+            fields,
+            cacheKey,
+            cached.toolName,
+            call,
+            originalExecute,
+            executeOptions,
+          );
         }
         started = { outcome: 'claimed' } as const;
       } else {
@@ -401,7 +447,14 @@ export function withToolboxIdempotency(
           startedAt,
         );
         if (!replaced) {
-          return createUnknownOutcomeAfterReplacementRace(fields, cacheKey, cached.toolName);
+          return createUnknownOutcomeAfterReplacementRace(
+            fields,
+            cacheKey,
+            cached.toolName,
+            call,
+            originalExecute,
+            executeOptions,
+          );
         }
         started = { outcome: 'claimed' } as const;
       }
@@ -420,7 +473,14 @@ export function withToolboxIdempotency(
         });
       }
 
-      return createCompletedCacheHitResult(fields, cacheKey, entry);
+      return createCompletedCacheHitResult(
+        fields,
+        cacheKey,
+        entry,
+        call,
+        originalExecute,
+        executeOptions,
+      );
     }
 
     let result: ToolExecutionResult;

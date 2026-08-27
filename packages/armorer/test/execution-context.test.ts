@@ -68,13 +68,16 @@ describe('execution authority and projections', () => {
   it('exports a versioned deny-by-default projection and never exports payloads', () => {
     const projection = projectExecutionSnapshot(
       {
-        executionId: 'execution-1',
-        toolName: 'charge',
-        ownerId: 'owner-a',
-        tenantId: 'tenant-a',
-        result: { card: 'secret' },
-        credentials: { token: 'secret' },
-        newlyAddedUnclassifiedField: 'must-not-leak',
+        snapshot: {
+          executionId: 'execution-1',
+          toolName: 'charge',
+          ownerId: 'owner-a',
+          tenantId: 'tenant-a',
+          result: { card: 'secret' },
+          credentials: { token: 'secret' },
+          newlyAddedUnclassifiedField: 'must-not-leak',
+        },
+        context: effectiveContext,
       },
       { audience: 'tenant', tenantId: 'tenant-a', sourceTenantId: 'tenant-a' },
     );
@@ -83,15 +86,21 @@ describe('execution authority and projections', () => {
       version: 1,
       audience: 'tenant',
       data: {
-        executionId: 'execution-1',
-        toolName: 'charge',
-        ownerId: 'owner-a',
-        tenantId: 'tenant-a',
+        snapshot: {
+          executionId: 'execution-1',
+          toolName: 'charge',
+          ownerId: 'owner-a',
+          tenantId: 'tenant-a',
+        },
+        context: {
+          agentId: 'agent-a',
+          runId: 'run-a',
+        },
       },
     });
     expect(() =>
       projectExecutionSnapshot(
-        { executionId: 'execution-1' },
+        { snapshot: { executionId: 'execution-1' }, context: effectiveContext },
         { audience: 'tenant', tenantId: 'tenant-b', sourceTenantId: 'tenant-a' },
       ),
     ).toThrow('cross tenant');
@@ -100,7 +109,13 @@ describe('execution authority and projections', () => {
         { executionId: 'execution-1' },
         { audience: 'tenant', tenantId: 'tenant-a' },
       ),
-    ).toThrow('requires tenantId and sourceTenantId');
+    ).toThrow('requires tenantId and a trusted source tenant');
+    expect(() =>
+      projectExecutionSnapshot(
+        { snapshot: { executionId: 'execution-1' }, context: effectiveContext },
+        { audience: 'tenant', tenantId: 'tenant-a', sourceTenantId: 'tenant-b' },
+      ),
+    ).toThrow('cross tenant');
 
     expect(
       projectExecutionSnapshot([{ executionId: 'execution-1' }, undefined, { result: 'secret' }], {

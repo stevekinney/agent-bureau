@@ -280,6 +280,151 @@ describe('withToolboxIdempotency', () => {
     expect(addCallCount).toBe(0);
   });
 
+  it('reruns current access policy before returning same-revision completed cache hits', async () => {
+    let readCount = 0;
+    const observedPolicyRequests: string[] = [];
+    const authorizedRequestContext = {
+      ...createTestRequestContext('tenant-a'),
+      authority: {
+        ...createTestRequestContext('tenant-a').authority,
+        capabilities: ['records:read'],
+        authorizationRevision: 'authorization:1',
+      },
+    };
+    const createRequestContext = (
+      authorityOverrides: Partial<typeof authorizedRequestContext.authority>,
+    ) => ({
+      ...authorizedRequestContext,
+      authority: {
+        ...authorizedRequestContext.authority,
+        ...authorityOverrides,
+      },
+    });
+    const sensitiveTool = createTool({
+      name: 'read-sensitive-record',
+      description: 'Reads a sensitive record',
+      input: z.object({ recordId: z.string() }),
+      idempotencyKey: (input: unknown) => fullInputKey(input),
+      policy: {
+        beforeExecute(context) {
+          const policyContext = context.policyContext as
+            | {
+                capabilities?: readonly string[];
+                requestContext?: typeof authorizedRequestContext;
+              }
+            | undefined;
+          const requestContext = policyContext?.requestContext;
+          const capabilities = policyContext?.capabilities ?? [];
+          observedPolicyRequests.push(
+            `${requestContext?.authority.principalId}:${capabilities.join(',')}:${
+              requestContext?.authority.authorizationRevision
+            }`,
+          );
+          if (requestContext?.authority.principalId !== 'principal-a') {
+            return { allow: false, status: 'deny', reason: 'principal denied' };
+          }
+          if (!capabilities.includes('records:read')) {
+            return { allow: false, status: 'deny', reason: 'capability denied' };
+          }
+          if (requestContext.authority.authorizationRevision !== 'authorization:1') {
+            return { allow: false, status: 'deny', reason: 'authorization revision denied' };
+          }
+          return { allow: true };
+        },
+      },
+      async execute({ recordId }) {
+        readCount += 1;
+        return { recordId, secret: 'cached-sensitive-data' };
+      },
+    });
+    const toolbox = withToolboxIdempotency(createToolbox([sensitiveTool]), {
+      cache,
+      tenantId: 'tenant-a',
+      policyRevision: 'policy:1',
+    });
+    const call = {
+      id: 'read-call-1',
+      name: 'read-sensitive-record',
+      arguments: { recordId: 'record-a' },
+    };
+    const cacheKey = expectedCacheKey(
+      'tenant-a',
+      'default:read-sensitive-record',
+      'read-sensitive-record:sensitive-read-key',
+    );
+    const first = await toolbox.execute(call, {
+      idempotencyKey: 'sensitive-read-key',
+      requestContext: authorizedRequestContext,
+    });
+    const allowedRetry = await toolbox.execute(
+      {
+        ...call,
+        id: 'read-call-allowed-retry',
+      },
+      {
+        idempotencyKey: 'sensitive-read-key',
+        requestContext: authorizedRequestContext,
+      },
+    );
+
+    const deniedRetries = [
+      {
+        name: 'different principal',
+        requestContext: createRequestContext({ principalId: 'principal-b' }),
+        reason: 'principal denied',
+      },
+      {
+        name: 'missing capability',
+        requestContext: createRequestContext({ capabilities: ['records:list'] }),
+        reason: 'capability denied',
+      },
+      {
+        name: 'changed authorization revision',
+        requestContext: createRequestContext({ authorizationRevision: 'authorization:2' }),
+        reason: 'authorization revision denied',
+      },
+    ];
+
+    expect(first.outcome).toBe('success');
+    expect(first.idempotency).toEqual({
+      key: cacheKey,
+      outcome: 'fresh',
+    });
+    expect(allowedRetry.result).toEqual({
+      recordId: 'record-a',
+      secret: 'cached-sensitive-data',
+    });
+    expect(allowedRetry.idempotency).toEqual({
+      key: cacheKey,
+      outcome: 'deduped',
+    });
+
+    for (const retry of deniedRetries) {
+      const retryResult = await toolbox.execute(
+        {
+          ...call,
+          id: `read-call-${retry.name}`,
+        },
+        {
+          idempotencyKey: 'sensitive-read-key',
+          requestContext: retry.requestContext,
+        },
+      );
+      expect(retryResult.outcome).toBe('error');
+      expect(retryResult.error?.category).toBe('permission');
+      expect(retryResult.error?.message).toBe(retry.reason);
+      expect(retryResult.idempotency).toBeUndefined();
+    }
+    expect(readCount).toBe(1);
+    expect(observedPolicyRequests).toEqual([
+      'principal-a:records:read:authorization:1',
+      'principal-a:records:read:authorization:1',
+      'principal-b:records:read:authorization:1',
+      'principal-a:records:list:authorization:1',
+      'principal-a:records:read:authorization:2',
+    ]);
+  });
+
   it('keeps cached results tenant-isolated after operation-key dedupe', async () => {
     const toolbox = createToolbox([createToolWithKey()]);
     const tenantA = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });

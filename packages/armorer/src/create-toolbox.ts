@@ -97,6 +97,7 @@ import {
   approvalConsumeSymbol,
   type ApprovalResumeState,
   approvalResumeSymbol,
+  policyAuthorizationOnlySymbol,
   policyPauseDecisionsSymbol,
   policyPauseTierSymbol,
 } from './internal/approval-resume';
@@ -386,12 +387,14 @@ export interface ToolboxExecuteOptions extends Omit<ToolExecuteOptions, 'durable
 
 type InternalToolboxExecuteOptions = ToolboxExecuteOptions & {
   [approvalResumeSymbol]?: ApprovalResumeState;
+  [policyAuthorizationOnlySymbol]?: boolean;
   executionHandle?: ExecutionHandle;
 };
 
 type InternalToolExecuteOptionsWithMirror = ToolboxExecuteOptions & {
   [approvalConsumeSymbol]?: () => Promise<ApprovalAdmissionRollback>;
   [approvalResumeSymbol]?: ApprovalResumeState;
+  [policyAuthorizationOnlySymbol]?: boolean;
   executionHandle?: ExecutionHandle;
   privilegedContextMirrorHandle?: ExecutionHandle;
 };
@@ -1266,7 +1269,8 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
             options?.clearTimeoutFunction !== undefined ||
             durableOperationKey !== undefined ||
             (options !== undefined && approvalResumeSymbol in options) ||
-            (options !== undefined && approvalConsumeSymbol in options)
+            (options !== undefined && approvalConsumeSymbol in options) ||
+            (options !== undefined && policyAuthorizationOnlySymbol in options)
               ? {
                   ...(durableOperationKey !== undefined ? { durableOperationKey } : {}),
                   ...(options?.signal ? { signal: options.signal } : {}),
@@ -1301,6 +1305,9 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
                         [approvalConsumeSymbol]: options[approvalConsumeSymbol] as
                           (() => Promise<ApprovalAdmissionRollback>) | undefined,
                       }
+                    : {}),
+                  ...(options !== undefined && policyAuthorizationOnlySymbol in options
+                    ? { [policyAuthorizationOnlySymbol]: options[policyAuthorizationOnlySymbol] }
                     : {}),
                 }
               : {};

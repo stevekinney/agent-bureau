@@ -55,6 +55,7 @@ import {
   approvalConsumeSymbol,
   type ApprovalResumeState,
   approvalResumeSymbol,
+  policyAuthorizationOnlySymbol,
   policyPauseDecisionsSymbol,
   policyPauseTierSymbol,
 } from './internal/approval-resume';
@@ -96,6 +97,7 @@ function isAbortSignalLike(signal: MinimalAbortSignal | undefined): signal is Ab
 type InternalToolExecuteOptions = ToolExecuteOptions & {
   [approvalConsumeSymbol]?: () => Promise<ApprovalAdmissionRollback>;
   [approvalResumeSymbol]?: ApprovalResumeState;
+  [policyAuthorizationOnlySymbol]?: boolean;
   executionHandle?: ExecutionHandle;
   privilegedContextMirrorHandle?: ExecutionHandle;
 };
@@ -1065,11 +1067,30 @@ export function createTool<
         meta.callId = typedToolCall.id;
       }
 
-      const resolvedExecute = await resolveExecute();
-
+      let rollbackApprovalAdmission: ApprovalAdmissionRollback | undefined;
+      if (options[approvalConsumeSymbol]) {
+        rollbackApprovalAdmission = await options[approvalConsumeSymbol]();
+      }
       if (options.signal?.aborted) {
+        if (rollbackApprovalAdmission) await rollbackApprovalAdmission();
         return handleCancellation(options.signal.reason);
       }
+      if (options[policyAuthorizationOnlySymbol]) {
+        const callId = typedToolCall.id;
+        return {
+          callId,
+          outcome: 'success',
+          content: '',
+          toolCallId: callId,
+          toolName: name,
+          result: undefined,
+          executedArgumentsEdited,
+          inputDigest,
+        };
+      }
+
+      const resolvedExecute = await resolveExecute();
+
       const toolContext: ToolContext<E> = {
         dispatch,
         meta,
@@ -1105,14 +1126,6 @@ export function createTool<
       // At runtime we can only guarantee the base ToolContext shape, so we cast to
       // avoid `exactOptionalPropertyTypes` assignability issues.
 
-      let rollbackApprovalAdmission: ApprovalAdmissionRollback | undefined;
-      if (options[approvalConsumeSymbol]) {
-        rollbackApprovalAdmission = await options[approvalConsumeSymbol]();
-      }
-      if (options.signal?.aborted) {
-        if (rollbackApprovalAdmission) await rollbackApprovalAdmission();
-        return handleCancellation(options.signal.reason);
-      }
       const runner = Promise.resolve(resolvedExecute(parsed, toolContext as unknown as TContext));
       if (options.executionHandle) {
         void runner.then(
