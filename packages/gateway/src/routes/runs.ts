@@ -38,6 +38,13 @@ export function createRunsRoutes(bureau: Bureau) {
       throw new HTTPException(400, { message: 'Run request body must be a JSON object' });
     }
     try {
+      if (
+        'agentName' in body &&
+        body['agentName'] !== undefined &&
+        typeof body['agentName'] !== 'string'
+      ) {
+        throw new HTTPException(400, { message: 'agentName must be a string' });
+      }
       // Overwrite any caller-supplied `principal` with the authenticated
       // principal from the verified request header — never trust it from an
       // untrusted request body (AB-54 usage analytics attribution).

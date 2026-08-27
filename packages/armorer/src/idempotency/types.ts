@@ -38,6 +38,21 @@ export type IdempotencyResolutionReceipt = {
   authorization: string;
 };
 
+export type LegacyIdempotencyResolutionReceipt = {
+  version: 1;
+  key: string;
+  tenantId: string;
+  toolRevision: string;
+  toolName: string;
+  legacyStartedAt: number;
+  decision: 'retry';
+  evidence: string;
+  authorizedAt: number;
+  authorizedBy: string;
+  nonce: string;
+  authorization: string;
+};
+
 export type ToolResultCacheEntry = CachedToolResult | StartedToolExecution;
 export type ToolResultCacheClaimResult =
   { outcome: 'claimed' } | { outcome: 'existing'; entry: ToolResultCacheEntry };
@@ -81,6 +96,13 @@ export type ToolResultCache = {
   replaceUnknownStarted(
     key: string,
     expectedAttemptId: string,
+    execution: StartedToolExecution,
+    observedAt: number,
+  ): Promise<boolean>;
+  /** Atomically replace a legacy started marker that predates attempt fencing. */
+  replaceLegacyStarted(
+    key: string,
+    expected: { toolName: string; startedAt: number },
     execution: StartedToolExecution,
     observedAt: number,
   ): Promise<boolean>;

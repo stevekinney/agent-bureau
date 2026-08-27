@@ -55,6 +55,16 @@ describe('runs routes', () => {
     }
   });
 
+  it('POST /api/v1/runs returns 400 when agentName is not a string', async () => {
+    const gateway = await createTestGateway({ generate: createMockGenerate() });
+    const response = await requestJSON(gateway, '/api/v1/runs', {
+      method: 'POST',
+      body: JSON.stringify({ message: 'Hello', agentName: 42 }),
+    });
+
+    expect(response.status).toBe(400);
+  });
+
   it('POST /api/v1/runs creates a run and returns 201', async () => {
     const gateway = await createTestGateway({
       generate: createMockGenerate(),

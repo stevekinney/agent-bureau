@@ -47,6 +47,9 @@ describe('execution authority and projections', () => {
         ['write', 'admin'],
       ).authority.capabilities,
     ).toEqual(['write', 'admin']);
+    expect(narrowToolAuthority(effectiveContext, ['*']).authority.capabilities).toEqual(
+      effectiveContext.authority.capabilities,
+    );
   });
 
   it('keeps privileged context separate from general lifecycle snapshots', () => {

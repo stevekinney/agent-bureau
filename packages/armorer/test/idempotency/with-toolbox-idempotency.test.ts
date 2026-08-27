@@ -287,11 +287,12 @@ describe('withToolboxIdempotency', () => {
   it('returns unknown-outcome when a key was started without a recorded result', async () => {
     const toolbox = createToolbox([createToolWithKey()]);
     const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
+    const startedAt = Date.now();
 
     await cache.claimStarted(expectedCacheKey('tenant-a', 'default:add', 'add:started-key'), {
       status: 'started',
       toolName: 'add',
-      startedAt: Date.now(),
+      startedAt,
       ttl: 60_000,
     });
 
@@ -304,6 +305,320 @@ describe('withToolboxIdempotency', () => {
     expect(result.idempotency).toEqual({
       key: expectedCacheKey('tenant-a', 'default:add', 'add:started-key'),
       outcome: 'unknown-outcome',
+      legacyStartedAt: startedAt,
+    });
+    expect(addCallCount).toBe(0);
+  });
+
+  it('does not resolve legacy unfenced started entries without separate legacy authorization', async () => {
+    const store = createTestStore();
+    const legacyCache = createToolResultCache({ store, defaultTTL: 60_000 });
+    const toolbox = createToolbox([createToolWithKey()]);
+    const key = expectedCacheKey('tenant-a', 'default:add', 'add:legacy-started');
+    await store.set(
+      key,
+      JSON.stringify({
+        status: 'started',
+        toolName: 'add',
+        startedAt: 1_000,
+        ttl: 60_000,
+      }),
+    );
+    const idempotentToolbox = withToolboxIdempotency(toolbox, {
+      cache: legacyCache,
+      tenantId: 'tenant-a',
+      verifyResolutionReceipt: async () => true,
+      verifyLegacyResolutionReceipt: async () => false,
+    });
+
+    const normalReceiptResult = await idempotentToolbox.execute(
+      { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
+      {
+        idempotencyKey: 'legacy-started',
+        resolutionReceipt: {
+          version: 1,
+          key,
+          attemptId: 'invented-attempt',
+          tenantId: 'tenant-a',
+          toolRevision: 'default:add',
+          decision: 'retry',
+          evidence: 'operator checked provider',
+          authorizedAt: 2_000,
+          authorizedBy: 'operator-a',
+          nonce: 'normal-receipt',
+          authorization: 'signed',
+        },
+      },
+    );
+    const rejectedLegacyReceiptResult = await idempotentToolbox.execute(
+      { id: 'call-2', name: 'add', arguments: { a: 1, b: 2 } },
+      {
+        idempotencyKey: 'legacy-started',
+        legacyResolutionReceipt: {
+          version: 1,
+          key,
+          tenantId: 'tenant-a',
+          toolRevision: 'default:add',
+          toolName: 'add',
+          legacyStartedAt: 1_000,
+          decision: 'retry',
+          evidence: 'operator checked provider',
+          authorizedAt: 2_000,
+          authorizedBy: 'operator-a',
+          nonce: 'legacy-receipt',
+          authorization: 'signed',
+        },
+      },
+    );
+
+    expect(normalReceiptResult.idempotency).toEqual({
+      key,
+      outcome: 'unknown-outcome',
+      legacyStartedAt: 1_000,
+    });
+    expect(rejectedLegacyReceiptResult.idempotency).toEqual({
+      key,
+      outcome: 'unknown-outcome',
+      legacyStartedAt: 1_000,
+    });
+    expect(addCallCount).toBe(0);
+    expect(await legacyCache.getState(key)).toEqual(
+      expect.objectContaining({
+        status: 'started',
+        toolName: 'add',
+        startedAt: 1_000,
+      }),
+    );
+  });
+
+  it('resolves legacy unfenced started entries through an authorized migration receipt', async () => {
+    const store = createTestStore();
+    const legacyCache = createToolResultCache({ store, defaultTTL: 60_000 });
+    const toolbox = createToolbox([createToolWithKey()]);
+    const key = expectedCacheKey('tenant-a', 'default:add', 'add:legacy-resolution');
+    await store.set(
+      key,
+      JSON.stringify({
+        status: 'started',
+        toolName: 'add',
+        startedAt: 1_000,
+        ttl: 60_000,
+      }),
+    );
+    const idempotentToolbox = withToolboxIdempotency(toolbox, {
+      cache: legacyCache,
+      tenantId: 'tenant-a',
+      now: () => 2_000,
+      createAttemptId: () => 'replacement-attempt',
+      verifyLegacyResolutionReceipt: async (receipt) => receipt.authorization === 'legacy-signed',
+    });
+
+    const result = await idempotentToolbox.execute(
+      { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
+      {
+        idempotencyKey: 'legacy-resolution',
+        legacyResolutionReceipt: {
+          version: 1,
+          key,
+          tenantId: 'tenant-a',
+          toolRevision: 'default:add',
+          toolName: 'add',
+          legacyStartedAt: 1_000,
+          decision: 'retry',
+          evidence: 'Operator confirmed the original side effect did not occur.',
+          authorizedAt: 2_000,
+          authorizedBy: 'operator-a',
+          nonce: 'legacy-resolution-receipt',
+          authorization: 'legacy-signed',
+        },
+      },
+    );
+
+    expect(result.outcome).toBe('success');
+    expect(result.result).toBe(3);
+    expect(result.idempotency).toEqual({ key, outcome: 'fresh' });
+    expect(addCallCount).toBe(1);
+    expect(await legacyCache.getState(key)).toEqual(
+      expect.objectContaining({
+        status: 'completed',
+        toolName: 'add',
+        result: 3,
+      }),
+    );
+  });
+
+  it('does not migrate a legacy unfenced entry while its lease is active', async () => {
+    const store = createTestStore();
+    const legacyCache = createToolResultCache({ store, defaultTTL: 60_000 });
+    const toolbox = createToolbox([createToolWithKey()]);
+    const key = expectedCacheKey('tenant-a', 'default:add', 'add:leased-legacy-resolution');
+    await store.set(
+      key,
+      JSON.stringify({
+        status: 'started',
+        toolName: 'add',
+        startedAt: 1_000,
+        leaseExpiresAt: 3_000,
+        ttl: 60_000,
+      }),
+    );
+    const idempotentToolbox = withToolboxIdempotency(toolbox, {
+      cache: legacyCache,
+      tenantId: 'tenant-a',
+      now: () => 2_000,
+      verifyLegacyResolutionReceipt: async () => true,
+    });
+
+    const result = await idempotentToolbox.execute(
+      { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
+      {
+        idempotencyKey: 'leased-legacy-resolution',
+        legacyResolutionReceipt: {
+          version: 1,
+          key,
+          tenantId: 'tenant-a',
+          toolRevision: 'default:add',
+          toolName: 'add',
+          legacyStartedAt: 1_000,
+          decision: 'retry',
+          evidence: 'Operator confirmed the original side effect did not occur.',
+          authorizedAt: 2_000,
+          authorizedBy: 'operator-a',
+          nonce: 'leased-legacy-resolution-receipt',
+          authorization: 'legacy-signed',
+        },
+      },
+    );
+
+    expect(result.idempotency).toEqual({
+      key,
+      outcome: 'unknown-outcome',
+      legacyStartedAt: 1_000,
+    });
+    expect(addCallCount).toBe(0);
+  });
+
+  it('returns the current outcome when legacy migration loses its compare-and-set race', async () => {
+    const store = createTestStore();
+    const legacyCache = createToolResultCache({ store, defaultTTL: 60_000 });
+    const key = expectedCacheKey('tenant-a', 'default:add', 'add:legacy-migration-race');
+    await store.set(
+      key,
+      JSON.stringify({ status: 'started', toolName: 'add', startedAt: 1_000, ttl: 60_000 }),
+    );
+    const racingCache: ToolResultCache = {
+      ...legacyCache,
+      replaceLegacyStarted: async () => false,
+    };
+    const idempotentToolbox = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache: racingCache,
+      tenantId: 'tenant-a',
+      now: () => 2_000,
+      verifyLegacyResolutionReceipt: async () => true,
+    });
+
+    const result = await idempotentToolbox.execute(
+      { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
+      {
+        idempotencyKey: 'legacy-migration-race',
+        legacyResolutionReceipt: {
+          version: 1,
+          key,
+          tenantId: 'tenant-a',
+          toolRevision: 'default:add',
+          toolName: 'add',
+          legacyStartedAt: 1_000,
+          decision: 'retry',
+          evidence: 'Operator confirmed the original side effect did not occur.',
+          authorizedAt: 2_000,
+          authorizedBy: 'operator-a',
+          nonce: 'legacy-migration-race-receipt',
+          authorization: 'legacy-signed',
+        },
+      },
+    );
+
+    expect(result.idempotency).toEqual({
+      key,
+      outcome: 'unknown-outcome',
+      legacyStartedAt: 1_000,
+    });
+    expect(addCallCount).toBe(0);
+  });
+
+  it('rejects stale legacy receipts and legacy receipts against fenced started entries', async () => {
+    const toolbox = createToolbox([createToolWithKey()]);
+    const staleKey = expectedCacheKey('tenant-a', 'default:add', 'add:stale-legacy-receipt');
+    await cache.claimStarted(staleKey, {
+      status: 'started',
+      toolName: 'add',
+      startedAt: 1_000,
+      ttl: 60_000,
+    });
+    const fencedKey = expectedCacheKey('tenant-a', 'default:add', 'add:fenced-started');
+    await cache.claimStarted(fencedKey, {
+      status: 'started',
+      toolName: 'add',
+      startedAt: 1_000,
+      ttl: 60_000,
+      attemptId: 'fenced-attempt',
+    });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, {
+      cache,
+      tenantId: 'tenant-a',
+      verifyLegacyResolutionReceipt: async () => true,
+    });
+
+    const staleResult = await idempotentToolbox.execute(
+      { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
+      {
+        idempotencyKey: 'stale-legacy-receipt',
+        legacyResolutionReceipt: {
+          version: 1,
+          key: staleKey,
+          tenantId: 'tenant-a',
+          toolRevision: 'default:add',
+          toolName: 'add',
+          legacyStartedAt: 999,
+          decision: 'retry',
+          evidence: 'operator checked provider',
+          authorizedAt: 2_000,
+          authorizedBy: 'operator-a',
+          nonce: 'stale-legacy-receipt',
+          authorization: 'signed',
+        },
+      },
+    );
+    const fencedResult = await idempotentToolbox.execute(
+      { id: 'call-2', name: 'add', arguments: { a: 1, b: 2 } },
+      {
+        idempotencyKey: 'fenced-started',
+        legacyResolutionReceipt: {
+          version: 1,
+          key: fencedKey,
+          tenantId: 'tenant-a',
+          toolRevision: 'default:add',
+          toolName: 'add',
+          legacyStartedAt: 1_000,
+          decision: 'retry',
+          evidence: 'operator checked provider',
+          authorizedAt: 2_000,
+          authorizedBy: 'operator-a',
+          nonce: 'fenced-legacy-receipt',
+          authorization: 'signed',
+        },
+      },
+    );
+
+    expect(staleResult.idempotency).toEqual({
+      key: staleKey,
+      outcome: 'unknown-outcome',
+      legacyStartedAt: 1_000,
+    });
+    expect(fencedResult.idempotency).toEqual({
+      key: fencedKey,
+      outcome: 'unknown-outcome',
+      attemptId: 'fenced-attempt',
     });
     expect(addCallCount).toBe(0);
   });
@@ -907,13 +1222,14 @@ describe('withToolboxIdempotency', () => {
 
     const callerKey = 'orchestrator-tool-call-id-abc123';
     const cacheKey = expectedCacheKey('tenant-a', 'default:charge', `charge:${callerKey}`);
+    const startedAt = Date.now();
 
     // Simulate a previous attempt that claimed the started entry and then died
     // before recording any result — the orphaned "started" state.
     const claim = await claimCacheStarted(cache, cacheKey, {
       status: 'started',
       toolName: 'charge',
-      startedAt: Date.now(),
+      startedAt,
       ttl: 60_000,
     });
     expect(claim.outcome).toBe('claimed');
@@ -931,6 +1247,7 @@ describe('withToolboxIdempotency', () => {
     expect(retry.idempotency).toEqual({
       key: cacheKey,
       outcome: 'unknown-outcome',
+      legacyStartedAt: startedAt,
     });
   });
 

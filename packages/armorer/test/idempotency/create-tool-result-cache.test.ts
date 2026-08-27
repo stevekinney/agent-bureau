@@ -330,6 +330,145 @@ describe('createToolResultCache', () => {
       });
     });
 
+    it('reads legacy started entries without an attempt fence', async () => {
+      await store.set(
+        'legacy-started-key',
+        JSON.stringify({
+          status: 'started',
+          toolName: 'legacy-charge',
+          startedAt: 1_000,
+          ttl: 60_000,
+        }),
+      );
+
+      expect(await cache.get('legacy-started-key')).toBeUndefined();
+      expect(await cache.getState('legacy-started-key')).toEqual({
+        status: 'started',
+        toolName: 'legacy-charge',
+        startedAt: 1_000,
+        ttl: 60_000,
+      });
+    });
+
+    it('replaces only matching legacy started entries with a new fenced attempt', async () => {
+      await store.set(
+        'legacy-started-key',
+        JSON.stringify({
+          status: 'started',
+          toolName: 'legacy-charge',
+          startedAt: 1_000,
+          ttl: 60_000,
+        }),
+      );
+
+      await expect(
+        cache.replaceLegacyStarted(
+          'legacy-started-key',
+          { toolName: 'legacy-charge', startedAt: 999 },
+          {
+            status: 'started',
+            toolName: 'legacy-charge',
+            startedAt: 2_000,
+            ttl: 60_000,
+            attemptId: 'replacement-attempt',
+          },
+          2_000,
+        ),
+      ).resolves.toBe(false);
+      await expect(
+        cache.replaceLegacyStarted(
+          'legacy-started-key',
+          { toolName: 'legacy-charge', startedAt: 1_000 },
+          {
+            status: 'started',
+            toolName: 'legacy-charge',
+            startedAt: 2_000,
+            ttl: 60_000,
+          },
+          2_000,
+        ),
+      ).resolves.toBe(false);
+      await expect(
+        cache.replaceLegacyStarted(
+          'legacy-started-key',
+          { toolName: 'legacy-charge', startedAt: 1_000 },
+          {
+            status: 'started',
+            toolName: 'legacy-charge',
+            startedAt: 2_000,
+            ttl: 60_000,
+            attemptId: 'replacement-attempt',
+          },
+          2_000,
+        ),
+      ).resolves.toBe(true);
+
+      expect(await cache.getState('legacy-started-key')).toEqual(
+        expect.objectContaining({
+          status: 'started',
+          toolName: 'legacy-charge',
+          startedAt: 2_000,
+          attemptId: 'replacement-attempt',
+        }),
+      );
+    });
+
+    it('does not replace fenced or actively leased entries through the legacy path', async () => {
+      await cache.claimStarted('fenced-key', {
+        status: 'started',
+        toolName: 'charge',
+        startedAt: 1_000,
+        ttl: 60_000,
+        attemptId: 'current-attempt',
+      });
+      await store.set(
+        'active-legacy-key',
+        JSON.stringify({
+          status: 'started',
+          toolName: 'legacy-charge',
+          startedAt: 1_000,
+          ttl: 60_000,
+          leaseExpiresAt: 3_000,
+        }),
+      );
+
+      await expect(
+        cache.replaceLegacyStarted(
+          'fenced-key',
+          { toolName: 'charge', startedAt: 1_000 },
+          {
+            status: 'started',
+            toolName: 'charge',
+            startedAt: 2_000,
+            ttl: 60_000,
+            attemptId: 'replacement-attempt',
+          },
+          2_000,
+        ),
+      ).resolves.toBe(false);
+      await expect(
+        cache.replaceLegacyStarted(
+          'active-legacy-key',
+          { toolName: 'legacy-charge', startedAt: 1_000 },
+          {
+            status: 'started',
+            toolName: 'legacy-charge',
+            startedAt: 2_000,
+            ttl: 60_000,
+            attemptId: 'replacement-attempt',
+          },
+          2_000,
+        ),
+      ).resolves.toBe(false);
+
+      expect(await cache.getState('fenced-key')).toEqual(
+        expect.objectContaining({ attemptId: 'current-attempt' }),
+      );
+      expect(await cache.getState('active-legacy-key')).toEqual(
+        expect.objectContaining({ leaseExpiresAt: 3_000 }),
+      );
+    });
+
     it('deletes malformed entries on read', async () => {
       await store.set('malformed-key', JSON.stringify({ status: 'completed' }));
 

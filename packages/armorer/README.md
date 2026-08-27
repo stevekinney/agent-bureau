@@ -645,6 +645,7 @@ const idempotentToolbox = withToolboxIdempotency(toolbox, {
   cache,
   tenantId: currentTenant.id,
   verifyResolutionReceipt: (receipt) => verifyOperatorSignature(receipt),
+  verifyLegacyResolutionReceipt: (receipt) => verifyLegacyOperatorSignature(receipt),
 });
 
 const call = {
@@ -658,25 +659,48 @@ const result = await idempotentToolbox.execute(call, {
 });
 
 if (result.idempotency?.outcome === 'unknown-outcome') {
-  if (!result.idempotency.attemptId) throw new Error('Cannot resolve an unfenced attempt.');
-  const signedOperatorReceipt = signResolutionReceipt({
-    version: 1,
-    key: result.idempotency.key,
-    attemptId: result.idempotency.attemptId,
-    tenantId: currentTenant.id,
-    toolRevision: chargeCardTool.id,
-    decision: 'retry',
-    evidence: 'Operator confirmed the provider did not perform the side effect.',
-    authorizedAt: Date.now(),
-    authorizedBy: operator.principalId,
-    nonce: crypto.randomUUID(),
-  });
+  if (result.idempotency.attemptId) {
+    const signedOperatorReceipt = signResolutionReceipt({
+      version: 1,
+      key: result.idempotency.key,
+      attemptId: result.idempotency.attemptId,
+      tenantId: currentTenant.id,
+      toolRevision: chargeCardTool.id,
+      decision: 'retry',
+      evidence: 'Operator confirmed the provider did not perform the side effect.',
+      authorizedAt: Date.now(),
+      authorizedBy: operator.principalId,
+      nonce: crypto.randomUUID(),
+    });
 
-  await idempotentToolbox.execute(call, {
-    idempotencyKey: temporalToolCallId,
-    resolutionReceipt: signedOperatorReceipt,
-    requestContext,
-  });
+    await idempotentToolbox.execute(call, {
+      idempotencyKey: temporalToolCallId,
+      resolutionReceipt: signedOperatorReceipt,
+      requestContext,
+    });
+  } else if (result.idempotency.legacyStartedAt !== undefined) {
+    const signedLegacyReceipt = signLegacyResolutionReceipt({
+      version: 1,
+      key: result.idempotency.key,
+      tenantId: currentTenant.id,
+      toolRevision: chargeCardTool.id,
+      toolName: result.toolName,
+      legacyStartedAt: result.idempotency.legacyStartedAt,
+      decision: 'retry',
+      evidence: 'Operator confirmed the provider did not perform the side effect.',
+      authorizedAt: Date.now(),
+      authorizedBy: operator.principalId,
+      nonce: crypto.randomUUID(),
+    });
+
+    await idempotentToolbox.execute(call, {
+      idempotencyKey: temporalToolCallId,
+      legacyResolutionReceipt: signedLegacyReceipt,
+      requestContext,
+    });
+  } else {
+    throw new Error('Cannot resolve an unknown idempotency attempt.');
+  }
 }
 ```
 
@@ -694,7 +718,9 @@ If you do not pass `idempotencyKey`, `withToolboxIdempotency()` uses each tool's
 
 The operation cache key intentionally excludes request-instance authority fields such as principal, owner, run ID, authorization revision, audience, agent, and capabilities. Those fields can change across a legitimate logical retry. Cache access still requires current request authority, and Armorer rejects request contexts whose tenant does not match the idempotency tenant before reading or returning cached state.
 
-`createToolResultCache()` is deliberately process-local: it serializes claims only among cache instances in the same JavaScript process that share one store object. Distributed hosts must implement the complete `ToolResultCache` contract with storage-native compare-and-set operations for `claimStarted()`, `renewStarted()`, `completeStarted()`, `deleteStarted()`, and `replaceUnknownStarted()`. Attempt identifiers fence late completions and cleanup, active work renews a bounded lease up to an absolute deadline, and an authorized retry atomically replaces only the exact unknown attempt named by its receipt.
+Legacy stores may contain `started` entries that predate attempt fencing. Those entries surface as `unknown-outcome` with `legacyStartedAt` instead of `attemptId`. Resolve them only with `legacyResolutionReceipt`, verified by `verifyLegacyResolutionReceipt`; the receipt is bound to the same key, tenant, full tool revision, tool name, and decoded legacy `startedAt`, so a stale legacy receipt cannot replay against a later marker. A normal fenced `resolutionReceipt` never authorizes legacy migration, and a legacy receipt never replaces a fenced current entry.
+
+`createToolResultCache()` is deliberately process-local: it serializes claims only among cache instances in the same JavaScript process that share one store object. Distributed hosts must implement the complete `ToolResultCache` contract with storage-native compare-and-set operations for `claimStarted()`, `renewStarted()`, `completeStarted()`, `deleteStarted()`, `replaceUnknownStarted()`, and `replaceLegacyStarted()`. Attempt identifiers fence late completions and cleanup, active work renews a bounded lease up to an absolute deadline, and an authorized retry atomically replaces only the exact unknown attempt named by its receipt. Legacy migration must atomically replace only a still-unfenced started marker that matches the authorized legacy receipt.
 
 ### Fuzzy Tool Name Resolution
 

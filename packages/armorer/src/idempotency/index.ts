@@ -5,6 +5,7 @@ export type {
   CachedToolResult,
   IdempotencyOptions,
   IdempotencyResolutionReceipt,
+  LegacyIdempotencyResolutionReceipt,
   StartedToolExecution,
   ToolResultCache,
   ToolResultCacheEntry,

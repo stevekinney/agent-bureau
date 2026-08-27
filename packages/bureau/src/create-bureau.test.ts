@@ -457,6 +457,44 @@ describe('createBureau', () => {
         'billing-agent',
       ),
     ).toBeUndefined();
+
+    const futureDeadline = Date.now() + 60_000;
+    expect(
+      recoveredRequestContextFromMetadata(
+        {
+          lastRequestAuthorities: {
+            'run-deadline': {
+              principalId: 'principal-1',
+              tenantId: 'tenant-1',
+              ownerId: 'owner-1',
+              capabilities: ['tools:execute'],
+              authorizationRevision: 'authorization-7',
+              deadline: futureDeadline,
+            },
+          },
+        },
+        'run-deadline',
+        'billing-agent',
+      )?.deadline,
+    ).toBe(futureDeadline);
+    expect(
+      recoveredRequestContextFromMetadata(
+        {
+          lastRequestAuthorities: {
+            'run-expired': {
+              principalId: 'principal-1',
+              tenantId: 'tenant-1',
+              ownerId: 'owner-1',
+              capabilities: ['tools:execute'],
+              authorizationRevision: 'authorization-7',
+              deadline: Date.now() - 1,
+            },
+          },
+        },
+        'run-expired',
+        'billing-agent',
+      ),
+    ).toBeUndefined();
   });
 
   it('classifies only terminal approval binding failures as safe to suppress', () => {
@@ -4280,6 +4318,69 @@ describe('createBureau review queue (AB-20)', () => {
       expect(bureau.getRequestAuthorityValidator()).toBe(replacementValidator);
     } finally {
       await bureau.dispose();
+    }
+  });
+
+  it('reports deferred durable recovery failures after the authority validator is attached', async () => {
+    const storage = new MemoryStorage();
+    const sessionStore = createSessionStore(textValueStore(storage));
+    await sessionStore.save(
+      createAgentSession({
+        id: 'deferred-authority-recovery',
+        agentName: 'bureau',
+        conversationHistory: createConversationHistory({ id: 'deferred-authority-recovery' }),
+        metadata: {
+          lastRequestAuthorities: {
+            'run-deferred-authority': {
+              principalId: 'api-key:deferred',
+              tenantId: 'bureau',
+              ownerId: 'bureau',
+              capabilities: ['tools:execute'],
+              authorizationRevision: 'gateway:api-key:deferred',
+            },
+          },
+        },
+      }),
+    );
+    const probe = await createRuntimeComposition({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+    const enginePrototype = Object.getPrototypeOf(probe.durable!.engine) as {
+      recoverAll: () => Promise<unknown[]>;
+    };
+    probe.durable!.engine[Symbol.dispose]?.();
+    probe.disposeStorage?.();
+    const recoverAllSpy = spyOn(enginePrototype, 'recoverAll').mockRejectedValue(
+      new Error('deferred recovery unavailable'),
+    );
+    const diagnostics: string[] = [];
+
+    try {
+      const bureau = await createBureau({
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+        storage,
+        durableExecution: true,
+        onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.message),
+      });
+
+      try {
+        expect(recoverAllSpy).not.toHaveBeenCalled();
+        bureau.setRequestAuthorityValidator(() => true);
+        await pollUntil(() => diagnostics.some((message) => message.includes('Deferred durable')));
+        expect(diagnostics).toContainEqual(
+          expect.stringContaining(
+            'Deferred durable run recovery failed: deferred recovery unavailable',
+          ),
+        );
+      } finally {
+        await bureau.dispose();
+      }
+    } finally {
+      recoverAllSpy.mockRestore();
     }
   });
 

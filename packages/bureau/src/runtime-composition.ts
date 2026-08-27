@@ -135,6 +135,7 @@ function requestContextFromAuthorityValue(
   const authority = value as Record<string, JSONValue>;
   const capabilities = authority['capabilities'];
   const audience = authority['audience'];
+  const deadline = authority['deadline'];
   if (
     typeof authority['principalId'] !== 'string' ||
     typeof authority['tenantId'] !== 'string' ||
@@ -145,10 +146,12 @@ function requestContextFromAuthorityValue(
     (audience !== undefined &&
       audience !== 'public' &&
       audience !== 'tenant' &&
-      audience !== 'operator')
+      audience !== 'operator') ||
+    (deadline !== undefined && (typeof deadline !== 'number' || !Number.isFinite(deadline)))
   ) {
     return undefined;
   }
+  if (typeof deadline === 'number' && deadline <= Date.now()) return undefined;
   return {
     authority: {
       principalId: authority['principalId'],
@@ -158,6 +161,7 @@ function requestContextFromAuthorityValue(
       authorizationRevision: authority['authorizationRevision'],
     },
     ...(audience !== undefined ? { audience } : {}),
+    ...(typeof deadline === 'number' ? { deadline } : {}),
     ...(agentName !== undefined ? { agentId: agentName } : {}),
     ...(runId !== undefined ? { runId } : {}),
   };

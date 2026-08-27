@@ -104,6 +104,7 @@ export type {
   CreateToolResultCacheOptions,
   IdempotencyOptions,
   IdempotencyResolutionReceipt,
+  LegacyIdempotencyResolutionReceipt,
   ToolResultCache,
   WithToolboxIdempotencyOptions,
 } from './idempotency';

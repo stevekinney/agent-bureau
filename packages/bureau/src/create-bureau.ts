@@ -171,6 +171,11 @@ export function recoveredRequestContextFromMetadata(
   ) {
     return undefined;
   }
+  const deadline = value['deadline'];
+  if (deadline !== undefined && (typeof deadline !== 'number' || !Number.isFinite(deadline))) {
+    return undefined;
+  }
+  if (typeof deadline === 'number' && deadline <= Date.now()) return undefined;
   return normalizeRunRequestContext(
     {
       authority: {
@@ -183,6 +188,7 @@ export function recoveredRequestContextFromMetadata(
       ...(value['audience'] !== undefined
         ? { audience: value['audience'] as ToolRequestContext['audience'] }
         : {}),
+      ...(typeof deadline === 'number' ? { deadline } : {}),
     },
     runId,
     agentName,
@@ -739,6 +745,8 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   let requestAuthorityValidator:
     ((context: ToolRequestContext) => boolean | Promise<boolean>) | undefined =
     options.requestAuthorityValidator;
+  let durableRecoveryDeferred = false;
+  let durableRecoveryStarted = false;
   const liveFrameListeners = new Set<(frame: ServerFrame) => void>();
   // AB-96 — terminal RunReports, cached at the moment each run's lifecycle
   // event fires so `getRunReport` never needs to re-derive them.
@@ -1457,6 +1465,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
             capabilities: [...requestContext.authority.capabilities],
             authorizationRevision: requestContext.authority.authorizationRevision,
             ...(requestContext.audience !== undefined ? { audience: requestContext.audience } : {}),
+            ...(requestContext.deadline !== undefined ? { deadline: requestContext.deadline } : {}),
           },
           lastRequestAuthorities: {
             [runId]: {
@@ -1467,6 +1476,9 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
               authorizationRevision: requestContext.authority.authorizationRevision,
               ...(requestContext.audience !== undefined
                 ? { audience: requestContext.audience }
+                : {}),
+              ...(requestContext.deadline !== undefined
+                ? { deadline: requestContext.deadline }
                 : {}),
             },
           },
@@ -1734,6 +1746,8 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       // terminal event to settle through) — release whatever this admission
       // claimed so it does not leak a phantom concurrency/singleton hold.
       flowController?.settle(runId);
+      runRequestContexts.delete(runId);
+      runAttribution.delete(runId);
       throw error;
     }
   }
@@ -3182,6 +3196,18 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     resolveReview,
     setRequestAuthorityValidator(validator) {
       requestAuthorityValidator = validator;
+      options.requestAuthorityValidator = validator;
+      if (validator && durableRecoveryDeferred && !durableRecoveryStarted) {
+        durableRecoveryDeferred = false;
+        durableRecoveryStarted = true;
+        void recoverDurableRuns().catch((error) => {
+          diagnose({
+            level: 'error',
+            scope: 'recovery',
+            message: `[bureau] Deferred durable run recovery failed: ${serializeUnknownError(error)}`,
+          });
+        });
+      }
     },
     getRequestAuthorityValidator() {
       return requestAuthorityValidator;
@@ -3265,16 +3291,46 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     );
   }
 
-  // Resume any durable runs a previous process left in flight. Best-effort: a
-  // recovery failure is logged but never blocks bringing the bureau up.
-  try {
-    await recoverDurableRuns();
-  } catch (error) {
-    diagnose({
-      level: 'error',
-      scope: 'recovery',
-      message: `[bureau] Durable run recovery failed during boot: ${serializeUnknownError(error)}`,
-    });
+  // A standard `createBureau()` then `createGateway()` boot has no validator
+  // until the Gateway is constructed. Defer recovery when persisted sessions
+  // contain gateway-issued authority so those runs cannot execute unvalidated.
+  let hasDeferredGatewayAuthority = false;
+  if (!requestAuthorityValidator && runtime.durable && runtime.sessionStore) {
+    try {
+      const sessions = await runtime.sessionStore.list();
+      hasDeferredGatewayAuthority = sessions.some((session) => {
+        const authorities = session.metadata['lastRequestAuthorities'];
+        if (!authorities || typeof authorities !== 'object' || Array.isArray(authorities)) {
+          return false;
+        }
+        return Object.values(authorities as Record<string, JSONValue>).some((value) => {
+          if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+          const revision = (value as Record<string, JSONValue>)['authorizationRevision'];
+          return typeof revision === 'string' && revision.startsWith('gateway:');
+        });
+      });
+    } catch (error) {
+      hasDeferredGatewayAuthority = true;
+      diagnose({
+        level: 'error',
+        scope: 'recovery',
+        message: `[bureau] Could not inspect sessions before durable recovery; deferring until authority validator attachment: ${serializeUnknownError(error)}`,
+      });
+    }
+  }
+  if (hasDeferredGatewayAuthority) {
+    durableRecoveryDeferred = true;
+  } else {
+    durableRecoveryStarted = true;
+    try {
+      await recoverDurableRuns();
+    } catch (error) {
+      diagnose({
+        level: 'error',
+        scope: 'recovery',
+        message: `[bureau] Durable run recovery failed during boot: ${serializeUnknownError(error)}`,
+      });
+    }
   }
 
   return bureau;

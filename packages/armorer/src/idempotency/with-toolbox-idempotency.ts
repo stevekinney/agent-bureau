@@ -4,7 +4,13 @@ import type { ToolRequestContext } from '../execution-context';
 import type { ToolCallInput, ToolExecutionResult } from '../types';
 import { claimCacheStarted, getCacheEntry } from './cache-operations';
 import { fullInputKey, namespacedKey } from './key-generators';
-import type { CachedToolResult, IdempotencyResolutionReceipt, ToolResultCache } from './types';
+import type {
+  CachedToolResult,
+  IdempotencyResolutionReceipt,
+  LegacyIdempotencyResolutionReceipt,
+  StartedToolExecution,
+  ToolResultCache,
+} from './types';
 
 const DEFAULT_TTL = 300_000;
 
@@ -27,6 +33,9 @@ export type WithToolboxIdempotencyOptions = {
   leaseDurationMs?: number;
   maximumExecutionDurationMs?: number;
   verifyResolutionReceipt?: (receipt: IdempotencyResolutionReceipt) => boolean | Promise<boolean>;
+  verifyLegacyResolutionReceipt?: (
+    receipt: LegacyIdempotencyResolutionReceipt,
+  ) => boolean | Promise<boolean>;
   now?: () => number;
   createAttemptId?: () => string;
 };
@@ -34,6 +43,7 @@ export type WithToolboxIdempotencyOptions = {
 type ToolboxExecuteOptionsWithIdempotencyKey = {
   idempotencyKey?: string | ((call: ToolCallInput) => string | undefined);
   resolutionReceipt?: IdempotencyResolutionReceipt;
+  legacyResolutionReceipt?: LegacyIdempotencyResolutionReceipt;
   requestContext?: ToolRequestContext;
   mode?: 'parallel' | 'sequential';
   concurrency?: number;
@@ -111,6 +121,7 @@ export function withToolboxIdempotency(
     leaseDurationMs = 30_000,
     maximumExecutionDurationMs = Math.max(defaultTTL, DEFAULT_TTL),
     verifyResolutionReceipt,
+    verifyLegacyResolutionReceipt,
     now = Date.now,
     createAttemptId = () => crypto.randomUUID(),
   } = options;
@@ -155,7 +166,7 @@ export function withToolboxIdempotency(
     fields: { id: string },
     cacheKey: string,
     toolName: string,
-    attemptId?: string,
+    options: { attemptId?: string; legacyStartedAt?: number } = {},
   ): ToolExecutionResult {
     return {
       callId: fields.id,
@@ -167,7 +178,10 @@ export function withToolboxIdempotency(
       idempotency: {
         key: cacheKey,
         outcome: 'unknown-outcome',
-        ...(attemptId ? { attemptId } : {}),
+        ...(options.attemptId ? { attemptId: options.attemptId } : {}),
+        ...(options.legacyStartedAt !== undefined
+          ? { legacyStartedAt: options.legacyStartedAt }
+          : {}),
       },
       action: {
         type: 'approval',
@@ -175,6 +189,44 @@ export function withToolboxIdempotency(
           'This idempotency key has an unknown outcome. Re-approve before retrying the side effect.',
       },
     };
+  }
+
+  function hasReceiptAuthorization(
+    receipt: IdempotencyResolutionReceipt | LegacyIdempotencyResolutionReceipt | undefined,
+  ): boolean {
+    return Boolean(
+      receipt?.evidence && receipt.authorizedBy && receipt.nonce && receipt.authorization,
+    );
+  }
+
+  function createStartedExecution(toolName: string, startedAt: number): StartedToolExecution {
+    return {
+      status: 'started',
+      toolName,
+      startedAt,
+      ttl: defaultTTL,
+      attemptId: createAttemptId(),
+      leaseExpiresAt: Math.min(startedAt + leaseDurationMs, startedAt + maximumExecutionDurationMs),
+      absoluteDeadline: startedAt + maximumExecutionDurationMs,
+    };
+  }
+
+  async function createUnknownOutcomeAfterReplacementRace(
+    fields: { id: string },
+    cacheKey: string,
+    fallbackToolName: string,
+  ): Promise<ToolExecutionResult> {
+    const current = await cache.getState(cacheKey);
+    if (current?.status === 'completed') return createDedupedResult(fields, cacheKey, current);
+    const currentAttemptId = current?.status === 'started' ? current.attemptId : undefined;
+    const legacyStartedAt =
+      current?.status === 'started' && current.attemptId === undefined
+        ? current.startedAt
+        : undefined;
+    return createUnknownOutcomeResult(fields, cacheKey, current?.toolName ?? fallbackToolName, {
+      attemptId: currentAttemptId,
+      legacyStartedAt,
+    });
   }
 
   function createDedupedResult(
@@ -238,84 +290,96 @@ export function withToolboxIdempotency(
     const cached = await getCacheEntry(cache, cacheKey);
 
     const receipt = executionIdempotencyOptions?.resolutionReceipt;
+    const legacyReceipt = executionIdempotencyOptions?.legacyResolutionReceipt;
 
     if (cached && cached.status !== 'started') {
       return createDedupedResult(fields, cacheKey, cached);
     }
 
-    let execution: import('./types').StartedToolExecution;
+    let execution: StartedToolExecution;
     let started;
     if (cached?.status === 'started') {
-      const validReceipt =
-        receipt?.version === 1 &&
-        receipt.key === cacheKey &&
-        receipt.attemptId === cached.attemptId &&
-        receipt.tenantId === tenantId &&
-        receipt.toolRevision === revision &&
-        receipt.decision === 'retry' &&
-        Boolean(
-          receipt.evidence && receipt.authorizedBy && receipt.nonce && receipt.authorization,
-        ) &&
-        Boolean(verifyResolutionReceipt && (await verifyResolutionReceipt(receipt)));
-      if (!validReceipt || !cached.attemptId) {
-        return createUnknownOutcomeResult(fields, cacheKey, cached.toolName, cached.attemptId);
+      if (cached.attemptId === undefined) {
+        const validLegacyReceipt =
+          legacyReceipt?.version === 1 &&
+          legacyReceipt.key === cacheKey &&
+          legacyReceipt.tenantId === tenantId &&
+          legacyReceipt.toolRevision === revision &&
+          legacyReceipt.toolName === cached.toolName &&
+          legacyReceipt.legacyStartedAt === cached.startedAt &&
+          legacyReceipt.decision === 'retry' &&
+          hasReceiptAuthorization(legacyReceipt) &&
+          Boolean(
+            verifyLegacyResolutionReceipt && (await verifyLegacyResolutionReceipt(legacyReceipt)),
+          );
+        if (!validLegacyReceipt) {
+          return createUnknownOutcomeResult(fields, cacheKey, cached.toolName, {
+            legacyStartedAt: cached.startedAt,
+          });
+        }
+        const startedAt = now();
+        if (cached.leaseExpiresAt !== undefined && startedAt < cached.leaseExpiresAt) {
+          return createUnknownOutcomeResult(fields, cacheKey, cached.toolName, {
+            legacyStartedAt: cached.startedAt,
+          });
+        }
+        execution = createStartedExecution(fields.name, startedAt);
+        const replaced = await cache.replaceLegacyStarted(
+          cacheKey,
+          { toolName: cached.toolName, startedAt: cached.startedAt },
+          execution,
+          startedAt,
+        );
+        if (!replaced) {
+          return createUnknownOutcomeAfterReplacementRace(fields, cacheKey, cached.toolName);
+        }
+        started = { outcome: 'claimed' } as const;
+      } else {
+        const validReceipt =
+          receipt?.version === 1 &&
+          receipt.key === cacheKey &&
+          receipt.attemptId === cached.attemptId &&
+          receipt.tenantId === tenantId &&
+          receipt.toolRevision === revision &&
+          receipt.decision === 'retry' &&
+          hasReceiptAuthorization(receipt) &&
+          Boolean(verifyResolutionReceipt && (await verifyResolutionReceipt(receipt)));
+        if (!validReceipt) {
+          return createUnknownOutcomeResult(fields, cacheKey, cached.toolName, {
+            attemptId: cached.attemptId,
+          });
+        }
+        const startedAt = now();
+        if (cached.leaseExpiresAt !== undefined && startedAt < cached.leaseExpiresAt) {
+          return createUnknownOutcomeResult(fields, cacheKey, cached.toolName, {
+            attemptId: cached.attemptId,
+          });
+        }
+        execution = createStartedExecution(fields.name, startedAt);
+        const replaced = await cache.replaceUnknownStarted(
+          cacheKey,
+          cached.attemptId,
+          execution,
+          startedAt,
+        );
+        if (!replaced) {
+          return createUnknownOutcomeAfterReplacementRace(fields, cacheKey, cached.toolName);
+        }
+        started = { outcome: 'claimed' } as const;
       }
-      const startedAt = now();
-      if (cached.leaseExpiresAt !== undefined && startedAt < cached.leaseExpiresAt) {
-        return createUnknownOutcomeResult(fields, cacheKey, cached.toolName, cached.attemptId);
-      }
-      execution = {
-        status: 'started',
-        toolName: fields.name,
-        startedAt,
-        ttl: defaultTTL,
-        attemptId: createAttemptId(),
-        leaseExpiresAt: Math.min(
-          startedAt + leaseDurationMs,
-          startedAt + maximumExecutionDurationMs,
-        ),
-        absoluteDeadline: startedAt + maximumExecutionDurationMs,
-      };
-      const replaced = await cache.replaceUnknownStarted(
-        cacheKey,
-        cached.attemptId,
-        execution,
-        startedAt,
-      );
-      if (!replaced) {
-        const current = await cache.getState(cacheKey);
-        const currentAttemptId = current?.status === 'started' ? current.attemptId : undefined;
-        return current?.status === 'completed'
-          ? createDedupedResult(fields, cacheKey, current)
-          : createUnknownOutcomeResult(
-              fields,
-              cacheKey,
-              current?.toolName ?? cached.toolName,
-              currentAttemptId,
-            );
-      }
-      started = { outcome: 'claimed' } as const;
     } else {
       const startedAt = now();
-      execution = {
-        status: 'started',
-        toolName: fields.name,
-        startedAt,
-        ttl: defaultTTL,
-        attemptId: createAttemptId(),
-        leaseExpiresAt: Math.min(
-          startedAt + leaseDurationMs,
-          startedAt + maximumExecutionDurationMs,
-        ),
-        absoluteDeadline: startedAt + maximumExecutionDurationMs,
-      };
+      execution = createStartedExecution(fields.name, startedAt);
       started = await claimCacheStarted(cache, cacheKey, execution);
     }
 
     if (started.outcome === 'existing') {
       const entry = started.entry;
       if (entry.status === 'started') {
-        return createUnknownOutcomeResult(fields, cacheKey, entry.toolName, entry.attemptId);
+        return createUnknownOutcomeResult(fields, cacheKey, entry.toolName, {
+          attemptId: entry.attemptId,
+          legacyStartedAt: entry.attemptId === undefined ? entry.startedAt : undefined,
+        });
       }
 
       return createDedupedResult(fields, cacheKey, entry);

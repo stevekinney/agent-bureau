@@ -40,7 +40,8 @@ export type CreateToolResultCacheOptions = {
  * TTL expiration on read — expired entries are treated as cache misses and
  * cleaned up lazily. Atomicity is provided only among cache instances in this
  * JavaScript process that share the same store object. Distributed hosts must
- * implement ToolResultCache with storage-native compare-and-set operations.
+ * implement ToolResultCache with storage-native compare-and-set operations,
+ * including the fenced and legacy started-entry replacement methods.
  */
 export function createToolResultCache(options: CreateToolResultCacheOptions): ToolResultCache {
   const { store, defaultTTL, namespace, now = Date.now } = options;
@@ -272,6 +273,31 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
       return withKeyClaimLock(resolveKey(key), async () => {
         const existing = await getEntry(key);
         if (existing?.status !== 'started' || existing.attemptId !== expectedAttemptId) {
+          return false;
+        }
+        if (existing.leaseExpiresAt !== undefined && observedAt < existing.leaseExpiresAt) {
+          return false;
+        }
+        await store.set(resolveKey(key), JSON.stringify(encodeEntry(execution)));
+        return true;
+      });
+    },
+
+    async replaceLegacyStarted(
+      key: string,
+      expected: { toolName: string; startedAt: number },
+      execution: StartedToolExecution,
+      observedAt: number,
+    ): Promise<boolean> {
+      return withKeyClaimLock(resolveKey(key), async () => {
+        const existing = await getEntry(key);
+        if (
+          existing?.status !== 'started' ||
+          existing.attemptId !== undefined ||
+          existing.toolName !== expected.toolName ||
+          existing.startedAt !== expected.startedAt ||
+          !execution.attemptId
+        ) {
           return false;
         }
         if (existing.leaseExpiresAt !== undefined && observedAt < existing.leaseExpiresAt) {
