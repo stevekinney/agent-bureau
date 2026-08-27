@@ -37,13 +37,14 @@ const svelteKitVersions = {
   svelte: '5.56.9',
   vite: '8.2.1',
 };
-const realNodePath = (process.env.PATH ?? '')
-  .split(delimiter)
+const inheritedPath = process.env.PATH;
+const realNodePath = inheritedPath
+  ?.split(delimiter)
   .filter((segment) => !segment.includes('bun-node-'))
   .join(delimiter);
 const nodeBinary = (await Bun.file('/opt/homebrew/bin/node').exists())
   ? '/opt/homebrew/bin/node'
-  : Bun.which('node', { PATH: realNodePath });
+  : Bun.which('node', realNodePath ? { PATH: realNodePath } : undefined);
 if (!nodeBinary) throw new Error('Could not locate genuine Node.js on PATH');
 
 async function run(command: string[], cwd: string): Promise<string> {
@@ -142,7 +143,7 @@ console.log('armorer runtime consumer: all assertions passed');
   );
   const nodeResult = await $`${nodeBinary} run.mjs`
     .cwd(directory)
-    .env({ ...process.env, PATH: realNodePath })
+    .env({ ...process.env, ...(realNodePath ? { PATH: realNodePath } : {}) })
     .nothrow()
     .quiet();
   if (nodeResult.exitCode !== 0)
@@ -158,11 +159,11 @@ console.log('armorer runtime consumer: all assertions passed');
   );
   const cjsResult = await $`${nodeBinary} cjs.cjs`
     .cwd(directory)
-    .env({ ...process.env, PATH: realNodePath })
+    .env({ ...process.env, ...(realNodePath ? { PATH: realNodePath } : {}) })
     .nothrow()
     .quiet();
   if (cjsResult.exitCode !== 0)
-    throw new Error(`Node CommonJS consumer failed:\n${cjsResult.stderr}`);
+    throw new Error(`Node CommonJS consumer failed:\n${cjsResult.stdout}${cjsResult.stderr}`);
 }
 
 async function verifyBrowser(directory: string, tarball: string): Promise<void> {
