@@ -241,11 +241,10 @@ describe('withToolboxIdempotency', () => {
 
     expect(first.idempotency).toEqual({ key: expectedKey, outcome: 'fresh' });
     expect(sameRevisionRetry.idempotency).toEqual({ key: expectedKey, outcome: 'deduped' });
-    expect(changedRevisionRetry.outcome).toBe('success');
-    expect(changedRevisionRetry.result).toBe(3);
+    expect(changedRevisionRetry.outcome).toBe('action_required');
     expect(changedRevisionRetry.idempotency).toEqual({
       key: expectedKey,
-      outcome: 'deduped',
+      outcome: 'authorization-required',
     });
     expect(addCallCount).toBe(1);
   });
@@ -271,7 +270,10 @@ describe('withToolboxIdempotency', () => {
         { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
         { idempotencyKey: 'legacy-completed-key' },
       ),
-    ).rejects.toThrow('original input');
+    ).resolves.toMatchObject({
+      outcome: 'action_required',
+      idempotency: { outcome: 'authorization-required' },
+    });
     expect(addCallCount).toBe(0);
   });
 
@@ -287,6 +289,7 @@ describe('withToolboxIdempotency', () => {
       toolName: 'add',
       executedAt: Date.now(),
       ttl: 60_000,
+      policyRevision: 'policy:1',
       input: '{invalid',
     });
 
@@ -296,6 +299,31 @@ describe('withToolboxIdempotency', () => {
         { idempotencyKey: 'invalid-input-key' },
       ),
     ).rejects.toThrow('invalid original input');
+    expect(addCallCount).toBe(0);
+  });
+
+  it('fails closed for same-revision completed entries without original input', async () => {
+    const toolbox = createToolbox([createToolWithKey()]);
+    const idempotentToolbox = withToolboxIdempotency(toolbox, {
+      cache,
+      tenantId: 'tenant-a',
+      policyRevision: 'policy:1',
+    });
+    const key = expectedCacheKey('tenant-a', 'default:add', 'add:same-revision-missing-input');
+    await cache.set(key, {
+      result: 99,
+      toolName: 'add',
+      executedAt: Date.now(),
+      ttl: 60_000,
+      policyRevision: 'policy:1',
+    });
+
+    await expect(
+      idempotentToolbox.execute(
+        { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
+        { idempotencyKey: 'same-revision-missing-input' },
+      ),
+    ).rejects.toThrow('original input');
     expect(addCallCount).toBe(0);
   });
 
@@ -1218,6 +1246,7 @@ describe('withToolboxIdempotency', () => {
     const initialToolbox = withToolboxIdempotency(createToolbox([secretTool]), {
       cache,
       tenantId: 'tenant-a',
+      policyRevision: 'policy:2',
     });
     const initialResult = await initialToolbox.execute(call, { idempotencyKey, requestContext });
     expect(initialResult.idempotency?.outcome).toBe('fresh');
@@ -1832,6 +1861,25 @@ describe('withToolboxIdempotency', () => {
     }).execute({ name: 'slow-add', arguments: { value: 1 } });
     expect(result.result).toBe(2);
     expect(renewals).toBeGreaterThan(0);
+
+    const deadlineTool = createTool({
+      name: 'deadline-renewal',
+      description: 'deadline renewal',
+      input: z.object({}),
+      idempotencyKey: () => 'deadline-renewal',
+      async execute() {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return 'done';
+      },
+    });
+    const deadlineResult = await withToolboxIdempotency(createToolbox([deadlineTool]), {
+      cache,
+      tenantId: 'tenant-a',
+      leaseDurationMs: 10,
+      maximumExecutionDurationMs: 5,
+    }).execute({ name: deadlineTool.name, arguments: {} });
+    expect(deadlineResult.outcome).toBe('action_required');
+    expect(deadlineResult.idempotency?.outcome).toBe('unknown-outcome');
 
     const lostFenceCache: ToolResultCache = {
       ...cache,

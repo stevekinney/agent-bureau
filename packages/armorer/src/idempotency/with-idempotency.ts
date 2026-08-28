@@ -17,6 +17,27 @@ const DEFAULT_TTL = 300_000;
 const DEFAULT_LEASE_DURATION = 30_000;
 const maximumTimerDelay = 2_147_483_647;
 
+function scheduleBoundedTimeout(callback: () => void, delay: number): () => void {
+  let remaining = Math.max(0, delay);
+  let cancelled = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const schedule = () => {
+    if (cancelled) return;
+    const chunk = Math.min(remaining, maximumTimerDelay);
+    timer = setTimeout(() => {
+      if (cancelled) return;
+      remaining -= chunk;
+      if (remaining <= 0) callback();
+      else schedule();
+    }, chunk);
+  };
+  schedule();
+  return () => {
+    cancelled = true;
+    if (timer !== undefined) clearTimeout(timer);
+  };
+}
+
 export type DirectIdempotencyExecuteOptions = ToolExecuteOptions & {
   resolutionReceipt?: IdempotencyResolutionReceipt;
 };
@@ -361,40 +382,48 @@ export function withIdempotency<T extends Tool>(
     }
     let leaseOwned = true;
     let pendingRenewal = Promise.resolve();
+    let renewalTimer: (() => void) | undefined;
+    let renewalStopped = false;
     const stopRenewal = () => {
-      clearInterval(renewalInterval);
+      renewalStopped = true;
+      renewalTimer?.();
     };
-    const renewalInterval = setInterval(
-      () => {
-        pendingRenewal = pendingRenewal
-          .then(async () => {
-            const renewalTime = now();
-            if (
-              startedExecution.absoluteDeadline !== undefined &&
-              renewalTime >= startedExecution.absoluteDeadline
-            ) {
-              stopRenewal();
-              return;
-            }
-            leaseOwned =
-              leaseOwned &&
-              (await cache.renewStarted(
-                key,
-                startedExecution.attemptId!,
-                Math.min(
-                  renewalTime + leaseDurationMs,
-                  startedExecution.absoluteDeadline ?? renewalTime + leaseDurationMs,
-                ),
-                renewalTime,
-              ));
-          })
-          .catch(() => {
-            leaseOwned = false;
-          });
-      },
-      Math.max(1, Math.floor(leaseDurationMs / 2)),
-    );
-    const deadlineTimer = setTimeout(
+    const scheduleRenewal = () => {
+      if (renewalStopped) return;
+      renewalTimer = scheduleBoundedTimeout(
+        () => {
+          pendingRenewal = pendingRenewal
+            .then(async () => {
+              const renewalTime = now();
+              if (
+                startedExecution.absoluteDeadline !== undefined &&
+                renewalTime >= startedExecution.absoluteDeadline
+              ) {
+                stopRenewal();
+                return;
+              }
+              leaseOwned =
+                leaseOwned &&
+                (await cache.renewStarted(
+                  key,
+                  startedExecution.attemptId!,
+                  Math.min(
+                    renewalTime + leaseDurationMs,
+                    startedExecution.absoluteDeadline ?? renewalTime + leaseDurationMs,
+                  ),
+                  renewalTime,
+                ));
+            })
+            .catch(() => {
+              leaseOwned = false;
+            })
+            .finally(scheduleRenewal);
+        },
+        Math.max(1, Math.floor(leaseDurationMs / 2)),
+      );
+    };
+    scheduleRenewal();
+    const cancelDeadlineTimer = scheduleBoundedTimeout(
       stopRenewal,
       Math.max(0, (startedExecution.absoluteDeadline ?? now()) - startedExecution.startedAt),
     );
@@ -411,7 +440,7 @@ export function withIdempotency<T extends Tool>(
       throw error;
     } finally {
       stopRenewal();
-      clearTimeout(deadlineTimer);
+      cancelDeadlineTimer();
       await pendingRenewal;
     }
 

@@ -19,6 +19,28 @@ import type {
 } from './types';
 
 const DEFAULT_TTL = 300_000;
+const maximumTimerDelay = 2_147_483_647;
+
+function scheduleBoundedTimeout(callback: () => void, delay: number): () => void {
+  let remaining = Math.max(0, delay);
+  let cancelled = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const schedule = () => {
+    if (cancelled) return;
+    const chunk = Math.min(remaining, maximumTimerDelay);
+    timer = setTimeout(() => {
+      if (cancelled) return;
+      remaining -= chunk;
+      if (remaining <= 0) callback();
+      else schedule();
+    }, chunk);
+  };
+  schedule();
+  return () => {
+    cancelled = true;
+    if (timer !== undefined) clearTimeout(timer);
+  };
+}
 
 /**
  * Options for wrapping a toolbox with idempotency.
@@ -197,16 +219,35 @@ export function withToolboxIdempotency(
     };
   }
 
+  function createAuthorizationRequiredResult(
+    fields: { id: string },
+    cacheKey: string,
+    toolName: string,
+  ): ToolExecutionResult {
+    return {
+      callId: fields.id,
+      outcome: 'action_required',
+      content: 'Cached result requires authorization under the current policy revision.',
+      toolCallId: fields.id,
+      toolName,
+      result: undefined,
+      idempotency: { key: cacheKey, outcome: 'authorization-required' },
+      action: {
+        type: 'approval',
+        message: 'Re-authorize this cached result under the current policy revision.',
+      },
+    };
+  }
+
   function createPolicyAuthorizationOnlyOptions(executeOptions: unknown): unknown {
     const hasApprovalResume =
       executeOptions !== undefined &&
       executeOptions !== null &&
       typeof executeOptions === 'object' &&
       approvalResumeSymbol in executeOptions;
-    const authorizationOnlyOptions: Record<PropertyKey, unknown> =
-      executeOptions && typeof executeOptions === 'object'
-        ? { ...(executeOptions as Record<PropertyKey, unknown>) }
-        : {};
+    const authorizationOnlyOptions: Record<PropertyKey, unknown> = {
+      ...(executeOptions as Record<PropertyKey, unknown> | undefined),
+    };
     authorizationOnlyOptions[policyAuthorizationOnlySymbol] = true;
     if (!hasApprovalResume) {
       delete authorizationOnlyOptions[approvalConsumeSymbol];
@@ -222,6 +263,9 @@ export function withToolboxIdempotency(
     originalExecute: (call: ToolCallInput, options?: unknown) => Promise<ToolExecutionResult>,
     executeOptions?: unknown,
   ): Promise<ToolExecutionResult> {
+    if (cached.policyRevision !== policyRevision) {
+      return createAuthorizationRequiredResult(fields, cacheKey, cached.toolName);
+    }
     if (cached.input === undefined) {
       throw new Error('Cached result lacks its original input and cannot be reauthorized.');
     }
@@ -483,34 +527,42 @@ export function withToolboxIdempotency(
     let result: ToolExecutionResult;
     let leaseOwned = true;
     let pendingRenewal = Promise.resolve();
+    let renewalTimer: (() => void) | undefined;
+    let renewalStopped = false;
     const stopRenewal = () => {
-      clearInterval(renewalInterval);
+      renewalStopped = true;
+      renewalTimer?.();
     };
-    const renewalInterval = setInterval(
-      () => {
-        pendingRenewal = pendingRenewal
-          .then(async () => {
-            const renewalTime = now();
-            if (renewalTime >= execution.absoluteDeadline!) {
-              stopRenewal();
-              return;
-            }
-            leaseOwned =
-              leaseOwned &&
-              (await cache.renewStarted(
-                cacheKey,
-                execution.attemptId!,
-                Math.min(renewalTime + leaseDurationMs, execution.absoluteDeadline!),
-                renewalTime,
-              ));
-          })
-          .catch(() => {
-            leaseOwned = false;
-          });
-      },
-      Math.max(1, Math.floor(leaseDurationMs / 2)),
-    );
-    const deadlineTimer = setTimeout(
+    const scheduleRenewal = () => {
+      if (renewalStopped) return;
+      renewalTimer = scheduleBoundedTimeout(
+        () => {
+          pendingRenewal = pendingRenewal
+            .then(async () => {
+              const renewalTime = now();
+              if (renewalTime >= execution.absoluteDeadline!) {
+                stopRenewal();
+                return;
+              }
+              leaseOwned =
+                leaseOwned &&
+                (await cache.renewStarted(
+                  cacheKey,
+                  execution.attemptId!,
+                  Math.min(renewalTime + leaseDurationMs, execution.absoluteDeadline!),
+                  renewalTime,
+                ));
+            })
+            .catch(() => {
+              leaseOwned = false;
+            })
+            .finally(scheduleRenewal);
+        },
+        Math.max(1, Math.floor(leaseDurationMs / 2)),
+      );
+    };
+    scheduleRenewal();
+    const cancelDeadlineTimer = scheduleBoundedTimeout(
       stopRenewal,
       Math.max(0, execution.absoluteDeadline! - execution.startedAt),
     );
@@ -523,7 +575,7 @@ export function withToolboxIdempotency(
       throw error;
     } finally {
       stopRenewal();
-      clearTimeout(deadlineTimer);
+      cancelDeadlineTimer();
       await pendingRenewal;
     }
 

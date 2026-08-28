@@ -4385,6 +4385,11 @@ describe('createBureau review queue (AB-20)', () => {
       expect(bureau.listPendingReviews().every((review) => review.sessionId === sessionId)).toBe(
         true,
       );
+      await bureau.deleteSession(sessionId);
+      expect(bureau.listPendingReviews()).toHaveLength(0);
+      expect(
+        bureau.resolveReview({ id: olderReviewId, decision: 'approve', principal: 'operator-a' }),
+      ).rejects.toThrow(`No pending review with id "${olderReviewId}"`);
     } finally {
       await bureau.dispose();
     }

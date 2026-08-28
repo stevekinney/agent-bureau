@@ -46,6 +46,115 @@ const approvalRequestContext = {
 
 const approvalExecutionOptions = { requestContext: approvalRequestContext };
 
+function createManualToolboxDeadlineTiming(initialNow = 0) {
+  let now = initialNow;
+  const scheduled: Array<{ callback: () => void; milliseconds: number | undefined }> = [];
+  const scheduledDelayHistory: Array<number | undefined> = [];
+  const cleared: unknown[] = [];
+
+  return {
+    clearCount(): number {
+      return cleared.length;
+    },
+    fireDeadline(): void {
+      const entry = scheduled.shift();
+      if (!entry) throw new Error('Manual deadline was not scheduled');
+      entry.callback();
+    },
+    scheduledDelays(): readonly (number | undefined)[] {
+      return scheduled.map(({ milliseconds }) => milliseconds);
+    },
+    scheduledDelayHistory(): readonly (number | undefined)[] {
+      return scheduledDelayHistory;
+    },
+    setNow(nextNow: number): void {
+      now = nextNow;
+    },
+    options: {
+      now: () => now,
+      setTimeoutFunction(callback: () => void, milliseconds?: number) {
+        const handle = scheduled.length + 1;
+        scheduled.push({ callback, milliseconds });
+        scheduledDelayHistory.push(milliseconds);
+        return handle;
+      },
+      clearTimeoutFunction(handle: unknown) {
+        cleared.push(handle);
+      },
+    },
+  };
+}
+
+async function createResumeApprovalValidationFixture(options: {
+  currentInput: z.ZodTypeAny;
+  name: string;
+  secret?: string;
+}) {
+  const approvalStateStore = createProcessLocalApprovalStateStore();
+  const approvalPolicy = {
+    beforeExecute: () => ({
+      allow: false as const,
+      status: 'needs_approval' as const,
+      reason: 'approval required',
+    }),
+  };
+  let executions = 0;
+  const secret = options.secret ?? `${options.name}-secret`;
+  const sourceToolbox = createToolbox(
+    [
+      createTool({
+        name: options.name,
+        description: 'issues approval before current schema validation',
+        version: '1.0.0',
+        input: z.object({ value: z.string() }),
+        async execute() {
+          executions += 1;
+          return 'source';
+        },
+      }),
+    ],
+    {
+      approvalSecret: secret,
+      approvalStateStore,
+      policy: approvalPolicy,
+    },
+  );
+  const paused = await sourceToolbox.execute(
+    {
+      id: `${options.name}-call`,
+      name: options.name,
+      arguments: { value: 'approved' },
+    },
+    approvalExecutionOptions,
+  );
+  const resumeToolbox = createToolbox(
+    [
+      createTool({
+        name: options.name,
+        description: 'resumes approval after current schema validation',
+        version: '1.0.0',
+        input: options.currentInput,
+        async execute() {
+          executions += 1;
+          return 'resumed';
+        },
+      }),
+    ],
+    {
+      approvalSecret: secret,
+      approvalStateStore,
+      policy: approvalPolicy,
+    },
+  );
+
+  return {
+    approvalStateStore,
+    executions: () => executions,
+    paused,
+    resumeToolbox,
+  };
+}
+
 describe('createToolbox', () => {
   it('forwards custom deadline timer cleanup to the toolbox lifecycle', async () => {
     const scheduled: Array<() => void> = [];
@@ -731,6 +840,407 @@ describe('createToolbox', () => {
     expect(resumed.outcome).toBe('success');
     expect(resumed.result).toBe('approved');
     expect(executedValue).toBe('approved');
+  });
+
+  it('cancels stalled resumed-approval schema validation without consuming the approval', async () => {
+    let startValidation!: () => void;
+    const validationStarted = new Promise<void>((resolve) => {
+      startValidation = resolve;
+    });
+    let executions = 0;
+    const approvalStateStore = createProcessLocalApprovalStateStore();
+    const approvalPolicy = {
+      beforeExecute: () => ({
+        allow: false as const,
+        status: 'needs_approval' as const,
+        reason: 'approval required',
+      }),
+    };
+    const sourceToolbox = createToolbox(
+      [
+        createTool({
+          name: 'resume-stalled-validation',
+          description: 'issues approval before current schema stalls',
+          version: '1.0.0',
+          input: z.object({ value: z.string() }),
+          async execute() {
+            executions += 1;
+            return 'source';
+          },
+        }),
+      ],
+      {
+        approvalSecret: 'resume-stalled-validation-secret',
+        approvalStateStore,
+        policy: approvalPolicy,
+      },
+    );
+    const paused = await sourceToolbox.execute(
+      {
+        id: 'resume-stalled-validation-call',
+        name: 'resume-stalled-validation',
+        arguments: { value: 'approved' },
+      },
+      approvalExecutionOptions,
+    );
+    const resumeToolbox = createToolbox(
+      [
+        createTool({
+          name: 'resume-stalled-validation',
+          description: 'stalls during resumed approval validation',
+          version: '1.0.0',
+          input: z.object({ value: z.string() }).superRefine(async () => {
+            startValidation();
+            await new Promise<void>(() => {});
+          }),
+          async execute() {
+            executions += 1;
+            return 'unreachable';
+          },
+        }),
+      ],
+      {
+        approvalSecret: 'resume-stalled-validation-secret',
+        approvalStateStore,
+        policy: approvalPolicy,
+      },
+    );
+    const controller = new AbortController();
+
+    const pending = resumeToolbox.resumeApproval(
+      paused.pendingApproval as SignedPendingToolApproval,
+      {
+        ...approvalExecutionOptions,
+        signal: controller.signal,
+      },
+    );
+    await validationStarted;
+    controller.abort('caller cancelled resumed validation');
+
+    const result = await pending;
+
+    expect(result).toMatchObject({
+      outcome: 'error',
+      errorCategory: 'cancelled',
+      error: { code: 'CANCELLED', message: 'caller cancelled resumed validation' },
+    });
+    expect(executions).toBe(0);
+    expect(resumeToolbox.executions.inspect()).toHaveLength(0);
+    expect(await approvalStateStore.state(paused.pendingApproval!.approvalBinding!)).toBe('issued');
+  });
+
+  it('times out stalled resumed-approval schema validation without consuming the approval', async () => {
+    const timing = createManualToolboxDeadlineTiming();
+    let startValidation!: () => void;
+    const validationStarted = new Promise<void>((resolve) => {
+      startValidation = resolve;
+    });
+    let executions = 0;
+    const approvalStateStore = createProcessLocalApprovalStateStore();
+    const approvalPolicy = {
+      beforeExecute: () => ({
+        allow: false as const,
+        status: 'needs_approval' as const,
+        reason: 'approval required',
+      }),
+    };
+    const sourceToolbox = createToolbox(
+      [
+        createTool({
+          name: 'resume-deadline-validation',
+          description: 'issues approval before current schema stalls until deadline',
+          version: '1.0.0',
+          input: z.object({ value: z.string() }),
+          async execute() {
+            executions += 1;
+            return 'source';
+          },
+        }),
+      ],
+      {
+        approvalSecret: 'resume-deadline-validation-secret',
+        approvalStateStore,
+        policy: approvalPolicy,
+      },
+    );
+    const paused = await sourceToolbox.execute(
+      {
+        id: 'resume-deadline-validation-call',
+        name: 'resume-deadline-validation',
+        arguments: { value: 'approved' },
+      },
+      approvalExecutionOptions,
+    );
+    const resumeToolbox = createToolbox(
+      [
+        createTool({
+          name: 'resume-deadline-validation',
+          description: 'stalls during resumed approval deadline validation',
+          version: '1.0.0',
+          input: z.object({ value: z.string() }).superRefine(async () => {
+            startValidation();
+            await new Promise<void>(() => {});
+          }),
+          async execute() {
+            executions += 1;
+            return 'unreachable';
+          },
+        }),
+      ],
+      {
+        approvalSecret: 'resume-deadline-validation-secret',
+        approvalStateStore,
+        policy: approvalPolicy,
+      },
+    );
+
+    const pending = resumeToolbox.resumeApproval(
+      paused.pendingApproval as SignedPendingToolApproval,
+      {
+        ...approvalExecutionOptions,
+        requestContext: { ...approvalRequestContext, deadline: 10 },
+        ...timing.options,
+      },
+    );
+    await validationStarted;
+    expect(timing.scheduledDelays()).toEqual([10]);
+    timing.setNow(10);
+    timing.fireDeadline();
+
+    const result = await pending;
+
+    expect(result).toMatchObject({
+      outcome: 'error',
+      errorCategory: 'timeout',
+      error: { code: 'TIMEOUT', message: 'Execution deadline exceeded' },
+    });
+    expect(timing.clearCount()).toBe(0);
+    expect(executions).toBe(0);
+    expect(resumeToolbox.executions.inspect()).toHaveLength(0);
+    expect(await approvalStateStore.state(paused.pendingApproval!.approvalBinding!)).toBe('issued');
+  });
+
+  it('rejects non-finite resumed-approval validation deadlines before scheduling', async () => {
+    const timing = createManualToolboxDeadlineTiming();
+    const { approvalStateStore, executions, paused, resumeToolbox } =
+      await createResumeApprovalValidationFixture({
+        name: 'resume-non-finite-validation',
+        currentInput: z.object({ value: z.string() }),
+      });
+
+    await expect(
+      resumeToolbox.resumeApproval(paused.pendingApproval as SignedPendingToolApproval, {
+        ...approvalExecutionOptions,
+        requestContext: { ...approvalRequestContext, deadline: Infinity },
+        ...timing.options,
+      }),
+    ).rejects.toThrow('Execution deadline must be finite');
+
+    expect(timing.scheduledDelayHistory()).toEqual([]);
+    expect(executions()).toBe(0);
+    expect(await approvalStateStore.state(paused.pendingApproval!.approvalBinding!)).toBe('issued');
+  });
+
+  it('times out already-expired resumed-approval schema validation before scheduling', async () => {
+    const timing = createManualToolboxDeadlineTiming(10);
+    const { approvalStateStore, executions, paused, resumeToolbox } =
+      await createResumeApprovalValidationFixture({
+        name: 'resume-expired-validation',
+        currentInput: z.object({ value: z.string() }),
+      });
+
+    const result = await resumeToolbox.resumeApproval(
+      paused.pendingApproval as SignedPendingToolApproval,
+      {
+        ...approvalExecutionOptions,
+        requestContext: { ...approvalRequestContext, deadline: 10 },
+        ...timing.options,
+      },
+    );
+
+    expect(result).toMatchObject({
+      outcome: 'error',
+      errorCategory: 'timeout',
+      error: { code: 'TIMEOUT', message: 'Execution deadline exceeded' },
+    });
+    expect(timing.scheduledDelayHistory()).toEqual([]);
+    expect(executions()).toBe(0);
+    expect(await approvalStateStore.state(paused.pendingApproval!.approvalBinding!)).toBe('issued');
+  });
+
+  it('clears resumed-approval validation deadline timers after successful validation', async () => {
+    const timing = createManualToolboxDeadlineTiming();
+    const { approvalStateStore, executions, paused, resumeToolbox } =
+      await createResumeApprovalValidationFixture({
+        name: 'resume-successful-validation-cleanup',
+        currentInput: z.object({ value: z.string() }).superRefine(async () => {}),
+      });
+
+    const result = await resumeToolbox.resumeApproval(
+      paused.pendingApproval as SignedPendingToolApproval,
+      {
+        ...approvalExecutionOptions,
+        requestContext: { ...approvalRequestContext, deadline: 10 },
+        ...timing.options,
+      },
+    );
+
+    expect(result).toMatchObject({ outcome: 'success', result: 'resumed' });
+    expect(timing.clearCount()).toBeGreaterThan(0);
+    expect(executions()).toBe(1);
+    expect(await approvalStateStore.state(paused.pendingApproval!.approvalBinding!)).toBe(
+      'consumed',
+    );
+  });
+
+  it('clears resumed-approval validation deadline timers when validation rejects', async () => {
+    const timing = createManualToolboxDeadlineTiming();
+    const { approvalStateStore, executions, paused, resumeToolbox } =
+      await createResumeApprovalValidationFixture({
+        name: 'resume-rejected-validation-cleanup',
+        currentInput: z.object({ value: z.string() }).superRefine(async () => {
+          throw new Error('resume validation failed');
+        }),
+      });
+
+    await expect(
+      resumeToolbox.resumeApproval(paused.pendingApproval as SignedPendingToolApproval, {
+        ...approvalExecutionOptions,
+        requestContext: { ...approvalRequestContext, deadline: 10 },
+        ...timing.options,
+      }),
+    ).rejects.toThrow('resume validation failed');
+
+    expect(timing.clearCount()).toBe(1);
+    expect(executions()).toBe(0);
+    expect(await approvalStateStore.state(paused.pendingApproval!.approvalBinding!)).toBe('issued');
+  });
+
+  it('re-arms long resumed-approval validation deadlines without overflowing timer delay', async () => {
+    const maximumTimerDelay = 2_147_483_647;
+    const timing = createManualToolboxDeadlineTiming();
+    let startValidation!: () => void;
+    const validationStarted = new Promise<void>((resolve) => {
+      startValidation = resolve;
+    });
+    const { executions, paused, resumeToolbox } = await createResumeApprovalValidationFixture({
+      name: 'resume-long-validation-deadline',
+      currentInput: z.object({ value: z.string() }).superRefine(async () => {
+        startValidation();
+        await new Promise<void>(() => {});
+      }),
+    });
+    const controller = new AbortController();
+
+    const pending = resumeToolbox.resumeApproval(
+      paused.pendingApproval as SignedPendingToolApproval,
+      {
+        ...approvalExecutionOptions,
+        requestContext: { ...approvalRequestContext, deadline: maximumTimerDelay + 1_000 },
+        signal: controller.signal,
+        ...timing.options,
+      },
+    );
+    const pendingState = pending.then(
+      () => 'resolved',
+      () => 'rejected',
+    );
+    await validationStarted;
+
+    expect(timing.scheduledDelayHistory()).toEqual([maximumTimerDelay]);
+    timing.fireDeadline();
+    expect(await Promise.race([pendingState, Promise.resolve('pending')])).toBe('pending');
+    expect(timing.scheduledDelayHistory()).toEqual([maximumTimerDelay, maximumTimerDelay]);
+    controller.abort('stop long validation');
+
+    await expect(pending).resolves.toMatchObject({
+      outcome: 'error',
+      errorCategory: 'cancelled',
+      error: { code: 'CANCELLED', message: 'stop long validation' },
+    });
+    expect(executions()).toBe(0);
+  });
+
+  it('uses Error cancellation reasons while resumed-approval validation is pending', async () => {
+    let startValidation!: () => void;
+    const validationStarted = new Promise<void>((resolve) => {
+      startValidation = resolve;
+    });
+    const { executions, paused, resumeToolbox } = await createResumeApprovalValidationFixture({
+      name: 'resume-error-cancel-validation',
+      currentInput: z.object({ value: z.string() }).superRefine(async () => {
+        startValidation();
+        await new Promise<void>(() => {});
+      }),
+    });
+    const controller = new AbortController();
+
+    const pending = resumeToolbox.resumeApproval(
+      paused.pendingApproval as SignedPendingToolApproval,
+      {
+        ...approvalExecutionOptions,
+        signal: controller.signal,
+      },
+    );
+    await validationStarted;
+    controller.abort(new Error('error cancellation reason'));
+
+    await expect(pending).resolves.toMatchObject({
+      outcome: 'error',
+      errorCategory: 'cancelled',
+      error: { code: 'CANCELLED', message: 'error cancellation reason' },
+    });
+    expect(executions()).toBe(0);
+  });
+
+  it('uses the default cancellation reason while resumed-approval validation is pending', async () => {
+    let startValidation!: () => void;
+    const validationStarted = new Promise<void>((resolve) => {
+      startValidation = resolve;
+    });
+    const { executions, paused, resumeToolbox } = await createResumeApprovalValidationFixture({
+      name: 'resume-default-cancel-validation',
+      currentInput: z.object({ value: z.string() }).superRefine(async () => {
+        startValidation();
+        await new Promise<void>(() => {});
+      }),
+    });
+    const controller = new AbortController();
+
+    const pending = resumeToolbox.resumeApproval(
+      paused.pendingApproval as SignedPendingToolApproval,
+      {
+        ...approvalExecutionOptions,
+        signal: controller.signal,
+      },
+    );
+    await validationStarted;
+    controller.abort({ reason: 'non-string reason' });
+
+    await expect(pending).resolves.toMatchObject({
+      outcome: 'error',
+      errorCategory: 'cancelled',
+      error: { code: 'CANCELLED', message: 'Cancelled' },
+    });
+    expect(executions()).toBe(0);
+  });
+
+  it('uses the default resumed-approval validation deadline scheduler', async () => {
+    const { executions, paused, resumeToolbox } = await createResumeApprovalValidationFixture({
+      name: 'resume-default-validation-scheduler',
+      currentInput: z.object({ value: z.string() }).superRefine(async () => {}),
+    });
+
+    const result = await resumeToolbox.resumeApproval(
+      paused.pendingApproval as SignedPendingToolApproval,
+      {
+        ...approvalExecutionOptions,
+        requestContext: { ...approvalRequestContext, deadline: Date.now() + 60_000 },
+      },
+    );
+
+    expect(result).toMatchObject({ outcome: 'success', result: 'resumed' });
+    expect(executions()).toBe(1);
   });
 
   it('requires an approval secret before signing or resuming pending approvals', async () => {

@@ -1418,6 +1418,37 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     }
   }
 
+  function persistedApprovalRunIds(metadata: unknown): Set<string> {
+    const metadataRecord =
+      metadata && typeof metadata === 'object' && !Array.isArray(metadata)
+        ? (metadata as Record<string, unknown>)
+        : undefined;
+    const runIds = new Set<string>();
+    const lastRunId = metadataRecord?.['lastRunId'];
+    if (typeof lastRunId === 'string') runIds.add(lastRunId);
+    const pending = metadataRecord?.['pendingApprovalOverrides'];
+    const authorities = metadataRecord?.['lastRequestAuthorities'];
+    if (
+      pending &&
+      typeof pending === 'object' &&
+      !Array.isArray(pending) &&
+      authorities &&
+      typeof authorities === 'object' &&
+      !Array.isArray(authorities)
+    ) {
+      for (const authorityRunId of Object.keys(authorities)) {
+        if (
+          Object.keys(pending).some((reviewId) =>
+            reviewId.startsWith(`approval:${authorityRunId}:`),
+          )
+        ) {
+          runIds.add(authorityRunId);
+        }
+      }
+    }
+    return runIds;
+  }
+
   async function restorePendingApprovalStates(
     toolbox: BureauToolbox,
     metadata: unknown,
@@ -2823,8 +2854,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     const sessionStore = requireSessionStore();
     const session = await sessionStore.load(id);
     if (session) {
-      const runId = session.metadata['lastRunId'];
-      if (typeof runId === 'string') {
+      for (const runId of persistedApprovalRunIds(session.metadata)) {
         for (const reviewId of pendingApprovalOverrides.keys()) {
           if (reviewId.startsWith(`approval:${runId}:`)) pendingApprovalOverrides.delete(reviewId);
         }
@@ -3622,28 +3652,8 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         const runId = session.metadata['lastRunId'];
         const status = session.metadata['lastRunStatus'];
         const metadata = session.metadata;
-        const pending = metadata['pendingApprovalOverrides'];
-        const authorities = metadata['lastRequestAuthorities'];
-        const restoredRunIds = new Set<string>();
-        if (typeof runId === 'string' && status !== 'running') restoredRunIds.add(runId);
-        if (
-          pending &&
-          typeof pending === 'object' &&
-          !Array.isArray(pending) &&
-          authorities &&
-          typeof authorities === 'object' &&
-          !Array.isArray(authorities)
-        ) {
-          for (const authorityRunId of Object.keys(authorities)) {
-            if (
-              Object.keys(pending).some((reviewId) =>
-                reviewId.startsWith(`approval:${authorityRunId}:`),
-              )
-            ) {
-              restoredRunIds.add(authorityRunId);
-            }
-          }
-        }
+        const restoredRunIds = persistedApprovalRunIds(metadata);
+        if (typeof runId === 'string' && status === 'running') restoredRunIds.delete(runId);
         for (const restoredRunId of restoredRunIds) {
           const before = pendingApprovalOverrides.size;
           restorePendingApprovalOverrides(metadata, restoredRunId);
