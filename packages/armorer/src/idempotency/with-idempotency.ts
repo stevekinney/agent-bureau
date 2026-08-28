@@ -260,7 +260,7 @@ export function withIdempotency<T extends Tool>(
     executeOptions?: DirectIdempotencyExecuteOptions,
   ): Promise<unknown> {
     const requestContext = executeOptions?.requestContext;
-    if (executeOptions !== undefined && !requestContext) {
+    if (!requestContext) {
       throw new Error('Idempotency requires request-scoped execution authority.');
     }
     if (requestContext && requestContext.authority.tenantId !== tenantId) {
@@ -510,7 +510,7 @@ export function withIdempotency<T extends Tool>(
       if (isToolCall(input)) {
         return tool(input);
       }
-      return executeWithCache(input);
+      return executeWithCache(input, argArray[1] as DirectIdempotencyExecuteOptions | undefined);
     },
     get(target, prop, receiver) {
       if (prop === 'execute') {

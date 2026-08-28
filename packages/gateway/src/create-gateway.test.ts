@@ -274,6 +274,39 @@ describe('createGateway', () => {
     );
     expect(await second.getRequestAuthorityValidator()!(firstContext)).toBe(true);
   });
+
+  it('converges static-token authority revisions during concurrent gateway startup', async () => {
+    const kv = textValueStore(new MemoryStorage());
+    const first = createGatewayBureauStub(undefined, kv);
+    const second = createGatewayBureauStub(undefined, kv);
+    const [firstGateway, secondGateway] = await Promise.all([
+      createGateway(first.bureau, { authToken: 'stable-secret' }),
+      createGateway(second.bureau, { authToken: 'stable-secret' }),
+    ]);
+    firstGateway.app.get('/test-authority', (context) =>
+      context.json(resolveTrustedRequestContext(context, 'bureau')),
+    );
+    secondGateway.app.get('/test-authority', (context) =>
+      context.json(resolveTrustedRequestContext(context, 'bureau')),
+    );
+
+    const [firstResponse, secondResponse] = await Promise.all([
+      firstGateway.app.request('/test-authority', {
+        headers: { authorization: 'Bearer stable-secret' },
+      }),
+      secondGateway.app.request('/test-authority', {
+        headers: { authorization: 'Bearer stable-secret' },
+      }),
+    ]);
+    const firstContext = (await firstResponse.json()) as ToolRequestContext;
+    const secondContext = (await secondResponse.json()) as ToolRequestContext;
+
+    expect(secondContext.authority.authorizationRevision).toBe(
+      firstContext.authority.authorizationRevision,
+    );
+    expect(await first.getRequestAuthorityValidator()!(secondContext)).toBe(true);
+    expect(await second.getRequestAuthorityValidator()!(firstContext)).toBe(true);
+  });
 });
 
 describe('createBunAdapter', () => {

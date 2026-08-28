@@ -42,8 +42,16 @@ async function resolveStaticTokenRevisionSecret(store: Bureau['kv']): Promise<st
   const persisted = await store.get(STATIC_TOKEN_REVISION_SECRET_KEY);
   if (persisted) return persisted;
 
-  await store.set(STATIC_TOKEN_REVISION_SECRET_KEY, crypto.randomUUID());
-  return (await store.get(STATIC_TOKEN_REVISION_SECRET_KEY))!;
+  const candidate = crypto.randomUUID();
+  const created = await store.conditionalBatch(
+    [{ key: STATIC_TOKEN_REVISION_SECRET_KEY, expectedValue: null }],
+    [{ type: 'set', key: STATIC_TOKEN_REVISION_SECRET_KEY, value: candidate }],
+  );
+  if (created) return candidate;
+
+  const winner = await store.get(STATIC_TOKEN_REVISION_SECRET_KEY);
+  if (winner) return winner;
+  throw new Error('Static-token revision secret initialization lost without a persisted winner.');
 }
 
 /**
