@@ -4323,6 +4323,73 @@ describe('createBureau review queue (AB-20)', () => {
     }
   });
 
+  it('restores pending approvals for every terminal run retained by a reused session', async () => {
+    const storage = await resolveStorage({ type: 'memory' });
+    const sessionStore = createSessionStore(textValueStore(storage));
+    const sessionId = 'session-reused-for-approvals';
+    const olderRunId = 'run-older-approval';
+    const newestRunId = 'run-newest-approval';
+    const olderReviewId = `approval:${olderRunId}:older-call`;
+    const newestReviewId = `approval:${newestRunId}:newest-call`;
+    const approval = {
+      toolName: 'charge-card',
+      arguments: { cents: 250 },
+      approvalToken: 'persisted-approval-token',
+      action: { message: 'Approve charge' },
+    };
+    await sessionStore.save(
+      createAgentSession({
+        id: sessionId,
+        agentName: 'terminal-agent',
+        conversationHistory: createConversationHistory({ id: sessionId }),
+        metadata: {
+          lastRunId: newestRunId,
+          lastRunStatus: 'completed',
+          lastRequestAuthorities: {
+            [olderRunId]: {
+              principalId: 'principal-older',
+              tenantId: 'bureau',
+              ownerId: 'terminal-agent',
+              capabilities: ['tools:execute'],
+              authorizationRevision: 'bureau:1',
+            },
+            [newestRunId]: {
+              principalId: 'principal-newest',
+              tenantId: 'bureau',
+              ownerId: 'terminal-agent',
+              capabilities: ['tools:execute'],
+              authorizationRevision: 'bureau:1',
+            },
+          },
+          pendingApprovalOverrides: {
+            [olderReviewId]: { ...approval, callId: 'older-call' },
+            [newestReviewId]: { ...approval, callId: 'newest-call' },
+          },
+        },
+      }),
+    );
+
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage,
+      durableExecution: true,
+    });
+    try {
+      expect(
+        bureau
+          .listPendingReviews()
+          .map((review) => review.id)
+          .sort(),
+      ).toEqual([olderReviewId, newestReviewId].sort());
+      expect(bureau.listPendingReviews().every((review) => review.sessionId === sessionId)).toBe(
+        true,
+      );
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
   it('prunes terminal approvals whose persisted request authority has expired', async () => {
     const storage = await resolveStorage({ type: 'memory' });
     const sessionStore = createSessionStore(textValueStore(storage));

@@ -1462,9 +1462,14 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
 
   async function restoreTerminalReviewSession(
     session: Pick<AgentSession, 'id' | 'agentName' | 'metadata' | 'updatedAt'>,
+    restoredRunId?: string,
   ): Promise<void> {
-    const runId = session.metadata['lastRunId'];
-    if (typeof runId !== 'string' || session.metadata['lastRunStatus'] === 'running') return;
+    const runId = restoredRunId ?? session.metadata['lastRunId'];
+    if (
+      typeof runId !== 'string' ||
+      (runId === session.metadata['lastRunId'] && session.metadata['lastRunStatus'] === 'running')
+    )
+      return;
     const hasPendingOverride = Object.keys(
       (session.metadata['pendingApprovalOverrides'] as Record<string, unknown> | undefined) ?? {},
     ).some((reviewId) => reviewId.startsWith(`approval:${runId}:`));
@@ -3616,16 +3621,39 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       for (const session of sessions) {
         const runId = session.metadata['lastRunId'];
         const status = session.metadata['lastRunStatus'];
-        if (typeof runId === 'string' && status !== 'running') {
+        const metadata = session.metadata;
+        const pending = metadata['pendingApprovalOverrides'];
+        const authorities = metadata['lastRequestAuthorities'];
+        const restoredRunIds = new Set<string>();
+        if (typeof runId === 'string' && status !== 'running') restoredRunIds.add(runId);
+        if (
+          pending &&
+          typeof pending === 'object' &&
+          !Array.isArray(pending) &&
+          authorities &&
+          typeof authorities === 'object' &&
+          !Array.isArray(authorities)
+        ) {
+          for (const authorityRunId of Object.keys(authorities)) {
+            if (
+              Object.keys(pending).some((reviewId) =>
+                reviewId.startsWith(`approval:${authorityRunId}:`),
+              )
+            ) {
+              restoredRunIds.add(authorityRunId);
+            }
+          }
+        }
+        for (const restoredRunId of restoredRunIds) {
           const before = pendingApprovalOverrides.size;
-          restorePendingApprovalOverrides(session.metadata, runId);
+          restorePendingApprovalOverrides(metadata, restoredRunId);
           if (pendingApprovalOverrides.size > before) {
-            terminalReviewSessions.set(runId, {
+            terminalReviewSessions.set(restoredRunId, {
               sessionId: session.id,
               agentName: session.agentName,
               requestedAt: Date.parse(session.updatedAt) || Date.now(),
             });
-            await restoreTerminalReviewSession(session);
+            await restoreTerminalReviewSession(session, restoredRunId);
           }
         }
         if (!requestAuthorityValidator && hasRecoverableTransportAuthority(session.metadata)) {

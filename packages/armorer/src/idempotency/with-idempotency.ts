@@ -39,7 +39,11 @@ function isToolCall(value: unknown): value is ToolCallWithArguments {
   );
 }
 
-async function inputMatchesToolSchema(tool: Tool, params: unknown): Promise<boolean> {
+async function inputMatchesToolSchema(
+  tool: Tool,
+  params: unknown,
+  options?: ToolExecuteOptions,
+): Promise<boolean> {
   const input = (
     tool as unknown as {
       input?: { safeParseAsync?: (value: unknown) => Promise<{ success: boolean }> };
@@ -54,8 +58,92 @@ async function inputMatchesToolSchema(tool: Tool, params: unknown): Promise<bool
   // e.g. a non-Zod Standard Schema wrapped via `wrapStandardSchema`, whose
   // validation runs through an async `transform` — resolve instead of
   // throwing synchronously ("Encountered Promise during synchronous parse").
-  const result = await input.safeParseAsync(params);
+  const result = await raceSchemaPrevalidation(input.safeParseAsync(params), options);
   return result.success;
+}
+
+function raceSchemaPrevalidation<T>(promise: Promise<T>, options?: ToolExecuteOptions): Promise<T> {
+  const signal = options?.signal;
+  const deadline = options?.requestContext?.deadline;
+  const now = options?.now ?? Date.now;
+  if (deadline !== undefined && deadline <= now()) {
+    return Promise.reject(createPrevalidationDeadlineError());
+  }
+  if (signal?.aborted) {
+    return Promise.reject(createPrevalidationCancellationError(signal.reason));
+  }
+  if (!signal && deadline === undefined) {
+    return promise;
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    const setTimeoutFunction =
+      options?.setTimeoutFunction ??
+      ((callback, milliseconds) => setTimeout(callback, milliseconds));
+    const clearTimeoutFunction =
+      options?.clearTimeoutFunction ??
+      ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+    let deadlineTimer: unknown;
+    let deadlineTimerScheduled = false;
+    let settled = false;
+
+    const cleanup = () => {
+      signal?.removeEventListener('abort', onAbort);
+      if (deadlineTimerScheduled) {
+        clearTimeoutFunction(deadlineTimer);
+      }
+    };
+    const resolveOnce = (value: T) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(value);
+    };
+    const rejectOnce = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    function onAbort() {
+      rejectOnce(createPrevalidationCancellationError(signal?.reason));
+    }
+
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (deadline !== undefined) {
+      deadlineTimerScheduled = true;
+      deadlineTimer = setTimeoutFunction(
+        () => rejectOnce(createPrevalidationDeadlineError()),
+        Math.max(0, deadline - now()),
+      );
+    }
+    void promise.then(resolveOnce, (error) =>
+      rejectOnce(error instanceof Error ? error : new Error(String(error ?? 'Unknown error'))),
+    );
+  });
+}
+
+function createPrevalidationCancellationError(reason?: unknown): Error {
+  const message =
+    typeof reason === 'string' && reason.length > 0
+      ? reason
+      : reason instanceof Error && reason.message.length > 0
+        ? reason.message
+        : 'Cancelled';
+  const error = new Error(message) as Error & { category: 'cancelled'; code: 'CANCELLED' };
+  error.category = 'cancelled';
+  error.code = 'CANCELLED';
+  return error;
+}
+
+function createPrevalidationDeadlineError(): Error {
+  const error = new Error('Execution deadline exceeded') as Error & {
+    category: 'timeout';
+    code: 'TIMEOUT';
+  };
+  error.category = 'timeout';
+  error.code = 'TIMEOUT';
+  return error;
 }
 
 /**
@@ -133,7 +221,7 @@ export function withIdempotency<T extends Tool>(
       idempotencyKey!(params),
     ]);
 
-    if (!(await inputMatchesToolSchema(tool, params))) {
+    if (!(await inputMatchesToolSchema(tool, params, executeOptions))) {
       return tool(params);
     }
 

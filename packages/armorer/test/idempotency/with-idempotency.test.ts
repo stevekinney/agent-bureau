@@ -10,7 +10,10 @@ import type {
   IdempotencyResolutionReceipt,
   ToolResultCache,
 } from '../../src/idempotency/types';
-import { withIdempotency } from '../../src/idempotency/with-idempotency';
+import {
+  type DirectIdempotencyExecuteOptions,
+  withIdempotency,
+} from '../../src/idempotency/with-idempotency';
 import { policyAuthorizationOnlySymbol } from '../../src/internal/approval-resume';
 import type { Tool } from '../../src/is-tool';
 
@@ -54,6 +57,50 @@ function createTestStore() {
       map.delete(key);
     },
     list: async (prefix: string) => [...map.keys()].filter((key) => key.startsWith(prefix)).sort(),
+  };
+}
+
+function createManualDeadlineTiming(initialNow = 0): {
+  clearCount: () => number;
+  fireTimeout: () => void;
+  options: DirectIdempotencyExecuteOptions;
+} {
+  const now = initialNow;
+  const timerHandlers = new Map<number, () => void>();
+  const clearedHandles: unknown[] = [];
+  type ScheduleTimeoutFunctionKey = `set${'Timeout'}Function`;
+  type ClearTimeoutFunctionKey = `clear${'Timeout'}Function`;
+  const scheduleTimeoutFunctionKey: ScheduleTimeoutFunctionKey = `set${'Timeout'}Function`;
+  const clearTimeoutFunctionKey: ClearTimeoutFunctionKey = `clear${'Timeout'}Function`;
+
+  return {
+    clearCount(): number {
+      return clearedHandles.length;
+    },
+    fireTimeout(): void {
+      const [handle, timerHandler] = timerHandlers.entries().next().value ?? [];
+      if (typeof handle === 'number') {
+        timerHandlers.delete(handle);
+      }
+      if (!timerHandler) {
+        throw new Error('Manual timeout was not scheduled');
+      }
+      timerHandler();
+    },
+    options: {
+      now: () => now,
+      [scheduleTimeoutFunctionKey]: (handler) => {
+        const handle = timerHandlers.size + 1;
+        timerHandlers.set(handle, handler);
+        return handle;
+      },
+      [clearTimeoutFunctionKey]: (handle: unknown) => {
+        clearedHandles.push(handle);
+        if (typeof handle === 'number') {
+          timerHandlers.delete(handle);
+        }
+      },
+    } as DirectIdempotencyExecuteOptions,
   };
 }
 
@@ -1154,6 +1201,329 @@ describe('withIdempotency', () => {
     const cached = await wrapped({ name: 'ada' });
     expect(cached).toBe('hello, ada');
     expect(callCount).toBe(1);
+  });
+
+  it('cancels stalled async schema prevalidation before reading the cache', async () => {
+    let startPrevalidation!: () => void;
+    const prevalidationStarted = new Promise<void>((resolve) => {
+      startPrevalidation = resolve;
+    });
+    let cacheReads = 0;
+    let cacheClaims = 0;
+    const guardedCache: ToolResultCache = {
+      ...cache,
+      getState: async () => {
+        cacheReads++;
+        throw new Error('cache read should not run before cancellation');
+      },
+      claimStarted: async () => {
+        cacheClaims++;
+        throw new Error('cache claim should not run before cancellation');
+      },
+    };
+    const tool = createTool({
+      name: 'stalled-prevalidation-cancel',
+      description: 'Stalls during idempotency prevalidation',
+      version: '1.0.0',
+      input: z.object({ value: z.string() }).superRefine(async () => {
+        startPrevalidation();
+        await new Promise<void>(() => {});
+      }),
+      idempotencyKey: (input: unknown) => fullInputKey(input),
+      async execute({ value }) {
+        callCount++;
+        return value;
+      },
+    });
+    const wrapped = withIdempotency(tool, {
+      cache: guardedCache,
+      tenantId: 'tenant-a',
+    });
+    const controller = new AbortController();
+
+    const pending = wrapped.execute(
+      { value: 'blocked' },
+      { requestContext, signal: controller.signal },
+    );
+    await prevalidationStarted;
+    controller.abort('caller aborted prevalidation');
+
+    let thrown: unknown;
+    try {
+      await pending;
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toBe('caller aborted prevalidation');
+    expect((thrown as { category?: string; code?: string }).category).toBe('cancelled');
+    expect((thrown as { category?: string; code?: string }).code).toBe('CANCELLED');
+    expect(cacheReads).toBe(0);
+    expect(cacheClaims).toBe(0);
+    expect(callCount).toBe(0);
+  });
+
+  it('cancels pre-aborted async schema prevalidation before reading the cache', async () => {
+    let cacheReads = 0;
+    let cacheClaims = 0;
+    const guardedCache: ToolResultCache = {
+      ...cache,
+      getState: async () => {
+        cacheReads++;
+        throw new Error('cache read should not run after pre-abort');
+      },
+      claimStarted: async () => {
+        cacheClaims++;
+        throw new Error('cache claim should not run after pre-abort');
+      },
+    };
+    const tool = createTool({
+      name: 'preaborted-prevalidation',
+      description: 'Checks pre-aborted idempotency prevalidation',
+      version: '1.0.0',
+      input: z.object({ value: z.string() }).superRefine(async () => {
+        await new Promise<void>(() => {});
+      }),
+      idempotencyKey: (input: unknown) => fullInputKey(input),
+      async execute({ value }) {
+        callCount++;
+        return value;
+      },
+    });
+    const wrapped = withIdempotency(tool, {
+      cache: guardedCache,
+      tenantId: 'tenant-a',
+    });
+    const controller = new AbortController();
+    controller.abort(new Error('already aborted prevalidation'));
+
+    let thrown: unknown;
+    try {
+      await wrapped.execute({ value: 'blocked' }, { requestContext, signal: controller.signal });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toBe('already aborted prevalidation');
+    expect((thrown as { category?: string; code?: string }).category).toBe('cancelled');
+    expect((thrown as { category?: string; code?: string }).code).toBe('CANCELLED');
+    expect(cacheReads).toBe(0);
+    expect(cacheClaims).toBe(0);
+    expect(callCount).toBe(0);
+  });
+
+  it('times out stalled async schema prevalidation before reading the cache', async () => {
+    const timing = createManualDeadlineTiming();
+    let startPrevalidation!: () => void;
+    const prevalidationStarted = new Promise<void>((resolve) => {
+      startPrevalidation = resolve;
+    });
+    let cacheReads = 0;
+    let cacheClaims = 0;
+    const guardedCache: ToolResultCache = {
+      ...cache,
+      getState: async () => {
+        cacheReads++;
+        throw new Error('cache read should not run before deadline');
+      },
+      claimStarted: async () => {
+        cacheClaims++;
+        throw new Error('cache claim should not run before deadline');
+      },
+    };
+    const tool = createTool({
+      name: 'stalled-prevalidation-deadline',
+      description: 'Stalls during idempotency deadline prevalidation',
+      version: '1.0.0',
+      input: z.object({ value: z.string() }).superRefine(async () => {
+        startPrevalidation();
+        await new Promise<void>(() => {});
+      }),
+      idempotencyKey: (input: unknown) => fullInputKey(input),
+      async execute({ value }) {
+        callCount++;
+        return value;
+      },
+    });
+    const wrapped = withIdempotency(tool, {
+      cache: guardedCache,
+      tenantId: 'tenant-a',
+    });
+
+    const pending = wrapped.execute(
+      { value: 'blocked' },
+      {
+        requestContext: { ...requestContext, deadline: 10 },
+        ...timing.options,
+      },
+    );
+    await prevalidationStarted;
+    timing.fireTimeout();
+
+    let thrown: unknown;
+    try {
+      await pending;
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toBe('Execution deadline exceeded');
+    expect((thrown as { category?: string; code?: string }).category).toBe('timeout');
+    expect((thrown as { category?: string; code?: string }).code).toBe('TIMEOUT');
+    expect(cacheReads).toBe(0);
+    expect(cacheClaims).toBe(0);
+    expect(callCount).toBe(0);
+  });
+
+  it('times out already-expired async schema prevalidation before reading the cache', async () => {
+    let cacheReads = 0;
+    let cacheClaims = 0;
+    const guardedCache: ToolResultCache = {
+      ...cache,
+      getState: async () => {
+        cacheReads++;
+        throw new Error('cache read should not run after deadline');
+      },
+      claimStarted: async () => {
+        cacheClaims++;
+        throw new Error('cache claim should not run after deadline');
+      },
+    };
+    const tool = createTool({
+      name: 'expired-prevalidation',
+      description: 'Checks expired idempotency prevalidation',
+      version: '1.0.0',
+      input: z.object({ value: z.string() }).superRefine(async () => {
+        await new Promise<void>(() => {});
+      }),
+      idempotencyKey: (input: unknown) => fullInputKey(input),
+      async execute({ value }) {
+        callCount++;
+        return value;
+      },
+    });
+    const wrapped = withIdempotency(tool, {
+      cache: guardedCache,
+      tenantId: 'tenant-a',
+    });
+
+    let thrown: unknown;
+    try {
+      await wrapped.execute(
+        { value: 'blocked' },
+        {
+          requestContext: { ...requestContext, deadline: 10 },
+          now: () => 10,
+        },
+      );
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toBe('Execution deadline exceeded');
+    expect((thrown as { category?: string; code?: string }).category).toBe('timeout');
+    expect((thrown as { category?: string; code?: string }).code).toBe('TIMEOUT');
+    expect(cacheReads).toBe(0);
+    expect(cacheClaims).toBe(0);
+    expect(callCount).toBe(0);
+  });
+
+  it('continues after async schema prevalidation passes under a live signal and deadline', async () => {
+    const timing = createManualDeadlineTiming();
+    const controller = new AbortController();
+    const tool = createTool({
+      name: 'successful-prevalidation',
+      description: 'Completes async idempotency prevalidation',
+      version: '1.0.0',
+      input: z.object({ value: z.string() }).superRefine(async () => {}),
+      idempotencyKey: (input: unknown) => fullInputKey(input),
+      async execute({ value }) {
+        callCount++;
+        return value;
+      },
+    });
+    const wrapped = withIdempotency(tool, {
+      cache,
+      tenantId: 'tenant-a',
+    });
+
+    await expect(
+      wrapped.execute(
+        { value: 'allowed' },
+        {
+          requestContext: { ...requestContext, deadline: 10 },
+          signal: controller.signal,
+          ...timing.options,
+        },
+      ),
+    ).resolves.toBe('allowed');
+    expect(callCount).toBe(1);
+    expect(timing.clearCount()).toBeGreaterThan(0);
+  });
+
+  it('uses the default prevalidation deadline scheduler when no scheduler is supplied', async () => {
+    const controller = new AbortController();
+    const tool = createTool({
+      name: 'default-scheduled-prevalidation',
+      description: 'Completes async idempotency prevalidation with default scheduling',
+      version: '1.0.0',
+      input: z.object({ value: z.string() }).superRefine(async () => {}),
+      idempotencyKey: (input: unknown) => fullInputKey(input),
+      async execute({ value }) {
+        callCount++;
+        return value;
+      },
+    });
+    const wrapped = withIdempotency(tool, {
+      cache,
+      tenantId: 'tenant-a',
+    });
+
+    await expect(
+      wrapped.execute(
+        { value: 'allowed' },
+        {
+          requestContext: { ...requestContext, deadline: Date.now() + 60_000 },
+          signal: controller.signal,
+        },
+      ),
+    ).resolves.toBe('allowed');
+    expect(callCount).toBe(1);
+  });
+
+  it('normalizes non-Error async schema prevalidation rejections', async () => {
+    const tool = createTool({
+      name: 'rejected-prevalidation',
+      description: 'Rejects async idempotency prevalidation',
+      version: '1.0.0',
+      input: z.object({ value: z.string() }).superRefine(async () => {
+        throw 'schema rejected';
+      }),
+      idempotencyKey: (input: unknown) => fullInputKey(input),
+      async execute({ value }) {
+        callCount++;
+        return value;
+      },
+    });
+    const wrapped = withIdempotency(tool, {
+      cache,
+      tenantId: 'tenant-a',
+    });
+
+    await expect(
+      wrapped.execute(
+        { value: 'blocked' },
+        {
+          requestContext: { ...requestContext, deadline: 10 },
+          ...createManualDeadlineTiming().options,
+        },
+      ),
+    ).rejects.toThrow('schema rejected');
+    expect(callCount).toBe(0);
   });
 
   it('NEUTER CHECK: a sync `safeParse` on the wrapped schema throws (proves the fix is load-bearing)', () => {
