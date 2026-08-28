@@ -228,7 +228,10 @@ function withDefaultToolboxRequestContext(
       authorizationRevision !== 'bureau:scheduler:1';
     if (requiresTransportValidation && executionRequestContext) {
       const validator = requestAuthorityValidator();
-      if (!validator || !(await validator(executionRequestContext))) {
+      if (
+        !validator ||
+        !(await raceRequestAuthorityValidation(validator(executionRequestContext), options))
+      ) {
         throw new Error('Request authority is no longer current.');
       }
     }
@@ -240,6 +243,39 @@ function withDefaultToolboxRequestContext(
       if (property === 'execute') return executeWithDefaultRequestContext;
       return Reflect.get(target, property, receiver) as unknown;
     },
+  });
+}
+
+function raceRequestAuthorityValidation(
+  validation: boolean | Promise<boolean>,
+  options: ToolboxExecuteOptions,
+): Promise<boolean> {
+  const signal = options.signal;
+  const deadline = options.requestContext?.deadline;
+  const now = options.now ?? Date.now;
+  if (signal?.aborted) {
+    return Promise.reject(new Error(String(signal.reason ?? 'Cancelled')));
+  }
+  if (deadline !== undefined && deadline <= now()) {
+    return Promise.reject(new Error('Execution deadline exceeded'));
+  }
+  if (!signal && deadline === undefined) return Promise.resolve(validation);
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  const interruption = new Promise<boolean>((_resolve, reject) => {
+    onAbort = () => reject(new Error(String(signal?.reason ?? 'Cancelled')));
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (deadline !== undefined) {
+      timer = setTimeout(
+        () => reject(new Error('Execution deadline exceeded')),
+        Math.max(0, deadline - now()),
+      );
+    }
+  });
+  return Promise.race([Promise.resolve(validation), interruption]).finally(() => {
+    if (onAbort) signal?.removeEventListener('abort', onAbort);
+    if (timer !== undefined) clearTimeout(timer);
   });
 }
 

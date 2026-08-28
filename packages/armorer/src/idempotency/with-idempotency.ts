@@ -4,9 +4,15 @@ import { assertJsonValue, stableStringifyJson } from '../core/serialization/json
 import {
   approvalConsumeSymbol,
   approvalResumeSymbol,
+  executionCallbackStartSymbol,
   policyAuthorizationOnlySymbol,
 } from '../internal/approval-resume';
-import type { Tool, ToolCallWithArguments, ToolExecuteOptions } from '../is-tool';
+import type {
+  Tool,
+  ToolCallWithArguments,
+  ToolExecuteOptions,
+  ToolExecuteWithOptions,
+} from '../is-tool';
 import { claimCacheStarted, getCacheEntry } from './cache-operations';
 import type {
   CachedToolResult,
@@ -465,16 +471,22 @@ export function withIdempotency<T extends Tool>(
         absoluteDeadline: startedAt + maximumExecutionDurationMs,
         inputDigest,
       };
-      const started = await raceIdempotencyAwait(
-        () => claimCacheStarted(cache, key, startedExecution),
-        executeOptions,
-      );
+      // Once the atomic claim begins, observe its result before honoring
+      // cancellation. Otherwise the store can commit a claim after the raced
+      // caller has already returned, leaving a false unknown outcome.
+      const started = await claimCacheStarted(cache, key, startedExecution);
       if (started.outcome === 'existing') {
         if (started.entry.status === 'started') {
           onUnknownOutcome?.(key, started.entry);
           throw new Error(`Idempotency key "${key}" has an unknown outcome.`);
         }
         return returnAuthorizedCachedResult(started.entry);
+      }
+      try {
+        await raceIdempotencyAwait(() => Promise.resolve(), executeOptions);
+      } catch (error) {
+        await cache.deleteStarted(key, startedExecution.attemptId!);
+        throw error;
       }
     }
     let leaseOwned = true;
@@ -525,13 +537,18 @@ export function withIdempotency<T extends Tool>(
       Math.max(0, (startedExecution.absoluteDeadline ?? now()) - startedExecution.startedAt),
     );
 
+    let callbackStarted = false;
     let toolExecution: Awaited<ReturnType<Tool['executeWith']>>;
     try {
-      toolExecution = executeOptions
-        ? await tool.executeWith({ params, ...executeOptions })
-        : await tool.executeWith({ params });
+      toolExecution = await tool.executeWith({
+        params,
+        ...(executeOptions ?? {}),
+        [executionCallbackStartSymbol]: () => {
+          callbackStarted = true;
+        },
+      } as ToolExecuteWithOptions);
     } catch (error) {
-      if (isPreExecutionThrownError(error)) {
+      if (!callbackStarted) {
         await cache.deleteStarted(key, startedExecution.attemptId!);
       }
       throw error;
@@ -546,7 +563,7 @@ export function withIdempotency<T extends Tool>(
     }
 
     if (toolExecution.outcome !== 'success') {
-      if (isPreExecutionResult(toolExecution)) {
+      if (!callbackStarted || isPreExecutionResult(toolExecution)) {
         await cache.deleteStarted(key, startedExecution.attemptId!);
       }
       const message =
@@ -634,17 +651,6 @@ function createPolicyAuthorizationOnlyOptions(
     delete options[approvalConsumeSymbol];
   }
   return authorizationOnlyOptions;
-}
-
-function isPreExecutionThrownError(error: unknown): boolean {
-  if (!error || typeof error !== 'object') return false;
-  const category = (error as { category?: unknown }).category;
-  return (
-    category === 'validation' ||
-    category === 'permission' ||
-    category === 'not_found' ||
-    category === 'unavailable'
-  );
 }
 
 function isPreExecutionResult(result: unknown): boolean {

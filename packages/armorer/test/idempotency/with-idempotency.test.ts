@@ -736,6 +736,46 @@ describe('withIdempotency', () => {
     expect(await cache.getState(key)).toBeUndefined();
   });
 
+  it('clears a direct idempotency claim when cancellation wins before the callback starts', async () => {
+    let callbackRuns = 0;
+    const tool = createTool({
+      name: 'cancel-before-callback',
+      description: 'Stalls in policy before the callback',
+      version: '1.0.0',
+      input: z.object({}),
+      idempotencyKey: () => 'cancel-before-callback',
+      policy: { beforeExecute: () => new Promise(() => {}) },
+      async execute() {
+        callbackRuns += 1;
+        return 'unexpected';
+      },
+    });
+    const controller = new AbortController();
+    let deleteAttempts = 0;
+    const trackedCache: ToolResultCache = {
+      ...cache,
+      async deleteStarted(key, attemptId) {
+        deleteAttempts += 1;
+        return cache.deleteStarted(key, attemptId);
+      },
+    };
+    const wrapped = withIdempotency(tool, { cache: trackedCache, tenantId: 'tenant-a' });
+    const key = JSON.stringify([
+      'tenant-a',
+      tool.id,
+      'cancel-before-callback',
+      'cancel-before-callback',
+    ]);
+    const execution = wrapped.execute({}, { requestContext, signal: controller.signal });
+
+    while ((await cache.getState(key)) === undefined) await Promise.resolve();
+    controller.abort('cancel before callback');
+    await expect(execution).rejects.toThrow('cancel before callback');
+    expect(callbackRuns).toBe(0);
+    expect(deleteAttempts).toBe(1);
+    expect(await cache.getState(key)).toBeUndefined();
+  });
+
   it('rejects invalid direct idempotency lease durations', () => {
     const tool = createTestTool();
 

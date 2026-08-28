@@ -5,6 +5,7 @@ export const approvalConsumeSymbol: unique symbol = Symbol('armorer.approvalCons
 export const policyAuthorizationOnlySymbol: unique symbol = Symbol(
   'armorer.policyAuthorizationOnly',
 );
+export const executionCallbackStartSymbol: unique symbol = Symbol('armorer.executionCallbackStart');
 export const policyPauseDecisionsSymbol: unique symbol = Symbol('armorer.policyPauseDecisions');
 export const policyPauseTierSymbol: unique symbol = Symbol('armorer.policyPauseTier');
 

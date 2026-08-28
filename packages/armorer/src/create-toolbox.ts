@@ -399,6 +399,7 @@ type InternalToolExecuteOptionsWithMirror = ToolboxExecuteOptions & {
   [policyAuthorizationOnlySymbol]?: boolean;
   executionHandle?: ExecutionHandle;
   privilegedContextMirrorHandle?: ExecutionHandle;
+  parentCompletionHandle?: ExecutionHandle;
 };
 
 type ResumeApprovalValidationResult =
@@ -1467,7 +1468,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
                   // A single tool call can use the parent as its completion
                   // callback. This matters during shutdown: the tool promise
                   // may race its abort signal while the callback continues.
-                  ...(hasSingleChild ? { executionHandle } : {}),
+                  ...(hasSingleChild ? { parentCompletionHandle: executionHandle } : {}),
                   ...(options !== undefined && approvalResumeSymbol in options
                     ? { [approvalResumeSymbol]: options[approvalResumeSymbol] }
                     : {}),
@@ -1621,7 +1622,16 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       const output = isMultiple ? results : results[0]!;
       executionOutput = output;
       executionReturned = true;
-      if (liveStreams === 0) executionHandle.settle(output);
+      if (
+        liveStreams === 0 &&
+        !(
+          hasSingleChild &&
+          (executionHandle.snapshot().state === 'abort-requested' ||
+            executionHandle.snapshot().state === 'cleanup-pending')
+        )
+      ) {
+        executionHandle.settle(output);
+      }
       return output;
     } finally {
       if (

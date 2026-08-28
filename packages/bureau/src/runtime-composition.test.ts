@@ -134,6 +134,13 @@ describe('createRuntimeComposition', () => {
       },
     });
 
+    await runRuntime.toolbox.execute({
+      id: 'transport-authority-success-call',
+      name: 'transport-authorized-tool',
+      arguments: {},
+    });
+    expect(executions).toBe(1);
+
     authorityCurrent = false;
     const execution = runRuntime.toolbox.execute({
       id: 'transport-authority-call',
@@ -146,7 +153,156 @@ describe('createRuntimeComposition', () => {
     );
     expect(executionError).toBeInstanceOf(Error);
     expect((executionError as Error).message).toContain('no longer current');
+    expect(executions).toBe(1);
+    runtime.disposeStorage?.();
+  });
+
+  it('cancels a stalled transport authority revalidation before tool dispatch', async () => {
+    let executions = 0;
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      requestAuthorityValidator: () => new Promise(() => {}),
+      toolbox: createToolbox([
+        createTool({
+          name: 'stalled-authority-tool',
+          description: 'Must not run after authority cancellation',
+          input: z.object({}),
+          async execute() {
+            executions += 1;
+            return 'unexpected';
+          },
+        }),
+      ]),
+    });
+    const runRuntime = await runtime.createRunRuntime({
+      message: 'test',
+      sessionId: 'stalled-authority-session',
+      runId: 'stalled-authority-run',
+      requestContext: {
+        authority: {
+          principalId: 'api-key:stalled',
+          tenantId: 'tenant-a',
+          ownerId: 'owner-a',
+          capabilities: ['tools:execute'],
+          authorizationRevision: 'gateway:api-key:stalled',
+        },
+        audience: 'tenant',
+      },
+    });
+    const controller = new AbortController();
+    const execution = runRuntime.toolbox.execute(
+      { id: 'stalled-authority-call', name: 'stalled-authority-tool', arguments: {} },
+      { signal: controller.signal },
+    ) as unknown as Promise<unknown>;
+    controller.abort('authority check cancelled');
+
+    const executionError = await execution.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(executionError).toBeInstanceOf(Error);
+    expect((executionError as Error).message).toBe('authority check cancelled');
     expect(executions).toBe(0);
+    runtime.disposeStorage?.();
+  });
+
+  it('rejects pre-aborted and deadline-expired transport authority checks', async () => {
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      requestAuthorityValidator: () => new Promise(() => {}),
+      toolbox: createToolbox([
+        createTool({
+          name: 'bounded-authority-tool',
+          description: 'Must remain behind bounded authority validation',
+          input: z.object({}),
+          async execute() {
+            return 'unexpected';
+          },
+        }),
+      ]),
+    });
+    const authority = {
+      principalId: 'api-key:bounded',
+      tenantId: 'tenant-a',
+      ownerId: 'owner-a',
+      capabilities: ['tools:execute'] as const,
+      authorizationRevision: 'gateway:api-key:bounded',
+    };
+    const runRuntime = await runtime.createRunRuntime({
+      message: 'test',
+      sessionId: 'bounded-authority-session',
+      runId: 'bounded-authority-run',
+      requestContext: { authority, audience: 'tenant' },
+    });
+    const controller = new AbortController();
+    controller.abort('already cancelled');
+    const preAborted = runRuntime.toolbox.execute(
+      { id: 'pre-aborted-authority-call', name: 'bounded-authority-tool', arguments: {} },
+      { signal: controller.signal },
+    ) as unknown as Promise<unknown>;
+    const preAbortedError = await preAborted.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect((preAbortedError as Error).message).toBe('already cancelled');
+
+    const expired = runRuntime.toolbox.execute(
+      { id: 'expired-authority-call', name: 'bounded-authority-tool', arguments: {} },
+      {
+        requestContext: { authority, audience: 'tenant', deadline: Date.now() - 1 },
+      },
+    ) as unknown as Promise<unknown>;
+    const expiredError = await expired.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect((expiredError as Error).message).toBe('Execution deadline exceeded');
+
+    const deadline = runRuntime.toolbox.execute(
+      { id: 'deadline-authority-call', name: 'bounded-authority-tool', arguments: {} },
+      {
+        requestContext: { authority, audience: 'tenant', deadline: Date.now() + 5 },
+      },
+    ) as unknown as Promise<unknown>;
+    const deadlineError = await deadline.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect((deadlineError as Error).message).toBe('Execution deadline exceeded');
+    runtime.disposeStorage?.();
+  });
+
+  it('propagates transport authority validator failures', async () => {
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      requestAuthorityValidator: () => Promise.reject(new Error('validator unavailable')),
+      toolbox: createToolbox([]),
+    });
+    const runRuntime = await runtime.createRunRuntime({
+      message: 'test',
+      sessionId: 'rejected-authority-session',
+      runId: 'rejected-authority-run',
+      requestContext: {
+        authority: {
+          principalId: 'api-key:rejected',
+          tenantId: 'tenant-a',
+          ownerId: 'owner-a',
+          capabilities: ['tools:execute'],
+          authorizationRevision: 'gateway:api-key:rejected',
+        },
+        audience: 'tenant',
+      },
+    });
+    const execution = runRuntime.toolbox.execute({
+      id: 'rejected-authority-call',
+      name: 'missing',
+      arguments: {},
+    }) as unknown as Promise<unknown>;
+    const executionError = await execution.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect((executionError as Error).message).toBe('validator unavailable');
     runtime.disposeStorage?.();
   });
 

@@ -3896,6 +3896,43 @@ describe('createToolbox', () => {
     );
   });
 
+  it('settles a deadline-aborted parent after a cancellation-ignoring callback returns', async () => {
+    let release!: () => void;
+    const toolbox = createToolbox([
+      createTool({
+        name: 'ignore-deadline-abort',
+        description: 'Returns only after an external release',
+        input: z.object({}),
+        async execute() {
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          return 'late result';
+        },
+      }),
+    ]);
+    const execution = toolbox.execute(
+      { id: 'ignore-deadline-call', name: 'ignore-deadline-abort', arguments: {} },
+      { requestContext: { ...approvalRequestContext, deadline: Date.now() + 5 } },
+    );
+    while (!release) await Promise.resolve();
+    await expect(execution).resolves.toMatchObject({
+      outcome: 'error',
+      errorMessage: 'Execution deadline exceeded',
+    });
+    let idle = false;
+    const whenIdle = toolbox.whenIdle().then(() => {
+      idle = true;
+    });
+    await Promise.resolve();
+    expect(idle).toBe(false);
+
+    release();
+    await whenIdle;
+    expect(idle).toBe(true);
+    expect(toolbox.activeExecutions).toBe(0);
+  });
+
   it('returns unconsumed child streams before toolbox shutdown resolves', async () => {
     let returned = 0;
     const toolbox = createToolbox([

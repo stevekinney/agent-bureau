@@ -55,6 +55,7 @@ import {
   approvalConsumeSymbol,
   type ApprovalResumeState,
   approvalResumeSymbol,
+  executionCallbackStartSymbol,
   policyAuthorizationOnlySymbol,
   policyPauseDecisionsSymbol,
   policyPauseTierSymbol,
@@ -100,6 +101,8 @@ type InternalToolExecuteOptions = ToolExecuteOptions & {
   [policyAuthorizationOnlySymbol]?: boolean;
   executionHandle?: ExecutionHandle;
   privilegedContextMirrorHandle?: ExecutionHandle;
+  parentCompletionHandle?: ExecutionHandle;
+  [executionCallbackStartSymbol]?: () => void;
 };
 
 // Map from event type strings to their Event subclass constructors.
@@ -1185,7 +1188,16 @@ export function createTool<
       // At runtime we can only guarantee the base ToolContext shape, so we cast to
       // avoid `exactOptionalPropertyTypes` assignability issues.
 
+      options[executionCallbackStartSymbol]?.();
       const runner = Promise.resolve(resolvedExecute(parsed, toolContext as unknown as TContext));
+      if (options.parentCompletionHandle) {
+        void runner.then(
+          (result) => {
+            if (!isAsyncIterable(result)) options.parentCompletionHandle?.settle(result);
+          },
+          (error) => options.parentCompletionHandle?.settle(error),
+        );
+      }
       if (options.executionHandle) {
         void runner.then(
           (result) => {
