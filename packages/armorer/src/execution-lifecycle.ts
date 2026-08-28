@@ -137,6 +137,50 @@ type RecordState = {
 };
 
 let nextExecutionId = 0;
+const maximumTimerDelay = 2_147_483_647;
+
+function assertFiniteDeadline(deadline: number): void {
+  if (!Number.isFinite(deadline)) {
+    throw new Error('Execution deadline must be finite.');
+  }
+}
+
+function scheduleAbsoluteDeadline(options: {
+  deadline: number;
+  now: () => number;
+  schedule: (callback: () => void, milliseconds: number) => unknown;
+  clear: (handle: unknown) => void;
+  onDeadline: () => void;
+}): () => void {
+  assertFiniteDeadline(options.deadline);
+  let activeHandle: unknown;
+  let activeHandleScheduled = false;
+  let cleared = false;
+  const scheduleNext = () => {
+    if (cleared) return;
+    const remaining = options.deadline - options.now();
+    const delay = remaining <= 0 ? 0 : Math.min(remaining, maximumTimerDelay);
+    activeHandleScheduled = true;
+    activeHandle = options.schedule(() => {
+      activeHandleScheduled = false;
+      if (cleared) return;
+      if (options.deadline <= options.now()) {
+        options.onDeadline();
+        return;
+      }
+      scheduleNext();
+    }, delay);
+  };
+
+  scheduleNext();
+  return () => {
+    if (cleared) return;
+    cleared = true;
+    if (activeHandleScheduled) {
+      options.clear(activeHandle);
+    }
+  };
+}
 
 function retainTerminalPrivilegedContext(
   context: EffectiveToolExecutionContext | undefined,
@@ -231,6 +275,9 @@ export function createExecutionLifecycle(defaultOwnerId = 'anonymous'): Executio
     begin(options) {
       if (closed) throw new Error('Execution admission is closed');
       const now = options.now ?? Date.now;
+      if (options.deadline !== undefined) {
+        assertFiniteDeadline(options.deadline);
+      }
       const queuedAt = now();
       const executionId = options.executionId ?? `execution-${++nextExecutionId}`;
       if (records.has(executionId)) {
@@ -365,17 +412,16 @@ export function createExecutionLifecycle(defaultOwnerId = 'anonymous'): Executio
         const schedule =
           options.setTimeoutFunction ??
           ((callback, milliseconds) => setTimeout(callback, milliseconds));
-        const timeoutHandle = schedule(
-          () => abort('deadline', 'Execution deadline exceeded'),
-          Math.max(0, options.deadline - now()),
-        );
         const clear =
           options.clearTimeoutFunction ??
           ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
-        clearDeadline = () => {
-          clear(timeoutHandle);
-          clearDeadline = undefined;
-        };
+        clearDeadline = scheduleAbsoluteDeadline({
+          deadline: options.deadline,
+          now,
+          schedule,
+          clear,
+          onDeadline: () => abort('deadline', 'Execution deadline exceeded'),
+        });
       }
       ownerController.signal.addEventListener('abort', onOwnerAbort, { once: true });
       notifyListeners(Object.freeze({ type: 'execution.lifecycle', snapshot: record.snapshot }));

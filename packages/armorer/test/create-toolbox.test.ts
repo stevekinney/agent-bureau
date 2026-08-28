@@ -145,6 +145,7 @@ describe('createToolbox', () => {
   });
 
   it('races pending availability against the request deadline', async () => {
+    let currentTime = 0;
     let resolveAvailability!: (available: boolean) => void;
     const availability = new Promise<boolean>((resolve) => {
       resolveAvailability = resolve;
@@ -165,7 +166,7 @@ describe('createToolbox', () => {
     const pending = toolbox.execute(
       { id: 'pending-availability-call', name: 'pending-availability', arguments: {} },
       {
-        now: () => 0,
+        now: () => currentTime,
         requestContext: { ...approvalRequestContext, deadline: 10 },
         setTimeoutFunction(callback) {
           scheduled.push(callback);
@@ -175,6 +176,7 @@ describe('createToolbox', () => {
       },
     );
     await Promise.resolve();
+    currentTime = 10;
     scheduled[0]!();
 
     await expect(pending).resolves.toMatchObject({

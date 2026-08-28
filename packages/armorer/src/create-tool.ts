@@ -1102,14 +1102,22 @@ export function createTool<
         }
         emit('execute-success', { ...parsedDetail, result: undefined });
         emit('settled', { ...parsedDetail, result: undefined });
-        await runPolicyAfter(
-          {
-            ...policyContext,
-            outcome: 'success',
-            result: undefined,
-          },
-          options.signal,
-        );
+        try {
+          await runPolicyAfter(
+            {
+              ...policyContext,
+              outcome: 'success',
+              result: undefined,
+            },
+            options.signal,
+          );
+        } catch (error) {
+          // A cache hit has no side-effect callback, but approval admission is
+          // still single-use. If post-execution reporting is cancelled, leave
+          // the approval retryable because the cache result was not admitted.
+          if (rollbackApprovalAdmission) await rollbackApprovalAdmission();
+          throw error;
+        }
         finishTelemetry('success');
         const callId = typedToolCall.id;
         return {

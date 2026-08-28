@@ -1177,6 +1177,15 @@ describe('withToolboxIdempotency', () => {
 
   it('requires and consumes signed approval before returning cached results guarded by current policy', async () => {
     const reads: string[] = [];
+    let cancelAfterExecute = false;
+    let afterExecuteStarted!: () => void;
+    const afterExecuteStartedPromise = new Promise<void>((resolve) => {
+      afterExecuteStarted = resolve;
+    });
+    let releaseAfterExecute!: () => void;
+    const afterExecuteRelease = new Promise<void>((resolve) => {
+      releaseAfterExecute = resolve;
+    });
     const secretTool = createTool({
       name: 'read-secret',
       description: 'Reads sensitive data',
@@ -1227,6 +1236,12 @@ describe('withToolboxIdempotency', () => {
             reason: 'cached result access requires approval',
           };
         },
+        async afterExecute() {
+          if (cancelAfterExecute) {
+            afterExecuteStarted();
+            await afterExecuteRelease;
+          }
+        },
       },
     });
     const idempotentGuardedToolbox = withToolboxIdempotency(guardedToolbox, {
@@ -1247,6 +1262,22 @@ describe('withToolboxIdempotency', () => {
     expect(approval.approvalBinding).toBeDefined();
     expect(await approvalStateStore.state(approval.approvalBinding!)).toBe('issued');
 
+    cancelAfterExecute = true;
+    const controller = new AbortController();
+    const cancelledResume = idempotentGuardedToolbox.resumeApproval(approval, {
+      idempotencyKey,
+      requestContext,
+      signal: controller.signal,
+    });
+    await afterExecuteStartedPromise;
+    controller.abort('cache-hit reporting cancelled');
+    const cancelled = await cancelledResume;
+    expect(cancelled.outcome).toBe('error');
+    expect(cancelled.errorCategory).toBe('cancelled');
+    expect(await approvalStateStore.state(approval.approvalBinding!)).toBe('issued');
+    releaseAfterExecute();
+
+    cancelAfterExecute = false;
     const resumed = await idempotentGuardedToolbox.resumeApproval(approval, {
       idempotencyKey,
       requestContext,
@@ -1748,6 +1779,32 @@ describe('withToolboxIdempotency', () => {
     expect(startedResult.outcome).toBe('action_required');
   });
 
+  it('validates original input serialization before claiming or executing', async () => {
+    let executions = 0;
+    const tool = createTool({
+      name: 'serialization-guard',
+      description: 'serialization guard',
+      input: z.object({ value: z.any() }),
+      idempotencyKey: () => 'serialization-guard-key',
+      async execute() {
+        executions += 1;
+        return 'side effect';
+      },
+    });
+    const toolbox = withToolboxIdempotency(createToolbox([tool]), {
+      cache,
+      tenantId: 'tenant-a',
+    });
+    const circular: Record<string, unknown> = {};
+    circular['self'] = circular;
+    const inputs: unknown[] = [{ value: 1n }, { value: circular }, () => 'root function'];
+
+    for (const input of inputs) {
+      await expect(toolbox.execute({ name: tool.name, arguments: input })).rejects.toThrow();
+    }
+    expect(executions).toBe(0);
+  });
+
   it('renews active leases and stops completion after losing a fence', async () => {
     let renewals = 0;
     const slowTool = createTool({
@@ -1784,8 +1841,8 @@ describe('withToolboxIdempotency', () => {
       cache: lostFenceCache,
       tenantId: 'tenant-b',
     }).execute({ name: 'add', arguments: { a: 2, b: 3 } });
-    expect(unfenced.result).toBe(5);
-    expect(unfenced.idempotency).toBeUndefined();
+    expect(unfenced.outcome).toBe('action_required');
+    expect(unfenced.idempotency?.outcome).toBe('unknown-outcome');
     const lostFenceKey = expectedCacheKey(
       'tenant-b',
       'default:add',
@@ -1850,7 +1907,8 @@ describe('withToolboxIdempotency', () => {
       now: () => [0, 0, 100][clockIndex++] ?? 100,
     }).execute({ name: 'queued-renewal', arguments: { value: 7 } });
 
-    expect(result.result).toBe(7);
+    expect(result.outcome).toBe('action_required');
+    expect(result.idempotency?.outcome).toBe('unknown-outcome');
     expect(renewals).toBe(1);
   });
 

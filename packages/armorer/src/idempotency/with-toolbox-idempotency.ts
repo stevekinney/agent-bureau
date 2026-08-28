@@ -353,6 +353,7 @@ export function withToolboxIdempotency(
       throw new Error('Idempotency tenantId must match the request authority tenantId.');
     }
     const cacheKey = stableStringifyJson([tenantId, revision, baseKey]);
+    const serializedOriginalInput = serializeOriginalInput(call.arguments);
     const cached = await getCacheEntry(cache, cacheKey);
 
     const receipt = executionIdempotencyOptions?.resolutionReceipt;
@@ -534,7 +535,7 @@ export function withToolboxIdempotency(
         executedAt: now(),
         ttl: defaultTTL,
         policyRevision,
-        input: serializeOriginalInput(call.arguments),
+        input: serializedOriginalInput,
       };
       const completed = await cache.completeStarted(
         cacheKey,
@@ -543,7 +544,11 @@ export function withToolboxIdempotency(
         defaultTTL,
         now(),
       );
-      if (!completed) return result;
+      if (!completed) {
+        return createUnknownOutcomeResult(fields, cacheKey, result.toolName, {
+          attemptId: execution.attemptId,
+        });
+      }
       result.idempotency = {
         key: cacheKey,
         outcome: 'fresh',

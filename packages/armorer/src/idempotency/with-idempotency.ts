@@ -1,5 +1,4 @@
-import type { JsonValue } from '../core/serialization/json';
-import { stableStringifyJson } from '../core/serialization/json';
+import { assertJsonValue, stableStringifyJson } from '../core/serialization/json';
 import {
   approvalConsumeSymbol,
   approvalResumeSymbol,
@@ -16,6 +15,7 @@ import type {
 
 const DEFAULT_TTL = 300_000;
 const DEFAULT_LEASE_DURATION = 30_000;
+const maximumTimerDelay = 2_147_483_647;
 
 export type DirectIdempotencyExecuteOptions = ToolExecuteOptions & {
   resolutionReceipt?: IdempotencyResolutionReceipt;
@@ -66,6 +66,9 @@ function raceSchemaPrevalidation<T>(promise: Promise<T>, options?: ToolExecuteOp
   const signal = options?.signal;
   const deadline = options?.requestContext?.deadline;
   const now = options?.now ?? Date.now;
+  if (deadline !== undefined && !Number.isFinite(deadline)) {
+    return Promise.reject(createUnsupportedDeadlineError());
+  }
   if (deadline !== undefined && deadline <= now()) {
     return Promise.reject(createPrevalidationDeadlineError());
   }
@@ -89,9 +92,27 @@ function raceSchemaPrevalidation<T>(promise: Promise<T>, options?: ToolExecuteOp
 
     const cleanup = () => {
       signal?.removeEventListener('abort', onAbort);
-      if (deadlineTimerScheduled) {
-        clearTimeoutFunction(deadlineTimer);
-      }
+      clearDeadline();
+    };
+    const clearDeadline = () => {
+      if (!deadlineTimerScheduled) return;
+      deadlineTimerScheduled = false;
+      clearTimeoutFunction(deadlineTimer);
+    };
+    const scheduleDeadline = () => {
+      if (deadline === undefined) return;
+      const remaining = deadline - now();
+      const delay = remaining <= 0 ? 0 : Math.min(remaining, maximumTimerDelay);
+      deadlineTimerScheduled = true;
+      deadlineTimer = setTimeoutFunction(() => {
+        deadlineTimerScheduled = false;
+        if (settled) return;
+        if (deadline <= now()) {
+          rejectOnce(createPrevalidationDeadlineError());
+          return;
+        }
+        scheduleDeadline();
+      }, delay);
     };
     const resolveOnce = (value: T) => {
       if (settled) return;
@@ -110,13 +131,7 @@ function raceSchemaPrevalidation<T>(promise: Promise<T>, options?: ToolExecuteOp
     }
 
     signal?.addEventListener('abort', onAbort, { once: true });
-    if (deadline !== undefined) {
-      deadlineTimerScheduled = true;
-      deadlineTimer = setTimeoutFunction(
-        () => rejectOnce(createPrevalidationDeadlineError()),
-        Math.max(0, deadline - now()),
-      );
-    }
+    scheduleDeadline();
     void promise.then(resolveOnce, (error) =>
       rejectOnce(error instanceof Error ? error : new Error(String(error ?? 'Unknown error'))),
     );
@@ -144,6 +159,10 @@ function createPrevalidationDeadlineError(): Error {
   error.category = 'timeout';
   error.code = 'TIMEOUT';
   return error;
+}
+
+function createUnsupportedDeadlineError(): Error {
+  return new Error('Execution deadline must be finite.');
 }
 
 /**
@@ -260,6 +279,11 @@ export function withIdempotency<T extends Tool>(
     }
 
     let startedExecution: StartedToolExecution;
+    let originalInput: string | undefined;
+    const serializedOriginalInput = () => {
+      originalInput ??= serializeOriginalInput(params);
+      return originalInput;
+    };
     if (cached?.status === 'started') {
       const receipt = executeOptions?.resolutionReceipt;
       const validReceipt =
@@ -287,6 +311,7 @@ export function withIdempotency<T extends Tool>(
         onUnknownOutcome?.(key, cached);
         throw new Error(`Idempotency key "${key}" has an unknown outcome.`);
       }
+      serializedOriginalInput();
       startedExecution = {
         status: 'started',
         toolName: tool.name,
@@ -312,6 +337,7 @@ export function withIdempotency<T extends Tool>(
       }
     } else {
       const startedAt = now();
+      serializedOriginalInput();
       startedExecution = {
         status: 'started',
         toolName: tool.name,
@@ -407,7 +433,7 @@ export function withIdempotency<T extends Tool>(
       toolName: tool.name,
       executedAt: now(),
       ttl,
-      input: serializeOriginalInput(params),
+      input: serializedOriginalInput(),
     };
 
     if (
@@ -449,9 +475,9 @@ export function withIdempotency<T extends Tool>(
 }
 
 function serializeOriginalInput(input: unknown): string {
-  return stableStringifyJson(
-    JSON.parse(JSON.stringify(input === undefined ? null : input)) as JsonValue,
-  );
+  const jsonInput = input === undefined ? null : input;
+  assertJsonValue(jsonInput, 'idempotency input');
+  return stableStringifyJson(jsonInput);
 }
 
 function createPolicyAuthorizationOnlyOptions(

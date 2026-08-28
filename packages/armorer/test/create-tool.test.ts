@@ -26,7 +26,7 @@ function createManualExecutionTiming(initialNow = 0): {
   options: ToolExecuteOptions;
 } {
   let now = initialNow;
-  const timerHandlers = new Map<number, () => void>();
+  const timers = new Map<number, { handler: () => void; milliseconds: number }>();
   const clearedHandles: unknown[] = [];
   let nextHandle = 0;
   type ScheduleTimeoutFunctionKey = `set${'Timeout'}Function`;
@@ -41,26 +41,27 @@ function createManualExecutionTiming(initialNow = 0): {
       return clearedHandles.length;
     },
     fireTimeout(): void {
-      const [handle, timerHandler] = timerHandlers.entries().next().value ?? [];
+      const [handle, timer] = timers.entries().next().value ?? [];
       if (typeof handle === 'number') {
-        timerHandlers.delete(handle);
+        timers.delete(handle);
       }
-      if (!timerHandler) {
+      if (!timer) {
         throw new Error('Manual timeout was not scheduled');
       }
-      timerHandler();
+      now += timer.milliseconds;
+      timer.handler();
     },
     options: {
       now: () => now,
-      [scheduleTimeoutFunctionKey]: (handler) => {
+      [scheduleTimeoutFunctionKey]: (handler, milliseconds) => {
         const handle = ++nextHandle;
-        timerHandlers.set(handle, handler);
+        timers.set(handle, { handler, milliseconds });
         return handle;
       },
       [clearTimeoutFunctionKey]: (handle: unknown) => {
         clearedHandles.push(handle);
         if (typeof handle === 'number') {
-          timerHandlers.delete(handle);
+          timers.delete(handle);
         }
       },
     } as ToolExecuteOptions,
