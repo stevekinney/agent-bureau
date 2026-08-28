@@ -130,6 +130,19 @@ describe('approval binding state', () => {
     });
   });
 
+  it('snapshots issued bindings against post-verification caller mutation', async () => {
+    const store = createProcessLocalApprovalStateStore();
+    const mutableBinding = { ...binding };
+    await store.issue(mutableBinding);
+
+    mutableBinding.expiresAt += 1_000;
+
+    await expect(
+      store.reserve(mutableBinding, undefined, 10_000_000_000_150),
+    ).rejects.toMatchObject({ code: 'mismatch' });
+    await expect(store.state(binding)).resolves.toBe('issued');
+  });
+
   it('rejects cross-principal and cross-tenant replay and consumes concurrently once', async () => {
     const store = createProcessLocalApprovalStateStore();
     await store.issue(binding);

@@ -66,6 +66,10 @@ function validateApprovalClock(now: number): number {
   return now;
 }
 
+function snapshotApprovalBinding(binding: ApprovalBindingPayload): ApprovalBindingPayload {
+  return Object.freeze({ ...binding });
+}
+
 export interface ApprovalStateStore {
   issue(binding: ApprovalBindingPayload): Promise<void>;
   reserve(
@@ -142,7 +146,11 @@ export function createProcessLocalApprovalStateStore(nowFunction = Date.now): Ap
   const reserved = new Map<string, ApprovalBindingPayload>();
   const terminal = new Map<
     string,
-    { state: Exclude<ApprovalState, 'issued'>; expiresAt: number }
+    {
+      state: Exclude<ApprovalState, 'issued'>;
+      expiresAt: number;
+      binding?: ApprovalBindingPayload;
+    }
   >();
   const keyOf = (binding: Pick<ApprovalBindingPayload, 'nonce' | 'replayScope'>) =>
     `${binding.replayScope}\u0000${binding.nonce}`;
@@ -174,7 +182,7 @@ export function createProcessLocalApprovalStateStore(nowFunction = Date.now): Ap
             'already-consumed',
           );
         }
-        issued.set(key, binding);
+        issued.set(key, snapshotApprovalBinding(binding));
       });
     },
     reserve(binding, context, now = nowFunction()) {
@@ -202,7 +210,7 @@ export function createProcessLocalApprovalStateStore(nowFunction = Date.now): Ap
           );
         }
         issued.delete(key);
-        reserved.set(key, binding);
+        reserved.set(key, issuedBinding);
       });
     },
     commit(binding) {
@@ -223,7 +231,11 @@ export function createProcessLocalApprovalStateStore(nowFunction = Date.now): Ap
           throw new ApprovalBindingError('Approval binding was not found.', 'not-found');
         }
         reserved.delete(key);
-        terminal.set(key, { state: 'consumed', expiresAt: reservedBinding.expiresAt });
+        terminal.set(key, {
+          state: 'consumed',
+          expiresAt: reservedBinding.expiresAt,
+          binding: reservedBinding,
+        });
       });
     },
     release(binding) {
@@ -238,7 +250,7 @@ export function createProcessLocalApprovalStateStore(nowFunction = Date.now): Ap
         const terminalEntry = terminal.get(key);
         if (terminalEntry?.state === 'consumed') {
           terminal.delete(key);
-          issued.set(key, binding);
+          issued.set(key, terminalEntry.binding ?? snapshotApprovalBinding(binding));
         }
       });
     },
