@@ -464,7 +464,11 @@ export function withIdempotency<T extends Tool>(
     } finally {
       stopRenewal();
       cancelDeadlineTimer();
-      await pendingRenewal;
+      try {
+        await raceIdempotencyAwait(() => pendingRenewal, executeOptions);
+      } catch {
+        leaseOwned = false;
+      }
     }
 
     if (toolExecution.outcome !== 'success') {

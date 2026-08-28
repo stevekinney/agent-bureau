@@ -527,6 +527,60 @@ describe('withIdempotency', () => {
     );
   });
 
+  it('settles cancellation without waiting for an in-flight direct lease renewal', async () => {
+    let signalRenewalStarted!: () => void;
+    const renewalStarted = new Promise<void>((resolve) => {
+      signalRenewalStarted = resolve;
+    });
+    let releaseRenewal!: () => void;
+    const renewalReleased = new Promise<boolean>((resolve) => {
+      releaseRenewal = () => resolve(true);
+    });
+    let releaseTool!: () => void;
+    const toolReleased = new Promise<void>((resolve) => {
+      releaseTool = resolve;
+    });
+    const pendingRenewalCache: ToolResultCache = {
+      ...cache,
+      async renewStarted() {
+        signalRenewalStarted();
+        return renewalReleased;
+      },
+    };
+    const tool = createTool({
+      name: 'pending-direct-renewal',
+      description: 'Waits while its lease renewal remains pending',
+      version: '1.0.0',
+      input: z.object({}),
+      idempotencyKey: () => 'pending-direct-renewal',
+      async execute() {
+        await toolReleased;
+        return 'done';
+      },
+    });
+    const controller = new AbortController();
+    const execution = withIdempotency(tool, {
+      cache: pendingRenewalCache,
+      tenantId: 'tenant-a',
+      leaseDurationMs: 4,
+      maximumExecutionDurationMs: 100,
+    }).execute({}, { requestContext, signal: controller.signal });
+
+    await renewalStarted;
+    controller.abort('cancel pending renewal');
+    releaseTool();
+    expect(
+      await Promise.race([
+        execution.then(
+          () => 'settled',
+          () => 'settled',
+        ),
+        new Promise<'blocked'>((resolve) => setTimeout(() => resolve('blocked'), 50)),
+      ]),
+    ).toBe('settled');
+    releaseRenewal();
+  });
+
   it('clears a direct idempotency claim when execution throws a pre-execution error', async () => {
     const tool = createTestTool();
     const throwingTool = new Proxy(tool, {

@@ -2,6 +2,7 @@ import { createStore } from '@lostgradient/operative/store';
 import type { ToolRequestContext } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import { createBureau } from 'bureau';
+import { sha256HexSync } from 'interoperability';
 
 import { createBunAdapter, handleWsUpgrade } from './adapters/bun-adapter';
 import {
@@ -556,6 +557,19 @@ describe('buildRequestAuthorityValidator', () => {
           principalId: 'static-token',
           capabilities: ['*'],
           authorizationRevision: staticTokenAuthorizationRevision('wrong-secret'),
+        },
+      }),
+    ).toBe(false);
+    expect(
+      await validator!({
+        ...requestContext,
+        authority: {
+          ...requestContext.authority,
+          principalId: 'static-token',
+          capabilities: ['*'],
+          authorizationRevision: `gateway:static-token:${sha256HexSync(
+            'agent-bureau.gateway.static-token.authorization-revision:secret',
+          ).slice(0, 32)}`,
         },
       }),
     ).toBe(false);

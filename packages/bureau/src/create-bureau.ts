@@ -1618,6 +1618,26 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     const sessionId = request.sessionId?.trim() ?? crypto.randomUUID();
     const runId = `run-${crypto.randomUUID()}`;
     const agentName = request.agentName ?? BUREAU_AGENT_NAME;
+    const requestContext = normalizeRunRequestContext(
+      request.requestContext,
+      runId,
+      agentName,
+      request.principal,
+    );
+    if (isTransportIssuedAuthority(requestContext)) {
+      if (!requestAuthorityValidator) {
+        throw new BureauError(
+          'Cannot create run: transport-issued request authority cannot be validated.',
+          'CONFLICT',
+        );
+      }
+      if (!(await requestAuthorityValidator(requestContext))) {
+        throw new BureauError(
+          'Cannot create run: request authority is no longer current.',
+          'CONFLICT',
+        );
+      }
+    }
 
     // AB-13 — admit BEFORE any session/runtime work: createRun returns
     // synchronously right after the run starts (it does not await
@@ -1668,18 +1688,6 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         agentName,
         ...(request.principal !== undefined ? { principal: request.principal } : {}),
       });
-      const requestContext = normalizeRunRequestContext(
-        request.requestContext,
-        runId,
-        agentName,
-        request.principal,
-      );
-      if (isTransportIssuedAuthority(requestContext) && !requestAuthorityValidator) {
-        throw new BureauError(
-          'Cannot create run: transport-issued request authority cannot be validated.',
-          'CONFLICT',
-        );
-      }
       const runRuntime = await runtime.createRunRuntime({
         ...request,
         sessionId,

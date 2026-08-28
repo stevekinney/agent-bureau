@@ -1924,8 +1924,61 @@ describe('withToolboxIdempotency', () => {
       leaseDurationMs: 4,
       maximumExecutionDurationMs: 100,
     }).execute({ name: 'slow-add', arguments: { value: 2 } });
-    expect(renewalFailure.result).toBe(3);
-    expect(renewalFailure.idempotency).toBeUndefined();
+    expect(renewalFailure.outcome).toBe('action_required');
+    expect(renewalFailure.idempotency?.outcome).toBe('unknown-outcome');
+  });
+
+  it('settles cancellation without waiting for an in-flight lease renewal', async () => {
+    let signalRenewalStarted!: () => void;
+    const renewalStarted = new Promise<void>((resolve) => {
+      signalRenewalStarted = resolve;
+    });
+    let releaseRenewal!: () => void;
+    const renewalReleased = new Promise<boolean>((resolve) => {
+      releaseRenewal = () => resolve(true);
+    });
+    let releaseTool!: () => void;
+    const toolReleased = new Promise<void>((resolve) => {
+      releaseTool = resolve;
+    });
+    const pendingRenewalCache: ToolResultCache = {
+      ...cache,
+      async renewStarted() {
+        signalRenewalStarted();
+        return renewalReleased;
+      },
+    };
+    const tool = createTool({
+      name: 'pending-renewal-toolbox',
+      description: 'Waits while its lease renewal remains pending',
+      input: z.object({}),
+      idempotencyKey: () => 'pending-renewal-toolbox',
+      async execute() {
+        await toolReleased;
+        return 'done';
+      },
+    });
+    const controller = new AbortController();
+    const execution = withToolboxIdempotency(createToolbox([tool]), {
+      cache: pendingRenewalCache,
+      tenantId: 'tenant-a',
+      leaseDurationMs: 4,
+      maximumExecutionDurationMs: 100,
+    }).execute({ name: tool.name, arguments: {} }, { signal: controller.signal });
+
+    await renewalStarted;
+    controller.abort('cancel pending renewal');
+    releaseTool();
+    expect(
+      await Promise.race([
+        execution.then(
+          () => 'settled',
+          () => 'settled',
+        ),
+        new Promise<'blocked'>((resolve) => setTimeout(() => resolve('blocked'), 50)),
+      ]),
+    ).toBe('settled');
+    releaseRenewal();
   });
 
   it('checks the deadline after queued renewal wait', async () => {
@@ -2832,5 +2885,18 @@ describe('withToolboxIdempotency', () => {
     );
     expect(order).toHaveLength(3);
     expect(maximumActive).toBe(2);
+
+    order.length = 0;
+    maximumActive = 0;
+    const fractionalResults = await toolbox.execute(
+      calls.map((call, index) => ({
+        ...call,
+        id: `fractional-${index}`,
+        arguments: { value: index + 7 },
+      })),
+      { concurrency: 0.5 },
+    );
+    expect(fractionalResults).toHaveLength(3);
+    expect(order).toHaveLength(3);
   });
 });

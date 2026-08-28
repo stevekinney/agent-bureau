@@ -4099,13 +4099,62 @@ describe('createBureau session signal authority revalidation', () => {
     }
   });
 
+  it('rejects stale transport authority before flow-control admission or session persistence', async () => {
+    let flowControlCalls = 0;
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      requestAuthorityValidator: () => false,
+      flowControl: {
+        concurrency: {
+          limit: 1,
+          key() {
+            flowControlCalls += 1;
+            return 'all-runs';
+          },
+        },
+      },
+    });
+    try {
+      const error = await bureau
+        .createRun({
+          message: 'Do not admit stale authority',
+          sessionId: 'stale-authority-session',
+          requestContext: {
+            authority: {
+              principalId: 'api-key:stale',
+              tenantId: 'tenant-a',
+              ownerId: 'owner-a',
+              capabilities: ['tools:execute'],
+              authorizationRevision: 'gateway:api-key:stale',
+            },
+            audience: 'tenant',
+          },
+        })
+        .then(
+          () => undefined,
+          (rejection) => rejection,
+        );
+
+      expect(error).toBeInstanceOf(BureauError);
+      expect((error as BureauError).code).toBe('CONFLICT');
+      expect(flowControlCalls).toBe(0);
+      expect(bureau.listRuns()).toHaveLength(0);
+      expect(await bureau.getSession('stale-authority-session')).toBeUndefined();
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
   it('revalidates captured authority before delivering a direct session signal', async () => {
+    let authorityCurrent = true;
     const bureau = await createBureau({
       generate: () => new Promise<never>(() => {}),
       toolbox: createEmptyToolbox(),
       storage: { type: 'memory' },
       durableExecution: true,
-      requestAuthorityValidator: () => false,
+      requestAuthorityValidator: () => authorityCurrent,
     });
     const run = await bureau.createRun({
       message: 'Wait for a signal',
@@ -4125,6 +4174,7 @@ describe('createBureau session signal authority revalidation', () => {
       const session = await bureau.getSession(run.sessionId);
       return session?.metadata['lastRunStatus'] === 'running';
     });
+    authorityCurrent = false;
     const error = await bureau.signalSession(run.sessionId, 'human-response').then(
       () => undefined,
       (rejection) => rejection,
@@ -4679,6 +4729,7 @@ describe('createBureau review queue (AB-20)', () => {
 
   it('revalidates captured request authority before approving a delayed tool call', async () => {
     const charges: number[] = [];
+    let authorityCurrent = true;
     const bureau = await createBureau({
       generate: createSequentialGenerate([
         {
@@ -4691,7 +4742,7 @@ describe('createBureau review queue (AB-20)', () => {
       toolbox: createNeedsApprovalToolbox('stale-authority-secret', charges),
       stopWhen: stopWhen.toolOutcome('action_required'),
     });
-    bureau.setRequestAuthorityValidator(() => false);
+    bureau.setRequestAuthorityValidator(() => authorityCurrent);
     const run = await bureau.createRun({
       message: 'Charge with authority that will be revoked',
       requestContext: {
@@ -4707,6 +4758,7 @@ describe('createBureau review queue (AB-20)', () => {
     });
     await waitForRunCompletion(bureau, run.id);
     const [review] = bureau.listPendingReviews();
+    authorityCurrent = false;
 
     const resolution = bureau.resolveReview({
       id: review!.id,
@@ -5986,6 +6038,7 @@ describe('createBureau human input wiring — real durable park (F3)', () => {
   });
 
   it('revalidates captured request authority before approving a human wait', async () => {
+    let authorityCurrent = true;
     const bureau = await createBureau({
       generate: createSequentialGenerate([
         {
@@ -6007,7 +6060,7 @@ describe('createBureau human input wiring — real durable park (F3)', () => {
     });
     try {
       const signalSpy = spyOn(bureau, 'signalSession').mockImplementation(async () => {});
-      bureau.setRequestAuthorityValidator(() => false);
+      bureau.setRequestAuthorityValidator(() => authorityCurrent);
       const run = await bureau.createRun({
         message: 'Please refund this order',
         requestContext: {
@@ -6024,6 +6077,7 @@ describe('createBureau human input wiring — real durable park (F3)', () => {
 
       await pollUntil(() => bureau.listPendingReviews().some((review) => review.runId === run.id));
       const [review] = bureau.listPendingReviews();
+      authorityCurrent = false;
       expect(
         bureau.resolveReview({
           id: review!.id,

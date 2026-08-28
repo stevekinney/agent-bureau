@@ -1512,6 +1512,61 @@ describe('createRuntimeComposition durable execution', () => {
     }
   });
 
+  it('does not apply a transport validator to Bureau-issued scheduler recovery authority', async () => {
+    const session = createAgentSession({
+      id: 'session-scheduler-authority',
+      agentName: 'scheduler-agent',
+      conversationHistory: createConversationHistory({ id: 'session-scheduler-authority' }),
+      metadata: {
+        lastRunId: 'run-scheduler-authority',
+        lastRunStatus: 'running',
+        lastUserMessage: 'resume scheduler run',
+        lastRequestAuthority: {
+          principalId: 'scheduler:run-scheduler-authority',
+          tenantId: 'bureau',
+          ownerId: 'scheduler-agent',
+          capabilities: ['tools:execute'],
+          authorizationRevision: 'bureau:scheduler:1',
+          audience: 'operator',
+        },
+      },
+    });
+    let validatorCalls = 0;
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+      storage: { type: 'memory' },
+      durableExecution: true,
+      requestAuthorityValidator() {
+        validatorCalls += 1;
+        return false;
+      },
+    });
+
+    try {
+      getRuntimeCompositionTestingSeams(runtime).setSessionStore({
+        async load() {
+          return session;
+        },
+      } as unknown as SessionStore);
+
+      expect(
+        await getRuntimeCompositionTestingSeams(runtime).resolveRunServices({
+          workflowId: 'run-scheduler-authority',
+          workflowType: 'agentRun',
+          input: {
+            runId: 'run-scheduler-authority',
+            sessionId: 'session-scheduler-authority',
+            agentName: 'scheduler-agent',
+          },
+        }),
+      ).toMatchObject({ status: 'available' });
+      expect(validatorCalls).toBe(0);
+    } finally {
+      runtime.durable?.engine[Symbol.dispose]?.();
+    }
+  });
+
   it('logs and skips committed scheduled active skills when checkpoint verification throws', async () => {
     const logs: string[] = [];
     const runtime = await createRuntimeComposition({

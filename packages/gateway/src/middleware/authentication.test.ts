@@ -1,6 +1,7 @@
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { describe, expect, it } from 'bun:test';
 import { Hono } from 'hono';
+import { sha256HexSync } from 'interoperability';
 
 import { createApiKeyStore } from '../keys/create-api-key-store';
 import type { ApiKeyStore } from '../keys/types';
@@ -158,6 +159,11 @@ describe('authentication with api key store', () => {
     expect(body.authority.authorizationRevision).toBe(staticTokenAuthorizationRevision(token));
     expect(body.authority.authorizationRevision).not.toBe('gateway:static-token');
     expect(body.authority.authorizationRevision).not.toContain(token);
+    expect(body.authority.authorizationRevision).not.toBe(
+      `gateway:static-token:${sha256HexSync(
+        `agent-bureau.gateway.static-token.authorization-revision:${token}`,
+      ).slice(0, 32)}`,
+    );
   });
 
   it('normalizes managed scopes before exposing trusted request authority', async () => {

@@ -2195,16 +2195,21 @@ export async function createRuntimeComposition(
         reason: `run ${info.workflowId} request authority is unavailable during recovery`,
       };
     }
-    if (
-      requestAuthorityValidator === undefined &&
-      recoveredAuthority.authority.authorizationRevision !== 'bureau:1'
-    ) {
+    const recoveredAuthorizationRevision = recoveredAuthority.authority.authorizationRevision;
+    const requiresTransportValidation =
+      recoveredAuthorizationRevision !== 'bureau:1' &&
+      recoveredAuthorizationRevision !== 'bureau:scheduler:1';
+    if (requestAuthorityValidator === undefined && requiresTransportValidation) {
       return {
         status: 'unavailable',
         reason: `run ${info.workflowId} authority cannot be revalidated during recovery`,
       };
     }
-    if (requestAuthorityValidator && !(await requestAuthorityValidator(recoveredAuthority))) {
+    if (
+      requiresTransportValidation &&
+      requestAuthorityValidator &&
+      !(await requestAuthorityValidator(recoveredAuthority))
+    ) {
       return {
         status: 'unavailable',
         reason: `run ${info.workflowId} authority is no longer current`,

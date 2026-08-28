@@ -10,6 +10,7 @@ import {
   policyAuthorizationOnlySymbol,
 } from '../internal/approval-resume';
 import type { ToolCallInput, ToolExecutionResult } from '../types';
+import { normalizeConcurrency } from '../utilities/concurrency';
 import { claimCacheStarted, getCacheEntry } from './cache-operations';
 import { fullInputKey, namespacedKey } from './key-generators';
 import type {
@@ -796,7 +797,20 @@ export function withToolboxIdempotency(
     } finally {
       stopRenewal();
       cancelDeadlineTimer();
-      await pendingRenewal;
+      const renewalWait = await awaitBeforeExecution(
+        () => pendingRenewal,
+        fields,
+        fields.name,
+        executeOptions,
+      );
+      if (renewalWait.outcome === 'interrupted') leaseOwned = false;
+    }
+
+    if (!leaseOwned) {
+      return createUnknownOutcomeResult(fields, cacheKey, result.toolName, {
+        attemptId: execution.attemptId,
+        inputDigest: execution.inputDigest,
+      });
     }
 
     // Only cache successful results
@@ -855,7 +869,7 @@ export function withToolboxIdempotency(
               }
               return results;
             }
-            const concurrency = controls?.concurrency;
+            const concurrency = normalizeConcurrency(controls?.concurrency);
             if (concurrency !== undefined && concurrency > 0 && concurrency < input.length) {
               const results = new Array<ToolExecutionResult>(input.length);
               let nextIndex = 0;

@@ -2,7 +2,7 @@ import type { ToolRequestContext } from 'armorer';
 import type { Context } from 'hono';
 import { createMiddleware } from 'hono/factory';
 import { HTTPException } from 'hono/http-exception';
-import { sha256HexSync } from 'interoperability';
+import { hmacSha256HexSync } from 'interoperability';
 
 import { normalizeApiKeyScopes } from '../keys/create-api-key-store';
 import type { ApiKeyStore } from '../keys/types';
@@ -12,7 +12,7 @@ const DEFAULT_BUREAU_AGENT_NAME = 'bureau';
 const TOOL_EXECUTION_CAPABILITY = 'tools:execute';
 const UNRESTRICTED_CAPABILITY = '*';
 const AUTHORIZATION_REVISION_HEADER = 'x-auth-authorization-revision';
-const STATIC_TOKEN_REVISION_NAMESPACE = 'agent-bureau.gateway.static-token.authorization-revision';
+const STATIC_TOKEN_REVISION_SECRET = crypto.randomUUID();
 
 function gatewayAuthorityOwnerId(agentName: string | undefined): string {
   const trimmed = agentName?.trim();
@@ -40,9 +40,7 @@ export function gatewayAuthorizationRevisionForApiKey(apiKeyId: string): string 
 }
 
 export function staticTokenAuthorizationRevision(authToken: string): string {
-  return `gateway:static-token:${sha256HexSync(
-    `${STATIC_TOKEN_REVISION_NAMESPACE}:${authToken}`,
-  ).slice(0, 32)}`;
+  return `gateway:static-token:${hmacSha256HexSync(STATIC_TOKEN_REVISION_SECRET, authToken).slice(0, 32)}`;
 }
 
 /**
