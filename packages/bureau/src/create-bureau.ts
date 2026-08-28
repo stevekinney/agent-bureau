@@ -2882,6 +2882,17 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     if (!runtime.durable)
       throw new BureauError('Durable engine not configured', 'NOT_CONFIGURED', 'durable');
     const runId = await requireSessionRunId(sessionId);
+    const requestContext = runRequestContexts.get(runId);
+    if (
+      requestContext &&
+      isTransportIssuedAuthority(requestContext) &&
+      (!requestAuthorityValidator || !(await requestAuthorityValidator(requestContext)))
+    ) {
+      throw new BureauError(
+        'Cannot update: the request authority is no longer current.',
+        'CONFLICT',
+      );
+    }
     return runtime.durable.engine.update(runId, name, payload);
   }
 
@@ -3584,7 +3595,12 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   let hasDeferredGatewayAuthority = false;
   if (runtime.durable && runtime.sessionStore) {
     try {
-      const sessions = await runtime.sessionStore.list();
+      const sessions: SessionSummary[] = [];
+      for (let offset = 0; ; offset += 100) {
+        const page = await runtime.sessionStore.list({ limit: 100, offset });
+        sessions.push(...page);
+        if (page.length < 100) break;
+      }
       for (const session of sessions) {
         const runId = session.metadata['lastRunId'];
         const status = session.metadata['lastRunStatus'];

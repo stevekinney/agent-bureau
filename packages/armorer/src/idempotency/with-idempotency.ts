@@ -137,8 +137,7 @@ export function withIdempotency<T extends Tool>(
       return tool(params);
     }
 
-    const cached = await getCacheEntry(cache, key);
-    if (cached && cached.status !== 'started') {
+    const returnAuthorizedCachedResult = async (cached: CachedToolResult): Promise<unknown> => {
       if (cached.input === undefined) {
         throw new Error('Cached result lacks its original input and cannot be reauthorized.');
       }
@@ -165,6 +164,11 @@ export function withIdempotency<T extends Tool>(
       }
       onCacheHit?.(key, cached);
       return cached.result;
+    };
+
+    const cached = await getCacheEntry(cache, key);
+    if (cached && cached.status !== 'started') {
+      return returnAuthorizedCachedResult(cached);
     }
 
     let startedExecution: StartedToolExecution;
@@ -238,8 +242,7 @@ export function withIdempotency<T extends Tool>(
           onUnknownOutcome?.(key, started.entry);
           throw new Error(`Idempotency key "${key}" has an unknown outcome.`);
         }
-        onCacheHit?.(key, started.entry);
-        return started.entry.result;
+        return returnAuthorizedCachedResult(started.entry);
       }
     }
     let leaseOwned = true;

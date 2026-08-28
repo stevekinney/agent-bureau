@@ -978,6 +978,7 @@ describe('withIdempotency', () => {
       toolName: 'add',
       executedAt: Date.now(),
       ttl: 60_000,
+      input: JSON.stringify({ a: 1, b: 2 }),
     };
     const completedRace: ToolResultCache = {
       ...cache,
@@ -1004,6 +1005,58 @@ describe('withIdempotency', () => {
     await expect(
       withIdempotency(tool, { cache: lostFence, tenantId: 'tenant-a' })({ a: 3, b: 4 }),
     ).rejects.toThrow('lost its execution fence');
+  });
+
+  it('reauthorizes completed claim-race cache entries before returning cached data', async () => {
+    let executions = 0;
+    const onCacheHit = mock((_key: string, _result: CachedToolResult) => {});
+    const tool = createTool({
+      name: 'claim-race-policy',
+      description: 'Policy-protected claim race',
+      version: '1.0.0',
+      input: z.object({ value: z.string() }),
+      idempotencyKey: (input: unknown) => fullInputKey(input),
+      policy: {
+        beforeExecute(context) {
+          const currentContext = context.policyContext as
+            { requestContext?: typeof requestContext } | undefined;
+          return currentContext?.requestContext?.authority.principalId === 'principal-a'
+            ? { allow: true }
+            : { allow: false, reason: 'claim race principal denied' };
+        },
+      },
+      async execute({ value }) {
+        executions += 1;
+        return value;
+      },
+    });
+    const completed: CachedToolResult = {
+      result: 'cached-sensitive-data',
+      toolName: 'claim-race-policy',
+      executedAt: Date.now(),
+      ttl: 60_000,
+      input: JSON.stringify({ value: 'cached' }),
+    };
+    const completedRace: ToolResultCache = {
+      ...cache,
+      getState: async () => undefined,
+      claimStarted: async () => ({ outcome: 'existing', entry: completed }),
+    };
+    const wrapped = withIdempotency(tool, {
+      cache: completedRace,
+      tenantId: 'tenant-a',
+      onCacheHit,
+    });
+    const deniedContext = {
+      ...requestContext,
+      authority: { ...requestContext.authority, principalId: 'principal-b' },
+    };
+
+    await expect(
+      wrapped.execute({ value: 'cached' }, { requestContext: deniedContext }),
+    ).rejects.toThrow('claim race principal denied');
+    expect(onCacheHit).not.toHaveBeenCalled();
+    expect(executions).toBe(0);
   });
 
   it('uses custom TTL when provided', async () => {

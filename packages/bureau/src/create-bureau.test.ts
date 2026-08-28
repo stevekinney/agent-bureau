@@ -4131,6 +4131,12 @@ describe('createBureau session signal authority revalidation', () => {
 
     expect(error).toBeInstanceOf(BureauError);
     expect((error as BureauError).code).toBe('CONFLICT');
+    const updateError = await bureau.updateSession(run.sessionId, 'human-update').then(
+      () => undefined,
+      (rejection) => rejection,
+    );
+    expect(updateError).toBeInstanceOf(BureauError);
+    expect((updateError as BureauError).code).toBe('CONFLICT');
     bureau.abortRun(run.id);
     bureau.dispose();
   });
@@ -4652,6 +4658,71 @@ describe('createBureau review queue (AB-20)', () => {
             'Deferred durable run recovery failed: deferred recovery unavailable',
           ),
         );
+      } finally {
+        await bureau.dispose();
+      }
+    } finally {
+      recoverAllSpy.mockRestore();
+    }
+  });
+
+  it('scans every session page before starting recovery', async () => {
+    const storage = new MemoryStorage();
+    const sessionStore = createSessionStore(textValueStore(storage));
+    for (let index = 0; index < 100; index += 1) {
+      await sessionStore.save(
+        createAgentSession({
+          id: `session-page-${index}`,
+          agentName: 'bureau',
+          conversationHistory: createConversationHistory({ id: `session-page-${index}` }),
+          metadata: { lastRunStatus: 'completed' },
+        }),
+      );
+    }
+    await sessionStore.save(
+      createAgentSession({
+        id: 'session-page-100',
+        agentName: 'bureau',
+        conversationHistory: createConversationHistory({ id: 'session-page-100' }),
+        metadata: {
+          lastRunId: 'run-page-100',
+          lastRunStatus: 'running',
+          lastRequestAuthorities: {
+            'run-page-100': {
+              principalId: 'api-key:page-100',
+              tenantId: 'tenant-a',
+              ownerId: 'bureau',
+              capabilities: ['tools:execute'],
+              authorizationRevision: 'gateway:api-key:page-100',
+            },
+          },
+        },
+      }),
+    );
+    const probe = await createRuntimeComposition({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+    const enginePrototype = Object.getPrototypeOf(probe.durable!.engine) as {
+      recoverAll: () => Promise<unknown[]>;
+    };
+    probe.durable!.engine[Symbol.dispose]?.();
+    probe.disposeStorage?.();
+    const recoverAllSpy = spyOn(enginePrototype, 'recoverAll').mockResolvedValue([]);
+    try {
+      const bureau = await createBureau({
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+        storage,
+        durableExecution: true,
+      });
+      try {
+        expect(recoverAllSpy).not.toHaveBeenCalled();
+        bureau.setRequestAuthorityValidator(() => true);
+        await bureau.waitForRecovery?.();
+        expect(recoverAllSpy).toHaveBeenCalledTimes(1);
       } finally {
         await bureau.dispose();
       }
