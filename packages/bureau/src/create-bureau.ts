@@ -172,6 +172,8 @@ export function recoveredRequestContextFromMetadata(
     return undefined;
   }
   const deadline = value['deadline'];
+  const persistedAgentId = value['agentId'];
+  if (persistedAgentId !== undefined && typeof persistedAgentId !== 'string') return undefined;
   if (deadline !== undefined && (typeof deadline !== 'number' || !Number.isFinite(deadline))) {
     return undefined;
   }
@@ -191,7 +193,7 @@ export function recoveredRequestContextFromMetadata(
       ...(typeof deadline === 'number' ? { deadline } : {}),
     },
     runId,
-    agentName,
+    persistedAgentId ?? agentName,
     undefined,
   );
 }
@@ -1531,6 +1533,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       terminalReviewSessions.delete(runId);
       return;
     }
+    const recoveredAgentName = requestContext.agentId ?? session.agentName;
     const runRuntime = await runtime.createRunRuntime(
       {
         message:
@@ -1539,11 +1542,18 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
             : '',
         sessionId: session.id,
         runId,
-        agentName: session.agentName,
+        agentName: recoveredAgentName,
         requestContext,
       },
       { liveStreaming: false },
     );
+    const terminalReviewSession = terminalReviewSessions.get(runId);
+    if (terminalReviewSession) {
+      terminalReviewSessions.set(runId, {
+        ...terminalReviewSession,
+        agentName: recoveredAgentName,
+      });
+    }
     runRequestContexts.set(runId, requestContext);
     runToolboxesByRunId.set(runId, runRuntime.toolbox);
     await restorePendingApprovalStates(runRuntime.toolbox, session.metadata, runId, session.id);
@@ -1719,6 +1729,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
           // dispatch time. Credentials, tracing, and other request-local data
           // intentionally never cross the session boundary.
           lastRequestAuthority: {
+            agentId: agentName,
             principalId: requestContext.authority.principalId,
             tenantId: requestContext.authority.tenantId,
             ownerId: requestContext.authority.ownerId,
@@ -1729,6 +1740,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
           },
           lastRequestAuthorities: {
             [runId]: {
+              agentId: agentName,
               principalId: requestContext.authority.principalId,
               tenantId: requestContext.authority.tenantId,
               ownerId: requestContext.authority.ownerId,

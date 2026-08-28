@@ -33,6 +33,7 @@ export function expectedPersistedApiKeyAuthority(
   ownerId: string,
 ) {
   return {
+    agentId: ownerId,
     principalId: `api-key:${key.id}`,
     tenantId: 'bureau',
     ownerId,

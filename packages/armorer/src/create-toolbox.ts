@@ -439,9 +439,6 @@ async function validateResumedApprovalArguments(
   if (signal?.aborted) {
     return { outcome: 'interrupted', result: cancelled() };
   }
-  if (deadline !== undefined && !Number.isFinite(deadline)) {
-    throw new Error('Execution deadline must be finite.');
-  }
   if (deadline !== undefined && deadline <= now()) {
     return { outcome: 'interrupted', result: timedOut() };
   }
@@ -1642,6 +1639,10 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     const executeArguments = Object.prototype.hasOwnProperty.call(resumeOptions ?? {}, 'arguments')
       ? overrideArguments
       : approval.arguments;
+    const requestDeadline = executeOptions.requestContext?.deadline;
+    if (requestDeadline !== undefined && !Number.isFinite(requestDeadline)) {
+      throw new Error('Execution deadline must be finite.');
+    }
     const currentTool = getTool(approval.toolName);
     if (!currentTool) {
       throw new Error(`Tool not found: ${approval.toolName}`);
@@ -1809,7 +1810,20 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       return { outcome: 'read', state: await store.state(binding) };
     return new Promise((resolve, reject) => {
       let settled = false;
-      let timer: ReturnType<typeof setTimeout> | undefined;
+      const setTimeoutFunction =
+        options.setTimeoutFunction ??
+        ((callback: () => void, milliseconds?: number) => setTimeout(callback, milliseconds));
+      const clearTimeoutFunction =
+        options.clearTimeoutFunction ??
+        ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+      let timer: unknown;
+      let timerScheduled = false;
+      const cleanup = () => {
+        options.signal?.removeEventListener('abort', onAbort);
+        if (!timerScheduled) return;
+        timerScheduled = false;
+        clearTimeoutFunction(timer);
+      };
       const finish = (
         value:
           | { outcome: 'read'; state: ApprovalState | undefined }
@@ -1817,18 +1831,34 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       ) => {
         if (settled) return;
         settled = true;
-        options.signal?.removeEventListener('abort', onAbort);
-        if (timer !== undefined) clearTimeout(timer);
+        cleanup();
         resolve(value);
+      };
+      const fail = (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      };
+      const scheduleDeadline = () => {
+        if (deadline === undefined) return;
+        const remaining = deadline - now();
+        const delay = remaining <= 0 ? 0 : Math.min(remaining, maximumTimerDelay);
+        timerScheduled = true;
+        timer = setTimeoutFunction(() => {
+          timerScheduled = false;
+          if (settled) return;
+          if (deadline <= now()) {
+            finish({ outcome: 'interrupted', result: timedOut() });
+            return;
+          }
+          scheduleDeadline();
+        }, delay);
       };
       const onAbort = () => finish({ outcome: 'interrupted', result: cancelled() });
       options.signal?.addEventListener('abort', onAbort, { once: true });
-      if (deadline !== undefined)
-        timer = setTimeout(
-          () => finish({ outcome: 'interrupted', result: timedOut() }),
-          Math.max(0, deadline - now()),
-        );
-      void store.state(binding).then((state) => finish({ outcome: 'read', state }), reject);
+      scheduleDeadline();
+      void store.state(binding).then((state) => finish({ outcome: 'read', state }), fail);
     });
   }
 
@@ -1847,6 +1877,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     }
     const currentTool = getTool(approval.toolName);
     const binding = approval.approvalBinding;
+    validateApprovalBinding(binding, undefined, approvalNow());
     const staleRevisions = [
       binding.toolboxRevision !== toolboxRevision ? 'toolboxRevision' : undefined,
       binding.toolDefinitionRevision !== currentTool?.id ? 'toolDefinitionRevision' : undefined,

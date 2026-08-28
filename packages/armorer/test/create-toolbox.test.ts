@@ -1030,6 +1030,113 @@ describe('createToolbox', () => {
     resolveState('issued');
   });
 
+  it('re-arms long approval-state read deadlines without overflowing timer delay', async () => {
+    const maximumTimerDelay = 2_147_483_647;
+    const timing = createManualToolboxDeadlineTiming();
+    const sourceStore = createProcessLocalApprovalStateStore();
+    const tool = createTool({
+      name: 'long-approval-state-read',
+      description: 'waits for durable approval state',
+      version: '1.0.0',
+      input: z.object({}),
+      execute: () => 'executed',
+    });
+    const options = {
+      approvalSecret: 'long-approval-state-read-secret',
+      approvalStateStore: sourceStore,
+      policy: { beforeExecute: () => ({ status: 'needs_approval' as const }) },
+    };
+    const paused = await createToolbox([tool], options).execute(
+      { id: 'long-state-call', name: tool.name, arguments: {} },
+      approvalExecutionOptions,
+    );
+    let stateReadStarted!: () => void;
+    const stateRead = new Promise<void>((resolve) => {
+      stateReadStarted = resolve;
+    });
+    const controller = new AbortController();
+    const resume = createToolbox([tool], {
+      ...options,
+      approvalStateStore: {
+        ...sourceStore,
+        state: async () => {
+          stateReadStarted();
+          return new Promise<'issued'>(() => {});
+        },
+      },
+    }).resumeApproval(paused.pendingApproval as SignedPendingToolApproval, {
+      ...approvalExecutionOptions,
+      requestContext: {
+        ...approvalRequestContext,
+        deadline: maximumTimerDelay + 1_000,
+      },
+      signal: controller.signal,
+      ...timing.options,
+    });
+    await stateRead;
+
+    expect(timing.scheduledDelayHistory()).toEqual([maximumTimerDelay]);
+    timing.fireDeadline();
+    expect(timing.scheduledDelayHistory()).toEqual([maximumTimerDelay, maximumTimerDelay]);
+    controller.abort('stop durable state read');
+    await expect(resume).resolves.toMatchObject({
+      outcome: 'error',
+      errorCategory: 'cancelled',
+    });
+  });
+
+  it('cleans up approval-state read controls when durable storage rejects', async () => {
+    const timing = createManualToolboxDeadlineTiming();
+    const sourceStore = createProcessLocalApprovalStateStore();
+    const tool = createTool({
+      name: 'rejected-approval-state-read',
+      description: 'rejects durable approval state reads',
+      version: '1.0.0',
+      input: z.object({}),
+      execute: () => 'executed',
+    });
+    const options = {
+      approvalSecret: 'rejected-approval-state-read-secret',
+      approvalStateStore: sourceStore,
+      policy: { beforeExecute: () => ({ status: 'needs_approval' as const }) },
+    };
+    const paused = await createToolbox([tool], options).execute(
+      { id: 'rejected-state-call', name: tool.name, arguments: {} },
+      approvalExecutionOptions,
+    );
+    let removedAbortListeners = 0;
+    const signalTarget = new EventTarget();
+    const signal = {
+      aborted: false,
+      reason: undefined,
+      addEventListener: signalTarget.addEventListener.bind(signalTarget),
+      removeEventListener(...arguments_: Parameters<EventTarget['removeEventListener']>) {
+        removedAbortListeners += 1;
+        signalTarget.removeEventListener(...arguments_);
+      },
+    } as unknown as AbortSignal;
+
+    await expect(
+      createToolbox([tool], {
+        ...options,
+        approvalStateStore: {
+          ...sourceStore,
+          state: async () => {
+            throw new Error('durable approval state unavailable');
+          },
+        },
+      }).resumeApproval(paused.pendingApproval as SignedPendingToolApproval, {
+        ...approvalExecutionOptions,
+        requestContext: { ...approvalRequestContext, deadline: 10 },
+        signal,
+        ...timing.options,
+      }),
+    ).rejects.toThrow('durable approval state unavailable');
+
+    expect(removedAbortListeners).toBe(1);
+    expect(timing.clearCount()).toBe(1);
+  });
+
   it('times out stalled resumed-approval schema validation without consuming the approval', async () => {
     const timing = createManualToolboxDeadlineTiming();
     let startValidation!: () => void;
@@ -1104,8 +1211,9 @@ describe('createToolbox', () => {
       },
     );
     await validationStarted;
-    expect(timing.scheduledDelays()).toEqual([10]);
+    expect(timing.scheduledDelays()).toEqual([10, 10]);
     timing.setNow(10);
+    timing.fireDeadline();
     timing.fireDeadline();
 
     const result = await pending;
@@ -1115,7 +1223,7 @@ describe('createToolbox', () => {
       errorCategory: 'timeout',
       error: { code: 'TIMEOUT', message: 'Execution deadline exceeded' },
     });
-    expect(timing.clearCount()).toBe(0);
+    expect(timing.clearCount()).toBe(1);
     expect(executions).toBe(0);
     expect(resumeToolbox.executions.inspect()).toHaveLength(0);
     expect(await approvalStateStore.state(paused.pendingApproval!.approvalBinding!)).toBe('issued');
@@ -1212,7 +1320,7 @@ describe('createToolbox', () => {
       }),
     ).rejects.toThrow('resume validation failed');
 
-    expect(timing.clearCount()).toBe(1);
+    expect(timing.clearCount()).toBe(2);
     expect(executions()).toBe(0);
     expect(await approvalStateStore.state(paused.pendingApproval!.approvalBinding!)).toBe('issued');
   });
@@ -1248,10 +1356,15 @@ describe('createToolbox', () => {
     );
     await validationStarted;
 
-    expect(timing.scheduledDelayHistory()).toEqual([maximumTimerDelay]);
+    expect(timing.scheduledDelayHistory()).toEqual([maximumTimerDelay, maximumTimerDelay]);
+    timing.fireDeadline();
     timing.fireDeadline();
     expect(await Promise.race([pendingState, Promise.resolve('pending')])).toBe('pending');
-    expect(timing.scheduledDelayHistory()).toEqual([maximumTimerDelay, maximumTimerDelay]);
+    expect(timing.scheduledDelayHistory()).toEqual([
+      maximumTimerDelay,
+      maximumTimerDelay,
+      maximumTimerDelay,
+    ]);
     controller.abort('stop long validation');
 
     await expect(pending).resolves.toMatchObject({
@@ -1867,6 +1980,33 @@ describe('createToolbox', () => {
       ...options,
       approvalStateStore: concurrentStore,
     }).restoreApproval(approval);
+  });
+
+  it('rejects an expired issued binding during approval restoration', async () => {
+    const tool = createTool({
+      name: 'expired-restore',
+      version: '1.0.0',
+      description: 'Rejects expired restored approvals',
+      input: z.object({}),
+      execute: () => 'restored',
+    });
+    const sourceOptions = {
+      approvalSecret: 'expired-restore-secret',
+      approvalNow: () => 1_000,
+      policy: { beforeExecute: () => ({ status: 'needs_approval' as const }) },
+    };
+    const paused = await createToolbox([tool], sourceOptions).execute(
+      { id: 'expired-restore-call', name: tool.name, arguments: {} },
+      approvalExecutionOptions,
+    );
+    const approval = paused.pendingApproval as SignedPendingToolApproval;
+
+    await expect(
+      createToolbox([tool], {
+        ...sourceOptions,
+        approvalNow: () => approval.approvalBinding!.expiresAt,
+      }).restoreApproval(approval),
+    ).rejects.toMatchObject({ code: 'expired' });
   });
 
   it('rejects persisted approvals with stale toolbox or policy revisions', async () => {

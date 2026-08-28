@@ -428,6 +428,7 @@ describe('createBureau', () => {
         {
           lastRequestAuthorities: {
             'run-authorized': {
+              agentId: 'per-run-billing-agent',
               principalId: 'principal-1',
               tenantId: 'tenant-1',
               ownerId: 'owner-1',
@@ -449,7 +450,7 @@ describe('createBureau', () => {
         authorizationRevision: 'authorization-7',
       },
       audience: 'operator',
-      agentId: 'billing-agent',
+      agentId: 'per-run-billing-agent',
       runId: 'run-authorized',
     });
 
@@ -4347,6 +4348,7 @@ describe('createBureau review queue (AB-20)', () => {
           lastRunStatus: 'completed',
           lastRequestAuthorities: {
             [olderRunId]: {
+              agentId: 'older-run-agent',
               principalId: 'principal-older',
               tenantId: 'bureau',
               ownerId: 'terminal-agent',
@@ -4354,6 +4356,7 @@ describe('createBureau review queue (AB-20)', () => {
               authorizationRevision: 'bureau:1',
             },
             [newestRunId]: {
+              agentId: 'newest-run-agent',
               principalId: 'principal-newest',
               tenantId: 'bureau',
               ownerId: 'terminal-agent',
@@ -4385,6 +4388,14 @@ describe('createBureau review queue (AB-20)', () => {
       expect(bureau.listPendingReviews().every((review) => review.sessionId === sessionId)).toBe(
         true,
       );
+      expect(
+        Object.fromEntries(
+          bureau.listPendingReviews().map((review) => [review.runId, review.agentName]),
+        ),
+      ).toEqual({
+        [olderRunId]: 'older-run-agent',
+        [newestRunId]: 'newest-run-agent',
+      });
       await bureau.deleteSession(sessionId);
       expect(bureau.listPendingReviews()).toHaveLength(0);
       expect(
@@ -4522,6 +4533,7 @@ describe('createBureau review queue (AB-20)', () => {
     });
     expect(persistedSession?.metadata['lastRequestAuthorities']).toMatchObject({
       [run.id]: expect.objectContaining({
+        agentId: 'bureau',
         principalId: expect.any(String),
         tenantId: expect.any(String),
         ownerId: expect.any(String),
