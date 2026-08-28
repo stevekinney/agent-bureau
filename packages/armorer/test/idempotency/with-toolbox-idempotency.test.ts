@@ -152,6 +152,33 @@ describe('withToolboxIdempotency', () => {
     );
   });
 
+  it('deduplicates argumentless calls using the base toolbox empty-object normalization', async () => {
+    let executions = 0;
+    const tool = createTool({
+      name: 'argumentless',
+      description: 'Accepts an omitted arguments object',
+      input: z.object({}),
+      idempotencyKey: () => 'argumentless',
+      async execute() {
+        executions += 1;
+        return 'done';
+      },
+    });
+    const toolbox = withToolboxIdempotency(createToolbox([tool]), {
+      cache,
+      tenantId: 'tenant-a',
+    });
+    const call = { name: tool.name };
+
+    const first = await toolbox.execute(call);
+    const second = await toolbox.execute(call);
+
+    expect(first.result).toBe('done');
+    expect(second.result).toBe('done');
+    expect(second.idempotency?.outcome).toBe('deduped');
+    expect(executions).toBe(1);
+  });
+
   it('accepts an externally supplied idempotency key', async () => {
     const toolbox = createToolbox([createToolWithKey()]);
     const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });

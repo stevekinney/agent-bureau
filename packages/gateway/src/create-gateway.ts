@@ -35,6 +35,16 @@ const gatewayValidatorState = new WeakMap<
   object,
   { readonly hostValidator: RequestAuthorityValidator | undefined }
 >();
+const STATIC_TOKEN_REVISION_SECRET_KEY = 'gateway:private:static-token-revision-secret';
+
+async function resolveStaticTokenRevisionSecret(store: Bureau['kv']): Promise<string | undefined> {
+  if (!store) return undefined;
+  const persisted = await store.get(STATIC_TOKEN_REVISION_SECRET_KEY);
+  if (persisted) return persisted;
+
+  await store.set(STATIC_TOKEN_REVISION_SECRET_KEY, crypto.randomUUID());
+  return (await store.get(STATIC_TOKEN_REVISION_SECRET_KEY))!;
+}
 
 /**
  * Detects the current server runtime. Returns `'bun'` when running
@@ -112,6 +122,7 @@ export function buildWsAuthenticate(
 export function buildRequestAuthorityValidator(
   authToken: string | undefined,
   store: ApiKeyStore | undefined,
+  staticTokenRevisionSecret?: string,
 ): ((context: ToolRequestContext) => Promise<boolean>) | undefined {
   if (!authToken && !store) return undefined;
 
@@ -120,7 +131,8 @@ export function buildRequestAuthorityValidator(
     if (authority.principalId === 'static-token') {
       return (
         authToken !== undefined &&
-        authority.authorizationRevision === staticTokenAuthorizationRevision(authToken) &&
+        authority.authorizationRevision ===
+          staticTokenAuthorizationRevision(authToken, staticTokenRevisionSecret) &&
         authority.capabilities.length === 1 &&
         authority.capabilities[0] === '*'
       );
@@ -198,6 +210,7 @@ export async function createGateway(
     apiKeyStore = createApiKeyStore(bureau.kv);
     await bootstrapApiKey(apiKeyStore);
   }
+  const staticTokenRevisionSecret = await resolveStaticTokenRevisionSecret(bureau.kv);
   const authorityValidatorAccess = bureau as Bureau & BureauRequestAuthorityValidatorAccess;
   const existingValidator = authorityValidatorAccess.getRequestAuthorityValidator?.();
   const hostRequestAuthorityValidator =
@@ -205,7 +218,7 @@ export async function createGateway(
   gatewayValidatorState.set(bureau, { hostValidator: hostRequestAuthorityValidator });
   const requestAuthorityValidator = composeRequestAuthorityValidators(
     hostRequestAuthorityValidator,
-    buildRequestAuthorityValidator(options.authToken, apiKeyStore),
+    buildRequestAuthorityValidator(options.authToken, apiKeyStore, staticTokenRevisionSecret),
   );
   if (requestAuthorityValidator !== hostRequestAuthorityValidator) {
     bureau.setRequestAuthorityValidator(requestAuthorityValidator);
@@ -217,7 +230,7 @@ export async function createGateway(
   // Global middleware
   app.use('*', cors());
   app.use('*', requestIdentifier);
-  app.use('*', createAuthentication(options.authToken, apiKeyStore));
+  app.use('*', createAuthentication(options.authToken, apiKeyStore, staticTokenRevisionSecret));
   app.use('*', createRateLimiter({ store: bureau.kv }));
   app.use(
     '*',

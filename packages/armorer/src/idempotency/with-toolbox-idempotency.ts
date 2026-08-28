@@ -908,7 +908,7 @@ export function withToolboxIdempotency(
 
 function serializeOriginalInput(input: unknown): string {
   return stableStringifyJson(
-    JSON.parse(JSON.stringify(input === undefined ? null : input)) as JsonValue,
+    JSON.parse(JSON.stringify(input === undefined ? {} : input)) as JsonValue,
   );
 }
 

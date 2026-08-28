@@ -12,7 +12,7 @@ const DEFAULT_BUREAU_AGENT_NAME = 'bureau';
 const TOOL_EXECUTION_CAPABILITY = 'tools:execute';
 const UNRESTRICTED_CAPABILITY = '*';
 const AUTHORIZATION_REVISION_HEADER = 'x-auth-authorization-revision';
-const STATIC_TOKEN_REVISION_SECRET = crypto.randomUUID();
+const PROCESS_STATIC_TOKEN_REVISION_SECRET = crypto.randomUUID();
 
 function gatewayAuthorityOwnerId(agentName: string | undefined): string {
   const trimmed = agentName?.trim();
@@ -39,8 +39,11 @@ export function gatewayAuthorizationRevisionForApiKey(apiKeyId: string): string 
   return `gateway:api-key:${apiKeyId}`;
 }
 
-export function staticTokenAuthorizationRevision(authToken: string): string {
-  return `gateway:static-token:${hmacSha256HexSync(STATIC_TOKEN_REVISION_SECRET, authToken).slice(0, 32)}`;
+export function staticTokenAuthorizationRevision(
+  authToken: string,
+  revisionSecret: string = PROCESS_STATIC_TOKEN_REVISION_SECRET,
+): string {
+  return `gateway:static-token:${hmacSha256HexSync(revisionSecret, authToken).slice(0, 32)}`;
 }
 
 /**
@@ -103,7 +106,11 @@ export function resolveTrustedRequestContext(
  *
  * When neither `authToken` nor `apiKeyStore` is configured, all requests pass.
  */
-export function createAuthentication(authToken: string | undefined, apiKeyStore?: ApiKeyStore) {
+export function createAuthentication(
+  authToken: string | undefined,
+  apiKeyStore?: ApiKeyStore,
+  staticTokenRevisionSecret: string = PROCESS_STATIC_TOKEN_REVISION_SECRET,
+) {
   return createMiddleware(async (context, next) => {
     // Strip any client-injected scope/key headers to prevent spoofing.
     // These headers are set exclusively by this middleware after verification.
@@ -186,7 +193,10 @@ export function createAuthentication(authToken: string | undefined, apiKeyStore?
     // Fall back to static token comparison
     if (authToken && token === authToken) {
       headers.set('x-auth-principal', 'static-token');
-      headers.set(AUTHORIZATION_REVISION_HEADER, staticTokenAuthorizationRevision(authToken));
+      headers.set(
+        AUTHORIZATION_REVISION_HEADER,
+        staticTokenAuthorizationRevision(authToken, staticTokenRevisionSecret),
+      );
       commitHeaders();
       await next();
       return;

@@ -1,4 +1,5 @@
 import { createStore } from '@lostgradient/operative/store';
+import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import type { ToolRequestContext } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import { createBureau } from 'bureau';
@@ -11,7 +12,10 @@ import {
   createGateway,
 } from './create-gateway';
 import type { ApiKey, ApiKeyStore } from './keys/types';
-import { staticTokenAuthorizationRevision } from './middleware/authentication';
+import {
+  resolveTrustedRequestContext,
+  staticTokenAuthorizationRevision,
+} from './middleware/authentication';
 import { DEFAULT_PORT } from './types';
 
 describe('createGateway', () => {
@@ -30,14 +34,17 @@ describe('createGateway', () => {
     };
   }
 
-  function createGatewayBureauStub(hostValidator?: RequestAuthorityValidator) {
+  function createGatewayBureauStub(
+    hostValidator?: RequestAuthorityValidator,
+    kv: Parameters<typeof createGateway>[0]['kv'] = undefined,
+  ) {
     let requestAuthorityValidator = hostValidator;
     const bureau = {
       store: createStore(),
       memory: undefined,
       scheduler: undefined,
       ready: true,
-      kv: undefined,
+      kv,
       subscribeLiveFrames: () => () => undefined,
       addEventListener: () => undefined,
       removeEventListener: () => undefined,
@@ -238,6 +245,34 @@ describe('createGateway', () => {
     expect(await validator(staticTokenRequestContext('first-secret', 'allowed-owner'))).toBe(false);
     expect(await validator(staticTokenRequestContext('second-secret', 'allowed-owner'))).toBe(true);
     expect(await validator(staticTokenRequestContext('second-secret', 'blocked-owner'))).toBe(true);
+  });
+
+  it('preserves static-token authority revisions across gateway restarts', async () => {
+    const kv = textValueStore(new MemoryStorage());
+    const first = createGatewayBureauStub(undefined, kv);
+    const firstGateway = await createGateway(first.bureau, { authToken: 'stable-secret' });
+    firstGateway.app.get('/test-authority', (context) =>
+      context.json(resolveTrustedRequestContext(context, 'bureau')),
+    );
+    const firstResponse = await firstGateway.app.request('/test-authority', {
+      headers: { authorization: 'Bearer stable-secret' },
+    });
+    const firstContext = (await firstResponse.json()) as ToolRequestContext;
+
+    const second = createGatewayBureauStub(undefined, kv);
+    const secondGateway = await createGateway(second.bureau, { authToken: 'stable-secret' });
+    secondGateway.app.get('/test-authority', (context) =>
+      context.json(resolveTrustedRequestContext(context, 'bureau')),
+    );
+    const secondResponse = await secondGateway.app.request('/test-authority', {
+      headers: { authorization: 'Bearer stable-secret' },
+    });
+    const secondContext = (await secondResponse.json()) as ToolRequestContext;
+
+    expect(secondContext.authority.authorizationRevision).toBe(
+      firstContext.authority.authorizationRevision,
+    );
+    expect(await second.getRequestAuthorityValidator()!(firstContext)).toBe(true);
   });
 });
 
