@@ -200,7 +200,16 @@ export function createExecutionLifecycle(defaultOwnerId = 'anonymous'): Executio
       type: 'execution.lifecycle',
       snapshot: record.snapshot,
     } as const);
-    for (const listener of listeners) listener(event);
+    notifyListeners(event);
+  };
+  const notifyListeners = (event: ExecutionLifecycleEvent) => {
+    for (const listener of listeners) {
+      try {
+        listener(event);
+      } catch {
+        // Subscriber failures must not affect lifecycle state transitions.
+      }
+    }
   };
   const matches = (snapshot: ExecutionSnapshot, selector: ExecutionSelector = {}) =>
     (selector.executionId === undefined || snapshot.executionId === selector.executionId) &&
@@ -369,8 +378,7 @@ export function createExecutionLifecycle(defaultOwnerId = 'anonymous'): Executio
         };
       }
       ownerController.signal.addEventListener('abort', onOwnerAbort, { once: true });
-      for (const listener of listeners)
-        listener(Object.freeze({ type: 'execution.lifecycle', snapshot: record.snapshot }));
+      notifyListeners(Object.freeze({ type: 'execution.lifecycle', snapshot: record.snapshot }));
       return handle;
     },
     start() {

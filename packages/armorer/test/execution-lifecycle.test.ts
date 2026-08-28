@@ -4,6 +4,40 @@ import { createExecutionLifecycle, type EffectiveToolExecutionContext } from '..
 import { createConcurrencyLimiter } from '../src/utilities/concurrency';
 
 describe('execution lifecycle', () => {
+  it('isolates subscriber failures during initial and activation notifications', () => {
+    const lifecycle = createExecutionLifecycle();
+    lifecycle.subscribe(() => {
+      throw new Error('subscriber failed');
+    });
+
+    const handle = lifecycle.begin({
+      toolName: 'initial-notification',
+      callId: 'initial-notification',
+    });
+    handle.activate();
+
+    expect(handle.snapshot().state).toBe('active');
+  });
+
+  it('isolates subscriber failures while settling and completing the lifecycle', async () => {
+    const lifecycle = createExecutionLifecycle();
+    lifecycle.subscribe(() => {
+      throw new Error('subscriber failed');
+    });
+
+    const handle = lifecycle.begin({
+      toolName: 'settlement-notification',
+      callId: 'settlement-notification',
+    });
+    const settled = handle.whenSettled();
+    handle.activate();
+    handle.settle('done');
+
+    await expect(settled).resolves.toMatchObject({ state: 'terminal', result: 'done' });
+    await expect(lifecycle.shutdown()).resolves.toMatchObject({ terminal: 1 });
+    await expect(lifecycle.complete()).resolves.toBeUndefined();
+  });
+
   function createPrivilegedContext(): EffectiveToolExecutionContext & {
     debugGraph: { nested: { value: string } };
   } {
