@@ -4301,6 +4301,44 @@ function createRegatingApprovalToolbox(approvalSecret: string, charges: number[]
   ) as unknown as Toolbox;
 }
 
+function createDenyingResumeApprovalToolbox(approvalSecret: string, charges: number[]) {
+  let evaluationCount = 0;
+  return createToolbox(
+    [
+      createTool({
+        name: 'charge-card',
+        version: '1.0.0',
+        description: 'Charge a payment card',
+        input: z.object({ cents: z.number() }),
+        policy: {
+          beforeExecute() {
+            evaluationCount += 1;
+            return evaluationCount === 1
+              ? { status: 'allow' }
+              : { status: 'deny', reason: 'Current policy denies this charge' };
+          },
+        },
+        async execute({ cents }) {
+          charges.push(cents);
+          return { charged: cents };
+        },
+      }),
+    ],
+    {
+      approvalSecret,
+      policy: {
+        beforeExecute() {
+          return {
+            status: 'needs_approval',
+            reason: 'Operator approval required',
+            action: { message: 'Approve charge' },
+          };
+        },
+      },
+    },
+  ) as unknown as Toolbox;
+}
+
 describe('createBureau review queue (AB-20)', () => {
   it('restores terminal-session approval reviews without durable run recovery', async () => {
     const storage = await resolveStorage({ type: 'memory' });
@@ -5273,6 +5311,47 @@ describe('createBureau review queue (AB-20)', () => {
     });
 
     bureau.dispose();
+  });
+
+  it('keeps a review pending when approval resume fails before execution admission', async () => {
+    const charges: number[] = [];
+    const bureau = await createBureau({
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [{ id: 'denied-call', name: 'charge-card', arguments: { cents: 900 } }],
+        },
+      ]),
+      toolbox: createDenyingResumeApprovalToolbox('denied-resume-secret', charges),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+      storage: { type: 'memory' },
+    });
+
+    const run = await bureau.createRun({ message: 'Charge the customer' });
+    await waitForRunCompletion(bureau, run.id);
+    const [review] = bureau.listPendingReviews();
+    expect(review).toBeDefined();
+
+    expect(
+      bureau.resolveReview({
+        id: review!.id,
+        decision: 'approve',
+        principal: 'api-key:reviewer-denied',
+      }),
+    ).rejects.toThrow('Cannot approve: Current policy denies this charge');
+
+    expect(charges).toEqual([]);
+    expect(bureau.listPendingReviews().map(({ id }) => id)).toEqual([review!.id]);
+    const persistedSession = await bureau.getSession(run.sessionId);
+    expect(persistedSession?.metadata['resolvedReviewIds'] ?? []).not.toContain(review!.id);
+    expect(persistedSession?.metadata['pendingApprovalOverrides']).toHaveProperty(review!.id);
+    const approvedRecords = await bureau.auditTrail!.query({
+      runId: run.id,
+      type: 'review.tool-approval.approved',
+    });
+    expect(approvedRecords).toEqual([]);
+
+    await bureau.dispose();
   });
 
   it('retries replacement approval persistence when a resumed approval gates again', async () => {

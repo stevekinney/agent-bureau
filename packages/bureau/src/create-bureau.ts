@@ -3205,6 +3205,22 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
               );
             }
             keepPending = true;
+          } else if (
+            result !== null &&
+            typeof result === 'object' &&
+            'outcome' in result &&
+            result.outcome === 'error' &&
+            'approvalBindingConsumed' in result &&
+            result.approvalBindingConsumed === false
+          ) {
+            const failedResult = result as {
+              error?: { message?: string };
+              errorMessage?: string;
+            };
+            throw new BureauError(
+              `Cannot approve: ${failedResult.error?.message ?? failedResult.errorMessage ?? 'tool approval resume failed before execution admission.'}`,
+              'CONFLICT',
+            );
           }
         } else if (review.approval.approvalBinding && review.approval.approvalToken !== undefined) {
           try {

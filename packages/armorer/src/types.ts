@@ -44,6 +44,8 @@ export interface ToolExecutionResult extends ToolResult {
    */
   stream?: AsyncIterable<unknown>;
   error?: ToolError;
+  /** Whether a resumed approval crossed the execution-admission boundary. */
+  approvalBindingConsumed?: boolean;
   /** @deprecated Use error.message instead. */
   errorMessage?: string;
   /** @deprecated Use error.category instead. */

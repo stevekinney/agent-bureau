@@ -1497,6 +1497,44 @@ describe('createToolbox', () => {
     ).toThrow('approvalSecret is required');
   });
 
+  it('rejects invalid approval binding lifetimes at toolbox construction', () => {
+    for (const approvalBindingTtlMs of [0, -1, Number.NaN, Infinity, -Infinity]) {
+      expect(() => createToolbox([], { approvalBindingTtlMs })).toThrow(
+        'approvalBindingTtlMs must be finite and positive',
+      );
+    }
+  });
+
+  it('fails approval issuance when a finite lifetime cannot produce a future expiry', async () => {
+    const toolbox = createToolbox(
+      [
+        createTool({
+          name: 'overflowing-approval',
+          description: 'Requires an approval with an invalid numeric expiry',
+          version: '1.0.0',
+          input: z.object({}),
+          execute: () => 'executed',
+        }),
+      ],
+      {
+        approvalSecret: 'overflow-secret',
+        approvalBindingTtlMs: Number.MAX_VALUE,
+        approvalNow: () => Number.MAX_VALUE,
+        policy: { beforeExecute: () => ({ status: 'needs_approval' }) },
+      },
+    );
+
+    const result = await toolbox.execute(
+      { id: 'overflow-call', name: 'overflowing-approval', arguments: {} },
+      approvalExecutionOptions,
+    );
+
+    expect(result).toMatchObject({
+      outcome: 'error',
+      error: { message: 'approvalBindingTtlMs produces an invalid approval expiry.' },
+    });
+  });
+
   it('consumes approval bindings only after execution admission succeeds', async () => {
     const createApprovalToolbox = (
       store: ReturnType<typeof createProcessLocalApprovalStateStore>,

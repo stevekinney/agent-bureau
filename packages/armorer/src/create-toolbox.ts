@@ -978,6 +978,9 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     options.approvalStateStore ??
     (approvalSecret ? createProcessLocalApprovalStateStore(approvalNow) : undefined);
   const approvalBindingTtlMs = options.approvalBindingTtlMs ?? 5 * 60_000;
+  if (!Number.isFinite(approvalBindingTtlMs) || approvalBindingTtlMs <= 0) {
+    throw new Error('approvalBindingTtlMs must be finite and positive.');
+  }
   const approvalNonce = options.approvalNonce ?? (() => crypto.randomUUID());
   const catalogRevision = options.catalogRevision ?? 'catalog:1';
   const toolboxRevision = options.toolboxRevision ?? 'toolbox:1';
@@ -1494,6 +1497,10 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
               );
             }
             const issuedAt = approvalNow();
+            const expiresAt = issuedAt + approvalBindingTtlMs;
+            if (!Number.isFinite(expiresAt) || expiresAt <= issuedAt) {
+              throw new Error('approvalBindingTtlMs produces an invalid approval expiry.');
+            }
             result.pendingApproval.approvalBinding = {
               version: 1,
               principalId: requestContext.authority.principalId,
@@ -1511,7 +1518,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
               policyRevision,
               approvalRevision,
               issuedAt,
-              expiresAt: issuedAt + approvalBindingTtlMs,
+              expiresAt,
               nonce: approvalNonce(),
               replayScope: `${requestContext.authority.tenantId}:${requestContext.runId}`,
             };
@@ -1725,6 +1732,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     }
     let consumeApproval: (() => Promise<ApprovalAdmissionRollback>) | undefined;
     let consumeError: unknown;
+    let approvalBindingConsumed = approvalStateStore ? false : undefined;
     if (approvalStateStore && approvalContext) {
       consumeApproval = async () => {
         let reserved = false;
@@ -1732,6 +1740,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
           await approvalStateStore.reserve(approval.approvalBinding!, approvalContext);
           reserved = true;
           await approvalStateStore.commit(approval.approvalBinding!);
+          approvalBindingConsumed = true;
         } catch (error) {
           if (reserved) await approvalStateStore.release(approval.approvalBinding!);
           consumeError = error;
@@ -1775,7 +1784,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     if (consumeError !== undefined) {
       throw consumeError instanceof Error ? consumeError : new Error(String(consumeError));
     }
-    return result;
+    return approvalBindingConsumed === undefined ? result : { ...result, approvalBindingConsumed };
   }
 
   async function readApprovalStateWithInterruption(
