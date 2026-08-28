@@ -107,6 +107,7 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
           ? { policyRevision: value['policyRevision'] }
           : {}),
         ...(typeof value['input'] === 'string' ? { input: value['input'] } : {}),
+        ...(value['inputWasUndefined'] === true ? { inputWasUndefined: true as const } : {}),
       };
     }
 

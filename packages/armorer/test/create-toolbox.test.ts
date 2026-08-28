@@ -1652,6 +1652,87 @@ describe('createToolbox', () => {
     );
     expect(admittedAfterDeferredAbort.outcome).toBe('success');
 
+    const deferredReserveBaseStore = createProcessLocalApprovalStateStore();
+    let deferReserve = true;
+    let resolveReserveStarted: (() => void) | undefined;
+    const reserveStarted = new Promise<void>((resolve) => {
+      resolveReserveStarted = resolve;
+    });
+    let resolveDeferredReserve: (() => void) | undefined;
+    const deferredReserveStore = {
+      ...deferredReserveBaseStore,
+      reserve: (...arguments_: Parameters<typeof deferredReserveBaseStore.reserve>) => {
+        if (!deferReserve) return deferredReserveBaseStore.reserve(...arguments_);
+        return new Promise<void>((resolve, reject) => {
+          resolveReserveStarted?.();
+          resolveDeferredReserve = () => {
+            void deferredReserveBaseStore.reserve(...arguments_).then(resolve, reject);
+          };
+        });
+      },
+    };
+    const deferredReserveToolbox = createApprovalToolbox(deferredReserveStore);
+    const deferredReserveApprovalResult = await deferredReserveToolbox.execute(
+      { id: 'deferred-reserve-admission', name: 'admission-gated-action', arguments: {} },
+      approvalExecutionOptions,
+    );
+    const deferredReserveApproval =
+      deferredReserveApprovalResult.pendingApproval as SignedPendingToolApproval;
+    const deferredReserveController = new AbortController();
+    const deferredReserveResume = deferredReserveToolbox.resumeApproval(deferredReserveApproval, {
+      ...approvalExecutionOptions,
+      signal: deferredReserveController.signal,
+    });
+    await reserveStarted;
+    deferredReserveController.abort('aborted while reserving approval');
+    resolveDeferredReserve?.();
+    const deferredReserveResult = await deferredReserveResume;
+    expect(deferredReserveResult.errorCategory).toBe('cancelled');
+    deferReserve = false;
+    const admittedAfterDeferredReserveAbort = await deferredReserveToolbox.resumeApproval(
+      deferredReserveApproval,
+      approvalExecutionOptions,
+    );
+    expect(admittedAfterDeferredReserveAbort.outcome).toBe('success');
+
+    for (const interruptedWrite of ['reserve', 'commit'] as const) {
+      const deadlineBaseStore = createProcessLocalApprovalStateStore();
+      let currentTime = 0;
+      const deadlineStore = {
+        ...deadlineBaseStore,
+        async reserve(...arguments_: Parameters<typeof deadlineBaseStore.reserve>) {
+          await deadlineBaseStore.reserve(...arguments_);
+          if (interruptedWrite === 'reserve') currentTime = 10;
+        },
+        async commit(...arguments_: Parameters<typeof deadlineBaseStore.commit>) {
+          await deadlineBaseStore.commit(...arguments_);
+          if (interruptedWrite === 'commit') currentTime = 10;
+        },
+      };
+      const deadlineToolbox = createApprovalToolbox(deadlineStore);
+      const deadlineApprovalResult = await deadlineToolbox.execute(
+        {
+          id: `${interruptedWrite}-deadline-admission`,
+          name: 'admission-gated-action',
+          arguments: {},
+        },
+        approvalExecutionOptions,
+      );
+      const deadlineApproval = deadlineApprovalResult.pendingApproval as SignedPendingToolApproval;
+      const deadlineResult = await deadlineToolbox.resumeApproval(deadlineApproval, {
+        ...approvalExecutionOptions,
+        now: () => currentTime,
+        requestContext: { ...approvalExecutionOptions.requestContext, deadline: 10 },
+      });
+      expect(deadlineResult.errorCategory).toBe('timeout');
+      currentTime = 0;
+      const admittedAfterDeadline = await deadlineToolbox.resumeApproval(
+        deadlineApproval,
+        approvalExecutionOptions,
+      );
+      expect(admittedAfterDeadline.outcome).toBe('success');
+    }
+
     const closedStore = createStore();
     const closedToolbox = createApprovalToolbox(closedStore.store);
     const closedApproval = await closedToolbox.execute(

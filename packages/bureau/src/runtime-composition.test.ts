@@ -20,6 +20,7 @@ import { Conversation, createConversationHistory, getMessages } from 'conversati
 import { TypedEventTarget } from 'lifecycle';
 import type { Memory } from 'memory';
 import type { SkillProvider } from 'skills';
+import { z } from 'zod';
 
 import {
   activeSkillsFromStepMetadata,
@@ -97,6 +98,56 @@ describe('createRuntimeComposition', () => {
     expect(() => getRuntimeCompositionTestingSeams({} as RuntimeComposition)).toThrow(
       'Runtime composition testing seams are not registered for this composition',
     );
+  });
+
+  it('revalidates transport authority immediately before each tool execution', async () => {
+    let authorityCurrent = true;
+    let executions = 0;
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      requestAuthorityValidator: () => authorityCurrent,
+      toolbox: createToolbox([
+        createTool({
+          name: 'transport-authorized-tool',
+          description: 'Runs only while transport authority remains current',
+          input: z.object({}),
+          async execute() {
+            executions += 1;
+            return Promise.resolve('executed');
+          },
+        }),
+      ]),
+    });
+    const runRuntime = await runtime.createRunRuntime({
+      message: 'test',
+      sessionId: 'transport-authority-session',
+      runId: 'transport-authority-run',
+      requestContext: {
+        authority: {
+          principalId: 'api-key:transport',
+          tenantId: 'tenant-a',
+          ownerId: 'owner-a',
+          capabilities: ['tools:execute'],
+          authorizationRevision: 'gateway:api-key:transport',
+        },
+        audience: 'tenant',
+      },
+    });
+
+    authorityCurrent = false;
+    const execution = runRuntime.toolbox.execute({
+      id: 'transport-authority-call',
+      name: 'transport-authorized-tool',
+      arguments: {},
+    }) as unknown as Promise<unknown>;
+    const executionError = await execution.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(executionError).toBeInstanceOf(Error);
+    expect((executionError as Error).message).toContain('no longer current');
+    expect(executions).toBe(0);
+    runtime.disposeStorage?.();
   });
 
   it('validates and restores persisted request authority for durable recovery', async () => {

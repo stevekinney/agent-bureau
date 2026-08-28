@@ -12,6 +12,7 @@ import type {
   CachedToolResult,
   IdempotencyOptions,
   IdempotencyResolutionReceipt,
+  LegacyIdempotencyResolutionReceipt,
   StartedToolExecution,
 } from './types';
 
@@ -42,6 +43,7 @@ function scheduleBoundedTimeout(callback: () => void, delay: number): () => void
 
 export type DirectIdempotencyExecuteOptions = ToolExecuteOptions & {
   resolutionReceipt?: IdempotencyResolutionReceipt;
+  legacyResolutionReceipt?: LegacyIdempotencyResolutionReceipt;
 };
 
 export type IdempotentTool<T extends Tool> = T & {
@@ -198,6 +200,26 @@ function createUnsupportedDeadlineError(): Error {
   return new Error('Execution deadline must be finite.');
 }
 
+function createStartedExecution(
+  toolName: string,
+  startedAt: number,
+  inputDigest: string,
+  ttl: number,
+  leaseDurationMs: number,
+  maximumExecutionDurationMs: number,
+): StartedToolExecution {
+  return {
+    status: 'started',
+    toolName,
+    startedAt,
+    ttl,
+    attemptId: crypto.randomUUID(),
+    leaseExpiresAt: Math.min(startedAt + leaseDurationMs, startedAt + maximumExecutionDurationMs),
+    absoluteDeadline: startedAt + maximumExecutionDurationMs,
+    inputDigest,
+  };
+}
+
 /**
  * Wraps a tool with idempotency behavior. Duplicate executions with the same
  * input (as determined by the tool's `idempotencyKey`) return cached results
@@ -224,6 +246,7 @@ export function withIdempotency<T extends Tool>(
     onCacheHit,
     onUnknownOutcome,
     verifyResolutionReceipt,
+    verifyLegacyResolutionReceipt,
     leaseDurationMs = DEFAULT_LEASE_DURATION,
     maximumExecutionDurationMs = Math.max(ttl, DEFAULT_TTL),
   } = options;
@@ -273,9 +296,7 @@ export function withIdempotency<T extends Tool>(
       idempotencyKey!(params),
     ]);
 
-    if (!(await inputMatchesToolSchema(tool, params, executeOptions))) {
-      return tool(params);
-    }
+    await inputMatchesToolSchema(tool, params, executeOptions);
 
     const returnAuthorizedCachedResult = async (cached: CachedToolResult): Promise<unknown> => {
       if (cached.input === undefined) {
@@ -283,7 +304,7 @@ export function withIdempotency<T extends Tool>(
       }
       let originalParams: unknown;
       try {
-        originalParams = JSON.parse(cached.input);
+        originalParams = cached.inputWasUndefined ? undefined : JSON.parse(cached.input);
       } catch {
         throw new Error('Cached result has invalid original input and cannot be reauthorized.');
       }
@@ -316,65 +337,118 @@ export function withIdempotency<T extends Tool>(
 
     let startedExecution: StartedToolExecution;
     if (cached?.status === 'started') {
-      const receipt = executeOptions?.resolutionReceipt;
-      const receiptMatchesInput =
-        cached.inputDigest !== undefined &&
-        receipt?.inputDigest === cached.inputDigest &&
-        inputDigest === cached.inputDigest;
-      let validReceipt = false;
-      if (
-        receiptMatchesInput &&
-        cached.attemptId !== undefined &&
-        receipt?.version === 1 &&
-        receipt.key === key &&
-        receipt.attemptId === cached.attemptId &&
-        receipt.tenantId === tenantId &&
-        receipt.toolRevision === completeToolRevision &&
-        receipt.decision === 'retry' &&
-        receipt.evidence &&
-        receipt.authorizedAt !== undefined &&
-        receipt.authorizedBy &&
-        receipt.nonce &&
-        receipt.authorization &&
-        verifyResolutionReceipt
-      ) {
-        validReceipt = Boolean(
-          await raceIdempotencyAwait(
-            () => Promise.resolve(verifyResolutionReceipt(receipt)),
-            executeOptions,
-          ),
+      if (cached.attemptId === undefined) {
+        const legacyReceipt = executeOptions?.legacyResolutionReceipt;
+        let validLegacyReceipt = false;
+        if (
+          legacyReceipt?.version === 1 &&
+          legacyReceipt.key === key &&
+          legacyReceipt.tenantId === tenantId &&
+          legacyReceipt.toolRevision === completeToolRevision &&
+          legacyReceipt.toolName === cached.toolName &&
+          legacyReceipt.legacyStartedAt === cached.startedAt &&
+          legacyReceipt.decision === 'retry' &&
+          legacyReceipt.evidence &&
+          legacyReceipt.authorizedAt !== undefined &&
+          legacyReceipt.authorizedBy &&
+          legacyReceipt.nonce &&
+          legacyReceipt.authorization &&
+          verifyLegacyResolutionReceipt
+        ) {
+          validLegacyReceipt = Boolean(
+            await raceIdempotencyAwait(
+              () => Promise.resolve(verifyLegacyResolutionReceipt(legacyReceipt)),
+              executeOptions,
+            ),
+          );
+        }
+        const replacementTime = now();
+        if (
+          !validLegacyReceipt ||
+          (cached.leaseExpiresAt !== undefined && replacementTime < cached.leaseExpiresAt)
+        ) {
+          onUnknownOutcome?.(key, cached);
+          throw new Error(`Idempotency key "${key}" has an unknown outcome.`);
+        }
+        startedExecution = createStartedExecution(
+          tool.name,
+          replacementTime,
+          inputDigest,
+          ttl,
+          leaseDurationMs,
+          maximumExecutionDurationMs,
         );
-      }
-      const replacementTime = now();
-      if (
-        !validReceipt ||
-        (cached.leaseExpiresAt !== undefined && replacementTime < cached.leaseExpiresAt)
-      ) {
-        onUnknownOutcome?.(key, cached);
-        throw new Error(`Idempotency key "${key}" has an unknown outcome.`);
-      }
-      startedExecution = {
-        status: 'started',
-        toolName: tool.name,
-        startedAt: replacementTime,
-        ttl,
-        attemptId: crypto.randomUUID(),
-        leaseExpiresAt: Math.min(
-          replacementTime + leaseDurationMs,
-          replacementTime + maximumExecutionDurationMs,
-        ),
-        absoluteDeadline: replacementTime + maximumExecutionDurationMs,
-        inputDigest,
-      };
-      if (
-        !(await raceIdempotencyAwait(
-          () =>
-            cache.replaceUnknownStarted(key, cached.attemptId!, startedExecution, replacementTime),
-          executeOptions,
-        ))
-      ) {
-        onUnknownOutcome?.(key, cached);
-        throw new Error(`Idempotency key "${key}" has an unknown outcome.`);
+        if (
+          !(await raceIdempotencyAwait(
+            () =>
+              cache.replaceLegacyStarted(
+                key,
+                { toolName: cached.toolName, startedAt: cached.startedAt },
+                startedExecution,
+                replacementTime,
+              ),
+            executeOptions,
+          ))
+        ) {
+          onUnknownOutcome?.(key, cached);
+          throw new Error(`Idempotency key "${key}" has an unknown outcome.`);
+        }
+      } else {
+        const receipt = executeOptions?.resolutionReceipt;
+        const receiptMatchesInput =
+          cached.inputDigest !== undefined &&
+          receipt?.inputDigest === cached.inputDigest &&
+          inputDigest === cached.inputDigest;
+        let validReceipt = false;
+        if (
+          receiptMatchesInput &&
+          receipt?.version === 1 &&
+          receipt.key === key &&
+          receipt.attemptId === cached.attemptId &&
+          receipt.tenantId === tenantId &&
+          receipt.toolRevision === completeToolRevision &&
+          receipt.decision === 'retry' &&
+          receipt.evidence &&
+          receipt.authorizedAt !== undefined &&
+          receipt.authorizedBy &&
+          receipt.nonce &&
+          receipt.authorization &&
+          verifyResolutionReceipt
+        ) {
+          validReceipt = Boolean(
+            await raceIdempotencyAwait(
+              () => Promise.resolve(verifyResolutionReceipt(receipt)),
+              executeOptions,
+            ),
+          );
+        }
+        const replacementTime = now();
+        if (
+          !validReceipt ||
+          (cached.leaseExpiresAt !== undefined && replacementTime < cached.leaseExpiresAt)
+        ) {
+          onUnknownOutcome?.(key, cached);
+          throw new Error(`Idempotency key "${key}" has an unknown outcome.`);
+        }
+        startedExecution = createStartedExecution(
+          tool.name,
+          replacementTime,
+          inputDigest,
+          ttl,
+          leaseDurationMs,
+          maximumExecutionDurationMs,
+        );
+        const cachedAttemptId = cached.attemptId;
+        if (
+          !(await raceIdempotencyAwait(
+            () =>
+              cache.replaceUnknownStarted(key, cachedAttemptId, startedExecution, replacementTime),
+            executeOptions,
+          ))
+        ) {
+          onUnknownOutcome?.(key, cached);
+          throw new Error(`Idempotency key "${key}" has an unknown outcome.`);
+        }
       }
     } else {
       const startedAt = now();
@@ -490,6 +564,7 @@ export function withIdempotency<T extends Tool>(
       executedAt: now(),
       ttl,
       input: originalInput,
+      ...(params === undefined ? { inputWasUndefined: true as const } : {}),
     };
 
     if (

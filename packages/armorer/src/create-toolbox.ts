@@ -19,7 +19,7 @@ import {
 } from './approval-binding';
 import type { ApprovalPolicyConfiguration } from './approval-policy';
 import { approvalStatusToDecision, evaluateCapabilityApproval } from './approval-policy';
-import type { ToolError, ToolErrorCategory } from './core/errors';
+import { isToolError, type ToolError, type ToolErrorCategory } from './core/errors';
 import {
   type InspectorDetailLevel,
   inspectRegistry,
@@ -1591,12 +1591,14 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
             throw error;
           }
           const message = error instanceof Error ? error.message : String(error);
-          const toolError = createToolError(
-            'internal',
-            message,
-            extractErrorCode(error) ?? 'EXECUTION_ERROR',
-            false,
-          );
+          const toolError = isToolError(error)
+            ? error
+            : createToolError(
+                'internal',
+                message,
+                extractErrorCode(error) ?? 'EXECUTION_ERROR',
+                false,
+              );
           const errResult: ToolExecutionResult = {
             callId: toolCall.id,
             outcome: 'error',
@@ -1739,11 +1741,44 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
         try {
           await approvalStateStore.reserve(approval.approvalBinding!, approvalContext);
           reserved = true;
+          if (executeOptions.signal?.aborted) {
+            await approvalStateStore.release(approval.approvalBinding!);
+            reserved = false;
+            return async () => {};
+          }
+          if (
+            requestDeadline !== undefined &&
+            requestDeadline <= (executeOptions.now ?? Date.now)()
+          ) {
+            // eslint-disable-next-line @typescript-eslint/only-throw-error
+            throw createToolError('timeout', 'Execution deadline exceeded', 'TIMEOUT', false);
+          }
           await approvalStateStore.commit(approval.approvalBinding!);
           approvalBindingConsumed = true;
+          if (executeOptions.signal?.aborted) {
+            await approvalStateStore.release(approval.approvalBinding!);
+            reserved = false;
+            approvalBindingConsumed = false;
+            return async () => {};
+          }
+          if (
+            requestDeadline !== undefined &&
+            requestDeadline <= (executeOptions.now ?? Date.now)()
+          ) {
+            // eslint-disable-next-line @typescript-eslint/only-throw-error
+            throw createToolError('timeout', 'Execution deadline exceeded', 'TIMEOUT', false);
+          }
         } catch (error) {
           if (reserved) await approvalStateStore.release(approval.approvalBinding!);
-          consumeError = error;
+          approvalBindingConsumed = false;
+          if (
+            !error ||
+            typeof error !== 'object' ||
+            !('category' in error) ||
+            (error.category !== 'cancelled' && error.category !== 'timeout')
+          ) {
+            consumeError = error;
+          }
           throw error;
         }
         let rolledBack = false;

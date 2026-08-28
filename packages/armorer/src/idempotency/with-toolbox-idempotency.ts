@@ -537,6 +537,9 @@ export function withToolboxIdempotency(
     }
 
     const tool = toolbox.getTool(fields.name);
+    if (!tool) {
+      return originalExecute(call, executeOptions);
+    }
     const revision = toolRevision ?? formatToolRevision(tool);
     const baseKey = namespacedKey(fields.name, externalKey ?? keyFn!(fields.arguments));
     if (!revision) {

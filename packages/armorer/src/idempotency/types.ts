@@ -13,6 +13,8 @@ export type CachedToolResult = {
   policyRevision?: string;
   /** Canonical JSON serialization of the original input used to produce the result. */
   input?: string;
+  /** Distinguishes an original undefined input from the JSON null compatibility encoding. */
+  inputWasUndefined?: true;
 };
 
 export type StartedToolExecution = {
@@ -133,6 +135,10 @@ export type IdempotencyOptions = {
   onUnknownOutcome?: (key: string, execution: StartedToolExecution) => void;
   /** Authorizes replacing an expired fenced started marker before retrying. */
   verifyResolutionReceipt?: (receipt: IdempotencyResolutionReceipt) => boolean | Promise<boolean>;
+  /** Authorizes replacing a legacy started marker that predates attempt fencing. */
+  verifyLegacyResolutionReceipt?: (
+    receipt: LegacyIdempotencyResolutionReceipt,
+  ) => boolean | Promise<boolean>;
   leaseDurationMs?: number;
   maximumExecutionDurationMs?: number;
   now?: () => number;

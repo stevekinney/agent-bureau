@@ -8,6 +8,7 @@ import { fullInputKey } from '../../src/idempotency/key-generators';
 import type {
   CachedToolResult,
   IdempotencyResolutionReceipt,
+  LegacyIdempotencyResolutionReceipt,
   ToolResultCache,
 } from '../../src/idempotency/types';
 import {
@@ -419,6 +420,128 @@ describe('withIdempotency', () => {
     expect(callCount).toBe(2);
     const completed = await cache.getState(key);
     expect(completed?.status).toBe('completed');
+  });
+
+  it('migrates direct legacy started markers only with an authorized legacy receipt', async () => {
+    const legacyStore = createTestStore();
+    const legacyCache = createToolResultCache({ store: legacyStore, defaultTTL: 60_000 });
+    const tool = createTool({
+      name: 'legacy-direct',
+      description: 'Migrates a legacy direct marker',
+      version: '1.0.0',
+      input: z.object({ value: z.number() }),
+      idempotencyKey: () => 'legacy-direct',
+      async execute({ value }) {
+        callCount += 1;
+        return value;
+      },
+    });
+    const key = JSON.stringify(['tenant-a', 'legacy-direct:1', tool.name, 'legacy-direct']);
+    await legacyStore.set(
+      key,
+      JSON.stringify({ status: 'started', toolName: tool.name, startedAt: 1_000, ttl: 60_000 }),
+    );
+    const wrapped = withIdempotency(tool, {
+      cache: legacyCache,
+      tenantId: 'tenant-a',
+      toolRevision: 'legacy-direct:1',
+      now: () => 2_000,
+      verifyLegacyResolutionReceipt: async (receipt) => receipt.authorization === 'authorized',
+    });
+    const receipt: LegacyIdempotencyResolutionReceipt = {
+      version: 1,
+      key,
+      tenantId: 'tenant-a',
+      toolRevision: 'legacy-direct:1',
+      toolName: tool.name,
+      legacyStartedAt: 1_000,
+      decision: 'retry',
+      evidence: 'provider confirmed no side effect',
+      authorizedAt: 2_000,
+      authorizedBy: 'operator-a',
+      nonce: 'legacy-direct-receipt',
+      authorization: 'denied',
+    };
+
+    await expect(
+      wrapped.execute({ value: 7 }, { requestContext, legacyResolutionReceipt: receipt }),
+    ).rejects.toThrow('unknown outcome');
+    expect(callCount).toBe(0);
+
+    const result = await wrapped.execute(
+      { value: 7 },
+      {
+        requestContext,
+        legacyResolutionReceipt: { ...receipt, authorization: 'authorized' },
+      },
+    );
+    expect(result).toBe(7);
+    expect(callCount).toBe(1);
+    expect(await legacyCache.getState(key)).toEqual(
+      expect.objectContaining({ status: 'completed' }),
+    );
+  });
+
+  it('fails closed when a direct legacy marker replacement loses its compare-and-set race', async () => {
+    const tool = createTool({
+      name: 'legacy-direct-race',
+      description: 'Loses a legacy marker migration race',
+      version: '1.0.0',
+      input: z.object({}),
+      idempotencyKey: () => 'legacy-direct-race',
+      async execute() {
+        callCount += 1;
+        return 'unexpected';
+      },
+    });
+    const key = JSON.stringify([
+      'tenant-a',
+      'legacy-direct-race:1',
+      tool.name,
+      'legacy-direct-race',
+    ]);
+    const started = {
+      status: 'started' as const,
+      toolName: tool.name,
+      startedAt: 1_000,
+      ttl: 60_000,
+    };
+    const racingCache: ToolResultCache = {
+      ...cache,
+      getState: async () => started,
+      replaceLegacyStarted: async () => false,
+    };
+    const wrapped = withIdempotency(tool, {
+      cache: racingCache,
+      tenantId: 'tenant-a',
+      toolRevision: 'legacy-direct-race:1',
+      now: () => 2_000,
+      verifyLegacyResolutionReceipt: async () => true,
+    });
+
+    await expect(
+      wrapped.execute(
+        {},
+        {
+          requestContext,
+          legacyResolutionReceipt: {
+            version: 1,
+            key,
+            tenantId: 'tenant-a',
+            toolRevision: 'legacy-direct-race:1',
+            toolName: tool.name,
+            legacyStartedAt: 1_000,
+            decision: 'retry',
+            evidence: 'provider confirmed no side effect',
+            authorizedAt: 2_000,
+            authorizedBy: 'operator-a',
+            nonce: 'legacy-direct-race-receipt',
+            authorization: 'authorized',
+          },
+        },
+      ),
+    ).rejects.toThrow('unknown outcome');
+    expect(callCount).toBe(0);
   });
 
   it('renews an active lease and rejects completion after losing the fence', async () => {
@@ -1258,6 +1381,63 @@ describe('withIdempotency', () => {
     expect(executionResult.result).toBe(5);
     expect(executionResult.toolName).toBe('add');
     expect(callCount).toBe(2);
+  });
+
+  it('replays undefined direct inputs without converting them to null', async () => {
+    let executions = 0;
+    const tool = createTool({
+      name: 'undefined-input',
+      description: 'Accepts no input',
+      input: acceptsAnySchema(),
+      inputSchema: {},
+      idempotencyKey: () => 'undefined-input',
+      execute() {
+        executions += 1;
+        return 'ok';
+      },
+    });
+    const wrapped = withIdempotency(tool, {
+      cache,
+      tenantId: 'tenant-a',
+      toolRevision: 'undefined-input:1',
+    });
+
+    await expect(wrapped.execute(undefined, { requestContext })).resolves.toBe('ok');
+    await expect(wrapped.execute(undefined, { requestContext })).resolves.toBe('ok');
+
+    expect(executions).toBe(1);
+    const key = JSON.stringify(['tenant-a', 'undefined-input:1', tool.name, 'undefined-input']);
+    expect(await cache.getState(key)).toEqual(
+      expect.objectContaining({ input: 'null', inputWasUndefined: true }),
+    );
+  });
+
+  it('keeps invalid async-schema inputs on the canonical authorized execution path', async () => {
+    let policyCalls = 0;
+    const tool = createTool({
+      name: 'invalid-async-input',
+      description: 'Rejects invalid input asynchronously',
+      version: '1.0.0',
+      input: z.object({ value: z.string() }).superRefine(async ({ value }, context) => {
+        await Promise.resolve();
+        if (value === 'invalid') context.addIssue({ code: 'custom', message: 'invalid value' });
+      }),
+      idempotencyKey: () => 'invalid-async-input',
+      policy: {
+        beforeExecute({ requestContext: currentRequestContext }) {
+          policyCalls += 1;
+          expect(currentRequestContext).toEqual(requestContext);
+          return { allow: true };
+        },
+      },
+      execute() {
+        throw new Error('invalid input must not execute');
+      },
+    });
+    const wrapped = withIdempotency(tool, { cache, tenantId: 'tenant-a' });
+
+    await expect(wrapped.execute({ value: 'invalid' }, { requestContext })).rejects.toThrow();
+    expect(policyCalls).toBe(0);
   });
 
   it('passes direct ToolCall-style invocations through the original tool path', async () => {

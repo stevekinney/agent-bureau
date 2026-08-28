@@ -207,10 +207,12 @@ export function createSchedulerServiceRequestContext(runId: string, agentName: s
 function withDefaultToolboxRequestContext(
   toolbox: AnyToolbox,
   requestContext: ToolRequestContext | undefined,
+  requestAuthorityValidator: () =>
+    ((context: ToolRequestContext) => boolean | Promise<boolean>) | undefined,
 ): AnyToolbox {
   if (!requestContext) return toolbox;
 
-  const executeWithDefaultRequestContext = ((
+  const executeWithDefaultRequestContext = (async (
     input: ToolCallInput | ToolCallInput[],
     executeOptions?: ToolboxExecuteOptions,
   ) => {
@@ -218,6 +220,18 @@ function withDefaultToolboxRequestContext(
       executeOptions?.requestContext === undefined
         ? { ...(executeOptions ?? {}), requestContext }
         : executeOptions;
+    const executionRequestContext = options.requestContext;
+    const authorizationRevision = executionRequestContext?.authority.authorizationRevision;
+    const requiresTransportValidation =
+      authorizationRevision !== undefined &&
+      authorizationRevision !== 'bureau:1' &&
+      authorizationRevision !== 'bureau:scheduler:1';
+    if (requiresTransportValidation && executionRequestContext) {
+      const validator = requestAuthorityValidator();
+      if (!validator || !(await validator(executionRequestContext))) {
+        throw new Error('Request authority is no longer current.');
+      }
+    }
     return Array.isArray(input) ? toolbox.execute(input, options) : toolbox.execute(input, options);
   }) as AnyToolbox['execute'];
 
@@ -1625,7 +1639,11 @@ export async function createRuntimeComposition(
       validateResponse.push(guardrails.validateResponse);
     }
 
-    const runToolbox = withDefaultToolboxRequestContext(toolbox, requestContext);
+    const runToolbox = withDefaultToolboxRequestContext(
+      toolbox,
+      requestContext,
+      () => requestAuthorityValidator,
+    );
     return Promise.resolve({
       generate,
       toolbox: runToolbox,

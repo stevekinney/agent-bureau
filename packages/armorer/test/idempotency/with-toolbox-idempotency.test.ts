@@ -98,6 +98,28 @@ describe('withToolboxIdempotency', () => {
     });
   }
 
+  it('delegates unresolved names to the toolbox before deriving an idempotency key', async () => {
+    const toolbox = createToolbox([createToolWithKey()], { resolution: true });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, {
+      cache,
+      tenantId: 'tenant-a',
+    });
+
+    const fuzzy = await idempotentToolbox.execute(
+      { id: 'fuzzy-call', name: 'ADD', arguments: { a: 1, b: 2 } },
+      { idempotencyKey: 'fuzzy-key' },
+    );
+    const missing = await idempotentToolbox.execute(
+      { id: 'missing-call', name: 'missing', arguments: {} },
+      { idempotencyKey: 'missing-key' },
+    );
+
+    expect(fuzzy.outcome).toBe('success');
+    expect(fuzzy.result).toBe(3);
+    expect(missing.outcome).toBe('error');
+    expect(missing.errorCategory).toBe('not_found');
+  });
+
   it('uses the cache wall clock for TTL expiration when execution uses another clock', async () => {
     let cacheClock = 1_000;
     const wallClockCache = createToolResultCache({

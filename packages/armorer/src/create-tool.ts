@@ -3,7 +3,7 @@ import { createIncrementalHash, isStandardSchema, sha256HexSync } from 'interope
 import { CompletableEventTarget } from 'lifecycle';
 import { z } from 'zod';
 
-import type { ToolError, ToolErrorCategory } from './core/errors';
+import { isToolError, type ToolError, type ToolErrorCategory } from './core/errors';
 import { buildTagsFromRisk, type ToolRisk } from './core/risk';
 import { isZodSchema } from './core/schema-utilities';
 import { serializeToolDefinition } from './core/serialization';
@@ -2169,6 +2169,7 @@ function stableStringify(value: unknown): string {
 }
 
 function classifyErrorCategory(error: unknown): ToolErrorCategory {
+  if (isToolError(error)) return error.category;
   if (isTimeoutError(error)) return 'timeout';
   if (isTransientError(error)) return 'transient';
   return 'internal';
