@@ -26,12 +26,15 @@ export type StartedToolExecution = {
   leaseExpiresAt?: number;
   /** Absolute deadline after which the attempt can no longer be renewed. */
   absoluteDeadline?: number;
+  /** Stable digest of the original JSON input that the started attempt claimed. */
+  inputDigest?: string;
 };
 
 export type IdempotencyResolutionReceipt = {
   version: 1;
   key: string;
   attemptId: string;
+  inputDigest: string;
   tenantId: string;
   toolRevision: string;
   decision: 'retry';

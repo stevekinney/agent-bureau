@@ -3173,12 +3173,16 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
                 PendingReview,
                 { kind: 'tool-approval' }
               >['approval'];
+              // Publish the replacement locally before attempting durable
+              // persistence. The original binding has already been consumed;
+              // keeping it in memory after a persistence failure would make a
+              // later retry reuse an invalid approval.
+              pendingApprovalOverrides.set(review.id, replacementApproval);
               await persistPendingApprovalOverrideWithRetry(
                 review.sessionId,
                 review.id,
                 replacementApproval,
               );
-              pendingApprovalOverrides.set(review.id, replacementApproval);
             }
             keepPending = true;
           }

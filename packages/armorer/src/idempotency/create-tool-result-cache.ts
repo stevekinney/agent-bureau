@@ -85,6 +85,7 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
         ...(typeof value['absoluteDeadline'] === 'number'
           ? { absoluteDeadline: value['absoluteDeadline'] }
           : {}),
+        ...(typeof value['inputDigest'] === 'string' ? { inputDigest: value['inputDigest'] } : {}),
       };
     }
 

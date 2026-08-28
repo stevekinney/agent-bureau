@@ -929,6 +929,107 @@ describe('createToolbox', () => {
     expect(await approvalStateStore.state(paused.pendingApproval!.approvalBinding!)).toBe('issued');
   });
 
+  it('cancels while reading durable approval state without consuming or executing', async () => {
+    let executions = 0;
+    const sourceStore = createProcessLocalApprovalStateStore();
+    const tool = createTool({
+      name: 'stalled-approval-state',
+      description: 'stalled approval state',
+      version: '1.0.0',
+      input: z.object({}),
+      async execute() {
+        executions += 1;
+        return 'executed';
+      },
+    });
+    const options = {
+      approvalSecret: 'stalled-approval-state-secret',
+      approvalStateStore: sourceStore,
+      policy: { beforeExecute: () => ({ status: 'needs_approval' as const }) },
+    };
+    const paused = await createToolbox([tool], options).execute(
+      { id: 'stalled-state-call', name: tool.name, arguments: {} },
+      approvalExecutionOptions,
+    );
+    const approval = paused.pendingApproval as SignedPendingToolApproval;
+    const betweenReadsController = new AbortController();
+    const abortAfterStateStore = {
+      ...sourceStore,
+      state: () =>
+        ({
+          then(
+            onFulfilled: (state: 'issued') => unknown,
+            _onRejected?: (error: unknown) => unknown,
+          ) {
+            const result = onFulfilled('issued');
+            betweenReadsController.abort('cancelled after state read');
+            return Promise.resolve(result);
+          },
+        }) as Promise<'issued'>,
+    };
+    await expect(
+      createToolbox([tool], {
+        ...options,
+        approvalStateStore: abortAfterStateStore,
+      }).resumeApproval(approval, {
+        ...approvalExecutionOptions,
+        signal: betweenReadsController.signal,
+      }),
+    ).resolves.toMatchObject({ outcome: 'error', errorCategory: 'cancelled' });
+    let deadlineClockReads = 0;
+    await expect(
+      createToolbox([tool], options).resumeApproval(approval, {
+        ...approvalExecutionOptions,
+        requestContext: { ...approvalExecutionOptions.requestContext, deadline: 10 },
+        now: () => (deadlineClockReads++ === 0 ? 0 : 10),
+      }),
+    ).resolves.toMatchObject({ outcome: 'error', errorCategory: 'timeout' });
+    let resolveState!: (state: 'issued' | 'consumed' | 'revoked' | undefined) => void;
+    const statePending = new Promise<'issued' | 'consumed' | 'revoked' | undefined>((resolve) => {
+      resolveState = resolve;
+    });
+    const stalledStore = { ...sourceStore, state: async () => statePending };
+    const resumeToolbox = createToolbox([tool], {
+      ...options,
+      approvalStateStore: stalledStore,
+    });
+    const preAbortedController = new AbortController();
+    preAbortedController.abort('already cancelled state read');
+    await expect(
+      resumeToolbox.resumeApproval(approval, {
+        ...approvalExecutionOptions,
+        signal: preAbortedController.signal,
+      }),
+    ).resolves.toMatchObject({ outcome: 'error', errorCategory: 'cancelled' });
+    await expect(
+      resumeToolbox.resumeApproval(approval, {
+        ...approvalExecutionOptions,
+        requestContext: { ...approvalExecutionOptions.requestContext, deadline: 10 },
+        now: () => 10,
+      }),
+    ).resolves.toMatchObject({ outcome: 'error', errorCategory: 'timeout' });
+    await expect(
+      resumeToolbox.resumeApproval(approval, {
+        ...approvalExecutionOptions,
+        requestContext: {
+          ...approvalExecutionOptions.requestContext,
+          deadline: Date.now() + 5,
+        },
+      }),
+    ).resolves.toMatchObject({ outcome: 'error', errorCategory: 'timeout' });
+    const controller = new AbortController();
+    const pending = resumeToolbox.resumeApproval(approval, {
+      ...approvalExecutionOptions,
+      signal: controller.signal,
+    });
+    controller.abort('caller cancelled state read');
+    const result = await pending;
+
+    expect(result).toMatchObject({ outcome: 'error', errorCategory: 'cancelled' });
+    expect(executions).toBe(0);
+    resolveState('issued');
+  });
+
   it('times out stalled resumed-approval schema validation without consuming the approval', async () => {
     const timing = createManualToolboxDeadlineTiming();
     let startValidation!: () => void;
@@ -1731,6 +1832,41 @@ describe('createToolbox', () => {
     await revokedRecovery.restoreApproval(revokedApproval);
     await revokedRecovery.revokeApproval(revokedApproval);
     await expect(revokedRecovery.restoreApproval(revokedApproval)).rejects.toThrow('revoked');
+  });
+
+  it('accepts a concurrent restore when the binding is already issued', async () => {
+    const tool = createTool({
+      name: 'concurrent-restore',
+      version: '1.0.0',
+      description: 'Concurrent restore',
+      input: z.object({}),
+      execute: () => 'restored',
+    });
+    const sourceStore = createProcessLocalApprovalStateStore();
+    const options = {
+      approvalSecret: 'concurrent-restore-secret',
+      approvalStateStore: sourceStore,
+      policy: { beforeExecute: () => ({ status: 'needs_approval' as const }) },
+    };
+    const paused = await createToolbox([tool], options).execute(
+      { id: 'concurrent-restore-call', name: tool.name, arguments: {} },
+      approvalExecutionOptions,
+    );
+    const approval = paused.pendingApproval as SignedPendingToolApproval;
+    let firstStateRead = true;
+    const concurrentStore = {
+      ...sourceStore,
+      state: async () => (firstStateRead ? undefined : ('issued' as const)),
+      issue: async () => {
+        firstStateRead = false;
+        throw new Error('concurrent issue');
+      },
+    };
+
+    await createToolbox([tool], {
+      ...options,
+      approvalStateStore: concurrentStore,
+    }).restoreApproval(approval);
   });
 
   it('rejects persisted approvals with stale toolbox or policy revisions', async () => {

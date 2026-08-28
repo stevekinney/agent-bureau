@@ -601,6 +601,7 @@ describe('withToolboxIdempotency', () => {
           version: 1,
           key,
           attemptId: 'invented-attempt',
+          inputDigest: 'unused-input-digest',
           tenantId: 'tenant-a',
           toolRevision: 'default:add',
           decision: 'retry',
@@ -901,6 +902,7 @@ describe('withToolboxIdempotency', () => {
         startedAt: Date.now(),
         ttl: 60_000,
         attemptId: 'original-attempt',
+        inputDigest: fullInputKey({ a: 1, b: 2 }),
       },
     );
 
@@ -912,6 +914,7 @@ describe('withToolboxIdempotency', () => {
       key: expectedCacheKey('tenant-a', 'default:add', 'add:retry-after-review'),
       outcome: 'unknown-outcome',
       attemptId: 'original-attempt',
+      inputDigest: fullInputKey({ a: 1, b: 2 }),
     });
     const receiptAttemptId = pause.idempotency?.attemptId;
     if (!receiptAttemptId) throw new Error('Expected unknown outcome to expose attemptId.');
@@ -923,6 +926,7 @@ describe('withToolboxIdempotency', () => {
           version: 1,
           key: pause.idempotency.key,
           attemptId: receiptAttemptId,
+          inputDigest: pause.idempotency.inputDigest!,
           tenantId: 'tenant-a',
           toolRevision: 'default:add',
           decision: 'retry',
@@ -1455,6 +1459,7 @@ describe('withToolboxIdempotency', () => {
       key: expectedCacheKey('tenant-a', 'default:charge', 'charge:charge-once'),
       outcome: 'unknown-outcome',
       attemptId: expect.any(String),
+      inputDigest: expect.any(String),
     });
     expect(sideEffects).toEqual([100]);
     expect(
@@ -1491,6 +1496,7 @@ describe('withToolboxIdempotency', () => {
       key: expectedCacheKey('tenant-a', 'default:add', 'add:primitive-error'),
       outcome: 'unknown-outcome',
       attemptId: expect.any(String),
+      inputDigest: expect.any(String),
     });
     expect(
       await cache.getState!(expectedCacheKey('tenant-a', 'default:add', 'add:primitive-error')),
@@ -1532,6 +1538,7 @@ describe('withToolboxIdempotency', () => {
       key: expectedCacheKey('tenant-a', 'default:add', 'add:error-without-object'),
       outcome: 'unknown-outcome',
       attemptId: expect.any(String),
+      inputDigest: expect.any(String),
     });
     expect(
       await cache.getState!(
@@ -1747,6 +1754,7 @@ describe('withToolboxIdempotency', () => {
       ),
       outcome: 'unknown-outcome',
       attemptId: expect.any(String),
+      inputDigest: expect.any(String),
     });
   });
 
@@ -1969,6 +1977,7 @@ describe('withToolboxIdempotency', () => {
       startedAt: Date.now(),
       ttl: 60_000,
       attemptId: 'original-attempt',
+      inputDigest: fullInputKey({ a: 1, b: 2 }),
     };
     const completed = {
       status: 'completed' as const,
@@ -1999,6 +2008,7 @@ describe('withToolboxIdempotency', () => {
           version: 1,
           key,
           attemptId: 'original-attempt',
+          inputDigest: started.inputDigest,
           tenantId: 'tenant-a',
           toolRevision: 'default:add',
           decision: 'retry',
@@ -2031,6 +2041,7 @@ describe('withToolboxIdempotency', () => {
           version: 1,
           key,
           attemptId: 'original-attempt',
+          inputDigest: started.inputDigest,
           tenantId: 'tenant-a',
           toolRevision: 'default:add',
           decision: 'retry',
@@ -2066,6 +2077,7 @@ describe('withToolboxIdempotency', () => {
           version: 1,
           key,
           attemptId: 'original-attempt',
+          inputDigest: started.inputDigest,
           tenantId: 'tenant-a',
           toolRevision: 'default:add',
           decision: 'retry',
@@ -2095,6 +2107,7 @@ describe('withToolboxIdempotency', () => {
       attemptId: 'expired-attempt',
       leaseExpiresAt: 500,
       absoluteDeadline: 900,
+      inputDigest: fullInputKey({ a: 1, b: 2 }),
     });
     let clock = 1_000;
     let replacementStartedAt: number | undefined;
@@ -2133,6 +2146,7 @@ describe('withToolboxIdempotency', () => {
           version: 1,
           key,
           attemptId: 'expired-attempt',
+          inputDigest: fullInputKey({ a: 1, b: 2 }),
           tenantId: 'tenant-a',
           toolRevision: 'default:add',
           decision: 'retry',
@@ -2167,6 +2181,555 @@ describe('withToolboxIdempotency', () => {
     ).rejects.toThrow('tenantId must match');
   });
 
+  it('returns cancellation and deadline outcomes before cache admission', async () => {
+    const toolbox = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache,
+      tenantId: 'tenant-a',
+    });
+    const controller = new AbortController();
+    controller.abort(new Error('client stopped'));
+    const cancelled = await toolbox.execute(
+      { name: 'add', arguments: { a: 1, b: 2 } },
+      { signal: controller.signal },
+    );
+    expect(cancelled.errorCategory).toBe('cancelled');
+    expect(cancelled.errorMessage).toBe('client stopped');
+
+    const timedOut = await toolbox.execute(
+      { name: 'add', arguments: { a: 1, b: 2 } },
+      {
+        requestContext: { ...createTestRequestContext('tenant-a'), deadline: 10 },
+        now: () => 10,
+      },
+    );
+    expect(timedOut.errorCategory).toBe('timeout');
+    expect(timedOut.errorMessage).toBe('Execution deadline exceeded');
+
+    await expect(
+      toolbox.execute(
+        { name: 'add', arguments: { a: 1, b: 2 } },
+        {
+          requestContext: { ...createTestRequestContext('tenant-a'), deadline: Number.NaN },
+        },
+      ),
+    ).rejects.toThrow('Execution deadline must be finite');
+
+    const completedBeforeDeadline = await toolbox.execute(
+      { name: 'add', arguments: { a: 4, b: 5 } },
+      {
+        requestContext: {
+          ...createTestRequestContext('tenant-a'),
+          deadline: Date.now() + 1_000,
+        },
+      },
+    );
+    expect(completedBeforeDeadline.result).toBe(9);
+  });
+
+  it('interrupts a stalled cache read and rejects altered arguments for a started key', async () => {
+    let releaseRead!: (value: undefined) => void;
+    const stalledCache: ToolResultCache = {
+      ...cache,
+      getState: () => new Promise((resolve) => (releaseRead = resolve)),
+    };
+    const controller = new AbortController();
+    const toolbox = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache: stalledCache,
+      tenantId: 'tenant-a',
+    });
+    const pending = toolbox.execute(
+      { name: 'add', arguments: { a: 1, b: 2 } },
+      { signal: controller.signal },
+    );
+    controller.abort('read cancelled');
+    const cancelled = await pending;
+    expect(cancelled.errorCategory).toBe('cancelled');
+    releaseRead(undefined);
+
+    const key = expectedCacheKey('tenant-a', 'default:add', 'add:shared-digest');
+    await cache.claimStarted(key, {
+      status: 'started',
+      toolName: 'add',
+      startedAt: Date.now(),
+      ttl: 60_000,
+      attemptId: 'digest-attempt',
+      inputDigest: fullInputKey({ a: 1, b: 2 }),
+    });
+    const result = await withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache,
+      tenantId: 'tenant-a',
+    }).execute(
+      { name: 'add', arguments: { a: 9, b: 9 } },
+      {
+        idempotencyKey: 'shared-digest',
+        requestContext: createTestRequestContext('tenant-a'),
+        resolutionReceipt: {
+          version: 1,
+          key,
+          attemptId: 'digest-attempt',
+          inputDigest: fullInputKey({ a: 1, b: 2 }),
+          tenantId: 'tenant-a',
+          toolRevision: 'default:add',
+          decision: 'retry',
+          evidence: 'operator checked the original arguments',
+          authorizedAt: Date.now(),
+          authorizedBy: 'operator-a',
+          nonce: 'digest-nonce',
+          authorization: 'signed',
+        },
+      },
+    );
+    expect(result.outcome).toBe('action_required');
+    expect(result.idempotency?.outcome).toBe('unknown-outcome');
+  });
+
+  it('interrupts every deferred cache operation and re-arms stalled deadlines', async () => {
+    const call = { id: 'control-call', name: 'add', arguments: { a: 1, b: 2 } };
+    const requestContext = createTestRequestContext('tenant-a');
+    const interrupt = async (
+      cacheOverrides: Partial<ToolResultCache>,
+      operationOptions: Record<string, unknown> = {},
+      wrapperOptions: Record<string, unknown> = {},
+    ) => {
+      const controller = new AbortController();
+      const toolbox = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+        cache: { ...cache, ...cacheOverrides },
+        tenantId: 'tenant-a',
+        ...wrapperOptions,
+      });
+      const pending = toolbox.execute(call, {
+        requestContext,
+        signal: controller.signal,
+        ...operationOptions,
+      });
+      await Promise.resolve();
+      controller.abort('operation interrupted');
+      const result = await pending;
+      expect(result.errorCategory).toBe('cancelled');
+      return result;
+    };
+
+    let releaseRead!: () => void;
+    await interrupt({
+      getState: () => new Promise((resolve) => (releaseRead = resolve)),
+    });
+    releaseRead();
+
+    await expect(
+      withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+        cache: {
+          ...cache,
+          getState: () => {
+            throw new Error('cache read failed');
+          },
+        },
+        tenantId: 'tenant-a',
+      }).execute(call, {
+        requestContext,
+        signal: new AbortController().signal,
+        now: () => 0,
+      }),
+    ).rejects.toThrow();
+
+    const deadlineCallbacks: Array<() => void> = [];
+    let clock = 0;
+    let releaseDeadlineRead!: () => void;
+    const deadlineRead = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache: {
+        ...cache,
+        getState: () => new Promise((resolve) => (releaseDeadlineRead = resolve)),
+      },
+      tenantId: 'tenant-a',
+    }).execute(call, {
+      requestContext: { ...requestContext, deadline: 10 },
+      now: () => clock,
+      setTimeoutFunction: (callback: () => void) => {
+        deadlineCallbacks.push(callback);
+        return callback;
+      },
+      clearTimeoutFunction: () => undefined,
+    });
+    await Promise.resolve();
+    clock = 5;
+    deadlineCallbacks.shift()!();
+    clock = 10;
+    deadlineCallbacks.shift()!();
+    const deadlineResult = await deadlineRead;
+    expect(deadlineResult.errorCategory).toBe('timeout');
+    releaseDeadlineRead();
+
+    await interrupt({
+      getState: async () => undefined,
+      claimStarted: () => new Promise(() => undefined),
+    });
+
+    const started = {
+      status: 'started' as const,
+      toolName: 'add',
+      startedAt: Date.now(),
+      ttl: 60_000,
+      attemptId: 'control-attempt',
+      inputDigest: fullInputKey(call.arguments),
+      leaseExpiresAt: 0,
+    };
+    const key = expectedCacheKey('tenant-a', 'default:add', `add:${fullInputKey(call.arguments)}`);
+    const receipt = {
+      version: 1 as const,
+      key,
+      attemptId: started.attemptId,
+      inputDigest: started.inputDigest,
+      tenantId: 'tenant-a',
+      toolRevision: 'default:add',
+      decision: 'retry' as const,
+      evidence: 'operator checked the side effect',
+      authorizedAt: Date.now(),
+      authorizedBy: 'operator-a',
+      nonce: 'control-nonce',
+      authorization: 'signed',
+    };
+    await interrupt(
+      {
+        getState: async () => started,
+      },
+      { resolutionReceipt: receipt },
+      { verifyResolutionReceipt: () => new Promise(() => undefined) },
+    );
+  });
+
+  it('interrupts deadline cleanup, receipt verification, replacement, and race reads', async () => {
+    const call = { id: 'deferred-call', name: 'add', arguments: { a: 1, b: 2 } };
+    const requestContext = createTestRequestContext('tenant-a');
+    const key = expectedCacheKey('tenant-a', 'default:add', `add:${fullInputKey(call.arguments)}`);
+    const receipt = (attemptId: string) => ({
+      version: 1 as const,
+      key,
+      attemptId,
+      inputDigest: fullInputKey(call.arguments),
+      tenantId: 'tenant-a',
+      toolRevision: 'default:add',
+      decision: 'retry' as const,
+      evidence: 'operator verified the original attempt',
+      authorizedAt: Date.now(),
+      authorizedBy: 'operator-a',
+      nonce: `deferred-${attemptId}`,
+      authorization: 'signed',
+    });
+    const started = (attemptId: string): CachedToolResult => ({
+      status: 'started',
+      toolName: 'add',
+      startedAt: 0,
+      ttl: 60_000,
+      attemptId,
+      leaseExpiresAt: 0,
+      absoluteDeadline: 60_000,
+      inputDigest: fullInputKey(call.arguments),
+    });
+
+    let clearCount = 0;
+    let releaseRead!: () => void;
+    const deadlineController = new AbortController();
+    const deadlineRead = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache: {
+        ...cache,
+        getState: () => new Promise((resolve) => (releaseRead = () => resolve(undefined))),
+      },
+      tenantId: 'tenant-a',
+    }).execute(call, {
+      requestContext: { ...requestContext, deadline: 10 },
+      signal: deadlineController.signal,
+      now: () => 0,
+      setTimeoutFunction: (callback: () => void) => callback,
+      clearTimeoutFunction: () => {
+        clearCount++;
+      },
+    });
+    await Promise.resolve();
+    deadlineController.abort();
+    const deadlineResult = await deadlineRead;
+    expect(deadlineResult.errorCategory).toBe('cancelled');
+    expect(clearCount).toBe(1);
+    releaseRead();
+
+    const interruptDeferred = async (
+      entry: CachedToolResult,
+      operation: (controller: AbortController) => Partial<ToolResultCache>,
+      options: Record<string, unknown> = {},
+      waitUntil: () => boolean = () => true,
+      operationStarted?: Promise<void>,
+    ) => {
+      const controller = new AbortController();
+      const pending = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+        cache: {
+          ...cache,
+          getState: async () => entry,
+          ...operation(controller),
+        },
+        tenantId: 'tenant-a',
+        verifyResolutionReceipt: () => true,
+        ...options,
+      }).execute(call, {
+        requestContext,
+        signal: controller.signal,
+        resolutionReceipt: receipt(entry.attemptId!),
+      });
+      if (operationStarted) {
+        await operationStarted;
+      } else {
+        for (let index = 0; index < 5 && !waitUntil(); index++) {
+          await Promise.resolve();
+        }
+      }
+      controller.abort('deferred operation');
+      const result = await pending;
+      expect(result.errorCategory).toBe('cancelled');
+    };
+
+    const legacyStarted = {
+      status: 'started' as const,
+      toolName: 'add',
+      startedAt: 0,
+      ttl: 60_000,
+      leaseExpiresAt: 0,
+    } as CachedToolResult;
+    let legacyVerificationStarted = false;
+    const legacyController = new AbortController();
+    const legacyPending = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache: {
+        ...cache,
+        getState: async () => legacyStarted,
+      },
+      tenantId: 'tenant-a',
+      verifyLegacyResolutionReceipt: () => {
+        legacyVerificationStarted = true;
+        return new Promise(() => undefined);
+      },
+    }).execute(call, {
+      requestContext,
+      signal: legacyController.signal,
+      legacyResolutionReceipt: {
+        version: 1,
+        key,
+        tenantId: 'tenant-a',
+        toolRevision: 'default:add',
+        toolName: 'add',
+        legacyStartedAt: 0,
+        decision: 'retry',
+        evidence: 'operator verified the original attempt',
+        authorizedAt: 0,
+        authorizedBy: 'operator-a',
+        nonce: 'legacy-deferred',
+        authorization: 'signed',
+      },
+    });
+    for (let index = 0; index < 5 && !legacyVerificationStarted; index++) {
+      await Promise.resolve();
+    }
+    legacyController.abort('legacy verification');
+    const legacyResult = await legacyPending;
+    expect(legacyResult.errorCategory).toBe('cancelled');
+
+    let legacyReplacementStarted = false;
+    let markLegacyReplacementStarted!: () => void;
+    const legacyReplacementStartedPromise = new Promise<void>((resolve) => {
+      markLegacyReplacementStarted = resolve;
+    });
+    const legacyReplaceController = new AbortController();
+    const legacyReplacePending = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache: {
+        ...cache,
+        getState: async () => legacyStarted,
+        replaceLegacyStarted: () => {
+          legacyReplacementStarted = true;
+          markLegacyReplacementStarted();
+          return new Promise(() => undefined);
+        },
+      },
+      tenantId: 'tenant-a',
+      verifyLegacyResolutionReceipt: () => true,
+      now: () => 1_000,
+    }).execute(call, {
+      requestContext,
+      signal: legacyReplaceController.signal,
+      legacyResolutionReceipt: {
+        version: 1,
+        key,
+        tenantId: 'tenant-a',
+        toolRevision: 'default:add',
+        toolName: 'add',
+        legacyStartedAt: 0,
+        decision: 'retry',
+        evidence: 'operator verified the original attempt',
+        authorizedAt: 0,
+        authorizedBy: 'operator-a',
+        nonce: 'legacy-replace-deferred',
+        authorization: 'signed',
+      },
+    });
+    await legacyReplacementStartedPromise;
+    expect(legacyReplacementStarted).toBe(true);
+    legacyReplaceController.abort('legacy replacement');
+    const legacyReplaceResult = await legacyReplacePending;
+    expect(legacyReplaceResult.errorCategory).toBe('cancelled');
+
+    let fencedVerificationStarted = false;
+    await interruptDeferred(
+      started('verify-attempt'),
+      () => ({
+        replaceUnknownStarted: async () => false,
+      }),
+      {
+        verifyResolutionReceipt: () => {
+          fencedVerificationStarted = true;
+          return new Promise(() => undefined);
+        },
+      },
+      () => fencedVerificationStarted,
+    );
+
+    let fencedReplacementStarted = false;
+    let markFencedReplacementStarted!: () => void;
+    const fencedReplacementStartedPromise = new Promise<void>((resolve) => {
+      markFencedReplacementStarted = resolve;
+    });
+    await interruptDeferred(
+      started('fenced-attempt'),
+      () => ({
+        replaceUnknownStarted: () => {
+          fencedReplacementStarted = true;
+          markFencedReplacementStarted();
+          return new Promise(() => undefined);
+        },
+      }),
+      {},
+      () => fencedReplacementStarted,
+      fencedReplacementStartedPromise,
+    );
+
+    let claimStarted = false;
+    const claimController = new AbortController();
+    const claimPending = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache: {
+        ...cache,
+        getState: async () => undefined,
+        claimStarted: () => {
+          claimStarted = true;
+          return new Promise(() => undefined);
+        },
+      },
+      tenantId: 'tenant-a',
+    }).execute(call, { requestContext, signal: claimController.signal });
+    for (let index = 0; index < 5 && !claimStarted; index++) await Promise.resolve();
+    expect(claimStarted).toBe(true);
+    claimController.abort('claim interrupted');
+    const claimResult = await claimPending;
+    expect(claimResult.errorCategory).toBe('cancelled');
+
+    let readCount = 0;
+    let replaceCount = 0;
+    let releaseRaceRead!: () => void;
+    let markRaceReadStarted!: () => void;
+    const raceReadStarted = new Promise<void>((resolve) => {
+      markRaceReadStarted = resolve;
+    });
+    const raceController = new AbortController();
+    const racePending = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache: {
+        ...cache,
+        getState: async () => {
+          readCount++;
+          if (readCount === 1) return started('race-attempt');
+          markRaceReadStarted();
+          return new Promise((resolve) => (releaseRaceRead = () => resolve(undefined)));
+        },
+        replaceUnknownStarted: async () => {
+          replaceCount++;
+          return false;
+        },
+      },
+      tenantId: 'tenant-a',
+      verifyResolutionReceipt: () => true,
+      now: () => 1,
+    }).execute(call, {
+      requestContext,
+      signal: raceController.signal,
+      resolutionReceipt: receipt('race-attempt'),
+    });
+    await raceReadStarted;
+    expect(replaceCount).toBe(1);
+    expect(readCount).toBe(2);
+    expect(releaseRaceRead).toBeDefined();
+    raceController.abort('race read interrupted');
+    const raceResult = await racePending;
+    expect(raceResult.errorCategory).toBe('cancelled');
+    releaseRaceRead?.();
+  });
+
+  it('normalizes unknown failures and cancellation reasons', async () => {
+    const call = { name: 'add', arguments: { a: 1, b: 2 } };
+    const requestContext = createTestRequestContext('tenant-a');
+    await expect(
+      withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+        cache: { ...cache, getState: async () => Promise.reject({ code: 'cache-failure' }) },
+        tenantId: 'tenant-a',
+      }).execute(call, { requestContext, signal: new AbortController().signal }),
+    ).rejects.toThrow('Unknown error');
+
+    const receiptKey = expectedCacheKey(
+      'tenant-a',
+      'default:add',
+      `add:${fullInputKey(call.arguments)}`,
+    );
+    await expect(
+      withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+        cache: {
+          ...cache,
+          getState: async () => ({
+            status: 'started',
+            toolName: 'add',
+            startedAt: 0,
+            ttl: 60_000,
+            attemptId: 'sync-verification-attempt',
+            leaseExpiresAt: 0,
+            inputDigest: fullInputKey(call.arguments),
+          }),
+        },
+        tenantId: 'tenant-a',
+        verifyResolutionReceipt: () => {
+          throw 'synchronous verification failure';
+        },
+      }).execute(call, {
+        requestContext,
+        signal: new AbortController().signal,
+        resolutionReceipt: {
+          version: 1,
+          key: receiptKey,
+          attemptId: 'sync-verification-attempt',
+          inputDigest: fullInputKey(call.arguments),
+          tenantId: 'tenant-a',
+          toolRevision: 'default:add',
+          decision: 'retry',
+          evidence: 'operator verified the original attempt',
+          authorizedAt: 0,
+          authorizedBy: 'operator-a',
+          nonce: 'sync-verification',
+          authorization: 'signed',
+        },
+      }),
+    ).rejects.toThrow('synchronous verification failure');
+
+    let release!: () => void;
+    const controller = new AbortController();
+    const pending = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache: { ...cache, getState: () => new Promise((resolve) => (release = resolve)) },
+      tenantId: 'tenant-a',
+    }).execute(call, { requestContext, signal: controller.signal });
+    await Promise.resolve();
+    controller.abort({ reason: 'not-an-error' });
+    const result = await pending;
+    expect(result.errorMessage).toBe('Cancelled');
+    release();
+  });
+
   it('rejects non-finite lease and execution durations', () => {
     const toolbox = createToolbox([createToolWithKey()]);
     for (const options of [
@@ -2191,6 +2754,7 @@ describe('withToolboxIdempotency', () => {
       attemptId: 'active-attempt',
       leaseExpiresAt: 500,
       absoluteDeadline: 1_000,
+      inputDigest: fullInputKey({ a: 1, b: 2 }),
     });
     const toolbox = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
       cache,
@@ -2207,6 +2771,7 @@ describe('withToolboxIdempotency', () => {
           version: 1,
           key,
           attemptId: 'active-attempt',
+          inputDigest: fullInputKey({ a: 1, b: 2 }),
           tenantId: 'tenant-a',
           toolRevision: 'default:add',
           decision: 'retry',
@@ -2220,6 +2785,7 @@ describe('withToolboxIdempotency', () => {
     );
     expect(result.idempotency?.outcome).toBe('unknown-outcome');
     expect(result.idempotency?.attemptId).toBe('active-attempt');
+    expect(result.idempotency?.inputDigest).toBe(fullInputKey({ a: 1, b: 2 }));
     expect(addCallCount).toBe(0);
   });
 

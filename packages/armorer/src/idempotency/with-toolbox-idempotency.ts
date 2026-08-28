@@ -1,3 +1,5 @@
+import { sha256HexSync } from 'interoperability';
+
 import type { JsonValue } from '../core/serialization/json';
 import { stableStringifyJson } from '../core/serialization/json';
 import type { AnyToolbox } from '../create-toolbox';
@@ -73,6 +75,10 @@ type ToolboxExecuteOptionsWithIdempotencyKey = {
   resolutionReceipt?: IdempotencyResolutionReceipt;
   legacyResolutionReceipt?: LegacyIdempotencyResolutionReceipt;
   requestContext?: ToolRequestContext;
+  signal?: AbortSignal;
+  now?: () => number;
+  setTimeoutFunction?: (callback: () => void, milliseconds?: number) => unknown;
+  clearTimeoutFunction?: (handle: unknown) => void;
   mode?: 'parallel' | 'sequential';
   concurrency?: number;
 };
@@ -194,7 +200,7 @@ export function withToolboxIdempotency(
     fields: { id: string },
     cacheKey: string,
     toolName: string,
-    options: { attemptId?: string; legacyStartedAt?: number } = {},
+    options: { attemptId?: string; inputDigest?: string; legacyStartedAt?: number } = {},
   ): ToolExecutionResult {
     return {
       callId: fields.id,
@@ -207,6 +213,7 @@ export function withToolboxIdempotency(
         key: cacheKey,
         outcome: 'unknown-outcome',
         ...(options.attemptId ? { attemptId: options.attemptId } : {}),
+        ...(options.inputDigest ? { inputDigest: options.inputDigest } : {}),
         ...(options.legacyStartedAt !== undefined
           ? { legacyStartedAt: options.legacyStartedAt }
           : {}),
@@ -217,6 +224,138 @@ export function withToolboxIdempotency(
           'This idempotency key has an unknown outcome. Re-approve before retrying the side effect.',
       },
     };
+  }
+
+  function createInterruptedResult(
+    fields: { id: string },
+    toolName: string,
+    category: 'cancelled' | 'timeout',
+    message: string,
+    code: 'CANCELLED' | 'TIMEOUT',
+  ): ToolExecutionResult {
+    const error = { code, category, retryable: category === 'timeout', message };
+    return {
+      callId: fields.id,
+      outcome: 'error',
+      content: message,
+      toolCallId: fields.id,
+      toolName,
+      result: undefined,
+      error,
+      errorMessage: message,
+      errorCategory: category,
+    };
+  }
+
+  async function awaitBeforeExecution<T>(
+    operation: () => Promise<T>,
+    fields: { id: string },
+    toolName: string,
+    executeOptions: unknown,
+  ): Promise<
+    { outcome: 'completed'; value: T } | { outcome: 'interrupted'; result: ToolExecutionResult }
+  > {
+    const controls = executeOptions as ToolboxExecuteOptionsWithIdempotencyKey | undefined;
+    const signal = controls?.signal;
+    const deadline = controls?.requestContext?.deadline;
+    const currentTime = controls?.now ?? now;
+    const cancelled = () =>
+      createInterruptedResult(
+        fields,
+        toolName,
+        'cancelled',
+        formatCancellationReason(signal?.reason),
+        'CANCELLED',
+      );
+    const timedOut = () =>
+      createInterruptedResult(
+        fields,
+        toolName,
+        'timeout',
+        'Execution deadline exceeded',
+        'TIMEOUT',
+      );
+
+    if (deadline !== undefined && !Number.isFinite(deadline)) {
+      throw new Error('Execution deadline must be finite.');
+    }
+    if (deadline !== undefined && deadline <= currentTime()) {
+      return { outcome: 'interrupted', result: timedOut() };
+    }
+    if (signal?.aborted) {
+      return { outcome: 'interrupted', result: cancelled() };
+    }
+
+    let promise: Promise<T>;
+    try {
+      promise = operation();
+    } catch (error) {
+      return Promise.reject(normalizeIdempotencyError(error));
+    }
+
+    if (!signal && deadline === undefined) {
+      return { outcome: 'completed', value: await promise };
+    }
+
+    return new Promise((resolve, reject) => {
+      const setTimeoutFunction =
+        controls?.setTimeoutFunction ??
+        ((callback, milliseconds) => setTimeout(callback, milliseconds));
+      const clearTimeoutFunction =
+        controls?.clearTimeoutFunction ??
+        ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+      let deadlineTimer: unknown;
+      let deadlineTimerScheduled = false;
+      let settled = false;
+
+      const clearDeadline = () => {
+        if (!deadlineTimerScheduled) return;
+        deadlineTimerScheduled = false;
+        clearTimeoutFunction(deadlineTimer);
+      };
+      const cleanup = () => {
+        signal?.removeEventListener('abort', onAbort);
+        clearDeadline();
+      };
+      const resolveOnce = (
+        result:
+          | { outcome: 'completed'; value: T }
+          | { outcome: 'interrupted'; result: ToolExecutionResult },
+      ) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(result);
+      };
+      const rejectOnce = (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(normalizeIdempotencyError(error));
+      };
+      const scheduleDeadline = () => {
+        if (deadline === undefined) return;
+        const remaining = deadline - currentTime();
+        const delay = remaining <= 0 ? 0 : Math.min(remaining, maximumTimerDelay);
+        deadlineTimerScheduled = true;
+        deadlineTimer = setTimeoutFunction(() => {
+          deadlineTimerScheduled = false;
+          if (settled) return;
+          if (deadline <= currentTime()) {
+            resolveOnce({ outcome: 'interrupted', result: timedOut() });
+            return;
+          }
+          scheduleDeadline();
+        }, delay);
+      };
+      function onAbort() {
+        resolveOnce({ outcome: 'interrupted', result: cancelled() });
+      }
+
+      signal?.addEventListener('abort', onAbort, { once: true });
+      scheduleDeadline();
+      void promise.then((value) => resolveOnce({ outcome: 'completed', value }), rejectOnce);
+    });
   }
 
   function createAuthorizationRequiredResult(
@@ -297,7 +436,11 @@ export function withToolboxIdempotency(
     );
   }
 
-  function createStartedExecution(toolName: string, startedAt: number): StartedToolExecution {
+  function createStartedExecution(
+    toolName: string,
+    startedAt: number,
+    inputDigest: string,
+  ): StartedToolExecution {
     return {
       status: 'started',
       toolName,
@@ -306,6 +449,7 @@ export function withToolboxIdempotency(
       attemptId: createAttemptId(),
       leaseExpiresAt: Math.min(startedAt + leaseDurationMs, startedAt + maximumExecutionDurationMs),
       absoluteDeadline: startedAt + maximumExecutionDurationMs,
+      inputDigest,
     };
   }
 
@@ -317,7 +461,16 @@ export function withToolboxIdempotency(
     originalExecute: (call: ToolCallInput, options?: unknown) => Promise<ToolExecutionResult>,
     executeOptions?: unknown,
   ): Promise<ToolExecutionResult> {
-    const current = await cache.getState(cacheKey);
+    const currentRead = await awaitBeforeExecution(
+      () => cache.getState(cacheKey),
+      fields,
+      fallbackToolName,
+      executeOptions,
+    );
+    if (currentRead.outcome === 'interrupted') {
+      return currentRead.result;
+    }
+    const current = currentRead.value;
     if (current?.status === 'completed') {
       return createCompletedCacheHitResult(
         fields,
@@ -335,6 +488,7 @@ export function withToolboxIdempotency(
         : undefined;
     return createUnknownOutcomeResult(fields, cacheKey, current?.toolName ?? fallbackToolName, {
       attemptId: currentAttemptId,
+      inputDigest: current?.status === 'started' ? current.inputDigest : undefined,
       legacyStartedAt,
     });
   }
@@ -398,7 +552,17 @@ export function withToolboxIdempotency(
     }
     const cacheKey = stableStringifyJson([tenantId, revision, baseKey]);
     const serializedOriginalInput = serializeOriginalInput(call.arguments);
-    const cached = await getCacheEntry(cache, cacheKey);
+    const inputDigest = createInputDigest(serializedOriginalInput);
+    const cachedRead = await awaitBeforeExecution(
+      () => getCacheEntry(cache, cacheKey),
+      fields,
+      fields.name,
+      executeOptions,
+    );
+    if (cachedRead.outcome === 'interrupted') {
+      return cachedRead.result;
+    }
+    const cached = cachedRead.value;
 
     const receipt = executionIdempotencyOptions?.resolutionReceipt;
     const legacyReceipt = executionIdempotencyOptions?.legacyResolutionReceipt;
@@ -418,7 +582,8 @@ export function withToolboxIdempotency(
     let started;
     if (cached?.status === 'started') {
       if (cached.attemptId === undefined) {
-        const validLegacyReceipt =
+        let validLegacyReceipt = false;
+        if (
           legacyReceipt?.version === 1 &&
           legacyReceipt.key === cacheKey &&
           legacyReceipt.tenantId === tenantId &&
@@ -427,9 +592,19 @@ export function withToolboxIdempotency(
           legacyReceipt.legacyStartedAt === cached.startedAt &&
           legacyReceipt.decision === 'retry' &&
           hasReceiptAuthorization(legacyReceipt) &&
-          Boolean(
-            verifyLegacyResolutionReceipt && (await verifyLegacyResolutionReceipt(legacyReceipt)),
+          verifyLegacyResolutionReceipt
+        ) {
+          const legacyReceiptVerification = await awaitBeforeExecution(
+            () => Promise.resolve(verifyLegacyResolutionReceipt(legacyReceipt)),
+            fields,
+            cached.toolName,
+            executeOptions,
           );
+          if (legacyReceiptVerification.outcome === 'interrupted') {
+            return legacyReceiptVerification.result;
+          }
+          validLegacyReceipt = legacyReceiptVerification.value === true;
+        }
         if (!validLegacyReceipt) {
           return createUnknownOutcomeResult(fields, cacheKey, cached.toolName, {
             legacyStartedAt: cached.startedAt,
@@ -441,13 +616,23 @@ export function withToolboxIdempotency(
             legacyStartedAt: cached.startedAt,
           });
         }
-        execution = createStartedExecution(fields.name, startedAt);
-        const replaced = await cache.replaceLegacyStarted(
-          cacheKey,
-          { toolName: cached.toolName, startedAt: cached.startedAt },
-          execution,
-          startedAt,
+        execution = createStartedExecution(fields.name, startedAt, inputDigest);
+        const replacedResult = await awaitBeforeExecution(
+          () =>
+            cache.replaceLegacyStarted(
+              cacheKey,
+              { toolName: cached.toolName, startedAt: cached.startedAt },
+              execution,
+              startedAt,
+            ),
+          fields,
+          cached.toolName,
+          executeOptions,
         );
+        if (replacedResult.outcome === 'interrupted') {
+          return replacedResult.result;
+        }
+        const replaced = replacedResult.value;
         if (!replaced) {
           return createUnknownOutcomeAfterReplacementRace(
             fields,
@@ -460,7 +645,13 @@ export function withToolboxIdempotency(
         }
         started = { outcome: 'claimed' } as const;
       } else {
-        const validReceipt =
+        const receiptMatchesInput =
+          cached.inputDigest !== undefined &&
+          receipt?.inputDigest === cached.inputDigest &&
+          inputDigest === cached.inputDigest;
+        let validReceipt = false;
+        if (
+          receiptMatchesInput &&
           receipt?.version === 1 &&
           receipt.key === cacheKey &&
           receipt.attemptId === cached.attemptId &&
@@ -468,25 +659,44 @@ export function withToolboxIdempotency(
           receipt.toolRevision === revision &&
           receipt.decision === 'retry' &&
           hasReceiptAuthorization(receipt) &&
-          Boolean(verifyResolutionReceipt && (await verifyResolutionReceipt(receipt)));
+          verifyResolutionReceipt
+        ) {
+          const receiptVerification = await awaitBeforeExecution(
+            () => Promise.resolve(verifyResolutionReceipt(receipt)),
+            fields,
+            cached.toolName,
+            executeOptions,
+          );
+          if (receiptVerification.outcome === 'interrupted') {
+            return receiptVerification.result;
+          }
+          validReceipt = receiptVerification.value === true;
+        }
         if (!validReceipt) {
           return createUnknownOutcomeResult(fields, cacheKey, cached.toolName, {
             attemptId: cached.attemptId,
+            inputDigest: cached.inputDigest,
           });
         }
         const startedAt = now();
         if (cached.leaseExpiresAt !== undefined && startedAt < cached.leaseExpiresAt) {
           return createUnknownOutcomeResult(fields, cacheKey, cached.toolName, {
             attemptId: cached.attemptId,
+            inputDigest: cached.inputDigest,
           });
         }
-        execution = createStartedExecution(fields.name, startedAt);
-        const replaced = await cache.replaceUnknownStarted(
-          cacheKey,
-          cached.attemptId,
-          execution,
-          startedAt,
+        const cachedAttemptId = cached.attemptId;
+        execution = createStartedExecution(fields.name, startedAt, inputDigest);
+        const replacedResult = await awaitBeforeExecution(
+          () => cache.replaceUnknownStarted(cacheKey, cachedAttemptId, execution, startedAt),
+          fields,
+          cached.toolName,
+          executeOptions,
         );
+        if (replacedResult.outcome === 'interrupted') {
+          return replacedResult.result;
+        }
+        const replaced = replacedResult.value;
         if (!replaced) {
           return createUnknownOutcomeAfterReplacementRace(
             fields,
@@ -501,8 +711,17 @@ export function withToolboxIdempotency(
       }
     } else {
       const startedAt = now();
-      execution = createStartedExecution(fields.name, startedAt);
-      started = await claimCacheStarted(cache, cacheKey, execution);
+      execution = createStartedExecution(fields.name, startedAt, inputDigest);
+      const startedResult = await awaitBeforeExecution(
+        () => claimCacheStarted(cache, cacheKey, execution),
+        fields,
+        fields.name,
+        executeOptions,
+      );
+      if (startedResult.outcome === 'interrupted') {
+        return startedResult.result;
+      }
+      started = startedResult.value;
     }
 
     if (started.outcome === 'existing') {
@@ -510,6 +729,7 @@ export function withToolboxIdempotency(
       if (entry.status === 'started') {
         return createUnknownOutcomeResult(fields, cacheKey, entry.toolName, {
           attemptId: entry.attemptId,
+          inputDigest: entry.inputDigest,
           legacyStartedAt: entry.attemptId === undefined ? entry.startedAt : undefined,
         });
       }
@@ -599,6 +819,7 @@ export function withToolboxIdempotency(
       if (!completed) {
         return createUnknownOutcomeResult(fields, cacheKey, result.toolName, {
           attemptId: execution.attemptId,
+          inputDigest: execution.inputDigest,
         });
       }
       result.idempotency = {
@@ -675,6 +896,25 @@ function serializeOriginalInput(input: unknown): string {
   return stableStringifyJson(
     JSON.parse(JSON.stringify(input === undefined ? null : input)) as JsonValue,
   );
+}
+
+function createInputDigest(serializedOriginalInput: string): string {
+  return sha256HexSync(serializedOriginalInput);
+}
+
+function normalizeIdempotencyError(error: unknown): Error {
+  if (error instanceof Error) return error;
+  return new Error(typeof error === 'string' ? error : 'Unknown error');
+}
+
+function formatCancellationReason(reason: unknown): string {
+  if (typeof reason === 'string' && reason.length > 0) {
+    return reason;
+  }
+  if (reason instanceof Error && reason.message.length > 0) {
+    return reason.message;
+  }
+  return 'Cancelled';
 }
 
 function formatToolRevision(tool: unknown): string {

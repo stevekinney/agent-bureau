@@ -5288,7 +5288,7 @@ describe('createBureau review queue (AB-20)', () => {
     bureau.dispose();
   });
 
-  it('preserves the original approval when replacement approval persistence exhausts', async () => {
+  it('keeps the replacement approval retryable when its persistence exhausts', async () => {
     const backingStore = textValueStore(new MemoryStorage());
     let failReplacementPersistence = false;
     let replacementPersistenceAttempts = 0;
@@ -5360,10 +5360,23 @@ describe('createBureau review queue (AB-20)', () => {
       throw new Error('Expected original approval review');
     }
     expect(stillPendingReview.id).toBe(review.id);
-    expect(stillPendingReview.approval.approvalToken).toBe(originalApprovalToken);
+    expect(stillPendingReview.approval.approvalToken).not.toBe(originalApprovalToken);
     expect(persistedApprovalToken(await bureau.getSession(run.sessionId), review.id)).toBe(
       originalApprovalToken,
     );
+
+    // The in-memory replacement remains the only retryable approval even
+    // though durable persistence exhausted its attempts. Once storage
+    // recovers, a subsequent resolution uses that replacement binding rather
+    // than the consumed original descriptor.
+    failReplacementPersistence = false;
+    const retryOutcome = await bureau.resolveReview({
+      id: review.id,
+      decision: 'approve',
+      principal: 'api-key:reviewer-replacement-exhaustion',
+    });
+    expect(retryOutcome.decision).toBe('approve');
+    expect(replacementPersistenceAttempts).toBe(3);
 
     bureau.dispose();
   });

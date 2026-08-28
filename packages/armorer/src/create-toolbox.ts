@@ -12,6 +12,7 @@ import type { GeminiTool } from './adapters/gemini/types';
 import type { OpenAITool } from './adapters/openai/types';
 import {
   ApprovalBindingError,
+  type ApprovalState,
   type ApprovalStateStore,
   createProcessLocalApprovalStateStore,
   validateApprovalBinding,
@@ -1688,7 +1689,14 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
         approvalRevision,
       };
       validateApprovalBinding(approval.approvalBinding, approvalContext, approvalNow());
-      const state = await approvalStateStore.state(approval.approvalBinding);
+      const stateResult = await readApprovalStateWithInterruption(
+        approvalStateStore,
+        approval.approvalBinding,
+        approval,
+        executeOptions,
+      );
+      if (stateResult.outcome === 'interrupted') return stateResult.result;
+      const state = stateResult.state;
       if (state === undefined) {
         throw new ApprovalBindingError('Approval binding was not found.', 'not-found');
       }
@@ -1769,6 +1777,61 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     return result;
   }
 
+  async function readApprovalStateWithInterruption(
+    store: ApprovalStateStore,
+    binding: NonNullable<SignedPendingToolApproval['approvalBinding']>,
+    approval: SignedPendingToolApproval,
+    options: ToolboxExecuteOptions,
+  ): Promise<
+    | { outcome: 'read'; state: ApprovalState | undefined }
+    | { outcome: 'interrupted'; result: ToolExecutionResult }
+  > {
+    const now = options.now ?? Date.now;
+    const deadline = options.requestContext?.deadline;
+    const cancelled = () =>
+      createInterruptedResumeApprovalValidationResult(
+        approval,
+        'cancelled',
+        'Cancelled',
+        'CANCELLED',
+      );
+    const timedOut = () =>
+      createInterruptedResumeApprovalValidationResult(
+        approval,
+        'timeout',
+        'Execution deadline exceeded',
+        'TIMEOUT',
+      );
+    if (options.signal?.aborted) return { outcome: 'interrupted', result: cancelled() };
+    if (deadline !== undefined && deadline <= now())
+      return { outcome: 'interrupted', result: timedOut() };
+    if (!options.signal && deadline === undefined)
+      return { outcome: 'read', state: await store.state(binding) };
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const finish = (
+        value:
+          | { outcome: 'read'; state: ApprovalState | undefined }
+          | { outcome: 'interrupted'; result: ToolExecutionResult },
+      ) => {
+        if (settled) return;
+        settled = true;
+        options.signal?.removeEventListener('abort', onAbort);
+        if (timer !== undefined) clearTimeout(timer);
+        resolve(value);
+      };
+      const onAbort = () => finish({ outcome: 'interrupted', result: cancelled() });
+      options.signal?.addEventListener('abort', onAbort, { once: true });
+      if (deadline !== undefined)
+        timer = setTimeout(
+          () => finish({ outcome: 'interrupted', result: timedOut() }),
+          Math.max(0, deadline - now()),
+        );
+      void store.state(binding).then((state) => finish({ outcome: 'read', state }), reject);
+    });
+  }
+
   async function revokeApproval(approval: SignedPendingToolApproval): Promise<void> {
     verifyPendingApproval(approval);
     if (!approvalStateStore || !approval.approvalBinding) {
@@ -1798,7 +1861,13 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     }
     const state = await approvalStateStore.state(approval.approvalBinding);
     if (state === undefined) {
-      await approvalStateStore.issue(approval.approvalBinding);
+      try {
+        await approvalStateStore.issue(approval.approvalBinding);
+      } catch (error) {
+        const concurrentState = await approvalStateStore.state(approval.approvalBinding);
+        if (concurrentState === 'issued') return;
+        throw error;
+      }
       return;
     }
     if (state !== 'issued') {

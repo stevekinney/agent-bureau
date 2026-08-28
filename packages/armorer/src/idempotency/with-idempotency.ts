@@ -1,3 +1,5 @@
+import { sha256HexSync } from 'interoperability';
+
 import { assertJsonValue, stableStringifyJson } from '../core/serialization/json';
 import {
   approvalConsumeSymbol,
@@ -74,16 +76,20 @@ async function inputMatchesToolSchema(
   if (typeof input?.safeParseAsync !== 'function') {
     return true;
   }
+  const safeParseAsync = input.safeParseAsync;
 
   // `safeParseAsync` (not `safeParse`) so schemas with async refinements —
   // e.g. a non-Zod Standard Schema wrapped via `wrapStandardSchema`, whose
   // validation runs through an async `transform` — resolve instead of
   // throwing synchronously ("Encountered Promise during synchronous parse").
-  const result = await raceSchemaPrevalidation(input.safeParseAsync(params), options);
+  const result = await raceIdempotencyAwait(() => safeParseAsync(params), options);
   return result.success;
 }
 
-function raceSchemaPrevalidation<T>(promise: Promise<T>, options?: ToolExecuteOptions): Promise<T> {
+function raceIdempotencyAwait<T>(
+  operation: () => Promise<T>,
+  options?: ToolExecuteOptions,
+): Promise<T> {
   const signal = options?.signal;
   const deadline = options?.requestContext?.deadline;
   const now = options?.now ?? Date.now;
@@ -96,6 +102,14 @@ function raceSchemaPrevalidation<T>(promise: Promise<T>, options?: ToolExecuteOp
   if (signal?.aborted) {
     return Promise.reject(createPrevalidationCancellationError(signal.reason));
   }
+
+  let promise: Promise<T>;
+  try {
+    promise = operation();
+  } catch (error) {
+    return Promise.reject(normalizeIdempotencyError(error));
+  }
+
   if (!signal && deadline === undefined) {
     return promise;
   }
@@ -153,9 +167,7 @@ function raceSchemaPrevalidation<T>(promise: Promise<T>, options?: ToolExecuteOp
 
     signal?.addEventListener('abort', onAbort, { once: true });
     scheduleDeadline();
-    void promise.then(resolveOnce, (error) =>
-      rejectOnce(error instanceof Error ? error : new Error(String(error ?? 'Unknown error'))),
-    );
+    void promise.then(resolveOnce, (error) => rejectOnce(normalizeIdempotencyError(error)));
   });
 }
 
@@ -294,20 +306,24 @@ export function withIdempotency<T extends Tool>(
       return cached.result;
     };
 
-    const cached = await getCacheEntry(cache, key);
+    const originalInput = serializeOriginalInput(params);
+    const inputDigest = createInputDigest(originalInput);
+
+    const cached = await raceIdempotencyAwait(() => getCacheEntry(cache, key), executeOptions);
     if (cached && cached.status !== 'started') {
       return returnAuthorizedCachedResult(cached);
     }
 
     let startedExecution: StartedToolExecution;
-    let originalInput: string | undefined;
-    const serializedOriginalInput = () => {
-      originalInput ??= serializeOriginalInput(params);
-      return originalInput;
-    };
     if (cached?.status === 'started') {
       const receipt = executeOptions?.resolutionReceipt;
-      const validReceipt =
+      const receiptMatchesInput =
+        cached.inputDigest !== undefined &&
+        receipt?.inputDigest === cached.inputDigest &&
+        inputDigest === cached.inputDigest;
+      let validReceipt = false;
+      if (
+        receiptMatchesInput &&
         cached.attemptId !== undefined &&
         receipt?.version === 1 &&
         receipt.key === key &&
@@ -315,15 +331,20 @@ export function withIdempotency<T extends Tool>(
         receipt.tenantId === tenantId &&
         receipt.toolRevision === completeToolRevision &&
         receipt.decision === 'retry' &&
-        Boolean(
-          receipt.evidence &&
-          receipt.authorizedAt !== undefined &&
-          receipt.authorizedBy &&
-          receipt.nonce &&
-          receipt.authorization &&
-          verifyResolutionReceipt &&
-          (await verifyResolutionReceipt(receipt)),
+        receipt.evidence &&
+        receipt.authorizedAt !== undefined &&
+        receipt.authorizedBy &&
+        receipt.nonce &&
+        receipt.authorization &&
+        verifyResolutionReceipt
+      ) {
+        validReceipt = Boolean(
+          await raceIdempotencyAwait(
+            () => Promise.resolve(verifyResolutionReceipt(receipt)),
+            executeOptions,
+          ),
         );
+      }
       const replacementTime = now();
       if (
         !validReceipt ||
@@ -332,7 +353,6 @@ export function withIdempotency<T extends Tool>(
         onUnknownOutcome?.(key, cached);
         throw new Error(`Idempotency key "${key}" has an unknown outcome.`);
       }
-      serializedOriginalInput();
       startedExecution = {
         status: 'started',
         toolName: tool.name,
@@ -344,13 +364,13 @@ export function withIdempotency<T extends Tool>(
           replacementTime + maximumExecutionDurationMs,
         ),
         absoluteDeadline: replacementTime + maximumExecutionDurationMs,
+        inputDigest,
       };
       if (
-        !(await cache.replaceUnknownStarted(
-          key,
-          cached.attemptId!,
-          startedExecution,
-          replacementTime,
+        !(await raceIdempotencyAwait(
+          () =>
+            cache.replaceUnknownStarted(key, cached.attemptId!, startedExecution, replacementTime),
+          executeOptions,
         ))
       ) {
         onUnknownOutcome?.(key, cached);
@@ -358,7 +378,6 @@ export function withIdempotency<T extends Tool>(
       }
     } else {
       const startedAt = now();
-      serializedOriginalInput();
       startedExecution = {
         status: 'started',
         toolName: tool.name,
@@ -370,8 +389,12 @@ export function withIdempotency<T extends Tool>(
           startedAt + maximumExecutionDurationMs,
         ),
         absoluteDeadline: startedAt + maximumExecutionDurationMs,
+        inputDigest,
       };
-      const started = await claimCacheStarted(cache, key, startedExecution);
+      const started = await raceIdempotencyAwait(
+        () => claimCacheStarted(cache, key, startedExecution),
+        executeOptions,
+      );
       if (started.outcome === 'existing') {
         if (started.entry.status === 'started') {
           onUnknownOutcome?.(key, started.entry);
@@ -462,7 +485,7 @@ export function withIdempotency<T extends Tool>(
       toolName: tool.name,
       executedAt: now(),
       ttl,
-      input: serializedOriginalInput(),
+      input: originalInput,
     };
 
     if (
@@ -507,6 +530,15 @@ function serializeOriginalInput(input: unknown): string {
   const jsonInput = input === undefined ? null : input;
   assertJsonValue(jsonInput, 'idempotency input');
   return stableStringifyJson(jsonInput);
+}
+
+function createInputDigest(serializedOriginalInput: string): string {
+  return sha256HexSync(serializedOriginalInput);
+}
+
+function normalizeIdempotencyError(error: unknown): Error {
+  if (error instanceof Error) return error;
+  return new Error(typeof error === 'string' ? error : 'Unknown error');
 }
 
 function createPolicyAuthorizationOnlyOptions(

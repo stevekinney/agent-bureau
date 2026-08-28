@@ -387,12 +387,14 @@ describe('withIdempotency', () => {
     const started = await cache.getState(key);
     expect(started?.status).toBe('started');
     expect(started?.attemptId).toBeString();
+    expect(started?.inputDigest).toBeString();
 
     now = 110;
     const receipt: IdempotencyResolutionReceipt = {
       version: 1,
       key,
       attemptId: started!.attemptId!,
+      inputDigest: started!.inputDigest!,
       tenantId: 'tenant-a',
       toolRevision: 'charge:1',
       decision: 'retry',
@@ -600,6 +602,7 @@ describe('withIdempotency', () => {
       version: 1,
       key,
       attemptId: started!.attemptId!,
+      inputDigest: started!.inputDigest!,
       tenantId: 'tenant-a',
       toolRevision: 'charge:1',
       decision: 'retry',
@@ -1714,6 +1717,7 @@ describe('withIdempotency', () => {
       version: 1,
       key,
       attemptId: 'attempt-a',
+      inputDigest: 'unused-input-digest',
       tenantId: 'tenant-a',
       toolRevision: 'serializable-retry:1',
       decision: 'retry',
@@ -1762,6 +1766,47 @@ describe('withIdempotency', () => {
       ),
     ).rejects.toThrow('schema rejected');
     expect(callCount).toBe(0);
+  });
+
+  it('normalizes synchronous schema prevalidation throws before cache access', async () => {
+    let cacheReads = 0;
+    const guardedCache: ToolResultCache = {
+      ...cache,
+      getState: async () => {
+        cacheReads++;
+        return undefined;
+      },
+    };
+    const baseTool = createTool({
+      name: 'sync-throwing-prevalidation',
+      description: 'Throws synchronously during idempotency prevalidation',
+      version: '1.0.0',
+      input: z.object({ value: z.string() }),
+      idempotencyKey: (input: unknown) => fullInputKey(input),
+      async execute() {
+        return 'unreachable';
+      },
+    });
+    const tool = {
+      ...baseTool,
+      id: baseTool.id,
+      identity: baseTool.identity,
+      idempotencyKey: (input: unknown) => fullInputKey(input),
+      input: {
+        safeParseAsync() {
+          throw 'synchronous schema failure';
+        },
+      },
+    } as unknown as Tool;
+    const wrapped = withIdempotency(tool, {
+      cache: guardedCache,
+      tenantId: 'tenant-a',
+    });
+
+    await expect(wrapped.execute({ value: 'blocked' }, { requestContext })).rejects.toThrow(
+      'synchronous schema failure',
+    );
+    expect(cacheReads).toBe(0);
   });
 
   it('NEUTER CHECK: a sync `safeParse` on the wrapped schema throws (proves the fix is load-bearing)', () => {

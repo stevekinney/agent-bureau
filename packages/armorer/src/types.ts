@@ -82,6 +82,8 @@ export type ToolExecutionIdempotency = {
   outcome: 'fresh' | 'deduped' | 'unknown-outcome' | 'authorization-required';
   /** Fencing token for an unknown started attempt. Present when the durable cache recorded one. */
   attemptId?: string;
+  /** Stable digest of the original input bound to an unknown started attempt. */
+  inputDigest?: string;
   /** Started timestamp for an unknown legacy attempt that predates fencing. */
   legacyStartedAt?: number;
   resolutionReceipt?: {
