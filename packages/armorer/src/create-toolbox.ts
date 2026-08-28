@@ -1605,6 +1605,20 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     if (!approvalStateStore || !approval.approvalBinding) {
       throw new Error('Approval state store and binding are required to restore approvals.');
     }
+    const currentTool = getTool(approval.toolName);
+    const binding = approval.approvalBinding;
+    const staleRevisions = [
+      binding.toolboxRevision !== toolboxRevision ? 'toolboxRevision' : undefined,
+      binding.toolDefinitionRevision !== currentTool?.id ? 'toolDefinitionRevision' : undefined,
+      binding.policyRevision !== policyRevision ? 'policyRevision' : undefined,
+      binding.approvalRevision !== approvalRevision ? 'approvalRevision' : undefined,
+    ].filter((revision): revision is string => revision !== undefined);
+    if (staleRevisions.length > 0) {
+      throw new ApprovalBindingError(
+        `Cannot restore approval binding with stale ${staleRevisions.join(', ')}.`,
+        'invalid-binding',
+      );
+    }
     const state = await approvalStateStore.state(approval.approvalBinding);
     if (state === undefined) {
       await approvalStateStore.issue(approval.approvalBinding);

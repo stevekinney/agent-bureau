@@ -34,7 +34,7 @@ import {
 import { createStore } from '@lostgradient/operative/store';
 import { createMockGenerate as createSequentialGenerate } from '@lostgradient/operative/test';
 import { encode } from '@lostgradient/weft';
-import { KEYS, MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
+import { KEYS, MemoryStorage, resolveStorage, textValueStore } from '@lostgradient/weft/storage';
 import type { ConditionalTextValueStore } from '@lostgradient/weft/storage/text-value-store';
 import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { ApprovalBindingError, createTool, createToolbox } from 'armorer';
@@ -4065,6 +4065,39 @@ describe('createBureau session signal/update/query with terminal sessions', () =
 });
 
 describe('createBureau session signal authority revalidation', () => {
+  it('fails closed for transport-issued authority without a validator on live runs', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+    });
+    try {
+      const error = await bureau
+        .createRun({
+          message: 'Do not admit unvalidated authority',
+          requestContext: {
+            authority: {
+              principalId: 'api-key:missing-validator',
+              tenantId: 'tenant-a',
+              ownerId: 'owner-a',
+              capabilities: ['tools:execute'],
+              authorizationRevision: 'gateway:api-key:missing-validator',
+            },
+            audience: 'tenant',
+          },
+        })
+        .then(
+          () => undefined,
+          (rejection) => rejection,
+        );
+      expect(error).toBeInstanceOf(BureauError);
+      expect((error as BureauError).code).toBe('CONFLICT');
+      expect(bureau.listRuns()).toHaveLength(0);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
   it('revalidates captured authority before delivering a direct session signal', async () => {
     const bureau = await createBureau({
       generate: () => new Promise<never>(() => {}),
@@ -4212,6 +4245,69 @@ function createRegatingApprovalToolbox(approvalSecret: string, charges: number[]
 }
 
 describe('createBureau review queue (AB-20)', () => {
+  it('restores terminal-session approval reviews without durable run recovery', async () => {
+    const storage = await resolveStorage({ type: 'memory' });
+    const sessionStore = createSessionStore(textValueStore(storage));
+    const runId = 'run-terminal-review';
+    const reviewId = `approval:${runId}:call-terminal`;
+    const secondReviewId = `approval:${runId}:call-terminal-2`;
+    const approval = {
+      toolName: 'charge-card',
+      arguments: { cents: 250 },
+      approvalToken: 'persisted-approval-token',
+      action: { message: 'Approve charge' },
+    };
+    await sessionStore.save(
+      createAgentSession({
+        id: 'session-terminal-review',
+        agentName: 'terminal-agent',
+        conversationHistory: createConversationHistory({ id: 'session-terminal-review' }),
+        metadata: {
+          lastRunId: runId,
+          lastRunStatus: 'completed',
+          pendingApprovalOverrides: {
+            [reviewId]: {
+              ...approval,
+              callId: 'call-terminal',
+            },
+            [secondReviewId]: {
+              ...approval,
+              callId: 'call-terminal-2',
+            },
+          },
+        },
+      }),
+    );
+
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage,
+      durableExecution: true,
+    });
+    try {
+      const reviews = bureau.listPendingReviews();
+      expect(reviews).toHaveLength(2);
+      expect(reviews[0]).toMatchObject({
+        id: reviewId,
+        kind: 'tool-approval',
+        runId,
+        sessionId: 'session-terminal-review',
+        agentName: 'terminal-agent',
+        approval: expect.objectContaining({
+          callId: 'call-terminal',
+          toolName: 'charge-card',
+        }),
+      });
+      await bureau.resolveReview({ id: reviewId, decision: 'deny', principal: 'operator-a' });
+      expect(bureau.listPendingReviews().map((review) => review.id)).toEqual([secondReviewId]);
+      await bureau.resolveReview({ id: secondReviewId, decision: 'deny', principal: 'operator-a' });
+      expect(bureau.listPendingReviews()).toHaveLength(0);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
   it('listPendingReviews surfaces a tool call parked on needs_approval', async () => {
     const charges: number[] = [];
     const persistence = textValueStore(new MemoryStorage());

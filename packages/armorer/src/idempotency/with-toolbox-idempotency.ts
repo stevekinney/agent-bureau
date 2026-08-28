@@ -196,30 +196,6 @@ export function withToolboxIdempotency(
     };
   }
 
-  function createPolicyAuthorizationRequiredResult(
-    fields: { id: string },
-    cacheKey: string,
-    cached: CachedToolResult,
-  ): ToolExecutionResult {
-    return {
-      callId: fields.id,
-      outcome: 'action_required',
-      content: 'Cached tool result was recorded under a different policy revision.',
-      toolCallId: fields.id,
-      toolName: cached.toolName,
-      result: undefined,
-      idempotency: {
-        key: cacheKey,
-        outcome: 'authorization-required',
-      },
-      action: {
-        type: 'approval',
-        message:
-          'This idempotency key has a completed result recorded under a different policy revision. Re-authorize cached-result access before returning it.',
-      },
-    };
-  }
-
   function createPolicyAuthorizationOnlyOptions(executeOptions: unknown): unknown {
     const hasApprovalResume =
       executeOptions !== undefined &&
@@ -245,10 +221,6 @@ export function withToolboxIdempotency(
     originalExecute: (call: ToolCallInput, options?: unknown) => Promise<ToolExecutionResult>,
     executeOptions?: unknown,
   ): Promise<ToolExecutionResult> {
-    if (cached.policyRevision !== policyRevision) {
-      return createPolicyAuthorizationRequiredResult(fields, cacheKey, cached);
-    }
-
     const authorizationResult = await originalExecute(
       call,
       createPolicyAuthorizationOnlyOptions(executeOptions),

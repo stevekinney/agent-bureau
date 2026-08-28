@@ -755,6 +755,10 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     string,
     Extract<PendingReview, { kind: 'tool-approval' }>['approval']
   >();
+  const terminalReviewSessions = new Map<
+    string,
+    { sessionId: string; agentName: string; requestedAt: number }
+  >();
   // A persisted approval can be stale by the time a process restarts. Keep
   // that failure scoped to its review rather than preventing the bureau from
   // recovering unrelated runs.
@@ -775,6 +779,9 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   let requestAuthorityValidator:
     ((context: ToolRequestContext) => boolean | Promise<boolean>) | undefined =
     options.requestAuthorityValidator;
+  const isTransportIssuedAuthority = (context: ToolRequestContext): boolean =>
+    context.authority.authorizationRevision !== 'bureau:1' &&
+    context.authority.authorizationRevision !== 'bureau:scheduler:1';
   let durableRecoveryDeferred = false;
   let durableRecoveryStarted = false;
   let durableRecoveryBarrier: Promise<void> = Promise.resolve();
@@ -884,6 +891,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         runRequestContexts.delete(removedRunId);
         recoveredRunIds.delete(removedRunId);
         runToolboxesByRunId.delete(removedRunId);
+        terminalReviewSessions.delete(removedRunId);
         for (const id of pendingApprovalOverrides.keys()) {
           if (id.startsWith(`approval:${removedRunId}:`)) pendingApprovalOverrides.delete(id);
         }
@@ -1550,6 +1558,12 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         agentName,
         request.principal,
       );
+      if (isTransportIssuedAuthority(requestContext) && !requestAuthorityValidator) {
+        throw new BureauError(
+          'Cannot create run: transport-issued request authority cannot be validated.',
+          'CONFLICT',
+        );
+      }
       const runRuntime = await runtime.createRunRuntime({
         ...request,
         sessionId,
@@ -2752,6 +2766,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         }
         runRequestContexts.delete(runId);
         runToolboxesByRunId.delete(runId);
+        terminalReviewSessions.delete(runId);
       }
     }
     await sessionStore.delete(id);
@@ -2789,7 +2804,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     const requestContext = runRequestContexts.get(runId);
     if (
       requestContext &&
-      ((recoveredRunIds.has(runId) && !requestAuthorityValidator) ||
+      ((isTransportIssuedAuthority(requestContext) && !requestAuthorityValidator) ||
         (requestAuthorityValidator && !(await requestAuthorityValidator(requestContext))))
     ) {
       throw new BureauError(
@@ -2911,6 +2926,24 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       }
     }
 
+    for (const [runId, terminalReview] of terminalReviewSessions) {
+      for (const [reviewId, approval] of pendingApprovalOverrides) {
+        if (!reviewId.startsWith(`approval:${runId}:`)) continue;
+        if (resolvedReviewIds.has(reviewId) || invalidApprovalReviewIds.has(reviewId)) continue;
+        if (reviews.some((review) => review.id === reviewId)) continue;
+        reviews.push({
+          kind: 'tool-approval',
+          id: reviewId,
+          runId,
+          sessionId: terminalReview.sessionId,
+          agentName: terminalReview.agentName,
+          approval,
+          requestedAt: terminalReview.requestedAt,
+          ageMilliseconds: now - terminalReview.requestedAt,
+        });
+      }
+    }
+
     return reviews;
   }
 
@@ -2954,7 +2987,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
           const approvalRequestContext = runRequestContexts.get(review.runId);
           if (
             approvalRequestContext &&
-            recoveredRunIds.has(review.runId) &&
+            isTransportIssuedAuthority(approvalRequestContext) &&
             !requestAuthorityValidator
           ) {
             throw new BureauError(
@@ -3031,8 +3064,8 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         const requestContext = runRequestContexts.get(review.runId);
         if (
           requestContext &&
-          requestAuthorityValidator &&
-          !(await requestAuthorityValidator(requestContext))
+          ((isTransportIssuedAuthority(requestContext) && !requestAuthorityValidator) ||
+            (requestAuthorityValidator && !(await requestAuthorityValidator(requestContext))))
         ) {
           throw new BureauError(
             'Cannot approve: the request authority is no longer current.',
@@ -3053,7 +3086,16 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     resolvingReviewIds.delete(review.id);
     if (!keepPending) {
       resolvedReviewIds.add(review.id);
-      if (review.kind === 'tool-approval') pendingApprovalOverrides.delete(review.id);
+      if (review.kind === 'tool-approval') {
+        pendingApprovalOverrides.delete(review.id);
+        if (
+          !Array.from(pendingApprovalOverrides.keys()).some((reviewId) =>
+            reviewId.startsWith(`approval:${review.runId}:`),
+          )
+        ) {
+          terminalReviewSessions.delete(review.runId);
+        }
+      }
       try {
         await persistReviewResolutionWithRetry(
           review.sessionId,
@@ -3458,12 +3500,27 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   // until the Gateway is constructed. Defer recovery when persisted sessions
   // contain gateway-issued authority so those runs cannot execute unvalidated.
   let hasDeferredGatewayAuthority = false;
-  if (!requestAuthorityValidator && runtime.durable && runtime.sessionStore) {
+  if (runtime.durable && runtime.sessionStore) {
     try {
       const sessions = await runtime.sessionStore.list();
-      hasDeferredGatewayAuthority = sessions.some((session) =>
-        hasRecoverableTransportAuthority(session.metadata),
-      );
+      for (const session of sessions) {
+        const runId = session.metadata['lastRunId'];
+        const status = session.metadata['lastRunStatus'];
+        if (typeof runId === 'string' && status !== 'running') {
+          const before = pendingApprovalOverrides.size;
+          restorePendingApprovalOverrides(session.metadata, runId);
+          if (pendingApprovalOverrides.size > before) {
+            terminalReviewSessions.set(runId, {
+              sessionId: session.id,
+              agentName: session.agentName,
+              requestedAt: Date.parse(session.updatedAt) || Date.now(),
+            });
+          }
+        }
+        if (!requestAuthorityValidator && hasRecoverableTransportAuthority(session.metadata)) {
+          hasDeferredGatewayAuthority = true;
+        }
+      }
     } catch (error) {
       hasDeferredGatewayAuthority = true;
       diagnose({

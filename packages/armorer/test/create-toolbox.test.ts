@@ -1050,6 +1050,45 @@ describe('createToolbox', () => {
     await expect(revokedRecovery.restoreApproval(revokedApproval)).rejects.toThrow('revoked');
   });
 
+  it('rejects persisted approvals with stale toolbox or policy revisions', async () => {
+    const approvalStateStore = createProcessLocalApprovalStateStore();
+    const makeTool = (version: string) =>
+      createTool({
+        name: 'stale-revision-restore',
+        version,
+        description: 'Rejects stale recovery bindings',
+        input: z.object({}),
+        execute: () => 'restored',
+      });
+    const tool = makeTool('1.0.0');
+    const sourceOptions = {
+      approvalSecret: 'stale-revision-secret',
+      approvalStateStore,
+      policy: { beforeExecute: () => ({ status: 'needs_approval' as const }) },
+    };
+    const source = createToolbox([tool], sourceOptions);
+    const paused = await source.execute(
+      { id: 'stale-revision-approval', name: tool.name, arguments: {} },
+      approvalExecutionOptions,
+    );
+    const approval = paused.pendingApproval as SignedPendingToolApproval;
+
+    for (const { options: revisionOptions, tool: recoveryTool } of [
+      { options: { toolboxRevision: 'toolbox:2' }, tool },
+      { options: {}, tool: makeTool('2.0.0') },
+      { options: { policyRevision: 'policy:2' }, tool },
+      { options: { approvalRevision: 'approval:2' }, tool },
+    ]) {
+      const recovery = createToolbox([recoveryTool], {
+        ...sourceOptions,
+        ...revisionOptions,
+      });
+      await expect(recovery.restoreApproval(approval)).rejects.toMatchObject({
+        code: 'invalid-binding',
+      });
+    }
+  });
+
   it('resumes signed input requests with unchanged arguments', async () => {
     const toolbox = createToolbox(
       [

@@ -241,13 +241,12 @@ describe('withToolboxIdempotency', () => {
 
     expect(first.idempotency).toEqual({ key: expectedKey, outcome: 'fresh' });
     expect(sameRevisionRetry.idempotency).toEqual({ key: expectedKey, outcome: 'deduped' });
-    expect(changedRevisionRetry.outcome).toBe('action_required');
-    expect(changedRevisionRetry.result).toBeUndefined();
+    expect(changedRevisionRetry.outcome).toBe('success');
+    expect(changedRevisionRetry.result).toBe(3);
     expect(changedRevisionRetry.idempotency).toEqual({
       key: expectedKey,
-      outcome: 'authorization-required',
+      outcome: 'deduped',
     });
-    expect(changedRevisionRetry.action?.message).toContain('policy revision');
     expect(addCallCount).toBe(1);
   });
 
@@ -272,11 +271,11 @@ describe('withToolboxIdempotency', () => {
       { idempotencyKey: 'legacy-completed-key' },
     );
 
-    expect(result.outcome).toBe('action_required');
-    expect(result.result).toBeUndefined();
+    expect(result.outcome).toBe('success');
+    expect(result.result).toBe(99);
     expect(result.idempotency).toEqual({
       key,
-      outcome: 'authorization-required',
+      outcome: 'deduped',
     });
     expect(addCallCount).toBe(0);
   });
@@ -1214,6 +1213,7 @@ describe('withToolboxIdempotency', () => {
     const idempotentGuardedToolbox = withToolboxIdempotency(guardedToolbox, {
       cache,
       tenantId: 'tenant-a',
+      policyRevision: 'policy:2',
     });
 
     const approvalRequired = await idempotentGuardedToolbox.execute(call, {
