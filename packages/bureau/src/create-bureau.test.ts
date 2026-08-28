@@ -4660,6 +4660,46 @@ describe('createBureau review queue (AB-20)', () => {
     }
   });
 
+  it('does not defer recovery forever when session inspection fails with a validator', async () => {
+    const storage = new MemoryStorage();
+    const sessionStore = createSessionStore(textValueStore(storage));
+    await sessionStore.save(
+      createAgentSession({
+        id: 'inspection-failure-session',
+        agentName: 'bureau',
+        conversationHistory: createConversationHistory({ id: 'inspection-failure-session' }),
+        metadata: { lastRunStatus: 'completed' },
+      }),
+    );
+    let scanCalls = 0;
+    const originalGet = storage.get.bind(storage);
+    (storage as unknown as { get: (key: string) => Promise<unknown> }).get = async (key) => {
+      if (key.includes('agent-session')) {
+        scanCalls += 1;
+        throw new Error('session inspection unavailable');
+      }
+      return originalGet(key);
+    };
+    const diagnostics: string[] = [];
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage,
+      durableExecution: true,
+      requestAuthorityValidator: () => true,
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.message),
+    });
+    try {
+      await bureau.waitForRecovery?.();
+      expect(scanCalls).toBeGreaterThan(0);
+      expect(diagnostics).toContainEqual(
+        expect.stringContaining('continuing with the configured authority validator'),
+      );
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
   it('reports durable recovery failures during Bureau-origin boot', async () => {
     const probe = await createRuntimeComposition({
       generate: createMockGenerate(),

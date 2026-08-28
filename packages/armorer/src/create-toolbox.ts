@@ -952,6 +952,9 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       ...(deadline !== undefined ? { deadline } : {}),
       now: nowFunction,
       ...(options?.setTimeoutFunction ? { setTimeoutFunction: options.setTimeoutFunction } : {}),
+      ...(options?.clearTimeoutFunction
+        ? { clearTimeoutFunction: options.clearTimeoutFunction }
+        : {}),
       ...(options?.requestContext
         ? {
             privilegedContext: createEffectiveExecutionContext(
@@ -1084,55 +1087,16 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
           }
         }
 
-        // Track call for loop detection
-        for (const detector of loopDetectors.values()) {
-          detector.recordCall(toolCall.name, toolCall.arguments ?? {});
-        }
-
-        const budgetReason = checkBudget(budget, budgetStart, budgetCalls);
-        if (budgetReason) {
-          const toolError = createToolError('conflict', budgetReason, 'BUDGET_EXCEEDED', false);
-          const denied: ToolExecutionResult = {
-            callId: toolCall.id,
-            outcome: 'error',
-            content: toolError.message,
-            toolCallId: toolCall.id,
-            toolName: toolCall.name,
-            result: undefined,
-            error: toolError,
-            errorMessage: toolError.message,
-            errorCategory: toolError.category,
-          };
-          emit('budget-exceeded', { tool, call: toolCall, reason: budgetReason });
-          emit('error', { tool, result: denied });
-          if (errorMode === 'failFast') {
-            // eslint-disable-next-line @typescript-eslint/only-throw-error
-            throw toolError;
+        if (!options?.[policyAuthorizationOnlySymbol]) {
+          // Track call for loop detection
+          for (const detector of loopDetectors.values()) {
+            detector.recordCall(toolCall.name, toolCall.arguments ?? {});
           }
-          return denied;
-        }
 
-        budgetCalls += 1;
-
-        // Loop detection
-        if (autoLoopDetector) {
-          autoLoopDetector.recordCall(toolCall.name, toolCall.arguments ?? {});
-          const loopResult = autoLoopDetector.detectLoop();
-          if (loopResult.detected && loopResult.level === 'blocked') {
-            emit('loop-blocked', {
-              tool,
-              call: toolCall,
-              detector: loopResult.detector ?? 'simple-repeat',
-              count: loopResult.count,
-              message: loopResult.message,
-            });
-            const toolError = createToolError(
-              'conflict',
-              loopResult.message,
-              'LOOP_BLOCKED',
-              false,
-            );
-            const blocked: ToolExecutionResult = {
+          const budgetReason = checkBudget(budget, budgetStart, budgetCalls);
+          if (budgetReason) {
+            const toolError = createToolError('conflict', budgetReason, 'BUDGET_EXCEEDED', false);
+            const denied: ToolExecutionResult = {
               callId: toolCall.id,
               outcome: 'error',
               content: toolError.message,
@@ -1143,16 +1107,57 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
               errorMessage: toolError.message,
               errorCategory: toolError.category,
             };
-            return blocked;
+            emit('budget-exceeded', { tool, call: toolCall, reason: budgetReason });
+            emit('error', { tool, result: denied });
+            if (errorMode === 'failFast') {
+              // eslint-disable-next-line @typescript-eslint/only-throw-error
+              throw toolError;
+            }
+            return denied;
           }
-          if (loopResult.detected) {
-            emit('loop-warning', {
-              tool,
-              call: toolCall,
-              detector: loopResult.detector ?? 'simple-repeat',
-              count: loopResult.count,
-              message: loopResult.message,
-            });
+
+          budgetCalls += 1;
+
+          // Loop detection
+          if (autoLoopDetector) {
+            autoLoopDetector.recordCall(toolCall.name, toolCall.arguments ?? {});
+            const loopResult = autoLoopDetector.detectLoop();
+            if (loopResult.detected && loopResult.level === 'blocked') {
+              emit('loop-blocked', {
+                tool,
+                call: toolCall,
+                detector: loopResult.detector ?? 'simple-repeat',
+                count: loopResult.count,
+                message: loopResult.message,
+              });
+              const toolError = createToolError(
+                'conflict',
+                loopResult.message,
+                'LOOP_BLOCKED',
+                false,
+              );
+              const blocked: ToolExecutionResult = {
+                callId: toolCall.id,
+                outcome: 'error',
+                content: toolError.message,
+                toolCallId: toolCall.id,
+                toolName: toolCall.name,
+                result: undefined,
+                error: toolError,
+                errorMessage: toolError.message,
+                errorCategory: toolError.category,
+              };
+              return blocked;
+            }
+            if (loopResult.detected) {
+              emit('loop-warning', {
+                tool,
+                call: toolCall,
+                detector: loopResult.detector ?? 'simple-repeat',
+                count: loopResult.count,
+                message: loopResult.message,
+              });
+            }
           }
         }
 

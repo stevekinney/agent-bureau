@@ -47,6 +47,40 @@ const approvalRequestContext = {
 const approvalExecutionOptions = { requestContext: approvalRequestContext };
 
 describe('createToolbox', () => {
+  it('forwards custom deadline timer cleanup to the toolbox lifecycle', async () => {
+    const scheduled: Array<() => void> = [];
+    const cleared: unknown[] = [];
+    const toolbox = createToolbox([
+      createTool({
+        name: 'timer-forwarding',
+        description: 'timer forwarding',
+        version: '1.0.0',
+        input: z.object({}),
+        async execute() {
+          return 'ok';
+        },
+      }),
+    ]);
+
+    await toolbox.execute(
+      { id: 'timer-call', name: 'timer-forwarding', arguments: {} },
+      {
+        requestContext: { ...approvalRequestContext, deadline: 10 },
+        now: () => 0,
+        setTimeoutFunction(callback) {
+          scheduled.push(callback);
+          return 'timer-token';
+        },
+        clearTimeoutFunction(timer) {
+          cleared.push(timer);
+        },
+      },
+    );
+
+    expect(cleared).toEqual(['timer-token', 'timer-token']);
+    expect(scheduled).toHaveLength(2);
+  });
+
   it('hydrates from serialized configurations and executes tools', async () => {
     const toolbox = createToolbox([makeConfiguration()]);
 

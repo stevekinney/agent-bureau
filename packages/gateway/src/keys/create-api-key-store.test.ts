@@ -61,7 +61,7 @@ describe('create', () => {
   });
 
   it('rejects scope entries that cannot be emitted as HTTP header values', async () => {
-    for (const scope of ['line\nfeed', 'carriage\rreturn', 'null\u0000']) {
+    for (const scope of ['line\nfeed', 'carriage\rreturn', 'null\u0000', 'non-byte\u0100']) {
       let rejection: unknown;
       try {
         await store.create({ name: 'invalid-header-scope', scopes: [scope] });
@@ -75,6 +75,7 @@ describe('create', () => {
     }
     expect(await store.list()).toEqual([]);
     expect(() => new Headers({ 'x-scope': 'valid\tvalue' })).not.toThrow();
+    expect(() => new Headers({ 'x-scope': 'valid\u00ff' })).not.toThrow();
   });
 
   it('respects expiresAt', async () => {

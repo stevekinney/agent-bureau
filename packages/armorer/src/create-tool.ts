@@ -631,11 +631,12 @@ export function createTool<
 
   const resolvePolicyDecision = async (
     context: ToolPolicyContext,
+    signal?: MinimalAbortSignal,
   ): Promise<ToolPolicyDecision | undefined> => {
     if (!policyHooks?.beforeExecute) {
       return undefined;
     }
-    const decision = await policyHooks.beforeExecute(context);
+    const decision = await racePreExecution(() => policyHooks.beforeExecute!(context), signal);
     if (decision === undefined) {
       return undefined;
     }
@@ -904,17 +905,26 @@ export function createTool<
       // `parseAsync` (not `parse`) because a wrapped non-Zod Standard Schema
       // validator (see `wrapStandardSchema`) requires async parsing; it works
       // identically to `parse` for a plain Zod schema.
-      const parsed = (await schema.parseAsync(toolCall.arguments)) as TInput;
+      const parsed = (await racePreExecution(
+        () => schema.parseAsync(toolCall.arguments),
+        options.signal,
+      )) as TInput;
       const typedToolCall = { ...toolCall, arguments: parsed } as ToolCallWithArguments;
       const parsedDetail = { toolCall: typedToolCall, configuration };
       emit('validate-success', { ...parsedDetail, params: toolCall.arguments, parsed });
       if (options.signal?.aborted) {
+        if (options.executionHandle?.snapshot().abortSource === 'deadline') {
+          throw createAbortRejection(options.signal.reason);
+        }
         return handleCancellation(options.signal.reason);
       }
       const policyContext = buildPolicyContext(typedToolCall, parsed, inputDigest);
       attachRequestContextPolicyFacts(policyContext, options.requestContext);
       if (policyContextProvider) {
-        const injected = await policyContextProvider(policyContext);
+        const injected = await racePreExecution(
+          () => policyContextProvider(policyContext),
+          options.signal,
+        );
         if (injected && typeof injected === 'object' && !Array.isArray(injected)) {
           policyContext.policyContext = injected;
         }
@@ -923,7 +933,7 @@ export function createTool<
       // but can never replace the host request context.
       attachRequestContextPolicyFacts(policyContext, options.requestContext);
       const approvalResume = options[approvalResumeSymbol];
-      let decision = await resolvePolicyDecision(policyContext);
+      let decision = await resolvePolicyDecision(policyContext, options.signal);
       const effectiveRequestContext =
         options.requestContext && decision?.capabilities
           ? narrowToolAuthority(options.requestContext, decision.capabilities)
@@ -1073,6 +1083,9 @@ export function createTool<
         }
         if (options.signal?.aborted) {
           if (rollbackApprovalAdmission) await rollbackApprovalAdmission();
+          if (options.executionHandle?.snapshot().abortSource === 'deadline') {
+            throw createAbortRejection(options.signal.reason);
+          }
           return handleCancellation(options.signal.reason);
         }
         emit('execute-success', { ...parsedDetail, result: undefined });
@@ -1108,6 +1121,9 @@ export function createTool<
       }
       if (options.signal?.aborted) {
         if (rollbackApprovalAdmission) await rollbackApprovalAdmission();
+        if (options.executionHandle?.snapshot().abortSource === 'deadline') {
+          throw createAbortRejection(options.signal.reason);
+        }
         return handleCancellation(options.signal.reason);
       }
 
@@ -1408,7 +1424,7 @@ export function createTool<
       }
       const reportedError =
         isAbortRejection(error) && options.executionHandle?.snapshot().abortSource === 'deadline'
-          ? new Error('TIMEOUT')
+          ? createDeadlineError(error.reason)
           : error;
       const zodError = reportedError instanceof z.ZodError ? reportedError : undefined;
       const isZod = zodError !== undefined;
@@ -1461,9 +1477,21 @@ export function createTool<
       const errorPolicyContext = buildPolicyContext(toolCall, toolCall.arguments, inputDigest);
       attachRequestContextPolicyFacts(errorPolicyContext, policyRequestContext);
       if (policyContextProvider) {
-        const injected = await policyContextProvider(errorPolicyContext);
-        if (injected && typeof injected === 'object' && !Array.isArray(injected)) {
-          errorPolicyContext.policyContext = injected;
+        try {
+          const injected = await racePreExecution(
+            () => policyContextProvider(errorPolicyContext),
+            options.signal,
+          );
+          if (injected && typeof injected === 'object' && !Array.isArray(injected)) {
+            errorPolicyContext.policyContext = injected;
+          }
+        } catch (policyContextError) {
+          if (!isAbortRejection(policyContextError)) {
+            throw policyContextError;
+          }
+          if (options.executionHandle?.snapshot().abortSource !== 'deadline') {
+            return handleCancellation(policyContextError.reason);
+          }
         }
       }
       attachRequestContextPolicyFacts(errorPolicyContext, policyRequestContext);
@@ -1482,12 +1510,12 @@ export function createTool<
         errorDetails.inputDigest = inputDigest;
       }
       finishTelemetry('error', errorDetails);
-      const message = errorString(
-        normalizeError(
-          reportedError,
-          isTimeoutError(reportedError) ? { code: 'TIMEOUT' } : undefined,
-        ),
+      const normalizedError = normalizeError(
+        reportedError,
+        isTimeoutError(reportedError) ? { code: 'TIMEOUT' } : undefined,
       );
+      const message =
+        errorCategory === 'timeout' ? normalizedError.message : errorString(normalizedError);
       const toolError = isZod
         ? createToolError('validation', message, {
             code: 'VALIDATION_ERROR',
@@ -1755,6 +1783,28 @@ export function createTool<
         },
       );
     });
+  }
+
+  function racePreExecution<TP>(
+    operation: () => TP | Promise<TP>,
+    signal?: MinimalAbortSignal,
+  ): Promise<TP> {
+    if (signal?.aborted) {
+      return Promise.reject(createAbortRejection(signal.reason));
+    }
+    return raceWithSignal(Promise.resolve(operation()), signal);
+  }
+
+  function createDeadlineError(reason?: unknown): Error {
+    const message =
+      typeof reason === 'string' && reason.length > 0
+        ? reason
+        : reason instanceof Error && reason.message.length > 0
+          ? reason.message
+          : 'Execution deadline exceeded';
+    const error = new Error(message);
+    (error as Error & { code?: string }).code = 'TIMEOUT';
+    return error;
   }
 
   function raceWithSignal<TP>(promise: Promise<TP>, signal?: MinimalAbortSignal): Promise<TP> {

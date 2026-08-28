@@ -1306,6 +1306,26 @@ describe('withToolboxIdempotency', () => {
     expect(addCallCount).toBe(1);
   });
 
+  it('does not charge completed cache authorization against the toolbox budget', async () => {
+    const tool = createToolWithKey();
+    const toolbox = withToolboxIdempotency(createToolbox([tool], { budget: { maxCalls: 1 } }), {
+      cache,
+      tenantId: 'tenant-a',
+    });
+
+    await expect(
+      toolbox.execute({ name: tool.name, arguments: { a: 1, b: 2 } }),
+    ).resolves.toMatchObject({ outcome: 'success', result: 3 });
+    await expect(
+      toolbox.execute({ name: tool.name, arguments: { a: 1, b: 2 } }),
+    ).resolves.toMatchObject({
+      outcome: 'success',
+      result: 3,
+      idempotency: { outcome: 'deduped' },
+    });
+    expect(addCallCount).toBe(1);
+  });
+
   it('does not keep started state for denied results before execution', async () => {
     const tool = createToolWithKey();
     const toolbox = {

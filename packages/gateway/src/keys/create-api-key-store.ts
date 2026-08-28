@@ -26,13 +26,13 @@ export function normalizeApiKeyScopes(scopes: unknown): string[] {
     if (normalizedScope.includes(SCOPE_DELIMITER)) {
       throw new Error(INVALID_SCOPE_DELIMITER_MESSAGE);
     }
-    // Scope names are reflected into x-api-key-scopes. Reject the C0 control
-    // characters that Fetch/Bun/Node reject in HTTP header values; horizontal
-    // tab remains valid per the platform header-value grammar.
+    // Scope names are reflected into x-api-key-scopes. Reject characters that
+    // Fetch/Bun/Node reject in HTTP header values: non-ByteString code points
+    // and C0 controls, except horizontal tab which the platform grammar allows.
     if (
       [...normalizedScope].some((character) => {
         const code = character.charCodeAt(0);
-        return code <= 0x08 || (code >= 0x0a && code <= 0x1f);
+        return code > 0xff || code <= 0x08 || (code >= 0x0a && code <= 0x1f);
       })
     ) {
       throw new Error(INVALID_SCOPE_HEADER_MESSAGE);

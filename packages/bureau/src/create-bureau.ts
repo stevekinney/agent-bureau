@@ -3605,12 +3605,12 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         }
       }
     } catch (error) {
-      hasDeferredGatewayAuthority = true;
       diagnose({
         level: 'error',
         scope: 'recovery',
-        message: `[bureau] Could not inspect sessions before durable recovery; deferring until authority validator attachment: ${serializeUnknownError(error)}`,
+        message: `[bureau] Could not inspect sessions before durable recovery${requestAuthorityValidator ? '; continuing with the configured authority validator' : '; deferring until authority validator attachment'}: ${serializeUnknownError(error)}`,
       });
+      hasDeferredGatewayAuthority = !requestAuthorityValidator;
     }
   }
   if (hasDeferredGatewayAuthority) {

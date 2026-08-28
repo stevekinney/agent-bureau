@@ -638,6 +638,39 @@ describe('createTool', () => {
     expect(runs).toBe(0);
   });
 
+  it('reports a deadline abort with an Error reason after validation succeeds', async () => {
+    let runs = 0;
+    const tool = createTool({
+      name: 'deadline-abort-after-validation',
+      description: 'reports deadline aborts after validation',
+      input: z.object({}),
+      async execute() {
+        runs += 1;
+        return 'unreachable';
+      },
+    });
+    const removeListener = tool.addEventListener('validate-success', () => {
+      const snapshot = tool.executions.inspect({ callId: 'deadline-validation-call' })[0];
+      tool.executions
+        .locate(snapshot!.executionId)
+        ?.abort('deadline', new Error('deadline error reason'));
+    });
+
+    const result = await tool.execute({
+      id: 'deadline-validation-call',
+      name: 'deadline-abort-after-validation',
+      arguments: {},
+    });
+    removeListener();
+
+    expect(result).toMatchObject({
+      outcome: 'error',
+      errorCategory: 'timeout',
+      errorMessage: 'deadline error reason',
+    });
+    expect(runs).toBe(0);
+  });
+
   it('cancels if the signal aborts after validation succeeds', async () => {
     let runs = 0;
     const tool = createTool({
@@ -1807,6 +1840,136 @@ describe('isTool', () => {
     resolveExecutor(async () => 'unused');
   });
 
+  it('settles an absolute deadline while async schema parsing is pending', async () => {
+    const timing = createManualExecutionTiming();
+    let schemaStarted = false;
+    let executions = 0;
+    const tool = createTool({
+      name: 'deadline-pending-schema',
+      description: 'does not wait past an async schema parse',
+      input: z.object({ value: z.string() }).superRefine(async () => {
+        schemaStarted = true;
+        await new Promise<void>(() => {});
+      }),
+      async execute() {
+        executions += 1;
+        return 'unreachable';
+      },
+    });
+
+    const pending = tool.executeWith({
+      params: { value: 'x' },
+      callId: 'deadline-pending-schema-call',
+      requestContext: { ...createRequestContext(), deadline: 10 },
+      ...timing.options,
+    });
+    await drainMicrotasks();
+    timing.fireTimeout();
+
+    await expect(pending).resolves.toMatchObject({
+      outcome: 'error',
+      errorCategory: 'timeout',
+    });
+    expect(schemaStarted).toBe(true);
+    expect(executions).toBe(0);
+    expect(tool.executions.inspect({ callId: 'deadline-pending-schema-call' })[0]).toMatchObject({
+      state: 'cleanup-pending',
+      abortSource: 'deadline',
+    });
+  });
+
+  it('settles an absolute deadline while policy context resolution is pending', async () => {
+    const timing = createManualExecutionTiming();
+    let policyContextRequests = 0;
+    let policyChecks = 0;
+    let executions = 0;
+    const tool = createTool({
+      name: 'deadline-pending-policy-context',
+      description: 'does not wait past an async policy context provider',
+      input: z.object({}),
+      policyContext: async () => {
+        policyContextRequests += 1;
+        await new Promise<void>(() => {});
+        return {};
+      },
+      policy: {
+        beforeExecute() {
+          policyChecks += 1;
+          return { allow: true };
+        },
+      },
+      async execute() {
+        executions += 1;
+        return 'unreachable';
+      },
+    });
+
+    const pending = tool.executeWith({
+      params: {},
+      callId: 'deadline-pending-policy-context-call',
+      requestContext: { ...createRequestContext(), deadline: 10 },
+      ...timing.options,
+    });
+    await drainMicrotasks();
+    timing.fireTimeout();
+
+    await expect(pending).resolves.toMatchObject({
+      outcome: 'error',
+      errorCategory: 'timeout',
+    });
+    expect(policyContextRequests).toBe(1);
+    expect(policyChecks).toBe(0);
+    expect(executions).toBe(0);
+    expect(
+      tool.executions.inspect({ callId: 'deadline-pending-policy-context-call' })[0],
+    ).toMatchObject({
+      state: 'cleanup-pending',
+      abortSource: 'deadline',
+    });
+  });
+
+  it('settles an absolute deadline while policy evaluation is pending', async () => {
+    const timing = createManualExecutionTiming();
+    let policyChecks = 0;
+    let executions = 0;
+    const tool = createTool({
+      name: 'deadline-pending-policy',
+      description: 'does not wait past an async policy hook',
+      input: z.object({}),
+      policy: {
+        beforeExecute: async () => {
+          policyChecks += 1;
+          await new Promise<void>(() => {});
+          return { allow: true };
+        },
+      },
+      async execute() {
+        executions += 1;
+        return 'unreachable';
+      },
+    });
+
+    const pending = tool.executeWith({
+      params: {},
+      callId: 'deadline-pending-policy-call',
+      requestContext: { ...createRequestContext(), deadline: 10 },
+      ...timing.options,
+    });
+    await drainMicrotasks();
+    timing.fireTimeout();
+
+    await expect(pending).resolves.toMatchObject({
+      outcome: 'error',
+      errorCategory: 'timeout',
+    });
+    expect(policyChecks).toBe(1);
+    expect(executions).toBe(0);
+    expect(tool.executions.inspect({ callId: 'deadline-pending-policy-call' })[0]).toMatchObject({
+      state: 'cleanup-pending',
+      abortSource: 'deadline',
+    });
+  });
+
   it('clears absolute deadline timers with the matching custom cleanup function', async () => {
     const timing = createManualExecutionTiming();
     const tool = createTool({
@@ -2229,6 +2392,84 @@ describe('isTool', () => {
     expect(rollbackCount).toBe(1);
   });
 
+  it('reports authorization-only deadline aborts after approval admission as timeouts', async () => {
+    let rollbackCount = 0;
+    const tool = createTool({
+      name: 'authorization-only-deadline',
+      description: 'checks deadline after authorization-only approval admission',
+      input: z.object({}),
+      execute: async () => 'unexpected',
+    });
+
+    const result = await tool.execute(
+      {
+        id: 'authorization-only-deadline-call',
+        name: 'authorization-only-deadline',
+        arguments: {},
+      },
+      {
+        [policyAuthorizationOnlySymbol]: true,
+        [approvalConsumeSymbol]: async () => {
+          const snapshot = tool.executions.inspect({
+            callId: 'authorization-only-deadline-call',
+          })[0];
+          tool.executions.locate(snapshot!.executionId)?.abort('deadline', 'approval deadline');
+          return async () => {
+            rollbackCount += 1;
+          };
+        },
+      },
+    );
+
+    expect(result).toMatchObject({
+      outcome: 'error',
+      errorCategory: 'timeout',
+      errorMessage: 'approval deadline',
+    });
+    expect(rollbackCount).toBe(1);
+  });
+
+  it('reports execution deadline aborts after approval admission as timeouts', async () => {
+    let runs = 0;
+    let rollbackCount = 0;
+    const tool = createTool({
+      name: 'approval-deadline-before-execute',
+      description: 'checks deadline after approval admission before execute',
+      input: z.object({}),
+      async execute() {
+        runs += 1;
+        return 'unreachable';
+      },
+    });
+
+    const result = await tool.execute(
+      {
+        id: 'approval-deadline-before-execute-call',
+        name: 'approval-deadline-before-execute',
+        arguments: {},
+      },
+      {
+        [approvalConsumeSymbol]: async () => {
+          const snapshot = tool.executions.inspect({
+            callId: 'approval-deadline-before-execute-call',
+          })[0];
+          tool.executions.locate(snapshot!.executionId)?.abort('deadline', 'approval deadline');
+          return async () => {
+            rollbackCount += 1;
+          };
+        },
+      },
+    );
+
+    expect(result).toMatchObject({
+      outcome: 'error',
+      errorCategory: 'timeout',
+      errorMessage: 'approval deadline',
+    });
+    expect(runs).toBe(0);
+    expect(rollbackCount).toBe(1);
+  });
+
   it('computes input and output digests when enabled', async () => {
     const tool = createTool({
       name: 'digest',
@@ -2372,6 +2613,40 @@ describe('isTool', () => {
     expect(result.error?.message).toContain('boom');
     expect(result.inputDigest).toMatch(/^[a-f0-9]{64}$/);
     expect(calls).toBe(2);
+  });
+
+  it('cancels when the signal aborts during error policy context injection', async () => {
+    const controller = new AbortController();
+    let calls = 0;
+    let executions = 0;
+    const tool = createTool({
+      name: 'policy-error-context-cancel',
+      description: 'cancels during error policy context injection',
+      input: z.object({}),
+      policyContext: () => {
+        calls += 1;
+        if (calls === 2) {
+          controller.abort('cancelled while enriching error');
+        }
+        return {};
+      },
+      async execute() {
+        executions += 1;
+        throw new Error('boom');
+      },
+    });
+
+    const result = await tool.execute(createToolCall('policy-error-context-cancel', {}), {
+      signal: controller.signal,
+    });
+
+    expect(result).toMatchObject({
+      outcome: 'error',
+      errorCategory: 'cancelled',
+      errorMessage: 'cancelled while enriching error',
+    });
+    expect(calls).toBe(2);
+    expect(executions).toBe(1);
   });
 
   it('formats cancellation reasons for numbers', async () => {
