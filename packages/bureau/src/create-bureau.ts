@@ -1439,6 +1439,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     for (const [reviewId, approval] of Object.entries(overrides as Record<string, unknown>)) {
       if (!reviewId.startsWith(`approval:${runId}:`)) continue;
       if (approval && typeof approval === 'object' && !Array.isArray(approval)) {
+        if (!(approval as { approvalBinding?: unknown }).approvalBinding) continue;
         try {
           await restoreApproval(approval as SignedPendingToolApproval);
         } catch (error) {
@@ -1474,7 +1475,26 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       runId,
       session.agentName,
     );
-    if (!requestContext) return;
+    if (!requestContext) {
+      const overrides = session.metadata['pendingApprovalOverrides'];
+      if (overrides && typeof overrides === 'object' && !Array.isArray(overrides)) {
+        for (const reviewId of Object.keys(overrides)) {
+          if (!reviewId.startsWith(`approval:${runId}:`)) continue;
+          invalidApprovalReviewIds.add(reviewId);
+          pendingApprovalOverrides.delete(reviewId);
+          await prunePersistedInvalidApprovalReviewStateWithRetry(session.id, runId, reviewId);
+          diagnose({
+            level: 'warn',
+            scope: 'approval-recovery',
+            message:
+              `[bureau] Failed to restore request authority for "${reviewId}"; ` +
+              'the affected review will remain unavailable while other runs recover.',
+          });
+        }
+      }
+      terminalReviewSessions.delete(runId);
+      return;
+    }
     const runRuntime = await runtime.createRunRuntime(
       {
         message:

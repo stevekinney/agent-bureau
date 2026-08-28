@@ -4271,6 +4271,15 @@ describe('createBureau review queue (AB-20)', () => {
         metadata: {
           lastRunId: runId,
           lastRunStatus: 'completed',
+          lastRequestAuthorities: {
+            [runId]: {
+              principalId: 'principal-terminal',
+              tenantId: 'bureau',
+              ownerId: 'terminal-agent',
+              capabilities: ['tools:execute'],
+              authorizationRevision: 'bureau:1',
+            },
+          },
           pendingApprovalOverrides: {
             [reviewId]: {
               ...approval,
@@ -4309,6 +4318,57 @@ describe('createBureau review queue (AB-20)', () => {
       expect(bureau.listPendingReviews().map((review) => review.id)).toEqual([secondReviewId]);
       await bureau.resolveReview({ id: secondReviewId, decision: 'deny', principal: 'operator-a' });
       expect(bureau.listPendingReviews()).toHaveLength(0);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('prunes terminal approvals whose persisted request authority has expired', async () => {
+    const storage = await resolveStorage({ type: 'memory' });
+    const sessionStore = createSessionStore(textValueStore(storage));
+    const runId = 'run-expired-terminal-review';
+    const reviewId = `approval:${runId}:expired-call`;
+    await sessionStore.save(
+      createAgentSession({
+        id: 'session-expired-terminal-review',
+        agentName: 'terminal-agent',
+        conversationHistory: createConversationHistory({ id: 'session-expired-terminal-review' }),
+        metadata: {
+          lastRunId: runId,
+          lastRunStatus: 'completed',
+          lastRequestAuthorities: {
+            [runId]: {
+              principalId: 'principal-expired',
+              tenantId: 'bureau',
+              ownerId: 'terminal-agent',
+              capabilities: ['tools:execute'],
+              authorizationRevision: 'bureau:1',
+              deadline: Date.now() - 1,
+            },
+          },
+          pendingApprovalOverrides: {
+            [reviewId]: {
+              callId: 'expired-call',
+              toolName: 'charge-card',
+              arguments: { cents: 500 },
+              approvalToken: 'expired-token',
+            },
+          },
+        },
+      }),
+    );
+
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage,
+      durableExecution: true,
+    });
+    try {
+      expect(bureau.listPendingReviews()).toHaveLength(0);
+      const session = await bureau.getSession('session-expired-terminal-review');
+      expect(session?.metadata['pendingApprovalOverrides']).not.toHaveProperty(reviewId);
+      expect(session?.metadata['lastRequestAuthorities']).not.toHaveProperty(runId);
     } finally {
       await bureau.dispose();
     }

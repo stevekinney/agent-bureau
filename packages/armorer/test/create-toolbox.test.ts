@@ -144,6 +144,47 @@ describe('createToolbox', () => {
     ]);
   });
 
+  it('races pending availability against the request deadline', async () => {
+    let resolveAvailability!: (available: boolean) => void;
+    const availability = new Promise<boolean>((resolve) => {
+      resolveAvailability = resolve;
+    });
+    const scheduled: Array<() => void> = [];
+    const toolbox = createToolbox([
+      createTool({
+        name: 'pending-availability',
+        description: 'pending availability',
+        input: z.object({}),
+        availability: () => availability,
+        async execute() {
+          return 'unreachable';
+        },
+      }),
+    ]);
+
+    const pending = toolbox.execute(
+      { id: 'pending-availability-call', name: 'pending-availability', arguments: {} },
+      {
+        now: () => 0,
+        requestContext: { ...approvalRequestContext, deadline: 10 },
+        setTimeoutFunction(callback) {
+          scheduled.push(callback);
+          return 'deadline';
+        },
+        clearTimeoutFunction() {},
+      },
+    );
+    await Promise.resolve();
+    scheduled[0]!();
+
+    await expect(pending).resolves.toMatchObject({
+      outcome: 'error',
+      errorCategory: 'timeout',
+      error: { code: 'TIMEOUT' },
+    });
+    resolveAvailability(false);
+  });
+
   it('hydrates from serialized configurations and executes tools', async () => {
     const toolbox = createToolbox([makeConfiguration()]);
 
@@ -291,7 +332,7 @@ describe('createToolbox', () => {
         name: 'probe-tool',
         description: 'Tool with a failing availability probe',
         input: z.object({}),
-        availability() {
+        async availability() {
           throw new Error('probe failed');
         },
         async execute() {
