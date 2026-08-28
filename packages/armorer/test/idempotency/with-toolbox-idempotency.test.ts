@@ -1132,10 +1132,11 @@ describe('withToolboxIdempotency', () => {
       { idempotencyKey: 'charge-once', requestContext },
     );
 
-    const firstResume = await idempotentToolbox.resumeApproval(
-      paused.pendingApproval! as SignedPendingToolApproval,
-      { idempotencyKey: 'charge-once', requestContext },
-    );
+    const { resumeApproval } = idempotentToolbox;
+    const firstResume = await resumeApproval(paused.pendingApproval! as SignedPendingToolApproval, {
+      idempotencyKey: 'charge-once',
+      requestContext,
+    });
 
     expect(firstResume.result).toEqual({ charged: 100 });
     expect(firstResume.idempotency).toEqual({

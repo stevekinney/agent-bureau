@@ -90,6 +90,25 @@ function createTextStoreProxy(
   };
 }
 
+function persistedApprovalToken(
+  session: Awaited<ReturnType<Bureau['getSession']>>,
+  reviewId: string,
+): string {
+  const overrides = session?.metadata['pendingApprovalOverrides'];
+  if (typeof overrides !== 'object' || overrides === null || Array.isArray(overrides)) {
+    throw new Error('Expected pending approval overrides metadata');
+  }
+  const approval = (overrides as Record<string, unknown>)[reviewId];
+  if (typeof approval !== 'object' || approval === null || Array.isArray(approval)) {
+    throw new Error(`Expected pending approval override for "${reviewId}"`);
+  }
+  const approvalToken = (approval as { approvalToken?: unknown }).approvalToken;
+  if (typeof approvalToken !== 'string') {
+    throw new Error(`Expected persisted approval token for "${reviewId}"`);
+  }
+  return approvalToken;
+}
+
 /** A no-op `next` tool that lets a run take multiple steps. */
 function createNextTool() {
   return createTool({
@@ -4785,6 +4804,163 @@ describe('createBureau review queue (AB-20)', () => {
     expect(persistedSession?.metadata['pendingApprovalOverrides']).toMatchObject({
       [review!.id]: expect.objectContaining({ approvalToken: expect.any(String) }),
     });
+
+    bureau.dispose();
+  });
+
+  it('retries replacement approval persistence when a resumed approval gates again', async () => {
+    const backingStore = textValueStore(new MemoryStorage());
+    let replacementPersistenceFailuresRemaining = 2;
+    let failReplacementPersistence = false;
+    let replacementPersistenceAttempts = 0;
+    const persistence = createTextStoreProxy(backingStore, {
+      async conditionalBatch(conditions, operations) {
+        if (
+          failReplacementPersistence &&
+          operations.some((operation) => operation.key.startsWith('agent-session:')) &&
+          JSON.stringify(operations).includes('pendingApprovalOverrides')
+        ) {
+          replacementPersistenceAttempts += 1;
+          if (replacementPersistenceFailuresRemaining > 0) {
+            replacementPersistenceFailuresRemaining -= 1;
+            throw new Error('replacement approval persistence unavailable');
+          }
+        }
+        return backingStore.conditionalBatch(conditions, operations);
+      },
+    });
+    const charges: number[] = [];
+    const bureau = await createBureau({
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [
+            { id: 'replacement-retry-call', name: 'charge-card', arguments: { cents: 910 } },
+          ],
+        },
+      ]),
+      toolbox: createRegatingApprovalToolbox('replacement-retry-secret', charges),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+      persistence,
+      sessionPersistenceSleep: async () => {},
+    });
+
+    const run = await bureau.createRun({ message: 'Charge the customer after retry' });
+    await waitForRunCompletion(bureau, run.id);
+
+    const [review] = bureau.listPendingReviews();
+    expect(review?.kind).toBe('tool-approval');
+    if (!review || review.kind !== 'tool-approval')
+      throw new Error('Expected tool approval review');
+    const originalApprovalToken = persistedApprovalToken(
+      await bureau.getSession(run.sessionId),
+      review.id,
+    );
+
+    failReplacementPersistence = true;
+    const outcome = await bureau.resolveReview({
+      id: review.id,
+      decision: 'approve',
+      principal: 'api-key:reviewer-replacement-retry',
+    });
+
+    expect(outcome.decision).toBe('approve');
+    expect(replacementPersistenceAttempts).toBe(3);
+    expect(charges).toEqual([]);
+    const [stillPendingReview] = bureau.listPendingReviews();
+    expect(stillPendingReview?.kind).toBe('tool-approval');
+    if (!stillPendingReview || stillPendingReview.kind !== 'tool-approval') {
+      throw new Error('Expected replacement approval review');
+    }
+    const replacementApprovalToken = stillPendingReview.approval.approvalToken;
+    if (typeof replacementApprovalToken !== 'string') {
+      throw new Error('Expected replacement approval token');
+    }
+    expect(stillPendingReview.id).toBe(review.id);
+    expect(replacementApprovalToken).not.toBe(originalApprovalToken);
+    expect(persistedApprovalToken(await bureau.getSession(run.sessionId), review.id)).toBe(
+      replacementApprovalToken,
+    );
+
+    bureau.dispose();
+  });
+
+  it('preserves the original approval when replacement approval persistence exhausts', async () => {
+    const backingStore = textValueStore(new MemoryStorage());
+    let failReplacementPersistence = false;
+    let replacementPersistenceAttempts = 0;
+    const persistence = createTextStoreProxy(backingStore, {
+      async conditionalBatch(conditions, operations) {
+        if (
+          failReplacementPersistence &&
+          operations.some((operation) => operation.key.startsWith('agent-session:')) &&
+          JSON.stringify(operations).includes('pendingApprovalOverrides')
+        ) {
+          replacementPersistenceAttempts += 1;
+          throw new Error('replacement approval persistence unavailable');
+        }
+        return backingStore.conditionalBatch(conditions, operations);
+      },
+    });
+    const charges: number[] = [];
+    const bureau = await createBureau({
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [
+            { id: 'replacement-exhaustion-call', name: 'charge-card', arguments: { cents: 920 } },
+          ],
+        },
+      ]),
+      toolbox: createRegatingApprovalToolbox('replacement-exhaustion-secret', charges),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+      persistence,
+      sessionPersistenceSleep: async () => {},
+    });
+
+    const run = await bureau.createRun({ message: 'Charge the customer after exhaustion' });
+    await waitForRunCompletion(bureau, run.id);
+
+    const [review] = bureau.listPendingReviews();
+    expect(review?.kind).toBe('tool-approval');
+    if (!review || review.kind !== 'tool-approval')
+      throw new Error('Expected tool approval review');
+    const originalApprovalToken = review.approval.approvalToken;
+    if (typeof originalApprovalToken !== 'string') {
+      throw new Error('Expected original approval token');
+    }
+    expect(persistedApprovalToken(await bureau.getSession(run.sessionId), review.id)).toBe(
+      originalApprovalToken,
+    );
+
+    failReplacementPersistence = true;
+    const resolutionError = await bureau
+      .resolveReview({
+        id: review.id,
+        decision: 'approve',
+        principal: 'api-key:reviewer-replacement-exhaustion',
+      })
+      .then(
+        () => undefined,
+        (error) => error,
+      );
+    expect(resolutionError).toBeInstanceOf(Error);
+    expect((resolutionError as Error).message).toContain(
+      'replacement approval persistence unavailable',
+    );
+
+    expect(replacementPersistenceAttempts).toBe(3);
+    expect(charges).toEqual([]);
+    const [stillPendingReview] = bureau.listPendingReviews();
+    expect(stillPendingReview?.kind).toBe('tool-approval');
+    if (!stillPendingReview || stillPendingReview.kind !== 'tool-approval') {
+      throw new Error('Expected original approval review');
+    }
+    expect(stillPendingReview.id).toBe(review.id);
+    expect(stillPendingReview.approval.approvalToken).toBe(originalApprovalToken);
+    expect(persistedApprovalToken(await bureau.getSession(run.sessionId), review.id)).toBe(
+      originalApprovalToken,
+    );
 
     bureau.dispose();
   });

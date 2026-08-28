@@ -1780,6 +1780,52 @@ describe('isTool', () => {
     });
   });
 
+  it('settles an absolute deadline while resolving a pending lazy executor', async () => {
+    const timing = createManualExecutionTiming();
+    let resolveExecutor!: (executor: (params: Record<string, never>) => Promise<string>) => void;
+    const tool = createTool({
+      name: 'deadline-pending-executor',
+      description: 'does not wait past an absolute request deadline',
+      input: z.object({}),
+      execute: new Promise<(params: Record<string, never>) => Promise<string>>((resolve) => {
+        resolveExecutor = resolve;
+      }),
+    });
+
+    const pending = tool.executeWith({
+      params: {},
+      callId: 'deadline-pending-executor-call',
+      requestContext: { ...createRequestContext(), deadline: 10 },
+      ...timing.options,
+    });
+
+    timing.fireTimeout();
+    await expect(pending).resolves.toMatchObject({
+      outcome: 'error',
+      errorMessage: 'Execution deadline exceeded',
+    });
+    resolveExecutor(async () => 'unused');
+  });
+
+  it('clears absolute deadline timers with the matching custom cleanup function', async () => {
+    const timing = createManualExecutionTiming();
+    const tool = createTool({
+      name: 'custom-deadline-cleanup',
+      description: 'clears a custom absolute deadline timer',
+      input: z.object({}),
+      execute: async () => 'completed',
+    });
+
+    const result = await tool.executeWith({
+      params: {},
+      requestContext: { ...createRequestContext(), deadline: 10 },
+      ...timing.options,
+    });
+
+    expect(result.outcome).toBe('success');
+    expect(timing.clearCount()).toBe(1);
+  });
+
   it('expires a queued request before its callback is admitted', async () => {
     let releaseFirst!: () => void;
     let executions = 0;

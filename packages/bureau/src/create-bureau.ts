@@ -2998,15 +2998,16 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
           ) {
             const nextApproval = (result as Record<string, unknown>)['pendingApproval'];
             if (nextApproval && typeof nextApproval === 'object') {
-              pendingApprovalOverrides.set(
-                review.id,
-                nextApproval as Extract<PendingReview, { kind: 'tool-approval' }>['approval'],
-              );
-              await persistPendingApprovalOverride(
+              const replacementApproval = nextApproval as Extract<
+                PendingReview,
+                { kind: 'tool-approval' }
+              >['approval'];
+              await persistPendingApprovalOverrideWithRetry(
                 review.sessionId,
                 review.id,
-                nextApproval as Extract<PendingReview, { kind: 'tool-approval' }>['approval'],
+                replacementApproval,
               );
+              pendingApprovalOverrides.set(review.id, replacementApproval);
             }
             keepPending = true;
           }

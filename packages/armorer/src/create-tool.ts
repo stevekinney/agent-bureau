@@ -720,6 +720,9 @@ export function createTool<
       now: nowFunction,
       ...(limiter ? { capacity: limiter.capacity } : {}),
       ...(options?.setTimeoutFunction ? { setTimeoutFunction: options.setTimeoutFunction } : {}),
+      ...(options?.clearTimeoutFunction
+        ? { clearTimeoutFunction: options.clearTimeoutFunction }
+        : {}),
       ...(options?.effectiveContext ? { privilegedContext: options.effectiveContext } : {}),
     });
   };
@@ -1097,7 +1100,8 @@ export function createTool<
       // executor cannot execute, so its approval must remain available for a
       // later retry after the executor is repaired or replaced. Authorization
       // checks return above without resolving the executor at all.
-      const resolvedExecute = await resolveExecute();
+      const resolvedExecute =
+        typeof fn === 'function' ? fn : await raceWithSignal(resolveExecute(), options.signal);
       let rollbackApprovalAdmission: ApprovalAdmissionRollback | undefined;
       if (options[approvalConsumeSymbol]) {
         rollbackApprovalAdmission = await options[approvalConsumeSymbol]();

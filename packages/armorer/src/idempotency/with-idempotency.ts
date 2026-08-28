@@ -234,6 +234,9 @@ export function withIdempotency<T extends Tool>(
     }
     let leaseOwned = true;
     let pendingRenewal = Promise.resolve();
+    const stopRenewal = () => {
+      clearInterval(renewalInterval);
+    };
     const renewalInterval = setInterval(
       () => {
         pendingRenewal = pendingRenewal
@@ -243,6 +246,7 @@ export function withIdempotency<T extends Tool>(
               startedExecution.absoluteDeadline !== undefined &&
               renewalTime >= startedExecution.absoluteDeadline
             ) {
+              stopRenewal();
               return;
             }
             leaseOwned =
@@ -263,6 +267,10 @@ export function withIdempotency<T extends Tool>(
       },
       Math.max(1, Math.floor(leaseDurationMs / 2)),
     );
+    const deadlineTimer = setTimeout(
+      stopRenewal,
+      Math.max(0, (startedExecution.absoluteDeadline ?? now()) - startedExecution.startedAt),
+    );
 
     let toolExecution: Awaited<ReturnType<Tool['executeWith']>> | null;
     let result: unknown;
@@ -276,7 +284,8 @@ export function withIdempotency<T extends Tool>(
       }
       throw error;
     } finally {
-      clearInterval(renewalInterval);
+      stopRenewal();
+      clearTimeout(deadlineTimer);
       await pendingRenewal;
     }
 

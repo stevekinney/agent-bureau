@@ -497,12 +497,18 @@ export function withToolboxIdempotency(
     let result: ToolExecutionResult;
     let leaseOwned = true;
     let pendingRenewal = Promise.resolve();
+    const stopRenewal = () => {
+      clearInterval(renewalInterval);
+    };
     const renewalInterval = setInterval(
       () => {
         pendingRenewal = pendingRenewal
           .then(async () => {
             const renewalTime = now();
-            if (renewalTime >= execution.absoluteDeadline!) return;
+            if (renewalTime >= execution.absoluteDeadline!) {
+              stopRenewal();
+              return;
+            }
             leaseOwned =
               leaseOwned &&
               (await cache.renewStarted(
@@ -518,6 +524,10 @@ export function withToolboxIdempotency(
       },
       Math.max(1, Math.floor(leaseDurationMs / 2)),
     );
+    const deadlineTimer = setTimeout(
+      stopRenewal,
+      Math.max(0, execution.absoluteDeadline! - execution.startedAt),
+    );
     try {
       result = await originalExecute(call, executeOptions);
     } catch (error) {
@@ -526,7 +536,8 @@ export function withToolboxIdempotency(
       }
       throw error;
     } finally {
-      clearInterval(renewalInterval);
+      stopRenewal();
+      clearTimeout(deadlineTimer);
       await pendingRenewal;
     }
 
@@ -605,6 +616,12 @@ export function withToolboxIdempotency(
 
           return executeWithCache(input, originalExecute, executeOptions);
         };
+      }
+      if (prop === 'resumeApproval') {
+        // Keep approval resumption bound to this proxy so the toolbox's
+        // internal execute call is intercepted by the idempotency wrapper,
+        // including when callers destructure the method as a callback.
+        return target.resumeApproval.bind(receiver);
       }
       return Reflect.get(target, prop, receiver as object) as unknown;
     },
