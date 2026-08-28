@@ -1059,11 +1059,12 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
         }
 
         const availabilityResult = await isToolAvailable(tool, executionHandle.signal);
-        if (availabilityResult === 'timeout') {
+        if (availabilityResult === 'timeout' || availabilityResult === 'cancelled') {
+          const timedOut = executionHandle.snapshot().abortSource === 'deadline';
           const toolError = createToolError(
-            'timeout',
-            'Execution deadline exceeded',
-            'TIMEOUT',
+            timedOut ? 'timeout' : 'cancelled',
+            timedOut ? 'Execution deadline exceeded' : 'Cancelled',
+            timedOut ? 'TIMEOUT' : 'CANCELLED',
             false,
           );
           return {
@@ -1816,23 +1817,26 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     ) as unknown as AvailableTools<ToolsFromEntries<TEntries>>;
   }
 
-  async function isToolAvailable(tool: Tool, signal?: AbortSignal): Promise<boolean | 'timeout'> {
+  async function isToolAvailable(
+    tool: Tool,
+    signal?: AbortSignal,
+  ): Promise<boolean | 'timeout' | 'cancelled'> {
     const availability = tool.configuration.availability ?? tool.availability;
     if (!availability) {
       return true;
     }
     try {
       if (!signal) return await availability(baseContext);
-      if (signal.aborted) return 'timeout';
-      return await new Promise<boolean | 'timeout'>((resolve) => {
+      if (signal.aborted) return 'cancelled';
+      return await new Promise<boolean | 'timeout' | 'cancelled'>((resolve) => {
         let settled = false;
-        const finish = (result: boolean | 'timeout') => {
+        const finish = (result: boolean | 'timeout' | 'cancelled') => {
           if (settled) return;
           settled = true;
           signal.removeEventListener('abort', onAbort);
           resolve(result);
         };
-        const onAbort = () => finish('timeout');
+        const onAbort = () => finish('cancelled');
         signal.addEventListener('abort', onAbort, { once: true });
         void Promise.resolve(availability(baseContext)).then(
           (result) => finish(result),

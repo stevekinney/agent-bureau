@@ -122,6 +122,39 @@ describe('execution authority and projections', () => {
         audience: 'public',
       }).data,
     ).toEqual([{ executionId: 'execution-1' }, {}]);
+
+    const tenantSnapshots = [
+      { context: effectiveContext, snapshot: { executionId: 'execution-1' } },
+      { context: effectiveContext, snapshot: { executionId: 'execution-2' } },
+    ];
+    expect(
+      projectExecutionSnapshot(tenantSnapshots, {
+        audience: 'tenant',
+        tenantId: 'tenant-a',
+        sourceTenantId: 'tenant-a',
+      }).data,
+    ).toHaveLength(2);
+    expect(() =>
+      projectExecutionSnapshot(
+        [
+          tenantSnapshots[0],
+          {
+            context: {
+              ...effectiveContext,
+              authority: { ...effectiveContext.authority, tenantId: 'tenant-b' },
+            },
+          },
+        ],
+        { audience: 'tenant', tenantId: 'tenant-a', sourceTenantId: 'tenant-a' },
+      ),
+    ).toThrow('requires tenantId and a trusted source tenant');
+    expect(() =>
+      projectExecutionSnapshot([tenantSnapshots[0], { snapshot: { executionId: 'untrusted' } }], {
+        audience: 'tenant',
+        tenantId: 'tenant-a',
+        sourceTenantId: 'tenant-a',
+      }),
+    ).toThrow('requires tenantId and a trusted source tenant');
   });
 
   it('rejects unclassified primitive projection roots', () => {

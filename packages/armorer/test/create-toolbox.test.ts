@@ -185,6 +185,39 @@ describe('createToolbox', () => {
     resolveAvailability(false);
   });
 
+  it('preserves caller cancellation while availability is pending', async () => {
+    let resolveAvailability!: (available: boolean) => void;
+    const availability = new Promise<boolean>((resolve) => {
+      resolveAvailability = resolve;
+    });
+    const controller = new AbortController();
+    const toolbox = createToolbox([
+      createTool({
+        name: 'caller-cancelled-availability',
+        description: 'caller cancelled availability',
+        input: z.object({}),
+        availability: () => availability,
+        async execute() {
+          return 'unreachable';
+        },
+      }),
+    ]);
+
+    const pending = toolbox.execute(
+      { id: 'caller-cancelled-call', name: 'caller-cancelled-availability', arguments: {} },
+      { signal: controller.signal },
+    );
+    await Promise.resolve();
+    controller.abort('caller stopped');
+
+    await expect(pending).resolves.toMatchObject({
+      outcome: 'error',
+      errorCategory: 'cancelled',
+      error: { code: 'CANCELLED' },
+    });
+    resolveAvailability(false);
+  });
+
   it('hydrates from serialized configurations and executes tools', async () => {
     const toolbox = createToolbox([makeConfiguration()]);
 

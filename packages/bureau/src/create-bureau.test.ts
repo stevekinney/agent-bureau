@@ -5385,6 +5385,10 @@ describe('createBureau review queue (AB-20)', () => {
     expect(persistedSession?.metadata['resolvedReviewIds']).toContain(review!.id);
 
     await bureau.deleteSession(run.sessionId);
+    // Session deletion does not own the in-memory run's resolved-review
+    // suppression. Until the run itself is deleted, the resolved approval
+    // must not reappear in the review queue.
+    expect(bureau.listPendingReviews()).toHaveLength(0);
     bureau.deleteRun(run.id);
     await pollUntil(async () => {
       const session = await bureau.getSession(run.sessionId);

@@ -1,5 +1,6 @@
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { describe, expect, it } from 'bun:test';
+import { BureauError } from 'bureau';
 
 import { createTestGateway, requestJSON, waitForRunState } from '../test';
 import type { Bureau } from '../types';
@@ -261,6 +262,23 @@ describe('sessions routes', () => {
       expect(body.status).toBe('delivered');
     });
 
+    it('POST /api/v1/sessions/:id/signal returns 409 for revoked authority', async () => {
+      const stubBureau = makeStubBureau({
+        signalSession: async () => {
+          throw new BureauError('Request authority is no longer valid', 'CONFLICT');
+        },
+      });
+      const gateway = await createTestGateway(stubBureau, { authToken: AUTH_TOKEN });
+
+      const response = await requestJSON(gateway, '/api/v1/sessions/my-session/signal', {
+        method: 'POST',
+        headers: sessionWriteHeaders,
+        body: JSON.stringify({ name: 'human-approved' }),
+      });
+
+      expect(response.status).toBe(409);
+    });
+
     it('POST /api/v1/sessions/:id/update returns 200 when handler returns undefined', async () => {
       // A void update handler that intentionally returns undefined must not be
       // misidentified as "not configured". Before the fix the route treated any
@@ -278,6 +296,23 @@ describe('sessions routes', () => {
       // undefined serialises as absent key in JSON — the important thing is 200, not 501.
       const body = await response.json();
       expect(body).not.toHaveProperty('error');
+    });
+
+    it('POST /api/v1/sessions/:id/update returns 409 for revoked authority', async () => {
+      const stubBureau = makeStubBureau({
+        updateSession: async () => {
+          throw new BureauError('Request authority is no longer valid', 'CONFLICT');
+        },
+      });
+      const gateway = await createTestGateway(stubBureau, { authToken: AUTH_TOKEN });
+
+      const response = await requestJSON(gateway, '/api/v1/sessions/my-session/update', {
+        method: 'POST',
+        headers: sessionWriteHeaders,
+        body: JSON.stringify({ name: 'adjust-params' }),
+      });
+
+      expect(response.status).toBe(409);
     });
 
     it('GET /api/v1/sessions/:id/query returns 200 when handler returns undefined', async () => {

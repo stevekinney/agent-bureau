@@ -2004,6 +2004,153 @@ describe('isTool', () => {
     });
   });
 
+  it('settles an absolute deadline while policy afterExecute is pending', async () => {
+    const timing = createManualExecutionTiming();
+    let markAfterExecuteStarted!: () => void;
+    const afterExecuteStarted = new Promise<void>((resolve) => {
+      markAfterExecuteStarted = resolve;
+    });
+    let afterExecuteCalls = 0;
+    let executions = 0;
+    const tool = createTool({
+      name: 'deadline-pending-after-execute',
+      description: 'does not wait past an async afterExecute hook',
+      input: z.object({}),
+      policy: {
+        afterExecute: async () => {
+          afterExecuteCalls += 1;
+          markAfterExecuteStarted();
+          await new Promise<void>(() => {});
+        },
+      },
+      async execute() {
+        executions += 1;
+        return 'completed';
+      },
+    });
+
+    const pending = tool.executeWith({
+      params: {},
+      callId: 'deadline-pending-after-execute-call',
+      requestContext: { ...createRequestContext(), deadline: 10 },
+      ...timing.options,
+    });
+    await afterExecuteStarted;
+    timing.fireTimeout();
+
+    await expect(pending).resolves.toMatchObject({
+      outcome: 'error',
+      errorCategory: 'timeout',
+      errorMessage: 'Execution deadline exceeded',
+    });
+    expect(afterExecuteCalls).toBe(1);
+    expect(executions).toBe(1);
+    expect(
+      tool.executions.inspect({ callId: 'deadline-pending-after-execute-call' })[0],
+    ).toMatchObject({
+      state: 'cleanup-pending',
+      abortSource: 'deadline',
+    });
+  });
+
+  it('keeps deadline classification when policy afterExecute resolves late', async () => {
+    const timing = createManualExecutionTiming();
+    let markAfterExecuteStarted!: () => void;
+    const afterExecuteStarted = new Promise<void>((resolve) => {
+      markAfterExecuteStarted = resolve;
+    });
+    let resolveAfterExecute!: () => void;
+    const afterExecuteRelease = new Promise<void>((resolve) => {
+      resolveAfterExecute = resolve;
+    });
+    const tool = createTool({
+      name: 'deadline-late-after-execute',
+      description: 'does not return success after a late afterExecute hook',
+      input: z.object({}),
+      policy: {
+        afterExecute: async () => {
+          markAfterExecuteStarted();
+          await afterExecuteRelease;
+        },
+      },
+      async execute() {
+        return 'completed';
+      },
+    });
+
+    const pending = tool.executeWith({
+      params: {},
+      callId: 'deadline-late-after-execute-call',
+      requestContext: { ...createRequestContext(), deadline: 10 },
+      ...timing.options,
+    });
+    await afterExecuteStarted;
+    timing.fireTimeout();
+
+    const result = await pending;
+    expect(result).toMatchObject({
+      outcome: 'error',
+      errorCategory: 'timeout',
+      errorMessage: 'Execution deadline exceeded',
+    });
+
+    resolveAfterExecute();
+    await drainMicrotasks();
+
+    expect(
+      tool.executions.inspect({ callId: 'deadline-late-after-execute-call' })[0],
+    ).toMatchObject({
+      state: 'cleanup-pending',
+      abortSource: 'deadline',
+      result: expect.any(Error),
+    });
+  });
+
+  it('keeps caller cancellation classification while policy afterExecute is pending', async () => {
+    const controller = new AbortController();
+    let markAfterExecuteStarted!: () => void;
+    const afterExecuteStarted = new Promise<void>((resolve) => {
+      markAfterExecuteStarted = resolve;
+    });
+    let afterExecuteCalls = 0;
+    const tool = createTool({
+      name: 'caller-cancel-pending-after-execute',
+      description: 'reports caller cancellation from an async afterExecute hook',
+      input: z.object({}),
+      policy: {
+        afterExecute: async () => {
+          afterExecuteCalls += 1;
+          markAfterExecuteStarted();
+          await new Promise<void>(() => {});
+        },
+      },
+      async execute() {
+        return 'completed';
+      },
+    });
+
+    const pending = tool.executeWith({
+      params: {},
+      callId: 'caller-cancel-pending-after-execute-call',
+      signal: controller.signal,
+    });
+    await afterExecuteStarted;
+    controller.abort('caller cancelled afterExecute');
+
+    await expect(pending).resolves.toMatchObject({
+      outcome: 'error',
+      errorCategory: 'cancelled',
+      errorMessage: 'caller cancelled afterExecute',
+    });
+    expect(afterExecuteCalls).toBe(1);
+    expect(
+      tool.executions.inspect({ callId: 'caller-cancel-pending-after-execute-call' })[0],
+    ).toMatchObject({
+      state: 'cleanup-pending',
+      abortSource: 'caller',
+    });
+  });
+
   it('clears absolute deadline timers with the matching custom cleanup function', async () => {
     const timing = createManualExecutionTiming();
     const tool = createTool({

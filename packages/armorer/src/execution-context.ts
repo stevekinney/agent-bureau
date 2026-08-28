@@ -147,6 +147,15 @@ export function projectExecutionSnapshot(
 }
 
 function trustedProjectionTenantId(value: unknown): string | undefined {
+  if (Array.isArray(value)) {
+    if (value.length === 0) return undefined;
+    const tenantIds = value.map(trustedProjectionTenantId);
+    const firstTenantId = tenantIds[0];
+    if (!firstTenantId || tenantIds.some((tenantId) => tenantId !== firstTenantId)) {
+      return undefined;
+    }
+    return firstTenantId;
+  }
   if (!isRecord(value)) return undefined;
   const context = value['context'];
   if (!isRecord(context)) return undefined;

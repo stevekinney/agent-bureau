@@ -646,13 +646,19 @@ export function createTool<
     return resolveToolPolicyAllow(decision);
   };
 
-  const runPolicyAfter = async (context: ToolPolicyAfterContext): Promise<void> => {
+  const runPolicyAfter = async (
+    context: ToolPolicyAfterContext,
+    signal?: MinimalAbortSignal,
+  ): Promise<void> => {
     if (!policyHooks?.afterExecute) {
       return;
     }
     try {
-      await policyHooks.afterExecute(context);
+      await racePreExecution(() => policyHooks.afterExecute!(context), signal);
     } catch (error) {
+      if (isAbortRejection(error)) {
+        throw error;
+      }
       emit('log', {
         level: 'warn',
         message: 'policy afterExecute failed',
@@ -998,11 +1004,14 @@ export function createTool<
         if (!resumedApprovalIsSatisfied) {
           emit('policy-action-required', { ...parsedDetail, params: parsed, reason });
 
-          await runPolicyAfter({
-            ...policyContext,
-            outcome: 'action_required',
-            reason,
-          });
+          await runPolicyAfter(
+            {
+              ...policyContext,
+              outcome: 'action_required',
+              reason,
+            },
+            options.signal,
+          );
 
           finishTelemetry('paused', { reason });
 
@@ -1042,12 +1051,15 @@ export function createTool<
         });
         emit('execute-error', { ...parsedDetail, error: errorObj });
         emit('settled', { ...parsedDetail, error: errorObj });
-        await runPolicyAfter({
-          ...policyContext,
-          outcome: 'denied',
-          errorCategory: toolError.category,
-          reason,
-        });
+        await runPolicyAfter(
+          {
+            ...policyContext,
+            outcome: 'denied',
+            errorCategory: toolError.category,
+            reason,
+          },
+          options.signal,
+        );
         const deniedDetails: {
           reason?: string;
           errorCategory?: ToolErrorCategory;
@@ -1090,11 +1102,14 @@ export function createTool<
         }
         emit('execute-success', { ...parsedDetail, result: undefined });
         emit('settled', { ...parsedDetail, result: undefined });
-        await runPolicyAfter({
-          ...policyContext,
-          outcome: 'success',
-          result: undefined,
-        });
+        await runPolicyAfter(
+          {
+            ...policyContext,
+            outcome: 'success',
+            result: undefined,
+          },
+          options.signal,
+        );
         finishTelemetry('success');
         const callId = typedToolCall.id;
         return {
@@ -1295,7 +1310,7 @@ export function createTool<
                   if (finalized.outputDigest !== undefined) {
                     policyAfter.outputDigest = finalized.outputDigest;
                   }
-                  await runPolicyAfter(policyAfter);
+                  await runPolicyAfter(policyAfter, options.signal);
                   const successDetails: {
                     result?: unknown;
                     inputDigest?: string;
@@ -1319,12 +1334,15 @@ export function createTool<
                     error: streamError,
                   });
                   const streamErrorCategory = classifyErrorCategory(streamError);
-                  await runPolicyAfter({
-                    ...policyContext,
-                    outcome: 'error',
-                    errorCategory: streamErrorCategory,
-                    error: streamError,
-                  });
+                  await runPolicyAfter(
+                    {
+                      ...policyContext,
+                      outcome: 'error',
+                      errorCategory: streamErrorCategory,
+                      error: streamError,
+                    },
+                    options.signal,
+                  );
                   const errorDetails: {
                     error?: unknown;
                     errorCategory?: ToolErrorCategory;
@@ -1387,7 +1405,7 @@ export function createTool<
       if (outputDigest !== undefined) {
         policyAfter.outputDigest = outputDigest;
       }
-      await runPolicyAfter(policyAfter);
+      await runPolicyAfter(policyAfter, options.signal);
       const successDetails: {
         result?: unknown;
         inputDigest?: string;
@@ -1495,12 +1513,20 @@ export function createTool<
         }
       }
       attachRequestContextPolicyFacts(errorPolicyContext, policyRequestContext);
-      await runPolicyAfter({
-        ...errorPolicyContext,
-        outcome: 'error',
-        errorCategory,
-        error: reportedError,
-      });
+      try {
+        await runPolicyAfter(
+          {
+            ...errorPolicyContext,
+            outcome: 'error',
+            errorCategory,
+            error: reportedError,
+          },
+          options.signal,
+        );
+      } catch {
+        // Preserve the original timeout/cancellation result when the lifecycle
+        // signal aborts while reporting the error to afterExecute.
+      }
       const errorDetails: {
         error?: unknown;
         errorCategory?: ToolErrorCategory;

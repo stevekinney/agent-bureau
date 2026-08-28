@@ -2820,14 +2820,6 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     if (session) {
       const runId = session.metadata['lastRunId'];
       if (typeof runId === 'string') {
-        for (const reviewId of resolvedReviewIds) {
-          if (
-            reviewId.startsWith(`approval:${runId}:`) ||
-            reviewId.startsWith(`human-wait:${runId}:`)
-          ) {
-            resolvedReviewIds.delete(reviewId);
-          }
-        }
         for (const reviewId of pendingApprovalOverrides.keys()) {
           if (reviewId.startsWith(`approval:${runId}:`)) pendingApprovalOverrides.delete(reviewId);
         }
