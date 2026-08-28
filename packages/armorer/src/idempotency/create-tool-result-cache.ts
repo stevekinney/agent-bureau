@@ -105,6 +105,7 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
         ...(typeof value['policyRevision'] === 'string'
           ? { policyRevision: value['policyRevision'] }
           : {}),
+        ...(typeof value['input'] === 'string' ? { input: value['input'] } : {}),
       };
     }
 

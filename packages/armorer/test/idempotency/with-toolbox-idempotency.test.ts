@@ -266,17 +266,36 @@ describe('withToolboxIdempotency', () => {
     };
     await cache.set(key, legacyCompleted);
 
-    const result = await idempotentToolbox.execute(
-      { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
-      { idempotencyKey: 'legacy-completed-key' },
-    );
+    await expect(
+      idempotentToolbox.execute(
+        { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
+        { idempotencyKey: 'legacy-completed-key' },
+      ),
+    ).rejects.toThrow('original input');
+    expect(addCallCount).toBe(0);
+  });
 
-    expect(result.outcome).toBe('success');
-    expect(result.result).toBe(99);
-    expect(result.idempotency).toEqual({
-      key,
-      outcome: 'deduped',
+  it('does not return completed cache entries with invalid original input', async () => {
+    const toolbox = createToolbox([createToolWithKey()]);
+    const idempotentToolbox = withToolboxIdempotency(toolbox, {
+      cache,
+      tenantId: 'tenant-a',
     });
+    const key = expectedCacheKey('tenant-a', 'default:add', 'add:invalid-input-key');
+    await cache.set(key, {
+      result: 99,
+      toolName: 'add',
+      executedAt: Date.now(),
+      ttl: 60_000,
+      input: '{invalid',
+    });
+
+    await expect(
+      idempotentToolbox.execute(
+        { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
+        { idempotencyKey: 'invalid-input-key' },
+      ),
+    ).rejects.toThrow('invalid original input');
     expect(addCallCount).toBe(0);
   });
 
@@ -1251,6 +1270,42 @@ describe('withToolboxIdempotency', () => {
     expect(reads).toEqual(['record-1']);
   });
 
+  it('reauthorizes completed cache hits against the original input', async () => {
+    let allowAll = true;
+    const tool = createTool({
+      name: 'input-bound-cache',
+      description: 'Input-sensitive cached tool',
+      version: '1.0.0',
+      input: z.object({ value: z.string() }),
+      idempotencyKey: () => 'same-operation',
+      policy: {
+        beforeExecute({ params }) {
+          const value = (params as { value?: string }).value;
+          return allowAll || value === 'safe'
+            ? { allow: true }
+            : { allow: false, reason: 'unsafe original input' };
+        },
+      },
+      async execute({ value }) {
+        addCallCount++;
+        return value;
+      },
+    });
+    const toolbox = withToolboxIdempotency(createToolbox([tool]), {
+      cache,
+      tenantId: 'tenant-a',
+    });
+
+    await expect(
+      toolbox.execute({ name: tool.name, arguments: { value: 'unsafe' } }),
+    ).resolves.toMatchObject({ outcome: 'success', result: 'unsafe' });
+    allowAll = false;
+    await expect(
+      toolbox.execute({ name: tool.name, arguments: { value: 'safe' } }),
+    ).resolves.toMatchObject({ outcome: 'error', errorMessage: 'unsafe original input' });
+    expect(addCallCount).toBe(1);
+  });
+
   it('does not keep started state for denied results before execution', async () => {
     const tool = createToolWithKey();
     const toolbox = {
@@ -1648,6 +1703,7 @@ describe('withToolboxIdempotency', () => {
       executedAt: Date.now(),
       ttl: 60_000,
       policyRevision: 'policy:1',
+      input: JSON.stringify({ a: 1, b: 2 }),
     };
     const completedRace: ToolResultCache = {
       ...cache,
@@ -1795,6 +1851,7 @@ describe('withToolboxIdempotency', () => {
       executedAt: Date.now(),
       ttl: 60_000,
       policyRevision: 'policy:1',
+      input: JSON.stringify({ a: 1, b: 2 }),
     };
     let reads = 0;
     const racingCache: ToolResultCache = {

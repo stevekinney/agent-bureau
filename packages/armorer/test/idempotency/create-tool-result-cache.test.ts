@@ -56,6 +56,7 @@ describe('createToolResultCache', () => {
         toolName: 'greeter',
         executedAt: 1000,
         ttl: 5000,
+        input: JSON.stringify({ greeting: 'hello' }),
       };
 
       await cache.set('key-2', result);
@@ -66,6 +67,8 @@ describe('createToolResultCache', () => {
         ...result,
         status: 'completed',
       });
+      const cachedResult = await cache.get('key-2');
+      expect(cachedResult?.input).toBe(result.input);
     });
 
     it('preserves completed results whose value is undefined', async () => {

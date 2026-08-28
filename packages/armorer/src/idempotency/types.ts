@@ -11,6 +11,8 @@ export type CachedToolResult = {
   expiresAt?: number;
   /** Policy revision that authorized access to this completed result. Older entries may omit it. */
   policyRevision?: string;
+  /** Canonical JSON serialization of the original input used to produce the result. */
+  input?: string;
 };
 
 export type StartedToolExecution = {

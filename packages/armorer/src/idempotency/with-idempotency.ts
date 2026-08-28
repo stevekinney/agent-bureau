@@ -1,3 +1,4 @@
+import type { JsonValue } from '../core/serialization/json';
 import { stableStringifyJson } from '../core/serialization/json';
 import {
   approvalConsumeSymbol,
@@ -138,10 +139,19 @@ export function withIdempotency<T extends Tool>(
 
     const cached = await getCacheEntry(cache, key);
     if (cached && cached.status !== 'started') {
+      if (cached.input === undefined) {
+        throw new Error('Cached result lacks its original input and cannot be reauthorized.');
+      }
+      let originalParams: unknown;
+      try {
+        originalParams = JSON.parse(cached.input);
+      } catch {
+        throw new Error('Cached result has invalid original input and cannot be reauthorized.');
+      }
       if (typeof tool.executeWith === 'function') {
         const authorizationOptions = createPolicyAuthorizationOnlyOptions(executeOptions);
         const authorizationResult = await tool.executeWith({
-          params,
+          params: originalParams,
           ...(authorizationOptions as ToolExecuteOptions),
         });
         if (authorizationResult.outcome !== 'success' || authorizationResult.error) {
@@ -306,6 +316,7 @@ export function withIdempotency<T extends Tool>(
       toolName: tool.name,
       executedAt: now(),
       ttl,
+      input: serializeOriginalInput(params),
     };
 
     if (
@@ -344,6 +355,12 @@ export function withIdempotency<T extends Tool>(
       return Reflect.get(target, prop, receiver as object) as unknown;
     },
   });
+}
+
+function serializeOriginalInput(input: unknown): string {
+  return stableStringifyJson(
+    JSON.parse(JSON.stringify(input === undefined ? null : input)) as JsonValue,
+  );
 }
 
 function createPolicyAuthorizationOnlyOptions(

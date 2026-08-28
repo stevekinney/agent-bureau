@@ -1459,6 +1459,49 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     }
   }
 
+  async function restoreTerminalReviewSession(
+    session: Pick<AgentSession, 'id' | 'agentName' | 'metadata' | 'updatedAt'>,
+  ): Promise<void> {
+    const runId = session.metadata['lastRunId'];
+    if (typeof runId !== 'string' || session.metadata['lastRunStatus'] === 'running') return;
+    const hasPendingOverride = Object.keys(
+      (session.metadata['pendingApprovalOverrides'] as Record<string, unknown> | undefined) ?? {},
+    ).some((reviewId) => reviewId.startsWith(`approval:${runId}:`));
+    if (!hasPendingOverride) return;
+
+    const requestContext = recoveredRequestContextFromMetadata(
+      session.metadata,
+      runId,
+      session.agentName,
+    );
+    if (!requestContext) return;
+    const runRuntime = await runtime.createRunRuntime(
+      {
+        message:
+          typeof session.metadata['lastUserMessage'] === 'string'
+            ? session.metadata['lastUserMessage']
+            : '',
+        sessionId: session.id,
+        runId,
+        agentName: session.agentName,
+        requestContext,
+      },
+      { liveStreaming: false },
+    );
+    runRequestContexts.set(runId, requestContext);
+    runToolboxesByRunId.set(runId, runRuntime.toolbox);
+    await restorePendingApprovalStates(runRuntime.toolbox, session.metadata, runId, session.id);
+    if (
+      !Array.from(pendingApprovalOverrides.keys()).some((reviewId) =>
+        reviewId.startsWith(`approval:${runId}:`),
+      )
+    ) {
+      terminalReviewSessions.delete(runId);
+      runRequestContexts.delete(runId);
+      runToolboxesByRunId.delete(runId);
+    }
+  }
+
   function persistSessionUpdate(
     saveSessionUpdate: () => Promise<void>,
     context: { runId: string; sessionId: string; status: 'completed' | 'error' | 'aborted' },
@@ -3554,6 +3597,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
               agentName: session.agentName,
               requestedAt: Date.parse(session.updatedAt) || Date.now(),
             });
+            await restoreTerminalReviewSession(session);
           }
         }
         if (!requestAuthorityValidator && hasRecoverableTransportAuthority(session.metadata)) {

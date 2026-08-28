@@ -1,3 +1,4 @@
+import type { JsonValue } from '../core/serialization/json';
 import { stableStringifyJson } from '../core/serialization/json';
 import type { AnyToolbox } from '../create-toolbox';
 import type { ToolRequestContext } from '../execution-context';
@@ -221,8 +222,20 @@ export function withToolboxIdempotency(
     originalExecute: (call: ToolCallInput, options?: unknown) => Promise<ToolExecutionResult>,
     executeOptions?: unknown,
   ): Promise<ToolExecutionResult> {
+    if (cached.input === undefined) {
+      throw new Error('Cached result lacks its original input and cannot be reauthorized.');
+    }
+    let originalArguments: unknown;
+    try {
+      originalArguments = JSON.parse(cached.input);
+    } catch {
+      throw new Error('Cached result has invalid original input and cannot be reauthorized.');
+    }
     const authorizationResult = await originalExecute(
-      call,
+      {
+        ...call,
+        arguments: originalArguments,
+      },
       createPolicyAuthorizationOnlyOptions(executeOptions),
     );
     if (authorizationResult.outcome !== 'success' || authorizationResult.error) {
@@ -521,6 +534,7 @@ export function withToolboxIdempotency(
         executedAt: now(),
         ttl: defaultTTL,
         policyRevision,
+        input: serializeOriginalInput(call.arguments),
       };
       const completed = await cache.completeStarted(
         cacheKey,
@@ -598,6 +612,12 @@ export function withToolboxIdempotency(
       return Reflect.get(target, prop, receiver as object) as unknown;
     },
   });
+}
+
+function serializeOriginalInput(input: unknown): string {
+  return stableStringifyJson(
+    JSON.parse(JSON.stringify(input === undefined ? null : input)) as JsonValue,
+  );
 }
 
 function formatToolRevision(tool: unknown): string {

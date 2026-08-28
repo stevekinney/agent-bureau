@@ -193,6 +193,64 @@ describe('withIdempotency', () => {
     expect(callCount).toBe(1);
   });
 
+  it('fails closed for completed cache entries without original input', async () => {
+    const tool = createTestTool();
+    const wrapped = withIdempotency(tool, { cache, tenantId: 'tenant-a' });
+    await wrapped({ a: 1, b: 2 });
+    const key = JSON.stringify(['tenant-a', tool.id, tool.name, fullInputKey({ a: 1, b: 2 })]);
+    const cached = await cache.getState(key);
+    expect(cached?.status).toBe('completed');
+    await cache.set(key, { ...cached!, input: undefined });
+
+    await expect(wrapped({ a: 1, b: 2 })).rejects.toThrow('original input');
+    expect(callCount).toBe(1);
+  });
+
+  it('fails closed for completed cache entries with invalid original input', async () => {
+    const tool = createTestTool();
+    const wrapped = withIdempotency(tool, { cache, tenantId: 'tenant-a' });
+    await wrapped({ a: 1, b: 2 });
+    const key = JSON.stringify(['tenant-a', tool.id, tool.name, fullInputKey({ a: 1, b: 2 })]);
+    const cached = await cache.getState(key);
+    expect(cached?.status).toBe('completed');
+    await cache.set(key, { ...cached!, input: '{invalid' });
+
+    await expect(wrapped({ a: 1, b: 2 })).rejects.toThrow('invalid original input');
+    expect(callCount).toBe(1);
+  });
+
+  it('reauthorizes completed cache hits against the original input', async () => {
+    let allowAll = true;
+    const tool = createTool({
+      name: 'input-bound-cache',
+      description: 'Input-sensitive cached tool',
+      version: '1.0.0',
+      input: z.object({ value: z.string() }),
+      idempotencyKey: () => 'same-operation',
+      policy: {
+        beforeExecute({ policyContext }) {
+          const value = (policyContext as { params?: { value?: string } } | undefined)?.params
+            ?.value;
+          return allowAll || value === 'safe'
+            ? { allow: true }
+            : { allow: false, reason: 'unsafe original input' };
+        },
+      },
+      async execute({ value }) {
+        callCount++;
+        return value;
+      },
+    });
+    const wrapped = withIdempotency(tool, { cache, tenantId: 'tenant-a' });
+
+    await expect(wrapped({ value: 'unsafe' }, { requestContext })).resolves.toBe('unsafe');
+    allowAll = false;
+    await expect(wrapped({ value: 'safe' }, { requestContext })).rejects.toThrow(
+      'unsafe original input',
+    );
+    expect(callCount).toBe(1);
+  });
+
   it('keeps started state when execution throws after claiming a key', async () => {
     const sideEffects: number[] = [];
     const tool = createTool({

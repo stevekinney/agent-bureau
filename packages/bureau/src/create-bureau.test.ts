@@ -4308,6 +4308,48 @@ describe('createBureau review queue (AB-20)', () => {
     }
   });
 
+  it('restores terminal approval authority, toolbox, and binding state across restart', async () => {
+    const storage = await resolveStorage({ type: 'memory' });
+    const charges: number[] = [];
+    const bureauA = await createBureau({
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [{ id: 'restart-call', name: 'charge-card', arguments: { cents: 375 } }],
+        },
+      ]),
+      toolbox: createNeedsApprovalToolbox('restart-approval-secret', charges),
+      storage,
+      durableExecution: true,
+      stopWhen: stopWhen.toolOutcome('action_required'),
+    });
+    const run = await bureauA.createRun({ message: 'Persist approval for restart' });
+    await waitForRunCompletion(bureauA, run.id);
+    expect(bureauA.listPendingReviews()).toHaveLength(1);
+    await bureauA.dispose();
+
+    const bureauB = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createNeedsApprovalToolbox('restart-approval-secret', charges),
+      storage,
+      durableExecution: true,
+      stopWhen: stopWhen.noToolCalls(),
+    });
+    try {
+      const [review] = bureauB.listPendingReviews();
+      expect(review).toBeDefined();
+      const outcome = await bureauB.resolveReview({
+        id: review!.id,
+        decision: 'approve',
+        principal: 'operator-restart',
+      });
+      expect(outcome.decision).toBe('approve');
+      expect(charges).toEqual([375]);
+    } finally {
+      await bureauB.dispose();
+    }
+  });
+
   it('listPendingReviews surfaces a tool call parked on needs_approval', async () => {
     const charges: number[] = [];
     const persistence = textValueStore(new MemoryStorage());
