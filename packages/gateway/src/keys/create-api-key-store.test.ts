@@ -60,6 +60,23 @@ describe('create', () => {
     expect(await store.list()).toEqual([]);
   });
 
+  it('rejects scope entries that cannot be emitted as HTTP header values', async () => {
+    for (const scope of ['line\nfeed', 'carriage\rreturn', 'null\u0000']) {
+      let rejection: unknown;
+      try {
+        await store.create({ name: 'invalid-header-scope', scopes: [scope] });
+      } catch (error) {
+        rejection = error;
+      }
+      expect(rejection).toBeInstanceOf(Error);
+      expect((rejection as Error).message).toBe(
+        'API key scope entries must be valid HTTP header values',
+      );
+    }
+    expect(await store.list()).toEqual([]);
+    expect(() => new Headers({ 'x-scope': 'valid\tvalue' })).not.toThrow();
+  });
+
   it('respects expiresAt', async () => {
     const expires = new Date(Date.now() + 86400000).toISOString();
     const result = await store.create({ name: 'expiring', expiresAt: expires });

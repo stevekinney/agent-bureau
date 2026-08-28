@@ -751,6 +751,10 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   // from the queue immediately, and is never accidentally resolved twice.
   const resolvedReviewIds = new Set<string>();
   const resolvingReviewIds = new Set<string>();
+  const reviewResolutionCleanupPending = new Map<
+    string,
+    { sessionId: string; runId: string; kind: PendingReview['kind']; decision: 'approve' | 'deny' }
+  >();
   const pendingApprovalOverrides = new Map<
     string,
     Extract<PendingReview, { kind: 'tool-approval' }>['approval']
@@ -892,6 +896,9 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         recoveredRunIds.delete(removedRunId);
         runToolboxesByRunId.delete(removedRunId);
         terminalReviewSessions.delete(removedRunId);
+        for (const [reviewId, cleanup] of reviewResolutionCleanupPending) {
+          if (cleanup.runId === removedRunId) reviewResolutionCleanupPending.delete(reviewId);
+        }
         for (const id of pendingApprovalOverrides.keys()) {
           if (id.startsWith(`approval:${removedRunId}:`)) pendingApprovalOverrides.delete(id);
         }
@@ -2767,6 +2774,9 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         runRequestContexts.delete(runId);
         runToolboxesByRunId.delete(runId);
         terminalReviewSessions.delete(runId);
+        for (const [reviewId, cleanup] of reviewResolutionCleanupPending) {
+          if (cleanup.runId === runId) reviewResolutionCleanupPending.delete(reviewId);
+        }
       }
     }
     await sessionStore.delete(id);
@@ -2804,8 +2814,8 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     const requestContext = runRequestContexts.get(runId);
     if (
       requestContext &&
-      ((isTransportIssuedAuthority(requestContext) && !requestAuthorityValidator) ||
-        (requestAuthorityValidator && !(await requestAuthorityValidator(requestContext))))
+      isTransportIssuedAuthority(requestContext) &&
+      (!requestAuthorityValidator || !(await requestAuthorityValidator(requestContext)))
     ) {
       throw new BureauError(
         'Cannot signal: the request authority is no longer current.',
@@ -2961,6 +2971,32 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   async function resolveReview(input: ResolveReviewInput): Promise<ResolveReviewResult> {
     const review = listPendingReviews().find((candidate) => candidate.id === input.id);
     if (!review) {
+      const cleanup = reviewResolutionCleanupPending.get(input.id);
+      if (cleanup) {
+        if (cleanup.decision !== input.decision) {
+          throw new BureauError(`Review with id "${input.id}" is already resolved`, 'CONFLICT');
+        }
+        if (resolvingReviewIds.has(input.id)) {
+          throw new BureauError(
+            `Review with id "${input.id}" is already being resolved`,
+            'CONFLICT',
+          );
+        }
+        resolvingReviewIds.add(input.id);
+        try {
+          await persistReviewResolutionWithRetry(
+            cleanup.sessionId,
+            input.id,
+            cleanup.kind === 'tool-approval',
+            cleanup.runId,
+          );
+          reviewResolutionCleanupPending.delete(input.id);
+          releaseTerminalRunReviewState(cleanup.runId);
+          return { id: input.id, kind: cleanup.kind, decision: cleanup.decision };
+        } finally {
+          resolvingReviewIds.delete(input.id);
+        }
+      }
       throw new BureauError(`No pending review with id "${input.id}"`, 'NOT_FOUND');
     }
 
@@ -2997,6 +3033,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
           }
           if (
             approvalRequestContext &&
+            isTransportIssuedAuthority(approvalRequestContext) &&
             requestAuthorityValidator &&
             !(await requestAuthorityValidator(approvalRequestContext))
           ) {
@@ -3064,8 +3101,8 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         const requestContext = runRequestContexts.get(review.runId);
         if (
           requestContext &&
-          ((isTransportIssuedAuthority(requestContext) && !requestAuthorityValidator) ||
-            (requestAuthorityValidator && !(await requestAuthorityValidator(requestContext))))
+          isTransportIssuedAuthority(requestContext) &&
+          (!requestAuthorityValidator || !(await requestAuthorityValidator(requestContext)))
         ) {
           throw new BureauError(
             'Cannot approve: the request authority is no longer current.',
@@ -3104,10 +3141,12 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
           review.runId,
         );
       } catch (error) {
-        resolvedReviewIds.delete(review.id);
-        if (review.kind === 'tool-approval') {
-          pendingApprovalOverrides.set(review.id, review.approval);
-        }
+        reviewResolutionCleanupPending.set(review.id, {
+          sessionId: review.sessionId,
+          runId: review.runId,
+          kind: review.kind,
+          decision: input.decision,
+        });
         resolvingReviewIds.delete(review.id);
         throw error;
       }

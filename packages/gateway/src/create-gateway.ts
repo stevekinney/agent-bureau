@@ -153,9 +153,7 @@ function composeRequestAuthorityValidators(
   if (!gatewayValidator) return hostValidator;
 
   return async (context) => {
-    const isGatewayAuthority =
-      context.authority.principalId === 'static-token' ||
-      context.authority.principalId.startsWith('api-key:');
+    const isGatewayAuthority = context.authority.authorizationRevision.startsWith('gateway:');
     return isGatewayAuthority ? gatewayValidator(context) : hostValidator(context);
   };
 }

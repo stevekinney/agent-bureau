@@ -186,6 +186,7 @@ describe('createGateway', () => {
           principalId: 'host-principal',
           tenantId: 'host-tenant',
           ownerId: 'allowed-owner',
+          authorizationRevision: 'host:authority:1',
         },
       }),
     ).toBe(true);
@@ -197,9 +198,31 @@ describe('createGateway', () => {
           principalId: 'host-principal',
           tenantId: 'other-tenant',
           ownerId: 'blocked-owner',
+          authorizationRevision: 'host:authority:1',
         },
       }),
     ).toBe(false);
+  });
+
+  it('uses the host validator for non-Gateway transport revisions regardless of principal naming', async () => {
+    const hostValidator = (context: ToolRequestContext) =>
+      context.authority.ownerId === 'host-owner';
+    const { bureau, getRequestAuthorityValidator } = createGatewayBureauStub(hostValidator);
+
+    await createGateway(bureau, { authToken: 'secret' });
+    const validator = getRequestAuthorityValidator()!;
+    const context = staticTokenRequestContext('not-used', 'host-owner');
+
+    expect(
+      await validator({
+        ...context,
+        authority: {
+          ...context.authority,
+          principalId: 'api-key:another-transport',
+          authorizationRevision: 'static-token:transport:1',
+        },
+      }),
+    ).toBe(true);
   });
 
   it('replaces a previous gateway validator while preserving the host validator', async () => {

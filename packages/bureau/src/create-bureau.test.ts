@@ -4443,6 +4443,7 @@ describe('createBureau review queue (AB-20)', () => {
 
   it('resolveReview approve resumes a tool-approval and executes the tool for real', async () => {
     const charges: number[] = [];
+    let validatorCalls = 0;
     const bureau = await createBureau({
       generate: createSequentialGenerate([
         {
@@ -4452,6 +4453,10 @@ describe('createBureau review queue (AB-20)', () => {
       ]),
       toolbox: createNeedsApprovalToolbox('test-secret-2', charges),
       stopWhen: stopWhen.toolOutcome('action_required'),
+      requestAuthorityValidator: () => {
+        validatorCalls += 1;
+        return false;
+      },
     });
 
     const run = await bureau.createRun({ message: 'Charge the customer' });
@@ -4472,6 +4477,7 @@ describe('createBureau review queue (AB-20)', () => {
       charged: 750,
     });
     expect(charges).toEqual([750]); // the tool genuinely ran
+    expect(validatorCalls).toBe(0);
 
     // Resolved reviews disappear from the queue.
     expect(bureau.listPendingReviews()).toHaveLength(0);
@@ -4757,15 +4763,15 @@ describe('createBureau review queue (AB-20)', () => {
 
   it('retries approval resolution persistence after a transient cleanup failure', async () => {
     const backingStore = textValueStore(new MemoryStorage());
-    let failNextSessionUpdate = false;
+    let failedSessionUpdatesRemaining = 0;
     const persistence = createTextStoreProxy(backingStore, {
       async conditionalBatch(conditions, operations) {
         if (
-          failNextSessionUpdate &&
+          failedSessionUpdatesRemaining > 0 &&
           (conditions.some((condition) => condition.key.startsWith('agent-session:')) ||
             operations.some((operation) => operation.key.startsWith('agent-session:')))
         ) {
-          failNextSessionUpdate = false;
+          failedSessionUpdatesRemaining -= 1;
           throw new Error('override cleanup unavailable');
         }
         return backingStore.conditionalBatch(conditions, operations);
@@ -4790,7 +4796,23 @@ describe('createBureau review queue (AB-20)', () => {
     await waitForRunCompletion(bureau, run.id);
     const [review] = bureau.listPendingReviews();
     expect(review).toBeDefined();
-    failNextSessionUpdate = true;
+    failedSessionUpdatesRemaining = 3;
+
+    const resolutionError = await bureau
+      .resolveReview({
+        id: review!.id,
+        decision: 'approve',
+        principal: 'api-key:reviewer-cleanup',
+      })
+      .then(
+        () => undefined,
+        (error) => error,
+      );
+    expect(resolutionError).toBeInstanceOf(Error);
+    expect((resolutionError as Error).message).toContain('override cleanup unavailable');
+
+    expect(charges).toEqual([425]);
+    expect(bureau.listPendingReviews()).toHaveLength(0);
 
     const outcome = await bureau.resolveReview({
       id: review!.id,

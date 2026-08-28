@@ -7,6 +7,7 @@ const KEY_PREFIX = 'api-key:';
 const INVALID_SCOPE_ENTRY_MESSAGE = 'API key scope entries must be non-blank strings';
 const SCOPE_DELIMITER = ',';
 const INVALID_SCOPE_DELIMITER_MESSAGE = 'API key scope entries must not contain ","';
+const INVALID_SCOPE_HEADER_MESSAGE = 'API key scope entries must be valid HTTP header values';
 
 export function normalizeApiKeyScopes(scopes: unknown): string[] {
   if (scopes === undefined) return [];
@@ -24,6 +25,17 @@ export function normalizeApiKeyScopes(scopes: unknown): string[] {
     }
     if (normalizedScope.includes(SCOPE_DELIMITER)) {
       throw new Error(INVALID_SCOPE_DELIMITER_MESSAGE);
+    }
+    // Scope names are reflected into x-api-key-scopes. Reject the C0 control
+    // characters that Fetch/Bun/Node reject in HTTP header values; horizontal
+    // tab remains valid per the platform header-value grammar.
+    if (
+      [...normalizedScope].some((character) => {
+        const code = character.charCodeAt(0);
+        return code <= 0x08 || (code >= 0x0a && code <= 0x1f);
+      })
+    ) {
+      throw new Error(INVALID_SCOPE_HEADER_MESSAGE);
     }
     normalizedScopes.push(normalizedScope);
   }
