@@ -282,12 +282,11 @@ export function withIdempotency<T extends Tool>(
       Math.max(0, (startedExecution.absoluteDeadline ?? now()) - startedExecution.startedAt),
     );
 
-    let toolExecution: Awaited<ReturnType<Tool['executeWith']>> | null;
-    let result: unknown;
+    let toolExecution: Awaited<ReturnType<Tool['executeWith']>>;
     try {
-      // Execute the tool via its callable interface (params → result)
-      toolExecution = executeOptions ? await tool.executeWith({ params, ...executeOptions }) : null;
-      result = toolExecution ? toolExecution.result : await tool(params);
+      toolExecution = executeOptions
+        ? await tool.executeWith({ params, ...executeOptions })
+        : await tool.executeWith({ params });
     } catch (error) {
       if (isPreExecutionThrownError(error)) {
         await cache.deleteStarted(key, startedExecution.attemptId!);
@@ -299,7 +298,7 @@ export function withIdempotency<T extends Tool>(
       await pendingRenewal;
     }
 
-    if (toolExecution && toolExecution.outcome !== 'success') {
+    if (toolExecution.outcome !== 'success') {
       if (isPreExecutionResult(toolExecution)) {
         await cache.deleteStarted(key, startedExecution.attemptId!);
       }
@@ -311,6 +310,7 @@ export function withIdempotency<T extends Tool>(
       throw new Error(message);
     }
 
+    const result = toolExecution.result;
     const entry: CachedToolResult = {
       result,
       toolName: tool.name,

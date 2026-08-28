@@ -11,6 +11,7 @@ import type {
   ToolResultCache,
 } from '../../src/idempotency/types';
 import { withIdempotency } from '../../src/idempotency/with-idempotency';
+import { policyAuthorizationOnlySymbol } from '../../src/internal/approval-resume';
 import type { Tool } from '../../src/is-tool';
 
 const requestContext = {
@@ -581,6 +582,24 @@ describe('withIdempotency', () => {
         execute(input: { x: number }) {
           return tool(input);
         },
+        async executeWith(options: {
+          params: { x: number };
+          callId?: string;
+          [policyAuthorizationOnlySymbol]?: boolean;
+        }) {
+          const result = options[policyAuthorizationOnlySymbol]
+            ? undefined
+            : await tool(options.params);
+          const callId = options.callId ?? 'json-schema-input-call';
+          return {
+            callId,
+            outcome: 'success' as const,
+            content: result,
+            toolCallId: callId,
+            toolName: 'jsonSchemaInput',
+            result,
+          };
+        },
         configuration: {
           identity: { name: 'jsonSchemaInput' },
         },
@@ -826,6 +845,45 @@ describe('withIdempotency', () => {
     expect(executions).toBe(0);
   });
 
+  it('clears callable claims when policy stops execution before the callback runs', async () => {
+    let executions = 0;
+    const tool = createTool({
+      name: 'callable-approval-gated',
+      description: 'Requires approval before callable execution',
+      input: z.object({ value: z.string() }),
+      idempotencyKey: (input: unknown) => fullInputKey(input),
+      policy: {
+        beforeExecute: () => ({
+          status: 'needs_approval' as const,
+          reason: 'Callable approval required',
+          action: { message: 'Approve callable execution' },
+        }),
+      },
+      async execute({ value }) {
+        executions += 1;
+        return value;
+      },
+    });
+    const wrapped = withIdempotency(tool, {
+      cache,
+      tenantId: 'tenant-a',
+      toolRevision: 'callable-approval-gated:1',
+    });
+    const input = { value: 'one' };
+    const key = JSON.stringify([
+      'tenant-a',
+      'callable-approval-gated:1',
+      'callable-approval-gated',
+      fullInputKey(input),
+    ]);
+
+    await expect(wrapped(input)).rejects.toThrow('Callable approval required');
+    expect(await cache.getState(key)).toBeUndefined();
+    await expect(wrapped(input)).rejects.toThrow('Callable approval required');
+    expect(await cache.getState(key)).toBeUndefined();
+    expect(executions).toBe(0);
+  });
+
   it('clears claims when policy denies execution before the callback runs', async () => {
     let executions = 0;
     const tool = createTool({
@@ -853,6 +911,41 @@ describe('withIdempotency', () => {
     await expect(wrapped.execute({ value: 'one' }, { requestContext })).rejects.toThrow(
       'Execution denied',
     );
+    expect(executions).toBe(0);
+  });
+
+  it('clears callable claims when policy denies execution before the callback runs', async () => {
+    let executions = 0;
+    const tool = createTool({
+      name: 'callable-policy-denied',
+      description: 'Callable path is denied before execution',
+      input: z.object({ value: z.string() }),
+      idempotencyKey: (input: unknown) => fullInputKey(input),
+      policy: {
+        beforeExecute: () => ({ allow: false, reason: 'Callable execution denied' }),
+      },
+      async execute({ value }) {
+        executions += 1;
+        return value;
+      },
+    });
+    const wrapped = withIdempotency(tool, {
+      cache,
+      tenantId: 'tenant-a',
+      toolRevision: 'callable-policy-denied:1',
+    });
+    const input = { value: 'one' };
+    const key = JSON.stringify([
+      'tenant-a',
+      'callable-policy-denied:1',
+      'callable-policy-denied',
+      fullInputKey(input),
+    ]);
+
+    await expect(wrapped(input)).rejects.toThrow('Callable execution denied');
+    expect(await cache.getState(key)).toBeUndefined();
+    await expect(wrapped(input)).rejects.toThrow('Callable execution denied');
+    expect(await cache.getState(key)).toBeUndefined();
     expect(executions).toBe(0);
   });
 

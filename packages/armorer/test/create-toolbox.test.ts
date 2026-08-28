@@ -81,6 +81,69 @@ describe('createToolbox', () => {
     expect(scheduled).toHaveLength(2);
   });
 
+  it('starts relative timeouts when sequential child execution is admitted', async () => {
+    let secondExecuted = false;
+    const toolbox = createToolbox([
+      createTool({
+        name: 'slow-first',
+        description: 'slow first',
+        input: z.object({}),
+        async execute() {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          return 'first';
+        },
+      }),
+      createTool({
+        name: 'fast-second',
+        description: 'fast second',
+        input: z.object({}),
+        async execute() {
+          secondExecuted = true;
+          return 'second';
+        },
+      }),
+    ]);
+
+    const results = await toolbox.execute(
+      [
+        { id: 'first', name: 'slow-first', arguments: {} },
+        { id: 'second', name: 'fast-second', arguments: {} },
+      ],
+      { mode: 'sequential', timeout: 10 },
+    );
+
+    expect(results).toHaveLength(2);
+    expect(results[1]).toMatchObject({ outcome: 'success', result: 'second' });
+    expect(secondExecuted).toBe(true);
+  });
+
+  it('classifies expired deadlines before missing or unavailable dispatch', async () => {
+    const unavailable = createTool({
+      name: 'expired-unavailable',
+      description: 'expired unavailable',
+      input: z.object({}),
+      availability: () => false,
+      async execute() {
+        return 'unreachable';
+      },
+    });
+    const toolbox = createToolbox([unavailable]);
+    const requestContext = { ...approvalRequestContext, deadline: 99 };
+
+    const results = await toolbox.execute(
+      [
+        { id: 'missing', name: 'expired-missing', arguments: {} },
+        { id: 'unavailable', name: 'expired-unavailable', arguments: {} },
+      ],
+      { now: () => 100, requestContext },
+    );
+
+    expect(results).toEqual([
+      expect.objectContaining({ outcome: 'error', errorCategory: 'timeout' }),
+      expect.objectContaining({ outcome: 'error', errorCategory: 'timeout' }),
+    ]);
+  });
+
   it('hydrates from serialized configurations and executes tools', async () => {
     const toolbox = createToolbox([makeConfiguration()]);
 

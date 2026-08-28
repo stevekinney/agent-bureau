@@ -1813,6 +1813,40 @@ describe('isTool', () => {
     });
   });
 
+  it('rejects an expired request deadline before admitting a direct ToolCall callback', async () => {
+    let executions = 0;
+    const tool = createTool({
+      name: 'expired-direct-request-deadline',
+      description: 'rejects expired direct request deadlines',
+      input: z.object({}),
+      async execute() {
+        executions += 1;
+        return 'unreachable';
+      },
+    });
+
+    const result = await tool.execute(
+      {
+        id: 'expired-direct-request-deadline-call',
+        name: 'expired-direct-request-deadline',
+        arguments: {},
+      },
+      {
+        now: () => 100,
+        requestContext: { ...createRequestContext(), deadline: 99 },
+      },
+    );
+
+    expect(result).toMatchObject({ outcome: 'error', errorCategory: 'timeout' });
+    expect(executions).toBe(0);
+    expect(
+      tool.executions.inspect({ callId: 'expired-direct-request-deadline-call' })[0],
+    ).toMatchObject({
+      state: 'terminal',
+      abortSource: 'deadline',
+    });
+  });
+
   it('settles an absolute deadline while resolving a pending lazy executor', async () => {
     const timing = createManualExecutionTiming();
     let resolveExecutor!: (executor: (params: Record<string, never>) => Promise<string>) => void;

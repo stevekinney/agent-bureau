@@ -931,15 +931,8 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     options = requestContext ? { ...options, requestContext } : options;
     const firstCall = Array.isArray(input) ? input[0] : input;
     const nowFunction = options?.now ?? Date.now;
-    const timeoutDeadline =
-      options?.timeout !== undefined ? nowFunction() + options.timeout : undefined;
     const requestDeadline = options?.requestContext?.deadline;
-    const deadline =
-      timeoutDeadline === undefined
-        ? requestDeadline
-        : requestDeadline === undefined
-          ? timeoutDeadline
-          : Math.min(timeoutDeadline, requestDeadline);
+    const deadline = requestDeadline;
     const executionHandle = executionLifecycle.begin({
       ...(options?.executionId ? { executionId: options.executionId } : {}),
       toolName: Array.isArray(input) ? 'toolbox.batch' : (firstCall?.name ?? 'toolbox.unknown'),
@@ -1002,6 +995,25 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       // Map calls to tasks
       const tasks = calls.map((call, callIndex) => async () => {
         let toolCall = normalizeToolCall(call);
+        if (executionHandle.snapshot().abortSource === 'deadline') {
+          const toolError = createToolError(
+            'timeout',
+            'Execution deadline exceeded',
+            'TIMEOUT',
+            false,
+          );
+          return {
+            callId: toolCall.id,
+            outcome: 'error' as const,
+            content: toolError.message,
+            toolCallId: toolCall.id,
+            toolName: toolCall.name,
+            result: undefined,
+            error: toolError,
+            errorMessage: toolError.message,
+            errorCategory: toolError.category,
+          } satisfies ToolExecutionResult;
+        }
         let tool = getTool(toolCall.name) as Tool | undefined; // toolCall.name might be ID
         if (!tool && resolutionEnabled) {
           const allNames = [...toolsByName.keys()];
