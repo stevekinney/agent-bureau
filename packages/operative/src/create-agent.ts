@@ -253,9 +253,10 @@ export type { AgentRun };
  * import { createToolbox } from 'armorer';
  * import { createAgent, stopWhen } from '@lostgradient/operative';
  *
- * // Built once per process — the stable approvalSecret is what makes
- * // resumeApproval() work across separate HTTP requests. Approval-gated tools
- * // must also declare a stable version, for example `version: '1'`.
+ * // Built once for this process. This example requires both HTTP requests to
+ * // reach this toolbox instance. Multi-process or restart-safe hosts must also
+ * // configure every toolbox with the same durable ApprovalStateStore.
+ * // Approval-gated tools must declare a stable version, for example `version: '1'`.
  * const toolbox = createToolbox([deleteFileTool], {
  *   approvalPolicy: { mode: 'on-mutation' },
  *   approvalSecret: Bun.env['APPROVAL_SECRET'],
@@ -292,7 +293,19 @@ export type { AgentRun };
  *
  * // Later, authenticate the approval request and build a fresh context with
  * // the same bound identity fields. Do not reuse an expired request deadline.
- * const approvalRequestContext = { ...requestContext, deadline: Date.now() + 30_000 };
+ * const approvalRequestContext = {
+ *   authority: {
+ *     principalId: approvalUser.id,
+ *     tenantId: approvalTenant.id,
+ *     ownerId: approvalSession.id,
+ *     capabilities: approvalAuthorization.capabilities,
+ *     authorizationRevision: approvalAuthorization.revision,
+ *   },
+ *   audience: requestContext.audience,
+ *   agentId: requestContext.agentId,
+ *   runId: requestContext.runId,
+ *   deadline: Date.now() + 30_000,
+ * };
  * const resumedResult = await toolbox.resumeApproval(signedApproval, {
  *   requestContext: approvalRequestContext,
  * });

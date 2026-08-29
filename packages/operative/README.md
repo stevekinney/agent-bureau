@@ -236,7 +236,16 @@ const pending = result.steps.at(-1)?.results.find((r) => r.pendingApproval)?.pen
 // context. Preserve the bound identity fields, but derive controls such as a
 // deadline from this request instead of copying an expired deadline.
 const approvalRequestContext = {
-  ...requestContext,
+  authority: {
+    principalId: approvalUser.id,
+    tenantId: approvalTenant.id,
+    ownerId: approvalSession.id,
+    capabilities: approvalAuthorization.capabilities,
+    authorizationRevision: approvalAuthorization.revision,
+  },
+  audience: requestContext.audience,
+  agentId: requestContext.agentId,
+  runId: requestContext.runId,
   deadline: Date.now() + 30_000,
 };
 const resumedResult = await toolbox.resumeApproval(signedApproval, {
