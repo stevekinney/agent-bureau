@@ -165,11 +165,12 @@ const result = await run.result(); // await — same handle
 
 ##### Stateless chat host: resume a conversation, share a toolbox, park on approval
 
-A host with a browser- or client-owned conversation and an approval-gated toolbox — a stateless HTTP chat backend, for example — needs three things `createAgent` provides directly:
+A host with a browser- or client-owned conversation and an approval-gated toolbox — a stateless HTTP chat backend, for example — needs four things `createAgent` provides directly:
 
 1. **A conversation input**, not just a fresh string: `agent.run({ conversation })` starts the loop from an existing `ConversationHistory` — the shape a stateless backend POSTs and stores between turns.
-2. **A pre-built `Toolbox`**, not a freshly composed one: pass `toolbox` instead of `tools`. The same instance is reused across every `run()` call, which is required for armorer's cross-request approval flow — `toolbox.resumeApproval(signedApproval)` only verifies a token signed by the toolbox's own `approvalSecret`.
-3. **Park-on-approval**, not headless denial: `stopWhen: [stopWhen.pendingApproval(), stopWhen.noToolCalls()]` (from `@lostgradient/operative/conditions`) stops the run cleanly after a step whose tool results include a pending approval — no further `generate` call happens, and the pending approval stays reachable on the final `RunResult`'s last step. `noToolCalls()` has to be combined in: `pendingApproval()` alone never fires on a normal, no-tool-call turn, so a plain text reply would otherwise run to `maximumSteps` instead of finishing.
+2. **Request-scoped authority**, not authority stored on the toolbox: pass the authenticated request's `requestContext` through `executeOptions`. Use that same context when calling `toolbox.resumeApproval()`. Armorer binds the pending approval to its principal, tenant, owner, authorization revision, audience, agent, and run, then rejects a missing or mismatched context.
+3. **A pre-built `Toolbox`**, not a freshly composed one: pass `toolbox` instead of `tools`. Reuse the same instance across requests, or configure every instance with the same secret and durable approval state store, so a later request can validate and consume the issued approval.
+4. **Park-on-approval**, not headless denial: `stopWhen: [stopWhen.pendingApproval(), stopWhen.noToolCalls()]` (from `@lostgradient/operative/conditions`) stops the run cleanly after a step whose tool results include a pending approval — no further `generate` call happens, and the pending approval stays reachable on the final `RunResult`'s last step. `noToolCalls()` has to be combined in: `pendingApproval()` alone never fires on a normal, no-tool-call turn, so a plain text reply would otherwise run to `maximumSteps` instead of finishing.
 
 ```typescript
 import { createToolbox } from 'armorer';
@@ -188,9 +189,25 @@ const toolbox = createToolbox([deleteFileTool], {
   approvalSecret: Bun.env['APPROVAL_SECRET'],
 });
 
+// Build this from the authenticated request. Do not store tenant or principal
+// authority in the reusable toolbox.
+const requestContext = {
+  authority: {
+    principalId: currentUser.id,
+    tenantId: currentTenant.id,
+    ownerId: currentSession.id,
+    capabilities: currentAuthorization.capabilities,
+    authorizationRevision: currentAuthorization.revision,
+  },
+  audience: 'tenant',
+  agentId: agentId,
+  runId: runId,
+} as const;
+
 const agent = createAgent({
   generate: myProvider,
   toolbox,
+  executeOptions: { requestContext },
   stopWhen: [stopWhen.pendingApproval(), stopWhen.noToolCalls()],
 });
 
@@ -200,8 +217,9 @@ const result = await run.result();
 const pending = result.steps.at(-1)?.results.find((r) => r.pendingApproval)?.pendingApproval;
 // ...send `pending` to a human, store `result.conversation.current` server-side...
 
-// Later, on approval: resume on the SAME toolbox instance.
-const resumedResult = await toolbox.resumeApproval(signedApproval);
+// Later, on approval: reconstruct the same authenticated authority. Every
+// identity and revision must still match the binding issued above.
+const resumedResult = await toolbox.resumeApproval(signedApproval, { requestContext });
 ```
 
 > [!IMPORTANT] Reconcile the pending result — do not append on top of it

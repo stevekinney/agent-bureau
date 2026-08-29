@@ -1,10 +1,14 @@
 # @lostgradient/operative
 
-## 0.2.1
+## 0.3.0
+
+### Minor Changes
+
+- a6e18f2: Require request-scoped Armorer execution authority when using approval-gated toolboxes, and update the stateless approval flow for Armorer 2.
 
 ### Patch Changes
 
-- Updated dependencies [a6e18f2]
+- Updated dependencies [a6e18f2]:
   - armorer@2.0.0
 
 ## 0.2.0
