@@ -5505,6 +5505,9 @@ describe('createBureau review queue (AB-20)', () => {
     const persistedSession = await bureau.getSession(run.sessionId);
     expect(persistedSession?.metadata['resolvedReviewIds'] ?? []).not.toContain(review!.id);
     expect(persistedSession?.metadata['pendingApprovalOverrides']).toHaveProperty(review!.id);
+    expect(persistedSession?.metadata['approvalResolutionStartedIds'] ?? []).not.toContain(
+      review!.id,
+    );
     const approvedRecords = await bureau.auditTrail!.query({
       runId: run.id,
       type: 'review.tool-approval.approved',

@@ -6234,7 +6234,8 @@ describe('createToolbox', () => {
       },
       async revoke(binding) {
         revocations += 1;
-        await baseApprovalStateStore.revoke(binding);
+        void binding;
+        throw new Error('late revocation unavailable');
       },
     };
     const toolbox = createToolbox(
@@ -6278,7 +6279,7 @@ describe('createToolbox', () => {
     expect(cancelled.errorCategory).toBe('cancelled');
     releaseIssuance();
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(revocations).toBe(1);
+    expect(revocations).toBe(3);
   });
 
   it('times out stalled approval issuance and clears issuance deadline controls', async () => {

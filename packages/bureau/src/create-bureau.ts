@@ -3379,6 +3379,11 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
               error?: { message?: string };
               errorMessage?: string;
             };
+            await persistPendingApprovalOverrideWithRetry(
+              review.sessionId,
+              review.id,
+              review.approval,
+            );
             throw new BureauError(
               `Cannot approve: ${failedResult.error?.message ?? failedResult.errorMessage ?? 'tool approval resume failed before execution admission.'}`,
               'CONFLICT',

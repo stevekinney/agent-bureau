@@ -281,6 +281,19 @@ describe('createGateway', () => {
     ).toBe(true);
   });
 
+  it('does not overwrite a host validator replaced while a gateway is active', async () => {
+    const originalHostValidator = () => true;
+    const replacementHostValidator = () => false;
+    const { bureau, getRequestAuthorityValidator } = createGatewayBureauStub(originalHostValidator);
+    const gateway = await createGateway(bureau, { authToken: 'secret', port: 0 });
+    const runningGateway = await gateway.start();
+
+    bureau.setRequestAuthorityValidator(replacementHostValidator);
+    runningGateway.stop();
+
+    expect(getRequestAuthorityValidator()).toBe(replacementHostValidator);
+  });
+
   it('preserves static-token authority revisions across gateway restarts', async () => {
     const kv = textValueStore(new MemoryStorage());
     const first = createGatewayBureauStub(undefined, kv);

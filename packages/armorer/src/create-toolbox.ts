@@ -1956,6 +1956,19 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     if (deadline !== undefined && deadline <= now()) return timedOut();
 
     const issuance = store.issue(binding);
+    const revokeLateIssuance = async () => {
+      let lastError: unknown;
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        try {
+          await store.revoke(binding);
+          return;
+        } catch (error) {
+          lastError = error;
+          if (attempt < 3) await Promise.resolve();
+        }
+      }
+      throw lastError;
+    };
     return new Promise((resolve, reject) => {
       let settled = false;
       const setTimeoutFunction =
@@ -1982,10 +1995,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
         if (settled) return;
         settled = true;
         cleanup();
-        void issuance.then(
-          () => store.revoke(binding),
-          () => undefined,
-        );
+        void issuance.then(revokeLateIssuance, () => undefined).catch(() => undefined);
         resolve(result);
       };
       const fail = (error: unknown) => {

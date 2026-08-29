@@ -316,12 +316,17 @@ export async function createGateway(
         bureau.removeEventListener('run.removed', clearRunBufferOnRemoval);
         if (gatewayRequestAuthorityValidator) {
           retainedState.gatewayValidators.delete(gatewayRequestAuthorityValidator);
-          const replacementValidator = composeRequestAuthorityValidators(
-            retainedState.hostValidator,
-            retainedState.gatewayValidators,
-          );
-          retainedState.installedValidator = replacementValidator;
-          bureau.setRequestAuthorityValidator(replacementValidator);
+          if (
+            authorityValidatorAccess.getRequestAuthorityValidator?.() ===
+            retainedState.installedValidator
+          ) {
+            const replacementValidator = composeRequestAuthorityValidators(
+              retainedState.hostValidator,
+              retainedState.gatewayValidators,
+            );
+            retainedState.installedValidator = replacementValidator;
+            bureau.setRequestAuthorityValidator(replacementValidator);
+          }
         }
       },
     };
