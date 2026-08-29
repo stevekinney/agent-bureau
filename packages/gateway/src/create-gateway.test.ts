@@ -247,6 +247,40 @@ describe('createGateway', () => {
     expect(await validator(staticTokenRequestContext('second-secret', 'blocked-owner'))).toBe(true);
   });
 
+  it('preserves a host validator replaced after the previous gateway was created', async () => {
+    const originalHostValidator = (context: ToolRequestContext) =>
+      context.authority.ownerId === 'original-owner';
+    const replacementHostValidator = (context: ToolRequestContext) =>
+      context.authority.ownerId === 'replacement-owner';
+    const { bureau, getRequestAuthorityValidator } = createGatewayBureauStub(originalHostValidator);
+
+    await createGateway(bureau, { authToken: 'first-secret' });
+    bureau.setRequestAuthorityValidator(replacementHostValidator);
+    await createGateway(bureau, { authToken: 'second-secret' });
+
+    const validator = getRequestAuthorityValidator()!;
+    const hostContext = {
+      ...staticTokenRequestContext('unrelated-secret'),
+      authority: {
+        ...staticTokenRequestContext('unrelated-secret').authority,
+        principalId: 'host-principal',
+        authorizationRevision: 'host:authority:2',
+      },
+    };
+    expect(
+      await validator({
+        ...hostContext,
+        authority: { ...hostContext.authority, ownerId: 'original-owner' },
+      }),
+    ).toBe(false);
+    expect(
+      await validator({
+        ...hostContext,
+        authority: { ...hostContext.authority, ownerId: 'replacement-owner' },
+      }),
+    ).toBe(true);
+  });
+
   it('preserves static-token authority revisions across gateway restarts', async () => {
     const kv = textValueStore(new MemoryStorage());
     const first = createGatewayBureauStub(undefined, kv);

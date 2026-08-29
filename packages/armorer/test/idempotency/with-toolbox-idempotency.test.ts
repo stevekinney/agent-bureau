@@ -1022,6 +1022,52 @@ describe('withToolboxIdempotency', () => {
     );
   });
 
+  it('rejects a replacement attempt that reuses the expired fence identifier', async () => {
+    const key = expectedCacheKey('tenant-a', 'default:add', 'add:colliding-replacement');
+    const inputDigest = fullInputKey({ a: 1, b: 2 });
+    await cache.claimStarted(key, {
+      status: 'started',
+      toolName: 'add',
+      startedAt: 0,
+      ttl: 60_000,
+      attemptId: 'colliding-attempt',
+      inputDigest,
+      leaseExpiresAt: 1,
+    });
+    const idempotentToolbox = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache,
+      tenantId: 'tenant-a',
+      now: () => 2,
+      createAttemptId: () => 'colliding-attempt',
+      verifyResolutionReceipt: () => true,
+    });
+
+    await expect(
+      idempotentToolbox.execute(
+        { name: 'add', arguments: { a: 1, b: 2 } },
+        {
+          idempotencyKey: 'colliding-replacement',
+          resolutionReceipt: {
+            version: 1,
+            key,
+            attemptId: 'colliding-attempt',
+            inputDigest,
+            tenantId: 'tenant-a',
+            toolRevision: 'default:add',
+            decision: 'retry',
+            evidence: 'The original attempt did not produce an effect.',
+            authorizedAt: 2,
+            authorizedBy: 'operator-a',
+            nonce: 'colliding-replacement',
+            authorization: 'signed',
+          },
+        },
+      ),
+    ).rejects.toThrow('non-empty and unique');
+    expect(addCallCount).toBe(0);
+    expect(await cache.getState(key)).toMatchObject({ attemptId: 'colliding-attempt' });
+  });
+
   it('does not keep started state for validation failures', async () => {
     const toolbox = createToolbox([createToolWithKey()]);
     const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });

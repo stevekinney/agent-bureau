@@ -469,13 +469,18 @@ export function withToolboxIdempotency(
     toolName: string,
     startedAt: number,
     inputDigest: string,
+    previousAttemptId?: string,
   ): StartedToolExecution {
+    const attemptId = createAttemptId();
+    if (!attemptId || attemptId === previousAttemptId) {
+      throw new Error('Idempotency attempt identifiers must be non-empty and unique.');
+    }
     return {
       status: 'started',
       toolName,
       startedAt,
       ttl: defaultTTL,
-      attemptId: createAttemptId(),
+      attemptId,
       leaseExpiresAt: Math.min(startedAt + leaseDurationMs, startedAt + maximumExecutionDurationMs),
       absoluteDeadline: startedAt + maximumExecutionDurationMs,
       inputDigest,
@@ -722,7 +727,7 @@ export function withToolboxIdempotency(
           });
         }
         const cachedAttemptId = cached.attemptId;
-        execution = createStartedExecution(fields.name, startedAt, inputDigest);
+        execution = createStartedExecution(fields.name, startedAt, inputDigest, cachedAttemptId);
         const replacement = cache.replaceUnknownStarted(
           cacheKey,
           cachedAttemptId,

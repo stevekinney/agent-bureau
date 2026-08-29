@@ -33,7 +33,10 @@ type BureauRequestAuthorityValidatorAccess = {
 
 const gatewayValidatorState = new WeakMap<
   object,
-  { readonly hostValidator: RequestAuthorityValidator | undefined }
+  {
+    readonly hostValidator: RequestAuthorityValidator | undefined;
+    readonly installedValidator: RequestAuthorityValidator | undefined;
+  }
 >();
 const STATIC_TOKEN_REVISION_SECRET_KEY = 'gateway:private:static-token-revision-secret';
 
@@ -221,9 +224,12 @@ export async function createGateway(
   const staticTokenRevisionSecret = await resolveStaticTokenRevisionSecret(bureau.kv);
   const authorityValidatorAccess = bureau as Bureau & BureauRequestAuthorityValidatorAccess;
   const existingValidator = authorityValidatorAccess.getRequestAuthorityValidator?.();
+  const previousGatewayValidator = gatewayValidatorState.get(bureau);
   const hostRequestAuthorityValidator =
-    gatewayValidatorState.get(bureau)?.hostValidator ?? existingValidator;
-  gatewayValidatorState.set(bureau, { hostValidator: hostRequestAuthorityValidator });
+    previousGatewayValidator !== undefined &&
+    previousGatewayValidator.installedValidator === existingValidator
+      ? previousGatewayValidator.hostValidator
+      : existingValidator;
   const requestAuthorityValidator = composeRequestAuthorityValidators(
     hostRequestAuthorityValidator,
     buildRequestAuthorityValidator(options.authToken, apiKeyStore, staticTokenRevisionSecret),
@@ -231,6 +237,10 @@ export async function createGateway(
   if (requestAuthorityValidator !== hostRequestAuthorityValidator) {
     bureau.setRequestAuthorityValidator(requestAuthorityValidator);
   }
+  gatewayValidatorState.set(bureau, {
+    hostValidator: hostRequestAuthorityValidator,
+    installedValidator: requestAuthorityValidator,
+  });
   await authorityValidatorAccess.waitForRecovery?.();
 
   const app = new Hono();
