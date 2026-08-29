@@ -61,6 +61,11 @@ function createManualToolboxDeadlineTiming(initialNow = 0) {
       if (!entry) throw new Error('Manual deadline was not scheduled');
       entry.callback();
     },
+    fireLastDeadline(): void {
+      const entry = scheduled.pop();
+      if (!entry) throw new Error('Manual deadline was not scheduled');
+      entry.callback();
+    },
     scheduledDelays(): readonly (number | undefined)[] {
       return scheduled.map(({ milliseconds }) => milliseconds);
     },
@@ -6212,7 +6217,301 @@ describe('createToolbox', () => {
     });
   });
 
+  it('cancels stalled approval issuance and revokes a binding committed after cancellation', async () => {
+    const baseApprovalStateStore = createProcessLocalApprovalStateStore();
+    let releaseIssuance!: () => void;
+    const issuanceGate = new Promise<void>((resolve) => {
+      releaseIssuance = resolve;
+    });
+    let issuanceCalls = 0;
+    let revocations = 0;
+    const approvalStateStore: typeof baseApprovalStateStore = {
+      ...baseApprovalStateStore,
+      async issue(binding) {
+        issuanceCalls += 1;
+        await issuanceGate;
+        await baseApprovalStateStore.issue(binding);
+      },
+      async revoke(binding) {
+        revocations += 1;
+        await baseApprovalStateStore.revoke(binding);
+      },
+    };
+    const toolbox = createToolbox(
+      [
+        createTool({
+          name: 'cancel-stalled-issuance',
+          version: '1.0.0',
+          description: 'Requires an approval binding before execution',
+          input: z.object({}),
+          async execute() {
+            return 'unreachable';
+          },
+        }),
+      ],
+      {
+        approvalSecret: 'cancel-stalled-issuance-secret',
+        approvalStateStore,
+        policy: {
+          beforeExecute: () => ({
+            allow: false,
+            status: 'needs_approval',
+            reason: 'approval required',
+          }),
+        },
+      },
+    );
+    const controller = new AbortController();
+
+    const pending = toolbox.execute(
+      { id: 'cancel-stalled-issuance', name: 'cancel-stalled-issuance', arguments: {} },
+      { ...approvalExecutionOptions, signal: controller.signal },
+    );
+    for (let attempt = 0; attempt < 10 && issuanceCalls === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(issuanceCalls).toBe(1);
+    controller.abort('operator cancelled');
+    const cancelled = await pending;
+
+    expect(cancelled.outcome).toBe('error');
+    expect(cancelled.errorCategory).toBe('cancelled');
+    releaseIssuance();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(revocations).toBe(1);
+  });
+
+  it('times out stalled approval issuance and clears issuance deadline controls', async () => {
+    const timing = createManualToolboxDeadlineTiming();
+    const baseApprovalStateStore = createProcessLocalApprovalStateStore();
+    let releaseIssuance!: () => void;
+    const issuanceGate = new Promise<void>((resolve) => {
+      releaseIssuance = resolve;
+    });
+    let issuanceCalls = 0;
+    let revocations = 0;
+    const approvalStateStore: typeof baseApprovalStateStore = {
+      ...baseApprovalStateStore,
+      async issue(binding) {
+        issuanceCalls += 1;
+        await issuanceGate;
+        await baseApprovalStateStore.issue(binding);
+      },
+      async revoke(binding) {
+        revocations += 1;
+        await baseApprovalStateStore.revoke(binding);
+      },
+    };
+    const toolbox = createToolbox(
+      [
+        createTool({
+          name: 'deadline-stalled-issuance',
+          version: '1.0.0',
+          description: 'Requires an approval binding before execution',
+          input: z.object({}),
+          async execute() {
+            return 'unreachable';
+          },
+        }),
+      ],
+      {
+        approvalSecret: 'deadline-stalled-issuance-secret',
+        approvalStateStore,
+        policy: {
+          beforeExecute: () => ({
+            allow: false,
+            status: 'needs_approval',
+            reason: 'approval required',
+          }),
+        },
+      },
+    );
+
+    const pending = toolbox.execute(
+      { id: 'deadline-stalled-issuance', name: 'deadline-stalled-issuance', arguments: {} },
+      {
+        ...approvalExecutionOptions,
+        requestContext: { ...approvalRequestContext, deadline: 10 },
+        ...timing.options,
+      },
+    );
+    for (let attempt = 0; attempt < 10 && issuanceCalls === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(issuanceCalls).toBe(1);
+    timing.setNow(5);
+    timing.fireLastDeadline();
+    timing.setNow(10);
+    timing.fireLastDeadline();
+    const timedOut = await pending;
+
+    expect(timedOut.errorCategory).toBe('timeout');
+    releaseIssuance();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(revocations).toBe(1);
+  });
+
+  it('cleans up approval issuance controls on success and storage failure', async () => {
+    const baseApprovalStateStore = createProcessLocalApprovalStateStore();
+    const successfulController = new AbortController();
+    const successfulToolbox = createToolbox(
+      [
+        createTool({
+          name: 'controlled-issuance-success',
+          version: '1.0.0',
+          description: 'Issues successfully under a live abort signal',
+          input: z.object({}),
+          async execute() {
+            return 'unreachable';
+          },
+        }),
+      ],
+      {
+        approvalSecret: 'controlled-issuance-success-secret',
+        approvalStateStore: baseApprovalStateStore,
+        policy: {
+          beforeExecute: () => ({
+            allow: false,
+            status: 'needs_approval',
+            reason: 'approval required',
+          }),
+        },
+      },
+    );
+    const succeeded = await successfulToolbox.execute(
+      { id: 'controlled-issuance-success', name: 'controlled-issuance-success', arguments: {} },
+      {
+        ...approvalExecutionOptions,
+        requestContext: { ...approvalRequestContext, deadline: Date.now() + 1_000 },
+        signal: successfulController.signal,
+      },
+    );
+    expect(succeeded.outcome).toBe('action_required');
+
+    const failingController = new AbortController();
+    let releaseFailedIssuance!: () => void;
+    const failedIssuanceGate = new Promise<void>((resolve) => {
+      releaseFailedIssuance = resolve;
+    });
+    let failedIssuanceCalls = 0;
+    const failingToolbox = createToolbox(
+      [
+        createTool({
+          name: 'controlled-issuance-failure',
+          version: '1.0.0',
+          description: 'Fails while issuing under a live abort signal',
+          input: z.object({}),
+          async execute() {
+            return 'unreachable';
+          },
+        }),
+      ],
+      {
+        approvalSecret: 'controlled-issuance-failure-secret',
+        approvalStateStore: {
+          ...baseApprovalStateStore,
+          async issue() {
+            failedIssuanceCalls += 1;
+            await failedIssuanceGate;
+            throw new Error('approval issuance unavailable');
+          },
+        },
+        policy: {
+          beforeExecute: () => ({
+            allow: false,
+            status: 'needs_approval',
+            reason: 'approval required',
+          }),
+        },
+      },
+    );
+    const failedPending = failingToolbox.execute(
+      { id: 'controlled-issuance-failure', name: 'controlled-issuance-failure', arguments: {} },
+      { ...approvalExecutionOptions, signal: failingController.signal },
+    );
+    for (let attempt = 0; attempt < 10 && failedIssuanceCalls === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(failedIssuanceCalls).toBe(1);
+    failingController.abort('operator cancelled');
+    const failed = await failedPending;
+    expect(failed.errorCategory).toBe('cancelled');
+    releaseFailedIssuance();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
   describe('status-only policy decisions', () => {
+    it('rolls back consumed approval admission when replacement binding issuance is cancelled', async () => {
+      const baseApprovalStateStore = createProcessLocalApprovalStateStore();
+      let releaseReplacementIssuance!: () => void;
+      const replacementIssuanceGate = new Promise<void>((resolve) => {
+        releaseReplacementIssuance = resolve;
+      });
+      let issuanceCalls = 0;
+      const approvalStateStore: typeof baseApprovalStateStore = {
+        ...baseApprovalStateStore,
+        async issue(binding) {
+          issuanceCalls += 1;
+          if (issuanceCalls === 2) await replacementIssuanceGate;
+          await baseApprovalStateStore.issue(binding);
+        },
+      };
+      const toolbox = createToolbox(
+        [
+          createTool({
+            name: 'cancel-replacement-issuance',
+            version: '1.0.0',
+            description: 'Requires a second approval after registry approval',
+            input: z.object({}),
+            policy: {
+              beforeExecute: () => ({
+                status: 'needs_approval',
+                reason: 'tool approval required',
+              }),
+            },
+            async execute() {
+              return 'unreachable';
+            },
+          }),
+        ],
+        {
+          approvalSecret: 'cancel-replacement-issuance-secret',
+          approvalStateStore,
+          policy: {
+            beforeExecute: () => ({
+              status: 'needs_approval',
+              reason: 'registry approval required',
+            }),
+          },
+        },
+      );
+      const initial = await toolbox.execute(
+        {
+          id: 'cancel-replacement-issuance',
+          name: 'cancel-replacement-issuance',
+          arguments: {},
+        },
+        approvalExecutionOptions,
+      );
+      const initialApproval = initial.pendingApproval as SignedPendingToolApproval;
+      const controller = new AbortController();
+      const pendingReplacement = toolbox.resumeApproval(initialApproval, {
+        ...approvalExecutionOptions,
+        signal: controller.signal,
+      });
+      for (let attempt = 0; attempt < 10 && issuanceCalls < 2; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      expect(issuanceCalls).toBe(2);
+      controller.abort('operator cancelled');
+      const cancelled = await pendingReplacement;
+
+      expect(cancelled.errorCategory).toBe('cancelled');
+      expect(await approvalStateStore.state(initialApproval.approvalBinding!)).toBe('issued');
+      releaseReplacementIssuance();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
     it('requires distinct registry and tool pauses to be satisfied in policy order', async () => {
       let executed = false;
       const baseApprovalStateStore = createProcessLocalApprovalStateStore();

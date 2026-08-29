@@ -1536,13 +1536,26 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
             const consumeApproval = executeOptions[approvalConsumeSymbol];
             const rollbackApprovalAdmission = consumeApproval ? await consumeApproval() : undefined;
             try {
-              await approvalStateStore.issue(result.pendingApproval.approvalBinding);
+              const interrupted = await issueApprovalStateWithInterruption(
+                approvalStateStore,
+                result.pendingApproval as SignedPendingToolApproval,
+                executeOptions,
+              );
+              if (interrupted) {
+                if (rollbackApprovalAdmission) await rollbackApprovalAdmission();
+                return interrupted;
+              }
             } catch (error) {
               if (rollbackApprovalAdmission) await rollbackApprovalAdmission();
               throw error;
             }
           } else if (result.pendingApproval?.approvalBinding && approvalStateStore) {
-            await approvalStateStore.issue(result.pendingApproval.approvalBinding);
+            const interrupted = await issueApprovalStateWithInterruption(
+              approvalStateStore,
+              result.pendingApproval as SignedPendingToolApproval,
+              executeOptions,
+            );
+            if (interrupted) return interrupted;
           }
           let hasLiveStream = false;
           const stream = resolveResultStream(result);
@@ -1913,6 +1926,93 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       options.signal?.addEventListener('abort', onAbort, { once: true });
       scheduleDeadline();
       void store.state(binding).then((state) => finish({ outcome: 'read', state }), fail);
+    });
+  }
+
+  async function issueApprovalStateWithInterruption(
+    store: ApprovalStateStore,
+    approval: SignedPendingToolApproval,
+    options: ToolboxExecuteOptions,
+  ): Promise<ToolExecutionResult | undefined> {
+    const binding = approval.approvalBinding;
+    if (!binding) return undefined;
+    const now = options.now ?? Date.now;
+    const deadline = options.requestContext?.deadline;
+    const cancelled = () =>
+      createInterruptedResumeApprovalValidationResult(
+        approval,
+        'cancelled',
+        formatCancellationReason(options.signal?.reason),
+        'CANCELLED',
+      );
+    const timedOut = () =>
+      createInterruptedResumeApprovalValidationResult(
+        approval,
+        'timeout',
+        'Execution deadline exceeded',
+        'TIMEOUT',
+      );
+    if (options.signal?.aborted) return cancelled();
+    if (deadline !== undefined && deadline <= now()) return timedOut();
+
+    const issuance = store.issue(binding);
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const setTimeoutFunction =
+        options.setTimeoutFunction ??
+        ((callback: () => void, milliseconds?: number) => setTimeout(callback, milliseconds));
+      const clearTimeoutFunction =
+        options.clearTimeoutFunction ??
+        ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+      let timer: unknown;
+      let timerScheduled = false;
+      const cleanup = () => {
+        options.signal?.removeEventListener('abort', onAbort);
+        if (!timerScheduled) return;
+        timerScheduled = false;
+        clearTimeoutFunction(timer);
+      };
+      const finish = (result: ToolExecutionResult | undefined) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(result);
+      };
+      const interrupt = (result: ToolExecutionResult) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        void issuance.then(
+          () => store.revoke(binding),
+          () => undefined,
+        );
+        resolve(result);
+      };
+      const fail = (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      };
+      const scheduleDeadline = () => {
+        if (deadline === undefined) return;
+        const remaining = deadline - now();
+        const delay = remaining <= 0 ? 0 : Math.min(remaining, maximumTimerDelay);
+        timerScheduled = true;
+        timer = setTimeoutFunction(() => {
+          timerScheduled = false;
+          if (settled) return;
+          if (deadline <= now()) {
+            interrupt(timedOut());
+            return;
+          }
+          scheduleDeadline();
+        }, delay);
+      };
+      const onAbort = () => interrupt(cancelled());
+      options.signal?.addEventListener('abort', onAbort, { once: true });
+      scheduleDeadline();
+      void issuance.then(() => finish(undefined), fail);
     });
   }
 

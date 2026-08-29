@@ -233,7 +233,7 @@ describe('createGateway', () => {
     ).toBe(true);
   });
 
-  it('replaces a previous gateway validator while preserving the host validator', async () => {
+  it('retains every active gateway validator while preserving the host validator', async () => {
     const hostValidator = (context: ToolRequestContext) =>
       context.authority.ownerId === 'allowed-owner';
     const { bureau, getRequestAuthorityValidator } = createGatewayBureauStub(hostValidator);
@@ -242,7 +242,7 @@ describe('createGateway', () => {
     await createGateway(bureau, { authToken: 'second-secret' });
 
     const validator = getRequestAuthorityValidator()!;
-    expect(await validator(staticTokenRequestContext('first-secret', 'allowed-owner'))).toBe(false);
+    expect(await validator(staticTokenRequestContext('first-secret', 'allowed-owner'))).toBe(true);
     expect(await validator(staticTokenRequestContext('second-secret', 'allowed-owner'))).toBe(true);
     expect(await validator(staticTokenRequestContext('second-secret', 'blocked-owner'))).toBe(true);
   });

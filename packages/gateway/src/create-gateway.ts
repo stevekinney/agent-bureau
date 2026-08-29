@@ -35,7 +35,8 @@ const gatewayValidatorState = new WeakMap<
   object,
   {
     readonly hostValidator: RequestAuthorityValidator | undefined;
-    readonly installedValidator: RequestAuthorityValidator | undefined;
+    readonly gatewayValidators: Set<RequestAuthorityValidator>;
+    installedValidator: RequestAuthorityValidator | undefined;
   }
 >();
 const STATIC_TOKEN_REVISION_SECRET_KEY = 'gateway:private:static-token-revision-secret';
@@ -170,14 +171,17 @@ export function buildRequestAuthorityValidator(
 
 function composeRequestAuthorityValidators(
   hostValidator: RequestAuthorityValidator | undefined,
-  gatewayValidator: RequestAuthorityValidator | undefined,
+  gatewayValidators: ReadonlySet<RequestAuthorityValidator>,
 ): RequestAuthorityValidator | undefined {
-  if (!hostValidator) return gatewayValidator;
-  if (!gatewayValidator) return hostValidator;
+  if (gatewayValidators.size === 0) return hostValidator;
 
   return async (context) => {
     const isGatewayAuthority = context.authority.authorizationRevision.startsWith('gateway:');
-    return isGatewayAuthority ? gatewayValidator(context) : hostValidator(context);
+    if (!isGatewayAuthority) return hostValidator ? hostValidator(context) : false;
+    for (const gatewayValidator of gatewayValidators) {
+      if (await gatewayValidator(context)) return true;
+    }
+    return false;
   };
 }
 
@@ -225,22 +229,32 @@ export async function createGateway(
   const authorityValidatorAccess = bureau as Bureau & BureauRequestAuthorityValidatorAccess;
   const existingValidator = authorityValidatorAccess.getRequestAuthorityValidator?.();
   const previousGatewayValidator = gatewayValidatorState.get(bureau);
-  const hostRequestAuthorityValidator =
+  const retainedState =
     previousGatewayValidator !== undefined &&
     previousGatewayValidator.installedValidator === existingValidator
-      ? previousGatewayValidator.hostValidator
-      : existingValidator;
-  const requestAuthorityValidator = composeRequestAuthorityValidators(
-    hostRequestAuthorityValidator,
-    buildRequestAuthorityValidator(options.authToken, apiKeyStore, staticTokenRevisionSecret),
+      ? previousGatewayValidator
+      : {
+          hostValidator: existingValidator,
+          gatewayValidators: new Set<RequestAuthorityValidator>(),
+          installedValidator: existingValidator,
+        };
+  const gatewayRequestAuthorityValidator = buildRequestAuthorityValidator(
+    options.authToken,
+    apiKeyStore,
+    staticTokenRevisionSecret,
   );
-  if (requestAuthorityValidator !== hostRequestAuthorityValidator) {
+  if (gatewayRequestAuthorityValidator) {
+    retainedState.gatewayValidators.add(gatewayRequestAuthorityValidator);
+  }
+  const requestAuthorityValidator = composeRequestAuthorityValidators(
+    retainedState.hostValidator,
+    retainedState.gatewayValidators,
+  );
+  retainedState.installedValidator = requestAuthorityValidator;
+  if (requestAuthorityValidator !== existingValidator) {
     bureau.setRequestAuthorityValidator(requestAuthorityValidator);
   }
-  gatewayValidatorState.set(bureau, {
-    hostValidator: hostRequestAuthorityValidator,
-    installedValidator: requestAuthorityValidator,
-  });
+  gatewayValidatorState.set(bureau, retainedState);
   await authorityValidatorAccess.waitForRecovery?.();
 
   const app = new Hono();
@@ -300,6 +314,15 @@ export async function createGateway(
         wsHandler.dispose();
         unsubscribeLiveFrames();
         bureau.removeEventListener('run.removed', clearRunBufferOnRemoval);
+        if (gatewayRequestAuthorityValidator) {
+          retainedState.gatewayValidators.delete(gatewayRequestAuthorityValidator);
+          const replacementValidator = composeRequestAuthorityValidators(
+            retainedState.hostValidator,
+            retainedState.gatewayValidators,
+          );
+          retainedState.installedValidator = replacementValidator;
+          bureau.setRequestAuthorityValidator(replacementValidator);
+        }
       },
     };
   }

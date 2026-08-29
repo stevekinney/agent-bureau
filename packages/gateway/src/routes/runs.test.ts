@@ -1,6 +1,7 @@
 import type { GenerateFunction, Toolbox } from '@lostgradient/operative';
 import { createTool, createToolbox, type ToolRequestContext } from 'armorer';
-import { describe, expect, it } from 'bun:test';
+import { describe, expect, it, spyOn } from 'bun:test';
+import { BureauError } from 'bureau';
 
 import {
   attackerRequestContextFixture,
@@ -171,6 +172,23 @@ describe('runs routes', () => {
       body: JSON.stringify({ message: 'Hello' }),
     });
     expect(response.status).toBe(429);
+  });
+
+  it('POST /api/v1/runs returns 409 when request authority becomes stale before admission', async () => {
+    const gateway = await createTestGateway({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+    spyOn(gateway.bureau, 'createRun').mockRejectedValue(
+      new BureauError('Request authority is no longer valid', 'CONFLICT'),
+    );
+
+    const response = await requestJSON(gateway, '/api/v1/runs', {
+      method: 'POST',
+      body: JSON.stringify({ message: 'Hello' }),
+    });
+
+    expect(response.status).toBe(409);
   });
 
   it('GET /api/v1/runs lists all runs', async () => {
