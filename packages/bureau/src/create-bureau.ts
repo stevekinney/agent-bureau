@@ -255,6 +255,30 @@ export function omitKeysWithPrefix(
   return remaining;
 }
 
+function stringValues(values: readonly JSONValue[]): string[] {
+  const strings: string[] = [];
+  for (const value of values) {
+    if (typeof value === 'string') strings.push(value);
+  }
+  return strings;
+}
+
+function omitStringValue(values: readonly JSONValue[], omittedValue: string): JSONValue[] {
+  const remaining: JSONValue[] = [];
+  for (const value of values) {
+    if (value !== omittedValue) remaining.push(value);
+  }
+  return remaining;
+}
+
+function omitStringsWithPrefix(values: readonly JSONValue[], prefix: string): JSONValue[] {
+  const remaining: JSONValue[] = [];
+  for (const value of values) {
+    if (typeof value !== 'string' || !value.startsWith(prefix)) remaining.push(value);
+  }
+  return remaining;
+}
+
 export function defaultSessionPersistenceSleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
@@ -1153,6 +1177,11 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       ...session!,
       metadata: {
         ...session!.metadata,
+        approvalResolutionStartedIds: Array.isArray(
+          session!.metadata['approvalResolutionStartedIds'],
+        )
+          ? omitStringValue(session!.metadata['approvalResolutionStartedIds'], reviewId)
+          : [],
         pendingApprovalOverrides: {
           ...(typeof session!.metadata['pendingApprovalOverrides'] === 'object' &&
           session!.metadata['pendingApprovalOverrides'] !== null &&
@@ -1165,6 +1194,27 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     }));
   }
 
+  async function persistApprovalResolutionStarted(
+    sessionId: string,
+    reviewId: string,
+  ): Promise<void> {
+    if (!runtime.sessionStore) return;
+    await runtime.sessionStore.update(sessionId, (session) => {
+      if (!session) return session;
+      const current = session.metadata['approvalResolutionStartedIds'];
+      const startedIds = Array.isArray(current) ? stringValues(current) : [];
+      return {
+        ...session,
+        metadata: {
+          ...session.metadata,
+          approvalResolutionStartedIds: startedIds.includes(reviewId)
+            ? startedIds
+            : [...startedIds, reviewId],
+        },
+      };
+    });
+  }
+
   async function prunePersistedPendingApprovalOverrides(
     sessionId: string,
     reviewIdPrefix: string,
@@ -1173,13 +1223,49 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     await runtime.sessionStore.update(sessionId, (session) => {
       if (!session) return session;
       const current = session.metadata['pendingApprovalOverrides'];
-      if (typeof current !== 'object' || current === null || Array.isArray(current)) return session;
-      const remaining = omitKeysWithPrefix(current as Record<string, JSONValue>, reviewIdPrefix);
+      const remaining =
+        typeof current === 'object' && current !== null && !Array.isArray(current)
+          ? omitKeysWithPrefix(current as Record<string, JSONValue>, reviewIdPrefix)
+          : current;
+      const currentStarted = session.metadata['approvalResolutionStartedIds'];
+      const remainingStarted = Array.isArray(currentStarted)
+        ? omitStringsWithPrefix(currentStarted, reviewIdPrefix)
+        : currentStarted;
       return {
         ...session,
-        metadata: { ...session.metadata, pendingApprovalOverrides: remaining },
+        metadata: {
+          ...session.metadata,
+          ...(remaining === undefined ? {} : { pendingApprovalOverrides: remaining }),
+          ...(remainingStarted === undefined
+            ? {}
+            : { approvalResolutionStartedIds: remainingStarted }),
+        },
       };
     });
+  }
+
+  async function retryRunDeletionPersistenceWrite(
+    operation: 'pending-approvals' | 'resolved-reviews',
+    sessionId: string,
+    reviewIdPrefix: string,
+  ): Promise<void> {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= SESSION_PERSISTENCE_MAXIMUM_ATTEMPTS; attempt += 1) {
+      try {
+        if (operation === 'pending-approvals') {
+          await prunePersistedPendingApprovalOverrides(sessionId, reviewIdPrefix);
+        } else {
+          await prunePersistedResolvedReviewIds(sessionId, reviewIdPrefix);
+        }
+        return;
+      } catch (error) {
+        lastError = error;
+        if (attempt < SESSION_PERSISTENCE_MAXIMUM_ATTEMPTS) {
+          await sessionPersistenceSleep(sessionPersistenceRetryDelayMilliseconds);
+        }
+      }
+    }
+    throw lastError;
   }
 
   async function prunePersistedInvalidApprovalReviewState(
@@ -1281,6 +1367,25 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     throw lastError;
   }
 
+  async function persistApprovalResolutionStartedWithRetry(
+    sessionId: string,
+    reviewId: string,
+  ): Promise<void> {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= SESSION_PERSISTENCE_MAXIMUM_ATTEMPTS; attempt += 1) {
+      try {
+        await persistApprovalResolutionStarted(sessionId, reviewId);
+        return;
+      } catch (error) {
+        lastError = error;
+        if (attempt < SESSION_PERSISTENCE_MAXIMUM_ATTEMPTS) {
+          await sessionPersistenceSleep(sessionPersistenceRetryDelayMilliseconds);
+        }
+      }
+    }
+    throw lastError;
+  }
+
   async function persistReviewResolution(
     sessionId: string,
     reviewId: string,
@@ -1334,6 +1439,11 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         ...session,
         metadata: {
           ...session.metadata,
+          approvalResolutionStartedIds: Array.isArray(
+            session.metadata['approvalResolutionStartedIds'],
+          )
+            ? omitStringValue(session.metadata['approvalResolutionStartedIds'], reviewId)
+            : [],
           resolvedReviewIds: resolvedReviewIds.includes(reviewId)
             ? resolvedReviewIds
             : [...resolvedReviewIds, reviewId],
@@ -1415,9 +1525,15 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         ? (metadata as Record<string, unknown>)
         : undefined;
     const overrides = metadataRecord?.['pendingApprovalOverrides'];
+    const resolutionStartedIds = new Set(
+      Array.isArray(metadataRecord?.['approvalResolutionStartedIds'])
+        ? stringValues(metadataRecord['approvalResolutionStartedIds'])
+        : [],
+    );
     if (typeof overrides !== 'object' || overrides === null || Array.isArray(overrides)) return;
     for (const [reviewId, approval] of Object.entries(overrides as Record<string, unknown>)) {
       if (!reviewId.startsWith(`approval:${runId}:`)) continue;
+      if (resolutionStartedIds.has(reviewId)) continue;
       if (invalidApprovalReviewIds.has(reviewId)) continue;
       if (approval && typeof approval === 'object' && !Array.isArray(approval)) {
         pendingApprovalOverrides.set(
@@ -1476,9 +1592,15 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         ? (metadata as Record<string, unknown>)
         : undefined;
     const overrides = metadataRecord?.['pendingApprovalOverrides'];
+    const resolutionStartedIds = new Set(
+      Array.isArray(metadataRecord?.['approvalResolutionStartedIds'])
+        ? stringValues(metadataRecord['approvalResolutionStartedIds'])
+        : [],
+    );
     if (typeof overrides !== 'object' || overrides === null || Array.isArray(overrides)) return;
     for (const [reviewId, approval] of Object.entries(overrides as Record<string, unknown>)) {
       if (!reviewId.startsWith(`approval:${runId}:`)) continue;
+      if (resolutionStartedIds.has(reviewId)) continue;
       if (approval && typeof approval === 'object' && !Array.isArray(approval)) {
         if (!(approval as { approvalBinding?: unknown }).approvalBinding) continue;
         try {
@@ -2860,9 +2982,9 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     runToolboxesByRunId.delete(id);
     store.removeRun(id);
     if (sessionId) {
-      detachBestEffortPromise(prunePersistedPendingApprovalOverrides(sessionId, `approval:${id}:`));
-      detachBestEffortPromise(prunePersistedResolvedReviewIds(sessionId, `approval:${id}:`));
-      detachBestEffortPromise(prunePersistedResolvedReviewIds(sessionId, `human-wait:${id}:`));
+      await retryRunDeletionPersistenceWrite('pending-approvals', sessionId, `approval:${id}:`);
+      await retryRunDeletionPersistenceWrite('resolved-reviews', sessionId, `approval:${id}:`);
+      await retryRunDeletionPersistenceWrite('resolved-reviews', sessionId, `human-wait:${id}:`);
     }
     // AB-96 — drop the cached terminal RunReport too, or a long-lived bureau
     // that creates/deletes many runs would retain one forever per run id.
@@ -3202,6 +3324,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
               'CONFLICT',
             );
           }
+          await persistApprovalResolutionStartedWithRetry(review.sessionId, review.id);
           result = await approvalToolbox.resumeApproval(
             { ...approval, approvalToken: approval.approvalToken },
             {
@@ -3262,6 +3385,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
             );
           }
         } else if (review.approval.approvalBinding && review.approval.approvalToken !== undefined) {
+          await persistApprovalResolutionStartedWithRetry(review.sessionId, review.id);
           try {
             await approvalToolbox.revokeApproval(review.approval as SignedPendingToolApproval);
           } catch (error) {

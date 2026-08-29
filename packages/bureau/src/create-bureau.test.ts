@@ -2637,6 +2637,23 @@ describe('createBureau', () => {
   });
 
   it('revokes pending approval bindings before deleting a terminal run', async () => {
+    const backingStore = textValueStore(new MemoryStorage());
+    let deletionPersistenceAttempts = 0;
+    let failNextDeletionPersistence = false;
+    const persistence = createTextStoreProxy(backingStore, {
+      async conditionalBatch(conditions, operations) {
+        if (
+          failNextDeletionPersistence &&
+          operations.some((operation) => operation.key.startsWith('agent-session:'))
+        ) {
+          failNextDeletionPersistence = false;
+          deletionPersistenceAttempts += 1;
+          throw new Error('deletion persistence unavailable');
+        }
+        if (deletionPersistenceAttempts > 0) deletionPersistenceAttempts += 1;
+        return backingStore.conditionalBatch(conditions, operations);
+      },
+    });
     const baseApprovalStore = createProcessLocalApprovalStateStore();
     let revocations = 0;
     const approvalStateStore = {
@@ -2679,13 +2696,20 @@ describe('createBureau', () => {
         },
       ) as unknown as Toolbox,
       stopWhen: stopWhen.toolOutcome('action_required'),
+      persistence,
+      sessionPersistenceSleep: async () => {},
     });
     const run = await bureau.createRun({ message: 'Request approval then delete the run' });
     await waitForRunCompletion(bureau, run.id);
     expect(bureau.listPendingReviews()).toHaveLength(1);
 
+    failNextDeletionPersistence = true;
     await bureau.deleteRun(run.id);
     expect(revocations).toBe(1);
+    expect(deletionPersistenceAttempts).toBe(4);
+    const persistedSession = await bureau.getSession(run.sessionId);
+    expect(persistedSession?.metadata['pendingApprovalOverrides']).toEqual({});
+    expect(persistedSession?.metadata['approvalResolutionStartedIds']).toEqual([]);
     bureau.dispose();
   });
 
@@ -5275,8 +5299,8 @@ describe('createBureau review queue (AB-20)', () => {
       async conditionalBatch(conditions, operations) {
         if (
           failedSessionUpdatesRemaining > 0 &&
-          (conditions.some((condition) => condition.key.startsWith('agent-session:')) ||
-            operations.some((operation) => operation.key.startsWith('agent-session:')))
+          operations.some((operation) => operation.key.startsWith('agent-session:')) &&
+          JSON.stringify(operations).includes('resolvedReviewIds')
         ) {
           failedSessionUpdatesRemaining -= 1;
           throw new Error('override cleanup unavailable');
@@ -5322,29 +5346,35 @@ describe('createBureau review queue (AB-20)', () => {
     expect(charges).toEqual([425]);
     expect(bureau.listPendingReviews()).toHaveLength(0);
 
-    const outcome = await bureau.resolveReview({
-      id: review!.id,
-      decision: 'approve',
-      principal: 'api-key:reviewer-cleanup',
-      reason: 'approved after inspection',
-    });
-
-    expect(outcome.decision).toBe('approve');
-    expect(charges).toEqual([425]);
-    expect(bureau.listPendingReviews()).toHaveLength(0);
     const persistedSession = await bureau.getSession(run.sessionId);
-    expect(persistedSession?.metadata['resolvedReviewIds']).toContain(review!.id);
-    expect(persistedSession?.metadata['pendingApprovalOverrides']).not.toHaveProperty(review!.id);
-    const records = await bureau.auditTrail!.query({ runId: run.id });
-    const approvalRecord = records.find(
-      (record) => record.type === 'review.tool-approval.approved',
-    );
-    expect(approvalRecord?.principal).toBe('api-key:reviewer-cleanup');
-    expect((approvalRecord?.detail as { reason?: string }).reason).toBe(
-      'approved after inspection',
-    );
+    expect(persistedSession?.metadata['approvalResolutionStartedIds']).toContain(review!.id);
+    expect(persistedSession?.metadata['pendingApprovalOverrides']).toHaveProperty(review!.id);
     expect(diagnostics).toEqual([]);
-    bureau.dispose();
+    await bureau.dispose();
+
+    const restartedBureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createNeedsApprovalToolbox('cleanup-secret', charges),
+      persistence,
+    });
+    try {
+      expect(restartedBureau.listPendingReviews()).toHaveLength(0);
+      expect(charges).toEqual([425]);
+      const restartedResolutionError = await restartedBureau
+        .resolveReview({
+          id: review!.id,
+          decision: 'approve',
+          principal: 'api-key:reviewer-cleanup',
+        })
+        .then(
+          () => undefined,
+          (error) => error,
+        );
+      expect(restartedResolutionError).toMatchObject({ code: 'NOT_FOUND' });
+      expect(charges).toEqual([425]);
+    } finally {
+      await restartedBureau.dispose();
+    }
   });
 
   it('retries an initial approval binding persistence failure before exposing the live review', async () => {
@@ -5489,12 +5519,15 @@ describe('createBureau review queue (AB-20)', () => {
     let replacementPersistenceFailuresRemaining = 2;
     let failReplacementPersistence = false;
     let replacementPersistenceAttempts = 0;
+    const originalApprovalTokenForFailure: { value: string | undefined } = { value: undefined };
     const persistence = createTextStoreProxy(backingStore, {
       async conditionalBatch(conditions, operations) {
         if (
           failReplacementPersistence &&
           operations.some((operation) => operation.key.startsWith('agent-session:')) &&
-          JSON.stringify(operations).includes('pendingApprovalOverrides')
+          JSON.stringify(operations).includes('pendingApprovalOverrides') &&
+          originalApprovalTokenForFailure.value !== undefined &&
+          !JSON.stringify(operations).includes(originalApprovalTokenForFailure.value)
         ) {
           replacementPersistenceAttempts += 1;
           if (replacementPersistenceFailuresRemaining > 0) {
@@ -5532,6 +5565,7 @@ describe('createBureau review queue (AB-20)', () => {
       await bureau.getSession(run.sessionId),
       review.id,
     );
+    originalApprovalTokenForFailure.value = originalApprovalToken;
 
     failReplacementPersistence = true;
     const outcome = await bureau.resolveReview({
@@ -5565,12 +5599,15 @@ describe('createBureau review queue (AB-20)', () => {
     const backingStore = textValueStore(new MemoryStorage());
     let failReplacementPersistence = false;
     let replacementPersistenceAttempts = 0;
+    const originalApprovalTokenForFailure: { value: string | undefined } = { value: undefined };
     const persistence = createTextStoreProxy(backingStore, {
       async conditionalBatch(conditions, operations) {
         if (
           failReplacementPersistence &&
           operations.some((operation) => operation.key.startsWith('agent-session:')) &&
-          JSON.stringify(operations).includes('pendingApprovalOverrides')
+          JSON.stringify(operations).includes('pendingApprovalOverrides') &&
+          originalApprovalTokenForFailure.value !== undefined &&
+          !JSON.stringify(operations).includes(originalApprovalTokenForFailure.value)
         ) {
           replacementPersistenceAttempts += 1;
           throw new Error('replacement approval persistence unavailable');
@@ -5608,6 +5645,7 @@ describe('createBureau review queue (AB-20)', () => {
     expect(persistedApprovalToken(await bureau.getSession(run.sessionId), review.id)).toBe(
       originalApprovalToken,
     );
+    originalApprovalTokenForFailure.value = originalApprovalToken;
 
     failReplacementPersistence = true;
     const resolutionError = await bureau
