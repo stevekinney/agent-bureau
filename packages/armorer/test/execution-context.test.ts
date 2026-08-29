@@ -134,6 +134,20 @@ describe('execution authority and projections', () => {
         sourceTenantId: 'tenant-a',
       }).data,
     ).toHaveLength(2);
+    expect(
+      projectExecutionSnapshot([], {
+        audience: 'tenant',
+        tenantId: 'tenant-a',
+        sourceTenantId: 'tenant-a',
+      }).data,
+    ).toEqual([]);
+    expect(() =>
+      projectExecutionSnapshot([], {
+        audience: 'tenant',
+        tenantId: 'tenant-a',
+        sourceTenantId: 'tenant-b',
+      }),
+    ).toThrow('requires tenantId and a trusted source tenant');
     expect(() =>
       projectExecutionSnapshot(
         [

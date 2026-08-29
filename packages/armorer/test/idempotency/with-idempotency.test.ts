@@ -166,6 +166,15 @@ describe('withIdempotency', () => {
     expect(callCount).toBe(1);
   });
 
+  it('rejects streaming before claiming or executing an idempotency key', async () => {
+    const wrapped = withIdempotency(createTestTool(), { cache, tenantId: 'tenant-a' });
+
+    await expect(wrapped({ a: 1, b: 2 }, { requestContext, stream: true })).rejects.toThrow(
+      'Idempotency does not support streaming executions',
+    );
+    expect(callCount).toBe(0);
+  });
+
   it('returns cached result on duplicate call', async () => {
     const tool = createTestTool();
     const wrapped = withIdempotency(tool, {

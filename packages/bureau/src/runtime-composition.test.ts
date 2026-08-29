@@ -272,6 +272,76 @@ describe('createRuntimeComposition', () => {
     runtime.disposeStorage?.();
   });
 
+  it('chunks long transport authority deadlines without expiring them early', async () => {
+    let resolveValidation!: (value: boolean) => void;
+    const validation = new Promise<boolean>((resolve) => {
+      resolveValidation = resolve;
+    });
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      requestAuthorityValidator: () => validation,
+      toolbox: createToolbox([
+        createTool({
+          name: 'long-deadline-authority-tool',
+          description: 'Must not expire an oversized authority deadline early',
+          input: z.object({}),
+          async execute() {
+            return 'authorized';
+          },
+        }),
+      ]),
+    });
+    const authority = {
+      principalId: 'api-key:long-deadline',
+      tenantId: 'tenant-a',
+      ownerId: 'owner-a',
+      capabilities: ['tools:execute'] as const,
+      authorizationRevision: 'gateway:api-key:long-deadline',
+    };
+    const runRuntime = await runtime.createRunRuntime({
+      message: 'test',
+      sessionId: 'long-deadline-authority-session',
+      runId: 'long-deadline-authority-run',
+      requestContext: { authority, audience: 'tenant' },
+    });
+    const scheduled: Array<{ callback: () => void; delay: number }> = [];
+    const cleared: unknown[] = [];
+    let currentTime = 0;
+    const execution = runRuntime.toolbox.execute(
+      {
+        id: 'long-deadline-authority-call',
+        name: 'long-deadline-authority-tool',
+        arguments: {},
+      },
+      {
+        requestContext: {
+          authority,
+          audience: 'tenant',
+          deadline: 2_147_484_647,
+        },
+        now: () => currentTime,
+        setTimeoutFunction(callback, milliseconds) {
+          const handle = { callback, delay: milliseconds ?? 0 };
+          scheduled.push(handle);
+          return handle;
+        },
+        clearTimeoutFunction(handle) {
+          cleared.push(handle);
+        },
+      },
+    ) as unknown as Promise<{ result?: unknown }>;
+
+    expect(scheduled[0]?.delay).toBe(2_147_483_647);
+    currentTime = 2_147_483_647;
+    scheduled[0]?.callback();
+    expect(scheduled[1]?.delay).toBe(1_000);
+    resolveValidation(true);
+    const result = await execution;
+    expect(result.result).toBe('authorized');
+    expect(cleared).toContain(scheduled[1]);
+    runtime.disposeStorage?.();
+  });
+
   it('propagates transport authority validator failures', async () => {
     const runtime = await createRuntimeComposition({
       generate: async () => ({ content: 'x', toolCalls: [] }),

@@ -295,6 +295,9 @@ export function withIdempotency<T extends Tool>(
     if (requestContext && requestContext.authority.tenantId !== tenantId) {
       throw new Error('Idempotency tenantId must match request authority tenantId.');
     }
+    if (executeOptions?.stream) {
+      throw new Error('Idempotency does not support streaming executions.');
+    }
     const key = stableStringifyJson([
       tenantId,
       completeToolRevision,

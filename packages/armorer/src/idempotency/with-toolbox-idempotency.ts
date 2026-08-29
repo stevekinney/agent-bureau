@@ -82,6 +82,7 @@ type ToolboxExecuteOptionsWithIdempotencyKey = {
   clearTimeoutFunction?: (handle: unknown) => void;
   mode?: 'parallel' | 'sequential';
   concurrency?: number;
+  stream?: boolean;
 };
 
 const PRE_EXECUTION_CONFLICT_CODES = new Set(['BUDGET_EXCEEDED', 'LOOP_BLOCKED']);
@@ -518,6 +519,9 @@ export function withToolboxIdempotency(
     originalExecute: (call: ToolCallInput, options?: unknown) => Promise<ToolExecutionResult>,
     executeOptions?: unknown,
   ): Promise<ToolExecutionResult> {
+    if ((executeOptions as ToolboxExecuteOptionsWithIdempotencyKey | undefined)?.stream) {
+      throw new Error('Idempotency does not support streaming executions.');
+    }
     const fields = extractCallFields(call);
     if (!fields.name) {
       return originalExecute(call, executeOptions);

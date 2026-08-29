@@ -120,6 +120,21 @@ describe('withToolboxIdempotency', () => {
     expect(missing.errorCategory).toBe('not_found');
   });
 
+  it('rejects streaming before claiming or executing an idempotency key', async () => {
+    const toolbox = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache,
+      tenantId: 'tenant-a',
+    });
+
+    await expect(
+      toolbox.execute(
+        { id: 'streaming-call', name: 'add', arguments: { a: 1, b: 2 } },
+        { stream: true },
+      ),
+    ).rejects.toThrow('Idempotency does not support streaming executions');
+    expect(addCallCount).toBe(0);
+  });
+
   it('uses the cache wall clock for TTL expiration when execution uses another clock', async () => {
     let cacheClock = 1_000;
     const wallClockCache = createToolResultCache({

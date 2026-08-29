@@ -261,21 +261,32 @@ function raceRequestAuthorityValidation(
   }
   if (!signal && deadline === undefined) return Promise.resolve(validation);
 
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  const maximumTimerDelay = 2_147_483_647;
+  const setTimeoutFunction =
+    options.setTimeoutFunction ??
+    ((callback: () => void, milliseconds: number) => setTimeout(callback, milliseconds));
+  const clearTimeoutFunction =
+    options.clearTimeoutFunction ??
+    ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+  let timer: unknown;
   let onAbort: (() => void) | undefined;
   const interruption = new Promise<boolean>((_resolve, reject) => {
     onAbort = () => reject(new Error(String(signal?.reason ?? 'Cancelled')));
     signal?.addEventListener('abort', onAbort, { once: true });
-    if (deadline !== undefined) {
-      timer = setTimeout(
-        () => reject(new Error('Execution deadline exceeded')),
-        Math.max(0, deadline - now()),
-      );
-    }
+    const scheduleDeadline = () => {
+      if (deadline === undefined) return;
+      const remaining = deadline - now();
+      if (remaining <= 0) {
+        reject(new Error('Execution deadline exceeded'));
+        return;
+      }
+      timer = setTimeoutFunction(scheduleDeadline, Math.min(remaining, maximumTimerDelay));
+    };
+    scheduleDeadline();
   });
   return Promise.race([Promise.resolve(validation), interruption]).finally(() => {
     if (onAbort) signal?.removeEventListener('abort', onAbort);
-    if (timer !== undefined) clearTimeout(timer);
+    if (timer !== undefined) clearTimeoutFunction(timer);
   });
 }
 

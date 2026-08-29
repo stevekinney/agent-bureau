@@ -124,13 +124,18 @@ export function projectExecutionSnapshot(
   options: ExternalProjectionOptions,
 ): ExternalExecutionProjection {
   if (options.audience === 'tenant') {
+    const emptySnapshotCollection = Array.isArray(value) && value.length === 0;
     const sourceTenantId = trustedProjectionTenantId(value);
-    if (!options.tenantId || !sourceTenantId) {
+    if (
+      !options.tenantId ||
+      (!sourceTenantId && (!emptySnapshotCollection || options.sourceTenantId !== options.tenantId))
+    ) {
       throw new Error('Tenant projection requires tenantId and a trusted source tenant');
     }
     if (
-      (options.sourceTenantId !== undefined && options.sourceTenantId !== sourceTenantId) ||
-      options.tenantId !== sourceTenantId
+      sourceTenantId !== undefined &&
+      ((options.sourceTenantId !== undefined && options.sourceTenantId !== sourceTenantId) ||
+        options.tenantId !== sourceTenantId)
     ) {
       throw new Error('Tenant projection cannot cross tenant boundaries');
     }
