@@ -1719,6 +1719,34 @@ describe('isTool', () => {
     expect(tool.executions.inspect({ ownerId: 'anonymous' })).toHaveLength(0);
   });
 
+  it('snapshots direct request authority before entering the concurrency queue', async () => {
+    let releaseFirst!: () => void;
+    const observedOwners: string[] = [];
+    const tool = createTool({
+      name: 'queued-request-authority-snapshot',
+      description: 'Keeps queued request authority immutable',
+      input: z.object({ order: z.number() }),
+      concurrency: 1,
+      async execute({ order }, context) {
+        observedOwners.push(context.requestContext!.authority.ownerId);
+        if (order === 1) await new Promise<void>((resolve) => (releaseFirst = resolve));
+        return order;
+      },
+    });
+    const first = tool.execute(
+      { order: 1 },
+      { requestContext: createRequestContext('first-owner') },
+    );
+    while (!releaseFirst) await Promise.resolve();
+    const queuedContext = createRequestContext('original-owner');
+    const second = tool.execute({ order: 2 }, { requestContext: queuedContext });
+    queuedContext.authority.ownerId = 'mutated-owner';
+    releaseFirst();
+
+    await Promise.all([first, second]);
+    expect(observedOwners).toEqual(['first-owner', 'original-owner']);
+  });
+
   it('uses request authority owner for executeWith owner-scoped abort', async () => {
     let observedSignal: AbortSignal | undefined;
     const requestContext = createRequestContext('request-owner');

@@ -741,14 +741,22 @@ export function createTool<
     toolCall: ToolCallWithArguments,
     options?: InternalToolExecuteOptions,
   ): Promise<ToolExecutionResult> => {
-    const resolvedTimeout = options?.timeout ?? timeout;
-    const nowFunction = options?.now ?? Date.now;
-    const requestDeadline = options?.requestContext?.deadline;
+    const executionOptions: InternalToolExecuteOptions | undefined = options?.requestContext
+      ? { ...options, requestContext: freezeToolRequestContext(options.requestContext) }
+      : options;
+    const resolvedTimeout = executionOptions?.timeout ?? timeout;
+    const nowFunction = executionOptions?.now ?? Date.now;
+    const requestDeadline = executionOptions?.requestContext?.deadline;
     // Request deadlines are absolute and govern the whole lifecycle,
     // including queueing. Execution timeouts are relative and begin only
     // after admission, in withTimeout inside executeInner.
     const deadline = requestDeadline;
-    const executionHandle = beginExecutionLifecycle(toolCall.id, options, deadline, nowFunction);
+    const executionHandle = beginExecutionLifecycle(
+      toolCall.id,
+      executionOptions,
+      deadline,
+      nowFunction,
+    );
     if (deadline !== undefined && deadline <= nowFunction()) {
       executionHandle.abort('deadline', 'Execution deadline exceeded');
       const result = deadlineCancellationResult(toolCall);
@@ -756,7 +764,7 @@ export function createTool<
       return Promise.resolve(result);
     }
     const executeOptions: InternalToolExecuteOptions = {
-      ...options,
+      ...executionOptions,
       ...(resolvedTimeout !== undefined ? { timeout: resolvedTimeout } : {}),
       executionHandle,
     };

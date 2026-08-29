@@ -388,15 +388,11 @@ export function withIdempotency<T extends Tool>(
           maximumExecutionDurationMs,
         );
         if (
-          !(await raceIdempotencyAwait(
-            () =>
-              cache.replaceLegacyStarted(
-                key,
-                { toolName: cached.toolName, startedAt: cached.startedAt },
-                startedExecution,
-                replacementTime,
-              ),
-            executeOptions,
+          !(await cache.replaceLegacyStarted(
+            key,
+            { toolName: cached.toolName, startedAt: cached.startedAt },
+            startedExecution,
+            replacementTime,
           ))
         ) {
           onUnknownOutcome?.(key, cached);
@@ -449,10 +445,11 @@ export function withIdempotency<T extends Tool>(
         );
         const cachedAttemptId = cached.attemptId;
         if (
-          !(await raceIdempotencyAwait(
-            () =>
-              cache.replaceUnknownStarted(key, cachedAttemptId, startedExecution, replacementTime),
-            executeOptions,
+          !(await cache.replaceUnknownStarted(
+            key,
+            cachedAttemptId,
+            startedExecution,
+            replacementTime,
           ))
         ) {
           onUnknownOutcome?.(key, cached);
@@ -485,14 +482,53 @@ export function withIdempotency<T extends Tool>(
         }
         return returnAuthorizedCachedResult(started.entry);
       }
-      try {
-        await raceIdempotencyAwait(() => Promise.resolve(), executeOptions);
-      } catch (error) {
-        await cache.deleteStarted(key, startedExecution.attemptId!);
+    }
+    try {
+      await raceIdempotencyAwait(() => Promise.resolve(), executeOptions);
+    } catch (error) {
+      await cache.deleteStarted(key, startedExecution.attemptId!);
+      throw error;
+    }
+    const admissionTime = now();
+    if (
+      startedExecution.absoluteDeadline !== undefined &&
+      admissionTime >= startedExecution.absoluteDeadline
+    ) {
+      await cache.deleteStarted(key, startedExecution.attemptId!);
+      throw new Error(`Idempotency key "${key}" exceeded its maximum execution duration.`);
+    }
+    const initialRenewal = cache.renewStarted(
+      key,
+      startedExecution.attemptId!,
+      Math.min(
+        admissionTime + leaseDurationMs,
+        startedExecution.absoluteDeadline ?? admissionTime + leaseDurationMs,
+      ),
+      admissionTime,
+    );
+    let leaseOwned: boolean;
+    try {
+      leaseOwned = await raceIdempotencyAwait(() => initialRenewal, executeOptions);
+    } catch (error) {
+      void initialRenewal
+        .then((owned) =>
+          owned ? cache.deleteStarted(key, startedExecution.attemptId!) : undefined,
+        )
+        .catch(() => undefined);
+      if (
+        executeOptions?.signal?.aborted ||
+        (executeOptions?.requestContext?.deadline !== undefined &&
+          executeOptions.requestContext.deadline <= (executeOptions.now ?? now)())
+      ) {
         throw error;
       }
+      throw new Error(`Idempotency key "${key}" lost its execution fence before admission.`, {
+        cause: error,
+      });
     }
-    let leaseOwned = true;
+    if (!leaseOwned) {
+      throw new Error(`Idempotency key "${key}" lost its execution fence before admission.`);
+    }
     let pendingRenewal = Promise.resolve();
     let renewalTimer: (() => void) | undefined;
     let renewalStopped = false;
@@ -587,10 +623,18 @@ export function withIdempotency<T extends Tool>(
       ...(params === undefined ? { inputWasUndefined: true as const } : {}),
     };
 
-    if (
-      !leaseOwned ||
-      !(await cache.completeStarted(key, startedExecution.attemptId!, entry, ttl, now()))
-    ) {
+    let completed = false;
+    if (leaseOwned) {
+      try {
+        completed = await raceIdempotencyAwait(
+          () => cache.completeStarted(key, startedExecution.attemptId!, entry, ttl, now()),
+          executeOptions,
+        );
+      } catch {
+        completed = false;
+      }
+    }
+    if (!completed) {
       throw new Error(`Idempotency key "${key}" lost its execution fence before completion.`);
     }
 

@@ -544,7 +544,7 @@ export interface Bureau {
    */
   getRunReport(id: string): RunReport | undefined;
   abortRun(id: string): RunSummary;
-  deleteRun(id: string): void;
+  deleteRun(id: string): Promise<void>;
 
   /**
    * Read the durable engine's view of a run: its full {@link WorkflowState}

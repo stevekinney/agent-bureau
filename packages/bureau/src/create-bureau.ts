@@ -755,7 +755,15 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   const resolvingReviewIds = new Set<string>();
   const reviewResolutionCleanupPending = new Map<
     string,
-    { sessionId: string; runId: string; kind: PendingReview['kind']; decision: 'approve' | 'deny' }
+    {
+      sessionId: string;
+      runId: string;
+      kind: PendingReview['kind'];
+      decision: 'approve' | 'deny';
+      review: PendingReview;
+      principal: string;
+      reason?: string;
+    }
   >();
   const pendingApprovalOverrides = new Map<
     string,
@@ -2800,7 +2808,30 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     };
   }
 
-  function deleteRun(id: string): void {
+  async function revokePendingApprovalsForRun(runId: string): Promise<void> {
+    const approvalToolbox = runToolboxesByRunId.get(runId) ?? runtime.baseToolbox;
+    const approvals = new Map<string, SignedPendingToolApproval>();
+    for (const review of listPendingReviews()) {
+      if (review.kind === 'tool-approval' && review.runId === runId) {
+        approvals.set(review.id, review.approval as SignedPendingToolApproval);
+      }
+    }
+    for (const [reviewId, approval] of pendingApprovalOverrides) {
+      if (reviewId.startsWith(`approval:${runId}:`)) {
+        approvals.set(reviewId, approval as SignedPendingToolApproval);
+      }
+    }
+    for (const approval of approvals.values()) {
+      if (!approval.approvalBinding || approval.approvalToken === undefined) continue;
+      try {
+        await approvalToolbox.revokeApproval(approval);
+      } catch (error) {
+        if (!isTerminalApprovalBindingError(error)) throw error;
+      }
+    }
+  }
+
+  async function deleteRun(id: string): Promise<void> {
     const runState = store.getRun(id);
     if (!runState) {
       throw new BureauError('Run not found', 'NOT_FOUND');
@@ -2810,6 +2841,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       throw new BureauError('Cannot delete a running run', 'CONFLICT');
     }
 
+    await revokePendingApprovalsForRun(id);
     const sessionId = getRunSessionIdentifier(runState);
     runSessionIdentifiers.delete(runState.activeRun);
     runAttribution.delete(id);
@@ -2875,6 +2907,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     const session = await sessionStore.load(id);
     if (session) {
       for (const runId of persistedApprovalRunIds(session.metadata)) {
+        await revokePendingApprovalsForRun(runId);
         for (const reviewId of pendingApprovalOverrides.keys()) {
           if (reviewId.startsWith(`approval:${runId}:`)) pendingApprovalOverrides.delete(reviewId);
         }
@@ -3113,6 +3146,12 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
           );
           reviewResolutionCleanupPending.delete(input.id);
           releaseTerminalRunReviewState(cleanup.runId);
+          await recordReviewDecision(
+            cleanup.review,
+            cleanup.decision,
+            cleanup.principal,
+            cleanup.reason,
+          );
           return { id: input.id, kind: cleanup.kind, decision: cleanup.decision };
         } finally {
           resolvingReviewIds.delete(input.id);
@@ -3287,6 +3326,9 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
           runId: review.runId,
           kind: review.kind,
           decision: input.decision,
+          review,
+          principal: input.principal,
+          ...(input.reason !== undefined ? { reason: input.reason } : {}),
         });
         resolvingReviewIds.delete(review.id);
         throw error;
@@ -3294,12 +3336,23 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       releaseTerminalRunReviewState(review.runId);
     }
 
+    await recordReviewDecision(review, input.decision, input.principal, input.reason);
+
+    return { id: review.id, kind: review.kind, decision: input.decision, result };
+  }
+
+  async function recordReviewDecision(
+    review: PendingReview,
+    decision: 'approve' | 'deny',
+    principal: string,
+    reason?: string,
+  ): Promise<void> {
     const decisionType =
       review.kind === 'tool-approval'
-        ? input.decision === 'approve'
+        ? decision === 'approve'
           ? 'review.tool-approval.approved'
           : 'review.tool-approval.denied'
-        : input.decision === 'approve'
+        : decision === 'approve'
           ? 'review.human-wait.approved'
           : 'review.human-wait.denied';
 
@@ -3308,13 +3361,11 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       type: decisionType,
       detail: {
         review,
-        decision: input.decision,
-        ...(input.reason !== undefined ? { reason: input.reason } : {}),
+        decision,
+        ...(reason !== undefined ? { reason } : {}),
       },
-      principal: input.principal,
+      principal,
     });
-
-    return { id: review.id, kind: review.kind, decision: input.decision, result };
   }
 
   async function createSchedule(

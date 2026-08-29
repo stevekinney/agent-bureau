@@ -93,9 +93,9 @@ export function createRunsRoutes(bureau: Bureau) {
     }
   });
 
-  app.delete('/:id', (context) => {
+  app.delete('/:id', async (context) => {
     try {
-      bureau.deleteRun(context.req.param('id'));
+      await bureau.deleteRun(context.req.param('id'));
       return context.body(null, 204);
     } catch (error) {
       if (error instanceof BureauError) {

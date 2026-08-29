@@ -1978,13 +1978,29 @@ describe('withToolboxIdempotency', () => {
 
     const failedRenewalCache: ToolResultCache = {
       ...cache,
+      renewStarted: async () => false,
+    };
+    const lostInitialFence = await withToolboxIdempotency(createToolbox([slowTool]), {
+      cache: failedRenewalCache,
+      tenantId: 'tenant-c',
+      leaseDurationMs: 4,
+      maximumExecutionDurationMs: 100,
+    }).execute({ name: 'slow-add', arguments: { value: 2 } });
+    expect(lostInitialFence.outcome).toBe('action_required');
+    expect(lostInitialFence.idempotency?.outcome).toBe('unknown-outcome');
+
+    let renewalCalls = 0;
+    const rejectedScheduledRenewalCache: ToolResultCache = {
+      ...cache,
       renewStarted: async () => {
+        renewalCalls += 1;
+        if (renewalCalls === 1) return true;
         throw new Error('lease storage unavailable');
       },
     };
     const renewalFailure = await withToolboxIdempotency(createToolbox([slowTool]), {
-      cache: failedRenewalCache,
-      tenantId: 'tenant-c',
+      cache: rejectedScheduledRenewalCache,
+      tenantId: 'tenant-d',
       leaseDurationMs: 4,
       maximumExecutionDurationMs: 100,
     }).execute({ name: 'slow-add', arguments: { value: 2 } });
@@ -2001,6 +2017,8 @@ describe('withToolboxIdempotency', () => {
     const renewalReleased = new Promise<boolean>((resolve) => {
       releaseRenewal = () => resolve(true);
     });
+    let renewalCalls = 0;
+    let lateRenewalDeletes = 0;
     let releaseTool!: () => void;
     const toolReleased = new Promise<void>((resolve) => {
       releaseTool = resolve;
@@ -2008,8 +2026,14 @@ describe('withToolboxIdempotency', () => {
     const pendingRenewalCache: ToolResultCache = {
       ...cache,
       async renewStarted() {
+        renewalCalls += 1;
+        if (renewalCalls === 1) return true;
         signalRenewalStarted();
         return renewalReleased;
+      },
+      async deleteStarted() {
+        lateRenewalDeletes += 1;
+        return true;
       },
     };
     const tool = createTool({
@@ -2043,9 +2067,91 @@ describe('withToolboxIdempotency', () => {
       ]),
     ).toBe('settled');
     releaseRenewal();
+    await renewalReleased;
+    await Promise.resolve();
+    expect(lateRenewalDeletes).toBe(0);
   });
 
-  it('checks the deadline after queued renewal wait', async () => {
+  it('rejects a claim whose execution duration expires before admission', async () => {
+    let callbackRuns = 0;
+    let deletes = 0;
+    const expiringTool = createTool({
+      name: 'expired-before-admission',
+      description: 'Expires after its durable claim',
+      input: z.object({}),
+      idempotencyKey: () => 'expired-before-admission',
+      async execute() {
+        callbackRuns += 1;
+        return 'unexpected';
+      },
+    });
+    let clockReads = 0;
+    const result = await withToolboxIdempotency(createToolbox([expiringTool]), {
+      cache: {
+        ...cache,
+        async deleteStarted() {
+          deletes += 1;
+          return true;
+        },
+      },
+      tenantId: 'tenant-a',
+      maximumExecutionDurationMs: 5,
+      now: () => [0, 5][clockReads++] ?? 5,
+    }).execute({ name: expiringTool.name, arguments: {} });
+
+    expect(result.errorCategory).toBe('timeout');
+    expect(callbackRuns).toBe(0);
+    expect(deletes).toBe(1);
+  });
+
+  it('bounds and cleans up toolbox initial lease renewal', async () => {
+    let resolveRenewal!: (owned: boolean) => void;
+    const renewal = new Promise<boolean>((resolve) => {
+      resolveRenewal = resolve;
+    });
+    let renewalStarted!: () => void;
+    const renewalDidStart = new Promise<void>((resolve) => {
+      renewalStarted = resolve;
+    });
+    let deletes = 0;
+    const controller = new AbortController();
+    const tool = createToolWithKey();
+    const pending = withToolboxIdempotency(createToolbox([tool]), {
+      cache: {
+        ...cache,
+        renewStarted: () => {
+          renewalStarted();
+          return renewal;
+        },
+        deleteStarted: async () => {
+          deletes += 1;
+          return true;
+        },
+      },
+      tenantId: 'tenant-a',
+    }).execute({ name: tool.name, arguments: { a: 1, b: 2 } }, { signal: controller.signal });
+    await renewalDidStart;
+    controller.abort('cancel initial toolbox renewal');
+    const interruptedResult = await pending;
+    expect(interruptedResult.errorCategory).toBe('cancelled');
+    resolveRenewal(true);
+    await renewal;
+    await Promise.resolve();
+    expect(deletes).toBe(1);
+
+    const rejected = await withToolboxIdempotency(createToolbox([tool]), {
+      cache: {
+        ...cache,
+        renewStarted: async () => {
+          throw new Error('renewal rejected');
+        },
+      },
+      tenantId: 'tenant-b',
+    }).execute({ name: tool.name, arguments: { a: 1, b: 2 } });
+    expect(rejected.idempotency?.outcome).toBe('unknown-outcome');
+  });
+
+  it('checks the deadline before starting a queued renewal', async () => {
     let renewals = 0;
     let clockIndex = 0;
     let releaseFirstRenewal!: () => void;
@@ -2067,7 +2173,7 @@ describe('withToolboxIdempotency', () => {
       ...cache,
       async renewStarted(key, attemptId, leaseExpiresAt, observedAt) {
         renewals += 1;
-        if (renewals === 1) await firstRenewalReleased;
+        if (renewals === 2) await firstRenewalReleased;
         return cache.renewStarted(key, attemptId, leaseExpiresAt, observedAt);
       },
     };
@@ -2646,6 +2752,11 @@ describe('withToolboxIdempotency', () => {
     expect(legacyResult.errorCategory).toBe('cancelled');
 
     let legacyReplacementStarted = false;
+    let resolveLegacyReplacement!: (replaced: boolean) => void;
+    const legacyReplacement = new Promise<boolean>((resolve) => {
+      resolveLegacyReplacement = resolve;
+    });
+    let legacyReplacementDeletes = 0;
     let markLegacyReplacementStarted!: () => void;
     const legacyReplacementStartedPromise = new Promise<void>((resolve) => {
       markLegacyReplacementStarted = resolve;
@@ -2658,7 +2769,11 @@ describe('withToolboxIdempotency', () => {
         replaceLegacyStarted: () => {
           legacyReplacementStarted = true;
           markLegacyReplacementStarted();
-          return new Promise(() => undefined);
+          return legacyReplacement;
+        },
+        deleteStarted: async () => {
+          legacyReplacementDeletes += 1;
+          return true;
         },
       },
       tenantId: 'tenant-a',
@@ -2687,6 +2802,10 @@ describe('withToolboxIdempotency', () => {
     legacyReplaceController.abort('legacy replacement');
     const legacyReplaceResult = await legacyReplacePending;
     expect(legacyReplaceResult.errorCategory).toBe('cancelled');
+    resolveLegacyReplacement(true);
+    await legacyReplacement;
+    await Promise.resolve();
+    expect(legacyReplacementDeletes).toBe(1);
 
     let fencedVerificationStarted = false;
     await interruptDeferred(
@@ -2704,6 +2823,11 @@ describe('withToolboxIdempotency', () => {
     );
 
     let fencedReplacementStarted = false;
+    let resolveFencedReplacement!: (replaced: boolean) => void;
+    const fencedReplacement = new Promise<boolean>((resolve) => {
+      resolveFencedReplacement = resolve;
+    });
+    let fencedReplacementDeletes = 0;
     let markFencedReplacementStarted!: () => void;
     const fencedReplacementStartedPromise = new Promise<void>((resolve) => {
       markFencedReplacementStarted = resolve;
@@ -2714,15 +2838,28 @@ describe('withToolboxIdempotency', () => {
         replaceUnknownStarted: () => {
           fencedReplacementStarted = true;
           markFencedReplacementStarted();
-          return new Promise(() => undefined);
+          return fencedReplacement;
+        },
+        deleteStarted: async () => {
+          fencedReplacementDeletes += 1;
+          throw new Error('late fenced cleanup failed');
         },
       }),
       {},
       () => fencedReplacementStarted,
       fencedReplacementStartedPromise,
     );
+    resolveFencedReplacement(true);
+    await fencedReplacement;
+    await Promise.resolve();
+    expect(fencedReplacementDeletes).toBe(1);
 
     let claimStarted = false;
+    let resolveClaim!: (result: { outcome: 'claimed' }) => void;
+    const delayedClaim = new Promise<{ outcome: 'claimed' }>((resolve) => {
+      resolveClaim = resolve;
+    });
+    let lateClaimDeletes = 0;
     const claimController = new AbortController();
     const claimPending = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
       cache: {
@@ -2730,7 +2867,11 @@ describe('withToolboxIdempotency', () => {
         getState: async () => undefined,
         claimStarted: () => {
           claimStarted = true;
-          return new Promise(() => undefined);
+          return delayedClaim;
+        },
+        deleteStarted: async () => {
+          lateClaimDeletes += 1;
+          throw new Error('late claim cleanup failed');
         },
       },
       tenantId: 'tenant-a',
@@ -2740,6 +2881,41 @@ describe('withToolboxIdempotency', () => {
     claimController.abort('claim interrupted');
     const claimResult = await claimPending;
     expect(claimResult.errorCategory).toBe('cancelled');
+    resolveClaim({ outcome: 'claimed' });
+    await delayedClaim;
+    await Promise.resolve();
+    expect(lateClaimDeletes).toBe(1);
+
+    let resolveLostClaim!: (result: { outcome: 'existing'; entry: CachedToolResult }) => void;
+    const lostClaim = new Promise<{
+      outcome: 'existing';
+      entry: CachedToolResult;
+    }>((resolve) => {
+      resolveLostClaim = resolve;
+    });
+    let markLostClaimStarted!: () => void;
+    const lostClaimStarted = new Promise<void>((resolve) => {
+      markLostClaimStarted = resolve;
+    });
+    const lostClaimController = new AbortController();
+    const lostClaimPending = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache: {
+        ...cache,
+        getState: async () => undefined,
+        claimStarted: () => {
+          markLostClaimStarted();
+          return lostClaim;
+        },
+      },
+      tenantId: 'tenant-a',
+    }).execute(call, { requestContext, signal: lostClaimController.signal });
+    await lostClaimStarted;
+    lostClaimController.abort('lost claim race');
+    const lostClaimResult = await lostClaimPending;
+    expect(lostClaimResult.errorCategory).toBe('cancelled');
+    resolveLostClaim({ outcome: 'existing', entry: started('late-existing-attempt') });
+    await lostClaim;
+    await Promise.resolve();
 
     let readCount = 0;
     let replaceCount = 0;
@@ -2779,6 +2955,34 @@ describe('withToolboxIdempotency', () => {
     const raceResult = await racePending;
     expect(raceResult.errorCategory).toBe('cancelled');
     releaseRaceRead?.();
+  });
+
+  it('bounds a stalled toolbox completion write by request cancellation', async () => {
+    let completionStarted!: () => void;
+    const completionPending = new Promise<void>((resolve) => {
+      completionStarted = resolve;
+    });
+    const controller = new AbortController();
+    const execution = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache: {
+        ...cache,
+        completeStarted: async () => {
+          completionStarted();
+          return new Promise(() => undefined);
+        },
+      },
+      tenantId: 'tenant-a',
+    }).execute(
+      { id: 'stalled-completion', name: 'add', arguments: { a: 1, b: 2 } },
+      { signal: controller.signal },
+    );
+
+    await completionPending;
+    controller.abort('cancel stalled completion');
+    const result = await execution;
+    expect(result.outcome).toBe('action_required');
+    expect(result.idempotency?.outcome).toBe('unknown-outcome');
+    expect(addCallCount).toBe(1);
   });
 
   it('normalizes unknown failures and cancellation reasons', async () => {

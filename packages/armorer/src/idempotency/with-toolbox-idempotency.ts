@@ -24,6 +24,33 @@ import type {
 const DEFAULT_TTL = 300_000;
 const maximumTimerDelay = 2_147_483_647;
 
+async function cleanLateStartedWrite(
+  cache: ToolResultCache,
+  cacheKey: string,
+  attemptId: string,
+  write: Promise<boolean>,
+): Promise<void> {
+  try {
+    if (await write) await cache.deleteStarted(cacheKey, attemptId);
+  } catch {
+    return;
+  }
+}
+
+async function cleanLateClaim(
+  cache: ToolResultCache,
+  cacheKey: string,
+  attemptId: string,
+  claim: ReturnType<typeof claimCacheStarted>,
+): Promise<void> {
+  try {
+    const claimResult = await claim;
+    if (claimResult.outcome === 'claimed') await cache.deleteStarted(cacheKey, attemptId);
+  } catch {
+    return;
+  }
+}
+
 function scheduleBoundedTimeout(callback: () => void, delay: number): () => void {
   let remaining = Math.max(0, delay);
   let cancelled = false;
@@ -625,19 +652,20 @@ export function withToolboxIdempotency(
           });
         }
         execution = createStartedExecution(fields.name, startedAt, inputDigest);
+        const replacement = cache.replaceLegacyStarted(
+          cacheKey,
+          { toolName: cached.toolName, startedAt: cached.startedAt },
+          execution,
+          startedAt,
+        );
         const replacedResult = await awaitBeforeExecution(
-          () =>
-            cache.replaceLegacyStarted(
-              cacheKey,
-              { toolName: cached.toolName, startedAt: cached.startedAt },
-              execution,
-              startedAt,
-            ),
+          () => replacement,
           fields,
           cached.toolName,
           executeOptions,
         );
         if (replacedResult.outcome === 'interrupted') {
+          void cleanLateStartedWrite(cache, cacheKey, execution.attemptId!, replacement);
           return replacedResult.result;
         }
         const replaced = replacedResult.value;
@@ -695,13 +723,20 @@ export function withToolboxIdempotency(
         }
         const cachedAttemptId = cached.attemptId;
         execution = createStartedExecution(fields.name, startedAt, inputDigest);
+        const replacement = cache.replaceUnknownStarted(
+          cacheKey,
+          cachedAttemptId,
+          execution,
+          startedAt,
+        );
         const replacedResult = await awaitBeforeExecution(
-          () => cache.replaceUnknownStarted(cacheKey, cachedAttemptId, execution, startedAt),
+          () => replacement,
           fields,
           cached.toolName,
           executeOptions,
         );
         if (replacedResult.outcome === 'interrupted') {
+          void cleanLateStartedWrite(cache, cacheKey, execution.attemptId!, replacement);
           return replacedResult.result;
         }
         const replaced = replacedResult.value;
@@ -720,13 +755,15 @@ export function withToolboxIdempotency(
     } else {
       const startedAt = now();
       execution = createStartedExecution(fields.name, startedAt, inputDigest);
+      const claim = claimCacheStarted(cache, cacheKey, execution);
       const startedResult = await awaitBeforeExecution(
-        () => claimCacheStarted(cache, cacheKey, execution),
+        () => claim,
         fields,
         fields.name,
         executeOptions,
       );
       if (startedResult.outcome === 'interrupted') {
+        void cleanLateClaim(cache, cacheKey, execution.attemptId!, claim);
         return startedResult.result;
       }
       started = startedResult.value;
@@ -752,8 +789,49 @@ export function withToolboxIdempotency(
       );
     }
 
+    const admissionTime = now();
+    if (admissionTime >= execution.absoluteDeadline!) {
+      await cache.deleteStarted(cacheKey, execution.attemptId!);
+      return createInterruptedResult(
+        fields,
+        fields.name,
+        'timeout',
+        'Idempotency execution duration exceeded',
+        'TIMEOUT',
+      );
+    }
+    const initialRenewal = cache.renewStarted(
+      cacheKey,
+      execution.attemptId!,
+      Math.min(admissionTime + leaseDurationMs, execution.absoluteDeadline!),
+      admissionTime,
+    );
+    let initialRenewalResult: Awaited<ReturnType<typeof awaitBeforeExecution<boolean>>>;
+    try {
+      initialRenewalResult = await awaitBeforeExecution(
+        () => initialRenewal,
+        fields,
+        fields.name,
+        executeOptions,
+      );
+    } catch {
+      return createUnknownOutcomeResult(fields, cacheKey, fields.name, {
+        attemptId: execution.attemptId,
+        inputDigest: execution.inputDigest,
+      });
+    }
+    if (initialRenewalResult.outcome === 'interrupted') {
+      void cleanLateStartedWrite(cache, cacheKey, execution.attemptId!, initialRenewal);
+      return initialRenewalResult.result;
+    }
+    let leaseOwned = initialRenewalResult.value;
+    if (!leaseOwned) {
+      return createUnknownOutcomeResult(fields, cacheKey, fields.name, {
+        attemptId: execution.attemptId,
+        inputDigest: execution.inputDigest,
+      });
+    }
     let result: ToolExecutionResult;
-    let leaseOwned = true;
     let pendingRenewal = Promise.resolve();
     let renewalTimer: (() => void) | undefined;
     let renewalStopped = false;
@@ -830,13 +908,13 @@ export function withToolboxIdempotency(
         policyRevision,
         input: serializedOriginalInput,
       };
-      const completed = await cache.completeStarted(
-        cacheKey,
-        execution.attemptId!,
-        entry,
-        defaultTTL,
-        now(),
+      const completion = await awaitBeforeExecution(
+        () => cache.completeStarted(cacheKey, execution.attemptId!, entry, defaultTTL, now()),
+        fields,
+        result.toolName,
+        executeOptions,
       );
+      const completed = completion.outcome === 'completed' && completion.value;
       if (!completed) {
         return createUnknownOutcomeResult(fields, cacheKey, result.toolName, {
           attemptId: execution.attemptId,

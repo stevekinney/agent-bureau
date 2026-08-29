@@ -37,7 +37,12 @@ import { encode } from '@lostgradient/weft';
 import { KEYS, MemoryStorage, resolveStorage, textValueStore } from '@lostgradient/weft/storage';
 import type { ConditionalTextValueStore } from '@lostgradient/weft/storage/text-value-store';
 import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
-import { ApprovalBindingError, createTool, createToolbox } from 'armorer';
+import {
+  ApprovalBindingError,
+  createProcessLocalApprovalStateStore,
+  createTool,
+  createToolbox,
+} from 'armorer';
 import { createMockTool, createTestToolbox } from 'armorer/test';
 import { afterEach, describe, expect, it, mock, spyOn } from 'bun:test';
 import { Conversation, createConversationHistory, getMessages } from 'conversationalist';
@@ -2622,7 +2627,122 @@ describe('createBureau', () => {
     const run = await bureau.createRun({ message: 'Hello' });
     expect(bureau.getRun(run.id)?.status).toBe('running');
 
-    expect(() => bureau.deleteRun(run.id)).toThrow(BureauError);
+    let deletionError: unknown;
+    try {
+      await bureau.deleteRun(run.id);
+    } catch (error) {
+      deletionError = error;
+    }
+    expect(deletionError).toBeInstanceOf(BureauError);
+  });
+
+  it('revokes pending approval bindings before deleting a terminal run', async () => {
+    const baseApprovalStore = createProcessLocalApprovalStateStore();
+    let revocations = 0;
+    const approvalStateStore = {
+      ...baseApprovalStore,
+      async revoke(binding: Parameters<typeof baseApprovalStore.revoke>[0]) {
+        revocations += 1;
+        return baseApprovalStore.revoke(binding);
+      },
+    };
+    const bureau = await createBureau({
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [{ id: 'delete-run-approval', name: 'delete-run-tool', arguments: {} }],
+        },
+      ]),
+      toolbox: createToolbox(
+        [
+          createTool({
+            name: 'delete-run-tool',
+            version: '1.0.0',
+            description: 'Must be revoked when its run is deleted',
+            input: z.object({}),
+            async execute() {
+              return 'unexpected';
+            },
+          }),
+        ],
+        {
+          approvalSecret: 'delete-run-secret',
+          approvalStateStore,
+          policy: {
+            beforeExecute: () => ({
+              allow: false,
+              status: 'needs_approval',
+              reason: 'Operator approval required',
+              action: { message: 'Approve deletion test' },
+            }),
+          },
+        },
+      ) as unknown as Toolbox,
+      stopWhen: stopWhen.toolOutcome('action_required'),
+    });
+    const run = await bureau.createRun({ message: 'Request approval then delete the run' });
+    await waitForRunCompletion(bureau, run.id);
+    expect(bureau.listPendingReviews()).toHaveLength(1);
+
+    await bureau.deleteRun(run.id);
+    expect(revocations).toBe(1);
+    bureau.dispose();
+  });
+
+  it('revokes persisted approval bindings before deleting their session', async () => {
+    const baseApprovalStore = createProcessLocalApprovalStateStore();
+    let revocations = 0;
+    const approvalStateStore = {
+      ...baseApprovalStore,
+      async revoke(binding: Parameters<typeof baseApprovalStore.revoke>[0]) {
+        revocations += 1;
+        return baseApprovalStore.revoke(binding);
+      },
+    };
+    const bureau = await createBureau({
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [
+            { id: 'delete-session-approval', name: 'delete-session-tool', arguments: {} },
+          ],
+        },
+      ]),
+      toolbox: createToolbox(
+        [
+          createTool({
+            name: 'delete-session-tool',
+            version: '1.0.0',
+            description: 'Must be revoked when its session is deleted',
+            input: z.object({}),
+            async execute() {
+              return 'unexpected';
+            },
+          }),
+        ],
+        {
+          approvalSecret: 'delete-session-secret',
+          approvalStateStore,
+          policy: {
+            beforeExecute: () => ({
+              allow: false,
+              status: 'needs_approval',
+              reason: 'Operator approval required',
+              action: { message: 'Approve deletion test' },
+            }),
+          },
+        },
+      ) as unknown as Toolbox,
+      stopWhen: stopWhen.toolOutcome('action_required'),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+    const run = await bureau.createRun({ message: 'Request approval then delete the session' });
+    await waitForRunCompletion(bureau, run.id);
+    expect(bureau.listPendingReviews()).toHaveLength(1);
+
+    await bureau.deleteSession(run.sessionId);
+    expect(revocations).toBe(1);
+    bureau.dispose();
   });
 
   it('throws NOT_CONFIGURED for session APIs when persistence is not configured', async () => {
@@ -2655,7 +2775,7 @@ describe('createBureau', () => {
     const session = await bureau.getSession(run.sessionId);
     expect(session?.id).toBe(run.sessionId);
 
-    bureau.deleteRun(run.id);
+    await bureau.deleteRun(run.id);
 
     await bureau.deleteSession(run.sessionId);
     const deleted = await bureau.getSession(run.sessionId);
@@ -5190,6 +5310,7 @@ describe('createBureau review queue (AB-20)', () => {
         id: review!.id,
         decision: 'approve',
         principal: 'api-key:reviewer-cleanup',
+        reason: 'approved after inspection',
       })
       .then(
         () => undefined,
@@ -5205,6 +5326,7 @@ describe('createBureau review queue (AB-20)', () => {
       id: review!.id,
       decision: 'approve',
       principal: 'api-key:reviewer-cleanup',
+      reason: 'approved after inspection',
     });
 
     expect(outcome.decision).toBe('approve');
@@ -5213,6 +5335,14 @@ describe('createBureau review queue (AB-20)', () => {
     const persistedSession = await bureau.getSession(run.sessionId);
     expect(persistedSession?.metadata['resolvedReviewIds']).toContain(review!.id);
     expect(persistedSession?.metadata['pendingApprovalOverrides']).not.toHaveProperty(review!.id);
+    const records = await bureau.auditTrail!.query({ runId: run.id });
+    const approvalRecord = records.find(
+      (record) => record.type === 'review.tool-approval.approved',
+    );
+    expect(approvalRecord?.principal).toBe('api-key:reviewer-cleanup');
+    expect((approvalRecord?.detail as { reason?: string }).reason).toBe(
+      'approved after inspection',
+    );
     expect(diagnostics).toEqual([]);
     bureau.dispose();
   });
@@ -5617,7 +5747,7 @@ describe('createBureau review queue (AB-20)', () => {
     // suppression. Until the run itself is deleted, the resolved approval
     // must not reappear in the review queue.
     expect(bureau.listPendingReviews()).toHaveLength(0);
-    bureau.deleteRun(run.id);
+    await bureau.deleteRun(run.id);
     await pollUntil(async () => {
       const session = await bureau.getSession(run.sessionId);
       const resolved = session?.metadata['resolvedReviewIds'];
@@ -5677,7 +5807,7 @@ describe('createBureau review queue (AB-20)', () => {
     first.emitter.dispatchEvent(
       new RunAbortedEvent(0, new Conversation(), new AbortAgentRunError('test-cleanup')),
     );
-    bureau.deleteRun(runId);
+    await bureau.deleteRun(runId);
 
     // A new run REUSES the same run id and produces the exact same review id
     // (`human-wait:${runId}:human-response`). Before the fix, this id was

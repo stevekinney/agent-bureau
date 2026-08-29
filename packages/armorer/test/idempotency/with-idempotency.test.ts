@@ -589,10 +589,7 @@ describe('withIdempotency', () => {
     release();
     await expect(execution).resolves.toBe(7);
 
-    let releaseLostFence!: () => void;
-    const blockedLostFence = new Promise<void>((resolve) => {
-      releaseLostFence = resolve;
-    });
+    let lostFenceCallbackRuns = 0;
     const lostFenceCache: ToolResultCache = {
       ...cache,
       async renewStarted() {
@@ -606,7 +603,7 @@ describe('withIdempotency', () => {
       input: z.object({ value: z.number() }),
       idempotencyKey: (input: unknown) => fullInputKey(input),
       async execute({ value }) {
-        await blockedLostFence;
+        lostFenceCallbackRuns += 1;
         return value;
       },
     });
@@ -617,9 +614,8 @@ describe('withIdempotency', () => {
       maximumExecutionDurationMs: 100,
     });
     const lostExecution = lostFence.execute({ value: 8 }, { requestContext });
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    releaseLostFence();
     await expect(lostExecution).rejects.toThrow('lost its execution fence');
+    expect(lostFenceCallbackRuns).toBe(0);
   });
 
   it('stops renewing at the absolute deadline and rejects renewal failures', async () => {
@@ -642,14 +638,17 @@ describe('withIdempotency', () => {
       tenantId: 'tenant-a',
       leaseDurationMs: 4,
       maximumExecutionDurationMs: 5,
-      now: () => (clockReads++ === 0 ? 100 : 105),
+      now: () => [100, 100, 105][clockReads++] ?? 105,
     });
     const deadlineExecution = deadlineTool.execute({ value: 9 }, { requestContext });
     await expect(deadlineExecution).rejects.toThrow('lost its execution fence');
 
+    let renewalCalls = 0;
     const rejectingRenewalCache: ToolResultCache = {
       ...cache,
       async renewStarted() {
+        renewalCalls += 1;
+        if (renewalCalls === 1) return true;
         throw new Error('renewal store unavailable');
       },
     };
@@ -674,6 +673,7 @@ describe('withIdempotency', () => {
     const renewalReleased = new Promise<boolean>((resolve) => {
       releaseRenewal = () => resolve(true);
     });
+    let renewalCalls = 0;
     let releaseTool!: () => void;
     const toolReleased = new Promise<void>((resolve) => {
       releaseTool = resolve;
@@ -681,6 +681,8 @@ describe('withIdempotency', () => {
     const pendingRenewalCache: ToolResultCache = {
       ...cache,
       async renewStarted() {
+        renewalCalls += 1;
+        if (renewalCalls === 1) return true;
         signalRenewalStarted();
         return renewalReleased;
       },
@@ -717,6 +719,65 @@ describe('withIdempotency', () => {
       ]),
     ).toBe('settled');
     releaseRenewal();
+  });
+
+  it('cleans up direct admission claims that expire or are cancelled during initial renewal', async () => {
+    const expiringTool = createTestTool();
+    let expirationClockReads = 0;
+    const expiring = withIdempotency(expiringTool, {
+      cache,
+      tenantId: 'tenant-a',
+      maximumExecutionDurationMs: 5,
+      now: () => [0, 5][expirationClockReads++] ?? 5,
+    });
+    await expect(expiring.execute({ value: 'expired' }, { requestContext })).rejects.toThrow(
+      'exceeded its maximum execution duration',
+    );
+
+    let resolveRenewal!: (owned: boolean) => void;
+    const renewal = new Promise<boolean>((resolve) => {
+      resolveRenewal = resolve;
+    });
+    let renewalStarted!: () => void;
+    const renewalDidStart = new Promise<void>((resolve) => {
+      renewalStarted = resolve;
+    });
+    let deletes = 0;
+    const controller = new AbortController();
+    const pending = withIdempotency(createTestTool(), {
+      cache: {
+        ...cache,
+        renewStarted: () => {
+          renewalStarted();
+          return renewal;
+        },
+        deleteStarted: async () => {
+          deletes += 1;
+          return true;
+        },
+      },
+      tenantId: 'tenant-a',
+    }).execute({ value: 'cancelled' }, { requestContext, signal: controller.signal });
+    await renewalDidStart;
+    controller.abort('cancel initial renewal');
+    await expect(pending).rejects.toThrow('cancel initial renewal');
+    resolveRenewal(true);
+    await renewal;
+    await Promise.resolve();
+    expect(deletes).toBe(1);
+
+    const rejected = withIdempotency(createTestTool(), {
+      cache: {
+        ...cache,
+        renewStarted: async () => {
+          throw new Error('renewal rejected');
+        },
+      },
+      tenantId: 'tenant-a',
+    });
+    await expect(rejected.execute({ value: 'rejected' }, { requestContext })).rejects.toThrow(
+      'lost its execution fence before admission',
+    );
   });
 
   it('clears a direct idempotency claim when execution throws a pre-execution error', async () => {
@@ -783,6 +844,30 @@ describe('withIdempotency', () => {
     expect(callbackRuns).toBe(0);
     expect(deleteAttempts).toBe(1);
     expect(await cache.getState(key)).toBeUndefined();
+  });
+
+  it('bounds a stalled direct completion write by request cancellation', async () => {
+    let completionStarted!: () => void;
+    const completionPending = new Promise<void>((resolve) => {
+      completionStarted = resolve;
+    });
+    const stalledCompletionCache: ToolResultCache = {
+      ...cache,
+      completeStarted: async () => {
+        completionStarted();
+        return new Promise(() => undefined);
+      },
+    };
+    const controller = new AbortController();
+    const execution = withIdempotency(createTestTool(), {
+      cache: stalledCompletionCache,
+      tenantId: 'tenant-a',
+    }).execute({ a: 1, b: 2 }, { requestContext, signal: controller.signal });
+
+    await completionPending;
+    controller.abort('cancel stalled completion');
+    await expect(execution).rejects.toThrow('lost its execution fence before completion');
+    expect(callCount).toBe(1);
   });
 
   it('rejects invalid direct idempotency lease durations', () => {
