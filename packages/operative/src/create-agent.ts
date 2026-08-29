@@ -117,12 +117,13 @@ export type CreateAgentToolConfiguration =
  *   a toolbox this factory builds itself).
  *
  *   Unlike `tools`, a `toolbox` you pass here is NOT rebuilt per run — every
- *   `run()` call shares this exact instance. That's required for armorer's
- *   cross-request approval flow: `toolbox.resumeApproval(signedApproval)`
- *   only verifies a `SignedPendingToolApproval` signed by the *same*
- *   `approvalSecret` the toolbox was created with. A host that owns a
- *   module-scoped toolbox (stable `approvalSecret` per process) passes it
- *   here so approvals minted on one run can be resumed on the next.
+ *   `run()` call shares this exact instance. Armorer's cross-request approval
+ *   flow additionally requires versioned tools, request-scoped authority in
+ *   `executeOptions.requestContext`, the same authority re-authenticated when
+ *   calling `toolbox.resumeApproval()`, and approval state shared between the
+ *   issuing and resuming toolbox. A module-scoped toolbox supplies process-local
+ *   state; multi-process or restart-safe hosts must configure the same durable
+ *   `ApprovalStateStore` and `approvalSecret` on every toolbox instance.
  *
  *   Because the instance is shared, concurrent runs against the same
  *   `StandaloneAgent` will cross-fire each other's toolbox events and share
