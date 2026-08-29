@@ -254,12 +254,30 @@ export type { AgentRun };
  * import { createAgent, stopWhen } from '@lostgradient/operative';
  *
  * // Built once per process — the stable approvalSecret is what makes
- * // resumeApproval() work across separate HTTP requests.
- * const toolbox = createToolbox([deleteFileTool], { approvalSecret: Bun.env['APPROVAL_SECRET'] });
+ * // resumeApproval() work across separate HTTP requests. Approval-gated tools
+ * // must also declare a stable version, for example `version: '1'`.
+ * const toolbox = createToolbox([deleteFileTool], {
+ *   approvalPolicy: { mode: 'on-mutation' },
+ *   approvalSecret: Bun.env['APPROVAL_SECRET'],
+ * });
+ *
+ * const requestContext = {
+ *   authority: {
+ *     principalId: currentUser.id,
+ *     tenantId: currentTenant.id,
+ *     ownerId: currentSession.id,
+ *     capabilities: currentAuthorization.capabilities,
+ *     authorizationRevision: currentAuthorization.revision,
+ *   },
+ *   audience: 'tenant',
+ *   agentId,
+ *   runId,
+ * } as const;
  *
  * const agent = createAgent({
  *   generate: myProvider,
  *   toolbox,
+ *   executeOptions: { requestContext },
  *   // Combined with noToolCalls(): pendingApproval() alone never stops a
  *   // normal, no-tool-call turn, so a plain text reply would otherwise run
  *   // to maximumSteps instead of finishing.
@@ -272,17 +290,18 @@ export type { AgentRun };
  * const pending = result.steps.at(-1)?.results.find((r) => r.pendingApproval)?.pendingApproval;
  * // ...send `pending` to a human, store `result.conversation.current` server-side...
  *
- * // Later, on approval: resume on the SAME toolbox instance.
- * const resumedResult = await toolbox.resumeApproval(signedApproval);
+ * // Later, authenticate the approval request and build a fresh context with
+ * // the same bound identity fields. Do not reuse an expired request deadline.
+ * const approvalRequestContext = { ...requestContext, deadline: Date.now() + 30_000 };
+ * const resumedResult = await toolbox.resumeApproval(signedApproval, {
+ *   requestContext: approvalRequestContext,
+ * });
  * // `result.conversation` already has an `action_required` tool-result for
  * // this call (the loop appends it before stopWhen ever runs) — appending
  * // `resumedResult` on top would leave two results for the same call, which
- * // most providers reject on the next turn. There is currently no public
- * // API to replace it in place; see
- * // https://github.com/stevekinney/agent-bureau/issues/267 for the missing
- * // primitive. Until it lands, the host is responsible for reconciling
- * // `resumedResult` into the stored history itself before starting the next
- * // run — this package does not (yet) provide a safe helper for that step.
+ * // most providers reject on the next turn. Use conversationalist's
+ * // resolveToolResult(conversation, callId, resumedResult) to replace the
+ * // pending result before starting the next run.
  * ```
  */
 export function createAgent<O>(
