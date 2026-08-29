@@ -10,9 +10,16 @@ import { z } from 'zod';
 import type { AnthropicTool } from './adapters/anthropic/types';
 import type { GeminiTool } from './adapters/gemini/types';
 import type { OpenAITool } from './adapters/openai/types';
+import {
+  ApprovalBindingError,
+  type ApprovalState,
+  type ApprovalStateStore,
+  createProcessLocalApprovalStateStore,
+  validateApprovalBinding,
+} from './approval-binding';
 import type { ApprovalPolicyConfiguration } from './approval-policy';
 import { approvalStatusToDecision, evaluateCapabilityApproval } from './approval-policy';
-import type { ToolError, ToolErrorCategory } from './core/errors';
+import { isToolError, type ToolError, type ToolErrorCategory } from './core/errors';
 import {
   type InspectorDetailLevel,
   inspectRegistry,
@@ -73,6 +80,13 @@ import {
   ToolboxValidateErrorEvent,
   ToolboxValidateSuccessEvent,
 } from './events';
+import {
+  type EffectiveToolExecutionContext,
+  freezeEffectiveToolExecutionContext,
+  freezeToolRequestContext,
+  narrowToolAuthority,
+  type ToolRequestContext,
+} from './execution-context';
 import type {
   ExecutionCleanupReport,
   ExecutionHandle,
@@ -81,8 +95,11 @@ import type {
 } from './execution-lifecycle';
 import { createExecutionLifecycle } from './execution-lifecycle';
 import {
+  type ApprovalAdmissionRollback,
+  approvalConsumeSymbol,
   type ApprovalResumeState,
   approvalResumeSymbol,
+  policyAuthorizationOnlySymbol,
   policyPauseDecisionsSymbol,
   policyPauseTierSymbol,
 } from './internal/approval-resume';
@@ -180,6 +197,11 @@ export function createMiddleware(
 export interface ToolboxOptions {
   signal?: MinimalAbortSignal;
   context?: ToolboxContext;
+  catalogRevision?: string;
+  toolboxRevision?: string;
+  policyRevision?: string;
+  approvalRevision?: string;
+  redactionRevision?: string;
   embed?: Embedder;
   policy?: ToolPolicyHooks;
   policyContext?: ToolPolicyContextProvider | Record<string, unknown>;
@@ -232,6 +254,10 @@ export interface ToolboxOptions {
    * processes that need to resume approvals created by this toolbox.
    */
   approvalSecret?: string;
+  approvalStateStore?: ApprovalStateStore;
+  approvalBindingTtlMs?: number;
+  approvalNow?: () => number;
+  approvalNonce?: () => string;
 }
 
 export interface ImportedToolboxOptions extends ToolboxOptions {
@@ -358,20 +384,154 @@ export interface ToolboxExecuteOptions extends Omit<ToolExecuteOptions, 'durable
   spanLinks?: OpenTelemetrySpanLink[];
   durableOperationKey?: string | ((call: ToolCall, index: number) => string | undefined);
   idempotencyKey?: string | ((call: ToolCall) => string | undefined);
-  /**
-   * Retry an idempotent call after a human has reviewed a prior unknown outcome.
-   * Interpreted by withToolboxIdempotency().
-   */
-  retryUnknownOutcome?: boolean;
+  resolutionReceipt?: import('./idempotency/types').IdempotencyResolutionReceipt;
 }
 
 type InternalToolboxExecuteOptions = ToolboxExecuteOptions & {
   [approvalResumeSymbol]?: ApprovalResumeState;
+  [policyAuthorizationOnlySymbol]?: boolean;
   executionHandle?: ExecutionHandle;
 };
 
+type InternalToolExecuteOptionsWithMirror = ToolboxExecuteOptions & {
+  [approvalConsumeSymbol]?: () => Promise<ApprovalAdmissionRollback>;
+  [approvalResumeSymbol]?: ApprovalResumeState;
+  [policyAuthorizationOnlySymbol]?: boolean;
+  executionHandle?: ExecutionHandle;
+  privilegedContextMirrorHandle?: ExecutionHandle;
+  parentCompletionHandle?: ExecutionHandle;
+};
+
+type ResumeApprovalValidationResult =
+  | {
+      outcome: 'parsed';
+      parsedArguments: Awaited<ReturnType<ToolParametersSchema['safeParseAsync']>>;
+    }
+  | { outcome: 'interrupted'; result: ToolExecutionResult };
+
 export type ToolboxEntry = ToolConfiguration | Tool;
 export type ToolboxEntries = readonly ToolboxEntry[];
+
+const maximumTimerDelay = 2_147_483_647;
+
+async function validateResumedApprovalArguments(
+  approval: SignedPendingToolApproval,
+  validation: Promise<Awaited<ReturnType<ToolParametersSchema['safeParseAsync']>>>,
+  options: ToolboxExecuteOptions,
+): Promise<ResumeApprovalValidationResult> {
+  const signal = options.signal;
+  const deadline = options.requestContext?.deadline;
+  const now = options.now ?? Date.now;
+  const cancelled = () =>
+    createInterruptedResumeApprovalValidationResult(
+      approval,
+      'cancelled',
+      formatCancellationReason(signal?.reason),
+      'CANCELLED',
+    );
+  const timedOut = () =>
+    createInterruptedResumeApprovalValidationResult(
+      approval,
+      'timeout',
+      'Execution deadline exceeded',
+      'TIMEOUT',
+    );
+
+  if (signal?.aborted) {
+    return { outcome: 'interrupted', result: cancelled() };
+  }
+  if (deadline !== undefined && deadline <= now()) {
+    return { outcome: 'interrupted', result: timedOut() };
+  }
+  if (!signal && deadline === undefined) {
+    return { outcome: 'parsed', parsedArguments: await validation };
+  }
+
+  return new Promise<ResumeApprovalValidationResult>((resolve, reject) => {
+    const setTimeoutFunction =
+      options.setTimeoutFunction ??
+      ((callback, milliseconds) => setTimeout(callback, milliseconds));
+    const clearTimeoutFunction =
+      options.clearTimeoutFunction ??
+      ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+    let deadlineTimer: unknown;
+    let deadlineTimerScheduled = false;
+    let settled = false;
+
+    const clearDeadline = () => {
+      if (!deadlineTimerScheduled) return;
+      deadlineTimerScheduled = false;
+      clearTimeoutFunction(deadlineTimer);
+    };
+    const cleanup = () => {
+      signal?.removeEventListener('abort', onAbort);
+      clearDeadline();
+    };
+    const resolveOnce = (result: ResumeApprovalValidationResult) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(result);
+    };
+    const rejectOnce = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const scheduleDeadline = () => {
+      if (deadline === undefined) return;
+      const remaining = deadline - now();
+      const delay = remaining <= 0 ? 0 : Math.min(remaining, maximumTimerDelay);
+      deadlineTimerScheduled = true;
+      deadlineTimer = setTimeoutFunction(() => {
+        deadlineTimerScheduled = false;
+        if (settled) return;
+        if (deadline <= now()) {
+          resolveOnce({ outcome: 'interrupted', result: timedOut() });
+          return;
+        }
+        scheduleDeadline();
+      }, delay);
+    };
+    function onAbort() {
+      resolveOnce({ outcome: 'interrupted', result: cancelled() });
+    }
+
+    signal?.addEventListener('abort', onAbort, { once: true });
+    scheduleDeadline();
+    void validation.then(
+      (parsedArguments) => resolveOnce({ outcome: 'parsed', parsedArguments }),
+      rejectOnce,
+    );
+  });
+}
+
+function createInterruptedResumeApprovalValidationResult(
+  approval: SignedPendingToolApproval,
+  category: ToolErrorCategory,
+  message: string,
+  code: string,
+): ToolExecutionResult {
+  const toolError = createToolError(category, message, code, false);
+  return {
+    callId: approval.callId,
+    outcome: 'error',
+    content: toolError.message,
+    toolCallId: approval.callId,
+    toolName: approval.toolName,
+    result: undefined,
+    error: toolError,
+    errorMessage: toolError.message,
+    errorCategory: toolError.category,
+  };
+}
+
+function formatCancellationReason(reason: unknown): string {
+  if (typeof reason === 'string' && reason.length > 0) return reason;
+  if (reason instanceof Error && reason.message.length > 0) return reason.message;
+  return 'Cancelled';
+}
 
 export type ImportedToolConfiguration = {
   name: string;
@@ -452,6 +612,8 @@ export interface Toolbox<TTools extends readonly Tool[] = readonly Tool[]> {
     approval: SignedPendingToolApproval,
     options?: ToolboxExecuteOptions & { arguments?: unknown },
   ): Promise<ToolExecutionResult>;
+  restoreApproval(approval: SignedPendingToolApproval): Promise<void>;
+  revokeApproval(approval: SignedPendingToolApproval): Promise<void>;
   extend<const TEntries extends ToolboxEntries>(
     ...entries: TEntries
   ): Toolbox<MergeTools<TTools, ToolsFromEntries<TEntries>>>;
@@ -811,7 +973,43 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
   // Loop detection: instances are created on demand and stored
   const loopDetectors = new Map<string, LoopDetector>();
   let loopDetectorIdCounter = 0;
+  const approvalNow = options.approvalNow ?? Date.now;
   const approvalSecret = options.approvalSecret;
+  const approvalStateStore =
+    options.approvalStateStore ??
+    (approvalSecret ? createProcessLocalApprovalStateStore(approvalNow) : undefined);
+  const approvalBindingTtlMs = options.approvalBindingTtlMs ?? 5 * 60_000;
+  if (!Number.isFinite(approvalBindingTtlMs) || approvalBindingTtlMs <= 0) {
+    throw new Error('approvalBindingTtlMs must be finite and positive.');
+  }
+  const approvalNonce = options.approvalNonce ?? (() => crypto.randomUUID());
+  const catalogRevision = options.catalogRevision ?? 'catalog:1';
+  const toolboxRevision = options.toolboxRevision ?? 'toolbox:1';
+  const policyRevision = options.policyRevision ?? 'policy:1';
+  const approvalRevision = options.approvalRevision ?? 'approval:1';
+  const redactionRevision = options.redactionRevision ?? 'redaction:1';
+  function createEffectiveExecutionContext(
+    requestContext: NonNullable<ToolboxExecuteOptions['requestContext']>,
+    toolDefinitionRevision: string,
+  ): EffectiveToolExecutionContext {
+    return freezeEffectiveToolExecutionContext({
+      ...requestContext,
+      revisions: Object.freeze({
+        catalog: catalogRevision,
+        toolbox: toolboxRevision,
+        toolDefinition: toolDefinitionRevision,
+        policy: policyRevision,
+        approval: approvalRevision,
+        redaction: redactionRevision,
+      }),
+    });
+  }
+  function toolDefinitionRevisionForCall(call: ToolCallInput | undefined): string {
+    if (!call?.name) {
+      return 'unknown';
+    }
+    return getTool(call.name)?.id ?? call.name;
+  }
   const buildTool =
     typeof options.toolFactory === 'function'
       ? (configuration: ToolConfiguration) =>
@@ -860,19 +1058,41 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     input: ToolCallInput | ToolCallInput[],
     options?: InternalToolboxExecuteOptions,
   ): Promise<ToolExecutionResult | ToolExecutionResult[]> {
+    const requestContext = options?.requestContext
+      ? freezeToolRequestContext(options.requestContext)
+      : undefined;
+    options = requestContext ? { ...options, requestContext } : options;
     const firstCall = Array.isArray(input) ? input[0] : input;
     const nowFunction = options?.now ?? Date.now;
+    const requestDeadline = options?.requestContext?.deadline;
+    const deadline = requestDeadline;
     const executionHandle = executionLifecycle.begin({
       ...(options?.executionId ? { executionId: options.executionId } : {}),
       toolName: Array.isArray(input) ? 'toolbox.batch' : (firstCall?.name ?? 'toolbox.unknown'),
       callId: firstCall?.id ?? `toolbox-call-${nowFunction()}`,
-      ...(options?.ownerId ? { ownerId: options.ownerId } : {}),
+      ...((options?.ownerId ?? requestContext?.authority.ownerId) !== undefined
+        ? { ownerId: options?.ownerId ?? requestContext?.authority.ownerId }
+        : {}),
       ...(options?.parentExecutionId ? { parentExecutionId: options.parentExecutionId } : {}),
       ...(options?.signal instanceof AbortSignal ? { signal: options.signal } : {}),
-      ...(options?.timeout !== undefined ? { deadline: nowFunction() + options.timeout } : {}),
+      ...(deadline !== undefined ? { deadline } : {}),
       now: nowFunction,
       ...(options?.setTimeoutFunction ? { setTimeoutFunction: options.setTimeoutFunction } : {}),
+      ...(options?.clearTimeoutFunction
+        ? { clearTimeoutFunction: options.clearTimeoutFunction }
+        : {}),
+      ...(options?.requestContext
+        ? {
+            privilegedContext: createEffectiveExecutionContext(
+              options.requestContext,
+              Array.isArray(input) ? 'batch' : toolDefinitionRevisionForCall(firstCall),
+            ),
+          }
+        : {}),
     });
+    if (deadline !== undefined && deadline <= nowFunction()) {
+      executionHandle.abort('deadline', 'Execution deadline exceeded');
+    }
     executionHandle.activate();
     options = { ...options, signal: executionHandle.signal };
     let hasSingleChild = false;
@@ -908,6 +1128,25 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       // Map calls to tasks
       const tasks = calls.map((call, callIndex) => async () => {
         let toolCall = normalizeToolCall(call);
+        if (executionHandle.snapshot().abortSource === 'deadline') {
+          const toolError = createToolError(
+            'timeout',
+            'Execution deadline exceeded',
+            'TIMEOUT',
+            false,
+          );
+          return {
+            callId: toolCall.id,
+            outcome: 'error' as const,
+            content: toolError.message,
+            toolCallId: toolCall.id,
+            toolName: toolCall.name,
+            result: undefined,
+            error: toolError,
+            errorMessage: toolError.message,
+            errorCategory: toolError.category,
+          } satisfies ToolExecutionResult;
+        }
         let tool = getTool(toolCall.name) as Tool | undefined; // toolCall.name might be ID
         if (!tool && resolutionEnabled) {
           const allNames = [...toolsByName.keys()];
@@ -952,7 +1191,28 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
           return notFound;
         }
 
-        if (!(await isToolAvailable(tool))) {
+        const availabilityResult = await isToolAvailable(tool, executionHandle.signal);
+        if (availabilityResult === 'timeout' || availabilityResult === 'cancelled') {
+          const timedOut = executionHandle.snapshot().abortSource === 'deadline';
+          const toolError = createToolError(
+            timedOut ? 'timeout' : 'cancelled',
+            timedOut ? 'Execution deadline exceeded' : 'Cancelled',
+            timedOut ? 'TIMEOUT' : 'CANCELLED',
+            false,
+          );
+          return {
+            callId: toolCall.id,
+            outcome: 'error' as const,
+            content: toolError.message,
+            toolCallId: toolCall.id,
+            toolName: toolCall.name,
+            result: undefined,
+            error: toolError,
+            errorMessage: toolError.message,
+            errorCategory: toolError.category,
+          } satisfies ToolExecutionResult;
+        }
+        if (!availabilityResult) {
           const toolError = createToolError(
             'unavailable',
             `Tool unavailable: ${toolCall.name}`,
@@ -993,55 +1253,16 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
           }
         }
 
-        // Track call for loop detection
-        for (const detector of loopDetectors.values()) {
-          detector.recordCall(toolCall.name, toolCall.arguments ?? {});
-        }
-
-        const budgetReason = checkBudget(budget, budgetStart, budgetCalls);
-        if (budgetReason) {
-          const toolError = createToolError('conflict', budgetReason, 'BUDGET_EXCEEDED', false);
-          const denied: ToolExecutionResult = {
-            callId: toolCall.id,
-            outcome: 'error',
-            content: toolError.message,
-            toolCallId: toolCall.id,
-            toolName: toolCall.name,
-            result: undefined,
-            error: toolError,
-            errorMessage: toolError.message,
-            errorCategory: toolError.category,
-          };
-          emit('budget-exceeded', { tool, call: toolCall, reason: budgetReason });
-          emit('error', { tool, result: denied });
-          if (errorMode === 'failFast') {
-            // eslint-disable-next-line @typescript-eslint/only-throw-error
-            throw toolError;
+        if (!options?.[policyAuthorizationOnlySymbol]) {
+          // Track call for loop detection
+          for (const detector of loopDetectors.values()) {
+            detector.recordCall(toolCall.name, toolCall.arguments ?? {});
           }
-          return denied;
-        }
 
-        budgetCalls += 1;
-
-        // Loop detection
-        if (autoLoopDetector) {
-          autoLoopDetector.recordCall(toolCall.name, toolCall.arguments ?? {});
-          const loopResult = autoLoopDetector.detectLoop();
-          if (loopResult.detected && loopResult.level === 'blocked') {
-            emit('loop-blocked', {
-              tool,
-              call: toolCall,
-              detector: loopResult.detector ?? 'simple-repeat',
-              count: loopResult.count,
-              message: loopResult.message,
-            });
-            const toolError = createToolError(
-              'conflict',
-              loopResult.message,
-              'LOOP_BLOCKED',
-              false,
-            );
-            const blocked: ToolExecutionResult = {
+          const budgetReason = checkBudget(budget, budgetStart, budgetCalls);
+          if (budgetReason) {
+            const toolError = createToolError('conflict', budgetReason, 'BUDGET_EXCEEDED', false);
+            const denied: ToolExecutionResult = {
               callId: toolCall.id,
               outcome: 'error',
               content: toolError.message,
@@ -1052,21 +1273,98 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
               errorMessage: toolError.message,
               errorCategory: toolError.category,
             };
-            return blocked;
+            emit('budget-exceeded', { tool, call: toolCall, reason: budgetReason });
+            emit('error', { tool, result: denied });
+            if (errorMode === 'failFast') {
+              // eslint-disable-next-line @typescript-eslint/only-throw-error
+              throw toolError;
+            }
+            return denied;
           }
-          if (loopResult.detected) {
-            emit('loop-warning', {
-              tool,
-              call: toolCall,
-              detector: loopResult.detector ?? 'simple-repeat',
-              count: loopResult.count,
-              message: loopResult.message,
-            });
+
+          budgetCalls += 1;
+
+          // Loop detection
+          if (autoLoopDetector) {
+            autoLoopDetector.recordCall(toolCall.name, toolCall.arguments ?? {});
+            const loopResult = autoLoopDetector.detectLoop();
+            if (loopResult.detected && loopResult.level === 'blocked') {
+              emit('loop-blocked', {
+                tool,
+                call: toolCall,
+                detector: loopResult.detector ?? 'simple-repeat',
+                count: loopResult.count,
+                message: loopResult.message,
+              });
+              const toolError = createToolError(
+                'conflict',
+                loopResult.message,
+                'LOOP_BLOCKED',
+                false,
+              );
+              const blocked: ToolExecutionResult = {
+                callId: toolCall.id,
+                outcome: 'error',
+                content: toolError.message,
+                toolCallId: toolCall.id,
+                toolName: toolCall.name,
+                result: undefined,
+                error: toolError,
+                errorMessage: toolError.message,
+                errorCategory: toolError.category,
+              };
+              return blocked;
+            }
+            if (loopResult.detected) {
+              emit('loop-warning', {
+                tool,
+                call: toolCall,
+                detector: loopResult.detector ?? 'simple-repeat',
+                count: loopResult.count,
+                message: loopResult.message,
+              });
+            }
           }
         }
 
         // Bubble up events
         const cleanup: (() => void)[] = [];
+        const initialEffectiveContext = options?.requestContext
+          ? createEffectiveExecutionContext(options.requestContext, tool.id)
+          : undefined;
+        const childExecutionHandle =
+          !hasSingleChild && initialEffectiveContext
+            ? executionLifecycle.begin({
+                executionId: `${executionHandle.id}:child:${callIndex + 1}`,
+                toolName: tool.name,
+                callId: toolCall.id,
+                ownerId: executionHandle.snapshot().ownerId,
+                parentExecutionId: executionHandle.id,
+                ...(options?.signal instanceof AbortSignal ? { signal: options.signal } : {}),
+                ...(options?.timeout !== undefined
+                  ? { deadline: nowFunction() + options.timeout }
+                  : {}),
+                scheduleDeadline: false,
+                now: nowFunction,
+                privilegedContext: initialEffectiveContext,
+              })
+            : undefined;
+        const privilegedContextMirrorHandle = hasSingleChild
+          ? executionHandle
+          : childExecutionHandle;
+        const settleChildExecution = (result?: unknown) => {
+          if (!childExecutionHandle) {
+            return;
+          }
+          const state = childExecutionHandle.snapshot().state;
+          if (state === 'abort-requested') {
+            childExecutionHandle.cleanupPending(result);
+            childExecutionHandle.cleanup();
+            return;
+          }
+          childExecutionHandle.settle(result);
+        };
+        childExecutionHandle?.activate();
         // Always bubble up events for consistency
         const toolEventTypes: (keyof DefaultToolEvents)[] = [
           'tool.started',
@@ -1132,45 +1430,145 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
             typeof options?.durableOperationKey === 'function'
               ? options.durableOperationKey(toolCall, callIndex)
               : options?.durableOperationKey;
-          const executeOptions: ToolboxExecuteOptions & { executionHandle?: ExecutionHandle } =
+          const executeOptions: InternalToolExecuteOptionsWithMirror =
             options?.signal ||
             options?.timeout !== undefined ||
             options?.stream !== undefined ||
             options?.elicit ||
+            options?.requestContext ||
+            options?.now !== undefined ||
+            options?.setTimeoutFunction !== undefined ||
+            options?.clearTimeoutFunction !== undefined ||
             durableOperationKey !== undefined ||
-            (options !== undefined && approvalResumeSymbol in options)
+            (options !== undefined && approvalResumeSymbol in options) ||
+            (options !== undefined && approvalConsumeSymbol in options) ||
+            (options !== undefined && policyAuthorizationOnlySymbol in options)
               ? {
                   ...(durableOperationKey !== undefined ? { durableOperationKey } : {}),
                   ...(options?.signal ? { signal: options.signal } : {}),
                   ...(options?.timeout !== undefined ? { timeout: options.timeout } : {}),
                   ...(options?.stream !== undefined ? { stream: options.stream } : {}),
                   ...(options?.elicit ? { elicit: options.elicit } : {}),
+                  ...(options?.now ? { now: options.now } : {}),
+                  ...(options?.setTimeoutFunction
+                    ? { setTimeoutFunction: options.setTimeoutFunction }
+                    : {}),
+                  ...(options?.clearTimeoutFunction
+                    ? { clearTimeoutFunction: options.clearTimeoutFunction }
+                    : {}),
                   ownerId: executionHandle.snapshot().ownerId,
                   parentExecutionId: executionHandle.id,
+                  ...(privilegedContextMirrorHandle ? { privilegedContextMirrorHandle } : {}),
+                  ...(options?.requestContext && initialEffectiveContext
+                    ? {
+                        requestContext: freezeToolRequestContext(options.requestContext),
+                        effectiveContext: initialEffectiveContext,
+                      }
+                    : {}),
                   // A single tool call can use the parent as its completion
                   // callback. This matters during shutdown: the tool promise
                   // may race its abort signal while the callback continues.
-                  ...(hasSingleChild ? { executionHandle } : {}),
+                  ...(hasSingleChild ? { parentCompletionHandle: executionHandle } : {}),
                   ...(options !== undefined && approvalResumeSymbol in options
                     ? { [approvalResumeSymbol]: options[approvalResumeSymbol] }
+                    : {}),
+                  ...(options !== undefined && approvalConsumeSymbol in options
+                    ? {
+                        [approvalConsumeSymbol]: options[approvalConsumeSymbol] as
+                          (() => Promise<ApprovalAdmissionRollback>) | undefined,
+                      }
+                    : {}),
+                  ...(options !== undefined && policyAuthorizationOnlySymbol in options
+                    ? { [policyAuthorizationOnlySymbol]: options[policyAuthorizationOnlySymbol] }
                     : {}),
                 }
               : {};
 
           const result = await tool.execute(toolCall, executeOptions as ToolExecuteOptions);
+          if (result.pendingApproval && approvalSecret && approvalStateStore) {
+            const requestContext = options?.requestContext;
+            if (!requestContext?.agentId || !requestContext.runId || !requestContext.audience) {
+              throw new Error(
+                'Approval authorization requires request principal, tenant, audience, agentId, and runId.',
+              );
+            }
+            if (!tool.identity.version) {
+              throw new Error(
+                `Approval authorization requires a versioned tool definition for "${tool.name}".`,
+              );
+            }
+            const issuedAt = approvalNow();
+            const expiresAt = issuedAt + approvalBindingTtlMs;
+            if (!Number.isFinite(expiresAt) || expiresAt <= issuedAt) {
+              throw new Error('approvalBindingTtlMs produces an invalid approval expiry.');
+            }
+            result.pendingApproval.approvalBinding = {
+              version: 1,
+              principalId: requestContext.authority.principalId,
+              tenantId: requestContext.authority.tenantId,
+              ownerId: requestContext.authority.ownerId,
+              authorizationRevision: requestContext.authority.authorizationRevision,
+              capabilitiesRevision: stableStringifyJson(
+                [...requestContext.authority.capabilities].sort(),
+              ),
+              audience: requestContext.audience,
+              agentId: requestContext.agentId,
+              runId: requestContext.runId,
+              toolboxRevision,
+              toolDefinitionRevision: tool.id,
+              policyRevision,
+              approvalRevision,
+              issuedAt,
+              expiresAt,
+              nonce: approvalNonce(),
+              replayScope: `${requestContext.authority.tenantId}:${requestContext.runId}`,
+            };
+          }
           if (result.pendingApproval && approvalSecret) {
             result.pendingApproval.approvalToken = signPendingApproval(result.pendingApproval);
+          }
+          if (
+            result.pendingApproval?.approvalBinding &&
+            result.pendingApproval.satisfiedPolicyPauses?.length &&
+            approvalStateStore &&
+            approvalConsumeSymbol in executeOptions
+          ) {
+            const consumeApproval = executeOptions[approvalConsumeSymbol];
+            const rollbackApprovalAdmission = consumeApproval ? await consumeApproval() : undefined;
+            try {
+              const interrupted = await issueApprovalStateWithInterruption(
+                approvalStateStore,
+                result.pendingApproval as SignedPendingToolApproval,
+                executeOptions,
+              );
+              if (interrupted) {
+                if (rollbackApprovalAdmission) await rollbackApprovalAdmission();
+                return interrupted;
+              }
+            } catch (error) {
+              if (rollbackApprovalAdmission) await rollbackApprovalAdmission();
+              throw error;
+            }
+          } else if (result.pendingApproval?.approvalBinding && approvalStateStore) {
+            const interrupted = await issueApprovalStateWithInterruption(
+              approvalStateStore,
+              result.pendingApproval as SignedPendingToolApproval,
+              executeOptions,
+            );
+            if (interrupted) return interrupted;
           }
           let hasLiveStream = false;
           const stream = resolveResultStream(result);
           if (stream) {
             hasLiveStream = true;
             liveStreams += 1;
+            childExecutionHandle?.streaming();
             executionHandle.streaming();
             const wrapped = wrapAsyncIterable(
               stream,
               () => {
                 cleanup.forEach((fn) => fn());
+                settleChildExecution(result);
                 finalizeParentStream();
               },
               executionHandle,
@@ -1185,6 +1583,9 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
           if (result.error) {
             emit('error', { tool, result });
             cleanup.forEach((fn) => fn());
+            if (!hasLiveStream) {
+              settleChildExecution(result);
+            }
             if (errorMode === 'failFast') {
               // eslint-disable-next-line @typescript-eslint/only-throw-error
               throw result.error;
@@ -1193,21 +1594,25 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
             emit('complete', { tool, result });
             if (!hasLiveStream) {
               cleanup.forEach((fn) => fn());
+              settleChildExecution(result);
             }
           }
           return result;
         } catch (error) {
           cleanup.forEach((fn) => fn());
           if (errorMode === 'failFast') {
+            settleChildExecution(error);
             throw error;
           }
           const message = error instanceof Error ? error.message : String(error);
-          const toolError = createToolError(
-            'internal',
-            message,
-            extractErrorCode(error) ?? 'EXECUTION_ERROR',
-            false,
-          );
+          const toolError = isToolError(error)
+            ? error
+            : createToolError(
+                'internal',
+                message,
+                extractErrorCode(error) ?? 'EXECUTION_ERROR',
+                false,
+              );
           const errResult: ToolExecutionResult = {
             callId: toolCall.id,
             outcome: 'error',
@@ -1220,6 +1625,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
             errorCategory: toolError.category,
           };
           emit('error', { tool, result: errResult });
+          settleChildExecution(errResult);
           return errResult;
         }
       });
@@ -1229,7 +1635,16 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       const output = isMultiple ? results : results[0]!;
       executionOutput = output;
       executionReturned = true;
-      if (liveStreams === 0) executionHandle.settle(output);
+      if (
+        liveStreams === 0 &&
+        !(
+          hasSingleChild &&
+          (executionHandle.snapshot().state === 'abort-requested' ||
+            executionHandle.snapshot().state === 'cleanup-pending')
+        )
+      ) {
+        executionHandle.settle(output);
+      }
       return output;
     } finally {
       if (
@@ -1246,7 +1661,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     }
   }
 
-  function resumeApproval(
+  async function resumeApproval(
     this: Toolbox,
     approval: SignedPendingToolApproval,
     resumeOptions?: ToolboxExecuteOptions & { arguments?: unknown },
@@ -1256,11 +1671,150 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     const executeArguments = Object.prototype.hasOwnProperty.call(resumeOptions ?? {}, 'arguments')
       ? overrideArguments
       : approval.arguments;
-
+    const requestDeadline = executeOptions.requestContext?.deadline;
+    if (requestDeadline !== undefined && !Number.isFinite(requestDeadline)) {
+      throw new Error('Execution deadline must be finite.');
+    }
+    const currentTool = getTool(approval.toolName);
+    if (!currentTool) {
+      throw new Error(`Tool not found: ${approval.toolName}`);
+    }
+    let approvalContext:
+      | {
+          principalId: string;
+          tenantId: string;
+          ownerId: string;
+          authorizationRevision: string;
+          capabilitiesRevision: string;
+          audience: NonNullable<ToolRequestContext['audience']>;
+          agentId: string;
+          runId: string;
+          toolboxRevision: string;
+          toolDefinitionRevision: string;
+          policyRevision: string;
+          approvalRevision: string;
+        }
+      | undefined;
+    if (approvalStateStore) {
+      const requestContext = resumeOptions?.requestContext;
+      if (
+        !requestContext?.agentId ||
+        !requestContext.runId ||
+        !requestContext.audience ||
+        !approval.approvalBinding
+      ) {
+        throw new Error('Request context and approval binding are required.');
+      }
+      approvalContext = {
+        principalId: requestContext.authority.principalId,
+        tenantId: requestContext.authority.tenantId,
+        ownerId: requestContext.authority.ownerId,
+        authorizationRevision: requestContext.authority.authorizationRevision,
+        capabilitiesRevision: stableStringifyJson(
+          [...requestContext.authority.capabilities].sort(),
+        ),
+        audience: requestContext.audience,
+        agentId: requestContext.agentId,
+        runId: requestContext.runId,
+        toolboxRevision,
+        toolDefinitionRevision: currentTool.id,
+        policyRevision,
+        approvalRevision,
+      };
+      validateApprovalBinding(approval.approvalBinding, approvalContext, approvalNow());
+      const stateResult = await readApprovalStateWithInterruption(
+        approvalStateStore,
+        approval.approvalBinding,
+        approval,
+        executeOptions,
+      );
+      if (stateResult.outcome === 'interrupted') return stateResult.result;
+      const state = stateResult.state;
+      if (state === undefined) {
+        throw new ApprovalBindingError('Approval binding was not found.', 'not-found');
+      }
+      if (state === 'revoked') {
+        throw new ApprovalBindingError('Approval binding was revoked.', 'revoked');
+      }
+      if (state === 'consumed') {
+        throw new ApprovalBindingError(
+          'Approval binding has already been consumed.',
+          'already-consumed',
+        );
+      }
+    }
+    const validation = await validateResumedApprovalArguments(
+      approval,
+      currentTool.input.safeParseAsync(executeArguments),
+      executeOptions,
+    );
+    if (validation.outcome === 'interrupted') {
+      return validation.result;
+    }
+    const { parsedArguments } = validation;
+    if (!parsedArguments.success) {
+      throw parsedArguments.error;
+    }
+    let consumeApproval: (() => Promise<ApprovalAdmissionRollback>) | undefined;
+    let consumeError: unknown;
+    let approvalBindingConsumed = approvalStateStore ? false : undefined;
+    if (approvalStateStore && approvalContext) {
+      consumeApproval = async () => {
+        let reserved = false;
+        try {
+          await approvalStateStore.reserve(approval.approvalBinding!, approvalContext);
+          reserved = true;
+          if (executeOptions.signal?.aborted) {
+            await approvalStateStore.release(approval.approvalBinding!);
+            reserved = false;
+            return async () => {};
+          }
+          if (
+            requestDeadline !== undefined &&
+            requestDeadline <= (executeOptions.now ?? Date.now)()
+          ) {
+            // eslint-disable-next-line @typescript-eslint/only-throw-error
+            throw createToolError('timeout', 'Execution deadline exceeded', 'TIMEOUT', false);
+          }
+          await approvalStateStore.commit(approval.approvalBinding!);
+          approvalBindingConsumed = true;
+          if (executeOptions.signal?.aborted) {
+            await approvalStateStore.release(approval.approvalBinding!);
+            reserved = false;
+            approvalBindingConsumed = false;
+            return async () => {};
+          }
+          if (
+            requestDeadline !== undefined &&
+            requestDeadline <= (executeOptions.now ?? Date.now)()
+          ) {
+            // eslint-disable-next-line @typescript-eslint/only-throw-error
+            throw createToolError('timeout', 'Execution deadline exceeded', 'TIMEOUT', false);
+          }
+        } catch (error) {
+          if (reserved) await approvalStateStore.release(approval.approvalBinding!);
+          approvalBindingConsumed = false;
+          if (
+            !error ||
+            typeof error !== 'object' ||
+            !('category' in error) ||
+            (error.category !== 'cancelled' && error.category !== 'timeout')
+          ) {
+            consumeError = error;
+          }
+          throw error;
+        }
+        let rolledBack = false;
+        return async () => {
+          if (rolledBack) return;
+          rolledBack = true;
+          await approvalStateStore.release(approval.approvalBinding!);
+        };
+      };
+    }
     const executeForResume =
       this && typeof this === 'object' && 'execute' in this ? this.execute.bind(this) : execute;
-
-    return executeForResume(
+    const result = await executeForResume(
       {
         id: approval.callId,
         name: approval.toolName,
@@ -1268,6 +1822,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       } as ToolCallInput,
       {
         ...executeOptions,
+        ...(consumeApproval ? { [approvalConsumeSymbol]: consumeApproval } : {}),
         [approvalResumeSymbol]: {
           approvedAction: approval.action,
           approvedPolicyPauseTier: approval.policyPauseTier,
@@ -1284,6 +1839,236 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
         },
       } as InternalToolboxExecuteOptions,
     );
+    if (consumeError !== undefined) {
+      throw consumeError instanceof Error ? consumeError : new Error(String(consumeError));
+    }
+    return approvalBindingConsumed === undefined ? result : { ...result, approvalBindingConsumed };
+  }
+
+  async function readApprovalStateWithInterruption(
+    store: ApprovalStateStore,
+    binding: NonNullable<SignedPendingToolApproval['approvalBinding']>,
+    approval: SignedPendingToolApproval,
+    options: ToolboxExecuteOptions,
+  ): Promise<
+    | { outcome: 'read'; state: ApprovalState | undefined }
+    | { outcome: 'interrupted'; result: ToolExecutionResult }
+  > {
+    const now = options.now ?? Date.now;
+    const deadline = options.requestContext?.deadline;
+    const cancelled = () =>
+      createInterruptedResumeApprovalValidationResult(
+        approval,
+        'cancelled',
+        'Cancelled',
+        'CANCELLED',
+      );
+    const timedOut = () =>
+      createInterruptedResumeApprovalValidationResult(
+        approval,
+        'timeout',
+        'Execution deadline exceeded',
+        'TIMEOUT',
+      );
+    if (options.signal?.aborted) return { outcome: 'interrupted', result: cancelled() };
+    if (deadline !== undefined && deadline <= now())
+      return { outcome: 'interrupted', result: timedOut() };
+    if (!options.signal && deadline === undefined)
+      return { outcome: 'read', state: await store.state(binding) };
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const setTimeoutFunction =
+        options.setTimeoutFunction ??
+        ((callback: () => void, milliseconds?: number) => setTimeout(callback, milliseconds));
+      const clearTimeoutFunction =
+        options.clearTimeoutFunction ??
+        ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+      let timer: unknown;
+      let timerScheduled = false;
+      const cleanup = () => {
+        options.signal?.removeEventListener('abort', onAbort);
+        if (!timerScheduled) return;
+        timerScheduled = false;
+        clearTimeoutFunction(timer);
+      };
+      const finish = (
+        value:
+          | { outcome: 'read'; state: ApprovalState | undefined }
+          | { outcome: 'interrupted'; result: ToolExecutionResult },
+      ) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(value);
+      };
+      const fail = (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      };
+      const scheduleDeadline = () => {
+        if (deadline === undefined) return;
+        const remaining = deadline - now();
+        const delay = remaining <= 0 ? 0 : Math.min(remaining, maximumTimerDelay);
+        timerScheduled = true;
+        timer = setTimeoutFunction(() => {
+          timerScheduled = false;
+          if (settled) return;
+          if (deadline <= now()) {
+            finish({ outcome: 'interrupted', result: timedOut() });
+            return;
+          }
+          scheduleDeadline();
+        }, delay);
+      };
+      const onAbort = () => finish({ outcome: 'interrupted', result: cancelled() });
+      options.signal?.addEventListener('abort', onAbort, { once: true });
+      scheduleDeadline();
+      void store.state(binding).then((state) => finish({ outcome: 'read', state }), fail);
+    });
+  }
+
+  async function issueApprovalStateWithInterruption(
+    store: ApprovalStateStore,
+    approval: SignedPendingToolApproval,
+    options: ToolboxExecuteOptions,
+  ): Promise<ToolExecutionResult | undefined> {
+    const binding = approval.approvalBinding;
+    if (!binding) return undefined;
+    const now = options.now ?? Date.now;
+    const deadline = options.requestContext?.deadline;
+    const cancelled = () =>
+      createInterruptedResumeApprovalValidationResult(
+        approval,
+        'cancelled',
+        formatCancellationReason(options.signal?.reason),
+        'CANCELLED',
+      );
+    const timedOut = () =>
+      createInterruptedResumeApprovalValidationResult(
+        approval,
+        'timeout',
+        'Execution deadline exceeded',
+        'TIMEOUT',
+      );
+    if (options.signal?.aborted) return cancelled();
+    if (deadline !== undefined && deadline <= now()) return timedOut();
+
+    const issuance = store.issue(binding);
+    const revokeLateIssuance = async () => {
+      let lastError: unknown;
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        try {
+          await store.revoke(binding);
+          return;
+        } catch (error) {
+          lastError = error;
+          if (attempt < 3) await Promise.resolve();
+        }
+      }
+      throw lastError;
+    };
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const setTimeoutFunction =
+        options.setTimeoutFunction ??
+        ((callback: () => void, milliseconds?: number) => setTimeout(callback, milliseconds));
+      const clearTimeoutFunction =
+        options.clearTimeoutFunction ??
+        ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+      let timer: unknown;
+      let timerScheduled = false;
+      const cleanup = () => {
+        options.signal?.removeEventListener('abort', onAbort);
+        if (!timerScheduled) return;
+        timerScheduled = false;
+        clearTimeoutFunction(timer);
+      };
+      const finish = (result: ToolExecutionResult | undefined) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(result);
+      };
+      const interrupt = (result: ToolExecutionResult) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        void issuance.then(revokeLateIssuance, () => undefined).catch(() => undefined);
+        resolve(result);
+      };
+      const fail = (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      };
+      const scheduleDeadline = () => {
+        if (deadline === undefined) return;
+        const remaining = deadline - now();
+        const delay = remaining <= 0 ? 0 : Math.min(remaining, maximumTimerDelay);
+        timerScheduled = true;
+        timer = setTimeoutFunction(() => {
+          timerScheduled = false;
+          if (settled) return;
+          if (deadline <= now()) {
+            interrupt(timedOut());
+            return;
+          }
+          scheduleDeadline();
+        }, delay);
+      };
+      const onAbort = () => interrupt(cancelled());
+      options.signal?.addEventListener('abort', onAbort, { once: true });
+      scheduleDeadline();
+      void issuance.then(() => finish(undefined), fail);
+    });
+  }
+
+  async function revokeApproval(approval: SignedPendingToolApproval): Promise<void> {
+    verifyPendingApproval(approval);
+    if (!approvalStateStore || !approval.approvalBinding) {
+      throw new Error('Approval state store and binding are required to revoke an approval.');
+    }
+    await approvalStateStore.revoke(approval.approvalBinding);
+  }
+
+  async function restoreApproval(approval: SignedPendingToolApproval): Promise<void> {
+    verifyPendingApproval(approval);
+    if (!approvalStateStore || !approval.approvalBinding) {
+      throw new Error('Approval state store and binding are required to restore approvals.');
+    }
+    const currentTool = getTool(approval.toolName);
+    const binding = approval.approvalBinding;
+    validateApprovalBinding(binding, undefined, approvalNow());
+    const staleRevisions = [
+      binding.toolboxRevision !== toolboxRevision ? 'toolboxRevision' : undefined,
+      binding.toolDefinitionRevision !== currentTool?.id ? 'toolDefinitionRevision' : undefined,
+      binding.policyRevision !== policyRevision ? 'policyRevision' : undefined,
+      binding.approvalRevision !== approvalRevision ? 'approvalRevision' : undefined,
+    ].filter((revision): revision is string => revision !== undefined);
+    if (staleRevisions.length > 0) {
+      throw new ApprovalBindingError(
+        `Cannot restore approval binding with stale ${staleRevisions.join(', ')}.`,
+        'invalid-binding',
+      );
+    }
+    const state = await approvalStateStore.state(approval.approvalBinding);
+    if (state === undefined) {
+      try {
+        await approvalStateStore.issue(approval.approvalBinding);
+      } catch (error) {
+        const concurrentState = await approvalStateStore.state(approval.approvalBinding);
+        if (concurrentState === 'issued') return;
+        throw error;
+      }
+      return;
+    }
+    if (state !== 'issued') {
+      const errorCode = state === 'consumed' ? 'already-consumed' : 'revoked';
+      throw new ApprovalBindingError(`Cannot restore ${state} approval binding.`, errorCode);
+    }
   }
 
   function approvalTokenPayload(
@@ -1312,6 +2097,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       throw new Error('Toolbox approvalSecret is required to resume signed pending approvals.');
     }
     if (
+      !approval ||
       typeof approval.approvalToken !== 'string' ||
       !timingSafeEqualHex(approval.approvalToken, signPendingApproval(approval))
     ) {
@@ -1339,6 +2125,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
 
     return createToolboxBase(mergedEntries, {
       ...options,
+      ...(approvalStateStore ? { approvalStateStore } : {}),
       context,
     });
   }
@@ -1433,13 +2220,32 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     ) as unknown as AvailableTools<ToolsFromEntries<TEntries>>;
   }
 
-  async function isToolAvailable(tool: Tool): Promise<boolean> {
+  async function isToolAvailable(
+    tool: Tool,
+    signal?: AbortSignal,
+  ): Promise<boolean | 'timeout' | 'cancelled'> {
     const availability = tool.configuration.availability ?? tool.availability;
     if (!availability) {
       return true;
     }
     try {
-      return await availability(baseContext);
+      if (!signal) return await availability(baseContext);
+      if (signal.aborted) return 'cancelled';
+      return await new Promise<boolean | 'timeout' | 'cancelled'>((resolve) => {
+        let settled = false;
+        const finish = (result: boolean | 'timeout' | 'cancelled') => {
+          if (settled) return;
+          settled = true;
+          signal.removeEventListener('abort', onAbort);
+          resolve(result);
+        };
+        const onAbort = () => finish('cancelled');
+        signal.addEventListener('abort', onAbort, { once: true });
+        void Promise.resolve(availability(baseContext)).then(
+          (result) => finish(result),
+          () => finish(false),
+        );
+      });
     } catch {
       return false;
     }
@@ -1519,6 +2325,8 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
   const api: Toolbox<ToolsFromEntries<TEntries>> = {
     execute,
     resumeApproval,
+    restoreApproval,
+    revokeApproval,
     extend,
     tools,
     getAvailable,
@@ -1685,6 +2493,10 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
           toolCall: toolContext.toolCall,
           ...(toolContext.durableOperationKey !== undefined
             ? { durableOperationKey: toolContext.durableOperationKey }
+            : {}),
+          ...(toolContext.requestContext ? { requestContext: toolContext.requestContext } : {}),
+          ...(toolContext.effectiveContext
+            ? { effectiveContext: toolContext.effectiveContext }
             : {}),
           signal: toolContext.signal,
           timeout: toolContext.timeout,
@@ -2173,20 +2985,45 @@ function mergePolicies(
       } else if (registryDecision?.allow === false) {
         return registryDecision;
       }
-      const toolDecision = await resolvePolicyDecision(toolPolicy?.beforeExecute, context);
+      const toolDecisionContext =
+        registryDecision?.capabilities === undefined
+          ? context
+          : withNarrowedPolicyContextCapabilities(context, registryDecision.capabilities);
+      const toolDecision = await resolvePolicyDecision(
+        toolPolicy?.beforeExecute,
+        toolDecisionContext,
+      );
       if (isPausePolicyDecision(toolDecision)) {
         pendingPauseDecisions.push({ ...toolDecision, [policyPauseTierSymbol]: 'tool' });
       } else if (toolDecision?.allow === false) {
         return toolDecision;
       }
+      const capabilitySets = [registryDecision?.capabilities, toolDecision?.capabilities].filter(
+        (capabilities): capabilities is readonly string[] => capabilities !== undefined,
+      );
+      const capabilities = capabilitySets.reduce<readonly string[] | undefined>(
+        (current, next) =>
+          current === undefined
+            ? [...next]
+            : current.includes('*')
+              ? [...next]
+              : next.includes('*')
+                ? current
+                : current.filter((capability) => next.includes(capability)),
+        undefined,
+      );
       const firstPauseDecision = pendingPauseDecisions[0];
       if (firstPauseDecision) {
         return {
           ...firstPauseDecision,
+          ...(capabilities ? { capabilities } : {}),
           [policyPauseDecisionsSymbol]: pendingPauseDecisions,
         };
       }
-      return { allow: true } satisfies ToolPolicyDecision;
+      return {
+        allow: true,
+        ...(capabilities ? { capabilities } : {}),
+      } satisfies ToolPolicyDecision;
     },
     async afterExecute(context) {
       if (toolPolicy?.afterExecute) {
@@ -2197,6 +3034,56 @@ function mergePolicies(
       }
     },
   };
+}
+
+function withNarrowedPolicyContextCapabilities(
+  context: ToolPolicyContext,
+  capabilities: readonly string[],
+): ToolPolicyContext {
+  const requestContext = readPolicyRequestContext(context);
+  if (!requestContext) {
+    return context;
+  }
+  const narrowedRequestContext = narrowToolAuthority(requestContext, capabilities);
+  return {
+    ...context,
+    policyContext: {
+      ...(context.policyContext ?? {}),
+      requestContext: narrowedRequestContext,
+      capabilities: narrowedRequestContext.authority.capabilities,
+    },
+  };
+}
+
+function readPolicyRequestContext(context: ToolPolicyContext): ToolRequestContext | undefined {
+  const requestContext = context.policyContext?.['requestContext'];
+  return isToolRequestContext(requestContext) ? requestContext : undefined;
+}
+
+function isToolRequestContext(value: unknown): value is ToolRequestContext {
+  if (!isRecord(value)) {
+    return false;
+  }
+  const authority = value['authority'];
+  if (!isRecord(authority)) {
+    return false;
+  }
+  const capabilities = authority['capabilities'];
+  return (
+    typeof authority['principalId'] === 'string' &&
+    typeof authority['tenantId'] === 'string' &&
+    typeof authority['ownerId'] === 'string' &&
+    typeof authority['authorizationRevision'] === 'string' &&
+    isStringArray(capabilities)
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isStringArray(value: unknown): value is readonly string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string');
 }
 
 function isPausePolicyDecision(

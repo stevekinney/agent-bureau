@@ -32,7 +32,12 @@ import type {
 import type { ObservabilityOptions } from '@lostgradient/weft/observability';
 import type { Storage, StorageConfiguration, TextValueStore } from '@lostgradient/weft/storage';
 import type { ConditionalTextValueStore } from '@lostgradient/weft/storage/text-value-store';
-import type { AnyToolbox, PendingToolApproval, SignedPendingToolApproval } from 'armorer';
+import type {
+  AnyToolbox,
+  PendingToolApproval,
+  SignedPendingToolApproval,
+  ToolRequestContext,
+} from 'armorer';
 import type { ConversationSnapshot } from 'conversationalist';
 import type { ToolPolicy } from 'interoperability';
 import type {
@@ -312,6 +317,8 @@ export interface BureauOptions {
    */
   guardrails?: GuardrailsOptions | false;
   identity?: IdentityConfiguration;
+  /** Host-owned authority check used before durable recovery resumes user code. */
+  requestAuthorityValidator?: (context: ToolRequestContext) => boolean | Promise<boolean>;
   skills?: SkillRuntimeConfiguration;
   streaming?: StreamingConfiguration;
   scheduler?: SchedulerConfiguration;
@@ -537,7 +544,7 @@ export interface Bureau {
    */
   getRunReport(id: string): RunReport | undefined;
   abortRun(id: string): RunSummary;
-  deleteRun(id: string): void;
+  deleteRun(id: string): Promise<void>;
 
   /**
    * Read the durable engine's view of a run: its full {@link WorkflowState}
@@ -623,6 +630,26 @@ export interface Bureau {
    * currently pending review (including an already-resolved one).
    */
   resolveReview(input: ResolveReviewInput): Promise<ResolveReviewResult>;
+
+  /**
+   * Installs the host-owned authority freshness check used immediately before
+   * a delayed tool approval is resumed. Transports that issue revocable
+   * credentials should configure this when they attach to the bureau.
+   */
+  setRequestAuthorityValidator(
+    validator: ((context: ToolRequestContext) => boolean | Promise<boolean>) | undefined,
+  ): void;
+
+  /** Waits for any deferred durable recovery released by validator attachment. */
+  waitForRecovery?(): Promise<void>;
+
+  /**
+   * Returns the current host-owned authority freshness check so transports can
+   * compose their own revocation checks without replacing construction-time
+   * host validation.
+   */
+  getRequestAuthorityValidator():
+    ((context: ToolRequestContext) => boolean | Promise<boolean>) | undefined;
 
   /**
    * Register a durable recurring schedule via `engine.schedule(...)`.
@@ -846,6 +873,8 @@ export interface CreateRunRequest {
    * field verbatim from an untrusted request body.
    */
   principal?: string;
+  /** Authenticated, request-scoped authority forwarded to Armorer tool execution. */
+  requestContext?: ToolRequestContext;
 }
 
 export interface SubmitSchedulerTaskRequest {

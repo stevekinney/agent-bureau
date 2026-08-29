@@ -1,10 +1,17 @@
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { describe, expect, it } from 'bun:test';
 import { Hono } from 'hono';
+import { sha256HexSync } from 'interoperability';
 
 import { createApiKeyStore } from '../keys/create-api-key-store';
 import type { ApiKeyStore } from '../keys/types';
-import { createAuthentication } from './authentication';
+import {
+  createAuthentication,
+  gatewayAuthorizationRevisionForApiKey,
+  gatewayCapabilitiesForScopes,
+  resolveTrustedRequestContext,
+  staticTokenAuthorizationRevision,
+} from './authentication';
 import { errorHandler } from './error-handler';
 import { requestIdentifier } from './request-identifier';
 
@@ -114,6 +121,109 @@ describe('authentication', () => {
 });
 
 describe('authentication with api key store', () => {
+  it('represents managed and static admin credentials as unrestricted authority', async () => {
+    const kv = textValueStore(new MemoryStorage());
+    const apiKeyStore = createApiKeyStore(kv);
+    const { plaintext } = await apiKeyStore.create({ name: 'admin-key', scopes: [] });
+
+    const app = new Hono();
+    app.use('*', createAuthentication('static-secret', apiKeyStore));
+    app.get('/authority', (context) =>
+      context.json(resolveTrustedRequestContext(context, 'billing-agent')),
+    );
+
+    for (const token of [plaintext, 'static-secret']) {
+      const response = await app.request('/authority', {
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.authority.capabilities).toEqual(['*']);
+    }
+  });
+
+  it('derives static-token authorization revision without preserving the token value', async () => {
+    const token = 'rotatable-static-secret';
+    const app = new Hono();
+    app.use('*', createAuthentication(token));
+    app.get('/authority', (context) =>
+      context.json(resolveTrustedRequestContext(context, 'billing-agent')),
+    );
+
+    const response = await app.request('/authority', {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(response.status).toBe(200);
+    const body = await response.json();
+
+    expect(body.authority.authorizationRevision).toBe(staticTokenAuthorizationRevision(token));
+    expect(body.authority.authorizationRevision).not.toBe('gateway:static-token');
+    expect(body.authority.authorizationRevision).not.toContain(token);
+    expect(body.authority.authorizationRevision).not.toBe(
+      `gateway:static-token:${sha256HexSync(
+        `agent-bureau.gateway.static-token.authorization-revision:${token}`,
+      ).slice(0, 32)}`,
+    );
+  });
+
+  it('normalizes managed scopes before exposing trusted request authority', async () => {
+    const kv = textValueStore(new MemoryStorage());
+    const apiKeyStore = createApiKeyStore(kv);
+    const { key, plaintext } = await apiKeyStore.create({
+      name: 'duplicate-scope-key',
+      scopes: ['runs:write', 'tools:execute', 'runs:write'],
+    });
+
+    const app = new Hono();
+    app.use('*', createAuthentication(undefined, apiKeyStore));
+    app.get('/authority', (context) =>
+      context.json({
+        scopes: context.req.header('x-api-key-scopes'),
+        requestContext: resolveTrustedRequestContext(context, 'billing-agent'),
+      }),
+    );
+
+    const response = await app.request('/authority', {
+      headers: { authorization: `Bearer ${plaintext}` },
+    });
+    expect(response.status).toBe(200);
+    const body = await response.json();
+
+    expect(body.scopes).toBe('runs:write,tools:execute');
+    expect(body.requestContext.authority.capabilities).toEqual(
+      gatewayCapabilitiesForScopes(key.scopes),
+    );
+    expect(body.requestContext.authority.authorizationRevision).toBe(
+      gatewayAuthorizationRevisionForApiKey(key.id),
+    );
+  });
+
+  it('rejects malformed stored scopes instead of promoting them to unrestricted authority', async () => {
+    const kv = textValueStore(new MemoryStorage());
+    const apiKeyStore = createApiKeyStore(kv);
+    const { key, plaintext } = await apiKeyStore.create({
+      name: 'tampered-scope-key',
+      scopes: ['runs:write'],
+    });
+    const raw = await kv.get(`api-key:${key.id}`);
+    expect(raw).not.toBeNull();
+    const stored = JSON.parse(raw!);
+    stored.scopes = ['   '];
+    await kv.set(`api-key:${key.id}`, JSON.stringify(stored));
+
+    const app = createApp(undefined, apiKeyStore);
+    const response = await app.request('/protected', {
+      headers: { authorization: `Bearer ${plaintext}` },
+    });
+
+    expect(response.status).toBe(401);
+    const body = await response.json();
+    expect(body.error.message).toBe('Invalid authorization token');
+    expect(() => gatewayCapabilitiesForScopes(['   '])).toThrow(
+      'API key scope entries must be non-blank strings',
+    );
+  });
+
   it('accepts a valid managed API key', async () => {
     const kv = textValueStore(new MemoryStorage());
     const apiKeyStore = createApiKeyStore(kv);

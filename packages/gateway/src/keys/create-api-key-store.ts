@@ -4,6 +4,43 @@ import { extractKeyId, generateApiKey, hashApiKey, verifyApiKey } from './key-ut
 import type { ApiKey, ApiKeyStore, CreateApiKeyOptions } from './types';
 
 const KEY_PREFIX = 'api-key:';
+const INVALID_SCOPE_ENTRY_MESSAGE = 'API key scope entries must be non-blank strings';
+const SCOPE_DELIMITER = ',';
+const INVALID_SCOPE_DELIMITER_MESSAGE = 'API key scope entries must not contain ","';
+const INVALID_SCOPE_HEADER_MESSAGE = 'API key scope entries must be valid HTTP header values';
+
+export function normalizeApiKeyScopes(scopes: unknown): string[] {
+  if (scopes === undefined) return [];
+  if (!Array.isArray(scopes)) {
+    throw new Error('API key scopes must be an array of strings');
+  }
+  const normalizedScopes: string[] = [];
+  for (const scope of scopes) {
+    if (typeof scope !== 'string') {
+      throw new Error(INVALID_SCOPE_ENTRY_MESSAGE);
+    }
+    const normalizedScope = scope.trim();
+    if (normalizedScope.length === 0) {
+      throw new Error(INVALID_SCOPE_ENTRY_MESSAGE);
+    }
+    if (normalizedScope.includes(SCOPE_DELIMITER)) {
+      throw new Error(INVALID_SCOPE_DELIMITER_MESSAGE);
+    }
+    // Scope names are reflected into x-api-key-scopes. Reject characters that
+    // Fetch/Bun/Node reject in HTTP header values: non-ByteString code points
+    // and C0 controls, except horizontal tab which the platform grammar allows.
+    if (
+      [...normalizedScope].some((character) => {
+        const code = character.charCodeAt(0);
+        return code > 0xff || code <= 0x08 || (code >= 0x0a && code <= 0x1f);
+      })
+    ) {
+      throw new Error(INVALID_SCOPE_HEADER_MESSAGE);
+    }
+    normalizedScopes.push(normalizedScope);
+  }
+  return Array.from(new Set(normalizedScopes));
+}
 
 /** Returns true if the value is a string that parses to a valid Date. */
 function isValidDate(value: unknown): boolean {
@@ -22,7 +59,8 @@ function parseApiKey(raw: string): ApiKey | undefined {
       'keyHash' in parsed &&
       'active' in parsed &&
       'createdAt' in parsed &&
-      isValidDate((parsed as Record<string, unknown>)['createdAt'])
+      isValidDate((parsed as Record<string, unknown>)['createdAt']) &&
+      Array.isArray((parsed as Record<string, unknown>)['scopes'])
     ) {
       return parsed as ApiKey;
     }
@@ -39,6 +77,7 @@ function parseApiKey(raw: string): ApiKey | undefined {
  */
 export function createApiKeyStore(kv: TextValueStore): ApiKeyStore {
   async function create(options: CreateApiKeyOptions): Promise<{ key: ApiKey; plaintext: string }> {
+    const scopes = normalizeApiKeyScopes(options.scopes);
     const plaintext = generateApiKey();
     const id = extractKeyId(plaintext);
 
@@ -54,7 +93,7 @@ export function createApiKeyStore(kv: TextValueStore): ApiKeyStore {
       id,
       name: options.name,
       keyHash,
-      scopes: options.scopes ?? [],
+      scopes,
       createdAt: new Date().toISOString(),
       expiresAt: options.expiresAt,
       active: true,

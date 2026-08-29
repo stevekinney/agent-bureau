@@ -24,6 +24,23 @@ export {
 export { combineToolboxes } from './combine-toolboxes';
 export type { ToolError, ToolErrorCategory } from './core/errors';
 export type {
+  EffectiveToolExecutionContext,
+  ExternalExecutionProjection,
+  ExternalFieldClass,
+  ExternalProjectionAudience,
+  ExternalProjectionOptions,
+  ToolAuthority,
+  ToolRequestContext,
+} from './execution-context';
+export {
+  EXTERNAL_PROJECTION_VERSION,
+  freezeEffectiveToolExecutionContext,
+  freezeToolRequestContext,
+  narrowToolAuthority,
+  privilegedExecutionSnapshot,
+  projectExecutionSnapshot,
+} from './execution-context';
+export type {
   BeginExecutionOptions,
   ExecutionAbortSource,
   ExecutionCleanupOutcome,
@@ -39,6 +56,18 @@ export type {
 export { createExecutionLifecycle } from './execution-lifecycle';
 // `ToolDefinition` is part of the public `Tool` type's structure, so downstream
 // packages must be able to name it to emit their own declarations (TS2883).
+export type {
+  ApprovalBindingContext,
+  ApprovalBindingPayload,
+  ApprovalState,
+  ApprovalStateStore,
+} from './approval-binding';
+export {
+  APPROVAL_BINDING_VERSION,
+  ApprovalBindingError,
+  createProcessLocalApprovalStateStore,
+  validateApprovalBinding,
+} from './approval-binding';
 export type {
   AnyToolDefinition,
   ToolAvailabilityContext,
@@ -73,7 +102,11 @@ export { createMiddleware, createToolbox, isToolbox } from './create-toolbox';
 export type {
   CachedToolResult,
   CreateToolResultCacheOptions,
+  DirectIdempotencyExecuteOptions,
   IdempotencyOptions,
+  IdempotencyResolutionReceipt,
+  IdempotentTool,
+  LegacyIdempotencyResolutionReceipt,
   ToolResultCache,
   WithToolboxIdempotencyOptions,
 } from './idempotency';

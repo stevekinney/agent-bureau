@@ -41,6 +41,7 @@ describe('ToolError model', () => {
     const resultPromise = tool.executeWith({
       params: {},
       timeout: 1,
+      now: () => 1_000,
       [scheduleTimeoutFunctionKey]: (handler) => {
         timeoutHandlers.push(handler);
         return timeoutHandlers.length;

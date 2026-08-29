@@ -1,3 +1,8 @@
+import {
+  type EffectiveToolExecutionContext,
+  freezeEffectiveToolExecutionContext,
+} from './execution-context';
+
 export type ExecutionState =
   | 'queued'
   | 'active'
@@ -65,6 +70,8 @@ export interface ExecutionHandle {
   readonly id: string;
   readonly signal: AbortSignal;
   snapshot(): ExecutionSnapshot;
+  privilegedSnapshot(): PrivilegedExecutionSnapshot;
+  updatePrivilegedContext(context: EffectiveToolExecutionContext): void;
   queued(position: number, capacity?: number): void;
   activate(): void;
   waiting(declaredWait: string): void;
@@ -92,6 +99,12 @@ export interface BeginExecutionOptions {
   setTimeoutFunction?: (callback: () => void, milliseconds: number) => unknown;
   clearTimeoutFunction?: (handle: unknown) => void;
   scheduleDeadline?: boolean;
+  privilegedContext?: EffectiveToolExecutionContext;
+}
+
+export interface PrivilegedExecutionSnapshot {
+  snapshot: ExecutionSnapshot;
+  context?: EffectiveToolExecutionContext;
 }
 
 export interface ExecutionLifecycle {
@@ -102,6 +115,7 @@ export interface ExecutionLifecycle {
   begin(options: BeginExecutionOptions): ExecutionHandle;
   start(): () => void;
   inspect(selector?: ExecutionSelector): readonly ExecutionSnapshot[];
+  inspectPrivileged(selector?: ExecutionSelector): readonly PrivilegedExecutionSnapshot[];
   locate(executionId: string): ExecutionHandle | undefined;
   subscribe(listener: (event: ExecutionLifecycleEvent) => void): () => void;
   closeAdmission(): void;
@@ -119,9 +133,83 @@ type RecordState = {
   controller: AbortController;
   settled: Promise<ExecutionSnapshot>;
   resolveSettled: (snapshot: ExecutionSnapshot) => void;
+  privilegedContext?: EffectiveToolExecutionContext;
 };
 
 let nextExecutionId = 0;
+const maximumTimerDelay = 2_147_483_647;
+
+function assertFiniteDeadline(deadline: number): void {
+  if (!Number.isFinite(deadline)) {
+    throw new Error('Execution deadline must be finite.');
+  }
+}
+
+function scheduleAbsoluteDeadline(options: {
+  deadline: number;
+  now: () => number;
+  schedule: (callback: () => void, milliseconds: number) => unknown;
+  clear: (handle: unknown) => void;
+  onDeadline: () => void;
+}): () => void {
+  assertFiniteDeadline(options.deadline);
+  let activeHandle: unknown;
+  let activeHandleScheduled = false;
+  let cleared = false;
+  const scheduleNext = () => {
+    if (cleared) return;
+    const remaining = options.deadline - options.now();
+    const delay = remaining <= 0 ? 0 : Math.min(remaining, maximumTimerDelay);
+    activeHandleScheduled = true;
+    activeHandle = options.schedule(() => {
+      activeHandleScheduled = false;
+      if (cleared) return;
+      if (options.deadline <= options.now()) {
+        options.onDeadline();
+        return;
+      }
+      scheduleNext();
+    }, delay);
+  };
+
+  scheduleNext();
+  return () => {
+    if (cleared) return;
+    cleared = true;
+    if (activeHandleScheduled) {
+      options.clear(activeHandle);
+    }
+  };
+}
+
+function retainTerminalPrivilegedContext(
+  context: EffectiveToolExecutionContext | undefined,
+): EffectiveToolExecutionContext | undefined {
+  if (!context) return undefined;
+  return freezeEffectiveToolExecutionContext({
+    authority: {
+      principalId: context.authority.principalId,
+      tenantId: context.authority.tenantId,
+      ownerId: context.authority.ownerId,
+      capabilities: [...context.authority.capabilities],
+      authorizationRevision: context.authority.authorizationRevision,
+    },
+    ...(context.audience !== undefined ? { audience: context.audience } : {}),
+    ...(context.agentId !== undefined ? { agentId: context.agentId } : {}),
+    ...(context.runId !== undefined ? { runId: context.runId } : {}),
+    ...(context.requestId !== undefined ? { requestId: context.requestId } : {}),
+    ...(context.locale !== undefined ? { locale: context.locale } : {}),
+    ...(context.deadline !== undefined ? { deadline: context.deadline } : {}),
+    revisions: {
+      catalog: context.revisions.catalog,
+      toolbox: context.revisions.toolbox,
+      toolDefinition: context.revisions.toolDefinition,
+      policy: context.revisions.policy,
+      approval: context.revisions.approval,
+      redaction: context.revisions.redaction,
+    },
+  });
+}
 
 export function createExecutionLifecycle(defaultOwnerId = 'anonymous'): ExecutionLifecycle {
   const ownerController = new AbortController();
@@ -156,7 +244,16 @@ export function createExecutionLifecycle(defaultOwnerId = 'anonymous'): Executio
       type: 'execution.lifecycle',
       snapshot: record.snapshot,
     } as const);
-    for (const listener of listeners) listener(event);
+    notifyListeners(event);
+  };
+  const notifyListeners = (event: ExecutionLifecycleEvent) => {
+    for (const listener of listeners) {
+      try {
+        listener(event);
+      } catch {
+        // Subscriber failures must not affect lifecycle state transitions.
+      }
+    }
   };
   const matches = (snapshot: ExecutionSnapshot, selector: ExecutionSelector = {}) =>
     (selector.executionId === undefined || snapshot.executionId === selector.executionId) &&
@@ -178,6 +275,9 @@ export function createExecutionLifecycle(defaultOwnerId = 'anonymous'): Executio
     begin(options) {
       if (closed) throw new Error('Execution admission is closed');
       const now = options.now ?? Date.now;
+      if (options.deadline !== undefined) {
+        assertFiniteDeadline(options.deadline);
+      }
       const queuedAt = now();
       const executionId = options.executionId ?? `execution-${++nextExecutionId}`;
       if (records.has(executionId)) {
@@ -190,6 +290,9 @@ export function createExecutionLifecycle(defaultOwnerId = 'anonymous'): Executio
         controller,
         settled,
         resolveSettled,
+        ...(options.privilegedContext
+          ? { privilegedContext: freezeEffectiveToolExecutionContext(options.privilegedContext) }
+          : {}),
         snapshot: freeze({
           executionId,
           toolName: options.toolName,
@@ -224,6 +327,9 @@ export function createExecutionLifecycle(defaultOwnerId = 'anonymous'): Executio
         if (record.snapshot.state === 'terminal') return;
         removeAbortListeners();
         clearDeadline?.();
+        if (patch.state === 'terminal' || patch.state === 'unknown-effect') {
+          record.privilegedContext = retainTerminalPrivilegedContext(record.privilegedContext);
+        }
         if (record.snapshot.state === 'unknown-effect') {
           if (Object.prototype.hasOwnProperty.call(patch, 'result')) {
             transition({ result: patch.result });
@@ -243,6 +349,16 @@ export function createExecutionLifecycle(defaultOwnerId = 'anonymous'): Executio
         id: executionId,
         signal: controller.signal,
         snapshot: () => record.snapshot,
+        privilegedSnapshot: () =>
+          Object.freeze({
+            snapshot: record.snapshot,
+            ...(record.privilegedContext ? { context: record.privilegedContext } : {}),
+          }),
+        updatePrivilegedContext: (context) => {
+          if (record.snapshot.state === 'terminal' || record.snapshot.state === 'unknown-effect')
+            return;
+          record.privilegedContext = freezeEffectiveToolExecutionContext(context);
+        },
         queued: (queuePosition, capacity) => {
           if (record.snapshot.state !== 'queued') return;
           transition({ queuePosition, ...(capacity === undefined ? {} : { capacity }) });
@@ -296,21 +412,19 @@ export function createExecutionLifecycle(defaultOwnerId = 'anonymous'): Executio
         const schedule =
           options.setTimeoutFunction ??
           ((callback, milliseconds) => setTimeout(callback, milliseconds));
-        const timeoutHandle = schedule(
-          () => abort('deadline', 'Execution deadline exceeded'),
-          Math.max(0, options.deadline - now()),
-        );
         const clear =
           options.clearTimeoutFunction ??
           ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
-        clearDeadline = () => {
-          clear(timeoutHandle);
-          clearDeadline = undefined;
-        };
+        clearDeadline = scheduleAbsoluteDeadline({
+          deadline: options.deadline,
+          now,
+          schedule,
+          clear,
+          onDeadline: () => abort('deadline', 'Execution deadline exceeded'),
+        });
       }
       ownerController.signal.addEventListener('abort', onOwnerAbort, { once: true });
-      for (const listener of listeners)
-        listener(Object.freeze({ type: 'execution.lifecycle', snapshot: record.snapshot }));
+      notifyListeners(Object.freeze({ type: 'execution.lifecycle', snapshot: record.snapshot }));
       return handle;
     },
     start() {
@@ -326,6 +440,18 @@ export function createExecutionLifecycle(defaultOwnerId = 'anonymous'): Executio
         [...records.values()]
           .map(({ snapshot }) => snapshot)
           .filter((snapshot) => matches(snapshot, selector)),
+      );
+    },
+    inspectPrivileged(selector) {
+      return Object.freeze(
+        [...records.values()]
+          .filter(({ snapshot }) => matches(snapshot, selector))
+          .map(({ snapshot, privilegedContext }) =>
+            Object.freeze({
+              snapshot,
+              ...(privilegedContext ? { context: privilegedContext } : {}),
+            }),
+          ),
       );
     },
     locate: (executionId) => handles.get(executionId),

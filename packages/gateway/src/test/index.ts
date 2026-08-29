@@ -3,9 +3,58 @@ import type { Bureau, BureauOptions } from 'bureau';
 import { createBureau } from 'bureau';
 
 import { createGateway } from '../create-gateway';
+import { createApiKeyStore } from '../keys/create-api-key-store';
+import type { ApiKey, CreateApiKeyOptions } from '../keys/types';
+import {
+  gatewayAuthorizationRevisionForApiKey,
+  gatewayCapabilitiesForScopes,
+} from '../middleware/authentication';
 import type { Gateway, GatewayOptions } from '../types';
 
 export { waitForCondition, waitForRunState };
+
+export const gatewayAuthorityTestScopes = ['runs:write', 'hooks:write'] as const;
+
+export function attackerRequestContextFixture() {
+  return {
+    authority: {
+      principalId: 'attacker',
+      tenantId: 'attacker-tenant',
+      ownerId: 'attacker-owner',
+      capabilities: ['admin'],
+      authorizationRevision: 'attacker:1',
+    },
+    audience: 'operator',
+  };
+}
+
+export function expectedPersistedApiKeyAuthority(
+  key: Pick<ApiKey, 'id' | 'scopes'>,
+  ownerId: string,
+) {
+  return {
+    agentId: ownerId,
+    principalId: `api-key:${key.id}`,
+    tenantId: 'bureau',
+    ownerId,
+    capabilities: gatewayCapabilitiesForScopes(key.scopes),
+    authorizationRevision: gatewayAuthorizationRevisionForApiKey(key.id),
+    audience: 'operator',
+  };
+}
+
+export async function createGatewayAuthorityTestApiKey(
+  gateway: Gateway,
+  options: CreateApiKeyOptions = {
+    name: 'authority-test-key',
+    scopes: [...gatewayAuthorityTestScopes],
+  },
+) {
+  if (!gateway.bureau.kv) {
+    throw new Error('Authority regression tests require a gateway with a KV-backed bureau');
+  }
+  return createApiKeyStore(gateway.bureau.kv).create(options);
+}
 
 /**
  * Combined options for `createTestGateway`. Merges bureau-level configuration

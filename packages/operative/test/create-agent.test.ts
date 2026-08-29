@@ -753,12 +753,26 @@ describe('createAgent — conversation resume', () => {
 // ---------------------------------------------------------------------------
 
 describe('createAgent — park-on-approval', () => {
+  const approvalRequestContext = {
+    authority: {
+      principalId: 'principal-a',
+      tenantId: 'tenant-a',
+      ownerId: 'owner-a',
+      capabilities: ['tools:execute'],
+      authorizationRevision: 'authorization:1',
+    },
+    audience: 'tenant' as const,
+    agentId: 'agent-a',
+    runId: 'run-a',
+  };
+
   function buildApprovalGatedToolbox(approvalSecret: string) {
     const charges: number[] = [];
     const toolbox = createToolbox(
       [
         createTool({
           name: 'charge-card',
+          version: '1.0.0',
           description: 'Charge a payment card',
           input: z.object({ cents: z.number() }),
           metadata: { mutates: true },
@@ -801,6 +815,7 @@ describe('createAgent — park-on-approval', () => {
       generate,
       toolbox,
       stopWhen: [pendingApproval(), noToolCalls()],
+      executeOptions: { requestContext: approvalRequestContext },
     });
 
     const result = await agent.run('Please charge $5.00').result();
@@ -818,7 +833,9 @@ describe('createAgent — park-on-approval', () => {
     // Resuming on the SAME toolbox instance the host holds verifies the token
     // (same approvalSecret that minted it).
     const signed = pending as SignedPendingToolApproval;
-    const resumed = await toolbox.resumeApproval(signed);
+    const resumed = await toolbox.resumeApproval(signed, {
+      requestContext: approvalRequestContext,
+    });
     expect(resumed.outcome).toBe('success');
   });
 
@@ -855,6 +872,7 @@ describe('createAgent — park-on-approval', () => {
       generate,
       toolbox,
       stopWhen: [pendingApproval(), noToolCalls()],
+      executeOptions: { requestContext: approvalRequestContext },
     });
 
     const firstResult = await agent.run('Please charge $5.00').result();
@@ -875,7 +893,9 @@ describe('createAgent — park-on-approval', () => {
     // exists; this test covers what IS supported today: park-on-approval and
     // toolbox-level resumption.
     expect(generateCallCount).toBe(1);
-    const resumed = await toolbox.resumeApproval(signed);
+    const resumed = await toolbox.resumeApproval(signed, {
+      requestContext: approvalRequestContext,
+    });
     expect(resumed.outcome).toBe('success');
     expect(resumed.callId).toBe(signed.callId);
   });

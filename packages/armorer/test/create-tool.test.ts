@@ -3,9 +3,14 @@ import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
-import type { ToolExecuteOptions } from '../src';
+import type { EffectiveToolExecutionContext, ToolExecuteOptions, ToolRequestContext } from '../src';
 import { createTool, createToolCall, isTool, lazy, withContext } from '../src';
-import { type ApprovalResumeState, approvalResumeSymbol } from '../src/internal/approval-resume';
+import {
+  approvalConsumeSymbol,
+  type ApprovalResumeState,
+  approvalResumeSymbol,
+  policyAuthorizationOnlySymbol,
+} from '../src/internal/approval-resume';
 import { createConcurrencyLimiter } from '../src/utilities/concurrency';
 
 async function drainMicrotasks(): Promise<void> {
@@ -21,7 +26,7 @@ function createManualExecutionTiming(initialNow = 0): {
   options: ToolExecuteOptions;
 } {
   let now = initialNow;
-  const timerHandlers = new Map<number, () => void>();
+  const timers = new Map<number, { handler: () => void; milliseconds: number }>();
   const clearedHandles: unknown[] = [];
   let nextHandle = 0;
   type ScheduleTimeoutFunctionKey = `set${'Timeout'}Function`;
@@ -36,30 +41,99 @@ function createManualExecutionTiming(initialNow = 0): {
       return clearedHandles.length;
     },
     fireTimeout(): void {
-      const [handle, timerHandler] = timerHandlers.entries().next().value ?? [];
+      const [handle, timer] = timers.entries().next().value ?? [];
       if (typeof handle === 'number') {
-        timerHandlers.delete(handle);
+        timers.delete(handle);
       }
-      if (!timerHandler) {
+      if (!timer) {
         throw new Error('Manual timeout was not scheduled');
       }
-      timerHandler();
+      now += timer.milliseconds;
+      timer.handler();
     },
     options: {
       now: () => now,
-      [scheduleTimeoutFunctionKey]: (handler) => {
+      [scheduleTimeoutFunctionKey]: (handler, milliseconds) => {
         const handle = ++nextHandle;
-        timerHandlers.set(handle, handler);
+        timers.set(handle, { handler, milliseconds });
         return handle;
       },
       [clearTimeoutFunctionKey]: (handle: unknown) => {
         clearedHandles.push(handle);
         if (typeof handle === 'number') {
-          timerHandlers.delete(handle);
+          timers.delete(handle);
         }
       },
     } as ToolExecuteOptions,
   };
+}
+
+function createEffectiveContext(): EffectiveToolExecutionContext {
+  return {
+    authority: {
+      principalId: 'principal-a',
+      tenantId: 'tenant-a',
+      ownerId: 'owner-a',
+      capabilities: ['tools:execute', 'runs:write'],
+      authorizationRevision: 'authorization:1',
+    },
+    audience: 'operator',
+    agentId: 'agent-a',
+    runId: 'run-a',
+    requestId: 'request-a',
+    credentials: { token: 'secret' },
+    traceContext: { traceparent: 'secret-trace' },
+    revisions: {
+      catalog: 'catalog:1',
+      toolbox: 'toolbox:1',
+      toolDefinition: 'tool:1',
+      policy: 'policy:1',
+      approval: 'approval:1',
+      redaction: 'redaction:1',
+    },
+  };
+}
+
+function createRequestContext(ownerId = 'owner-a'): ToolRequestContext {
+  const context = createEffectiveContext();
+  return {
+    authority: {
+      ...context.authority,
+      ownerId,
+    },
+    audience: context.audience,
+    agentId: context.agentId,
+    runId: context.runId,
+    requestId: context.requestId,
+    credentials: context.credentials,
+    traceContext: context.traceContext,
+  };
+}
+
+function expectTerminalAuditContext(context: EffectiveToolExecutionContext | undefined): void {
+  expect(context).toEqual({
+    authority: {
+      principalId: 'principal-a',
+      tenantId: 'tenant-a',
+      ownerId: 'owner-a',
+      capabilities: ['tools:execute', 'runs:write'],
+      authorizationRevision: 'authorization:1',
+    },
+    audience: 'operator',
+    agentId: 'agent-a',
+    runId: 'run-a',
+    requestId: 'request-a',
+    revisions: {
+      catalog: 'catalog:1',
+      toolbox: 'toolbox:1',
+      toolDefinition: 'tool:1',
+      policy: 'policy:1',
+      approval: 'approval:1',
+      redaction: 'redaction:1',
+    },
+  });
+  expect(context).not.toHaveProperty('credentials');
+  expect(context).not.toHaveProperty('traceContext');
 }
 
 describe('createTool', () => {
@@ -310,6 +384,31 @@ describe('createTool', () => {
     expect(result.error?.message).toContain('lazy load failed');
   });
 
+  it('does not consume approval admission when a lazy executor rejects', async () => {
+    let consumeCount = 0;
+    const tool = createTool({
+      name: 'lazy-reject-before-approval',
+      description: 'fails before approval admission',
+      input: z.object({ value: z.string() }),
+      execute: Promise.resolve().then(() => {
+        throw new Error('lazy load failed before approval');
+      }),
+    });
+
+    const result = await tool.execute(
+      createToolCall('lazy-reject-before-approval', { value: 'x' }),
+      {
+        [approvalConsumeSymbol]: async () => {
+          consumeCount += 1;
+          return async () => {};
+        },
+      },
+    );
+
+    expect(result.error?.message).toContain('lazy load failed before approval');
+    expect(consumeCount).toBe(0);
+  });
+
   it('returns an error when lazy execute resolves to non-function', async () => {
     const tool = createTool({
       name: 'lazy-bad',
@@ -511,6 +610,66 @@ describe('createTool', () => {
 
     expect(runs).toBe(0);
     expect(result.error?.message).toContain('abort after start');
+  });
+
+  it('reports a deadline abort raised during execute-start listeners as a timeout', async () => {
+    let runs = 0;
+    const tool = createTool({
+      name: 'deadline-abort-during-start',
+      description: 'reports deadline aborts during admission',
+      input: z.object({}),
+      async execute() {
+        runs += 1;
+        return 'unreachable';
+      },
+    });
+    const removeListener = tool.addEventListener('execute-start', () => {
+      const snapshot = tool.executions.inspect({ callId: 'deadline-start-call' })[0];
+      tool.executions.locate(snapshot!.executionId)?.abort('deadline', 'deadline during admission');
+    });
+
+    const result = await tool.execute({
+      id: 'deadline-start-call',
+      name: 'deadline-abort-during-start',
+      arguments: {},
+    });
+    removeListener();
+
+    expect(result).toMatchObject({ outcome: 'error', errorCategory: 'timeout' });
+    expect(runs).toBe(0);
+  });
+
+  it('reports a deadline abort with an Error reason after validation succeeds', async () => {
+    let runs = 0;
+    const tool = createTool({
+      name: 'deadline-abort-after-validation',
+      description: 'reports deadline aborts after validation',
+      input: z.object({}),
+      async execute() {
+        runs += 1;
+        return 'unreachable';
+      },
+    });
+    const removeListener = tool.addEventListener('validate-success', () => {
+      const snapshot = tool.executions.inspect({ callId: 'deadline-validation-call' })[0];
+      tool.executions
+        .locate(snapshot!.executionId)
+        ?.abort('deadline', new Error('deadline error reason'));
+    });
+
+    const result = await tool.execute({
+      id: 'deadline-validation-call',
+      name: 'deadline-abort-after-validation',
+      arguments: {},
+    });
+    removeListener();
+
+    expect(result).toMatchObject({
+      outcome: 'error',
+      errorCategory: 'timeout',
+      errorMessage: 'deadline error reason',
+    });
+    expect(runs).toBe(0);
   });
 
   it('cancels if the signal aborts after validation succeeds', async () => {
@@ -1441,6 +1600,702 @@ describe('isTool', () => {
     ]);
   });
 
+  it('seeds executeWith privileged lifecycle context at queued admission', async () => {
+    let releaseFirst!: () => void;
+    let executionCount = 0;
+    const effectiveContext = createEffectiveContext();
+    const tool = createTool({
+      name: 'execute-with-queued-authority',
+      description: 'captures queued authority',
+      input: z.object({}),
+      concurrency: 1,
+      async execute() {
+        executionCount += 1;
+        if (executionCount === 1) {
+          await new Promise<void>((resolve) => {
+            releaseFirst = resolve;
+          });
+        }
+        return executionCount;
+      },
+    });
+
+    const first = tool.executeWith({ params: {}, callId: 'active-call' });
+    while (executionCount === 0) await Promise.resolve();
+    const queued = tool.executeWith({
+      params: {},
+      callId: 'queued-authority-call',
+      effectiveContext,
+    });
+    const [queuedSnapshot] = tool.executions.inspectPrivileged({
+      callId: 'queued-authority-call',
+    });
+
+    expect(queuedSnapshot?.snapshot.state).toBe('queued');
+    expect(queuedSnapshot?.context?.authority).toEqual(effectiveContext.authority);
+    expect(queuedSnapshot?.context?.revisions).toEqual(effectiveContext.revisions);
+    expect(queuedSnapshot?.context?.credentials).toBe(effectiveContext.credentials);
+    expect(queuedSnapshot?.context?.traceContext).toBe(effectiveContext.traceContext);
+
+    releaseFirst();
+    await Promise.all([first, queued]);
+  });
+
+  it('retains executeWith authority audit fields after validation failure', async () => {
+    const tool = createTool({
+      name: 'execute-with-validation-authority',
+      description: 'validation failure still keeps audit context',
+      input: z.object({ value: z.string() }),
+      async execute() {
+        return 'unreachable';
+      },
+    });
+
+    const result = await tool.executeWith({
+      params: { value: 42 },
+      callId: 'validation-authority-call',
+      effectiveContext: createEffectiveContext(),
+    });
+    const [snapshot] = tool.executions.inspectPrivileged({
+      callId: 'validation-authority-call',
+    });
+
+    expect(result.outcome).toBe('error');
+    expect(result.errorCategory).toBe('validation');
+    expect(snapshot?.snapshot.state).toBe('terminal');
+    expectTerminalAuditContext(snapshot?.context);
+  });
+
+  it('retains executeWith authority audit fields when policy context provider throws', async () => {
+    const tool = createTool({
+      name: 'execute-with-policy-context-authority',
+      description: 'policy context provider failure still keeps audit context',
+      input: z.object({ value: z.string() }),
+      policyContext() {
+        throw new Error('policy context failed');
+      },
+      async execute() {
+        return 'unreachable';
+      },
+    });
+
+    const result = await tool.executeWith({
+      params: { value: 'ok' },
+      callId: 'policy-context-authority-call',
+      effectiveContext: createEffectiveContext(),
+    });
+    const [snapshot] = tool.executions.inspectPrivileged({
+      callId: 'policy-context-authority-call',
+    });
+
+    expect(result.outcome).toBe('error');
+    expect(snapshot?.snapshot.state).toBe('terminal');
+    expectTerminalAuditContext(snapshot?.context);
+  });
+
+  it('uses request authority owner for executeCall lifecycle inspection', async () => {
+    const requestContext = createRequestContext('request-owner');
+    const tool = createTool({
+      name: 'execute-call-request-owner',
+      description: 'records request authority owner',
+      input: z.object({}),
+      async execute() {
+        return 'ok';
+      },
+    });
+
+    const result = await tool.execute(createToolCall('execute-call-request-owner', {}), {
+      requestContext,
+    });
+
+    expect(result).toMatchObject({ outcome: 'success' });
+    expect(tool.executions.inspect({ ownerId: 'request-owner' })).toEqual([
+      expect.objectContaining({
+        callId: expect.any(String),
+        ownerId: 'request-owner',
+        state: 'terminal',
+      }),
+    ]);
+    expect(tool.executions.inspect({ ownerId: 'anonymous' })).toHaveLength(0);
+  });
+
+  it('snapshots direct request authority before entering the concurrency queue', async () => {
+    let releaseFirst!: () => void;
+    const observedOwners: string[] = [];
+    const tool = createTool({
+      name: 'queued-request-authority-snapshot',
+      description: 'Keeps queued request authority immutable',
+      input: z.object({ order: z.number() }),
+      concurrency: 1,
+      async execute({ order }, context) {
+        observedOwners.push(context.requestContext!.authority.ownerId);
+        if (order === 1) await new Promise<void>((resolve) => (releaseFirst = resolve));
+        return order;
+      },
+    });
+    const first = tool.execute(
+      { order: 1 },
+      { requestContext: createRequestContext('first-owner') },
+    );
+    while (!releaseFirst) await Promise.resolve();
+    const queuedContext = createRequestContext('original-owner');
+    const second = tool.execute({ order: 2 }, { requestContext: queuedContext });
+    queuedContext.authority.ownerId = 'mutated-owner';
+    releaseFirst();
+
+    await Promise.all([first, second]);
+    expect(observedOwners).toEqual(['first-owner', 'original-owner']);
+  });
+
+  it('uses request authority owner for executeWith owner-scoped abort', async () => {
+    let observedSignal: AbortSignal | undefined;
+    const requestContext = createRequestContext('request-owner');
+    const tool = createTool({
+      name: 'execute-with-request-owner-abort',
+      description: 'aborts by request authority owner',
+      input: z.object({}),
+      async execute(_params, context) {
+        observedSignal = context.signal;
+        await new Promise<void>((resolve) => {
+          context.signal?.addEventListener('abort', () => resolve(), { once: true });
+        });
+        return 'settled after abort';
+      },
+    });
+
+    const pending = tool.executeWith({
+      params: {},
+      callId: 'request-owner-abort-call',
+      requestContext,
+    });
+    while (!observedSignal) await Promise.resolve();
+
+    expect(tool.executions.abort({ ownerId: 'other-owner' }, 'wrong owner')).toBe(0);
+    expect(tool.executions.abort({ ownerId: 'request-owner' }, 'request owner stopped')).toBe(1);
+
+    const result = await pending;
+    expect(result).toMatchObject({
+      outcome: 'error',
+      errorCategory: 'cancelled',
+      errorMessage: 'request owner stopped',
+    });
+    await drainMicrotasks();
+    expect(tool.executions.inspect({ callId: 'request-owner-abort-call' })[0]).toMatchObject({
+      ownerId: 'request-owner',
+      state: 'terminal',
+      abortSource: 'owner',
+    });
+  });
+
+  it('keeps explicit ownerId over request authority owner', async () => {
+    const tool = createTool({
+      name: 'explicit-owner-over-request-owner',
+      description: 'keeps explicit execution owner',
+      input: z.object({}),
+      async execute() {
+        return 'ok';
+      },
+    });
+
+    const result = await tool.executeWith({
+      params: {},
+      callId: 'explicit-owner-call',
+      ownerId: 'explicit-owner',
+      requestContext: createRequestContext('request-owner'),
+    });
+
+    expect(result).toMatchObject({ outcome: 'success' });
+    expect(tool.executions.inspect({ ownerId: 'explicit-owner' })).toEqual([
+      expect.objectContaining({
+        callId: 'explicit-owner-call',
+        ownerId: 'explicit-owner',
+        state: 'terminal',
+      }),
+    ]);
+    expect(tool.executions.inspect({ ownerId: 'request-owner' })).toHaveLength(0);
+  });
+
+  it('rejects an expired request deadline before admitting the callback', async () => {
+    let executions = 0;
+    const tool = createTool({
+      name: 'expired-request-deadline',
+      description: 'rejects expired request deadlines',
+      input: z.object({}),
+      async execute() {
+        executions += 1;
+        return 'unreachable';
+      },
+    });
+
+    const result = await tool.executeWith({
+      params: {},
+      callId: 'expired-request-deadline-call',
+      now: () => 100,
+      requestContext: { ...createRequestContext(), deadline: 99 },
+    });
+
+    expect(result).toMatchObject({ outcome: 'error', errorCategory: 'timeout' });
+    expect(executions).toBe(0);
+    expect(tool.executions.inspect({ callId: 'expired-request-deadline-call' })[0]).toMatchObject({
+      state: 'terminal',
+      abortSource: 'deadline',
+    });
+  });
+
+  it('rejects an expired request deadline before admitting a direct ToolCall callback', async () => {
+    let executions = 0;
+    const tool = createTool({
+      name: 'expired-direct-request-deadline',
+      description: 'rejects expired direct request deadlines',
+      input: z.object({}),
+      async execute() {
+        executions += 1;
+        return 'unreachable';
+      },
+    });
+
+    const result = await tool.execute(
+      {
+        id: 'expired-direct-request-deadline-call',
+        name: 'expired-direct-request-deadline',
+        arguments: {},
+      },
+      {
+        now: () => 100,
+        requestContext: { ...createRequestContext(), deadline: 99 },
+      },
+    );
+
+    expect(result).toMatchObject({ outcome: 'error', errorCategory: 'timeout' });
+    expect(executions).toBe(0);
+    expect(
+      tool.executions.inspect({ callId: 'expired-direct-request-deadline-call' })[0],
+    ).toMatchObject({
+      state: 'terminal',
+      abortSource: 'deadline',
+    });
+  });
+
+  it('settles an absolute deadline while resolving a pending lazy executor', async () => {
+    const timing = createManualExecutionTiming();
+    let resolveExecutor!: (executor: (params: Record<string, never>) => Promise<string>) => void;
+    const tool = createTool({
+      name: 'deadline-pending-executor',
+      description: 'does not wait past an absolute request deadline',
+      input: z.object({}),
+      execute: new Promise<(params: Record<string, never>) => Promise<string>>((resolve) => {
+        resolveExecutor = resolve;
+      }),
+    });
+
+    const pending = tool.executeWith({
+      params: {},
+      callId: 'deadline-pending-executor-call',
+      requestContext: { ...createRequestContext(), deadline: 10 },
+      ...timing.options,
+    });
+
+    timing.fireTimeout();
+    await expect(pending).resolves.toMatchObject({
+      outcome: 'error',
+      errorMessage: 'Execution deadline exceeded',
+    });
+    resolveExecutor(async () => 'unused');
+  });
+
+  it('settles an absolute deadline while async schema parsing is pending', async () => {
+    const timing = createManualExecutionTiming();
+    let schemaStarted = false;
+    let executions = 0;
+    const tool = createTool({
+      name: 'deadline-pending-schema',
+      description: 'does not wait past an async schema parse',
+      input: z.object({ value: z.string() }).superRefine(async () => {
+        schemaStarted = true;
+        await new Promise<void>(() => {});
+      }),
+      async execute() {
+        executions += 1;
+        return 'unreachable';
+      },
+    });
+
+    const pending = tool.executeWith({
+      params: { value: 'x' },
+      callId: 'deadline-pending-schema-call',
+      requestContext: { ...createRequestContext(), deadline: 10 },
+      ...timing.options,
+    });
+    await drainMicrotasks();
+    timing.fireTimeout();
+
+    await expect(pending).resolves.toMatchObject({
+      outcome: 'error',
+      errorCategory: 'timeout',
+    });
+    expect(schemaStarted).toBe(true);
+    expect(executions).toBe(0);
+    expect(tool.executions.inspect({ callId: 'deadline-pending-schema-call' })[0]).toMatchObject({
+      state: 'cleanup-pending',
+      abortSource: 'deadline',
+    });
+  });
+
+  it('settles an absolute deadline while policy context resolution is pending', async () => {
+    const timing = createManualExecutionTiming();
+    let policyContextRequests = 0;
+    let policyChecks = 0;
+    let executions = 0;
+    const tool = createTool({
+      name: 'deadline-pending-policy-context',
+      description: 'does not wait past an async policy context provider',
+      input: z.object({}),
+      policyContext: async () => {
+        policyContextRequests += 1;
+        await new Promise<void>(() => {});
+        return {};
+      },
+      policy: {
+        beforeExecute() {
+          policyChecks += 1;
+          return { allow: true };
+        },
+      },
+      async execute() {
+        executions += 1;
+        return 'unreachable';
+      },
+    });
+
+    const pending = tool.executeWith({
+      params: {},
+      callId: 'deadline-pending-policy-context-call',
+      requestContext: { ...createRequestContext(), deadline: 10 },
+      ...timing.options,
+    });
+    await drainMicrotasks();
+    timing.fireTimeout();
+
+    await expect(pending).resolves.toMatchObject({
+      outcome: 'error',
+      errorCategory: 'timeout',
+    });
+    expect(policyContextRequests).toBe(1);
+    expect(policyChecks).toBe(0);
+    expect(executions).toBe(0);
+    expect(
+      tool.executions.inspect({ callId: 'deadline-pending-policy-context-call' })[0],
+    ).toMatchObject({
+      state: 'cleanup-pending',
+      abortSource: 'deadline',
+    });
+  });
+
+  it('settles an absolute deadline while policy evaluation is pending', async () => {
+    const timing = createManualExecutionTiming();
+    let policyChecks = 0;
+    let executions = 0;
+    const tool = createTool({
+      name: 'deadline-pending-policy',
+      description: 'does not wait past an async policy hook',
+      input: z.object({}),
+      policy: {
+        beforeExecute: async () => {
+          policyChecks += 1;
+          await new Promise<void>(() => {});
+          return { allow: true };
+        },
+      },
+      async execute() {
+        executions += 1;
+        return 'unreachable';
+      },
+    });
+
+    const pending = tool.executeWith({
+      params: {},
+      callId: 'deadline-pending-policy-call',
+      requestContext: { ...createRequestContext(), deadline: 10 },
+      ...timing.options,
+    });
+    await drainMicrotasks();
+    timing.fireTimeout();
+
+    await expect(pending).resolves.toMatchObject({
+      outcome: 'error',
+      errorCategory: 'timeout',
+    });
+    expect(policyChecks).toBe(1);
+    expect(executions).toBe(0);
+    expect(tool.executions.inspect({ callId: 'deadline-pending-policy-call' })[0]).toMatchObject({
+      state: 'cleanup-pending',
+      abortSource: 'deadline',
+    });
+  });
+
+  it('settles an absolute deadline while policy afterExecute is pending', async () => {
+    const timing = createManualExecutionTiming();
+    let markAfterExecuteStarted!: () => void;
+    const afterExecuteStarted = new Promise<void>((resolve) => {
+      markAfterExecuteStarted = resolve;
+    });
+    let afterExecuteCalls = 0;
+    let executions = 0;
+    const tool = createTool({
+      name: 'deadline-pending-after-execute',
+      description: 'does not wait past an async afterExecute hook',
+      input: z.object({}),
+      policy: {
+        afterExecute: async () => {
+          afterExecuteCalls += 1;
+          markAfterExecuteStarted();
+          await new Promise<void>(() => {});
+        },
+      },
+      async execute() {
+        executions += 1;
+        return 'completed';
+      },
+    });
+
+    const pending = tool.executeWith({
+      params: {},
+      callId: 'deadline-pending-after-execute-call',
+      requestContext: { ...createRequestContext(), deadline: 10 },
+      ...timing.options,
+    });
+    await afterExecuteStarted;
+    timing.fireTimeout();
+
+    await expect(pending).resolves.toMatchObject({
+      outcome: 'error',
+      errorCategory: 'timeout',
+      errorMessage: 'Execution deadline exceeded',
+    });
+    expect(afterExecuteCalls).toBe(1);
+    expect(executions).toBe(1);
+    expect(
+      tool.executions.inspect({ callId: 'deadline-pending-after-execute-call' })[0],
+    ).toMatchObject({
+      state: 'cleanup-pending',
+      abortSource: 'deadline',
+    });
+  });
+
+  it('keeps deadline classification when policy afterExecute resolves late', async () => {
+    const timing = createManualExecutionTiming();
+    let markAfterExecuteStarted!: () => void;
+    const afterExecuteStarted = new Promise<void>((resolve) => {
+      markAfterExecuteStarted = resolve;
+    });
+    let resolveAfterExecute!: () => void;
+    const afterExecuteRelease = new Promise<void>((resolve) => {
+      resolveAfterExecute = resolve;
+    });
+    const tool = createTool({
+      name: 'deadline-late-after-execute',
+      description: 'does not return success after a late afterExecute hook',
+      input: z.object({}),
+      policy: {
+        afterExecute: async () => {
+          markAfterExecuteStarted();
+          await afterExecuteRelease;
+        },
+      },
+      async execute() {
+        return 'completed';
+      },
+    });
+
+    const pending = tool.executeWith({
+      params: {},
+      callId: 'deadline-late-after-execute-call',
+      requestContext: { ...createRequestContext(), deadline: 10 },
+      ...timing.options,
+    });
+    await afterExecuteStarted;
+    timing.fireTimeout();
+
+    const result = await pending;
+    expect(result).toMatchObject({
+      outcome: 'error',
+      errorCategory: 'timeout',
+      errorMessage: 'Execution deadline exceeded',
+    });
+
+    resolveAfterExecute();
+    await drainMicrotasks();
+
+    expect(
+      tool.executions.inspect({ callId: 'deadline-late-after-execute-call' })[0],
+    ).toMatchObject({
+      state: 'cleanup-pending',
+      abortSource: 'deadline',
+      result: expect.any(Error),
+    });
+  });
+
+  it('keeps caller cancellation classification while policy afterExecute is pending', async () => {
+    const controller = new AbortController();
+    let markAfterExecuteStarted!: () => void;
+    const afterExecuteStarted = new Promise<void>((resolve) => {
+      markAfterExecuteStarted = resolve;
+    });
+    let afterExecuteCalls = 0;
+    const tool = createTool({
+      name: 'caller-cancel-pending-after-execute',
+      description: 'reports caller cancellation from an async afterExecute hook',
+      input: z.object({}),
+      policy: {
+        afterExecute: async () => {
+          afterExecuteCalls += 1;
+          markAfterExecuteStarted();
+          await new Promise<void>(() => {});
+        },
+      },
+      async execute() {
+        return 'completed';
+      },
+    });
+
+    const pending = tool.executeWith({
+      params: {},
+      callId: 'caller-cancel-pending-after-execute-call',
+      signal: controller.signal,
+    });
+    await afterExecuteStarted;
+    controller.abort('caller cancelled afterExecute');
+
+    await expect(pending).resolves.toMatchObject({
+      outcome: 'error',
+      errorCategory: 'cancelled',
+      errorMessage: 'caller cancelled afterExecute',
+    });
+    expect(afterExecuteCalls).toBe(1);
+    expect(
+      tool.executions.inspect({ callId: 'caller-cancel-pending-after-execute-call' })[0],
+    ).toMatchObject({
+      state: 'cleanup-pending',
+      abortSource: 'caller',
+    });
+  });
+
+  it('clears absolute deadline timers with the matching custom cleanup function', async () => {
+    const timing = createManualExecutionTiming();
+    const tool = createTool({
+      name: 'custom-deadline-cleanup',
+      description: 'clears a custom absolute deadline timer',
+      input: z.object({}),
+      execute: async () => 'completed',
+    });
+
+    const result = await tool.executeWith({
+      params: {},
+      requestContext: { ...createRequestContext(), deadline: 10 },
+      ...timing.options,
+    });
+
+    expect(result.outcome).toBe('success');
+    expect(timing.clearCount()).toBe(1);
+  });
+
+  it('expires a queued request before its callback is admitted', async () => {
+    let releaseFirst!: () => void;
+    let executions = 0;
+    const timing = createManualExecutionTiming();
+    const tool = createTool({
+      name: 'queued-request-deadline',
+      description: 'expires queued request deadlines',
+      concurrency: 1,
+      input: z.object({}),
+      async execute() {
+        executions += 1;
+        if (executions === 1) await new Promise<void>((resolve) => (releaseFirst = resolve));
+        return executions;
+      },
+    });
+
+    const first = tool.executeWith({ params: {}, callId: 'first-deadline-call' });
+    while (executions === 0) await Promise.resolve();
+    const queued = tool.executeWith({
+      params: {},
+      callId: 'queued-deadline-call',
+      requestContext: { ...createRequestContext(), deadline: 10 },
+      ...timing.options,
+    });
+
+    timing.fireTimeout();
+    await expect(queued).resolves.toMatchObject({ outcome: 'error' });
+    expect(executions).toBe(1);
+    expect(tool.executions.inspect({ callId: 'queued-deadline-call' })[0]).toMatchObject({
+      state: 'terminal',
+      abortSource: 'deadline',
+    });
+    releaseFirst();
+    await first;
+  });
+
+  it('starts a relative execution timeout after queued admission', async () => {
+    let releaseFirst!: () => void;
+    let executions = 0;
+    const tool = createTool({
+      name: 'queued-relative-timeout',
+      description: 'does not spend execution timeout while queued',
+      concurrency: 1,
+      input: z.object({}),
+      async execute() {
+        executions += 1;
+        if (executions === 1) await new Promise<void>((resolve) => (releaseFirst = resolve));
+        return executions;
+      },
+    });
+
+    const first = tool.executeWith({ params: {}, callId: 'relative-timeout-first' });
+    while (executions === 0) await Promise.resolve();
+    const queued = tool.executeWith({
+      params: {},
+      callId: 'relative-timeout-queued',
+      timeout: 10,
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    releaseFirst();
+
+    await expect(first).resolves.toMatchObject({ outcome: 'success' });
+    await expect(queued).resolves.toMatchObject({ outcome: 'success', result: 2 });
+    expect(tool.executions.inspect({ callId: 'relative-timeout-queued' })[0]).toMatchObject({
+      state: 'terminal',
+    });
+  });
+
+  it('uses the earlier request deadline when it is sooner than the execution timeout', async () => {
+    const timing = createManualExecutionTiming();
+    const tool = createTool({
+      name: 'combined-request-deadline',
+      description: 'combines request and execution deadlines',
+      input: z.object({}),
+      async execute() {
+        return new Promise<string>(() => {});
+      },
+    });
+
+    const pending = tool.executeWith({
+      params: {},
+      callId: 'combined-request-deadline-call',
+      timeout: 100,
+      requestContext: { ...createRequestContext(), deadline: 10 },
+      ...timing.options,
+    });
+    await drainMicrotasks();
+    timing.fireTimeout();
+
+    await expect(pending).resolves.toMatchObject({ outcome: 'error', errorCategory: 'timeout' });
+    expect(tool.executions.inspect({ callId: 'combined-request-deadline-call' })[0]).toMatchObject({
+      deadline: 10,
+      state: 'cleanup-pending',
+      abortSource: 'deadline',
+    });
+  });
+
   it('direct call emits validate-error and settled on parse failure', async () => {
     const diagnostics = {
       safeParseWithReport: () => ({
@@ -1610,6 +2465,7 @@ describe('isTool', () => {
     const resumeOptions = {
       [approvalResumeSymbol]: {
         approvedAction: paused.action,
+        approvedPolicyPauseTier: 'tool' as const,
         proposedArguments: toolCall.arguments,
         reason: paused.pendingApproval.reason,
         satisfiedPauses: [],
@@ -1648,6 +2504,180 @@ describe('isTool', () => {
     expect(out).toBe('X');
     expect(started).toBe(1);
     expect(finished).toBe(1);
+  });
+
+  it('finishes telemetry for authorization-only executions', async () => {
+    const tool = createTool({
+      name: 'authorization-only-telemetry',
+      description: 'checks authorization without executing',
+      input: z.object({ value: z.string() }),
+      telemetry: true,
+      async execute() {
+        throw new Error('authorization-only execution must not run');
+      },
+    });
+
+    let started = 0;
+    let finished = 0;
+    let succeeded = 0;
+    let settled = 0;
+    tool.addEventListener('tool.started' as any, () => {
+      started += 1;
+    });
+    tool.addEventListener('tool.finished' as any, (event) => {
+      finished += 1;
+      expect((event as any).status).toBe('success');
+    });
+    tool.addEventListener('execute-success' as any, () => {
+      succeeded += 1;
+    });
+    tool.addEventListener('settled' as any, () => {
+      settled += 1;
+    });
+
+    const result = await tool.execute(
+      createToolCall('authorization-only-telemetry', { value: 'x' }),
+      { [policyAuthorizationOnlySymbol]: true },
+    );
+
+    expect(result.outcome).toBe('success');
+    expect(started).toBe(1);
+    expect(finished).toBe(1);
+    expect(succeeded).toBe(1);
+    expect(settled).toBe(1);
+  });
+
+  it('does not resolve lazy executors for authorization-only executions', async () => {
+    let resolveExecutor:
+      ((executor: (params: { value: string }) => Promise<string>) => void) | undefined;
+    let executorResolved = false;
+    const executePromise = new Promise<(params: { value: string }) => Promise<string>>(
+      (resolve) => {
+        resolveExecutor = (executor) => {
+          executorResolved = true;
+          resolve(executor);
+        };
+      },
+    );
+    const tool = createTool({
+      name: 'authorization-only-lazy-executor',
+      description: 'checks authorization without loading execution',
+      input: z.object({ value: z.string() }),
+      execute: executePromise,
+    });
+
+    const result = await tool.execute(
+      createToolCall('authorization-only-lazy-executor', { value: 'x' }),
+      { [policyAuthorizationOnlySymbol]: true },
+    );
+
+    expect(result.outcome).toBe('success');
+    expect(executorResolved).toBe(false);
+    resolveExecutor?.(async ({ value }) => value);
+  });
+
+  it('rolls back approval admission when authorization-only execution is aborted', async () => {
+    const controller = new AbortController();
+    let rollbackCount = 0;
+    const tool = createTool({
+      name: 'authorization-only-abort',
+      description: 'checks cancellation after approval admission',
+      input: z.object({}),
+      execute: async () => 'unexpected',
+    });
+
+    const result = await tool.execute(createToolCall('authorization-only-abort', {}), {
+      signal: controller.signal,
+      [policyAuthorizationOnlySymbol]: true,
+      [approvalConsumeSymbol]: async () => {
+        controller.abort('authorization cancelled');
+        return async () => {
+          rollbackCount += 1;
+        };
+      },
+    });
+
+    expect(result.outcome).toBe('error');
+    expect(result.errorMessage).toBe('authorization cancelled');
+    expect(rollbackCount).toBe(1);
+  });
+
+  it('reports authorization-only deadline aborts after approval admission as timeouts', async () => {
+    let rollbackCount = 0;
+    const tool = createTool({
+      name: 'authorization-only-deadline',
+      description: 'checks deadline after authorization-only approval admission',
+      input: z.object({}),
+      execute: async () => 'unexpected',
+    });
+
+    const result = await tool.execute(
+      {
+        id: 'authorization-only-deadline-call',
+        name: 'authorization-only-deadline',
+        arguments: {},
+      },
+      {
+        [policyAuthorizationOnlySymbol]: true,
+        [approvalConsumeSymbol]: async () => {
+          const snapshot = tool.executions.inspect({
+            callId: 'authorization-only-deadline-call',
+          })[0];
+          tool.executions.locate(snapshot!.executionId)?.abort('deadline', 'approval deadline');
+          return async () => {
+            rollbackCount += 1;
+          };
+        },
+      },
+    );
+
+    expect(result).toMatchObject({
+      outcome: 'error',
+      errorCategory: 'timeout',
+      errorMessage: 'approval deadline',
+    });
+    expect(rollbackCount).toBe(1);
+  });
+
+  it('reports execution deadline aborts after approval admission as timeouts', async () => {
+    let runs = 0;
+    let rollbackCount = 0;
+    const tool = createTool({
+      name: 'approval-deadline-before-execute',
+      description: 'checks deadline after approval admission before execute',
+      input: z.object({}),
+      async execute() {
+        runs += 1;
+        return 'unreachable';
+      },
+    });
+
+    const result = await tool.execute(
+      {
+        id: 'approval-deadline-before-execute-call',
+        name: 'approval-deadline-before-execute',
+        arguments: {},
+      },
+      {
+        [approvalConsumeSymbol]: async () => {
+          const snapshot = tool.executions.inspect({
+            callId: 'approval-deadline-before-execute-call',
+          })[0];
+          tool.executions.locate(snapshot!.executionId)?.abort('deadline', 'approval deadline');
+          return async () => {
+            rollbackCount += 1;
+          };
+        },
+      },
+    );
+
+    expect(result).toMatchObject({
+      outcome: 'error',
+      errorCategory: 'timeout',
+      errorMessage: 'approval deadline',
+    });
+    expect(runs).toBe(0);
+    expect(rollbackCount).toBe(1);
   });
 
   it('computes input and output digests when enabled', async () => {
@@ -1793,6 +2823,40 @@ describe('isTool', () => {
     expect(result.error?.message).toContain('boom');
     expect(result.inputDigest).toMatch(/^[a-f0-9]{64}$/);
     expect(calls).toBe(2);
+  });
+
+  it('cancels when the signal aborts during error policy context injection', async () => {
+    const controller = new AbortController();
+    let calls = 0;
+    let executions = 0;
+    const tool = createTool({
+      name: 'policy-error-context-cancel',
+      description: 'cancels during error policy context injection',
+      input: z.object({}),
+      policyContext: () => {
+        calls += 1;
+        if (calls === 2) {
+          controller.abort('cancelled while enriching error');
+        }
+        return {};
+      },
+      async execute() {
+        executions += 1;
+        throw new Error('boom');
+      },
+    });
+
+    const result = await tool.execute(createToolCall('policy-error-context-cancel', {}), {
+      signal: controller.signal,
+    });
+
+    expect(result).toMatchObject({
+      outcome: 'error',
+      errorCategory: 'cancelled',
+      errorMessage: 'cancelled while enriching error',
+    });
+    expect(calls).toBe(2);
+    expect(executions).toBe(1);
   });
 
   it('formats cancellation reasons for numbers', async () => {

@@ -2,33 +2,66 @@ import { BureauError } from 'bureau';
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 
-import { resolvePrincipal } from '../middleware/authentication';
+import { resolvePrincipal, resolveTrustedRequestContext } from '../middleware/authentication';
 import { assembleRunTimeline } from '../timeline';
 import type { Bureau, CreateRunRequest, PendingReview, RunDetail } from '../types';
 
 export { assembleRunTimeline, type RunTimelineEntry, type RunTimelineEntryKind } from '../timeline';
 
+function publicCreateRunRequest(
+  body: CreateRunRequest,
+): Omit<CreateRunRequest, 'principal' | 'requestContext'> {
+  const request: Omit<CreateRunRequest, 'principal' | 'requestContext'> = { message: body.message };
+  if (body.sessionId !== undefined) request.sessionId = body.sessionId;
+  if (body.systemPrompt !== undefined) request.systemPrompt = body.systemPrompt;
+  if (body.maximumSteps !== undefined) request.maximumSteps = body.maximumSteps;
+  if (body.maximumTokens !== undefined) request.maximumTokens = body.maximumTokens;
+  if (body.agentName !== undefined) request.agentName = body.agentName;
+  return request;
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
 export function createRunsRoutes(bureau: Bureau) {
   const app = new Hono();
 
   app.post('/', async (context) => {
-    let body: CreateRunRequest;
+    let body: unknown;
     try {
-      body = await context.req.json<CreateRunRequest>();
+      body = await context.req.json<unknown>();
     } catch {
       throw new HTTPException(400, { message: 'Invalid JSON body' });
     }
+    if (!isJsonObject(body)) {
+      throw new HTTPException(400, { message: 'Run request body must be a JSON object' });
+    }
     try {
+      if (
+        'agentName' in body &&
+        body['agentName'] !== undefined &&
+        typeof body['agentName'] !== 'string'
+      ) {
+        throw new HTTPException(400, { message: 'agentName must be a string' });
+      }
       // Overwrite any caller-supplied `principal` with the authenticated
       // principal from the verified request header — never trust it from an
       // untrusted request body (AB-54 usage analytics attribution).
-      const summary = await bureau.createRun({ ...body, principal: resolvePrincipal(context) });
+      const request = publicCreateRunRequest(body as unknown as CreateRunRequest);
+      const requestContext = resolveTrustedRequestContext(context, request.agentName);
+      const summary = await bureau.createRun({
+        ...request,
+        principal: resolvePrincipal(context),
+        ...(requestContext ? { requestContext } : {}),
+      });
       return context.json(summary, 201);
     } catch (error) {
       if (error instanceof BureauError) {
         if (error.code === 'NOT_CONFIGURED')
           throw new HTTPException(503, { message: error.message });
         if (error.code === 'BAD_REQUEST') throw new HTTPException(400, { message: error.message });
+        if (error.code === 'CONFLICT') throw new HTTPException(409, { message: error.message });
         // AB-13 — a flow-control policy (concurrency cap, rate limit, or
         // singleton dedupe) rejected this run's admission.
         if (error.code === 'RATE_LIMITED') throw new HTTPException(429, { message: error.message });
@@ -61,9 +94,9 @@ export function createRunsRoutes(bureau: Bureau) {
     }
   });
 
-  app.delete('/:id', (context) => {
+  app.delete('/:id', async (context) => {
     try {
-      bureau.deleteRun(context.req.param('id'));
+      await bureau.deleteRun(context.req.param('id'));
       return context.body(null, 204);
     } catch (error) {
       if (error instanceof BureauError) {

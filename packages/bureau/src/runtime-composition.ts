@@ -76,7 +76,9 @@ import {
   combineToolboxes,
   createTool,
   createToolbox,
+  type ToolboxExecuteOptions,
   type ToolCallInput,
+  type ToolRequestContext,
 } from 'armorer';
 import {
   Conversation,
@@ -112,6 +114,181 @@ import type {
 } from './types';
 
 export type BureauToolbox = AnyToolbox;
+
+const requestAuthorityMetadataKey = 'lastRequestAuthority';
+const requestAuthoritiesMetadataKey = 'lastRequestAuthorities';
+const defaultBureauAgentName = 'bureau';
+const schedulerServicePrincipalId = 'service:scheduler';
+const schedulerServiceAuthorizationRevision = 'bureau:scheduler:1';
+const toolExecutionCapability = 'tools:execute';
+
+function isJsonRecord(value: JSONValue | undefined): value is Record<string, JSONValue> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function requestContextFromAuthorityValue(
+  value: JSONValue | undefined,
+  runId: string | undefined,
+  agentName: string | undefined,
+): ToolRequestContext | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const authority = value as Record<string, JSONValue>;
+  const capabilities = authority['capabilities'];
+  const audience = authority['audience'];
+  const deadline = authority['deadline'];
+  if (
+    typeof authority['principalId'] !== 'string' ||
+    typeof authority['tenantId'] !== 'string' ||
+    typeof authority['ownerId'] !== 'string' ||
+    typeof authority['authorizationRevision'] !== 'string' ||
+    !Array.isArray(capabilities) ||
+    !capabilities.every((capability) => typeof capability === 'string') ||
+    (audience !== undefined &&
+      audience !== 'public' &&
+      audience !== 'tenant' &&
+      audience !== 'operator') ||
+    (deadline !== undefined && (typeof deadline !== 'number' || !Number.isFinite(deadline)))
+  ) {
+    return undefined;
+  }
+  if (typeof deadline === 'number' && deadline <= Date.now()) return undefined;
+  return {
+    authority: {
+      principalId: authority['principalId'],
+      tenantId: authority['tenantId'],
+      ownerId: authority['ownerId'],
+      capabilities: Object.freeze([...capabilities] as string[]),
+      authorizationRevision: authority['authorizationRevision'],
+    },
+    ...(audience !== undefined ? { audience } : {}),
+    ...(typeof deadline === 'number' ? { deadline } : {}),
+    ...(agentName !== undefined ? { agentId: agentName } : {}),
+    ...(runId !== undefined ? { runId } : {}),
+  };
+}
+
+function recoveredRequestContext(
+  metadata: Record<string, JSONValue>,
+  runId: string | undefined,
+  agentName: string | undefined,
+): ToolRequestContext | undefined {
+  const authorities = metadata[requestAuthoritiesMetadataKey];
+  if (isJsonRecord(authorities)) {
+    return requestContextFromAuthorityValue(
+      runId === undefined ? undefined : authorities[runId],
+      runId,
+      agentName,
+    );
+  }
+  return requestContextFromAuthorityValue(metadata[requestAuthorityMetadataKey], runId, agentName);
+}
+
+function normalizedServiceAgentName(agentName: string | undefined): string {
+  const trimmed = agentName?.trim();
+  return trimmed && trimmed.length > 0 ? trimmed : defaultBureauAgentName;
+}
+
+export function createSchedulerServiceRequestContext(runId: string, agentName: string | undefined) {
+  const ownerId = normalizedServiceAgentName(agentName);
+  return {
+    authority: {
+      principalId: schedulerServicePrincipalId,
+      tenantId: 'bureau',
+      ownerId,
+      capabilities: Object.freeze([toolExecutionCapability]),
+      authorizationRevision: schedulerServiceAuthorizationRevision,
+    },
+    audience: 'operator',
+    agentId: ownerId,
+    runId,
+  } satisfies ToolRequestContext;
+}
+
+function withDefaultToolboxRequestContext(
+  toolbox: AnyToolbox,
+  requestContext: ToolRequestContext | undefined,
+  requestAuthorityValidator: () =>
+    ((context: ToolRequestContext) => boolean | Promise<boolean>) | undefined,
+): AnyToolbox {
+  if (!requestContext) return toolbox;
+
+  const executeWithDefaultRequestContext = (async (
+    input: ToolCallInput | ToolCallInput[],
+    executeOptions?: ToolboxExecuteOptions,
+  ) => {
+    const options =
+      executeOptions?.requestContext === undefined
+        ? { ...(executeOptions ?? {}), requestContext }
+        : executeOptions;
+    const executionRequestContext = options.requestContext;
+    const authorizationRevision = executionRequestContext?.authority.authorizationRevision;
+    const requiresTransportValidation =
+      authorizationRevision !== undefined &&
+      authorizationRevision !== 'bureau:1' &&
+      authorizationRevision !== 'bureau:scheduler:1';
+    if (requiresTransportValidation && executionRequestContext) {
+      const validator = requestAuthorityValidator();
+      if (
+        !validator ||
+        !(await raceRequestAuthorityValidation(validator(executionRequestContext), options))
+      ) {
+        throw new Error('Request authority is no longer current.');
+      }
+    }
+    return Array.isArray(input) ? toolbox.execute(input, options) : toolbox.execute(input, options);
+  }) as AnyToolbox['execute'];
+
+  return new Proxy(toolbox, {
+    get(target, property, receiver) {
+      if (property === 'execute') return executeWithDefaultRequestContext;
+      return Reflect.get(target, property, receiver) as unknown;
+    },
+  });
+}
+
+function raceRequestAuthorityValidation(
+  validation: boolean | Promise<boolean>,
+  options: ToolboxExecuteOptions,
+): Promise<boolean> {
+  const signal = options.signal;
+  const deadline = options.requestContext?.deadline;
+  const now = options.now ?? Date.now;
+  if (signal?.aborted) {
+    return Promise.reject(new Error(String(signal.reason ?? 'Cancelled')));
+  }
+  if (deadline !== undefined && deadline <= now()) {
+    return Promise.reject(new Error('Execution deadline exceeded'));
+  }
+  if (!signal && deadline === undefined) return Promise.resolve(validation);
+
+  const maximumTimerDelay = 2_147_483_647;
+  const setTimeoutFunction =
+    options.setTimeoutFunction ??
+    ((callback: () => void, milliseconds: number) => setTimeout(callback, milliseconds));
+  const clearTimeoutFunction =
+    options.clearTimeoutFunction ??
+    ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+  let timer: unknown;
+  let onAbort: (() => void) | undefined;
+  const interruption = new Promise<boolean>((_resolve, reject) => {
+    onAbort = () => reject(new Error(String(signal?.reason ?? 'Cancelled')));
+    signal?.addEventListener('abort', onAbort, { once: true });
+    const scheduleDeadline = () => {
+      if (deadline === undefined) return;
+      const remaining = deadline - now();
+      if (remaining <= 0) {
+        reject(new Error('Execution deadline exceeded'));
+        return;
+      }
+      timer = setTimeoutFunction(scheduleDeadline, Math.min(remaining, maximumTimerDelay));
+    };
+    scheduleDeadline();
+  });
+  return Promise.race([Promise.resolve(validation), interruption]).finally(() => {
+    if (onAbort) signal?.removeEventListener('abort', onAbort);
+    if (timer !== undefined) clearTimeoutFunction(timer);
+  });
+}
 
 /**
  * AB-40 — the enabled-by-default guardrail preset. Wired whenever
@@ -568,6 +745,7 @@ const defaultRuntimeCompositionDependencies: RuntimeCompositionDependencies = {
 };
 
 export type RuntimeCompositionTestingSeams = {
+  recoveredRequestContext: typeof recoveredRequestContext;
   resolveRunServices(info: WorkflowServicesResolverInfo): Promise<WorkflowServicesResolution>;
   buildScheduledRunServices(
     info: WorkflowServicesResolverInfo,
@@ -1012,6 +1190,9 @@ export interface RuntimeComposition {
    * that produced the pending approval.
    */
   baseToolbox: BureauToolbox;
+  setRequestAuthorityValidator(
+    validator: ((context: ToolRequestContext) => boolean | Promise<boolean>) | undefined,
+  ): void;
   ready: boolean;
   provider: RedactedProviderConfiguration | undefined;
   providers: RedactedProviderRouteConfiguration[];
@@ -1051,6 +1232,7 @@ export async function createRuntimeComposition(
   // This flag lets the resolver bail out cleanly until composition is ready. Manual
   // mode has no background poller, but shares the same gate for consistency.
   let compositionReady = false;
+  let requestAuthorityValidator = options.requestAuthorityValidator;
 
   // AB-10: run ids the durable engine flags as version-mismatched during boot
   // recovery — see RuntimeComposition.workflowVersionMismatches.
@@ -1362,6 +1544,7 @@ export async function createRuntimeComposition(
     },
   ) {
     const liveStreaming = runtimeOptions?.liveStreaming ?? true;
+    const requestContext = request.requestContext;
     // AB-40 — the auto-wired default guardrail preset (`options.guardrails ===
     // undefined`) runs its output PII validator in `mode: 'tripwire'` against
     // the FULL response content in `validateResponse`, which only runs after
@@ -1503,9 +1686,14 @@ export async function createRuntimeComposition(
       validateResponse.push(guardrails.validateResponse);
     }
 
+    const runToolbox = withDefaultToolboxRequestContext(
+      toolbox,
+      requestContext,
+      () => requestAuthorityValidator,
+    );
     return Promise.resolve({
       generate,
-      toolbox,
+      toolbox: runToolbox,
       prepareStep,
       onStep,
       validateResponse,
@@ -1555,6 +1743,7 @@ export async function createRuntimeComposition(
     const initialActiveSkills = isActiveSkillEntryArray(lastActiveSkillsRaw)
       ? lastActiveSkillsRaw
       : undefined;
+    const requestContext = recoveredRequestContext(session.metadata, runId, agentName);
     const runRuntime = await createRunRuntime(
       {
         message: typeof message === 'string' ? message : '',
@@ -1564,6 +1753,7 @@ export async function createRuntimeComposition(
         // recovery path is exactly where the at-least-once re-fire happens.
         ...(runId !== undefined ? { runId } : {}),
         ...(agentName !== undefined ? { agentName } : {}),
+        ...(requestContext ? { requestContext } : {}),
       },
       { liveStreaming: false, initialActiveSkills },
     );
@@ -1581,6 +1771,7 @@ export async function createRuntimeComposition(
         prepareStep: runRuntime.prepareStep,
         onStep: runRuntime.onStep,
         validateResponse: runRuntime.validateResponse,
+        ...(requestContext ? { executeOptions: { requestContext } } : {}),
         // Thread agentName and runId so curated tool.* bubble events stamped by
         // the resumed run carry the same {agentName, runId, step} metadata as the
         // pre-crash run (C3 parity). Without them, recovered runs emit blank ids.
@@ -1877,9 +2068,10 @@ export async function createRuntimeComposition(
       runId,
       isRecoveredFireReplay,
     );
+    const requestContext = createSchedulerServiceRequestContext(runId, agentName);
 
     const runRuntime = await createRunRuntime(
-      { message: scheduledInput.input, sessionId, runId, agentName },
+      { message: scheduledInput.input, sessionId, runId, agentName, requestContext },
       { liveStreaming: false, initialActiveSkills },
     );
 
@@ -1910,6 +2102,7 @@ export async function createRuntimeComposition(
           ),
         ],
         validateResponse: runRuntime.validateResponse,
+        executeOptions: { requestContext },
         agentName,
         runId,
       },
@@ -2056,6 +2249,38 @@ export async function createRuntimeComposition(
       };
     }
 
+    const recoveredAuthority = recoveredRequestContext(
+      session.metadata,
+      info.workflowId,
+      info.input.agentName,
+    );
+    if (!recoveredAuthority) {
+      return {
+        status: 'unavailable',
+        reason: `run ${info.workflowId} request authority is unavailable during recovery`,
+      };
+    }
+    const recoveredAuthorizationRevision = recoveredAuthority.authority.authorizationRevision;
+    const requiresTransportValidation =
+      recoveredAuthorizationRevision !== 'bureau:1' &&
+      recoveredAuthorizationRevision !== 'bureau:scheduler:1';
+    if (requestAuthorityValidator === undefined && requiresTransportValidation) {
+      return {
+        status: 'unavailable',
+        reason: `run ${info.workflowId} authority cannot be revalidated during recovery`,
+      };
+    }
+    if (
+      requiresTransportValidation &&
+      requestAuthorityValidator &&
+      !(await requestAuthorityValidator(recoveredAuthority))
+    ) {
+      return {
+        status: 'unavailable',
+        reason: `run ${info.workflowId} authority is no longer current`,
+      };
+    }
+
     let services: DurableRunDeps | null;
     try {
       // info.workflowId === the run id (pinned at engine.start) — thread it so the
@@ -2127,6 +2352,9 @@ export async function createRuntimeComposition(
     // so any toolbox sharing this instance's `approvalSecret` and tool set can
     // resume a signed pending approval, not only the specific per-run clone.
     baseToolbox,
+    setRequestAuthorityValidator(validator) {
+      requestAuthorityValidator = validator;
+    },
     ready:
       options.generate !== undefined ||
       options.provider !== undefined ||
@@ -2143,6 +2371,7 @@ export async function createRuntimeComposition(
   };
 
   runtimeCompositionTestingSeams.set(composition, {
+    recoveredRequestContext,
     resolveRunServices,
     buildScheduledRunServices(info, store, recoveredScheduleMarker) {
       return buildScheduledRunServices(

@@ -3,7 +3,7 @@ import { createIncrementalHash, isStandardSchema, sha256HexSync } from 'interope
 import { CompletableEventTarget } from 'lifecycle';
 import { z } from 'zod';
 
-import type { ToolError, ToolErrorCategory } from './core/errors';
+import { isToolError, type ToolError, type ToolErrorCategory } from './core/errors';
 import { buildTagsFromRisk, type ToolRisk } from './core/risk';
 import { isZodSchema } from './core/schema-utilities';
 import { serializeToolDefinition } from './core/serialization';
@@ -43,10 +43,20 @@ import {
   ToolValidateErrorEvent,
   ToolValidateSuccessEvent,
 } from './events';
+import {
+  freezeEffectiveToolExecutionContext,
+  freezeToolRequestContext,
+  narrowToolAuthority,
+  type ToolRequestContext,
+} from './execution-context';
 import { createExecutionLifecycle, type ExecutionHandle } from './execution-lifecycle';
 import {
+  type ApprovalAdmissionRollback,
+  approvalConsumeSymbol,
   type ApprovalResumeState,
   approvalResumeSymbol,
+  executionCallbackStartSymbol,
+  policyAuthorizationOnlySymbol,
   policyPauseDecisionsSymbol,
   policyPauseTierSymbol,
 } from './internal/approval-resume';
@@ -86,8 +96,13 @@ function isAbortSignalLike(signal: MinimalAbortSignal | undefined): signal is Ab
 }
 
 type InternalToolExecuteOptions = ToolExecuteOptions & {
+  [approvalConsumeSymbol]?: () => Promise<ApprovalAdmissionRollback>;
   [approvalResumeSymbol]?: ApprovalResumeState;
+  [policyAuthorizationOnlySymbol]?: boolean;
   executionHandle?: ExecutionHandle;
+  privilegedContextMirrorHandle?: ExecutionHandle;
+  parentCompletionHandle?: ExecutionHandle;
+  [executionCallbackStartSymbol]?: () => void;
 };
 
 // Map from event type strings to their Event subclass constructors.
@@ -602,13 +617,29 @@ export function createTool<
     return context;
   };
 
+  const attachRequestContextPolicyFacts = (
+    context: ToolPolicyContext,
+    requestContext: ToolRequestContext | undefined,
+  ): void => {
+    if (!requestContext) {
+      return;
+    }
+    const frozenRequestContext = freezeToolRequestContext(requestContext);
+    context.policyContext = {
+      ...(context.policyContext ?? {}),
+      requestContext: frozenRequestContext,
+      capabilities: frozenRequestContext.authority.capabilities,
+    };
+  };
+
   const resolvePolicyDecision = async (
     context: ToolPolicyContext,
+    signal?: MinimalAbortSignal,
   ): Promise<ToolPolicyDecision | undefined> => {
     if (!policyHooks?.beforeExecute) {
       return undefined;
     }
-    const decision = await policyHooks.beforeExecute(context);
+    const decision = await racePreExecution(() => policyHooks.beforeExecute!(context), signal);
     if (decision === undefined) {
       return undefined;
     }
@@ -618,13 +649,19 @@ export function createTool<
     return resolveToolPolicyAllow(decision);
   };
 
-  const runPolicyAfter = async (context: ToolPolicyAfterContext): Promise<void> => {
+  const runPolicyAfter = async (
+    context: ToolPolicyAfterContext,
+    signal?: MinimalAbortSignal,
+  ): Promise<void> => {
     if (!policyHooks?.afterExecute) {
       return;
     }
     try {
-      await policyHooks.afterExecute(context);
+      await racePreExecution(() => policyHooks.afterExecute!(context), signal);
     } catch (error) {
+      if (isAbortRejection(error)) {
+        throw error;
+      }
       emit('log', {
         level: 'warn',
         message: 'policy afterExecute failed',
@@ -655,27 +692,79 @@ export function createTool<
     };
   };
 
+  const deadlineCancellationResult = (toolCall: ToolCallWithArguments): ToolExecutionResult => {
+    const message = 'TIMEOUT';
+    const toolError = createToolError('timeout', message, {
+      code: 'TIMEOUT',
+      retryable: false,
+    });
+    return {
+      callId: toolCall.id,
+      outcome: 'error',
+      content: message,
+      toolCallId: toolCall.id,
+      toolName: name,
+      result: undefined,
+      error: toolError,
+      errorMessage: message,
+      errorCategory: 'timeout',
+    };
+  };
+
+  const beginExecutionLifecycle = (
+    callId: string,
+    options: ToolExecuteOptions | undefined,
+    deadline: number | undefined,
+    nowFunction: () => number,
+  ): ExecutionHandle => {
+    const ownerId = options?.ownerId ?? options?.requestContext?.authority.ownerId;
+    return executionLifecycle.begin({
+      ...(options?.executionId ? { executionId: options.executionId } : {}),
+      toolName: name,
+      callId,
+      ...(ownerId !== undefined ? { ownerId } : {}),
+      ...(options?.parentExecutionId ? { parentExecutionId: options.parentExecutionId } : {}),
+      ...(isAbortSignalLike(options?.signal) ? { signal: options.signal } : {}),
+      ...(deadline !== undefined ? { deadline } : {}),
+      scheduleDeadline: options?.requestContext?.deadline !== undefined,
+      now: nowFunction,
+      ...(limiter ? { capacity: limiter.capacity } : {}),
+      ...(options?.setTimeoutFunction ? { setTimeoutFunction: options.setTimeoutFunction } : {}),
+      ...(options?.clearTimeoutFunction
+        ? { clearTimeoutFunction: options.clearTimeoutFunction }
+        : {}),
+      ...(options?.effectiveContext ? { privilegedContext: options.effectiveContext } : {}),
+    });
+  };
+
   const executeCall = (
     toolCall: ToolCallWithArguments,
     options?: InternalToolExecuteOptions,
   ): Promise<ToolExecutionResult> => {
-    const resolvedTimeout = options?.timeout ?? timeout;
-    const nowFunction = options?.now ?? Date.now;
-    const executionHandle = executionLifecycle.begin({
-      ...(options?.executionId ? { executionId: options.executionId } : {}),
-      toolName: name,
-      callId: toolCall.id,
-      ...(options?.ownerId ? { ownerId: options.ownerId } : {}),
-      ...(options?.parentExecutionId ? { parentExecutionId: options.parentExecutionId } : {}),
-      ...(isAbortSignalLike(options?.signal) ? { signal: options.signal } : {}),
-      ...(resolvedTimeout !== undefined ? { deadline: nowFunction() + resolvedTimeout } : {}),
-      scheduleDeadline: false,
-      now: nowFunction,
-      ...(limiter ? { capacity: limiter.capacity } : {}),
-      ...(options?.setTimeoutFunction ? { setTimeoutFunction: options.setTimeoutFunction } : {}),
-    });
+    const executionOptions: InternalToolExecuteOptions | undefined = options?.requestContext
+      ? { ...options, requestContext: freezeToolRequestContext(options.requestContext) }
+      : options;
+    const resolvedTimeout = executionOptions?.timeout ?? timeout;
+    const nowFunction = executionOptions?.now ?? Date.now;
+    const requestDeadline = executionOptions?.requestContext?.deadline;
+    // Request deadlines are absolute and govern the whole lifecycle,
+    // including queueing. Execution timeouts are relative and begin only
+    // after admission, in withTimeout inside executeInner.
+    const deadline = requestDeadline;
+    const executionHandle = beginExecutionLifecycle(
+      toolCall.id,
+      executionOptions,
+      deadline,
+      nowFunction,
+    );
+    if (deadline !== undefined && deadline <= nowFunction()) {
+      executionHandle.abort('deadline', 'Execution deadline exceeded');
+      const result = deadlineCancellationResult(toolCall);
+      executionHandle.settle(result);
+      return Promise.resolve(result);
+    }
     const executeOptions: InternalToolExecuteOptions = {
-      ...options,
+      ...executionOptions,
       ...(resolvedTimeout !== undefined ? { timeout: resolvedTimeout } : {}),
       executionHandle,
     };
@@ -814,9 +903,10 @@ export function createTool<
       };
     };
 
-    if (options.signal?.aborted) {
+    if (options.signal?.aborted && options.executionHandle?.snapshot().abortSource !== 'deadline') {
       return handleCancellation(options.signal.reason);
     }
+    let policyRequestContext = options.requestContext;
 
     try {
       emit('execute-start', {
@@ -824,27 +914,57 @@ export function createTool<
         params: toolCall.arguments,
       });
       if (options.signal?.aborted) {
+        if (options.executionHandle?.snapshot().abortSource === 'deadline') {
+          throw createAbortRejection(options.signal.reason);
+        }
         return handleCancellation(options.signal.reason);
       }
       // `parseAsync` (not `parse`) because a wrapped non-Zod Standard Schema
       // validator (see `wrapStandardSchema`) requires async parsing; it works
       // identically to `parse` for a plain Zod schema.
-      const parsed = (await schema.parseAsync(toolCall.arguments)) as TInput;
+      const parsed = (await racePreExecution(
+        () => schema.parseAsync(toolCall.arguments),
+        options.signal,
+      )) as TInput;
       const typedToolCall = { ...toolCall, arguments: parsed } as ToolCallWithArguments;
       const parsedDetail = { toolCall: typedToolCall, configuration };
       emit('validate-success', { ...parsedDetail, params: toolCall.arguments, parsed });
       if (options.signal?.aborted) {
+        if (options.executionHandle?.snapshot().abortSource === 'deadline') {
+          throw createAbortRejection(options.signal.reason);
+        }
         return handleCancellation(options.signal.reason);
       }
       const policyContext = buildPolicyContext(typedToolCall, parsed, inputDigest);
+      attachRequestContextPolicyFacts(policyContext, options.requestContext);
       if (policyContextProvider) {
-        const injected = await policyContextProvider(policyContext);
+        const injected = await racePreExecution(
+          () => policyContextProvider(policyContext),
+          options.signal,
+        );
         if (injected && typeof injected === 'object' && !Array.isArray(injected)) {
           policyContext.policyContext = injected;
         }
       }
+      // The host owns identity and tenancy. A provider may add policy facts,
+      // but can never replace the host request context.
+      attachRequestContextPolicyFacts(policyContext, options.requestContext);
       const approvalResume = options[approvalResumeSymbol];
-      let decision = await resolvePolicyDecision(policyContext);
+      let decision = await resolvePolicyDecision(policyContext, options.signal);
+      const effectiveRequestContext =
+        options.requestContext && decision?.capabilities
+          ? narrowToolAuthority(options.requestContext, decision.capabilities)
+          : options.requestContext;
+      policyRequestContext = effectiveRequestContext;
+      attachRequestContextPolicyFacts(policyContext, effectiveRequestContext);
+      if (effectiveRequestContext && options.effectiveContext) {
+        const effectiveExecutionContext = freezeEffectiveToolExecutionContext({
+          ...effectiveRequestContext,
+          revisions: options.effectiveContext.revisions,
+        });
+        options.executionHandle?.updatePrivilegedContext(effectiveExecutionContext);
+        options.privilegedContextMirrorHandle?.updatePrivilegedContext(effectiveExecutionContext);
+      }
       const parsedArgumentsDigest = stableStringifyJson(normalizeToolContent(parsed));
       const proposedArgumentsDigest =
         approvalResume === undefined
@@ -863,7 +983,7 @@ export function createTool<
         for (const pauseDecision of policyPauseDecisions) {
           if (
             approvalResume.satisfiedPauses.some((satisfiedPause) =>
-              policyPauseMatchesSatisfiedPause(pauseDecision, satisfiedPause, policyPauseDecisions),
+              policyPauseMatchesSatisfiedPause(pauseDecision, satisfiedPause),
             )
           ) {
             continue;
@@ -880,18 +1000,9 @@ export function createTool<
         const action = createToolAction(type, decision, reason);
         const resumedArgumentsMatchApproval = proposedArgumentsDigest === parsedArgumentsDigest;
         const approvedPolicyPauseTierMatches =
-          approvalResume === undefined
-            ? false
-            : approvalResume.approvedPolicyPauseTier === undefined
-              ? policyPauseDecisions === undefined ||
-                policyPauseDecisions.filter((pauseDecision) =>
-                  policyPauseMatchesDescriptor(
-                    pauseDecision,
-                    approvalResume.approvedAction,
-                    approvalResume.reason,
-                  ),
-                ).length === 1
-              : approvalResume.approvedPolicyPauseTier === decision[policyPauseTierSymbol];
+          approvalResume !== undefined &&
+          approvalResume.approvedPolicyPauseTier !== undefined &&
+          approvalResume.approvedPolicyPauseTier === (decision[policyPauseTierSymbol] ?? 'tool');
         resumedApprovalIsSatisfied =
           approvalResume !== undefined &&
           approvedPolicyPauseTierMatches &&
@@ -904,11 +1015,14 @@ export function createTool<
         if (!resumedApprovalIsSatisfied) {
           emit('policy-action-required', { ...parsedDetail, params: parsed, reason });
 
-          await runPolicyAfter({
-            ...policyContext,
-            outcome: 'action_required',
-            reason,
-          });
+          await runPolicyAfter(
+            {
+              ...policyContext,
+              outcome: 'action_required',
+              reason,
+            },
+            options.signal,
+          );
 
           finishTelemetry('paused', { reason });
 
@@ -928,9 +1042,7 @@ export function createTool<
               action,
               reason,
               metadata: normalizeToolContent(configuration.metadata ?? {}),
-              ...(decision[policyPauseTierSymbol] !== undefined
-                ? { policyPauseTier: decision[policyPauseTierSymbol] }
-                : {}),
+              policyPauseTier: decision[policyPauseTierSymbol] ?? 'tool',
               ...(approvalResume !== undefined && !executedArgumentsEdited
                 ? { satisfiedPolicyPauses: approvalResume.satisfiedPauses }
                 : {}),
@@ -950,12 +1062,15 @@ export function createTool<
         });
         emit('execute-error', { ...parsedDetail, error: errorObj });
         emit('settled', { ...parsedDetail, error: errorObj });
-        await runPolicyAfter({
-          ...policyContext,
-          outcome: 'denied',
-          errorCategory: toolError.category,
-          reason,
-        });
+        await runPolicyAfter(
+          {
+            ...policyContext,
+            outcome: 'denied',
+            errorCategory: toolError.category,
+            reason,
+          },
+          options.signal,
+        );
         const deniedDetails: {
           reason?: string;
           errorCategory?: ToolErrorCategory;
@@ -984,16 +1099,89 @@ export function createTool<
         meta.callId = typedToolCall.id;
       }
 
-      const resolvedExecute = await resolveExecute();
+      if (options[policyAuthorizationOnlySymbol]) {
+        let rollbackApprovalAdmission: ApprovalAdmissionRollback | undefined;
+        if (options[approvalConsumeSymbol]) {
+          rollbackApprovalAdmission = await options[approvalConsumeSymbol]();
+        }
+        if (options.signal?.aborted) {
+          if (rollbackApprovalAdmission) await rollbackApprovalAdmission();
+          if (options.executionHandle?.snapshot().abortSource === 'deadline') {
+            throw createAbortRejection(options.signal.reason);
+          }
+          return handleCancellation(options.signal.reason);
+        }
+        emit('execute-success', { ...parsedDetail, result: undefined });
+        emit('settled', { ...parsedDetail, result: undefined });
+        try {
+          await runPolicyAfter(
+            {
+              ...policyContext,
+              outcome: 'success',
+              result: undefined,
+            },
+            options.signal,
+          );
+        } catch (error) {
+          // A cache hit has no side-effect callback, but approval admission is
+          // still single-use. If post-execution reporting is cancelled, leave
+          // the approval retryable because the cache result was not admitted.
+          if (rollbackApprovalAdmission) await rollbackApprovalAdmission();
+          throw error;
+        }
+        finishTelemetry('success');
+        const callId = typedToolCall.id;
+        return {
+          callId,
+          outcome: 'success',
+          content: '',
+          toolCallId: callId,
+          toolName: name,
+          result: undefined,
+          executedArgumentsEdited,
+          inputDigest,
+        };
+      }
 
+      // Resolve lazy executors before consuming an approval. A rejected
+      // executor cannot execute, so its approval must remain available for a
+      // later retry after the executor is repaired or replaced. Authorization
+      // checks return above without resolving the executor at all.
+      const resolvedExecute =
+        typeof fn === 'function' ? fn : await raceWithSignal(resolveExecute(), options.signal);
+      let rollbackApprovalAdmission: ApprovalAdmissionRollback | undefined;
+      if (options[approvalConsumeSymbol]) {
+        rollbackApprovalAdmission = await options[approvalConsumeSymbol]();
+      }
       if (options.signal?.aborted) {
+        if (rollbackApprovalAdmission) await rollbackApprovalAdmission();
+        if (options.executionHandle?.snapshot().abortSource === 'deadline') {
+          throw createAbortRejection(options.signal.reason);
+        }
         return handleCancellation(options.signal.reason);
       }
+
       const toolContext: ToolContext<E> = {
         dispatch,
         meta,
         toolCall: typedToolCall,
         configuration,
+        ...(effectiveRequestContext
+          ? { requestContext: freezeToolRequestContext(effectiveRequestContext) }
+          : {}),
+        ...(options.effectiveContext
+          ? {
+              effectiveContext: freezeEffectiveToolExecutionContext({
+                ...options.effectiveContext,
+                ...(effectiveRequestContext
+                  ? {
+                      ...freezeToolRequestContext(effectiveRequestContext),
+                      revisions: options.effectiveContext.revisions,
+                    }
+                  : {}),
+              }),
+            }
+          : {}),
         ...(options.durableOperationKey !== undefined
           ? { durableOperationKey: options.durableOperationKey }
           : {}),
@@ -1008,7 +1196,16 @@ export function createTool<
       // At runtime we can only guarantee the base ToolContext shape, so we cast to
       // avoid `exactOptionalPropertyTypes` assignability issues.
 
+      options[executionCallbackStartSymbol]?.();
       const runner = Promise.resolve(resolvedExecute(parsed, toolContext as unknown as TContext));
+      if (options.parentCompletionHandle) {
+        void runner.then(
+          (result) => {
+            if (!isAsyncIterable(result)) options.parentCompletionHandle?.settle(result);
+          },
+          (error) => options.parentCompletionHandle?.settle(error),
+        );
+      }
       if (options.executionHandle) {
         void runner.then(
           (result) => {
@@ -1141,7 +1338,7 @@ export function createTool<
                   if (finalized.outputDigest !== undefined) {
                     policyAfter.outputDigest = finalized.outputDigest;
                   }
-                  await runPolicyAfter(policyAfter);
+                  await runPolicyAfter(policyAfter, options.signal);
                   const successDetails: {
                     result?: unknown;
                     inputDigest?: string;
@@ -1165,12 +1362,15 @@ export function createTool<
                     error: streamError,
                   });
                   const streamErrorCategory = classifyErrorCategory(streamError);
-                  await runPolicyAfter({
-                    ...policyContext,
-                    outcome: 'error',
-                    errorCategory: streamErrorCategory,
-                    error: streamError,
-                  });
+                  await runPolicyAfter(
+                    {
+                      ...policyContext,
+                      outcome: 'error',
+                      errorCategory: streamErrorCategory,
+                      error: streamError,
+                    },
+                    options.signal,
+                  );
                   const errorDetails: {
                     error?: unknown;
                     errorCategory?: ToolErrorCategory;
@@ -1233,7 +1433,7 @@ export function createTool<
       if (outputDigest !== undefined) {
         policyAfter.outputDigest = outputDigest;
       }
-      await runPolicyAfter(policyAfter);
+      await runPolicyAfter(policyAfter, options.signal);
       const successDetails: {
         result?: unknown;
         inputDigest?: string;
@@ -1270,7 +1470,7 @@ export function createTool<
       }
       const reportedError =
         isAbortRejection(error) && options.executionHandle?.snapshot().abortSource === 'deadline'
-          ? new Error('TIMEOUT')
+          ? createDeadlineError(error.reason)
           : error;
       const zodError = reportedError instanceof z.ZodError ? reportedError : undefined;
       const isZod = zodError !== undefined;
@@ -1321,18 +1521,40 @@ export function createTool<
       const callId = toolCall.id;
       const errorCategory = classifyErrorCategory(reportedError);
       const errorPolicyContext = buildPolicyContext(toolCall, toolCall.arguments, inputDigest);
+      attachRequestContextPolicyFacts(errorPolicyContext, policyRequestContext);
       if (policyContextProvider) {
-        const injected = await policyContextProvider(errorPolicyContext);
-        if (injected && typeof injected === 'object' && !Array.isArray(injected)) {
-          errorPolicyContext.policyContext = injected;
+        try {
+          const injected = await racePreExecution(
+            () => policyContextProvider(errorPolicyContext),
+            options.signal,
+          );
+          if (injected && typeof injected === 'object' && !Array.isArray(injected)) {
+            errorPolicyContext.policyContext = injected;
+          }
+        } catch (policyContextError) {
+          if (!isAbortRejection(policyContextError)) {
+            throw policyContextError;
+          }
+          if (options.executionHandle?.snapshot().abortSource !== 'deadline') {
+            return handleCancellation(policyContextError.reason);
+          }
         }
       }
-      await runPolicyAfter({
-        ...errorPolicyContext,
-        outcome: 'error',
-        errorCategory,
-        error: reportedError,
-      });
+      attachRequestContextPolicyFacts(errorPolicyContext, policyRequestContext);
+      try {
+        await runPolicyAfter(
+          {
+            ...errorPolicyContext,
+            outcome: 'error',
+            errorCategory,
+            error: reportedError,
+          },
+          options.signal,
+        );
+      } catch {
+        // Preserve the original timeout/cancellation result when the lifecycle
+        // signal aborts while reporting the error to afterExecute.
+      }
       const errorDetails: {
         error?: unknown;
         errorCategory?: ToolErrorCategory;
@@ -1342,12 +1564,12 @@ export function createTool<
         errorDetails.inputDigest = inputDigest;
       }
       finishTelemetry('error', errorDetails);
-      const message = errorString(
-        normalizeError(
-          reportedError,
-          isTimeoutError(reportedError) ? { code: 'TIMEOUT' } : undefined,
-        ),
+      const normalizedError = normalizeError(
+        reportedError,
+        isTimeoutError(reportedError) ? { code: 'TIMEOUT' } : undefined,
       );
+      const message =
+        errorCategory === 'timeout' ? normalizedError.message : errorString(normalizedError);
       const toolError = isZod
         ? createToolError('validation', message, {
             code: 'VALIDATION_ERROR',
@@ -1520,19 +1742,18 @@ export function createTool<
       ...(resolvedTimeout !== undefined ? { timeout: resolvedTimeout } : {}),
     };
     const nowFunction = options.now ?? Date.now;
-    const executionHandle = executionLifecycle.begin({
-      ...(options.executionId ? { executionId: options.executionId } : {}),
-      toolName: name,
-      callId: toolCall.id,
-      ...(options.ownerId ? { ownerId: options.ownerId } : {}),
-      ...(options.parentExecutionId ? { parentExecutionId: options.parentExecutionId } : {}),
-      ...(isAbortSignalLike(options.signal) ? { signal: options.signal } : {}),
-      ...(resolvedTimeout !== undefined ? { deadline: nowFunction() + resolvedTimeout } : {}),
-      scheduleDeadline: false,
-      now: nowFunction,
-      ...(limiter ? { capacity: limiter.capacity } : {}),
-      ...(options.setTimeoutFunction ? { setTimeoutFunction: options.setTimeoutFunction } : {}),
-    });
+    const requestDeadline = options.requestContext?.deadline;
+    // Request deadlines are absolute and govern the whole lifecycle,
+    // including queueing. Execution timeouts are relative and begin only
+    // after admission, in withTimeout inside executeInner.
+    const deadline = requestDeadline;
+    const executionHandle = beginExecutionLifecycle(toolCall.id, options, deadline, nowFunction);
+    if (deadline !== undefined && deadline <= nowFunction()) {
+      executionHandle.abort('deadline', 'Execution deadline exceeded');
+      const result = deadlineCancellationResult(toolCall);
+      executionHandle.settle(result);
+      return Promise.resolve(result);
+    }
     const execution = runWithConcurrency(
       () => (
         executionHandle.activate(),
@@ -1616,6 +1837,28 @@ export function createTool<
         },
       );
     });
+  }
+
+  function racePreExecution<TP>(
+    operation: () => TP | Promise<TP>,
+    signal?: MinimalAbortSignal,
+  ): Promise<TP> {
+    if (signal?.aborted) {
+      return Promise.reject(createAbortRejection(signal.reason));
+    }
+    return raceWithSignal(Promise.resolve(operation()), signal);
+  }
+
+  function createDeadlineError(reason?: unknown): Error {
+    const message =
+      typeof reason === 'string' && reason.length > 0
+        ? reason
+        : reason instanceof Error && reason.message.length > 0
+          ? reason.message
+          : 'Execution deadline exceeded';
+    const error = new Error(message);
+    (error as Error & { code?: string }).code = 'TIMEOUT';
+    return error;
   }
 
   function raceWithSignal<TP>(promise: Promise<TP>, signal?: MinimalAbortSignal): Promise<TP> {
@@ -1893,18 +2136,13 @@ function createToolAction(
 function policyPauseMatchesSatisfiedPause(
   decision: ToolPolicyDecision,
   satisfiedPause: SatisfiedPolicyPause,
-  policyPauseDecisions: readonly ToolPolicyDecision[],
 ): boolean {
   if (!policyPauseMatchesDescriptor(decision, satisfiedPause.action, satisfiedPause.reason)) {
     return false;
   }
-  if (satisfiedPause.tier !== undefined) {
-    return satisfiedPause.tier === decision[policyPauseTierSymbol];
-  }
   return (
-    policyPauseDecisions.filter((pauseDecision) =>
-      policyPauseMatchesDescriptor(pauseDecision, satisfiedPause.action, satisfiedPause.reason),
-    ).length === 1
+    satisfiedPause.tier !== undefined &&
+    satisfiedPause.tier === (decision[policyPauseTierSymbol] ?? 'tool')
   );
 }
 
@@ -1951,6 +2189,7 @@ function stableStringify(value: unknown): string {
 }
 
 function classifyErrorCategory(error: unknown): ToolErrorCategory {
+  if (isToolError(error)) return error.category;
   if (isTimeoutError(error)) return 'timeout';
   if (isTransientError(error)) return 'transient';
   return 'internal';

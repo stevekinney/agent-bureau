@@ -37,6 +37,47 @@ describe('create', () => {
     expect(result.key.scopes).toEqual(['runs:read', 'runs:write']);
   });
 
+  it('rejects blank scope entries instead of creating an admin key', async () => {
+    let rejection: unknown;
+    try {
+      await store.create({ name: 'blank-scoped', scopes: ['   '] });
+    } catch (error) {
+      rejection = error;
+    }
+    expect(rejection).toBeInstanceOf(Error);
+    expect((rejection as Error).message).toBe('API key scope entries must be non-blank strings');
+  });
+
+  it('rejects delimiter-bearing scope entries instead of splitting them downstream', async () => {
+    let rejection: unknown;
+    try {
+      await store.create({ name: 'delimiter-scoped', scopes: ['runs:read,runs:write'] });
+    } catch (error) {
+      rejection = error;
+    }
+    expect(rejection).toBeInstanceOf(Error);
+    expect((rejection as Error).message).toBe('API key scope entries must not contain ","');
+    expect(await store.list()).toEqual([]);
+  });
+
+  it('rejects scope entries that cannot be emitted as HTTP header values', async () => {
+    for (const scope of ['line\nfeed', 'carriage\rreturn', 'null\u0000', 'non-byte\u0100']) {
+      let rejection: unknown;
+      try {
+        await store.create({ name: 'invalid-header-scope', scopes: [scope] });
+      } catch (error) {
+        rejection = error;
+      }
+      expect(rejection).toBeInstanceOf(Error);
+      expect((rejection as Error).message).toBe(
+        'API key scope entries must be valid HTTP header values',
+      );
+    }
+    expect(await store.list()).toEqual([]);
+    expect(() => new Headers({ 'x-scope': 'valid\tvalue' })).not.toThrow();
+    expect(() => new Headers({ 'x-scope': 'valid\u00ff' })).not.toThrow();
+  });
+
   it('respects expiresAt', async () => {
     const expires = new Date(Date.now() + 86400000).toISOString();
     const result = await store.create({ name: 'expiring', expiresAt: expires });

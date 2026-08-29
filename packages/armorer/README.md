@@ -330,38 +330,79 @@ whenever `status` is present — it is derived from the status (`'allow'` →
 `true`; `'deny'`, `'needs_approval'`, `'needs_input'` → `false`).
 
 ```ts
-const toolbox = createToolbox([], {
-  // Use the same secret anywhere pending approvals may be resumed.
-  approvalSecret: process.env.ARMORER_APPROVAL_SECRET,
-  policy: {
-    async beforeExecute(context) {
-      if (context.metadata?.sensitive) {
-        return {
-          status: 'needs_approval',
-          reason: 'Sensitive action requires confirmation',
-        };
-      }
-      return { allow: true };
-    },
-  },
-});
+const sharedDurableApprovalStore = openSharedDurableApprovalStore();
+const approvalStateStore = createDurableApprovalStateStore(sharedDurableApprovalStore);
+const approvalDescriptors = sharedDurableApprovalStore.collection('approval-descriptors');
 
-const result = await toolbox.execute(sensitiveCall);
-if (result.outcome === 'action_required') {
-  // Persist the descriptor and show the approval UI to the user.
-  await durableStore.set(result.pendingApproval!.callId, result.pendingApproval);
+function buildToolbox() {
+  return createToolbox([], {
+    // Use the same secret and durable approval state anywhere pending approvals may be resumed.
+    approvalSecret: process.env.ARMORER_APPROVAL_SECRET,
+    approvalStateStore,
+    policy: {
+      async beforeExecute(context) {
+        if (context.metadata?.sensitive) {
+          return {
+            status: 'needs_approval',
+            reason: 'Sensitive action requires confirmation',
+          };
+        }
+        return { allow: true };
+      },
+    },
+  });
 }
 
-// Later, possibly in another process, rebuild the same toolbox and resume.
-const approved = await durableStore.get('tool-call-id');
-const resumed = await toolbox.resumeApproval(approved);
+const toolbox = buildToolbox();
+
+const requestContext = {
+  authority: {
+    principalId: currentUser.id,
+    tenantId: currentTenant.id,
+    ownerId: currentSession.id,
+    capabilities: currentAuthorization.capabilities,
+    authorizationRevision: currentAuthorization.revision,
+  },
+  audience: 'tenant',
+  agentId: agent.id,
+  runId: run.id,
+} as const;
+
+const result = await toolbox.execute(sensitiveCall, { requestContext });
+if (result.outcome === 'action_required') {
+  // Persist the descriptor and show the approval UI to the user.
+  await approvalDescriptors.set(result.pendingApproval!.callId, result.pendingApproval);
+}
+
+// Later, possibly in another process, rebuild the same toolbox over the same durable store.
+const recoveredToolbox = buildToolbox();
+const approved = await approvalDescriptors.get('tool-call-id');
+const resumed = await recoveredToolbox.resumeApproval(approved, { requestContext });
 
 if (resumed.executedArgumentsEdited) {
   // Record both the proposed and executed arguments in your transcript.
 }
 ```
 
-`pendingApproval` is JSON-serializable and includes `callId`, `toolName`, validated `arguments`, the requested action, reason, and tool metadata. When the toolbox has an `approvalSecret`, the descriptor also includes an `approvalToken` and can be treated as `SignedPendingToolApproval` for `resumeApproval()`. Use the same `approvalSecret` anywhere the approval may be resumed. Without `approvalSecret`, pending approvals are unsigned and cannot be resumed through `resumeApproval()`. `resumeApproval()` verifies the token, reconstructs the original call id, re-validates the original or edited arguments, and re-runs policy against those arguments. The granted approval only satisfies the original approval prompt when the resumed arguments match the proposed arguments; edited arguments must be allowed by policy. The result sets `executedArgumentsEdited` when the resumed arguments differ from the proposed arguments.
+`pendingApproval` is JSON-serializable and includes the proposed call plus a signed, versioned binding to the principal, tenant, audience, agent, run, toolbox revision, tool-definition revision, policy revision, issue time, expiry, nonce, and replay scope. A valid signature proves descriptor integrity; it does not authorize whoever presents it. `resumeApproval()` also requires the current `requestContext`, consumes the binding once, re-validates the original or edited arguments, and re-runs policy. Expired, revoked, replayed, cross-tenant, cross-principal, and revision-mismatched approvals fail closed.
+
+The built-in approval state store is explicitly process-local. Pass the same storage-backed `ApprovalStateStore` configuration to every toolbox instance that issues, restores, revokes, or resumes approvals across processes, and back it with the same durable database, queue, or key-value store as the approval descriptors themselves. `createDurableApprovalStateStore()` in the example is host code: Armorer defines the contract, but your process owns the durable storage implementation. Without `approvalSecret`, pending approvals are unsigned and cannot be resumed.
+
+A complete `ApprovalStateStore` implementation must implement every method used by `resumeApproval()`, `restoreApproval()`, and `revokeApproval()`:
+
+- `issue(binding)`: validate and record a newly issued binding keyed by `replayScope` and `nonce`; fail if that binding is already issued, reserved, consumed, or revoked.
+- `reserve(binding, context, now)`: atomically validate the binding, match the supplied principal, tenant, owner, authorization, capability, audience, agent, run, toolbox, tool-definition, policy, and approval revisions, then move the binding from `issued` to an in-flight reserved state; fail closed for expired, missing, consumed, revoked, or mismatched bindings.
+- `commit(binding)`: atomically mark a reserved binding as `consumed` after the resumed execution has been admitted, so later replay attempts fail with `already-consumed`.
+- `release(binding)`: return a reserved binding to `issued` when admission is rolled back or the resumed execution does not actually start; if your implementation supports rollback after a just-committed admission, it must restore that same binding rather than minting a new one.
+- `consume(binding, context, now)`: keep this shortcut only where it is still applicable; it must be equivalent to `reserve(binding, context, now)` followed by `commit(binding)` with storage-native atomicity.
+- `revoke(binding)`: atomically move an issued binding to `revoked`; revoking an already consumed binding must fail, and revoking an already revoked binding may be idempotent.
+- `state(binding)`: return `issued`, `consumed`, `revoked`, or `undefined` for the binding key; recovery uses this to restore missing issued bindings without reviving consumed or revoked approvals.
+
+### Request Authority and Execution Projections
+
+A toolbox is a tenant-neutral catalog. Authority belongs to each `execute()` call through `requestContext`; do not bake principals, tenant credentials, or authorization decisions into a reusable toolbox. Armorer freezes the host identity before policy evaluation. A policy decision may return a `capabilities` subset to narrow authority, but it cannot grant capabilities the host did not provide.
+
+General lifecycle snapshots never contain request authority or credentials. Trusted host code can use `executions.inspectPrivileged()` or `handle.privilegedSnapshot()` to read the effective context and its catalog, toolbox, tool-definition, policy, approval, and redaction revisions. Use `projectExecutionSnapshot()` for external output: its versioned projection enforces the requested audience and tenant and drops payloads, credentials, trace context, provider data, and every field without an explicit visibility classification.
 
 ## Agent Integration
 
@@ -575,48 +616,127 @@ The middleware leaves unflagged tools unchanged. For flagged tools, string resul
 
 ## Idempotency
 
-Use `armorer/idempotency` when a tool might be retried by an at-least-once executor. The cache records three outcomes:
+Use `armorer/idempotency` when a tool might be retried by an at-least-once executor. The cache records four outcomes:
 
 - `fresh`: this process executed the tool and recorded the result.
 - `deduped`: a completed result already existed and was returned.
 - `unknown-outcome`: execution started earlier, but no result was recorded.
+- `authorization-required`: a completed result exists, but it was recorded under another policy revision and must not be returned without reauthorization.
 
 ```ts
 import { createToolbox } from 'armorer';
 import { createToolResultCache, withToolboxIdempotency } from 'armorer/idempotency';
 
-const cache = createToolResultCache({ store: durableKeyValueStore });
+// This adapter is atomic only among instances sharing this store object in one process.
+const cache = createToolResultCache({ store: processLocalKeyValueStore });
 const toolbox = createToolbox([chargeCardTool]);
-const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+const requestContext = {
+  authority: {
+    principalId: operator.principalId,
+    tenantId: currentTenant.id,
+    ownerId: operator.ownerId,
+    capabilities: ['tools:execute'],
+    authorizationRevision: operator.authorizationRevision,
+  },
+  audience: 'operator',
+  agentId: 'billing-agent',
+  runId: temporalWorkflowRunId,
+};
+const idempotentToolbox = withToolboxIdempotency(toolbox, {
+  cache,
+  tenantId: currentTenant.id,
+  verifyResolutionReceipt: (receipt) => verifyOperatorSignature(receipt),
+  verifyLegacyResolutionReceipt: (receipt) => verifyLegacyOperatorSignature(receipt),
+});
 
-const result = await idempotentToolbox.execute(
-  {
-    id: 'provider-call-1',
-    name: 'charge-card',
-    arguments: { cents: 2500 },
-  },
-  {
-    idempotencyKey: temporalToolCallId,
-  },
-);
+const call = {
+  id: 'provider-call-1',
+  name: 'charge-card',
+  arguments: { cents: 2500 },
+};
+const result = await idempotentToolbox.execute(call, {
+  idempotencyKey: temporalToolCallId,
+  requestContext,
+});
 
 if (result.idempotency?.outcome === 'unknown-outcome') {
-  // Do not replay blindly. Ask for review before retrying.
+  if (result.idempotency.attemptId) {
+    const signedOperatorReceipt = signResolutionReceipt({
+      version: 1,
+      key: result.idempotency.key,
+      attemptId: result.idempotency.attemptId,
+      tenantId: currentTenant.id,
+      toolRevision: chargeCardTool.id,
+      decision: 'retry',
+      evidence: 'Operator confirmed the provider did not perform the side effect.',
+      authorizedAt: Date.now(),
+      authorizedBy: operator.principalId,
+      nonce: crypto.randomUUID(),
+    });
+
+    await idempotentToolbox.execute(call, {
+      idempotencyKey: temporalToolCallId,
+      resolutionReceipt: signedOperatorReceipt,
+      requestContext,
+    });
+  } else if (result.idempotency.legacyStartedAt !== undefined) {
+    const signedLegacyReceipt = signLegacyResolutionReceipt({
+      version: 1,
+      key: result.idempotency.key,
+      tenantId: currentTenant.id,
+      toolRevision: chargeCardTool.id,
+      toolName: result.toolName,
+      legacyStartedAt: result.idempotency.legacyStartedAt,
+      decision: 'retry',
+      evidence: 'Operator confirmed the provider did not perform the side effect.',
+      authorizedAt: Date.now(),
+      authorizedBy: operator.principalId,
+      nonce: crypto.randomUUID(),
+    });
+
+    await idempotentToolbox.execute(call, {
+      idempotencyKey: temporalToolCallId,
+      legacyResolutionReceipt: signedLegacyReceipt,
+      requestContext,
+    });
+  } else {
+    throw new Error('Cannot resolve an unknown idempotency attempt.');
+  }
 }
 ```
 
-After human review, retry an unknown outcome explicitly:
+An expired lease is still an unknown outcome—it is never evidence that the side effect did not happen. After an authorized operator verifies the external system, retry with a typed resolution receipt bound to the tenant, full tool revision, cache key, and fenced attempt:
 
 ```ts
 await idempotentToolbox.execute(call, {
   idempotencyKey: temporalToolCallId,
-  retryUnknownOutcome: true,
+  resolutionReceipt: signedOperatorReceipt,
+  requestContext,
 });
 ```
 
-If you do not pass `idempotencyKey`, `withToolboxIdempotency()` uses each tool's configured `idempotencyKey` function. Tools without an `idempotencyKey` are not deduped by default; set `requireExplicitKey: false` to use `fullInputKey` for those tools. Caller-supplied keys are useful when an orchestrator already mints a stable key per provider `tool_call_id` and needs retries to reuse that exact key. Armorer scopes the cache entry by tool name, so the same external key cannot dedupe two different tools into one result.
+The direct `withIdempotency()` wrapper uses the same fenced recovery rule. Configure `verifyResolutionReceipt`, then pass the signed receipt through the wrapped tool's typed `execute()` options after the lease expires. The cache atomically replaces only the attempt named by the verified receipt:
 
-The default `createToolResultCache()` serializes `claimStarted()` calls for the same key within a cache instance. For durable stores shared across processes, implement `ToolResultCache.claimStarted()` with compare-and-set semantics. Without that method, Armorer keeps compatibility with the original completed-result cache shape and falls back to a read-then-mark path when `markStarted()` is available. That fallback protects retries after a crashed execution, but only an atomic cache backend can prevent two concurrent processes from claiming the same new key at exactly the same time.
+```ts
+const idempotentCharge = withIdempotency(chargeCardTool, {
+  cache,
+  tenantId: currentTenant.id,
+  verifyResolutionReceipt,
+});
+
+await idempotentCharge.execute(call.arguments, {
+  requestContext,
+  resolutionReceipt: signedOperatorReceipt,
+});
+```
+
+If you do not pass `idempotencyKey`, `withToolboxIdempotency()` uses each tool's configured `idempotencyKey` function. Tools without an `idempotencyKey` are not deduped by default; set `requireExplicitKey: false` to use `fullInputKey` for those tools. Every cache key includes the tenant, full tool revision, tool name, and caller or derived key, so one tenant or tool revision cannot consume another's result.
+
+The operation cache key intentionally excludes request-instance authority fields such as principal, owner, run ID, authorization revision, audience, agent, and capabilities. Those fields can change across a legitimate logical retry. Cache access still requires current request authority, and Armorer rejects request contexts whose tenant does not match the idempotency tenant before reading or returning cached state. Completed toolbox cache hits are also bound to the `policyRevision` that authorized recording the result. If the current policy revision matches, Armorer re-runs the current `beforeExecute` policy before returning the cached result. If the current policy revision differs, Armorer returns `authorization-required` without repeating the side effect.
+
+Legacy stores may contain `started` entries that predate attempt fencing. Those entries surface as `unknown-outcome` with `legacyStartedAt` instead of `attemptId`. Resolve them only with `legacyResolutionReceipt`, verified by `verifyLegacyResolutionReceipt`; the receipt is bound to the same key, tenant, full tool revision, tool name, and decoded legacy `startedAt`, so a stale legacy receipt cannot replay against a later marker. A normal fenced `resolutionReceipt` never authorizes legacy migration, and a legacy receipt never replaces a fenced current entry.
+
+`createToolResultCache()` is deliberately process-local: it serializes claims only among cache instances in the same JavaScript process that share one store object. Distributed hosts must implement the complete `ToolResultCache` contract with storage-native compare-and-set operations for `claimStarted()`, `renewStarted()`, `completeStarted()`, `deleteStarted()`, `replaceUnknownStarted()`, and `replaceLegacyStarted()`. Attempt identifiers fence late completions and cleanup, active work renews a bounded lease up to an absolute deadline, and an authorized retry atomically replaces only the exact unknown attempt named by its receipt. Legacy migration must atomically replace only a still-unfenced started marker that matches the authorized legacy receipt.
 
 ### Fuzzy Tool Name Resolution
 
@@ -959,7 +1079,7 @@ console.log(toolbox.completed, toolbox.activeExecutions); // true, 0
 await pending; // resolves with the normal cancelled ToolResult
 ```
 
-`executions` exposes immutable, monotonically revisioned snapshots for queued, active, waiting, streaming, abort-requested, cleanup-pending, terminal, and unknown-effect work. Each snapshot includes stable execution, call, tool, and owner identifiers plus queue, capacity, deadline, activity, result, and cleanup details when available. Use `inspect()` or `subscribe()` for observation, `locate()` for a stable execution handle, and toolbox `abort()` for scoped cancellation.
+`executions` exposes immutable, monotonically revisioned snapshots for queued, active, waiting, streaming, abort-requested, cleanup-pending, terminal, and unknown-effect work. Each general snapshot includes stable execution, call, tool, and owner identifiers plus queue, capacity, deadline, activity, result, and cleanup details when available. Use `inspect()` or `subscribe()` for tenant-neutral observation, `inspectPrivileged()` for the effective request authority and revision context, `locate()` for a stable execution handle, and toolbox `abort()` for scoped cancellation.
 
 Caller cancellation, execution deadlines, and owner shutdown are composed into the signal exposed through `context.signal`; Armorer never aborts the caller-owned signal itself. Cancellation is a request, not proof that an external effect stopped. If a callback ignores cancellation, the execution remains `cleanup-pending` until the callback settles. A cleanup outcome of `unresolved` becomes `unknown-effect` so shutdown reports do not claim an unverified cleanup.
 

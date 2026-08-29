@@ -34,10 +34,15 @@ import {
 import { createStore } from '@lostgradient/operative/store';
 import { createMockGenerate as createSequentialGenerate } from '@lostgradient/operative/test';
 import { encode } from '@lostgradient/weft';
-import { KEYS, MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
+import { KEYS, MemoryStorage, resolveStorage, textValueStore } from '@lostgradient/weft/storage';
 import type { ConditionalTextValueStore } from '@lostgradient/weft/storage/text-value-store';
 import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
-import { createTool, createToolbox } from 'armorer';
+import {
+  ApprovalBindingError,
+  createProcessLocalApprovalStateStore,
+  createTool,
+  createToolbox,
+} from 'armorer';
 import { createMockTool, createTestToolbox } from 'armorer/test';
 import { afterEach, describe, expect, it, mock, spyOn } from 'bun:test';
 import { Conversation, createConversationHistory, getMessages } from 'conversationalist';
@@ -55,9 +60,14 @@ import {
   createHumanWaitContext,
   defaultSessionPersistenceSleep,
   detachBestEffortPromise,
+  emptyRecoveredStepMetadata,
+  hasRecoverableTransportAuthority,
   isRecoverableScheduledFireInput,
+  isTerminalApprovalBindingError,
   loadExistingScheduledSessionId,
   monitorRecoveredScheduledFire,
+  omitKeysWithPrefix,
+  recoveredRequestContextFromMetadata,
   wireFlowControlSchedulerEvents,
   wireStreamEventTargetFrames,
 } from './create-bureau';
@@ -83,6 +93,25 @@ function createTextStoreProxy(
       overrides.conditionalBatch ??
       ((conditions, operations) => backingStore.conditionalBatch(conditions, operations)),
   };
+}
+
+function persistedApprovalToken(
+  session: Awaited<ReturnType<Bureau['getSession']>>,
+  reviewId: string,
+): string {
+  const overrides = session?.metadata['pendingApprovalOverrides'];
+  if (typeof overrides !== 'object' || overrides === null || Array.isArray(overrides)) {
+    throw new Error('Expected pending approval overrides metadata');
+  }
+  const approval = (overrides as Record<string, unknown>)[reviewId];
+  if (typeof approval !== 'object' || approval === null || Array.isArray(approval)) {
+    throw new Error(`Expected pending approval override for "${reviewId}"`);
+  }
+  const approvalToken = (approval as { approvalToken?: unknown }).approvalToken;
+  if (typeof approvalToken !== 'string') {
+    throw new Error(`Expected persisted approval token for "${reviewId}"`);
+  }
+  return approvalToken;
 }
 
 /** A no-op `next` tool that lets a run take multiple steps. */
@@ -398,6 +427,184 @@ describe('create-bureau helper coverage', () => {
 });
 
 describe('createBureau', () => {
+  it('rebuilds only valid persisted request authority for recovered runs', () => {
+    expect(
+      recoveredRequestContextFromMetadata(
+        {
+          lastRequestAuthorities: {
+            'run-authorized': {
+              agentId: 'per-run-billing-agent',
+              principalId: 'principal-1',
+              tenantId: 'tenant-1',
+              ownerId: 'owner-1',
+              capabilities: ['tools:execute', 'payments:charge'],
+              authorizationRevision: 'authorization-7',
+              audience: 'operator',
+            },
+          },
+        },
+        'run-authorized',
+        'billing-agent',
+      ),
+    ).toEqual({
+      authority: {
+        principalId: 'principal-1',
+        tenantId: 'tenant-1',
+        ownerId: 'owner-1',
+        capabilities: ['tools:execute', 'payments:charge'],
+        authorizationRevision: 'authorization-7',
+      },
+      audience: 'operator',
+      agentId: 'per-run-billing-agent',
+      runId: 'run-authorized',
+    });
+
+    expect(
+      recoveredRequestContextFromMetadata(
+        { lastRequestAuthorities: { 'other-run': {} } },
+        'run-missing',
+        'billing-agent',
+      ),
+    ).toBeUndefined();
+
+    expect(
+      recoveredRequestContextFromMetadata(
+        {
+          lastRequestAuthority: {
+            principalId: 'api-key:legacy',
+            tenantId: 'tenant-1',
+            ownerId: 'owner-1',
+            capabilities: ['tools:execute'],
+            authorizationRevision: 'gateway:api-key:legacy',
+          },
+        },
+        'legacy-run',
+        'billing-agent',
+      ),
+    ).toEqual({
+      authority: {
+        principalId: 'api-key:legacy',
+        tenantId: 'tenant-1',
+        ownerId: 'owner-1',
+        capabilities: ['tools:execute'],
+        authorizationRevision: 'gateway:api-key:legacy',
+      },
+      audience: 'operator',
+      agentId: 'billing-agent',
+      runId: 'legacy-run',
+    });
+    expect(
+      recoveredRequestContextFromMetadata(
+        {
+          lastRequestAuthorities: {
+            'run-malformed': {
+              principalId: 'principal-1',
+              tenantId: 'tenant-1',
+              ownerId: 'owner-1',
+              capabilities: [42],
+              authorizationRevision: 'authorization-7',
+            },
+          },
+        },
+        'run-malformed',
+        'billing-agent',
+      ),
+    ).toBeUndefined();
+
+    const futureDeadline = Date.now() + 60_000;
+    expect(
+      recoveredRequestContextFromMetadata(
+        {
+          lastRequestAuthorities: {
+            'run-deadline': {
+              principalId: 'principal-1',
+              tenantId: 'tenant-1',
+              ownerId: 'owner-1',
+              capabilities: ['tools:execute'],
+              authorizationRevision: 'authorization-7',
+              deadline: futureDeadline,
+            },
+          },
+        },
+        'run-deadline',
+        'billing-agent',
+      )?.deadline,
+    ).toBe(futureDeadline);
+    expect(
+      recoveredRequestContextFromMetadata(
+        {
+          lastRequestAuthorities: {
+            'run-expired': {
+              principalId: 'principal-1',
+              tenantId: 'tenant-1',
+              ownerId: 'owner-1',
+              capabilities: ['tools:execute'],
+              authorizationRevision: 'authorization-7',
+              deadline: Date.now() - 1,
+            },
+          },
+        },
+        'run-expired',
+        'billing-agent',
+      ),
+    ).toBeUndefined();
+  });
+
+  it('does not defer recovery for terminal sessions with transport authority', () => {
+    const authority = {
+      principalId: 'api-key:terminal',
+      tenantId: 'tenant-1',
+      ownerId: 'owner-1',
+      capabilities: ['tools:execute'],
+      authorizationRevision: 'gateway:api-key:terminal',
+    };
+
+    expect(
+      hasRecoverableTransportAuthority({
+        lastRunStatus: 'completed',
+        lastRunId: 'run-terminal',
+        lastRequestAuthority: authority,
+      }),
+    ).toBe(false);
+    expect(
+      hasRecoverableTransportAuthority({
+        lastRunStatus: 'running',
+        lastRunId: 'run-active',
+        lastRequestAuthorities: { 'run-active': authority },
+      }),
+    ).toBe(true);
+    expect(
+      hasRecoverableTransportAuthority({
+        lastRunStatus: 'running',
+        lastRunId: 'run-active',
+        lastRequestAuthorities: {
+          'run-stale': authority,
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it('classifies only terminal approval binding failures as safe to suppress', () => {
+    expect(
+      isTerminalApprovalBindingError(
+        new ApprovalBindingError('Approval binding was revoked.', 'revoked'),
+      ),
+    ).toBe(true);
+    expect(
+      isTerminalApprovalBindingError(
+        new ApprovalBindingError('Approval binding does not match.', 'mismatch'),
+      ),
+    ).toBe(false);
+    expect(isTerminalApprovalBindingError(undefined)).toBe(false);
+    expect(emptyRecoveredStepMetadata()).toEqual({});
+    expect(
+      omitKeysWithPrefix(
+        { 'approval:run-a:call-a': 'remove', 'approval:run-b:call-b': 'keep' },
+        'approval:run-a:',
+      ),
+    ).toEqual({ 'approval:run-b:call-b': 'keep' });
+  });
+
   it('is not ready when no generate function is configured', async () => {
     const bureau = await createBureau();
     expect(bureau.ready).toBe(false);
@@ -1526,6 +1733,16 @@ describe('createBureau', () => {
 
       const run = await bureauA.createRun({ message: 'Recover into the audit trail' });
       await pollUntil(() => bureauAReachedStep1);
+      await bureauA.sessionStore!.update(run.sessionId, (session) => ({
+        ...session!,
+        metadata: {
+          ...session!.metadata,
+          resolvedReviewIds: [
+            `approval:${run.id}:recovered-approval`,
+            `human-wait:${run.id}:recovered-signal`,
+          ],
+        },
+      }));
       bureauA.dispose();
 
       // Observe boot ordering via a spy on `createAuditTrail`. Recovery REATTACHES
@@ -2410,7 +2627,146 @@ describe('createBureau', () => {
     const run = await bureau.createRun({ message: 'Hello' });
     expect(bureau.getRun(run.id)?.status).toBe('running');
 
-    expect(() => bureau.deleteRun(run.id)).toThrow(BureauError);
+    let deletionError: unknown;
+    try {
+      await bureau.deleteRun(run.id);
+    } catch (error) {
+      deletionError = error;
+    }
+    expect(deletionError).toBeInstanceOf(BureauError);
+  });
+
+  it('revokes pending approval bindings before deleting a terminal run', async () => {
+    const backingStore = textValueStore(new MemoryStorage());
+    let deletionPersistenceAttempts = 0;
+    let failNextDeletionPersistence = false;
+    const persistence = createTextStoreProxy(backingStore, {
+      async conditionalBatch(conditions, operations) {
+        if (
+          failNextDeletionPersistence &&
+          operations.some((operation) => operation.key.startsWith('agent-session:'))
+        ) {
+          failNextDeletionPersistence = false;
+          deletionPersistenceAttempts += 1;
+          throw new Error('deletion persistence unavailable');
+        }
+        if (deletionPersistenceAttempts > 0) deletionPersistenceAttempts += 1;
+        return backingStore.conditionalBatch(conditions, operations);
+      },
+    });
+    const baseApprovalStore = createProcessLocalApprovalStateStore();
+    let revocations = 0;
+    const approvalStateStore = {
+      ...baseApprovalStore,
+      async revoke(binding: Parameters<typeof baseApprovalStore.revoke>[0]) {
+        revocations += 1;
+        return baseApprovalStore.revoke(binding);
+      },
+    };
+    const bureau = await createBureau({
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [{ id: 'delete-run-approval', name: 'delete-run-tool', arguments: {} }],
+        },
+      ]),
+      toolbox: createToolbox(
+        [
+          createTool({
+            name: 'delete-run-tool',
+            version: '1.0.0',
+            description: 'Must be revoked when its run is deleted',
+            input: z.object({}),
+            async execute() {
+              return 'unexpected';
+            },
+          }),
+        ],
+        {
+          approvalSecret: 'delete-run-secret',
+          approvalStateStore,
+          policy: {
+            beforeExecute: () => ({
+              allow: false,
+              status: 'needs_approval',
+              reason: 'Operator approval required',
+              action: { message: 'Approve deletion test' },
+            }),
+          },
+        },
+      ) as unknown as Toolbox,
+      stopWhen: stopWhen.toolOutcome('action_required'),
+      persistence,
+      sessionPersistenceSleep: async () => {},
+    });
+    const run = await bureau.createRun({ message: 'Request approval then delete the run' });
+    await waitForRunCompletion(bureau, run.id);
+    expect(bureau.listPendingReviews()).toHaveLength(1);
+
+    failNextDeletionPersistence = true;
+    await bureau.deleteRun(run.id);
+    expect(revocations).toBe(1);
+    expect(deletionPersistenceAttempts).toBe(4);
+    const persistedSession = await bureau.getSession(run.sessionId);
+    expect(persistedSession?.metadata['pendingApprovalOverrides']).toEqual({});
+    expect(persistedSession?.metadata['approvalResolutionStartedIds']).toEqual([]);
+    bureau.dispose();
+  });
+
+  it('revokes persisted approval bindings before deleting their session', async () => {
+    const baseApprovalStore = createProcessLocalApprovalStateStore();
+    let revocations = 0;
+    const approvalStateStore = {
+      ...baseApprovalStore,
+      async revoke(binding: Parameters<typeof baseApprovalStore.revoke>[0]) {
+        revocations += 1;
+        return baseApprovalStore.revoke(binding);
+      },
+    };
+    const bureau = await createBureau({
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [
+            { id: 'delete-session-approval', name: 'delete-session-tool', arguments: {} },
+          ],
+        },
+      ]),
+      toolbox: createToolbox(
+        [
+          createTool({
+            name: 'delete-session-tool',
+            version: '1.0.0',
+            description: 'Must be revoked when its session is deleted',
+            input: z.object({}),
+            async execute() {
+              return 'unexpected';
+            },
+          }),
+        ],
+        {
+          approvalSecret: 'delete-session-secret',
+          approvalStateStore,
+          policy: {
+            beforeExecute: () => ({
+              allow: false,
+              status: 'needs_approval',
+              reason: 'Operator approval required',
+              action: { message: 'Approve deletion test' },
+            }),
+          },
+        },
+      ) as unknown as Toolbox,
+      stopWhen: stopWhen.toolOutcome('action_required'),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+    const run = await bureau.createRun({ message: 'Request approval then delete the session' });
+    await waitForRunCompletion(bureau, run.id);
+    expect(bureau.listPendingReviews()).toHaveLength(1);
+
+    await bureau.deleteSession(run.sessionId);
+    expect(revocations).toBe(1);
+    bureau.dispose();
   });
 
   it('throws NOT_CONFIGURED for session APIs when persistence is not configured', async () => {
@@ -2442,6 +2798,8 @@ describe('createBureau', () => {
 
     const session = await bureau.getSession(run.sessionId);
     expect(session?.id).toBe(run.sessionId);
+
+    await bureau.deleteRun(run.id);
 
     await bureau.deleteSession(run.sessionId);
     const deleted = await bureau.getSession(run.sessionId);
@@ -2616,6 +2974,27 @@ describe('createBureau', () => {
     });
 
     expect(bureau.getTools()).toEqual([]);
+  });
+
+  it('returns run reports for unknown, active, and completed runs', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    expect(bureau.getRunReport('missing-report-run')).toBeUndefined();
+
+    const active = createParkedActiveRun();
+    bureau.store.register(active.activeRun, 'active-report-run');
+    expect(bureau.getRunReport('active-report-run')).toMatchObject({
+      runId: 'active-report-run',
+    });
+
+    const completed = await bureau.createRun({ message: 'Completed report' });
+    await waitForRunCompletion(bureau, completed.id);
+    expect(bureau.getRunReport(completed.id)?.runId).toBe(completed.id);
+
+    bureau.dispose();
   });
 
   it('does not abort run setup when a subscribeLiveFrames listener throws (regression PRRT_kwDORvupsc6PxP_w)', async () => {
@@ -3830,6 +4209,134 @@ describe('createBureau session signal/update/query with terminal sessions', () =
   });
 });
 
+describe('createBureau session signal authority revalidation', () => {
+  it('fails closed for transport-issued authority without a validator on live runs', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+    });
+    try {
+      const error = await bureau
+        .createRun({
+          message: 'Do not admit unvalidated authority',
+          requestContext: {
+            authority: {
+              principalId: 'api-key:missing-validator',
+              tenantId: 'tenant-a',
+              ownerId: 'owner-a',
+              capabilities: ['tools:execute'],
+              authorizationRevision: 'gateway:api-key:missing-validator',
+            },
+            audience: 'tenant',
+          },
+        })
+        .then(
+          () => undefined,
+          (rejection) => rejection,
+        );
+      expect(error).toBeInstanceOf(BureauError);
+      expect((error as BureauError).code).toBe('CONFLICT');
+      expect(bureau.listRuns()).toHaveLength(0);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('rejects stale transport authority before flow-control admission or session persistence', async () => {
+    let flowControlCalls = 0;
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      requestAuthorityValidator: () => false,
+      flowControl: {
+        concurrency: {
+          limit: 1,
+          key() {
+            flowControlCalls += 1;
+            return 'all-runs';
+          },
+        },
+      },
+    });
+    try {
+      const error = await bureau
+        .createRun({
+          message: 'Do not admit stale authority',
+          sessionId: 'stale-authority-session',
+          requestContext: {
+            authority: {
+              principalId: 'api-key:stale',
+              tenantId: 'tenant-a',
+              ownerId: 'owner-a',
+              capabilities: ['tools:execute'],
+              authorizationRevision: 'gateway:api-key:stale',
+            },
+            audience: 'tenant',
+          },
+        })
+        .then(
+          () => undefined,
+          (rejection) => rejection,
+        );
+
+      expect(error).toBeInstanceOf(BureauError);
+      expect((error as BureauError).code).toBe('CONFLICT');
+      expect(flowControlCalls).toBe(0);
+      expect(bureau.listRuns()).toHaveLength(0);
+      expect(await bureau.getSession('stale-authority-session')).toBeUndefined();
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('revalidates captured authority before delivering a direct session signal', async () => {
+    let authorityCurrent = true;
+    const bureau = await createBureau({
+      generate: () => new Promise<never>(() => {}),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+      requestAuthorityValidator: () => authorityCurrent,
+    });
+    const run = await bureau.createRun({
+      message: 'Wait for a signal',
+      requestContext: {
+        authority: {
+          principalId: 'api-key:revoked',
+          tenantId: 'tenant-a',
+          ownerId: 'owner-a',
+          capabilities: ['tools:execute'],
+          authorizationRevision: 'gateway:api-key:revoked',
+        },
+        audience: 'tenant',
+      },
+    });
+
+    await pollUntil(async () => {
+      const session = await bureau.getSession(run.sessionId);
+      return session?.metadata['lastRunStatus'] === 'running';
+    });
+    authorityCurrent = false;
+    const error = await bureau.signalSession(run.sessionId, 'human-response').then(
+      () => undefined,
+      (rejection) => rejection,
+    );
+
+    expect(error).toBeInstanceOf(BureauError);
+    expect((error as BureauError).code).toBe('CONFLICT');
+    const updateError = await bureau.updateSession(run.sessionId, 'human-update').then(
+      () => undefined,
+      (rejection) => rejection,
+    );
+    expect(updateError).toBeInstanceOf(BureauError);
+    expect((updateError as BureauError).code).toBe('CONFLICT');
+    bureau.abortRun(run.id);
+    bureau.dispose();
+  });
+});
+
 // ── AB-20: review queue ──────────────────────────────────────────────
 
 /**
@@ -3875,6 +4382,7 @@ function createNeedsApprovalToolbox(approvalSecret: string, charges: number[]) {
     [
       createTool({
         name: 'charge-card',
+        version: '1.0.0',
         description: 'Charge a payment card',
         input: z.object({ cents: z.number() }),
         async execute({ cents }) {
@@ -3911,6 +4419,7 @@ function createRegatingApprovalToolbox(approvalSecret: string, charges: number[]
     [
       createTool({
         name: 'charge-card',
+        version: '1.0.0',
         description: 'Charge a payment card',
         input: z.object({ cents: z.number() }),
         async execute({ cents }) {
@@ -3936,9 +4445,295 @@ function createRegatingApprovalToolbox(approvalSecret: string, charges: number[]
   ) as unknown as Toolbox;
 }
 
+function createDenyingResumeApprovalToolbox(approvalSecret: string, charges: number[]) {
+  let evaluationCount = 0;
+  return createToolbox(
+    [
+      createTool({
+        name: 'charge-card',
+        version: '1.0.0',
+        description: 'Charge a payment card',
+        input: z.object({ cents: z.number() }),
+        policy: {
+          beforeExecute() {
+            evaluationCount += 1;
+            return evaluationCount === 1
+              ? { status: 'allow' }
+              : { status: 'deny', reason: 'Current policy denies this charge' };
+          },
+        },
+        async execute({ cents }) {
+          charges.push(cents);
+          return { charged: cents };
+        },
+      }),
+    ],
+    {
+      approvalSecret,
+      policy: {
+        beforeExecute() {
+          return {
+            status: 'needs_approval',
+            reason: 'Operator approval required',
+            action: { message: 'Approve charge' },
+          };
+        },
+      },
+    },
+  ) as unknown as Toolbox;
+}
+
 describe('createBureau review queue (AB-20)', () => {
+  it('restores terminal-session approval reviews without durable run recovery', async () => {
+    const storage = await resolveStorage({ type: 'memory' });
+    const sessionStore = createSessionStore(textValueStore(storage));
+    const runId = 'run-terminal-review';
+    const reviewId = `approval:${runId}:call-terminal`;
+    const secondReviewId = `approval:${runId}:call-terminal-2`;
+    const approval = {
+      toolName: 'charge-card',
+      arguments: { cents: 250 },
+      approvalToken: 'persisted-approval-token',
+      action: { message: 'Approve charge' },
+    };
+    await sessionStore.save(
+      createAgentSession({
+        id: 'session-terminal-review',
+        agentName: 'terminal-agent',
+        conversationHistory: createConversationHistory({ id: 'session-terminal-review' }),
+        metadata: {
+          lastRunId: runId,
+          lastRunStatus: 'completed',
+          lastRequestAuthorities: {
+            [runId]: {
+              principalId: 'principal-terminal',
+              tenantId: 'bureau',
+              ownerId: 'terminal-agent',
+              capabilities: ['tools:execute'],
+              authorizationRevision: 'bureau:1',
+            },
+          },
+          pendingApprovalOverrides: {
+            [reviewId]: {
+              ...approval,
+              callId: 'call-terminal',
+            },
+            [secondReviewId]: {
+              ...approval,
+              callId: 'call-terminal-2',
+            },
+          },
+        },
+      }),
+    );
+
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage,
+      durableExecution: true,
+    });
+    try {
+      const reviews = bureau.listPendingReviews();
+      expect(reviews).toHaveLength(2);
+      expect(reviews[0]).toMatchObject({
+        id: reviewId,
+        kind: 'tool-approval',
+        runId,
+        sessionId: 'session-terminal-review',
+        agentName: 'terminal-agent',
+        approval: expect.objectContaining({
+          callId: 'call-terminal',
+          toolName: 'charge-card',
+        }),
+      });
+      await bureau.resolveReview({ id: reviewId, decision: 'deny', principal: 'operator-a' });
+      expect(bureau.listPendingReviews().map((review) => review.id)).toEqual([secondReviewId]);
+      await bureau.resolveReview({ id: secondReviewId, decision: 'deny', principal: 'operator-a' });
+      expect(bureau.listPendingReviews()).toHaveLength(0);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('restores pending approvals for every terminal run retained by a reused session', async () => {
+    const storage = await resolveStorage({ type: 'memory' });
+    const sessionStore = createSessionStore(textValueStore(storage));
+    const sessionId = 'session-reused-for-approvals';
+    const olderRunId = 'run-older-approval';
+    const newestRunId = 'run-newest-approval';
+    const olderReviewId = `approval:${olderRunId}:older-call`;
+    const newestReviewId = `approval:${newestRunId}:newest-call`;
+    const approval = {
+      toolName: 'charge-card',
+      arguments: { cents: 250 },
+      approvalToken: 'persisted-approval-token',
+      action: { message: 'Approve charge' },
+    };
+    await sessionStore.save(
+      createAgentSession({
+        id: sessionId,
+        agentName: 'terminal-agent',
+        conversationHistory: createConversationHistory({ id: sessionId }),
+        metadata: {
+          lastRunId: newestRunId,
+          lastRunStatus: 'completed',
+          lastRequestAuthorities: {
+            [olderRunId]: {
+              agentId: 'older-run-agent',
+              principalId: 'principal-older',
+              tenantId: 'bureau',
+              ownerId: 'terminal-agent',
+              capabilities: ['tools:execute'],
+              authorizationRevision: 'bureau:1',
+            },
+            [newestRunId]: {
+              agentId: 'newest-run-agent',
+              principalId: 'principal-newest',
+              tenantId: 'bureau',
+              ownerId: 'terminal-agent',
+              capabilities: ['tools:execute'],
+              authorizationRevision: 'bureau:1',
+            },
+          },
+          pendingApprovalOverrides: {
+            [olderReviewId]: { ...approval, callId: 'older-call' },
+            [newestReviewId]: { ...approval, callId: 'newest-call' },
+          },
+        },
+      }),
+    );
+
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage,
+      durableExecution: true,
+    });
+    try {
+      expect(
+        bureau
+          .listPendingReviews()
+          .map((review) => review.id)
+          .sort(),
+      ).toEqual([olderReviewId, newestReviewId].sort());
+      expect(bureau.listPendingReviews().every((review) => review.sessionId === sessionId)).toBe(
+        true,
+      );
+      expect(
+        Object.fromEntries(
+          bureau.listPendingReviews().map((review) => [review.runId, review.agentName]),
+        ),
+      ).toEqual({
+        [olderRunId]: 'older-run-agent',
+        [newestRunId]: 'newest-run-agent',
+      });
+      await bureau.deleteSession(sessionId);
+      expect(bureau.listPendingReviews()).toHaveLength(0);
+      expect(
+        bureau.resolveReview({ id: olderReviewId, decision: 'approve', principal: 'operator-a' }),
+      ).rejects.toThrow(`No pending review with id "${olderReviewId}"`);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('prunes terminal approvals whose persisted request authority has expired', async () => {
+    const storage = await resolveStorage({ type: 'memory' });
+    const sessionStore = createSessionStore(textValueStore(storage));
+    const runId = 'run-expired-terminal-review';
+    const reviewId = `approval:${runId}:expired-call`;
+    await sessionStore.save(
+      createAgentSession({
+        id: 'session-expired-terminal-review',
+        agentName: 'terminal-agent',
+        conversationHistory: createConversationHistory({ id: 'session-expired-terminal-review' }),
+        metadata: {
+          lastRunId: runId,
+          lastRunStatus: 'completed',
+          lastRequestAuthorities: {
+            [runId]: {
+              principalId: 'principal-expired',
+              tenantId: 'bureau',
+              ownerId: 'terminal-agent',
+              capabilities: ['tools:execute'],
+              authorizationRevision: 'bureau:1',
+              deadline: Date.now() - 1,
+            },
+          },
+          pendingApprovalOverrides: {
+            [reviewId]: {
+              callId: 'expired-call',
+              toolName: 'charge-card',
+              arguments: { cents: 500 },
+              approvalToken: 'expired-token',
+            },
+          },
+        },
+      }),
+    );
+
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage,
+      durableExecution: true,
+    });
+    try {
+      expect(bureau.listPendingReviews()).toHaveLength(0);
+      const session = await bureau.getSession('session-expired-terminal-review');
+      expect(session?.metadata['pendingApprovalOverrides']).not.toHaveProperty(reviewId);
+      expect(session?.metadata['lastRequestAuthorities']).not.toHaveProperty(runId);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('restores terminal approval authority, toolbox, and binding state across restart', async () => {
+    const storage = await resolveStorage({ type: 'memory' });
+    const charges: number[] = [];
+    const bureauA = await createBureau({
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [{ id: 'restart-call', name: 'charge-card', arguments: { cents: 375 } }],
+        },
+      ]),
+      toolbox: createNeedsApprovalToolbox('restart-approval-secret', charges),
+      storage,
+      durableExecution: true,
+      stopWhen: stopWhen.toolOutcome('action_required'),
+    });
+    const run = await bureauA.createRun({ message: 'Persist approval for restart' });
+    await waitForRunCompletion(bureauA, run.id);
+    expect(bureauA.listPendingReviews()).toHaveLength(1);
+    await bureauA.dispose();
+
+    const bureauB = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createNeedsApprovalToolbox('restart-approval-secret', charges),
+      storage,
+      durableExecution: true,
+      stopWhen: stopWhen.noToolCalls(),
+    });
+    try {
+      const [review] = bureauB.listPendingReviews();
+      expect(review).toBeDefined();
+      const outcome = await bureauB.resolveReview({
+        id: review!.id,
+        decision: 'approve',
+        principal: 'operator-restart',
+      });
+      expect(outcome.decision).toBe('approve');
+      expect(charges).toEqual([375]);
+    } finally {
+      await bureauB.dispose();
+    }
+  });
+
   it('listPendingReviews surfaces a tool call parked on needs_approval', async () => {
     const charges: number[] = [];
+    const persistence = textValueStore(new MemoryStorage());
     const bureau = await createBureau({
       generate: createSequentialGenerate([
         {
@@ -3948,6 +4743,7 @@ describe('createBureau review queue (AB-20)', () => {
       ]),
       toolbox: createNeedsApprovalToolbox('test-secret', charges),
       stopWhen: stopWhen.toolOutcome('action_required'),
+      persistence,
     });
 
     const run = await bureau.createRun({ message: 'Charge the customer' });
@@ -3963,6 +4759,18 @@ describe('createBureau review queue (AB-20)', () => {
     expect(review!.approval.toolName).toBe('charge-card');
     expect(review!.approval.arguments).toEqual({ cents: 500 });
     expect(review!.approval.approvalToken).toEqual(expect.any(String));
+    const persistedSession = await bureau.getSession(run.sessionId);
+    expect(persistedSession?.metadata['pendingApprovalOverrides']).toMatchObject({
+      [review!.id]: expect.objectContaining({ approvalToken: review!.approval.approvalToken }),
+    });
+    expect(persistedSession?.metadata['lastRequestAuthorities']).toMatchObject({
+      [run.id]: expect.objectContaining({
+        agentId: 'bureau',
+        principalId: expect.any(String),
+        tenantId: expect.any(String),
+        ownerId: expect.any(String),
+      }),
+    });
     expect(review!.ageMilliseconds).toBeGreaterThanOrEqual(0);
     expect(charges).toEqual([]); // not yet executed
 
@@ -4059,6 +4867,7 @@ describe('createBureau review queue (AB-20)', () => {
 
   it('resolveReview approve resumes a tool-approval and executes the tool for real', async () => {
     const charges: number[] = [];
+    let validatorCalls = 0;
     const bureau = await createBureau({
       generate: createSequentialGenerate([
         {
@@ -4068,6 +4877,10 @@ describe('createBureau review queue (AB-20)', () => {
       ]),
       toolbox: createNeedsApprovalToolbox('test-secret-2', charges),
       stopWhen: stopWhen.toolOutcome('action_required'),
+      requestAuthorityValidator: () => {
+        validatorCalls += 1;
+        return false;
+      },
     });
 
     const run = await bureau.createRun({ message: 'Charge the customer' });
@@ -4088,10 +4901,524 @@ describe('createBureau review queue (AB-20)', () => {
       charged: 750,
     });
     expect(charges).toEqual([750]); // the tool genuinely ran
+    expect(validatorCalls).toBe(0);
 
     // Resolved reviews disappear from the queue.
     expect(bureau.listPendingReviews()).toHaveLength(0);
 
+    bureau.dispose();
+  });
+
+  it('revalidates captured request authority before approving a delayed tool call', async () => {
+    const charges: number[] = [];
+    let authorityCurrent = true;
+    const bureau = await createBureau({
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [
+            { id: 'stale-authority-call', name: 'charge-card', arguments: { cents: 500 } },
+          ],
+        },
+      ]),
+      toolbox: createNeedsApprovalToolbox('stale-authority-secret', charges),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+    });
+    bureau.setRequestAuthorityValidator(() => authorityCurrent);
+    const run = await bureau.createRun({
+      message: 'Charge with authority that will be revoked',
+      requestContext: {
+        authority: {
+          principalId: 'api-key:revoked',
+          tenantId: 'bureau',
+          ownerId: 'bureau',
+          capabilities: ['tools:execute'],
+          authorizationRevision: 'gateway:api-key:revoked',
+        },
+        audience: 'operator',
+      },
+    });
+    await waitForRunCompletion(bureau, run.id);
+    const [review] = bureau.listPendingReviews();
+    authorityCurrent = false;
+
+    const resolution = bureau.resolveReview({
+      id: review!.id,
+      decision: 'approve',
+      principal: 'api-key:reviewer',
+    });
+    expect(resolution).rejects.toThrow('no longer current');
+    expect(charges).toEqual([]);
+    expect(bureau.listPendingReviews()).toHaveLength(1);
+    bureau.dispose();
+  });
+
+  it('exposes the construction-time request authority validator for transport composition', async () => {
+    const constructionValidator = () => true;
+    const replacementValidator = () => false;
+    const bureau = await createBureau({ requestAuthorityValidator: constructionValidator });
+
+    try {
+      expect(bureau.getRequestAuthorityValidator()).toBe(constructionValidator);
+
+      bureau.setRequestAuthorityValidator(replacementValidator);
+
+      expect(bureau.getRequestAuthorityValidator()).toBe(replacementValidator);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('reports deferred durable recovery failures after the authority validator is attached', async () => {
+    const storage = new MemoryStorage();
+    const sessionStore = createSessionStore(textValueStore(storage));
+    await sessionStore.save(
+      createAgentSession({
+        id: 'deferred-authority-recovery',
+        agentName: 'bureau',
+        conversationHistory: createConversationHistory({ id: 'deferred-authority-recovery' }),
+        metadata: {
+          lastRunId: 'run-deferred-authority',
+          lastRunStatus: 'running',
+          lastRequestAuthorities: {
+            'run-deferred-authority': {
+              principalId: 'api-key:deferred',
+              tenantId: 'bureau',
+              ownerId: 'bureau',
+              capabilities: ['tools:execute'],
+              authorizationRevision: 'gateway:api-key:deferred',
+            },
+          },
+        },
+      }),
+    );
+    const probe = await createRuntimeComposition({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+    const enginePrototype = Object.getPrototypeOf(probe.durable!.engine) as {
+      recoverAll: () => Promise<unknown[]>;
+    };
+    probe.durable!.engine[Symbol.dispose]?.();
+    probe.disposeStorage?.();
+    const recoverAllSpy = spyOn(enginePrototype, 'recoverAll').mockRejectedValue(
+      new Error('deferred recovery unavailable'),
+    );
+    const diagnostics: string[] = [];
+
+    try {
+      const bureau = await createBureau({
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+        storage,
+        durableExecution: true,
+        onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.message),
+      });
+
+      try {
+        expect(recoverAllSpy).not.toHaveBeenCalled();
+        const recoveryBarrier = bureau.waitForRecovery?.();
+        expect(recoveryBarrier).toBeDefined();
+        expect(bureau.waitForRecovery?.()).toBe(recoveryBarrier);
+        let recoverySettled = false;
+        void recoveryBarrier!.then(() => {
+          recoverySettled = true;
+        });
+        await Promise.resolve();
+        expect(recoverySettled).toBe(false);
+        bureau.setRequestAuthorityValidator(() => true);
+        await recoveryBarrier;
+        expect(recoverySettled).toBe(true);
+        expect(diagnostics).toContainEqual(
+          expect.stringContaining(
+            'Deferred durable run recovery failed: deferred recovery unavailable',
+          ),
+        );
+      } finally {
+        await bureau.dispose();
+      }
+    } finally {
+      recoverAllSpy.mockRestore();
+    }
+  });
+
+  it('scans every session page before starting recovery', async () => {
+    const storage = new MemoryStorage();
+    const sessionStore = createSessionStore(textValueStore(storage));
+    for (let index = 0; index < 100; index += 1) {
+      await sessionStore.save(
+        createAgentSession({
+          id: `session-page-${index}`,
+          agentName: 'bureau',
+          conversationHistory: createConversationHistory({ id: `session-page-${index}` }),
+          metadata: { lastRunStatus: 'completed' },
+        }),
+      );
+    }
+    await sessionStore.save(
+      createAgentSession({
+        id: 'session-page-100',
+        agentName: 'bureau',
+        conversationHistory: createConversationHistory({ id: 'session-page-100' }),
+        metadata: {
+          lastRunId: 'run-page-100',
+          lastRunStatus: 'running',
+          lastRequestAuthorities: {
+            'run-page-100': {
+              principalId: 'api-key:page-100',
+              tenantId: 'tenant-a',
+              ownerId: 'bureau',
+              capabilities: ['tools:execute'],
+              authorizationRevision: 'gateway:api-key:page-100',
+            },
+          },
+        },
+      }),
+    );
+    const probe = await createRuntimeComposition({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+    const enginePrototype = Object.getPrototypeOf(probe.durable!.engine) as {
+      recoverAll: () => Promise<unknown[]>;
+    };
+    probe.durable!.engine[Symbol.dispose]?.();
+    probe.disposeStorage?.();
+    const recoverAllSpy = spyOn(enginePrototype, 'recoverAll').mockResolvedValue([]);
+    try {
+      const bureau = await createBureau({
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+        storage,
+        durableExecution: true,
+      });
+      try {
+        expect(recoverAllSpy).not.toHaveBeenCalled();
+        bureau.setRequestAuthorityValidator(() => true);
+        await bureau.waitForRecovery?.();
+        expect(recoverAllSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        await bureau.dispose();
+      }
+    } finally {
+      recoverAllSpy.mockRestore();
+    }
+  });
+
+  it('does not defer recovery forever when session inspection fails with a validator', async () => {
+    const storage = new MemoryStorage();
+    const sessionStore = createSessionStore(textValueStore(storage));
+    await sessionStore.save(
+      createAgentSession({
+        id: 'inspection-failure-session',
+        agentName: 'bureau',
+        conversationHistory: createConversationHistory({ id: 'inspection-failure-session' }),
+        metadata: { lastRunStatus: 'completed' },
+      }),
+    );
+    let scanCalls = 0;
+    const originalGet = storage.get.bind(storage);
+    (storage as unknown as { get: (key: string) => Promise<unknown> }).get = async (key) => {
+      if (key.includes('agent-session')) {
+        scanCalls += 1;
+        throw new Error('session inspection unavailable');
+      }
+      return originalGet(key);
+    };
+    const diagnostics: string[] = [];
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage,
+      durableExecution: true,
+      requestAuthorityValidator: () => true,
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.message),
+    });
+    try {
+      await bureau.waitForRecovery?.();
+      expect(scanCalls).toBeGreaterThan(0);
+      expect(diagnostics).toContainEqual(
+        expect.stringContaining('continuing with the configured authority validator'),
+      );
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('reports durable recovery failures during Bureau-origin boot', async () => {
+    const probe = await createRuntimeComposition({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+    const enginePrototype = Object.getPrototypeOf(probe.durable!.engine) as {
+      recoverAll: () => Promise<unknown[]>;
+    };
+    probe.durable!.engine[Symbol.dispose]?.();
+    probe.disposeStorage?.();
+    const recoverAllSpy = spyOn(enginePrototype, 'recoverAll').mockRejectedValue(
+      new Error('boot recovery unavailable'),
+    );
+    const diagnostics: string[] = [];
+
+    try {
+      const bureau = await createBureau({
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'memory' },
+        durableExecution: true,
+        onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.message),
+      });
+
+      try {
+        expect(diagnostics).toContainEqual(
+          expect.stringContaining(
+            'Durable run recovery failed during boot: boot recovery unavailable',
+          ),
+        );
+      } finally {
+        await bureau.dispose();
+      }
+    } finally {
+      recoverAllSpy.mockRestore();
+    }
+  });
+
+  it('durably prunes approvals and request authority when approval restoration is permanently invalid', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-stale-approval-recovery-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const approvalSecret = 'expired-recovery-approval-secret';
+    const charges: number[] = [];
+    try {
+      let bureauAReachedStep1 = false;
+      const bureauA = await createBureau({
+        generate: async ({ step }) => {
+          if (step === 0) {
+            return {
+              content: '',
+              toolCalls: [
+                { id: 'expired-recovery-call', name: 'charge-card', arguments: { cents: 875 } },
+              ],
+            };
+          }
+          bureauAReachedStep1 = true;
+          return new Promise<never>(() => {});
+        },
+        toolbox: createNeedsApprovalToolbox(approvalSecret, charges),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      const run = await bureauA.createRun({ message: 'Persist an approval that will expire' });
+      await pollUntil(() => bureauAReachedStep1);
+      const reviewId = `approval:${run.id}:expired-recovery-call`;
+      const beforeRecovery = await bureauA.getSession(run.sessionId);
+      expect(beforeRecovery?.metadata['pendingApprovalOverrides']).toMatchObject({
+        [reviewId]: expect.objectContaining({ approvalToken: expect.any(String) }),
+      });
+      expect(beforeRecovery?.metadata['lastRequestAuthorities']).toMatchObject({
+        [run.id]: expect.objectContaining({ authorizationRevision: 'bureau:1' }),
+      });
+
+      bureauA.dispose();
+
+      const diagnostics: string[] = [];
+      const bureauB = await createBureau({
+        generate: async () => ({
+          content: 'Recovered after stale approval pruning',
+          toolCalls: [],
+        }),
+        toolbox: createToolbox(
+          [
+            createTool({
+              name: 'charge-card',
+              version: '1.0.0',
+              description: 'Charge a payment card',
+              input: z.object({ cents: z.number() }),
+              async execute({ cents }) {
+                charges.push(cents);
+                return { charged: cents };
+              },
+            }),
+          ],
+          {
+            approvalSecret,
+            approvalNow: () => Date.now() + 10 * 60_000,
+            policy: {
+              beforeExecute() {
+                return {
+                  allow: false,
+                  status: 'needs_approval',
+                  reason: 'Operator approval required',
+                  action: { message: 'Approve charge' },
+                };
+              },
+            },
+          },
+        ) as unknown as Toolbox,
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+        onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.message),
+      });
+
+      try {
+        const restoredInvalidApproval = await pollUntil(() =>
+          diagnostics.some((message) =>
+            message.includes(`Failed to restore approval binding for "${reviewId}"`),
+          ),
+        );
+        expect(restoredInvalidApproval).toBe(true);
+        const afterRecovery = await bureauB.getSession(run.sessionId);
+        expect(afterRecovery?.metadata['pendingApprovalOverrides']).not.toHaveProperty(reviewId);
+        expect(afterRecovery?.metadata['lastRequestAuthorities']).not.toHaveProperty(run.id);
+        expect(bureauB.listPendingReviews()).toHaveLength(0);
+        expect(charges).toEqual([]);
+      } finally {
+        bureauB.dispose();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('retries approval resolution persistence after a transient cleanup failure', async () => {
+    const backingStore = textValueStore(new MemoryStorage());
+    let failedSessionUpdatesRemaining = 0;
+    const persistence = createTextStoreProxy(backingStore, {
+      async conditionalBatch(conditions, operations) {
+        if (
+          failedSessionUpdatesRemaining > 0 &&
+          operations.some((operation) => operation.key.startsWith('agent-session:')) &&
+          JSON.stringify(operations).includes('resolvedReviewIds')
+        ) {
+          failedSessionUpdatesRemaining -= 1;
+          throw new Error('override cleanup unavailable');
+        }
+        return backingStore.conditionalBatch(conditions, operations);
+      },
+    });
+    const diagnostics: string[] = [];
+    const charges: number[] = [];
+    const bureau = await createBureau({
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [{ id: 'cleanup-call', name: 'charge-card', arguments: { cents: 425 } }],
+        },
+      ]),
+      toolbox: createNeedsApprovalToolbox('cleanup-secret', charges),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+      persistence,
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.message),
+    });
+
+    const run = await bureau.createRun({ message: 'Charge despite cleanup storage failure' });
+    await waitForRunCompletion(bureau, run.id);
+    const [review] = bureau.listPendingReviews();
+    expect(review).toBeDefined();
+    failedSessionUpdatesRemaining = 3;
+
+    const resolutionError = await bureau
+      .resolveReview({
+        id: review!.id,
+        decision: 'approve',
+        principal: 'api-key:reviewer-cleanup',
+        reason: 'approved after inspection',
+      })
+      .then(
+        () => undefined,
+        (error) => error,
+      );
+    expect(resolutionError).toBeInstanceOf(Error);
+    expect((resolutionError as Error).message).toContain('override cleanup unavailable');
+
+    expect(charges).toEqual([425]);
+    expect(bureau.listPendingReviews()).toHaveLength(0);
+
+    const persistedSession = await bureau.getSession(run.sessionId);
+    expect(persistedSession?.metadata['approvalResolutionStartedIds']).toContain(review!.id);
+    expect(persistedSession?.metadata['pendingApprovalOverrides']).toHaveProperty(review!.id);
+    expect(diagnostics).toEqual([]);
+    await bureau.dispose();
+
+    const restartedBureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createNeedsApprovalToolbox('cleanup-secret', charges),
+      persistence,
+    });
+    try {
+      expect(restartedBureau.listPendingReviews()).toHaveLength(0);
+      expect(charges).toEqual([425]);
+      const restartedResolutionError = await restartedBureau
+        .resolveReview({
+          id: review!.id,
+          decision: 'approve',
+          principal: 'api-key:reviewer-cleanup',
+        })
+        .then(
+          () => undefined,
+          (error) => error,
+        );
+      expect(restartedResolutionError).toMatchObject({ code: 'NOT_FOUND' });
+      expect(charges).toEqual([425]);
+    } finally {
+      await restartedBureau.dispose();
+    }
+  });
+
+  it('retries an initial approval binding persistence failure before exposing the live review', async () => {
+    const backingStore = textValueStore(new MemoryStorage());
+    let failedApprovalPersistence = false;
+    const persistence = createTextStoreProxy(backingStore, {
+      async conditionalBatch(conditions, operations) {
+        if (
+          !failedApprovalPersistence &&
+          JSON.stringify(operations).includes('pendingApprovalOverrides')
+        ) {
+          failedApprovalPersistence = true;
+          throw new Error('approval binding persistence unavailable');
+        }
+        return backingStore.conditionalBatch(conditions, operations);
+      },
+    });
+    const diagnostics: string[] = [];
+    const bureau = await createBureau({
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [{ id: 'persist-call', name: 'charge-card', arguments: { cents: 725 } }],
+        },
+      ]),
+      toolbox: createNeedsApprovalToolbox('persist-secret', []),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+      persistence,
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.message),
+      sessionPersistenceSleep: async () => {},
+    });
+
+    const run = await bureau.createRun({
+      message: 'Keep the live approval after persistence fails',
+    });
+    await waitForRunCompletion(bureau, run.id);
+
+    expect(failedApprovalPersistence).toBe(true);
+    expect(bureau.listPendingReviews()).toHaveLength(1);
+    const persistedSession = await bureau.getSession(run.sessionId);
+    expect(persistedSession?.metadata['pendingApprovalOverrides']).toHaveProperty(
+      bureau.listPendingReviews()[0]!.id,
+    );
+    expect(diagnostics).toEqual([]);
     bureau.dispose();
   });
 
@@ -4112,6 +5439,7 @@ describe('createBureau review queue (AB-20)', () => {
       ]),
       toolbox: createRegatingApprovalToolbox('test-secret-3', charges),
       stopWhen: stopWhen.toolOutcome('action_required'),
+      storage: { type: 'memory' },
     });
 
     const run = await bureau.createRun({ message: 'Charge the customer' });
@@ -4119,6 +5447,10 @@ describe('createBureau review queue (AB-20)', () => {
 
     const [review] = bureau.listPendingReviews();
     expect(review).toBeDefined();
+    await bureau.sessionStore!.update(run.sessionId, (session) => ({
+      ...session!,
+      metadata: { ...session!.metadata, resolvedReviewIds: [review!.id] },
+    }));
 
     const outcome = await bureau.resolveReview({
       id: review!.id,
@@ -4133,6 +5465,232 @@ describe('createBureau review queue (AB-20)', () => {
     const stillPending = bureau.listPendingReviews();
     expect(stillPending).toHaveLength(1);
     expect(stillPending[0]!.id).toBe(review!.id);
+    const persistedSession = await bureau.getSession(run.sessionId);
+    expect(persistedSession?.metadata['pendingApprovalOverrides']).toMatchObject({
+      [review!.id]: expect.objectContaining({ approvalToken: expect.any(String) }),
+    });
+
+    bureau.dispose();
+  });
+
+  it('keeps a review pending when approval resume fails before execution admission', async () => {
+    const charges: number[] = [];
+    const bureau = await createBureau({
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [{ id: 'denied-call', name: 'charge-card', arguments: { cents: 900 } }],
+        },
+      ]),
+      toolbox: createDenyingResumeApprovalToolbox('denied-resume-secret', charges),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+      storage: { type: 'memory' },
+    });
+
+    const run = await bureau.createRun({ message: 'Charge the customer' });
+    await waitForRunCompletion(bureau, run.id);
+    const [review] = bureau.listPendingReviews();
+    expect(review).toBeDefined();
+
+    expect(
+      bureau.resolveReview({
+        id: review!.id,
+        decision: 'approve',
+        principal: 'api-key:reviewer-denied',
+      }),
+    ).rejects.toThrow('Cannot approve: Current policy denies this charge');
+
+    expect(charges).toEqual([]);
+    expect(bureau.listPendingReviews().map(({ id }) => id)).toEqual([review!.id]);
+    const persistedSession = await bureau.getSession(run.sessionId);
+    expect(persistedSession?.metadata['resolvedReviewIds'] ?? []).not.toContain(review!.id);
+    expect(persistedSession?.metadata['pendingApprovalOverrides']).toHaveProperty(review!.id);
+    expect(persistedSession?.metadata['approvalResolutionStartedIds'] ?? []).not.toContain(
+      review!.id,
+    );
+    const approvedRecords = await bureau.auditTrail!.query({
+      runId: run.id,
+      type: 'review.tool-approval.approved',
+    });
+    expect(approvedRecords).toEqual([]);
+
+    await bureau.dispose();
+  });
+
+  it('retries replacement approval persistence when a resumed approval gates again', async () => {
+    const backingStore = textValueStore(new MemoryStorage());
+    let replacementPersistenceFailuresRemaining = 2;
+    let failReplacementPersistence = false;
+    let replacementPersistenceAttempts = 0;
+    const originalApprovalTokenForFailure: { value: string | undefined } = { value: undefined };
+    const persistence = createTextStoreProxy(backingStore, {
+      async conditionalBatch(conditions, operations) {
+        if (
+          failReplacementPersistence &&
+          operations.some((operation) => operation.key.startsWith('agent-session:')) &&
+          JSON.stringify(operations).includes('pendingApprovalOverrides') &&
+          originalApprovalTokenForFailure.value !== undefined &&
+          !JSON.stringify(operations).includes(originalApprovalTokenForFailure.value)
+        ) {
+          replacementPersistenceAttempts += 1;
+          if (replacementPersistenceFailuresRemaining > 0) {
+            replacementPersistenceFailuresRemaining -= 1;
+            throw new Error('replacement approval persistence unavailable');
+          }
+        }
+        return backingStore.conditionalBatch(conditions, operations);
+      },
+    });
+    const charges: number[] = [];
+    const bureau = await createBureau({
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [
+            { id: 'replacement-retry-call', name: 'charge-card', arguments: { cents: 910 } },
+          ],
+        },
+      ]),
+      toolbox: createRegatingApprovalToolbox('replacement-retry-secret', charges),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+      persistence,
+      sessionPersistenceSleep: async () => {},
+    });
+
+    const run = await bureau.createRun({ message: 'Charge the customer after retry' });
+    await waitForRunCompletion(bureau, run.id);
+
+    const [review] = bureau.listPendingReviews();
+    expect(review?.kind).toBe('tool-approval');
+    if (!review || review.kind !== 'tool-approval')
+      throw new Error('Expected tool approval review');
+    const originalApprovalToken = persistedApprovalToken(
+      await bureau.getSession(run.sessionId),
+      review.id,
+    );
+    originalApprovalTokenForFailure.value = originalApprovalToken;
+
+    failReplacementPersistence = true;
+    const outcome = await bureau.resolveReview({
+      id: review.id,
+      decision: 'approve',
+      principal: 'api-key:reviewer-replacement-retry',
+    });
+
+    expect(outcome.decision).toBe('approve');
+    expect(replacementPersistenceAttempts).toBe(3);
+    expect(charges).toEqual([]);
+    const [stillPendingReview] = bureau.listPendingReviews();
+    expect(stillPendingReview?.kind).toBe('tool-approval');
+    if (!stillPendingReview || stillPendingReview.kind !== 'tool-approval') {
+      throw new Error('Expected replacement approval review');
+    }
+    const replacementApprovalToken = stillPendingReview.approval.approvalToken;
+    if (typeof replacementApprovalToken !== 'string') {
+      throw new Error('Expected replacement approval token');
+    }
+    expect(stillPendingReview.id).toBe(review.id);
+    expect(replacementApprovalToken).not.toBe(originalApprovalToken);
+    expect(persistedApprovalToken(await bureau.getSession(run.sessionId), review.id)).toBe(
+      replacementApprovalToken,
+    );
+
+    bureau.dispose();
+  });
+
+  it('keeps the replacement approval retryable when its persistence exhausts', async () => {
+    const backingStore = textValueStore(new MemoryStorage());
+    let failReplacementPersistence = false;
+    let replacementPersistenceAttempts = 0;
+    const originalApprovalTokenForFailure: { value: string | undefined } = { value: undefined };
+    const persistence = createTextStoreProxy(backingStore, {
+      async conditionalBatch(conditions, operations) {
+        if (
+          failReplacementPersistence &&
+          operations.some((operation) => operation.key.startsWith('agent-session:')) &&
+          JSON.stringify(operations).includes('pendingApprovalOverrides') &&
+          originalApprovalTokenForFailure.value !== undefined &&
+          !JSON.stringify(operations).includes(originalApprovalTokenForFailure.value)
+        ) {
+          replacementPersistenceAttempts += 1;
+          throw new Error('replacement approval persistence unavailable');
+        }
+        return backingStore.conditionalBatch(conditions, operations);
+      },
+    });
+    const charges: number[] = [];
+    const bureau = await createBureau({
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [
+            { id: 'replacement-exhaustion-call', name: 'charge-card', arguments: { cents: 920 } },
+          ],
+        },
+      ]),
+      toolbox: createRegatingApprovalToolbox('replacement-exhaustion-secret', charges),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+      persistence,
+      sessionPersistenceSleep: async () => {},
+    });
+
+    const run = await bureau.createRun({ message: 'Charge the customer after exhaustion' });
+    await waitForRunCompletion(bureau, run.id);
+
+    const [review] = bureau.listPendingReviews();
+    expect(review?.kind).toBe('tool-approval');
+    if (!review || review.kind !== 'tool-approval')
+      throw new Error('Expected tool approval review');
+    const originalApprovalToken = review.approval.approvalToken;
+    if (typeof originalApprovalToken !== 'string') {
+      throw new Error('Expected original approval token');
+    }
+    expect(persistedApprovalToken(await bureau.getSession(run.sessionId), review.id)).toBe(
+      originalApprovalToken,
+    );
+    originalApprovalTokenForFailure.value = originalApprovalToken;
+
+    failReplacementPersistence = true;
+    const resolutionError = await bureau
+      .resolveReview({
+        id: review.id,
+        decision: 'approve',
+        principal: 'api-key:reviewer-replacement-exhaustion',
+      })
+      .then(
+        () => undefined,
+        (error) => error,
+      );
+    expect(resolutionError).toBeInstanceOf(Error);
+    expect((resolutionError as Error).message).toContain(
+      'replacement approval persistence unavailable',
+    );
+
+    expect(replacementPersistenceAttempts).toBe(3);
+    expect(charges).toEqual([]);
+    const [stillPendingReview] = bureau.listPendingReviews();
+    expect(stillPendingReview?.kind).toBe('tool-approval');
+    if (!stillPendingReview || stillPendingReview.kind !== 'tool-approval') {
+      throw new Error('Expected original approval review');
+    }
+    expect(stillPendingReview.id).toBe(review.id);
+    expect(stillPendingReview.approval.approvalToken).not.toBe(originalApprovalToken);
+    expect(persistedApprovalToken(await bureau.getSession(run.sessionId), review.id)).toBe(
+      originalApprovalToken,
+    );
+
+    // The in-memory replacement remains the only retryable approval even
+    // though durable persistence exhausted its attempts. Once storage
+    // recovers, a subsequent resolution uses that replacement binding rather
+    // than the consumed original descriptor.
+    failReplacementPersistence = false;
+    const retryOutcome = await bureau.resolveReview({
+      id: review.id,
+      decision: 'approve',
+      principal: 'api-key:reviewer-replacement-exhaustion',
+    });
+    expect(retryOutcome.decision).toBe('approve');
+    expect(replacementPersistenceAttempts).toBe(3);
 
     bureau.dispose();
   });
@@ -4222,6 +5780,20 @@ describe('createBureau review queue (AB-20)', () => {
     expect((denyRecord!.detail as { reason?: string }).reason).toBe('Amount looks fraudulent');
 
     expect(bureau.listPendingReviews()).toHaveLength(0);
+    const persistedSession = await bureau.getSession(run.sessionId);
+    expect(persistedSession?.metadata['resolvedReviewIds']).toContain(review!.id);
+
+    await bureau.deleteSession(run.sessionId);
+    // Session deletion does not own the in-memory run's resolved-review
+    // suppression. Until the run itself is deleted, the resolved approval
+    // must not reappear in the review queue.
+    expect(bureau.listPendingReviews()).toHaveLength(0);
+    await bureau.deleteRun(run.id);
+    await pollUntil(async () => {
+      const session = await bureau.getSession(run.sessionId);
+      const resolved = session?.metadata['resolvedReviewIds'];
+      return !Array.isArray(resolved) || !resolved.includes(review!.id);
+    });
 
     bureau.dispose();
   });
@@ -4276,7 +5848,7 @@ describe('createBureau review queue (AB-20)', () => {
     first.emitter.dispatchEvent(
       new RunAbortedEvent(0, new Conversation(), new AbortAgentRunError('test-cleanup')),
     );
-    bureau.deleteRun(runId);
+    await bureau.deleteRun(runId);
 
     // A new run REUSES the same run id and produces the exact same review id
     // (`human-wait:${runId}:human-response`). Before the fix, this id was
@@ -4710,6 +6282,61 @@ describe('createBureau human input wiring — real durable park (F3)', () => {
 
       // Resolved reviews disappear from the queue immediately.
       expect(bureau.listPendingReviews()).toHaveLength(0);
+    } finally {
+      bureau.dispose();
+    }
+  });
+
+  it('revalidates captured request authority before approving a human wait', async () => {
+    let authorityCurrent = true;
+    const bureau = await createBureau({
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [
+            {
+              id: 'human-wait-authority-call',
+              name: 'requestHumanInput',
+              arguments: { signalName: 'human-response', prompt: 'Approve this refund?' },
+            },
+          ],
+        },
+      ]),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+      humanInput: true,
+      stopWhen: stopWhen.toolCalled('requestHumanInput'),
+    });
+    try {
+      const signalSpy = spyOn(bureau, 'signalSession').mockImplementation(async () => {});
+      bureau.setRequestAuthorityValidator(() => authorityCurrent);
+      const run = await bureau.createRun({
+        message: 'Please refund this order',
+        requestContext: {
+          authority: {
+            principalId: 'api-key:revoked',
+            tenantId: 'bureau',
+            ownerId: 'bureau',
+            capabilities: ['tools:execute'],
+            authorizationRevision: 'gateway:api-key:revoked',
+          },
+          audience: 'operator',
+        },
+      });
+
+      await pollUntil(() => bureau.listPendingReviews().some((review) => review.runId === run.id));
+      const [review] = bureau.listPendingReviews();
+      authorityCurrent = false;
+      expect(
+        bureau.resolveReview({
+          id: review!.id,
+          decision: 'approve',
+          principal: 'test-operator',
+        }),
+      ).rejects.toThrow('no longer current');
+      expect(signalSpy).not.toHaveBeenCalled();
+      expect(bureau.listPendingReviews()).toHaveLength(1);
     } finally {
       bureau.dispose();
     }

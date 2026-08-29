@@ -8,7 +8,13 @@ import { describe, expect, it, spyOn } from 'bun:test';
 import type { Bureau } from 'bureau';
 import { CompletableEventTarget } from 'lifecycle';
 
-import { createTestGateway, requestJSON } from '../test';
+import {
+  attackerRequestContextFixture,
+  createGatewayAuthorityTestApiKey,
+  createTestGateway,
+  expectedPersistedApiKeyAuthority,
+  requestJSON,
+} from '../test';
 
 function createMockGenerate(): GenerateFunction {
   return async () => ({ content: 'Done.', toolCalls: [] });
@@ -52,10 +58,13 @@ function registerParkedRun(bureau: Bureau, name: string, prompt: string): string
 async function sendMessage(
   gatewayApp: { request: (path: string, init?: RequestInit) => Response | Promise<Response> },
   body: unknown,
+  headers?: HeadersInit,
 ) {
+  const requestHeaders = new Headers(headers);
+  requestHeaders.set('content-type', 'application/json');
   const response = await gatewayApp.request('/a2a', {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: requestHeaders,
     body: JSON.stringify(body),
   });
   return { status: response.status, body: await response.json() };
@@ -143,6 +152,41 @@ describe('A2A JSON-RPC endpoint (POST /a2a)', () => {
       { artifactId: `${task.id}:result`, name: 'Result', parts: [{ text: 'Done.' }] },
     ]);
     expect(task.contextId).toBeTruthy();
+  });
+
+  it('SendMessage derives request authority from the verified API key and ignores caller context', async () => {
+    const gateway = await createTestGateway({
+      generate: createMockGenerate(),
+      storage: { type: 'memory' },
+    });
+    const { key, plaintext } = await createGatewayAuthorityTestApiKey(gateway);
+
+    const { status, body } = await sendMessage(
+      gateway.app,
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'SendMessage',
+        params: {
+          requestContext: attackerRequestContextFixture(),
+          message: {
+            messageId: 'm1',
+            role: 'ROLE_USER',
+            parts: [{ text: 'Hello' }],
+            requestContext: attackerRequestContextFixture(),
+          },
+        },
+      },
+      { authorization: `Bearer ${plaintext}` },
+    );
+
+    expect(status).toBe(200);
+    expect(body.error).toBeUndefined();
+
+    const session = await gateway.bureau.getSession(body.result.task.contextId);
+    expect(session?.metadata['lastRequestAuthority']).toEqual(
+      expectedPersistedApiKeyAuthority(key, 'bureau'),
+    );
   });
 
   it('SendMessage with returnImmediately: true does not block on run completion', async () => {

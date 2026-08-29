@@ -1,14 +1,49 @@
 import { beforeEach, describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
+import { createProcessLocalApprovalStateStore } from '../../src/approval-binding';
 import { createTool } from '../../src/create-tool';
 import { createToolbox, type Toolbox } from '../../src/create-toolbox';
 import { claimCacheStarted } from '../../src/idempotency/cache-operations';
 import { createToolResultCache } from '../../src/idempotency/create-tool-result-cache';
 import { fullInputKey } from '../../src/idempotency/key-generators';
-import type { ToolResultCache } from '../../src/idempotency/types';
-import { withToolboxIdempotency } from '../../src/idempotency/with-toolbox-idempotency';
+import type { CachedToolResult, ToolResultCache } from '../../src/idempotency/types';
+import { withToolboxIdempotency as createIdempotentToolbox } from '../../src/idempotency/with-toolbox-idempotency';
 import type { SignedPendingToolApproval, ToolCallInput } from '../../src/types';
+
+const createTestRequestContext = (tenantId: string) => ({
+  authority: {
+    principalId: 'principal-a',
+    tenantId,
+    ownerId: 'owner-a',
+    capabilities: ['tools:execute'],
+    authorizationRevision: 'authorization:1',
+  },
+  audience: 'tenant' as const,
+  agentId: 'agent-a',
+  runId: 'run-a',
+});
+
+function expectedCacheKey(tenantId: string, revision: string, baseKey: string): string {
+  return JSON.stringify([tenantId, revision, baseKey]);
+}
+
+const withToolboxIdempotency = (
+  ...arguments_: Parameters<typeof createIdempotentToolbox>
+): ReturnType<typeof createIdempotentToolbox> => {
+  const toolbox = createIdempotentToolbox(...arguments_);
+  const requestContext = createTestRequestContext(arguments_[1].tenantId);
+  return new Proxy(toolbox, {
+    get(target, property, receiver) {
+      if (property !== 'execute') return Reflect.get(target, property, receiver);
+      return (input: unknown, options?: Record<string, unknown>) =>
+        target.execute(input as ToolCallInput, {
+          ...options,
+          requestContext: options?.['requestContext'] ?? requestContext,
+        });
+    },
+  });
+};
 
 function createTestStore() {
   const map = new Map<string, string>();
@@ -63,9 +98,73 @@ describe('withToolboxIdempotency', () => {
     });
   }
 
+  it('delegates unresolved names to the toolbox before deriving an idempotency key', async () => {
+    const toolbox = createToolbox([createToolWithKey()], { resolution: true });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, {
+      cache,
+      tenantId: 'tenant-a',
+    });
+
+    const fuzzy = await idempotentToolbox.execute(
+      { id: 'fuzzy-call', name: 'ADD', arguments: { a: 1, b: 2 } },
+      { idempotencyKey: 'fuzzy-key' },
+    );
+    const missing = await idempotentToolbox.execute(
+      { id: 'missing-call', name: 'missing', arguments: {} },
+      { idempotencyKey: 'missing-key' },
+    );
+
+    expect(fuzzy.outcome).toBe('success');
+    expect(fuzzy.result).toBe(3);
+    expect(missing.outcome).toBe('error');
+    expect(missing.errorCategory).toBe('not_found');
+  });
+
+  it('rejects streaming before claiming or executing an idempotency key', async () => {
+    const toolbox = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache,
+      tenantId: 'tenant-a',
+    });
+
+    await expect(
+      toolbox.execute(
+        { id: 'streaming-call', name: 'add', arguments: { a: 1, b: 2 } },
+        { stream: true },
+      ),
+    ).rejects.toThrow('Idempotency does not support streaming executions');
+    expect(addCallCount).toBe(0);
+  });
+
+  it('uses the cache wall clock for TTL expiration when execution uses another clock', async () => {
+    let cacheClock = 1_000;
+    const wallClockCache = createToolResultCache({
+      store: createTestStore(),
+      defaultTTL: 100,
+      now: () => cacheClock,
+    });
+    const toolbox = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache: wallClockCache,
+      tenantId: 'tenant-a',
+      defaultTTL: 100,
+      now: () => 10_000_000,
+    });
+    const call = { name: 'add', arguments: { a: 1, b: 2 } };
+
+    const firstResult = await toolbox.execute(call);
+    const secondResult = await toolbox.execute(call);
+    expect(firstResult.result).toBe(3);
+    expect(secondResult.result).toBe(3);
+    expect(addCallCount).toBe(1);
+
+    cacheClock = 1_101;
+    const expiredResult = await toolbox.execute(call);
+    expect(expiredResult.result).toBe(3);
+    expect(addCallCount).toBe(2);
+  });
+
   it('wraps tools that have idempotencyKey by default', async () => {
     const toolbox = createToolbox([createToolWithKey(), createToolWithoutKey()]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     // Execute add twice with same args
     const result1 = await idempotentToolbox.execute({ name: 'add', arguments: { a: 1, b: 2 } });
@@ -76,18 +175,50 @@ describe('withToolboxIdempotency', () => {
     expect(result1.idempotency?.outcome).toBe('fresh');
     expect(result2.idempotency?.outcome).toBe('deduped');
     expect(addCallCount).toBe(1); // Cached on second call
-    expect(await cache.getState!(`add:${fullInputKey({ a: 1, b: 2 })}`)).toEqual(
+    expect(
+      await cache.getState!(
+        expectedCacheKey('tenant-a', 'default:add', `add:${fullInputKey({ a: 1, b: 2 })}`),
+      ),
+    ).toEqual(
       expect.objectContaining({
         status: 'completed',
         toolName: 'add',
         result: 3,
+        policyRevision: 'policy:1',
       }),
     );
   });
 
+  it('deduplicates argumentless calls using the base toolbox empty-object normalization', async () => {
+    let executions = 0;
+    const tool = createTool({
+      name: 'argumentless',
+      description: 'Accepts an omitted arguments object',
+      input: z.object({}),
+      idempotencyKey: () => 'argumentless',
+      async execute() {
+        executions += 1;
+        return 'done';
+      },
+    });
+    const toolbox = withToolboxIdempotency(createToolbox([tool]), {
+      cache,
+      tenantId: 'tenant-a',
+    });
+    const call = { name: tool.name };
+
+    const first = await toolbox.execute(call);
+    const second = await toolbox.execute(call);
+
+    expect(first.result).toBe('done');
+    expect(second.result).toBe('done');
+    expect(second.idempotency?.outcome).toBe('deduped');
+    expect(executions).toBe(1);
+  });
+
   it('accepts an externally supplied idempotency key', async () => {
     const toolbox = createToolbox([createToolWithKey()]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     const result1 = await idempotentToolbox.execute(
       { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
@@ -101,15 +232,336 @@ describe('withToolboxIdempotency', () => {
     expect(result1.result).toBe(3);
     expect(result2.result).toBe(3);
     expect(result2.idempotency).toEqual({
-      key: 'add:temporal-tool-call-id',
+      key: expectedCacheKey('tenant-a', 'default:add', 'add:temporal-tool-call-id'),
       outcome: 'deduped',
     });
     expect(addCallCount).toBe(1);
   });
 
+  it('keeps operation keys stable across logical retries with new request authority', async () => {
+    const toolbox = createToolbox([createToolWithKey()]);
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
+    const firstRequestContext = createTestRequestContext('tenant-a');
+    const retryRequestContext = {
+      ...firstRequestContext,
+      agentId: 'agent-b',
+      runId: 'run-b',
+      authority: {
+        ...firstRequestContext.authority,
+        principalId: 'principal-b',
+        ownerId: 'owner-b',
+        capabilities: ['payments:charge', 'tools:execute'],
+        authorizationRevision: 'authorization:2',
+      },
+    };
+
+    const first = await idempotentToolbox.execute(
+      { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
+      { idempotencyKey: 'logical-operation-id', requestContext: firstRequestContext },
+    );
+    const retry = await idempotentToolbox.execute(
+      { id: 'call-2', name: 'add', arguments: { a: 9, b: 9 } },
+      { idempotencyKey: 'logical-operation-id', requestContext: retryRequestContext },
+    );
+
+    expect(first.idempotency).toEqual({
+      key: expectedCacheKey('tenant-a', 'default:add', 'add:logical-operation-id'),
+      outcome: 'fresh',
+    });
+    expect(retry.idempotency).toEqual({
+      key: expectedCacheKey('tenant-a', 'default:add', 'add:logical-operation-id'),
+      outcome: 'deduped',
+    });
+    expect(retry.result).toBe(3);
+    expect(addCallCount).toBe(1);
+  });
+
+  it('binds completed cache-hit access to the current policy revision without changing the operation key', async () => {
+    const toolbox = createToolbox([createToolWithKey()]);
+    const revisionOneToolbox = withToolboxIdempotency(toolbox, {
+      cache,
+      tenantId: 'tenant-a',
+      policyRevision: 'policy:1',
+    });
+    const revisionTwoToolbox = withToolboxIdempotency(toolbox, {
+      cache,
+      tenantId: 'tenant-a',
+      policyRevision: 'policy:2',
+    });
+    const expectedKey = expectedCacheKey('tenant-a', 'default:add', 'add:policy-bound-key');
+
+    const first = await revisionOneToolbox.execute(
+      { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
+      { idempotencyKey: 'policy-bound-key' },
+    );
+    const sameRevisionRetry = await revisionOneToolbox.execute(
+      { id: 'call-2', name: 'add', arguments: { a: 9, b: 9 } },
+      { idempotencyKey: 'policy-bound-key' },
+    );
+    const changedRevisionRetry = await revisionTwoToolbox.execute(
+      { id: 'call-3', name: 'add', arguments: { a: 9, b: 9 } },
+      { idempotencyKey: 'policy-bound-key' },
+    );
+
+    expect(first.idempotency).toEqual({ key: expectedKey, outcome: 'fresh' });
+    expect(sameRevisionRetry.idempotency).toEqual({ key: expectedKey, outcome: 'deduped' });
+    expect(changedRevisionRetry.outcome).toBe('action_required');
+    expect(changedRevisionRetry.idempotency).toEqual({
+      key: expectedKey,
+      outcome: 'authorization-required',
+    });
+    expect(addCallCount).toBe(1);
+  });
+
+  it('does not return legacy completed cache entries that lack a policy revision', async () => {
+    const toolbox = createToolbox([createToolWithKey()]);
+    const idempotentToolbox = withToolboxIdempotency(toolbox, {
+      cache,
+      tenantId: 'tenant-a',
+      policyRevision: 'policy:1',
+    });
+    const key = expectedCacheKey('tenant-a', 'default:add', 'add:legacy-completed-key');
+    const legacyCompleted: CachedToolResult = {
+      result: 99,
+      toolName: 'add',
+      executedAt: Date.now(),
+      ttl: 60_000,
+    };
+    await cache.set(key, legacyCompleted);
+
+    await expect(
+      idempotentToolbox.execute(
+        { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
+        { idempotencyKey: 'legacy-completed-key' },
+      ),
+    ).resolves.toMatchObject({
+      outcome: 'action_required',
+      idempotency: { outcome: 'authorization-required' },
+    });
+    expect(addCallCount).toBe(0);
+  });
+
+  it('does not return completed cache entries with invalid original input', async () => {
+    const toolbox = createToolbox([createToolWithKey()]);
+    const idempotentToolbox = withToolboxIdempotency(toolbox, {
+      cache,
+      tenantId: 'tenant-a',
+    });
+    const key = expectedCacheKey('tenant-a', 'default:add', 'add:invalid-input-key');
+    await cache.set(key, {
+      result: 99,
+      toolName: 'add',
+      executedAt: Date.now(),
+      ttl: 60_000,
+      policyRevision: 'policy:1',
+      input: '{invalid',
+    });
+
+    await expect(
+      idempotentToolbox.execute(
+        { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
+        { idempotencyKey: 'invalid-input-key' },
+      ),
+    ).rejects.toThrow('invalid original input');
+    expect(addCallCount).toBe(0);
+  });
+
+  it('fails closed for same-revision completed entries without original input', async () => {
+    const toolbox = createToolbox([createToolWithKey()]);
+    const idempotentToolbox = withToolboxIdempotency(toolbox, {
+      cache,
+      tenantId: 'tenant-a',
+      policyRevision: 'policy:1',
+    });
+    const key = expectedCacheKey('tenant-a', 'default:add', 'add:same-revision-missing-input');
+    await cache.set(key, {
+      result: 99,
+      toolName: 'add',
+      executedAt: Date.now(),
+      ttl: 60_000,
+      policyRevision: 'policy:1',
+    });
+
+    await expect(
+      idempotentToolbox.execute(
+        { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
+        { idempotencyKey: 'same-revision-missing-input' },
+      ),
+    ).rejects.toThrow('original input');
+    expect(addCallCount).toBe(0);
+  });
+
+  it('reruns current access policy before returning same-revision completed cache hits', async () => {
+    let readCount = 0;
+    const observedPolicyRequests: string[] = [];
+    const authorizedRequestContext = {
+      ...createTestRequestContext('tenant-a'),
+      authority: {
+        ...createTestRequestContext('tenant-a').authority,
+        capabilities: ['records:read'],
+        authorizationRevision: 'authorization:1',
+      },
+    };
+    const createRequestContext = (
+      authorityOverrides: Partial<typeof authorizedRequestContext.authority>,
+    ) => ({
+      ...authorizedRequestContext,
+      authority: {
+        ...authorizedRequestContext.authority,
+        ...authorityOverrides,
+      },
+    });
+    const sensitiveTool = createTool({
+      name: 'read-sensitive-record',
+      description: 'Reads a sensitive record',
+      input: z.object({ recordId: z.string() }),
+      idempotencyKey: (input: unknown) => fullInputKey(input),
+      policy: {
+        beforeExecute(context) {
+          const policyContext = context.policyContext as
+            | {
+                capabilities?: readonly string[];
+                requestContext?: typeof authorizedRequestContext;
+              }
+            | undefined;
+          const requestContext = policyContext?.requestContext;
+          const capabilities = policyContext?.capabilities ?? [];
+          observedPolicyRequests.push(
+            `${requestContext?.authority.principalId}:${capabilities.join(',')}:${
+              requestContext?.authority.authorizationRevision
+            }`,
+          );
+          if (requestContext?.authority.principalId !== 'principal-a') {
+            return { allow: false, status: 'deny', reason: 'principal denied' };
+          }
+          if (!capabilities.includes('records:read')) {
+            return { allow: false, status: 'deny', reason: 'capability denied' };
+          }
+          if (requestContext.authority.authorizationRevision !== 'authorization:1') {
+            return { allow: false, status: 'deny', reason: 'authorization revision denied' };
+          }
+          return { allow: true };
+        },
+      },
+      async execute({ recordId }) {
+        readCount += 1;
+        return { recordId, secret: 'cached-sensitive-data' };
+      },
+    });
+    const toolbox = withToolboxIdempotency(createToolbox([sensitiveTool]), {
+      cache,
+      tenantId: 'tenant-a',
+      policyRevision: 'policy:1',
+    });
+    const call = {
+      id: 'read-call-1',
+      name: 'read-sensitive-record',
+      arguments: { recordId: 'record-a' },
+    };
+    const cacheKey = expectedCacheKey(
+      'tenant-a',
+      'default:read-sensitive-record',
+      'read-sensitive-record:sensitive-read-key',
+    );
+    const first = await toolbox.execute(call, {
+      idempotencyKey: 'sensitive-read-key',
+      requestContext: authorizedRequestContext,
+    });
+    const allowedRetry = await toolbox.execute(
+      {
+        ...call,
+        id: 'read-call-allowed-retry',
+      },
+      {
+        idempotencyKey: 'sensitive-read-key',
+        requestContext: authorizedRequestContext,
+      },
+    );
+
+    const deniedRetries = [
+      {
+        name: 'different principal',
+        requestContext: createRequestContext({ principalId: 'principal-b' }),
+        reason: 'principal denied',
+      },
+      {
+        name: 'missing capability',
+        requestContext: createRequestContext({ capabilities: ['records:list'] }),
+        reason: 'capability denied',
+      },
+      {
+        name: 'changed authorization revision',
+        requestContext: createRequestContext({ authorizationRevision: 'authorization:2' }),
+        reason: 'authorization revision denied',
+      },
+    ];
+
+    expect(first.outcome).toBe('success');
+    expect(first.idempotency).toEqual({
+      key: cacheKey,
+      outcome: 'fresh',
+    });
+    expect(allowedRetry.result).toEqual({
+      recordId: 'record-a',
+      secret: 'cached-sensitive-data',
+    });
+    expect(allowedRetry.idempotency).toEqual({
+      key: cacheKey,
+      outcome: 'deduped',
+    });
+
+    for (const retry of deniedRetries) {
+      const retryResult = await toolbox.execute(
+        {
+          ...call,
+          id: `read-call-${retry.name}`,
+        },
+        {
+          idempotencyKey: 'sensitive-read-key',
+          requestContext: retry.requestContext,
+        },
+      );
+      expect(retryResult.outcome).toBe('error');
+      expect(retryResult.error?.category).toBe('permission');
+      expect(retryResult.error?.message).toBe(retry.reason);
+      expect(retryResult.idempotency).toBeUndefined();
+    }
+    expect(readCount).toBe(1);
+    expect(observedPolicyRequests).toEqual([
+      'principal-a:records:read:authorization:1',
+      'principal-a:records:read:authorization:1',
+      'principal-b:records:read:authorization:1',
+      'principal-a:records:list:authorization:1',
+      'principal-a:records:read:authorization:2',
+    ]);
+  });
+
+  it('keeps cached results tenant-isolated after operation-key dedupe', async () => {
+    const toolbox = createToolbox([createToolWithKey()]);
+    const tenantA = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
+    const tenantB = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-b' });
+
+    const tenantAResult = await tenantA.execute(
+      { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
+      { idempotencyKey: 'shared-logical-id' },
+    );
+    const tenantBResult = await tenantB.execute(
+      { id: 'call-2', name: 'add', arguments: { a: 9, b: 9 } },
+      { idempotencyKey: 'shared-logical-id' },
+    );
+
+    expect(tenantAResult.result).toBe(3);
+    expect(tenantBResult.result).toBe(18);
+    expect(tenantBResult.idempotency).toEqual({
+      key: expectedCacheKey('tenant-b', 'default:add', 'add:shared-logical-id'),
+      outcome: 'fresh',
+    });
+    expect(addCallCount).toBe(2);
+  });
+
   it('uses externally supplied idempotency keys for tools without their own key', async () => {
     const toolbox = createToolbox([createToolWithoutKey()]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     const result1 = await idempotentToolbox.execute(
       { id: 'call-1', name: 'multiply', arguments: { a: 2, b: 3 } },
@@ -123,7 +575,7 @@ describe('withToolboxIdempotency', () => {
     expect(result1.result).toBe(6);
     expect(result2.result).toBe(6);
     expect(result2.idempotency).toEqual({
-      key: 'multiply:orchestrator-tool-call-id',
+      key: expectedCacheKey('tenant-a', 'default:multiply', 'multiply:orchestrator-tool-call-id'),
       outcome: 'deduped',
     });
     expect(mulCallCount).toBe(1);
@@ -133,6 +585,7 @@ describe('withToolboxIdempotency', () => {
     const toolbox = createToolbox([createToolWithKey(), createToolWithoutKey()]);
     const idempotentToolbox = withToolboxIdempotency(toolbox, {
       cache,
+      tenantId: 'tenant-a',
       requireExplicitKey: false,
     });
 
@@ -147,20 +600,25 @@ describe('withToolboxIdempotency', () => {
 
     expect(addResult.result).toBe(3);
     expect(multiplyResult.result).toBe(12);
-    expect(addResult.idempotency?.key).toBe('add:shared-key');
-    expect(multiplyResult.idempotency?.key).toBe('multiply:shared-key');
+    expect(addResult.idempotency?.key).toBe(
+      expectedCacheKey('tenant-a', 'default:add', 'add:shared-key'),
+    );
+    expect(multiplyResult.idempotency?.key).toBe(
+      expectedCacheKey('tenant-a', 'default:multiply', 'multiply:shared-key'),
+    );
     expect(addCallCount).toBe(1);
     expect(mulCallCount).toBe(1);
   });
 
   it('returns unknown-outcome when a key was started without a recorded result', async () => {
     const toolbox = createToolbox([createToolWithKey()]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
+    const startedAt = Date.now();
 
-    await cache.markStarted!('add:started-key', {
+    await cache.claimStarted(expectedCacheKey('tenant-a', 'default:add', 'add:started-key'), {
       status: 'started',
       toolName: 'add',
-      startedAt: Date.now(),
+      startedAt,
       ttl: 60_000,
     });
 
@@ -171,41 +629,143 @@ describe('withToolboxIdempotency', () => {
 
     expect(result.outcome).toBe('action_required');
     expect(result.idempotency).toEqual({
-      key: 'add:started-key',
+      key: expectedCacheKey('tenant-a', 'default:add', 'add:started-key'),
       outcome: 'unknown-outcome',
+      legacyStartedAt: startedAt,
     });
     expect(addCallCount).toBe(0);
   });
 
-  it('retries an unknown outcome only after explicit approval', async () => {
+  it('does not resolve legacy unfenced started entries without separate legacy authorization', async () => {
+    const store = createTestStore();
+    const legacyCache = createToolResultCache({ store, defaultTTL: 60_000 });
     const toolbox = createToolbox([createToolWithKey()]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
-
-    await cache.markStarted!('add:retry-after-review', {
-      status: 'started',
-      toolName: 'add',
-      startedAt: Date.now(),
-      ttl: 60_000,
+    const key = expectedCacheKey('tenant-a', 'default:add', 'add:legacy-started');
+    await store.set(
+      key,
+      JSON.stringify({
+        status: 'started',
+        toolName: 'add',
+        startedAt: 1_000,
+        ttl: 60_000,
+      }),
+    );
+    const idempotentToolbox = withToolboxIdempotency(toolbox, {
+      cache: legacyCache,
+      tenantId: 'tenant-a',
+      verifyResolutionReceipt: async () => true,
+      verifyLegacyResolutionReceipt: async () => false,
     });
 
-    const pause = await idempotentToolbox.execute(
+    const normalReceiptResult = await idempotentToolbox.execute(
       { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
-      { idempotencyKey: 'retry-after-review' },
+      {
+        idempotencyKey: 'legacy-started',
+        resolutionReceipt: {
+          version: 1,
+          key,
+          attemptId: 'invented-attempt',
+          inputDigest: 'unused-input-digest',
+          tenantId: 'tenant-a',
+          toolRevision: 'default:add',
+          decision: 'retry',
+          evidence: 'operator checked provider',
+          authorizedAt: 2_000,
+          authorizedBy: 'operator-a',
+          nonce: 'normal-receipt',
+          authorization: 'signed',
+        },
+      },
     );
-    const retry = await idempotentToolbox.execute(
+    const rejectedLegacyReceiptResult = await idempotentToolbox.execute(
       { id: 'call-2', name: 'add', arguments: { a: 1, b: 2 } },
-      { idempotencyKey: 'retry-after-review', retryUnknownOutcome: true },
+      {
+        idempotencyKey: 'legacy-started',
+        legacyResolutionReceipt: {
+          version: 1,
+          key,
+          tenantId: 'tenant-a',
+          toolRevision: 'default:add',
+          toolName: 'add',
+          legacyStartedAt: 1_000,
+          decision: 'retry',
+          evidence: 'operator checked provider',
+          authorizedAt: 2_000,
+          authorizedBy: 'operator-a',
+          nonce: 'legacy-receipt',
+          authorization: 'signed',
+        },
+      },
     );
 
-    expect(pause.outcome).toBe('action_required');
-    expect(retry.outcome).toBe('success');
-    expect(retry.result).toBe(3);
-    expect(retry.idempotency).toEqual({
-      key: 'add:retry-after-review',
-      outcome: 'fresh',
+    expect(normalReceiptResult.idempotency).toEqual({
+      key,
+      outcome: 'unknown-outcome',
+      legacyStartedAt: 1_000,
     });
+    expect(rejectedLegacyReceiptResult.idempotency).toEqual({
+      key,
+      outcome: 'unknown-outcome',
+      legacyStartedAt: 1_000,
+    });
+    expect(addCallCount).toBe(0);
+    expect(await legacyCache.getState(key)).toEqual(
+      expect.objectContaining({
+        status: 'started',
+        toolName: 'add',
+        startedAt: 1_000,
+      }),
+    );
+  });
+
+  it('resolves legacy unfenced started entries through an authorized migration receipt', async () => {
+    const store = createTestStore();
+    const legacyCache = createToolResultCache({ store, defaultTTL: 60_000 });
+    const toolbox = createToolbox([createToolWithKey()]);
+    const key = expectedCacheKey('tenant-a', 'default:add', 'add:legacy-resolution');
+    await store.set(
+      key,
+      JSON.stringify({
+        status: 'started',
+        toolName: 'add',
+        startedAt: 1_000,
+        ttl: 60_000,
+      }),
+    );
+    const idempotentToolbox = withToolboxIdempotency(toolbox, {
+      cache: legacyCache,
+      tenantId: 'tenant-a',
+      now: () => 2_000,
+      createAttemptId: () => 'replacement-attempt',
+      verifyLegacyResolutionReceipt: async (receipt) => receipt.authorization === 'legacy-signed',
+    });
+
+    const result = await idempotentToolbox.execute(
+      { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
+      {
+        idempotencyKey: 'legacy-resolution',
+        legacyResolutionReceipt: {
+          version: 1,
+          key,
+          tenantId: 'tenant-a',
+          toolRevision: 'default:add',
+          toolName: 'add',
+          legacyStartedAt: 1_000,
+          decision: 'retry',
+          evidence: 'Operator confirmed the original side effect did not occur.',
+          authorizedAt: 2_000,
+          authorizedBy: 'operator-a',
+          nonce: 'legacy-resolution-receipt',
+          authorization: 'legacy-signed',
+        },
+      },
+    );
+
+    expect(result.outcome).toBe('success');
+    expect(result.result).toBe(3);
+    expect(result.idempotency).toEqual({ key, outcome: 'fresh' });
     expect(addCallCount).toBe(1);
-    expect(await cache.getState!('add:retry-after-review')).toEqual(
+    expect(await legacyCache.getState(key)).toEqual(
       expect.objectContaining({
         status: 'completed',
         toolName: 'add',
@@ -214,54 +774,303 @@ describe('withToolboxIdempotency', () => {
     );
   });
 
-  it('retries an unknown outcome returned by an atomic claim only after explicit approval', async () => {
-    const started = {
-      status: 'started' as const,
-      toolName: 'add',
-      startedAt: Date.now(),
-      ttl: 60_000,
-    };
-    let claims = 0;
-    let deletes = 0;
-    const atomicCache: ToolResultCache = {
-      async get() {
-        return undefined;
-      },
-      async claimStarted(_key, execution) {
-        claims++;
-        if (claims === 1) {
-          return { outcome: 'existing', entry: started };
-        }
-        return { outcome: 'claimed' };
-      },
-      async set() {},
-      async delete() {
-        deletes++;
-      },
-      async clear() {},
-    };
+  it('does not migrate a legacy unfenced entry while its lease is active', async () => {
+    const store = createTestStore();
+    const legacyCache = createToolResultCache({ store, defaultTTL: 60_000 });
     const toolbox = createToolbox([createToolWithKey()]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache: atomicCache });
+    const key = expectedCacheKey('tenant-a', 'default:add', 'add:leased-legacy-resolution');
+    await store.set(
+      key,
+      JSON.stringify({
+        status: 'started',
+        toolName: 'add',
+        startedAt: 1_000,
+        leaseExpiresAt: 3_000,
+        ttl: 60_000,
+      }),
+    );
+    const idempotentToolbox = withToolboxIdempotency(toolbox, {
+      cache: legacyCache,
+      tenantId: 'tenant-a',
+      now: () => 2_000,
+      verifyLegacyResolutionReceipt: async () => true,
+    });
 
     const result = await idempotentToolbox.execute(
       { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
-      { idempotencyKey: 'atomic-retry', retryUnknownOutcome: true },
+      {
+        idempotencyKey: 'leased-legacy-resolution',
+        legacyResolutionReceipt: {
+          version: 1,
+          key,
+          tenantId: 'tenant-a',
+          toolRevision: 'default:add',
+          toolName: 'add',
+          legacyStartedAt: 1_000,
+          decision: 'retry',
+          evidence: 'Operator confirmed the original side effect did not occur.',
+          authorizedAt: 2_000,
+          authorizedBy: 'operator-a',
+          nonce: 'leased-legacy-resolution-receipt',
+          authorization: 'legacy-signed',
+        },
+      },
     );
 
-    expect(result.outcome).toBe('success');
-    expect(result.result).toBe(3);
     expect(result.idempotency).toEqual({
-      key: 'add:atomic-retry',
+      key,
+      outcome: 'unknown-outcome',
+      legacyStartedAt: 1_000,
+    });
+    expect(addCallCount).toBe(0);
+  });
+
+  it('returns the current outcome when legacy migration loses its compare-and-set race', async () => {
+    const store = createTestStore();
+    const legacyCache = createToolResultCache({ store, defaultTTL: 60_000 });
+    const key = expectedCacheKey('tenant-a', 'default:add', 'add:legacy-migration-race');
+    await store.set(
+      key,
+      JSON.stringify({ status: 'started', toolName: 'add', startedAt: 1_000, ttl: 60_000 }),
+    );
+    const racingCache: ToolResultCache = {
+      ...legacyCache,
+      replaceLegacyStarted: async () => false,
+    };
+    const idempotentToolbox = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache: racingCache,
+      tenantId: 'tenant-a',
+      now: () => 2_000,
+      verifyLegacyResolutionReceipt: async () => true,
+    });
+
+    const result = await idempotentToolbox.execute(
+      { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
+      {
+        idempotencyKey: 'legacy-migration-race',
+        legacyResolutionReceipt: {
+          version: 1,
+          key,
+          tenantId: 'tenant-a',
+          toolRevision: 'default:add',
+          toolName: 'add',
+          legacyStartedAt: 1_000,
+          decision: 'retry',
+          evidence: 'Operator confirmed the original side effect did not occur.',
+          authorizedAt: 2_000,
+          authorizedBy: 'operator-a',
+          nonce: 'legacy-migration-race-receipt',
+          authorization: 'legacy-signed',
+        },
+      },
+    );
+
+    expect(result.idempotency).toEqual({
+      key,
+      outcome: 'unknown-outcome',
+      legacyStartedAt: 1_000,
+    });
+    expect(addCallCount).toBe(0);
+  });
+
+  it('rejects stale legacy receipts and legacy receipts against fenced started entries', async () => {
+    const toolbox = createToolbox([createToolWithKey()]);
+    const staleKey = expectedCacheKey('tenant-a', 'default:add', 'add:stale-legacy-receipt');
+    await cache.claimStarted(staleKey, {
+      status: 'started',
+      toolName: 'add',
+      startedAt: 1_000,
+      ttl: 60_000,
+    });
+    const fencedKey = expectedCacheKey('tenant-a', 'default:add', 'add:fenced-started');
+    await cache.claimStarted(fencedKey, {
+      status: 'started',
+      toolName: 'add',
+      startedAt: 1_000,
+      ttl: 60_000,
+      attemptId: 'fenced-attempt',
+    });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, {
+      cache,
+      tenantId: 'tenant-a',
+      verifyLegacyResolutionReceipt: async () => true,
+    });
+
+    const staleResult = await idempotentToolbox.execute(
+      { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
+      {
+        idempotencyKey: 'stale-legacy-receipt',
+        legacyResolutionReceipt: {
+          version: 1,
+          key: staleKey,
+          tenantId: 'tenant-a',
+          toolRevision: 'default:add',
+          toolName: 'add',
+          legacyStartedAt: 999,
+          decision: 'retry',
+          evidence: 'operator checked provider',
+          authorizedAt: 2_000,
+          authorizedBy: 'operator-a',
+          nonce: 'stale-legacy-receipt',
+          authorization: 'signed',
+        },
+      },
+    );
+    const fencedResult = await idempotentToolbox.execute(
+      { id: 'call-2', name: 'add', arguments: { a: 1, b: 2 } },
+      {
+        idempotencyKey: 'fenced-started',
+        legacyResolutionReceipt: {
+          version: 1,
+          key: fencedKey,
+          tenantId: 'tenant-a',
+          toolRevision: 'default:add',
+          toolName: 'add',
+          legacyStartedAt: 1_000,
+          decision: 'retry',
+          evidence: 'operator checked provider',
+          authorizedAt: 2_000,
+          authorizedBy: 'operator-a',
+          nonce: 'fenced-legacy-receipt',
+          authorization: 'signed',
+        },
+      },
+    );
+
+    expect(staleResult.idempotency).toEqual({
+      key: staleKey,
+      outcome: 'unknown-outcome',
+      legacyStartedAt: 1_000,
+    });
+    expect(fencedResult.idempotency).toEqual({
+      key: fencedKey,
+      outcome: 'unknown-outcome',
+      attemptId: 'fenced-attempt',
+    });
+    expect(addCallCount).toBe(0);
+  });
+
+  it('retries an unknown outcome only after explicit approval', async () => {
+    const toolbox = createToolbox([createToolWithKey()]);
+    const idempotentToolbox = withToolboxIdempotency(toolbox, {
+      cache,
+      tenantId: 'tenant-a',
+      verifyResolutionReceipt: (receipt) => receipt.authorization === 'authorized-signature',
+    });
+
+    await cache.claimStarted(
+      expectedCacheKey('tenant-a', 'default:add', 'add:retry-after-review'),
+      {
+        status: 'started',
+        toolName: 'add',
+        startedAt: Date.now(),
+        ttl: 60_000,
+        attemptId: 'original-attempt',
+        inputDigest: fullInputKey({ a: 1, b: 2 }),
+      },
+    );
+
+    const pause = await idempotentToolbox.execute(
+      { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
+      { idempotencyKey: 'retry-after-review' },
+    );
+    expect(pause.idempotency).toEqual({
+      key: expectedCacheKey('tenant-a', 'default:add', 'add:retry-after-review'),
+      outcome: 'unknown-outcome',
+      attemptId: 'original-attempt',
+      inputDigest: fullInputKey({ a: 1, b: 2 }),
+    });
+    const receiptAttemptId = pause.idempotency?.attemptId;
+    if (!receiptAttemptId) throw new Error('Expected unknown outcome to expose attemptId.');
+    const retry = await idempotentToolbox.execute(
+      { id: 'call-2', name: 'add', arguments: { a: 1, b: 2 } },
+      {
+        idempotencyKey: 'retry-after-review',
+        resolutionReceipt: {
+          version: 1,
+          key: pause.idempotency.key,
+          attemptId: receiptAttemptId,
+          inputDigest: pause.idempotency.inputDigest!,
+          tenantId: 'tenant-a',
+          toolRevision: 'default:add',
+          decision: 'retry',
+          evidence: 'Operator confirmed the original side effect did not occur.',
+          authorizedAt: Date.now(),
+          authorizedBy: 'operator-1',
+          nonce: 'receipt-1',
+          authorization: 'authorized-signature',
+        },
+      },
+    );
+
+    expect(pause.outcome).toBe('action_required');
+    expect(retry.outcome).toBe('success');
+    expect(retry.result).toBe(3);
+    expect(retry.idempotency).toEqual({
+      key: expectedCacheKey('tenant-a', 'default:add', 'add:retry-after-review'),
       outcome: 'fresh',
     });
-    expect(claims).toBe(2);
-    expect(deletes).toBe(1);
     expect(addCallCount).toBe(1);
+    expect(
+      await cache.getState!(expectedCacheKey('tenant-a', 'default:add', 'add:retry-after-review')),
+    ).toEqual(
+      expect.objectContaining({
+        status: 'completed',
+        toolName: 'add',
+        result: 3,
+      }),
+    );
+  });
+
+  it('rejects a replacement attempt that reuses the expired fence identifier', async () => {
+    const key = expectedCacheKey('tenant-a', 'default:add', 'add:colliding-replacement');
+    const inputDigest = fullInputKey({ a: 1, b: 2 });
+    await cache.claimStarted(key, {
+      status: 'started',
+      toolName: 'add',
+      startedAt: 0,
+      ttl: 60_000,
+      attemptId: 'colliding-attempt',
+      inputDigest,
+      leaseExpiresAt: 1,
+    });
+    const idempotentToolbox = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache,
+      tenantId: 'tenant-a',
+      now: () => 2,
+      createAttemptId: () => 'colliding-attempt',
+      verifyResolutionReceipt: () => true,
+    });
+
+    await expect(
+      idempotentToolbox.execute(
+        { name: 'add', arguments: { a: 1, b: 2 } },
+        {
+          idempotencyKey: 'colliding-replacement',
+          resolutionReceipt: {
+            version: 1,
+            key,
+            attemptId: 'colliding-attempt',
+            inputDigest,
+            tenantId: 'tenant-a',
+            toolRevision: 'default:add',
+            decision: 'retry',
+            evidence: 'The original attempt did not produce an effect.',
+            authorizedAt: 2,
+            authorizedBy: 'operator-a',
+            nonce: 'colliding-replacement',
+            authorization: 'signed',
+          },
+        },
+      ),
+    ).rejects.toThrow('non-empty and unique');
+    expect(addCallCount).toBe(0);
+    expect(await cache.getState(key)).toMatchObject({ attemptId: 'colliding-attempt' });
   });
 
   it('does not keep started state for validation failures', async () => {
     const toolbox = createToolbox([createToolWithKey()]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     const result = await idempotentToolbox.execute(
       { name: 'add', arguments: { a: '1', b: 2 } },
@@ -270,13 +1079,15 @@ describe('withToolboxIdempotency', () => {
 
     expect(result.outcome).toBe('error');
     expect(result.idempotency).toBeUndefined();
-    expect(await cache.getState!('add:invalid-input')).toBeUndefined();
+    expect(
+      await cache.getState!(expectedCacheKey('tenant-a', 'default:add', 'add:invalid-input')),
+    ).toBeUndefined();
     expect(addCallCount).toBe(0);
   });
 
   it('does not keep started state when fail-fast validation throws', async () => {
     const toolbox = createToolbox([createToolWithKey()]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     await expect(
       idempotentToolbox.execute(
@@ -285,7 +1096,9 @@ describe('withToolboxIdempotency', () => {
       ),
     ).rejects.toMatchObject({ category: 'validation' });
 
-    expect(await cache.getState!('add:invalid-input')).toBeUndefined();
+    expect(
+      await cache.getState!(expectedCacheKey('tenant-a', 'default:add', 'add:invalid-input')),
+    ).toBeUndefined();
 
     const retry = await idempotentToolbox.execute(
       { name: 'add', arguments: { a: '1', b: 2 } },
@@ -294,7 +1107,9 @@ describe('withToolboxIdempotency', () => {
 
     expect(retry.outcome).toBe('error');
     expect(retry.idempotency).toBeUndefined();
-    expect(await cache.getState!('add:invalid-input')).toBeUndefined();
+    expect(
+      await cache.getState!(expectedCacheKey('tenant-a', 'default:add', 'add:invalid-input')),
+    ).toBeUndefined();
     expect(addCallCount).toBe(0);
   });
 
@@ -312,7 +1127,7 @@ describe('withToolboxIdempotency', () => {
       },
     });
     const toolbox = createToolbox([tool]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     const first = await idempotentToolbox.execute(
       { name: 'add', arguments: { a: 1, b: 2 } },
@@ -327,7 +1142,9 @@ describe('withToolboxIdempotency', () => {
     expect(first.outcome).toBe('error');
     expect(first.error?.category).toBe('unavailable');
     expect(first.idempotency).toBeUndefined();
-    expect(await cache.getState!('add:unavailable-now')).toEqual(
+    expect(
+      await cache.getState!(expectedCacheKey('tenant-a', 'default:add', 'add:unavailable-now')),
+    ).toEqual(
       expect.objectContaining({
         status: 'completed',
         toolName: 'add',
@@ -337,7 +1154,7 @@ describe('withToolboxIdempotency', () => {
     expect(second.outcome).toBe('success');
     expect(second.result).toBe(3);
     expect(second.idempotency).toEqual({
-      key: 'add:unavailable-now',
+      key: expectedCacheKey('tenant-a', 'default:add', 'add:unavailable-now'),
       outcome: 'fresh',
     });
     expect(addCallCount).toBe(1);
@@ -355,7 +1172,7 @@ describe('withToolboxIdempotency', () => {
         },
       },
     });
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     const first = await idempotentToolbox.execute(
       { name: 'add', arguments: { a: 1, b: 2 } },
@@ -370,7 +1187,9 @@ describe('withToolboxIdempotency', () => {
     expect(second.outcome).toBe('action_required');
     expect(first.idempotency).toBeUndefined();
     expect(second.idempotency).toBeUndefined();
-    expect(await cache.getState!('add:approval-pause')).toBeUndefined();
+    expect(
+      await cache.getState!(expectedCacheKey('tenant-a', 'default:add', 'add:approval-pause')),
+    ).toBeUndefined();
     expect(addCallCount).toBe(0);
   });
 
@@ -378,7 +1197,7 @@ describe('withToolboxIdempotency', () => {
     const toolbox = createToolbox([createToolWithKey()], {
       budget: { maxCalls: 0 },
     });
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     const first = await idempotentToolbox.execute(
       { name: 'add', arguments: { a: 1, b: 2 } },
@@ -394,7 +1213,9 @@ describe('withToolboxIdempotency', () => {
     expect(first.error?.code).toBe('BUDGET_EXCEEDED');
     expect(second.outcome).toBe('error');
     expect(second.idempotency).toBeUndefined();
-    expect(await cache.getState!('add:budget-block')).toBeUndefined();
+    expect(
+      await cache.getState!(expectedCacheKey('tenant-a', 'default:add', 'add:budget-block')),
+    ).toBeUndefined();
     expect(addCallCount).toBe(0);
   });
 
@@ -402,7 +1223,7 @@ describe('withToolboxIdempotency', () => {
     const toolbox = createToolbox([createToolWithKey()], {
       budget: { maxCalls: 0 },
     });
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     await expect(
       idempotentToolbox.execute(
@@ -411,7 +1232,9 @@ describe('withToolboxIdempotency', () => {
       ),
     ).rejects.toMatchObject({ category: 'conflict', code: 'BUDGET_EXCEEDED' });
 
-    expect(await cache.getState!('add:budget-block')).toBeUndefined();
+    expect(
+      await cache.getState!(expectedCacheKey('tenant-a', 'default:add', 'add:budget-block')),
+    ).toBeUndefined();
 
     const retry = await idempotentToolbox.execute(
       { name: 'add', arguments: { a: 1, b: 2 } },
@@ -420,7 +1243,9 @@ describe('withToolboxIdempotency', () => {
 
     expect(retry.outcome).toBe('error');
     expect(retry.idempotency).toBeUndefined();
-    expect(await cache.getState!('add:budget-block')).toBeUndefined();
+    expect(
+      await cache.getState!(expectedCacheKey('tenant-a', 'default:add', 'add:budget-block')),
+    ).toBeUndefined();
     expect(addCallCount).toBe(0);
   });
 
@@ -429,6 +1254,7 @@ describe('withToolboxIdempotency', () => {
     const chargeTool = createTool({
       name: 'charge',
       description: 'Charges a payment method',
+      version: '1.0.0',
       input: z.object({ cents: z.number() }),
       idempotencyKey: (input: unknown) => fullInputKey(input),
       async execute({ cents }) {
@@ -448,32 +1274,230 @@ describe('withToolboxIdempotency', () => {
         },
       },
     });
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
+    const requestContext = {
+      authority: {
+        principalId: 'principal-a',
+        tenantId: 'tenant-a',
+        ownerId: 'owner-a',
+        capabilities: ['payments:charge'],
+        authorizationRevision: 'authorization:1',
+      },
+      audience: 'tenant' as const,
+      agentId: 'agent-a',
+      runId: 'run-a',
+    };
     const paused = await idempotentToolbox.execute(
       { id: 'charge-call', name: 'charge', arguments: { cents: 100 } },
-      { idempotencyKey: 'charge-once' },
+      { idempotencyKey: 'charge-once', requestContext },
     );
 
-    const firstResume = await idempotentToolbox.resumeApproval(
-      paused.pendingApproval! as SignedPendingToolApproval,
-      { idempotencyKey: 'charge-once' },
-    );
-    const secondResume = await idempotentToolbox.resumeApproval(
-      paused.pendingApproval! as SignedPendingToolApproval,
-      { idempotencyKey: 'charge-once' },
-    );
+    const { resumeApproval } = idempotentToolbox;
+    const firstResume = await resumeApproval(paused.pendingApproval! as SignedPendingToolApproval, {
+      idempotencyKey: 'charge-once',
+      requestContext,
+    });
 
     expect(firstResume.result).toEqual({ charged: 100 });
     expect(firstResume.idempotency).toEqual({
-      key: 'charge:charge-once',
+      key: expectedCacheKey(
+        'tenant-a',
+        'default:charge@1.0.0',
+        'charge:charge-once',
+        requestContext,
+      ),
       outcome: 'fresh',
     });
-    expect(secondResume.result).toEqual({ charged: 100 });
-    expect(secondResume.idempotency).toEqual({
-      key: 'charge:charge-once',
+    await expect(
+      idempotentToolbox.resumeApproval(paused.pendingApproval! as SignedPendingToolApproval, {
+        idempotencyKey: 'charge-once',
+        requestContext,
+      }),
+    ).rejects.toThrow('already been consumed');
+    expect(charges).toEqual([100]);
+  });
+
+  it('requires and consumes signed approval before returning cached results guarded by current policy', async () => {
+    const reads: string[] = [];
+    let cancelAfterExecute = false;
+    let afterExecuteStarted!: () => void;
+    const afterExecuteStartedPromise = new Promise<void>((resolve) => {
+      afterExecuteStarted = resolve;
+    });
+    let releaseAfterExecute!: () => void;
+    const afterExecuteRelease = new Promise<void>((resolve) => {
+      releaseAfterExecute = resolve;
+    });
+    const secretTool = createTool({
+      name: 'read-secret',
+      description: 'Reads sensitive data',
+      version: '1.0.0',
+      input: z.object({ recordId: z.string() }),
+      idempotencyKey: (input: unknown) => fullInputKey(input),
+      async execute({ recordId }) {
+        reads.push(recordId);
+        return { recordId, secret: 'classified' };
+      },
+    });
+    const requestContext = {
+      authority: {
+        principalId: 'principal-a',
+        tenantId: 'tenant-a',
+        ownerId: 'owner-a',
+        capabilities: ['records:read'],
+        authorizationRevision: 'authorization:1',
+      },
+      audience: 'tenant' as const,
+      agentId: 'agent-a',
+      runId: 'run-a',
+    };
+    const call = {
+      id: 'read-secret-call',
+      name: 'read-secret',
+      arguments: { recordId: 'record-1' },
+    };
+    const idempotencyKey = 'read-secret-once';
+    const initialToolbox = withToolboxIdempotency(createToolbox([secretTool]), {
+      cache,
+      tenantId: 'tenant-a',
+      policyRevision: 'policy:2',
+    });
+    const initialResult = await initialToolbox.execute(call, { idempotencyKey, requestContext });
+    expect(initialResult.idempotency?.outcome).toBe('fresh');
+    expect(initialResult.result).toEqual({ recordId: 'record-1', secret: 'classified' });
+    expect(reads).toEqual(['record-1']);
+
+    const approvalStateStore = createProcessLocalApprovalStateStore();
+    const guardedToolbox = createToolbox([secretTool], {
+      approvalSecret: 'cached-result-approval-secret',
+      approvalStateStore,
+      policy: {
+        beforeExecute() {
+          return {
+            allow: false,
+            status: 'needs_approval',
+            reason: 'cached result access requires approval',
+          };
+        },
+        async afterExecute() {
+          if (cancelAfterExecute) {
+            afterExecuteStarted();
+            await afterExecuteRelease;
+          }
+        },
+      },
+    });
+    const idempotentGuardedToolbox = withToolboxIdempotency(guardedToolbox, {
+      cache,
+      tenantId: 'tenant-a',
+      policyRevision: 'policy:2',
+    });
+
+    const approvalRequired = await idempotentGuardedToolbox.execute(call, {
+      idempotencyKey,
+      requestContext,
+    });
+    expect(approvalRequired.outcome).toBe('action_required');
+    expect(approvalRequired.pendingApproval?.approvalToken).toEqual(expect.any(String));
+    expect(reads).toEqual(['record-1']);
+
+    const approval = approvalRequired.pendingApproval! as SignedPendingToolApproval;
+    expect(approval.approvalBinding).toBeDefined();
+    expect(await approvalStateStore.state(approval.approvalBinding!)).toBe('issued');
+
+    cancelAfterExecute = true;
+    const controller = new AbortController();
+    const cancelledResume = idempotentGuardedToolbox.resumeApproval(approval, {
+      idempotencyKey,
+      requestContext,
+      signal: controller.signal,
+    });
+    await afterExecuteStartedPromise;
+    controller.abort('cache-hit reporting cancelled');
+    const cancelled = await cancelledResume;
+    expect(cancelled.outcome).toBe('error');
+    expect(cancelled.errorCategory).toBe('cancelled');
+    expect(await approvalStateStore.state(approval.approvalBinding!)).toBe('issued');
+    releaseAfterExecute();
+
+    cancelAfterExecute = false;
+    const resumed = await idempotentGuardedToolbox.resumeApproval(approval, {
+      idempotencyKey,
+      requestContext,
+    });
+    expect(resumed.outcome).toBe('success');
+    expect(resumed.result).toEqual({ recordId: 'record-1', secret: 'classified' });
+    expect(resumed.idempotency).toEqual({
+      key: expectedCacheKey(
+        'tenant-a',
+        'default:read-secret@1.0.0',
+        `read-secret:${idempotencyKey}`,
+      ),
       outcome: 'deduped',
     });
-    expect(charges).toEqual([100]);
+    expect(reads).toEqual(['record-1']);
+    expect(await approvalStateStore.state(approval.approvalBinding!)).toBe('consumed');
+
+    await expect(
+      idempotentGuardedToolbox.resumeApproval(approval, { idempotencyKey, requestContext }),
+    ).rejects.toThrow('already been consumed');
+    expect(reads).toEqual(['record-1']);
+  });
+
+  it('reauthorizes completed cache hits against the original input', async () => {
+    let allowAll = true;
+    const tool = createTool({
+      name: 'input-bound-cache',
+      description: 'Input-sensitive cached tool',
+      version: '1.0.0',
+      input: z.object({ value: z.string() }),
+      idempotencyKey: () => 'same-operation',
+      policy: {
+        beforeExecute({ params }) {
+          const value = (params as { value?: string }).value;
+          return allowAll || value === 'safe'
+            ? { allow: true }
+            : { allow: false, reason: 'unsafe original input' };
+        },
+      },
+      async execute({ value }) {
+        addCallCount++;
+        return value;
+      },
+    });
+    const toolbox = withToolboxIdempotency(createToolbox([tool]), {
+      cache,
+      tenantId: 'tenant-a',
+    });
+
+    await expect(
+      toolbox.execute({ name: tool.name, arguments: { value: 'unsafe' } }),
+    ).resolves.toMatchObject({ outcome: 'success', result: 'unsafe' });
+    allowAll = false;
+    await expect(
+      toolbox.execute({ name: tool.name, arguments: { value: 'safe' } }),
+    ).resolves.toMatchObject({ outcome: 'error', errorMessage: 'unsafe original input' });
+    expect(addCallCount).toBe(1);
+  });
+
+  it('does not charge completed cache authorization against the toolbox budget', async () => {
+    const tool = createToolWithKey();
+    const toolbox = withToolboxIdempotency(createToolbox([tool], { budget: { maxCalls: 1 } }), {
+      cache,
+      tenantId: 'tenant-a',
+    });
+
+    await expect(
+      toolbox.execute({ name: tool.name, arguments: { a: 1, b: 2 } }),
+    ).resolves.toMatchObject({ outcome: 'success', result: 3 });
+    await expect(
+      toolbox.execute({ name: tool.name, arguments: { a: 1, b: 2 } }),
+    ).resolves.toMatchObject({
+      outcome: 'success',
+      result: 3,
+      idempotency: { outcome: 'deduped' },
+    });
+    expect(addCallCount).toBe(1);
   });
 
   it('does not keep started state for denied results before execution', async () => {
@@ -493,7 +1517,7 @@ describe('withToolboxIdempotency', () => {
         };
       },
     } as Toolbox;
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     const first = await idempotentToolbox.execute(
       { name: 'add', arguments: { a: 1, b: 2 } },
@@ -508,7 +1532,9 @@ describe('withToolboxIdempotency', () => {
     expect(second.outcome).toBe('denied');
     expect(first.idempotency).toBeUndefined();
     expect(second.idempotency).toBeUndefined();
-    expect(await cache.getState!('add:policy-denied')).toBeUndefined();
+    expect(
+      await cache.getState!(expectedCacheKey('tenant-a', 'default:add', 'add:policy-denied')),
+    ).toBeUndefined();
     expect(addCallCount).toBe(0);
   });
 
@@ -525,7 +1551,7 @@ describe('withToolboxIdempotency', () => {
       },
     });
     const toolbox = createToolbox([chargeTool]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     const first = await idempotentToolbox.execute(
       { id: 'call-1', name: 'charge', arguments: { cents: 100 } },
@@ -540,13 +1566,15 @@ describe('withToolboxIdempotency', () => {
     expect(first.idempotency).toBeUndefined();
     expect(second.outcome).toBe('action_required');
     expect(second.idempotency).toEqual({
-      key: 'charge:charge-once',
+      key: expectedCacheKey('tenant-a', 'default:charge', 'charge:charge-once'),
       outcome: 'unknown-outcome',
+      attemptId: expect.any(String),
+      inputDigest: expect.any(String),
     });
     expect(sideEffects).toEqual([100]);
-    expect(await cache.getState!('charge:charge-once')).toEqual(
-      expect.objectContaining({ status: 'started', toolName: 'charge' }),
-    );
+    expect(
+      await cache.getState!(expectedCacheKey('tenant-a', 'default:charge', 'charge:charge-once')),
+    ).toEqual(expect.objectContaining({ status: 'started', toolName: 'charge' }));
   });
 
   it('keeps started state when execution throws an unknown primitive error', async () => {
@@ -559,7 +1587,7 @@ describe('withToolboxIdempotency', () => {
         throw 'provider timeout after side effect';
       },
     } as Toolbox;
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     await expect(
       idempotentToolbox.execute(
@@ -575,12 +1603,14 @@ describe('withToolboxIdempotency', () => {
 
     expect(retry.outcome).toBe('action_required');
     expect(retry.idempotency).toEqual({
-      key: 'add:primitive-error',
+      key: expectedCacheKey('tenant-a', 'default:add', 'add:primitive-error'),
       outcome: 'unknown-outcome',
+      attemptId: expect.any(String),
+      inputDigest: expect.any(String),
     });
-    expect(await cache.getState!('add:primitive-error')).toEqual(
-      expect.objectContaining({ status: 'started', toolName: 'add' }),
-    );
+    expect(
+      await cache.getState!(expectedCacheKey('tenant-a', 'default:add', 'add:primitive-error')),
+    ).toEqual(expect.objectContaining({ status: 'started', toolName: 'add' }));
   });
 
   it('keeps started state for error results without an error object', async () => {
@@ -601,7 +1631,7 @@ describe('withToolboxIdempotency', () => {
         };
       },
     } as Toolbox;
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     const first = await idempotentToolbox.execute(
       { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
@@ -615,18 +1645,23 @@ describe('withToolboxIdempotency', () => {
     expect(first.outcome).toBe('error');
     expect(second.outcome).toBe('action_required');
     expect(second.idempotency).toEqual({
-      key: 'add:error-without-object',
+      key: expectedCacheKey('tenant-a', 'default:add', 'add:error-without-object'),
       outcome: 'unknown-outcome',
+      attemptId: expect.any(String),
+      inputDigest: expect.any(String),
     });
-    expect(await cache.getState!('add:error-without-object')).toEqual(
-      expect.objectContaining({ status: 'started', toolName: 'add' }),
-    );
+    expect(
+      await cache.getState!(
+        expectedCacheKey('tenant-a', 'default:add', 'add:error-without-object'),
+      ),
+    ).toEqual(expect.objectContaining({ status: 'started', toolName: 'add' }));
   });
 
   it('does not wrap tools without idempotencyKey by default (requireExplicitKey: true)', async () => {
     const toolbox = createToolbox([createToolWithKey(), createToolWithoutKey()]);
     const idempotentToolbox = withToolboxIdempotency(toolbox, {
       cache,
+      tenantId: 'tenant-a',
       requireExplicitKey: true,
     });
 
@@ -637,118 +1672,11 @@ describe('withToolboxIdempotency', () => {
     expect(mulCallCount).toBe(2); // Not cached
   });
 
-  it('supports caches that only implement the original completed-result API', async () => {
-    const completedResults = new Map<string, Awaited<ReturnType<ToolResultCache['get']>>>();
-    const legacyCache: ToolResultCache = {
-      async get(key) {
-        return completedResults.get(key);
-      },
-      async set(key, result) {
-        completedResults.set(key, result);
-      },
-      async delete(key) {
-        completedResults.delete(key);
-      },
-      async clear() {
-        completedResults.clear();
-      },
-    };
-    const toolbox = createToolbox([createToolWithKey()]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache: legacyCache });
-
-    const first = await idempotentToolbox.execute({ name: 'add', arguments: { a: 1, b: 2 } });
-    const second = await idempotentToolbox.execute({ name: 'add', arguments: { a: 1, b: 2 } });
-
-    expect(first.result).toBe(3);
-    expect(second.idempotency?.outcome).toBe('deduped');
-    expect(addCallCount).toBe(1);
-  });
-
-  it('uses an existing completed result returned while claiming a toolbox key', async () => {
-    const completed = {
-      result: 99,
-      toolName: 'add',
-      executedAt: Date.now(),
-      ttl: 60_000,
-    };
-    let reads = 0;
-    const racingCache: ToolResultCache = {
-      async get() {
-        reads++;
-        return reads === 1 ? undefined : completed;
-      },
-      async set() {
-        throw new Error('set should not be called');
-      },
-      async delete() {
-        throw new Error('delete should not be called');
-      },
-      async clear() {},
-    };
-    const toolbox = createToolbox([createToolWithKey()]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache: racingCache });
-    const key = `add:${fullInputKey({ a: 1, b: 2 })}`;
-
-    const result = await idempotentToolbox.execute({ name: 'add', arguments: { a: 1, b: 2 } });
-
-    expect(result).toMatchObject({
-      outcome: 'success',
-      result: 99,
-      idempotency: {
-        key,
-        outcome: 'deduped',
-      },
-    });
-    expect(addCallCount).toBe(0);
-  });
-
-  it('surfaces an existing started result returned while claiming a toolbox key', async () => {
-    const started = {
-      status: 'started' as const,
-      toolName: 'add',
-      startedAt: Date.now(),
-      ttl: 60_000,
-    };
-    let reads = 0;
-    const racingCache: ToolResultCache = {
-      async getState() {
-        reads++;
-        return reads === 1 ? undefined : started;
-      },
-      async get() {
-        return undefined;
-      },
-      async set() {
-        throw new Error('set should not be called');
-      },
-      async delete() {
-        throw new Error('delete should not be called');
-      },
-      async clear() {},
-    };
-    const toolbox = createToolbox([createToolWithKey()]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache: racingCache });
-    const key = `add:${fullInputKey({ a: 1, b: 2 })}`;
-
-    const result = await idempotentToolbox.execute({ name: 'add', arguments: { a: 1, b: 2 } });
-
-    expect(result).toMatchObject({
-      outcome: 'action_required',
-      idempotency: {
-        key,
-        outcome: 'unknown-outcome',
-      },
-      action: {
-        type: 'approval',
-      },
-    });
-    expect(addCallCount).toBe(0);
-  });
-
   it('wraps all tools with fullInputKey when requireExplicitKey is false', async () => {
     const toolbox = createToolbox([createToolWithKey(), createToolWithoutKey()]);
     const idempotentToolbox = withToolboxIdempotency(toolbox, {
       cache,
+      tenantId: 'tenant-a',
       requireExplicitKey: false,
     });
 
@@ -763,14 +1691,14 @@ describe('withToolboxIdempotency', () => {
 
   it('returns a new toolbox without mutating the original', () => {
     const toolbox = createToolbox([createToolWithKey()]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     expect(idempotentToolbox).not.toBe(toolbox);
   });
 
   it('preserves all tools in the toolbox', () => {
     const toolbox = createToolbox([createToolWithKey(), createToolWithoutKey()]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     const originalTools = toolbox.tools();
     const wrappedTools = idempotentToolbox.tools();
@@ -783,6 +1711,7 @@ describe('withToolboxIdempotency', () => {
     const toolbox = createToolbox([createToolWithKey()]);
     const idempotentToolbox = withToolboxIdempotency(toolbox, {
       cache,
+      tenantId: 'tenant-a',
       defaultTTL: 1000,
     });
 
@@ -794,7 +1723,7 @@ describe('withToolboxIdempotency', () => {
 
   it('passes unnamed calls through to the original toolbox execution', async () => {
     const toolbox = createToolbox([createToolWithKey()]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     const result = await idempotentToolbox.execute({ name: '', arguments: { a: 1, b: 2 } } as any);
 
@@ -805,7 +1734,7 @@ describe('withToolboxIdempotency', () => {
 
   it('supports array execution when wrapping toolbox calls with idempotency', async () => {
     const toolbox = createToolbox([createToolWithKey(), createToolWithoutKey()]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     const results = await idempotentToolbox.execute([
       { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
@@ -816,12 +1745,13 @@ describe('withToolboxIdempotency', () => {
     expect(results[0]?.result).toBe(3);
     expect(results[1]?.outcome).toBe('action_required');
     expect(results[1]?.idempotency?.outcome).toBe('unknown-outcome');
+    expect(results[1]?.idempotency?.attemptId).toEqual(expect.any(String));
     expect(addCallCount).toBe(1);
   });
 
   it('handles empty toolbox gracefully', () => {
     const toolbox = createToolbox([]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     expect(idempotentToolbox.tools()).toHaveLength(0);
   });
@@ -848,17 +1778,18 @@ describe('withToolboxIdempotency', () => {
     });
     // Note: chargeTool has NO idempotencyKey; the caller supplies one externally.
     const toolbox = createToolbox([chargeTool]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     const callerKey = 'orchestrator-tool-call-id-abc123';
-    const cacheKey = `charge:${callerKey}`;
+    const cacheKey = expectedCacheKey('tenant-a', 'default:charge', `charge:${callerKey}`);
+    const startedAt = Date.now();
 
     // Simulate a previous attempt that claimed the started entry and then died
     // before recording any result — the orphaned "started" state.
     const claim = await claimCacheStarted(cache, cacheKey, {
       status: 'started',
       toolName: 'charge',
-      startedAt: Date.now(),
+      startedAt,
       ttl: 60_000,
     });
     expect(claim.outcome).toBe('claimed');
@@ -876,6 +1807,7 @@ describe('withToolboxIdempotency', () => {
     expect(retry.idempotency).toEqual({
       key: cacheKey,
       outcome: 'unknown-outcome',
+      legacyStartedAt: startedAt,
     });
   });
 
@@ -905,7 +1837,7 @@ describe('withToolboxIdempotency', () => {
       },
     });
     const toolbox = createToolbox([chargeTool]);
-    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     const callerKey = 'orchestrator-tool-call-id-xyz789';
 
@@ -925,8 +1857,1360 @@ describe('withToolboxIdempotency', () => {
     expect(sideEffects).toEqual([500]);
     expect(second.outcome).toBe('action_required');
     expect(second.idempotency).toEqual({
-      key: 'charge:orchestrator-tool-call-id-xyz789',
+      key: expectedCacheKey(
+        'tenant-a',
+        'default:charge',
+        'charge:orchestrator-tool-call-id-xyz789',
+      ),
+      outcome: 'unknown-outcome',
+      attemptId: expect.any(String),
+      inputDigest: expect.any(String),
+    });
+  });
+
+  it('validates idempotency scope and duration options', () => {
+    const toolbox = createToolbox([createToolWithKey()]);
+    expect(() => withToolboxIdempotency(toolbox, { cache, tenantId: '' })).toThrow(
+      'non-empty tenantId',
+    );
+    expect(() =>
+      withToolboxIdempotency(toolbox, {
+        cache,
+        tenantId: 'tenant-a',
+        leaseDurationMs: 0,
+      }),
+    ).toThrow('durations must be finite and positive');
+    const unversioned = withToolboxIdempotency(toolbox, {
+      cache,
+      tenantId: 'tenant-a',
+      toolRevision: '',
+    });
+    expect(
+      unversioned.execute(
+        { name: 'add', arguments: { a: 1, b: 2 } },
+        { idempotencyKey: 'unversioned' },
+      ),
+    ).rejects.toThrow('complete revision');
+  });
+
+  it('uses atomic claim results that arrive after the initial read', async () => {
+    const toolbox = createToolbox([createToolWithKey()]);
+    const completed = {
+      result: 99,
+      toolName: 'add',
+      executedAt: Date.now(),
+      ttl: 60_000,
+      policyRevision: 'policy:1',
+      input: JSON.stringify({ a: 1, b: 2 }),
+    };
+    const completedRace: ToolResultCache = {
+      ...cache,
+      getState: async () => undefined,
+      claimStarted: async () => ({ outcome: 'existing', entry: completed }),
+    };
+    const completedResult = await withToolboxIdempotency(toolbox, {
+      cache: completedRace,
+      tenantId: 'tenant-a',
+    }).execute({ name: 'add', arguments: { a: 1, b: 2 } });
+    expect(completedResult.result).toBe(99);
+
+    const startedRace: ToolResultCache = {
+      ...cache,
+      getState: async () => undefined,
+      claimStarted: async (_key, execution) => ({ outcome: 'existing', entry: execution }),
+    };
+    const startedResult = await withToolboxIdempotency(toolbox, {
+      cache: startedRace,
+      tenantId: 'tenant-a',
+    }).execute({ name: 'add', arguments: { a: 1, b: 2 } });
+    expect(startedResult.outcome).toBe('action_required');
+  });
+
+  it('validates original input serialization before claiming or executing', async () => {
+    let executions = 0;
+    const tool = createTool({
+      name: 'serialization-guard',
+      description: 'serialization guard',
+      input: z.object({ value: z.any() }),
+      idempotencyKey: () => 'serialization-guard-key',
+      async execute() {
+        executions += 1;
+        return 'side effect';
+      },
+    });
+    const toolbox = withToolboxIdempotency(createToolbox([tool]), {
+      cache,
+      tenantId: 'tenant-a',
+    });
+    const circular: Record<string, unknown> = {};
+    circular['self'] = circular;
+    const inputs: unknown[] = [{ value: 1n }, { value: circular }, () => 'root function'];
+
+    for (const input of inputs) {
+      await expect(toolbox.execute({ name: tool.name, arguments: input })).rejects.toThrow();
+    }
+    expect(executions).toBe(0);
+  });
+
+  it('renews active leases and stops completion after losing a fence', async () => {
+    let renewals = 0;
+    const slowTool = createTool({
+      name: 'slow-add',
+      description: 'Waits before adding',
+      input: z.object({ value: z.number() }),
+      idempotencyKey: (input: unknown) => fullInputKey(input),
+      async execute({ value }) {
+        await new Promise((resolve) => setTimeout(resolve, 12));
+        return value + 1;
+      },
+    });
+    const renewingCache: ToolResultCache = {
+      ...cache,
+      async renewStarted(key, attemptId, leaseExpiresAt) {
+        renewals += 1;
+        return cache.renewStarted(key, attemptId, leaseExpiresAt);
+      },
+    };
+    const result = await withToolboxIdempotency(createToolbox([slowTool]), {
+      cache: renewingCache,
+      tenantId: 'tenant-a',
+      leaseDurationMs: 4,
+      maximumExecutionDurationMs: 100,
+    }).execute({ name: 'slow-add', arguments: { value: 1 } });
+    expect(result.result).toBe(2);
+    expect(renewals).toBeGreaterThan(0);
+
+    const deadlineTool = createTool({
+      name: 'deadline-renewal',
+      description: 'deadline renewal',
+      input: z.object({}),
+      idempotencyKey: () => 'deadline-renewal',
+      async execute() {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return 'done';
+      },
+    });
+    const deadlineResult = await withToolboxIdempotency(createToolbox([deadlineTool]), {
+      cache,
+      tenantId: 'tenant-a',
+      leaseDurationMs: 10,
+      maximumExecutionDurationMs: 5,
+    }).execute({ name: deadlineTool.name, arguments: {} });
+    expect(deadlineResult.outcome).toBe('action_required');
+    expect(deadlineResult.idempotency?.outcome).toBe('unknown-outcome');
+
+    const lostFenceCache: ToolResultCache = {
+      ...cache,
+      completeStarted: async () => false,
+    };
+    const unfenced = await withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache: lostFenceCache,
+      tenantId: 'tenant-b',
+    }).execute({ name: 'add', arguments: { a: 2, b: 3 } });
+    expect(unfenced.outcome).toBe('action_required');
+    expect(unfenced.idempotency?.outcome).toBe('unknown-outcome');
+    const lostFenceKey = expectedCacheKey(
+      'tenant-b',
+      'default:add',
+      `add:${fullInputKey({ a: 2, b: 3 })}`,
+    );
+    await expect(cache.getState(lostFenceKey)).resolves.toMatchObject({ status: 'started' });
+    const unknown = await withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache,
+      tenantId: 'tenant-b',
+    }).execute({ name: 'add', arguments: { a: 2, b: 3 } });
+    expect(unknown.outcome).toBe('action_required');
+    expect(addCallCount).toBe(1);
+
+    const failedRenewalCache: ToolResultCache = {
+      ...cache,
+      renewStarted: async () => false,
+    };
+    const lostInitialFence = await withToolboxIdempotency(createToolbox([slowTool]), {
+      cache: failedRenewalCache,
+      tenantId: 'tenant-c',
+      leaseDurationMs: 4,
+      maximumExecutionDurationMs: 100,
+    }).execute({ name: 'slow-add', arguments: { value: 2 } });
+    expect(lostInitialFence.outcome).toBe('action_required');
+    expect(lostInitialFence.idempotency?.outcome).toBe('unknown-outcome');
+
+    let renewalCalls = 0;
+    const rejectedScheduledRenewalCache: ToolResultCache = {
+      ...cache,
+      renewStarted: async () => {
+        renewalCalls += 1;
+        if (renewalCalls === 1) return true;
+        throw new Error('lease storage unavailable');
+      },
+    };
+    const renewalFailure = await withToolboxIdempotency(createToolbox([slowTool]), {
+      cache: rejectedScheduledRenewalCache,
+      tenantId: 'tenant-d',
+      leaseDurationMs: 4,
+      maximumExecutionDurationMs: 100,
+    }).execute({ name: 'slow-add', arguments: { value: 2 } });
+    expect(renewalFailure.outcome).toBe('action_required');
+    expect(renewalFailure.idempotency?.outcome).toBe('unknown-outcome');
+  });
+
+  it('settles cancellation without waiting for an in-flight lease renewal', async () => {
+    let signalRenewalStarted!: () => void;
+    const renewalStarted = new Promise<void>((resolve) => {
+      signalRenewalStarted = resolve;
+    });
+    let releaseRenewal!: () => void;
+    const renewalReleased = new Promise<boolean>((resolve) => {
+      releaseRenewal = () => resolve(true);
+    });
+    let renewalCalls = 0;
+    let lateRenewalDeletes = 0;
+    let releaseTool!: () => void;
+    const toolReleased = new Promise<void>((resolve) => {
+      releaseTool = resolve;
+    });
+    const pendingRenewalCache: ToolResultCache = {
+      ...cache,
+      async renewStarted() {
+        renewalCalls += 1;
+        if (renewalCalls === 1) return true;
+        signalRenewalStarted();
+        return renewalReleased;
+      },
+      async deleteStarted() {
+        lateRenewalDeletes += 1;
+        return true;
+      },
+    };
+    const tool = createTool({
+      name: 'pending-renewal-toolbox',
+      description: 'Waits while its lease renewal remains pending',
+      input: z.object({}),
+      idempotencyKey: () => 'pending-renewal-toolbox',
+      async execute() {
+        await toolReleased;
+        return 'done';
+      },
+    });
+    const controller = new AbortController();
+    const execution = withToolboxIdempotency(createToolbox([tool]), {
+      cache: pendingRenewalCache,
+      tenantId: 'tenant-a',
+      leaseDurationMs: 4,
+      maximumExecutionDurationMs: 100,
+    }).execute({ name: tool.name, arguments: {} }, { signal: controller.signal });
+
+    await renewalStarted;
+    controller.abort('cancel pending renewal');
+    releaseTool();
+    expect(
+      await Promise.race([
+        execution.then(
+          () => 'settled',
+          () => 'settled',
+        ),
+        new Promise<'blocked'>((resolve) => setTimeout(() => resolve('blocked'), 50)),
+      ]),
+    ).toBe('settled');
+    releaseRenewal();
+    await renewalReleased;
+    await Promise.resolve();
+    expect(lateRenewalDeletes).toBe(0);
+  });
+
+  it('rejects a claim whose execution duration expires before admission', async () => {
+    let callbackRuns = 0;
+    let deletes = 0;
+    const expiringTool = createTool({
+      name: 'expired-before-admission',
+      description: 'Expires after its durable claim',
+      input: z.object({}),
+      idempotencyKey: () => 'expired-before-admission',
+      async execute() {
+        callbackRuns += 1;
+        return 'unexpected';
+      },
+    });
+    let clockReads = 0;
+    const result = await withToolboxIdempotency(createToolbox([expiringTool]), {
+      cache: {
+        ...cache,
+        async deleteStarted() {
+          deletes += 1;
+          return true;
+        },
+      },
+      tenantId: 'tenant-a',
+      maximumExecutionDurationMs: 5,
+      now: () => [0, 5][clockReads++] ?? 5,
+    }).execute({ name: expiringTool.name, arguments: {} });
+
+    expect(result.errorCategory).toBe('timeout');
+    expect(callbackRuns).toBe(0);
+    expect(deletes).toBe(1);
+  });
+
+  it('bounds and cleans up toolbox initial lease renewal', async () => {
+    let resolveRenewal!: (owned: boolean) => void;
+    const renewal = new Promise<boolean>((resolve) => {
+      resolveRenewal = resolve;
+    });
+    let renewalStarted!: () => void;
+    const renewalDidStart = new Promise<void>((resolve) => {
+      renewalStarted = resolve;
+    });
+    let deletes = 0;
+    const controller = new AbortController();
+    const tool = createToolWithKey();
+    const pending = withToolboxIdempotency(createToolbox([tool]), {
+      cache: {
+        ...cache,
+        renewStarted: () => {
+          renewalStarted();
+          return renewal;
+        },
+        deleteStarted: async () => {
+          deletes += 1;
+          return true;
+        },
+      },
+      tenantId: 'tenant-a',
+    }).execute({ name: tool.name, arguments: { a: 1, b: 2 } }, { signal: controller.signal });
+    await renewalDidStart;
+    controller.abort('cancel initial toolbox renewal');
+    const interruptedResult = await pending;
+    expect(interruptedResult.errorCategory).toBe('cancelled');
+    resolveRenewal(true);
+    await renewal;
+    await Promise.resolve();
+    expect(deletes).toBe(1);
+
+    const rejected = await withToolboxIdempotency(createToolbox([tool]), {
+      cache: {
+        ...cache,
+        renewStarted: async () => {
+          throw new Error('renewal rejected');
+        },
+      },
+      tenantId: 'tenant-b',
+    }).execute({ name: tool.name, arguments: { a: 1, b: 2 } });
+    expect(rejected.idempotency?.outcome).toBe('unknown-outcome');
+  });
+
+  it('checks the deadline before starting a queued renewal', async () => {
+    let renewals = 0;
+    let clockIndex = 0;
+    let releaseFirstRenewal!: () => void;
+    const firstRenewalReleased = new Promise<void>((resolve) => {
+      releaseFirstRenewal = resolve;
+    });
+    const slowTool = createTool({
+      name: 'queued-renewal',
+      description: 'Waits for queued lease renewal',
+      input: z.object({ value: z.number() }),
+      idempotencyKey: (input: unknown) => fullInputKey(input),
+      async execute({ value }) {
+        await new Promise((resolve) => setTimeout(resolve, 8));
+        releaseFirstRenewal();
+        return value;
+      },
+    });
+    const renewalCache: ToolResultCache = {
+      ...cache,
+      async renewStarted(key, attemptId, leaseExpiresAt, observedAt) {
+        renewals += 1;
+        if (renewals === 2) await firstRenewalReleased;
+        return cache.renewStarted(key, attemptId, leaseExpiresAt, observedAt);
+      },
+    };
+
+    const result = await withToolboxIdempotency(createToolbox([slowTool]), {
+      cache: renewalCache,
+      tenantId: 'tenant-a',
+      leaseDurationMs: 4,
+      maximumExecutionDurationMs: 10,
+      now: () => [0, 0, 100][clockIndex++] ?? 100,
+    }).execute({ name: 'queued-renewal', arguments: { value: 7 } });
+
+    expect(result.outcome).toBe('action_required');
+    expect(result.idempotency?.outcome).toBe('unknown-outcome');
+    expect(renewals).toBe(1);
+  });
+
+  it('rechecks cache state when authorized unknown replacement loses its race', async () => {
+    const toolbox = createToolbox([createToolWithKey()]);
+    const key = expectedCacheKey('tenant-a', 'default:add', 'add:replacement-race');
+    const started = {
+      status: 'started' as const,
+      toolName: 'add',
+      startedAt: Date.now(),
+      ttl: 60_000,
+      attemptId: 'original-attempt',
+      inputDigest: fullInputKey({ a: 1, b: 2 }),
+    };
+    const completed = {
+      status: 'completed' as const,
+      result: 42,
+      toolName: 'add',
+      executedAt: Date.now(),
+      ttl: 60_000,
+      policyRevision: 'policy:1',
+      input: JSON.stringify({ a: 1, b: 2 }),
+    };
+    let reads = 0;
+    const racingCache: ToolResultCache = {
+      ...cache,
+      getState: async () => (reads++ === 0 ? started : completed),
+      replaceUnknownStarted: async () => false,
+    };
+    const idempotent = withToolboxIdempotency(toolbox, {
+      cache: racingCache,
+      tenantId: 'tenant-a',
+      verifyResolutionReceipt: async () => true,
+    });
+    const result = await idempotent.execute(
+      { name: 'add', arguments: { a: 1, b: 2 } },
+      {
+        idempotencyKey: 'replacement-race',
+        requestContext: createTestRequestContext('tenant-a'),
+        resolutionReceipt: {
+          version: 1,
+          key,
+          attemptId: 'original-attempt',
+          inputDigest: started.inputDigest,
+          tenantId: 'tenant-a',
+          toolRevision: 'default:add',
+          decision: 'retry',
+          evidence: 'Provider ledger proves no side effect occurred.',
+          authorizedAt: Date.now(),
+          authorizedBy: 'operator-a',
+          nonce: 'receipt-race',
+          authorization: 'signed-receipt',
+        },
+      },
+    );
+    expect(result.result).toBe(42);
+    expect(result.idempotency?.outcome).toBe('deduped');
+
+    reads = 0;
+    const missingRaceCache: ToolResultCache = {
+      ...racingCache,
+      getState: async () => (reads++ === 0 ? started : undefined),
+    };
+    const missingResult = await withToolboxIdempotency(toolbox, {
+      cache: missingRaceCache,
+      tenantId: 'tenant-a',
+      verifyResolutionReceipt: async () => true,
+    }).execute(
+      { name: 'add', arguments: { a: 1, b: 2 } },
+      {
+        idempotencyKey: 'replacement-race',
+        requestContext: createTestRequestContext('tenant-a'),
+        resolutionReceipt: {
+          version: 1,
+          key,
+          attemptId: 'original-attempt',
+          inputDigest: started.inputDigest,
+          tenantId: 'tenant-a',
+          toolRevision: 'default:add',
+          decision: 'retry',
+          evidence: 'Provider ledger proves no side effect occurred.',
+          authorizedAt: Date.now(),
+          authorizedBy: 'operator-a',
+          nonce: 'receipt-race-2',
+          authorization: 'signed-receipt',
+        },
+      },
+    );
+    expect(missingResult.outcome).toBe('action_required');
+
+    reads = 0;
+    const malformedCurrent = {
+      status: 'reserved',
+      toolName: 'add',
+    } as unknown as Awaited<ReturnType<ToolResultCache['getState']>>;
+    const malformedRaceCache: ToolResultCache = {
+      ...racingCache,
+      getState: async () => (reads++ === 0 ? started : malformedCurrent),
+    };
+    const malformedResult = await withToolboxIdempotency(toolbox, {
+      cache: malformedRaceCache,
+      tenantId: 'tenant-a',
+      verifyResolutionReceipt: async () => true,
+    }).execute(
+      { name: 'add', arguments: { a: 1, b: 2 } },
+      {
+        idempotencyKey: 'replacement-race',
+        requestContext: createTestRequestContext('tenant-a'),
+        resolutionReceipt: {
+          version: 1,
+          key,
+          attemptId: 'original-attempt',
+          inputDigest: started.inputDigest,
+          tenantId: 'tenant-a',
+          toolRevision: 'default:add',
+          decision: 'retry',
+          evidence: 'Provider ledger proves no side effect occurred.',
+          authorizedAt: Date.now(),
+          authorizedBy: 'operator-a',
+          nonce: 'receipt-race-3',
+          authorization: 'signed-receipt',
+        },
+      },
+    );
+    expect(malformedResult.outcome).toBe('action_required');
+    expect(malformedResult.idempotency).toEqual({
+      key,
       outcome: 'unknown-outcome',
     });
+    expect(malformedResult.idempotency).not.toHaveProperty('attemptId');
+  });
+
+  it('starts replacement leases after receipt verification and uses the injected completion clock', async () => {
+    const key = expectedCacheKey('tenant-a', 'default:add', 'add:fresh-retry-clock');
+    await cache.claimStarted(key, {
+      status: 'started',
+      toolName: 'add',
+      startedAt: 100,
+      ttl: 60_000,
+      attemptId: 'expired-attempt',
+      leaseExpiresAt: 500,
+      absoluteDeadline: 900,
+      inputDigest: fullInputKey({ a: 1, b: 2 }),
+    });
+    let clock = 1_000;
+    let replacementStartedAt: number | undefined;
+    let replacementLeaseExpiresAt: number | undefined;
+    let completedAt: number | undefined;
+    const observingCache: ToolResultCache = {
+      ...cache,
+      async replaceUnknownStarted(cacheKey, expectedAttemptId, replacement, currentTime) {
+        replacementStartedAt = replacement.startedAt;
+        replacementLeaseExpiresAt = replacement.leaseExpiresAt;
+        return cache.replaceUnknownStarted!(cacheKey, expectedAttemptId, replacement, currentTime);
+      },
+      async completeStarted(cacheKey, attemptId, result, ttl, currentTime) {
+        completedAt = result.executedAt;
+        return cache.completeStarted!(cacheKey, attemptId, result, ttl, currentTime);
+      },
+    };
+    const toolbox = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache: observingCache,
+      tenantId: 'tenant-a',
+      leaseDurationMs: 200,
+      maximumExecutionDurationMs: 1_000,
+      now: () => clock,
+      verifyResolutionReceipt: async () => {
+        clock = 2_000;
+        return true;
+      },
+    });
+
+    const result = await toolbox.execute(
+      { name: 'add', arguments: { a: 1, b: 2 } },
+      {
+        idempotencyKey: 'fresh-retry-clock',
+        requestContext: createTestRequestContext('tenant-a'),
+        resolutionReceipt: {
+          version: 1,
+          key,
+          attemptId: 'expired-attempt',
+          inputDigest: fullInputKey({ a: 1, b: 2 }),
+          tenantId: 'tenant-a',
+          toolRevision: 'default:add',
+          decision: 'retry',
+          evidence: 'the original attempt did not produce an external effect',
+          authorizedAt: 1_000,
+          authorizedBy: 'operator-a',
+          nonce: 'fresh-clock-receipt',
+          authorization: 'signed',
+        },
+      },
+    );
+
+    expect(result.result).toBe(3);
+    expect(replacementStartedAt).toBe(2_000);
+    expect(replacementLeaseExpiresAt).toBe(2_200);
+    expect(completedAt).toBe(2_000);
+  });
+
+  it('requires current request authority and rejects a mismatched tenant', async () => {
+    const toolbox = createIdempotentToolbox(createToolbox([createToolWithKey()]), {
+      cache,
+      tenantId: 'tenant-a',
+    });
+    await expect(toolbox.execute({ name: 'add', arguments: { a: 1, b: 2 } })).rejects.toThrow(
+      'request-scoped execution authority',
+    );
+    await expect(
+      toolbox.execute(
+        { name: 'add', arguments: { a: 1, b: 2 } },
+        { requestContext: createTestRequestContext('tenant-b') },
+      ),
+    ).rejects.toThrow('tenantId must match');
+  });
+
+  it('returns cancellation and deadline outcomes before cache admission', async () => {
+    const toolbox = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache,
+      tenantId: 'tenant-a',
+    });
+    const controller = new AbortController();
+    controller.abort(new Error('client stopped'));
+    const cancelled = await toolbox.execute(
+      { name: 'add', arguments: { a: 1, b: 2 } },
+      { signal: controller.signal },
+    );
+    expect(cancelled.errorCategory).toBe('cancelled');
+    expect(cancelled.errorMessage).toBe('client stopped');
+
+    const timedOut = await toolbox.execute(
+      { name: 'add', arguments: { a: 1, b: 2 } },
+      {
+        requestContext: { ...createTestRequestContext('tenant-a'), deadline: 10 },
+        now: () => 10,
+      },
+    );
+    expect(timedOut.errorCategory).toBe('timeout');
+    expect(timedOut.errorMessage).toBe('Execution deadline exceeded');
+
+    await expect(
+      toolbox.execute(
+        { name: 'add', arguments: { a: 1, b: 2 } },
+        {
+          requestContext: { ...createTestRequestContext('tenant-a'), deadline: Number.NaN },
+        },
+      ),
+    ).rejects.toThrow('Execution deadline must be finite');
+
+    const completedBeforeDeadline = await toolbox.execute(
+      { name: 'add', arguments: { a: 4, b: 5 } },
+      {
+        requestContext: {
+          ...createTestRequestContext('tenant-a'),
+          deadline: Date.now() + 1_000,
+        },
+      },
+    );
+    expect(completedBeforeDeadline.result).toBe(9);
+  });
+
+  it('interrupts a stalled cache read and rejects altered arguments for a started key', async () => {
+    let releaseRead!: (value: undefined) => void;
+    const stalledCache: ToolResultCache = {
+      ...cache,
+      getState: () => new Promise((resolve) => (releaseRead = resolve)),
+    };
+    const controller = new AbortController();
+    const toolbox = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache: stalledCache,
+      tenantId: 'tenant-a',
+    });
+    const pending = toolbox.execute(
+      { name: 'add', arguments: { a: 1, b: 2 } },
+      { signal: controller.signal },
+    );
+    controller.abort('read cancelled');
+    const cancelled = await pending;
+    expect(cancelled.errorCategory).toBe('cancelled');
+    releaseRead(undefined);
+
+    const key = expectedCacheKey('tenant-a', 'default:add', 'add:shared-digest');
+    await cache.claimStarted(key, {
+      status: 'started',
+      toolName: 'add',
+      startedAt: Date.now(),
+      ttl: 60_000,
+      attemptId: 'digest-attempt',
+      inputDigest: fullInputKey({ a: 1, b: 2 }),
+    });
+    const result = await withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache,
+      tenantId: 'tenant-a',
+    }).execute(
+      { name: 'add', arguments: { a: 9, b: 9 } },
+      {
+        idempotencyKey: 'shared-digest',
+        requestContext: createTestRequestContext('tenant-a'),
+        resolutionReceipt: {
+          version: 1,
+          key,
+          attemptId: 'digest-attempt',
+          inputDigest: fullInputKey({ a: 1, b: 2 }),
+          tenantId: 'tenant-a',
+          toolRevision: 'default:add',
+          decision: 'retry',
+          evidence: 'operator checked the original arguments',
+          authorizedAt: Date.now(),
+          authorizedBy: 'operator-a',
+          nonce: 'digest-nonce',
+          authorization: 'signed',
+        },
+      },
+    );
+    expect(result.outcome).toBe('action_required');
+    expect(result.idempotency?.outcome).toBe('unknown-outcome');
+  });
+
+  it('interrupts every deferred cache operation and re-arms stalled deadlines', async () => {
+    const call = { id: 'control-call', name: 'add', arguments: { a: 1, b: 2 } };
+    const requestContext = createTestRequestContext('tenant-a');
+    const interrupt = async (
+      cacheOverrides: Partial<ToolResultCache>,
+      operationOptions: Record<string, unknown> = {},
+      wrapperOptions: Record<string, unknown> = {},
+    ) => {
+      const controller = new AbortController();
+      const toolbox = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+        cache: { ...cache, ...cacheOverrides },
+        tenantId: 'tenant-a',
+        ...wrapperOptions,
+      });
+      const pending = toolbox.execute(call, {
+        requestContext,
+        signal: controller.signal,
+        ...operationOptions,
+      });
+      await Promise.resolve();
+      controller.abort('operation interrupted');
+      const result = await pending;
+      expect(result.errorCategory).toBe('cancelled');
+      return result;
+    };
+
+    let releaseRead!: () => void;
+    await interrupt({
+      getState: () => new Promise((resolve) => (releaseRead = resolve)),
+    });
+    releaseRead();
+
+    await expect(
+      withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+        cache: {
+          ...cache,
+          getState: () => {
+            throw new Error('cache read failed');
+          },
+        },
+        tenantId: 'tenant-a',
+      }).execute(call, {
+        requestContext,
+        signal: new AbortController().signal,
+        now: () => 0,
+      }),
+    ).rejects.toThrow();
+
+    const deadlineCallbacks: Array<() => void> = [];
+    let clock = 0;
+    let releaseDeadlineRead!: () => void;
+    const deadlineRead = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache: {
+        ...cache,
+        getState: () => new Promise((resolve) => (releaseDeadlineRead = resolve)),
+      },
+      tenantId: 'tenant-a',
+    }).execute(call, {
+      requestContext: { ...requestContext, deadline: 10 },
+      now: () => clock,
+      setTimeoutFunction: (callback: () => void) => {
+        deadlineCallbacks.push(callback);
+        return callback;
+      },
+      clearTimeoutFunction: () => undefined,
+    });
+    await Promise.resolve();
+    clock = 5;
+    deadlineCallbacks.shift()!();
+    clock = 10;
+    deadlineCallbacks.shift()!();
+    const deadlineResult = await deadlineRead;
+    expect(deadlineResult.errorCategory).toBe('timeout');
+    releaseDeadlineRead();
+
+    await interrupt({
+      getState: async () => undefined,
+      claimStarted: () => new Promise(() => undefined),
+    });
+
+    const started = {
+      status: 'started' as const,
+      toolName: 'add',
+      startedAt: Date.now(),
+      ttl: 60_000,
+      attemptId: 'control-attempt',
+      inputDigest: fullInputKey(call.arguments),
+      leaseExpiresAt: 0,
+    };
+    const key = expectedCacheKey('tenant-a', 'default:add', `add:${fullInputKey(call.arguments)}`);
+    const receipt = {
+      version: 1 as const,
+      key,
+      attemptId: started.attemptId,
+      inputDigest: started.inputDigest,
+      tenantId: 'tenant-a',
+      toolRevision: 'default:add',
+      decision: 'retry' as const,
+      evidence: 'operator checked the side effect',
+      authorizedAt: Date.now(),
+      authorizedBy: 'operator-a',
+      nonce: 'control-nonce',
+      authorization: 'signed',
+    };
+    await interrupt(
+      {
+        getState: async () => started,
+      },
+      { resolutionReceipt: receipt },
+      { verifyResolutionReceipt: () => new Promise(() => undefined) },
+    );
+  });
+
+  it('interrupts deadline cleanup, receipt verification, replacement, and race reads', async () => {
+    const call = { id: 'deferred-call', name: 'add', arguments: { a: 1, b: 2 } };
+    const requestContext = createTestRequestContext('tenant-a');
+    const key = expectedCacheKey('tenant-a', 'default:add', `add:${fullInputKey(call.arguments)}`);
+    const receipt = (attemptId: string) => ({
+      version: 1 as const,
+      key,
+      attemptId,
+      inputDigest: fullInputKey(call.arguments),
+      tenantId: 'tenant-a',
+      toolRevision: 'default:add',
+      decision: 'retry' as const,
+      evidence: 'operator verified the original attempt',
+      authorizedAt: Date.now(),
+      authorizedBy: 'operator-a',
+      nonce: `deferred-${attemptId}`,
+      authorization: 'signed',
+    });
+    const started = (attemptId: string): CachedToolResult => ({
+      status: 'started',
+      toolName: 'add',
+      startedAt: 0,
+      ttl: 60_000,
+      attemptId,
+      leaseExpiresAt: 0,
+      absoluteDeadline: 60_000,
+      inputDigest: fullInputKey(call.arguments),
+    });
+
+    let clearCount = 0;
+    let releaseRead!: () => void;
+    const deadlineController = new AbortController();
+    const deadlineRead = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache: {
+        ...cache,
+        getState: () => new Promise((resolve) => (releaseRead = () => resolve(undefined))),
+      },
+      tenantId: 'tenant-a',
+    }).execute(call, {
+      requestContext: { ...requestContext, deadline: 10 },
+      signal: deadlineController.signal,
+      now: () => 0,
+      setTimeoutFunction: (callback: () => void) => callback,
+      clearTimeoutFunction: () => {
+        clearCount++;
+      },
+    });
+    await Promise.resolve();
+    deadlineController.abort();
+    const deadlineResult = await deadlineRead;
+    expect(deadlineResult.errorCategory).toBe('cancelled');
+    expect(clearCount).toBe(1);
+    releaseRead();
+
+    const interruptDeferred = async (
+      entry: CachedToolResult,
+      operation: (controller: AbortController) => Partial<ToolResultCache>,
+      options: Record<string, unknown> = {},
+      waitUntil: () => boolean = () => true,
+      operationStarted?: Promise<void>,
+    ) => {
+      const controller = new AbortController();
+      const pending = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+        cache: {
+          ...cache,
+          getState: async () => entry,
+          ...operation(controller),
+        },
+        tenantId: 'tenant-a',
+        verifyResolutionReceipt: () => true,
+        ...options,
+      }).execute(call, {
+        requestContext,
+        signal: controller.signal,
+        resolutionReceipt: receipt(entry.attemptId!),
+      });
+      if (operationStarted) {
+        await operationStarted;
+      } else {
+        for (let index = 0; index < 5 && !waitUntil(); index++) {
+          await Promise.resolve();
+        }
+      }
+      controller.abort('deferred operation');
+      const result = await pending;
+      expect(result.errorCategory).toBe('cancelled');
+    };
+
+    const legacyStarted = {
+      status: 'started' as const,
+      toolName: 'add',
+      startedAt: 0,
+      ttl: 60_000,
+      leaseExpiresAt: 0,
+    } as CachedToolResult;
+    let legacyVerificationStarted = false;
+    const legacyController = new AbortController();
+    const legacyPending = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache: {
+        ...cache,
+        getState: async () => legacyStarted,
+      },
+      tenantId: 'tenant-a',
+      verifyLegacyResolutionReceipt: () => {
+        legacyVerificationStarted = true;
+        return new Promise(() => undefined);
+      },
+    }).execute(call, {
+      requestContext,
+      signal: legacyController.signal,
+      legacyResolutionReceipt: {
+        version: 1,
+        key,
+        tenantId: 'tenant-a',
+        toolRevision: 'default:add',
+        toolName: 'add',
+        legacyStartedAt: 0,
+        decision: 'retry',
+        evidence: 'operator verified the original attempt',
+        authorizedAt: 0,
+        authorizedBy: 'operator-a',
+        nonce: 'legacy-deferred',
+        authorization: 'signed',
+      },
+    });
+    for (let index = 0; index < 5 && !legacyVerificationStarted; index++) {
+      await Promise.resolve();
+    }
+    legacyController.abort('legacy verification');
+    const legacyResult = await legacyPending;
+    expect(legacyResult.errorCategory).toBe('cancelled');
+
+    let legacyReplacementStarted = false;
+    let resolveLegacyReplacement!: (replaced: boolean) => void;
+    const legacyReplacement = new Promise<boolean>((resolve) => {
+      resolveLegacyReplacement = resolve;
+    });
+    let legacyReplacementDeletes = 0;
+    let markLegacyReplacementStarted!: () => void;
+    const legacyReplacementStartedPromise = new Promise<void>((resolve) => {
+      markLegacyReplacementStarted = resolve;
+    });
+    const legacyReplaceController = new AbortController();
+    const legacyReplacePending = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache: {
+        ...cache,
+        getState: async () => legacyStarted,
+        replaceLegacyStarted: () => {
+          legacyReplacementStarted = true;
+          markLegacyReplacementStarted();
+          return legacyReplacement;
+        },
+        deleteStarted: async () => {
+          legacyReplacementDeletes += 1;
+          return true;
+        },
+      },
+      tenantId: 'tenant-a',
+      verifyLegacyResolutionReceipt: () => true,
+      now: () => 1_000,
+    }).execute(call, {
+      requestContext,
+      signal: legacyReplaceController.signal,
+      legacyResolutionReceipt: {
+        version: 1,
+        key,
+        tenantId: 'tenant-a',
+        toolRevision: 'default:add',
+        toolName: 'add',
+        legacyStartedAt: 0,
+        decision: 'retry',
+        evidence: 'operator verified the original attempt',
+        authorizedAt: 0,
+        authorizedBy: 'operator-a',
+        nonce: 'legacy-replace-deferred',
+        authorization: 'signed',
+      },
+    });
+    await legacyReplacementStartedPromise;
+    expect(legacyReplacementStarted).toBe(true);
+    legacyReplaceController.abort('legacy replacement');
+    const legacyReplaceResult = await legacyReplacePending;
+    expect(legacyReplaceResult.errorCategory).toBe('cancelled');
+    resolveLegacyReplacement(true);
+    await legacyReplacement;
+    await Promise.resolve();
+    expect(legacyReplacementDeletes).toBe(1);
+
+    let fencedVerificationStarted = false;
+    await interruptDeferred(
+      started('verify-attempt'),
+      () => ({
+        replaceUnknownStarted: async () => false,
+      }),
+      {
+        verifyResolutionReceipt: () => {
+          fencedVerificationStarted = true;
+          return new Promise(() => undefined);
+        },
+      },
+      () => fencedVerificationStarted,
+    );
+
+    let fencedReplacementStarted = false;
+    let resolveFencedReplacement!: (replaced: boolean) => void;
+    const fencedReplacement = new Promise<boolean>((resolve) => {
+      resolveFencedReplacement = resolve;
+    });
+    let fencedReplacementDeletes = 0;
+    let markFencedReplacementStarted!: () => void;
+    const fencedReplacementStartedPromise = new Promise<void>((resolve) => {
+      markFencedReplacementStarted = resolve;
+    });
+    await interruptDeferred(
+      started('fenced-attempt'),
+      () => ({
+        replaceUnknownStarted: () => {
+          fencedReplacementStarted = true;
+          markFencedReplacementStarted();
+          return fencedReplacement;
+        },
+        deleteStarted: async () => {
+          fencedReplacementDeletes += 1;
+          throw new Error('late fenced cleanup failed');
+        },
+      }),
+      {},
+      () => fencedReplacementStarted,
+      fencedReplacementStartedPromise,
+    );
+    resolveFencedReplacement(true);
+    await fencedReplacement;
+    await Promise.resolve();
+    expect(fencedReplacementDeletes).toBe(1);
+
+    let claimStarted = false;
+    let resolveClaim!: (result: { outcome: 'claimed' }) => void;
+    const delayedClaim = new Promise<{ outcome: 'claimed' }>((resolve) => {
+      resolveClaim = resolve;
+    });
+    let lateClaimDeletes = 0;
+    const claimController = new AbortController();
+    const claimPending = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache: {
+        ...cache,
+        getState: async () => undefined,
+        claimStarted: () => {
+          claimStarted = true;
+          return delayedClaim;
+        },
+        deleteStarted: async () => {
+          lateClaimDeletes += 1;
+          throw new Error('late claim cleanup failed');
+        },
+      },
+      tenantId: 'tenant-a',
+    }).execute(call, { requestContext, signal: claimController.signal });
+    for (let index = 0; index < 5 && !claimStarted; index++) await Promise.resolve();
+    expect(claimStarted).toBe(true);
+    claimController.abort('claim interrupted');
+    const claimResult = await claimPending;
+    expect(claimResult.errorCategory).toBe('cancelled');
+    resolveClaim({ outcome: 'claimed' });
+    await delayedClaim;
+    await Promise.resolve();
+    expect(lateClaimDeletes).toBe(1);
+
+    let resolveLostClaim!: (result: { outcome: 'existing'; entry: CachedToolResult }) => void;
+    const lostClaim = new Promise<{
+      outcome: 'existing';
+      entry: CachedToolResult;
+    }>((resolve) => {
+      resolveLostClaim = resolve;
+    });
+    let markLostClaimStarted!: () => void;
+    const lostClaimStarted = new Promise<void>((resolve) => {
+      markLostClaimStarted = resolve;
+    });
+    const lostClaimController = new AbortController();
+    const lostClaimPending = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache: {
+        ...cache,
+        getState: async () => undefined,
+        claimStarted: () => {
+          markLostClaimStarted();
+          return lostClaim;
+        },
+      },
+      tenantId: 'tenant-a',
+    }).execute(call, { requestContext, signal: lostClaimController.signal });
+    await lostClaimStarted;
+    lostClaimController.abort('lost claim race');
+    const lostClaimResult = await lostClaimPending;
+    expect(lostClaimResult.errorCategory).toBe('cancelled');
+    resolveLostClaim({ outcome: 'existing', entry: started('late-existing-attempt') });
+    await lostClaim;
+    await Promise.resolve();
+
+    let readCount = 0;
+    let replaceCount = 0;
+    let releaseRaceRead!: () => void;
+    let markRaceReadStarted!: () => void;
+    const raceReadStarted = new Promise<void>((resolve) => {
+      markRaceReadStarted = resolve;
+    });
+    const raceController = new AbortController();
+    const racePending = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache: {
+        ...cache,
+        getState: async () => {
+          readCount++;
+          if (readCount === 1) return started('race-attempt');
+          markRaceReadStarted();
+          return new Promise((resolve) => (releaseRaceRead = () => resolve(undefined)));
+        },
+        replaceUnknownStarted: async () => {
+          replaceCount++;
+          return false;
+        },
+      },
+      tenantId: 'tenant-a',
+      verifyResolutionReceipt: () => true,
+      now: () => 1,
+    }).execute(call, {
+      requestContext,
+      signal: raceController.signal,
+      resolutionReceipt: receipt('race-attempt'),
+    });
+    await raceReadStarted;
+    expect(replaceCount).toBe(1);
+    expect(readCount).toBe(2);
+    expect(releaseRaceRead).toBeDefined();
+    raceController.abort('race read interrupted');
+    const raceResult = await racePending;
+    expect(raceResult.errorCategory).toBe('cancelled');
+    releaseRaceRead?.();
+  });
+
+  it('bounds a stalled toolbox completion write by request cancellation', async () => {
+    let completionStarted!: () => void;
+    const completionPending = new Promise<void>((resolve) => {
+      completionStarted = resolve;
+    });
+    const controller = new AbortController();
+    const execution = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache: {
+        ...cache,
+        completeStarted: async () => {
+          completionStarted();
+          return new Promise(() => undefined);
+        },
+      },
+      tenantId: 'tenant-a',
+    }).execute(
+      { id: 'stalled-completion', name: 'add', arguments: { a: 1, b: 2 } },
+      { signal: controller.signal },
+    );
+
+    await completionPending;
+    controller.abort('cancel stalled completion');
+    const result = await execution;
+    expect(result.outcome).toBe('action_required');
+    expect(result.idempotency?.outcome).toBe('unknown-outcome');
+    expect(addCallCount).toBe(1);
+  });
+
+  it('normalizes unknown failures and cancellation reasons', async () => {
+    const call = { name: 'add', arguments: { a: 1, b: 2 } };
+    const requestContext = createTestRequestContext('tenant-a');
+    await expect(
+      withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+        cache: { ...cache, getState: async () => Promise.reject({ code: 'cache-failure' }) },
+        tenantId: 'tenant-a',
+      }).execute(call, { requestContext, signal: new AbortController().signal }),
+    ).rejects.toThrow('Unknown error');
+
+    const receiptKey = expectedCacheKey(
+      'tenant-a',
+      'default:add',
+      `add:${fullInputKey(call.arguments)}`,
+    );
+    await expect(
+      withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+        cache: {
+          ...cache,
+          getState: async () => ({
+            status: 'started',
+            toolName: 'add',
+            startedAt: 0,
+            ttl: 60_000,
+            attemptId: 'sync-verification-attempt',
+            leaseExpiresAt: 0,
+            inputDigest: fullInputKey(call.arguments),
+          }),
+        },
+        tenantId: 'tenant-a',
+        verifyResolutionReceipt: () => {
+          throw 'synchronous verification failure';
+        },
+      }).execute(call, {
+        requestContext,
+        signal: new AbortController().signal,
+        resolutionReceipt: {
+          version: 1,
+          key: receiptKey,
+          attemptId: 'sync-verification-attempt',
+          inputDigest: fullInputKey(call.arguments),
+          tenantId: 'tenant-a',
+          toolRevision: 'default:add',
+          decision: 'retry',
+          evidence: 'operator verified the original attempt',
+          authorizedAt: 0,
+          authorizedBy: 'operator-a',
+          nonce: 'sync-verification',
+          authorization: 'signed',
+        },
+      }),
+    ).rejects.toThrow('synchronous verification failure');
+
+    let release!: () => void;
+    const controller = new AbortController();
+    const pending = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache: { ...cache, getState: () => new Promise((resolve) => (release = resolve)) },
+      tenantId: 'tenant-a',
+    }).execute(call, { requestContext, signal: controller.signal });
+    await Promise.resolve();
+    controller.abort({ reason: 'not-an-error' });
+    const result = await pending;
+    expect(result.errorMessage).toBe('Cancelled');
+    release();
+  });
+
+  it('rejects non-finite lease and execution durations', () => {
+    const toolbox = createToolbox([createToolWithKey()]);
+    for (const options of [
+      { leaseDurationMs: Number.NaN },
+      { leaseDurationMs: Number.POSITIVE_INFINITY },
+      { maximumExecutionDurationMs: Number.NaN },
+      { maximumExecutionDurationMs: Number.POSITIVE_INFINITY },
+    ]) {
+      expect(() =>
+        withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a', ...options }),
+      ).toThrow('finite and positive');
+    }
+  });
+
+  it('does not replace an active lease even with an authorized receipt', async () => {
+    const key = expectedCacheKey('tenant-a', 'default:add', 'add:active-lease');
+    await cache.claimStarted(key, {
+      status: 'started',
+      toolName: 'add',
+      startedAt: 100,
+      ttl: 60_000,
+      attemptId: 'active-attempt',
+      leaseExpiresAt: 500,
+      absoluteDeadline: 1_000,
+      inputDigest: fullInputKey({ a: 1, b: 2 }),
+    });
+    const toolbox = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
+      cache,
+      tenantId: 'tenant-a',
+      now: () => 200,
+      verifyResolutionReceipt: () => true,
+    });
+    const result = await toolbox.execute(
+      { id: 'retry', name: 'add', arguments: { a: 1, b: 2 } },
+      {
+        idempotencyKey: 'active-lease',
+        requestContext: createTestRequestContext('tenant-a'),
+        resolutionReceipt: {
+          version: 1,
+          key,
+          attemptId: 'active-attempt',
+          inputDigest: fullInputKey({ a: 1, b: 2 }),
+          tenantId: 'tenant-a',
+          toolRevision: 'default:add',
+          decision: 'retry',
+          evidence: 'operator verified the external effect',
+          authorizedAt: 200,
+          authorizedBy: 'operator-a',
+          nonce: 'active-lease-receipt',
+          authorization: 'signed',
+        },
+      },
+    );
+    expect(result.idempotency?.outcome).toBe('unknown-outcome');
+    expect(result.idempotency?.attemptId).toBe('active-attempt');
+    expect(result.idempotency?.inputDigest).toBe(fullInputKey({ a: 1, b: 2 }));
+    expect(addCallCount).toBe(0);
+  });
+
+  it('preserves sequential and bounded-concurrency batch controls', async () => {
+    let active = 0;
+    let maximumActive = 0;
+    const order: number[] = [];
+    const tool = createTool({
+      name: 'controlled',
+      description: 'records execution order',
+      input: z.object({ value: z.number() }),
+      idempotencyKey: ({ value }: { value: number }) => String(value),
+      async execute({ value }) {
+        active += 1;
+        maximumActive = Math.max(maximumActive, active);
+        await Promise.resolve();
+        order.push(value);
+        active -= 1;
+        return value;
+      },
+    });
+    const toolbox = withToolboxIdempotency(createToolbox([tool]), {
+      cache,
+      tenantId: 'tenant-a',
+    });
+    const calls = [1, 2, 3].map((value) => ({
+      id: `call-${value}`,
+      name: 'controlled',
+      arguments: { value },
+    }));
+    await toolbox.execute(calls, { mode: 'sequential' });
+    expect(order).toEqual([1, 2, 3]);
+    expect(maximumActive).toBe(1);
+
+    order.length = 0;
+    maximumActive = 0;
+    await toolbox.execute(
+      calls.map((call, index) => ({
+        ...call,
+        id: `bounded-${index}`,
+        arguments: { value: index + 4 },
+      })),
+      { concurrency: 2 },
+    );
+    expect(order).toHaveLength(3);
+    expect(maximumActive).toBe(2);
+
+    order.length = 0;
+    maximumActive = 0;
+    const fractionalResults = await toolbox.execute(
+      calls.map((call, index) => ({
+        ...call,
+        id: `fractional-${index}`,
+        arguments: { value: index + 7 },
+      })),
+      { concurrency: 0.5 },
+    );
+    expect(fractionalResults).toHaveLength(3);
+    expect(order).toHaveLength(3);
   });
 });

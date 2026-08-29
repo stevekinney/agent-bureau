@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 
+import { normalizeApiKeyScopes } from '../keys/create-api-key-store';
 import type { ApiKeyStore } from '../keys/types';
 
 /**
@@ -22,9 +23,19 @@ export function createKeysRoutes(apiKeyStore: ApiKeyStore) {
       throw new HTTPException(400, { message: 'Request must include a "name" string' });
     }
 
+    let scopes: string[] | undefined;
+    try {
+      scopes = body.scopes === undefined ? undefined : normalizeApiKeyScopes(body.scopes);
+    } catch (error) {
+      if (error instanceof Error) {
+        throw new HTTPException(400, { message: error.message });
+      }
+      throw error;
+    }
+
     const result = await apiKeyStore.create({
       name: body.name,
-      scopes: body.scopes,
+      scopes,
       expiresAt: body.expiresAt,
     });
 

@@ -14,12 +14,13 @@ import {
 import { createCheckpoint, encode, serializeCheckpoint } from '@lostgradient/weft';
 import { KEYS, MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
-import { createToolbox } from 'armorer';
+import { createTool, createToolbox, type ToolRequestContext } from 'armorer';
 import { afterEach, describe, expect, it } from 'bun:test';
 import { Conversation, createConversationHistory, getMessages } from 'conversationalist';
 import { TypedEventTarget } from 'lifecycle';
 import type { Memory } from 'memory';
 import type { SkillProvider } from 'skills';
+import { z } from 'zod';
 
 import {
   activeSkillsFromStepMetadata,
@@ -79,6 +80,14 @@ async function saveRecoverableSession(sessionStore: SessionStore, runId: string)
         lastRunId: runId,
         lastRunStatus: 'running',
         lastUserMessage: 'recover this session if it is not scheduler-origin',
+        lastRequestAuthority: {
+          principalId: `run:${runId}`,
+          tenantId: 'bureau',
+          ownerId: 'test-agent',
+          capabilities: ['tools:execute'],
+          authorizationRevision: 'bureau:1',
+          audience: 'operator',
+        },
       },
     }),
   );
@@ -89,6 +98,364 @@ describe('createRuntimeComposition', () => {
     expect(() => getRuntimeCompositionTestingSeams({} as RuntimeComposition)).toThrow(
       'Runtime composition testing seams are not registered for this composition',
     );
+  });
+
+  it('revalidates transport authority immediately before each tool execution', async () => {
+    let authorityCurrent = true;
+    let executions = 0;
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      requestAuthorityValidator: () => authorityCurrent,
+      toolbox: createToolbox([
+        createTool({
+          name: 'transport-authorized-tool',
+          description: 'Runs only while transport authority remains current',
+          input: z.object({}),
+          async execute() {
+            executions += 1;
+            return Promise.resolve('executed');
+          },
+        }),
+      ]),
+    });
+    const runRuntime = await runtime.createRunRuntime({
+      message: 'test',
+      sessionId: 'transport-authority-session',
+      runId: 'transport-authority-run',
+      requestContext: {
+        authority: {
+          principalId: 'api-key:transport',
+          tenantId: 'tenant-a',
+          ownerId: 'owner-a',
+          capabilities: ['tools:execute'],
+          authorizationRevision: 'gateway:api-key:transport',
+        },
+        audience: 'tenant',
+      },
+    });
+
+    await runRuntime.toolbox.execute({
+      id: 'transport-authority-success-call',
+      name: 'transport-authorized-tool',
+      arguments: {},
+    });
+    expect(executions).toBe(1);
+
+    authorityCurrent = false;
+    const execution = runRuntime.toolbox.execute({
+      id: 'transport-authority-call',
+      name: 'transport-authorized-tool',
+      arguments: {},
+    }) as unknown as Promise<unknown>;
+    const executionError = await execution.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(executionError).toBeInstanceOf(Error);
+    expect((executionError as Error).message).toContain('no longer current');
+    expect(executions).toBe(1);
+    runtime.disposeStorage?.();
+  });
+
+  it('cancels a stalled transport authority revalidation before tool dispatch', async () => {
+    let executions = 0;
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      requestAuthorityValidator: () => new Promise(() => {}),
+      toolbox: createToolbox([
+        createTool({
+          name: 'stalled-authority-tool',
+          description: 'Must not run after authority cancellation',
+          input: z.object({}),
+          async execute() {
+            executions += 1;
+            return 'unexpected';
+          },
+        }),
+      ]),
+    });
+    const runRuntime = await runtime.createRunRuntime({
+      message: 'test',
+      sessionId: 'stalled-authority-session',
+      runId: 'stalled-authority-run',
+      requestContext: {
+        authority: {
+          principalId: 'api-key:stalled',
+          tenantId: 'tenant-a',
+          ownerId: 'owner-a',
+          capabilities: ['tools:execute'],
+          authorizationRevision: 'gateway:api-key:stalled',
+        },
+        audience: 'tenant',
+      },
+    });
+    const controller = new AbortController();
+    const execution = runRuntime.toolbox.execute(
+      { id: 'stalled-authority-call', name: 'stalled-authority-tool', arguments: {} },
+      { signal: controller.signal },
+    ) as unknown as Promise<unknown>;
+    controller.abort('authority check cancelled');
+
+    const executionError = await execution.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(executionError).toBeInstanceOf(Error);
+    expect((executionError as Error).message).toBe('authority check cancelled');
+    expect(executions).toBe(0);
+    runtime.disposeStorage?.();
+  });
+
+  it('rejects pre-aborted and deadline-expired transport authority checks', async () => {
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      requestAuthorityValidator: () => new Promise(() => {}),
+      toolbox: createToolbox([
+        createTool({
+          name: 'bounded-authority-tool',
+          description: 'Must remain behind bounded authority validation',
+          input: z.object({}),
+          async execute() {
+            return 'unexpected';
+          },
+        }),
+      ]),
+    });
+    const authority = {
+      principalId: 'api-key:bounded',
+      tenantId: 'tenant-a',
+      ownerId: 'owner-a',
+      capabilities: ['tools:execute'] as const,
+      authorizationRevision: 'gateway:api-key:bounded',
+    };
+    const runRuntime = await runtime.createRunRuntime({
+      message: 'test',
+      sessionId: 'bounded-authority-session',
+      runId: 'bounded-authority-run',
+      requestContext: { authority, audience: 'tenant' },
+    });
+    const controller = new AbortController();
+    controller.abort('already cancelled');
+    const preAborted = runRuntime.toolbox.execute(
+      { id: 'pre-aborted-authority-call', name: 'bounded-authority-tool', arguments: {} },
+      { signal: controller.signal },
+    ) as unknown as Promise<unknown>;
+    const preAbortedError = await preAborted.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect((preAbortedError as Error).message).toBe('already cancelled');
+
+    const expired = runRuntime.toolbox.execute(
+      { id: 'expired-authority-call', name: 'bounded-authority-tool', arguments: {} },
+      {
+        requestContext: { authority, audience: 'tenant', deadline: Date.now() - 1 },
+      },
+    ) as unknown as Promise<unknown>;
+    const expiredError = await expired.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect((expiredError as Error).message).toBe('Execution deadline exceeded');
+
+    const deadline = runRuntime.toolbox.execute(
+      { id: 'deadline-authority-call', name: 'bounded-authority-tool', arguments: {} },
+      {
+        requestContext: { authority, audience: 'tenant', deadline: Date.now() + 5 },
+      },
+    ) as unknown as Promise<unknown>;
+    const deadlineError = await deadline.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect((deadlineError as Error).message).toBe('Execution deadline exceeded');
+    runtime.disposeStorage?.();
+  });
+
+  it('chunks long transport authority deadlines without expiring them early', async () => {
+    let resolveValidation!: (value: boolean) => void;
+    const validation = new Promise<boolean>((resolve) => {
+      resolveValidation = resolve;
+    });
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      requestAuthorityValidator: () => validation,
+      toolbox: createToolbox([
+        createTool({
+          name: 'long-deadline-authority-tool',
+          description: 'Must not expire an oversized authority deadline early',
+          input: z.object({}),
+          async execute() {
+            return 'authorized';
+          },
+        }),
+      ]),
+    });
+    const authority = {
+      principalId: 'api-key:long-deadline',
+      tenantId: 'tenant-a',
+      ownerId: 'owner-a',
+      capabilities: ['tools:execute'] as const,
+      authorizationRevision: 'gateway:api-key:long-deadline',
+    };
+    const runRuntime = await runtime.createRunRuntime({
+      message: 'test',
+      sessionId: 'long-deadline-authority-session',
+      runId: 'long-deadline-authority-run',
+      requestContext: { authority, audience: 'tenant' },
+    });
+    const scheduled: Array<{ callback: () => void; delay: number }> = [];
+    const cleared: unknown[] = [];
+    let currentTime = 0;
+    const execution = runRuntime.toolbox.execute(
+      {
+        id: 'long-deadline-authority-call',
+        name: 'long-deadline-authority-tool',
+        arguments: {},
+      },
+      {
+        requestContext: {
+          authority,
+          audience: 'tenant',
+          deadline: 2_147_484_647,
+        },
+        now: () => currentTime,
+        setTimeoutFunction(callback, milliseconds) {
+          const handle = { callback, delay: milliseconds ?? 0 };
+          scheduled.push(handle);
+          return handle;
+        },
+        clearTimeoutFunction(handle) {
+          cleared.push(handle);
+        },
+      },
+    ) as unknown as Promise<{ result?: unknown }>;
+
+    expect(scheduled[0]?.delay).toBe(2_147_483_647);
+    currentTime = 2_147_483_647;
+    scheduled[0]?.callback();
+    expect(scheduled[1]?.delay).toBe(1_000);
+    resolveValidation(true);
+    const result = await execution;
+    expect(result.result).toBe('authorized');
+    expect(cleared).toContain(scheduled[1]);
+    runtime.disposeStorage?.();
+  });
+
+  it('propagates transport authority validator failures', async () => {
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      requestAuthorityValidator: () => Promise.reject(new Error('validator unavailable')),
+      toolbox: createToolbox([]),
+    });
+    const runRuntime = await runtime.createRunRuntime({
+      message: 'test',
+      sessionId: 'rejected-authority-session',
+      runId: 'rejected-authority-run',
+      requestContext: {
+        authority: {
+          principalId: 'api-key:rejected',
+          tenantId: 'tenant-a',
+          ownerId: 'owner-a',
+          capabilities: ['tools:execute'],
+          authorizationRevision: 'gateway:api-key:rejected',
+        },
+        audience: 'tenant',
+      },
+    });
+    const execution = runRuntime.toolbox.execute({
+      id: 'rejected-authority-call',
+      name: 'missing',
+      arguments: {},
+    }) as unknown as Promise<unknown>;
+    const executionError = await execution.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect((executionError as Error).message).toBe('validator unavailable');
+    runtime.disposeStorage?.();
+  });
+
+  it('validates and restores persisted request authority for durable recovery', async () => {
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+    });
+    const recover = getRuntimeCompositionTestingSeams(runtime).recoveredRequestContext;
+    const metadata = {
+      lastRequestAuthority: {
+        principalId: 'principal-a',
+        tenantId: 'tenant-a',
+        ownerId: 'owner-a',
+        capabilities: ['tools:execute'],
+        authorizationRevision: 'authorization:1',
+        audience: 'tenant',
+      },
+    };
+    expect(recover(metadata, 'run-a', 'agent-a')).toMatchObject({
+      audience: 'tenant',
+      agentId: 'agent-a',
+      runId: 'run-a',
+      authority: {
+        principalId: 'principal-a',
+        tenantId: 'tenant-a',
+        ownerId: 'owner-a',
+        capabilities: ['tools:execute'],
+        authorizationRevision: 'authorization:1',
+      },
+    });
+    expect(
+      recover(
+        {
+          lastRequestAuthority: {
+            ...metadata.lastRequestAuthority,
+            audience: 'invalid-audience',
+          },
+        },
+        'run-a',
+        'agent-a',
+      ),
+    ).toBeUndefined();
+  });
+
+  it('does not restore legacy request authority when a per-run map exists without the recovered run', async () => {
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+    });
+    const recover = getRuntimeCompositionTestingSeams(runtime).recoveredRequestContext;
+    const metadata = {
+      lastRequestAuthority: {
+        principalId: 'legacy-principal',
+        tenantId: 'legacy-tenant',
+        ownerId: 'legacy-owner',
+        capabilities: ['legacy:execute'],
+        authorizationRevision: 'legacy:1',
+        audience: 'tenant',
+      },
+      lastRequestAuthorities: {
+        'run-b': {
+          principalId: 'principal-b',
+          tenantId: 'tenant-b',
+          ownerId: 'owner-b',
+          capabilities: ['tools:execute'],
+          authorizationRevision: 'authorization:2',
+          audience: 'operator',
+        },
+      },
+    };
+
+    expect(recover(metadata, 'run-a', 'agent-a')).toBeUndefined();
+    expect(recover(metadata, 'run-b', 'agent-b')).toMatchObject({
+      audience: 'operator',
+      agentId: 'agent-b',
+      runId: 'run-b',
+      authority: {
+        principalId: 'principal-b',
+        tenantId: 'tenant-b',
+        ownerId: 'owner-b',
+        capabilities: ['tools:execute'],
+        authorizationRevision: 'authorization:2',
+      },
+    });
   });
 
   it('provides an unavailable toolbox that accepts empty calls and rejects tool calls', async () => {
@@ -945,6 +1312,149 @@ describe('createRuntimeComposition durable execution', () => {
     }
   });
 
+  it('binds service request authority to scheduled fire toolbox execution and durable options', async () => {
+    const { z } = await import('zod');
+    const observedRequestContexts: ToolRequestContext[] = [];
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      toolbox: createToolbox([
+        createTool({
+          name: 'capture_request_context',
+          description: 'Capture the request context supplied to a scheduled tool call.',
+          input: z.object({}),
+          async execute(_input, context) {
+            if (context.requestContext) observedRequestContexts.push(context.requestContext);
+            return context.requestContext?.authority.principalId ?? null;
+          },
+        }),
+      ]),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    try {
+      expect(runtime.sessionStore).toBeDefined();
+      const resolution = await getRuntimeCompositionTestingSeams(runtime).buildScheduledRunServices(
+        {
+          workflowId: 'scheduled-authority-run',
+          workflowType: 'agentRun',
+          input: {
+            agentName: 'researcher',
+            input: 'capture context',
+            scheduleId: 'nightly-digest',
+          },
+          schedule: { id: 'nightly-digest' },
+        },
+        runtime.sessionStore!,
+      );
+
+      expect(resolution.status).toBe('available');
+      if (resolution.status !== 'available') {
+        throw new Error(`Expected scheduled services to be available: ${resolution.reason}`);
+      }
+      const services = resolution.services as DurableRunDeps;
+
+      expect(services.options.executeOptions?.requestContext).toMatchObject({
+        audience: 'operator',
+        agentId: 'researcher',
+        runId: 'scheduled-authority-run',
+        authority: {
+          principalId: 'service:scheduler',
+          tenantId: 'bureau',
+          ownerId: 'researcher',
+          capabilities: ['tools:execute'],
+          authorizationRevision: 'bureau:scheduler:1',
+        },
+      });
+
+      const result = await services.toolbox.execute({
+        name: 'capture_request_context',
+        arguments: {},
+      });
+
+      expect(result.result).toBe('service:scheduler');
+      expect(observedRequestContexts).toHaveLength(1);
+      expect(observedRequestContexts[0]).toMatchObject(
+        services.options.executeOptions!.requestContext!,
+      );
+    } finally {
+      runtime.durable?.engine[Symbol.dispose]?.();
+    }
+  });
+
+  it('binds service request authority when creating a scheduler task runtime', async () => {
+    const { z } = await import('zod');
+    const observedRequestContexts: ToolRequestContext[] = [];
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      toolbox: createToolbox([
+        createTool({
+          name: 'capture_scheduler_task_context',
+          description: 'Capture the request context supplied to a scheduler task tool call.',
+          input: z.object({}),
+          async execute(_input, context) {
+            if (context.requestContext) observedRequestContexts.push(context.requestContext);
+            return context.requestContext?.authority.principalId ?? null;
+          },
+        }),
+      ]),
+    });
+
+    const runRuntime = await runtime.createRunRuntime(
+      {
+        message: 'capture context',
+        sessionId: 'caller-chosen-scheduler-task-live',
+        requestContext: {
+          authority: {
+            principalId: 'service:scheduler',
+            tenantId: 'bureau',
+            ownerId: 'bureau',
+            capabilities: ['tools:execute'],
+            authorizationRevision: 'bureau:scheduler:1',
+          },
+          audience: 'operator',
+          agentId: 'bureau',
+          runId: 'scheduler-task-live',
+        },
+      },
+      { liveStreaming: false },
+    );
+
+    const result = await runRuntime.toolbox.execute({
+      name: 'capture_scheduler_task_context',
+      arguments: {},
+    });
+
+    expect(result.result).toBe('service:scheduler');
+    expect(observedRequestContexts).toHaveLength(1);
+    expect(observedRequestContexts[0]).toMatchObject({
+      audience: 'operator',
+      agentId: 'bureau',
+      runId: 'scheduler-task-live',
+      authority: {
+        principalId: 'service:scheduler',
+        tenantId: 'bureau',
+        ownerId: 'bureau',
+        capabilities: ['tools:execute'],
+        authorizationRevision: 'bureau:scheduler:1',
+      },
+    });
+
+    const spoofedRuntime = await runtime.createRunRuntime(
+      {
+        message: 'do not infer context',
+        sessionId: 'scheduler-task-spoofed',
+      },
+      { liveStreaming: false },
+    );
+    const spoofedResult = await spoofedRuntime.toolbox.execute({
+      name: 'capture_scheduler_task_context',
+      arguments: {},
+    });
+    expect(spoofedResult.result).toBe(null);
+    expect(observedRequestContexts).toHaveLength(1);
+  });
+
   it('uses an explicit scheduled session id as proof for markerless recovered fires', async () => {
     const runtime = await createRuntimeComposition({
       generate: async () => ({ content: 'x', toolCalls: [] }),
@@ -960,7 +1470,17 @@ describe('createRuntimeComposition durable execution', () => {
           id: 'explicit-scheduled-session',
           agentName: 'agent',
           conversationHistory: createConversationHistory({ id: 'explicit-scheduled-session' }),
-          metadata: { lastScheduledFireRunId: 'scheduled-run' },
+          metadata: {
+            lastScheduledFireRunId: 'scheduled-run',
+            lastRequestAuthority: {
+              principalId: 'principal-a',
+              tenantId: 'tenant-a',
+              ownerId: 'owner-a',
+              capabilities: ['tools:execute'],
+              authorizationRevision: 'authorization:1',
+              audience: 'invalid-audience',
+            },
+          },
         }),
       );
 
@@ -1027,7 +1547,19 @@ describe('createRuntimeComposition durable execution', () => {
       id: 'session-owned',
       agentName: 'agent',
       conversationHistory: createConversationHistory({ id: 'session-owned' }),
-      metadata: { lastRunId: 'run-owned', lastRunStatus: 'running', lastUserMessage: 'resume' },
+      metadata: {
+        lastRunId: 'run-owned',
+        lastRunStatus: 'running',
+        lastUserMessage: 'resume',
+        lastRequestAuthority: {
+          principalId: 'run:run-owned',
+          tenantId: 'bureau',
+          ownerId: 'agent',
+          capabilities: ['tools:execute'],
+          authorizationRevision: 'bureau:1',
+          audience: 'operator',
+        },
+      },
     });
     const runtime = await createRuntimeComposition({
       generate: async () => ({ content: 'x', toolCalls: [] }),
@@ -1094,6 +1626,219 @@ describe('createRuntimeComposition durable execution', () => {
           input: { runId: 'run-owned', sessionId: 'session-owned', agentName: 'agent' },
         }),
       ).toMatchObject({ status: 'unavailable', reason: 'run run-owned not reconstructable' });
+    } finally {
+      runtime.durable?.engine[Symbol.dispose]?.();
+    }
+  });
+
+  it('fails closed when recovered request authority is missing', async () => {
+    const session = createAgentSession({
+      id: 'session-missing-authority',
+      agentName: 'agent',
+      conversationHistory: createConversationHistory({ id: 'session-missing-authority' }),
+      metadata: {
+        lastRunId: 'run-missing-authority',
+        lastRunStatus: 'running',
+        lastUserMessage: 'resume',
+      },
+    });
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    try {
+      getRuntimeCompositionTestingSeams(runtime).setSessionStore({
+        async load() {
+          return session;
+        },
+      } as unknown as SessionStore);
+
+      expect(
+        await getRuntimeCompositionTestingSeams(runtime).resolveRunServices({
+          workflowId: 'run-missing-authority',
+          workflowType: 'agentRun',
+          input: {
+            runId: 'run-missing-authority',
+            sessionId: 'session-missing-authority',
+            agentName: 'agent',
+          },
+        }),
+      ).toMatchObject({
+        status: 'unavailable',
+        reason: 'run run-missing-authority request authority is unavailable during recovery',
+      });
+    } finally {
+      runtime.durable?.engine[Symbol.dispose]?.();
+    }
+  });
+
+  it('fails closed when recovered request authority cannot be revalidated', async () => {
+    const session = createAgentSession({
+      id: 'session-custom-authority',
+      agentName: 'agent',
+      conversationHistory: createConversationHistory({ id: 'session-custom-authority' }),
+      metadata: {
+        lastRunId: 'run-custom-authority',
+        lastRunStatus: 'running',
+        lastUserMessage: 'resume',
+        lastRequestAuthority: {
+          principalId: 'principal-a',
+          tenantId: 'tenant-a',
+          ownerId: 'owner-a',
+          capabilities: ['tools:execute'],
+          authorizationRevision: 'authorization:1',
+          audience: 'tenant',
+        },
+      },
+    });
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    try {
+      getRuntimeCompositionTestingSeams(runtime).setSessionStore({
+        async load() {
+          return session;
+        },
+      } as unknown as SessionStore);
+
+      expect(
+        await getRuntimeCompositionTestingSeams(runtime).resolveRunServices({
+          workflowId: 'run-custom-authority',
+          workflowType: 'agentRun',
+          input: {
+            runId: 'run-custom-authority',
+            sessionId: 'session-custom-authority',
+            agentName: 'agent',
+          },
+        }),
+      ).toMatchObject({
+        status: 'unavailable',
+        reason: 'run run-custom-authority authority cannot be revalidated during recovery',
+      });
+    } finally {
+      runtime.durable?.engine[Symbol.dispose]?.();
+    }
+  });
+
+  it('fails closed when recovered request authority is no longer current', async () => {
+    const session = createAgentSession({
+      id: 'session-revoked-authority',
+      agentName: 'agent',
+      conversationHistory: createConversationHistory({ id: 'session-revoked-authority' }),
+      metadata: {
+        lastRunId: 'run-revoked-authority',
+        lastRunStatus: 'running',
+        lastUserMessage: 'resume',
+        lastRequestAuthority: {
+          principalId: 'principal-a',
+          tenantId: 'tenant-a',
+          ownerId: 'owner-a',
+          capabilities: ['tools:execute'],
+          authorizationRevision: 'authorization:1',
+          audience: 'tenant',
+        },
+      },
+    });
+    const validatedContexts: ToolRequestContext[] = [];
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+      storage: { type: 'memory' },
+      durableExecution: true,
+      requestAuthorityValidator(context) {
+        validatedContexts.push(context);
+        return false;
+      },
+    });
+
+    try {
+      getRuntimeCompositionTestingSeams(runtime).setSessionStore({
+        async load() {
+          return session;
+        },
+      } as unknown as SessionStore);
+
+      expect(
+        await getRuntimeCompositionTestingSeams(runtime).resolveRunServices({
+          workflowId: 'run-revoked-authority',
+          workflowType: 'agentRun',
+          input: {
+            runId: 'run-revoked-authority',
+            sessionId: 'session-revoked-authority',
+            agentName: 'agent',
+          },
+        }),
+      ).toMatchObject({
+        status: 'unavailable',
+        reason: 'run run-revoked-authority authority is no longer current',
+      });
+      expect(validatedContexts).toHaveLength(1);
+      expect(validatedContexts[0]).toMatchObject({
+        runId: 'run-revoked-authority',
+        authority: { authorizationRevision: 'authorization:1' },
+      });
+    } finally {
+      runtime.durable?.engine[Symbol.dispose]?.();
+    }
+  });
+
+  it('does not apply a transport validator to Bureau-issued scheduler recovery authority', async () => {
+    const session = createAgentSession({
+      id: 'session-scheduler-authority',
+      agentName: 'scheduler-agent',
+      conversationHistory: createConversationHistory({ id: 'session-scheduler-authority' }),
+      metadata: {
+        lastRunId: 'run-scheduler-authority',
+        lastRunStatus: 'running',
+        lastUserMessage: 'resume scheduler run',
+        lastRequestAuthority: {
+          principalId: 'scheduler:run-scheduler-authority',
+          tenantId: 'bureau',
+          ownerId: 'scheduler-agent',
+          capabilities: ['tools:execute'],
+          authorizationRevision: 'bureau:scheduler:1',
+          audience: 'operator',
+        },
+      },
+    });
+    let validatorCalls = 0;
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+      storage: { type: 'memory' },
+      durableExecution: true,
+      requestAuthorityValidator() {
+        validatorCalls += 1;
+        return false;
+      },
+    });
+
+    try {
+      getRuntimeCompositionTestingSeams(runtime).setSessionStore({
+        async load() {
+          return session;
+        },
+      } as unknown as SessionStore);
+
+      expect(
+        await getRuntimeCompositionTestingSeams(runtime).resolveRunServices({
+          workflowId: 'run-scheduler-authority',
+          workflowType: 'agentRun',
+          input: {
+            runId: 'run-scheduler-authority',
+            sessionId: 'session-scheduler-authority',
+            agentName: 'scheduler-agent',
+          },
+        }),
+      ).toMatchObject({ status: 'available' });
+      expect(validatorCalls).toBe(0);
     } finally {
       runtime.durable?.engine[Symbol.dispose]?.();
     }
@@ -1470,6 +2215,14 @@ describe('createRuntimeComposition durable execution', () => {
               lastRunStatus: 'running',
               lastUserMessage: 'recover this session',
               lastMaximumTokens: expectedMaximumTokens,
+              lastRequestAuthority: {
+                principalId: `run:${runId}`,
+                tenantId: 'bureau',
+                ownerId: 'test-agent',
+                capabilities: ['tools:execute'],
+                authorizationRevision: 'bureau:1',
+                audience: 'operator',
+              },
             },
           }),
         );

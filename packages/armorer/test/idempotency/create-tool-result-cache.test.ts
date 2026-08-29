@@ -56,6 +56,7 @@ describe('createToolResultCache', () => {
         toolName: 'greeter',
         executedAt: 1000,
         ttl: 5000,
+        input: JSON.stringify({ greeting: 'hello' }),
       };
 
       await cache.set('key-2', result);
@@ -66,6 +67,8 @@ describe('createToolResultCache', () => {
         ...result,
         status: 'completed',
       });
+      const cachedResult = await cache.get('key-2');
+      expect(cachedResult?.input).toBe(result.input);
     });
 
     it('preserves completed results whose value is undefined', async () => {
@@ -78,11 +81,11 @@ describe('createToolResultCache', () => {
 
       await cache.set('undefined-result', result);
 
-      expect(await cache.get('undefined-result')).toEqual({
+      expect(await cache.get('undefined-result')).toMatchObject({
         ...result,
         status: 'completed',
       });
-      expect(await cache.getState!('undefined-result')).toEqual({
+      expect(await cache.getState!('undefined-result')).toMatchObject({
         ...result,
         status: 'completed',
       });
@@ -91,15 +94,18 @@ describe('createToolResultCache', () => {
 
   describe('TTL expiration', () => {
     it('returns undefined for an expired entry', async () => {
+      let clock = 1_000;
+      const expiringCache = createToolResultCache({ store, now: () => clock });
       const result: CachedToolResult = {
         result: 'stale',
         toolName: 'old-tool',
-        executedAt: Date.now() - 120_000, // 2 minutes ago
+        executedAt: 10_000_000,
         ttl: 60_000, // 1 minute TTL
       };
 
-      await cache.set('expired-key', result);
-      const retrieved = await cache.get('expired-key');
+      await expiringCache.set('expired-key', result);
+      clock = 61_001;
+      const retrieved = await expiringCache.get('expired-key');
 
       expect(retrieved).toBeUndefined();
     });
@@ -187,7 +193,7 @@ describe('createToolResultCache', () => {
 
   describe('started executions', () => {
     it('stores and retrieves a started state separately from completed results', async () => {
-      await cache.markStarted!('started-key', {
+      await cache.claimStarted('started-key', {
         status: 'started',
         toolName: 'charge-card',
         startedAt: Date.now(),
@@ -212,14 +218,14 @@ describe('createToolResultCache', () => {
       };
       await cache.set('completed-key', completed);
 
-      await expect(
-        cache.claimStarted!('completed-key', {
+      expect(
+        await cache.claimStarted!('completed-key', {
           status: 'started',
           toolName: 'charge-card',
           startedAt: Date.now(),
           ttl: 60_000,
         }),
-      ).resolves.toEqual({ outcome: 'existing', entry: { ...completed, status: 'completed' } });
+      ).toMatchObject({ outcome: 'existing', entry: { ...completed, status: 'completed' } });
     });
 
     it('serializes concurrent claims for the same key within a cache instance', async () => {
@@ -293,16 +299,18 @@ describe('createToolResultCache', () => {
       );
     });
 
-    it('expires and deletes stale started state', async () => {
-      await cache.markStarted!('expired-started-key', {
+    it('preserves stale started state as an unknown outcome', async () => {
+      await cache.claimStarted('expired-started-key', {
         status: 'started',
         toolName: 'charge-card',
         startedAt: Date.now() - 120_000,
         ttl: 60_000,
       });
 
-      expect(await cache.getState!('expired-started-key')).toBeUndefined();
-      expect(await store.get('expired-started-key')).toBeNull();
+      expect(await cache.getState('expired-started-key')).toEqual(
+        expect.objectContaining({ status: 'started', toolName: 'charge-card' }),
+      );
+      expect(await store.get('expired-started-key')).not.toBeNull();
     });
 
     it('reads legacy completed entries without a status field', async () => {
@@ -323,6 +331,145 @@ describe('createToolResultCache', () => {
         executedAt: expect.any(Number),
         ttl: 60_000,
       });
+    });
+
+    it('reads legacy started entries without an attempt fence', async () => {
+      await store.set(
+        'legacy-started-key',
+        JSON.stringify({
+          status: 'started',
+          toolName: 'legacy-charge',
+          startedAt: 1_000,
+          ttl: 60_000,
+        }),
+      );
+
+      expect(await cache.get('legacy-started-key')).toBeUndefined();
+      expect(await cache.getState('legacy-started-key')).toEqual({
+        status: 'started',
+        toolName: 'legacy-charge',
+        startedAt: 1_000,
+        ttl: 60_000,
+      });
+    });
+
+    it('replaces only matching legacy started entries with a new fenced attempt', async () => {
+      await store.set(
+        'legacy-started-key',
+        JSON.stringify({
+          status: 'started',
+          toolName: 'legacy-charge',
+          startedAt: 1_000,
+          ttl: 60_000,
+        }),
+      );
+
+      await expect(
+        cache.replaceLegacyStarted(
+          'legacy-started-key',
+          { toolName: 'legacy-charge', startedAt: 999 },
+          {
+            status: 'started',
+            toolName: 'legacy-charge',
+            startedAt: 2_000,
+            ttl: 60_000,
+            attemptId: 'replacement-attempt',
+          },
+          2_000,
+        ),
+      ).resolves.toBe(false);
+      await expect(
+        cache.replaceLegacyStarted(
+          'legacy-started-key',
+          { toolName: 'legacy-charge', startedAt: 1_000 },
+          {
+            status: 'started',
+            toolName: 'legacy-charge',
+            startedAt: 2_000,
+            ttl: 60_000,
+          },
+          2_000,
+        ),
+      ).resolves.toBe(false);
+      await expect(
+        cache.replaceLegacyStarted(
+          'legacy-started-key',
+          { toolName: 'legacy-charge', startedAt: 1_000 },
+          {
+            status: 'started',
+            toolName: 'legacy-charge',
+            startedAt: 2_000,
+            ttl: 60_000,
+            attemptId: 'replacement-attempt',
+          },
+          2_000,
+        ),
+      ).resolves.toBe(true);
+
+      expect(await cache.getState('legacy-started-key')).toEqual(
+        expect.objectContaining({
+          status: 'started',
+          toolName: 'legacy-charge',
+          startedAt: 2_000,
+          attemptId: 'replacement-attempt',
+        }),
+      );
+    });
+
+    it('does not replace fenced or actively leased entries through the legacy path', async () => {
+      await cache.claimStarted('fenced-key', {
+        status: 'started',
+        toolName: 'charge',
+        startedAt: 1_000,
+        ttl: 60_000,
+        attemptId: 'current-attempt',
+      });
+      await store.set(
+        'active-legacy-key',
+        JSON.stringify({
+          status: 'started',
+          toolName: 'legacy-charge',
+          startedAt: 1_000,
+          ttl: 60_000,
+          leaseExpiresAt: 3_000,
+        }),
+      );
+
+      await expect(
+        cache.replaceLegacyStarted(
+          'fenced-key',
+          { toolName: 'charge', startedAt: 1_000 },
+          {
+            status: 'started',
+            toolName: 'charge',
+            startedAt: 2_000,
+            ttl: 60_000,
+            attemptId: 'replacement-attempt',
+          },
+          2_000,
+        ),
+      ).resolves.toBe(false);
+      await expect(
+        cache.replaceLegacyStarted(
+          'active-legacy-key',
+          { toolName: 'legacy-charge', startedAt: 1_000 },
+          {
+            status: 'started',
+            toolName: 'legacy-charge',
+            startedAt: 2_000,
+            ttl: 60_000,
+            attemptId: 'replacement-attempt',
+          },
+          2_000,
+        ),
+      ).resolves.toBe(false);
+
+      expect(await cache.getState('fenced-key')).toEqual(
+        expect.objectContaining({ attemptId: 'current-attempt' }),
+      );
+      expect(await cache.getState('active-legacy-key')).toEqual(
+        expect.objectContaining({ leaseExpiresAt: 3_000 }),
+      );
     });
 
     it('deletes malformed entries on read', async () => {
@@ -362,18 +509,191 @@ describe('createToolResultCache', () => {
       expect(retrieved).toMatchObject(result);
     });
 
-    it('treats an entry as expired when executedAt + ttl is in the past', async () => {
-      const defaultCache = createToolResultCache({ store });
+    it('expires an entry from its cache-clock insertion timestamp', async () => {
+      let clock = 1_000;
+      const defaultCache = createToolResultCache({ store, now: () => clock });
       const result: CachedToolResult = {
         result: 'expired',
         toolName: 'tool',
-        executedAt: Date.now() - 400_000, // 400 seconds ago, beyond 300s default
+        executedAt: 10_000_000,
         ttl: 300_000,
       };
 
       await defaultCache.set('ttl-expired', result);
+      clock = 301_001;
       const retrieved = await defaultCache.get('ttl-expired');
       expect(retrieved).toBeUndefined();
     });
+  });
+
+  it('shares claim fencing across independent cache instances using one store', async () => {
+    const first = createToolResultCache({ store });
+    const second = createToolResultCache({ store });
+    const execution = {
+      status: 'started' as const,
+      toolName: 'charge',
+      startedAt: Date.now(),
+      ttl: 60_000,
+      attemptId: 'attempt-1',
+    };
+    const [left, right] = await Promise.all([
+      first.claimStarted!('shared', execution),
+      second.claimStarted!('shared', { ...execution, attemptId: 'attempt-2' }),
+    ]);
+    expect([left.outcome, right.outcome].filter((outcome) => outcome === 'claimed')).toHaveLength(
+      1,
+    );
+  });
+
+  it('shares claim fencing by resolved backing key across namespaces', async () => {
+    const namespaced = createToolResultCache({ store, namespace: 'a' });
+    const unnamespaced = createToolResultCache({ store });
+    const execution = {
+      status: 'started' as const,
+      toolName: 'charge',
+      startedAt: Date.now(),
+      ttl: 60_000,
+    };
+
+    const [left, right] = await Promise.all([
+      namespaced.claimStarted!('x', { ...execution, attemptId: 'namespaced' }),
+      unnamespaced.claimStarted!('a:x', { ...execution, attemptId: 'unnamespaced' }),
+    ]);
+
+    expect([left.outcome, right.outcome].filter((outcome) => outcome === 'claimed')).toHaveLength(
+      1,
+    );
+    expect(await store.get('a:x')).toBeString();
+  });
+
+  it('renews and completes only for the current fencing token', async () => {
+    await cache.claimStarted!('fenced', {
+      status: 'started',
+      toolName: 'charge',
+      startedAt: Date.now(),
+      ttl: 60_000,
+      attemptId: 'current',
+      absoluteDeadline: Date.now() + 60_000,
+    });
+    expect(await cache.renewStarted!('fenced', 'stale', Date.now() + 30_000, Date.now())).toBe(
+      false,
+    );
+    expect(await cache.renewStarted!('fenced', 'current', Date.now() + 30_000, Date.now())).toBe(
+      true,
+    );
+    expect(
+      await cache.completeStarted!('fenced', 'stale', {
+        result: 'late',
+        toolName: 'charge',
+        executedAt: Date.now(),
+        ttl: 60_000,
+      }),
+    ).toBe(false);
+    expect(
+      await cache.completeStarted!('fenced', 'current', {
+        result: 'ok',
+        toolName: 'charge',
+        executedAt: Date.now(),
+        ttl: 60_000,
+      }),
+    ).toBe(true);
+    const completed = await cache.get('fenced');
+    expect(completed?.result).toBe('ok');
+  });
+
+  it('uses the configured cache clock as the default completion observation time', async () => {
+    const clockedCache = createToolResultCache({
+      store: createTestStore(),
+      defaultTTL: 60_000,
+      now: () => 1_000,
+    });
+    await clockedCache.claimStarted('clocked-completion', {
+      status: 'started',
+      toolName: 'charge',
+      startedAt: 500,
+      ttl: 60_000,
+      attemptId: 'clocked-attempt',
+      absoluteDeadline: 1_500,
+    });
+
+    await expect(
+      clockedCache.completeStarted('clocked-completion', 'clocked-attempt', {
+        result: 'ok',
+        toolName: 'charge',
+        executedAt: 1_000,
+        ttl: 60_000,
+      }),
+    ).resolves.toBe(true);
+    await expect(clockedCache.get('clocked-completion')).resolves.toMatchObject({
+      status: 'completed',
+      result: 'ok',
+    });
+  });
+
+  it('enforces absolute deadlines and unknown-attempt replacement fences', async () => {
+    await cache.claimStarted('expired-fence', {
+      status: 'started',
+      toolName: 'charge',
+      startedAt: Date.now() - 100,
+      ttl: 60_000,
+      attemptId: 'expired-attempt',
+      leaseExpiresAt: Date.now() - 50,
+      absoluteDeadline: Date.now() - 1,
+    });
+    await expect(
+      cache.renewStarted('expired-fence', 'expired-attempt', Date.now() + 100, Date.now()),
+    ).resolves.toBe(false);
+    await expect(
+      cache.completeStarted('expired-fence', 'expired-attempt', {
+        result: 'late',
+        toolName: 'charge',
+        executedAt: Date.now(),
+        ttl: 60_000,
+      }),
+    ).resolves.toBe(false);
+
+    await cache.claimStarted('bounded-renewal', {
+      status: 'started',
+      toolName: 'charge',
+      startedAt: Date.now(),
+      ttl: 60_000,
+      attemptId: 'bounded-attempt',
+      absoluteDeadline: Date.now() + 10_000,
+    });
+    await expect(
+      cache.renewStarted('bounded-renewal', 'bounded-attempt', Date.now() + 20_000, Date.now()),
+    ).resolves.toBe(true);
+    const boundedRenewal = await cache.getState('bounded-renewal');
+    expect(
+      boundedRenewal?.status === 'started' ? boundedRenewal.leaseExpiresAt : undefined,
+    ).toBeLessThanOrEqual(Date.now() + 10_000);
+
+    await expect(cache.deleteStarted('bounded-renewal', 'stale-attempt')).resolves.toBe(false);
+    await expect(
+      cache.replaceUnknownStarted(
+        'bounded-renewal',
+        'bounded-attempt',
+        {
+          status: 'started',
+          toolName: 'charge',
+          startedAt: Date.now(),
+          ttl: 60_000,
+          attemptId: 'replacement-attempt',
+        },
+        Date.now(),
+      ),
+    ).resolves.toBe(false);
+    await expect(cache.deleteStarted('bounded-renewal', 'bounded-attempt')).resolves.toBe(true);
+    await expect(cache.getState('bounded-renewal')).resolves.toBeUndefined();
+
+    await expect(
+      cache.replaceUnknownStarted('bounded-renewal', 'stale-attempt', {
+        status: 'started',
+        toolName: 'charge',
+        startedAt: Date.now(),
+        ttl: 60_000,
+        attemptId: 'replacement',
+      }),
+    ).resolves.toBe(false);
   });
 });

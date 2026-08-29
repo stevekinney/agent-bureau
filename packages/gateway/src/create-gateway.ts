@@ -1,3 +1,4 @@
+import type { ToolRequestContext } from 'armorer';
 import type { Bureau } from 'bureau';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
@@ -13,11 +14,49 @@ import {
   errorHandler,
   requestIdentifier,
 } from './middleware';
+import {
+  gatewayAuthorizationRevisionForApiKey,
+  gatewayCapabilitiesForScopes,
+  staticTokenAuthorizationRevision,
+} from './middleware/authentication';
 import { createRoutes } from './routes';
 import { createPages } from './server/pages';
 import type { Gateway, GatewayOptions } from './types';
 import { DEFAULT_PORT, SCOPE } from './types';
 import { createWebSocketHandler } from './websocket';
+
+type RequestAuthorityValidator = (context: ToolRequestContext) => boolean | Promise<boolean>;
+type BureauRequestAuthorityValidatorAccess = {
+  readonly getRequestAuthorityValidator?: () => RequestAuthorityValidator | undefined;
+  readonly waitForRecovery?: () => Promise<void>;
+};
+
+const gatewayValidatorState = new WeakMap<
+  object,
+  {
+    readonly hostValidator: RequestAuthorityValidator | undefined;
+    readonly gatewayValidators: Set<RequestAuthorityValidator>;
+    installedValidator: RequestAuthorityValidator | undefined;
+  }
+>();
+const STATIC_TOKEN_REVISION_SECRET_KEY = 'gateway:private:static-token-revision-secret';
+
+async function resolveStaticTokenRevisionSecret(store: Bureau['kv']): Promise<string | undefined> {
+  if (!store) return undefined;
+  const persisted = await store.get(STATIC_TOKEN_REVISION_SECRET_KEY);
+  if (persisted) return persisted;
+
+  const candidate = crypto.randomUUID();
+  const created = await store.conditionalBatch(
+    [{ key: STATIC_TOKEN_REVISION_SECRET_KEY, expectedValue: null }],
+    [{ type: 'set', key: STATIC_TOKEN_REVISION_SECRET_KEY, value: candidate }],
+  );
+  if (created) return candidate;
+
+  const winner = await store.get(STATIC_TOKEN_REVISION_SECRET_KEY);
+  if (winner) return winner;
+  throw new Error('Static-token revision secret initialization lost without a persisted winner.');
+}
 
 /**
  * Detects the current server runtime. Returns `'bun'` when running
@@ -92,6 +131,60 @@ export function buildWsAuthenticate(
   };
 }
 
+export function buildRequestAuthorityValidator(
+  authToken: string | undefined,
+  store: ApiKeyStore | undefined,
+  staticTokenRevisionSecret?: string,
+): ((context: ToolRequestContext) => Promise<boolean>) | undefined {
+  if (!authToken && !store) return undefined;
+
+  return async (context) => {
+    const { authority } = context;
+    if (authority.principalId === 'static-token') {
+      return (
+        authToken !== undefined &&
+        authority.authorizationRevision ===
+          staticTokenAuthorizationRevision(authToken, staticTokenRevisionSecret) &&
+        authority.capabilities.length === 1 &&
+        authority.capabilities[0] === '*'
+      );
+    }
+    if (!authority.principalId.startsWith('api-key:') || !store) return false;
+
+    const keyId = authority.principalId.slice('api-key:'.length);
+    const keys = await store.list();
+    const key = keys.find((candidate) => candidate.id === keyId);
+    if (!key?.active) return false;
+    if (key.expiresAt !== undefined && Date.parse(key.expiresAt) <= Date.now()) return false;
+    if (authority.authorizationRevision !== gatewayAuthorizationRevisionForApiKey(key.id)) {
+      return false;
+    }
+
+    const currentCapabilities = [...gatewayCapabilitiesForScopes(key.scopes)].sort();
+    const capturedCapabilities = [...authority.capabilities].sort();
+    return (
+      currentCapabilities.length === capturedCapabilities.length &&
+      currentCapabilities.every((capability, index) => capability === capturedCapabilities[index])
+    );
+  };
+}
+
+function composeRequestAuthorityValidators(
+  hostValidator: RequestAuthorityValidator | undefined,
+  gatewayValidators: ReadonlySet<RequestAuthorityValidator>,
+): RequestAuthorityValidator | undefined {
+  if (gatewayValidators.size === 0) return hostValidator;
+
+  return async (context) => {
+    const isGatewayAuthority = context.authority.authorizationRevision.startsWith('gateway:');
+    if (!isGatewayAuthority) return hostValidator ? hostValidator(context) : false;
+    for (const gatewayValidator of gatewayValidators) {
+      if (await gatewayValidator(context)) return true;
+    }
+    return false;
+  };
+}
+
 /**
  * Creates a new Gateway (HTTP door) over an already-constructed Bureau (brain).
  *
@@ -132,13 +225,44 @@ export async function createGateway(
     apiKeyStore = createApiKeyStore(bureau.kv);
     await bootstrapApiKey(apiKeyStore);
   }
+  const staticTokenRevisionSecret = await resolveStaticTokenRevisionSecret(bureau.kv);
+  const authorityValidatorAccess = bureau as Bureau & BureauRequestAuthorityValidatorAccess;
+  const existingValidator = authorityValidatorAccess.getRequestAuthorityValidator?.();
+  const previousGatewayValidator = gatewayValidatorState.get(bureau);
+  const retainedState =
+    previousGatewayValidator !== undefined &&
+    previousGatewayValidator.installedValidator === existingValidator
+      ? previousGatewayValidator
+      : {
+          hostValidator: existingValidator,
+          gatewayValidators: new Set<RequestAuthorityValidator>(),
+          installedValidator: existingValidator,
+        };
+  const gatewayRequestAuthorityValidator = buildRequestAuthorityValidator(
+    options.authToken,
+    apiKeyStore,
+    staticTokenRevisionSecret,
+  );
+  if (gatewayRequestAuthorityValidator) {
+    retainedState.gatewayValidators.add(gatewayRequestAuthorityValidator);
+  }
+  const requestAuthorityValidator = composeRequestAuthorityValidators(
+    retainedState.hostValidator,
+    retainedState.gatewayValidators,
+  );
+  retainedState.installedValidator = requestAuthorityValidator;
+  if (requestAuthorityValidator !== existingValidator) {
+    bureau.setRequestAuthorityValidator(requestAuthorityValidator);
+  }
+  gatewayValidatorState.set(bureau, retainedState);
+  await authorityValidatorAccess.waitForRecovery?.();
 
   const app = new Hono();
 
   // Global middleware
   app.use('*', cors());
   app.use('*', requestIdentifier);
-  app.use('*', createAuthentication(options.authToken, apiKeyStore));
+  app.use('*', createAuthentication(options.authToken, apiKeyStore, staticTokenRevisionSecret));
   app.use('*', createRateLimiter({ store: bureau.kv }));
   app.use(
     '*',
@@ -190,6 +314,20 @@ export async function createGateway(
         wsHandler.dispose();
         unsubscribeLiveFrames();
         bureau.removeEventListener('run.removed', clearRunBufferOnRemoval);
+        if (gatewayRequestAuthorityValidator) {
+          retainedState.gatewayValidators.delete(gatewayRequestAuthorityValidator);
+          if (
+            authorityValidatorAccess.getRequestAuthorityValidator?.() ===
+            retainedState.installedValidator
+          ) {
+            const replacementValidator = composeRequestAuthorityValidators(
+              retainedState.hostValidator,
+              retainedState.gatewayValidators,
+            );
+            retainedState.installedValidator = replacementValidator;
+            bureau.setRequestAuthorityValidator(replacementValidator);
+          }
+        }
       },
     };
   }
