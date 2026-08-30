@@ -10,27 +10,13 @@ This applies to everything: compiler warnings, ESLint violations, TypeScript err
 
 ## Filing Work in Upstream Dependencies (weft, cinder)
 
-This monorepo consumes **weft** (`@lostgradient/weft`) and **cinder** (`@lostgradient/cinder`) as published npm packages. Both live in sibling repositories: `../weft` and `../cinder`. When you hit a bug, missing feature, or needed change that belongs _in one of those libraries_ — not in our consuming code — file a ticket against that repository instead of working around it here.
+This monorepo consumes **weft** (`@lostgradient/weft`) and **cinder** (`@lostgradient/cinder`) as published npm packages. Both live in sibling repositories: `../weft` and `../cinder`. When you hit a bug, missing feature, or needed change that belongs _in one of those libraries_ — not in our consuming code — file it against that repository instead of working around it here.
 
-**Decide whose problem it is first.** Is the defect in the dependency's published surface, or in how we consume it? If ours, fix it here. If theirs, file a ticket. Do not patch `node_modules/@lostgradient/weft`, vendor a copy, or build a shim layer to route around an upstream bug — those are exactly the compatibility-bridge patterns we don't allow.
+**Decide whose problem it is first.** Is the defect in the dependency's published surface, or in how we consume it? If ours, fix it here. If theirs, file it upstream. Do not patch `node_modules/@lostgradient/weft`, vendor a copy, or build a shim layer to route around an upstream bug — those are exactly the compatibility-bridge patterns we don't allow.
 
-**Target the other repo with `--project`.** The `tasks` CLI defaults to the current repository, but `tasks create --project <owner/repo>` files against any registered project from anywhere — no `cd` required. Bare names work when unambiguous (`--project weft`, `--project cinder`). The same flag works on `tasks list` and `tasks get`, so you can read back what you filed without leaving agent-bureau.
+**File in the owning Linear team first, not a local ticket.** Both of these repos have an owning Linear team in the `lost-gradient` workspace today — `weft` is `WFT`, `cinder` is `CIN` — per the team map in `~/.claude/CLAUDE.md`'s "Lost Gradient Linear operating rules" and `~/Vaults/Lost Gradient/Linear Plan.md`. File the issue there with a minimal repro, the version agent-bureau consumes, expected vs. actual behavior, and what we need from the fix. If the agent-bureau work this came from is itself a Linear issue, create a native `blocked by` relation from it to the new upstream issue — never only a mention in prose. Only fall back to filing locally with Scrumlord's `tasks create --project <owner/repo>` (bare names like `--project weft` work when unambiguous; still the right tool for agent-bureau's own local task graph) when the affected repository has no owning Linear team.
 
-```bash
-tasks create --project weft \
-  --title "Engine.recoverAll throws on duplicate run id" \
-  --description "Consumed from agent-bureau via the @lostgradient/weft version declared in the relevant workspace package.json.
-
-Repro: ...
-Expected: ...
-Actual: ...
-What we need: ..." \
-  --tag agent-bureau --tag upstream
-```
-
-Write a ticket you'd want to receive: a minimal repro, the version agent-bureau consumes, the expected vs. actual behavior, and what we need from the fix. Always tag it `agent-bureau` so the originating project is findable from the other repo's backlog.
-
-**Auto-file, then report.** These are all the user's own repositories and a misfile is reversible (`tasks delete`), so go ahead and create the ticket without asking first — then report the created task ID (and URL, if returned) back so the user can track it. Use `--draft` only if the request is genuinely ambiguous and needs the user's refinement before it's actionable.
+**As the primary coordinator, file it yourself, then report.** These are all the user's own repositories, so go ahead and create the Linear issue without asking first. Per the standing Lost Gradient rule, the primary coordinator is the sole Linear writer — do the write directly rather than delegating it to a subagent, read the created issue back to confirm it landed, and report its identifier and URL so the user can track it.
 
 ## Session Hygiene
 
