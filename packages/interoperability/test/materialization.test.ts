@@ -396,6 +396,63 @@ describe('interoperability materialization', () => {
     expect(result.content).toBe('custom-join');
   });
 
+  test('normalizeJSONValue elides and retries when array coercion throws', () => {
+    const circular: any[] = [1, 2];
+    circular.push(circular);
+    // Deterministic stand-in for the engine behaviour this guards against: Bun >= 1.4 throws a
+    // RangeError out of the default join on a self-referential array, where 1.3.13 returns
+    // '1,2,'. Forcing the throw here exercises the elide-and-retry path on BOTH engines, so the
+    // recovery is covered on the pinned runtime rather than only on the newer one.
+    Object.defineProperty(circular, 'join', {
+      value: () => {
+        throw new RangeError('simulated engine cycle overflow');
+      },
+    });
+
+    const result = materializeToolResult({
+      callId: 'c6-throwing-join',
+      outcome: 'success',
+      content: circular as any,
+    });
+
+    expect(result.content).toBe('1,2,');
+  });
+
+  test('normalizeJSONValue falls back to a tag when coercion throws and there is no cycle to break', () => {
+    const unstringifiable: Record<string, unknown> = {
+      // Forces JSON.stringify to throw, so the value reaches the last-resort coercion at all.
+      big: 1n,
+      toString: () => {
+        throw new Error('coercion refused');
+      },
+    };
+
+    const result = materializeToolResult({
+      callId: 'c6-throwing-tostring',
+      outcome: 'success',
+      content: unstringifiable as any,
+    });
+
+    // Normalization must still produce a string rather than propagate the hook's error.
+    expect(result.content).toBe('[object Object]');
+  });
+
+  test('normalizeJSONValue treats a null Symbol.toPrimitive as absent, not as a custom hook', () => {
+    const circular: any[] = [1, 2];
+    circular.push(circular);
+    // JS coercion treats a null or undefined Symbol.toPrimitive as absent and falls through to
+    // toString, so this must render like any other cyclic array.
+    Object.defineProperty(circular, Symbol.toPrimitive, { value: null });
+
+    const result = materializeToolResult({
+      callId: 'c6-null-toprimitive',
+      outcome: 'success',
+      content: circular as any,
+    });
+
+    expect(result.content).toBe('1,2,');
+  });
+
   test('normalizeJSONValue does not dispatch through an input-controlled map', () => {
     const circular: any[] = [1, 2];
     circular.push(circular);

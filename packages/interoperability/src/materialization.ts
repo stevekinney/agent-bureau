@@ -154,40 +154,52 @@ function normalizeJSONValue(value: unknown): JSONValue {
  * documented fallback that consumers (armorer, conversationalist, operative) rely on, so it is
  * preserved deliberately.
  *
- * Self-referential arrays are elided first because `String()` is not safe to call on them across
- * every supported runtime. `Array.prototype.join`'s cycle guard is an engine extension, not a
- * spec requirement: Bun 1.3.13 yields `'1,2,'` for `[1, 2, <self>]`, while Bun 1.4.0 recurses
- * until the stack overflows and throws a `RangeError` out of what is supposed to be a total
- * normalization step. Eliding cycles here reproduces the documented result on both, so the output
- * no longer depends on the host's `join` implementation. Circular plain objects are untouched:
- * `String()` renders them as `[object Object]` without recursing, and consumers assert that.
+ * `String()` is attempted first and unconditionally, so whatever the engine would normally
+ * produce is what callers get: a custom `toString`, `Symbol.toPrimitive`, or overridden `join`
+ * is honoured, in the right order, reading any accessor-backed hook exactly once.
+ *
+ * The retry exists because `Array.prototype.join`'s cycle guard is an engine extension rather
+ * than a spec requirement. Bun 1.3.13 renders `[1, 2, <self>]` as `'1,2,'`; Bun 1.4.0 recurses
+ * until the stack overflows, throwing a `RangeError` out of what is meant to be a total
+ * normalization step. Eliding the cycles and retrying reproduces the guarded result, so both
+ * engines agree. Reacting to the throw rather than predicting it also means no cross-realm array
+ * (whose `Array.prototype` is a different object) and no oddly-shaped hook (`Symbol.toPrimitive`
+ * set to `null`, which coercion treats as absent) can be misclassified in advance.
  */
 function stringifyNonJSON(value: unknown): string {
-  return String(elideArrayCycles(value, new WeakSet()));
+  try {
+    return String(value);
+  } catch {
+    try {
+      return String(elideArrayCycles(value, new WeakSet()));
+    } catch {
+      // A coercion hook that throws for its own reasons, on a value that is not a cycle this
+      // function can break. Materialization normalizes, it does not validate, so even here it
+      // must produce a string rather than propagate.
+      return Object.prototype.toString.call(value);
+    }
+  }
 }
 
 /**
  * Returns `value` with every back-reference to an array already open on the current path replaced
  * by an empty string — the same substitution a cycle-guarding `Array.prototype.join` performs.
- * Non-array values are returned untouched, so object rendering is unaffected. The `WeakSet` is
- * path-scoped (entries are removed on the way back up), so a shared-but-acyclic reference is
- * rendered normally instead of being mistaken for a cycle.
+ * Non-array values are returned untouched, so object rendering is unaffected. `Array.isArray` is
+ * realm-agnostic, so an array from a VM sandbox or iframe is handled like any other.
  *
- * Arrays carrying their own coercion hook are left alone: `String()` routes through the hook
- * rather than through the default comma-join, so the hook's output is what the caller documented
- * and eliding would silently replace it with a joined clone.
+ * The `WeakSet` is path-scoped (entries are removed on the way back up), so a shared-but-acyclic
+ * reference is rendered normally instead of being mistaken for a cycle.
  */
 function elideArrayCycles(value: unknown, open: WeakSet<object>): unknown {
   if (!Array.isArray(value)) return value;
-  if (!usesDefaultArrayCoercion(value)) return value;
   if (open.has(value)) return '';
 
   open.add(value);
 
   // Indices are walked directly rather than through `value.map`. `map` is an input-controlled
-  // property — an array can carry an own `map` of its own, or be a subclass that overrides it —
-  // and dispatching through it could throw from inside the one function that exists to guarantee
-  // a string is always produced. `String()` never consults `map`, so neither does this.
+  // property — an array can carry an own `map`, or be a subclass that overrides it — and
+  // dispatching through it could throw from inside the one function that exists to guarantee a
+  // string is always produced. `String()` never consults `map`, so neither does this.
   const elided: unknown[] = [];
   for (let index = 0; index < value.length; index += 1) {
     elided.push(elideArrayCycles(value[index], open));
@@ -196,21 +208,6 @@ function elideArrayCycles(value: unknown, open: WeakSet<object>): unknown {
   open.delete(value);
 
   return elided;
-}
-
-/**
- * Whether `String(value)` would render this array through the built-in comma-join — the only path
- * that recurses on a cycle, and therefore the only one that needs eliding. `Array.prototype
- * .toString` delegates to `this.join` when it is callable, so an overridden `join` counts as a
- * custom hook just as much as an overridden `toString` or a `Symbol.toPrimitive`.
- */
-function usesDefaultArrayCoercion(value: unknown[]): boolean {
-  const coercible = value as { [Symbol.toPrimitive]?: unknown };
-  return (
-    coercible[Symbol.toPrimitive] === undefined &&
-    value.toString === Array.prototype.toString &&
-    value.join === Array.prototype.join
-  );
 }
 
 function assertJSONValue(value: unknown, path: string): asserts value is JSONValue {
