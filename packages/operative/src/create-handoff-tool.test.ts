@@ -216,6 +216,16 @@ describe('stop conditions around a handoff (AB-149)', () => {
     );
   }
 
+  /**
+   * Mirrors the README's custom-input recovery snippet exactly. Reads the LAST step, the same
+   * step extractHandoffTarget reads, so a failed earlier attempt is never mistaken for the
+   * successful call.
+   */
+  function recoverReason(result: RunResult): string | undefined {
+    const handoffCall = result.steps.at(-1)?.toolCalls.find((call) => call.name === HANDOFF_NAME);
+    return handoffCall && z.object({ reason: z.string() }).parse(handoffCall.arguments).reason;
+  }
+
   /** Emits the given tool calls one step at a time, then plain text forever after. */
   function generateSteps(
     ...perStepToolCalls: { name: string; arguments: unknown }[][]
@@ -309,12 +319,32 @@ describe('stop conditions around a handoff (AB-149)', () => {
 
     // The reason is recoverable from the recorded tool CALL instead. This mirrors the exact
     // recovery snippet in the README so the documented shape stays honest.
-    const handoffCall = result.steps
-      .flatMap((step) => step.toolCalls)
-      .find((call) => call.name === HANDOFF_NAME);
-    const reason =
-      handoffCall && z.object({ reason: z.string() }).parse(handoffCall.arguments).reason;
+    expect(recoverReason(result)).toBe('needs a human');
+  });
 
-    expect(reason).toBe('needs a human');
+  it('recovers custom input after a failed handoff attempt precedes the successful one', async () => {
+    // Regression: the composition deliberately lets a failed handoff retry, so more than one
+    // call by this name can be recorded. Scanning ALL steps would find the FAILED call first
+    // (its bad arguments are still recorded on toolCalls) and throw on parse. Recovery must
+    // read the LAST step, symmetric with extractHandoffTarget.
+    const result = await executeLoop({
+      generate: generateSteps(
+        [{ name: HANDOFF_NAME, arguments: 'just a bare string' }],
+        [{ name: HANDOFF_NAME, arguments: { reason: 'needs a human' } }],
+      ),
+      toolbox: makeHandoffToolbox(),
+      conversation: new Conversation(),
+      maximumSteps: 3,
+      stopWhen: stopWhen.every(
+        stopWhen.toolCalled(HANDOFF_NAME),
+        stopWhen.not(stopWhen.toolOutcome('error')),
+      ),
+    });
+
+    // The failed attempt is genuinely recorded, which is what makes the all-steps scan wrong.
+    expect(result.steps[0]?.toolCalls[0]?.arguments).toBe('just a bare string');
+
+    expect(targetOf(result)).toBe('support');
+    expect(recoverReason(result)).toBe('needs a human');
   });
 });

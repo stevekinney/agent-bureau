@@ -1078,11 +1078,13 @@ if (target) {
 > Read the value back off the recorded tool _call_ instead, which `RunResult.steps` keeps alongside the results. Note this is the raw `arguments` the model sent, as materialized JSON — not Zod's parse output, so schema defaults and transforms are not reflected in it:
 >
 > ```typescript
-> const handoffCall = result.steps
->   .flatMap((step) => step.toolCalls)
->   .find((call) => call.name === 'escalate-to-support');
+> // Read the LAST step, the same step extractHandoffTarget reads. A failed attempt is still
+> // recorded on toolCalls, so scanning every step would find the failed call first and throw.
+> // Gate on `target` so you only parse arguments a successful handoff actually validated.
+> const handoffCall = target
+>   ? result.steps.at(-1)?.toolCalls.find((call) => call.name === 'escalate-to-support')
+>   : undefined;
 >
-> // Validation already guaranteed the shape, so re-parse to recover the typed value.
 > const reason =
 >   handoffCall && z.object({ reason: z.string() }).parse(handoffCall.arguments).reason;
 > ```
