@@ -298,7 +298,54 @@ describe('interoperability materialization', () => {
       content: circular as any,
     });
 
-    expect(result.content).toBe(String(circular));
+    // Asserted as a literal rather than as `String(circular)`: the expression under test is
+    // exactly the one that is unsafe on some engines (Bun >= 1.4 overflows the stack instead of
+    // applying join()'s cycle guard), so computing the expectation that way would make this test
+    // pass or crash depending on the host rather than on the code.
+    expect(result.content).toBe('1,2,');
+  });
+
+  test('normalizeJSONValue elides nested and mutual array cycles the same way join does', () => {
+    const outer: any[] = ['a'];
+    const inner: any[] = ['b', outer];
+    outer.push(inner);
+
+    const result = materializeToolResult({
+      callId: 'c6-mutual',
+      outcome: 'success',
+      content: outer as any,
+    });
+
+    expect(result.content).toBe('a,b,');
+  });
+
+  test('normalizeJSONValue renders a shared but acyclic array reference normally', () => {
+    const shared: any[] = [1];
+    // The BigInt is what forces the `stringifyNonJSON` path: it makes `JSON.stringify` throw.
+    // A function would not, since `JSON.stringify` silently nulls it and the value round-trips.
+    const content: any[] = [shared, shared, 1n];
+
+    const result = materializeToolResult({
+      callId: 'c6-shared',
+      outcome: 'success',
+      content: content as any,
+    });
+
+    // `shared` appears twice but is never its own ancestor, so neither occurrence is a cycle.
+    expect(result.content).toBe('1,1,1');
+  });
+
+  test('normalizeJSONValue leaves circular plain objects rendering as [object Object]', () => {
+    const circular: Record<string, unknown> = {};
+    circular['self'] = circular;
+
+    const result = materializeToolResult({
+      callId: 'c6-object',
+      outcome: 'success',
+      content: circular as any,
+    });
+
+    expect(result.content).toBe('[object Object]');
   });
 
   test('normalizeJSONValue falls back to String() for circular objects', () => {

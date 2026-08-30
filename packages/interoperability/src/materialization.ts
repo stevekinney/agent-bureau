@@ -153,9 +153,35 @@ function normalizeJSONValue(value: unknown): JSONValue {
  * The `String()` default — including the `[object Object]` sentinel for plain objects — is the
  * documented fallback that consumers (armorer, conversationalist, operative) rely on, so it is
  * preserved deliberately.
+ *
+ * Self-referential arrays are elided first because `String()` is not safe to call on them across
+ * every supported runtime. `Array.prototype.join`'s cycle guard is an engine extension, not a
+ * spec requirement: Bun 1.3.13 yields `'1,2,'` for `[1, 2, <self>]`, while Bun 1.4.0 recurses
+ * until the stack overflows and throws a `RangeError` out of what is supposed to be a total
+ * normalization step. Eliding cycles here reproduces the documented result on both, so the output
+ * no longer depends on the host's `join` implementation. Circular plain objects are untouched:
+ * `String()` renders them as `[object Object]` without recursing, and consumers assert that.
  */
 function stringifyNonJSON(value: unknown): string {
-  return String(value);
+  return String(elideArrayCycles(value, new WeakSet()));
+}
+
+/**
+ * Returns `value` with every back-reference to an array already open on the current path replaced
+ * by an empty string — the same substitution a cycle-guarding `Array.prototype.join` performs.
+ * Non-array values are returned untouched, so object rendering is unaffected. The `WeakSet` is
+ * path-scoped (entries are removed on the way back up), so a shared-but-acyclic reference is
+ * rendered normally instead of being mistaken for a cycle.
+ */
+function elideArrayCycles(value: unknown, open: WeakSet<object>): unknown {
+  if (!Array.isArray(value)) return value;
+  if (open.has(value)) return '';
+
+  open.add(value);
+  const elided = value.map((entry) => elideArrayCycles(entry, open));
+  open.delete(value);
+
+  return elided;
 }
 
 function assertJSONValue(value: unknown, path: string): asserts value is JSONValue {
