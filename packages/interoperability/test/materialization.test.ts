@@ -434,7 +434,32 @@ describe('interoperability materialization', () => {
     });
 
     // Normalization must still produce a string rather than propagate the hook's error.
-    expect(result.content).toBe('[object Object]');
+    expect(result.content).toBe('[unstringifiable]');
+  });
+
+  test('normalizeJSONValue survives a throwing Symbol.toStringTag on the terminal path', () => {
+    const hostile: Record<string, unknown> = {
+      // Forces JSON.stringify to throw so the value reaches the last-resort coercion.
+      big: 1n,
+      toString: () => {
+        throw new Error('coercion refused');
+      },
+    };
+    // `Object.prototype.toString` would Get(value, Symbol.toStringTag), so a throwing accessor
+    // there used to escape materialization entirely. The terminal tag must not dispatch.
+    Object.defineProperty(hostile, Symbol.toStringTag, {
+      get: () => {
+        throw new Error('toStringTag refused');
+      },
+    });
+
+    const result = materializeToolResult({
+      callId: 'c6-hostile-tag',
+      outcome: 'success',
+      content: hostile as any,
+    });
+
+    expect(result.content).toBe('[unstringifiable]');
   });
 
   test('normalizeJSONValue treats a null Symbol.toPrimitive as absent, not as a custom hook', () => {

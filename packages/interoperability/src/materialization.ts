@@ -148,6 +148,13 @@ function normalizeJSONValue(value: unknown): JSONValue {
 }
 
 /**
+ * Terminal rendering for a value whose own coercion hooks throw. Only reached once `String()` has
+ * failed on both the value and its cycle-elided form, so there is no faithful rendering left to
+ * produce — and deliberately a constant, so producing it cannot itself throw.
+ */
+const UNSTRINGIFIABLE_TAG = '[unstringifiable]';
+
+/**
  * Last-resort coercion of a value that has already been proven non-JSON-serializable (it failed
  * `assertJSONValue` and either threw or round-tripped to `undefined` through `JSON.stringify`).
  * The `String()` default — including the `[object Object]` sentinel for plain objects — is the
@@ -165,6 +172,14 @@ function normalizeJSONValue(value: unknown): JSONValue {
  * engines agree. Reacting to the throw rather than predicting it also means no cross-realm array
  * (whose `Array.prototype` is a different object) and no oddly-shaped hook (`Symbol.toPrimitive`
  * set to `null`, which coercion treats as absent) can be misclassified in advance.
+ *
+ * Known trade-off, accepted deliberately: on an engine that throws, a cyclic array whose elements
+ * carry effectful coercion hooks invokes those hooks during the failed attempt and again on the
+ * retry. Avoiding that would mean classifying the array before coercing it, which is the approach
+ * this replaced — it produced four distinct misclassification defects, each of which let the
+ * original `RangeError` back through. Duplicate invocation of a side-effecting hook, on a value
+ * already proven non-JSON, on the failure path of one engine, is the cheaper failure than
+ * reintroducing the crash this exists to prevent.
  */
 function stringifyNonJSON(value: unknown): string {
   try {
@@ -173,10 +188,15 @@ function stringifyNonJSON(value: unknown): string {
     try {
       return String(elideArrayCycles(value, new WeakSet()));
     } catch {
-      // A coercion hook that throws for its own reasons, on a value that is not a cycle this
-      // function can break. Materialization normalizes, it does not validate, so even here it
-      // must produce a string rather than propagate.
-      return Object.prototype.toString.call(value);
+      // A coercion hook that throws for its own reasons, on a value with no cycle this function
+      // can break. Materialization normalizes, it does not validate, so even here it must
+      // produce a string rather than propagate.
+      //
+      // This is a constant rather than `Object.prototype.toString.call(value)` because that
+      // performs `Get(value, Symbol.toStringTag)` — another input-controlled property, whose
+      // accessor can throw and would defeat the totality this branch exists to provide. Nothing
+      // here dispatches through the value at all.
+      return UNSTRINGIFIABLE_TAG;
     }
   }
 }
