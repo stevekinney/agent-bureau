@@ -185,8 +185,14 @@ function stringifyNonJSON(value: unknown): string {
   try {
     return String(value);
   } catch {
+    const elided = elideArrayCycles(value, new WeakSet());
+
+    // Nothing was elided, so there is no cycle to break and a retry would invoke the same
+    // throwing hook on the same value and fail identically — twice for no benefit.
+    if (elided === value) return UNSTRINGIFIABLE_TAG;
+
     try {
-      return String(elideArrayCycles(value, new WeakSet()));
+      return String(elided);
     } catch {
       // A coercion hook that throws for its own reasons, on a value with no cycle this function
       // can break. Materialization normalizes, it does not validate, so even here it must
@@ -202,6 +208,15 @@ function stringifyNonJSON(value: unknown): string {
 }
 
 /**
+ * `Array.isArray` narrows an `unknown` to `any[]`, which silently turns every element read into
+ * an `any`. This predicate keeps the elements typed as `unknown` so they stay narrowed
+ * deliberately rather than by accident. Like `Array.isArray`, it is realm-agnostic.
+ */
+function isUnknownArray(value: unknown): value is readonly unknown[] {
+  return Array.isArray(value);
+}
+
+/**
  * Returns `value` with every back-reference to an array already open on the current path replaced
  * by an empty string — the same substitution a cycle-guarding `Array.prototype.join` performs.
  * Non-array values are returned untouched, so object rendering is unaffected. `Array.isArray` is
@@ -209,25 +224,39 @@ function stringifyNonJSON(value: unknown): string {
  *
  * The `WeakSet` is path-scoped (entries are removed on the way back up), so a shared-but-acyclic
  * reference is rendered normally instead of being mistaken for a cycle.
+ *
+ * An array is rebuilt only when something beneath it actually changed, and the original is
+ * returned by reference otherwise. That keeps the rewrite confined to the cyclic path: a nested
+ * acyclic array carrying its own `toString` or `join` survives intact and still renders through
+ * its own hook, instead of being flattened into a plain clone. The check is purely structural —
+ * nothing inspects a coercion hook to decide.
  */
 function elideArrayCycles(value: unknown, open: WeakSet<object>): unknown {
-  if (!Array.isArray(value)) return value;
+  if (!isUnknownArray(value)) return value;
   if (open.has(value)) return '';
 
   open.add(value);
+
+  // `length` is read once up front: `value` may be a Proxy, whose `get` trap would otherwise fire
+  // on every iteration and could report a different length each time.
+  const length = value.length;
 
   // Indices are walked directly rather than through `value.map`. `map` is an input-controlled
   // property — an array can carry an own `map`, or be a subclass that overrides it — and
   // dispatching through it could throw from inside the one function that exists to guarantee a
   // string is always produced. `String()` never consults `map`, so neither does this.
   const elided: unknown[] = [];
-  for (let index = 0; index < value.length; index += 1) {
-    elided.push(elideArrayCycles(value[index], open));
+  let changed = false;
+  for (let index = 0; index < length; index += 1) {
+    const entry = value[index];
+    const elidedEntry = elideArrayCycles(entry, open);
+    if (elidedEntry !== entry) changed = true;
+    elided.push(elidedEntry);
   }
 
   open.delete(value);
 
-  return elided;
+  return changed ? elided : value;
 }
 
 function assertJSONValue(value: unknown, path: string): asserts value is JSONValue {

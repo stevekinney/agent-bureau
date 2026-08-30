@@ -462,6 +462,55 @@ describe('interoperability materialization', () => {
     expect(result.content).toBe('[unstringifiable]');
   });
 
+  test('normalizeJSONValue keeps a nested acyclic array\'s own toString through elision', () => {
+    const inner: any[] = ['x'];
+    Object.defineProperty(inner, 'toString', { value: () => 'INNER' });
+
+    const outer: any[] = [inner];
+    outer.push(outer);
+    // Deterministic stand-in for the engine throw, so the elision path runs on both runtimes.
+    Object.defineProperty(outer, 'join', {
+      value: () => {
+        throw new RangeError('simulated engine cycle overflow');
+      },
+    });
+
+    const result = materializeToolResult({
+      callId: 'c6-nested-hook',
+      outcome: 'success',
+      content: outer as any,
+    });
+
+    // `inner` sits on no cycle, so it is returned by reference rather than rebuilt, and still
+    // renders through its own hook. Only `outer` — which actually carries the back-reference —
+    // is rewritten.
+    expect(result.content).toBe('INNER,');
+  });
+
+  test('normalizeJSONValue tags a cycle whose elements still refuse coercion', () => {
+    const refuses = {
+      toString: () => {
+        throw new Error('coercion refused');
+      },
+    };
+    const circular: any[] = [refuses];
+    circular.push(circular);
+    Object.defineProperty(circular, 'join', {
+      value: () => {
+        throw new RangeError('simulated engine cycle overflow');
+      },
+    });
+
+    const result = materializeToolResult({
+      callId: 'c6-cycle-then-refuse',
+      outcome: 'success',
+      content: circular as any,
+    });
+
+    // The cycle is broken, but the surviving element still throws, so the terminal tag applies.
+    expect(result.content).toBe('[unstringifiable]');
+  });
+
   test('normalizeJSONValue treats a null Symbol.toPrimitive as absent, not as a custom hook', () => {
     const circular: any[] = [1, 2];
     circular.push(circular);
