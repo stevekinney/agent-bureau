@@ -1765,13 +1765,13 @@ When the pinned spec revision changes, re-diff these two files against the new c
 
 `gen_ai.provider.name` values are mapped from operative's internal `ProviderName` to the conventions' well-known values where one is registered:
 
-| `ProviderName` | `gen_ai.provider.name` | Note                                                                                                                                                                                                 |
-| -------------- | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `anthropic`    | `anthropic`            | Well-known value.                                                                                                                                                                                    |
-| `openai`       | `openai`               | Well-known value.                                                                                                                                                                                    |
-| `gemini`       | `gcp.gemini`           | operative's `gemini` provider talks to the AI Studio endpoint (`generativelanguage.googleapis.com`) via `@google/generative-ai`, which the conventions register as `gcp.gemini` (not bare `gemini`). |
-| `voyage`       | `voyage`               | No well-known value registered — a custom value, as explicitly permitted by the conventions.                                                                                                         |
-| `ollama`       | `ollama`               | No well-known value registered — a custom value, as explicitly permitted by the conventions.                                                                                                         |
+| `ProviderName` | `gen_ai.provider.name` | Note                                                                                                                                                                                         |
+| -------------- | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `anthropic`    | `anthropic`            | Well-known value.                                                                                                                                                                            |
+| `openai`       | `openai`               | Well-known value.                                                                                                                                                                            |
+| `gemini`       | `gcp.gemini`           | operative's `gemini` provider talks to the AI Studio endpoint (`generativelanguage.googleapis.com`) via `@google/genai`, which the conventions register as `gcp.gemini` (not bare `gemini`). |
+| `voyage`       | `voyage`               | No well-known value registered — a custom value, as explicitly permitted by the conventions.                                                                                                 |
+| `ollama`       | `ollama`               | No well-known value registered — a custom value, as explicitly permitted by the conventions.                                                                                                 |
 
 `total_tokens` is intentionally not emitted as a `gen_ai.usage.*` attribute anywhere — it isn't a defined attribute in the conventions, and any GenAI-aware backend already sums `input_tokens` + `output_tokens` itself.
 

@@ -80,7 +80,7 @@ export function resolveOpenAIEffort(
 }
 
 /**
- * Gemini models that expose `generationConfig.thinkingConfig` — the 2.5
+ * Gemini models that expose `config.thinkingConfig` — the 2.5
  * family. `gemini-2.0-flash` has no thinking mode at all, so effort is
  * degraded to "omit" for it.
  */

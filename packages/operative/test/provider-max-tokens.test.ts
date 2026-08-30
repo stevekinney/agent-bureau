@@ -171,8 +171,8 @@ describe('providers — toolbox availability gating', () => {
 
     await generate(makeContext(undefined, makeAvailabilityToolbox()));
 
-    const call = client._calls[0];
-    const tools = call?.['tools'] as
+    const config = client._calls[0]?.['config'] as Record<string, unknown> | undefined;
+    const tools = config?.['tools'] as
       Array<{ functionDeclarations: Array<{ name: string }> }> | undefined;
     expect(tools?.flatMap((tool) => tool.functionDeclarations.map((entry) => entry.name))).toEqual([
       'available-tool',

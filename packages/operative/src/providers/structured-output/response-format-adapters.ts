@@ -12,7 +12,7 @@ type OpenAIResponseFormat =
   | undefined;
 
 /**
- * Gemini generationConfig fields for response format (camelCase per @google/generative-ai SDK).
+ * Gemini `GenerateContentConfig` fields for response format (camelCase per @google/genai).
  */
 type GeminiResponseFormat =
   { responseMimeType: 'application/json'; responseSchema?: Record<string, unknown> } | undefined;

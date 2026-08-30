@@ -1,4 +1,4 @@
-import type { Content } from '@google/generative-ai';
+import type { Content } from '@google/genai';
 import { describe, expectTypeOf, it } from 'bun:test';
 import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions';
 

@@ -11,7 +11,6 @@ const FORBIDDEN_CORE_PACKAGES = [
   '@openai/agents',
   'openai',
   '@anthropic-ai/sdk',
-  '@google/generative-ai',
   '@google/genai',
 ];
 

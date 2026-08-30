@@ -189,7 +189,7 @@ describe('provider helper coverage', () => {
     await expect(createMockOpenAIClient([]).chat.completions.create({})).rejects.toThrow(
       'MockOpenAIClient: no response at index 0',
     );
-    await expect(createMockGeminiModel([]).generateContent({})).rejects.toThrow(
+    await expect(createMockGeminiModel([]).models.generateContent({})).rejects.toThrow(
       'MockGeminiModel: no response at index 0',
     );
   });
@@ -209,7 +209,7 @@ describe('provider helper coverage', () => {
       [geminiStreamTextChunks],
       [new Error('gemini stream failed')],
       { errorAfterEvents: 1 },
-    ).generateContentStream({});
+    ).models.generateContentStream({});
 
     await expect(
       (async () => {
@@ -227,7 +227,7 @@ describe('provider helper coverage', () => {
     ).rejects.toThrow('openai stream failed');
     await expect(
       (async () => {
-        for await (const _chunk of geminiStream.stream) {
+        for await (const _chunk of geminiStream) {
           // consume until the configured error fires
         }
       })(),
@@ -247,7 +247,7 @@ describe('provider helper coverage', () => {
       [[]],
       [new Error('gemini late failure')],
       { errorAfterEvents: 1 },
-    ).generateContentStream({});
+    ).models.generateContentStream({});
 
     await expect(
       (async () => {
@@ -265,7 +265,7 @@ describe('provider helper coverage', () => {
     ).rejects.toThrow('openai late failure');
     await expect(
       (async () => {
-        for await (const _chunk of geminiStream.stream) {
+        for await (const _chunk of geminiStream) {
           // consume until the configured error fires
         }
       })(),
@@ -743,10 +743,8 @@ describe('Gemini provider coverage', () => {
       geminiMixedResponse,
       geminiNoUsageResponse,
       {
-        response: {
-          candidates: [{ content: {} }],
-          usageMetadata: { promptTokenCount: 3, candidatesTokenCount: 4 },
-        },
+        candidates: [{ content: {} }],
+        usageMetadata: { promptTokenCount: 3, candidatesTokenCount: 4 },
       },
     ]);
     const generate = createGeminiProvider({
@@ -779,10 +777,15 @@ describe('Gemini provider coverage', () => {
       usage: { prompt: 3, completion: 4, total: 7 },
     });
 
+    // `@google/genai` takes the model per request and folds the tool config
+    // and the former `generationConfig` fields into one flat `config` object.
     expect(client._calls[0]).toMatchObject({
+      model: 'gemini-pro',
       contents: [],
-      toolConfig: { functionCallingConfig: { mode: 'ANY', allowedFunctionNames: ['get_weather'] } },
-      generationConfig: {
+      config: {
+        toolConfig: {
+          functionCallingConfig: { mode: 'ANY', allowedFunctionNames: ['get_weather'] },
+        },
         maxOutputTokens: 200,
         temperature: 0.1,
         topP: 0.8,
@@ -882,7 +885,8 @@ describe('Gemini provider coverage', () => {
       failingGenerate({ ...makeContext(), streaming: makeStreamingHandle() }),
     ).rejects.toMatchObject({ provider: 'gemini' });
 
-    expect(client._calls[0]?.['generationConfig']).toMatchObject({
+    expect(client._calls[0]?.['model']).toBe('gemini-pro');
+    expect(client._calls[0]?.['config']).toMatchObject({
       maxOutputTokens: 200,
       responseMimeType: 'application/json',
     });

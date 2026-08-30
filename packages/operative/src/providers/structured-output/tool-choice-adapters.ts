@@ -13,7 +13,7 @@ type OpenAIToolChoice =
   'auto' | 'required' | 'none' | { type: 'function'; function: { name: string } };
 
 /**
- * Gemini toolConfig parameter shape (camelCase per @google/generative-ai SDK).
+ * Gemini toolConfig parameter shape (camelCase per @google/genai SDK).
  */
 type GeminiToolConfig = {
   functionCallingConfig: {

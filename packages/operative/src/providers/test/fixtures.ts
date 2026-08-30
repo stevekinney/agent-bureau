@@ -114,81 +114,73 @@ export const openAINoUsageResponse: OpenAIChatCompletion = {
 // ── Gemini Fixtures ──────────────────────────────────────────────────
 
 export const geminiTextResponse: GeminiGenerateContentResult = {
-  response: {
-    candidates: [
-      {
-        content: {
-          parts: [{ text: 'Hello from Gemini!' }],
-        },
+  candidates: [
+    {
+      content: {
+        parts: [{ text: 'Hello from Gemini!' }],
       },
-    ],
-    usageMetadata: {
-      promptTokenCount: 10,
-      candidatesTokenCount: 5,
-      totalTokenCount: 15,
     },
+  ],
+  usageMetadata: {
+    promptTokenCount: 10,
+    candidatesTokenCount: 5,
+    totalTokenCount: 15,
   },
 };
 
 export const geminiFunctionCallResponse: GeminiGenerateContentResult = {
-  response: {
-    candidates: [
-      {
-        content: {
-          parts: [
-            {
-              functionCall: {
-                name: 'get_weather',
-                args: { location: 'San Francisco' },
-              },
+  candidates: [
+    {
+      content: {
+        parts: [
+          {
+            functionCall: {
+              name: 'get_weather',
+              args: { location: 'San Francisco' },
             },
-          ],
-        },
+          },
+        ],
       },
-    ],
-    usageMetadata: {
-      promptTokenCount: 15,
-      candidatesTokenCount: 20,
-      totalTokenCount: 35,
     },
+  ],
+  usageMetadata: {
+    promptTokenCount: 15,
+    candidatesTokenCount: 20,
+    totalTokenCount: 35,
   },
 };
 
 export const geminiMixedResponse: GeminiGenerateContentResult = {
-  response: {
-    candidates: [
-      {
-        content: {
-          parts: [
-            { text: 'Let me check the weather.' },
-            {
-              functionCall: {
-                name: 'get_weather',
-                args: { location: 'New York' },
-              },
+  candidates: [
+    {
+      content: {
+        parts: [
+          { text: 'Let me check the weather.' },
+          {
+            functionCall: {
+              name: 'get_weather',
+              args: { location: 'New York' },
             },
-          ],
-        },
+          },
+        ],
       },
-    ],
-    usageMetadata: {
-      promptTokenCount: 20,
-      candidatesTokenCount: 25,
-      totalTokenCount: 45,
     },
+  ],
+  usageMetadata: {
+    promptTokenCount: 20,
+    candidatesTokenCount: 25,
+    totalTokenCount: 45,
   },
 };
 
 export const geminiNoUsageResponse: GeminiGenerateContentResult = {
-  response: {
-    candidates: [
-      {
-        content: {
-          parts: [{ text: 'No usage info.' }],
-        },
+  candidates: [
+    {
+      content: {
+        parts: [{ text: 'No usage info.' }],
       },
-    ],
-  },
+    },
+  ],
 };
 
 // ── Anthropic Streaming Fixtures ────────────────────────────────────
@@ -311,7 +303,7 @@ export const openAIStreamToolCallChunks: OpenAIChatCompletionChunk[] = [
 
 // ── Gemini Streaming Fixtures ───────────────────────────────────────
 
-export const geminiStreamTextChunks: GeminiGenerateContentResult['response'][] = [
+export const geminiStreamTextChunks: GeminiGenerateContentResult[] = [
   {
     candidates: [{ content: { parts: [{ text: 'Hello ' }] } }],
   },
@@ -321,7 +313,7 @@ export const geminiStreamTextChunks: GeminiGenerateContentResult['response'][] =
   },
 ];
 
-export const geminiStreamFunctionCallChunks: GeminiGenerateContentResult['response'][] = [
+export const geminiStreamFunctionCallChunks: GeminiGenerateContentResult[] = [
   {
     candidates: [
       {
@@ -413,7 +405,7 @@ export const openAIStreamMixedChunks: OpenAIChatCompletionChunk[] = [
 
 // ── Gemini Mixed Text + Function Call Streaming Fixtures ───────────
 
-export const geminiStreamMixedChunks: GeminiGenerateContentResult['response'][] = [
+export const geminiStreamMixedChunks: GeminiGenerateContentResult[] = [
   {
     candidates: [
       {
@@ -455,7 +447,7 @@ export const openAIStreamEmptyChunks: OpenAIChatCompletionChunk[] = [
 
 // ── Gemini Empty Stream Fixtures ───────────────────────────────────
 
-export const geminiStreamEmptyChunks: GeminiGenerateContentResult['response'][] = [
+export const geminiStreamEmptyChunks: GeminiGenerateContentResult[] = [
   {
     candidates: [],
     usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 0, totalTokenCount: 5 },
@@ -568,7 +560,7 @@ export const openAIStreamMultiToolChunks: OpenAIChatCompletionChunk[] = [
 
 // ── Gemini Multi-Function-Call Streaming Fixtures ──────────────────
 
-export const geminiStreamMultiFunctionCallChunks: GeminiGenerateContentResult['response'][] = [
+export const geminiStreamMultiFunctionCallChunks: GeminiGenerateContentResult[] = [
   {
     candidates: [
       {

@@ -179,30 +179,40 @@ export interface OpenAIProviderOptions extends BaseProviderOptions {
 }
 
 /**
- * Structural interface for a Gemini GenerativeModel instance.
+ * Structural interface for a `@google/genai` client.
+ *
+ * The maintained SDK centres on a `GoogleGenAI` client whose `models`
+ * namespace takes the model id on every request, rather than binding a model
+ * handle at construction time the way the previous SDK's `getGenerativeModel()`
+ * did.
  */
 export interface GeminiGenerativeModel {
-  generateContent(params: Record<string, unknown>): Promise<GeminiGenerateContentResult>;
+  models: {
+    generateContent(params: Record<string, unknown>): Promise<GeminiGenerateContentResult>;
+  };
 }
 
 /**
- * Minimal shape of a Gemini generateContent result.
+ * Minimal shape of a `@google/genai` `GenerateContentResponse`.
+ *
+ * Candidates and usage sit at the top level — the frozen SDK's `.response`
+ * wrapper is gone. `functionCall.name` and `functionCall.args` are both
+ * optional in the maintained SDK, so parts must be narrowed before they are
+ * handed to armorer's stricter `GeminiPart` union.
  */
 export interface GeminiGenerateContentResult {
-  response: {
-    candidates?: Array<{
-      content?: {
-        parts?: Array<{
-          text?: string;
-          functionCall?: { name: string; args: Record<string, unknown> };
-        }>;
-      };
-    }>;
-    usageMetadata?: {
-      promptTokenCount?: number;
-      candidatesTokenCount?: number;
-      totalTokenCount?: number;
+  candidates?: Array<{
+    content?: {
+      parts?: Array<{
+        text?: string;
+        functionCall?: { name?: string; args?: Record<string, unknown> };
+      }>;
     };
+  }>;
+  usageMetadata?: {
+    promptTokenCount?: number;
+    candidatesTokenCount?: number;
+    totalTokenCount?: number;
   };
 }
 
@@ -213,7 +223,7 @@ export interface GeminiProviderOptions extends BaseProviderOptions {
   client?: GeminiGenerativeModel;
   apiKey?: string;
   /**
-   * Overrides the Gemini SDK's default base URL (`RequestOptions.baseUrl`).
+   * Overrides the Gemini SDK's default base URL (`HttpOptions.baseUrl`).
    * Accepts any string — including a credential-injecting proxy origin —
    * with no shape validation.
    */
@@ -299,10 +309,16 @@ export interface OpenAIStreamingClient {
 }
 
 /**
- * Structural interface for a Gemini GenerativeModel that supports streaming.
+ * Structural interface for a `@google/genai` client that supports streaming.
+ *
+ * `models.generateContentStream` resolves to the async iterable of chunks
+ * directly; the frozen SDK's `{ stream }` wrapper object is gone, and each
+ * chunk is a full `GenerateContentResponse`.
  */
 export interface GeminiStreamingModel {
-  generateContentStream(
-    params: Record<string, unknown>,
-  ): Promise<{ stream: AsyncIterable<GeminiGenerateContentResult['response']> }>;
+  models: {
+    generateContentStream(
+      params: Record<string, unknown>,
+    ): Promise<AsyncIterable<GeminiGenerateContentResult>>;
+  };
 }
