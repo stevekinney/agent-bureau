@@ -348,6 +348,71 @@ describe('interoperability materialization', () => {
     expect(result.content).toBe('[object Object]');
   });
 
+  test('normalizeJSONValue preserves a circular array\'s own toString hook', () => {
+    const circular: any[] = [1, 2];
+    circular.push(circular);
+    // A custom hook is what `String()` actually calls, and it does not recurse the way the
+    // default comma-join does, so eliding here would replace real output with a joined clone.
+    circular.toString = () => 'custom-array';
+
+    const result = materializeToolResult({
+      callId: 'c6-tostring',
+      outcome: 'success',
+      content: circular as any,
+    });
+
+    expect(result.content).toBe('custom-array');
+  });
+
+  test('normalizeJSONValue preserves a circular array\'s Symbol.toPrimitive hook', () => {
+    const circular: any[] = [1, 2];
+    circular.push(circular);
+    Object.defineProperty(circular, Symbol.toPrimitive, {
+      value: () => 'primitive-array',
+    });
+
+    const result = materializeToolResult({
+      callId: 'c6-toprimitive',
+      outcome: 'success',
+      content: circular as any,
+    });
+
+    expect(result.content).toBe('primitive-array');
+  });
+
+  test('normalizeJSONValue preserves a circular array\'s overridden join', () => {
+    const circular: any[] = [1, 2];
+    circular.push(circular);
+    // `Array.prototype.toString` delegates to `this.join`, so overriding join is as much a
+    // custom coercion hook as overriding toString.
+    circular.join = () => 'custom-join';
+
+    const result = materializeToolResult({
+      callId: 'c6-join',
+      outcome: 'success',
+      content: circular as any,
+    });
+
+    expect(result.content).toBe('custom-join');
+  });
+
+  test('normalizeJSONValue does not dispatch through an input-controlled map', () => {
+    const circular: any[] = [1, 2];
+    circular.push(circular);
+    // An array carrying its own `map` (metadata, or a subclass override) must not be invoked:
+    // `String()` never consults `map`, so normalization must not either. Before this guard the
+    // elision called `value.map(...)` and threw here.
+    Object.defineProperty(circular, 'map', { value: null });
+
+    const result = materializeToolResult({
+      callId: 'c6-map',
+      outcome: 'success',
+      content: circular as any,
+    });
+
+    expect(result.content).toBe('1,2,');
+  });
+
   test('normalizeJSONValue falls back to String() for circular objects', () => {
     const circular: any = { a: 1 };
     circular.self = circular;

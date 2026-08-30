@@ -172,16 +172,45 @@ function stringifyNonJSON(value: unknown): string {
  * Non-array values are returned untouched, so object rendering is unaffected. The `WeakSet` is
  * path-scoped (entries are removed on the way back up), so a shared-but-acyclic reference is
  * rendered normally instead of being mistaken for a cycle.
+ *
+ * Arrays carrying their own coercion hook are left alone: `String()` routes through the hook
+ * rather than through the default comma-join, so the hook's output is what the caller documented
+ * and eliding would silently replace it with a joined clone.
  */
 function elideArrayCycles(value: unknown, open: WeakSet<object>): unknown {
   if (!Array.isArray(value)) return value;
+  if (!usesDefaultArrayCoercion(value)) return value;
   if (open.has(value)) return '';
 
   open.add(value);
-  const elided = value.map((entry) => elideArrayCycles(entry, open));
+
+  // Indices are walked directly rather than through `value.map`. `map` is an input-controlled
+  // property — an array can carry an own `map` of its own, or be a subclass that overrides it —
+  // and dispatching through it could throw from inside the one function that exists to guarantee
+  // a string is always produced. `String()` never consults `map`, so neither does this.
+  const elided: unknown[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    elided.push(elideArrayCycles(value[index], open));
+  }
+
   open.delete(value);
 
   return elided;
+}
+
+/**
+ * Whether `String(value)` would render this array through the built-in comma-join — the only path
+ * that recurses on a cycle, and therefore the only one that needs eliding. `Array.prototype
+ * .toString` delegates to `this.join` when it is callable, so an overridden `join` counts as a
+ * custom hook just as much as an overridden `toString` or a `Symbol.toPrimitive`.
+ */
+function usesDefaultArrayCoercion(value: unknown[]): boolean {
+  const coercible = value as { [Symbol.toPrimitive]?: unknown };
+  return (
+    coercible[Symbol.toPrimitive] === undefined &&
+    value.toString === Array.prototype.toString &&
+    value.join === Array.prototype.join
+  );
 }
 
 function assertJSONValue(value: unknown, path: string): asserts value is JSONValue {
