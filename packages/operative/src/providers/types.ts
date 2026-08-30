@@ -179,30 +179,64 @@ export interface OpenAIProviderOptions extends BaseProviderOptions {
 }
 
 /**
- * Structural interface for a Gemini GenerativeModel instance.
+ * Minimal shape of a `@google/genai` `GenerateContentParameters` request body.
+ *
+ * The SDK's own `GenerateContentParameters` is an `interface`, so it carries no
+ * implicit index signature and is therefore *not* assignable to
+ * `Record<string, unknown>`. Naming the required `model`/`contents` fields here
+ * — and widening only the payload-shaped fields to `unknown` — is what lets a
+ * real `GoogleGenAI` instance satisfy {@link GeminiGenerativeModel} and
+ * {@link GeminiStreamingModel} without a cast, while keeping consumer fakes
+ * trivial to write. Do not add an index signature: that would put the
+ * assignability back where it was.
  */
-export interface GeminiGenerativeModel {
-  generateContent(params: Record<string, unknown>): Promise<GeminiGenerateContentResult>;
+export interface GeminiGenerateContentRequest {
+  /** Provider-native model id, sent with every request by the maintained SDK. */
+  model: string;
+  /** `ContentListUnion` in the SDK; widened here so fakes need not model it. */
+  contents: unknown;
+  /** `GenerateContentConfig` in the SDK; omitted when no options are set. */
+  config?: unknown;
 }
 
 /**
- * Minimal shape of a Gemini generateContent result.
+ * Structural interface for a `@google/genai` client.
+ *
+ * The maintained SDK centres on a `GoogleGenAI` client whose `models`
+ * namespace takes the model id on every request, rather than binding a model
+ * handle at construction time the way the previous SDK's `getGenerativeModel()`
+ * did.
+ *
+ * A real `GoogleGenAI` instance is assignable to this interface — see
+ * `gemini-client-assignability.test-d.ts`, which locks that in.
+ */
+export interface GeminiGenerativeModel {
+  models: {
+    generateContent(params: GeminiGenerateContentRequest): Promise<GeminiGenerateContentResult>;
+  };
+}
+
+/**
+ * Minimal shape of a `@google/genai` `GenerateContentResponse`.
+ *
+ * Candidates and usage sit at the top level — the frozen SDK's `.response`
+ * wrapper is gone. `functionCall.name` and `functionCall.args` are both
+ * optional in the maintained SDK, so parts must be narrowed before they are
+ * handed to armorer's stricter `GeminiPart` union.
  */
 export interface GeminiGenerateContentResult {
-  response: {
-    candidates?: Array<{
-      content?: {
-        parts?: Array<{
-          text?: string;
-          functionCall?: { name: string; args: Record<string, unknown> };
-        }>;
-      };
-    }>;
-    usageMetadata?: {
-      promptTokenCount?: number;
-      candidatesTokenCount?: number;
-      totalTokenCount?: number;
+  candidates?: Array<{
+    content?: {
+      parts?: Array<{
+        text?: string;
+        functionCall?: { name?: string; args?: Record<string, unknown> };
+      }>;
     };
+  }>;
+  usageMetadata?: {
+    promptTokenCount?: number;
+    candidatesTokenCount?: number;
+    totalTokenCount?: number;
   };
 }
 
@@ -213,7 +247,7 @@ export interface GeminiProviderOptions extends BaseProviderOptions {
   client?: GeminiGenerativeModel;
   apiKey?: string;
   /**
-   * Overrides the Gemini SDK's default base URL (`RequestOptions.baseUrl`).
+   * Overrides the Gemini SDK's default base URL (`HttpOptions.baseUrl`).
    * Accepts any string — including a credential-injecting proxy origin —
    * with no shape validation.
    */
@@ -299,10 +333,19 @@ export interface OpenAIStreamingClient {
 }
 
 /**
- * Structural interface for a Gemini GenerativeModel that supports streaming.
+ * Structural interface for a `@google/genai` client that supports streaming.
+ *
+ * `models.generateContentStream` resolves to the async iterable of chunks
+ * directly; the frozen SDK's `{ stream }` wrapper object is gone, and each
+ * chunk is a full `GenerateContentResponse`.
+ *
+ * A real `GoogleGenAI` instance is assignable to this interface — see
+ * `gemini-client-assignability.test-d.ts`, which locks that in.
  */
 export interface GeminiStreamingModel {
-  generateContentStream(
-    params: Record<string, unknown>,
-  ): Promise<{ stream: AsyncIterable<GeminiGenerateContentResult['response']> }>;
+  models: {
+    generateContentStream(
+      params: GeminiGenerateContentRequest,
+    ): Promise<AsyncIterable<GeminiGenerateContentResult>>;
+  };
 }

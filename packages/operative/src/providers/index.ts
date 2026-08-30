@@ -101,6 +101,7 @@ export type {
   AnthropicStreamingClient,
   BaseProviderOptions,
   Effort,
+  GeminiGenerateContentRequest,
   GeminiGenerateContentResult,
   GeminiGenerativeModel,
   GeminiProviderOptions,

@@ -44,14 +44,14 @@ export interface GeminiFormatToolResultsOptions {
  *
  * @example
  * ```ts
+ * import { GoogleGenAI } from '@google/genai';
  * import { toGeminiTools } from 'armorer/adapters/gemini';
  *
- * const tools = toGeminiTools(toolbox);
- *
- * // Use with Gemini SDK
- * const model = genAI.getGenerativeModel({
+ * const client = new GoogleGenAI({ apiKey });
+ * const response = await client.models.generateContent({
  *   model: 'gemini-pro',
- *   tools: toGeminiTools(toolbox),
+ *   contents,
+ *   config: { tools: toGeminiTools(toolbox) },
  * });
  * ```
  */

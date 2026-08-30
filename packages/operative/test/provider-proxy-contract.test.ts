@@ -19,7 +19,7 @@
  * exact-set assertion; then restore.
  *
  * IMPORTANT — do not mock.module() '@anthropic-ai/sdk', 'openai', or
- * '@google/generative-ai' anywhere else in this package's test suite.
+ * '@google/genai' anywhere else in this package's test suite.
  * bun:test's mock.module() mutates the process-global module registry (not
  * a per-file sandbox), and this file's dynamic `import(...)` calls need the
  * REAL SDKs to actually hit the wire. `provider-coverage.test.ts` used to

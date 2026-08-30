@@ -53,7 +53,7 @@ export default defineConfig({
       '@lostgradient/weft',
       'zod',
       '@anthropic-ai/sdk',
-      '@google/generative-ai',
+      '@google/genai',
       'openai',
       '@opentelemetry/api',
       /^bun(:|$)/,

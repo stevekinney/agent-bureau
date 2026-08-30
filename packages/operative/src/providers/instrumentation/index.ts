@@ -28,7 +28,7 @@ function toGenAiProviderName(provider: ProviderName): string {
   switch (provider) {
     case 'gemini':
       // operative's `gemini` provider talks to the AI Studio endpoint
-      // (generativelanguage.googleapis.com) via @google/generative-ai,
+      // (generativelanguage.googleapis.com) via @google/genai,
       // which the conventions register as `gcp.gemini`.
       return 'gcp.gemini';
     case 'anthropic':

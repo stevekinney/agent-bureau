@@ -252,7 +252,7 @@ describe('effort tiers — Gemini', () => {
 
       const result = await generate(makeContext());
 
-      expect(client._calls[0]?.['generationConfig']).toMatchObject({
+      expect(client._calls[0]?.['config']).toMatchObject({
         thinkingConfig: { thinkingBudget: budget },
       });
       expect(result.metadata?.['effectiveEffort']).toBe(effort);
@@ -269,9 +269,8 @@ describe('effort tiers — Gemini', () => {
 
     const result = await generate(makeContext());
 
-    const generationConfig = client._calls[0]?.['generationConfig'] as
-      Record<string, unknown> | undefined;
-    expect(generationConfig?.['thinkingConfig']).toBeUndefined();
+    const config = client._calls[0]?.['config'] as Record<string, unknown> | undefined;
+    expect(config?.['thinkingConfig']).toBeUndefined();
     expect(result.metadata?.['effectiveEffort']).toBe('none');
   });
 

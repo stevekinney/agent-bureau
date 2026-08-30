@@ -1,7 +1,7 @@
 /**
  * Gemini provider subpath — `@lostgradient/operative/gemini`.
  *
- * Dynamically imports `@google/generative-ai` on first call (zero-SDK-if-unused).
+ * Dynamically imports `@google/genai` on first call (zero-SDK-if-unused).
  * This is the preferred import for consumers who only use Gemini, avoiding
  * bundling the Anthropic or OpenAI SDKs.
  *
@@ -11,6 +11,7 @@
  */
 export { createGeminiProvider, createGeminiProviderStream } from './providers/gemini.ts';
 export type {
+  GeminiGenerateContentRequest,
   GeminiGenerateContentResult,
   GeminiGenerativeModel,
   GeminiProviderOptions,

@@ -59,6 +59,77 @@ describe('createGeminiProvider — client injection (baseline)', () => {
   });
 });
 
+// ── Narrowing @google/genai's optional function-call fields ───────────
+//
+// `@google/genai` types `FunctionCall.name` and `FunctionCall.args` as
+// optional, while armorer's `GeminiFunctionCallPart` requires both. These
+// cover the narrowing that bridges the two.
+
+describe('createGeminiProvider — optional function-call fields', () => {
+  it('defaults a named function call with no args to empty arguments', async () => {
+    const client = createMockGeminiModel([
+      { candidates: [{ content: { parts: [{ functionCall: { name: 'get_weather' } }] } }] },
+    ]);
+    const generate = createGeminiProvider({ model: 'gemini-pro', client });
+
+    const result = await generate(makeContext());
+
+    expect(result.toolCalls).toEqual([{ name: 'get_weather', arguments: {} }]);
+  });
+
+  it('drops a function call with no name, since it cannot be dispatched', async () => {
+    const client = createMockGeminiModel([
+      {
+        candidates: [
+          {
+            content: { parts: [{ functionCall: { args: { location: 'Paris' } } }, { text: 'Hi' }] },
+          },
+        ],
+      },
+    ]);
+    const generate = createGeminiProvider({ model: 'gemini-pro', client });
+
+    const result = await generate(makeContext());
+
+    expect(result.toolCalls).toEqual([]);
+    expect(result.content).toBe('Hi');
+  });
+});
+
+describe('createGeminiProviderStream — optional function-call fields', () => {
+  it('defaults a named function call with no args to empty arguments', async () => {
+    const client = createMockGeminiStreamingModel([
+      [{ candidates: [{ content: { parts: [{ functionCall: { name: 'get_weather' } }] } }] }],
+    ]);
+    const generate = createGeminiProviderStream({ model: 'gemini-pro', client });
+
+    const result = await generate({
+      ...makeContext(),
+      streaming: { update: () => undefined },
+    });
+
+    expect(result.toolCalls).toEqual([{ name: 'get_weather', arguments: {} }]);
+  });
+
+  it('drops a function call with no name, since it cannot be dispatched', async () => {
+    const client = createMockGeminiStreamingModel([
+      [
+        {
+          candidates: [{ content: { parts: [{ functionCall: { args: { location: 'Paris' } } }] } }],
+        },
+      ],
+    ]);
+    const generate = createGeminiProviderStream({ model: 'gemini-pro', client });
+
+    const result = await generate({
+      ...makeContext(),
+      streaming: { update: () => undefined },
+    });
+
+    expect(result.toolCalls).toEqual([]);
+  });
+});
+
 // ── createGeminiProvider — API key handling ────────────────────────────
 
 describe('createGeminiProvider — API key handling (PRRT_kwDORvupsc6MX3PU)', () => {
@@ -123,7 +194,7 @@ describe('createGeminiProviderStream — client injection (baseline)', () => {
     expect(updates[updates.length - 1]).toBe('Hello from Gemini!');
   });
 
-  it('sends the resolved thinking budget in streaming generation configuration', async () => {
+  it('sends the resolved thinking budget in the streaming request config', async () => {
     const client = createMockGeminiStreamingModel([geminiStreamTextChunks]);
     const generate = createGeminiProviderStream({
       model: 'gemini-2.5-pro',
@@ -136,7 +207,7 @@ describe('createGeminiProviderStream — client injection (baseline)', () => {
       streaming: { update: () => undefined },
     });
 
-    expect(client._calls[0]?.['generationConfig']).toMatchObject({
+    expect(client._calls[0]?.['config']).toMatchObject({
       thinkingConfig: { thinkingBudget: 16_384 },
     });
   });
