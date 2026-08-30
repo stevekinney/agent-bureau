@@ -1,10 +1,10 @@
 ---
-'@lostgradient/operative': major
+'@lostgradient/operative': minor
 ---
 
 Migrate the Gemini provider from the frozen `@google/generative-ai` package to Google's maintained `@google/genai` SDK (peer floor `>=2.19.0`).
 
-BREAKING: this changes both the optional peer dependency name and the structural shape of the client you may pass as `options.client`. Anyone constructing their own Gemini client must update on both counts.
+BREAKING (Gemini client surface; released as a minor under 0.x convention): this changes both the optional peer dependency name and the structural shape of the client you may pass as `options.client`. Anyone constructing their own Gemini client must update on both counts.
 
 - Install `@google/genai` instead of `@google/generative-ai`. The old package has not been published since 2025-04-30.
 - `createGeminiProvider`/`createGeminiProviderStream` now take a `GoogleGenAI` client rather than a `GenerativeModel` handle. Calls go through the `models` namespace (`client.models.generateContent`), the model id travels with each request instead of being bound at client construction, and `generateContentStream` resolves to the chunk async-iterable directly rather than to a `{ stream }` wrapper.

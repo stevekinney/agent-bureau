@@ -264,12 +264,15 @@ function extractSystemInstruction(messages: ReadonlyArray<Message>): GeminiConte
  *
  * @example
  * ```ts
+ * import { GoogleGenAI } from '@google/genai';
  * import { toGeminiMessages } from 'conversationalist/adapters/gemini';
  *
+ * const client = new GoogleGenAI({ apiKey });
  * const { systemInstruction, contents } = toGeminiMessages(conversation);
- * const response = await genAI.getGenerativeModel({ model: 'gemini-pro' }).generateContent({
- *   systemInstruction,
+ * const response = await client.models.generateContent({
+ *   model: 'gemini-pro',
  *   contents,
+ *   config: { systemInstruction },
  * });
  * ```
  *

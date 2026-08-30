@@ -71,8 +71,9 @@ const geminiTools = toGeminiTools([tool1, tool2]);
 const geminiTools = await toolbox.toGeminiTools();
 
 // Use with Gemini SDK
-const model = genAI.getGenerativeModel({
+const response = await client.models.generateContent({
   model: 'gemini-pro',
-  tools: await toolbox.toGeminiTools(),
+  contents,
+  config: { tools: await toolbox.toGeminiTools() },
 });
 ```
