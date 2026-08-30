@@ -316,29 +316,4 @@ describe('checkStaleWorkspaceDist (fixture end-to-end)', () => {
     );
   });
 
-  test('reports a package stale when a source file is deleted after its dist/ was built', async () => {
-    const t0 = Date.UTC(2024, 0, 1);
-
-    const pkg = await makeFixturePackage(root, 'deletion-target');
-    const extraFile = join(pkg.srcDirectory, 'extra.ts');
-    await writeFile(extraFile, 'export const extra = true;');
-    await setMtime(extraFile, t0);
-    await setMtime(join(pkg.srcDirectory, 'index.ts'), t0);
-    await setMtime(pkg.srcDirectory, t0);
-    await setMtime(join(pkg.distDirectory, 'index.js'), t0 + 1000);
-    await setMtime(pkg.distDirectory, t0 + 1000);
-
-    // Precondition: with both source files intact and predating dist/, nothing is stale yet.
-    const beforeDeletion = await checkStaleWorkspaceDist(root);
-    expect(beforeDeletion.map((status) => status.name)).toEqual(['deletion-target']);
-
-    // Deleting extra.ts (real deletion, no manual mtime set on the directory) bumps
-    // src/'s own mtime to "now" — after dist/'s mtime — even though the remaining
-    // index.ts file's own mtime is untouched.
-    await unlink(extraFile);
-
-    await expect(checkStaleWorkspaceDist(root)).rejects.toThrow(
-      /^dist\/ is older than src\/ for: deletion-target\./,
-    );
-  });
 });

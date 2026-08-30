@@ -18,15 +18,20 @@
  *
  * Exits non-zero naming every package whose `dist/` predates that combined `src/` (fail-closed).
  *
- * Limitation (honest, not fixable within this guard's design): this is a fast mtime heuristic,
- * not a proof of freshness. It walks directory mtimes as well as file mtimes, which catches the
- * common case of a deleted source file (removing a file bumps its parent directory's mtime on
- * macOS and Linux) — but it can still miss a deletion on a filesystem that doesn't update
- * directory mtimes on unlink, and it has no way to detect a change that doesn't touch mtime at
- * all (e.g. a file rewritten with `utimes` preserved, or a content change on a filesystem with
- * coarse mtime resolution). `turbo run build` remains the authority on whether `dist/` is
- * actually current — treat this guard as a cheap tripwire for ad hoc scripts, not a replacement
- * for it.
+ * Limitations (honest — this is a fast mtime heuristic, not a proof of freshness):
+ *
+ * - **Deletions are invisible.** Removing a source file leaves no remaining file with a newer
+ *   mtime, so a `dist/` still carrying the deleted module reads as fresh. Detecting this would
+ *   mean counting directory mtimes, which was tried and reverted: ordinary test runs create and
+ *   delete fixture directories inside `src/`, so it made the guard fail after a plain
+ *   `turbo run test` with no source edits at all.
+ * - **mtime skew without content change reads as stale.** `touch`ing a file, or a branch switch
+ *   that rewrites mtimes, trips the guard even though `dist/` is genuinely current. Turborepo
+ *   hashes *content*, so `turbo run build` is a cache hit that leaves `dist/` mtimes untouched
+ *   and the guard stays red; `turbo run build --force` is what clears that case.
+ *
+ * `turbo run build` remains the authority on whether `dist/` is actually current. Treat this as
+ * a cheap tripwire for ad hoc scripts, not a replacement for it.
  *
  * Usage: `bun run scripts/check-stale-workspace-dist.ts` (wired to `bun run check:stale-dist`)
  * Exit code 0 = every checked package's `dist/` is at least as new as its (transitive) `src/`;
@@ -112,22 +117,29 @@ export function computeEffectiveSourceMtimes(
 }
 
 /**
- * Newest mtime (ms since epoch) under `directory`, across both files and directories, or
- * `undefined` if `directory` doesn't exist. Including directory mtimes (not just file mtimes)
- * means deleting a source file is detectable: removing a file bumps its parent directory's
- * mtime on macOS and Linux, even though no remaining file gets a newer mtime of its own. This is
- * a heuristic, not a guarantee — see the module-level limitation note above.
+ * Newest *file* mtime (ms since epoch) under `directory`, or `undefined` if `directory` doesn't
+ * exist.
+ *
+ * Directory mtimes are deliberately excluded. Counting them looks appealing — deleting a file
+ * bumps its parent directory's mtime, which would make deletions detectable — but it makes the
+ * guard fire constantly in normal use: several suites create and delete fixture directories
+ * *inside* `src/` while running (for example `packages/gateway/src/server/pages.test.ts` and the
+ * evaluation fixtures), so a plain `turbo run test` would leave every dependent package looking
+ * stale with zero source edits and a clean `git status`. A tripwire that cries wolf after an
+ * ordinary test run is worse than one with a documented blind spot, so deletions stay in the
+ * blind spot — see the module-level limitation note.
  */
 export async function newestMtimeMs(directory: string): Promise<number | undefined> {
-  const rootStats = await stat(directory).catch(() => undefined);
-  if (rootStats === undefined) return undefined;
+  if (!existsSync(directory)) return undefined;
 
-  let newest = rootStats.mtimeMs;
+  let newest: number | undefined;
 
   const glob = new Bun.Glob('**/*');
-  for await (const relativePath of glob.scan({ cwd: directory, onlyFiles: false, dot: true })) {
+  for await (const relativePath of glob.scan({ cwd: directory, onlyFiles: true, dot: true })) {
     const entryStats = await stat(resolve(directory, relativePath)).catch(() => undefined);
-    if (entryStats !== undefined && entryStats.mtimeMs > newest) newest = entryStats.mtimeMs;
+    if (entryStats !== undefined && (newest === undefined || entryStats.mtimeMs > newest)) {
+      newest = entryStats.mtimeMs;
+    }
   }
 
   return newest;
@@ -232,7 +244,9 @@ export async function checkStaleWorkspaceDist(
     throw new Error(
       `dist/ is older than src/ for: ${stalePackages.join(', ')}. Run \`turbo run build\` ` +
         '(or `turbo run build --filter=<package>`) before running an ad hoc script against ' +
-        'workspace package code.',
+        'workspace package code. If that reports FULL TURBO and this check still fails, the ' +
+        'skew is mtime-only with unchanged content — Turborepo hashes content, so the cached ' +
+        'build leaves dist/ mtimes untouched; `turbo run build --force` clears it.',
     );
   }
 
