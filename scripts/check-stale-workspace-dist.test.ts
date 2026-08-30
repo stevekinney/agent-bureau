@@ -8,6 +8,8 @@ import {
   checkStaleWorkspaceDist,
   computeEffectiveSourceMtimes,
   findStaleDistPackages,
+  isBuildIrrelevantSourcePath,
+  newestMtimeMs,
   resolveTransitiveDependencyNames,
   type WorkspaceDependencyGraph,
 } from './check-stale-workspace-dist';
@@ -188,6 +190,76 @@ describe('computeEffectiveSourceMtimes', () => {
   });
 });
 
+describe('isBuildIrrelevantSourcePath', () => {
+  test('excludes colocated test files, which every build config already excludes', () => {
+    expect(isBuildIrrelevantSourcePath('create-handoff-tool.test.ts')).toBe(true);
+    expect(isBuildIrrelevantSourcePath('providers/routing/routing-metrics.test.ts')).toBe(true);
+  });
+
+  test('excludes type-test files', () => {
+    expect(isBuildIrrelevantSourcePath('public-api.test-d.ts')).toBe(true);
+    expect(isBuildIrrelevantSourcePath('bureau-types-no-runtime-values.test-d.ts')).toBe(true);
+  });
+
+  test('keeps ordinary source files, including ones whose name merely contains "test"', () => {
+    expect(isBuildIrrelevantSourcePath('index.ts')).toBe(false);
+    expect(isBuildIrrelevantSourcePath('create-handoff-tool.ts')).toBe(false);
+    expect(isBuildIrrelevantSourcePath('latest.ts')).toBe(false);
+    expect(isBuildIrrelevantSourcePath('test-helpers.ts')).toBe(false);
+  });
+
+  test('keeps a src/test/ entry module — the directory is a real published build entry', () => {
+    // operative and conversationalist both ship `./src/test/index.ts` as a build entry, so the
+    // exclusion must match the FILE suffix and never skip the `test/` directory wholesale.
+    expect(isBuildIrrelevantSourcePath('test/index.ts')).toBe(false);
+    expect(isBuildIrrelevantSourcePath('test/store.ts')).toBe(false);
+    // ...but a test file that happens to live inside it is still excluded.
+    expect(isBuildIrrelevantSourcePath('test/durable-engine.test.ts')).toBe(true);
+  });
+
+  test('keeps non-TypeScript files and other build inputs', () => {
+    expect(isBuildIrrelevantSourcePath('schema.json')).toBe(false);
+    expect(isBuildIrrelevantSourcePath('ui/styles.css')).toBe(false);
+  });
+});
+
+describe('newestMtimeMs', () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), 'newest-mtime-'));
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test('returns undefined for a directory that does not exist', async () => {
+    expect(await newestMtimeMs(join(root, 'missing'))).toBeUndefined();
+  });
+
+  test('ignores files the predicate rejects, even when they are the newest on disk', async () => {
+    const t0 = Date.UTC(2024, 0, 1);
+
+    await writeFile(join(root, 'index.ts'), 'export const a = 1;');
+    await setMtime(join(root, 'index.ts'), t0);
+
+    await writeFile(join(root, 'index.test.ts'), 'test("a", () => {});');
+    await setMtime(join(root, 'index.test.ts'), t0 + 60_000);
+
+    // Without the filter the newest file is the test; with it, the source file wins.
+    expect(await newestMtimeMs(root)).toBe(t0 + 60_000);
+    expect(await newestMtimeMs(root, { ignore: isBuildIrrelevantSourcePath })).toBe(t0);
+  });
+
+  test('returns undefined when every file in the directory is ignored', async () => {
+    await writeFile(join(root, 'only.test.ts'), 'test("a", () => {});');
+    await setMtime(join(root, 'only.test.ts'), Date.UTC(2024, 0, 1));
+
+    expect(await newestMtimeMs(root, { ignore: isBuildIrrelevantSourcePath })).toBeUndefined();
+  });
+});
+
 /** Builds a minimal fixture workspace package under `root/packages/<name>`. */
 async function makeFixturePackage(
   root: string,
@@ -316,4 +388,64 @@ describe('checkStaleWorkspaceDist (fixture end-to-end)', () => {
     );
   });
 
+  test('editing a colocated test file does not flag the package or its consumers', async () => {
+    const t0 = Date.UTC(2024, 0, 1);
+
+    const dependency = await makeFixturePackage(root, 'dependency');
+    await setMtime(join(dependency.srcDirectory, 'index.ts'), t0);
+    await setMtime(join(dependency.distDirectory, 'index.js'), t0 + 1000);
+
+    const consumer = await makeFixturePackage(root, 'consumer', {
+      dependencies: { dependency: '0.0.1' },
+    });
+    await setMtime(join(consumer.srcDirectory, 'index.ts'), t0);
+    await setMtime(join(consumer.distDirectory, 'index.js'), t0 + 1000);
+
+    // A colocated test edited long after both dist/ directories — the AB-151 false positive.
+    await writeFile(join(dependency.srcDirectory, 'index.test.ts'), 'test("a", () => {});');
+    await setMtime(join(dependency.srcDirectory, 'index.test.ts'), t0 + 900_000);
+
+    // A test file is not a build input, so nothing is stale.
+    const statuses = await checkStaleWorkspaceDist(root);
+    expect(statuses.map((status) => status.name).sort()).toEqual(['consumer', 'dependency']);
+  });
+
+  test('editing a real source file still flags the package and its consumers', async () => {
+    const t0 = Date.UTC(2024, 0, 1);
+
+    const dependency = await makeFixturePackage(root, 'dependency');
+    await setMtime(join(dependency.srcDirectory, 'index.ts'), t0);
+    await setMtime(join(dependency.distDirectory, 'index.js'), t0 + 1000);
+
+    const consumer = await makeFixturePackage(root, 'consumer', {
+      dependencies: { dependency: '0.0.1' },
+    });
+    await setMtime(join(consumer.srcDirectory, 'index.ts'), t0);
+    await setMtime(join(consumer.distDirectory, 'index.js'), t0 + 1000);
+
+    // Same timing as the test above, but on a real build input — the guard must still fire.
+    await setMtime(join(dependency.srcDirectory, 'index.ts'), t0 + 900_000);
+
+    await expect(checkStaleWorkspaceDist(root)).rejects.toThrow(
+      /^dist\/ is older than src\/ for: consumer, dependency\./,
+    );
+  });
+
+  test('a src/test/ entry module is a build input and still flags the package', async () => {
+    const t0 = Date.UTC(2024, 0, 1);
+
+    const pkg = await makeFixturePackage(root, 'has-test-entry');
+    await setMtime(join(pkg.srcDirectory, 'index.ts'), t0);
+    await setMtime(join(pkg.distDirectory, 'index.js'), t0 + 1000);
+
+    // `src/test/index.ts` is a published entry for operative and conversationalist, so an edit
+    // there must NOT be swallowed by the exclusion.
+    await mkdir(join(pkg.srcDirectory, 'test'), { recursive: true });
+    await writeFile(join(pkg.srcDirectory, 'test', 'index.ts'), 'export const helper = 1;');
+    await setMtime(join(pkg.srcDirectory, 'test', 'index.ts'), t0 + 900_000);
+
+    await expect(checkStaleWorkspaceDist(root)).rejects.toThrow(
+      /^dist\/ is older than src\/ for: has-test-entry\./,
+    );
+  });
 });

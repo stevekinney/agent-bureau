@@ -7,7 +7,11 @@
  * `bun run <file>.ts` from silently resolving a stale `dist/` that predates the current `src/` —
  * this produced a real false-positive bug report (AB-146, since canceled).
  *
- * Walks every workspace package that has BOTH a `src/` and a `dist/` directory. For each one, it
+ * Walks every workspace package that has BOTH a `src/` and a `dist/` directory, skipping the
+ * colocated `*.test.ts`/`*.test-d.ts` files that this repository keeps inside `src/` — every
+ * build config already excludes them and none is a build entry, so editing one can't change an
+ * emitted artifact and must not flag the package (see `isBuildIrrelevantSourcePath`). For each
+ * package, it
  * resolves the transitive workspace dependency graph (from each package.json's `dependencies`/
  * `devDependencies` entries that name another workspace package — matched by package NAME, since
  * internal deps are a mix of the `workspace:*` protocol and plain semver ranges) and compares the
@@ -117,8 +121,40 @@ export function computeEffectiveSourceMtimes(
 }
 
 /**
+ * Filename suffixes for files that live under `src/` but can never change build output.
+ *
+ * This mirrors what the builds themselves already ignore rather than inventing a new list:
+ * nine of the eleven `packages/*\/tsconfig.build.json` files exclude `**\/*.test.ts` (two of
+ * them `**\/*.test-d.ts` as well), and the two that don't — `conversationalist` and
+ * `interoperability` — keep their runtime tests in a sibling `test/` directory they also
+ * exclude, leaving only conversationalist's two in-`src` `.test-d.ts` type-tests.
+ *
+ * The stronger guarantee is structural: every package builds from an explicit entry list
+ * (each `tsdown.config.ts`'s `entry` map, or interoperability's `bun build ./src/index.ts
+ * ./src/embeddings.ts`), no test file is one of those entries, and no source file anywhere in
+ * the repository imports a `.test.ts`/`.test-d.ts` module — so a test file can't be pulled into
+ * a bundle transitively either. Editing one therefore cannot make any `dist/` stale.
+ *
+ * Deliberately kept to these two suffixes. Excluding more silently weakens the guard, and this
+ * is a suffix match on the *file* — never a `src/test/` directory skip, since `src/test/index.ts`
+ * is a real published entry for both operative and conversationalist. (A file such as
+ * `packages/operative/src/test/durable-engine.test.ts` is still correctly excluded: the suffix
+ * matches the filename, not the directory it sits in.)
+ */
+const BUILD_IRRELEVANT_SOURCE_SUFFIXES = ['.test.ts', '.test-d.ts'] as const;
+
+/**
+ * True when `relativePath` names a file the build demonstrably ignores, so its mtime must not
+ * count toward a package's `src/` freshness. Exported for direct unit testing.
+ */
+export function isBuildIrrelevantSourcePath(relativePath: string): boolean {
+  return BUILD_IRRELEVANT_SOURCE_SUFFIXES.some((suffix) => relativePath.endsWith(suffix));
+}
+
+/**
  * Newest *file* mtime (ms since epoch) under `directory`, or `undefined` if `directory` doesn't
- * exist.
+ * exist. Pass `ignore` to skip files whose relative path it accepts — the `src/` scan passes
+ * {@link isBuildIrrelevantSourcePath} so ordinary test edits don't read as a stale `dist/`.
  *
  * Directory mtimes are deliberately excluded. Counting them looks appealing — deleting a file
  * bumps its parent directory's mtime, which would make deletions detectable — but it makes the
@@ -129,13 +165,19 @@ export function computeEffectiveSourceMtimes(
  * ordinary test run is worse than one with a documented blind spot, so deletions stay in the
  * blind spot — see the module-level limitation note.
  */
-export async function newestMtimeMs(directory: string): Promise<number | undefined> {
+export async function newestMtimeMs(
+  directory: string,
+  options: { ignore?: (relativePath: string) => boolean } = {},
+): Promise<number | undefined> {
   if (!existsSync(directory)) return undefined;
 
+  const { ignore } = options;
   let newest: number | undefined;
 
   const glob = new Bun.Glob('**/*');
   for await (const relativePath of glob.scan({ cwd: directory, onlyFiles: true, dot: true })) {
+    if (ignore?.(relativePath)) continue;
+
     const entryStats = await stat(resolve(directory, relativePath)).catch(() => undefined);
     if (entryStats !== undefined && (newest === undefined || entryStats.mtimeMs > newest)) {
       newest = entryStats.mtimeMs;
@@ -204,7 +246,11 @@ async function collectPackageDistStatuses(repositoryRoot: string): Promise<Packa
     const distDirectory = resolve(pkg.directory, 'dist');
 
     const [sourceMtimeMs, distMtimeMs] = await Promise.all([
-      existsSync(srcDirectory) ? newestMtimeMs(srcDirectory) : undefined,
+      // Test and type-test files are skipped: they are excluded from every build config and are
+      // never a build entry, so editing one cannot make dist/ stale.
+      existsSync(srcDirectory)
+        ? newestMtimeMs(srcDirectory, { ignore: isBuildIrrelevantSourcePath })
+        : undefined,
       existsSync(distDirectory) ? newestMtimeMs(distDirectory) : undefined,
     ]);
 

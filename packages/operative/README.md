@@ -1010,11 +1010,26 @@ const escalateToSupport = createHandoffTool({
 const triageAgent = createAgent({
   generate,
   tools: { 'escalate-to-support': escalateToSupport },
-  // Pair a handoff tool with stopWhen.toolCalled(name), not
-  // stopWhen.noToolCalls(): the handoff itself IS a tool call, so
-  // noToolCalls() never sees a step with zero tool calls and the loop runs
-  // to maximumSteps instead of exiting on the handoff.
-  stopWhen: stopWhen.toolCalled('escalate-to-support'),
+  stopWhen: [
+    // Pair a handoff tool with stopWhen.toolCalled(name), not
+    // stopWhen.noToolCalls(): the handoff itself IS a tool call, so
+    // noToolCalls() never sees a step with zero tool calls and the loop runs
+    // to maximumSteps instead of exiting on the handoff.
+    //
+    // toolCalled() inspects only the generated call NAME, never the result, so
+    // on its own it also fires on a handoff that FAILED — bad arguments error
+    // before execute runs, no HANDOFF_MARKER is produced, and the run ends
+    // with extractHandoffTarget returning undefined. Requiring the step to be
+    // error-free keeps a failed handoff from ending the loop, giving the model
+    // another step to call it correctly.
+    stopWhen.every(
+      stopWhen.toolCalled('escalate-to-support'),
+      stopWhen.not(stopWhen.toolOutcome('error')),
+    ),
+    // Bound the retry: a handoff the model never gets right would otherwise
+    // run to the default maximumSteps.
+    stopWhen.maximumSteps(8),
+  ],
 });
 
 // After a run, check whether a handoff occurred. extractHandoffTarget expects
@@ -1026,13 +1041,26 @@ const target = extractHandoffTarget(
     results: step.results.map((r) => ({ content: String(r.content) })),
   })),
 );
+
+// Always branch on undefined rather than assuming the run stopped because a
+// transfer happened. The run can end with no marker in the final step — a
+// handoff that never validated, or a maximumSteps/budget stop.
 if (target) {
   // target is the agent name that was handed off to
+} else {
+  // No transfer. Handle it — retry, escalate differently, or return the
+  // assistant's own last message — instead of treating it as a handoff.
 }
 ```
 
+> [!NOTE] Why the composition, and its limits
+> No built-in stop condition inspects a tool result for _success_ — `stopWhen.toolOutcome` triggers on `'error'`/`'action_required'`, and `stopWhen.contentMatches` reads the assistant's text, not tool results. Composing `every` with `not(toolOutcome('error'))` is how you express "the handoff was called _and_ the step is clean" out of what exists. Two consequences are worth knowing:
+>
+> - `toolOutcome('error')` is evaluated across the whole step, not per call. A successful handoff that shares a step with some other failing tool will not stop the loop, and if the run ends later, the marker is no longer in the final step — `extractHandoffTarget` reads only the last step, so it will miss it.
+> - Neither form removes the `undefined` check. `stopWhen.toolCalled` alone stops on a failed handoff; the composition can stop for an unrelated reason. The caller is what decides a transfer occurred.
+
 > [!WARNING]
-> `createHandoffTool`'s `input` option defaults to `z.object({})` — an empty-object schema — when omitted. A tool call whose `arguments` is a bare string (rather than an object) fails schema validation and the call errors instead of reaching `execute`, with nothing in the type signature to flag it. Pass a custom schema when the handoff needs structured input from the model, for example a reason or a ticket summary to hand off alongside the transfer:
+> `createHandoffTool`'s `input` option defaults to `z.object({})` — an empty-object schema — when omitted. A tool call whose `arguments` is a bare string (rather than an object) fails schema validation and the call errors instead of reaching `execute`, with nothing in the type signature to flag it. Pass a custom schema when the handoff needs structured input from the model, for example a reason or a ticket summary:
 >
 > ```typescript
 > import { z } from 'zod';
@@ -1044,6 +1072,22 @@ if (target) {
 >   input: z.object({ reason: z.string() }),
 > });
 > ```
+>
+> A custom schema **constrains and validates** the call; it does not add anything to the transfer. `createHandoffTool`'s `execute` takes no arguments and returns a marker containing only `type` and `agent`, so `extractHandoffTarget` can only ever give you the target agent name — never the `reason`. `HandoffOccurredEvent` is the same story: it carries the source agent, target agent, and session id, and nothing from the input.
+>
+> Read the value back off the recorded tool _call_ instead, which `RunResult.steps` keeps alongside the results. Note this is the raw `arguments` the model sent, as materialized JSON — not Zod's parse output, so schema defaults and transforms are not reflected in it:
+>
+> ```typescript
+> const handoffCall = result.steps
+>   .flatMap((step) => step.toolCalls)
+>   .find((call) => call.name === 'escalate-to-support');
+>
+> // Validation already guaranteed the shape, so re-parse to recover the typed value.
+> const reason =
+>   handoffCall && z.object({ reason: z.string() }).parse(handoffCall.arguments).reason;
+> ```
+>
+> If the target agent needs the reason in its own context, pass it explicitly when you start that agent's run — the handoff mechanism will not carry it across for you.
 
 **Agent Registry:**
 
