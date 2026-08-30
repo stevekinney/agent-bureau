@@ -900,3 +900,92 @@ describe('createAgent — park-on-approval', () => {
     expect(resumed.callId).toBe(signed.callId);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Default stopWhen (AB-147)
+//
+// createAgent has no bureau to fall back on, so an omitted `stopWhen` used to
+// mean "no stop conditions at all" — the loop ran every step to
+// maximumSteps (DEFAULT_MAXIMUM_STEPS, 25). Verifies the default is now
+// `stopWhen.noToolCalls()`, that it's overridable, and that the README's
+// Quick Start example (a self-echoing generate with no stopWhen) produces a
+// single echo instead of 25 levels of nested "Echo: Echo: ... ".
+// ---------------------------------------------------------------------------
+
+describe('createAgent — default stopWhen', () => {
+  it('the README Quick Start example produces a single echo, not nested repetition', async () => {
+    // Verbatim reproduction of the README's Quick Start `generate` and
+    // `createAgent` call — no explicit `stopWhen`.
+    const generate: GenerateFunction = async ({ conversation }) => {
+      const last = conversation.getMessages().at(-1);
+      return {
+        content: `Echo: ${last?.content ?? '(empty)'}`,
+        toolCalls: [],
+      };
+    };
+
+    const assistant = createAgent({
+      generate,
+      instructions: 'You are a helpful assistant.',
+    });
+
+    const run = assistant.run('Hello, agent!');
+    const result = await run.result();
+
+    expect(result.content).toBe('Echo: Hello, agent!');
+    expect(result.finishReason).toBe('stop-condition');
+    expect(result.steps).toHaveLength(1);
+  });
+
+  it('stops after a step with no tool calls when stopWhen is omitted', async () => {
+    const agent = createAgent({
+      generate: singleResponse('hello'),
+    });
+
+    const result = await agent.run('test').result();
+
+    expect(result.finishReason).toBe('stop-condition');
+    expect(result.steps).toHaveLength(1);
+  });
+
+  it('runs to maximumSteps when stopWhen is omitted and every step calls a tool', async () => {
+    let callCount = 0;
+    const generate: GenerateFunction = async () => {
+      callCount++;
+      return toolCallResponse([{ name: 'noop', arguments: {} }]);
+    };
+
+    const noopTool = createTool({
+      name: 'noop',
+      description: 'Does nothing.',
+      input: z.object({}),
+      execute: () => Promise.resolve('ok'),
+    });
+
+    const agent = createAgent({
+      generate,
+      tools: { noop: noopTool },
+      maximumSteps: 3,
+    });
+
+    const result = await agent.run('test').result();
+
+    expect(result.finishReason).toBe('maximum-steps');
+    expect(callCount).toBe(3);
+  });
+
+  it('an explicit stopWhen overrides the default', async () => {
+    const agent = createAgent({
+      generate: singleResponse('hello'),
+      stopWhen: pendingApproval(),
+      maximumSteps: 2,
+    });
+
+    const result = await agent.run('test').result();
+
+    // pendingApproval() never fires on a plain text reply — with the default
+    // overridden, the loop runs to maximumSteps instead of stopping after
+    // step 0 the way the (unset) default would have.
+    expect(result.finishReason).toBe('maximum-steps');
+  });
+});

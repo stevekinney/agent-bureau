@@ -83,8 +83,11 @@ const assistant = createAgent({
 const run = assistant.run('Hello, agent!');
 const result = await run.result();
 console.log(result.content); // "Echo: Hello, agent!"
-console.log(result.finishReason); // "stop-condition" | "maximum-steps" | …
+console.log(result.finishReason); // "stop-condition"
 ```
+
+> [!NOTE]
+> `createAgent` defaults `stopWhen` to `stopWhen.noToolCalls()` when you don't supply one, so the loop above stops after the first step (the stub `generate` never returns tool calls) instead of running to `maximumSteps` (`DEFAULT_MAXIMUM_STEPS`, 25) and re-echoing its own output 25 times over. Pass an explicit `stopWhen` — for example `stopWhen.toolCalled('submit-form')` — to override it, most importantly for any agent that is expected to finish on a tool call rather than a plain reply (a handoff tool, for instance — see the Handoffs section under [Multi-Agent Patterns](#multi-agent-patterns)).
 
 ### Event-Driven Style with `createActiveRun()`
 
@@ -403,8 +406,16 @@ import {
   resumeSession,
   stopWhen,
 } from '@lostgradient/operative';
+import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 
-// createSessionStore wraps Weft's conditional TextValueStore.
+// createSessionStore requires a real Weft `ConditionalTextValueStore` — it
+// checks for a `.conditionalBatch` method, so a hand-rolled `{ get, set,
+// delete }` stub throws `TypeError: createSessionStore requires a
+// ConditionalTextValueStore`. For tests and prototyping, wrap an in-memory
+// `MemoryStorage` with `textValueStore()` (from `@lostgradient/weft/storage`)
+// — this is the same pattern operative's own test suite uses. Swap in a
+// real Weft-backed store for production.
+const kvStore = textValueStore(new MemoryStorage());
 const sessions = createSessionStore(kvStore);
 
 await sessions.save(session);
@@ -981,13 +992,29 @@ const supervisor = createSupervisor({
 **Handoffs:**
 
 ```typescript
-import { createHandoffTool, extractHandoffTarget, HANDOFF_MARKER } from '@lostgradient/operative';
+import {
+  createAgent,
+  createHandoffTool,
+  extractHandoffTarget,
+  HANDOFF_MARKER,
+  stopWhen,
+} from '@lostgradient/operative';
 
 // Each handoff targets one specific agent
 const escalateToSupport = createHandoffTool({
   name: 'escalate-to-support',
   description: 'Transfer the conversation to the human support agent.',
   agent: { name: 'support', run: (input) => supportAgent.run(input).result() },
+});
+
+const triageAgent = createAgent({
+  generate,
+  tools: { 'escalate-to-support': escalateToSupport },
+  // Pair a handoff tool with stopWhen.toolCalled(name), not
+  // stopWhen.noToolCalls(): the handoff itself IS a tool call, so
+  // noToolCalls() never sees a step with zero tool calls and the loop runs
+  // to maximumSteps instead of exiting on the handoff.
+  stopWhen: stopWhen.toolCalled('escalate-to-support'),
 });
 
 // After a run, check whether a handoff occurred. extractHandoffTarget expects
@@ -1003,6 +1030,20 @@ if (target) {
   // target is the agent name that was handed off to
 }
 ```
+
+> [!WARNING]
+> `createHandoffTool`'s `input` option defaults to `z.object({})` — an empty-object schema — when omitted. A tool call whose `arguments` is a bare string (rather than an object) fails schema validation and the call errors instead of reaching `execute`, with nothing in the type signature to flag it. Pass a custom schema when the handoff needs structured input from the model, for example a reason or a ticket summary to hand off alongside the transfer:
+>
+> ```typescript
+> import { z } from 'zod';
+>
+> const escalateToSupport = createHandoffTool({
+>   name: 'escalate-to-support',
+>   description: 'Transfer the conversation to the human support agent.',
+>   agent: { name: 'support', run: (input) => supportAgent.run(input).result() },
+>   input: z.object({ reason: z.string() }),
+> });
+> ```
 
 **Agent Registry:**
 
@@ -1383,11 +1424,14 @@ Every detector/validator returns a `DetectionResult`/`ValidationResult` carrying
 | ------------------------------- | ---------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `createPromptInjectionDetector` | Input detector   | Incoming content, any provenance  | Pattern + heuristic scoring; confidence scales with the number of matched signals.                                                                                                                                                                |
 | `createInputLengthDetector`     | Input detector   | Incoming content                  | Blocks overlong inputs before they reach the model.                                                                                                                                                                                               |
-| `createTopicBoundaryDetector`   | Input detector   | Incoming content                  | Restricts the conversation to an allow/block topic list.                                                                                                                                                                                          |
+| `createTopicBoundaryDetector`   | Input detector   | Incoming content                  | Restricts the conversation to an allow/block topic list. Matching is literal, case-insensitive substring matching, not semantic — see the note below the table.                                                                                   |
 | `createOutputPIIValidator`      | Output validator | Model output                      | Detects and redacts email addresses, phone numbers, and API-key-shaped secrets in generated text.                                                                                                                                                 |
 | `createGroundingValidator`      | Output validator | Model output vs. supplied context | Flags claims the output makes that aren't traceable to the provided context.                                                                                                                                                                      |
 | `createCodeSafetyValidator`     | Output validator | Model output                      | Flags destructive shell patterns (`rm -rf`), code execution (`eval`/`exec`/`Function`/`subprocess`), dangerous SQL (`DROP TABLE`, unfiltered `DELETE FROM`), and pipe-to-shell (`curl \| bash`) in generated code. Extend with `blockedPatterns`. |
 | `createSessionTaintTracker`     | Session state    | Cumulative session history        | Sticky escalation: once a high-confidence hit taints a session, escalated detectors/validators activate for its remainder.                                                                                                                        |
+
+> [!WARNING]
+> `createTopicBoundaryDetector`'s `allowedTopics`/`blockedKeywords` matching is **literal, case-insensitive substring matching** — `input.toLowerCase().includes(keyword.toLowerCase())` — not semantic matching. There is no NLP, embeddings, or synonym lookup involved. With `allowedTopics: ['cooking']`, the clearly on-topic input `"What is a good recipe for banana bread?"` is flagged and blocked, because the literal substring `"cooking"` never appears. List every literal word or phrase you expect callers to use — including common synonyms and paraphrases — not just one representative term.
 
 #### Provenance and the Three Retrieval Surfaces (AB-41)
 

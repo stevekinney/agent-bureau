@@ -1,13 +1,35 @@
 import type { DetectionResult, DetectorContext, InputDetector } from '../types';
 
-/** Options for configuring the topic boundary detector. */
+/**
+ * Options for configuring the topic boundary detector.
+ *
+ * Matching against both `allowedTopics` and `blockedKeywords` is **literal,
+ * case-insensitive substring matching** — `input.toLowerCase().includes(keyword.toLowerCase())` —
+ * not semantic or fuzzy matching. There is no NLP, embeddings, or synonym
+ * lookup involved.
+ *
+ * This means a clearly on-topic paraphrase can be flagged as off-topic when
+ * it never uses the literal keyword. For example, with
+ * `allowedTopics: ['cooking']`, the input `"What is a good recipe for banana
+ * bread?"` is flagged and blocked, because the substring `"cooking"` never
+ * appears — the detector has no way to know "recipe" and "banana bread" are
+ * about cooking. Conversely, a keyword can also match inside an unrelated
+ * word (`"cooking"` matches `"cookingware"`), and a blocked keyword can
+ * appear inside an otherwise-innocuous sentence and still trigger.
+ *
+ * Choose `allowedTopics`/`blockedKeywords` accordingly: list every literal
+ * word or phrase you want matched (including common synonyms and
+ * paraphrases you expect callers to use), not just one representative term.
+ */
 export interface TopicBoundaryDetectorOptions {
   allowedTopics: string[];
   blockedKeywords?: string[];
 }
 
 /**
- * Creates a detector that enforces topic boundaries via keyword matching.
+ * Creates a detector that enforces topic boundaries via literal, case-insensitive
+ * substring matching — see {@link TopicBoundaryDetectorOptions} for what that does and
+ * does not catch.
  *
  * Blocked keywords always trigger regardless of allowed topics. When no blocked keyword
  * matches, the detector checks whether the input contains at least one allowed topic keyword.

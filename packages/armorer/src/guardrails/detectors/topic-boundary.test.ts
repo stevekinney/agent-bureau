@@ -40,6 +40,19 @@ describe('createTopicBoundaryDetector', () => {
       const result = await detector.detect('I want to learn about machine learning.', baseContext);
       expect(result.triggered).toBe(false);
     });
+
+    // AB-148: matching is literal, case-insensitive substring matching, not
+    // semantic. A clearly on-topic paraphrase that never uses the literal
+    // keyword is flagged as off-topic — this is documented behavior (see
+    // the JSDoc on TopicBoundaryDetectorOptions), not a bug this test is
+    // guarding against. Pinned here so the documented behavior can't
+    // silently drift.
+    it('flags a paraphrased, on-topic input that never uses the literal allowed-topic keyword', async () => {
+      const detector = createTopicBoundaryDetector({ allowedTopics: ['cooking'] });
+      const result = await detector.detect('What is a good recipe for banana bread?', baseContext);
+      expect(result.triggered).toBe(true);
+      expect(result.category).toBe('topic-boundary');
+    });
   });
 
   describe('blocked keywords', () => {

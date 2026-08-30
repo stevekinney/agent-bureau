@@ -46,3 +46,15 @@ Always build before type-checking or testing so downstream packages have fresh t
 
 - Always use `workspace:*` protocol for internal dependencies.
 - Integration tests live in `packages/integration/` and run via `turbo run integration --filter=integration`.
+
+## Ad Hoc Scripts Against Workspace Package Code
+
+Bun's workspace linking resolves an internal import like `import { Conversation } from 'conversationalist'` to that package's `dist/`, not its `src/`. The `build`/`test`/`check-types` pipeline above is Turborepo-driven: Turborepo's task graph rebuilds stale dependents automatically via `^build`, so those tasks always see current code. A plain `bun run <file>.ts` outside that graph has no such guarantee — it can silently resolve a `dist/` that predates the `src/` you just edited, producing a false-positive bug report against stale, already-fixed code (this happened for real: AB-146).
+
+Before running any ad hoc script (`bun run <file>.ts`) against workspace package code — as opposed to `build`/`test`/`check-types`, which already handle this correctly for their own tasks — run the staleness guard first:
+
+```bash
+bun run check:stale-dist
+```
+
+It walks every workspace package with both a `src/` and a `dist/` directory, compares the newest file mtime under each, and exits non-zero naming every package whose `dist/` is older than its `src/`. Run `turbo run build` (or `turbo run build --filter=<package>`) to clear a failure before continuing with the ad hoc script.
