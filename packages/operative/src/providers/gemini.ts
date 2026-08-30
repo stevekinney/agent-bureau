@@ -9,6 +9,7 @@ import { resolveCommonParameters } from './shared/resolve-common-parameters.ts';
 import { toGeminiResponseFormat } from './structured-output/response-format-adapters.ts';
 import { toGeminiToolChoice } from './structured-output/tool-choice-adapters.ts';
 import type {
+  GeminiGenerateContentRequest,
   GeminiGenerativeModel,
   GeminiProviderOptions,
   GeminiStreamingModel,
@@ -127,23 +128,22 @@ function resolveGeminiApiKey(apiKey: string | undefined): string {
 /**
  * Dynamically imports `@google/genai` and constructs a `GoogleGenAI` client.
  *
- * The returned client is cast to the local structural interface: that interface
- * intentionally widens the request parameter to `Record<string, unknown>` so
- * consumer fakes stay trivial to write, which makes it contravariantly
- * incompatible with the SDK's precise `GenerateContentParameters` even though
- * the runtime shape is exactly what the SDK expects.
+ * The client is returned as the local structural interfaces with no cast: a
+ * real `GoogleGenAI` satisfies both of them, which is the same guarantee
+ * consumers rely on when they pass their own client through
+ * {@link GeminiProviderOptions.client}. Keeping this cast-free means the
+ * production path itself proves that guarantee at build time.
  */
-async function importGeminiClient<T>(options: {
+async function importGeminiClient(options: {
   apiKey?: string | undefined;
   baseURL?: string | undefined;
-}): Promise<T> {
+}): Promise<GeminiGenerativeModel & GeminiStreamingModel> {
   const module = await import('@google/genai');
   const apiKey = resolveGeminiApiKey(options.apiKey);
-  const client = new module.GoogleGenAI({
+  return new module.GoogleGenAI({
     apiKey,
     ...(options.baseURL ? { httpOptions: { baseUrl: options.baseURL } } : {}),
   });
-  return client as unknown as T;
 }
 
 /**
@@ -168,7 +168,7 @@ export function createGeminiProvider(options: GeminiProviderOptions): GenerateFu
   function getClient(): Promise<GeminiGenerativeModel> {
     if (options.client) return Promise.resolve(options.client);
     if (!clientPromise) {
-      clientPromise = importGeminiClient<GeminiGenerativeModel>(options);
+      clientPromise = importGeminiClient(options);
     }
     return clientPromise;
   }
@@ -190,17 +190,14 @@ export function createGeminiProvider(options: GeminiProviderOptions): GenerateFu
       thinkingBudget: resolvedEffort?.thinkingBudget,
     });
 
-    const params: Record<string, unknown> = {
+    const request: GeminiGenerateContentRequest = {
       model: resolvedModel,
       contents,
+      ...(Object.keys(config).length > 0 ? { config } : {}),
     };
 
-    if (Object.keys(config).length > 0) {
-      params['config'] = config;
-    }
-
     try {
-      const result = await client.models.generateContent(params);
+      const result = await client.models.generateContent(request);
 
       const candidates = result.candidates ?? [];
       const parts = candidates[0]?.content?.parts ?? [];
@@ -264,7 +261,7 @@ export function createGeminiProviderStream(
   function getClient(): Promise<GeminiStreamingModel> {
     if (options.client) return Promise.resolve(options.client);
     if (!clientPromise) {
-      clientPromise = importGeminiClient<GeminiStreamingModel>(options);
+      clientPromise = importGeminiClient(options);
     }
     return clientPromise;
   }
@@ -289,17 +286,14 @@ export function createGeminiProviderStream(
       thinkingBudget: resolvedEffort?.thinkingBudget,
     });
 
-    const params: Record<string, unknown> = {
+    const request: GeminiGenerateContentRequest = {
       model: resolvedModel,
       contents,
+      ...(Object.keys(config).length > 0 ? { config } : {}),
     };
 
-    if (Object.keys(config).length > 0) {
-      params['config'] = config;
-    }
-
     try {
-      const stream = await client.models.generateContentStream(params);
+      const stream = await client.models.generateContentStream(request);
 
       let accumulatedText = '';
       const accumulatedFunctionCallParts: GeminiPart[] = [];

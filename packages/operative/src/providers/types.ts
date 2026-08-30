@@ -179,16 +179,40 @@ export interface OpenAIProviderOptions extends BaseProviderOptions {
 }
 
 /**
+ * Minimal shape of a `@google/genai` `GenerateContentParameters` request body.
+ *
+ * The SDK's own `GenerateContentParameters` is an `interface`, so it carries no
+ * implicit index signature and is therefore *not* assignable to
+ * `Record<string, unknown>`. Naming the required `model`/`contents` fields here
+ * — and widening only the payload-shaped fields to `unknown` — is what lets a
+ * real `GoogleGenAI` instance satisfy {@link GeminiGenerativeModel} and
+ * {@link GeminiStreamingModel} without a cast, while keeping consumer fakes
+ * trivial to write. Do not add an index signature: that would put the
+ * assignability back where it was.
+ */
+export interface GeminiGenerateContentRequest {
+  /** Provider-native model id, sent with every request by the maintained SDK. */
+  model: string;
+  /** `ContentListUnion` in the SDK; widened here so fakes need not model it. */
+  contents: unknown;
+  /** `GenerateContentConfig` in the SDK; omitted when no options are set. */
+  config?: unknown;
+}
+
+/**
  * Structural interface for a `@google/genai` client.
  *
  * The maintained SDK centres on a `GoogleGenAI` client whose `models`
  * namespace takes the model id on every request, rather than binding a model
  * handle at construction time the way the previous SDK's `getGenerativeModel()`
  * did.
+ *
+ * A real `GoogleGenAI` instance is assignable to this interface — see
+ * `gemini-client-assignability.test-d.ts`, which locks that in.
  */
 export interface GeminiGenerativeModel {
   models: {
-    generateContent(params: Record<string, unknown>): Promise<GeminiGenerateContentResult>;
+    generateContent(params: GeminiGenerateContentRequest): Promise<GeminiGenerateContentResult>;
   };
 }
 
@@ -314,11 +338,14 @@ export interface OpenAIStreamingClient {
  * `models.generateContentStream` resolves to the async iterable of chunks
  * directly; the frozen SDK's `{ stream }` wrapper object is gone, and each
  * chunk is a full `GenerateContentResponse`.
+ *
+ * A real `GoogleGenAI` instance is assignable to this interface — see
+ * `gemini-client-assignability.test-d.ts`, which locks that in.
  */
 export interface GeminiStreamingModel {
   models: {
     generateContentStream(
-      params: Record<string, unknown>,
+      params: GeminiGenerateContentRequest,
     ): Promise<AsyncIterable<GeminiGenerateContentResult>>;
   };
 }

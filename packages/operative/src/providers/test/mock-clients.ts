@@ -3,6 +3,7 @@ import type {
   AnthropicMessageResponse,
   AnthropicStreamEvent,
   AnthropicStreamingClient,
+  GeminiGenerateContentRequest,
   GeminiGenerateContentResult,
   GeminiGenerativeModel,
   GeminiStreamingModel,
@@ -99,7 +100,7 @@ export function createMockOpenAIClient(
 }
 
 export interface MockGeminiModel extends GeminiGenerativeModel {
-  _calls: Array<Record<string, unknown>>;
+  _calls: GeminiGenerateContentRequest[];
   _responses: GeminiGenerateContentResult[];
   _errors: Error[];
 }
@@ -112,7 +113,7 @@ export function createMockGeminiModel(
   responses: GeminiGenerateContentResult[],
   errors: Error[] = [],
 ): MockGeminiModel {
-  const calls: Array<Record<string, unknown>> = [];
+  const calls: GeminiGenerateContentRequest[] = [];
   let responseIndex = 0;
   let errorIndex = 0;
 
@@ -121,7 +122,9 @@ export function createMockGeminiModel(
     _responses: responses,
     _errors: errors,
     models: {
-      async generateContent(params: Record<string, unknown>): Promise<GeminiGenerateContentResult> {
+      async generateContent(
+        params: GeminiGenerateContentRequest,
+      ): Promise<GeminiGenerateContentResult> {
         calls.push(params);
         const error = errors[errorIndex];
         if (error && errorIndex < errors.length) {
@@ -264,7 +267,7 @@ export function createMockOpenAIStreamingClient(
 }
 
 export interface MockGeminiStreamingModel extends GeminiStreamingModel {
-  _calls: Array<Record<string, unknown>>;
+  _calls: GeminiGenerateContentRequest[];
   _chunkSequences: GeminiGenerateContentResult[][];
   _errors: Error[];
 }
@@ -282,7 +285,7 @@ export function createMockGeminiStreamingModel(
   errors: Error[] = [],
   options?: { errorAfterEvents?: number },
 ): MockGeminiStreamingModel {
-  const calls: Array<Record<string, unknown>> = [];
+  const calls: GeminiGenerateContentRequest[] = [];
   let sequenceIndex = 0;
   let errorIndex = 0;
   const errorAfterEvents = options?.errorAfterEvents;
@@ -293,7 +296,7 @@ export function createMockGeminiStreamingModel(
     _errors: errors,
     models: {
       async generateContentStream(
-        params: Record<string, unknown>,
+        params: GeminiGenerateContentRequest,
       ): Promise<AsyncIterable<GeminiGenerateContentResult>> {
         calls.push(params);
         const error = errors[errorIndex];

@@ -19,6 +19,9 @@ export interface GeminiEmbeddingModel {
 
 /**
  * Structural interface for a `@google/genai` client that can embed content.
+ *
+ * A real `GoogleGenAI` instance is assignable to this interface — see
+ * `providers/gemini-client-assignability.test-d.ts`, which locks that in.
  */
 export interface GeminiEmbeddingClient {
   models: GeminiEmbeddingModel;
@@ -58,13 +61,10 @@ export function createGeminiEmbedder(options: GeminiEmbedderOptions = {}): Embed
     }
     if (!clientPromise) {
       const { apiKey } = options;
-      clientPromise = import('@google/genai').then(
-        // The structural interface above intentionally widens the request type
-        // so consumer fakes stay trivial, which makes it contravariantly
-        // incompatible with the SDK's precise `EmbedContentParameters` even
-        // though the runtime shape is exactly what the SDK expects.
-        (module) => new module.GoogleGenAI({ apiKey }) as unknown as GeminiEmbeddingClient,
-      );
+      // No cast: a real `GoogleGenAI` satisfies `GeminiEmbeddingClient` as
+      // declared, which is the same guarantee a consumer passing their own
+      // client relies on. `gemini-client-assignability.test-d.ts` locks it in.
+      clientPromise = import('@google/genai').then((module) => new module.GoogleGenAI({ apiKey }));
     }
     return clientPromise;
   }

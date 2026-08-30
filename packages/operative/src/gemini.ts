@@ -11,6 +11,7 @@
  */
 export { createGeminiProvider, createGeminiProviderStream } from './providers/gemini.ts';
 export type {
+  GeminiGenerateContentRequest,
   GeminiGenerateContentResult,
   GeminiGenerativeModel,
   GeminiProviderOptions,
