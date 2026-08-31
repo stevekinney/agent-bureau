@@ -14,10 +14,13 @@ import { toAnthropicToolChoice } from './structured-output/tool-choice-adapters.
 import type { ToolChoice } from './structured-output/types.ts';
 import type {
   AnthropicClient,
+  AnthropicCountTokensRequest,
+  AnthropicCountTokensResponse,
   AnthropicMessageResponse,
   AnthropicProviderOptions,
   AnthropicStreamingClient,
   AnthropicThinkingConfig,
+  AnthropicTokenCountingClient,
   GenerateContext,
   GenerateFunction,
   GenerateResponse,
@@ -540,5 +543,108 @@ export function createAnthropicProviderStream(
       if (error instanceof ProviderError) throw error;
       throw new ProviderError({ provider: 'anthropic', cause: error });
     }
+  };
+}
+
+/**
+ * Options for createAnthropicTokenCounter.
+ */
+export interface AnthropicTokenCounterOptions {
+  /**
+   * An already-constructed client. A real `Anthropic` instance satisfies
+   * {@link AnthropicTokenCountingClient} with no cast — see
+   * `providers/anthropic-token-counting-assignability.test-d.ts`.
+   */
+  client?: AnthropicTokenCountingClient;
+  /** Falls back to the SDK's own `ANTHROPIC_API_KEY` lookup when omitted. */
+  apiKey?: string;
+  /**
+   * Overrides the Anthropic SDK's default base URL. Accepts any string —
+   * including a credential-injecting proxy origin — with no shape validation,
+   * matching {@link AnthropicProviderOptions.baseURL}. A proxy in front of
+   * Anthropic still speaks the `messages.countTokens` API, which is why
+   * `getProviderCapabilities('anthropic')` keeps reporting
+   * `serverSideTokenCounting: true` regardless of this value.
+   */
+  baseURL?: string;
+}
+
+/**
+ * The Anthropic `messages.countTokens` operation, error-normalized.
+ */
+export interface AnthropicTokenCountingOperations {
+  /**
+   * Counts the tokens `request.messages` — plus `system` and `tools`, when
+   * supplied — would consume, server-side, before any generation request is
+   * made.
+   *
+   * **Provisional response shape.** `AB-64` — still in Backlog — is what will
+   * define this package's real context/output-limit fields; see
+   * {@link AnthropicCountTokensResponse} for why this deliberately keeps the
+   * SDK's own field name for now rather than inventing a new one.
+   */
+  countTokens(request: AnthropicCountTokensRequest): Promise<AnthropicCountTokensResponse>;
+}
+
+/**
+ * Creates a client for Anthropic's native server-side token-counting API.
+ *
+ * When no `client` is provided, dynamically imports `@anthropic-ai/sdk` and
+ * constructs one from `apiKey`/`baseURL` — so a consumer that never calls
+ * `countTokens` never loads the SDK. An omitted `apiKey` leaves the SDK to do
+ * its own `ANTHROPIC_API_KEY` lookup, matching `createAnthropicBatchClient`
+ * rather than the Gemini counter, which resolves its key eagerly through a
+ * helper that has no Anthropic counterpart.
+ *
+ * Requires `@anthropic-ai/sdk >= 0.31.0`, the first release carrying stable
+ * `client.messages.countTokens` (2024-11-01, "add message token counting &
+ * PDFs support"). The package's declared peer floor (`>=0.50.0`) is already
+ * well above that, so every admitted version has the method and no runtime
+ * surface guard is warranted here — unlike a genuinely absent namespace, there
+ * is no reachable failure mode for one to catch.
+ *
+ * Per AB-155 this is progressive enhancement over a genuine native mechanism,
+ * and it is the Anthropic sibling `createGeminiTokenCounter` deliberately left
+ * out of scope. OpenAI still has no server-side token-counting endpoint, and no
+ * synthesized character-ratio estimate stands in for one through this
+ * signature: a token count feeds budgeting decisions, and a wrong number there
+ * is worse than no number.
+ */
+export function createAnthropicTokenCounter(
+  options: AnthropicTokenCounterOptions = {},
+): AnthropicTokenCountingOperations {
+  let clientPromise: Promise<AnthropicTokenCountingClient> | undefined;
+
+  function getClient(): Promise<AnthropicTokenCountingClient> {
+    if (options.client) return Promise.resolve(options.client);
+    if (!clientPromise) {
+      clientPromise = import('@anthropic-ai/sdk').then((module) => {
+        const Anthropic = module.default ?? module.Anthropic;
+        const clientOptions: { apiKey?: string; baseURL?: string } = {};
+        if (options.apiKey) clientOptions.apiKey = options.apiKey;
+        if (options.baseURL) clientOptions.baseURL = options.baseURL;
+        // No cast: a real `Anthropic` satisfies `AnthropicTokenCountingClient`
+        // as declared, the same guarantee a consumer passing their own client
+        // relies on. The assignability probe locks it in.
+        return new Anthropic(clientOptions);
+      });
+    }
+    return clientPromise;
+  }
+
+  return {
+    async countTokens(request: AnthropicCountTokensRequest): Promise<AnthropicCountTokensResponse> {
+      try {
+        const client = await getClient();
+        return await client.messages.countTokens(request);
+      } catch (error) {
+        // getClient() can itself throw from inside this try — the SDK
+        // constructor rejects a missing key — and re-wrapping an error that is
+        // already a ProviderError would double-stack the "[provider:anthropic]"
+        // prefix and obscure the real cause.
+        if (error instanceof ProviderError) throw error;
+        throw new ProviderError({ provider: 'anthropic', cause: error });
+      }
+    },
   };
 }
