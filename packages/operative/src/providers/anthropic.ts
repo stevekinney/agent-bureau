@@ -16,6 +16,7 @@ import type {
   AnthropicClient,
   AnthropicCountTokensRequest,
   AnthropicCountTokensResponse,
+  AnthropicMessageCreateRequest,
   AnthropicMessageResponse,
   AnthropicProviderOptions,
   AnthropicStreamingClient,
@@ -216,7 +217,15 @@ function assertThinkingParametersCompatible(
  * Anthropic's `input_tokens` already EXCLUDES cache activity — it,
  * `cache_creation_input_tokens`, and `cache_read_input_tokens` are three
  * disjoint buckets. `cacheCreationTokens`/`cacheReadTokens` are only set when
- * the API actually reported the field; they are never fabricated as `0`.
+ * the API actually reported a numeric value; they are never fabricated as
+ * `0`.
+ *
+ * The SDK's real `Usage` type declares both cache fields `number | null`, not
+ * merely optional — `null` is the API's way of saying "no cache activity,"
+ * the same thing an absent field would mean. Checking `!= null` (rather than
+ * `!== undefined`) treats the two the same, so this omits the field for
+ * either rather than forwarding a literal `null` into {@link TokenUsage},
+ * whose own type never accepted one.
  */
 function buildAnthropicUsage(
   usage: NonNullable<AnthropicMessageResponse['usage']>,
@@ -225,10 +234,10 @@ function buildAnthropicUsage(
     prompt: usage.input_tokens ?? 0,
     completion: usage.output_tokens ?? 0,
     total: (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0),
-    ...(usage.cache_creation_input_tokens !== undefined
+    ...(usage.cache_creation_input_tokens != null
       ? { cacheCreationTokens: usage.cache_creation_input_tokens }
       : {}),
-    ...(usage.cache_read_input_tokens !== undefined
+    ...(usage.cache_read_input_tokens != null
       ? { cacheReadTokens: usage.cache_read_input_tokens }
       : {}),
   };
@@ -266,7 +275,7 @@ export function createAnthropicProvider(options: AnthropicProviderOptions): Gene
         const Anthropic = module.default ?? module.Anthropic;
         const clientOptions: Record<string, unknown> = { apiKey: options.apiKey };
         if (options.baseURL) clientOptions['baseURL'] = options.baseURL;
-        return new Anthropic(clientOptions) as unknown as AnthropicClient;
+        return new Anthropic(clientOptions);
       });
     }
     return clientPromise;
@@ -286,7 +295,7 @@ export function createAnthropicProvider(options: AnthropicProviderOptions): Gene
     const tools = await context.toolbox.toAnthropicTools();
     const hasTools = tools.length > 0;
 
-    const params: Record<string, unknown> = {
+    const params: AnthropicMessageCreateRequest = {
       model: resolvedModel,
       messages,
       max_tokens: effectiveMaximumTokens,
@@ -378,7 +387,7 @@ export function createAnthropicProviderStream(
         const Anthropic = module.default ?? module.Anthropic;
         const clientOptions: Record<string, unknown> = { apiKey: options.apiKey };
         if (options.baseURL) clientOptions['baseURL'] = options.baseURL;
-        return new Anthropic(clientOptions) as unknown as AnthropicStreamingClient;
+        return new Anthropic(clientOptions);
       });
     }
     return clientPromise;
@@ -401,7 +410,7 @@ export function createAnthropicProviderStream(
     const tools = await context.toolbox.toAnthropicTools();
     const hasTools = tools.length > 0;
 
-    const params: Record<string, unknown> = {
+    const params: AnthropicMessageCreateRequest = {
       model: resolvedModel,
       messages,
       max_tokens: effectiveMaximumTokens,
@@ -438,8 +447,12 @@ export function createAnthropicProviderStream(
       let accumulatedText = '';
       let inputTokens: number | undefined;
       let outputTokens: number | undefined;
-      let cacheCreationTokens: number | undefined;
-      let cacheReadTokens: number | undefined;
+      // `| null`: the SDK's real `Usage`/`MessageDeltaUsage` types declare both
+      // cache fields `number | null`, not merely optional — see
+      // `buildAnthropicUsage`'s doc comment for why `null` and "unset" are
+      // treated the same below.
+      let cacheCreationTokens: number | null | undefined;
+      let cacheReadTokens: number | null | undefined;
 
       // Track in-progress tool calls by content block index
       const pendingToolCalls: Map<number, { id?: string; name: string; partialJson: string }> =
@@ -525,8 +538,8 @@ export function createAnthropicProviderStream(
               prompt: inputTokens ?? 0,
               completion: outputTokens ?? 0,
               total: (inputTokens ?? 0) + (outputTokens ?? 0),
-              ...(cacheCreationTokens !== undefined ? { cacheCreationTokens } : {}),
-              ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
+              ...(cacheCreationTokens != null ? { cacheCreationTokens } : {}),
+              ...(cacheReadTokens != null ? { cacheReadTokens } : {}),
             }
           : undefined;
 

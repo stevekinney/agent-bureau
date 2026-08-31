@@ -12,6 +12,7 @@
 export { createAnthropicProvider, createAnthropicProviderStream } from './providers/anthropic.ts';
 export type {
   AnthropicClient,
+  AnthropicMessageCreateRequest,
   AnthropicMessageResponse,
   AnthropicProviderOptions,
   AnthropicStreamEvent,
