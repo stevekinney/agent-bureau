@@ -158,6 +158,17 @@ const UNSTRINGIFIABLE_TAG = '[unstringifiable]';
 const MAXIMUM_ARRAY_LENGTH = 0xffff_ffff;
 
 /**
+ * Ceiling on how many entries one cycle-elision traversal may visit in total.
+ *
+ * The array-length cap bounds a single array, but `0xffff_ffff` is a *legitimate* length for a
+ * sparse array, and a nested structure can multiply out well past any single-array bound. Since
+ * this runs only after coercion has already thrown, abandoning an oversized traversal and
+ * returning the terminal tag is strictly better than spending minutes rebuilding a value nobody
+ * can render anyway. Exceeding it throws, which the caller already treats as "no rescue possible".
+ */
+const MAXIMUM_TRAVERSAL_ENTRIES = 1_000_000;
+
+/**
  * Last-resort coercion of a value that has already been proven non-JSON-serializable (it failed
  * `assertJSONValue` and either threw or round-tripped to `undefined` through `JSON.stringify`).
  * The `String()` default — including the `[object Object]` sentinel for plain objects — is the
@@ -192,7 +203,9 @@ function stringifyNonJSON(value: unknown): string {
       // Inside the try: walking the value can itself run user code — an index getter, or a
       // Proxy trap — and a throw from the traversal must not escape any more than a throw from
       // the coercion it is trying to rescue.
-      const elided = elideArrayCycles(value, new WeakSet());
+      const elided = elideArrayCycles(value, new WeakSet(), {
+        remaining: MAXIMUM_TRAVERSAL_ENTRIES,
+      });
 
       // Nothing was elided, so there is no cycle to break and a retry would invoke the same
       // throwing hook on the same value and fail identically — twice for no benefit.
@@ -237,7 +250,11 @@ function isUnknownArray(value: unknown): value is readonly unknown[] {
  * its own hook, instead of being flattened into a plain clone. The check is purely structural —
  * nothing inspects a coercion hook to decide.
  */
-function elideArrayCycles(value: unknown, open: WeakSet<object>): unknown {
+function elideArrayCycles(
+  value: unknown,
+  open: WeakSet<object>,
+  budget: { remaining: number },
+): unknown {
   if (!isUnknownArray(value)) return value;
   if (open.has(value)) return '';
 
@@ -262,8 +279,13 @@ function elideArrayCycles(value: unknown, open: WeakSet<object>): unknown {
   const elided: unknown[] = [];
   let changed = false;
   for (let index = 0; index < length; index += 1) {
+    budget.remaining -= 1;
+    if (budget.remaining < 0) {
+      throw new RangeError('Cycle elision exceeded its traversal budget');
+    }
+
     const entry: unknown = value[index];
-    const elidedEntry = elideArrayCycles(entry, open);
+    const elidedEntry = elideArrayCycles(entry, open, budget);
     // `Object.is`, not `!==`: `NaN !== NaN` would report an untouched element as changed and
     // rebuild an acyclic array that should have been returned by reference, discarding its hook.
     if (!Object.is(elidedEntry, entry)) changed = true;

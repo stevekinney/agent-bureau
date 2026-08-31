@@ -586,6 +586,26 @@ describe('interoperability materialization', () => {
     expect(result.content).toBe('[unstringifiable]');
   });
 
+  test('normalizeJSONValue abandons an oversized traversal instead of walking it', () => {
+    // A legitimate sparse array — no Proxy needed. Its length is a valid array length, so the
+    // array-length cap accepts it; only the traversal budget stops the walk.
+    const huge: any[] = new Array(2_000_000);
+    huge[0] = 1n; // forces JSON.stringify to throw, so the last-resort path is reached
+    Object.defineProperty(huge, 'join', {
+      value: () => {
+        throw new RangeError('simulated engine cycle overflow');
+      },
+    });
+
+    const result = materializeToolResult({
+      callId: 'c6-oversized-traversal',
+      outcome: 'success',
+      content: huge as any,
+    });
+
+    expect(result.content).toBe('[unstringifiable]');
+  });
+
   test('normalizeJSONValue contains a throw from the elision traversal itself', () => {
     const target: any[] = [1, 2];
 
