@@ -820,6 +820,99 @@ export interface AnthropicBatchClient {
 }
 
 /**
+ * Minimal shape of an Anthropic `messages.countTokens` request body.
+ *
+ * Mirrors `MessageCountTokensParams` in the installed `@anthropic-ai/sdk`
+ * (0.122.0): `messages` and `model` are required, everything else is optional.
+ *
+ * Every optional field is declared even though this package never inspects one
+ * of them. An object literal passed at a call site is subject to excess
+ * property checking against this interface, so a field omitted here would be
+ * unpassable by a caller — the interface has to name the whole request surface
+ * to stay usable, not just the part operative reads.
+ *
+ * Bodies are widened to `unknown` rather than `Record<string, unknown>`. The
+ * SDK's parameter types are `interface`s with no implicit index signature, so
+ * `Record<string, unknown>` fails the bivariant method check in *both*
+ * directions and makes a real `Anthropic` un-injectable without a cast. That is
+ * the defect AB-154 found on the Gemini migration, and it is why
+ * {@link AnthropicClient} still needs an `as unknown as` at its construction
+ * site today. `anthropic-token-counting-assignability.test-d.ts` pins this one
+ * down so it cannot regress the same way.
+ */
+export interface AnthropicCountTokensRequest {
+  /** Provider-native model id. Token counts are model-specific. */
+  model: string;
+  /** `Array<MessageParam>` in the SDK; widened so fakes need not model it. */
+  messages: unknown;
+  /** `string | Array<TextBlockParam>` in the SDK. */
+  system?: unknown;
+  /** `Array<ToolUnion>` in the SDK. Tools count toward the total. */
+  tools?: unknown;
+  /** `ToolChoice` in the SDK. */
+  tool_choice?: unknown;
+  /** `ThinkingConfigParam` in the SDK. */
+  thinking?: unknown;
+  /** `OutputConfig` in the SDK. */
+  output_config?: unknown;
+  /** `CacheControlEphemeral | null` in the SDK. */
+  cache_control?: unknown;
+}
+
+/**
+ * Minimal shape of an Anthropic `MessageTokensCount` response.
+ *
+ * **`input_tokens` is optional here although the SDK declares it required.**
+ * That is deliberate, not a transcription slip. The declared type describes
+ * what Anthropic's own endpoint returns; it is not a runtime guarantee, and
+ * this package is routinely pointed at something else — see
+ * {@link AnthropicProviderOptions.baseURL}, which accepts any origin including
+ * a credential-injecting proxy. Typing the field as required would let a
+ * response that genuinely omits it surface as `undefined` through a `number`,
+ * or invite a `?? 0` default at the call site.
+ *
+ * Narrowing is the caller's job precisely because "absent" and "zero" are
+ * different facts, and a caller budgeting against a token count needs to tell
+ * them apart. This mirrors {@link GeminiCountTokensResponse} and
+ * {@link TokenUsage}, which carry the same rule. A real `MessageTokensCount`
+ * still satisfies this interface: a required property is assignable to an
+ * optional one of the same type.
+ *
+ * **Provisional.** Deliberately the SDK's own field name, unrenamed, rather
+ * than a new provider-neutral shape — AB-64 is still in Backlog and will define
+ * the context/output-limit fields this package standardizes on. Inventing a
+ * parallel budgeting shape now would only be more surface for AB-64 to
+ * reconcile. Note that this is the same *policy* as
+ * {@link GeminiCountTokensResponse}, not the same fields: Anthropic reports
+ * `input_tokens`, Gemini reports `totalTokens`, and neither is translated into
+ * the other's vocabulary here.
+ */
+export interface AnthropicCountTokensResponse {
+  /**
+   * Total tokens across the request's messages, system prompt, and tools.
+   * Absent when the response genuinely omits it; never fabricated as `0`.
+   */
+  input_tokens?: number;
+}
+
+/**
+ * Structural interface for the `messages.countTokens` operation of an
+ * `@anthropic-ai/sdk` client.
+ *
+ * Deliberately narrower than the SDK's `Messages` resource, which also exposes
+ * `create`, `stream`, and `batches` — this package only ever calls
+ * `countTokens` through this interface, matching the minimal-interface rule
+ * {@link AnthropicBatchClient} and the Gemini interfaces follow. A real
+ * `Anthropic` satisfies this; see
+ * `anthropic-token-counting-assignability.test-d.ts`.
+ */
+export interface AnthropicTokenCountingClient {
+  messages: {
+    countTokens(params: AnthropicCountTokensRequest): Promise<AnthropicCountTokensResponse>;
+  };
+}
+
+/**
  * Minimal shape of an OpenAI `batches.create` request body.
  *
  * Unlike Anthropic and Gemini, OpenAI takes no inline requests: the batch is

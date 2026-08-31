@@ -8,7 +8,15 @@
  *   import { createGeminiProvider }    from '@lostgradient/operative/gemini'
  */
 
-export { createAnthropicProvider, createAnthropicProviderStream } from './anthropic.ts';
+export type {
+  AnthropicTokenCounterOptions,
+  AnthropicTokenCountingOperations,
+} from './anthropic.ts';
+export {
+  createAnthropicProvider,
+  createAnthropicProviderStream,
+  createAnthropicTokenCounter,
+} from './anthropic.ts';
 export type {
   AnthropicBatchClientOptions,
   AnthropicBatchOperations,
@@ -119,6 +127,8 @@ export type {
   AnthropicBatchCreateRequestItem,
   AnthropicBatchListQuery,
   AnthropicClient,
+  AnthropicCountTokensRequest,
+  AnthropicCountTokensResponse,
   AnthropicMessageBatch,
   AnthropicMessageBatchIndividualResponse,
   AnthropicMessageBatchRequestCounts,
@@ -128,6 +138,7 @@ export type {
   AnthropicStreamEvent,
   AnthropicStreamingClient,
   AnthropicThinkingConfig,
+  AnthropicTokenCountingClient,
   BaseProviderOptions,
   Effort,
   GeminiBatchClient,
