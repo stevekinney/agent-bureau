@@ -133,6 +133,7 @@ export type {
   AnthropicMessageBatchIndividualResponse,
   AnthropicMessageBatchRequestCounts,
   AnthropicMessageBatchResult,
+  AnthropicMessageCreateRequest,
   AnthropicMessageResponse,
   AnthropicProviderOptions,
   AnthropicStreamEvent,

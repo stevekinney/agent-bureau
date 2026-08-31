@@ -74,25 +74,115 @@ export interface BaseProviderOptions {
 
 /**
  * Structural interface for the Anthropic SDK client surface the provider uses.
+ *
+ * `create` returns a plain `Promise` rather than mirroring the SDK's real
+ * overloaded signature (`MessageCreateParamsNonStreaming` /
+ * `MessageCreateParamsStreaming` / `MessageCreateParamsBase`, each returning a
+ * different `APIPromise<...>` shape). TypeScript only checks the *last*
+ * overload — `create(params: MessageCreateParamsBase, options?): APIPromise<Stream<RawMessageStreamEvent> | Message>`
+ * — when comparing an overloaded method against a single-signature interface
+ * member, so a real `Anthropic` is assignable here as long as this return
+ * type is broad enough for that overload's resolved value type; see
+ * `anthropic-client-assignability.test-d.ts`.
  */
 export interface AnthropicClient {
   messages: {
-    create(params: Record<string, unknown>): Promise<AnthropicMessageResponse>;
+    create(params: AnthropicMessageCreateRequest): Promise<AnthropicMessageResponse>;
   };
 }
 
 /**
+ * Minimal shape of an Anthropic `messages.create` request body.
+ *
+ * Mirrors `MessageCreateParamsBase` in the installed `@anthropic-ai/sdk`
+ * (0.122.0): `model`, `messages`, and `max_tokens` are required, everything
+ * else is optional. `signal` has no counterpart on the real SDK's params
+ * type — it exists only because `providers/anthropic.ts` currently folds
+ * `context.signal` into the same body object it builds the rest of the
+ * request from, rather than passing it as the SDK's separate `options`
+ * argument. That is a pre-existing quirk, not something this type
+ * introduces; widening `signal` here keeps behavior byte-for-byte instead of
+ * silently dropping the field once this interface stops being
+ * `Record<string, unknown>`.
+ *
+ * Every optional field is declared even though this package never inspects
+ * some of them. An object literal passed at a call site is subject to excess
+ * property checking against this interface, so a field omitted here would be
+ * unpassable by a caller — the interface has to name the whole request
+ * surface to stay usable, not just the part operative reads.
+ *
+ * Bodies are widened to `unknown` rather than `Record<string, unknown>`. The
+ * SDK's parameter types are `interface`s with no implicit index signature, so
+ * `Record<string, unknown>` fails the bivariant method check in *both*
+ * directions and makes a real `Anthropic` un-injectable without a cast. That
+ * is the defect AB-154 found on the Gemini migration, and it is why
+ * {@link AnthropicClient} needed an `as unknown as` at its construction site
+ * before this type existed — see {@link AnthropicCountTokensRequest} for the
+ * AB-167 precedent this follows.
+ */
+export interface AnthropicMessageCreateRequest {
+  /** Provider-native model id. */
+  model: string;
+  /** `Array<MessageParam>` in the SDK; widened so fakes need not model it. */
+  messages: unknown;
+  /** Maximum tokens to generate before stopping. */
+  max_tokens: number;
+  /** `CacheControlEphemeral | null` in the SDK. */
+  cache_control?: unknown;
+  /** `MessageCreateParamsContainer | null` in the SDK. */
+  container?: unknown;
+  /** `string | null` in the SDK. */
+  inference_geo?: unknown;
+  /** `Metadata` in the SDK. */
+  metadata?: unknown;
+  /** `OutputConfig` in the SDK. */
+  output_config?: unknown;
+  /** `'auto' | 'standard_only'` in the SDK. */
+  service_tier?: unknown;
+  /** `Array<string>` in the SDK. */
+  stop_sequences?: unknown;
+  /** `boolean` in the SDK. */
+  stream?: unknown;
+  /** `string | Array<TextBlockParam>` in the SDK. */
+  system?: unknown;
+  /** `number` in the SDK. Deprecated on newer models. */
+  temperature?: unknown;
+  /** `ThinkingConfigParam` in the SDK. */
+  thinking?: unknown;
+  /** `ToolChoice` in the SDK. */
+  tool_choice?: unknown;
+  /** `Array<ToolUnion>` in the SDK. */
+  tools?: unknown;
+  /** `number` in the SDK. Deprecated on newer models. */
+  top_k?: unknown;
+  /** `number` in the SDK. Deprecated on newer models. */
+  top_p?: unknown;
+  /** `string` in the SDK; header param, not a body field. */
+  user_profile_id?: unknown;
+  /**
+   * No counterpart on the SDK's `MessageCreateParamsBase` — see the interface
+   * doc comment above.
+   */
+  signal?: unknown;
+}
+
+/**
  * Minimal shape of an Anthropic Messages API response.
+ *
+ * `stop_reason` and the two cache-token `usage` fields are widened to allow
+ * `null` because the SDK's real `Message`/`Usage` types declare them
+ * `string | null` and `number | null` respectively, not merely optional —
+ * `anthropic-client-assignability.test-d.ts` is what caught this.
  */
 export interface AnthropicMessageResponse {
   content: Array<{ type: string; text?: string; id?: string; name?: string; input?: unknown }>;
   usage?: {
     input_tokens?: number;
     output_tokens?: number;
-    cache_creation_input_tokens?: number;
-    cache_read_input_tokens?: number;
+    cache_creation_input_tokens?: number | null;
+    cache_read_input_tokens?: number | null;
   };
-  stop_reason?: string;
+  stop_reason?: string | null;
 }
 
 /**
@@ -610,8 +700,8 @@ export interface AnthropicStreamEvent {
     usage?: {
       input_tokens?: number;
       output_tokens?: number;
-      cache_creation_input_tokens?: number;
-      cache_read_input_tokens?: number;
+      cache_creation_input_tokens?: number | null;
+      cache_read_input_tokens?: number | null;
     };
   };
   index?: number;
@@ -621,7 +711,11 @@ export interface AnthropicStreamEvent {
     text?: string;
     thinking?: string;
     partial_json?: string;
-    stop_reason?: string;
+    /**
+     * Widened to allow `null`: the SDK's `RawMessageDeltaEvent.Delta.stop_reason`
+     * is `StopReason | null`, not merely optional.
+     */
+    stop_reason?: string | null;
     usage?: { output_tokens?: number };
   };
   usage?: { output_tokens?: number };
@@ -653,10 +747,20 @@ export interface OpenAIChatCompletionChunk {
 
 /**
  * Structural interface for an Anthropic client that supports streaming.
+ *
+ * `create` resolves to `Promise<AsyncIterable<...>>` rather than a bare
+ * `AsyncIterable<...>`. The real SDK's streaming overload returns
+ * `APIPromise<Stream<RawMessageStreamEvent>>` — a `Promise`, not itself
+ * iterable (`APIPromise extends Promise<T>` with no `Symbol.asyncIterator`)
+ * — so a bare `AsyncIterable` return type is not satisfied by a real
+ * `Anthropic` client; see `anthropic-client-assignability.test-d.ts`. Callers
+ * already `await Promise.resolve(client.messages.create(params))` before
+ * iterating, so this matches existing call-site behavior for both a real
+ * client and a synchronous mock.
  */
 export interface AnthropicStreamingClient {
   messages: {
-    create(params: Record<string, unknown>): AsyncIterable<AnthropicStreamEvent>;
+    create(params: AnthropicMessageCreateRequest): Promise<AsyncIterable<AnthropicStreamEvent>>;
   };
 }
 
@@ -835,10 +939,12 @@ export interface AnthropicBatchClient {
  * SDK's parameter types are `interface`s with no implicit index signature, so
  * `Record<string, unknown>` fails the bivariant method check in *both*
  * directions and makes a real `Anthropic` un-injectable without a cast. That is
- * the defect AB-154 found on the Gemini migration, and it is why
- * {@link AnthropicClient} still needs an `as unknown as` at its construction
- * site today. `anthropic-token-counting-assignability.test-d.ts` pins this one
- * down so it cannot regress the same way.
+ * the defect AB-154 found on the Gemini migration, and it is the same defect
+ * AB-174 fixed on {@link AnthropicClient} and {@link AnthropicStreamingClient}
+ * (see {@link AnthropicMessageCreateRequest}), which previously needed an
+ * `as unknown as` at their construction sites for the same reason.
+ * `anthropic-token-counting-assignability.test-d.ts` pins this one down so it
+ * cannot regress the same way.
  */
 export interface AnthropicCountTokensRequest {
   /** Provider-native model id. Token counts are model-specific. */

@@ -195,7 +195,7 @@ describe('provider helper coverage', () => {
   });
 
   it('streaming mock clients can fail after yielding part of a stream', async () => {
-    const anthropicStream = createMockAnthropicStreamingClient(
+    const anthropicStream = await createMockAnthropicStreamingClient(
       [anthropicStreamTextEvents],
       [new Error('anthropic stream failed')],
       { errorAfterEvents: 1 },
@@ -235,7 +235,7 @@ describe('provider helper coverage', () => {
   });
 
   it('streaming mock clients throw after a short stream when the error threshold is beyond the stream length', async () => {
-    const anthropicStream = createMockAnthropicStreamingClient(
+    const anthropicStream = await createMockAnthropicStreamingClient(
       [[]],
       [new Error('anthropic late failure')],
       { errorAfterEvents: 1 },

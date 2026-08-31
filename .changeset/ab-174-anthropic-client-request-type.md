@@ -1,0 +1,16 @@
+---
+'@lostgradient/operative': major
+---
+
+Replace `AnthropicClient`/`AnthropicStreamingClient`'s `Record<string, unknown>` request parameter with a named `AnthropicMessageCreateRequest`, and remove the `as unknown as` cast that shape forced at both SDK construction sites.
+
+BREAKING: this narrows the structural type of the `client` you may pass as `options.client` to `createAnthropicProvider`/`createAnthropicProviderStream`. Anyone constructing a hand-rolled client against the old `Record<string, unknown>` parameter must update it.
+
+- `messages.create`'s parameter is now `AnthropicMessageCreateRequest`: `model`, `messages`, and `max_tokens` are required; every other field the real `@anthropic-ai/sdk` `MessageCreateParamsBase` accepts (`cache_control`, `container`, `inference_geo`, `metadata`, `output_config`, `service_tier`, `stop_sequences`, `stream`, `system`, `temperature`, `thinking`, `tool_choice`, `tools`, `top_k`, `top_p`, `user_profile_id`) is declared optional and widened to `unknown`, plus a `signal?: unknown` field that has no SDK counterpart — `providers/anthropic.ts` folds `context.signal` into this same body object, and that pre-existing behavior is preserved unchanged. A hand-rolled client implementing `create(params: Record<string, unknown>)` no longer satisfies `AnthropicClient`; a custom `create` must accept (at least) the named required fields.
+- `AnthropicStreamingClient.messages.create` now resolves to `Promise<AsyncIterable<AnthropicStreamEvent>>` instead of a bare `AsyncIterable<AnthropicStreamEvent>`. The real SDK's streaming overload returns an `APIPromise` — a `Promise`, not itself iterable — so a bare-iterable return type was never satisfiable by a real `Anthropic` client. A hand-rolled streaming client that returned its iterable synchronously must now return (or resolve) a `Promise` of it; `createAnthropicProviderStream` already awaits the result, so real and mock clients both keep working unchanged.
+- `AnthropicMessageResponse.stop_reason` and its `usage.cache_creation_input_tokens`/`usage.cache_read_input_tokens` fields now allow `null` in addition to being optional, matching the real SDK's `Message`/`Usage` types, which declare them nullable rather than merely optional. This is a widening for readers, not a narrowing.
+- `createMockAnthropicClient`/`createMockAnthropicStreamingClient` from `@lostgradient/operative/providers/test` were reshaped to match: `_calls` is now typed as `AnthropicMessageCreateRequest[]`, and the streaming mock's `create` is `async` to satisfy the new `Promise`-wrapped return type.
+
+No behavior change to the emitted HTTP request: every field the provider was already setting on the request body is still set the same way, through the same bracket-notation assignments. `AnthropicMessageCreateRequest` is exported alongside the existing Anthropic types from both `@lostgradient/operative/providers` and the `@lostgradient/operative/anthropic` subpath.
+
+`anthropic-client-assignability.test-d.ts` (a type-only, coverage-inert `.test-d.ts` file that `tsconfig.build.json` excludes from published declarations) asserts a real `Anthropic` satisfies both interfaces with no cast, following the pattern `anthropic-token-counting-assignability.test-d.ts` established for AB-167.
