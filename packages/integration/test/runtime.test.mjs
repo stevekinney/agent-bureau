@@ -40,13 +40,7 @@ function materializeParsedToolCalls(toolCalls, environment) {
   });
 }
 
-async function executeToolTurn(
-  conversation,
-  parsedToolCalls,
-  toolbox,
-  environment,
-  options = {},
-) {
+async function executeToolTurn(conversation, parsedToolCalls, toolbox, environment, options = {}) {
   const toolCalls = materializeParsedToolCalls(parsedToolCalls, environment);
   const withCalls = appendToolCalls(conversation, toolCalls, environment);
   const results = await toolbox.execute(toolCalls, options.executeOptions);
@@ -70,18 +64,10 @@ describe('published integration surface', () => {
     const armorerTest = await import('armorer/test');
 
     const conversationalistRoot = await import('conversationalist');
-    const conversationalistConversation = await import(
-      'conversationalist/conversation'
-    );
-    const conversationalistOpenAI = await import(
-      'conversationalist/adapters/openai'
-    );
-    const conversationalistAnthropic = await import(
-      'conversationalist/adapters/anthropic'
-    );
-    const conversationalistGemini = await import(
-      'conversationalist/adapters/gemini'
-    );
+    const conversationalistConversation = await import('conversationalist/conversation');
+    const conversationalistOpenAI = await import('conversationalist/adapters/openai');
+    const conversationalistAnthropic = await import('conversationalist/adapters/anthropic');
+    const conversationalistGemini = await import('conversationalist/adapters/gemini');
     const conversationalistTest = await import('conversationalist/test');
 
     assert.equal(typeof armorerRoot.createToolbox, 'function');
@@ -95,22 +81,10 @@ describe('published integration surface', () => {
     assert.equal(typeof conversationalistRoot.Conversation, 'function');
     assert.equal(typeof conversationalistRoot.materializeToolCalls, 'function');
     assert.equal(typeof conversationalistConversation.appendToolCalls, 'function');
-    assert.equal(
-      typeof conversationalistOpenAI.openAIConversationAdapter.append,
-      'function',
-    );
-    assert.equal(
-      typeof conversationalistAnthropic.anthropicConversationAdapter.import,
-      'function',
-    );
-    assert.equal(
-      typeof conversationalistGemini.geminiConversationAdapter.export,
-      'function',
-    );
-    assert.equal(
-      typeof conversationalistTest.createTestConversationEnvironment,
-      'function',
-    );
+    assert.equal(typeof conversationalistOpenAI.openAIConversationAdapter.append, 'function');
+    assert.equal(typeof conversationalistAnthropic.anthropicConversationAdapter.import, 'function');
+    assert.equal(typeof conversationalistGemini.geminiConversationAdapter.export, 'function');
+    assert.equal(typeof conversationalistTest.createTestConversationEnvironment, 'function');
     assert.equal(typeof conversationalistTest.createConversationRecorder, 'function');
   });
 
@@ -170,9 +144,7 @@ describe('event parity', () => {
 
       assert.ok(
         conversationRecorder.events.some(
-          (event) =>
-            event.type === 'change' &&
-            event.action === 'messages.appended',
+          (event) => event.type === 'change' && event.action === 'messages.appended',
         ),
       );
       assert.ok(toolboxRecorder.events.some((event) => event.type === 'call'));
@@ -196,12 +168,9 @@ describe('documented manual interop flow', () => {
       environment,
     );
 
-    const messages = await exportProvider(
-      conversation,
-      'openai',
-      environment,
-      { groupToolCalls: true },
-    );
+    const messages = await exportProvider(conversation, 'openai', environment, {
+      groupToolCalls: true,
+    });
     const tools = await toolbox.toProvider('openai');
     const turn = await executeToolTurn(
       conversation,
@@ -227,18 +196,13 @@ describe('documented manual interop flow', () => {
       environment,
     );
 
-    assert.deepEqual(messages, [
-      { role: 'user', content: 'What is the weather in Denver?' },
-    ]);
+    assert.deepEqual(messages, [{ role: 'user', content: 'What is the weather in Denver?' }]);
     assert.equal(tools[0]?.function.name, 'get_weather');
     assert.equal(turn.results[0]?.outcome, 'success');
 
-    const formatted = await exportProvider(
-      turn.conversation,
-      'openai',
-      environment,
-      { groupToolCalls: true },
-    );
+    const formatted = await exportProvider(turn.conversation, 'openai', environment, {
+      groupToolCalls: true,
+    });
     assert.equal(formatted[1]?.role, 'assistant');
     assert.equal(formatted[1]?.tool_calls?.[0]?.id, 'call-openai-1');
     assert.equal(formatted[1]?.tool_calls?.[0]?.function.name, 'get_weather');
@@ -247,14 +211,9 @@ describe('documented manual interop flow', () => {
   });
 
   it('runs the Anthropic flow with generic provider helpers and full-envelope parsing', async () => {
-    const { environment, toolbox } = createIntegrationHarness(
-      'anthropic-canonical',
-    );
+    const { environment, toolbox } = createIntegrationHarness('anthropic-canonical');
 
-    let conversation = createConversationHistory(
-      { id: 'anthropic-loop' },
-      environment,
-    );
+    let conversation = createConversationHistory({ id: 'anthropic-loop' }, environment);
     conversation = appendUserMessage(
       conversation,
       'Use the weather tool for Denver.',
@@ -294,10 +253,7 @@ describe('documented manual interop flow', () => {
     assert.equal(formatted.messages[1]?.content?.[0]?.id, 'call-anthropic-1');
     assert.equal(formatted.messages[2]?.role, 'user');
     assert.equal(formatted.messages[2]?.content?.[0]?.type, 'tool_result');
-    assert.equal(
-      formatted.messages[2]?.content?.[0]?.tool_use_id,
-      'call-anthropic-1',
-    );
+    assert.equal(formatted.messages[2]?.content?.[0]?.tool_use_id, 'call-anthropic-1');
   });
 
   it('runs the Gemini flow with shared ID materialization and async result persistence', async () => {
@@ -350,23 +306,14 @@ describe('documented manual interop flow', () => {
 
     const formatted = await exportProvider(turn.conversation, 'gemini', environment);
     assert.equal(formatted.contents[1]?.role, 'model');
-    assert.equal(
-      formatted.contents[1]?.parts?.[0]?.functionCall?.name,
-      'stream_weather',
-    );
-    assert.deepEqual(
-      formatted.contents[1]?.parts?.[0]?.functionCall?.args,
-      { location: 'Denver' },
-    );
+    assert.equal(formatted.contents[1]?.parts?.[0]?.functionCall?.name, 'stream_weather');
+    assert.deepEqual(formatted.contents[1]?.parts?.[0]?.functionCall?.args, { location: 'Denver' });
     assert.equal(formatted.contents[2]?.role, 'user');
-    assert.equal(
-      formatted.contents[2]?.parts?.[0]?.functionResponse?.name,
-      'stream_weather',
-    );
-    assert.deepEqual(
-      formatted.contents[2]?.parts?.[0]?.functionResponse?.response,
-      ['Denver:72F', 'sunny'],
-    );
+    assert.equal(formatted.contents[2]?.parts?.[0]?.functionResponse?.name, 'stream_weather');
+    assert.deepEqual(formatted.contents[2]?.parts?.[0]?.functionResponse?.response, [
+      'Denver:72F',
+      'sunny',
+    ]);
   });
 });
 
@@ -405,9 +352,7 @@ describe('advanced cross-package interop', () => {
     );
 
     const firstResults = await toolbox.execute(
-      getToolCalls(conversation).filter(
-        (toolCall) => toolCall.id === 'call-openai-weather',
-      ),
+      getToolCalls(conversation).filter((toolCall) => toolCall.id === 'call-openai-weather'),
     );
     conversation = appendToolResults(conversation, firstResults, environment);
 
@@ -437,38 +382,23 @@ describe('advanced cross-package interop', () => {
     );
 
     const secondResults = await toolbox.execute(
-      getToolCalls(conversation).filter(
-        (toolCall) => toolCall.id === 'call-openai-summary',
-      ),
+      getToolCalls(conversation).filter((toolCall) => toolCall.id === 'call-openai-summary'),
     );
     conversation = appendToolResults(conversation, secondResults, environment);
 
     const messages = getMessages(conversation);
     assert.deepEqual(
       messages.map((message) => message.role),
-      [
-        'user',
-        'assistant',
-        'tool-call',
-        'tool-result',
-        'assistant',
-        'tool-call',
-        'tool-result',
-      ],
+      ['user', 'assistant', 'tool-call', 'tool-result', 'assistant', 'tool-call', 'tool-result'],
     );
     assert.equal(messages[1]?.content, 'I will look up the current weather first.');
     assert.equal(messages[4]?.content, 'Now I will summarize those conditions.');
   });
 
   it('appends Anthropic payloads with mixed content blocks in original order', async () => {
-    const { environment, toolbox } = createIntegrationHarness(
-      'anthropic-advanced',
-    );
+    const { environment, toolbox } = createIntegrationHarness('anthropic-advanced');
 
-    let conversation = createConversationHistory(
-      { id: 'anthropic-advanced' },
-      environment,
-    );
+    let conversation = createConversationHistory({ id: 'anthropic-advanced' }, environment);
     conversation = appendUserMessage(
       conversation,
       'Check the weather and summarize it.',
@@ -499,9 +429,7 @@ describe('advanced cross-package interop', () => {
     );
 
     const weatherResults = await toolbox.execute(
-      getToolCalls(conversation).filter(
-        (toolCall) => toolCall.id === 'call-anthropic-weather',
-      ),
+      getToolCalls(conversation).filter((toolCall) => toolCall.id === 'call-anthropic-weather'),
     );
     conversation = appendToolResults(conversation, weatherResults, environment);
 
@@ -528,9 +456,7 @@ describe('advanced cross-package interop', () => {
     );
 
     const summaryResults = await toolbox.execute(
-      getToolCalls(conversation).filter(
-        (toolCall) => toolCall.id === 'call-anthropic-summary',
-      ),
+      getToolCalls(conversation).filter((toolCall) => toolCall.id === 'call-anthropic-summary'),
     );
     conversation = appendToolResults(conversation, summaryResults, environment);
 
@@ -575,9 +501,7 @@ describe('advanced cross-package interop', () => {
     );
 
     const firstResults = await toolbox.execute(
-      getToolCalls(conversation).filter(
-        (toolCall) => toolCall.id === 'call-persist-weather',
-      ),
+      getToolCalls(conversation).filter((toolCall) => toolCall.id === 'call-persist-weather'),
     );
     conversation = appendToolResults(conversation, firstResults, environment);
 
@@ -623,15 +547,7 @@ describe('advanced cross-package interop', () => {
 
     assert.deepEqual(
       getMessages(completedConversation).map((message) => message.role),
-      [
-        'user',
-        'assistant',
-        'tool-call',
-        'tool-result',
-        'assistant',
-        'tool-call',
-        'tool-result',
-      ],
+      ['user', 'assistant', 'tool-call', 'tool-result', 'assistant', 'tool-call', 'tool-result'],
     );
   });
 
@@ -759,9 +675,7 @@ describe('advanced cross-package interop', () => {
     );
 
     const openAIResults = await toolbox.execute(
-      getToolCalls(openAIConversation).filter(
-        (toolCall) => toolCall.id === 'call-openai-error',
-      ),
+      getToolCalls(openAIConversation).filter((toolCall) => toolCall.id === 'call-openai-error'),
     );
     openAIConversation = appendToolResults(openAIConversation, openAIResults, environment);
     const reconstructedFromOpenAI = await Conversation.fromProvider(
@@ -776,10 +690,7 @@ describe('advanced cross-package interop', () => {
     assert.equal(reconstructedOpenAIResults[0]?.outcome, 'error');
     assert.match(reconstructedOpenAIResults[0]?.error?.message ?? '', /Denver/);
 
-    let anthropicConversation = createConversationHistory(
-      { id: 'anthropic-results' },
-      environment,
-    );
+    let anthropicConversation = createConversationHistory({ id: 'anthropic-results' }, environment);
     anthropicConversation = appendUserMessage(
       anthropicConversation,
       'Request the approval-gated weather tool.',
@@ -812,21 +723,14 @@ describe('advanced cross-package interop', () => {
         (toolCall) => toolCall.id === 'call-anthropic-approval',
       ),
     );
-    anthropicConversation = appendToolResults(
-      anthropicConversation,
-      anthropicResults,
-      environment,
-    );
+    anthropicConversation = appendToolResults(anthropicConversation, anthropicResults, environment);
     const reconstructedFromAnthropic = await Conversation.fromProvider(
       'anthropic',
       await exportProvider(anthropicConversation, 'anthropic', environment),
       environment,
     );
     const reconstructedAnthropicResults = getToolResults(reconstructedFromAnthropic.current);
-    assert.equal(
-      reconstructedAnthropicResults[0]?.callId,
-      'call-anthropic-approval',
-    );
+    assert.equal(reconstructedAnthropicResults[0]?.callId, 'call-anthropic-approval');
     assert.equal(reconstructedAnthropicResults[0]?.outcome, 'action_required');
     assert.equal(reconstructedAnthropicResults[0]?.action?.type, 'approval');
   });
@@ -836,10 +740,7 @@ describe('message and tool round-trips', () => {
   it('round-trips OpenAI, Anthropic, and Gemini messages through generic Conversation provider helpers', async () => {
     const { environment, toolbox } = createIntegrationHarness('message-roundtrip');
 
-    let openAIConversation = createConversationHistory(
-      { id: 'openai-roundtrip' },
-      environment,
-    );
+    let openAIConversation = createConversationHistory({ id: 'openai-roundtrip' }, environment);
     openAIConversation = appendUserMessage(
       openAIConversation,
       'Check the weather in Denver.',
@@ -912,10 +813,7 @@ describe('message and tool round-trips', () => {
       'call-anthropic-roundtrip',
     );
 
-    let geminiConversation = createConversationHistory(
-      { id: 'gemini-roundtrip' },
-      environment,
-    );
+    let geminiConversation = createConversationHistory({ id: 'gemini-roundtrip' }, environment);
     geminiConversation = appendUserMessage(
       geminiConversation,
       'Stream the weather for Denver.',
@@ -963,13 +861,9 @@ describe('message and tool round-trips', () => {
     const importedOpenAI = await createToolbox.fromProvider('openai', openAITools, {
       sourceToolbox: harness.toolbox,
     });
-    const importedAnthropic = await createToolbox.fromProvider(
-      'anthropic',
-      anthropicTools,
-      {
-        sourceToolbox: harness.toolbox,
-      },
-    );
+    const importedAnthropic = await createToolbox.fromProvider('anthropic', anthropicTools, {
+      sourceToolbox: harness.toolbox,
+    });
     const importedGemini = await createToolbox.fromProvider('gemini', geminiTools, {
       sourceToolbox: harness.toolbox,
     });
