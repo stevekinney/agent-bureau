@@ -1,5 +1,48 @@
 # @lostgradient/operative
 
+## 0.7.0
+
+### Minor Changes
+
+- ca25ea3: Replace `AnthropicClient`/`AnthropicStreamingClient`'s `Record<string, unknown>` request parameter with a named `AnthropicMessageCreateRequest`, and remove the `as unknown as` cast that shape forced at both SDK construction sites.
+
+  This narrows the structural type of the `client` you may pass as `options.client` to `createAnthropicProvider`/`createAnthropicProviderStream`. It is a compile-time break for anyone who constructed a hand-rolled client against the old `Record<string, unknown>` parameter, released as a minor under pre-1.0 semver rather than as a major, so that `@lostgradient/operative` does not declare a stable 1.0 surface ahead of schedule. There is no runtime break: the emitted HTTP request is byte-for-byte unchanged, and every shipped caller in this repository compiles without modification. Pin an exact version if you depend on a hand-rolled Anthropic client and cannot absorb a type change on a minor bump.
+
+  - `messages.create`'s parameter is now `AnthropicMessageCreateRequest`: `model`, `messages`, and `max_tokens` are required; every other field the real `@anthropic-ai/sdk` `MessageCreateParamsBase` accepts (`cache_control`, `container`, `inference_geo`, `metadata`, `output_config`, `service_tier`, `stop_sequences`, `stream`, `system`, `temperature`, `thinking`, `tool_choice`, `tools`, `top_k`, `top_p`, `user_profile_id`) is declared optional and widened to `unknown`, plus a `signal?: unknown` field that has no SDK counterpart — `providers/anthropic.ts` folds `context.signal` into this same body object, and that pre-existing behavior is preserved unchanged. A hand-rolled client implementing `create(params: Record<string, unknown>)` no longer satisfies `AnthropicClient`; a custom `create` must accept (at least) the named required fields.
+  - `AnthropicStreamingClient.messages.create` now returns `AsyncIterable<AnthropicStreamEvent> | Promise<AsyncIterable<AnthropicStreamEvent>>` rather than a bare `AsyncIterable<AnthropicStreamEvent>`. The promise arm is required because the real SDK's streaming overload returns an `APIPromise` — a `Promise`, not itself iterable — so a bare-iterable return type was never satisfiable by a real `Anthropic`. The bare-iterable arm is retained so a hand-rolled or mock client that returns its generator synchronously stays valid; narrowing to promise-only would break `for await (const event of client.messages.create(params))` against such a client. `createAnthropicProviderStream` awaits the result, which is a no-op on the non-promise arm.
+  - `AnthropicMessageResponse.stop_reason` and its `usage.cache_creation_input_tokens`/`usage.cache_read_input_tokens` fields now allow `null` in addition to being optional, matching the real SDK's `Message`/`Usage` types, which declare them nullable rather than merely optional. This is a widening for readers, not a narrowing.
+  - `createMockAnthropicClient`/`createMockAnthropicStreamingClient` from `@lostgradient/operative/providers/test` keep their existing runtime behaviour: the streaming mock still returns its async generator synchronously and still throws queued errors synchronously, so direct `for await` over the mock is unaffected. Only the `_calls` array is retyped, from `Record<string, unknown>[]` to `AnthropicMessageCreateRequest[]`.
+
+  No behavior change to the emitted HTTP request: every field the provider was already setting on the request body is still set the same way, through the same bracket-notation assignments. `AnthropicMessageCreateRequest` is exported alongside the existing Anthropic types from both `@lostgradient/operative/providers` and the `@lostgradient/operative/anthropic` subpath.
+
+  `anthropic-client-assignability.test-d.ts` (a type-only, coverage-inert `.test-d.ts` file that `tsconfig.build.json` excludes from published declarations) asserts a real `Anthropic` satisfies both interfaces with no cast, following the pattern `anthropic-token-counting-assignability.test-d.ts` established for AB-167.
+
+- 5454047: Raise the declared Bun floor from `>=1.3.13` to `>=1.4.0`.
+
+  The repository now pins Bun 1.4.0 everywhere it builds and tests: `packageManager`, both
+  CI jobs, the release workflow, and the Dockerfile. Continuing to advertise `>=1.3.13`
+  would leave a claim that no gate re-verifies on any pull request, which is the failure
+  mode AB-169 exists to close. The declared floor now matches the only version actually
+  tested.
+
+  Released as a minor rather than a major because `engines` is advisory: npm and Bun warn
+  rather than fail unless a consumer opts into strict engine checking. No runtime, type, or
+  API surface changed in any of these packages.
+
+  Consumers still on Bun 1.3.x should upgrade or pin an exact version. The full suite did
+  pass under 1.3.13 at the time of this change, so the raised floor states what is
+  supported going forward rather than a known incompatibility.
+
+  The same floor was raised on the eight private workspace packages (`bureau`,
+  `cloudflare`, `evaluation`, `gateway`, `interoperability`, `lifecycle`, `memory`,
+  `skills`) for internal consistency. Those are unpublished, so they carry no changeset.
+
+### Patch Changes
+
+- Updated dependencies [5454047]
+  - conversationalist@1.1.0
+  - armorer@2.1.0
+
 ## 0.6.0
 
 ### Minor Changes
