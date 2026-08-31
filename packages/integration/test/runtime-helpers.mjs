@@ -50,10 +50,9 @@ export function createIntegrationHarness(identifierPrefix = 'integration') {
     name: 'fail_weather',
     input: z.object({ location: z.string() }),
     impl: async ({ location }) => {
-      const error = Object.assign(
-        new Error(`Weather service unavailable for ${location}`),
-        { code: 'WEATHER_UNAVAILABLE' },
-      );
+      const error = Object.assign(new Error(`Weather service unavailable for ${location}`), {
+        code: 'WEATHER_UNAVAILABLE',
+      });
       throw error;
     },
   });
@@ -109,8 +108,6 @@ export function getToolCalls(conversation) {
 
 export function getToolResults(conversation) {
   return getMessages(conversation)
-    .filter(
-      (message) => message.role === 'tool-result' && Boolean(message.toolResult),
-    )
+    .filter((message) => message.role === 'tool-result' && Boolean(message.toolResult))
     .map((message) => message.toolResult);
 }
