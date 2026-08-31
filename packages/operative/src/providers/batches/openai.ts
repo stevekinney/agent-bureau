@@ -38,6 +38,13 @@ const OPENAI_BATCH_REQUIREMENT: BatchSurfaceRequirement = {
  * credential-injecting proxy in front of `api.openai.com`, say — constructs
  * their own `OpenAI` client with whatever `baseURL` they need and passes it as
  * `client`. That path is unchanged and needs no cast.
+ *
+ * Omitting the knob does not pin the endpoint, though. A client this factory
+ * constructs for itself carries no explicit `baseURL`, and `openai` documents
+ * that option as defaulting to `process.env['OPENAI_BASE_URL']` — so an
+ * ambient override routes these batch calls wherever it points.
+ * `getProviderCapabilities('openai')` reads the same variable for exactly that
+ * reason, so what it advertises and where a request lands stay in agreement.
  */
 export interface OpenAIBatchClientOptions {
   /**

@@ -236,6 +236,67 @@ describe('createGeminiProvider — caller-owned cachedContent', () => {
     const config = client._calls[0]?.config as Record<string, unknown>;
     expect(config['cachedContent']).toBe('cachedContents/provided-by-caller');
   });
+
+  // The cache is the head of the prompt, so the conversation has to be the
+  // tail. Operative cannot subtract a prefix it never saw, so the contract is
+  // the caller's to keep — but the system-instruction half of it is checkable
+  // from here, and a violation has to be a diagnostic rather than a request
+  // that quietly states the cached instruction twice.
+  it('rejects a system message in the conversation beside a caller-owned cache', async () => {
+    const client = createMockGeminiModel([textResponse()]);
+    const generate = createGeminiProvider({
+      model: 'gemini-pro',
+      client,
+      cachedContent: 'cachedContents/provided-by-caller',
+    });
+
+    await expect(
+      generate(makeContext(conversationWithSystem('You are a helpful assistant.'))),
+    ).rejects.toThrow(ProviderError);
+    expect(client._calls).toHaveLength(0);
+  });
+
+  it('names the cache and the fix when it rejects a non-tail conversation', async () => {
+    const client = createMockGeminiModel([textResponse()]);
+    const generate = createGeminiProvider({
+      model: 'gemini-pro',
+      client,
+      cachedContent: 'cachedContents/provided-by-caller',
+    });
+
+    await expect(
+      generate(makeContext(conversationWithSystem('You are a helpful assistant.'))),
+    ).rejects.toThrow(/cachedContents\/provided-by-caller.*tail only/s);
+  });
+
+  it('rejects a non-tail conversation on the streaming factory too', async () => {
+    const client = createMockGeminiStreamingModel([streamChunks()]);
+    const generate = createGeminiProviderStream({
+      model: 'gemini-pro',
+      client,
+      cachedContent: 'cachedContents/provided-by-caller',
+    });
+
+    await expect(
+      generate({
+        ...makeContext(conversationWithSystem('You are a helpful assistant.')),
+        streaming: makeStreamingHandle(),
+      }),
+    ).rejects.toThrow(ProviderError);
+    expect(client._calls).toHaveLength(0);
+  });
+
+  it('leaves a system message alone when no caller-owned cache is named', async () => {
+    // The contract is a consequence of `cachedContent`, not a new rule about
+    // system messages: the uncached path still sends one as it always has.
+    const client = createMockGeminiModel([textResponse()]);
+    const generate = createGeminiProvider({ model: 'gemini-pro', client });
+
+    await generate(makeContext(conversationWithSystem('You are a helpful assistant.')));
+
+    const config = client._calls[0]?.config as Record<string, unknown>;
+    expect(config['systemInstruction']).toBeDefined();
+  });
 });
 
 // ── Provider-managed cache: assembler + contextBudget ───────────────
@@ -734,6 +795,41 @@ describe('createGeminiProvider — managed cache expiry', () => {
 
     expect(cache.calls).toHaveLength(2);
     expect(referencedCache(client._calls[1])).toBe('cachedContents/renewed');
+  });
+
+  // A Gemini cache is a billable resource, so "renew it once" is a cost
+  // property and not just a tidiness one. Every request in a burst awaits the
+  // same lapsed entry and wakes to the same lapsed answer, so each one has to
+  // be able to tell whether another has already installed the renewal.
+  it('installs one shared renewal for a burst of concurrent requests after expiry', async () => {
+    const cache = createFakeCaches([
+      { name: 'cachedContents/lapsed', expireTime: ALREADY_PAST },
+      { name: 'cachedContents/renewed', expireTime: FAR_FUTURE },
+    ]);
+    const client = {
+      ...createMockGeminiModel([textResponse(), textResponse(), textResponse(), textResponse()]),
+      ...cache,
+    };
+    const generate = createGeminiProvider({ model: 'gemini-pro', client, ...assembling() });
+    const conversation = conversationWithSystem('You are a helpful assistant.');
+
+    // Seed the entry, and let it be lapsed by the time the burst arrives.
+    await generate(makeContext(conversation));
+    expect(cache.calls).toHaveLength(1);
+
+    await Promise.all([
+      generate(makeContext(conversation)),
+      generate(makeContext(conversation)),
+      generate(makeContext(conversation)),
+    ]);
+
+    // One renewal for three concurrent requests, not one billable cache each.
+    expect(cache.calls).toHaveLength(2);
+    expect(client._calls.slice(1).map(referencedCache)).toEqual([
+      'cachedContents/renewed',
+      'cachedContents/renewed',
+      'cachedContents/renewed',
+    ]);
   });
 
   it('prefers the SDK’s expireTime over a configured cacheTtl that is still live', async () => {

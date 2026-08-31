@@ -47,21 +47,44 @@ const NO_CAPABILITIES: ProviderCapabilities = {
 };
 
 /**
+ * The base URL the `openai` SDK would use when no explicit one is passed.
+ *
+ * `openai` 7.8.0's `client.d.ts` documents the option as
+ * "Defaults to process.env['OPENAI_BASE_URL']" and again as
+ * `@param {string} [opts.baseURL=process.env['OPENAI_BASE_URL'] ??
+ * https://api.openai.com/v1]`, so a client constructed with no `baseURL` — the
+ * way `createOpenAIBatchClient` constructs its own — silently picks this up.
+ * Reading it here is what keeps the capability report about the *effective*
+ * endpoint rather than about the options object.
+ *
+ * A read, not a mutation, so this stays side-effect-free; and synchronous, so
+ * {@link getProviderCapabilities} stays callable mid-request-assembly.
+ * `Bun.env` and `process.env` are the same values, checked in that order to
+ * match `providers/shared/gemini-api-key.ts`, which is the package's existing
+ * environment-reading shape.
+ */
+function readOpenAIBaseUrlOverride(): string | undefined {
+  return typeof Bun !== 'undefined' ? Bun.env['OPENAI_BASE_URL'] : process.env['OPENAI_BASE_URL'];
+}
+
+/**
  * Reports which of the four capabilities a provider supports.
  *
- * Static and synchronous by design: it makes no network call and performs no
- * provider discovery. It answers from what operative knows at build time about
- * the SDK surfaces it ships against — `@anthropic-ai/sdk`, `openai`, and
- * `@google/genai` — so it is safe to call while assembling a request, in a
- * routing decision, or in a UI that renders which options to offer.
+ * Synchronous and side-effect-free by design: it makes no network call and
+ * performs no provider discovery, so it is safe to call while assembling a
+ * request, in a routing decision, or in a UI that renders which options to
+ * offer. It answers from what operative knows at build time about the SDK
+ * surfaces it ships against — `@anthropic-ai/sdk`, `openai`, and
+ * `@google/genai` — plus one ambient input, described under "Reads the
+ * environment" below.
  *
  * ## What each provider reports
  *
  * | Provider | Batch | Thinking | Caching | Token counting |
  * | --- | --- | --- | --- | --- |
  * | `anthropic` | yes | yes | yes | yes |
- * | `openai` (default base URL) | yes | no | no | no |
- * | `openai` (custom `baseURL`) | no | no | no | no |
+ * | `openai` (default endpoint) | yes | no | no | no |
+ * | `openai` (custom `baseURL` **or** `OPENAI_BASE_URL` set) | no | no | no | no |
  * | `gemini` | yes | no | yes | yes |
  * | `voyage`, `ollama` | no | no | no | no |
  *
@@ -92,7 +115,26 @@ const NO_CAPABILITIES: ProviderCapabilities = {
  * An empty-string `baseURL` counts as the default endpoint, because that is
  * what client construction actually does with it: every provider factory writes
  * the option through a truthiness check (`if (baseURL) …`), so `''` never
- * reaches the SDK and the default endpoint is used.
+ * reaches the SDK and the default endpoint is used. An empty-string
+ * `OPENAI_BASE_URL` counts as the default for the same reason.
+ *
+ * ## Reads the environment
+ *
+ * The `openai` answer depends on ambient environment, and cannot honestly not:
+ * `openai` documents `baseURL` as "Defaults to `process.env['OPENAI_BASE_URL']`",
+ * so an unset option is not the same thing as the default endpoint. A process
+ * with `OPENAI_BASE_URL` pointing at LM Studio or Ollama is in exactly the
+ * configuration the rule above is conservative about, and reporting
+ * `batchInference: true` there would send a caller's batch request to a server
+ * with no `/v1/batches` — `createOpenAIBatchClient` constructs its client with
+ * no explicit base URL, so the SDK honors the override. This function therefore
+ * reports on the *effective* endpoint: an explicit `options.baseURL` first, then
+ * the environment override, then the default.
+ *
+ * Two consequences worth knowing. The answer can differ between two processes
+ * running the same code, so it is a fact about this process rather than about
+ * the build. And it is not memoizable across a change to `process.env` — call
+ * it when you need the answer instead of caching it at module load.
  *
  * ## Provisional
  *
@@ -104,7 +146,8 @@ const NO_CAPABILITIES: ProviderCapabilities = {
  *
  * @param provider - The provider to report on.
  * @param options.baseURL - The base URL that would be passed to the provider
- *   factory, if any. Only consulted for `openai`.
+ *   factory, if any. Only consulted for `openai`. Leaving it unset does not
+ *   assert the default endpoint — `OPENAI_BASE_URL` is consulted next.
  */
 export function getProviderCapabilities(
   provider: ProviderName,
@@ -121,7 +164,10 @@ export function getProviderCapabilities(
     case 'openai':
       return {
         ...NO_CAPABILITIES,
-        batchInference: !options?.baseURL,
+        // The effective endpoint, not the options object: an unset `baseURL`
+        // leaves the SDK to honor `OPENAI_BASE_URL`, which points at exactly
+        // the OpenAI-compatible servers this rule is conservative about.
+        batchInference: !(options?.baseURL || readOpenAIBaseUrlOverride()),
       };
     case 'gemini':
       return {

@@ -472,6 +472,31 @@ export interface GeminiProviderOptions extends BaseProviderOptions {
    * Names an already-created `CachedContent` resource to serve this run's
    * prompt prefix from, lowered verbatim to `config.cachedContent`.
    *
+   * ## Contract: the conversation you pass must be the tail only
+   *
+   * A `CachedContent` resource *is* the head of the prompt — it holds the
+   * `systemInstruction` and `contents` the model sees before anything on the
+   * request. Setting this option therefore does not append a cache to your
+   * conversation; it declares that the head of the conversation already lives
+   * server-side. Every call must pass **only the turns that are not in that
+   * cache**. Passing the same full conversation you would have sent uncached
+   * states the cached prefix twice, which changes the prompt the model reads and
+   * bills you for the duplicate tokens on every request.
+   *
+   * Operative cannot do the subtraction for you. It never sees inside a resource
+   * it did not create, so it has no boundary to split on — unlike the
+   * provider-managed path below, where it created the prefix and knows exactly
+   * where it ends. You own the cache, so you own the boundary.
+   *
+   * The one half of the contract that *is* checkable is enforced: a conversation
+   * carrying a system message is rejected with a `ProviderError` at the point of
+   * use, because that message would be sent as `config.systemInstruction`
+   * beside `config.cachedContent` and duplicate or contradict the instruction
+   * the cache holds. Re-sent conversational turns cannot be detected from here
+   * and are yours to keep out.
+   *
+   * ## Naming and exclusivity
+   *
    * Named after the SDK's own `GenerateContentConfig.cachedContent` field
    * rather than after anything on {@link AnthropicProviderOptions}, because
    * there is no Anthropic analog to rename it to: Anthropic's prompt cache is

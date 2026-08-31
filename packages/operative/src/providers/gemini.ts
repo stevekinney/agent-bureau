@@ -254,6 +254,46 @@ function isCacheCreatingClient(client: object): client is GeminiCacheCreatingCli
 }
 
 /**
+ * Enforces the tail-only input contract a caller-owned `cachedContent` carries.
+ *
+ * A `CachedContent` resource is a *prompt prefix*: `@google/genai`'s own README
+ * describes `ai.caches` as the way "to reduce costs when repeatedly using the
+ * same large prompt prefix", `CreateCachedContentConfig` holds the `contents`
+ * and `systemInstruction` that prefix is made of, and `GenerateContentConfig`
+ * carries `cachedContent` alongside a `systemInstruction` of its own. So a
+ * request that names a cache *and* re-sends the material already inside it
+ * states that material twice.
+ *
+ * The provider-managed path avoids that by splitting at the `cacheBoundary`
+ * mark it created, but that boundary is only knowable because operative built
+ * the cache. A caller-owned resource is opaque here — operative never sees its
+ * contents and cannot subtract them — so the contract is inverted instead:
+ * whoever owns the cache owns the boundary, and passes only the tail.
+ *
+ * One half of that contract is mechanically checkable and is checked here. A
+ * system message lowers to `config.systemInstruction`, which would ride
+ * alongside `config.cachedContent` and either duplicate the instruction the
+ * cache already holds or contradict it. That is rejected with a
+ * {@link ProviderError} naming the fix, rather than sent as a quietly doubled
+ * prompt or left to come back as an opaque provider rejection.
+ *
+ * The other half — turns already inside the cache, re-sent as ordinary
+ * `contents` — is not checkable from here at all, for exactly the reason above,
+ * and is stated as a contract on {@link GeminiProviderOptions.cachedContent}.
+ */
+function assertTailOnlyConversation(
+  systemInstruction: unknown,
+  cachedContent: string | undefined,
+): void {
+  if (cachedContent === undefined || systemInstruction === undefined) return;
+  throw new ProviderError({
+    provider: 'gemini',
+    cause: undefined,
+    message: `[provider:gemini] cachedContent (${cachedContent}) names a cache you own, so the conversation passed to each call must be the tail only — the turns that are not already in that cache. This one carries a system message, which would be sent as config.systemInstruction alongside config.cachedContent and duplicate or contradict the instruction the cache holds. Put the system prompt in the cache and leave it out of the conversation, or drop cachedContent.`,
+  });
+}
+
+/**
  * Splits an assembled conversation at its `cacheBoundary` mark into the stable
  * prefix that becomes the cache resource and the tail that is sent with every
  * request.
@@ -308,7 +348,9 @@ interface GeminiContentResolver {
  * as before this existed.
  *
  * Caller-owned cache (`cachedContent`): the name is passed straight through to
- * `config.cachedContent`. Operative creates nothing and owns no lifecycle.
+ * `config.cachedContent`. Operative creates nothing and owns no lifecycle — and
+ * because it cannot see inside a resource it did not create, the conversation
+ * must arrive tail-only. See {@link assertTailOnlyConversation}.
  *
  * Provider-managed cache (`assembler` + `contextBudget`): the assembler runs in
  * stable-prefix mode, the conversation is split at the resulting
@@ -334,15 +376,17 @@ interface GeminiContentResolver {
  * request time by {@link sendWithCacheRecovery}.
  *
  * Creation is memoized as a promise, so two concurrent first calls for one
- * prefix share a single `caches.create`. A rejected creation is evicted rather
- * than retained: with keying and expiry in place it would otherwise be the only
- * permanently immortal state here, and one transient failure would poison that
- * prefix for the life of the provider. Every call that meets a failing creation
- * still throws — a creation failure normalizes through `ProviderError` and
- * there is deliberately no quiet fallback to an uncached request, which would
- * hide a billing and behavior change from the caller who asked for caching —
- * what an eviction buys is that the *next* call gets a real attempt instead of
- * a replayed rejection.
+ * prefix share a single `caches.create` — and so does a burst that arrives
+ * after that prefix's resource expires, which installs one renewal every waiter
+ * then shares rather than one billable resource per request. A rejected
+ * creation is evicted rather than retained: with keying and expiry in place it
+ * would otherwise be the only permanently immortal state here, and one
+ * transient failure would poison that prefix for the life of the provider.
+ * Every call that meets a failing creation still throws — a creation failure
+ * normalizes through `ProviderError` and there is deliberately no quiet
+ * fallback to an uncached request, which would hide a billing and behavior
+ * change from the caller who asked for caching — what an eviction buys is that
+ * the *next* call gets a real attempt instead of a replayed rejection.
  */
 function createGeminiContentResolver(input: {
   /**
@@ -418,18 +462,47 @@ function createGeminiContentResolver(input: {
     return creation;
   }
 
+  /**
+   * Resolves the cache name for one request, renewing a lapsed resource at most
+   * once no matter how many requests meet it at the same moment.
+   *
+   * Every waiter for a prefix awaits the same stored promise, so a burst that
+   * arrives after that resource expires wakes with the same lapsed answer.
+   * Deciding to renew is therefore not enough — each waiter has to know whether
+   * *another* waiter already decided. The map is re-read at the resume point and
+   * everything from there to {@link startCreation} is synchronous;
+   * `startCreation` installs its entry before it yields, so the read and the
+   * install happen in one turn. Exactly one waiter can find its own entry still
+   * in place, and it is the one that renews; the rest see the successor and
+   * await that instead. Without this, a burst of *n* requests after every expiry
+   * created *n* billable Gemini caches and kept only the last.
+   *
+   * The re-read guards the live path too: it stops a waiter that has been asleep
+   * across a replacement from re-inserting the stale entry over its successor
+   * while refreshing LRU order.
+   */
   async function acquireCache(cacheKey: string, payload: GeminiCachePayload): Promise<string> {
     const existing = managedCaches.get(cacheKey);
     if (existing) {
       const managed = await existing;
-      if (managed.expiresAt === undefined || managed.expiresAt > Date.now()) {
-        // Re-insert so eviction sweeps a genuinely cold prefix, not a busy one.
+      const current = managedCaches.get(cacheKey);
+      if (current === existing) {
+        if (managed.expiresAt === undefined || managed.expiresAt > Date.now()) {
+          // Re-insert so eviction sweeps a genuinely cold prefix, not a busy one.
+          managedCaches.delete(cacheKey);
+          managedCaches.set(cacheKey, existing);
+          return managed.name;
+        }
+        // Lapsed, and this waiter still holds the entry it woke to, so it is the
+        // one renewal: delete first so the replacement enters at the LRU tail.
         managedCaches.delete(cacheKey);
-        managedCaches.set(cacheKey, existing);
-        return managed.name;
+      } else if (current !== undefined) {
+        // Someone renewed while this waiter slept. Share it rather than create a
+        // second resource for the same prefix; a name that is somehow stale
+        // again by the time it is sent is what `sendWithCacheRecovery` is for.
+        const renewed = await current;
+        return renewed.name;
       }
-      // Lapsed: this key's resource is replaced, every other key keeps its own.
-      if (managedCaches.get(cacheKey) === existing) managedCaches.delete(cacheKey);
     }
     const created = await startCreation(cacheKey, payload);
     return created.name;
@@ -443,6 +516,7 @@ function createGeminiContentResolver(input: {
     async resolve(context: GenerateContext): Promise<GeminiRequestContent> {
       if (!cacheAwareAssembly) {
         const { systemInstruction, contents } = toGeminiMessages(context.conversation.current);
+        assertTailOnlyConversation(systemInstruction, options.cachedContent);
         return {
           systemInstruction,
           contents,
