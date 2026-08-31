@@ -118,7 +118,10 @@ export type AnthropicThinkingConfig =
       /**
        * Anthropic's constraint, quoted from the SDK's own declaration: "Must
        * be ≥1024 and less than `max_tokens`." Both provider factories check
-       * this at construction rather than letting the API reject the request.
+       * this rather than letting the API reject the request — the ≥1024 floor
+       * at construction, and the `< max_tokens` bound per request, since
+       * {@link GenerateContext.maximumTokens} can raise the effective
+       * `max_tokens` above the construction-time value on any given call.
        */
       budget_tokens: number;
       /** `'omitted'` redacts thinking content but keeps a signature for multi-turn continuity. */
@@ -181,8 +184,41 @@ export interface AnthropicProviderOptions extends BaseProviderOptions {
    * `extendedCacheTtl` and `baseURL` as the other native-shape options on
    * this type.
    *
-   * `{ type: 'enabled' }` is validated at provider construction against the
-   * effective `max_tokens`; see {@link AnthropicThinkingConfig}.
+   * ## Known limitation: thinking is not yet supported end-to-end with tool calls
+   *
+   * Setting this alongside a toolbox is **not** a supported combination today.
+   * Anthropic documents thinking-block replay as mandatory inside a tool-use
+   * turn — "Required: within a tool-use turn, pass thinking blocks back",
+   * "complete and unmodified", each block carrying the signed `signature` the
+   * server decrypts to reconstruct the reasoning. This provider extracts only
+   * `text` and `tool_use` blocks from the response, so the `thinking` (or
+   * `redacted_thinking`) block that accompanied the tool call never reaches
+   * the conversation, and the follow-up request that carries the tool result
+   * omits it. Anthropic does not hard-fail that request: it degrades — the API
+   * strips blocks that would form an invalid turn structure, or silently
+   * disables thinking for that request — so the failure mode is quality loss
+   * that never announces itself, not an error the caller can catch.
+   *
+   * Fixing it means preserving native response blocks in conversation history,
+   * which is **output**-side work owned by AB-73 (the multimodal output
+   * contract, project ABP-13) and reaches into conversationalist's message
+   * model and `run-step.ts`. AB-157 — the issue that added this option — is
+   * scoped to the *request* knob only, and is recorded as `related` to AB-73
+   * precisely so both do not quietly reshape the same response surface. Until
+   * AB-73 lands, use this option on tool-free requests, or accept that
+   * multi-step tool loops lose reasoning continuity between steps.
+   *
+   * ## Validation
+   *
+   * `{ type: 'enabled' }`'s budget is checked against Anthropic's documented
+   * bounds; see {@link AnthropicThinkingConfig}. Both factories additionally
+   * reject, at construction, the combinations Anthropic documents as
+   * incompatible with an active thinking configuration: a non-default
+   * {@link BaseProviderOptions.temperature}, a
+   * {@link BaseProviderOptions.topP} below 0.95, and — for `{ type: 'enabled' }`
+   * only — a forced {@link BaseProviderOptions.toolChoice} (`'required'` or a
+   * named tool). Forced tool use is fine with `{ type: 'adaptive' }`, which
+   * Anthropic explicitly supports.
    */
   thinking?: AnthropicThinkingConfig;
 }
