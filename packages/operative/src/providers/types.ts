@@ -349,3 +349,310 @@ export interface GeminiStreamingModel {
     ): Promise<AsyncIterable<GeminiGenerateContentResult>>;
   };
 }
+
+// ── Batch Inference Types ───────────────────────────────────────────
+//
+// Three providers expose a native batch-inference endpoint and their request
+// shapes have almost nothing in common: Anthropic inlines the per-request
+// Messages bodies, OpenAI points at a previously uploaded JSONL file, and
+// Gemini names a source (`src`) that may be inline requests, a GCS/BigQuery
+// URI, or an uploaded file name. The structural interfaces below mirror each
+// SDK as it actually is rather than flattening the three into one invented
+// shape — see `providers/batches/` for the factories built on them, and
+// `getProviderCapabilities` in `providers/capabilities.ts` for which providers
+// have a batch endpoint at all.
+//
+// Every member is declared with method syntax on purpose. TypeScript compares
+// method parameters bivariantly, which is what lets a real SDK client satisfy
+// these interfaces without a cast even though the SDKs' own parameter types are
+// `interface`s (no implicit index signature) and some of their members are
+// arrow-function properties. Declaring a request parameter as
+// `Record<string, unknown>` would break that in both directions — the mistake
+// documented on {@link GeminiGenerateContentRequest}. Widen only the
+// payload-shaped fields, and name the rest.
+//
+// `providers/batch-client-assignability.test-d.ts` locks all of this in against
+// the real `Anthropic`, `OpenAI`, and `GoogleGenAI` classes.
+
+/**
+ * One request inside an Anthropic Message Batch.
+ */
+export interface AnthropicBatchCreateRequestItem {
+  /** Caller-chosen id, unique within the batch, used to match up results. */
+  custom_id: string;
+  /**
+   * `MessageCreateParamsNonStreaming` in the SDK — the same body
+   * `messages.create` takes. Widened here so fakes need not model the whole
+   * Messages request surface.
+   */
+  params: unknown;
+}
+
+/**
+ * Minimal shape of an Anthropic `messages.batches.create` request body.
+ */
+export interface AnthropicBatchCreateRequest {
+  requests: ReadonlyArray<AnthropicBatchCreateRequestItem>;
+}
+
+/**
+ * Minimal shape of Anthropic's `messages.batches.list` query, mirroring the
+ * SDK's cursor `PageParams`.
+ */
+export interface AnthropicBatchListQuery {
+  limit?: number;
+  before_id?: string;
+  after_id?: string;
+}
+
+/**
+ * Per-status request tallies on an Anthropic Message Batch. Every request
+ * starts in `processing` and moves to one of the other buckets only once the
+ * whole batch ends.
+ */
+export interface AnthropicMessageBatchRequestCounts {
+  canceled: number;
+  errored: number;
+  expired: number;
+  processing: number;
+  succeeded: number;
+}
+
+/**
+ * Minimal shape of an Anthropic `MessageBatch`.
+ */
+export interface AnthropicMessageBatch {
+  id: string;
+  processing_status: 'in_progress' | 'canceling' | 'ended';
+  request_counts: AnthropicMessageBatchRequestCounts;
+  /** Set only once processing ends. */
+  results_url: string | null;
+  created_at: string;
+  /** Set only once processing ends. */
+  ended_at: string | null;
+  expires_at: string;
+}
+
+/**
+ * Processing result for a single request in an Anthropic Message Batch.
+ *
+ * Kept as a discriminated union rather than a widened object so callers can
+ * narrow on `type`. `message` and `error` are widened because they are the
+ * full Messages response and error payloads.
+ */
+export type AnthropicMessageBatchResult =
+  | { type: 'succeeded'; message: unknown }
+  | { type: 'errored'; error: unknown }
+  | { type: 'canceled' }
+  | { type: 'expired' };
+
+/**
+ * One line of the `.jsonl` results stream for an Anthropic Message Batch.
+ * Results are not guaranteed to arrive in request order — match them up by
+ * `custom_id`.
+ */
+export interface AnthropicMessageBatchIndividualResponse {
+  custom_id: string;
+  result: AnthropicMessageBatchResult;
+}
+
+/**
+ * Structural interface for the Anthropic SDK client surface the batch factory
+ * uses: the stable `client.messages.batches` resource.
+ *
+ * `list` is typed as an `AsyncIterable` rather than a promise because the SDK
+ * returns a `PagePromise`, which is directly iterable and fetches further pages
+ * as it goes. `results` keeps the SDK's `Promise<AsyncIterable<…>>` shape: the
+ * request that opens the `.jsonl` stream is awaited first, then the lines are
+ * iterated.
+ */
+export interface AnthropicBatchClient {
+  messages: {
+    batches: {
+      create(params: AnthropicBatchCreateRequest): Promise<AnthropicMessageBatch>;
+      retrieve(messageBatchId: string): Promise<AnthropicMessageBatch>;
+      list(query?: AnthropicBatchListQuery): AsyncIterable<AnthropicMessageBatch>;
+      cancel(messageBatchId: string): Promise<AnthropicMessageBatch>;
+      results(
+        messageBatchId: string,
+      ): Promise<AsyncIterable<AnthropicMessageBatchIndividualResponse>>;
+    };
+  };
+}
+
+/**
+ * Minimal shape of an OpenAI `batches.create` request body.
+ *
+ * Unlike Anthropic and Gemini, OpenAI takes no inline requests: the batch is
+ * built from a JSONL file already uploaded with purpose `batch`, named here by
+ * `input_file_id`.
+ */
+export interface OpenAIBatchCreateRequest {
+  /** Only `'24h'` is currently accepted by the API. */
+  completion_window: '24h';
+  /**
+   * The API route every request in the file targets, e.g.
+   * `'/v1/chat/completions'`, `'/v1/responses'`, or `'/v1/embeddings'`. Typed
+   * as `string` rather than pinned to the SDK's literal union so a newly
+   * supported route does not require an operative release; the installed SDK's
+   * `BatchCreateParams['endpoint']` is the authority on what the API accepts.
+   */
+  endpoint: string;
+  /** Id of an uploaded JSONL file containing the batched requests. */
+  input_file_id: string;
+  metadata?: Record<string, string> | null;
+}
+
+/**
+ * Minimal shape of OpenAI's `batches.list` query, mirroring the SDK's
+ * `CursorPageParams`.
+ */
+export interface OpenAIBatchListQuery {
+  after?: string;
+  limit?: number;
+}
+
+/**
+ * Per-status request tallies on an OpenAI batch.
+ */
+export interface OpenAIBatchRequestCounts {
+  completed: number;
+  failed: number;
+  total: number;
+}
+
+/**
+ * Minimal shape of an OpenAI `Batch`.
+ */
+export interface OpenAIBatch {
+  id: string;
+  object: 'batch';
+  endpoint: string;
+  input_file_id: string;
+  completion_window: string;
+  /** Unix seconds. */
+  created_at: number;
+  status:
+    | 'validating'
+    | 'failed'
+    | 'in_progress'
+    | 'finalizing'
+    | 'completed'
+    | 'expired'
+    | 'cancelling'
+    | 'cancelled';
+  /** Id of the file holding results for the requests that succeeded. */
+  output_file_id?: string;
+  /** Id of the file holding results for the requests that errored. */
+  error_file_id?: string;
+  request_counts?: OpenAIBatchRequestCounts;
+}
+
+/**
+ * Structural interface for the OpenAI SDK client surface the batch factory
+ * uses: the top-level `client.batches` resource.
+ *
+ * There is deliberately no `results` member: OpenAI returns results as an
+ * uploaded file, so a caller reads `output_file_id` through `client.files`
+ * rather than streaming them off the batch itself.
+ */
+export interface OpenAIBatchClient {
+  batches: {
+    create(body: OpenAIBatchCreateRequest): Promise<OpenAIBatch>;
+    retrieve(batchId: string): Promise<OpenAIBatch>;
+    list(query?: OpenAIBatchListQuery): AsyncIterable<OpenAIBatch>;
+    cancel(batchId: string): Promise<OpenAIBatch>;
+  };
+}
+
+/**
+ * Minimal shape of a `@google/genai` `CreateBatchJobParameters`.
+ *
+ * `model` is optional in the SDK and stays optional here: making it required
+ * would fail assignability in both directions and take a real `GoogleGenAI`
+ * out of reach without a cast.
+ */
+export interface GeminiCreateBatchJobRequest {
+  /** Provider-native model id. Optional in the SDK — see the type's note. */
+  model?: string;
+  /**
+   * `BatchJobSourceUnion` in the SDK: inline requests, a GCS/BigQuery URI, or
+   * an uploaded file name. Widened so fakes need not model the union.
+   */
+  src: unknown;
+  /** `CreateBatchJobConfig` in the SDK; omitted when no options are set. */
+  config?: unknown;
+}
+
+/**
+ * Names one existing `@google/genai` batch job. Gemini addresses jobs by a
+ * server-generated resource name inside a parameter object, where Anthropic and
+ * OpenAI take a bare id string — an asymmetry these interfaces keep rather than
+ * paper over.
+ */
+export interface GeminiBatchJobReference {
+  /** A fully-qualified batch job resource name, or its trailing id. */
+  name: string;
+  /** Per-request config in the SDK; omitted when no options are set. */
+  config?: unknown;
+}
+
+/**
+ * Minimal shape of a `@google/genai` `ListBatchJobsParameters`.
+ */
+export interface GeminiListBatchJobsRequest {
+  /** `ListBatchJobsConfig` in the SDK, carrying `pageSize`/`pageToken`. */
+  config?: unknown;
+}
+
+/**
+ * Minimal shape of a `@google/genai` `BatchJob`. Every field is optional in the
+ * SDK, so every field is optional here.
+ */
+export interface GeminiBatchJob {
+  /** Server-generated resource name — the handle for `get`/`cancel`/`delete`. */
+  name?: string;
+  displayName?: string;
+  /** `JobState` in the SDK, a string enum such as `'JOB_STATE_SUCCEEDED'`. */
+  state?: string;
+  createTime?: string;
+  startTime?: string;
+  endTime?: string;
+  updateTime?: string;
+  model?: string;
+  /** `BatchJobDestination` in the SDK: where the results were written. */
+  dest?: unknown;
+  /** `JobError` in the SDK; set only for failed or cancelled jobs. */
+  error?: unknown;
+}
+
+/**
+ * Minimal shape of the `@google/genai` `DeleteResourceJob` returned by
+ * `batches.delete`.
+ */
+export interface GeminiDeleteResourceJob {
+  name?: string;
+  done?: boolean;
+  /** `JobError` in the SDK. */
+  error?: unknown;
+}
+
+/**
+ * Structural interface for a `@google/genai` client's `batches` namespace.
+ *
+ * Shaped nothing like the other two on purpose. `create` takes
+ * `{ model, src, config }` instead of a request list or a file id; jobs are
+ * addressed by resource name rather than id; the retrieval verb is `get`, not
+ * `retrieve`; `cancel` resolves to nothing; and Gemini alone exposes `delete`.
+ * `list` resolves to a `Pager`, so it is `Promise<AsyncIterable<…>>` where
+ * Anthropic's and OpenAI's directly-iterable page promises are `AsyncIterable`.
+ */
+export interface GeminiBatchClient {
+  batches: {
+    create(params: GeminiCreateBatchJobRequest): Promise<GeminiBatchJob>;
+    get(params: GeminiBatchJobReference): Promise<GeminiBatchJob>;
+    list(params?: GeminiListBatchJobsRequest): Promise<AsyncIterable<GeminiBatchJob>>;
+    cancel(params: GeminiBatchJobReference): Promise<void>;
+    delete(params: GeminiBatchJobReference): Promise<GeminiDeleteResourceJob>;
+  };
+}

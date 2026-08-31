@@ -78,6 +78,23 @@ describe('operative package exports', () => {
     expect(missing).toEqual([]);
   });
 
+  it('all per-provider batch subpaths are in the exports map', () => {
+    // One entry per provider with a native batch endpoint. There is
+    // deliberately no OpenAI-compatible/local-server entry: those servers reuse
+    // OpenAI's chat shape and implement no batches endpoint, so "unsupported"
+    // is expressed as "nothing to import". Do not add one.
+    const required = [
+      './providers/batches',
+      './providers/batches/anthropic',
+      './providers/batches/openai',
+      './providers/batches/gemini',
+    ];
+
+    const exported = new Set(Object.keys(exports));
+    const missing = required.filter((subpath) => !exported.has(subpath));
+    expect(missing).toEqual([]);
+  });
+
   it('the providers/instrumentation subpath is in the exports map', () => {
     const exported = new Set(Object.keys(exports));
     expect(exported.has('./providers/instrumentation')).toBe(true);

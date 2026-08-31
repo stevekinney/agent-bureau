@@ -4,6 +4,7 @@ import { toGeminiMessages } from 'conversationalist/adapters/gemini';
 
 import { ProviderError } from './errors.ts';
 import { resolveGeminiEffort } from './shared/effort.ts';
+import { resolveGeminiApiKey } from './shared/gemini-api-key.ts';
 import { resolveGeminiModel } from './shared/model-registry.ts';
 import { resolveCommonParameters } from './shared/resolve-common-parameters.ts';
 import { toGeminiResponseFormat } from './structured-output/response-format-adapters.ts';
@@ -104,25 +105,6 @@ function buildGeminiConfig(input: {
   }
 
   return config;
-}
-
-/**
- * Resolves the API key from the explicit option or the `GOOGLE_API_KEY`
- * environment variable, throwing a `ProviderError` when neither is set.
- */
-function resolveGeminiApiKey(apiKey: string | undefined): string {
-  const resolved =
-    apiKey ??
-    (typeof Bun !== 'undefined' ? Bun.env['GOOGLE_API_KEY'] : process.env['GOOGLE_API_KEY']);
-  if (!resolved) {
-    throw new ProviderError({
-      provider: 'gemini',
-      cause: undefined,
-      message:
-        '[provider:gemini] Missing API key: provide an apiKey option or set the GOOGLE_API_KEY environment variable.',
-    });
-  }
-  return resolved;
 }
 
 /**

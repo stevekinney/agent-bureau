@@ -10,6 +10,21 @@
 
 export { createAnthropicProvider, createAnthropicProviderStream } from './anthropic.ts';
 export type {
+  AnthropicBatchClientOptions,
+  AnthropicBatchOperations,
+  GeminiBatchClientOptions,
+  GeminiBatchOperations,
+  OpenAIBatchClientOptions,
+  OpenAIBatchOperations,
+} from './batches/index.ts';
+export {
+  createAnthropicBatchClient,
+  createGeminiBatchClient,
+  createOpenAIBatchClient,
+} from './batches/index.ts';
+export type { ProviderCapabilities } from './capabilities.ts';
+export { getProviderCapabilities } from './capabilities.ts';
+export type {
   GeminiEmbedderOptions,
   GeminiEmbeddingClient,
   GeminiEmbeddingModel,
@@ -94,21 +109,40 @@ export {
   toOpenAIToolChoice,
 } from './structured-output/index.ts';
 export type {
+  AnthropicBatchClient,
+  AnthropicBatchCreateRequest,
+  AnthropicBatchCreateRequestItem,
+  AnthropicBatchListQuery,
   AnthropicClient,
+  AnthropicMessageBatch,
+  AnthropicMessageBatchIndividualResponse,
+  AnthropicMessageBatchRequestCounts,
+  AnthropicMessageBatchResult,
   AnthropicMessageResponse,
   AnthropicProviderOptions,
   AnthropicStreamEvent,
   AnthropicStreamingClient,
   BaseProviderOptions,
   Effort,
+  GeminiBatchClient,
+  GeminiBatchJob,
+  GeminiBatchJobReference,
+  GeminiCreateBatchJobRequest,
+  GeminiDeleteResourceJob,
   GeminiGenerateContentRequest,
   GeminiGenerateContentResult,
   GeminiGenerativeModel,
+  GeminiListBatchJobsRequest,
   GeminiProviderOptions,
   GeminiStreamingModel,
   GenerateContext,
   GenerateFunction,
   GenerateResponse,
+  OpenAIBatch,
+  OpenAIBatchClient,
+  OpenAIBatchCreateRequest,
+  OpenAIBatchListQuery,
+  OpenAIBatchRequestCounts,
   OpenAIChatCompletion,
   OpenAIChatCompletionChunk,
   OpenAIClient,

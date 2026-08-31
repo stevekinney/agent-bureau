@@ -169,6 +169,34 @@
       "default": "./dist/providers/streaming/index.js",
       "types": "./dist/providers/streaming/index.d.ts"
     },
+    "./providers/batches": {
+      "bun": "./dist/providers/batches/index.js",
+      "import": "./dist/providers/batches/index.js",
+      "require": "./dist/providers/batches/index.cjs",
+      "default": "./dist/providers/batches/index.js",
+      "types": "./dist/providers/batches/index.d.ts"
+    },
+    "./providers/batches/anthropic": {
+      "bun": "./dist/providers/batches/anthropic.js",
+      "import": "./dist/providers/batches/anthropic.js",
+      "require": "./dist/providers/batches/anthropic.cjs",
+      "default": "./dist/providers/batches/anthropic.js",
+      "types": "./dist/providers/batches/anthropic.d.ts"
+    },
+    "./providers/batches/openai": {
+      "bun": "./dist/providers/batches/openai.js",
+      "import": "./dist/providers/batches/openai.js",
+      "require": "./dist/providers/batches/openai.cjs",
+      "default": "./dist/providers/batches/openai.js",
+      "types": "./dist/providers/batches/openai.d.ts"
+    },
+    "./providers/batches/gemini": {
+      "bun": "./dist/providers/batches/gemini.js",
+      "import": "./dist/providers/batches/gemini.js",
+      "require": "./dist/providers/batches/gemini.cjs",
+      "default": "./dist/providers/batches/gemini.js",
+      "types": "./dist/providers/batches/gemini.d.ts"
+    },
     "./providers/embeddings": {
       "bun": "./dist/providers/embeddings/index.js",
       "import": "./dist/providers/embeddings/index.js",
