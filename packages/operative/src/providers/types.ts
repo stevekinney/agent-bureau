@@ -128,6 +128,23 @@ export interface AnthropicProviderOptions extends BaseProviderOptions {
   contextBudget?: TokenBudget;
   /** Passed through to `assembler` as `pinnedMessages` (e.g. reference docs, tool usage notes). */
   pinnedMessages?: ReadonlyArray<Message>;
+  /**
+   * Requests Anthropic's extended-thinking mode, mirroring the native
+   * `thinking` request field shape directly (`{ type: 'enabled';
+   * budget_tokens: number }` or `{ type: 'disabled' }`).
+   *
+   * This is deliberately a second, provider-native escape hatch rather than
+   * a provider-neutral abstraction: `effort` is already operative's one
+   * neutral knob over this dimension, and layering a second abstraction over
+   * the same concept would just create two competing vocabularies for the
+   * same thing. `thinking` and `effort` lower to different wire fields
+   * (`thinking` vs. `output_config.effort`) and neither overrides the
+   * other — when both are set, both are sent, and Anthropic applies its own
+   * documented interaction between them. This sits alongside
+   * `extendedCacheTtl` and `baseURL` as the other native-shape options on
+   * this type.
+   */
+  thinking?: { type: 'enabled'; budget_tokens: number } | { type: 'disabled' };
 }
 
 /**

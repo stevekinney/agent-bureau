@@ -157,6 +157,7 @@ export function createAnthropicProvider(options: AnthropicProviderOptions): Gene
 
     if (system !== undefined) params['system'] = system;
     if (resolvedEffort !== undefined) params['output_config'] = { effort: resolvedEffort };
+    if (options.thinking) params['thinking'] = options.thinking;
     if (options.requestMetadata) params['metadata'] = options.requestMetadata;
 
     // Tool choice: when 'none', omit tools entirely; otherwise set tool_choice
@@ -268,6 +269,7 @@ export function createAnthropicProviderStream(
 
     if (system !== undefined) params['system'] = system;
     if (resolvedEffort !== undefined) params['output_config'] = { effort: resolvedEffort };
+    if (options.thinking) params['thinking'] = options.thinking;
     if (options.requestMetadata) params['metadata'] = options.requestMetadata;
 
     // Tool choice: when 'none', omit tools entirely; otherwise set tool_choice
