@@ -348,7 +348,7 @@ describe('interoperability materialization', () => {
     expect(result.content).toBe('[object Object]');
   });
 
-  test('normalizeJSONValue preserves a circular array\'s own toString hook', () => {
+  test("normalizeJSONValue preserves a circular array's own toString hook", () => {
     const circular: any[] = [1, 2];
     circular.push(circular);
     // A custom hook is what `String()` actually calls, and it does not recurse the way the
@@ -364,7 +364,7 @@ describe('interoperability materialization', () => {
     expect(result.content).toBe('custom-array');
   });
 
-  test('normalizeJSONValue preserves a circular array\'s Symbol.toPrimitive hook', () => {
+  test("normalizeJSONValue preserves a circular array's Symbol.toPrimitive hook", () => {
     const circular: any[] = [1, 2];
     circular.push(circular);
     Object.defineProperty(circular, Symbol.toPrimitive, {
@@ -380,7 +380,7 @@ describe('interoperability materialization', () => {
     expect(result.content).toBe('primitive-array');
   });
 
-  test('normalizeJSONValue preserves a circular array\'s overridden join', () => {
+  test("normalizeJSONValue preserves a circular array's overridden join", () => {
     const circular: any[] = [1, 2];
     circular.push(circular);
     // `Array.prototype.toString` delegates to `this.join`, so overriding join is as much a
@@ -462,7 +462,7 @@ describe('interoperability materialization', () => {
     expect(result.content).toBe('[unstringifiable]');
   });
 
-  test('normalizeJSONValue keeps a nested acyclic array\'s own toString through elision', () => {
+  test("normalizeJSONValue keeps a nested acyclic array's own toString through elision", () => {
     const inner: any[] = ['x'];
     Object.defineProperty(inner, 'toString', { value: () => 'INNER' });
 

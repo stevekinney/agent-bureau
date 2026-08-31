@@ -135,7 +135,7 @@ pipeline without publishing a version; its next release goes out entirely throug
 - **`scripts/release.ts`** — exports `RELEASE_INVENTORY`, the explicit list of publishable packages
   as `{ directory, packageName }` entries, and is the idempotent publisher: skips already-published
   versions, runs the shape gate before each publish, and publishes with `npm publish --provenance
-  --access public --ignore-scripts` from the package directory (provenance requires publishing from
+--access public --ignore-scripts` from the package directory (provenance requires publishing from
   a directory, not a prebuilt tarball). On partial failure it stops without unpublishing; re-running
   is safe.
 - **`scripts/check-package-shape.ts`** — the fail-closed gate: asserts every `package.json` file

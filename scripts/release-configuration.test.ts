@@ -40,7 +40,9 @@ function allSteps(workflow: ReleaseWorkflow): WorkflowStep[] {
 }
 
 function changesetsActionStep(workflow: ReleaseWorkflow): WorkflowStep {
-  const step = allSteps(workflow).find((candidate) => candidate.uses?.startsWith('changesets/action'));
+  const step = allSteps(workflow).find((candidate) =>
+    candidate.uses?.startsWith('changesets/action'),
+  );
   if (!step) throw new Error('release.yml does not have a changesets/action step');
   return step;
 }

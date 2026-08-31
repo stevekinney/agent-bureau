@@ -61,7 +61,7 @@ It walks every workspace package with both a `src/` and a `dist/` directory and,
 
 This guard is a fast mtime heuristic, not a proof of freshness, and it has two known blind spots worth knowing before you trust it:
 
-- **Deleted source files are invisible.** Nothing left in `src/` gets a newer mtime, so a `dist/` still carrying the deleted module reads as fresh. Counting directory mtimes would catch this, and was tried and reverted: several suites create and delete fixture directories *inside* `src/` while running, so it made the guard fail after a plain `turbo run test` with no source edits at all. A tripwire that fires after an ordinary test run is worse than one with a documented gap.
+- **Deleted source files are invisible.** Nothing left in `src/` gets a newer mtime, so a `dist/` still carrying the deleted module reads as fresh. Counting directory mtimes would catch this, and was tried and reverted: several suites create and delete fixture directories _inside_ `src/` while running, so it made the guard fail after a plain `turbo run test` with no source edits at all. A tripwire that fires after an ordinary test run is worse than one with a documented gap.
 - **mtime skew without a content change reads as stale.** A `touch`, or a branch switch that rewrites mtimes, trips the guard even though `dist/` is current — and because Turborepo hashes content, `turbo run build` is a cache hit that cannot clear it. Use `turbo run build --force`.
 
 `turbo run build` remains the authority on whether `dist/` is actually current; treat this guard as a cheap tripwire for ad hoc scripts, not a replacement for it.
