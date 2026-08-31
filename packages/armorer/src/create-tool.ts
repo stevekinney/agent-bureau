@@ -102,6 +102,13 @@ type InternalToolExecuteOptions = ToolExecuteOptions & {
   executionHandle?: ExecutionHandle;
   privilegedContextMirrorHandle?: ExecutionHandle;
   parentCompletionHandle?: ExecutionHandle;
+  /**
+   * Reports whether the tool's own callback is still in flight behind
+   * `parentCompletionHandle`. The owner of that handle must not settle it while
+   * this reports `true`: the callback may ignore cancellation and keep running
+   * long after the raced execution promise has already rejected.
+   */
+  onParentCompletionPending?: (pending: boolean) => void;
   [executionCallbackStartSymbol]?: () => void;
 };
 
@@ -1199,11 +1206,22 @@ export function createTool<
       options[executionCallbackStartSymbol]?.();
       const runner = Promise.resolve(resolvedExecute(parsed, toolContext as unknown as TContext));
       if (options.parentCompletionHandle) {
+        // The callback now owns the parent handle's completion. Report that it
+        // is in flight so the parent's owner does not settle it from a result
+        // that was produced by racing an abort against a callback that is still
+        // running. The release is unconditional: an async iterable result skips
+        // the settle below because a stream owns the rest of the lifecycle, but
+        // the callback itself is finished either way.
+        options.onParentCompletionPending?.(true);
         void runner.then(
           (result) => {
             if (!isAsyncIterable(result)) options.parentCompletionHandle?.settle(result);
+            options.onParentCompletionPending?.(false);
           },
-          (error) => options.parentCompletionHandle?.settle(error),
+          (error) => {
+            options.parentCompletionHandle?.settle(error);
+            options.onParentCompletionPending?.(false);
+          },
         );
       }
       if (options.executionHandle) {

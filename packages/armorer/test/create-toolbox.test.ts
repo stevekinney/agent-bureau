@@ -3938,6 +3938,55 @@ describe('createToolbox', () => {
     expect(toolbox.activeExecutions).toBe(0);
   });
 
+  it('keeps a running callback unfinished when the tool deadline timer beats the parent timer', async () => {
+    const timing = createManualToolboxDeadlineTiming();
+    let release!: () => void;
+    const toolbox = createToolbox([
+      createTool({
+        name: 'tool-deadline-race',
+        description: 'Returns only after an external release',
+        input: z.object({}),
+        async execute() {
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          return 'late result';
+        },
+      }),
+    ]);
+    const execution = toolbox.execute(
+      { id: 'tool-deadline-race-call', name: 'tool-deadline-race', arguments: {} },
+      {
+        requestContext: { ...approvalRequestContext, deadline: 10 },
+        ...timing.options,
+      },
+    );
+    while (!release) await Promise.resolve();
+
+    // Both the toolbox parent and the tool arm their own timer for the same
+    // absolute deadline. Firing only the tool's timer (scheduled second) is the
+    // interleaving where the parent is never marked abort-requested.
+    expect(timing.scheduledDelays()).toEqual([10, 10]);
+    timing.setNow(10);
+    timing.fireLastDeadline();
+
+    await expect(execution).resolves.toMatchObject({
+      outcome: 'error',
+      errorMessage: 'Execution deadline exceeded',
+    });
+    let idle = false;
+    const whenIdle = toolbox.whenIdle().then(() => {
+      idle = true;
+    });
+    await Promise.resolve();
+    expect(idle).toBe(false);
+
+    release();
+    await whenIdle;
+    expect(idle).toBe(true);
+    expect(toolbox.activeExecutions).toBe(0);
+  });
+
   it('returns unconsumed child streams before toolbox shutdown resolves', async () => {
     let returned = 0;
     const toolbox = createToolbox([
