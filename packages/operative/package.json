@@ -1,6 +1,6 @@
 {
   "name": "@lostgradient/operative",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "A composable agent loop that wires Armorer and Conversationalist into the standard agentic cycle. Includes provider subpaths for Anthropic, OpenAI, and Gemini (dynamically imported — zero-SDK-if-unused).",
   "keywords": [
     "ai",
@@ -240,8 +240,8 @@
   },
   "dependencies": {
     "@lostgradient/weft": "^0.20.0",
-    "armorer": "^2.0.0",
-    "conversationalist": "^1.0.0"
+    "armorer": "^2.0.1",
+    "conversationalist": "^1.0.1"
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "^0.122.0",
