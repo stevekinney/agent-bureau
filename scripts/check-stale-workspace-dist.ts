@@ -129,11 +129,19 @@ export function computeEffectiveSourceMtimes(
  * `interoperability` — keep their runtime tests in a sibling `test/` directory they also
  * exclude, leaving only conversationalist's two in-`src` `.test-d.ts` type-tests.
  *
- * The stronger guarantee is structural: every package builds from an explicit entry list
- * (each `tsdown.config.ts`'s `entry` map, or interoperability's `bun build ./src/index.ts
- * ./src/embeddings.ts`), no test file is one of those entries, and no source file anywhere in
- * the repository imports a `.test.ts`/`.test-d.ts` module — so a test file can't be pulled into
- * a bundle transitively either. Editing one therefore cannot make any `dist/` stale.
+ * The structural argument has two halves, and only the first is entry-driven. *Bundling* is:
+ * every package emits JavaScript from an explicit entry list (each `tsdown.config.ts`'s `entry`
+ * map, skills' `entrypoints` array, interoperability's `bun build ./src/index.ts
+ * ./src/embeddings.ts`), no test file is one of those entries, and no source file anywhere in the
+ * repository imports a `.test.ts`/`.test-d.ts` module — so a test file cannot be pulled into a
+ * bundle transitively either.
+ *
+ * *Declaration* emit is not entry-driven. Packages that run `tsc --emitDeclarationOnly --project
+ * tsconfig.build.json` compile whatever `include` minus `exclude` selects, so a type-test file is
+ * only kept out of `dist/` by that config's `exclude`. `packages/skills` previously excluded
+ * `**\/*.test.ts` but not `**\/*.test-d.ts` and duly emitted `package-graph.test-d.d.ts`; that
+ * exclude is now aligned with the rest of the workspace. Keep them aligned — this suffix list and
+ * those `exclude` arrays have to agree for the reasoning above to hold.
  *
  * Deliberately kept to these two suffixes. Excluding more silently weakens the guard, and this
  * is a suffix match on the *file* — never a `src/test/` directory skip, since `src/test/index.ts`
