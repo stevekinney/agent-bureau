@@ -157,20 +157,13 @@ definition to validate against. `DiagnosticAgentRun` is the handle for exactly
 that case.
 
 ```ts
+// AB-34 classifies a recovered run as independently owned, so the required
+// capabilities in that amendment apply to it exactly as they do to AgentRun.
+// Its deliberate omission of unwrap()/output() is unrelated and stands.
 export interface DiagnosticAgentRun extends AsyncIterable<RunEvent> {
   result(): Promise<RunResult<unknown, false>>;
   abort(reason?: string): void;
   [Symbol.dispose](): void;
-
-  // Added by AB-34, by the identical argument that adds them to RunOutcomeBase.
-  // A recovered run is classified independently owned in the classification
-  // table, so it must carry the same inspect, observe, and cleanup surface. Its
-  // deliberate omission of unwrap()/output() is unrelated and stands.
-  snapshot(): StartedWorkSnapshot<RunStatus>;
-  subscribeSnapshot(listener: (snapshot: StartedWorkSnapshot<RunStatus>) => void): () => void;
-  children(options?: { readonly recursive?: boolean }): readonly ChildWorkDescriptor[];
-  abortChild(childId: string, reason?: string): void;
-  closed(): Promise<CleanupOutcome>;
 }
 ```
 
@@ -606,55 +599,45 @@ export interface StartedWorkSnapshot<
 
 A snapshot is a plain, frozen data value. Reading it never starts work, never blocks, and never mutates state—repeated reads before a represented change return the identical object by reference, which is what lets a caller diff-by-identity instead of deep-comparing. `startedAt` and `lastTransitionAt` are this contract's floor; the richer timestamp and progress fields AB-34's acceptance criteria alludes to (heartbeat, expected-next-observation, and the rest) are AB-88's specialization, not repeated here. `result` is the terminal-result field the acceptance criteria names—for a resource whose result is large or requires its own retrieval path (an `AgentRun`'s full `RunResult`, a `RunReport`), `result` on the snapshot MAY be a reference or summary rather than the full value, with the owning handle's own `result()`/`getRunReport`-style method as the authoritative retrieval path; the snapshot's obligation is only to mark, truthfully, whether a terminal result exists.
 
-### Live-handle additions
+### Required capabilities
 
-Two capabilities are added to `RunOutcomeBase` (and therefore to `AgentRun` and, by the same argument, to any future independently owned live handle). Both are additions—nothing already specified by AB-15 changes shape or signature:
+This contract states **what every independently owned live handle must let a
+caller do**. It deliberately does not declare the method signatures.
 
-```ts
-export interface RunOutcomeBase<
-  O = never,
-  H extends boolean = false,
-> extends AsyncIterable<RunEvent> {
-  result(): Promise<RunResult<O, H>>;
-  unwrap(): Promise<UnwrappedValue<O, H>>;
+That boundary was drawn the hard way. An earlier revision of this amendment
+declared a concrete `RunOutcomeBase` surface — `snapshot()`, `subscribeSnapshot()`,
+`children()`, `abortChild()`, `closed()` — and three rounds of review found the
+same failure repeatedly: every prose refinement created a new obligation on those
+signatures, and each fix introduced a fresh inconsistency (`abortChild` declared
+`void` here and `boolean` there; an "awaitable durable acknowledgement" promised
+with no method to carry it). The signatures belong to the issues that implement
+them, which have the runtime context to get them right. This document fixes the
+requirements those signatures must satisfy, and nothing more.
 
-  // New in this amendment.
-  snapshot(): StartedWorkSnapshot<RunStatus>;
-  subscribeSnapshot(listener: (snapshot: StartedWorkSnapshot<RunStatus>) => void): () => void;
-  children(options?: { readonly recursive?: boolean }): readonly ChildWorkDescriptor[];
-  abortChild(childId: string, reason?: string): void;
-  closed(): Promise<CleanupOutcome>;
-}
+| Capability                      | What it must guarantee                                                                                                                                                                                                                                                                                                                        | Signature owned by |
+| :------------------------------ | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :----------------- |
+| Cached snapshot                 | A framework-neutral, immutable read with stable identity and a monotonic `revision`. Reading never starts work, never blocks, never mutates. Repeated reads before a represented change return the identical object by reference, so callers diff by identity.                                                                                | AB-88              |
+| Non-consuming state observation | Any number of independent observers on one resource. Disposal ends _that_ observation only — never the work, never another observer's. A newly registered observer receives the current state before registration returns, closing the read-then-subscribe gap. Subscribing to already-terminal work delivers the terminal state immediately. | AB-88              |
+| Child discovery                 | The ownership graph is inspectable from the root to arbitrary depth. Runtime-created children stay visible even when never returned to a caller. Descriptors carry enough edge information to reassemble the tree without promoting any child to an independently owned resource.                                                             | AB-50              |
+| Scoped child cancellation       | Cancelling one child never propagates to its siblings. Idempotent: a repeat request, or one against already-terminal or unknown work, is not an error. It is distinct from `abort()`, which AB-15 fixed and this amendment does not change.                                                                                                   | AB-50              |
+| Cleanup acknowledgement         | Awaitable, and always resolves rather than rejecting — a failed or unresolved teardown is a value, not a thrown error. It reports at least: cleanup was not required, completed, failed, or could not be determined. For durable work it resolves only after the cancellation record is committed.                                            | AB-37              |
 
-// A child descriptor is a snapshot plus the edges needed to keep walking. Its
-// `parentId` is always present — that is what makes a flat recursive result
-// reassemblable into the tree — and `hasChildren` lets a caller decide whether
-// descending is worthwhile without fetching first.
-export interface ChildWorkDescriptor extends StartedWorkSnapshot {
-  readonly parentId: string;
-  readonly hasChildren: boolean;
-}
-```
+Two constraints bind every implementer of the above, and are the part this
+document is actually deciding:
 
-`snapshot()` is the cached, framework-neutral, immutable read the acceptance criteria requires—it is the natural extension point for a Svelte rune, a React hook, or a plain poll loop to project into, without any of them touching `AsyncIterable<RunEvent>`. `subscribeSnapshot()` is a non-consuming _state_ subscription: any number of independent listeners can register against the same run's snapshot at once, and disposing one listener's subscription neither aborts the run nor removes another listener's registration. This is the deliberate answer to the non-goal about observer disposal: disposal ends _that_ observation, never the work. Because `subscribeSnapshot()` delivers the current snapshot synchronously to a newly registered listener before returning its unsubscribe function, a caller who reads a snapshot, then subscribes, cannot miss a transition that happened in between—the first delivered value is always current as of subscription time, closing the read-subscribe-read gap the acceptance criteria calls out by name.
+**Vocabulary.** Where a concept matches armorer's existing one exactly, adopt
+armorer's term rather than inventing a synonym — `revision`, and the cleanup
+outcome set `not-required | completed | failed | unresolved`
+(`packages/armorer/src/execution-lifecycle.ts:26`). Where no exact match exists,
+do not contort the surface to borrow one; `ExecutionHandle` carries
+execution-machinery members with no public equivalent, and coupling a public API
+to another package's internals makes every upstream change a breaking rename.
 
-`subscribeSnapshot()` covers state observation only, and does not by itself satisfy "application streaming, telemetry, operator monitoring, and test recording can observe the same work simultaneously" for _event_ fan-out—the iterator stays single-consumption exactly as AB-15 already specifies (`CompletedRunIterationError` on a second consumer is unchanged), and this amendment does not add a multicast event stream to sit alongside it. Multicast event observation is AB-88's specialization: its own acceptance criteria already require exactly this ("`AgentRun` observation is non-consuming: application streaming, telemetry, a watchdog, an operator, and a test recorder can observe one run independently"), and armorer's `ExecutionLifecycle.subscribe(listener)` (execution-lifecycle.ts:120) is existing prior art for a multicast event subscription sitting next to a single-consumption iterator. This amendment's contribution is narrower and structural: whichever mechanism AB-88 lands on, no observer's disposal may consume another observer's stream or abort the work—that invariant is fixed here so AB-88 cannot relitigate it.
-
-`children()` returns parent-owned descriptors — snapshots plus their edges, not live handles — without promoting any child to an independently owned, Bureau-reachable resource.
-
-**Recursion is explicit, because a flat list of plain snapshots cannot satisfy "the ownership graph is recursively inspectable from the root".** A child has no standalone locator and a bare `StartedWorkSnapshot` carries no `children()` of its own, so traversal would stop after one level. Two mechanisms close that:
-
-- `children({ recursive: true })` returns the whole subtree as a flat list, each entry carrying `parentId`, so a caller can reassemble the tree without another call.
-- `hasChildren` on each descriptor lets a caller walking level by level know whether descending is worthwhile.
-
-Default (`recursive` absent or `false`) stays one level, so the common case pays nothing for a deep subtree it does not want. `abortChild(childId, reason?)` targets any descendant the recursive walk exposed, not only a direct child — the identifier is what scopes it. Scoped cancellation of one child is a distinct method, not an overload of `abort(reason?: string): void` (which AB-15 already shipped and this amendment does not change):
-
-```ts
-// New in this amendment, alongside abort(reason?)—not a replacement for it.
-abortChild(childId: string, reason?: string): boolean; // idempotent: false if already terminal or unknown
-```
-
-`abortChild` is the mechanism behind "abort one child without canceling its sibling" from AB-34's own verification walk. AB-50 owns the concrete implementation; this amendment fixes only the shape and the invariant (targeting one child never propagates to its siblings).
+**Naming.** The state-observation capability must not be called `subscribe`.
+`ActiveRun.subscribe` (`create-run.ts:53`) and `Bureau.subscribe`
+(`create-bureau.ts:3800`) already mean _event_ subscription in this package, and
+reusing the name for state observation on a sibling handle would read as the same
+thing and mean something else.
 
 ### Handles versus locators
 
@@ -662,28 +645,18 @@ An in-process live start returns a handle synchronously and non-thenably—this 
 
 ### Abort and cleanup
 
-`abort(reason?: string): void` is idempotent everywhere: calling it once cancellation has already been requested, or after the work is already terminal, has no additional effect and never throws. Today's `AgentRun.abort()` already satisfies this by construction—it forwards to `AbortController.abort()`, which is idempotent on its own terms. `abort()` only _requests_ cancellation; it does not itself report that teardown finished. A separate, always-resolving cleanup acknowledgement reports the outcome honestly:
-
-```ts
-export interface CleanupOutcome {
-  readonly status: 'not-required' | 'completed' | 'failed' | 'unresolved';
-  readonly error?: unknown;
-}
-
-// Declared on the live-handle surface above, alongside abort(). Repeated here
-// for locality; the normative declaration is the interface, not this fence.
-closed(): Promise<CleanupOutcome>;
-```
-
-`closed()` never rejects—a failed or unresolved teardown is a resolved value, not a thrown error, so a caller awaiting cleanup always gets an answer instead of having to wrap the call in its own try/catch to find out whether cleanup itself failed.
-
-The four literals are armorer's `ExecutionCleanupOutcome` verbatim (`packages/armorer/src/execution-lifecycle.ts:26`), which is what "adopt armorer's vocabulary where the concepts match exactly" means in practice. `not-required` covers work that was already terminal when cleanup was requested, and `unresolved` covers teardown that neither completed nor definitively failed — a timeout, or a side effect whose outcome is unknown. Implementers get one enum, not two dialects.
+`abort(reason?: string): void` is idempotent everywhere: calling it once cancellation has already been requested, or after the work is already terminal, has no additional effect and never throws. Today's `AgentRun.abort()` already satisfies this by construction—it forwards to `AbortController.abort()`, which is idempotent on its own terms. `abort()` only _requests_ cancellation; it does not itself report that teardown finished. A separate cleanup acknowledgement reports the outcome honestly, with the
+guarantees listed under [Required capabilities](#required-capabilities). It is
+awaitable and always resolves: a failed or unresolved teardown is a value, not a
+thrown error, so a caller awaiting cleanup always gets an answer rather than
+wrapping the call to discover whether cleanup itself failed. AB-37 owns its
+signature.
 
 **Bureau's `abortRun` is a known non-conformance, not a new rule.** `packages/bureau/src/create-bureau.ts:2916` throws `BureauError('Run is already {status}', 'CONFLICT')` when `abortRun(id)` is called against a run that is not currently `'running'`. That is not idempotent—a second `abortRun` call, or a call arriving after the run finished on its own, fails instead of returning an already-terminal outcome. This amendment does not fix it (no runtime code changes here); it records the gap, names `packages/bureau/src/create-bureau.ts:2916-2929` as its exact location, and assigns remediation ownership to AB-37, which owns cancellation and asynchronous shutdown and already covers the durable fencing and cleanup-acknowledgement semantics this fix depends on. Filing it separately now would likely be rewritten once AB-37 settles those semantics. Until that remediation lands, `abortRun` is a **declared exception** to the idempotent-abort rule—the same escape hatch the vault brief's Definition of Done anticipates ("the decision document records intentional exceptions and their owners")—not a silent contradiction.
 
-Armorer's existing `ExecutionHandle.abort(source?, reason?): boolean` (`packages/armorer/src/execution-lifecycle.ts:80`) already conforms: it returns whether _this_ call changed anything, so a repeated call returns `false` rather than throwing. Its `whenSettled(): Promise<ExecutionSnapshot>` (line 83's neighbor) is the closest existing prior art for `closed()` above, and its `ExecutionCleanupOutcome` (`'not-required' | 'completed' | 'failed' | 'unresolved'`, line 26) is the closest existing prior art for `CleanupOutcome`. Settled: adopt armorer's vocabulary where the concepts match exactly — the `revision` field and the shape of the cleanup-outcome enum — but keep this contract's own `snapshot()`, `subscribeSnapshot()`, and `closed()` method names rather than armorer's `whenSettled()`. The snapshot notifier is deliberately not called `subscribe`: `ActiveRun.subscribe` (`create-run.ts:53`) and `Bureau.subscribe` (`create-bureau.ts:3800`) already mean _event_ subscription in this same package, so reusing the name on a sibling run handle would read as the same thing and mean something else. `ExecutionHandle` also carries execution-machinery members with no public-API equivalent, so adopting its surface verbatim would couple operative's public API to another package's internal machinery and make any future armorer change a breaking rename here.
+Armorer's existing `ExecutionHandle.abort(source?, reason?): boolean` (`packages/armorer/src/execution-lifecycle.ts:80`) already conforms: it returns whether _this_ call changed anything, so a repeated call returns `false` rather than throwing. Its `whenSettled(): Promise<ExecutionSnapshot>` (line 83's neighbor) is the closest existing prior art for the cleanup acknowledgement this contract requires, and its `ExecutionCleanupOutcome` (`'not-required' | 'completed' | 'failed' | 'unresolved'`, line 26) is the outcome set [Required capabilities](#required-capabilities) adopts. The naming and vocabulary constraints recorded there — borrow armorer's terms where the concepts match exactly, and do not call state observation `subscribe` — bind whoever declares the signatures.
 
-Parent-owned children are targetable without becoming independently owned resources: a parent handle exposes both discovery (`children()`, see [Live-handle additions](#live-handle-additions)) and scoped cancellation (`abortChild(childId, reason?)`, narrowing to one child) without any child gaining its own Bureau-reachable locator by default. This is the same selector-based spirit armorer's `ExecutionLifecycle.inspect(selector?)`/`abort(selector?)` already uses at the tool-execution layer—one identifier in, one target affected—and it is how "abort one child without canceling its sibling" (named explicitly in AB-34's verification walk) is satisfiable without contradicting the intake clarification's parent-owned default.
+Parent-owned children are targetable without becoming independently owned resources: a parent handle must expose both child discovery and scoped child cancellation (see [Required capabilities](#required-capabilities)) without any child gaining its own Bureau-reachable locator by default. This is the same selector-based spirit armorer's `ExecutionLifecycle.inspect(selector?)`/`abort(selector?)` already uses at the tool-execution layer—one identifier in, one target affected—and it is how "abort one child without canceling its sibling" (named explicitly in AB-34's verification walk) is satisfiable without contradicting the intake clarification's parent-owned default.
 
 ### Durable cancellation
 
@@ -722,7 +695,7 @@ An unsupported capability is declared, not discovered by failure: every snapshot
 
 The typed `unsupported-capability` outcome applies to **locator APIs only** — the `Bureau.abortRun`-style operations that already return a value and can therefore carry one. It deliberately does **not** apply to a live handle's `abort()`. AB-15 fixed that signature as `abort(reason?: string): void`, non-throwing, and this amendment does not reopen it; a `void` method has no channel for a typed outcome, so requiring one would make the two rules mutually unsatisfiable. On a handle whose snapshot declares `cancellable: false`, `abort()` is a no-op that neither throws nor changes state, and its non-effect is observable the honest way: the snapshot's `status` does not move to a cancelling state, and `closed()` resolves `not-required`. Callers who need a typed refusal use the locator API.
 
-Subscribing to work that is already terminal is not a missed-transition bug: `subscribeSnapshot()`'s synchronous first delivery (see [Live-handle additions](#live-handle-additions)) means a terminal-before-subscribe caller receives the terminal snapshot immediately, satisfying "monitor a result without missing it" the same way a not-yet-terminal caller's normal transition delivery does.
+Observing work that is already terminal is not a missed-transition bug: the deliver-current-state-on-registration guarantee in [Required capabilities](#required-capabilities) means a terminal-before-observation caller receives the terminal state immediately, satisfying "monitor a result without missing it" the same way a not-yet-terminal caller's normal transition delivery does.
 
 Reusing an idempotency key for a request that does not canonically match the original returns a typed conflict outcome, never a silent overwrite and never a second start—this is the vocabulary section's idempotency-key rule restated as a control-flow requirement.
 
@@ -752,9 +725,21 @@ accepts a key today. This contract fixes the semantics any key-accepting
 operation must satisfy, so the first one cannot invent different rules, but
 choosing which operations take a key and what carries it is out of scope here.
 
-### Compile-ready examples
+### Illustrative examples
 
-Three examples, matching AB-34's own acceptance-criteria bullet, added to AB-15's existing `## Compile-ready examples` section:
+Three scenarios from AB-34's own acceptance-criteria bullet, showing what the
+[required capabilities](#required-capabilities) look like in use.
+
+**These are not compile-ready and are not normative on naming.** The member names
+below are placeholders for the capabilities, not declarations — this amendment
+deliberately does not declare the signatures, so AB-88, AB-50, and AB-37 may
+choose different names as long as they satisfy the guarantees and honour the two
+constraints recorded above. What the examples _do_ fix is the shape of each
+scenario: what a caller must be able to accomplish, and in what order.
+
+`scripts/documentation-examples.test.ts` tracks every capability these examples
+exercise against its owning issue, so a member cannot appear here without an
+owner, and an owner cannot disappear while the example still calls it.
 
 ```ts
 // A direct run: snapshot and subscribe alongside the existing result()/unwrap().

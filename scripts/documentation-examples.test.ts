@@ -19,10 +19,17 @@ import { describe, expect, test } from 'bun:test';
  * to AB-50. Type-checking would fail against today's source by design.
  *
  * So this harness checks what is both checkable and actually at risk: every member
- * an example invokes on a run handle is either declared by this contract
- * document itself, or listed below as pending with the issue that owns it. Both
- * directions are asserted, so a pending entry cannot outlive its implementation
- * and a new example cannot reference an API nobody owns.
+ * an example invokes on a run handle is either declared by this contract document
+ * itself, or listed below as a required capability with the issue that owns its
+ * signature. Both directions are asserted, so an entry cannot outlive its
+ * implementation and a new example cannot reference a capability nobody owns.
+ *
+ * AB-34 was re-scoped after three review rounds: it states the capabilities every
+ * independently owned handle must provide and leaves the signatures to AB-88,
+ * AB-50, and AB-37. So the map below is no longer "declared here, unimplemented"
+ * — it is "required here, declared by that issue". The examples use placeholder
+ * names; the owning issue picks the real one. What this harness still guarantees
+ * is that no capability appears in an example without a named owner.
  *
  * Members are matched against declared interface members rather than by grepping
  * whole files. An earlier draft of this harness grepped, and reported
@@ -37,10 +44,15 @@ const documentPath = resolve(repositoryRoot, 'documentation/operative-type-safe-
 const agentRunPath = resolve(repositoryRoot, 'packages/operative/src/agent-run.ts');
 
 /**
- * Members the contract ratifies that no package implements yet, each naming the
- * issue that owns delivery. When that issue lands, its entry must be removed —
- * the "quietly implemented" test below fails if an implemented member is still
- * listed, so this cannot rot into a permanent excuse list.
+ * Capabilities this contract requires, each naming the issue that owns declaring
+ * and implementing the signature. When that issue lands, its entry must be
+ * removed — the "quietly implemented" test below fails if an implemented member
+ * is still listed, so this cannot rot into a permanent excuse list.
+ *
+ * The key is the placeholder name used in the illustrative examples. The owning
+ * issue may choose a different one; when it does, this map and the examples move
+ * together, and the test that every invoked member is accounted for is what
+ * forces that.
  */
 const PENDING_IMPLEMENTATION: Readonly<Record<string, string>> = {
   snapshot: 'AB-88',
