@@ -19,7 +19,11 @@
 import type { GoogleGenAI } from '@google/genai';
 
 import type { GeminiEmbeddingClient } from './embeddings/gemini.ts';
-import type { GeminiGenerativeModel, GeminiStreamingModel } from './types.ts';
+import type {
+  GeminiCacheCreatingClient,
+  GeminiGenerativeModel,
+  GeminiStreamingModel,
+} from './types.ts';
 
 /** Fails to compile unless `T` resolves to exactly `true`. */
 type Assert<T extends true> = T;
@@ -37,4 +41,20 @@ export type GoogleGenAiSatisfiesStreamingModel = Assert<
 /** `createGeminiEmbedder({ client })` accepts a real `GoogleGenAI`. */
 export type GoogleGenAiSatisfiesEmbeddingClient = Assert<
   GoogleGenAI extends GeminiEmbeddingClient ? true : false
+>;
+
+/**
+ * The provider-managed context cache can call `caches.create` on a real
+ * `GoogleGenAI` — as `createGeminiProvider`'s own imported client, and as a
+ * caller's `client` or `cacheClient`.
+ *
+ * This pins down that context caching lives on the `caches` namespace of the
+ * maintained SDK's top-level client. It is emphatically not the deprecated
+ * `@google/generative-ai` `getGenerativeModelFromCachedContent` shape, which
+ * bound a cache to a model handle at construction time and which this SDK does
+ * not carry forward: here a cache is a standalone named resource, created
+ * through `caches.create` and referenced by name on an ordinary request.
+ */
+export type GoogleGenAiSatisfiesCacheCreatingClient = Assert<
+  GoogleGenAI extends GeminiCacheCreatingClient ? true : false
 >;

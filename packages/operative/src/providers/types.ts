@@ -250,10 +250,75 @@ export interface GeminiGenerateContentResult {
       }>;
     };
   }>;
-  usageMetadata?: {
-    promptTokenCount?: number;
-    candidatesTokenCount?: number;
-    totalTokenCount?: number;
+  usageMetadata?: GeminiUsageMetadata;
+}
+
+/**
+ * Minimal shape of a `@google/genai` `GenerateContentResponseUsageMetadata`.
+ *
+ * `promptTokenCount` INCLUDES `cachedContentTokenCount` — the SDK states it
+ * outright: "When `cached_content` is set, this also includes the number of
+ * tokens in the cached content." That makes Gemini match OpenAI's inclusive
+ * accounting rather than Anthropic's disjoint buckets, which is why
+ * `buildGeminiUsage` subtracts rather than passing the count straight through.
+ * Gemini reports no cache-write counterpart, so there is nothing to map to
+ * `cacheCreationTokens`.
+ */
+export interface GeminiUsageMetadata {
+  promptTokenCount?: number;
+  candidatesTokenCount?: number;
+  totalTokenCount?: number;
+  /** Tokens of the prompt served from a context cache, per the SDK's own docs. */
+  cachedContentTokenCount?: number;
+}
+
+/**
+ * Minimal shape of a `@google/genai` `CreateCachedContentParameters`.
+ *
+ * `model` is required in the SDK and required here. `config` is
+ * `CreateCachedContentConfig` — carrying `contents`, `systemInstruction`,
+ * `ttl`, `displayName`, `tools`, and `toolConfig` — widened to `unknown` for
+ * the same reason {@link GeminiGenerateContentRequest} widens its own
+ * payload-shaped fields: the SDK's config types are `interface`s with no
+ * implicit index signature, so a `Record<string, unknown>` here would take a
+ * real `GoogleGenAI` out of reach without a cast.
+ */
+export interface GeminiCreateCachedContentRequest {
+  /** Provider-native model id. Must match the model used to generate. */
+  model: string;
+  /** `CreateCachedContentConfig` in the SDK; omitted when no options are set. */
+  config?: unknown;
+}
+
+/**
+ * Minimal shape of a `@google/genai` `CachedContent`. Every field is optional
+ * in the SDK, so every field is optional here.
+ */
+export interface GeminiCachedContent {
+  /** Server-generated resource name — the handle passed back as `cachedContent`. */
+  name?: string;
+  displayName?: string;
+  model?: string;
+  createTime?: string;
+  updateTime?: string;
+  expireTime?: string;
+  /** `CachedContentUsageMetadata` in the SDK, carrying `totalTokenCount`. */
+  usageMetadata?: { totalTokenCount?: number };
+}
+
+/**
+ * Structural interface for the `caches` namespace of a `@google/genai` client.
+ *
+ * Deliberately narrower than the SDK's `Caches` class, which also exposes
+ * `get`, `list`, `update`, and `delete`. This package only ever creates a cache
+ * resource, so only `create` is named — a smaller surface for a caller's fake
+ * to satisfy, and the same minimal-interface rule the batch and generate
+ * interfaces follow. A real `GoogleGenAI` satisfies this; see
+ * `gemini-client-assignability.test-d.ts`.
+ */
+export interface GeminiCacheCreatingClient {
+  caches: {
+    create(params: GeminiCreateCachedContentRequest): Promise<GeminiCachedContent>;
   };
 }
 
@@ -269,6 +334,74 @@ export interface GeminiProviderOptions extends BaseProviderOptions {
    * with no shape validation.
    */
   baseURL?: string;
+  /**
+   * Names an already-created `CachedContent` resource to serve this run's
+   * prompt prefix from, lowered verbatim to `config.cachedContent`.
+   *
+   * Named after the SDK's own `GenerateContentConfig.cachedContent` field
+   * rather than after anything on {@link AnthropicProviderOptions}, because
+   * there is no Anthropic analog to rename it to: Anthropic's prompt cache is
+   * an unnamed, per-request `cache_control` breakpoint with no handle, while
+   * Gemini's is an explicitly-created server resource addressed by its
+   * server-generated name.
+   *
+   * Mutually exclusive with {@link GeminiProviderOptions.assembler} +
+   * {@link GeminiProviderOptions.contextBudget}: one names a cache you own,
+   * the other has the provider create and own one. Setting both is rejected at
+   * factory-construction time rather than silently resolved.
+   */
+  cachedContent?: string;
+  /**
+   * Enables prompt-cache-aware context assembly. When set (together with
+   * {@link GeminiProviderOptions.contextBudget}), each call runs `assembler`
+   * in stable-prefix mode instead of sending the conversation verbatim. The
+   * `cacheBoundary` mark on the assembled system/pinned prefix splits the
+   * conversation: everything up to and including the boundary is created once
+   * as a `CachedContent` resource, and every request then sends only the tail
+   * and references the cache by name.
+   *
+   * Same name, same type, and the same `assembler && contextBudget`
+   * engagement condition as {@link AnthropicProviderOptions.assembler} — the
+   * concept genuinely matches, so the name does too. What differs is the
+   * lowering: `toGeminiMessages` documents `cacheBoundary` as a wire-level
+   * no-op for Gemini, because Gemini has no per-message annotation to lower it
+   * to. The mark is still the mechanism here; it just steers an out-of-band
+   * `caches.create` call rather than a `cache_control` field.
+   */
+  assembler?: ContextAssembler;
+  /** Token budget passed to `assembler`. Required when `assembler` is set. */
+  contextBudget?: TokenBudget;
+  /** Passed through to `assembler` as `pinnedMessages` (e.g. reference docs, tool usage notes). */
+  pinnedMessages?: ReadonlyArray<Message>;
+  /**
+   * TTL for the provider-created cache resource, as the SDK's duration string
+   * (`'3600s'`, up to nine fractional digits). Passed to `caches.create` as
+   * `config.ttl`; when omitted, Gemini applies its own server-side default.
+   *
+   * The deliberate divergence from
+   * {@link AnthropicProviderOptions.extendedCacheTtl}: that option is a
+   * boolean because Anthropic offers exactly two fixed lifetimes (5 minutes,
+   * or 1 hour) for an annotation on a request that is about to be sent
+   * anyway. Gemini's TTL is an arbitrary duration on a standalone resource
+   * with its own lifecycle, so a boolean could not express it and the
+   * `extended` framing would be a fiction. No effect unless `assembler` +
+   * `contextBudget` actually produce a provider-created cache — a cache named
+   * through {@link GeminiProviderOptions.cachedContent} carries the TTL it was
+   * created with.
+   */
+  cacheTtl?: string;
+  /**
+   * Cache-capable client used for the one `caches.create` call the
+   * `assembler` + `contextBudget` path makes.
+   *
+   * Only consulted when {@link GeminiProviderOptions.client} is also supplied
+   * and does not itself expose `caches`; a real `GoogleGenAI` does, and so
+   * does the client this factory imports for itself, so this is purely an
+   * escape hatch for a hand-written fake or a narrowed wrapper. Supplying
+   * neither, with the assembler path enabled and an injected client that has
+   * no `caches`, is rejected at factory-construction time.
+   */
+  cacheClient?: GeminiCacheCreatingClient;
 }
 
 // ── Streaming Types ─────────────────────────────────────────────────

@@ -1,12 +1,9 @@
 import { parseAnthropicToolCalls } from 'armorer/adapters/anthropic';
-import type { ConversationHistory, Message, MessageInput } from 'conversationalist';
-import { appendMessages, createProjection } from 'conversationalist';
 import { toAnthropicMessages } from 'conversationalist/adapters/anthropic';
 import type { ToolCallInput } from 'interoperability';
 
-import type { TokenBudget } from '../context/token-budget.ts';
-import type { ContextAssembler } from '../context/types.ts';
 import { ProviderError, ToolCallParseError } from './errors.ts';
+import { createCacheAwareAssembly } from './shared/cache-aware-assembly.ts';
 import { resolveAnthropicEffort } from './shared/effort.ts';
 import { resolveAnthropicModel } from './shared/model-registry.ts';
 import { resolveCommonParameters } from './shared/resolve-common-parameters.ts';
@@ -22,60 +19,6 @@ import type {
   StreamingGenerateFunction,
   StreamingHandle,
 } from './types.ts';
-
-/**
- * Converts an assembled `Message` (from `ContextAssembler`) into the
- * `MessageInput` shape `appendMessages` expects, preserving the
- * `cacheBoundary` mark a stable-prefix assembly sets on the boundary message.
- */
-function toMessageInput(message: Message): MessageInput {
-  const content: MessageInput['content'] =
-    typeof message.content === 'string' ? message.content : [...message.content];
-  return {
-    role: message.role,
-    content,
-    metadata: { ...message.metadata },
-    hidden: message.hidden,
-    ...(message.toolCall ? { toolCall: message.toolCall } : {}),
-    ...(message.toolResult ? { toolResult: message.toolResult } : {}),
-    ...(message.tokenUsage ? { tokenUsage: message.tokenUsage } : {}),
-    ...(message.cacheBoundary ? { cacheBoundary: true as const } : {}),
-  };
-}
-
-/**
- * Creates a stateful helper that runs `assembler` in stable-prefix mode on
- * every call and folds the result into an incremental `ConversationHistory`
- * through `createProjection` — the same conversation-level prefix-extension
- * mechanism AB-98 built for incremental streaming projections. Reusing one
- * projection instance across calls means the unchanged stable prefix is
- * never re-processed, only the new tail; the `cacheBoundary` mark that
- * landed on the prefix's last message the first time it was appended is
- * therefore preserved untouched for as long as it stays a prefix extension,
- * which is exactly what lets Anthropic's `cache_control` breakpoint survive
- * across steps.
- */
-function createCacheAwareAssembly(
-  assembler: ContextAssembler,
-  budget: TokenBudget,
-  pinnedMessages?: ReadonlyArray<Message>,
-): (context: GenerateContext) => ConversationHistory {
-  const projection = createProjection<Message>({
-    identify: (message) => message.id,
-    reduce: ({ conversation, event }) => appendMessages(conversation, toMessageInput(event)),
-  });
-
-  return (context: GenerateContext): ConversationHistory => {
-    const { messages } = assembler({
-      conversation: context.conversation,
-      budget,
-      stablePrefix: true,
-      ...(pinnedMessages ? { pinnedMessages } : {}),
-    });
-    projection.apply(messages);
-    return projection.snapshot();
-  };
-}
 
 /**
  * Build a provider-neutral {@link TokenUsage} from an Anthropic `usage` payload.
