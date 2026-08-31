@@ -78,12 +78,14 @@ export interface BaseProviderOptions {
  * `create` returns a plain `Promise` rather than mirroring the SDK's real
  * overloaded signature (`MessageCreateParamsNonStreaming` /
  * `MessageCreateParamsStreaming` / `MessageCreateParamsBase`, each returning a
- * different `APIPromise<...>` shape). TypeScript only checks the *last*
- * overload — `create(params: MessageCreateParamsBase, options?): APIPromise<Stream<RawMessageStreamEvent> | Message>`
- * — when comparing an overloaded method against a single-signature interface
- * member, so a real `Anthropic` is assignable here as long as this return
- * type is broad enough for that overload's resolved value type; see
- * `anthropic-client-assignability.test-d.ts`.
+ * different `APIPromise<...>` shape). This shape is pinned against a real
+ * `Anthropic` client (SDK 0.122.0) by
+ * `anthropic-client-assignability.test-d.ts`, confirmed empirically rather
+ * than derived from a documented TypeScript overload-assignability rule —
+ * `AnthropicMessageResponse` widening `stop_reason` and the cache-token
+ * `usage` fields to allow `null` was what made a real client satisfy this
+ * interface, since the SDK's `Message`/`Usage` types declare them nullable,
+ * not merely optional.
  */
 export interface AnthropicClient {
   messages: {

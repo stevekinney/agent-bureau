@@ -512,6 +512,17 @@ describe('Anthropic provider coverage', () => {
         content: [{ type: 'text' }],
         usage: { input_tokens: 3 },
       },
+      {
+        content: [{ type: 'text', text: 'No cache activity.' }],
+        // A real Anthropic response reports these as `null`, not merely
+        // omitted, when there was no cache activity — see
+        // `buildAnthropicUsage`'s doc comment.
+        usage: {
+          input_tokens: 7,
+          cache_creation_input_tokens: null,
+          cache_read_input_tokens: null,
+        },
+      },
     ]);
     const generate = createAnthropicProvider({
       model: 'claude-3-5-sonnet-20241022',
@@ -541,6 +552,14 @@ describe('Anthropic provider coverage', () => {
       content: '',
       usage: { prompt: 3, completion: 0, total: 3 },
     });
+    const anthropicResponseWithNullCacheTokens = await generate(makeContext());
+    expect(anthropicResponseWithNullCacheTokens.usage).toEqual({
+      prompt: 7,
+      completion: 0,
+      total: 7,
+    });
+    expect(anthropicResponseWithNullCacheTokens.usage).not.toHaveProperty('cacheCreationTokens');
+    expect(anthropicResponseWithNullCacheTokens.usage).not.toHaveProperty('cacheReadTokens');
 
     expect(client._calls[0]).toMatchObject({
       model: 'claude-3-5-sonnet-20241022',
@@ -576,6 +595,23 @@ describe('Anthropic provider coverage', () => {
       anthropicStreamEmptyEvents,
       [{ type: 'message_start' }, { type: 'message_delta' }, { type: 'message_stop' }],
       anthropicStreamMultiToolEvents,
+      [
+        {
+          type: 'message_start',
+          // A real Anthropic response reports these as `null`, not merely
+          // omitted, when there was no cache activity — see the streaming
+          // usage accumulator's doc comment in providers/anthropic.ts.
+          message: {
+            usage: {
+              input_tokens: 9,
+              cache_creation_input_tokens: null,
+              cache_read_input_tokens: null,
+            },
+          },
+        },
+        { type: 'message_delta' },
+        { type: 'message_stop' },
+      ],
     ]);
     const generate = createAnthropicProviderStream({
       model: 'claude-3-5-sonnet-20241022',
@@ -622,6 +658,21 @@ describe('Anthropic provider coverage', () => {
       { id: 'toolu_multi_01', name: 'get_weather', arguments: { location: 'Paris' } },
       { id: 'toolu_multi_02', name: 'get_weather', arguments: { location: 'London' } },
     ]);
+    const anthropicStreamingResponseWithNullCacheTokens = await generate({
+      ...makeContext(),
+      streaming: makeStreamingHandle(),
+    });
+    expect(anthropicStreamingResponseWithNullCacheTokens.usage).toEqual({
+      prompt: 9,
+      completion: 0,
+      total: 9,
+    });
+    expect(anthropicStreamingResponseWithNullCacheTokens.usage).not.toHaveProperty(
+      'cacheCreationTokens',
+    );
+    expect(anthropicStreamingResponseWithNullCacheTokens.usage).not.toHaveProperty(
+      'cacheReadTokens',
+    );
 
     const abortController = new AbortController();
     abortController.abort();

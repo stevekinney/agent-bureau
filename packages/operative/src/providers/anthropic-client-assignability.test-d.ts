@@ -16,19 +16,16 @@
  *
  * `messages.create` is additionally overloaded three times in the real SDK
  * (`MessageCreateParamsNonStreaming` / `...Streaming` / `...Base`, each
- * returning a different `APIPromise<...>` shape). TypeScript's structural
- * assignability check against a single-signature interface member only
- * considers the *last* overload —
- * `create(params: MessageCreateParamsBase, options?): APIPromise<Stream<RawMessageStreamEvent> | Message>`
- * — which is why {@link AnthropicMessageResponse} widens `stop_reason` and
- * the cache-token `usage` fields to allow `null` (the real `Message`/`Usage`
- * types declare them nullable, not merely optional), and why
+ * returning a different `APIPromise<...>` shape). The two assertions below
+ * are what actually pin the resulting shapes down — confirmed empirically
+ * against the installed SDK (0.122.0) rather than derived from a documented
+ * TypeScript overload-assignability rule. Two consequences fell out of
+ * making both pass: {@link AnthropicMessageResponse} widens `stop_reason`
+ * and the cache-token `usage` fields to allow `null` (the real
+ * `Message`/`Usage` types declare them nullable, not merely optional), and
  * {@link AnthropicStreamingClient} resolves to `Promise<AsyncIterable<...>>`
- * rather than a bare `AsyncIterable<...>` (the real overload's resolved
- * value can be a `Message`, and only the `Promise`-wrapped shape is broad
- * enough to hold both `Stream<...>` and `Message` on the way to that
- * resolution). Both were confirmed empirically against the installed SDK
- * (0.122.0) before landing.
+ * rather than a bare `AsyncIterable<...>`, since the SDK's streaming
+ * overload returns an `APIPromise` — a `Promise`, not itself iterable.
  *
  * Why the `.test-d.ts` suffix: `tsconfig.json` includes `src`, so
  * `bun run check-types` checks this file, while `tsconfig.build.json`
