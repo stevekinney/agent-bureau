@@ -327,7 +327,7 @@ async function verifyManifestConsumer(directory: string, tarballPath: string): P
   if (manifest.type !== 'module' || manifest.conversationalistSupport.module !== 'esm') {
     throw new VerificationFailure(consumer, 'support matrix', 'package must be ESM-only');
   }
-  if (manifest.engines.bun !== '>=1.3.13' || manifest.engines.node !== NODE_RANGE) {
+  if (manifest.engines.bun !== '>=1.4.0' || manifest.engines.node !== NODE_RANGE) {
     throw new VerificationFailure(
       consumer,
       'support matrix',
@@ -413,7 +413,7 @@ async function verifyManifestConsumer(directory: string, tarballPath: string): P
     }
   }
   if (
-    !Bun.semver.satisfies('1.3.13', manifest.engines.bun) ||
+    !Bun.semver.satisfies('1.4.0', manifest.engines.bun) ||
     Bun.semver.satisfies('1.3.12', manifest.engines.bun)
   ) {
     throw new VerificationFailure(consumer, 'Bun floor', 'Bun boundary is not exact');

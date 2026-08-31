@@ -178,7 +178,7 @@ const tool = surfaces[0].createTool({ name: 'bun', description: 'x', execute: as
 if (surfaces.length !== ${allSpecifiers.length} || await tool.execute({}) !== 'ok') process.exit(1);`,
   );
   await run(['bun', 'bun.mjs'], directory);
-  await run(['npx', '--yes', 'bun@1.3.13', 'bun.mjs'], directory);
+  await run(['npx', '--yes', 'bun@1.4.0', 'bun.mjs'], directory);
 
   await Bun.write(
     join(directory, 'cjs.cjs'),
@@ -296,7 +296,7 @@ async function verifyManifest(directory: string, tarball: string): Promise<void>
   for (const subpath of serverOnlySubpaths)
     if (manifest.exports[subpath]?.browser)
       throw new Error(`${subpath} must not declare browser support`);
-  if (manifest.engines.bun !== '>=1.3.13' || manifest.engines.node !== '^20.16.0 || >=22.3.0')
+  if (manifest.engines.bun !== '>=1.4.0' || manifest.engines.node !== '^20.16.0 || >=22.3.0')
     throw new Error('engine boundaries changed unexpectedly');
 
   const installedPackage = join(directory, 'node_modules', 'armorer');
@@ -325,8 +325,8 @@ async function verifyManifest(directory: string, tarball: string): Promise<void>
       throw new Error(`Node ${version} support must be ${expected}`);
     }
   }
-  if (!Bun.semver.satisfies('1.3.13', manifest.engines.bun))
-    throw new Error('Bun 1.3.13 must satisfy the declared floor');
+  if (!Bun.semver.satisfies('1.4.0', manifest.engines.bun))
+    throw new Error('Bun 1.4.0 must satisfy the declared floor');
   if (Bun.semver.satisfies('1.3.12', manifest.engines.bun))
     throw new Error('Bun 1.3.12 must remain below the declared floor');
 }

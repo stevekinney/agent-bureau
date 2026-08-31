@@ -48,7 +48,7 @@ describe('public API export map', () => {
   });
 
   it('keeps the minimum supported runtime boundaries explicit', () => {
-    expect(pkg.engines).toEqual({ bun: '>=1.3.13', node: '^20.16.0 || >=22.3.0' });
+    expect(pkg.engines).toEqual({ bun: '>=1.4.0', node: '^20.16.0 || >=22.3.0' });
   });
 
   it('includes the canonical adapter subpaths', () => {
