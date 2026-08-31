@@ -2,6 +2,7 @@ import type { GeminiPart } from 'armorer/adapters/gemini';
 import { parseGeminiToolCalls } from 'armorer/adapters/gemini';
 import type { ConversationHistory } from 'conversationalist';
 import { toGeminiMessages } from 'conversationalist/adapters/gemini';
+import { sha256HexSync } from 'interoperability';
 
 import { ProviderError } from './errors.ts';
 import { createCacheAwareAssembly } from './shared/cache-aware-assembly.ts';
@@ -119,6 +120,119 @@ interface GeminiRequestContent {
   contents: unknown;
   /** Resource name for `config.cachedContent`, when a cache is in play. */
   cachedContent: string | undefined;
+  /**
+   * Digest of the stable prefix {@link GeminiRequestContent.cachedContent} was
+   * created from — the key the resolver memoized it under, so a request the
+   * provider rejects for naming a dead cache can drop exactly that entry.
+   * Absent whenever the provider created no cache for this request.
+   */
+  cacheKey: string | undefined;
+}
+
+/** The lowered stable prefix a `caches.create` call is built from. */
+type GeminiCachePayload = ReturnType<typeof toGeminiMessages>;
+
+/** One provider-created cache resource, with what is known about its lifetime. */
+interface ManagedCache {
+  /** Server-generated resource name, referenced as `config.cachedContent`. */
+  readonly name: string;
+  /**
+   * Epoch milliseconds after which the resource is treated as gone. `undefined`
+   * when neither the SDK nor `cacheTtl` said anything usable, in which case the
+   * entry is only ever replaced reactively — see {@link isMissingCacheError}.
+   */
+  readonly expiresAt: number | undefined;
+}
+
+/**
+ * How many distinct stable prefixes one generated function keeps cache
+ * resources for.
+ *
+ * A generate function is reusable across runs, so the number of prefixes it
+ * sees is unbounded in principle — a `Map` keyed by prefix and never trimmed
+ * would grow for the life of the process. At the bound, the least recently
+ * used entry is evicted: the next request for that prefix simply creates a
+ * fresh resource, so eviction costs one extra `caches.create` and never
+ * changes what a request means.
+ *
+ * The evicted resource is deliberately not deleted server-side. Gemini expires
+ * it on its own TTL, and {@link GeminiCacheCreatingClient} names only `create`
+ * — widening that interface to reach `caches.delete` would break every fake a
+ * caller has written against it, to reclaim something the server reclaims
+ * anyway.
+ *
+ * Eight is chosen as comfortably more distinct system-or-pinned prefixes than
+ * one generate function realistically multiplexes, while staying small enough
+ * that the retained set is trivially bounded.
+ */
+const MAXIMUM_MANAGED_CACHES = 8;
+
+/**
+ * Parses the SDK's cache duration string — digits, up to nine fractional
+ * digits, terminated by `'s'` (`'3600s'`, `'3.5s'`) — into milliseconds.
+ * Anything else returns `undefined`: this package does not re-specify Gemini's
+ * duration grammar, so a string it cannot read is passed to the API unchanged
+ * and simply yields no local expiry bookkeeping.
+ */
+function parseCacheTtlMilliseconds(ttl: string): number | undefined {
+  const match = /^(\d+(?:\.\d{1,9})?)s$/.exec(ttl);
+  const seconds = match?.[1];
+  if (seconds === undefined) return undefined;
+  return Number(seconds) * 1000;
+}
+
+/**
+ * Decides when a freshly created cache resource stops being usable.
+ *
+ * The SDK's own `CachedContent.expireTime` wins whenever it is present and
+ * parseable: it is the server's answer, and it accounts for Gemini's default
+ * TTL on a `caches.create` that carried no `ttl` of its own — the case the
+ * caller's `cacheTtl` cannot describe at all. A configured `cacheTtl` is the
+ * fallback for a response (or a caller's fake) that reports no `expireTime`.
+ * When neither yields a timestamp the entry carries no expiry, and a resource
+ * that dies anyway is recovered from at request time instead.
+ */
+function resolveCacheExpiry(
+  created: GeminiCachedContent,
+  cacheTtl: string | undefined,
+  createdAt: number,
+): number | undefined {
+  if (created.expireTime !== undefined) {
+    const expireTime = Date.parse(created.expireTime);
+    if (!Number.isNaN(expireTime)) return expireTime;
+  }
+  if (cacheTtl !== undefined) {
+    const ttlMilliseconds = parseCacheTtlMilliseconds(cacheTtl);
+    if (ttlMilliseconds !== undefined) return createdAt + ttlMilliseconds;
+  }
+  return undefined;
+}
+
+/** The message of whatever the SDK threw, however it chose to throw it. */
+function readErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'string') return error;
+  return '';
+}
+
+/** Ways Gemini words a `cachedContent` reference it will not honor. */
+const MISSING_CACHE_REASONS = ['not found', 'expired', 'does not exist'];
+
+/**
+ * Recognizes a request rejected because the cache resource it named is gone.
+ *
+ * Expiry bookkeeping narrows this window but cannot close it: a resource can
+ * lapse between the freshness check and the request landing, and it can be
+ * deleted out from under this process entirely. Gemini publishes no
+ * machine-readable code for "that cache is gone", so this reads the message —
+ * conservatively, requiring both that it names the cached-content resource and
+ * that it gives a reason consistent with the resource being absent, so an
+ * ordinary quota or safety rejection never triggers a pointless re-creation.
+ */
+function isMissingCacheError(error: unknown): boolean {
+  const message = readErrorMessage(error).toLowerCase();
+  if (!message.includes('cachedcontent') && !message.includes('cached content')) return false;
+  return MISSING_CACHE_REASONS.some((reason) => message.includes(reason));
 }
 
 /**
@@ -176,6 +290,17 @@ function splitAtCacheBoundary(
 }
 
 /**
+ * The per-request content resolver both Gemini factories share, plus the hook
+ * a factory uses to retire a cache entry the API has just told it is dead.
+ */
+interface GeminiContentResolver {
+  /** Produces the content for one request, creating or reusing a cache as needed. */
+  resolve(context: GenerateContext): Promise<GeminiRequestContent>;
+  /** Drops the entry stored under `cacheKey`, leaving every other prefix's cache intact. */
+  invalidate(cacheKey: string): void;
+}
+
+/**
  * Builds the per-request content resolver both Gemini factories share,
  * covering all three caching modes this provider supports.
  *
@@ -187,18 +312,37 @@ function splitAtCacheBoundary(
  *
  * Provider-managed cache (`assembler` + `contextBudget`): the assembler runs in
  * stable-prefix mode, the conversation is split at the resulting
- * `cacheBoundary`, and the prefix is created once as a `CachedContent`
- * resource whose name every later request references while sending only the
- * tail. `systemInstruction` is omitted from those requests because it lives in
- * the cache; nothing else is dropped.
+ * `cacheBoundary`, and the prefix is created as a `CachedContent` resource
+ * whose name later requests reference while sending only the tail.
+ * `systemInstruction` is omitted from those requests because it lives in the
+ * cache; nothing else is dropped.
  *
- * The creation promise is memoized the same way the client promise is: two
- * concurrent first calls share one `caches.create`, and a rejection stays
- * rejected rather than silently retrying against a provider that already
- * refused. A creation failure normalizes through the caller's existing
- * `ProviderError` boundary — there is deliberately no quiet fallback to an
- * uncached request, which would hide a billing and behavior change from the
- * caller who asked for caching.
+ * Resources are memoized **per stable prefix**, keyed by a SHA-256 digest of
+ * the lowered prefix payload, never once per factory. A generated function is
+ * reusable across runs, so a factory-wide singleton would hand a second
+ * conversation the first one's cached content: the request would omit its own
+ * system and pinned prefix while pointing at another run's, which is both a
+ * wrong answer and a leak of the earlier run's instructions into it. Keying on
+ * the payload makes "same prefix" the only thing that shares a resource. The
+ * model and `cacheTtl` are fixed for a resolver's lifetime, so neither needs to
+ * be in the key. The map is bounded — see {@link MAXIMUM_MANAGED_CACHES}.
+ *
+ * Each entry carries what {@link resolveCacheExpiry} could determine about its
+ * lifetime, and a lapsed entry is replaced — for that key alone, leaving every
+ * other prefix's resource untouched — rather than referenced until the API
+ * rejects it. Whatever expiry bookkeeping cannot catch is recovered from at
+ * request time by {@link sendWithCacheRecovery}.
+ *
+ * Creation is memoized as a promise, so two concurrent first calls for one
+ * prefix share a single `caches.create`. A rejected creation is evicted rather
+ * than retained: with keying and expiry in place it would otherwise be the only
+ * permanently immortal state here, and one transient failure would poison that
+ * prefix for the life of the provider. Every call that meets a failing creation
+ * still throws — a creation failure normalizes through `ProviderError` and
+ * there is deliberately no quiet fallback to an uncached request, which would
+ * hide a billing and behavior change from the caller who asked for caching —
+ * what an eviction buys is that the *next* call gets a real attempt instead of
+ * a replayed rejection.
  */
 function createGeminiContentResolver(input: {
   /**
@@ -212,27 +356,30 @@ function createGeminiContentResolver(input: {
   resolvedModel: string;
   cacheClient: GeminiCacheCreatingClient | undefined;
   importClient: () => Promise<GeminiCacheCreatingClient>;
-}): (context: GenerateContext) => Promise<GeminiRequestContent> {
+}): GeminiContentResolver {
   const { options, resolvedModel } = input;
   const cacheAwareAssembly =
     options.assembler && options.contextBudget
       ? createCacheAwareAssembly(options.assembler, options.contextBudget, options.pinnedMessages)
       : undefined;
 
-  let creationPromise: Promise<string> | undefined;
+  /** Prefix digest to in-flight-or-settled creation. Insertion order is LRU order. */
+  const managedCaches = new Map<string, Promise<ManagedCache>>();
 
-  async function createCache(prefix: ConversationHistory): Promise<string> {
+  async function createCache(payload: GeminiCachePayload): Promise<ManagedCache> {
     const client = input.cacheClient ?? (await input.importClient());
-    const { systemInstruction, contents } = toGeminiMessages(prefix);
     const config: Record<string, unknown> = {};
-    if (systemInstruction !== undefined) config['systemInstruction'] = systemInstruction;
-    if (contents.length > 0) config['contents'] = contents;
+    if (payload.systemInstruction !== undefined) {
+      config['systemInstruction'] = payload.systemInstruction;
+    }
+    if (payload.contents.length > 0) config['contents'] = payload.contents;
     if (options.cacheTtl !== undefined) config['ttl'] = options.cacheTtl;
 
     // Normalized here rather than at the two call sites: this is the only
     // Gemini API call either factory makes outside its own `try`, and leaving
     // it unwrapped would let a raw SDK error escape a provider that normalizes
     // every other failure into `ProviderError`.
+    const createdAt = Date.now();
     let created: GeminiCachedContent;
     try {
       created = await client.caches.create({ model: resolvedModel, config });
@@ -248,33 +395,146 @@ function createGeminiContentResolver(input: {
           '[provider:gemini] caches.create returned no resource name, so there is no cache to reference on the request.',
       });
     }
+    return {
+      name: created.name,
+      expiresAt: resolveCacheExpiry(created, options.cacheTtl, createdAt),
+    };
+  }
+
+  function startCreation(cacheKey: string, payload: GeminiCachePayload): Promise<ManagedCache> {
+    const creation = createCache(payload);
+    // A failed creation is not a cache resource, so it does not belong in a map
+    // of them. The identity check keeps a late rejection from deleting the
+    // successor that already replaced it.
+    creation.catch(() => {
+      if (managedCaches.get(cacheKey) === creation) managedCaches.delete(cacheKey);
+    });
+    managedCaches.set(cacheKey, creation);
+
+    const [leastRecentlyUsed] = managedCaches.keys();
+    if (managedCaches.size > MAXIMUM_MANAGED_CACHES && leastRecentlyUsed !== undefined) {
+      managedCaches.delete(leastRecentlyUsed);
+    }
+    return creation;
+  }
+
+  async function acquireCache(cacheKey: string, payload: GeminiCachePayload): Promise<string> {
+    const existing = managedCaches.get(cacheKey);
+    if (existing) {
+      const managed = await existing;
+      if (managed.expiresAt === undefined || managed.expiresAt > Date.now()) {
+        // Re-insert so eviction sweeps a genuinely cold prefix, not a busy one.
+        managedCaches.delete(cacheKey);
+        managedCaches.set(cacheKey, existing);
+        return managed.name;
+      }
+      // Lapsed: this key's resource is replaced, every other key keeps its own.
+      if (managedCaches.get(cacheKey) === existing) managedCaches.delete(cacheKey);
+    }
+    const created = await startCreation(cacheKey, payload);
     return created.name;
   }
 
-  return async (context: GenerateContext): Promise<GeminiRequestContent> => {
-    if (!cacheAwareAssembly) {
-      const { systemInstruction, contents } = toGeminiMessages(context.conversation.current);
-      return { systemInstruction, contents, cachedContent: options.cachedContent };
-    }
+  return {
+    invalidate(cacheKey: string): void {
+      managedCaches.delete(cacheKey);
+    },
 
-    const assembled = cacheAwareAssembly(context);
-    const split = splitAtCacheBoundary(assembled);
-    if (!split) {
-      const { systemInstruction, contents } = toGeminiMessages(assembled);
-      return { systemInstruction, contents, cachedContent: undefined };
-    }
+    async resolve(context: GenerateContext): Promise<GeminiRequestContent> {
+      if (!cacheAwareAssembly) {
+        const { systemInstruction, contents } = toGeminiMessages(context.conversation.current);
+        return {
+          systemInstruction,
+          contents,
+          cachedContent: options.cachedContent,
+          cacheKey: undefined,
+        };
+      }
 
-    if (!creationPromise) creationPromise = createCache(split.prefix);
-    const cachedContent = await creationPromise;
-    const { contents } = toGeminiMessages(split.tail);
-    return { systemInstruction: undefined, contents, cachedContent };
+      const assembled = cacheAwareAssembly(context);
+      const split = splitAtCacheBoundary(assembled);
+      if (!split) {
+        const { systemInstruction, contents } = toGeminiMessages(assembled);
+        return { systemInstruction, contents, cachedContent: undefined, cacheKey: undefined };
+      }
+
+      const payload = toGeminiMessages(split.prefix);
+      const cacheKey = sha256HexSync(JSON.stringify(payload));
+      const cachedContent = await acquireCache(cacheKey, payload);
+      const { contents } = toGeminiMessages(split.tail);
+      return { systemInstruction: undefined, contents, cachedContent, cacheKey };
+    },
   };
+}
+
+/**
+ * Runs one request against freshly resolved content and, at most once, rebuilds
+ * the cache and runs it again when the provider rejected it for naming a cache
+ * resource that is gone.
+ *
+ * Expiry bookkeeping shrinks that window but cannot close it — a resource can
+ * lapse between the freshness check and the request landing, or be deleted by
+ * something else entirely — so the alternative to recovering here is a run that
+ * fails on a condition the provider can simply fix. Recovery is bounded to a
+ * single extra attempt: a second identical rejection is a real error, not a
+ * stale handle, and retrying it forever would just be a slower failure.
+ *
+ * `send` reports through `markEmitted` that it has already handed output to the
+ * caller. A streaming attempt that has pushed text to `streaming.update` cannot
+ * be replayed without rewinding what the caller has already seen, so once that
+ * is called the error is surfaced rather than recovered from.
+ *
+ * The recoverability test deliberately runs on the raw SDK error, before
+ * `ProviderError` normalization, so it reads the provider's own wording.
+ */
+async function sendWithCacheRecovery<T>(
+  input: {
+    resolver: GeminiContentResolver;
+    context: GenerateContext;
+    send: (content: GeminiRequestContent, markEmitted: () => void) => Promise<T>;
+  },
+  /** Recoveries still allowed. Recurses at most once, so depth is bounded at two. */
+  recoveriesLeft = 1,
+): Promise<T> {
+  const { resolver, context, send } = input;
+
+  // Outside the `try`, matching the pre-existing boundary: a cache-creation
+  // failure already arrives normalized and must not be re-wrapped.
+  const content = await resolver.resolve(context);
+  let emitted = false;
+
+  try {
+    return await send(content, () => {
+      emitted = true;
+    });
+  } catch (error) {
+    if (
+      recoveriesLeft > 0 &&
+      !emitted &&
+      content.cacheKey !== undefined &&
+      isMissingCacheError(error)
+    ) {
+      resolver.invalidate(content.cacheKey);
+      return await sendWithCacheRecovery(input, recoveriesLeft - 1);
+    }
+    throw new ProviderError({ provider: 'gemini', cause: error });
+  }
 }
 
 /**
  * Resolves, once at factory-construction time, the client the provider-managed
  * cache path will call `caches.create` on — or `undefined` when the provider
  * imports its own client and can use that.
+ *
+ * Precedence, in order: a cache-capable injected `client`, then `cacheClient`,
+ * then the client this factory imports for itself. An injected client that can
+ * create caches always wins, because `cacheClient` is documented as the escape
+ * hatch for a client that cannot — and the two may carry different
+ * credentials, projects, or endpoints, so preferring `cacheClient` over a
+ * perfectly capable `client` risks generating against a cache the generating
+ * client cannot see. `cacheClient` still applies with no injected client at
+ * all: it names a cache-capable client, which is exactly what this needs, and
+ * consulting it costs nothing an import would not.
  *
  * Throws when caching is configured against an injected client that cannot
  * create caches and no `cacheClient` was supplied, and when `cachedContent`
@@ -297,9 +557,9 @@ function resolveCacheClient(
         '[provider:gemini] cachedContent names a cache you own while assembler + contextBudget ask the provider to create one. Set one or the other.',
     });
   }
+  if (options.client && isCacheCreatingClient(options.client)) return options.client;
   if (options.cacheClient) return options.cacheClient;
   if (!options.client) return undefined;
-  if (isCacheCreatingClient(options.client)) return options.client;
   throw new ProviderError({
     provider: 'gemini',
     cause: undefined,
@@ -419,7 +679,7 @@ export function createGeminiProvider(options: GeminiProviderOptions): GenerateFu
     return importClient();
   }
 
-  const resolveContent = createGeminiContentResolver({
+  const resolver = createGeminiContentResolver({
     options,
     resolvedModel,
     cacheClient,
@@ -428,58 +688,59 @@ export function createGeminiProvider(options: GeminiProviderOptions): GenerateFu
 
   return async (context: GenerateContext): Promise<GenerateResponse> => {
     const client = await getClient();
-    const { systemInstruction, contents, cachedContent } = await resolveContent(context);
     const tools = await context.toolbox.toGeminiTools();
 
-    const config = buildGeminiConfig({
-      systemInstruction,
-      cachedContent,
-      tools,
-      toolChoice: options.toolChoice,
-      responseFormat: options.responseFormat,
-      maximumTokens: context.maximumTokens ?? common.maximumTokens,
-      temperature: common.temperature,
-      topP: common.topP,
-      stopSequences: common.stopSequences,
-      thinkingBudget: resolvedEffort?.thinkingBudget,
-    });
+    return await sendWithCacheRecovery({
+      resolver,
+      context,
+      send: async (content): Promise<GenerateResponse> => {
+        const config = buildGeminiConfig({
+          systemInstruction: content.systemInstruction,
+          cachedContent: content.cachedContent,
+          tools,
+          toolChoice: options.toolChoice,
+          responseFormat: options.responseFormat,
+          maximumTokens: context.maximumTokens ?? common.maximumTokens,
+          temperature: common.temperature,
+          topP: common.topP,
+          stopSequences: common.stopSequences,
+          thinkingBudget: resolvedEffort?.thinkingBudget,
+        });
 
-    const request: GeminiGenerateContentRequest = {
-      model: resolvedModel,
-      contents,
-      ...(Object.keys(config).length > 0 ? { config } : {}),
-    };
+        const request: GeminiGenerateContentRequest = {
+          model: resolvedModel,
+          contents: content.contents,
+          ...(Object.keys(config).length > 0 ? { config } : {}),
+        };
 
-    try {
-      const result = await client.models.generateContent(request);
+        const result = await client.models.generateContent(request);
 
-      const candidates = result.candidates ?? [];
-      const parts = candidates[0]?.content?.parts ?? [];
+        const candidates = result.candidates ?? [];
+        const parts = candidates[0]?.content?.parts ?? [];
 
-      const textParts: string[] = [];
-      for (const part of parts) {
-        if (part.text) {
-          textParts.push(part.text);
+        const textParts: string[] = [];
+        for (const part of parts) {
+          if (part.text) {
+            textParts.push(part.text);
+          }
         }
-      }
 
-      const toolCalls = parseGeminiToolCalls(toGeminiParts(parts));
+        const toolCalls = parseGeminiToolCalls(toGeminiParts(parts));
 
-      const usageMetadata = result.usageMetadata;
-      const usage = usageMetadata ? buildGeminiUsage(usageMetadata) : undefined;
+        const usageMetadata = result.usageMetadata;
+        const usage = usageMetadata ? buildGeminiUsage(usageMetadata) : undefined;
 
-      return {
-        content: textParts.join(''),
-        toolCalls,
-        usage,
-        metadata: {
-          effectiveModel: resolvedModel,
-          effectiveEffort: resolvedEffort ? resolvedEffort.effort : 'none',
-        },
-      };
-    } catch (error) {
-      throw new ProviderError({ provider: 'gemini', cause: error });
-    }
+        return {
+          content: textParts.join(''),
+          toolCalls,
+          usage,
+          metadata: {
+            effectiveModel: resolvedModel,
+            effectiveEffort: resolvedEffort ? resolvedEffort.effort : 'none',
+          },
+        };
+      },
+    });
   };
 }
 
@@ -520,7 +781,7 @@ export function createGeminiProviderStream(
     return importClient();
   }
 
-  const resolveContent = createGeminiContentResolver({
+  const resolver = createGeminiContentResolver({
     options,
     resolvedModel,
     cacheClient,
@@ -532,72 +793,76 @@ export function createGeminiProviderStream(
   ): Promise<GenerateResponse> => {
     const client = await getClient();
     const { streaming } = context;
-    const { systemInstruction, contents, cachedContent } = await resolveContent(context);
     const tools = await context.toolbox.toGeminiTools();
 
-    const config = buildGeminiConfig({
-      systemInstruction,
-      cachedContent,
-      tools,
-      toolChoice: options.toolChoice,
-      responseFormat: options.responseFormat,
-      maximumTokens: context.maximumTokens ?? common.maximumTokens,
-      temperature: common.temperature,
-      topP: common.topP,
-      stopSequences: common.stopSequences,
-      thinkingBudget: resolvedEffort?.thinkingBudget,
+    return await sendWithCacheRecovery({
+      resolver,
+      context,
+      send: async (content, markEmitted): Promise<GenerateResponse> => {
+        const config = buildGeminiConfig({
+          systemInstruction: content.systemInstruction,
+          cachedContent: content.cachedContent,
+          tools,
+          toolChoice: options.toolChoice,
+          responseFormat: options.responseFormat,
+          maximumTokens: context.maximumTokens ?? common.maximumTokens,
+          temperature: common.temperature,
+          topP: common.topP,
+          stopSequences: common.stopSequences,
+          thinkingBudget: resolvedEffort?.thinkingBudget,
+        });
+
+        const request: GeminiGenerateContentRequest = {
+          model: resolvedModel,
+          contents: content.contents,
+          ...(Object.keys(config).length > 0 ? { config } : {}),
+        };
+
+        const stream = await client.models.generateContentStream(request);
+
+        let accumulatedText = '';
+        const accumulatedFunctionCallParts: GeminiPart[] = [];
+        let latestUsageMetadata: GeminiUsageMetadata | undefined;
+
+        for await (const chunk of stream) {
+          if (context.signal?.aborted) break;
+          const candidates = chunk.candidates ?? [];
+          const parts = candidates[0]?.content?.parts ?? [];
+
+          for (const part of parts) {
+            if (part.text) {
+              accumulatedText += part.text;
+              // Past this point the caller has seen output, so a later
+              // missing-cache rejection can no longer be retried away.
+              markEmitted();
+              streaming.update(accumulatedText);
+            }
+            if (part.functionCall) {
+              const functionCallPart = toGeminiFunctionCallPart(part.functionCall);
+              if (functionCallPart) accumulatedFunctionCallParts.push(functionCallPart);
+            }
+          }
+
+          if (chunk.usageMetadata) {
+            latestUsageMetadata = chunk.usageMetadata;
+          }
+        }
+
+        const toolCalls = parseGeminiToolCalls(accumulatedFunctionCallParts);
+
+        const usage = latestUsageMetadata ? buildGeminiUsage(latestUsageMetadata) : undefined;
+
+        return {
+          content: accumulatedText,
+          toolCalls,
+          usage,
+          metadata: {
+            effectiveModel: resolvedModel,
+            effectiveEffort: resolvedEffort ? resolvedEffort.effort : 'none',
+          },
+        };
+      },
     });
-
-    const request: GeminiGenerateContentRequest = {
-      model: resolvedModel,
-      contents,
-      ...(Object.keys(config).length > 0 ? { config } : {}),
-    };
-
-    try {
-      const stream = await client.models.generateContentStream(request);
-
-      let accumulatedText = '';
-      const accumulatedFunctionCallParts: GeminiPart[] = [];
-      let latestUsageMetadata: GeminiUsageMetadata | undefined;
-
-      for await (const chunk of stream) {
-        if (context.signal?.aborted) break;
-        const candidates = chunk.candidates ?? [];
-        const parts = candidates[0]?.content?.parts ?? [];
-
-        for (const part of parts) {
-          if (part.text) {
-            accumulatedText += part.text;
-            streaming.update(accumulatedText);
-          }
-          if (part.functionCall) {
-            const functionCallPart = toGeminiFunctionCallPart(part.functionCall);
-            if (functionCallPart) accumulatedFunctionCallParts.push(functionCallPart);
-          }
-        }
-
-        if (chunk.usageMetadata) {
-          latestUsageMetadata = chunk.usageMetadata;
-        }
-      }
-
-      const toolCalls = parseGeminiToolCalls(accumulatedFunctionCallParts);
-
-      const usage = latestUsageMetadata ? buildGeminiUsage(latestUsageMetadata) : undefined;
-
-      return {
-        content: accumulatedText,
-        toolCalls,
-        usage,
-        metadata: {
-          effectiveModel: resolvedModel,
-          effectiveEffort: resolvedEffort ? resolvedEffort.effort : 'none',
-        },
-      };
-    } catch (error) {
-      throw new ProviderError({ provider: 'gemini', cause: error });
-    }
   };
 }
 

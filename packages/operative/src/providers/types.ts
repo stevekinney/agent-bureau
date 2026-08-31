@@ -414,9 +414,26 @@ export interface GeminiProviderOptions extends BaseProviderOptions {
    * {@link GeminiProviderOptions.contextBudget}), each call runs `assembler`
    * in stable-prefix mode instead of sending the conversation verbatim. The
    * `cacheBoundary` mark on the assembled system/pinned prefix splits the
-   * conversation: everything up to and including the boundary is created once
-   * as a `CachedContent` resource, and every request then sends only the tail
-   * and references the cache by name.
+   * conversation: everything up to and including the boundary is created as a
+   * `CachedContent` resource, and every request then sends only the tail and
+   * references the cache by name.
+   *
+   * A resource is created once **per distinct stable prefix**, not once per
+   * generated function. A generate function is reusable across runs, so a
+   * second conversation with a different system prompt or different pinned
+   * content gets its own resource rather than inheriting the first run's — it
+   * would otherwise omit its own prefix while pointing at another run's, which
+   * is both a wrong answer and a leak of that run's instructions into it. The
+   * retained set is bounded, and the least recently used entry is evicted past
+   * the bound; eviction abandons the resource to its own server-side TTL and
+   * costs at most one extra creation the next time that prefix comes back.
+   *
+   * Expiry is tracked per entry, from the SDK's own `CachedContent.expireTime`
+   * where it reports one and from {@link GeminiProviderOptions.cacheTtl}
+   * otherwise, so a lapsed resource is replaced rather than referenced until
+   * the API rejects it. A resource that dies inside the remaining window — it
+   * lapsed between the check and the request, or was deleted elsewhere — is
+   * detected from the rejection and rebuilt once for that request.
    *
    * Same name, same type, and the same `assembler && contextBudget`
    * engagement condition as {@link AnthropicProviderOptions.assembler} — the
@@ -446,16 +463,29 @@ export interface GeminiProviderOptions extends BaseProviderOptions {
    * `contextBudget` actually produce a provider-created cache — a cache named
    * through {@link GeminiProviderOptions.cachedContent} carries the TTL it was
    * created with.
+   *
+   * Also the fallback for local expiry bookkeeping: the provider replaces a
+   * lapsed cache rather than referencing it, and prefers the SDK's own
+   * `CachedContent.expireTime` for that — it accounts for Gemini's server-side
+   * default when this is unset, which nothing here could otherwise know. This
+   * value is used only when the response reports no usable `expireTime`.
    */
   cacheTtl?: string;
   /**
-   * Cache-capable client used for the one `caches.create` call the
-   * `assembler` + `contextBudget` path makes.
+   * Cache-capable client used for the `caches.create` calls the `assembler` +
+   * `contextBudget` path makes.
    *
-   * Only consulted when {@link GeminiProviderOptions.client} is also supplied
-   * and does not itself expose `caches`; a real `GoogleGenAI` does, and so
-   * does the client this factory imports for itself, so this is purely an
-   * escape hatch for a hand-written fake or a narrowed wrapper. Supplying
+   * Precedence is: a {@link GeminiProviderOptions.client} that itself exposes
+   * `caches`, then this, then the client the factory imports for itself. A
+   * real `GoogleGenAI` exposes `caches`, and so does the imported client, so
+   * this is purely an escape hatch for a hand-written fake or a narrowed
+   * wrapper — and it is deliberately the *lower* precedence of the two: the
+   * two clients may carry different credentials, projects, or endpoints, so
+   * creating through this one while generating through a perfectly capable
+   * `client` risks referencing a cache the generating client cannot see.
+   *
+   * With no injected client at all, this is still used when supplied; it names
+   * a cache-capable client, which is exactly what the path needs. Supplying
    * neither, with the assembler path enabled and an injected client that has
    * no `caches`, is rejected at factory-construction time.
    */
