@@ -185,13 +185,16 @@ function stringifyNonJSON(value: unknown): string {
   try {
     return String(value);
   } catch {
-    const elided = elideArrayCycles(value, new WeakSet());
-
-    // Nothing was elided, so there is no cycle to break and a retry would invoke the same
-    // throwing hook on the same value and fail identically — twice for no benefit.
-    if (elided === value) return UNSTRINGIFIABLE_TAG;
-
     try {
+      // Inside the try: walking the value can itself run user code — an index getter, or a
+      // Proxy trap — and a throw from the traversal must not escape any more than a throw from
+      // the coercion it is trying to rescue.
+      const elided = elideArrayCycles(value, new WeakSet());
+
+      // Nothing was elided, so there is no cycle to break and a retry would invoke the same
+      // throwing hook on the same value and fail identically — twice for no benefit.
+      if (elided === value) return UNSTRINGIFIABLE_TAG;
+
       return String(elided);
     } catch {
       // A coercion hook that throws for its own reasons, on a value with no cycle this function
@@ -235,11 +238,16 @@ function elideArrayCycles(value: unknown, open: WeakSet<object>): unknown {
   if (!isUnknownArray(value)) return value;
   if (open.has(value)) return '';
 
-  open.add(value);
-
   // `length` is read once up front: `value` may be a Proxy, whose `get` trap would otherwise fire
   // on every iteration and could report a different length each time.
   const length = value.length;
+
+  // `Array.isArray` is true for a Proxy over an array, and a trap may report any `length` at all
+  // — `Infinity` would spin the loop forever, which is a worse failure than the throw this
+  // function exists to prevent. Anything outside a real array's index range is left untouched.
+  if (!Number.isSafeInteger(length) || length < 0) return value;
+
+  open.add(value);
 
   // Indices are walked directly rather than through `value.map`. `map` is an input-controlled
   // property — an array can carry an own `map`, or be a subclass that overrides it — and
@@ -248,9 +256,11 @@ function elideArrayCycles(value: unknown, open: WeakSet<object>): unknown {
   const elided: unknown[] = [];
   let changed = false;
   for (let index = 0; index < length; index += 1) {
-    const entry = value[index];
+    const entry: unknown = value[index];
     const elidedEntry = elideArrayCycles(entry, open);
-    if (elidedEntry !== entry) changed = true;
+    // `Object.is`, not `!==`: `NaN !== NaN` would report an untouched element as changed and
+    // rebuild an acyclic array that should have been returned by reference, discarding its hook.
+    if (!Object.is(elidedEntry, entry)) changed = true;
     elided.push(elidedEntry);
   }
 

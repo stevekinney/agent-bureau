@@ -511,6 +511,75 @@ describe('interoperability materialization', () => {
     expect(result.content).toBe('[unstringifiable]');
   });
 
+  test('normalizeJSONValue keeps a nested acyclic array holding NaN unrebuilt', () => {
+    const inner: any[] = [Number.NaN];
+    Object.defineProperty(inner, 'toString', { value: () => 'INNER' });
+
+    const outer: any[] = [inner];
+    outer.push(outer);
+    Object.defineProperty(outer, 'join', {
+      value: () => {
+        throw new RangeError('simulated engine cycle overflow');
+      },
+    });
+
+    const result = materializeToolResult({
+      callId: 'c6-nan',
+      outcome: 'success',
+      content: outer as any,
+    });
+
+    // `NaN !== NaN`, so an identity comparison would mark `inner` as changed, rebuild it as a
+    // plain array and lose its hook — rendering 'NaN,' instead.
+    expect(result.content).toBe('INNER,');
+  });
+
+  test('normalizeJSONValue leaves a proxy reporting a non-finite length untouched', () => {
+    const target: any[] = [1, 2];
+    Object.defineProperty(target, 'join', {
+      value: () => {
+        throw new RangeError('simulated engine cycle overflow');
+      },
+    });
+
+    const hostile: any = new Proxy(target, {
+      get(receiverTarget, property, receiver) {
+        if (property === 'length') return Number.POSITIVE_INFINITY;
+        return Reflect.get(receiverTarget, property, receiver);
+      },
+    });
+
+    // An unguarded `for (i = 0; i < Infinity; i += 1)` would hang here rather than throw, which
+    // is a worse failure than the one this function exists to prevent.
+    const result = materializeToolResult({
+      callId: 'c6-infinite-length',
+      outcome: 'success',
+      content: hostile as any,
+    });
+
+    expect(result.content).toBe('[unstringifiable]');
+  });
+
+  test('normalizeJSONValue contains a throw from the elision traversal itself', () => {
+    const target: any[] = [1, 2];
+
+    const hostile: any = new Proxy(target, {
+      get(receiverTarget, property, receiver) {
+        // Fails both the initial coercion and the traversal that tries to rescue it.
+        if (property === '0') throw new Error('index trap refused');
+        return Reflect.get(receiverTarget, property, receiver);
+      },
+    });
+
+    const result = materializeToolResult({
+      callId: 'c6-throwing-traversal',
+      outcome: 'success',
+      content: hostile as any,
+    });
+
+    expect(result.content).toBe('[unstringifiable]');
+  });
+
   test('normalizeJSONValue treats a null Symbol.toPrimitive as absent, not as a custom hook', () => {
     const circular: any[] = [1, 2];
     circular.push(circular);
