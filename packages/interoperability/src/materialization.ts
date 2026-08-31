@@ -154,6 +154,9 @@ function normalizeJSONValue(value: unknown): JSONValue {
  */
 const UNSTRINGIFIABLE_TAG = '[unstringifiable]';
 
+/** Largest length a real array can report: `2 ** 32 - 1` per ECMA-262. A Proxy may claim more. */
+const MAXIMUM_ARRAY_LENGTH = 0xffff_ffff;
+
 /**
  * Last-resort coercion of a value that has already been proven non-JSON-serializable (it failed
  * `assertJSONValue` and either threw or round-tripped to `undefined` through `JSON.stringify`).
@@ -242,10 +245,13 @@ function elideArrayCycles(value: unknown, open: WeakSet<object>): unknown {
   // on every iteration and could report a different length each time.
   const length = value.length;
 
-  // `Array.isArray` is true for a Proxy over an array, and a trap may report any `length` at all
-  // — `Infinity` would spin the loop forever, which is a worse failure than the throw this
-  // function exists to prevent. Anything outside a real array's index range is left untouched.
-  if (!Number.isSafeInteger(length) || length < 0) return value;
+  // `Array.isArray` is true for a Proxy over an array, and a trap may report any `length` at all.
+  // `Infinity` would spin the loop forever, and a merely large safe integer is nearly as bad:
+  // `Number.isSafeInteger(2 ** 32)` is `true`, so a bare safe-integer check still admits billions
+  // of indexed reads. A real array's length cannot exceed 2^32 - 1, so anything outside that
+  // range is not a length this walk can honour and the value is left untouched. Hanging would be
+  // a worse failure than the throw this function exists to prevent.
+  if (!Number.isSafeInteger(length) || length < 0 || length > MAXIMUM_ARRAY_LENGTH) return value;
 
   open.add(value);
 

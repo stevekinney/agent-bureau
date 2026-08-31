@@ -560,6 +560,32 @@ describe('interoperability materialization', () => {
     expect(result.content).toBe('[unstringifiable]');
   });
 
+  test('normalizeJSONValue leaves a proxy reporting a length beyond the array limit untouched', () => {
+    const target: any[] = [1, 2];
+    Object.defineProperty(target, 'join', {
+      value: () => {
+        throw new RangeError('simulated engine cycle overflow');
+      },
+    });
+
+    const hostile: any = new Proxy(target, {
+      get(receiverTarget, property, receiver) {
+        // A safe integer, so a bare Number.isSafeInteger check admits it — but far outside the
+        // 2^32 - 1 a real array can report, so walking it would attempt billions of reads.
+        if (property === 'length') return 2 ** 40;
+        return Reflect.get(receiverTarget, property, receiver);
+      },
+    });
+
+    const result = materializeToolResult({
+      callId: 'c6-oversized-length',
+      outcome: 'success',
+      content: hostile as any,
+    });
+
+    expect(result.content).toBe('[unstringifiable]');
+  });
+
   test('normalizeJSONValue contains a throw from the elision traversal itself', () => {
     const target: any[] = [1, 2];
 
