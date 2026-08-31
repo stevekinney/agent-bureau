@@ -47,6 +47,7 @@ const PENDING_IMPLEMENTATION: Readonly<Record<string, string>> = {
   subscribeSnapshot: 'AB-88',
   children: 'AB-50',
   abortChild: 'AB-50',
+  closed: 'AB-37',
 };
 
 /** Calls in the examples that are not run-handle members. */
@@ -104,15 +105,45 @@ function typescriptFences(markdown: string): string[] {
   return fences;
 }
 
-/** Members invoked on an identifier that looks like a run handle. */
-function runHandleCalls(source: string): Set<string> {
-  const members = new Set<string>();
-  const pattern = /\b(?:run|parentRun|activeRun|childRun)\.([A-Za-z_$][\w$]*)\s*\(/g;
+/**
+ * Variables a fence initialises from a run-producing call.
+ *
+ * An earlier version matched a hard-coded list of identifier names, which meant
+ * `const draft = bureau.run(...)` was invisible and a typo on it would pass. The
+ * binding name carries no meaning; what makes a variable a run handle is what it
+ * was assigned from.
+ */
+function runHandleBindings(source: string): Set<string> {
+  const names = new Set<string>();
+  // `const x = bureau.run(...)`, `const x = await agent.run(...)`, `const x = createRun(...)`
+  const pattern =
+    /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:await\s+)?(?:[A-Za-z_$][\w$]*\.)?(?:run|createRun|createActiveRun|getRun)\s*\(/g;
   let match = pattern.exec(source);
   while (match !== null) {
-    const name = match[1];
-    if (name !== undefined && !NOT_RUN_HANDLE_MEMBERS.has(name)) members.add(name);
+    if (match[1] !== undefined) names.add(match[1]);
     match = pattern.exec(source);
+  }
+  return names;
+}
+
+/** Members invoked on any variable that holds a run handle. */
+function runHandleCalls(source: string): Set<string> {
+  const bindings = runHandleBindings(source);
+  // Names conventionally used for a run handle even where the assignment is
+  // elided in a fragment.
+  for (const conventional of ['run', 'parentRun', 'activeRun', 'childRun']) {
+    bindings.add(conventional);
+  }
+
+  const members = new Set<string>();
+  for (const binding of bindings) {
+    const pattern = new RegExp(`\\b${binding}\\.([A-Za-z_$][\\w$]*)\\s*\\(`, 'g');
+    let match = pattern.exec(source);
+    while (match !== null) {
+      const name = match[1];
+      if (name !== undefined && !NOT_RUN_HANDLE_MEMBERS.has(name)) members.add(name);
+      match = pattern.exec(source);
+    }
   }
   return members;
 }
