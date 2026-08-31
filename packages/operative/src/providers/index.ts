@@ -127,6 +127,7 @@ export type {
   AnthropicProviderOptions,
   AnthropicStreamEvent,
   AnthropicStreamingClient,
+  AnthropicThinkingConfig,
   BaseProviderOptions,
   Effort,
   GeminiBatchClient,

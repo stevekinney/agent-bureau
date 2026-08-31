@@ -1,10 +1,25 @@
 import { ProviderError } from '../errors.ts';
+import type { BatchSurfaceRequirement } from '../shared/batch-support.ts';
+import { assertBatchSurface } from '../shared/batch-support.ts';
 import type {
   OpenAIBatch,
   OpenAIBatchClient,
   OpenAIBatchCreateRequest,
   OpenAIBatchListQuery,
 } from '../types.ts';
+
+/**
+ * `openai` 4.34.0 introduced `client.batches` with `create`/`retrieve`/`cancel`;
+ * `list` landed in 4.38.0. See `shared/batch-support.ts` for how both were
+ * established and why the declared peer range stays `>=4.0.0`.
+ */
+const OPENAI_BATCH_REQUIREMENT: BatchSurfaceRequirement = {
+  provider: 'openai',
+  packageName: 'openai',
+  minimumVersion: '4.38.0',
+  path: ['batches'],
+  methods: ['create', 'retrieve', 'list', 'cancel'],
+};
 
 /**
  * Options for createOpenAIBatchClient.
@@ -72,10 +87,21 @@ export interface OpenAIBatchOperations {
  * a batch's output as an uploaded file, so results are read through
  * `client.files` using the `output_file_id` (and `error_file_id`) on the
  * retrieved batch, not streamed off the batch itself.
+ *
+ * Requires `openai >= 4.38.0` — the first release whose `client.batches`
+ * carries every method {@link OpenAIBatchOperations} advertises. The package's
+ * declared peer range is intentionally wider (`>=4.0.0`), because chat-only
+ * consumers should not be held to a batch-API floor; a client that predates
+ * 4.38.0 is rejected here with a {@link ProviderError} naming the requirement
+ * rather than failing with an opaque `TypeError` on every operation. An
+ * injected `client` is checked when this factory is called; a lazily imported
+ * one is checked as soon as it is constructed.
  */
 export function createOpenAIBatchClient(
   options: OpenAIBatchClientOptions = {},
 ): OpenAIBatchOperations {
+  if (options.client) assertBatchSurface(options.client, OPENAI_BATCH_REQUIREMENT);
+
   let clientPromise: Promise<OpenAIBatchClient> | undefined;
 
   function getClient(): Promise<OpenAIBatchClient> {
@@ -88,7 +114,9 @@ export function createOpenAIBatchClient(
         // No cast: a real `OpenAI` satisfies `OpenAIBatchClient` as declared,
         // the same guarantee a consumer passing their own client relies on.
         // `batch-client-assignability.test-d.ts` locks it in.
-        return new OpenAI(clientOptions);
+        const client = new OpenAI(clientOptions);
+        assertBatchSurface(client, OPENAI_BATCH_REQUIREMENT);
+        return client;
       });
     }
     return clientPromise;

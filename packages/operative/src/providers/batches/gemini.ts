@@ -1,4 +1,6 @@
 import { ProviderError } from '../errors.ts';
+import type { BatchSurfaceRequirement } from '../shared/batch-support.ts';
+import { assertBatchSurface } from '../shared/batch-support.ts';
 import { resolveGeminiApiKey } from '../shared/gemini-api-key.ts';
 import type {
   GeminiBatchClient,
@@ -8,6 +10,20 @@ import type {
   GeminiDeleteResourceJob,
   GeminiListBatchJobsRequest,
 } from '../types.ts';
+
+/**
+ * `@google/genai` 1.7.0 introduced `client.batches`. The declared peer floor
+ * (`>=2.19.0`) is already well above it, so this guard exists for symmetry with
+ * OpenAI's and for installs that ignore peer warnings — see
+ * `shared/batch-support.ts`.
+ */
+const GEMINI_BATCH_REQUIREMENT: BatchSurfaceRequirement = {
+  provider: 'gemini',
+  packageName: '@google/genai',
+  minimumVersion: '1.7.0',
+  path: ['batches'],
+  methods: ['create', 'get', 'list', 'cancel', 'delete'],
+};
 
 /**
  * Options for createGeminiBatchClient.
@@ -73,10 +89,19 @@ export interface GeminiBatchOperations {
  * `GOOGLE_API_KEY` environment variable, resolved by the same helper the
  * generate factories use; a missing key fails here rather than as an opaque
  * auth error on the first request.
+ *
+ * Requires `@google/genai >= 1.7.0`, the first release carrying
+ * `client.batches`. The package's declared peer floor (`>=2.19.0`) is already
+ * well above that, so this is a belt-and-braces check rather than a gap in the
+ * range; a client without the namespace is rejected with a
+ * {@link ProviderError} naming the requirement instead of failing with an
+ * opaque `TypeError` on every operation.
  */
 export function createGeminiBatchClient(
   options: GeminiBatchClientOptions = {},
 ): GeminiBatchOperations {
+  if (options.client) assertBatchSurface(options.client, GEMINI_BATCH_REQUIREMENT);
+
   let clientPromise: Promise<GeminiBatchClient> | undefined;
 
   function getClient(): Promise<GeminiBatchClient> {
@@ -86,13 +111,14 @@ export function createGeminiBatchClient(
       // No cast: a real `GoogleGenAI` satisfies `GeminiBatchClient` as
       // declared, the same guarantee a consumer passing their own client
       // relies on. `batch-client-assignability.test-d.ts` locks it in.
-      clientPromise = import('@google/genai').then(
-        (module) =>
-          new module.GoogleGenAI({
-            apiKey,
-            ...(options.baseURL ? { httpOptions: { baseUrl: options.baseURL } } : {}),
-          }),
-      );
+      clientPromise = import('@google/genai').then((module) => {
+        const client = new module.GoogleGenAI({
+          apiKey,
+          ...(options.baseURL ? { httpOptions: { baseUrl: options.baseURL } } : {}),
+        });
+        assertBatchSurface(client, GEMINI_BATCH_REQUIREMENT);
+        return client;
+      });
     }
     return clientPromise;
   }

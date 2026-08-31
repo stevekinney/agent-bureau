@@ -659,3 +659,120 @@ describe('getProviderCapabilities', () => {
     );
   });
 });
+
+// ── Peer-SDK batch-surface guard ─────────────────────────────────────
+
+/**
+ * Each factory rejects a client whose SDK predates the batch resource, instead
+ * of accepting it and then failing with `TypeError: Cannot read properties of
+ * undefined (reading 'create')` on every operation.
+ *
+ * This matters most for `openai`, whose declared peer range (`>=4.0.0`)
+ * genuinely admits such an install: `client.batches` first shipped in 4.34.0,
+ * and `list` — which `OpenAIBatchOperations` advertises — only in 4.38.0. Both
+ * numbers were established by downloading the releases from the npm registry
+ * and reading their published declarations. The range stays wide on purpose, so
+ * chat-only consumers are not held to a batch-API floor; the guard closes the
+ * gap instead. Anthropic's floor (`>=0.50.0` against 0.33.0) and Gemini's
+ * (`>=2.19.0` against 1.7.0) already exclude it, and are guarded anyway for
+ * symmetry — a peer range is a declaration, not an enforcement.
+ *
+ * The old shapes are modelled by deleting a property off an otherwise-valid
+ * fake, which keeps every client here typed as the real structural interface
+ * instead of cast into position.
+ */
+describe('batch factories — peer-SDK surface guard', () => {
+  it('rejects an openai client whose SDK predates the batches resource', () => {
+    const { client } = createFakeOpenAIClient();
+    Reflect.deleteProperty(client, 'batches');
+
+    expect(() => createOpenAIBatchClient({ client })).toThrow(ProviderError);
+    expect(() => createOpenAIBatchClient({ client })).toThrow(
+      /batch operations require openai >= 4\.38\.0, but client\.batches is not available/,
+    );
+  });
+
+  it('rejects an openai client from 4.34.0–4.37.x, which has `batches` but no `list`', () => {
+    const { client } = createFakeOpenAIClient();
+    Reflect.deleteProperty(client.batches, 'list');
+
+    expect(() => createOpenAIBatchClient({ client })).toThrow(
+      /require openai >= 4\.38\.0, but client\.batches is missing list\(\)/,
+    );
+  });
+
+  it('names every missing method rather than only the first', () => {
+    const { client } = createFakeOpenAIClient();
+    Reflect.deleteProperty(client.batches, 'list');
+    Reflect.deleteProperty(client.batches, 'cancel');
+
+    expect(() => createOpenAIBatchClient({ client })).toThrow(
+      /client\.batches is missing list\(\), cancel\(\)/,
+    );
+  });
+
+  it('classifies the guard failure as a non-retryable provider error', () => {
+    const { client } = createFakeOpenAIClient();
+    Reflect.deleteProperty(client, 'batches');
+
+    let thrown: unknown;
+    try {
+      createOpenAIBatchClient({ client });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(ProviderError);
+    expect((thrown as ProviderError).provider).toBe('openai');
+    expect((thrown as ProviderError).retryable).toBe(false);
+    expect((thrown as ProviderError).statusCode).toBeUndefined();
+  });
+
+  it('rejects an @anthropic-ai/sdk client with no stable messages.batches', () => {
+    const { client } = createFakeAnthropicClient();
+    Reflect.deleteProperty(client.messages, 'batches');
+
+    expect(() => createAnthropicBatchClient({ client })).toThrow(
+      /require @anthropic-ai\/sdk >= 0\.33\.0, but client\.messages\.batches is not available/,
+    );
+  });
+
+  it('rejects an @anthropic-ai/sdk client missing only `results`', () => {
+    const { client } = createFakeAnthropicClient();
+    Reflect.deleteProperty(client.messages.batches, 'results');
+
+    expect(() => createAnthropicBatchClient({ client })).toThrow(
+      /client\.messages\.batches is missing results\(\)/,
+    );
+  });
+
+  it('rejects a @google/genai client that predates client.batches', () => {
+    const { client } = createFakeGeminiClient();
+    Reflect.deleteProperty(client, 'batches');
+
+    expect(() => createGeminiBatchClient({ client })).toThrow(
+      /require @google\/genai >= 1\.7\.0, but client\.batches is not available/,
+    );
+  });
+
+  it('rejects a @google/genai client missing only `delete`', () => {
+    const { client } = createFakeGeminiClient();
+    Reflect.deleteProperty(client.batches, 'delete');
+
+    expect(() => createGeminiBatchClient({ client })).toThrow(
+      /client\.batches is missing delete\(\)/,
+    );
+  });
+
+  it('accepts every complete fake, so the guard costs the valid path nothing', () => {
+    expect(() =>
+      createOpenAIBatchClient({ client: createFakeOpenAIClient().client }),
+    ).not.toThrow();
+    expect(() =>
+      createAnthropicBatchClient({ client: createFakeAnthropicClient().client }),
+    ).not.toThrow();
+    expect(() =>
+      createGeminiBatchClient({ client: createFakeGeminiClient().client }),
+    ).not.toThrow();
+  });
+});

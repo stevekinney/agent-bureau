@@ -96,6 +96,42 @@ export interface AnthropicMessageResponse {
 }
 
 /**
+ * Structural mirror of the Anthropic SDK's `ThinkingConfigParam` union, for
+ * {@link AnthropicProviderOptions.thinking}.
+ *
+ * Declared structurally rather than re-exported from `@anthropic-ai/sdk`
+ * because that SDK is an *optional* peer dependency: a direct type import
+ * would drag it into this package's published declarations and break every
+ * consumer who does not install it. `anthropic-thinking-assignability.test-d.ts`
+ * pins this against drift by asserting the SDK's own `ThinkingConfigParam` is
+ * assignable to this type, so a fourth variant added upstream fails the build
+ * here rather than silently becoming unreachable.
+ *
+ * All three of the SDK's variants are present on purpose. An earlier revision
+ * declared only `enabled`/`disabled`, which narrowed a supposedly native-shaped
+ * escape hatch and left `{ type: 'adaptive' }` — a mode Anthropic actually
+ * accepts — unreachable without defeating the type system.
+ */
+export type AnthropicThinkingConfig =
+  | {
+      type: 'enabled';
+      /**
+       * Anthropic's constraint, quoted from the SDK's own declaration: "Must
+       * be ≥1024 and less than `max_tokens`." Both provider factories check
+       * this at construction rather than letting the API reject the request.
+       */
+      budget_tokens: number;
+      /** `'omitted'` redacts thinking content but keeps a signature for multi-turn continuity. */
+      display?: 'summarized' | 'omitted' | null;
+    }
+  | { type: 'disabled' }
+  | {
+      type: 'adaptive';
+      /** `'omitted'` redacts thinking content but keeps a signature for multi-turn continuity. */
+      display?: 'summarized' | 'omitted' | null;
+    };
+
+/**
  * Options for createAnthropicProvider.
  */
 export interface AnthropicProviderOptions extends BaseProviderOptions {
@@ -130,8 +166,9 @@ export interface AnthropicProviderOptions extends BaseProviderOptions {
   pinnedMessages?: ReadonlyArray<Message>;
   /**
    * Requests Anthropic's extended-thinking mode, mirroring the native
-   * `thinking` request field shape directly (`{ type: 'enabled';
-   * budget_tokens: number }` or `{ type: 'disabled' }`).
+   * `thinking` request field shape directly — see
+   * {@link AnthropicThinkingConfig} for the full union (`enabled`, `disabled`,
+   * and `adaptive`).
    *
    * This is deliberately a second, provider-native escape hatch rather than
    * a provider-neutral abstraction: `effort` is already operative's one
@@ -143,8 +180,11 @@ export interface AnthropicProviderOptions extends BaseProviderOptions {
    * documented interaction between them. This sits alongside
    * `extendedCacheTtl` and `baseURL` as the other native-shape options on
    * this type.
+   *
+   * `{ type: 'enabled' }` is validated at provider construction against the
+   * effective `max_tokens`; see {@link AnthropicThinkingConfig}.
    */
-  thinking?: { type: 'enabled'; budget_tokens: number } | { type: 'disabled' };
+  thinking?: AnthropicThinkingConfig;
 }
 
 /**

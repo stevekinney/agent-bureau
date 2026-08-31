@@ -1,4 +1,6 @@
 import { ProviderError } from '../errors.ts';
+import type { BatchSurfaceRequirement } from '../shared/batch-support.ts';
+import { assertBatchSurface } from '../shared/batch-support.ts';
 import type {
   AnthropicBatchClient,
   AnthropicBatchCreateRequest,
@@ -6,6 +8,21 @@ import type {
   AnthropicMessageBatch,
   AnthropicMessageBatchIndividualResponse,
 } from '../types.ts';
+
+/**
+ * `@anthropic-ai/sdk` 0.33.0 promoted Message Batches out of `client.beta` onto
+ * stable `client.messages.batches` with all five methods used here. The
+ * declared peer floor (`>=0.50.0`) is already above it, so this guard exists
+ * for symmetry with OpenAI's and for installs that ignore peer warnings — see
+ * `shared/batch-support.ts`.
+ */
+const ANTHROPIC_BATCH_REQUIREMENT: BatchSurfaceRequirement = {
+  provider: 'anthropic',
+  packageName: '@anthropic-ai/sdk',
+  minimumVersion: '0.33.0',
+  path: ['messages', 'batches'],
+  methods: ['create', 'retrieve', 'list', 'cancel', 'results'],
+};
 
 /**
  * Options for createAnthropicBatchClient.
@@ -67,10 +84,19 @@ export interface AnthropicBatchOperations {
  * Batching is a genuinely different lifecycle from a generate call: submit,
  * poll for up to 24 hours, then read results. This factory exposes exactly that
  * and does not pretend to be a `GenerateFunction`.
+ *
+ * Requires `@anthropic-ai/sdk >= 0.33.0`, the first release carrying stable
+ * `client.messages.batches`. The package's declared peer floor (`>=0.50.0`) is
+ * already above that, so this is a belt-and-braces check rather than a gap in
+ * the range; a client without the namespace is rejected with a
+ * {@link ProviderError} naming the requirement instead of failing with an
+ * opaque `TypeError` on every operation.
  */
 export function createAnthropicBatchClient(
   options: AnthropicBatchClientOptions = {},
 ): AnthropicBatchOperations {
+  if (options.client) assertBatchSurface(options.client, ANTHROPIC_BATCH_REQUIREMENT);
+
   let clientPromise: Promise<AnthropicBatchClient> | undefined;
 
   function getClient(): Promise<AnthropicBatchClient> {
@@ -84,7 +110,9 @@ export function createAnthropicBatchClient(
         // No cast: a real `Anthropic` satisfies `AnthropicBatchClient` as
         // declared, the same guarantee a consumer passing their own client
         // relies on. `batch-client-assignability.test-d.ts` locks it in.
-        return new Anthropic(clientOptions);
+        const client = new Anthropic(clientOptions);
+        assertBatchSurface(client, ANTHROPIC_BATCH_REQUIREMENT);
+        return client;
       });
     }
     return clientPromise;

@@ -13,12 +13,71 @@ import type {
   AnthropicMessageResponse,
   AnthropicProviderOptions,
   AnthropicStreamingClient,
+  AnthropicThinkingConfig,
   GenerateContext,
   GenerateFunction,
   GenerateResponse,
   StreamingGenerateFunction,
   StreamingHandle,
 } from './types.ts';
+
+/**
+ * Anthropic's floor for an enabled thinking budget, quoted from
+ * `ThinkingConfigEnabled` in `@anthropic-ai/sdk`: "Must be ≥1024 and less than
+ * `max_tokens`."
+ */
+const MINIMUM_THINKING_BUDGET_TOKENS = 1024;
+
+/**
+ * Rejects an `{ type: 'enabled' }` thinking budget that Anthropic's API cannot
+ * accept, naming both numbers involved.
+ *
+ * Both halves of the SDK's documented constraint are checked. The upper bound
+ * is the interesting one: `budget_tokens` must be strictly *less than*
+ * `max_tokens`, so a plausible-looking `{ budget_tokens: 4096 }` against this
+ * package's default `maximumTokens` of 4096 is invalid by construction and
+ * earns a reliable 400 on every request.
+ *
+ * This throws rather than adjusting either number, deliberately. Quietly
+ * raising `max_tokens` would change billing the caller never asked for, and
+ * quietly lowering `budget_tokens` would degrade the feature they explicitly
+ * requested — both would substitute our guess for their intent. The error is a
+ * configuration fault, so it carries no status code and is not retryable.
+ *
+ * Called at construction against the provider's own `maximumTokens`, and again
+ * per request when `GenerateContext.maximumTokens` overrides it — the
+ * constraint is against the `max_tokens` actually sent, which the caller can
+ * still lower after the provider is built.
+ */
+function assertThinkingBudgetFits(
+  thinking: AnthropicThinkingConfig | undefined,
+  maximumTokens: number,
+): void {
+  if (thinking?.type !== 'enabled') return;
+
+  const budget = thinking.budget_tokens;
+
+  if (budget < MINIMUM_THINKING_BUDGET_TOKENS) {
+    throw new ProviderError({
+      provider: 'anthropic',
+      cause: undefined,
+      message:
+        `[provider:anthropic] thinking.budget_tokens (${budget}) is below Anthropic's minimum ` +
+        `of ${MINIMUM_THINKING_BUDGET_TOKENS}.`,
+    });
+  }
+
+  if (budget >= maximumTokens) {
+    throw new ProviderError({
+      provider: 'anthropic',
+      cause: undefined,
+      message:
+        `[provider:anthropic] thinking.budget_tokens (${budget}) must be less than max_tokens ` +
+        `(${maximumTokens}). Raise maximumTokens above ${budget}, or lower thinking.budget_tokens ` +
+        `below ${maximumTokens}.`,
+    });
+  }
+}
 
 /**
  * Build a provider-neutral {@link TokenUsage} from an Anthropic `usage` payload.
@@ -56,6 +115,7 @@ function buildAnthropicUsage(
  */
 export function createAnthropicProvider(options: AnthropicProviderOptions): GenerateFunction {
   const { maximumTokens = 4096 } = options;
+  assertThinkingBudgetFits(options.thinking, maximumTokens);
   const resolvedModel = resolveAnthropicModel(options.model);
   const resolvedEffort = options.effort
     ? resolveAnthropicEffort(options.effort, resolvedModel)
@@ -81,6 +141,8 @@ export function createAnthropicProvider(options: AnthropicProviderOptions): Gene
   }
 
   return async (context: GenerateContext): Promise<GenerateResponse> => {
+    const effectiveMaximumTokens = context.maximumTokens ?? maximumTokens;
+    assertThinkingBudgetFits(options.thinking, effectiveMaximumTokens);
     const client = await getClient();
     const conversationForRequest = cacheAwareAssembly
       ? cacheAwareAssembly(context)
@@ -95,7 +157,7 @@ export function createAnthropicProvider(options: AnthropicProviderOptions): Gene
     const params: Record<string, unknown> = {
       model: resolvedModel,
       messages,
-      max_tokens: context.maximumTokens ?? maximumTokens,
+      max_tokens: effectiveMaximumTokens,
     };
 
     if (system !== undefined) params['system'] = system;
@@ -164,6 +226,7 @@ export function createAnthropicProviderStream(
   options: Omit<AnthropicProviderOptions, 'client'> & { client?: AnthropicStreamingClient },
 ): StreamingGenerateFunction {
   const { maximumTokens = 4096 } = options;
+  assertThinkingBudgetFits(options.thinking, maximumTokens);
   const resolvedModel = resolveAnthropicModel(options.model);
   const resolvedEffort = options.effort
     ? resolveAnthropicEffort(options.effort, resolvedModel)
@@ -191,6 +254,8 @@ export function createAnthropicProviderStream(
   return async (
     context: GenerateContext & { streaming: StreamingHandle },
   ): Promise<GenerateResponse> => {
+    const effectiveMaximumTokens = context.maximumTokens ?? maximumTokens;
+    assertThinkingBudgetFits(options.thinking, effectiveMaximumTokens);
     const client = await getClient();
     const { streaming } = context;
     const conversationForRequest = cacheAwareAssembly
@@ -206,7 +271,7 @@ export function createAnthropicProviderStream(
     const params: Record<string, unknown> = {
       model: resolvedModel,
       messages,
-      max_tokens: context.maximumTokens ?? maximumTokens,
+      max_tokens: effectiveMaximumTokens,
       stream: true,
     };
 
