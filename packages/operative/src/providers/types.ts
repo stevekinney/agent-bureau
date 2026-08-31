@@ -323,6 +323,64 @@ export interface GeminiCacheCreatingClient {
 }
 
 /**
+ * Minimal shape of a `@google/genai` `CountTokensParameters`.
+ *
+ * `model` and `contents` are required in the SDK and required here; `config`
+ * is `CountTokensConfig` — carrying `systemInstruction`, `tools`, and
+ * `generationConfig`, none of which this package needs to inspect — widened to
+ * `unknown` for the same reason {@link GeminiGenerateContentRequest} widens its
+ * own payload-shaped fields: the SDK's config types are `interface`s with no
+ * implicit index signature, so a `Record<string, unknown>` here would take a
+ * real `GoogleGenAI` out of reach without a cast.
+ */
+export interface GeminiCountTokensRequest {
+  /** Provider-native model id. Token counts are model-specific. */
+  model: string;
+  /** `ContentListUnion` in the SDK; widened here so fakes need not model it. */
+  contents: unknown;
+  /** `CountTokensConfig` in the SDK; omitted when no options are set. */
+  config?: unknown;
+}
+
+/**
+ * Minimal shape of a `@google/genai` `CountTokensResponse`.
+ *
+ * Both fields are optional in the SDK — `totalTokens` genuinely can come back
+ * absent, not merely zero, so this type never fabricates a `0` for it. That
+ * mirrors {@link GeminiUsageMetadata} and {@link TokenUsage}'s own rule:
+ * "absent" and "zero" are distinct, and a caller doing budgeting on a token
+ * count needs to be able to tell them apart.
+ *
+ * **Provisional.** This is deliberately the SDK's own field names, unrenamed,
+ * rather than a new provider-neutral shape — AB-64 is still in Backlog and
+ * will define the real context/output-limit fields this package standardizes
+ * on. Introducing a parallel budgeting shape here now would just be more
+ * surface for AB-64 to reconcile against later.
+ */
+export interface GeminiCountTokensResponse {
+  /** Total token count for `contents` (and `config`, when supplied). */
+  totalTokens?: number;
+  /** Tokens attributable to a referenced context cache. */
+  cachedContentTokenCount?: number;
+}
+
+/**
+ * Structural interface for the `models.countTokens` operation of a
+ * `@google/genai` client.
+ *
+ * Deliberately narrower than the SDK's `Models` class, which also exposes
+ * `generateContent`, `embedContent`, and much more — this package only ever
+ * calls `countTokens` through this interface, matching the minimal-interface
+ * rule {@link GeminiCacheCreatingClient} and the batch interfaces follow. A
+ * real `GoogleGenAI` satisfies this; see `gemini-client-assignability.test-d.ts`.
+ */
+export interface GeminiTokenCountingClient {
+  models: {
+    countTokens(params: GeminiCountTokensRequest): Promise<GeminiCountTokensResponse>;
+  };
+}
+
+/**
  * Options for createGeminiProvider.
  */
 export interface GeminiProviderOptions extends BaseProviderOptions {

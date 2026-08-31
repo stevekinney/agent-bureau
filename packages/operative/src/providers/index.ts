@@ -58,7 +58,12 @@ export {
   createProviderHealthTracker,
   FalloverExhaustedError,
 } from './fallover/index.ts';
-export { createGeminiProvider, createGeminiProviderStream } from './gemini.ts';
+export type { GeminiTokenCounterOptions, GeminiTokenCountingOperations } from './gemini.ts';
+export {
+  createGeminiProvider,
+  createGeminiProviderStream,
+  createGeminiTokenCounter,
+} from './gemini.ts';
 export { createOpenAIProvider, createOpenAIProviderStream } from './openai.ts';
 export type {
   ComplexitySignals,
@@ -129,6 +134,8 @@ export type {
   GeminiBatchJobReference,
   GeminiCacheCreatingClient,
   GeminiCachedContent,
+  GeminiCountTokensRequest,
+  GeminiCountTokensResponse,
   GeminiCreateBatchJobRequest,
   GeminiCreateCachedContentRequest,
   GeminiDeleteResourceJob,
@@ -138,6 +145,7 @@ export type {
   GeminiListBatchJobsRequest,
   GeminiProviderOptions,
   GeminiStreamingModel,
+  GeminiTokenCountingClient,
   GeminiUsageMetadata,
   GenerateContext,
   GenerateFunction,

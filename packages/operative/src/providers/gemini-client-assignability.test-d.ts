@@ -23,6 +23,7 @@ import type {
   GeminiCacheCreatingClient,
   GeminiGenerativeModel,
   GeminiStreamingModel,
+  GeminiTokenCountingClient,
 } from './types.ts';
 
 /** Fails to compile unless `T` resolves to exactly `true`. */
@@ -57,4 +58,15 @@ export type GoogleGenAiSatisfiesEmbeddingClient = Assert<
  */
 export type GoogleGenAiSatisfiesCacheCreatingClient = Assert<
   GoogleGenAI extends GeminiCacheCreatingClient ? true : false
+>;
+
+/**
+ * `createGeminiTokenCounter({ client })` accepts a real `GoogleGenAI`.
+ *
+ * Pins down that `models.countTokens` — the maintained SDK's server-side
+ * token-counting operation — lives on the same `models` namespace as
+ * `generateContent`, not on a separate counting-specific client.
+ */
+export type GoogleGenAiSatisfiesTokenCountingClient = Assert<
+  GoogleGenAI extends GeminiTokenCountingClient ? true : false
 >;

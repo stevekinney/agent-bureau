@@ -14,10 +14,13 @@ import { toGeminiToolChoice } from './structured-output/tool-choice-adapters.ts'
 import type {
   GeminiCacheCreatingClient,
   GeminiCachedContent,
+  GeminiCountTokensRequest,
+  GeminiCountTokensResponse,
   GeminiGenerateContentRequest,
   GeminiGenerativeModel,
   GeminiProviderOptions,
   GeminiStreamingModel,
+  GeminiTokenCountingClient,
   GeminiUsageMetadata,
   GenerateContext,
   GenerateFunction,
@@ -595,5 +598,104 @@ export function createGeminiProviderStream(
     } catch (error) {
       throw new ProviderError({ provider: 'gemini', cause: error });
     }
+  };
+}
+
+/**
+ * Options for createGeminiTokenCounter.
+ */
+export interface GeminiTokenCounterOptions {
+  /**
+   * An already-constructed client. A real `GoogleGenAI` instance satisfies
+   * {@link GeminiTokenCountingClient} with no cast — see
+   * `providers/gemini-client-assignability.test-d.ts`.
+   */
+  client?: GeminiTokenCountingClient;
+  /** Falls back to the `GOOGLE_API_KEY` environment variable when omitted. */
+  apiKey?: string;
+  /**
+   * Overrides the Gemini SDK's default base URL (`HttpOptions.baseUrl`).
+   * Accepts any string — including a credential-injecting proxy origin — with
+   * no shape validation, matching `GeminiProviderOptions.baseURL`. A proxy in
+   * front of Gemini still speaks the `models.countTokens` API, which is why
+   * `getProviderCapabilities('gemini')` keeps reporting
+   * `serverSideTokenCounting: true` regardless of this value.
+   */
+  baseURL?: string;
+}
+
+/**
+ * The `@google/genai` `models.countTokens` operation, error-normalized.
+ */
+export interface GeminiTokenCountingOperations {
+  /**
+   * Counts the tokens `request.contents` (and `request.config`, when
+   * supplied) would consume, server-side, before any generation request is
+   * made.
+   *
+   * **Provisional response shape.** `AB-64` — still in Backlog — is what will
+   * define this package's real context/output-limit fields; see
+   * {@link GeminiCountTokensResponse} for why this deliberately keeps the
+   * SDK's own field names for now rather than inventing a new one.
+   */
+  countTokens(request: GeminiCountTokensRequest): Promise<GeminiCountTokensResponse>;
+}
+
+/**
+ * Creates a client for Gemini's native server-side token-counting API.
+ *
+ * When no `client` is provided, dynamically imports `@google/genai` and
+ * constructs one from `apiKey`/`baseURL` — so a consumer that never calls
+ * `countTokens` never loads the SDK. The key comes from `apiKey` or the
+ * `GOOGLE_API_KEY` environment variable, resolved by the same helper the
+ * generate and batch factories use; a missing key fails here rather than as
+ * an opaque auth error on the first request.
+ *
+ * Gemini-only: per AB-155, this is progressive enhancement over a genuine
+ * native mechanism. Anthropic's `messages.countTokens` is a real sibling
+ * capability but is deliberately out of scope for this factory — it gets its
+ * own issue. OpenAI has no server-side token-counting endpoint at all, and no
+ * synthesized character-ratio estimate stands in for it through this
+ * signature: a token count feeds budgeting decisions, and a wrong number
+ * there is worse than no number. There is simply nothing to import for
+ * OpenAI — not a factory that errors or silently no-ops.
+ */
+export function createGeminiTokenCounter(
+  options: GeminiTokenCounterOptions = {},
+): GeminiTokenCountingOperations {
+  let clientPromise: Promise<GeminiTokenCountingClient> | undefined;
+
+  function getClient(): Promise<GeminiTokenCountingClient> {
+    if (options.client) return Promise.resolve(options.client);
+    if (!clientPromise) {
+      const apiKey = resolveGeminiApiKey(options.apiKey);
+      // No cast: a real `GoogleGenAI` satisfies `GeminiTokenCountingClient` as
+      // declared, the same guarantee a consumer passing their own client
+      // relies on. `gemini-client-assignability.test-d.ts` locks it in.
+      clientPromise = import('@google/genai').then(
+        (module) =>
+          new module.GoogleGenAI({
+            apiKey,
+            ...(options.baseURL ? { httpOptions: { baseUrl: options.baseURL } } : {}),
+          }),
+      );
+    }
+    return clientPromise;
+  }
+
+  return {
+    async countTokens(request: GeminiCountTokensRequest): Promise<GeminiCountTokensResponse> {
+      try {
+        const client = await getClient();
+        return await client.models.countTokens(request);
+      } catch (error) {
+        // getClient() can itself throw a ProviderError (a missing API key, via
+        // resolveGeminiApiKey) from inside this try — re-wrapping that would
+        // double-stack the "[provider:gemini]" prefix and obscure the real
+        // cause, so an already-normalized error passes through unchanged.
+        if (error instanceof ProviderError) throw error;
+        throw new ProviderError({ provider: 'gemini', cause: error });
+      }
+    },
   };
 }
