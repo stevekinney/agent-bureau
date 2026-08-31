@@ -10,6 +10,21 @@
 
 export { createAnthropicProvider, createAnthropicProviderStream } from './anthropic.ts';
 export type {
+  AnthropicBatchClientOptions,
+  AnthropicBatchOperations,
+  GeminiBatchClientOptions,
+  GeminiBatchOperations,
+  OpenAIBatchClientOptions,
+  OpenAIBatchOperations,
+} from './batches/index.ts';
+export {
+  createAnthropicBatchClient,
+  createGeminiBatchClient,
+  createOpenAIBatchClient,
+} from './batches/index.ts';
+export type { ProviderCapabilities } from './capabilities.ts';
+export { getProviderCapabilities } from './capabilities.ts';
+export type {
   GeminiEmbedderOptions,
   GeminiEmbeddingClient,
   GeminiEmbeddingModel,
@@ -43,7 +58,12 @@ export {
   createProviderHealthTracker,
   FalloverExhaustedError,
 } from './fallover/index.ts';
-export { createGeminiProvider, createGeminiProviderStream } from './gemini.ts';
+export type { GeminiTokenCounterOptions, GeminiTokenCountingOperations } from './gemini.ts';
+export {
+  createGeminiProvider,
+  createGeminiProviderStream,
+  createGeminiTokenCounter,
+} from './gemini.ts';
 export { createOpenAIProvider, createOpenAIProviderStream } from './openai.ts';
 export type {
   ComplexitySignals,
@@ -94,21 +114,48 @@ export {
   toOpenAIToolChoice,
 } from './structured-output/index.ts';
 export type {
+  AnthropicBatchClient,
+  AnthropicBatchCreateRequest,
+  AnthropicBatchCreateRequestItem,
+  AnthropicBatchListQuery,
   AnthropicClient,
+  AnthropicMessageBatch,
+  AnthropicMessageBatchIndividualResponse,
+  AnthropicMessageBatchRequestCounts,
+  AnthropicMessageBatchResult,
   AnthropicMessageResponse,
   AnthropicProviderOptions,
   AnthropicStreamEvent,
   AnthropicStreamingClient,
+  AnthropicThinkingConfig,
   BaseProviderOptions,
   Effort,
+  GeminiBatchClient,
+  GeminiBatchJob,
+  GeminiBatchJobReference,
+  GeminiCacheCreatingClient,
+  GeminiCachedContent,
+  GeminiCountTokensRequest,
+  GeminiCountTokensResponse,
+  GeminiCreateBatchJobRequest,
+  GeminiCreateCachedContentRequest,
+  GeminiDeleteResourceJob,
   GeminiGenerateContentRequest,
   GeminiGenerateContentResult,
   GeminiGenerativeModel,
+  GeminiListBatchJobsRequest,
   GeminiProviderOptions,
   GeminiStreamingModel,
+  GeminiTokenCountingClient,
+  GeminiUsageMetadata,
   GenerateContext,
   GenerateFunction,
   GenerateResponse,
+  OpenAIBatch,
+  OpenAIBatchClient,
+  OpenAIBatchCreateRequest,
+  OpenAIBatchListQuery,
+  OpenAIBatchRequestCounts,
   OpenAIChatCompletion,
   OpenAIChatCompletionChunk,
   OpenAIClient,

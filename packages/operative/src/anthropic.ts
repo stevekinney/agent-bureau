@@ -16,4 +16,5 @@ export type {
   AnthropicProviderOptions,
   AnthropicStreamEvent,
   AnthropicStreamingClient,
+  AnthropicThinkingConfig,
 } from './providers/types.ts';

@@ -1,21 +1,23 @@
 import { parseAnthropicToolCalls } from 'armorer/adapters/anthropic';
-import type { ConversationHistory, Message, MessageInput } from 'conversationalist';
-import { appendMessages, createProjection } from 'conversationalist';
 import { toAnthropicMessages } from 'conversationalist/adapters/anthropic';
 import type { ToolCallInput } from 'interoperability';
 
-import type { TokenBudget } from '../context/token-budget.ts';
-import type { ContextAssembler } from '../context/types.ts';
 import { ProviderError, ToolCallParseError } from './errors.ts';
+import { createCacheAwareAssembly } from './shared/cache-aware-assembly.ts';
 import { resolveAnthropicEffort } from './shared/effort.ts';
 import { resolveAnthropicModel } from './shared/model-registry.ts';
-import { resolveCommonParameters } from './shared/resolve-common-parameters.ts';
+import {
+  resolveCommonParameters,
+  type ResolvedCommonParameters,
+} from './shared/resolve-common-parameters.ts';
 import { toAnthropicToolChoice } from './structured-output/tool-choice-adapters.ts';
+import type { ToolChoice } from './structured-output/types.ts';
 import type {
   AnthropicClient,
   AnthropicMessageResponse,
   AnthropicProviderOptions,
   AnthropicStreamingClient,
+  AnthropicThinkingConfig,
   GenerateContext,
   GenerateFunction,
   GenerateResponse,
@@ -24,57 +26,185 @@ import type {
 } from './types.ts';
 
 /**
- * Converts an assembled `Message` (from `ContextAssembler`) into the
- * `MessageInput` shape `appendMessages` expects, preserving the
- * `cacheBoundary` mark a stable-prefix assembly sets on the boundary message.
+ * Anthropic's floor for an enabled thinking budget, quoted from
+ * `ThinkingConfigEnabled` in `@anthropic-ai/sdk`: "Must be ≥1024 and less than
+ * `max_tokens`."
  */
-function toMessageInput(message: Message): MessageInput {
-  const content: MessageInput['content'] =
-    typeof message.content === 'string' ? message.content : [...message.content];
-  return {
-    role: message.role,
-    content,
-    metadata: { ...message.metadata },
-    hidden: message.hidden,
-    ...(message.toolCall ? { toolCall: message.toolCall } : {}),
-    ...(message.toolResult ? { toolResult: message.toolResult } : {}),
-    ...(message.tokenUsage ? { tokenUsage: message.tokenUsage } : {}),
-    ...(message.cacheBoundary ? { cacheBoundary: true as const } : {}),
-  };
+const MINIMUM_THINKING_BUDGET_TOKENS = 1024;
+
+/**
+ * The only `temperature` Anthropic accepts while thinking is on. Its docs:
+ * "On older models, the restriction applies only while thinking is on:
+ * `temperature` and `top_k` are incompatible with thinking" — and on Opus 4.7
+ * and later a non-default `temperature` is rejected regardless of thinking.
+ * Either way, `1` (the API default) is the single value that always survives.
+ */
+const THINKING_TEMPERATURE = 1;
+
+/**
+ * Anthropic's floor for `top_p` while thinking is on, quoted from the same
+ * sentence: "`top_p` is allowed at values between 0.95 and 1." The bound is
+ * inclusive, so exactly `0.95` is accepted.
+ */
+const MINIMUM_THINKING_TOP_P = 0.95;
+
+/**
+ * Rejects an `{ type: 'enabled' }` thinking budget below Anthropic's documented
+ * minimum of 1024 tokens.
+ *
+ * This half of the constraint depends on nothing but the budget itself, so it
+ * is checked once at construction. The upper bound — which depends on the
+ * `max_tokens` actually sent — lives in
+ * {@link assertThinkingBudgetBelowMaximum} instead.
+ *
+ * This throws rather than raising the budget: quietly substituting 1024 would
+ * spend tokens the caller never asked for. The error is a configuration fault,
+ * so it carries no status code and is not retryable.
+ */
+function assertThinkingBudgetMeetsMinimum(thinking: AnthropicThinkingConfig | undefined): void {
+  if (thinking?.type !== 'enabled') return;
+
+  const budget = thinking.budget_tokens;
+
+  if (budget < MINIMUM_THINKING_BUDGET_TOKENS) {
+    throw new ProviderError({
+      provider: 'anthropic',
+      cause: undefined,
+      message:
+        `[provider:anthropic] thinking.budget_tokens (${budget}) is below Anthropic's minimum ` +
+        `of ${MINIMUM_THINKING_BUDGET_TOKENS}.`,
+    });
+  }
 }
 
 /**
- * Creates a stateful helper that runs `assembler` in stable-prefix mode on
- * every call and folds the result into an incremental `ConversationHistory`
- * through `createProjection` — the same conversation-level prefix-extension
- * mechanism AB-98 built for incremental streaming projections. Reusing one
- * projection instance across calls means the unchanged stable prefix is
- * never re-processed, only the new tail; the `cacheBoundary` mark that
- * landed on the prefix's last message the first time it was appended is
- * therefore preserved untouched for as long as it stays a prefix extension,
- * which is exactly what lets Anthropic's `cache_control` breakpoint survive
- * across steps.
+ * Rejects an `{ type: 'enabled' }` thinking budget that is not strictly below
+ * the `max_tokens` this request will actually send, naming both numbers.
+ *
+ * Deliberately per request, not per construction. `GenerateContext.maximumTokens`
+ * is documented to override the provider's construction-time `maximumTokens`
+ * for that call, so the effective limit is not known until the call happens: a
+ * 4096-token budget against the default `maximumTokens` of 4096 is perfectly
+ * valid for a caller that supplies `maximumTokens: 8192` on every invocation.
+ * Checking at construction would reject a configuration that never produces an
+ * invalid request.
+ *
+ * This throws rather than adjusting either number, deliberately. Quietly
+ * raising `max_tokens` would change billing the caller never asked for, and
+ * quietly lowering `budget_tokens` would degrade the feature they explicitly
+ * requested — both would substitute our guess for their intent. The error is a
+ * configuration fault, so it carries no status code and is not retryable.
+ *
+ * The check is strict because this provider sends no beta headers. Anthropic
+ * documents one exception — under interleaved thinking
+ * (`interleaved-thinking-2025-05-14`) the budget spans a whole assistant turn
+ * and may exceed `max_tokens` — which becomes reachable only if a `betas`
+ * option is ever added here.
  */
-function createCacheAwareAssembly(
-  assembler: ContextAssembler,
-  budget: TokenBudget,
-  pinnedMessages?: ReadonlyArray<Message>,
-): (context: GenerateContext) => ConversationHistory {
-  const projection = createProjection<Message>({
-    identify: (message) => message.id,
-    reduce: ({ conversation, event }) => appendMessages(conversation, toMessageInput(event)),
-  });
+function assertThinkingBudgetBelowMaximum(
+  thinking: AnthropicThinkingConfig | undefined,
+  maximumTokens: number,
+): void {
+  if (thinking?.type !== 'enabled') return;
 
-  return (context: GenerateContext): ConversationHistory => {
-    const { messages } = assembler({
-      conversation: context.conversation,
-      budget,
-      stablePrefix: true,
-      ...(pinnedMessages ? { pinnedMessages } : {}),
+  const budget = thinking.budget_tokens;
+
+  if (budget >= maximumTokens) {
+    throw new ProviderError({
+      provider: 'anthropic',
+      cause: undefined,
+      message:
+        `[provider:anthropic] thinking.budget_tokens (${budget}) must be less than max_tokens ` +
+        `(${maximumTokens}). Raise maximumTokens above ${budget}, or lower thinking.budget_tokens ` +
+        `below ${maximumTokens}.`,
     });
-    projection.apply(messages);
-    return projection.snapshot();
-  };
+  }
+}
+
+/**
+ * Names a `toolChoice` that forces tool use, or `undefined` when it does not.
+ *
+ * Anthropic's two forcing shapes are `{ type: 'any' }` and
+ * `{ type: 'tool', name }`, which this package's neutral `ToolChoice` spells
+ * `'required'` and `{ tool }` respectively — see `toAnthropicToolChoice`.
+ */
+function describeForcedToolChoice(choice: ToolChoice | undefined): string | undefined {
+  if (choice === 'required') return `'required'`;
+  if (typeof choice === 'object') return `the named tool '${choice.tool}'`;
+  return undefined;
+}
+
+/**
+ * Rejects the option combinations Anthropic documents as incompatible with an
+ * active `thinking` configuration, naming both conflicting fields.
+ *
+ * Three constraints, each verified against Anthropic's thinking documentation
+ * rather than assumed, because they do not all apply to the same modes:
+ *
+ * - **`temperature`** — "the restriction applies only while thinking is on:
+ *   `temperature` and `top_k` are incompatible with thinking." Applies to
+ *   `enabled` *and* `adaptive`; only the default of `1` survives.
+ * - **`topP`** — from the same sentence, "`top_p` is allowed at values between
+ *   0.95 and 1." Also both active modes. This package sends no `top_k`, so
+ *   that third parameter has nothing to guard.
+ * - **forced `toolChoice`** — `enabled` **only**. Anthropic is explicit that
+ *   the limitation is a manual-extended-thinking one: "Adaptive thinking,
+ *   including on models where thinking is on by default, supports forced tool
+ *   use." Guarding `adaptive` here would reject requests the API accepts.
+ *
+ * `{ type: 'disabled' }` and an absent `thinking` skip all three — the
+ * conflicts exist only while thinking is actually on.
+ *
+ * Checked once at construction, which is complete for this provider: all three
+ * fields are construction-time options and none of them is re-read from
+ * `GenerateContext` on the way to the request body. (`GenerateContext.toolChoice`
+ * exists, but the Anthropic provider lowers `options.toolChoice` only — if that
+ * ever changes, this check has to move per request alongside it.)
+ */
+function assertThinkingParametersCompatible(
+  thinking: AnthropicThinkingConfig | undefined,
+  toolChoice: ToolChoice | undefined,
+  common: ResolvedCommonParameters,
+): void {
+  if (thinking === undefined || thinking.type === 'disabled') return;
+
+  if (common.temperature !== undefined && common.temperature !== THINKING_TEMPERATURE) {
+    throw new ProviderError({
+      provider: 'anthropic',
+      cause: undefined,
+      message:
+        `[provider:anthropic] temperature (${common.temperature}) cannot be combined with ` +
+        `thinking.type '${thinking.type}'. Anthropic accepts only the default temperature of ` +
+        `${THINKING_TEMPERATURE} while thinking is on — omit temperature, or set thinking.type ` +
+        `to 'disabled'.`,
+    });
+  }
+
+  if (common.topP !== undefined && common.topP < MINIMUM_THINKING_TOP_P) {
+    throw new ProviderError({
+      provider: 'anthropic',
+      cause: undefined,
+      message:
+        `[provider:anthropic] topP (${common.topP}) cannot be combined with thinking.type ` +
+        `'${thinking.type}'. Anthropic accepts top_p only between ${MINIMUM_THINKING_TOP_P} and 1 ` +
+        `while thinking is on — raise topP to at least ${MINIMUM_THINKING_TOP_P}, omit it, or set ` +
+        `thinking.type to 'disabled'.`,
+    });
+  }
+
+  const forced = describeForcedToolChoice(toolChoice);
+
+  if (thinking.type === 'enabled' && forced !== undefined) {
+    throw new ProviderError({
+      provider: 'anthropic',
+      cause: undefined,
+      message:
+        `[provider:anthropic] toolChoice ${forced} cannot be combined with thinking.type ` +
+        `'enabled'. Anthropic rejects forced tool use with manual extended thinking — use ` +
+        `toolChoice 'auto' or 'none', or switch thinking.type to 'adaptive', which does support ` +
+        `forced tool use.`,
+    });
+  }
 }
 
 /**
@@ -118,6 +248,8 @@ export function createAnthropicProvider(options: AnthropicProviderOptions): Gene
     ? resolveAnthropicEffort(options.effort, resolvedModel)
     : undefined;
   const common = resolveCommonParameters(options);
+  assertThinkingBudgetMeetsMinimum(options.thinking);
+  assertThinkingParametersCompatible(options.thinking, options.toolChoice, common);
   let clientPromise: Promise<AnthropicClient> | undefined;
   const cacheAwareAssembly =
     options.assembler && options.contextBudget
@@ -138,6 +270,8 @@ export function createAnthropicProvider(options: AnthropicProviderOptions): Gene
   }
 
   return async (context: GenerateContext): Promise<GenerateResponse> => {
+    const effectiveMaximumTokens = context.maximumTokens ?? maximumTokens;
+    assertThinkingBudgetBelowMaximum(options.thinking, effectiveMaximumTokens);
     const client = await getClient();
     const conversationForRequest = cacheAwareAssembly
       ? cacheAwareAssembly(context)
@@ -152,11 +286,12 @@ export function createAnthropicProvider(options: AnthropicProviderOptions): Gene
     const params: Record<string, unknown> = {
       model: resolvedModel,
       messages,
-      max_tokens: context.maximumTokens ?? maximumTokens,
+      max_tokens: effectiveMaximumTokens,
     };
 
     if (system !== undefined) params['system'] = system;
     if (resolvedEffort !== undefined) params['output_config'] = { effort: resolvedEffort };
+    if (options.thinking) params['thinking'] = options.thinking;
     if (options.requestMetadata) params['metadata'] = options.requestMetadata;
 
     // Tool choice: when 'none', omit tools entirely; otherwise set tool_choice
@@ -225,6 +360,8 @@ export function createAnthropicProviderStream(
     ? resolveAnthropicEffort(options.effort, resolvedModel)
     : undefined;
   const common = resolveCommonParameters(options);
+  assertThinkingBudgetMeetsMinimum(options.thinking);
+  assertThinkingParametersCompatible(options.thinking, options.toolChoice, common);
   let clientPromise: Promise<AnthropicStreamingClient> | undefined;
   const cacheAwareAssembly =
     options.assembler && options.contextBudget
@@ -247,6 +384,8 @@ export function createAnthropicProviderStream(
   return async (
     context: GenerateContext & { streaming: StreamingHandle },
   ): Promise<GenerateResponse> => {
+    const effectiveMaximumTokens = context.maximumTokens ?? maximumTokens;
+    assertThinkingBudgetBelowMaximum(options.thinking, effectiveMaximumTokens);
     const client = await getClient();
     const { streaming } = context;
     const conversationForRequest = cacheAwareAssembly
@@ -262,12 +401,13 @@ export function createAnthropicProviderStream(
     const params: Record<string, unknown> = {
       model: resolvedModel,
       messages,
-      max_tokens: context.maximumTokens ?? maximumTokens,
+      max_tokens: effectiveMaximumTokens,
       stream: true,
     };
 
     if (system !== undefined) params['system'] = system;
     if (resolvedEffort !== undefined) params['output_config'] = { effort: resolvedEffort };
+    if (options.thinking) params['thinking'] = options.thinking;
     if (options.requestMetadata) params['metadata'] = options.requestMetadata;
 
     // Tool choice: when 'none', omit tools entirely; otherwise set tool_choice
