@@ -148,14 +148,153 @@ function normalizeJSONValue(value: unknown): JSONValue {
 }
 
 /**
+ * Terminal rendering for a value whose own coercion hooks throw. Only reached once `String()` has
+ * failed on both the value and its cycle-elided form, so there is no faithful rendering left to
+ * produce — and deliberately a constant, so producing it cannot itself throw.
+ */
+const UNSTRINGIFIABLE_TAG = '[unstringifiable]';
+
+/** Largest length a real array can report: `2 ** 32 - 1` per ECMA-262. A Proxy may claim more. */
+const MAXIMUM_ARRAY_LENGTH = 0xffff_ffff;
+
+/**
+ * Ceiling on how many entries one cycle-elision traversal may visit in total.
+ *
+ * The array-length cap bounds a single array, but `0xffff_ffff` is a *legitimate* length for a
+ * sparse array, and a nested structure can multiply out well past any single-array bound. Since
+ * this runs only after coercion has already thrown, abandoning an oversized traversal and
+ * returning the terminal tag is strictly better than spending minutes rebuilding a value nobody
+ * can render anyway. Exceeding it throws, which the caller already treats as "no rescue possible".
+ */
+const MAXIMUM_TRAVERSAL_ENTRIES = 1_000_000;
+
+/**
  * Last-resort coercion of a value that has already been proven non-JSON-serializable (it failed
  * `assertJSONValue` and either threw or round-tripped to `undefined` through `JSON.stringify`).
  * The `String()` default — including the `[object Object]` sentinel for plain objects — is the
  * documented fallback that consumers (armorer, conversationalist, operative) rely on, so it is
  * preserved deliberately.
+ *
+ * `String()` is attempted first and unconditionally, so whatever the engine would normally
+ * produce is what callers get: a custom `toString`, `Symbol.toPrimitive`, or overridden `join`
+ * is honoured, in the right order, reading any accessor-backed hook exactly once.
+ *
+ * The retry exists because `Array.prototype.join`'s cycle guard is an engine extension rather
+ * than a spec requirement. Bun 1.3.13 renders `[1, 2, <self>]` as `'1,2,'`; Bun 1.4.0 recurses
+ * until the stack overflows, throwing a `RangeError` out of what is meant to be a total
+ * normalization step. Eliding the cycles and retrying reproduces the guarded result, so both
+ * engines agree. Reacting to the throw rather than predicting it also means no cross-realm array
+ * (whose `Array.prototype` is a different object) and no oddly-shaped hook (`Symbol.toPrimitive`
+ * set to `null`, which coercion treats as absent) can be misclassified in advance.
+ *
+ * Known trade-off, accepted deliberately: on an engine that throws, a cyclic array whose elements
+ * carry effectful coercion hooks invokes those hooks during the failed attempt and again on the
+ * retry. Avoiding that would mean classifying the array before coercing it, which is the approach
+ * this replaced — it produced four distinct misclassification defects, each of which let the
+ * original `RangeError` back through. Duplicate invocation of a side-effecting hook, on a value
+ * already proven non-JSON, on the failure path of one engine, is the cheaper failure than
+ * reintroducing the crash this exists to prevent.
  */
 function stringifyNonJSON(value: unknown): string {
-  return String(value);
+  try {
+    return String(value);
+  } catch {
+    try {
+      // Inside the try: walking the value can itself run user code — an index getter, or a
+      // Proxy trap — and a throw from the traversal must not escape any more than a throw from
+      // the coercion it is trying to rescue.
+      const elided = elideArrayCycles(value, new WeakSet(), {
+        remaining: MAXIMUM_TRAVERSAL_ENTRIES,
+      });
+
+      // Nothing was elided, so there is no cycle to break and a retry would invoke the same
+      // throwing hook on the same value and fail identically — twice for no benefit.
+      if (elided === value) return UNSTRINGIFIABLE_TAG;
+
+      return String(elided);
+    } catch {
+      // A coercion hook that throws for its own reasons, on a value with no cycle this function
+      // can break. Materialization normalizes, it does not validate, so even here it must
+      // produce a string rather than propagate.
+      //
+      // This is a constant rather than `Object.prototype.toString.call(value)` because that
+      // performs `Get(value, Symbol.toStringTag)` — another input-controlled property, whose
+      // accessor can throw and would defeat the totality this branch exists to provide. Nothing
+      // here dispatches through the value at all.
+      return UNSTRINGIFIABLE_TAG;
+    }
+  }
+}
+
+/**
+ * `Array.isArray` narrows an `unknown` to `any[]`, which silently turns every element read into
+ * an `any`. This predicate keeps the elements typed as `unknown` so they stay narrowed
+ * deliberately rather than by accident. Like `Array.isArray`, it is realm-agnostic.
+ */
+function isUnknownArray(value: unknown): value is readonly unknown[] {
+  return Array.isArray(value);
+}
+
+/**
+ * Returns `value` with every back-reference to an array already open on the current path replaced
+ * by an empty string — the same substitution a cycle-guarding `Array.prototype.join` performs.
+ * Non-array values are returned untouched, so object rendering is unaffected. `Array.isArray` is
+ * realm-agnostic, so an array from a VM sandbox or iframe is handled like any other.
+ *
+ * The `WeakSet` is path-scoped (entries are removed on the way back up), so a shared-but-acyclic
+ * reference is rendered normally instead of being mistaken for a cycle.
+ *
+ * An array is rebuilt only when something beneath it actually changed, and the original is
+ * returned by reference otherwise. That keeps the rewrite confined to the cyclic path: a nested
+ * acyclic array carrying its own `toString` or `join` survives intact and still renders through
+ * its own hook, instead of being flattened into a plain clone. The check is purely structural —
+ * nothing inspects a coercion hook to decide.
+ */
+function elideArrayCycles(
+  value: unknown,
+  open: WeakSet<object>,
+  budget: { remaining: number },
+): unknown {
+  if (!isUnknownArray(value)) return value;
+  if (open.has(value)) return '';
+
+  // `length` is read once up front: `value` may be a Proxy, whose `get` trap would otherwise fire
+  // on every iteration and could report a different length each time.
+  const length = value.length;
+
+  // `Array.isArray` is true for a Proxy over an array, and a trap may report any `length` at all.
+  // `Infinity` would spin the loop forever, and a merely large safe integer is nearly as bad:
+  // `Number.isSafeInteger(2 ** 32)` is `true`, so a bare safe-integer check still admits billions
+  // of indexed reads. A real array's length cannot exceed 2^32 - 1, so anything outside that
+  // range is not a length this walk can honour and the value is left untouched. Hanging would be
+  // a worse failure than the throw this function exists to prevent.
+  if (!Number.isSafeInteger(length) || length < 0 || length > MAXIMUM_ARRAY_LENGTH) return value;
+
+  open.add(value);
+
+  // Indices are walked directly rather than through `value.map`. `map` is an input-controlled
+  // property — an array can carry an own `map`, or be a subclass that overrides it — and
+  // dispatching through it could throw from inside the one function that exists to guarantee a
+  // string is always produced. `String()` never consults `map`, so neither does this.
+  const elided: unknown[] = [];
+  let changed = false;
+  for (let index = 0; index < length; index += 1) {
+    budget.remaining -= 1;
+    if (budget.remaining < 0) {
+      throw new RangeError('Cycle elision exceeded its traversal budget');
+    }
+
+    const entry: unknown = value[index];
+    const elidedEntry = elideArrayCycles(entry, open, budget);
+    // `Object.is`, not `!==`: `NaN !== NaN` would report an untouched element as changed and
+    // rebuild an acyclic array that should have been returned by reference, discarding its hook.
+    if (!Object.is(elidedEntry, entry)) changed = true;
+    elided.push(elidedEntry);
+  }
+
+  open.delete(value);
+
+  return changed ? elided : value;
 }
 
 function assertJSONValue(value: unknown, path: string): asserts value is JSONValue {
