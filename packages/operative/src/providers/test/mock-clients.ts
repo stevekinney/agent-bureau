@@ -159,10 +159,12 @@ export interface MockAnthropicStreamingClient extends AnthropicStreamingClient {
  * When `errorAfterEvents` is set, the async generator yields that many events
  * from the current sequence before throwing the next error from `errors`.
  *
- * `create` is `async` because {@link AnthropicStreamingClient} resolves to
- * `Promise<AsyncIterable<...>>`, matching the real SDK's `create` (which
- * returns an `APIPromise`, not a bare async iterable) — see the interface's
- * doc comment in `types.ts`.
+ * `create` returns its async generator synchronously, and queued errors throw
+ * synchronously, so `for await (const event of client.messages.create(params))`
+ * works directly against this mock. {@link AnthropicStreamingClient} accepts
+ * either that bare iterable or a `Promise` of one, the latter because the real
+ * SDK's `create` returns an `APIPromise` rather than a bare async iterable —
+ * see the interface's doc comment in `types.ts`.
  */
 export function createMockAnthropicStreamingClient(
   eventSequences: AnthropicStreamEvent[][],
@@ -179,9 +181,7 @@ export function createMockAnthropicStreamingClient(
     _eventSequences: eventSequences,
     _errors: errors,
     messages: {
-      async create(
-        params: AnthropicMessageCreateRequest,
-      ): Promise<AsyncIterable<AnthropicStreamEvent>> {
+      create(params: AnthropicMessageCreateRequest): AsyncIterable<AnthropicStreamEvent> {
         calls.push(params);
         const error = errors[errorIndex];
         if (error && errorIndex < errors.length && errorAfterEvents === undefined) {

@@ -762,7 +762,22 @@ export interface OpenAIChatCompletionChunk {
  */
 export interface AnthropicStreamingClient {
   messages: {
-    create(params: AnthropicMessageCreateRequest): Promise<AsyncIterable<AnthropicStreamEvent>>;
+    /**
+     * Returns either a directly iterable stream or a promise of one.
+     *
+     * The real `@anthropic-ai/sdk` streaming overload returns an `APIPromise`,
+     * which is a `Promise` and not itself async-iterable, so the promise arm is
+     * required for a real `Anthropic` to satisfy this interface without a cast.
+     * The bare-iterable arm is kept so a hand-rolled or mock client that returns
+     * its generator synchronously stays valid — narrowing to promise-only would
+     * be a runtime break for anyone doing
+     * `for await (const event of client.messages.create(params))` against their
+     * own client. `createAnthropicProviderStream` awaits the result, which is a
+     * no-op on the non-promise arm.
+     */
+    create(
+      params: AnthropicMessageCreateRequest,
+    ): AsyncIterable<AnthropicStreamEvent> | Promise<AsyncIterable<AnthropicStreamEvent>>;
   };
 }
 
