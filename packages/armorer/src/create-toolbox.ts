@@ -400,6 +400,7 @@ type InternalToolExecuteOptionsWithMirror = ToolboxExecuteOptions & {
   executionHandle?: ExecutionHandle;
   privilegedContextMirrorHandle?: ExecutionHandle;
   parentCompletionHandle?: ExecutionHandle;
+  onParentCompletionPending?: (pending: boolean) => void;
 };
 
 type ResumeApprovalValidationResult =
@@ -1096,6 +1097,10 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     executionHandle.activate();
     options = { ...options, signal: executionHandle.signal };
     let hasSingleChild = false;
+    // True while a single child's tool callback is still running. A callback
+    // that ignores cancellation outlives the raced execution promise, and the
+    // parent handle stays unfinished until createTool settles it.
+    let childCallbackPending = false;
     try {
       const calls = Array.isArray(input) ? input : [input];
       const isMultiple = Array.isArray(input);
@@ -1468,7 +1473,14 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
                   // A single tool call can use the parent as its completion
                   // callback. This matters during shutdown: the tool promise
                   // may race its abort signal while the callback continues.
-                  ...(hasSingleChild ? { parentCompletionHandle: executionHandle } : {}),
+                  ...(hasSingleChild
+                    ? {
+                        parentCompletionHandle: executionHandle,
+                        onParentCompletionPending: (pending: boolean) => {
+                          childCallbackPending = pending;
+                        },
+                      }
+                    : {}),
                   ...(options !== undefined && approvalResumeSymbol in options
                     ? { [approvalResumeSymbol]: options[approvalResumeSymbol] }
                     : {}),
@@ -1637,6 +1649,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       executionReturned = true;
       if (
         liveStreams === 0 &&
+        !childCallbackPending &&
         !(
           hasSingleChild &&
           (executionHandle.snapshot().state === 'abort-requested' ||
@@ -1654,6 +1667,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
         // For a single child, createTool settles this parent only when the
         // underlying callback actually returns (including cancellation-ignoring
         // callbacks). Do not mark it terminal from the raced toolbox promise.
+        !childCallbackPending &&
         !(hasSingleChild && executionHandle.snapshot().state === 'abort-requested')
       ) {
         executionHandle.settle();
