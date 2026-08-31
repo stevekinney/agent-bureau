@@ -66,10 +66,36 @@ function read(path: string): string {
   return readFileSync(path, 'utf-8');
 }
 
-/** Members declared inside a named `interface` block. */
+/**
+ * Members declared across *every* block declaring the named interface.
+ *
+ * This document declares `RunOutcomeBase` twice on purpose: once as AB-15
+ * shipped it, and again in the AB-34 amendment that adds to it. Reading only the
+ * first occurrence made the harness self-defeating — the amendment's members
+ * passed solely because pending entries are checked first, so the moment AB-88
+ * shipped `snapshot()` the stale-pending test would demand its removal and the
+ * example call would immediately become unaccounted. The harness could not have
+ * survived the implementation it exists to track.
+ */
 function declaredMembers(source: string, interfaceName: string): Set<string> {
-  const start = source.indexOf(`interface ${interfaceName}`);
-  if (start < 0) throw new Error(`interface ${interfaceName} not found`);
+  const members = new Set<string>();
+  let searchFrom = 0;
+  let found = false;
+
+  for (;;) {
+    const start = source.indexOf(`interface ${interfaceName}`, searchFrom);
+    if (start < 0) break;
+    found = true;
+    for (const member of membersOfBlock(source, start)) members.add(member);
+    searchFrom = start + 1;
+  }
+
+  if (!found) throw new Error(`interface ${interfaceName} not found`);
+  return members;
+}
+
+/** Members declared in the brace-balanced block beginning after `start`. */
+function membersOfBlock(source: string, start: number): Set<string> {
   const open = source.indexOf('{', start);
   let depth = 0;
   let end = open;
