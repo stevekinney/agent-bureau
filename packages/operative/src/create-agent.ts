@@ -5,6 +5,7 @@ import type { ZodType } from 'zod';
 
 import type { AgentRun } from './agent-run';
 import { createAgentRun } from './agent-run';
+import { noToolCalls } from './conditions/predicates';
 import { createActiveRun } from './create-run';
 import type {
   ContextManagementOptions,
@@ -42,7 +43,19 @@ export interface CreateAgentOptionsBase {
    */
   instructions?: string;
 
-  /** Stop conditions checked after each step. */
+  /**
+   * Stop conditions checked after each step.
+   *
+   * Defaults to `stopWhen.noToolCalls()` when omitted — `createAgent` (unlike
+   * the lower-level `createActiveRun`, which never applies a default) has no
+   * caller to fall back on, and a run with no stop condition at all runs
+   * every step to `maximumSteps` (`DEFAULT_MAXIMUM_STEPS`, 25) before
+   * exiting with `finishReason: 'maximum-steps'`. For a plain text-in/
+   * text-out agent this default is exactly "stop once the model replies
+   * without calling a tool" — pass an explicit `stopWhen` (including
+   * `stopWhen.toolCalled(...)` for agents that MUST end on a tool call, e.g.
+   * `createHandoffTool`) to override it.
+   */
   stopWhen?: StopCondition | StopCondition[];
 
   /** Hard cap on the number of steps before the loop exits. */
@@ -333,6 +346,11 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknow
     instructions,
     permissions,
     output,
+    // Default to `noToolCalls()` when the caller doesn't supply a `stopWhen`
+    // — see the doc comment on `CreateAgentOptionsBase.stopWhen`. Falls back
+    // to `createActiveRun`'s own "no stop conditions at all" behavior only
+    // when explicitly overridden with an empty array.
+    stopWhen = noToolCalls(),
     ...rest
   } = options;
 
@@ -394,6 +412,7 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknow
         generate,
         toolbox,
         conversation,
+        stopWhen,
         ...(output ? { responseSchema: output } : {}),
         ...rest,
       };

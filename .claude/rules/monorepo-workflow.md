@@ -46,3 +46,22 @@ Always build before type-checking or testing so downstream packages have fresh t
 
 - Always use `workspace:*` protocol for internal dependencies.
 - Integration tests live in `packages/integration/` and run via `turbo run integration --filter=integration`.
+
+## Ad Hoc Scripts Against Workspace Package Code
+
+Bun's workspace linking resolves an internal import like `import { Conversation } from 'conversationalist'` to that package's `dist/`, not its `src/`. The `build`/`test`/`check-types` pipeline above is Turborepo-driven: Turborepo's task graph rebuilds stale dependents automatically via `^build`, so those tasks always see current code. A plain `bun run <file>.ts` outside that graph has no such guarantee — it can silently resolve a `dist/` that predates the `src/` you just edited, producing a false-positive bug report against stale, already-fixed code (this happened for real: AB-146).
+
+Before running any ad hoc script (`bun run <file>.ts`) against workspace package code — as opposed to `build`/`test`/`check-types`, which already handle this correctly for their own tasks — run the staleness guard first:
+
+```bash
+bun run check:stale-dist
+```
+
+It walks every workspace package with both a `src/` and a `dist/` directory and, for each one, compares its newest `dist/` mtime against the newest `src/` mtime across that package AND all of its transitive workspace dependencies (resolved by package NAME from `dependencies`/`devDependencies`, since internal deps mix the `workspace:*` protocol with plain semver ranges) — exiting non-zero naming every package that's stale either way. `armorer` and `conversationalist` inline `lifecycle` and `interoperability` at build time, so rebuilding `lifecycle` without rebuilding its consumers is exactly the kind of gap this closes. Run `turbo run build` (or `turbo run build --filter=<package>`) to clear a failure before continuing with the ad hoc script. If that reports `FULL TURBO` and the guard still fails, the skew is mtime-only with unchanged content: Turborepo hashes content, so a cached build leaves `dist/` mtimes untouched and the guard stays red. `turbo run build --force` clears that case.
+
+This guard is a fast mtime heuristic, not a proof of freshness, and it has two known blind spots worth knowing before you trust it:
+
+- **Deleted source files are invisible.** Nothing left in `src/` gets a newer mtime, so a `dist/` still carrying the deleted module reads as fresh. Counting directory mtimes would catch this, and was tried and reverted: several suites create and delete fixture directories *inside* `src/` while running, so it made the guard fail after a plain `turbo run test` with no source edits at all. A tripwire that fires after an ordinary test run is worse than one with a documented gap.
+- **mtime skew without a content change reads as stale.** A `touch`, or a branch switch that rewrites mtimes, trips the guard even though `dist/` is current — and because Turborepo hashes content, `turbo run build` is a cache hit that cannot clear it. Use `turbo run build --force`.
+
+`turbo run build` remains the authority on whether `dist/` is actually current; treat this guard as a cheap tripwire for ad hoc scripts, not a replacement for it.
