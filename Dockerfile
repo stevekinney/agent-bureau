@@ -8,7 +8,7 @@
 # monorepo context rather than a single package — there is no "install the
 # gateway package" path. This mirrors the fork-the-template posture the
 # project has settled on (see the roadmap's AB-81 decision record).
-FROM oven/bun:1.3.13-slim
+FROM oven/bun:1.4.0-slim
 
 WORKDIR /app
 

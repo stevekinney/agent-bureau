@@ -32,7 +32,7 @@ This package is ESM-only. `zod` is a peer dependency.
 
 ## Host Support
 
-The package manifest is the machine-readable support contract. Conversationalist supports Bun `>=1.3.13` and Node.js `^20.19.0 || ^22.12.0 || >=24`. The verified SvelteKit deployment target is `@sveltejs/adapter-vercel` on Vercel's `nodejs22.x` runtime. Controllers on servers are request-local and are not durable storage; client controllers are ephemeral projections that must reconcile with an authorized source.
+The package manifest is the machine-readable support contract. Conversationalist supports Bun `>=1.4.0` and Node.js `^20.19.0 || ^22.12.0 || >=24`. The verified SvelteKit deployment target is `@sveltejs/adapter-vercel` on Vercel's `nodejs22.x` runtime. Controllers on servers are request-local and are not durable storage; client controllers are ephemeral projections that must reconcile with an authorized source.
 
 | Public subpath                         | Bun | Node.js | Browser | SSR |
 | -------------------------------------- | --- | ------- | ------- | --- |

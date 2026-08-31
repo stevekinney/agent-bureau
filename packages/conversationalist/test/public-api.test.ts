@@ -42,7 +42,7 @@ describe('public API export map', () => {
   });
 
   it('declares exact supported runtime boundaries', () => {
-    expect(pkg.engines).toEqual({ bun: '>=1.3.13', node: '^20.19.0 || ^22.12.0 || >=24' });
+    expect(pkg.engines).toEqual({ bun: '>=1.4.0', node: '^20.19.0 || ^22.12.0 || >=24' });
   });
 
   it('includes the canonical subpaths', () => {
