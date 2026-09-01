@@ -62,17 +62,16 @@ const PENDING_IMPLEMENTATION: Readonly<Record<string, string>> = {
   closed: 'AB-37',
 };
 
-/** Calls in the examples that are not run-handle members. */
-const NOT_RUN_HANDLE_MEMBERS = new Set([
-  'log',
-  'run',
-  'createSchedule',
-  'abortRun',
-  'getRun',
-  'listRuns',
-  'toISOString',
-  'unsubscribe',
-]);
+/**
+ * Identifiers that are never a run handle, used only when deciding whether a
+ * *receiver* is one.
+ *
+ * This must not be applied to member names. Once a receiver is known to hold a
+ * run handle, every member invoked on it has to be accounted for — filtering
+ * afterwards would let `run.getRun()` pass while being neither documented nor
+ * owned, which is exactly the accounting this harness claims to do.
+ */
+const NEVER_A_RUN_HANDLE = new Set(['bureau', 'console', 'schedule', 'fires', 'Object', 'Array']);
 
 function read(path: string): string {
   return readFileSync(path, 'utf-8');
@@ -81,13 +80,13 @@ function read(path: string): string {
 /**
  * Members declared across *every* block declaring the named interface.
  *
- * This document declares `RunOutcomeBase` twice on purpose: once as AB-15
- * shipped it, and again in the AB-34 amendment that adds to it. Reading only the
- * first occurrence made the harness self-defeating — the amendment's members
- * passed solely because pending entries are checked first, so the moment AB-88
- * shipped `snapshot()` the stale-pending test would demand its removal and the
- * example call would immediately become unaccounted. The harness could not have
- * survived the implementation it exists to track.
+ * The document declares `RunOutcomeBase` once today. Scanning every occurrence
+ * anyway is deliberate: an earlier revision of AB-34 re-declared it to add
+ * members, this parser read only the first block, and the amendment's members
+ * passed solely because pending entries are checked first — so the harness would
+ * have broken the moment the implementation it tracks actually landed. A later
+ * amendment can re-declare an interface the same way, and aggregating costs
+ * nothing.
  */
 function declaredMembers(source: string, interfaceName: string): Set<string> {
   const members = new Set<string>();
@@ -158,7 +157,8 @@ function runHandleBindings(source: string): Set<string> {
     /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:await\s+)?(?:[A-Za-z_$][\w$]*\.)?(?:run|createRun|createActiveRun|getRun)\s*\(/g;
   let match = pattern.exec(source);
   while (match !== null) {
-    if (match[1] !== undefined) names.add(match[1]);
+    const name = match[1];
+    if (name !== undefined && !NEVER_A_RUN_HANDLE.has(name)) names.add(name);
     match = pattern.exec(source);
   }
   return names;
@@ -175,7 +175,9 @@ function runHandleCalls(source: string): Set<string> {
 
   const members = new Set<string>();
   const record = (name: string | undefined): void => {
-    if (name !== undefined && !NOT_RUN_HANDLE_MEMBERS.has(name)) members.add(name);
+    // No member-name filtering: the receiver is already known to be a run
+    // handle, so anything invoked on it must be documented or owned.
+    if (name !== undefined) members.add(name);
   };
 
   for (const binding of bindings) {
@@ -189,18 +191,46 @@ function runHandleCalls(source: string): Set<string> {
 
   // Calls chained straight off a run producer, which never create a binding:
   //   await bureau.run('writer', '...').unwrap()
-  // Without this, such a call is invoked on a run handle but invisible to the
-  // binding scan, so a typo in it would pass a test that claims to account for
-  // every run-handle member the examples invoke.
-  const chained =
-    /(?:[A-Za-z_$][\w$]*\.)?(?:run|createRun|createActiveRun|getRun)\s*\([^)]*\)\s*\.\s*([A-Za-z_$][\w$]*)\s*\(/g;
-  let chainMatch = chained.exec(source);
-  while (chainMatch !== null) {
-    record(chainMatch[1]);
-    chainMatch = chained.exec(source);
-  }
+  // These are invoked on a run handle but invisible to the binding scan, so a
+  // typo in one would pass a test that claims to account for every run-handle
+  // member the examples invoke.
+  //
+  // Argument spans are matched by counting parentheses rather than by `[^)]*`,
+  // which stopped at the first `)` and so missed a nested call such as
+  // `bureau.run('writer', makePrompt()).unwrap()`.
+  for (const member of chainedFromProducer(source)) record(member);
 
   return members;
+}
+
+/** Members invoked directly on the result of a run-producing call. */
+function chainedFromProducer(source: string): Set<string> {
+  const found = new Set<string>();
+  const producer = /(?:[A-Za-z_$][\w$]*\.)?(?:run|createRun|createActiveRun|getRun)\s*\(/g;
+
+  let match = producer.exec(source);
+  while (match !== null) {
+    // Walk from the producer's opening parenthesis to its balanced close,
+    // skipping over nested calls in the arguments.
+    let depth = 0;
+    let index = match.index + match[0].length - 1;
+    for (; index < source.length; index += 1) {
+      if (source[index] === '(') depth += 1;
+      else if (source[index] === ')') {
+        depth -= 1;
+        if (depth === 0) break;
+      }
+    }
+
+    const after = source.slice(index + 1);
+    const chained = /^\s*\.\s*([A-Za-z_$][\w$]*)\s*\(/.exec(after);
+    if (chained?.[1] !== undefined) found.add(chained[1]);
+
+    producer.lastIndex = index + 1;
+    match = producer.exec(source);
+  }
+
+  return found;
 }
 
 const document = read(documentPath);
