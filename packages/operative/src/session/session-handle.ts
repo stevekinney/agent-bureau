@@ -1257,6 +1257,7 @@ export function createSessionHandle(
           // A run error is treated as a non-met tick — we emit done(false) and
           // propagate. The caller should handle this as an error condition.
           emitter.dispatchEvent(new SessionMonitorDoneEvent(sessionId, false, tick + 1));
+          if (signal?.aborted) throw processLocalAbortError();
           throw err;
         } finally {
           signal?.removeEventListener('abort', abortRun);
@@ -1269,6 +1270,10 @@ export function createSessionHandle(
         // this check a predicate that returns false would keep sleeping and
         // re-running after a provider/tool failure instead of surfacing it, the
         // same way the catch block does for thrown errors (PRRT_kwDORvupsc6MddwB).
+        if (signal?.aborted) {
+          emitter.dispatchEvent(new SessionMonitorDoneEvent(sessionId, false, tick + 1));
+          throw processLocalAbortError();
+        }
         if (FAILURE_FINISH_REASONS.has(result.finishReason)) {
           emitter.dispatchEvent(new SessionMonitorDoneEvent(sessionId, false, tick + 1));
           // Prefer the run's own error; otherwise synthesize one naming the

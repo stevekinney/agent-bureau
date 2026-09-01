@@ -3358,7 +3358,7 @@ describe('session.monitor()', () => {
     } catch (error) {
       caught = error;
     }
-    expect(caught).toBeInstanceOf(Error);
+    expect(caught).toMatchObject({ name: 'AbortError' });
   });
 
   it('clears its process-local inter-tick timer and stops when aborted', async () => {
