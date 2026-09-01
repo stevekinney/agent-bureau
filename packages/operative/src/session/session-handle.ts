@@ -569,20 +569,32 @@ function processLocalDelay(
   clearTimeoutFunction: (timer: unknown) => void,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
-    if (signal?.aborted) {
+    const timerState: { value?: unknown } = {};
+    let settled = false;
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      if (timerState.value !== undefined) clearTimeoutFunction(timerState.value);
+      signal?.removeEventListener('abort', onAbort);
       reject(processLocalAbortError());
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) {
+      onAbort();
       return;
     }
 
-    const onAbort = () => {
-      clearTimeoutFunction(timer);
-      reject(processLocalAbortError());
-    };
-    const timer = setTimeoutFunction(() => {
+    timerState.value = setTimeoutFunction(() => {
+      if (settled) return;
+      settled = true;
       signal?.removeEventListener('abort', onAbort);
       resolve();
     }, milliseconds);
-    signal?.addEventListener('abort', onAbort, { once: true });
+    if (settled) {
+      clearTimeoutFunction(timerState.value);
+    } else if (signal?.aborted) {
+      onAbort();
+    }
   });
 }
 
@@ -1114,6 +1126,7 @@ export function createSessionHandle(
         );
       }
 
+      if (options?.signal?.aborted) throw processLocalAbortError();
       emitter.dispatchEvent(new SessionSleepEvent(sessionId, ms));
       await processLocalDelay(ms, options?.signal, setTimeoutFunction, clearTimeoutFunction);
     },
@@ -1231,10 +1244,9 @@ export function createSessionHandle(
         }
 
         // Emit tick-started (met = null — run hasn't completed yet).
-        emitter.dispatchEvent(new SessionMonitorTickEvent(sessionId, tick, null));
-
         // Each tick is a full agent run.
         signal?.throwIfAborted();
+        emitter.dispatchEvent(new SessionMonitorTickEvent(sessionId, tick, null));
         const run = handle.run(input);
         const abortRun = () => run.abort('session monitor aborted');
         signal?.addEventListener('abort', abortRun, { once: true });
@@ -1292,7 +1304,12 @@ export function createSessionHandle(
         const remainingMs = maxMs !== undefined ? maxMs - elapsed : Infinity;
         const sleepMs = Math.min(everyMs, remainingMs);
         if (sleepMs > 0) {
-          await processLocalDelay(sleepMs, signal, setTimeoutFunction, clearTimeoutFunction);
+          try {
+            await processLocalDelay(sleepMs, signal, setTimeoutFunction, clearTimeoutFunction);
+          } catch (error) {
+            emitter.dispatchEvent(new SessionMonitorDoneEvent(sessionId, false, tick));
+            throw error;
+          }
         }
       }
     },
