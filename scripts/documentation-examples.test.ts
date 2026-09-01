@@ -150,37 +150,20 @@ function membersOfBlock(source: string, start: number): Set<string> {
 }
 
 /** True when a call expression produces a run handle. */
-function isRunProducer(node: ts.Node, agents: ReadonlySet<string>): boolean {
+function isRunProducer(node: ts.Node, isAgent: (name: string) => boolean): boolean {
   if (!ts.isCallExpression(node)) return false;
   const callee = unwrap(node.expression);
   if (!ts.isPropertyAccessExpression(callee)) return false;
   if (callee.name.text !== RUN_PRODUCER_METHOD) return false;
   const receiver = unwrap(callee.expression);
   if (!ts.isIdentifier(receiver)) return false;
-  return receiver.text === CONVENTIONAL_RUN_RECEIVER || agents.has(receiver.text);
+  return receiver.text === CONVENTIONAL_RUN_RECEIVER || isAgent(receiver.text);
 }
 
-/** Bindings initialised from an agent factory, whose `.run()` yields a handle. */
-function agentBindings(file: ts.SourceFile): Set<string> {
-  const agents = new Set<string>();
-  const visit = (node: ts.Node): void => {
-    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
-      const initializer = unwrap(node.initializer);
-      if (
-        ts.isCallExpression(initializer) &&
-        ts.isIdentifier(initializer.expression) &&
-        AGENT_FACTORIES.has(initializer.expression.text)
-      ) {
-        agents.add(node.name.text);
-      }
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(file);
-  return agents;
-}
-
-/** Unwraps `await x` and `(x)` down to the expression underneath. */
+/**
+ * Strips the transparent wrappers that do not change what an expression refers
+ * to: `await x`, `(x)`, `x as T`, `<T>x`, `x!`, `x satisfies T`.
+ */
 function unwrap(node: ts.Expression): ts.Expression {
   let current = node;
   for (;;) {
@@ -209,14 +192,10 @@ function unwrap(node: ts.Expression): ts.Expression {
  * Pass one records what every binding holds, per scope. Pass two resolves calls
  * against the scope active at that node.
  *
- * KNOWN LIMIT: pass two sees each binding's *final* value, not its value at each
- * call site. A fence that reassigns a variable between two calls on it therefore
- * resolves both against the later state. Fixing that means resolving in one
- * ordered pass, which loses the forward-alias handling pass one provides — two
- * attempts at that rewrite both passed these tests while silently detecting
- * nothing, so the limit is recorded rather than traded for a worse failure.
- * Documentation examples that reassign a handle mid-fence are the only affected
- * shape, and none does today. Scopes are identified by a
+ * Bindings are position-stamped, so a call resolves against the state at its own
+ * position rather than the binding's final value. Agent-ness rides on the same
+ * events, which makes agent receivers scope-aware: an inner binding shadowing an
+ * outer agent no longer inherits its handle-producing behaviour. Scopes are identified by a
  * deterministic pre-order counter, so both passes agree on which scope is which
  * without needing a type checker.
  */
@@ -240,26 +219,64 @@ function runHandleCalls(fence: string, index: number): Set<string> {
     ts.isForInStatement(node) ||
     ts.isCaseBlock(node);
 
-  const agents = agentBindings(file);
   const destructured = new Set<string>();
 
-  // scopeId -> binding name -> holds a run handle
-  const bindings = new Map<number, Map<string, boolean>>();
+  // scopeId -> name -> the binding's value at each point it was set.
+  //
+  // Position-stamped rather than a single final value, so a call resolves
+  // against the state at *its* position. A fence that reassigns a handle
+  // between two calls on it previously resolved both against the later state.
+  // Agent-ness is carried on the same events, which makes agent receivers
+  // scope-aware for free — a shadowed agent binding no longer leaks outward.
+  interface BindingState {
+    readonly pos: number;
+    readonly handle: boolean;
+    readonly agent: boolean;
+  }
+  const bindings = new Map<number, Map<string, BindingState[]>>();
   bindings.set(0, new Map());
 
-  const lookup = (chain: number[], name: string): boolean | undefined => {
+  /** The binding in force for `name` at `pos`, or undefined when unbound. */
+  const lookup = (chain: number[], name: string, pos: number): BindingState | undefined => {
     for (let i = chain.length - 1; i >= 0; i -= 1) {
-      const scope = bindings.get(chain[i] ?? 0);
-      const found = scope?.get(name);
-      if (found !== undefined) return found;
+      const states = bindings.get(chain[i] ?? 0)?.get(name);
+      if (states === undefined) continue;
+      let current: BindingState | undefined;
+      for (const state of states) {
+        if (state.pos <= pos) current = state;
+      }
+      // A name declared in this scope shadows an outer one even before its
+      // initialiser runs — that is a temporal dead zone, not the outer binding.
+      return current ?? { pos, handle: false, agent: false };
     }
     return undefined;
   };
 
-  const producesHandle = (expression: ts.Expression, chain: number[]): boolean => {
+  const record = (scope: number, name: string, state: BindingState): void => {
+    const forScope = bindings.get(scope);
+    if (!forScope) return;
+    const existing = forScope.get(name);
+    if (existing) existing.push(state);
+    else forScope.set(name, [state]);
+  };
+
+  const isAgentReceiver = (name: string, chain: number[], pos: number): boolean =>
+    lookup(chain, name, pos)?.agent === true;
+
+  const producesHandle = (expression: ts.Expression, chain: number[], pos: number): boolean => {
     const value = unwrap(expression);
-    if (isRunProducer(value, agents)) return true;
-    return ts.isIdentifier(value) && lookup(chain, value.text) === true;
+    if (isRunProducer(value, (name) => isAgentReceiver(name, chain, pos))) return true;
+    return ts.isIdentifier(value) && lookup(chain, value.text, pos)?.handle === true;
+  };
+
+  /** Whether this initialiser makes the binding an agent, whose .run() yields a handle. */
+  const producesAgent = (expression: ts.Expression): boolean => {
+    const value = unwrap(expression);
+    return (
+      ts.isCallExpression(value) &&
+      ts.isIdentifier(value.expression) &&
+      AGENT_FACTORIES.has(value.expression.text)
+    );
   };
 
   // ── Pass one: record every binding, in its own scope ────────────────
@@ -280,15 +297,21 @@ function runHandleCalls(fence: string, index: number): Set<string> {
       if (parameters) {
         for (const parameter of parameters) {
           if (ts.isIdentifier(parameter.name)) {
-            bindings.get(here[here.length - 1] ?? 0)?.set(parameter.name.text, false);
+            record(here[here.length - 1] ?? 0, parameter.name.text, {
+              pos: parameter.getStart(file),
+              handle: false,
+              agent: false,
+            });
           }
         }
       }
     }
 
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
-      const holds = node.initializer ? producesHandle(node.initializer, here) : false;
-      bindings.get(here[here.length - 1] ?? 0)?.set(node.name.text, holds);
+      const pos = node.getStart(file);
+      const holds = node.initializer ? producesHandle(node.initializer, here, pos) : false;
+      const agent = node.initializer ? producesAgent(node.initializer) : false;
+      record(here[here.length - 1] ?? 0, node.name.text, { pos, handle: holds, agent });
     }
 
     // Destructuring a handle is still invoking its members:
@@ -299,7 +322,7 @@ function runHandleCalls(fence: string, index: number): Set<string> {
       ts.isVariableDeclaration(node) &&
       ts.isObjectBindingPattern(node.name) &&
       node.initializer &&
-      producesHandle(node.initializer, here)
+      producesHandle(node.initializer, here, node.getStart(file))
     ) {
       for (const element of node.name.elements) {
         const property = element.propertyName ?? element.name;
@@ -312,9 +335,12 @@ function runHandleCalls(fence: string, index: number): Set<string> {
       node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
       ts.isIdentifier(node.left)
     ) {
-      // Reassignment updates the scope that declared the name.
+      const pos = node.getStart(file);
       const name = node.left.text;
-      const holds = producesHandle(node.right, here);
+      const holds = producesHandle(node.right, here, pos);
+      const agent = producesAgent(node.right);
+      // Reassignment records an event in the declaring scope, so calls before
+      // it keep resolving to the earlier state and calls after see the new one.
       let target = here[here.length - 1] ?? 0;
       for (let i = here.length - 1; i >= 0; i -= 1) {
         if (bindings.get(here[i] ?? 0)?.has(name)) {
@@ -322,10 +348,7 @@ function runHandleCalls(fence: string, index: number): Set<string> {
           break;
         }
       }
-      // Set in both directions. Retaining `true` monotonically meant
-      // `let d = bureau.run(...); d = helper(); d.subscribe()` still attributed
-      // the call to AgentRun, another false failure on correct code.
-      bindings.get(target)?.set(name, holds);
+      record(target, name, { pos, handle: holds, agent });
     }
 
     ts.forEachChild(node, (child) => declarePass(child, here));
@@ -346,10 +369,10 @@ function runHandleCalls(fence: string, index: number): Set<string> {
   const members = new Set<string>();
   let walkCounter = 0;
 
-  const onRunHandle = (receiver: ts.Expression, chain: number[]): boolean => {
+  const onRunHandle = (receiver: ts.Expression, chain: number[], pos: number): boolean => {
     const target = unwrap(receiver);
-    if (isRunProducer(target, agents)) return true;
-    return ts.isIdentifier(target) && lookup(chain, target.text) === true;
+    if (isRunProducer(target, (name) => isAgentReceiver(name, chain, pos))) return true;
+    return ts.isIdentifier(target) && lookup(chain, target.text, pos)?.handle === true;
   };
 
   const callPass = (node: ts.Node, chain: number[]): void => {
@@ -362,14 +385,20 @@ function runHandleCalls(fence: string, index: number): Set<string> {
     if (ts.isCallExpression(node)) {
       const callee = node.expression;
 
-      if (ts.isPropertyAccessExpression(callee) && onRunHandle(callee.expression, here)) {
+      if (
+        ts.isPropertyAccessExpression(callee) &&
+        onRunHandle(callee.expression, here, node.getStart(file))
+      ) {
         members.add(callee.name.text);
       }
 
       // Element access, which property-access-only collection missed entirely:
       //   run[Symbol.dispose]()   — explicitly part of the AgentRun contract
       //   run['reslut']()         — a typo that would otherwise pass
-      if (ts.isElementAccessExpression(callee) && onRunHandle(callee.expression, here)) {
+      if (
+        ts.isElementAccessExpression(callee) &&
+        onRunHandle(callee.expression, here, node.getStart(file))
+      ) {
         const argument = callee.argumentExpression;
         if (ts.isStringLiteralLike(argument)) {
           members.add(argument.text);
@@ -389,6 +418,67 @@ function runHandleCalls(fence: string, index: number): Set<string> {
   for (const member of destructured) members.add(member);
 
   return members;
+}
+
+// ── Classification-table consistency ────────────────────────────────
+//
+// Fifteen review rounds found the same four defects in this table over and over:
+// a durability cell stating "Durable" without the backing-store condition the
+// vocabulary requires; a non-conformance recorded with no owning issue; an
+// ownership value outside the declared vocabulary; and a cross-reference to a
+// section that does not exist. Each was fixed by hand and then reappeared on the
+// next row someone added.
+//
+// These checks turn all four into gates. A contract that states rules its own
+// table can violate is not enforcing them.
+
+interface ClassificationRow {
+  readonly resource: string;
+  readonly ownership: string;
+  readonly execution: string;
+  readonly durability: string;
+  readonly identity: string;
+  readonly locator: string;
+  readonly owner: string;
+}
+
+function classificationRows(markdown: string): ClassificationRow[] {
+  const start = markdown.indexOf('### Classification table');
+  if (start < 0) throw new Error('classification table not found');
+  const end = markdown.indexOf('\n### ', start + 1);
+  const section = markdown.slice(start, end < 0 ? markdown.length : end);
+
+  const rows: ClassificationRow[] = [];
+  for (const line of section.split('\n')) {
+    if (!line.startsWith('|')) continue;
+    if (line.includes(':---')) continue;
+    const cells = line
+      .split('|')
+      .slice(1, -1)
+      .map((cell) => cell.trim());
+    if (cells.length !== 7) continue;
+    if (cells[0] === 'Resource') continue;
+    rows.push({
+      resource: cells[0] ?? '',
+      ownership: cells[1] ?? '',
+      execution: cells[2] ?? '',
+      durability: cells[3] ?? '',
+      identity: cells[4] ?? '',
+      locator: cells[5] ?? '',
+      owner: cells[6] ?? '',
+    });
+  }
+  return rows;
+}
+
+/** GitHub-style heading slug, for checking in-document anchors. */
+function slug(heading: string): string {
+  return heading
+    .toLowerCase()
+    .replace(/`/g, '')
+    .replace(/[^\w\s-]/g, '')
+    .trim()
+    .replace(/\s+/g, '-');
 }
 
 const document = read(documentPath);
@@ -481,5 +571,83 @@ describe('documentation/operative-type-safe-api.md examples', () => {
   test('the started-work control contract section is present', () => {
     expect(document).toContain('## Started-work control contract');
     expect(document).toContain('### Classification table');
+  });
+});
+
+describe('documentation/operative-type-safe-api.md classification table', () => {
+  const rows = classificationRows(document);
+
+  test('the table is readable and non-trivial', () => {
+    expect(rows.length).toBeGreaterThan(10);
+  });
+
+  test('every ownership value comes from the declared vocabulary', () => {
+    // Ownership is independently owned, parent-owned, or inline. "Detached" is a
+    // state a row may additionally record, not a fourth value.
+    const permitted = /independently owned|parent-owned|inline|detached/i;
+    const offenders = rows
+      .filter((row) => !permitted.test(row.ownership))
+      .map((row) => `${row.resource}: ${row.ownership}`);
+    expect(offenders).toEqual([]);
+  });
+
+  test('no durability cell claims durability without its backing-store condition', () => {
+    // The vocabulary states durability follows the ultimate backing store,
+    // transitively. A cell asserting "Durable" with no condition is the mistake
+    // that recurred on five separate rows.
+    const conditional =
+      /only when|conditional|persist|backing store|process-local|inherit|undeterminable|from the child|same condition|whatever the wrapped|follows the/i;
+    const offenders = rows
+      .filter((row) => /durable/i.test(row.durability) && !conditional.test(row.durability))
+      .map((row) => `${row.resource}: ${row.durability}`);
+    expect(offenders).toEqual([]);
+  });
+
+  test('every declared non-conformance names an owning issue', () => {
+    const offenders = rows
+      .filter((row) => /non-conformance/i.test(`${row.locator} ${row.ownership} ${row.durability}`))
+      .filter((row) => !/AB-\d+/.test(row.owner))
+      .map((row) => row.resource);
+    expect(offenders).toEqual([]);
+  });
+
+  test('every row names an owner or states why none is needed', () => {
+    const offenders = rows
+      .filter((row) => !/AB-\d+|unchanged|this amendment|not yet filed|settled/i.test(row.owner))
+      .map((row) => `${row.resource}: ${row.owner}`);
+    expect(offenders).toEqual([]);
+  });
+});
+
+describe('documentation/operative-type-safe-api.md internal references', () => {
+  test('every in-document anchor link resolves to a heading', () => {
+    const headings = new Set(
+      [...document.matchAll(/^#+\s+(.+)$/gm)].map((match) => slug(match[1] ?? '')),
+    );
+    const broken = [...document.matchAll(/\]\(#([a-z0-9-]+)\)/g)]
+      .map((match) => match[1] ?? '')
+      .filter((target) => !headings.has(target));
+    expect([...new Set(broken)]).toEqual([]);
+  });
+
+  test('every required capability is described in the capabilities section', () => {
+    const start = document.indexOf('### Required capabilities');
+    expect(start).toBeGreaterThan(-1);
+    const end = document.indexOf('\n### ', start + 1);
+    const section = document.slice(start, end < 0 ? document.length : end);
+
+    // Each pending capability must be recognisable in the section that ratifies
+    // it, so the harness map and the contract cannot drift apart silently.
+    const described: Record<string, RegExp> = {
+      snapshot: /cached snapshot/i,
+      subscribeSnapshot: /non-consuming state observation|state observation/i,
+      children: /child discovery/i,
+      abortChild: /scoped child cancellation/i,
+      closed: /cleanup acknowledgement/i,
+    };
+    const missing = Object.keys(PENDING_IMPLEMENTATION).filter(
+      (capability) => !described[capability]?.test(section),
+    );
+    expect(missing).toEqual([]);
   });
 });
