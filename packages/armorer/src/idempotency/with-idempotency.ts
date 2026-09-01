@@ -29,12 +29,8 @@ const maximumTimerDelay = 2_147_483_647;
 function scheduleBoundedTimeout(
   callback: () => void,
   delay: number,
-  setTimeoutFunction: NonNullable<ToolExecuteOptions['setTimeoutFunction']> = (
-    handler,
-    milliseconds,
-  ) => setTimeout(handler, milliseconds),
-  clearTimeoutFunction: NonNullable<ToolExecuteOptions['clearTimeoutFunction']> = (handle) =>
-    clearTimeout(handle as ReturnType<typeof setTimeout>),
+  setTimeoutFunction?: ToolExecuteOptions['setTimeoutFunction'],
+  clearTimeoutFunction?: ToolExecuteOptions['clearTimeoutFunction'],
 ): () => void {
   let remaining = Math.max(0, delay);
   let cancelled = false;
@@ -42,7 +38,7 @@ function scheduleBoundedTimeout(
   const schedule = () => {
     if (cancelled) return;
     const chunk = Math.min(remaining, maximumTimerDelay);
-    timer = setTimeoutFunction(() => {
+    timer = (setTimeoutFunction ?? setTimeout)(() => {
       if (cancelled) return;
       remaining -= chunk;
       if (remaining <= 0) callback();
@@ -52,7 +48,7 @@ function scheduleBoundedTimeout(
   schedule();
   return () => {
     cancelled = true;
-    if (timer !== undefined) clearTimeoutFunction(timer);
+    if (timer !== undefined) (clearTimeoutFunction ?? clearTimeout)(timer);
   };
 }
 
@@ -541,12 +537,6 @@ export function withIdempotency<T extends Tool>(
     let pendingRenewal = Promise.resolve();
     let renewalTimer: (() => void) | undefined;
     let renewalStopped = false;
-    const setTimeoutFunction =
-      executeOptions?.setTimeoutFunction ??
-      ((callback: () => void, milliseconds?: number) => setTimeout(callback, milliseconds));
-    const clearTimeoutFunction =
-      executeOptions?.clearTimeoutFunction ??
-      ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
     const stopRenewal = () => {
       renewalStopped = true;
       renewalTimer?.();
@@ -583,16 +573,16 @@ export function withIdempotency<T extends Tool>(
             .finally(scheduleRenewal);
         },
         Math.max(1, Math.floor(leaseDurationMs / 2)),
-        setTimeoutFunction,
-        clearTimeoutFunction,
+        executeOptions?.setTimeoutFunction,
+        executeOptions?.clearTimeoutFunction,
       );
     };
     scheduleRenewal();
     const cancelDeadlineTimer = scheduleBoundedTimeout(
       stopRenewal,
       Math.max(0, (startedExecution.absoluteDeadline ?? now()) - startedExecution.startedAt),
-      setTimeoutFunction,
-      clearTimeoutFunction,
+      executeOptions?.setTimeoutFunction,
+      executeOptions?.clearTimeoutFunction,
     );
 
     let callbackStarted = false;
