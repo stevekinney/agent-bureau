@@ -210,9 +210,13 @@ export function createOpenAIProviderStream(
       let accumulatedText = '';
       let usage: GenerateResponse['usage'] | undefined;
 
-      // Track in-progress tool calls by index
-      const pendingToolCalls: Map<number, { id?: string; name: string; arguments: string }> =
-        new Map();
+      // Track in-progress tool calls by index. `blockId` is the stable identity
+      // carried on the live `stream:tool-call-*` events, so a host can
+      // correlate a start with its deltas before the response closes.
+      const pendingToolCalls: Map<
+        number,
+        { id?: string; name: string; arguments: string; blockId: string | undefined }
+      > = new Map();
 
       for await (const chunk of stream) {
         if (context.signal?.aborted) break;
@@ -228,19 +232,74 @@ export function createOpenAIProviderStream(
           // Accumulate tool calls
           if (choice.delta.tool_calls) {
             for (const toolCallDelta of choice.delta.tool_calls) {
-              const existing = pendingToolCalls.get(toolCallDelta.index);
-              if (existing) {
-                // Append arguments fragment
-                if (toolCallDelta.function?.arguments) {
-                  existing.arguments += toolCallDelta.function.arguments;
-                }
-              } else {
+              let pending = pendingToolCalls.get(toolCallDelta.index);
+
+              if (!pending) {
                 // First chunk for this tool call index
-                pendingToolCalls.set(toolCallDelta.index, {
+                pending = {
                   id: toolCallDelta.id,
                   name: toolCallDelta.function?.name ?? '',
-                  arguments: toolCallDelta.function?.arguments ?? '',
+                  arguments: '',
+                  blockId: undefined,
+                };
+                pendingToolCalls.set(toolCallDelta.index, pending);
+              } else {
+                // `id` and `function.name` are both optional on every delta, so
+                // the chunk that opens an index need not carry them. Take them
+                // from whichever later chunk does rather than leaving the call
+                // permanently unnamed or id-less.
+                if (pending.id === undefined) pending.id = toolCallDelta.id;
+                if (!pending.name && toolCallDelta.function?.name) {
+                  pending.name = toolCallDelta.function.name;
+                }
+              }
+
+              // Append arguments fragment. OpenAI may put the first fragment on
+              // the same chunk that opens the call, so this runs for the
+              // opening chunk too rather than only for continuations.
+              const argumentsFragment = toolCallDelta.function?.arguments;
+              if (argumentsFragment) pending.arguments += argumentsFragment;
+
+              // Hold the live start until BOTH the name and the provider's id
+              // are known, and use that id as the block id.
+              //
+              // The name, because an event announcing an empty tool is worse
+              // than one that arrives a chunk later. The id, because it is the
+              // only identity the wrapper can correlate a reported block with:
+              // the resolved response carries the provider id (the caller needs
+              // it to round-trip tool results), and a block id cannot be
+              // re-keyed once consumers have seen it. Publishing a synthesized
+              // id here would guarantee those two disagree.
+              //
+              // Both fields are optional on every delta, so a stream that never
+              // supplies an id gets no live events for that call — it is
+              // announced by the wrapper's reconstruction once the response
+              // resolves, exactly as before this option existed. The real API
+              // sends id and name together on a call's first delta, so this
+              // costs nothing in practice.
+              let justStarted = false;
+              if (pending.blockId === undefined && pending.name && pending.id !== undefined) {
+                pending.blockId = pending.id;
+                justStarted = true;
+                streaming.report?.({
+                  type: 'stream:tool-call-start',
+                  toolName: pending.name,
+                  blockId: pending.blockId,
                 });
+              }
+
+              // Emit whenever this chunk carried arguments, and once more at the
+              // moment of a deferred start, to flush fragments that arrived on
+              // chunks before the name did.
+              if (pending.blockId !== undefined && (argumentsFragment || justStarted)) {
+                if (pending.arguments) {
+                  streaming.report?.({
+                    type: 'stream:tool-call-delta',
+                    toolName: pending.name,
+                    blockId: pending.blockId,
+                    partialArguments: pending.arguments,
+                  });
+                }
               }
             }
           }

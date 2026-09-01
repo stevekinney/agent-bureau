@@ -5,6 +5,7 @@ export { createStreamStateMachine } from './stream-state-machine';
 export type {
   BlockType,
   EnhancedStreamingOptions,
+  LiveStreamEvent,
   StreamBlock,
   StreamCommand,
   StreamEvent,

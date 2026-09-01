@@ -454,9 +454,13 @@ export function createAnthropicProviderStream(
       let cacheCreationTokens: number | null | undefined;
       let cacheReadTokens: number | null | undefined;
 
-      // Track in-progress tool calls by content block index
-      const pendingToolCalls: Map<number, { id?: string; name: string; partialJson: string }> =
-        new Map();
+      // Track in-progress tool calls by content block index. `blockId` is the
+      // stable identity carried on the live `stream:tool-call-*` events, so a
+      // host can correlate a start with its deltas before the response closes.
+      const pendingToolCalls: Map<
+        number,
+        { id?: string; name: string; partialJson: string; blockId: string | undefined }
+      > = new Map();
 
       for await (const event of stream) {
         if (context.signal?.aborted) break;
@@ -470,11 +474,23 @@ export function createAnthropicProviderStream(
 
           case 'content_block_start': {
             if (event.content_block?.type === 'tool_use' && event.index !== undefined) {
+              const toolName = event.content_block.name!;
+              const blockId = event.content_block.id;
               pendingToolCalls.set(event.index, {
-                id: event.content_block.id,
-                name: event.content_block.name!,
+                id: blockId,
+                name: toolName,
                 partialJson: '',
+                blockId,
               });
+              // Only report when the provider gave the call an id, because that
+              // id is what the resolved response carries and therefore the only
+              // identity the wrapper can pair a live block with. A `tool_use`
+              // block without one — which the API does not produce — is left to
+              // the wrapper's reconstruction rather than published under a
+              // synthesized id that could never be correlated.
+              if (blockId !== undefined) {
+                streaming.report?.({ type: 'stream:tool-call-start', toolName, blockId });
+              }
             }
             break;
           }
@@ -491,6 +507,14 @@ export function createAnthropicProviderStream(
               const pending = pendingToolCalls.get(event.index);
               if (pending) {
                 pending.partialJson += event.delta.partial_json;
+                if (pending.blockId !== undefined) {
+                  streaming.report?.({
+                    type: 'stream:tool-call-delta',
+                    toolName: pending.name,
+                    blockId: pending.blockId,
+                    partialArguments: pending.partialJson,
+                  });
+                }
               }
             }
             break;

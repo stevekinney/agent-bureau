@@ -8,6 +8,7 @@ import type { BackpressureStrategy } from './backpressure';
 import type { CostEstimate, CostEstimationOptions } from './cost-estimation';
 import type { OperativeHookMap } from './hooks';
 import type { RetryMutator } from './retry/types';
+import type { LiveStreamEvent } from './streaming/types';
 import type { ResponseSchemaInput } from './structured-output/response-schema';
 import type { ResponseFormat, ToolChoice } from './structured-output/types';
 
@@ -398,6 +399,20 @@ export interface RunOptions {
 export interface StreamingHandle {
   update: (content: string) => void;
   messageId: string;
+  /**
+   * Live channel for structured events the text-only `update` cannot carry.
+   *
+   * A `StreamingGenerateFunction` calls this the moment the provider reports a
+   * tool call, so a wrapper can surface `stream:tool-call-start` and
+   * `stream:tool-call-delta` while the response is still open rather than
+   * reconstructing them from the resolved `GenerateResponse`.
+   *
+   * Optional on both sides: a wrapper installs it only when it wants live
+   * events (`withEnhancedStreaming`'s `liveToolCalls` option), and an adapter
+   * calls it as `streaming.report?.(...)`, so neither half has to know whether
+   * the other opted in.
+   */
+  report?: (event: LiveStreamEvent) => void;
 }
 
 /**

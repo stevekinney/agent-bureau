@@ -511,6 +511,7 @@ export type { BackpressureBuffer, BackpressureBufferOptions } from './streaming/
 export type {
   BlockType,
   EnhancedStreamingOptions,
+  LiveStreamEvent,
   StreamBlock,
   StreamCommand,
   StreamEvent,
