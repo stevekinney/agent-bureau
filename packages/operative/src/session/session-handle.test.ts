@@ -990,10 +990,57 @@ describe('session.fork()', () => {
 });
 
 // ---------------------------------------------------------------------------
-// sleep() — durable pause
+// sleep() — process-local delay
 // ---------------------------------------------------------------------------
 
 describe('session.sleep()', () => {
+  it('clears the default process-local timer when aborted', async () => {
+    const abortController = new AbortController();
+    const { handle } = createSessionHandleFixture();
+
+    const sleeping = handle.sleep('PT1H', { signal: abortController.signal });
+    abortController.abort();
+
+    let caught: unknown;
+    try {
+      await sleeping;
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({ name: 'AbortError' });
+  });
+
+  it('uses and clears a process-local timer when aborted, even with a durable engine', async () => {
+    const timerToken = Symbol('timer');
+    const clearedTimers: unknown[] = [];
+    const abortController = new AbortController();
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const engine = {} as AnyRunEngine;
+    const handle = createSessionHandle('abort-local-sleep-session', {
+      store,
+      agentName: 'test-agent',
+      engine,
+      runOptions: createTestRunOptions(),
+      setTimeoutFunction: () => timerToken,
+      clearTimeoutFunction: (timer) => {
+        clearedTimers.push(timer);
+      },
+    });
+
+    const sleeping = handle.sleep('PT1H', { signal: abortController.signal });
+    abortController.abort();
+
+    let caught: unknown;
+    try {
+      await sleeping;
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({ name: 'AbortError' });
+    expect(clearedTimers).toEqual([timerToken]);
+  });
+
   it('resolves after the specified milliseconds (in-memory path)', async () => {
     const { handle } = createSessionHandleFixture();
     const start = Date.now();
@@ -3203,10 +3250,93 @@ describe('AB-28: recover() reconciles a RunRef whose recovered run is already te
   });
 });
 
-// session.monitor() — durable conditional watch loop (D7)
+// session.monitor() — process-local conditional watch loop
 // ---------------------------------------------------------------------------
 
 describe('session.monitor()', () => {
+  it('aborts the active process-local monitor tick', async () => {
+    let signalGenerateStarted!: () => void;
+    const generateStarted = new Promise<void>((resolve) => {
+      signalGenerateStarted = resolve;
+    });
+    const blockingGenerate: GenerateFunction = async ({ signal }) => {
+      signalGenerateStarted();
+      await new Promise<never>((_resolve, reject) => {
+        signal?.addEventListener('abort', () => reject(new Error('monitor tick aborted')), {
+          once: true,
+        });
+      });
+      throw new Error('abort signal was not delivered');
+    };
+    const abortController = new AbortController();
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const handle = createSessionHandle('abort-active-monitor-session', {
+      store,
+      agentName: 'test-agent',
+      runOptions: createTestRunOptions(blockingGenerate),
+    });
+
+    const monitoring = handle.monitor({
+      every: 'PT1H',
+      input: 'check',
+      until: () => false,
+      signal: abortController.signal,
+    });
+    await generateStarted;
+    abortController.abort();
+
+    let caught: unknown;
+    try {
+      await monitoring;
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+  });
+
+  it('clears its process-local inter-tick timer and stops when aborted', async () => {
+    const timerToken = Symbol('timer');
+    const clearedTimers: unknown[] = [];
+    let timerScheduled: (() => void) | undefined;
+    const timerWasScheduled = new Promise<void>((resolve) => {
+      timerScheduled = resolve;
+    });
+    const abortController = new AbortController();
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const handle = createSessionHandle('abort-local-monitor-session', {
+      store,
+      agentName: 'test-agent',
+      runOptions: createTestRunOptions(),
+      setTimeoutFunction: () => {
+        timerScheduled?.();
+        return timerToken;
+      },
+      clearTimeoutFunction: (timer) => {
+        clearedTimers.push(timer);
+      },
+    });
+
+    const monitoring = handle.monitor({
+      every: 'PT1H',
+      input: 'check',
+      until: () => false,
+      signal: abortController.signal,
+    });
+    await timerWasScheduled;
+    abortController.abort();
+
+    let caught: unknown;
+    try {
+      await monitoring;
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({ name: 'AbortError' });
+    expect(clearedTimers).toEqual([timerToken]);
+  });
+
   it('returns true when the predicate is satisfied on the first tick', async () => {
     const { handle } = createSessionHandleFixture();
     const result = await handle.monitor({

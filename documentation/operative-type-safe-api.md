@@ -470,6 +470,29 @@ identical regardless of which agents were registered, which is why `Bureau`
 above is written as `Bureau<D extends AgentDefinitions = AgentDefinitions>`
 rather than requiring every consumer of, say, `getRun` to know `D`.
 
+### Process-local session timing
+
+`SessionHandle.sleep()` and `SessionHandle.monitor()` are host-process conveniences. `sleep()` delays the caller with a local timer, while `monitor()` runs a local loop whose individual `AgentRun` ticks may use the configured durable engine. Supplying a durable engine does not persist either the delay or the monitor controller: process exit loses the outstanding timer and monitor loop.
+
+```ts
+export interface MonitorOptions {
+  every: number | string;
+  input: string;
+  until: (result: RunResult) => boolean;
+  maxDuration?: number | string;
+  signal?: AbortSignal;
+}
+
+export interface SessionHandle {
+  sleep(duration: number | string, options?: { signal?: AbortSignal }): Promise<void>;
+  monitor(options: MonitorOptions): Promise<boolean>;
+}
+```
+
+Aborting the supplied signal clears the active process-local timer; a monitor also aborts its active tick. The `session.sleep`, `session.monitor.tick`, and `session.monitor.done` events describe only this local activity and make no durable, scheduled, or resumable claim.
+
+Durable behavior uses a distinct run-level capability: a Weft-backed wakeup to park a current run, a durable signal to release a named wait, or a Bureau recurring schedule to start future runs. Session timing never falls back to one of those capabilities implicitly.
+
 ## Events
 
 ```ts
