@@ -91,6 +91,16 @@ const AGENT_FACTORIES = new Set(['createAgent', 'createLazyAgent']);
 const BUREAU_FACTORIES = new Set(['createBureau']);
 const CONVENTIONAL_RUN_RECEIVER = 'bureau';
 
+/**
+ * The type whose surface this harness checks against.
+ *
+ * `DiagnosticAgentRun` is deliberately excluded. It declares a different surface
+ * — no `unwrap()`, no `output()`, by design rather than by omission — so
+ * admitting it here would check its examples against the wrong contract, the
+ * same mistake that made an earlier revision reject `createAgentEvaluation`.
+ */
+const RUN_HANDLE_TYPE = 'AgentRun';
+
 function read(path: string): string {
   return readFileSync(path, 'utf-8');
 }
@@ -106,59 +116,146 @@ function typescriptFences(markdown: string): string[] {
   return fences;
 }
 
-/** Members declared across every block declaring the named interface. */
-function declaredMembers(source: string, interfaceName: string): Set<string> {
-  const members = new Set<string>();
-  let searchFrom = 0;
-  let found = false;
+/**
+ * The run-handle surface, resolved from the contract's own declarations.
+ *
+ * Earlier revisions scanned `interface RunOutcomeBase` for members and then
+ * listed `output`, `abort`, and `[Symbol.dispose]` as string literals beside it.
+ * Those literals vouched for members independently of the document, so deleting
+ * `OutputMethod.output()` from the contract would leave `run.output()` in an
+ * example still accepted — the exact drift this harness exists to catch, hidden
+ * by the harness itself.
+ *
+ * The alias is resolved instead: its intersection is walked and every
+ * constituent looked up as an interface, another alias, or an inline object
+ * type, so the accepted surface is exactly what the document declares. A
+ * constituent the document references but no longer declares raises rather than
+ * silently shrinking the surface, because a smaller surface fails open.
+ */
+function declaredRunSurface(sources: readonly string[]): Set<string> {
+  const interfaces = new Map<string, ts.InterfaceDeclaration[]>();
+  const aliases = new Map<string, ts.TypeAliasDeclaration>();
 
-  for (;;) {
-    const start = source.indexOf(`interface ${interfaceName}`, searchFrom);
-    if (start < 0) break;
-    found = true;
-    for (const member of membersOfBlock(source, start)) members.add(member);
-    searchFrom = start + 1;
-  }
-
-  if (!found) throw new Error(`interface ${interfaceName} not found`);
-  return members;
-}
-
-/** Members declared in the brace-balanced block beginning after `start`. */
-function membersOfBlock(source: string, start: number): Set<string> {
-  const open = source.indexOf('{', start);
-  let depth = 0;
-  let end = open;
-  for (let index = open; index < source.length; index += 1) {
-    if (source[index] === '{') depth += 1;
-    if (source[index] === '}') {
-      depth -= 1;
-      if (depth === 0) {
-        end = index;
-        break;
+  sources.forEach((source, index) => {
+    const file = ts.createSourceFile(
+      `surface-${index}.ts`,
+      source,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const collect = (node: ts.Node): void => {
+      // Two fences declaring the same interface both count, the way TypeScript
+      // merges declarations and the way the earlier text scan read every block.
+      if (ts.isInterfaceDeclaration(node)) {
+        const existing = interfaces.get(node.name.text);
+        if (existing) existing.push(node);
+        else interfaces.set(node.name.text, [node]);
       }
+      if (ts.isTypeAliasDeclaration(node)) aliases.set(node.name.text, node);
+      ts.forEachChild(node, collect);
+    };
+    collect(file);
+  });
+
+  const surface = new Set<string>();
+  const resolved = new Set<string>();
+
+  const addMembers = (members: ts.NodeArray<ts.TypeElement>): void => {
+    for (const member of members) {
+      const name = member.name;
+      if (name === undefined) continue;
+      if (ts.isIdentifier(name) || ts.isStringLiteralLike(name)) surface.add(name.text);
+      // Spelled the way element-access collection records `run[Symbol.dispose]()`.
+      else if (ts.isComputedPropertyName(name)) surface.add(`[${name.expression.getText()}]`);
     }
-  }
-  const block = source.slice(open, end);
-  const members = new Set<string>();
-  const pattern = /^\s*(?:readonly\s+)?([A-Za-z_$][\w$]*)\s*[(<?:]/gm;
-  let match = pattern.exec(block);
-  while (match !== null) {
-    if (match[1] !== undefined) members.add(match[1]);
-    match = pattern.exec(block);
-  }
-  return members;
+  };
+
+  const visit = (node: ts.TypeNode | undefined): void => {
+    if (node === undefined) return;
+    if (ts.isParenthesizedTypeNode(node)) return visit(node.type);
+    if (ts.isTypeLiteralNode(node)) return addMembers(node.members);
+    if (ts.isIntersectionTypeNode(node) || ts.isUnionTypeNode(node)) {
+      for (const constituent of node.types) visit(constituent);
+      return;
+    }
+    // Both branches of a conditional belong to the surface, for different
+    // instantiations: `OutputMethod` yields `output()` for an agent with an
+    // output schema and `{}` for one without.
+    if (ts.isConditionalTypeNode(node)) {
+      visit(node.trueType);
+      visit(node.falseType);
+      return;
+    }
+    if (!ts.isTypeReferenceNode(node) || !ts.isIdentifier(node.typeName)) return;
+    const name = node.typeName.text;
+    if (resolved.has(name)) return;
+    resolved.add(name);
+
+    const declarations = interfaces.get(name);
+    if (declarations) {
+      for (const declaration of declarations) addMembers(declaration.members);
+      return;
+    }
+    const alias = aliases.get(name);
+    if (alias) return visit(alias.type);
+
+    throw new Error(
+      `${name} is referenced by ${RUN_HANDLE_TYPE} but the contract does not declare it`,
+    );
+  };
+
+  const root = aliases.get(RUN_HANDLE_TYPE);
+  if (root === undefined) throw new Error(`${RUN_HANDLE_TYPE} is not declared in the contract`);
+  visit(root.type);
+  return surface;
 }
 
 /** True when a call expression produces a run handle. */
-function isRunProducer(node: ts.Node, isAgent: (name: string) => boolean): boolean {
+function isRunProducer(node: ts.Node, isReceiver: (receiver: ts.Expression) => boolean): boolean {
   if (!ts.isCallExpression(node)) return false;
   const callee = unwrap(node.expression);
-  if (!ts.isPropertyAccessExpression(callee)) return false;
-  if (callee.name.text !== RUN_PRODUCER_METHOD) return false;
-  const receiver = unwrap(callee.expression);
-  if (!ts.isIdentifier(receiver)) return false;
-  return isAgent(receiver.text);
+
+  // Both spellings start a run, and only the first was recognised:
+  //   bureau.run(...)      — the ordinary form
+  //   bureau['run'](...)   — the same call, so a typo on its result must fail
+  let receiver: ts.Expression | undefined;
+  if (ts.isPropertyAccessExpression(callee) && callee.name.text === RUN_PRODUCER_METHOD) {
+    receiver = callee.expression;
+  } else if (
+    ts.isElementAccessExpression(callee) &&
+    ts.isStringLiteralLike(callee.argumentExpression) &&
+    callee.argumentExpression.text === RUN_PRODUCER_METHOD
+  ) {
+    receiver = callee.expression;
+  }
+  if (receiver === undefined) return false;
+
+  // The receiver is an expression rather than a name, so a factory call used
+  // directly as one — `createAgent(...).run('q')` — is not invisible.
+  return isReceiver(unwrap(receiver));
+}
+
+/**
+ * Whether an annotation makes the thing it annotates a run handle.
+ *
+ * Exactly `AgentRun`, including its generic instantiations. A substring match on
+ * the annotation text would also claim `Promise<AgentRun>` and `AgentRun[]` and
+ * then reject their legitimate members — a false failure on correct
+ * documentation, which is worse than the miss it fixes.
+ *
+ * Recording every parameter as definitively not-a-handle was that miss: a fence
+ * factoring handle use into a typed helper went entirely unchecked, so
+ * `function inspect(run: AgentRun) { run.reslut(); }` passed.
+ */
+function isRunHandleType(annotation: ts.TypeNode | undefined): boolean {
+  if (annotation === undefined) return false;
+  const node = ts.isParenthesizedTypeNode(annotation) ? annotation.type : annotation;
+  return (
+    ts.isTypeReferenceNode(node) &&
+    ts.isIdentifier(node.typeName) &&
+    node.typeName.text === RUN_HANDLE_TYPE
+  );
 }
 
 /**
@@ -265,37 +362,47 @@ function runHandleCalls(fence: string, index: number): Set<string> {
   };
 
   /**
-   * Whether `name` is a receiver whose `.run()` yields a handle.
+   * Whether this receiver's `.run()` yields a handle.
    *
    * A resolved binding wins over the conventional spelling, so an inner
    * `const bureau = helper()` shadows the outer one and its `.run()` is no
    * longer treated as producing a handle. The bare name is honoured only when
    * the fence never binds it, which is the fragment case these examples use.
    */
-  const isRunReceiver = (name: string, chain: number[], pos: number): boolean => {
-    const state = lookup(chain, name, pos);
+  const isRunReceiver = (receiver: ts.Expression, chain: number[], pos: number): boolean => {
+    // An unnamed receiver: `createAgent({ ... }).run('q').result()`.
+    if (factoryCall(receiver, AGENT_FACTORIES, chain, pos)) return true;
+    if (factoryCall(receiver, BUREAU_FACTORIES, chain, pos)) return true;
+    if (!ts.isIdentifier(receiver)) return false;
+    const state = lookup(chain, receiver.text, pos);
     if (state) return state.agent || state.bureau;
-    return name === CONVENTIONAL_RUN_RECEIVER;
+    return receiver.text === CONVENTIONAL_RUN_RECEIVER;
   };
 
   const producesHandle = (expression: ts.Expression, chain: number[], pos: number): boolean => {
     const value = unwrap(expression);
-    if (isRunProducer(value, (name) => isRunReceiver(name, chain, pos))) return true;
+    if (isRunProducer(value, (candidate) => isRunReceiver(candidate, chain, pos))) return true;
     return ts.isIdentifier(value) && lookup(chain, value.text, pos)?.handle === true;
   };
 
-  const factoryCall = (expression: ts.Expression, factories: ReadonlySet<string>): boolean => {
+  const factoryCall = (
+    expression: ts.Expression,
+    factories: ReadonlySet<string>,
+    chain: number[],
+    pos: number,
+  ): boolean => {
     const value = unwrap(expression);
-    return (
-      ts.isCallExpression(value) &&
-      ts.isIdentifier(value.expression) &&
-      factories.has(value.expression.text)
-    );
+    if (!ts.isCallExpression(value) || !ts.isIdentifier(value.expression)) return false;
+    if (!factories.has(value.expression.text)) return false;
+    // Spelling is not identity. A fence may shadow `createAgent` with its own
+    // local, parameter, or function declaration, and that name then returns
+    // something unrelated. A binding in force means this is not the import.
+    return lookup(chain, value.expression.text, pos) === undefined;
   };
 
   /** Whether this initialiser makes the binding an agent, whose .run() yields a handle. */
   const producesAgent = (expression: ts.Expression, chain: number[], pos: number): boolean => {
-    if (factoryCall(expression, AGENT_FACTORIES)) return true;
+    if (factoryCall(expression, AGENT_FACTORIES, chain, pos)) return true;
     // An alias carries it: `const a = researcher; a.run(...)`.
     const value = unwrap(expression);
     return ts.isIdentifier(value) && lookup(chain, value.text, pos)?.agent === true;
@@ -303,7 +410,7 @@ function runHandleCalls(fence: string, index: number): Set<string> {
 
   /** Whether this initialiser makes the binding a bureau. */
   const producesBureau = (expression: ts.Expression, chain: number[], pos: number): boolean => {
-    if (factoryCall(expression, BUREAU_FACTORIES)) return true;
+    if (factoryCall(expression, BUREAU_FACTORIES, chain, pos)) return true;
     const value = unwrap(expression);
     return ts.isIdentifier(value) && lookup(chain, value.text, pos)?.bureau === true;
   };
@@ -328,13 +435,37 @@ function runHandleCalls(fence: string, index: number): Set<string> {
           if (ts.isIdentifier(parameter.name)) {
             record(here[here.length - 1] ?? 0, parameter.name.text, {
               pos: parameter.getStart(file),
-              handle: false,
+              handle: isRunHandleType(parameter.type),
               agent: false,
               bureau: false,
             });
           }
         }
       }
+    }
+
+    // A function declaration binds its name in the scope it sits in, not the one
+    // it opens, and hoists to the top of that scope. Recording only variables,
+    // assignments, and parameters meant a fence shadowing a factory this way —
+    // `function createAgent() { ... }` — still resolved the name to the import.
+    //
+    // Only a fence-local implementation shadows: it has a body and is not
+    // exported. This document declares the real factories in their own fences
+    // — `createAgent`'s two overload signatures and
+    // `export declare function createBureau` — and those declare that very
+    // function rather than a different one sharing its name. Treating them as
+    // shadows would stop tracking any example added to those fences, which is
+    // the silent-miss failure this whole resolver exists to avoid.
+    const exported = (declaration: ts.FunctionDeclaration): boolean =>
+      declaration.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword) ===
+      true;
+    if (ts.isFunctionDeclaration(node) && node.name && node.body && !exported(node)) {
+      record(chain[chain.length - 1] ?? 0, node.name.text, {
+        pos: 0,
+        handle: false,
+        agent: false,
+        bureau: false,
+      });
     }
 
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
@@ -403,7 +534,7 @@ function runHandleCalls(fence: string, index: number): Set<string> {
 
   const onRunHandle = (receiver: ts.Expression, chain: number[], pos: number): boolean => {
     const target = unwrap(receiver);
-    if (isRunProducer(target, (name) => isRunReceiver(name, chain, pos))) return true;
+    if (isRunProducer(target, (candidate) => isRunReceiver(candidate, chain, pos))) return true;
     return ts.isIdentifier(target) && lookup(chain, target.text, pos)?.handle === true;
   };
 
@@ -524,18 +655,10 @@ const fences = typescriptFences(document);
 /**
  * The contract's own declared surface, taken from the document rather than from
  * a source file. `bureau-types.ts` also declares an `AgentRun`, but that is the
- * earlier spike shape; the ratified one is this document's `RunOutcomeBase`,
- * implemented in `agent-run.ts`.
+ * earlier spike shape; the ratified one is this document's, implemented in
+ * `agent-run.ts`.
  */
-const documentedMembers = new Set<string>([
-  ...declaredMembers(document, 'RunOutcomeBase'),
-  'output',
-  'abort',
-  // Declared on the AgentRun type alias rather than inside RunOutcomeBase, so
-  // the interface scan cannot see it, and spelled the way element-access
-  // collection records it.
-  '[Symbol.dispose]',
-]);
+const documentedMembers = declaredRunSurface(fences);
 
 describe('documentation/operative-type-safe-api.md examples', () => {
   test('the document contains fenced TypeScript examples to check', () => {
@@ -665,9 +788,20 @@ describe('documentation/operative-type-safe-api.md classification table', () => 
     // detached operation independently owned — so a cell whose ownership is
     // only "detached" cannot be translated into the required shape without
     // inventing a fourth value.
-    const permitted = /independently owned|parent-owned|inline/i;
+    //
+    // Presence of a permitted phrase is not enough on its own. A cell reading
+    // "Independently owned when constructed directly; Bureau-owned when Bureau
+    // starts it" passed on its first clause while its second named an ownership
+    // value that does not exist. So the permitted phrases are removed and any
+    // remaining claim of ownership in the residue is a coinage — which catches
+    // the next one too, however it is spelled.
+    const permitted = 'independently owned|parent-owned|inline';
     const offenders = rows
-      .filter((row) => !permitted.test(row.ownership))
+      .filter(
+        (row) =>
+          !new RegExp(permitted, 'i').test(row.ownership) ||
+          /\bowned\b/i.test(row.ownership.replace(new RegExp(permitted, 'gi'), '')),
+      )
       .map((row) => `${row.resource}: ${row.ownership}`);
     expect(offenders).toEqual([]);
   });
