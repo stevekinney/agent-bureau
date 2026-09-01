@@ -71,7 +71,8 @@ const PENDING_IMPLEMENTATION: Readonly<Record<string, string>> = {
  * valid code is worse than one with a narrower scope, so the scope is narrow and
  * stated. Extending it means pairing each producer with its own surface.
  */
-const RUN_PRODUCERS = new Set(['run']);
+const RUN_PRODUCER_RECEIVER = 'bureau';
+const RUN_PRODUCER_METHOD = 'run';
 
 function read(path: string): string {
   return readFileSync(path, 'utf-8');
@@ -135,10 +136,11 @@ function membersOfBlock(source: string, start: number): Set<string> {
 /** True when a call expression produces a run handle. */
 function isRunProducer(node: ts.Node): boolean {
   if (!ts.isCallExpression(node)) return false;
-  const callee = node.expression;
-  if (ts.isIdentifier(callee)) return RUN_PRODUCERS.has(callee.text);
-  if (ts.isPropertyAccessExpression(callee)) return RUN_PRODUCERS.has(callee.name.text);
-  return false;
+  const callee = unwrap(node.expression);
+  if (!ts.isPropertyAccessExpression(callee)) return false;
+  if (callee.name.text !== RUN_PRODUCER_METHOD) return false;
+  const receiver = unwrap(callee.expression);
+  return ts.isIdentifier(receiver) && receiver.text === RUN_PRODUCER_RECEIVER;
 }
 
 /** Unwraps `await x` and `(x)` down to the expression underneath. */
@@ -147,6 +149,10 @@ function unwrap(node: ts.Expression): ts.Expression {
   for (;;) {
     if (ts.isAwaitExpression(current)) current = current.expression;
     else if (ts.isParenthesizedExpression(current)) current = current.expression;
+    else if (ts.isAsExpression(current)) current = current.expression;
+    else if (ts.isTypeAssertionExpression(current)) current = current.expression;
+    else if (ts.isNonNullExpression(current)) current = current.expression;
+    else if (ts.isSatisfiesExpression(current)) current = current.expression;
     else return current;
   }
 }
@@ -217,6 +223,20 @@ function runHandleCalls(fence: string, index: number): Set<string> {
       here = [...chain, counter];
     }
 
+    // Parameters bind in the scope their function opened. Without this, a
+    // parameter named like an outer handle does not shadow it and its members
+    // are reported as invalid AgentRun calls — a false failure on correct code.
+    if (opensScope(node)) {
+      const parameters = (node as ts.SignatureDeclarationBase).parameters;
+      if (parameters) {
+        for (const parameter of parameters) {
+          if (ts.isIdentifier(parameter.name)) {
+            bindings.get(here[here.length - 1] ?? 0)?.set(parameter.name.text, false);
+          }
+        }
+      }
+    }
+
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
       const holds = node.initializer ? producesHandle(node.initializer, here) : false;
       bindings.get(here[here.length - 1] ?? 0)?.set(node.name.text, holds);
@@ -237,8 +257,10 @@ function runHandleCalls(fence: string, index: number): Set<string> {
           break;
         }
       }
-      if (holds) bindings.get(target)?.set(name, true);
-      else if (!bindings.get(target)?.has(name)) bindings.get(target)?.set(name, false);
+      // Set in both directions. Retaining `true` monotonically meant
+      // `let d = bureau.run(...); d = helper(); d.subscribe()` still attributed
+      // the call to AgentRun, another false failure on correct code.
+      bindings.get(target)?.set(name, holds);
     }
 
     ts.forEachChild(node, (child) => declarePass(child, here));
