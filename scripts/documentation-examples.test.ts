@@ -620,6 +620,22 @@ function runHandleCalls(fence: string, index: number): Set<string> {
       });
     }
 
+    // I fixed this for parameters and left declarations identifier-only, so
+    // `const { bureau } = evaluationKit` recorded nothing and the conventional
+    // fallback claimed the shadowing local — a false failure on correct code.
+    // A destructured initialiser cannot be proven to hold a producer, so these
+    // bind as ordinary names: a miss is survivable, a false failure is not.
+    if (ts.isVariableDeclaration(node) && !ts.isIdentifier(node.name)) {
+      for (const bound of boundNames(node.name)) {
+        record(here[here.length - 1] ?? 0, bound, {
+          pos: node.getStart(file),
+          handle: false,
+          agent: false,
+          bureau: false,
+        });
+      }
+    }
+
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
       const pos = node.getStart(file);
       const holds = node.initializer ? producesHandle(node.initializer, here, pos) : false;
@@ -762,6 +778,31 @@ interface ClassificationRow {
   readonly owner: string;
 }
 
+/**
+ * Table lines the row parser could not read.
+ *
+ * A row with a missing cell or an accidentally unescaped pipe was silently
+ * dropped, and every gate below then passed without examining that resource at
+ * all while the row-count assertion stayed satisfied by the rest of the table.
+ * Silence from an unparsed row is the same vacuous pass as silence from an
+ * unparsed fence.
+ */
+function malformedClassificationRows(markdown: string): string[] {
+  const start = markdown.indexOf('### Classification table');
+  if (start < 0) throw new Error('classification table not found');
+  const end = markdown.indexOf('\n### ', start + 1);
+  const section = markdown.slice(start, end < 0 ? markdown.length : end);
+
+  const malformed: string[] = [];
+  for (const line of section.split('\n')) {
+    if (!line.startsWith('|')) continue;
+    if (line.includes(':---')) continue;
+    const cells = line.replace(/\\\|/g, '\u0000').split('|').slice(1, -1);
+    if (cells.length !== 7) malformed.push(`${cells.length} cells: ${line.slice(0, 90)}`);
+  }
+  return malformed;
+}
+
 /** Every classification cell of a row, so a gate cannot check only some of them. */
 function cellsOf(row: ClassificationRow): string[] {
   return [row.resource, row.ownership, row.execution, row.durability, row.identity, row.locator];
@@ -854,13 +895,14 @@ describe('documentation/operative-type-safe-api.md examples', () => {
   test('no required capability has quietly been implemented under its placeholder name', () => {
     const source = read(agentRunPath);
     const stale = Object.keys(PENDING_IMPLEMENTATION).filter((member) =>
-      // Method form `snapshot(): T`, generic form `snapshot<T>()`, and
-      // function-valued property form `snapshot: () => T`. Matching only the
-      // first two meant an ordinary alternative signature under the exact
-      // placeholder name left the entry green.
-      new RegExp(`^\\s*(readonly\\s+)?${member}\\s*([(<]|:\\s*(\\(|async|function))`, 'm').test(
-        source,
-      ),
+      // Method form `snapshot(): T`, generic form `snapshot<T>()`,
+      // function-valued property form `snapshot: () => T`, and accessor form
+      // `get snapshot(): T`. Each was added after a review round found the
+      // previous set let a real implementation keep its exemption.
+      new RegExp(
+        `^\\s*(?:readonly\\s+|get\\s+|set\\s+|static\\s+)*${member}\\s*([(<]|:\\s*(\\(|async|function))`,
+        'm',
+      ).test(source),
     );
 
     // A failure here is good news needing action: the owning issue landed, so
@@ -1167,6 +1209,13 @@ describe('documentation/operative-type-safe-api.md classification table', () => 
       }
     }
     expect(offenders).toEqual([]);
+  });
+
+  test('every table row parses into the seven classification columns', () => {
+    // Without this the row parser's `continue` was a silent exemption: a row
+    // that failed to parse escaped every check below while the table still
+    // looked full.
+    expect(malformedClassificationRows(document)).toEqual([]);
   });
 
   test('no resource is classified twice', () => {
