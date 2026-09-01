@@ -174,15 +174,32 @@ function runHandleCalls(source: string): Set<string> {
   }
 
   const members = new Set<string>();
+  const record = (name: string | undefined): void => {
+    if (name !== undefined && !NOT_RUN_HANDLE_MEMBERS.has(name)) members.add(name);
+  };
+
   for (const binding of bindings) {
     const pattern = new RegExp(`\\b${binding}\\.([A-Za-z_$][\\w$]*)\\s*\\(`, 'g');
     let match = pattern.exec(source);
     while (match !== null) {
-      const name = match[1];
-      if (name !== undefined && !NOT_RUN_HANDLE_MEMBERS.has(name)) members.add(name);
+      record(match[1]);
       match = pattern.exec(source);
     }
   }
+
+  // Calls chained straight off a run producer, which never create a binding:
+  //   await bureau.run('writer', '...').unwrap()
+  // Without this, such a call is invoked on a run handle but invisible to the
+  // binding scan, so a typo in it would pass a test that claims to account for
+  // every run-handle member the examples invoke.
+  const chained =
+    /(?:[A-Za-z_$][\w$]*\.)?(?:run|createRun|createActiveRun|getRun)\s*\([^)]*\)\s*\.\s*([A-Za-z_$][\w$]*)\s*\(/g;
+  let chainMatch = chained.exec(source);
+  while (chainMatch !== null) {
+    record(chainMatch[1]);
+    chainMatch = chained.exec(source);
+  }
+
   return members;
 }
 
