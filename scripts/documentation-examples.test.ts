@@ -101,6 +101,24 @@ const CONVENTIONAL_RUN_RECEIVER = 'bureau';
  */
 const RUN_HANDLE_TYPE = 'AgentRun';
 
+/**
+ * Supertypes the contract inherits from without declaring, and the members they
+ * contribute.
+ *
+ * `RunOutcomeBase extends AsyncIterable<RunEvent>`, so `run[Symbol.asyncIterator]()`
+ * is a real member of the documented surface that no fence declares. Skipping
+ * heritage altogether rejected it — a false failure on a correct example — and
+ * resolving heritage without this map would instead throw on a global type. A
+ * Map rather than an object literal: `AMBIENT['constructor']` on an object
+ * resolves through the prototype chain to a truthy value.
+ */
+const AMBIENT_SUPERTYPE_MEMBERS = new Map<string, readonly string[]>([
+  ['AsyncIterable', ['[Symbol.asyncIterator]']],
+  ['Iterable', ['[Symbol.iterator]']],
+  ['Disposable', ['[Symbol.dispose]']],
+  ['AsyncDisposable', ['[Symbol.asyncDispose]']],
+]);
+
 function read(path: string): string {
   return readFileSync(path, 'utf-8');
 }
@@ -152,7 +170,19 @@ function declaredRunSurface(sources: readonly string[]): Set<string> {
         if (existing) existing.push(node);
         else interfaces.set(node.name.text, [node]);
       }
-      if (ts.isTypeAliasDeclaration(node)) aliases.set(node.name.text, node);
+      if (ts.isTypeAliasDeclaration(node)) {
+        // Last-wins let any later fence replace the normative declaration: an
+        // illustrative `type AgentRun` carrying a misspelled member would make
+        // that misspelling the checked surface. A type alias cannot be declared
+        // twice in one scope, so a second one is an error, not a redefinition.
+        // Interfaces above are unioned instead, which is how they merge.
+        if (aliases.has(node.name.text)) {
+          throw new Error(
+            `${node.name.text} is declared more than once across the contract's fences`,
+          );
+        }
+        aliases.set(node.name.text, node);
+      }
       ts.forEachChild(node, collect);
     };
     collect(file);
@@ -188,20 +218,39 @@ function declaredRunSurface(sources: readonly string[]): Set<string> {
       return;
     }
     if (!ts.isTypeReferenceNode(node) || !ts.isIdentifier(node.typeName)) return;
-    const name = node.typeName.text;
+    visitName(node.typeName.text);
+  };
+
+  const visitName = (name: string): void => {
     if (resolved.has(name)) return;
     resolved.add(name);
 
     const declarations = interfaces.get(name);
     if (declarations) {
-      for (const declaration of declarations) addMembers(declaration.members);
+      for (const declaration of declarations) {
+        addMembers(declaration.members);
+        // An inherited member is still a member an example may legitimately
+        // call, so heritage is followed rather than stopped at.
+        for (const clause of declaration.heritageClauses ?? []) {
+          for (const base of clause.types) {
+            if (ts.isIdentifier(base.expression)) visitName(base.expression.text);
+          }
+        }
+      }
       return;
     }
+
     const alias = aliases.get(name);
     if (alias) return visit(alias.type);
 
+    const ambient = AMBIENT_SUPERTYPE_MEMBERS.get(name);
+    if (ambient) {
+      for (const member of ambient) surface.add(member);
+      return;
+    }
+
     throw new Error(
-      `${name} is referenced by ${RUN_HANDLE_TYPE} but the contract does not declare it`,
+      `${name} is reachable from ${RUN_HANDLE_TYPE} but neither the contract nor the ambient supertype map declares it`,
     );
   };
 
@@ -319,6 +368,30 @@ function runHandleCalls(fence: string, index: number): Set<string> {
 
   const destructured = new Set<string>();
 
+  // What each local name actually imports. Matching the local spelling alone
+  // meant an aliased import was not recognised as a factory, so its `.run()`
+  // produced nothing to check and a typo on the result passed.
+  const importedAs = new Map<string, string>();
+  const namespaceImports = new Set<string>();
+  const collectImports = (node: ts.Node): void => {
+    if (ts.isImportDeclaration(node) && node.importClause) {
+      const clause = node.importClause;
+      // A default import is not any of these factories, and recording it as
+      // `default` says so rather than letting its local spelling stand in.
+      if (clause.name) importedAs.set(clause.name.text, 'default');
+      if (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings)) {
+        namespaceImports.add(clause.namedBindings.name.text);
+      }
+      if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
+        for (const element of clause.namedBindings.elements) {
+          importedAs.set(element.name.text, (element.propertyName ?? element.name).text);
+        }
+      }
+    }
+    ts.forEachChild(node, collectImports);
+  };
+  collectImports(file);
+
   // scopeId -> name -> the binding's value at each point it was set.
   //
   // Position-stamped rather than a single final value, so a call resolves
@@ -392,12 +465,29 @@ function runHandleCalls(fence: string, index: number): Set<string> {
     pos: number,
   ): boolean => {
     const value = unwrap(expression);
-    if (!ts.isCallExpression(value) || !ts.isIdentifier(value.expression)) return false;
-    if (!factories.has(value.expression.text)) return false;
-    // Spelling is not identity. A fence may shadow `createAgent` with its own
-    // local, parameter, or function declaration, and that name then returns
-    // something unrelated. A binding in force means this is not the import.
-    return lookup(chain, value.expression.text, pos) === undefined;
+    if (!ts.isCallExpression(value)) return false;
+    const callee = unwrap(value.expression);
+
+    // `agents.createBureau(...)` through `import * as agents`, unless the fence
+    // rebound the namespace name to something of its own.
+    if (
+      ts.isPropertyAccessExpression(callee) &&
+      ts.isIdentifier(callee.expression) &&
+      namespaceImports.has(callee.expression.text) &&
+      lookup(chain, callee.expression.text, pos) === undefined
+    ) {
+      return factories.has(callee.name.text);
+    }
+
+    if (!ts.isIdentifier(callee)) return false;
+    // Spelling is not identity, in both directions. A fence may shadow
+    // `createAgent` with its own local, parameter, or function declaration, and
+    // that name then returns something unrelated — so a binding in force means
+    // this is not the import. And `import { createBureau as makeBureau }` is
+    // the factory under a name the sets have never heard of, so the local name
+    // resolves to what it actually imports before being matched.
+    if (lookup(chain, callee.text, pos) !== undefined) return false;
+    return factories.has(importedAs.get(callee.text) ?? callee.text);
   };
 
   /** Whether this initialiser makes the binding an agent, whose .run() yields a handle. */
