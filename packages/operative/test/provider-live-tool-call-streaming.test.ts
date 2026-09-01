@@ -533,6 +533,79 @@ describe('live tool-call streaming — OpenAI adapter', () => {
     ]);
   });
 
+  it('keeps one block when the tool call id arrives after its name', async () => {
+    const eventTarget = new TypedEventTarget<StreamEventMap>();
+    const starts: string[] = [];
+    const completes: Array<{ blockId: string; arguments: unknown }> = [];
+
+    eventTarget.addEventListener('stream:tool-call-start', (event) =>
+      starts.push(event.detail.blockId),
+    );
+    eventTarget.addEventListener('stream:tool-call-complete', (event) =>
+      completes.push({ blockId: event.detail.blockId, arguments: event.detail.arguments }),
+    );
+
+    const client: OpenAIStreamingClient = {
+      chat: {
+        completions: {
+          create(): AsyncIterable<OpenAIChatCompletionChunk> {
+            return (async function* () {
+              // Name without id: the live start has to fire under a synthesized
+              // block id, because a block id cannot be re-keyed once published.
+              yield {
+                choices: [
+                  {
+                    delta: {
+                      tool_calls: [{ index: 0, function: { name: 'get_weather', arguments: '' } }],
+                    },
+                    finish_reason: null,
+                  },
+                ],
+                usage: null,
+              };
+              // The id turns up later and reaches the resolved response, so it
+              // can no longer match the block id by identity.
+              yield {
+                choices: [
+                  {
+                    delta: {
+                      tool_calls: [
+                        {
+                          index: 0,
+                          id: 'call_late_id',
+                          function: { arguments: '{"location":"Denver"}' },
+                        },
+                      ],
+                    },
+                    finish_reason: 'tool_calls',
+                  },
+                ],
+                usage: null,
+              };
+            })();
+          },
+        },
+      },
+    };
+
+    const generate = withEnhancedStreaming(
+      createOpenAIProviderStream({ model: 'gpt-4o', client }),
+      { eventTarget, liveToolCalls: true },
+    );
+
+    const response = await generate(makeContext());
+
+    // One block, not two: the call must not be reconstructed under a second id
+    // while the live block is left dangling and incomplete.
+    expect(starts).toEqual(['tool-0']);
+    expect(completes).toEqual([{ blockId: 'tool-0', arguments: { location: 'Denver' } }]);
+    // The provider id still reaches the response, which the caller needs to
+    // correlate the tool result back to the provider.
+    expect(response.toolCalls).toEqual([
+      { id: 'call_late_id', name: 'get_weather', arguments: { location: 'Denver' } },
+    ]);
+  });
+
   it('falls back to a synthesized block id when the tool call chunk carries no id', async () => {
     const blockIds: string[] = [];
     const eventTarget = new TypedEventTarget<StreamEventMap>();

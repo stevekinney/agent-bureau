@@ -234,19 +234,29 @@ export function withEnhancedStreaming(
         return { toolCall, reported };
       });
 
-      // Arrival order is the only remaining signal, and it is trustworthy in
-      // exactly one situation: no leftover call carries an id at all (so
-      // identity was never available to anyone) and the two sets are the same
-      // size (so the correspondence is forced). Pairing positionally outside
-      // that — a streaming function reporting only some of its calls, with a
-      // synthesized block id — would publish one call's name and arguments on
-      // another call's block. An unmatched call is reconstructed instead, which
-      // is wrong only in announcing a call twice, never in mislabelling one.
+      // Arrival order is the only remaining signal, and it is trustworthy when
+      // the two leftover sets are the same size: the correspondence is then
+      // forced, whatever ids are involved. That covers a provider supplying no
+      // tool-call ids at all, and an adapter that had to freeze a synthesized
+      // block id before the provider sent that call's id — OpenAI permits the
+      // name to arrive on an earlier delta than the id, and the block id cannot
+      // be re-keyed once it has been published to consumers.
+      //
+      // Unequal sizes mean a streaming function reported only some of its
+      // calls, and consuming a reported block for whichever call happens to
+      // come first would publish one call's name and arguments on another
+      // call's block. Those are left unpaired and reconstructed instead —
+      // wrong only in announcing a call twice, never in mislabelling one.
+      //
+      // Residual: equal-sized leftovers reported in a different order than the
+      // response lists them would still mispair. That needs two or more calls
+      // whose ids all arrive after their names AND whose live starts fire out
+      // of provider-index order; no adapter here produces it. Closing it for
+      // good means carrying a correlation key on `ToolCallInput`, which is a
+      // change to the shared `interoperability` types rather than to this
+      // package.
       const unpaired = pairings.filter((pairing) => pairing.reported === undefined);
-      const orderIsUnambiguous =
-        unpaired.length === unmatchedReported.length &&
-        unpaired.every((pairing) => pairing.toolCall.id === undefined);
-      if (orderIsUnambiguous) {
+      if (unpaired.length === unmatchedReported.length) {
         for (const pairing of unpaired) pairing.reported = unmatchedReported.shift();
       }
 
