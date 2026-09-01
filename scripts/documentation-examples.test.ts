@@ -154,10 +154,19 @@ function unwrap(node: ts.Expression): ts.Expression {
 /**
  * Every member invoked on a run handle in one fence.
  *
- * A receiver counts as a run handle when it is a producer call itself, a binding
- * initialised from one, or a binding aliased from another such binding. Aliases
- * resolve to a fixed point, so `const alias = draft` is covered however many
- * hops it takes.
+ * Two passes over one scope structure, which is what makes both properties hold
+ * at once. Review found the failure mode of each single-pass design:
+ *
+ * - Keying bindings by bare name conflates shadowed declarations, so an inner
+ *   `const run = helper()` was attributed to an outer run handle and its members
+ *   reported invalid — a false failure on correct documentation.
+ * - Resolving in one ordered pass loses forward references, so an alias declared
+ *   before the handle it points at silently stopped being tracked.
+ *
+ * Pass one records what every binding holds, per scope. Pass two resolves calls
+ * against the scope active at that node. Scopes are identified by a
+ * deterministic pre-order counter, so both passes agree on which scope is which
+ * without needing a type checker.
  */
 function runHandleCalls(fence: string, index: number): Set<string> {
   const file = ts.createSourceFile(
@@ -168,51 +177,112 @@ function runHandleCalls(fence: string, index: number): Set<string> {
     ts.ScriptKind.TS,
   );
 
-  const handles = new Set<string>();
-  const aliases: Array<{ from: string; to: string }> = [];
+  const opensScope = (node: ts.Node): boolean =>
+    ts.isBlock(node) ||
+    ts.isFunctionDeclaration(node) ||
+    ts.isFunctionExpression(node) ||
+    ts.isArrowFunction(node) ||
+    ts.isMethodDeclaration(node) ||
+    ts.isForStatement(node) ||
+    ts.isForOfStatement(node) ||
+    ts.isForInStatement(node) ||
+    ts.isCaseBlock(node);
 
-  const collectBindings = (node: ts.Node): void => {
-    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
-      const initializer = unwrap(node.initializer);
-      if (isRunProducer(initializer)) {
-        handles.add(node.name.text);
-      } else if (ts.isIdentifier(initializer)) {
-        aliases.push({ from: initializer.text, to: node.name.text });
-      }
+  // scopeId -> binding name -> holds a run handle
+  const bindings = new Map<number, Map<string, boolean>>();
+  bindings.set(0, new Map());
+
+  const lookup = (chain: number[], name: string): boolean | undefined => {
+    for (let i = chain.length - 1; i >= 0; i -= 1) {
+      const scope = bindings.get(chain[i] ?? 0);
+      const found = scope?.get(name);
+      if (found !== undefined) return found;
     }
-    ts.forEachChild(node, collectBindings);
+    return undefined;
   };
-  collectBindings(file);
 
-  for (let changed = true; changed;) {
-    changed = false;
-    for (const alias of aliases) {
-      if (handles.has(alias.from) && !handles.has(alias.to)) {
-        handles.add(alias.to);
-        changed = true;
-      }
+  const producesHandle = (expression: ts.Expression, chain: number[]): boolean => {
+    const value = unwrap(expression);
+    if (isRunProducer(value)) return true;
+    return ts.isIdentifier(value) && lookup(chain, value.text) === true;
+  };
+
+  // ── Pass one: record every binding, in its own scope ────────────────
+  let counter = 0;
+  const declarePass = (node: ts.Node, chain: number[]): void => {
+    let here = chain;
+    if (opensScope(node)) {
+      counter += 1;
+      bindings.set(counter, new Map());
+      here = [...chain, counter];
     }
+
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
+      const holds = node.initializer ? producesHandle(node.initializer, here) : false;
+      bindings.get(here[here.length - 1] ?? 0)?.set(node.name.text, holds);
+    }
+
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isIdentifier(node.left)
+    ) {
+      // Reassignment updates the scope that declared the name.
+      const name = node.left.text;
+      const holds = producesHandle(node.right, here);
+      let target = here[here.length - 1] ?? 0;
+      for (let i = here.length - 1; i >= 0; i -= 1) {
+        if (bindings.get(here[i] ?? 0)?.has(name)) {
+          target = here[i] ?? 0;
+          break;
+        }
+      }
+      if (holds) bindings.get(target)?.set(name, true);
+      else if (!bindings.get(target)?.has(name)) bindings.get(target)?.set(name, false);
+    }
+
+    ts.forEachChild(node, (child) => declarePass(child, here));
+  };
+  // Aliases can point forward (`const alias = draft` before `draft` is bound),
+  // so repeat the pass until nothing changes. Scope ids are deterministic, so
+  // each repetition sees the same scopes and only the binding values settle.
+  let previous = '';
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    counter = 0;
+    declarePass(file, [0]);
+    const snapshot = JSON.stringify([...bindings].map(([id, m]) => [id, [...m]]));
+    if (snapshot === previous) break;
+    previous = snapshot;
   }
 
+  // ── Pass two: resolve calls against the scope active at each node ───
   const members = new Set<string>();
+  let walkCounter = 0;
 
-  const onRunHandle = (receiver: ts.Expression): boolean => {
+  const onRunHandle = (receiver: ts.Expression, chain: number[]): boolean => {
     const target = unwrap(receiver);
-    return (ts.isIdentifier(target) && handles.has(target.text)) || isRunProducer(target);
+    if (isRunProducer(target)) return true;
+    return ts.isIdentifier(target) && lookup(chain, target.text) === true;
   };
 
-  const collectCalls = (node: ts.Node): void => {
+  const callPass = (node: ts.Node, chain: number[]): void => {
+    let here = chain;
+    if (opensScope(node)) {
+      walkCounter += 1;
+      here = [...chain, walkCounter];
+    }
+
     if (ts.isCallExpression(node)) {
       const callee = node.expression;
 
-      if (ts.isPropertyAccessExpression(callee) && onRunHandle(callee.expression)) {
+      if (ts.isPropertyAccessExpression(callee) && onRunHandle(callee.expression, here)) {
         members.add(callee.name.text);
       }
 
       // Element access, which property-access-only collection missed entirely:
       //   run[Symbol.dispose]()   — explicitly part of the AgentRun contract
       //   run['reslut']()         — a typo that would otherwise pass
-      if (ts.isElementAccessExpression(callee) && onRunHandle(callee.expression)) {
+      if (ts.isElementAccessExpression(callee) && onRunHandle(callee.expression, here)) {
         const argument = callee.argumentExpression;
         if (ts.isStringLiteralLike(argument)) {
           members.add(argument.text);
@@ -221,15 +291,14 @@ function runHandleCalls(fence: string, index: number): Set<string> {
           ts.isIdentifier(argument.expression) &&
           argument.expression.text === 'Symbol'
         ) {
-          // Well-known symbols are contract members too. Recorded under their
-          // documented spelling so the accounting map can name them.
           members.add(`[Symbol.${argument.name.text}]`);
         }
       }
     }
-    ts.forEachChild(node, collectCalls);
+
+    ts.forEachChild(node, (child) => callPass(child, here));
   };
-  collectCalls(file);
+  callPass(file, [0]);
 
   return members;
 }
