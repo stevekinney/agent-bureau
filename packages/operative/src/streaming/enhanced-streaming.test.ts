@@ -5,7 +5,7 @@ import { TypedEventTarget } from 'lifecycle';
 
 import type { GenerateContext, GenerateResponse, StreamingGenerateFunction } from '../types';
 import { withEnhancedStreaming } from './enhanced-streaming';
-import type { StreamCustomEvent, StreamEventMap } from './types';
+import type { StreamCustomEvent, StreamEvent, StreamEventMap, StreamState } from './types';
 
 function textResponse(content: string): GenerateResponse {
   return { content, toolCalls: [] };
@@ -236,5 +236,280 @@ describe('withEnhancedStreaming', () => {
     if (toolDeltas.length > 0) {
       expect(toolDeltas[0]?.toolName).toBe('search');
     }
+  });
+});
+
+/**
+ * AB-186 — `liveToolCalls` lets a `StreamingGenerateFunction` report tool-call
+ * events through `StreamingHandle.report` while the provider response is still
+ * open. Everything here is about the wrapper contract; the Anthropic and OpenAI
+ * adapters that drive `report` in production are covered end-to-end in
+ * `test/provider-live-tool-call-streaming.test.ts`.
+ */
+describe('withEnhancedStreaming live tool calls', () => {
+  function recordEvents(eventTarget: TypedEventTarget<StreamEventMap>): StreamEvent[] {
+    const events: StreamEvent[] = [];
+
+    function record<K extends keyof StreamEventMap>(type: K): void {
+      eventTarget.addEventListener(type, (event) => {
+        events.push(event.detail);
+      });
+    }
+
+    record('stream:block-start');
+    record('stream:block-delta');
+    record('stream:block-complete');
+    record('stream:text-delta');
+    record('stream:tool-call-start');
+    record('stream:tool-call-delta');
+    record('stream:tool-call-complete');
+
+    return events;
+  }
+
+  /** Narrows recorded events to one variant so its payload can be asserted. */
+  function eventsOfType<K extends StreamEvent['type']>(
+    events: StreamEvent[],
+    type: K,
+  ): Array<Extract<StreamEvent, { type: K }>> {
+    return events.filter(
+      (event): event is Extract<StreamEvent, { type: K }> => event.type === type,
+    );
+  }
+
+  /** A streaming function that reports one tool call live, then resolves. */
+  const reportingGenerate: StreamingGenerateFunction = async ({ streaming }) => {
+    streaming.update('Checking');
+    streaming.report?.({
+      type: 'stream:tool-call-start',
+      toolName: 'get_weather',
+      blockId: 'toolu_01',
+    });
+    streaming.report?.({
+      type: 'stream:tool-call-delta',
+      toolName: 'get_weather',
+      blockId: 'toolu_01',
+      partialArguments: '{"location":',
+    });
+    streaming.report?.({
+      type: 'stream:tool-call-delta',
+      toolName: 'get_weather',
+      blockId: 'toolu_01',
+      partialArguments: '{"location":"Denver"}',
+    });
+    return {
+      content: 'Checking',
+      toolCalls: [{ id: 'toolu_01', name: 'get_weather', arguments: { location: 'Denver' } }],
+    };
+  };
+
+  it('does not install the report channel unless liveToolCalls is enabled', async () => {
+    let reportChannel: unknown = 'unset';
+
+    const streamingGenerate: StreamingGenerateFunction = async ({ streaming }) => {
+      reportChannel = streaming.report;
+      streaming.update('Hi');
+      return textResponse('Hi');
+    };
+
+    await withEnhancedStreaming(streamingGenerate)(makeContext());
+
+    expect(reportChannel).toBeUndefined();
+  });
+
+  it('leaves event order and payloads unchanged when liveToolCalls is off', async () => {
+    const eventTarget = new TypedEventTarget<StreamEventMap>();
+    const events = recordEvents(eventTarget);
+
+    await withEnhancedStreaming(reportingGenerate, { eventTarget })(makeContext());
+
+    // Reported events are dropped on the floor; the wrapper reconstructs the
+    // tool-call events from the resolved response exactly as it always has,
+    // including the `tool-${name}-${index}-${messageId}` block id format.
+    const toolStart = events.find((event) => event.type === 'stream:tool-call-start');
+    expect(toolStart?.blockId).toMatch(/^tool-get_weather-0-/);
+
+    expect(events.map((event) => event.type)).toEqual([
+      'stream:block-start',
+      'stream:text-delta',
+      'stream:block-delta',
+      'stream:block-complete',
+      'stream:block-start',
+      'stream:tool-call-start',
+      'stream:block-delta',
+      'stream:tool-call-delta',
+      'stream:block-complete',
+      'stream:tool-call-complete',
+    ]);
+
+    const toolDelta = events.find((event) => event.type === 'stream:tool-call-delta');
+    expect(toolDelta?.partialArguments).toBe('{"location":"Denver"}');
+
+    const toolComplete = events.find((event) => event.type === 'stream:tool-call-complete');
+    expect(toolComplete?.arguments).toEqual({ location: 'Denver' });
+  });
+
+  it('forwards a reported tool-call event before the generate promise resolves', async () => {
+    const eventTarget = new TypedEventTarget<StreamEventMap>();
+    const observed: string[] = [];
+    const seenBeforeResolve: string[] = [];
+
+    eventTarget.addEventListener('stream:tool-call-start', () => observed.push('start'));
+
+    const streamingGenerate: StreamingGenerateFunction = async ({ streaming }) => {
+      streaming.report?.({
+        type: 'stream:tool-call-start',
+        toolName: 'get_weather',
+        blockId: 'toolu_01',
+      });
+      seenBeforeResolve.push(...observed);
+      return { content: '', toolCalls: [{ name: 'get_weather', arguments: {} }] };
+    };
+
+    await withEnhancedStreaming(streamingGenerate, { eventTarget, liveToolCalls: true })(
+      makeContext(),
+    );
+
+    expect(seenBeforeResolve).toEqual(['start']);
+  });
+
+  it('keeps the reported block id across start, delta, and the synthesized completion', async () => {
+    const eventTarget = new TypedEventTarget<StreamEventMap>();
+    const events = recordEvents(eventTarget);
+    const toolStarts: string[] = [];
+    const toolDeltas: string[] = [];
+
+    await withEnhancedStreaming(reportingGenerate, {
+      eventTarget,
+      liveToolCalls: true,
+      onToolCallStart: (toolName) => toolStarts.push(toolName),
+      onToolCallDelta: (_toolName, partialArgs) => toolDeltas.push(partialArgs),
+    })(makeContext());
+
+    expect(events.map((event) => event.type)).toEqual([
+      'stream:block-start',
+      'stream:text-delta',
+      'stream:block-delta',
+      'stream:block-start',
+      'stream:tool-call-start',
+      'stream:block-delta',
+      'stream:tool-call-delta',
+      'stream:block-delta',
+      'stream:tool-call-delta',
+      'stream:block-complete',
+      'stream:block-complete',
+      'stream:tool-call-complete',
+    ]);
+
+    const toolEvents = events.filter(
+      (event) =>
+        event.type === 'stream:tool-call-start' ||
+        event.type === 'stream:tool-call-delta' ||
+        event.type === 'stream:tool-call-complete',
+    );
+    expect(toolEvents.every((event) => event.blockId === 'toolu_01')).toBe(true);
+
+    // The wrapper diffs accumulated arguments into incremental block deltas,
+    // the same way it does for text.
+    const toolBlockDeltas = eventsOfType(events, 'stream:block-delta').filter(
+      (event) => event.block.id === 'toolu_01',
+    );
+    expect(toolBlockDeltas.map((event) => event.delta)).toEqual(['{"location":', '"Denver"}']);
+
+    expect(toolStarts).toEqual(['get_weather']);
+    expect(toolDeltas).toEqual(['{"location":', '{"location":"Denver"}']);
+  });
+
+  it('keeps the text block payload correct when a tool block opens mid-text', async () => {
+    const eventTarget = new TypedEventTarget<StreamEventMap>();
+    const events = recordEvents(eventTarget);
+
+    const streamingGenerate: StreamingGenerateFunction = async ({ streaming }) => {
+      streaming.update('Part 1');
+      streaming.report?.({
+        type: 'stream:tool-call-start',
+        toolName: 'get_weather',
+        blockId: 'toolu_01',
+      });
+      // A second text delta arrives while the tool block is the most recently
+      // started one — the text events must still describe the text block.
+      streaming.update('Part 1 Part 2');
+      return { content: 'Part 1 Part 2', toolCalls: [] };
+    };
+
+    await withEnhancedStreaming(streamingGenerate, { eventTarget, liveToolCalls: true })(
+      makeContext(),
+    );
+
+    const textBlockDeltas = eventsOfType(events, 'stream:block-delta').filter(
+      (event) => event.block.type === 'text',
+    );
+    expect(textBlockDeltas.map((event) => event.delta)).toEqual(['Part 1', ' Part 2']);
+  });
+
+  it('reconstructs tool-call events when the streaming function reports none', async () => {
+    const eventTarget = new TypedEventTarget<StreamEventMap>();
+    const events = recordEvents(eventTarget);
+
+    const streamingGenerate: StreamingGenerateFunction = async ({ streaming }) => {
+      streaming.update('Checking');
+      return {
+        content: 'Checking',
+        toolCalls: [{ name: 'get_weather', arguments: { location: 'Denver' } }],
+      };
+    };
+
+    await withEnhancedStreaming(streamingGenerate, { eventTarget, liveToolCalls: true })(
+      makeContext(),
+    );
+
+    const toolStart = events.find((event) => event.type === 'stream:tool-call-start');
+    expect(toolStart?.blockId).toMatch(/^tool-get_weather-0-/);
+  });
+
+  it('carries reported tool-call blocks into the final stream state', async () => {
+    const eventTarget = new TypedEventTarget<StreamEventMap>();
+    let finalState: StreamState | undefined;
+
+    eventTarget.addEventListener(
+      'stream:complete',
+      (event: StreamCustomEvent<'stream:complete'>) => {
+        finalState = event.detail.state;
+      },
+    );
+
+    await withEnhancedStreaming(reportingGenerate, { eventTarget, liveToolCalls: true })(
+      makeContext(),
+    );
+
+    expect(finalState?.toolCalls).toHaveLength(1);
+    expect(finalState?.toolCalls[0]).toMatchObject({
+      id: 'toolu_01',
+      toolName: 'get_weather',
+      partialArguments: '{"location":"Denver"}',
+      complete: true,
+    });
+  });
+
+  it('synthesizes no completion for a reported block the response dropped', async () => {
+    const eventTarget = new TypedEventTarget<StreamEventMap>();
+    const events = recordEvents(eventTarget);
+
+    const streamingGenerate: StreamingGenerateFunction = async ({ streaming }) => {
+      streaming.report?.({
+        type: 'stream:tool-call-start',
+        toolName: 'get_weather',
+        blockId: 'toolu_01',
+      });
+      // The adapter drops a caller-truncated tool call from the response.
+      return { content: '', toolCalls: [] };
+    };
+
+    await withEnhancedStreaming(streamingGenerate, { eventTarget, liveToolCalls: true })(
+      makeContext(),
+    );
+
+    expect(events.filter((event) => event.type === 'stream:tool-call-start')).toHaveLength(1);
+    expect(events.some((event) => event.type === 'stream:tool-call-complete')).toBe(false);
   });
 });

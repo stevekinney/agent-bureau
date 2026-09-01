@@ -43,6 +43,24 @@ export type StreamEvent =
   | { type: 'stream:complete'; state: StreamState }
   | { type: 'stream:error'; error: unknown };
 
+/**
+ * The subset of {@link StreamEvent} a `StreamingGenerateFunction` may report
+ * through `StreamingHandle.report` while the provider response is still open.
+ *
+ * Deliberately narrower than `StreamEvent`. Text already has a live channel
+ * (`StreamingHandle.update`), and lifecycle events like `stream:complete` or
+ * `stream:usage` belong to the wrapper that owns the state machine, not to the
+ * adapter feeding it. `stream:tool-call-complete` is excluded too: an adapter
+ * only knows a tool call's parsed `arguments` once the stream has closed and
+ * the accumulated JSON has been through `JSON.parse` — the step that raises
+ * `ToolCallParseError` — so the wrapper synthesizes the completion from the
+ * resolved `GenerateResponse` instead.
+ */
+export type LiveStreamEvent = Extract<
+  StreamEvent,
+  { type: 'stream:tool-call-start' | 'stream:tool-call-delta' }
+>;
+
 /** Custom event class wrapping a StreamEvent for use with TypedEventTarget. */
 export class StreamCustomEvent<T extends StreamEvent['type'] = StreamEvent['type']> extends Event {
   readonly detail: Extract<StreamEvent, { type: T }>;
@@ -68,6 +86,24 @@ export type EnhancedStreamingOptions = {
   onToolCallStart?: (toolName: string) => void;
   /** Called with partial tool call arguments. */
   onToolCallDelta?: (toolName: string, partialArgs: string) => void;
+  /**
+   * Installs `StreamingHandle.report`, letting the wrapped
+   * `StreamingGenerateFunction` push tool-call events through while the
+   * provider response is still open. The Anthropic and OpenAI streaming
+   * adapters report from `content_block_start`/`input_json_delta` and
+   * `delta.tool_calls` respectively, so a host observes
+   * `stream:tool-call-start` and `stream:tool-call-delta` mid-response rather
+   * than after the generate promise resolves.
+   *
+   * Off by default, because turning it on moves event timing and changes the
+   * `blockId` on tool-call events from the wrapper's own
+   * `tool-${name}-${index}-${messageId}` to the provider's block id.
+   *
+   * A streaming function that never reports — a hand-written one, or the
+   * Gemini adapter — falls back to reconstructing the tool-call events from
+   * the resolved `GenerateResponse`, exactly as with this option off.
+   */
+  liveToolCalls?: boolean;
 };
 
 /** Input commands the state machine accepts. */

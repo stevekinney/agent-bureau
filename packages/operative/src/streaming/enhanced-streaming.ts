@@ -9,7 +9,13 @@ import type {
 } from '../types';
 import { cancelStreamingIfActive } from './cancel-streaming';
 import { createStreamStateMachine } from './stream-state-machine';
-import type { EnhancedStreamingOptions, StreamEvent, StreamEventMap } from './types';
+import type {
+  EnhancedStreamingOptions,
+  LiveStreamEvent,
+  StreamBlock,
+  StreamEvent,
+  StreamEventMap,
+} from './types';
 import { StreamCustomEvent } from './types';
 
 /**
@@ -22,6 +28,13 @@ import { StreamCustomEvent } from './types';
  * callbacks (`onTextDelta`, `onToolCallStart`, `onToolCallDelta`), and emits
  * structured events on an optional `TypedEventTarget`.
  *
+ * Tool-call events are reconstructed from the resolved `GenerateResponse` by
+ * default, which means they land after the provider response has closed. Set
+ * `liveToolCalls` to install `StreamingHandle.report` instead, so an adapter
+ * that reports tool calls as it sees them — Anthropic and OpenAI both do —
+ * surfaces them while the response is still open. The reconstruction stays as
+ * the fallback for any streaming function that reports nothing.
+ *
  * The existing `withStreaming()` remains unchanged — this is a separate,
  * opt-in wrapper.
  */
@@ -29,15 +42,37 @@ export function withEnhancedStreaming(
   fn: StreamingGenerateFunction,
   options: EnhancedStreamingOptions = {},
 ): GenerateFunction {
-  const { eventTarget, onTextDelta, onToolCallStart, onToolCallDelta } = options;
+  const { eventTarget, onTextDelta, onToolCallStart, onToolCallDelta, liveToolCalls } = options;
 
   return async (context: GenerateContext): Promise<GenerateResponse> => {
     const { conversation } = context;
     const stateMachine = createStreamStateMachine();
 
     const messageId = conversation.appendStreamingMessage('assistant');
+    const textBlockId = `text-${messageId}`;
 
     let previousContent = '';
+
+    /**
+     * Tool-call blocks the wrapped function reported live, in arrival order.
+     * Non-empty means the live path ran, so the reconstruct-on-resolve path
+     * must stay out of the way.
+     */
+    const reportedToolCalls: Array<{ blockId: string; toolName: string }> = [];
+
+    /**
+     * Looks a tracked block up by id.
+     *
+     * Every event payload below identifies its block this way rather than
+     * reading `activeBlock`, because a tool block can open while the text
+     * block is still accumulating — OpenAI interleaves `delta.content` and
+     * `delta.tool_calls` — and the most recently started block would then be
+     * the wrong one to describe in a text event. Call sites that have just
+     * processed a `block-start` for the id assert the result with `!`.
+     */
+    function findBlock(id: string): StreamBlock | undefined {
+      return stateMachine.getState().blocks.find((block) => block.id === id);
+    }
 
     const handle: StreamingHandle = {
       messageId,
@@ -51,19 +86,19 @@ export function withEnhancedStreaming(
           if (previousContent.length === 0) {
             stateMachine.process({
               type: 'block-start',
-              id: `text-${messageId}`,
+              id: textBlockId,
               blockType: 'text',
             });
 
             emitEvent(eventTarget, 'stream:block-start', {
               type: 'stream:block-start',
-              block: { ...stateMachine.getState().activeBlock! },
+              block: { ...findBlock(textBlockId)! },
             });
           }
 
           stateMachine.process({
             type: 'block-delta',
-            id: `text-${messageId}`,
+            id: textBlockId,
             delta,
           });
 
@@ -79,25 +114,71 @@ export function withEnhancedStreaming(
 
           emitEvent(eventTarget, 'stream:block-delta', {
             type: 'stream:block-delta',
-            block: { ...stateMachine.getState().activeBlock! },
+            block: { ...findBlock(textBlockId)! },
             delta,
           });
         }
       },
     };
 
+    if (liveToolCalls) {
+      handle.report = (event: LiveStreamEvent): void => {
+        if (event.type === 'stream:tool-call-start') {
+          reportedToolCalls.push({ blockId: event.blockId, toolName: event.toolName });
+
+          stateMachine.process({
+            type: 'block-start',
+            id: event.blockId,
+            blockType: 'tool-call',
+            toolName: event.toolName,
+          });
+
+          emitEvent(eventTarget, 'stream:block-start', {
+            type: 'stream:block-start',
+            block: { ...findBlock(event.blockId)! },
+          });
+
+          onToolCallStart?.(event.toolName);
+
+          emitEvent(eventTarget, 'stream:tool-call-start', event);
+          return;
+        }
+
+        // `partialArguments` is cumulative, so diff it against what the state
+        // machine already holds to recover the incremental fragment — the same
+        // shape `update` uses for text.
+        const accumulated = findBlock(event.blockId)?.partialArguments ?? '';
+        const delta = event.partialArguments.slice(accumulated.length);
+
+        stateMachine.process({
+          type: 'block-delta',
+          id: event.blockId,
+          delta,
+        });
+
+        emitEvent(eventTarget, 'stream:block-delta', {
+          type: 'stream:block-delta',
+          block: { ...findBlock(event.blockId)! },
+          delta,
+        });
+
+        onToolCallDelta?.(event.toolName, event.partialArguments);
+
+        emitEvent(eventTarget, 'stream:tool-call-delta', event);
+      };
+    }
+
     try {
       const response = await fn({ ...context, streaming: handle });
 
       // Complete the text block if one was started
       if (previousContent.length > 0) {
-        const textBlockId = `text-${messageId}`;
         stateMachine.process({
           type: 'block-complete',
           id: textBlockId,
         });
 
-        const completedTextBlock = stateMachine.getState().blocks.find((b) => b.id === textBlockId);
+        const completedTextBlock = findBlock(textBlockId);
         if (completedTextBlock) {
           emitEvent(eventTarget, 'stream:block-complete', {
             type: 'stream:block-complete',
@@ -106,8 +187,41 @@ export function withEnhancedStreaming(
         }
       }
 
-      // Process tool calls from the response
-      if (response.toolCalls.length > 0) {
+      if (reportedToolCalls.length > 0) {
+        // The live path already emitted start and delta for each block. All
+        // that is left is the completion, whose parsed `arguments` only exist
+        // now — paired with the reported block at the same ordinal position,
+        // since adapters report and resolve tool calls in the same order.
+        // A response with fewer tool calls than were reported means the caller
+        // aborted mid-stream and the adapter dropped the truncated calls; those
+        // blocks stay open rather than being completed with invented arguments.
+        for (const [index, reported] of reportedToolCalls.entries()) {
+          const toolCall = response.toolCalls[index];
+          if (!toolCall) break;
+
+          stateMachine.process({
+            type: 'block-complete',
+            id: reported.blockId,
+          });
+
+          const completedToolBlock = findBlock(reported.blockId);
+          if (completedToolBlock) {
+            emitEvent(eventTarget, 'stream:block-complete', {
+              type: 'stream:block-complete',
+              block: { ...completedToolBlock },
+            });
+          }
+
+          emitEvent(eventTarget, 'stream:tool-call-complete', {
+            type: 'stream:tool-call-complete',
+            toolName: reported.toolName,
+            blockId: reported.blockId,
+            arguments: toolCall.arguments,
+          });
+        }
+      } else if (response.toolCalls.length > 0) {
+        // Nothing was reported live: reconstruct the whole tool-call event
+        // sequence from the resolved response.
         for (let i = 0; i < response.toolCalls.length; i++) {
           const toolCall = response.toolCalls[i]!;
           const toolBlockId = `tool-${toolCall.name}-${i}-${messageId}`;
@@ -122,7 +236,7 @@ export function withEnhancedStreaming(
 
           emitEvent(eventTarget, 'stream:block-start', {
             type: 'stream:block-start',
-            block: { ...stateMachine.getState().activeBlock! },
+            block: { ...findBlock(toolBlockId)! },
           });
 
           onToolCallStart?.(toolName);
@@ -148,7 +262,7 @@ export function withEnhancedStreaming(
 
           emitEvent(eventTarget, 'stream:block-delta', {
             type: 'stream:block-delta',
-            block: { ...stateMachine.getState().activeBlock! },
+            block: { ...findBlock(toolBlockId)! },
             delta: argsString,
           });
 
@@ -166,9 +280,7 @@ export function withEnhancedStreaming(
             id: toolBlockId,
           });
 
-          const completedToolBlock = stateMachine
-            .getState()
-            .blocks.find((b) => b.id === toolBlockId);
+          const completedToolBlock = findBlock(toolBlockId);
           if (completedToolBlock) {
             emitEvent(eventTarget, 'stream:block-complete', {
               type: 'stream:block-complete',

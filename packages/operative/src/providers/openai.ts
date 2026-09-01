@@ -210,9 +210,13 @@ export function createOpenAIProviderStream(
       let accumulatedText = '';
       let usage: GenerateResponse['usage'] | undefined;
 
-      // Track in-progress tool calls by index
-      const pendingToolCalls: Map<number, { id?: string; name: string; arguments: string }> =
-        new Map();
+      // Track in-progress tool calls by index. `blockId` is the stable identity
+      // carried on the live `stream:tool-call-*` events, so a host can
+      // correlate a start with its deltas before the response closes.
+      const pendingToolCalls: Map<
+        number,
+        { id?: string; name: string; arguments: string; blockId: string }
+      > = new Map();
 
       for await (const chunk of stream) {
         if (context.signal?.aborted) break;
@@ -228,18 +232,34 @@ export function createOpenAIProviderStream(
           // Accumulate tool calls
           if (choice.delta.tool_calls) {
             for (const toolCallDelta of choice.delta.tool_calls) {
-              const existing = pendingToolCalls.get(toolCallDelta.index);
-              if (existing) {
-                // Append arguments fragment
-                if (toolCallDelta.function?.arguments) {
-                  existing.arguments += toolCallDelta.function.arguments;
-                }
-              } else {
+              let pending = pendingToolCalls.get(toolCallDelta.index);
+
+              if (!pending) {
                 // First chunk for this tool call index
-                pendingToolCalls.set(toolCallDelta.index, {
+                pending = {
                   id: toolCallDelta.id,
                   name: toolCallDelta.function?.name ?? '',
-                  arguments: toolCallDelta.function?.arguments ?? '',
+                  arguments: '',
+                  blockId: toolCallDelta.id ?? `tool-${toolCallDelta.index}`,
+                };
+                pendingToolCalls.set(toolCallDelta.index, pending);
+                streaming.report?.({
+                  type: 'stream:tool-call-start',
+                  toolName: pending.name,
+                  blockId: pending.blockId,
+                });
+              }
+
+              // Append arguments fragment. OpenAI may put the first fragment on
+              // the same chunk that opens the call, so this runs for the
+              // opening chunk too rather than only for continuations.
+              if (toolCallDelta.function?.arguments) {
+                pending.arguments += toolCallDelta.function.arguments;
+                streaming.report?.({
+                  type: 'stream:tool-call-delta',
+                  toolName: pending.name,
+                  blockId: pending.blockId,
+                  partialArguments: pending.arguments,
                 });
               }
             }

@@ -1682,6 +1682,27 @@ const generate = withEnhancedStreaming(streamingGenerate, {
 });
 ```
 
+By default the tool-call events are reconstructed from the resolved `GenerateResponse`, which means they land _after_ the provider response has closed. Text deltas stream live; tool-call deltas do not. Set `liveToolCalls` to change that:
+
+```typescript
+import { createAnthropicProviderStream } from '@lostgradient/operative/anthropic';
+import { withEnhancedStreaming } from '@lostgradient/operative/streaming';
+
+const generate = withEnhancedStreaming(createAnthropicProviderStream({ model, apiKey }), {
+  eventTarget,
+  liveToolCalls: true,
+});
+```
+
+The option installs `StreamingHandle.report`, an optional structured channel alongside the text-only `update`. The Anthropic and OpenAI streaming adapters push through it as the provider emits — Anthropic from `content_block_start`/`input_json_delta`, OpenAI from `delta.tool_calls` — so `stream:tool-call-start` and `stream:tool-call-delta` reach a host while the response is still open.
+
+Two things to know before turning it on:
+
+- **`blockId` changes.** Live events carry the provider's own block id (`toolu_01`, `call_01`) instead of the wrapper's synthesized `tool-${name}-${index}-${messageId}`.
+- **`stream:tool-call-complete` stays late, by design.** An adapter only knows a tool call's parsed `arguments` once the stream has closed and the accumulated JSON has been through `JSON.parse` — the step that raises `ToolCallParseError`. The wrapper synthesizes the completion from the resolved response, reusing the live `blockId` so start, delta, and complete correlate.
+
+A streaming function that reports nothing — a hand-written one, or the Gemini adapter — falls back to the reconstruction, so the option is safe to leave on across providers.
+
 #### `createBackpressureBuffer(options)`
 
 Creates a backpressure-aware buffer for streaming events — queues, coalesces, and drops `StreamEvent`s under load:
@@ -1712,7 +1733,7 @@ machine.process({ type: 'block-delta', id: 'block-1', delta: 'Hello' });
 console.log(state.textContent);
 ```
 
-**Exported types:** `StreamBlock`, `StreamCommand`, `StreamEvent`, `StreamEventMap`, `StreamState`, `StreamStateMachine`, `BlockType`, `EnhancedStreamingOptions`, `BackpressureBuffer`, `BackpressureBufferOptions`, `StreamCustomEvent`.
+**Exported types:** `StreamBlock`, `StreamCommand`, `StreamEvent`, `StreamEventMap`, `StreamState`, `StreamStateMachine`, `BlockType`, `EnhancedStreamingOptions`, `LiveStreamEvent`, `BackpressureBuffer`, `BackpressureBufferOptions`, `StreamCustomEvent`.
 
 ---
 
