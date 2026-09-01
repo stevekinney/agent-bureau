@@ -195,12 +195,37 @@ function runHandleCalls(fence: string, index: number): Set<string> {
   }
 
   const members = new Set<string>();
+
+  const onRunHandle = (receiver: ts.Expression): boolean => {
+    const target = unwrap(receiver);
+    return (ts.isIdentifier(target) && handles.has(target.text)) || isRunProducer(target);
+  };
+
   const collectCalls = (node: ts.Node): void => {
-    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
-      const receiver = unwrap(node.expression.expression);
-      const onHandle =
-        (ts.isIdentifier(receiver) && handles.has(receiver.text)) || isRunProducer(receiver);
-      if (onHandle) members.add(node.expression.name.text);
+    if (ts.isCallExpression(node)) {
+      const callee = node.expression;
+
+      if (ts.isPropertyAccessExpression(callee) && onRunHandle(callee.expression)) {
+        members.add(callee.name.text);
+      }
+
+      // Element access, which property-access-only collection missed entirely:
+      //   run[Symbol.dispose]()   — explicitly part of the AgentRun contract
+      //   run['reslut']()         — a typo that would otherwise pass
+      if (ts.isElementAccessExpression(callee) && onRunHandle(callee.expression)) {
+        const argument = callee.argumentExpression;
+        if (ts.isStringLiteralLike(argument)) {
+          members.add(argument.text);
+        } else if (
+          ts.isPropertyAccessExpression(argument) &&
+          ts.isIdentifier(argument.expression) &&
+          argument.expression.text === 'Symbol'
+        ) {
+          // Well-known symbols are contract members too. Recorded under their
+          // documented spelling so the accounting map can name them.
+          members.add(`[Symbol.${argument.name.text}]`);
+        }
+      }
     }
     ts.forEachChild(node, collectCalls);
   };
@@ -222,6 +247,10 @@ const documentedMembers = new Set<string>([
   ...declaredMembers(document, 'RunOutcomeBase'),
   'output',
   'abort',
+  // Declared on the AgentRun type alias rather than inside RunOutcomeBase, so
+  // the interface scan cannot see it, and spelled the way element-access
+  // collection records it.
+  '[Symbol.dispose]',
 ]);
 
 describe('documentation/operative-type-safe-api.md examples', () => {
