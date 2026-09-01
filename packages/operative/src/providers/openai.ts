@@ -260,13 +260,26 @@ export function createOpenAIProviderStream(
               const argumentsFragment = toolCallDelta.function?.arguments;
               if (argumentsFragment) pending.arguments += argumentsFragment;
 
-              // Hold the live start until the name is actually known — an event
-              // announcing an empty tool name is worse than one that arrives a
-              // chunk later. `blockId` is frozen here so that every subsequent
-              // delta, and the completion synthesized from it, correlate.
+              // Hold the live start until BOTH the name and the provider's id
+              // are known, and use that id as the block id.
+              //
+              // The name, because an event announcing an empty tool is worse
+              // than one that arrives a chunk later. The id, because it is the
+              // only identity the wrapper can correlate a reported block with:
+              // the resolved response carries the provider id (the caller needs
+              // it to round-trip tool results), and a block id cannot be
+              // re-keyed once consumers have seen it. Publishing a synthesized
+              // id here would guarantee those two disagree.
+              //
+              // Both fields are optional on every delta, so a stream that never
+              // supplies an id gets no live events for that call — it is
+              // announced by the wrapper's reconstruction once the response
+              // resolves, exactly as before this option existed. The real API
+              // sends id and name together on a call's first delta, so this
+              // costs nothing in practice.
               let justStarted = false;
-              if (pending.blockId === undefined && pending.name) {
-                pending.blockId = pending.id ?? `tool-${toolCallDelta.index}`;
+              if (pending.blockId === undefined && pending.name && pending.id !== undefined) {
+                pending.blockId = pending.id;
                 justStarted = true;
                 streaming.report?.({
                   type: 'stream:tool-call-start',

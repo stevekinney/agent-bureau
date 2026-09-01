@@ -208,9 +208,9 @@ describe('live tool-call streaming — Anthropic adapter', () => {
     expect(partials).toEqual(['{"location":', '{"location":"Denver"}']);
   });
 
-  it('falls back to a synthesized block id when the tool_use block carries none', async () => {
-    const blockIds: string[] = [];
+  it('emits no live events for a tool_use block the provider gave no id', async () => {
     const eventTarget = new TypedEventTarget<StreamEventMap>();
+    const blockIds: string[] = [];
     eventTarget.addEventListener('stream:tool-call-start', (event) =>
       blockIds.push(event.detail.blockId),
     );
@@ -240,9 +240,17 @@ describe('live tool-call streaming — Anthropic adapter', () => {
       { eventTarget, liveToolCalls: true },
     );
 
-    await generate(makeContext());
+    const response = await generate(makeContext());
 
-    expect(blockIds).toEqual(['block-3']);
+    // The provider id is the only identity the wrapper can pair a live block
+    // with, since it is what the resolved response carries. Without one, the
+    // call is left to the reconstruction rather than published under a
+    // synthesized id that could never be correlated — so the one start that
+    // does arrive is the reconstructed one, not a live one.
+    expect(blockIds).toEqual([expect.stringMatching(/^tool-get_weather-0-/)]);
+    expect(response.toolCalls).toEqual([
+      { id: undefined, name: 'get_weather', arguments: { location: 'Denver' } },
+    ]);
   });
 
   it('keeps each tool call on its own block id across two calls in one response', async () => {
@@ -533,7 +541,7 @@ describe('live tool-call streaming — OpenAI adapter', () => {
     ]);
   });
 
-  it('keeps one block when the tool call id arrives after its name', async () => {
+  it('defers the live start until the tool call id arrives', async () => {
     const eventTarget = new TypedEventTarget<StreamEventMap>();
     const starts: string[] = [];
     const completes: Array<{ blockId: string; arguments: unknown }> = [];
@@ -550,8 +558,7 @@ describe('live tool-call streaming — OpenAI adapter', () => {
         completions: {
           create(): AsyncIterable<OpenAIChatCompletionChunk> {
             return (async function* () {
-              // Name without id: the live start has to fire under a synthesized
-              // block id, because a block id cannot be re-keyed once published.
+              // Name but no id: not enough to publish a correlatable block id.
               yield {
                 choices: [
                   {
@@ -563,8 +570,7 @@ describe('live tool-call streaming — OpenAI adapter', () => {
                 ],
                 usage: null,
               };
-              // The id turns up later and reaches the resolved response, so it
-              // can no longer match the block id by identity.
+              // The id arrives, and the start fires under it.
               yield {
                 choices: [
                   {
@@ -595,20 +601,19 @@ describe('live tool-call streaming — OpenAI adapter', () => {
 
     const response = await generate(makeContext());
 
-    // One block, not two: the call must not be reconstructed under a second id
-    // while the live block is left dangling and incomplete.
-    expect(starts).toEqual(['tool-0']);
-    expect(completes).toEqual([{ blockId: 'tool-0', arguments: { location: 'Denver' } }]);
-    // The provider id still reaches the response, which the caller needs to
-    // correlate the tool result back to the provider.
+    // One block, under the provider's own id, so start and completion pair by
+    // identity — never a live block under a synthesized id that the response
+    // could not be matched against.
+    expect(starts).toEqual(['call_late_id']);
+    expect(completes).toEqual([{ blockId: 'call_late_id', arguments: { location: 'Denver' } }]);
     expect(response.toolCalls).toEqual([
       { id: 'call_late_id', name: 'get_weather', arguments: { location: 'Denver' } },
     ]);
   });
 
-  it('falls back to a synthesized block id when the tool call chunk carries no id', async () => {
-    const blockIds: string[] = [];
+  it('emits no live events for a tool call the provider gave no id', async () => {
     const eventTarget = new TypedEventTarget<StreamEventMap>();
+    const blockIds: string[] = [];
     eventTarget.addEventListener('stream:tool-call-start', (event) =>
       blockIds.push(event.detail.blockId),
     );
@@ -648,6 +653,7 @@ describe('live tool-call streaming — OpenAI adapter', () => {
 
     await generate(makeContext());
 
-    expect(blockIds).toEqual(['tool-2']);
+    // Reconstructed, not reported live — see the Anthropic case above.
+    expect(blockIds).toEqual([expect.stringMatching(/^tool-get_weather-0-/)]);
   });
 });
