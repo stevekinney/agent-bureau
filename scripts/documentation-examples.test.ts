@@ -203,6 +203,60 @@ function runHandleCalls(source: string): Set<string> {
   return members;
 }
 
+/**
+ * Index of the parenthesis closing the one at `open`, ignoring parentheses that
+ * appear inside string literals, template literals, or comments.
+ *
+ * Counting raw characters was not enough: `bureau.run('writer', 'text )')` has a
+ * `)` inside a string, so a naive scan stopped early and any chained call after
+ * it went unrecorded. Returns -1 when no balanced close is found.
+ */
+function closingParenthesis(source: string, open: number): number {
+  let depth = 0;
+
+  for (let index = open; index < source.length; index += 1) {
+    const character = source[index];
+    const next = source[index + 1];
+
+    if (character === '/' && next === '/') {
+      const end = source.indexOf('\n', index);
+      if (end < 0) return -1;
+      index = end;
+      continue;
+    }
+
+    if (character === '/' && next === '*') {
+      const end = source.indexOf('*/', index + 2);
+      if (end < 0) return -1;
+      index = end + 1;
+      continue;
+    }
+
+    if (character === "'" || character === '"' || character === '`') {
+      const quote = character;
+      index += 1;
+      while (index < source.length) {
+        if (source[index] === '\\') {
+          index += 2;
+          continue;
+        }
+        if (source[index] === quote) break;
+        index += 1;
+      }
+      if (index >= source.length) return -1;
+      continue;
+    }
+
+    if (character === '(') depth += 1;
+    else if (character === ')') {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+  }
+
+  return -1;
+}
+
 /** Members invoked directly on the result of a run-producing call. */
 function chainedFromProducer(source: string): Set<string> {
   const found = new Set<string>();
@@ -212,14 +266,11 @@ function chainedFromProducer(source: string): Set<string> {
   while (match !== null) {
     // Walk from the producer's opening parenthesis to its balanced close,
     // skipping over nested calls in the arguments.
-    let depth = 0;
-    let index = match.index + match[0].length - 1;
-    for (; index < source.length; index += 1) {
-      if (source[index] === '(') depth += 1;
-      else if (source[index] === ')') {
-        depth -= 1;
-        if (depth === 0) break;
-      }
+    const index = closingParenthesis(source, match.index + match[0].length - 1);
+    if (index < 0) {
+      producer.lastIndex = match.index + match[0].length;
+      match = producer.exec(source);
+      continue;
     }
 
     const after = source.slice(index + 1);
@@ -264,7 +315,10 @@ describe('documentation/operative-type-safe-api.md examples', () => {
     const unaccounted = new Set<string>();
     for (const fence of fences) {
       for (const member of runHandleCalls(fence)) {
-        if (member in PENDING_IMPLEMENTATION) continue;
+        // Object.hasOwn, not `in`: `'constructor' in PENDING_IMPLEMENTATION`
+        // and `'toString' in ...` are both true through the prototype chain,
+        // so `run.toString()` would have counted as an owned capability.
+        if (Object.hasOwn(PENDING_IMPLEMENTATION, member)) continue;
         if (documentedMembers.has(member)) continue;
         unaccounted.add(member);
       }
@@ -297,8 +351,12 @@ describe('documentation/operative-type-safe-api.md examples', () => {
     // ActiveRun.subscribe and Bureau.subscribe are event subscriptions. A
     // snapshot notifier called `subscribe` on a sibling run handle would read as
     // the same thing and mean something else.
-    expect(PENDING_IMPLEMENTATION).not.toHaveProperty('subscribe');
-    expect(document).not.toContain('run.subscribe(');
+    // Check the declared surface, not one receiver spelling in the prose. The
+    // earlier assertion searched the Markdown for `run.subscribe(`, so adding
+    // `subscribe()` to the contract would have passed as long as no example
+    // happened to call it on a variable named `run`.
+    expect([...documentedMembers]).not.toContain('subscribe');
+    expect(Object.keys(PENDING_IMPLEMENTATION)).not.toContain('subscribe');
   });
 
   test('the started-work control contract section is present', () => {
