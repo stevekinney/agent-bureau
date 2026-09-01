@@ -7,8 +7,11 @@ import { createRateLimiter } from './rate-limiter';
 import { requestIdentifier } from './request-identifier';
 
 function createApp(options?: {
+  beforeRecordHookIdempotencyReceipt?: () => Promise<void>;
+  hasHookIdempotencyReceipt?: (principal: string, idempotencyKey: string) => boolean;
   limit?: number;
   now?: () => number;
+  recordHookIdempotencyReceipt?: (principal: string, idempotencyKey: string) => void;
   store?: TextValueStore;
   windowMs?: number;
 }) {
@@ -16,6 +19,15 @@ function createApp(options?: {
   app.use('*', requestIdentifier);
   app.use('*', createRateLimiter(options));
   app.get('/test', (c) => c.json({ ok: true }));
+  app.post('/hooks/*', async (context) => {
+    await options?.beforeRecordHookIdempotencyReceipt?.();
+    const principal = context.req.header('x-api-key-id');
+    const idempotencyKey = context.req.header('Idempotency-Key');
+    if (principal && idempotencyKey) {
+      options?.recordHookIdempotencyReceipt?.(principal, idempotencyKey);
+    }
+    return context.json({ ok: true });
+  });
   app.onError(errorHandler);
   return app;
 }
@@ -53,6 +65,84 @@ describe('rate limiter', () => {
     const response = await app.request('/test', { headers });
     expect(response.status).toBe(429);
     expect(response.headers.get('retry-after')).toBeString();
+  });
+
+  it('does not charge repeated hook idempotency keys against the rate limit', async () => {
+    const receipts = new Set<string>();
+    const app = createApp({
+      limit: 1,
+      windowMs: 60_000,
+      hasHookIdempotencyReceipt: (principal, key) => receipts.has(`${principal}:${key}`),
+      recordHookIdempotencyReceipt: (principal, key) => receipts.add(`${principal}:${key}`),
+    });
+    const headers = {
+      'Idempotency-Key': 'same-run',
+      'x-api-key-id': 'retrying-hook-client',
+    };
+
+    const firstResponse = await app.request('/hooks/example', { headers, method: 'POST' });
+    const replayResponse = await app.request('/hooks/example', { headers, method: 'POST' });
+    const distinctResponse = await app.request('/hooks/example', {
+      headers: { ...headers, 'Idempotency-Key': 'different-run' },
+      method: 'POST',
+    });
+
+    expect(firstResponse.status).toBe(200);
+    expect(replayResponse.status).toBe(200);
+    expect(distinctResponse.status).toBe(429);
+  });
+
+  it('serializes concurrent keyed hooks until the first receipt is recorded', async () => {
+    const receipts = new Set<string>();
+    let releaseFirstRequest!: () => void;
+    const firstRequestMayFinish = new Promise<void>((resolve) => {
+      releaseFirstRequest = resolve;
+    });
+    let handlerCalls = 0;
+    const app = createApp({
+      limit: 1,
+      windowMs: 60_000,
+      beforeRecordHookIdempotencyReceipt: async () => {
+        handlerCalls += 1;
+        if (handlerCalls === 1) await firstRequestMayFinish;
+      },
+      hasHookIdempotencyReceipt: (principal, key) => receipts.has(`${principal}:${key}`),
+      recordHookIdempotencyReceipt: (principal, key) => receipts.add(`${principal}:${key}`),
+    });
+    const request = () =>
+      app.request('/hooks/example', {
+        headers: {
+          'Idempotency-Key': 'concurrent-run',
+          'x-api-key-id': 'concurrent-hook-client',
+        },
+        method: 'POST',
+      });
+
+    const firstResponsePromise = request();
+    await Promise.resolve();
+    const secondResponsePromise = request();
+    releaseFirstRequest();
+
+    const responses = await Promise.all([firstResponsePromise, secondResponsePromise]);
+    expect(responses.map((response) => response.status)).toEqual([200, 200]);
+  });
+
+  it('does not exempt a malformed hook request without a recorded receipt', async () => {
+    const app = createApp({
+      limit: 1,
+      windowMs: 60_000,
+      hasHookIdempotencyReceipt: () => false,
+    });
+    const headers = {
+      'Idempotency-Key': 'malformed-key',
+      'x-api-key-id': 'malformed-hook-client',
+    };
+
+    const firstResponse = await app.request('/hooks/example', { headers, method: 'POST' });
+    const retryResponse = await app.request('/hooks/example', { headers, method: 'POST' });
+
+    expect(firstResponse.status).toBe(200);
+    expect(retryResponse.status).toBe(429);
   });
 
   it('tracks keys independently', async () => {

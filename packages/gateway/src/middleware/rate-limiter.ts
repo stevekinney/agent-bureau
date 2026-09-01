@@ -12,6 +12,8 @@ export type RateLimitOptions = {
   windowMs?: number;
   /** Clock used by tests to make pruning and reset calculations deterministic. */
   now?: () => number;
+  /** Whether a keyed hook request has a route-level receipt available to replay. */
+  hasHookIdempotencyReceipt?: (principal: string, idempotencyKey: string) => boolean;
 };
 
 type WindowEntry = {
@@ -22,6 +24,7 @@ type RateLimitDecision =
   | {
       remaining: number;
       resetAt: number;
+      downstreamHandled: boolean;
       status: 'allowed';
     }
   | {
@@ -132,6 +135,18 @@ export function createRateLimiter(options?: RateLimitOptions) {
       const entry = await windowStore.load(storageKey);
       const previousTimestampCount = entry.timestamps.length;
       entry.timestamps = entry.timestamps.filter((timestamp) => timestamp > windowStart);
+      const idempotencyKey = context.req.header('Idempotency-Key');
+      const isKeyedHookRequest =
+        context.req.method === 'POST' && context.req.path.startsWith('/hooks/') && idempotencyKey;
+
+      if (isKeyedHookRequest && options?.hasHookIdempotencyReceipt?.(principal, idempotencyKey)) {
+        return {
+          downstreamHandled: false,
+          remaining: Math.max(0, limit - entry.timestamps.length),
+          resetAt: Math.ceil(((entry.timestamps[0] ?? currentTime) + windowMs) / 1000),
+          status: 'allowed',
+        } satisfies RateLimitDecision;
+      }
 
       if (entry.timestamps.length >= limit) {
         if (entry.timestamps.length !== previousTimestampCount) {
@@ -149,7 +164,10 @@ export function createRateLimiter(options?: RateLimitOptions) {
       entry.timestamps.push(currentTime);
       await windowStore.save(storageKey, entry);
 
+      if (isKeyedHookRequest) await next();
+
       return {
+        downstreamHandled: Boolean(isKeyedHookRequest),
         remaining: Math.max(0, limit - entry.timestamps.length),
         resetAt: Math.ceil(((entry.timestamps[0] ?? currentTime) + windowMs) / 1000),
         status: 'allowed',
@@ -171,7 +189,7 @@ export function createRateLimiter(options?: RateLimitOptions) {
       });
     }
 
-    await next();
+    if (!decision.downstreamHandled) await next();
 
     context.header('x-ratelimit-limit', String(limit));
     context.header('x-ratelimit-remaining', String(decision.remaining));
