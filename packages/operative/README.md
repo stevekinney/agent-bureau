@@ -265,6 +265,28 @@ const resumedResult = await toolbox.resumeApproval(signedApproval, {
 
 **Mutation ownership:** `agent.run({ conversation })` SNAPSHOTS the supplied `ConversationHistory` — it clones the value before wrapping it in a fresh internal `Conversation`, so the run's state and the object you passed in are independent from the moment `run()` is called: the run never mutates your object, and mutations you make to it afterward (a stateless host commonly keeps a mutable reference between turns) never leak into an in-flight run. This matches the durable path's existing snapshot semantics. `instructions` is not re-appended on this path; the supplied history is assumed to already carry whatever system context it needs, so resuming it repeatedly never duplicates system messages.
 
+#### Process-local session timing
+
+`SessionHandle.sleep()` and `SessionHandle.monitor()` are host-process conveniences. Both use local timers, so process exit loses the outstanding delay or monitor loop even when the session has a durable engine. Individual monitor ticks can still be durable runs; the monitor controller itself is not persisted or recovered.
+
+Pass an `AbortSignal` to clear the active timer and stop the operation:
+
+```typescript
+const controller = new AbortController();
+
+const monitoring = session.monitor({
+  every: 'PT30S',
+  input: 'Check deployment health',
+  until: (result) => result.content.includes('healthy'),
+  signal: controller.signal,
+});
+
+controller.abort();
+await monitoring; // rejects with AbortError
+```
+
+Use a Weft-backed run wakeup or signal when a current run must survive restart, and use a Bureau recurring schedule when future runs must survive restart. Session timing does not switch to those durable capabilities implicitly.
+
 #### `createActiveRun(options)`
 
 The full-control factory behind `createAgent`, `createSessionHandle`, and bureau-owned agents alike — documented, public API, not an internal implementation detail. It accepts the complete `RunOptions` bag directly: an existing `Conversation` instance (not just a `ConversationHistory`), a pre-built `Toolbox`, hooks, and durable routing (engine + checkpoint store + run id). `bureau` and `evaluation` both depend on it as first-party consumers.

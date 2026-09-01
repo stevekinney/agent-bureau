@@ -719,6 +719,7 @@ export class SessionForkEvent extends Event {
   }
 }
 
+/** Emitted before a process-local `session.sleep()` timer starts. */
 export class SessionSleepEvent extends Event {
   static readonly type = 'session.sleep' as const;
   readonly sessionId: string;
@@ -774,7 +775,7 @@ export class SessionQueryEvent extends Event {
 }
 
 /**
- * Emitted when a `session.monitor()` loop ticks (starts a new poll run).
+ * Emitted when a process-local `session.monitor()` loop ticks (starts a new poll run).
  * Carries the tick number (0-based) and whether the predicate was satisfied.
  * The `met` field is `null` on the tick-started emission (before the run
  * completes) and `true` / `false` after the predicate is evaluated.
@@ -794,8 +795,8 @@ export class SessionMonitorTickEvent extends Event {
 }
 
 /**
- * Emitted when a `session.monitor()` loop completes — either because the
- * predicate was satisfied or the `maxDuration` deadline was reached.
+ * Emitted when a process-local `session.monitor()` loop completes—either
+ * because the predicate was satisfied or the `maxDuration` deadline was reached.
  */
 export class SessionMonitorDoneEvent extends Event {
   static readonly type = 'session.monitor.done' as const;
