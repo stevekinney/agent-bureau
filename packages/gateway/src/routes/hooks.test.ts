@@ -135,6 +135,23 @@ describe('webhook ingress routes (POST /hooks/*)', () => {
     expect(await second.json()).toEqual(await first.json());
   });
 
+  it('fingerprints the normalized session identifier used by Bureau', async () => {
+    const gateway = await createTestGateway({ generate: createMockGenerate() });
+    const request = (session: string) =>
+      requestJSON(gateway, `/hooks/event?agent=bureau&session=${session}`, {
+        method: 'POST',
+        headers: { 'Idempotency-Key': 'normalized-session-key' },
+        body: JSON.stringify({ message: 'Same request.' }),
+      });
+
+    const first = await request('%20shared-session%20');
+    const replay = await request('shared-session');
+
+    expect(first.status).toBe(202);
+    expect(replay.status).toBe(202);
+    expect(await replay.json()).toEqual(await first.json());
+  });
+
   it('returns a typed conflict when an Idempotency-Key is reused for another request', async () => {
     const gateway = await createTestGateway({ generate: createMockGenerate() });
 

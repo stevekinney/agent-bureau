@@ -19,6 +19,27 @@ type IdempotencyEntry = {
   receipt: Promise<HookReceipt>;
 };
 
+export type HookIdempotencyRegistry = {
+  delete(principal: string, idempotencyKey: string): void;
+  get(principal: string, idempotencyKey: string): IdempotencyEntry | undefined;
+  has(principal: string, idempotencyKey: string): boolean;
+  set(principal: string, idempotencyKey: string, entry: IdempotencyEntry): void;
+};
+
+export function createHookIdempotencyRegistry(): HookIdempotencyRegistry {
+  const entries = new Map<string, IdempotencyEntry>();
+  const scopedKey = (principal: string, idempotencyKey: string) =>
+    JSON.stringify([principal, HOOK_RUN_OPERATION, idempotencyKey]);
+
+  return {
+    delete: (principal, idempotencyKey) => entries.delete(scopedKey(principal, idempotencyKey)),
+    get: (principal, idempotencyKey) => entries.get(scopedKey(principal, idempotencyKey)),
+    has: (principal, idempotencyKey) => entries.has(scopedKey(principal, idempotencyKey)),
+    set: (principal, idempotencyKey, entry) =>
+      entries.set(scopedKey(principal, idempotencyKey), entry),
+  };
+}
+
 const bureauErrorHttpStatus = {
   NOT_CONFIGURED: 503,
   BAD_REQUEST: 400,
@@ -98,9 +119,11 @@ async function createRunWithoutIdempotency(bureau: Bureau, request: CreateRunReq
  * The session is named via the optional `?session=<id>` query parameter; omit
  * it for a fresh anonymous session.
  */
-export function createHooksRoutes(bureau: Bureau) {
+export function createHooksRoutes(
+  bureau: Bureau,
+  idempotencyRegistry = createHookIdempotencyRegistry(),
+) {
   const app = new Hono();
-  const idempotencyEntries = new Map<string, IdempotencyEntry>();
 
   app.post('/*', async (context) => {
     const agentName = context.req.query('agent');
@@ -122,7 +145,9 @@ export function createHooksRoutes(bureau: Bureau) {
       throw new HTTPException(400, { message: 'Request body must include a "message" string' });
     }
 
-    const sessionId = (context.req.query('session') ?? body['sessionId']) as string | undefined;
+    const rawSessionId = context.req.query('session') ?? body['sessionId'];
+    const sessionId =
+      typeof rawSessionId === 'string' ? rawSessionId.trim() : (rawSessionId as string | undefined);
     const trimmedAgentName = agentName.trim();
     const principal = resolvePrincipal(context);
     const requestContext = resolveTrustedRequestContext(context, trimmedAgentName);
@@ -131,7 +156,7 @@ export function createHooksRoutes(bureau: Bureau) {
       agentName: trimmedAgentName,
       principal,
       ...(requestContext ? { requestContext } : {}),
-      ...(sessionId ? { sessionId } : {}),
+      ...(rawSessionId ? { sessionId } : {}),
       ...(typeof body['systemPrompt'] === 'string' ? { systemPrompt: body['systemPrompt'] } : {}),
       ...(typeof body['maximumSteps'] === 'number' ? { maximumSteps: body['maximumSteps'] } : {}),
     };
@@ -141,9 +166,8 @@ export function createHooksRoutes(bureau: Bureau) {
       return context.json(await createRunWithoutIdempotency(bureau, request), 202);
     }
 
-    const scopedKey = JSON.stringify([principal, HOOK_RUN_OPERATION, idempotencyKey]);
     const requestFingerprint = JSON.stringify(request);
-    const existing = idempotencyEntries.get(scopedKey);
+    const existing = idempotencyRegistry.get(principal, idempotencyKey);
     let receiptPromise: Promise<HookReceipt>;
     if (existing) {
       if (existing.requestFingerprint !== requestFingerprint) {
@@ -166,8 +190,11 @@ export function createHooksRoutes(bureau: Bureau) {
         request,
         context.get('requestId' as never) as string | undefined,
       );
-      idempotencyEntries.set(scopedKey, { requestFingerprint, receipt: receiptPromise });
-      void receiptPromise.catch(() => idempotencyEntries.delete(scopedKey));
+      idempotencyRegistry.set(principal, idempotencyKey, {
+        requestFingerprint,
+        receipt: receiptPromise,
+      });
+      void receiptPromise.catch(() => idempotencyRegistry.delete(principal, idempotencyKey));
     }
 
     const receipt = await receiptPromise;

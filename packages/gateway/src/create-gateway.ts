@@ -20,6 +20,7 @@ import {
   staticTokenAuthorizationRevision,
 } from './middleware/authentication';
 import { createRoutes } from './routes';
+import { createHookIdempotencyRegistry } from './routes/hooks';
 import { createPages } from './server/pages';
 import type { Gateway, GatewayOptions } from './types';
 import { DEFAULT_PORT, SCOPE } from './types';
@@ -258,12 +259,20 @@ export async function createGateway(
   await authorityValidatorAccess.waitForRecovery?.();
 
   const app = new Hono();
+  const hookIdempotencyRegistry = createHookIdempotencyRegistry();
 
   // Global middleware
   app.use('*', cors());
   app.use('*', requestIdentifier);
   app.use('*', createAuthentication(options.authToken, apiKeyStore, staticTokenRevisionSecret));
-  app.use('*', createRateLimiter({ store: bureau.kv }));
+  app.use(
+    '*',
+    createRateLimiter({
+      store: bureau.kv,
+      hasHookIdempotencyReceipt: (principal, idempotencyKey) =>
+        hookIdempotencyRegistry.has(principal, idempotencyKey),
+    }),
+  );
   app.use(
     '*',
     createSecurityHeaders({
@@ -273,7 +282,16 @@ export async function createGateway(
   );
 
   // Mount API routes
-  app.route('/', createRoutes({ bureau, broker: liveFrameBroker, apiKeyStore, a2a: options.a2a }));
+  app.route(
+    '/',
+    createRoutes({
+      bureau,
+      broker: liveFrameBroker,
+      apiKeyStore,
+      a2a: options.a2a,
+      hookIdempotencyRegistry,
+    }),
+  );
 
   // Mount SSR pages — configuration (including systemPrompt) is read from
   // bureau.getConfiguration() so the door does not need to duplicate brain config.

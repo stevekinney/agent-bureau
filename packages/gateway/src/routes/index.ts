@@ -11,7 +11,8 @@ import { createAuditRoutes, createConversationRoutes, createMemoryRoutes } from 
 import { createConfigurationRoutes } from './configuration';
 import { createEventsRoutes } from './events';
 import { createHealthRoutes } from './health';
-import { createHooksRoutes } from './hooks';
+import type { HookIdempotencyRegistry } from './hooks';
+import { createHookIdempotencyRegistry, createHooksRoutes } from './hooks';
 import { createKeysRoutes } from './keys';
 import { createOpenAICompatRoutes } from './openai-compat';
 import { createReviewsRoutes } from './reviews';
@@ -26,9 +27,16 @@ type CreateRoutesOptions = {
   broker: LiveFrameBroker;
   apiKeyStore?: ApiKeyStore;
   a2a?: A2AAgentCardOptions;
+  hookIdempotencyRegistry?: HookIdempotencyRegistry;
 };
 
-export function createRoutes({ bureau, broker, apiKeyStore, a2a }: CreateRoutesOptions) {
+export function createRoutes({
+  bureau,
+  broker,
+  apiKeyStore,
+  a2a,
+  hookIdempotencyRegistry = createHookIdempotencyRegistry(),
+}: CreateRoutesOptions) {
   const app = new Hono();
 
   app.route('/api/v1/health', createHealthRoutes(bureau));
@@ -111,7 +119,7 @@ export function createRoutes({ bureau, broker, apiKeyStore, a2a }: CreateRoutesO
   // default-agent fallback. The HOOKS_WRITE scope guards these routes.
   const hooksRouter = new Hono();
   hooksRouter.post('*', createScopeGuard([SCOPE.HOOKS_WRITE]));
-  hooksRouter.route('/', createHooksRoutes(bureau));
+  hooksRouter.route('/', createHooksRoutes(bureau, hookIdempotencyRegistry));
   app.route('/hooks', hooksRouter);
 
   // OpenAI-compatible chat completions endpoint.
