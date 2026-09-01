@@ -18,6 +18,9 @@ import type {
 } from './types';
 import { StreamCustomEvent } from './types';
 
+/** One tool-call block a `StreamingGenerateFunction` reported while streaming. */
+type ReportedToolCall = { blockId: string; toolName: string };
+
 /**
  * Wraps a streaming generate function into a standard GenerateFunction with
  * enhanced observability.
@@ -55,10 +58,12 @@ export function withEnhancedStreaming(
 
     /**
      * Tool-call blocks the wrapped function reported live, in arrival order.
-     * Non-empty means the live path ran, so the reconstruct-on-resolve path
-     * must stay out of the way.
+     * Each is paired with a resolved tool call once the response lands; any
+     * left over was reported but dropped from the response — a caller aborting
+     * mid-stream — and stays open rather than being completed with invented
+     * arguments.
      */
-    const reportedToolCalls: Array<{ blockId: string; toolName: string }> = [];
+    const reportedToolCalls: ReportedToolCall[] = [];
 
     /**
      * Looks a tracked block up by id.
@@ -209,28 +214,41 @@ export function withEnhancedStreaming(
         }
       }
 
-      if (reportedToolCalls.length > 0) {
-        // The live path already emitted start and delta for each block. All
-        // that is left is the completion, whose parsed `arguments` only exist
-        // now — paired with the reported block at the same ordinal position,
-        // since adapters report and resolve tool calls in the same order.
-        // A response with fewer tool calls than were reported means the caller
-        // aborted mid-stream and the adapter dropped the truncated calls; those
-        // blocks stay open rather than being completed with invented arguments.
-        for (const [index, reported] of reportedToolCalls.entries()) {
-          const toolCall = response.toolCalls[index];
-          if (!toolCall) break;
+      // Pair every resolved tool call with the live block that reported it, if
+      // any. Identity first: adapters use the provider's tool-call id as the
+      // block id whenever the provider supplied one, so this stays correct even
+      // when live starts fired in a different order than the response lists
+      // them — OpenAI can hold one parallel call's start waiting for its name
+      // while a later index's name has already arrived.
+      const unmatchedReported = [...reportedToolCalls];
+      const pairings = response.toolCalls.map((toolCall) => {
+        const matchIndex =
+          toolCall.id === undefined
+            ? -1
+            : unmatchedReported.findIndex((reported) => reported.blockId === toolCall.id);
+        const reported = matchIndex === -1 ? undefined : unmatchedReported.splice(matchIndex, 1)[0];
+        return { toolCall, reported };
+      });
 
-          stateMachine.process({
-            type: 'block-complete',
-            id: reported.blockId,
-          });
+      // Anything left unmatched by id falls back to arrival order — an adapter
+      // that froze a block id before the provider sent that call's id ends up
+      // here, as does any provider supplying no ids at all.
+      for (const pairing of pairings) {
+        if (pairing.reported === undefined) pairing.reported = unmatchedReported.shift();
+      }
 
-          const completedToolBlock = findBlock(reported.blockId);
-          if (completedToolBlock) {
+      for (const [index, { toolCall, reported }] of pairings.entries()) {
+        if (reported) {
+          // The live path already emitted this block's start and deltas. Only
+          // the completion is left, because its parsed `arguments` did not
+          // exist until the response resolved.
+          stateMachine.process({ type: 'block-complete', id: reported.blockId });
+
+          const completedLiveBlock = findBlock(reported.blockId);
+          if (completedLiveBlock) {
             emitEvent(eventTarget, 'stream:block-complete', {
               type: 'stream:block-complete',
-              block: { ...completedToolBlock },
+              block: { ...completedLiveBlock },
             });
           }
 
@@ -243,83 +261,79 @@ export function withEnhancedStreaming(
             blockId: reported.blockId,
             arguments: toolCall.arguments,
           });
+          continue;
         }
-      } else if (response.toolCalls.length > 0) {
-        // Nothing was reported live: reconstruct the whole tool-call event
-        // sequence from the resolved response.
-        for (let i = 0; i < response.toolCalls.length; i++) {
-          const toolCall = response.toolCalls[i]!;
-          const toolBlockId = `tool-${toolCall.name}-${i}-${messageId}`;
-          const toolName = toolCall.name;
 
-          stateMachine.process({
-            type: 'block-start',
-            id: toolBlockId,
-            blockType: 'tool-call',
-            toolName,
-          });
+        // Never reported live — either nothing was reported at all, or the
+        // streaming function reported only some of its calls. Reconstruct the
+        // whole sequence so no call in the response goes unannounced.
+        const toolBlockId = `tool-${toolCall.name}-${index}-${messageId}`;
+        const toolName = toolCall.name;
 
-          emitEvent(eventTarget, 'stream:block-start', {
-            type: 'stream:block-start',
-            block: { ...findBlock(toolBlockId)! },
-          });
+        stateMachine.process({
+          type: 'block-start',
+          id: toolBlockId,
+          blockType: 'tool-call',
+          toolName,
+        });
 
-          onToolCallStart?.(toolName);
+        emitEvent(eventTarget, 'stream:block-start', {
+          type: 'stream:block-start',
+          block: { ...findBlock(toolBlockId)! },
+        });
 
-          emitEvent(eventTarget, 'stream:tool-call-start', {
-            type: 'stream:tool-call-start',
-            toolName,
-            blockId: toolBlockId,
-          });
+        onToolCallStart?.(toolName);
 
-          const argsString =
-            toolCall.arguments === undefined
-              ? ''
-              : typeof toolCall.arguments === 'string'
-                ? toolCall.arguments
-                : JSON.stringify(toolCall.arguments);
+        emitEvent(eventTarget, 'stream:tool-call-start', {
+          type: 'stream:tool-call-start',
+          toolName,
+          blockId: toolBlockId,
+        });
 
-          stateMachine.process({
-            type: 'block-delta',
-            id: toolBlockId,
-            delta: argsString,
-          });
+        const argsString =
+          toolCall.arguments === undefined
+            ? ''
+            : typeof toolCall.arguments === 'string'
+              ? toolCall.arguments
+              : JSON.stringify(toolCall.arguments);
 
-          emitEvent(eventTarget, 'stream:block-delta', {
-            type: 'stream:block-delta',
-            block: { ...findBlock(toolBlockId)! },
-            delta: argsString,
-          });
+        stateMachine.process({
+          type: 'block-delta',
+          id: toolBlockId,
+          delta: argsString,
+        });
 
-          onToolCallDelta?.(toolName, argsString);
+        emitEvent(eventTarget, 'stream:block-delta', {
+          type: 'stream:block-delta',
+          block: { ...findBlock(toolBlockId)! },
+          delta: argsString,
+        });
 
-          emitEvent(eventTarget, 'stream:tool-call-delta', {
-            type: 'stream:tool-call-delta',
-            toolName,
-            blockId: toolBlockId,
-            partialArguments: argsString,
-          });
+        onToolCallDelta?.(toolName, argsString);
 
-          stateMachine.process({
-            type: 'block-complete',
-            id: toolBlockId,
-          });
+        emitEvent(eventTarget, 'stream:tool-call-delta', {
+          type: 'stream:tool-call-delta',
+          toolName,
+          blockId: toolBlockId,
+          partialArguments: argsString,
+        });
 
-          const completedToolBlock = findBlock(toolBlockId);
-          if (completedToolBlock) {
-            emitEvent(eventTarget, 'stream:block-complete', {
-              type: 'stream:block-complete',
-              block: { ...completedToolBlock },
-            });
-          }
+        stateMachine.process({ type: 'block-complete', id: toolBlockId });
 
-          emitEvent(eventTarget, 'stream:tool-call-complete', {
-            type: 'stream:tool-call-complete',
-            toolName,
-            blockId: toolBlockId,
-            arguments: toolCall.arguments,
+        const completedToolBlock = findBlock(toolBlockId);
+        if (completedToolBlock) {
+          emitEvent(eventTarget, 'stream:block-complete', {
+            type: 'stream:block-complete',
+            block: { ...completedToolBlock },
           });
         }
+
+        emitEvent(eventTarget, 'stream:tool-call-complete', {
+          type: 'stream:tool-call-complete',
+          toolName,
+          blockId: toolBlockId,
+          arguments: toolCall.arguments,
+        });
       }
 
       // Track usage

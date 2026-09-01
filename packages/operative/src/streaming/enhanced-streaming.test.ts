@@ -598,6 +598,120 @@ describe('withEnhancedStreaming live tool calls', () => {
     expect(eventsOfType(events, 'stream:tool-call-complete')[0]?.toolName).toBe('get_weather');
   });
 
+  it('pairs completions by call id when starts fire out of response order', async () => {
+    const eventTarget = new TypedEventTarget<StreamEventMap>();
+    const events = recordEvents(eventTarget);
+
+    const streamingGenerate: StreamingGenerateFunction = async ({ streaming }) => {
+      // OpenAI can hold one parallel call's start waiting for its name while a
+      // later index's name has already arrived, so live start order need not
+      // match the order the response lists the calls in. Pairing by ordinal
+      // would hand each call's arguments to the other one's block.
+      streaming.report?.({
+        type: 'stream:tool-call-start',
+        toolName: 'get_time',
+        blockId: 'call_second',
+      });
+      streaming.report?.({
+        type: 'stream:tool-call-start',
+        toolName: 'get_weather',
+        blockId: 'call_first',
+      });
+      return {
+        content: '',
+        toolCalls: [
+          { id: 'call_first', name: 'get_weather', arguments: { location: 'Denver' } },
+          { id: 'call_second', name: 'get_time', arguments: { zone: 'MST' } },
+        ],
+      };
+    };
+
+    await withEnhancedStreaming(streamingGenerate, { eventTarget, liveToolCalls: true })(
+      makeContext(),
+    );
+
+    expect(
+      eventsOfType(events, 'stream:tool-call-complete').map((event) => ({
+        blockId: event.blockId,
+        toolName: event.toolName,
+        arguments: event.arguments,
+      })),
+    ).toEqual([
+      { blockId: 'call_first', toolName: 'get_weather', arguments: { location: 'Denver' } },
+      { blockId: 'call_second', toolName: 'get_time', arguments: { zone: 'MST' } },
+    ]);
+  });
+
+  it('reconstructs response tool calls the streaming function never reported', async () => {
+    const eventTarget = new TypedEventTarget<StreamEventMap>();
+    const events = recordEvents(eventTarget);
+
+    const streamingGenerate: StreamingGenerateFunction = async ({ streaming }) => {
+      // Only the first of two calls is reported live. The second must still be
+      // announced rather than vanishing because the live path ran at all.
+      streaming.report?.({
+        type: 'stream:tool-call-start',
+        toolName: 'get_weather',
+        blockId: 'call_first',
+      });
+      return {
+        content: '',
+        toolCalls: [
+          { id: 'call_first', name: 'get_weather', arguments: { location: 'Denver' } },
+          { name: 'get_time', arguments: { zone: 'MST' } },
+        ],
+      };
+    };
+
+    await withEnhancedStreaming(streamingGenerate, { eventTarget, liveToolCalls: true })(
+      makeContext(),
+    );
+
+    const starts = eventsOfType(events, 'stream:tool-call-start');
+    expect(starts.map((event) => event.toolName)).toEqual(['get_weather', 'get_time']);
+    expect(starts[1]?.blockId).toMatch(/^tool-get_time-1-/);
+
+    expect(
+      eventsOfType(events, 'stream:tool-call-complete').map((event) => event.toolName),
+    ).toEqual(['get_weather', 'get_time']);
+  });
+
+  it('carries an unreported tool call into the final stream state', async () => {
+    const eventTarget = new TypedEventTarget<StreamEventMap>();
+    let finalState: StreamState | undefined;
+
+    eventTarget.addEventListener(
+      'stream:complete',
+      (event: StreamCustomEvent<'stream:complete'>) => {
+        finalState = event.detail.state;
+      },
+    );
+
+    const streamingGenerate: StreamingGenerateFunction = async ({ streaming }) => {
+      streaming.report?.({
+        type: 'stream:tool-call-start',
+        toolName: 'get_weather',
+        blockId: 'call_first',
+      });
+      return {
+        content: '',
+        toolCalls: [
+          { id: 'call_first', name: 'get_weather', arguments: {} },
+          { name: 'get_time', arguments: {} },
+        ],
+      };
+    };
+
+    await withEnhancedStreaming(streamingGenerate, { eventTarget, liveToolCalls: true })(
+      makeContext(),
+    );
+
+    expect(finalState?.toolCalls.map((block) => block.toolName)).toEqual([
+      'get_weather',
+      'get_time',
+    ]);
+  });
+
   it('pairs each synthesized completion with the tool call at its own ordinal', async () => {
     const eventTarget = new TypedEventTarget<StreamEventMap>();
     const events = recordEvents(eventTarget);
