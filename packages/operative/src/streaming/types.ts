@@ -110,6 +110,7 @@ export type EnhancedStreamingOptions = {
 export type StreamCommand =
   | { type: 'block-start'; id: string; blockType: BlockType; toolName?: string }
   | { type: 'block-delta'; id: string; delta: string }
+  | { type: 'set-block-tool-name'; id: string; toolName: string }
   | { type: 'block-complete'; id: string }
   | { type: 'set-usage'; usage: TokenUsage }
   | { type: 'complete' };

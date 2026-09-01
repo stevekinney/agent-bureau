@@ -75,6 +75,13 @@ export function createStreamStateMachine(): StreamStateMachine {
         break;
       }
 
+      case 'set-block-tool-name': {
+        const block = findBlock(command.id);
+        if (!block) break;
+        block.toolName = command.toolName;
+        break;
+      }
+
       case 'block-complete': {
         const block = findBlock(command.id);
         if (!block) break;

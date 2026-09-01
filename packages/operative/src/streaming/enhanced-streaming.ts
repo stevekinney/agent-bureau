@@ -159,7 +159,11 @@ export function withEnhancedStreaming(
     if (liveToolCalls) {
       handle.report = (event: LiveStreamEvent): void => {
         if (event.type === 'stream:tool-call-start') {
-          startToolCallBlock(event.blockId, event.toolName);
+          // A delta can arrive before its own start and open the block itself
+          // (below). Starting it again would emit duplicate events, push a
+          // second `reportedToolCalls` entry, and leave a duplicate state
+          // machine block that nothing ever completes.
+          if (!findBlock(event.blockId)) startToolCallBlock(event.blockId, event.toolName);
           return;
         }
 
@@ -230,11 +234,20 @@ export function withEnhancedStreaming(
         return { toolCall, reported };
       });
 
-      // Anything left unmatched by id falls back to arrival order — an adapter
-      // that froze a block id before the provider sent that call's id ends up
-      // here, as does any provider supplying no ids at all.
-      for (const pairing of pairings) {
-        if (pairing.reported === undefined) pairing.reported = unmatchedReported.shift();
+      // Arrival order is the only remaining signal, and it is trustworthy in
+      // exactly one situation: no leftover call carries an id at all (so
+      // identity was never available to anyone) and the two sets are the same
+      // size (so the correspondence is forced). Pairing positionally outside
+      // that — a streaming function reporting only some of its calls, with a
+      // synthesized block id — would publish one call's name and arguments on
+      // another call's block. An unmatched call is reconstructed instead, which
+      // is wrong only in announcing a call twice, never in mislabelling one.
+      const unpaired = pairings.filter((pairing) => pairing.reported === undefined);
+      const orderIsUnambiguous =
+        unpaired.length === unmatchedReported.length &&
+        unpaired.every((pairing) => pairing.toolCall.id === undefined);
+      if (orderIsUnambiguous) {
+        for (const pairing of unpaired) pairing.reported = unmatchedReported.shift();
       }
 
       for (const [index, { toolCall, reported }] of pairings.entries()) {
@@ -242,6 +255,20 @@ export function withEnhancedStreaming(
           // The live path already emitted this block's start and deltas. Only
           // the completion is left, because its parsed `arguments` did not
           // exist until the response resolved.
+
+          // A block may have been started before its name was known. The
+          // response is authoritative, so reconcile it before completing —
+          // otherwise `stream:block-complete` and the final
+          // `stream:complete` state would keep the provisional name even
+          // though `stream:tool-call-complete` carries the real one.
+          if (toolCall.name && toolCall.name !== reported.toolName) {
+            stateMachine.process({
+              type: 'set-block-tool-name',
+              id: reported.blockId,
+              toolName: toolCall.name,
+            });
+          }
+
           stateMachine.process({ type: 'block-complete', id: reported.blockId });
 
           const completedLiveBlock = findBlock(reported.blockId);

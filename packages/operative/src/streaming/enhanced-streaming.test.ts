@@ -712,6 +712,153 @@ describe('withEnhancedStreaming live tool calls', () => {
     ]);
   });
 
+  it('ignores a start that arrives after a delta already opened the block', async () => {
+    const eventTarget = new TypedEventTarget<StreamEventMap>();
+    const events = recordEvents(eventTarget);
+    let finalState: StreamState | undefined;
+
+    eventTarget.addEventListener(
+      'stream:complete',
+      (event: StreamCustomEvent<'stream:complete'>) => {
+        finalState = event.detail.state;
+      },
+    );
+
+    const streamingGenerate: StreamingGenerateFunction = async ({ streaming }) => {
+      // The delta opens the block implicitly; the delayed start then arrives
+      // for the same id. Opening it twice would duplicate every start event and
+      // leave a second state-machine block that nothing ever completes.
+      streaming.report?.({
+        type: 'stream:tool-call-delta',
+        toolName: 'get_weather',
+        blockId: 'toolu_01',
+        partialArguments: '{"location":"Denver"}',
+      });
+      streaming.report?.({
+        type: 'stream:tool-call-start',
+        toolName: 'get_weather',
+        blockId: 'toolu_01',
+      });
+      return {
+        content: '',
+        toolCalls: [{ id: 'toolu_01', name: 'get_weather', arguments: { location: 'Denver' } }],
+      };
+    };
+
+    await withEnhancedStreaming(streamingGenerate, { eventTarget, liveToolCalls: true })(
+      makeContext(),
+    );
+
+    expect(eventsOfType(events, 'stream:tool-call-start')).toHaveLength(1);
+    expect(finalState?.toolCalls).toHaveLength(1);
+    expect(finalState?.toolCalls[0]).toMatchObject({ id: 'toolu_01', complete: true });
+  });
+
+  it('reconciles a provisional block name from the resolved response', async () => {
+    const eventTarget = new TypedEventTarget<StreamEventMap>();
+    const events = recordEvents(eventTarget);
+    let finalState: StreamState | undefined;
+
+    eventTarget.addEventListener(
+      'stream:complete',
+      (event: StreamCustomEvent<'stream:complete'>) => {
+        finalState = event.detail.state;
+      },
+    );
+
+    const streamingGenerate: StreamingGenerateFunction = async ({ streaming }) => {
+      streaming.report?.({ type: 'stream:tool-call-start', toolName: '', blockId: 'toolu_01' });
+      return {
+        content: '',
+        toolCalls: [{ id: 'toolu_01', name: 'get_weather', arguments: {} }],
+      };
+    };
+
+    await withEnhancedStreaming(streamingGenerate, { eventTarget, liveToolCalls: true })(
+      makeContext(),
+    );
+
+    // The block APIs must not keep the provisional name once the response has
+    // supplied the real one — `stream:tool-call-complete` alone is not enough.
+    expect(eventsOfType(events, 'stream:block-complete').at(-1)?.block.toolName).toBe(
+      'get_weather',
+    );
+    expect(finalState?.toolCalls[0]?.toolName).toBe('get_weather');
+  });
+
+  it('does not pair a reported block with an unrelated call when order is ambiguous', async () => {
+    const eventTarget = new TypedEventTarget<StreamEventMap>();
+    const events = recordEvents(eventTarget);
+
+    const streamingGenerate: StreamingGenerateFunction = async ({ streaming }) => {
+      // Only the SECOND returned call is reported, under a synthesized block id
+      // that matches no response id. Consuming it for the first unmatched call
+      // would publish get_weather's arguments on get_time's block.
+      streaming.report?.({
+        type: 'stream:tool-call-start',
+        toolName: 'get_time',
+        blockId: 'tool-1',
+      });
+      return {
+        content: '',
+        toolCalls: [
+          { id: 'call_weather', name: 'get_weather', arguments: { location: 'Denver' } },
+          { id: 'call_time', name: 'get_time', arguments: { zone: 'MST' } },
+        ],
+      };
+    };
+
+    await withEnhancedStreaming(streamingGenerate, { eventTarget, liveToolCalls: true })(
+      makeContext(),
+    );
+
+    // No completion may carry get_weather's arguments on the reported block.
+    const completions = eventsOfType(events, 'stream:tool-call-complete');
+    expect(completions.some((event) => event.blockId === 'tool-1')).toBe(false);
+    for (const completion of completions) {
+      if (completion.toolName === 'get_weather') {
+        expect(completion.arguments).toEqual({ location: 'Denver' });
+      }
+      if (completion.toolName === 'get_time') {
+        expect(completion.arguments).toEqual({ zone: 'MST' });
+      }
+    }
+    expect(completions.map((event) => event.toolName)).toEqual(['get_weather', 'get_time']);
+  });
+
+  it('pairs leftovers by arrival order when no call carries an id', async () => {
+    const eventTarget = new TypedEventTarget<StreamEventMap>();
+    const events = recordEvents(eventTarget);
+
+    const streamingGenerate: StreamingGenerateFunction = async ({ streaming }) => {
+      // A provider that supplies no tool-call ids at all: identity is available
+      // to nobody, the counts match, so arrival order is the forced answer.
+      streaming.report?.({ type: 'stream:tool-call-start', toolName: 'a', blockId: 'tool-0' });
+      streaming.report?.({ type: 'stream:tool-call-start', toolName: 'b', blockId: 'tool-1' });
+      return {
+        content: '',
+        toolCalls: [
+          { name: 'a', arguments: { n: 1 } },
+          { name: 'b', arguments: { n: 2 } },
+        ],
+      };
+    };
+
+    await withEnhancedStreaming(streamingGenerate, { eventTarget, liveToolCalls: true })(
+      makeContext(),
+    );
+
+    expect(
+      eventsOfType(events, 'stream:tool-call-complete').map((event) => ({
+        blockId: event.blockId,
+        arguments: event.arguments,
+      })),
+    ).toEqual([
+      { blockId: 'tool-0', arguments: { n: 1 } },
+      { blockId: 'tool-1', arguments: { n: 2 } },
+    ]);
+  });
+
   it('pairs each synthesized completion with the tool call at its own ordinal', async () => {
     const eventTarget = new TypedEventTarget<StreamEventMap>();
     const events = recordEvents(eventTarget);
