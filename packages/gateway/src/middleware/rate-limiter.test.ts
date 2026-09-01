@@ -55,6 +55,39 @@ describe('rate limiter', () => {
     expect(response.headers.get('retry-after')).toBeString();
   });
 
+  it('does not charge repeated hook idempotency keys against the rate limit', async () => {
+    const app = createApp({ limit: 1, windowMs: 60_000 });
+    const headers = {
+      'Idempotency-Key': 'same-run',
+      'x-api-key-id': 'retrying-hook-client',
+    };
+
+    const firstResponse = await app.request('/hooks/example', { headers, method: 'POST' });
+    const replayResponse = await app.request('/hooks/example', { headers, method: 'POST' });
+    const distinctResponse = await app.request('/hooks/example', {
+      headers: { ...headers, 'Idempotency-Key': 'different-run' },
+      method: 'POST',
+    });
+
+    expect(firstResponse.status).toBe(404);
+    expect(replayResponse.status).toBe(404);
+    expect(distinctResponse.status).toBe(429);
+  });
+
+  it('scopes hook idempotency admissions to the operation path', async () => {
+    const app = createApp({ limit: 1, windowMs: 60_000 });
+    const headers = {
+      'Idempotency-Key': 'shared-key',
+      'x-api-key-id': 'path-scoped-hook-client',
+    };
+
+    const firstResponse = await app.request('/hooks/first', { headers, method: 'POST' });
+    const otherPathResponse = await app.request('/hooks/second', { headers, method: 'POST' });
+
+    expect(firstResponse.status).toBe(404);
+    expect(otherPathResponse.status).toBe(429);
+  });
+
   it('tracks keys independently', async () => {
     const app = createApp({ limit: 2, windowMs: 60_000 });
 

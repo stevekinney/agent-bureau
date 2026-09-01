@@ -33,6 +33,32 @@ type RateLimitDecision =
 const DEFAULT_LIMIT = 60;
 const DEFAULT_WINDOW_MS = 60_000;
 
+function createIdempotencyAdmissionStore(windowMs: number, now: () => number) {
+  const admissions = new Map<string, number>();
+  let requestCount = 0;
+
+  return {
+    has(key: string): boolean {
+      requestCount += 1;
+      const currentTime = now();
+      if (requestCount % 1000 === 0) {
+        for (const [candidateKey, expiresAt] of admissions) {
+          if (expiresAt <= currentTime) admissions.delete(candidateKey);
+        }
+      }
+
+      const expiresAt = admissions.get(key);
+      if (expiresAt === undefined) return false;
+      if (expiresAt > currentTime) return true;
+      admissions.delete(key);
+      return false;
+    },
+    save(key: string): void {
+      admissions.set(key, now() + windowMs);
+    },
+  };
+}
+
 function createMemoryWindowStore(windowMs: number, now: () => number) {
   const windows = new Map<string, WindowEntry>();
   let requestCount = 0;
@@ -117,6 +143,7 @@ export function createRateLimiter(options?: RateLimitOptions) {
     ? createStoreBackedWindowStore(options.store)
     : createMemoryWindowStore(windowMs, now);
   const withPrincipalLock = createPrincipalMutex();
+  const idempotencyAdmissions = createIdempotencyAdmissionStore(windowMs, now);
 
   return createMiddleware(async (context, next) => {
     const principal = context.req.header('x-auth-principal') ?? context.req.header('x-api-key-id');
@@ -132,6 +159,19 @@ export function createRateLimiter(options?: RateLimitOptions) {
       const entry = await windowStore.load(storageKey);
       const previousTimestampCount = entry.timestamps.length;
       entry.timestamps = entry.timestamps.filter((timestamp) => timestamp > windowStart);
+      const idempotencyKey = context.req.header('Idempotency-Key');
+      const idempotencyAdmissionKey =
+        context.req.method === 'POST' && context.req.path.startsWith('/hooks/') && idempotencyKey
+          ? JSON.stringify([principal, context.req.method, context.req.path, idempotencyKey])
+          : undefined;
+
+      if (idempotencyAdmissionKey && idempotencyAdmissions.has(idempotencyAdmissionKey)) {
+        return {
+          remaining: Math.max(0, limit - entry.timestamps.length),
+          resetAt: Math.ceil(((entry.timestamps[0] ?? currentTime) + windowMs) / 1000),
+          status: 'allowed',
+        } satisfies RateLimitDecision;
+      }
 
       if (entry.timestamps.length >= limit) {
         if (entry.timestamps.length !== previousTimestampCount) {
@@ -148,6 +188,7 @@ export function createRateLimiter(options?: RateLimitOptions) {
 
       entry.timestamps.push(currentTime);
       await windowStore.save(storageKey, entry);
+      if (idempotencyAdmissionKey) idempotencyAdmissions.save(idempotencyAdmissionKey);
 
       return {
         remaining: Math.max(0, limit - entry.timestamps.length),
