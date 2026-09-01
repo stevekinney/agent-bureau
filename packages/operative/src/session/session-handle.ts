@@ -56,20 +56,24 @@ const FAILURE_FINISH_REASONS: ReadonlySet<FinishReason> = new Set([
 export type SessionRunOptions = Omit<RunOptions, 'conversation'>;
 
 /**
- * Options for `session.monitor()` — a durable conditional watch loop that runs
+ * Options for `session.monitor()` — a process-local conditional watch loop that runs
  * the agent on a repeating cadence until a predicate is satisfied or a deadline
  * is reached.
  *
- * Each tick fires a new durable `AgentRun` with `input` as the prompt. The
+ * Each tick starts a new `AgentRun` with `input` as the prompt. Individual runs
+ * may be durable, but the monitor controller and its timers are never persisted.
+ * Process exit loses the loop even when the session has a durable engine. The
  * `until` predicate receives the completed `RunResult` and returns `true` when
  * the condition is met (ending the loop). If `until` returns `false`, the loop
  * sleeps for `every` milliseconds and starts the next tick.
  *
- * The predicate must NOT be a closure that captures mutable state across ticks
- * — it is evaluated in-process after each run and cannot cross a durable
- * checkpoint boundary. It is a pure function of the run's output.
+ * The predicate is evaluated in-process after each run. Aborting `signal`
+ * aborts the active tick or clears the inter-tick timer.
  */
 export interface MonitorOptions {
+  /** Abort this process-local monitor loop and clear its current timer. */
+  signal?: AbortSignal;
+
   /**
    * How long to wait between ticks.
    * Milliseconds (number) or ISO-8601 duration string (e.g. `'PT5M'`, `'PT1H'`).
@@ -86,8 +90,8 @@ export interface MonitorOptions {
    * Return `true` to end the loop (condition met). Return `false` to sleep and
    * try again.
    *
-   * Must be a pure function of the run result — NOT a closure that captures
-   * mutable state across ticks (such state cannot survive a durable checkpoint).
+   * Must be a pure function of the run result. Captured process state is lost
+   * with the monitor loop when the host process exits.
    */
   until: (result: RunResult) => boolean;
 
@@ -167,13 +171,15 @@ export interface SessionHandle {
   fork(options?: { throughRun?: number }): Promise<SessionHandle>;
 
   /**
-   * Durable pause of the session. Requires a durable engine. Without an engine
-   * this falls back to a simple async sleep on the in-memory path.
+   * Process-local delay for host coordination. This always uses a local timer;
+   * process exit loses the delay even when this session has a durable engine.
+   * Use a run-level Weft wakeup or signal, or a Bureau recurring schedule, when
+   * the operation must survive restart.
    *
    * @param duration - Milliseconds (number) or an ISO-8601 duration string
    *   (e.g. `'PT30S'`, `'PT1H'`).
    */
-  sleep(duration: number | string): Promise<void>;
+  sleep(duration: number | string, options?: { signal?: AbortSignal }): Promise<void>;
 
   /**
    * Fire-and-forget signal into the in-flight run's workflow. The agent loop's
@@ -195,8 +201,9 @@ export interface SessionHandle {
   query<TResult = unknown>(name: string, input?: unknown): Promise<TResult>;
 
   /**
-   * Run the agent on a repeating cadence until a predicate is satisfied or a
-   * deadline is reached.
+   * Run the agent in this host process on a repeating cadence until a predicate
+   * is satisfied or a deadline is reached. The controller and inter-tick timers
+   * are process-local even when individual runs use a durable engine.
    *
    * Each tick:
    * 1. Executes a full agent run with `options.input` as the prompt.
@@ -263,6 +270,10 @@ export interface SessionHandleContext {
    * dispatches the corresponding typed event. Created internally if omitted.
    */
   emitter?: TypedEventTarget<OperativeEventMap>;
+  /** Process-local timer injection used by deterministic tests. */
+  setTimeoutFunction?: (callback: () => void, milliseconds: number) => unknown;
+  /** Matching cleanup function for `setTimeoutFunction`. */
+  clearTimeoutFunction?: (timer: unknown) => void;
 }
 
 /**
@@ -547,6 +558,46 @@ function parseDuration(iso: string): number {
   return (hours * 3600 + minutes * 60 + seconds) * 1000;
 }
 
+function processLocalAbortError(): DOMException {
+  return new DOMException('The process-local session timer was aborted', 'AbortError');
+}
+
+function processLocalDelay(
+  milliseconds: number,
+  signal: AbortSignal | undefined,
+  setTimeoutFunction: (callback: () => void, milliseconds: number) => unknown,
+  clearTimeoutFunction: (timer: unknown) => void,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timerState: { value?: unknown } = {};
+    let settled = false;
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      if (timerState.value !== undefined) clearTimeoutFunction(timerState.value);
+      signal?.removeEventListener('abort', onAbort);
+      reject(processLocalAbortError());
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+
+    timerState.value = setTimeoutFunction(() => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, milliseconds);
+    if (settled) {
+      clearTimeoutFunction(timerState.value);
+    } else if (signal?.aborted) {
+      onAbort();
+    }
+  });
+}
+
 /**
  * Creates a live `SessionHandle` for the given session id.
  *
@@ -562,6 +613,12 @@ export function createSessionHandle(
 ): SessionHandle {
   const { store, engine, checkpointStore, agentName, runOptions } = context;
   const emitter = context.emitter ?? new TypedEventTarget<OperativeEventMap>();
+  const setTimeoutFunction =
+    context.setTimeoutFunction ??
+    ((callback: () => void, milliseconds: number) => setTimeout(callback, milliseconds));
+  const clearTimeoutFunction =
+    context.clearTimeoutFunction ??
+    ((timer: unknown) => clearTimeout(timer as ReturnType<typeof setTimeout>));
 
   /**
    * The currently-in-flight `AgentRun`, if any. Set at `run()` start, cleared
@@ -1055,9 +1112,7 @@ export function createSessionHandle(
       return createSessionHandle(newSessionId, context);
     },
 
-    async sleep(duration: number | string): Promise<void> {
-      // In-memory path: a simple setTimeout (durable path via ctx.sleep is
-      // a Phase D concern when a Weft engine is wired through the session).
+    async sleep(duration: number | string, options?: { signal?: AbortSignal }): Promise<void> {
       const ms = typeof duration === 'number' ? duration : parseDuration(duration);
 
       // Reject string durations that parsed to 0 ms — same guard as
@@ -1071,8 +1126,9 @@ export function createSessionHandle(
         );
       }
 
+      if (options?.signal?.aborted) throw processLocalAbortError();
       emitter.dispatchEvent(new SessionSleepEvent(sessionId, ms));
-      await new Promise<void>((resolve) => setTimeout(resolve, ms));
+      await processLocalDelay(ms, options?.signal, setTimeoutFunction, clearTimeoutFunction);
     },
 
     async signal(name: string, payload?: unknown): Promise<void> {
@@ -1109,7 +1165,7 @@ export function createSessionHandle(
     },
 
     async monitor(options: MonitorOptions): Promise<boolean> {
-      const { every, input, until, maxDuration } = options;
+      const { every, input, until, maxDuration, signal } = options;
       const everyMs = typeof every === 'number' ? every : parseDuration(every);
 
       // Reject string durations that parsed to 0 ms — this means the string
@@ -1188,10 +1244,12 @@ export function createSessionHandle(
         }
 
         // Emit tick-started (met = null — run hasn't completed yet).
-        emitter.dispatchEvent(new SessionMonitorTickEvent(sessionId, tick, null));
-
         // Each tick is a full agent run.
+        signal?.throwIfAborted();
+        emitter.dispatchEvent(new SessionMonitorTickEvent(sessionId, tick, null));
         const run = handle.run(input);
+        const abortRun = () => run.abort('session monitor aborted');
+        signal?.addEventListener('abort', abortRun, { once: true });
         let result: RunResult;
         try {
           result = await run.result();
@@ -1199,7 +1257,10 @@ export function createSessionHandle(
           // A run error is treated as a non-met tick — we emit done(false) and
           // propagate. The caller should handle this as an error condition.
           emitter.dispatchEvent(new SessionMonitorDoneEvent(sessionId, false, tick + 1));
+          if (signal?.aborted) throw processLocalAbortError();
           throw err;
+        } finally {
+          signal?.removeEventListener('abort', abortRun);
         }
 
         // Surface terminal run FAILURES as errors instead of feeding them to the
@@ -1209,6 +1270,10 @@ export function createSessionHandle(
         // this check a predicate that returns false would keep sleeping and
         // re-running after a provider/tool failure instead of surfacing it, the
         // same way the catch block does for thrown errors (PRRT_kwDORvupsc6MddwB).
+        if (signal?.aborted) {
+          emitter.dispatchEvent(new SessionMonitorDoneEvent(sessionId, false, tick + 1));
+          throw processLocalAbortError();
+        }
         if (FAILURE_FINISH_REASONS.has(result.finishReason)) {
           emitter.dispatchEvent(new SessionMonitorDoneEvent(sessionId, false, tick + 1));
           // Prefer the run's own error; otherwise synthesize one naming the
@@ -1244,7 +1309,12 @@ export function createSessionHandle(
         const remainingMs = maxMs !== undefined ? maxMs - elapsed : Infinity;
         const sleepMs = Math.min(everyMs, remainingMs);
         if (sleepMs > 0) {
-          await new Promise<void>((resolve) => setTimeout(resolve, sleepMs));
+          try {
+            await processLocalDelay(sleepMs, signal, setTimeoutFunction, clearTimeoutFunction);
+          } catch (error) {
+            emitter.dispatchEvent(new SessionMonitorDoneEvent(sessionId, false, tick));
+            throw error;
+          }
         }
       }
     },
