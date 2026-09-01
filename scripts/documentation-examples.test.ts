@@ -207,7 +207,16 @@ function unwrap(node: ts.Expression): ts.Expression {
  *   before the handle it points at silently stopped being tracked.
  *
  * Pass one records what every binding holds, per scope. Pass two resolves calls
- * against the scope active at that node. Scopes are identified by a
+ * against the scope active at that node.
+ *
+ * KNOWN LIMIT: pass two sees each binding's *final* value, not its value at each
+ * call site. A fence that reassigns a variable between two calls on it therefore
+ * resolves both against the later state. Fixing that means resolving in one
+ * ordered pass, which loses the forward-alias handling pass one provides — two
+ * attempts at that rewrite both passed these tests while silently detecting
+ * nothing, so the limit is recorded rather than traded for a worse failure.
+ * Documentation examples that reassign a handle mid-fence are the only affected
+ * shape, and none does today. Scopes are identified by a
  * deterministic pre-order counter, so both passes agree on which scope is which
  * without needing a type checker.
  */
@@ -232,6 +241,7 @@ function runHandleCalls(fence: string, index: number): Set<string> {
     ts.isCaseBlock(node);
 
   const agents = agentBindings(file);
+  const destructured = new Set<string>();
 
   // scopeId -> binding name -> holds a run handle
   const bindings = new Map<number, Map<string, boolean>>();
@@ -279,6 +289,22 @@ function runHandleCalls(fence: string, index: number): Set<string> {
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
       const holds = node.initializer ? producesHandle(node.initializer, here) : false;
       bindings.get(here[here.length - 1] ?? 0)?.set(node.name.text, holds);
+    }
+
+    // Destructuring a handle is still invoking its members:
+    //   const { result, reslut } = bureau.run(...)
+    // The names are taken from the pattern rather than from a call site, since
+    // there is no call expression to see.
+    if (
+      ts.isVariableDeclaration(node) &&
+      ts.isObjectBindingPattern(node.name) &&
+      node.initializer &&
+      producesHandle(node.initializer, here)
+    ) {
+      for (const element of node.name.elements) {
+        const property = element.propertyName ?? element.name;
+        if (ts.isIdentifier(property)) destructured.add(property.text);
+      }
     }
 
     if (
@@ -360,6 +386,7 @@ function runHandleCalls(fence: string, index: number): Set<string> {
     ts.forEachChild(node, (child) => callPass(child, here));
   };
   callPass(file, [0]);
+  for (const member of destructured) members.add(member);
 
   return members;
 }
