@@ -253,7 +253,7 @@ describe('documentation/operative-type-safe-api.md examples', () => {
     expect([...unaccounted].sort()).toEqual([]);
   });
 
-  test('no required capability has quietly been implemented', () => {
+  test('no required capability has quietly been implemented under its placeholder name', () => {
     const source = read(agentRunPath);
     const stale = Object.keys(PENDING_IMPLEMENTATION).filter((member) =>
       new RegExp(`^\\s*${member}\\s*[(<]`, 'm').test(source),
@@ -261,6 +261,19 @@ describe('documentation/operative-type-safe-api.md examples', () => {
 
     // A failure here is good news needing action: the owning issue landed, so
     // drop the entry and let the member be checked as documented surface.
+    //
+    // KNOWN LIMIT, and the test name says so rather than overclaiming. AB-34 was
+    // re-scoped to make these names non-normative — the owning issue picks the
+    // real one — which means a rename slips past this check entirely. If AB-37
+    // ships `whenClosed()`, the `closed` entry and its example stay green here.
+    // The re-scope created this hole: the check assumed names it then stopped
+    // fixing.
+    //
+    // Nothing in a unit test can close it, because the mapping from capability
+    // to final name does not exist until the owning issue chooses it. The
+    // obligation therefore lives where it can be enforced: each capability's
+    // owning issue must remove its entry from this map as part of its own
+    // acceptance criteria, which the contract document states.
     expect(stale).toEqual([]);
   });
 
