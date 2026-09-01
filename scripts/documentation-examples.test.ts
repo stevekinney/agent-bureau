@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import { describe, expect, test } from 'bun:test';
+import ts from 'typescript';
 
 /**
  * AB-34's fourth verification command.
@@ -11,32 +12,33 @@ import { describe, expect, test } from 'bun:test';
  * AB-15 shipped it with no mechanism to check that they stay true. A renamed
  * method or a typo in an example is invisible until a reader copies it.
  *
- * Full type-checking of the fences is not possible, and not merely because it is
- * awkward. The examples are deliberately fragments — they call `bureau` and `run`
- * without declaring them — so no fence is a standalone module. More importantly,
- * AB-34 documents contract members that are ratified but not yet implemented:
- * `snapshot()`/`subscribeSnapshot()` belong to AB-88 and `children()`/`abortChild()`
- * to AB-50. Type-checking would fail against today's source by design.
- *
- * So this harness checks what is both checkable and actually at risk: every member
- * an example invokes on a run handle is either declared by this contract document
- * itself, or listed below as a required capability with the issue that owns its
- * signature. Both directions are asserted, so an entry cannot outlive its
- * implementation and a new example cannot reference a capability nobody owns.
+ * This harness checks that every member an example invokes on a run handle is
+ * either declared by the contract document itself, or listed below as a required
+ * capability with the issue that owns its signature. Both directions are
+ * asserted, so an entry cannot outlive its implementation and a new example
+ * cannot reference a capability nobody owns.
  *
  * AB-34 was re-scoped after three review rounds: it states the capabilities every
  * independently owned handle must provide and leaves the signatures to AB-88,
- * AB-50, and AB-37. So the map below is no longer "declared here, unimplemented"
- * — it is "required here, declared by that issue". The examples use placeholder
- * names; the owning issue picks the real one. What this harness still guarantees
- * is that no capability appears in an example without a named owner.
+ * AB-50, and AB-37. So the map below reads "required here, declared by that
+ * issue". The examples use placeholder names; the owning issue picks the real
+ * one, and the accounting test forces the map and the examples to move together.
  *
- * Members are matched against declared interface members rather than by grepping
- * whole files. An earlier draft of this harness grepped, and reported
- * `subscribe` as already shipped because `Bureau` has an unrelated event
- * subscription of that name — a false positive that would have hidden the real
- * finding: `ActiveRun.subscribe` already means event subscription in this same
- * package, which is why AB-34's snapshot notifier is named `subscribeSnapshot`.
+ * It does not type-check the fences. They are fragments that never declare
+ * `bureau` or `run`, so none is a standalone module, and the capabilities are
+ * unimplemented by design — a type-check would fail against today's source and
+ * prove nothing. Drift between an example and the contract is the real risk.
+ *
+ * WHY AN AST RATHER THAN REGULAR EXPRESSIONS. Earlier revisions scanned the
+ * fences with regular expressions, and review found five holes in sequence:
+ * hard-coded receiver names, member-name filtering applied after the receiver was
+ * already known, unbalanced parentheses in nested calls, parentheses inside
+ * string literals, and producer text inside comments treated as real code. That
+ * last one produced *false failures*, not merely misses. Each fix revealed the
+ * next gap, which is the signature of hand-rolled lexing. The TypeScript compiler
+ * is already a root devDependency, so parsing properly costs nothing and ends the
+ * class: comments and literals are excluded by construction, and aliasing becomes
+ * a data-flow question the AST can answer.
  */
 
 const repositoryRoot = resolve(import.meta.dir, '..');
@@ -48,11 +50,6 @@ const agentRunPath = resolve(repositoryRoot, 'packages/operative/src/agent-run.t
  * and implementing the signature. When that issue lands, its entry must be
  * removed — the "quietly implemented" test below fails if an implemented member
  * is still listed, so this cannot rot into a permanent excuse list.
- *
- * The key is the placeholder name used in the illustrative examples. The owning
- * issue may choose a different one; when it does, this map and the examples move
- * together, and the test that every invoked member is accounted for is what
- * forces that.
  */
 const PENDING_IMPLEMENTATION: Readonly<Record<string, string>> = {
   snapshot: 'AB-88',
@@ -62,32 +59,25 @@ const PENDING_IMPLEMENTATION: Readonly<Record<string, string>> = {
   closed: 'AB-37',
 };
 
-/**
- * Identifiers that are never a run handle, used only when deciding whether a
- * *receiver* is one.
- *
- * This must not be applied to member names. Once a receiver is known to hold a
- * run handle, every member invoked on it has to be accounted for — filtering
- * afterwards would let `run.getRun()` pass while being neither documented nor
- * owned, which is exactly the accounting this harness claims to do.
- */
-const NEVER_A_RUN_HANDLE = new Set(['bureau', 'console', 'schedule', 'fires', 'Object', 'Array']);
+/** Calls that produce a run handle. */
+const RUN_PRODUCERS = new Set(['run', 'createRun', 'createActiveRun', 'getRun']);
 
 function read(path: string): string {
   return readFileSync(path, 'utf-8');
 }
 
-/**
- * Members declared across *every* block declaring the named interface.
- *
- * The document declares `RunOutcomeBase` once today. Scanning every occurrence
- * anyway is deliberate: an earlier revision of AB-34 re-declared it to add
- * members, this parser read only the first block, and the amendment's members
- * passed solely because pending entries are checked first — so the harness would
- * have broken the moment the implementation it tracks actually landed. A later
- * amendment can re-declare an interface the same way, and aggregating costs
- * nothing.
- */
+function typescriptFences(markdown: string): string[] {
+  const fences: string[] = [];
+  const pattern = /```ts\n([\s\S]*?)```/g;
+  let match = pattern.exec(markdown);
+  while (match !== null) {
+    if (match[1] !== undefined) fences.push(match[1]);
+    match = pattern.exec(markdown);
+  }
+  return fences;
+}
+
+/** Members declared across every block declaring the named interface. */
 function declaredMembers(source: string, interfaceName: string): Set<string> {
   const members = new Set<string>();
   let searchFrom = 0;
@@ -131,157 +121,81 @@ function membersOfBlock(source: string, start: number): Set<string> {
   return members;
 }
 
-function typescriptFences(markdown: string): string[] {
-  const fences: string[] = [];
-  const pattern = /```ts\n([\s\S]*?)```/g;
-  let match = pattern.exec(markdown);
-  while (match !== null) {
-    if (match[1] !== undefined) fences.push(match[1]);
-    match = pattern.exec(markdown);
+/** True when a call expression produces a run handle. */
+function isRunProducer(node: ts.Node): boolean {
+  if (!ts.isCallExpression(node)) return false;
+  const callee = node.expression;
+  if (ts.isIdentifier(callee)) return RUN_PRODUCERS.has(callee.text);
+  if (ts.isPropertyAccessExpression(callee)) return RUN_PRODUCERS.has(callee.name.text);
+  return false;
+}
+
+/** Unwraps `await x` and `(x)` down to the expression underneath. */
+function unwrap(node: ts.Expression): ts.Expression {
+  let current = node;
+  for (;;) {
+    if (ts.isAwaitExpression(current)) current = current.expression;
+    else if (ts.isParenthesizedExpression(current)) current = current.expression;
+    else return current;
   }
-  return fences;
 }
 
 /**
- * Variables a fence initialises from a run-producing call.
+ * Every member invoked on a run handle in one fence.
  *
- * An earlier version matched a hard-coded list of identifier names, which meant
- * `const draft = bureau.run(...)` was invisible and a typo on it would pass. The
- * binding name carries no meaning; what makes a variable a run handle is what it
- * was assigned from.
+ * A receiver counts as a run handle when it is a producer call itself, a binding
+ * initialised from one, or a binding aliased from another such binding. Aliases
+ * resolve to a fixed point, so `const alias = draft` is covered however many
+ * hops it takes.
  */
-function runHandleBindings(source: string): Set<string> {
-  const names = new Set<string>();
-  // `const x = bureau.run(...)`, `const x = await agent.run(...)`, `const x = createRun(...)`
-  const pattern =
-    /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:await\s+)?(?:[A-Za-z_$][\w$]*\.)?(?:run|createRun|createActiveRun|getRun)\s*\(/g;
-  let match = pattern.exec(source);
-  while (match !== null) {
-    const name = match[1];
-    if (name !== undefined && !NEVER_A_RUN_HANDLE.has(name)) names.add(name);
-    match = pattern.exec(source);
-  }
-  return names;
-}
+function runHandleCalls(fence: string, index: number): Set<string> {
+  const file = ts.createSourceFile(
+    `example-${index}.ts`,
+    fence,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
 
-/** Members invoked on any variable that holds a run handle. */
-function runHandleCalls(source: string): Set<string> {
-  const bindings = runHandleBindings(source);
-  // Names conventionally used for a run handle even where the assignment is
-  // elided in a fragment.
-  for (const conventional of ['run', 'parentRun', 'activeRun', 'childRun']) {
-    bindings.add(conventional);
+  const handles = new Set<string>();
+  const aliases: Array<{ from: string; to: string }> = [];
+
+  const collectBindings = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
+      const initializer = unwrap(node.initializer);
+      if (isRunProducer(initializer)) {
+        handles.add(node.name.text);
+      } else if (ts.isIdentifier(initializer)) {
+        aliases.push({ from: initializer.text, to: node.name.text });
+      }
+    }
+    ts.forEachChild(node, collectBindings);
+  };
+  collectBindings(file);
+
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const alias of aliases) {
+      if (handles.has(alias.from) && !handles.has(alias.to)) {
+        handles.add(alias.to);
+        changed = true;
+      }
+    }
   }
 
   const members = new Set<string>();
-  const record = (name: string | undefined): void => {
-    // No member-name filtering: the receiver is already known to be a run
-    // handle, so anything invoked on it must be documented or owned.
-    if (name !== undefined) members.add(name);
-  };
-
-  for (const binding of bindings) {
-    const pattern = new RegExp(`\\b${binding}\\.([A-Za-z_$][\\w$]*)\\s*\\(`, 'g');
-    let match = pattern.exec(source);
-    while (match !== null) {
-      record(match[1]);
-      match = pattern.exec(source);
+  const collectCalls = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
+      const receiver = unwrap(node.expression.expression);
+      const onHandle =
+        (ts.isIdentifier(receiver) && handles.has(receiver.text)) || isRunProducer(receiver);
+      if (onHandle) members.add(node.expression.name.text);
     }
-  }
-
-  // Calls chained straight off a run producer, which never create a binding:
-  //   await bureau.run('writer', '...').unwrap()
-  // These are invoked on a run handle but invisible to the binding scan, so a
-  // typo in one would pass a test that claims to account for every run-handle
-  // member the examples invoke.
-  //
-  // Argument spans are matched by counting parentheses rather than by `[^)]*`,
-  // which stopped at the first `)` and so missed a nested call such as
-  // `bureau.run('writer', makePrompt()).unwrap()`.
-  for (const member of chainedFromProducer(source)) record(member);
+    ts.forEachChild(node, collectCalls);
+  };
+  collectCalls(file);
 
   return members;
-}
-
-/**
- * Index of the parenthesis closing the one at `open`, ignoring parentheses that
- * appear inside string literals, template literals, or comments.
- *
- * Counting raw characters was not enough: `bureau.run('writer', 'text )')` has a
- * `)` inside a string, so a naive scan stopped early and any chained call after
- * it went unrecorded. Returns -1 when no balanced close is found.
- */
-function closingParenthesis(source: string, open: number): number {
-  let depth = 0;
-
-  for (let index = open; index < source.length; index += 1) {
-    const character = source[index];
-    const next = source[index + 1];
-
-    if (character === '/' && next === '/') {
-      const end = source.indexOf('\n', index);
-      if (end < 0) return -1;
-      index = end;
-      continue;
-    }
-
-    if (character === '/' && next === '*') {
-      const end = source.indexOf('*/', index + 2);
-      if (end < 0) return -1;
-      index = end + 1;
-      continue;
-    }
-
-    if (character === "'" || character === '"' || character === '`') {
-      const quote = character;
-      index += 1;
-      while (index < source.length) {
-        if (source[index] === '\\') {
-          index += 2;
-          continue;
-        }
-        if (source[index] === quote) break;
-        index += 1;
-      }
-      if (index >= source.length) return -1;
-      continue;
-    }
-
-    if (character === '(') depth += 1;
-    else if (character === ')') {
-      depth -= 1;
-      if (depth === 0) return index;
-    }
-  }
-
-  return -1;
-}
-
-/** Members invoked directly on the result of a run-producing call. */
-function chainedFromProducer(source: string): Set<string> {
-  const found = new Set<string>();
-  const producer = /(?:[A-Za-z_$][\w$]*\.)?(?:run|createRun|createActiveRun|getRun)\s*\(/g;
-
-  let match = producer.exec(source);
-  while (match !== null) {
-    // Walk from the producer's opening parenthesis to its balanced close,
-    // skipping over nested calls in the arguments.
-    const index = closingParenthesis(source, match.index + match[0].length - 1);
-    if (index < 0) {
-      producer.lastIndex = match.index + match[0].length;
-      match = producer.exec(source);
-      continue;
-    }
-
-    const after = source.slice(index + 1);
-    const chained = /^\s*\.\s*([A-Za-z_$][\w$]*)\s*\(/.exec(after);
-    if (chained?.[1] !== undefined) found.add(chained[1]);
-
-    producer.lastIndex = index + 1;
-    match = producer.exec(source);
-  }
-
-  return found;
 }
 
 const document = read(documentPath);
@@ -290,10 +204,8 @@ const fences = typescriptFences(document);
 /**
  * The contract's own declared surface, taken from the document rather than from
  * a source file. `bureau-types.ts` also declares an `AgentRun`, but that is the
- * earlier spike shape (`result`/`abort`/dispose only); the ratified one is this
- * document's `RunOutcomeBase` plus the AB-34 additions, implemented in
- * `agent-run.ts`. Reading the document keeps this check about whether the
- * examples match the contract they illustrate.
+ * earlier spike shape; the ratified one is this document's `RunOutcomeBase`,
+ * implemented in `agent-run.ts`.
  */
 const documentedMembers = new Set<string>([
   ...declaredMembers(document, 'RunOutcomeBase'),
@@ -311,18 +223,18 @@ describe('documentation/operative-type-safe-api.md examples', () => {
     expect([...documentedMembers].sort()).toContain('unwrap');
   });
 
-  test('every run-handle member an example invokes is shipped or explicitly pending', () => {
+  test('every run-handle member an example invokes is documented or owned', () => {
     const unaccounted = new Set<string>();
-    for (const fence of fences) {
-      for (const member of runHandleCalls(fence)) {
-        // Object.hasOwn, not `in`: `'constructor' in PENDING_IMPLEMENTATION`
-        // and `'toString' in ...` are both true through the prototype chain,
-        // so `run.toString()` would have counted as an owned capability.
+    fences.forEach((fence, index) => {
+      for (const member of runHandleCalls(fence, index)) {
+        // Object.hasOwn, not `in`: `'constructor' in PENDING_IMPLEMENTATION` and
+        // `'toString' in ...` are both true through the prototype chain, so
+        // `run.toString()` would otherwise count as an owned capability.
         if (Object.hasOwn(PENDING_IMPLEMENTATION, member)) continue;
         if (documentedMembers.has(member)) continue;
         unaccounted.add(member);
       }
-    }
+    });
 
     // A failure means an example calls something that neither exists nor has an
     // owner. Either the example is wrong, or the member needs a
@@ -330,31 +242,28 @@ describe('documentation/operative-type-safe-api.md examples', () => {
     expect([...unaccounted].sort()).toEqual([]);
   });
 
-  test('no pending member has quietly been implemented', () => {
+  test('no required capability has quietly been implemented', () => {
     const source = read(agentRunPath);
     const stale = Object.keys(PENDING_IMPLEMENTATION).filter((member) =>
       new RegExp(`^\\s*${member}\\s*[(<]`, 'm').test(source),
     );
 
     // A failure here is good news needing action: the owning issue landed, so
-    // drop the entry and let the member be checked as shipped surface.
+    // drop the entry and let the member be checked as documented surface.
     expect(stale).toEqual([]);
   });
 
-  test('every pending member names the issue that owns it', () => {
+  test('every required capability names the issue that owns it', () => {
     for (const [member, owner] of Object.entries(PENDING_IMPLEMENTATION)) {
       expect(owner, `${member} must name an owning issue`).toMatch(/^AB-\d+$/);
     }
   });
 
-  test('the snapshot notifier is not named subscribe, which already means events', () => {
-    // ActiveRun.subscribe and Bureau.subscribe are event subscriptions. A
-    // snapshot notifier called `subscribe` on a sibling run handle would read as
-    // the same thing and mean something else.
-    // Check the declared surface, not one receiver spelling in the prose. The
-    // earlier assertion searched the Markdown for `run.subscribe(`, so adding
-    // `subscribe()` to the contract would have passed as long as no example
-    // happened to call it on a variable named `run`.
+  test('the state-observation capability is not named subscribe', () => {
+    // ActiveRun.subscribe and Bureau.subscribe are event subscriptions. This
+    // checks the declared surface rather than a receiver spelling in the prose:
+    // an earlier assertion searched for `run.subscribe(`, which would have
+    // passed had the contract declared subscribe() with no example calling it.
     expect([...documentedMembers]).not.toContain('subscribe');
     expect(Object.keys(PENDING_IMPLEMENTATION)).not.toContain('subscribe');
   });
