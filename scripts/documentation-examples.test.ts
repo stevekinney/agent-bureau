@@ -286,6 +286,22 @@ function isRunProducer(node: ts.Node, isReceiver: (receiver: ts.Expression) => b
 }
 
 /**
+ * Every name a binding introduces, including through object and array patterns.
+ *
+ * `{ bureau }`, `[first, ...rest]`, and nested combinations all bind names that
+ * shadow outer ones. A rest element and a defaulted element bind as well.
+ */
+function boundNames(name: ts.BindingName): string[] {
+  if (ts.isIdentifier(name)) return [name.text];
+  const names: string[] = [];
+  for (const element of name.elements) {
+    if (ts.isOmittedExpression(element)) continue;
+    names.push(...boundNames(element.name));
+  }
+  return names;
+}
+
+/**
  * Whether an annotation makes the thing it annotates a run handle.
  *
  * Exactly `AgentRun`, including its generic instantiations. A substring match on
@@ -522,10 +538,15 @@ function runHandleCalls(fence: string, index: number): Set<string> {
       const parameters = (node as ts.SignatureDeclarationBase).parameters;
       if (parameters) {
         for (const parameter of parameters) {
-          if (ts.isIdentifier(parameter.name)) {
-            record(here[here.length - 1] ?? 0, parameter.name.text, {
+          // A binding pattern introduces names as surely as an identifier does.
+          // Recording only the identifier form meant `function inspect({ bureau })`
+          // left `bureau` unbound, so the conventional-receiver fallback claimed
+          // it and rejected the members of whatever its `.run()` returned — a
+          // false failure on correct documentation.
+          for (const bound of boundNames(parameter.name)) {
+            record(here[here.length - 1] ?? 0, bound, {
               pos: parameter.getStart(file),
-              handle: isRunHandleType(parameter.type),
+              handle: ts.isIdentifier(parameter.name) ? isRunHandleType(parameter.type) : false,
               agent: false,
               bureau: false,
             });
@@ -693,6 +714,11 @@ interface ClassificationRow {
   readonly identity: string;
   readonly locator: string;
   readonly owner: string;
+}
+
+/** Every classification cell of a row, so a gate cannot check only some of them. */
+function cellsOf(row: ClassificationRow): string[] {
+  return [row.resource, row.ownership, row.execution, row.durability, row.identity, row.locator];
 }
 
 function classificationRows(markdown: string): ClassificationRow[] {
@@ -865,6 +891,48 @@ describe('documentation/operative-type-safe-api.md fences', () => {
   });
 });
 
+/**
+ * Capability to owning issue, read from the Required capabilities table.
+ *
+ * Restating this map in the harness would let the two disagree, which is the
+ * class of defect the table exists to prevent.
+ */
+function requiredCapabilityOwners(markdown: string): (capability: string) => string {
+  const start = markdown.indexOf('### Required capabilities');
+  if (start < 0) throw new Error('required capabilities section not found');
+  const end = markdown.indexOf('\n### ', start + 1);
+  const section = markdown.slice(start, end < 0 ? markdown.length : end);
+
+  const owners = new Map<string, string>();
+  for (const line of section.split('\n')) {
+    if (!line.startsWith('|') || line.includes(':---')) continue;
+    const cells = line
+      .replace(/\\\|/g, '\u0000')
+      .split('|')
+      .slice(1, -1)
+      .map((cell) => cell.replace(/\u0000/g, '\\|').trim());
+    const capability = cells[0];
+    const owner = cells[cells.length - 1];
+    if (!capability || !owner || !/^AB-\d+$/.test(owner)) continue;
+    owners.set(capability, owner);
+  }
+
+  return (capability: string): string => {
+    const owner = owners.get(capability);
+    if (!owner) throw new Error(`Required capabilities declares no owner for "${capability}"`);
+    return owner;
+  };
+}
+
+/** The issue the unowned-background-work rule assigns to one half of the split. */
+function ruleOwner(markdown: string, half: string): string {
+  const match = new RegExp(`\\*\\*(AB-\\d+) owns ${half}\\*\\*`).exec(markdown);
+  if (!match?.[1]) {
+    throw new Error(`the unowned-background-work rule no longer assigns an owner for "${half}"`);
+  }
+  return match[1];
+}
+
 describe('documentation/operative-type-safe-api.md classification table', () => {
   const rows = classificationRows(document);
 
@@ -917,10 +985,80 @@ describe('documentation/operative-type-safe-api.md classification table', () => 
   });
 
   test('every declared non-conformance names an owning issue', () => {
+    // Every cell, not three of them. A row declaring its non-conformance in the
+    // identity or execution-mode cell was never examined, so a generic owner
+    // like "this amendment" satisfied the check below it and the defect stayed
+    // unassigned — the gate claimed more than it checked.
     const offenders = rows
-      .filter((row) => /non-conformance/i.test(`${row.locator} ${row.ownership} ${row.durability}`))
+      .filter((row) => /non-conformance/i.test(cellsOf(row).join(' ')))
       .filter((row) => !/AB-\d+/.test(row.owner))
       .map((row) => row.resource);
+    expect(offenders).toEqual([]);
+  });
+
+  test('every gap a row records names the issue that owns that capability', () => {
+    // THE DEFECT THIS ENDS. Five rows were corrected by hand across three review
+    // rounds for one thing: the row records a multi-part gap and names a single
+    // owner, so the named issue can close while the rest of the declared
+    // non-conformance stays unowned. Restating the split in prose did not stop
+    // it recurring on the next row, which is what a gate is for.
+    //
+    // Owners are read from the document's own Required capabilities table and
+    // from the unowned-background-work rule, never restated here, so the mapping
+    // cannot drift from the contract.
+    //
+    // KNOWN LIMIT, stated rather than overclaimed: this recognises the table's
+    // established vocabulary for recording an absent capability, listed below in
+    // one place. A row inventing a new phrasing for the same gap is not caught.
+    // That is the cost of gap prose rather than a structured column, and the
+    // vocabulary is centralised so extending it is a one-line change.
+    const capabilityOwners = requiredCapabilityOwners(document);
+    const shutdownOwner = ruleOwner(document, 'the awaitable shutdown');
+    const identityOwner = ruleOwner(document, 'identity and the observation surface');
+
+    const gaps: ReadonlyArray<{ readonly absent: RegExp; readonly owner: string }> = [
+      {
+        absent: /no (cached )?snapshot|required snapshot/i,
+        owner: capabilityOwners('Cached snapshot'),
+      },
+      {
+        absent: /no (state )?observation|no inspection|nothing observes|no caller can inspect/i,
+        owner: capabilityOwners('Non-consuming state observation'),
+      },
+      { absent: /no child discovery/i, owner: capabilityOwners('Child discovery') },
+      {
+        absent: /cleanup acknowledgement|cleanup-acknowledgement|cleanup confirmed/i,
+        owner: capabilityOwners('Cleanup acknowledgement'),
+      },
+      { absent: /no awaitable shutdown|nothing can await or cancel/i, owner: shutdownOwner },
+      { absent: /no identity|no identifier|none of its own/i, owner: identityOwner },
+    ];
+
+    const offenders: string[] = [];
+    for (const row of rows) {
+      // Scoped to rows that declare a non-conformance. A row recording a
+      // limitation it is not calling a breach — an inline operation with
+      // nothing to reattach to — is classified, not owed a capability owner.
+      const text = cellsOf(row).join(' ');
+      if (!/non-conformance/i.test(text)) continue;
+      for (const gap of gaps) {
+        if (!gap.absent.test(text)) continue;
+        if (row.owner.includes(gap.owner)) continue;
+        const complaint = `${row.resource}: records a gap owned by ${gap.owner}, which its owner cell does not name`;
+        if (!offenders.includes(complaint)) offenders.push(complaint);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  test('no row conditions an owner on an open question', () => {
+    // "AB-88 if these writes should become inspectable" reads as ownership and
+    // is not: it defers the decision that assigning an owner is supposed to
+    // settle, and it satisfies every other check on this table. A row either
+    // names the issue that owns the gap or does not record the gap.
+    const offenders = rows
+      .filter((row) => /\bAB-\d+\s+(if|unless|should|might|may|perhaps)\b/i.test(row.owner))
+      .map((row) => `${row.resource}: ${row.owner}`);
     expect(offenders).toEqual([]);
   });
 
