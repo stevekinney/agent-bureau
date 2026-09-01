@@ -460,6 +460,79 @@ describe('live tool-call streaming — OpenAI adapter', () => {
     ]);
   });
 
+  it('defers the start until a later chunk supplies the name and id', async () => {
+    const eventTarget = new TypedEventTarget<StreamEventMap>();
+    const starts: Array<{ toolName: string; blockId: string }> = [];
+    const deltas: Array<{ blockId: string; partialArguments: string }> = [];
+
+    eventTarget.addEventListener('stream:tool-call-start', (event) =>
+      starts.push({ toolName: event.detail.toolName, blockId: event.detail.blockId }),
+    );
+    eventTarget.addEventListener('stream:tool-call-delta', (event) =>
+      deltas.push({
+        blockId: event.detail.blockId,
+        partialArguments: event.detail.partialArguments,
+      }),
+    );
+
+    const client: OpenAIStreamingClient = {
+      chat: {
+        completions: {
+          create(): AsyncIterable<OpenAIChatCompletionChunk> {
+            return (async function* () {
+              // Both `id` and `function.name` are optional on every delta. This
+              // chunk opens index 0 carrying neither, only an argument fragment.
+              yield {
+                choices: [
+                  {
+                    delta: { tool_calls: [{ index: 0, function: { arguments: '{"loc' } }] },
+                    finish_reason: null,
+                  },
+                ],
+                usage: null,
+              };
+              yield {
+                choices: [
+                  {
+                    delta: {
+                      tool_calls: [
+                        {
+                          index: 0,
+                          id: 'call_late',
+                          type: 'function',
+                          function: { name: 'get_weather', arguments: 'ation":"Denver"}' },
+                        },
+                      ],
+                    },
+                    finish_reason: 'tool_calls',
+                  },
+                ],
+                usage: null,
+              };
+            })();
+          },
+        },
+      },
+    };
+
+    const generate = withEnhancedStreaming(
+      createOpenAIProviderStream({ model: 'gpt-4o', client }),
+      { eventTarget, liveToolCalls: true },
+    );
+
+    const response = await generate(makeContext());
+
+    // No event announces an empty tool name; the start waits for the real one
+    // and adopts the late id as its block id.
+    expect(starts).toEqual([{ toolName: 'get_weather', blockId: 'call_late' }]);
+    // The fragment buffered before the start is flushed once the start fires.
+    expect(deltas).toEqual([{ blockId: 'call_late', partialArguments: '{"location":"Denver"}' }]);
+    // The late id and name also reach the resolved response.
+    expect(response.toolCalls).toEqual([
+      { id: 'call_late', name: 'get_weather', arguments: { location: 'Denver' } },
+    ]);
+  });
+
   it('falls back to a synthesized block id when the tool call chunk carries no id', async () => {
     const blockIds: string[] = [];
     const eventTarget = new TypedEventTarget<StreamEventMap>();

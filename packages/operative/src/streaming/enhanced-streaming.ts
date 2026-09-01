@@ -121,27 +121,49 @@ export function withEnhancedStreaming(
       },
     };
 
+    /**
+     * Opens a reported tool-call block and emits its start events.
+     *
+     * Shared by the reported `stream:tool-call-start` and by a delta that
+     * arrives for a block no start was reported for — see `handle.report`.
+     */
+    function startToolCallBlock(blockId: string, toolName: string): void {
+      reportedToolCalls.push({ blockId, toolName });
+
+      stateMachine.process({
+        type: 'block-start',
+        id: blockId,
+        blockType: 'tool-call',
+        toolName,
+      });
+
+      emitEvent(eventTarget, 'stream:block-start', {
+        type: 'stream:block-start',
+        block: { ...findBlock(blockId)! },
+      });
+
+      onToolCallStart?.(toolName);
+
+      emitEvent(eventTarget, 'stream:tool-call-start', {
+        type: 'stream:tool-call-start',
+        toolName,
+        blockId,
+      });
+    }
+
     if (liveToolCalls) {
       handle.report = (event: LiveStreamEvent): void => {
         if (event.type === 'stream:tool-call-start') {
-          reportedToolCalls.push({ blockId: event.blockId, toolName: event.toolName });
-
-          stateMachine.process({
-            type: 'block-start',
-            id: event.blockId,
-            blockType: 'tool-call',
-            toolName: event.toolName,
-          });
-
-          emitEvent(eventTarget, 'stream:block-start', {
-            type: 'stream:block-start',
-            block: { ...findBlock(event.blockId)! },
-          });
-
-          onToolCallStart?.(event.toolName);
-
-          emitEvent(eventTarget, 'stream:tool-call-start', event);
+          startToolCallBlock(event.blockId, event.toolName);
           return;
+        }
+
+        // A delta for a block that never started. The state machine would no-op
+        // and the emitted payload would describe a block that does not exist,
+        // so open it first: `report` is public surface, and a hand-written
+        // `StreamingGenerateFunction` can reach here by reporting out of order.
+        if (!findBlock(event.blockId)) {
+          startToolCallBlock(event.blockId, event.toolName);
         }
 
         // `partialArguments` is cumulative, so diff it against what the state
@@ -214,7 +236,10 @@ export function withEnhancedStreaming(
 
           emitEvent(eventTarget, 'stream:tool-call-complete', {
             type: 'stream:tool-call-complete',
-            toolName: reported.toolName,
+            // The resolved response is authoritative for the name; the reported
+            // one is the fallback for a streaming function that reported a
+            // block the response then left unnamed.
+            toolName: toolCall.name || reported.toolName,
             blockId: reported.blockId,
             arguments: toolCall.arguments,
           });

@@ -215,7 +215,7 @@ export function createOpenAIProviderStream(
       // correlate a start with its deltas before the response closes.
       const pendingToolCalls: Map<
         number,
-        { id?: string; name: string; arguments: string; blockId: string }
+        { id?: string; name: string; arguments: string; blockId: string | undefined }
       > = new Map();
 
       for await (const chunk of stream) {
@@ -240,9 +240,34 @@ export function createOpenAIProviderStream(
                   id: toolCallDelta.id,
                   name: toolCallDelta.function?.name ?? '',
                   arguments: '',
-                  blockId: toolCallDelta.id ?? `tool-${toolCallDelta.index}`,
+                  blockId: undefined,
                 };
                 pendingToolCalls.set(toolCallDelta.index, pending);
+              } else {
+                // `id` and `function.name` are both optional on every delta, so
+                // the chunk that opens an index need not carry them. Take them
+                // from whichever later chunk does rather than leaving the call
+                // permanently unnamed or id-less.
+                if (pending.id === undefined) pending.id = toolCallDelta.id;
+                if (!pending.name && toolCallDelta.function?.name) {
+                  pending.name = toolCallDelta.function.name;
+                }
+              }
+
+              // Append arguments fragment. OpenAI may put the first fragment on
+              // the same chunk that opens the call, so this runs for the
+              // opening chunk too rather than only for continuations.
+              const argumentsFragment = toolCallDelta.function?.arguments;
+              if (argumentsFragment) pending.arguments += argumentsFragment;
+
+              // Hold the live start until the name is actually known — an event
+              // announcing an empty tool name is worse than one that arrives a
+              // chunk later. `blockId` is frozen here so that every subsequent
+              // delta, and the completion synthesized from it, correlate.
+              let justStarted = false;
+              if (pending.blockId === undefined && pending.name) {
+                pending.blockId = pending.id ?? `tool-${toolCallDelta.index}`;
+                justStarted = true;
                 streaming.report?.({
                   type: 'stream:tool-call-start',
                   toolName: pending.name,
@@ -250,17 +275,18 @@ export function createOpenAIProviderStream(
                 });
               }
 
-              // Append arguments fragment. OpenAI may put the first fragment on
-              // the same chunk that opens the call, so this runs for the
-              // opening chunk too rather than only for continuations.
-              if (toolCallDelta.function?.arguments) {
-                pending.arguments += toolCallDelta.function.arguments;
-                streaming.report?.({
-                  type: 'stream:tool-call-delta',
-                  toolName: pending.name,
-                  blockId: pending.blockId,
-                  partialArguments: pending.arguments,
-                });
+              // Emit whenever this chunk carried arguments, and once more at the
+              // moment of a deferred start, to flush fragments that arrived on
+              // chunks before the name did.
+              if (pending.blockId !== undefined && (argumentsFragment || justStarted)) {
+                if (pending.arguments) {
+                  streaming.report?.({
+                    type: 'stream:tool-call-delta',
+                    toolName: pending.name,
+                    blockId: pending.blockId,
+                    partialArguments: pending.arguments,
+                  });
+                }
               }
             }
           }
