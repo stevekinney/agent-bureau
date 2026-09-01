@@ -60,6 +60,18 @@ const PENDING_IMPLEMENTATION: Readonly<Record<string, string>> = {
 };
 
 /**
+ * Which capability of the Required capabilities table each placeholder stands
+ * for, so its owner can be compared against the contract rather than restated.
+ */
+const CAPABILITY_OF_MEMBER: Readonly<Record<string, string>> = {
+  snapshot: 'Cached snapshot',
+  subscribeSnapshot: 'Non-consuming state observation',
+  children: 'Child discovery',
+  abortChild: 'Scoped child cancellation',
+  closed: 'Cleanup acknowledgement',
+};
+
+/**
  * Calls that produce an `AgentRun`, the surface `documentedMembers` describes.
  *
  * Deliberately only `run`. Earlier revisions also listed `createRun`,
@@ -100,6 +112,27 @@ const CONVENTIONAL_RUN_RECEIVER = 'bureau';
  * same mistake that made an earlier revision reject `createAgentEvaluation`.
  */
 const RUN_HANDLE_TYPE = 'AgentRun';
+
+/**
+ * Annotations that make a binding a receiver whose `.run()` yields a handle.
+ *
+ * The mirror of `RUN_HANDLE_TYPE`. A fence that factors a run through
+ * `function fire(office: Bureau)` recorded `office` as neither agent nor
+ * bureau, so a typo on its run's result went unchecked — the same miss typed
+ * `AgentRun` parameters had, one step earlier in the chain.
+ */
+const BUREAU_TYPE = 'Bureau';
+const AGENT_TYPE = 'RunnableAgent';
+
+/**
+ * The packages that provide this contract, by their real published names.
+ *
+ * A name is not a factory on its own. `import { createAgent } from
+ * 'evaluation-kit'` is some other library's function that happens to agree on
+ * a spelling, and treating it as ours rejected the legitimate members of
+ * whatever *it* returns — a false failure on correct documentation.
+ */
+const CONTRACT_MODULES = new Set(['@lostgradient/operative', 'bureau']);
 
 /**
  * Supertypes the contract inherits from without declaring, and the members they
@@ -313,13 +346,11 @@ function boundNames(name: ts.BindingName): string[] {
  * factoring handle use into a typed helper went entirely unchecked, so
  * `function inspect(run: AgentRun) { run.reslut(); }` passed.
  */
-function isRunHandleType(annotation: ts.TypeNode | undefined): boolean {
+function isNamedType(annotation: ts.TypeNode | undefined, name: string): boolean {
   if (annotation === undefined) return false;
   const node = ts.isParenthesizedTypeNode(annotation) ? annotation.type : annotation;
   return (
-    ts.isTypeReferenceNode(node) &&
-    ts.isIdentifier(node.typeName) &&
-    node.typeName.text === RUN_HANDLE_TYPE
+    ts.isTypeReferenceNode(node) && ts.isIdentifier(node.typeName) && node.typeName.text === name
   );
 }
 
@@ -392,15 +423,24 @@ function runHandleCalls(fence: string, index: number): Set<string> {
   const collectImports = (node: ts.Node): void => {
     if (ts.isImportDeclaration(node) && node.importClause) {
       const clause = node.importClause;
-      // A default import is not any of these factories, and recording it as
-      // `default` says so rather than letting its local spelling stand in.
+      // Only a package that actually provides this contract can contribute a
+      // factory. An import from anywhere else binds the name to something the
+      // sets must not claim, so it resolves to nothing they recognise.
+      const specifier = ts.isStringLiteralLike(node.moduleSpecifier)
+        ? node.moduleSpecifier.text
+        : '';
+      const foreign = !CONTRACT_MODULES.has(specifier);
+      // A default import is not any of these factories either, and recording it
+      // as `default` says so rather than letting its local spelling stand in.
       if (clause.name) importedAs.set(clause.name.text, 'default');
       if (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings)) {
-        namespaceImports.add(clause.namedBindings.name.text);
+        if (!foreign) namespaceImports.add(clause.namedBindings.name.text);
+        else importedAs.set(clause.namedBindings.name.text, 'foreign');
       }
       if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
         for (const element of clause.namedBindings.elements) {
-          importedAs.set(element.name.text, (element.propertyName ?? element.name).text);
+          const imported = (element.propertyName ?? element.name).text;
+          importedAs.set(element.name.text, foreign ? 'foreign' : imported);
         }
       }
     }
@@ -543,12 +583,13 @@ function runHandleCalls(fence: string, index: number): Set<string> {
           // left `bureau` unbound, so the conventional-receiver fallback claimed
           // it and rejected the members of whatever its `.run()` returned — a
           // false failure on correct documentation.
+          const named = ts.isIdentifier(parameter.name);
           for (const bound of boundNames(parameter.name)) {
             record(here[here.length - 1] ?? 0, bound, {
               pos: parameter.getStart(file),
-              handle: ts.isIdentifier(parameter.name) ? isRunHandleType(parameter.type) : false,
-              agent: false,
-              bureau: false,
+              handle: named && isNamedType(parameter.type, RUN_HANDLE_TYPE),
+              agent: named && isNamedType(parameter.type, AGENT_TYPE),
+              bureau: named && isNamedType(parameter.type, BUREAU_TYPE),
             });
           }
         }
@@ -599,7 +640,12 @@ function runHandleCalls(fence: string, index: number): Set<string> {
     ) {
       for (const element of node.name.elements) {
         const property = element.propertyName ?? element.name;
-        if (ts.isIdentifier(property)) destructured.add(property.text);
+        // `const { 'reslut': value } = bureau.run(...)` names the member with a
+        // string literal, exactly as `run['reslut']()` does. The element-access
+        // collector already handled that spelling; this one did not.
+        if (ts.isIdentifier(property) || ts.isStringLiteralLike(property)) {
+          destructured.add(property.text);
+        }
       }
     }
 
@@ -835,9 +881,20 @@ describe('documentation/operative-type-safe-api.md examples', () => {
     expect(stale).toEqual([]);
   });
 
-  test('every required capability names the issue that owns it', () => {
+  test('every required capability names the issue the contract assigns it', () => {
+    // Checking the identifier's *shape* let the harness and the contract
+    // disagree about substance: reassigning `snapshot` to AB-99 stayed green
+    // while the Required capabilities table still said AB-88. The owner is now
+    // compared against the table row this capability corresponds to, so the two
+    // cannot drift apart silently.
+    const owners = requiredCapabilityOwners(document);
     for (const [member, owner] of Object.entries(PENDING_IMPLEMENTATION)) {
       expect(owner, `${member} must name an owning issue`).toMatch(/^AB-\d+$/);
+      const capability = CAPABILITY_OF_MEMBER[member];
+      expect(capability, `${member} must correspond to a declared capability`).toBeDefined();
+      expect(owner, `${member} must be owned by whoever owns "${capability}"`).toBe(
+        owners(capability ?? ''),
+      );
     }
   });
 
@@ -922,6 +979,28 @@ function requiredCapabilityOwners(markdown: string): (capability: string) => str
     if (!owner) throw new Error(`Required capabilities declares no owner for "${capability}"`);
     return owner;
   };
+}
+
+/** Every capability the Required capabilities table declares, in its own words. */
+function requiredCapabilityNames(markdown: string): string[] {
+  const start = markdown.indexOf('### Required capabilities');
+  if (start < 0) throw new Error('required capabilities section not found');
+  const end = markdown.indexOf('\n### ', start + 1);
+  const section = markdown.slice(start, end < 0 ? markdown.length : end);
+
+  const names: string[] = [];
+  for (const line of section.split('\n')) {
+    if (!line.startsWith('|') || line.includes(':---')) continue;
+    const cells = line
+      .split('|')
+      .slice(1, -1)
+      .map((cell) => cell.trim());
+    const capability = cells[0];
+    const owner = cells[cells.length - 1];
+    if (!capability || !owner || !/^AB-\d+$/.test(owner)) continue;
+    names.push(capability);
+  }
+  return names;
 }
 
 /** The issue the unowned-background-work rule assigns to one half of the split. */
@@ -1049,6 +1128,60 @@ describe('documentation/operative-type-safe-api.md classification table', () => 
       }
     }
     expect(offenders).toEqual([]);
+  });
+
+  test('a row whose locator is a live handle accounts for every required capability', () => {
+    // A live handle for independently owned work owes the whole capability set,
+    // so a row documenting one must say where each capability stands. Review
+    // found these one at a time — the diagnostic handle, then the flagship
+    // `AgentRun` — which is the shape of a missing gate, not a missing sentence.
+    //
+    // Scoped to handle-bearing rows deliberately, and the scope was measured
+    // rather than guessed. Requiring every independently owned row to recite all
+    // five would have flagged twelve of twelve, most of them vacuously: a
+    // heartbeat loop has no children to discover, and a gate that forces
+    // boilerplate teaches people to write boilerplate.
+    const mentions: ReadonlyArray<readonly [string, RegExp]> = [
+      ['Cached snapshot', /snapshot/i],
+      ['Non-consuming state observation', /observ|inspect/i],
+      ['Child discovery', /child discovery|children/i],
+      ['Scoped child cancellation', /scoped child cancellation|abortChild/i],
+      ['Cleanup acknowledgement', /cleanup/i],
+    ];
+
+    // Adding a capability to the contract without teaching this gate to
+    // recognise it would silently narrow what the gate checks.
+    expect([...mentions.map(([name]) => name)].sort()).toEqual(
+      requiredCapabilityNames(document).sort(),
+    );
+
+    const offenders: string[] = [];
+    for (const row of rows) {
+      const text = cellsOf(row).join(' ');
+      if (!/non-conformance/i.test(text)) continue;
+      if (!/independently owned/i.test(row.ownership)) continue;
+      if (!/Live `|\bhandle\b/i.test(row.locator)) continue;
+      for (const [capability, mentioned] of mentions) {
+        if (mentioned.test(text)) continue;
+        offenders.push(`${row.resource}: says nothing about "${capability}"`);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  test('no resource is classified twice', () => {
+    // The section promises every resource is "classified once". Two rows for one
+    // resource are validated independently, so contradictory ownership,
+    // durability, or owners would all pass while the contract said two things.
+    const seen = new Set<string>();
+    const duplicated = rows
+      .map((row) => row.resource)
+      .filter((resource) => {
+        if (seen.has(resource)) return true;
+        seen.add(resource);
+        return false;
+      });
+    expect(duplicated).toEqual([]);
   });
 
   test('no row conditions an owner on an open question', () => {
