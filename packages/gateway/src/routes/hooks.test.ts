@@ -6,6 +6,7 @@ import {
   createGatewayAuthorityTestApiKey,
   createTestGateway,
   expectedPersistedApiKeyAuthority,
+  gatewayAuthorityTestScopes,
   requestJSON,
   waitForRunState,
 } from '../test';
@@ -61,6 +62,9 @@ describe('webhook ingress routes (POST /hooks/*)', () => {
       body: JSON.stringify({ message: 'Hello' }),
     });
     expect(response.status).toBe(503);
+    const body = await response.json();
+    expect(body.error.code).toBe('SERVICE_UNAVAILABLE');
+    expect(body.error.requestId).toBeString();
   });
 
   it('dispatches the run and returns 202 with agent name from query', async () => {
@@ -112,7 +116,7 @@ describe('webhook ingress routes (POST /hooks/*)', () => {
     expect(body.sessionId).toBe('my-session');
   });
 
-  it('rejects duplicate Idempotency-Key with 409', async () => {
+  it('returns the original receipt for an identical Idempotency-Key retry', async () => {
     const gateway = await createTestGateway({ generate: createMockGenerate() });
 
     const first = await requestJSON(gateway, '/hooks/event?agent=bureau', {
@@ -125,9 +129,50 @@ describe('webhook ingress routes (POST /hooks/*)', () => {
     const second = await requestJSON(gateway, '/hooks/event?agent=bureau', {
       method: 'POST',
       headers: { 'Idempotency-Key': 'unique-key-1' },
-      body: JSON.stringify({ message: 'Duplicate.' }),
+      body: JSON.stringify({ message: 'First request.' }),
     });
-    expect(second.status).toBe(409);
+    expect(second.status).toBe(202);
+    expect(await second.json()).toEqual(await first.json());
+  });
+
+  it('returns a typed conflict when an Idempotency-Key is reused for another request', async () => {
+    const gateway = await createTestGateway({ generate: createMockGenerate() });
+
+    const first = await requestJSON(gateway, '/hooks/event?agent=bureau', {
+      method: 'POST',
+      headers: { 'Idempotency-Key': 'conflicting-key' },
+      body: JSON.stringify({ message: 'First request.' }),
+    });
+    expect(first.status).toBe(202);
+
+    const conflict = await requestJSON(gateway, '/hooks/event?agent=bureau', {
+      method: 'POST',
+      headers: { 'Idempotency-Key': 'conflicting-key' },
+      body: JSON.stringify({ message: 'Different request.' }),
+    });
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toEqual({
+      error: {
+        code: 'IDEMPOTENCY_CONFLICT',
+        message: 'Idempotency key "conflicting-key" was reused with a different canonical request.',
+      },
+    });
+  });
+
+  it('returns the original failure receipt for an identical retry', async () => {
+    const gateway = await createTestGateway();
+    const request = {
+      method: 'POST',
+      headers: { 'Idempotency-Key': 'failed-key' },
+      body: JSON.stringify({ message: 'Cannot run.' }),
+    };
+
+    const first = await requestJSON(gateway, '/hooks/event?agent=bureau', request);
+    const second = await requestJSON(gateway, '/hooks/event?agent=bureau', request);
+
+    expect(first.status).toBe(503);
+    expect(second.status).toBe(503);
+    expect(await second.json()).toEqual(await first.json());
   });
 
   it('allows same agent with different Idempotency-Keys', async () => {
@@ -146,6 +191,46 @@ describe('webhook ingress routes (POST /hooks/*)', () => {
       body: JSON.stringify({ message: 'Second.' }),
     });
     expect(second.status).toBe(202);
+  });
+
+  it('scopes the same Idempotency-Key to the authenticated principal', async () => {
+    const gateway = await createTestGateway({
+      generate: createMockGenerate(),
+      storage: { type: 'memory' },
+    });
+    const firstPrincipal = await createGatewayAuthorityTestApiKey(gateway, {
+      name: 'first-principal',
+      scopes: [...gatewayAuthorityTestScopes],
+    });
+    const secondPrincipal = await createGatewayAuthorityTestApiKey(gateway, {
+      name: 'second-principal',
+      scopes: [...gatewayAuthorityTestScopes],
+    });
+    const request = (authorization: string) => ({
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${authorization}`,
+        'Idempotency-Key': 'shared-principal-key',
+      },
+      body: JSON.stringify({ message: 'Same request.' }),
+    });
+
+    const first = await requestJSON(
+      gateway,
+      '/hooks/event?agent=bureau',
+      request(firstPrincipal.plaintext),
+    );
+    const second = await requestJSON(
+      gateway,
+      '/hooks/event?agent=bureau',
+      request(secondPrincipal.plaintext),
+    );
+
+    expect(first.status).toBe(202);
+    expect(second.status).toBe(202);
+    const firstReceipt = await first.json();
+    const secondReceipt = await second.json();
+    expect(firstReceipt.id).not.toBe(secondReceipt.id);
   });
 
   it('does not consume the Idempotency-Key when the body is invalid JSON', async () => {
@@ -206,12 +291,7 @@ describe('webhook ingress routes (POST /hooks/*)', () => {
     expect(pathB.status).toBe(202);
   });
 
-  it('rejects one of two concurrent requests with the same Idempotency-Key (TOCTOU fix)', async () => {
-    // Both requests are dispatched concurrently via Promise.all. Without the fix,
-    // both pass idempotencyKeys.has() before either reaches idempotencyKeys.add()
-    // (the await on json() yields the event loop between check and add). With the
-    // fix, the key is reserved synchronously before the first await, so exactly
-    // one request wins and the other gets 409.
+  it('shares one receipt between concurrent identical Idempotency-Key requests', async () => {
     const gateway = await createTestGateway({ generate: createMockGenerate() });
     const key = 'concurrent-key';
 
@@ -219,17 +299,17 @@ describe('webhook ingress routes (POST /hooks/*)', () => {
       requestJSON(gateway, '/hooks/event?agent=bureau', {
         method: 'POST',
         headers: { 'Idempotency-Key': key },
-        body: JSON.stringify({ message: 'Concurrent request A.' }),
+        body: JSON.stringify({ message: 'Concurrent request.' }),
       }),
       requestJSON(gateway, '/hooks/event?agent=bureau', {
         method: 'POST',
         headers: { 'Idempotency-Key': key },
-        body: JSON.stringify({ message: 'Concurrent request B.' }),
+        body: JSON.stringify({ message: 'Concurrent request.' }),
       }),
     ]);
 
-    const statuses = [first.status, second.status].sort();
-    // Exactly one should succeed (202) and one should be rejected (409).
-    expect(statuses).toEqual([202, 409]);
+    expect(first.status).toBe(202);
+    expect(second.status).toBe(202);
+    expect(await second.json()).toEqual(await first.json());
   });
 });

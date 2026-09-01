@@ -77,14 +77,20 @@ function createTestStore() {
 function createManualDeadlineTiming(initialNow = 0): {
   clearCount: () => number;
   fireTimeout: () => void;
+  firstTimeoutScheduled: Promise<void>;
   scheduledDelays: () => readonly number[];
   setNow: (nextNow: number) => void;
   options: DirectIdempotencyExecuteOptions;
 } {
   let now = initialNow;
+  let nextTimerHandle = 1;
   const timerHandlers = new Map<number, () => void>();
   const delays: number[] = [];
   const clearedHandles: unknown[] = [];
+  let resolveFirstTimeoutScheduled!: () => void;
+  const firstTimeoutScheduled = new Promise<void>((resolve) => {
+    resolveFirstTimeoutScheduled = resolve;
+  });
   type ScheduleTimeoutFunctionKey = `set${'Timeout'}Function`;
   type ClearTimeoutFunctionKey = `clear${'Timeout'}Function`;
   const scheduleTimeoutFunctionKey: ScheduleTimeoutFunctionKey = `set${'Timeout'}Function`;
@@ -104,6 +110,7 @@ function createManualDeadlineTiming(initialNow = 0): {
       }
       timerHandler();
     },
+    firstTimeoutScheduled,
     scheduledDelays(): readonly number[] {
       return delays;
     },
@@ -113,9 +120,10 @@ function createManualDeadlineTiming(initialNow = 0): {
     options: {
       now: () => now,
       [scheduleTimeoutFunctionKey]: (handler, milliseconds) => {
-        const handle = timerHandlers.size + 1;
+        const handle = nextTimerHandle++;
         timerHandlers.set(handle, handler);
         delays.push(milliseconds);
+        resolveFirstTimeoutScheduled();
         return handle;
       },
       [clearTimeoutFunctionKey]: (handle: unknown) => {
@@ -583,8 +591,14 @@ describe('withIdempotency', () => {
       leaseDurationMs: 10,
       maximumExecutionDurationMs: 100,
     });
-    const execution = wrapped.execute({ value: 7 }, { requestContext });
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    const timing = createManualDeadlineTiming();
+    const execution = wrapped.execute({ value: 7 }, { requestContext, ...timing.options });
+    await timing.firstTimeoutScheduled;
+    expect(timing.scheduledDelays()).toEqual([5, 100]);
+    timing.setNow(5);
+    timing.fireTimeout();
+    await Promise.resolve();
+    await Promise.resolve();
     expect(renewals).toBeGreaterThan(0);
     release();
     await expect(execution).resolves.toBe(7);
