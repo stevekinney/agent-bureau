@@ -71,8 +71,24 @@ const PENDING_IMPLEMENTATION: Readonly<Record<string, string>> = {
  * valid code is worse than one with a narrower scope, so the scope is narrow and
  * stated. Extending it means pairing each producer with its own surface.
  */
-const RUN_PRODUCER_RECEIVER = 'bureau';
 const RUN_PRODUCER_METHOD = 'run';
+
+/**
+ * Receivers whose `.run(...)` yields an `AgentRun`.
+ *
+ * Matching by method name alone treated `createAgentEvaluation(...).run()`,
+ * which returns a `Promise<EvaluationReport>`, as a run handle and rejected
+ * `then` as undocumented. Restricting to `bureau` alone then went too far the
+ * other way and hid the contract's own standalone path, where a `RunnableAgent`
+ * returned by `createAgent` is the receiver.
+ *
+ * So receivers are resolved from the fence: `bureau` by convention, plus any
+ * binding initialised from `createAgent`/`createLazyAgent`. Both are named
+ * because both produce the surface this contract describes, and neither
+ * silently admits an unrelated `.run()`.
+ */
+const AGENT_FACTORIES = new Set(['createAgent', 'createLazyAgent']);
+const CONVENTIONAL_RUN_RECEIVER = 'bureau';
 
 function read(path: string): string {
   return readFileSync(path, 'utf-8');
@@ -134,13 +150,34 @@ function membersOfBlock(source: string, start: number): Set<string> {
 }
 
 /** True when a call expression produces a run handle. */
-function isRunProducer(node: ts.Node): boolean {
+function isRunProducer(node: ts.Node, agents: ReadonlySet<string>): boolean {
   if (!ts.isCallExpression(node)) return false;
   const callee = unwrap(node.expression);
   if (!ts.isPropertyAccessExpression(callee)) return false;
   if (callee.name.text !== RUN_PRODUCER_METHOD) return false;
   const receiver = unwrap(callee.expression);
-  return ts.isIdentifier(receiver) && receiver.text === RUN_PRODUCER_RECEIVER;
+  if (!ts.isIdentifier(receiver)) return false;
+  return receiver.text === CONVENTIONAL_RUN_RECEIVER || agents.has(receiver.text);
+}
+
+/** Bindings initialised from an agent factory, whose `.run()` yields a handle. */
+function agentBindings(file: ts.SourceFile): Set<string> {
+  const agents = new Set<string>();
+  const visit = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
+      const initializer = unwrap(node.initializer);
+      if (
+        ts.isCallExpression(initializer) &&
+        ts.isIdentifier(initializer.expression) &&
+        AGENT_FACTORIES.has(initializer.expression.text)
+      ) {
+        agents.add(node.name.text);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  return agents;
 }
 
 /** Unwraps `await x` and `(x)` down to the expression underneath. */
@@ -194,6 +231,8 @@ function runHandleCalls(fence: string, index: number): Set<string> {
     ts.isForInStatement(node) ||
     ts.isCaseBlock(node);
 
+  const agents = agentBindings(file);
+
   // scopeId -> binding name -> holds a run handle
   const bindings = new Map<number, Map<string, boolean>>();
   bindings.set(0, new Map());
@@ -209,7 +248,7 @@ function runHandleCalls(fence: string, index: number): Set<string> {
 
   const producesHandle = (expression: ts.Expression, chain: number[]): boolean => {
     const value = unwrap(expression);
-    if (isRunProducer(value)) return true;
+    if (isRunProducer(value, agents)) return true;
     return ts.isIdentifier(value) && lookup(chain, value.text) === true;
   };
 
@@ -283,7 +322,7 @@ function runHandleCalls(fence: string, index: number): Set<string> {
 
   const onRunHandle = (receiver: ts.Expression, chain: number[]): boolean => {
     const target = unwrap(receiver);
-    if (isRunProducer(target)) return true;
+    if (isRunProducer(target, agents)) return true;
     return ts.isIdentifier(target) && lookup(chain, target.text) === true;
   };
 
