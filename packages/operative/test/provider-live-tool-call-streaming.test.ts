@@ -26,6 +26,8 @@ import { z } from 'zod';
 
 import { createAnthropicProviderStream } from '../src/providers/anthropic.ts';
 import { createOpenAIProviderStream } from '../src/providers/openai.ts';
+import { anthropicStreamMultiToolEvents } from '../src/providers/test/fixtures.ts';
+import { createMockAnthropicStreamingClient } from '../src/providers/test/mock-clients.ts';
 import type {
   AnthropicStreamEvent,
   AnthropicStreamingClient,
@@ -241,6 +243,37 @@ describe('live tool-call streaming — Anthropic adapter', () => {
     await generate(makeContext());
 
     expect(blockIds).toEqual(['block-3']);
+  });
+
+  it('keeps each tool call on its own block id across two calls in one response', async () => {
+    const eventTarget = new TypedEventTarget<StreamEventMap>();
+    const completions: Array<{ blockId: string; arguments: unknown }> = [];
+    const starts: string[] = [];
+
+    eventTarget.addEventListener('stream:tool-call-start', (event) =>
+      starts.push(event.detail.blockId),
+    );
+    eventTarget.addEventListener('stream:tool-call-complete', (event) =>
+      completions.push({ blockId: event.detail.blockId, arguments: event.detail.arguments }),
+    );
+
+    const client = createMockAnthropicStreamingClient([anthropicStreamMultiToolEvents]);
+
+    const generate = withEnhancedStreaming(
+      createAnthropicProviderStream({ model: 'claude-sonnet-5', client }),
+      { eventTarget, liveToolCalls: true },
+    );
+
+    await generate(makeContext());
+
+    // The completion is synthesized after the response resolves and paired
+    // with the reported block by arrival order. Mispairing would hand one
+    // call's arguments to the other's block id — the failure this pins down.
+    expect(starts).toEqual(['toolu_multi_01', 'toolu_multi_02']);
+    expect(completions).toEqual([
+      { blockId: 'toolu_multi_01', arguments: { location: 'Paris' } },
+      { blockId: 'toolu_multi_02', arguments: { location: 'London' } },
+    ]);
   });
 
   it('emits no completion events when the caller aborts after live events fired', async () => {

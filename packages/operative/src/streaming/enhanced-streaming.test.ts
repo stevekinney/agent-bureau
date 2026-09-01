@@ -512,4 +512,60 @@ describe('withEnhancedStreaming live tool calls', () => {
     expect(events.filter((event) => event.type === 'stream:tool-call-start')).toHaveLength(1);
     expect(events.some((event) => event.type === 'stream:tool-call-complete')).toBe(false);
   });
+
+  it('pairs each synthesized completion with the tool call at its own ordinal', async () => {
+    const eventTarget = new TypedEventTarget<StreamEventMap>();
+    const events = recordEvents(eventTarget);
+
+    const streamingGenerate: StreamingGenerateFunction = async ({ streaming }) => {
+      for (const [blockId, toolName, args] of [
+        ['toolu_01', 'get_weather', '{"location":"Denver"}'],
+        ['toolu_02', 'get_time', '{"zone":"MST"}'],
+      ] as const) {
+        streaming.report?.({ type: 'stream:tool-call-start', toolName, blockId });
+        streaming.report?.({
+          type: 'stream:tool-call-delta',
+          toolName,
+          blockId,
+          partialArguments: args,
+        });
+      }
+
+      return {
+        content: '',
+        toolCalls: [
+          { id: 'toolu_01', name: 'get_weather', arguments: { location: 'Denver' } },
+          { id: 'toolu_02', name: 'get_time', arguments: { zone: 'MST' } },
+        ],
+      };
+    };
+
+    await withEnhancedStreaming(streamingGenerate, { eventTarget, liveToolCalls: true })(
+      makeContext(),
+    );
+
+    // Arguments only become known after the response resolves, so each
+    // completion is matched to its reported block by arrival order. Getting
+    // that pairing wrong would hand one tool's arguments to another's blockId.
+    expect(
+      eventsOfType(events, 'stream:tool-call-complete').map((event) => ({
+        blockId: event.blockId,
+        toolName: event.toolName,
+        arguments: event.arguments,
+      })),
+    ).toEqual([
+      { blockId: 'toolu_01', toolName: 'get_weather', arguments: { location: 'Denver' } },
+      { blockId: 'toolu_02', toolName: 'get_time', arguments: { zone: 'MST' } },
+    ]);
+
+    expect(
+      eventsOfType(events, 'stream:tool-call-delta').map((event) => [
+        event.blockId,
+        event.partialArguments,
+      ]),
+    ).toEqual([
+      ['toolu_01', '{"location":"Denver"}'],
+      ['toolu_02', '{"zone":"MST"}'],
+    ]);
+  });
 });
