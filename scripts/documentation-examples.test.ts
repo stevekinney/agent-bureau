@@ -59,8 +59,19 @@ const PENDING_IMPLEMENTATION: Readonly<Record<string, string>> = {
   closed: 'AB-37',
 };
 
-/** Calls that produce a run handle. */
-const RUN_PRODUCERS = new Set(['run', 'createRun', 'createActiveRun', 'getRun']);
+/**
+ * Calls that produce an `AgentRun`, the surface `documentedMembers` describes.
+ *
+ * Deliberately only `run`. Earlier revisions also listed `createRun`,
+ * `createActiveRun`, and `getRun`, which return `ActiveRun` and `RunSummary` —
+ * different types with different members. Treating their results as `AgentRun`
+ * would reject a legitimate example: `createActiveRun(...).subscribe(...)` is
+ * correct on an `ActiveRun`, whose event subscription is exactly the member this
+ * contract forbids naming `subscribe` on a run handle. A checker that fails
+ * valid code is worse than one with a narrower scope, so the scope is narrow and
+ * stated. Extending it means pairing each producer with its own surface.
+ */
+const RUN_PRODUCERS = new Set(['run']);
 
 function read(path: string): string {
   return readFileSync(path, 'utf-8');
