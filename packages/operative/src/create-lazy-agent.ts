@@ -752,12 +752,21 @@ type LazyAgentState<O, H extends boolean> =
 
 /**
  * Deep-freezes a caller-supplied `AgentGenerationProfile` before it is
- * exposed on the returned agent. `generationProfile` is documented as an
- * immutable snapshot; unlike `createAgent` (which builds the object itself
- * from scratch), `createLazyAgent` receives it ready-made from the caller,
- * so freezing here — in place, preserving reference identity for
- * `readGenerationProfile` — is what actually closes the mutation vector for
- * a caller who built the profile by hand rather than through `createAgent`.
+ * exposed on the returned agent, and forces `selector: 'unavailable'`
+ * regardless of what the caller's profile claims. `generationProfile` is
+ * documented as an immutable snapshot; unlike `createAgent` (which builds
+ * the object itself from scratch), `createLazyAgent` receives it ready-made
+ * from the caller, so freezing the nested collections here — in place,
+ * their references shared with (never copied from) the caller's own objects
+ * — is what actually closes the mutation vector for a caller who built the
+ * profile by hand rather than through `createAgent`. The top-level object
+ * IS a fresh shallow copy (never the caller's own object): AB-64's
+ * verification walk fixes `selector: 'unavailable'` permanently for a
+ * standalone or lazy agent, which has no Bureau, no policy, and no catalog
+ * to select through, so a caller-supplied `'available'` must never survive
+ * unchanged — reusing the caller's object in place would make forcing this
+ * one field impossible without also being able to mutate a field the
+ * `Object.freeze` below has already locked.
  */
 function freezeGenerationProfile(profile: AgentGenerationProfile): AgentGenerationProfile {
   if (profile.preferences) {
@@ -777,7 +786,7 @@ function freezeGenerationProfile(profile: AgentGenerationProfile): AgentGenerati
     Object.freeze(profile.allowedCandidates);
   }
   Object.freeze(profile.descriptors);
-  return Object.freeze(profile);
+  return Object.freeze({ ...profile, selector: 'unavailable' });
 }
 
 /**

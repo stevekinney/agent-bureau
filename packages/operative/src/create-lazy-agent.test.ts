@@ -1361,7 +1361,10 @@ describe('createLazyAgent — generationProfile (AB-64 AC2, AB-245)', () => {
       { generationProfile: profile },
     );
 
-    expect(readGenerationProfile(lazy)).toBe(profile);
+    expect(readGenerationProfile(lazy)).toEqual(profile);
+    // Reads the identical object by reference across two consecutive calls
+    // — the profile is computed and frozen once, not rebuilt per read.
+    expect(readGenerationProfile(lazy)).toBe(readGenerationProfile(lazy));
   });
 
   it('reports its name alongside the generationProfile without either forcing a load', () => {
@@ -1383,7 +1386,7 @@ describe('createLazyAgent — generationProfile (AB-64 AC2, AB-245)', () => {
     );
 
     expect(lazy.name).toBe('catalog-agent');
-    expect(readGenerationProfile(lazy)).toBe(profile);
+    expect(readGenerationProfile(lazy)).toEqual(profile);
     expect(loaderCalls).toBe(0);
   });
 
@@ -1442,5 +1445,28 @@ describe('createLazyAgent — generationProfile (AB-64 AC2, AB-245)', () => {
     expect(exposed.allowedCandidates).toEqual([
       { provider: 'anthropic', model: 'claude-opus-4-6' },
     ]);
+  });
+
+  it('forces selector: unavailable even when the caller-supplied profile claims available (review)', () => {
+    // AB-64's verification walk: a createLazyAgent agent has no Bureau, no
+    // policy, and no catalog, so it can never select — this must not
+    // survive a caller's mistaken (or malicious) claim otherwise.
+    const claimedAvailable: AgentGenerationProfile = {
+      mode: 'selectable',
+      revision: 1,
+      projection: 'privileged',
+      descriptors: [],
+      freshness: '2026-09-02T12:00:00.000Z',
+      selector: 'available',
+    };
+
+    const lazy = createLazyAgent(
+      () => {
+        throw new Error('the loader must not run for a capability read');
+      },
+      { generationProfile: claimedAvailable },
+    );
+
+    expect(readGenerationProfile(lazy).selector).toBe('unavailable');
   });
 });

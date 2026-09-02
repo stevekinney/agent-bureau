@@ -18,22 +18,29 @@ function tripleKey(descriptor: BackendDescriptor): string {
  * descriptor instances for the identical triple (e.g. one built at a
  * different moment, so only `freshness` differs; or one OpenAI route
  * constructed with a proxying `baseURL` and one without, so
- * `endpointAmbiguous` and every derived capability flag differ). `freshness`
- * is excluded from the comparison entirely — it carries no capability
- * information and would otherwise make the winner depend on construction
- * timing. An `endpointAmbiguous` descriptor sorts first: reporting the more
+ * `endpointAmbiguous` and every derived capability flag differ). An
+ * `endpointAmbiguous` descriptor sorts first: reporting the more
  * conservative (capability-flags-false) reading is safer than reporting the
- * official endpoint's capabilities for what might be a proxy.
+ * official endpoint's capabilities for what might be a proxy. When every
+ * OTHER field is identical and only `freshness` differs, `freshness` itself
+ * (lexicographically — both are ISO 8601 UTC timestamps, so this is also
+ * chronological) becomes the final tiebreak, rather than defaulting to
+ * "whichever was inserted first": comparing content with freshness excluded
+ * and then falling through to "keep the existing entry" on a tie would make
+ * the winner depend on route array order in exactly the one case (identical
+ * content, different construction time) this function exists to make
+ * order-independent.
  */
 function conservativeOrder(a: BackendDescriptor, b: BackendDescriptor): number {
   const aAmbiguous = a.endpointAmbiguous === true;
   const bAmbiguous = b.endpointAmbiguous === true;
   if (aAmbiguous !== bAmbiguous) return aAmbiguous ? -1 : 1;
-  const { freshness: _aFreshness, ...aRest } = a;
-  const { freshness: _bFreshness, ...bRest } = b;
+  const { freshness: aFreshness, ...aRest } = a;
+  const { freshness: bFreshness, ...bRest } = b;
   const aSerialized = JSON.stringify(aRest);
   const bSerialized = JSON.stringify(bRest);
-  return aSerialized < bSerialized ? -1 : aSerialized > bSerialized ? 1 : 0;
+  if (aSerialized !== bSerialized) return aSerialized < bSerialized ? -1 : 1;
+  return aFreshness < bFreshness ? -1 : aFreshness > bFreshness ? 1 : 0;
 }
 
 /**
@@ -45,10 +52,19 @@ function conservativeOrder(a: BackendDescriptor, b: BackendDescriptor): number {
  * routes' descriptors sharing the same triple but disagreeing on content) is
  * resolved by `conservativeOrder`, not by insertion order, so the result is
  * identical no matter which route happened to be declared first.
+ *
+ * Takes the caller's already-deduplicated `routeMap` (last-write-wins by
+ * name, matching `createRoutingGenerate`'s own dispatch), not the raw
+ * `routes` array: two routes sharing a name are never both reachable —
+ * `routeMap.get(name)` only ever returns the last one — so a shadowed
+ * earlier route's descriptors must not appear in the union either. Unioning
+ * over the raw array would advertise a backend dispatch can never select.
  */
-function unionDescriptors(routes: RoutingOptions['routes']): readonly BackendDescriptor[] {
+function unionDescriptors(
+  routeMap: ReadonlyMap<string, RoutingOptions['routes'][number]>,
+): readonly BackendDescriptor[] {
   const byKey = new Map<string, BackendDescriptor>();
-  for (const route of routes) {
+  for (const route of routeMap.values()) {
     for (const descriptor of readBackendDescriptors(route.generate)) {
       const key = tripleKey(descriptor);
       const existing = byKey.get(key);
@@ -139,7 +155,9 @@ export function createRoutingGenerate(options: RoutingOptions): GenerateFunction
     return selectedRoute.generate(context);
   };
 
-  // AB-64 AC2/AB-245: the union of every route's attached descriptors,
-  // deduplicated and lexicographically ordered — see `unionDescriptors`.
-  return withBackendDescriptors(generate, unionDescriptors(routes));
+  // AB-64 AC2/AB-245: the union of every REACHABLE route's attached
+  // descriptors, deduplicated and lexicographically ordered — see
+  // `unionDescriptors`. `routeMap`, not `routes`, so a shadowed
+  // duplicate-name route contributes nothing.
+  return withBackendDescriptors(generate, unionDescriptors(routeMap));
 }

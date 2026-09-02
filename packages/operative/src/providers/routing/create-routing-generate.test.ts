@@ -393,4 +393,64 @@ describe('createRoutingGenerate — descriptor union (AB-64 AC2, AB-245)', () =>
     expect(officialFirstDescriptors).toHaveLength(1);
     expect(officialFirstDescriptors[0]?.endpointAmbiguous).toBe(true);
   });
+
+  it('breaks a freshness-only tie deterministically, independent of route order (review)', () => {
+    // Two descriptors for the identical triple, identical in every field
+    // EXCEPT freshness — the case content-comparison alone (with freshness
+    // excluded) cannot distinguish, so it must not silently fall back to
+    // "whichever route was declared first".
+    const earlier = createModelCatalog({ now: () => '2026-01-01T00:00:00.000Z' }).descriptors.find(
+      (d) => d.provider === 'anthropic',
+    );
+    if (!earlier) throw new Error('expected at least one anthropic seed descriptor');
+    const later = createModelCatalog({ now: () => '2026-06-01T00:00:00.000Z' }).descriptors.find(
+      (d) => d.provider === 'anthropic' && d.model === earlier.model,
+    );
+    if (!later) throw new Error('expected a matching later-freshness anthropic descriptor');
+    expect(later.freshness).not.toBe(earlier.freshness);
+
+    const earlierFirst = createRoutingGenerate({
+      routes: [
+        routeWithDescriptors('a', 'a-response', [earlier]),
+        routeWithDescriptors('b', 'b-response', [later]),
+      ],
+      strategy: () => ({ route: 'a', reason: 'test' }),
+      fallback: 'a',
+    });
+    const laterFirst = createRoutingGenerate({
+      routes: [
+        routeWithDescriptors('b', 'b-response', [later]),
+        routeWithDescriptors('a', 'a-response', [earlier]),
+      ],
+      strategy: () => ({ route: 'a', reason: 'test' }),
+      fallback: 'a',
+    });
+
+    const earlierFirstDescriptors = readBackendDescriptors(earlierFirst);
+    const laterFirstDescriptors = readBackendDescriptors(laterFirst);
+    expect(earlierFirstDescriptors).toEqual(laterFirstDescriptors);
+    expect(earlierFirstDescriptors).toHaveLength(1);
+    expect(earlierFirstDescriptors[0]?.freshness).toBe(earlier.freshness);
+  });
+
+  it('excludes a shadowed duplicate-name route’s descriptors from the union (review)', () => {
+    // routeMap keeps only the LAST route for a repeated name — dispatch can
+    // never reach the shadowed one, so its descriptor must not appear
+    // either.
+    const anthropic = descriptorsFor('anthropic')[0];
+    const openai = descriptorsFor('openai')[0];
+    if (!anthropic || !openai)
+      throw new Error('expected seed descriptors for anthropic and openai');
+
+    const generate = createRoutingGenerate({
+      routes: [
+        routeWithDescriptors('fast', 'shadowed-response', [anthropic]),
+        routeWithDescriptors('fast', 'winning-response', [openai]),
+      ],
+      strategy: () => ({ route: 'fast', reason: 'test' }),
+      fallback: 'fast',
+    });
+
+    expect(readBackendDescriptors(generate)).toEqual([openai]);
+  });
 });
