@@ -408,7 +408,13 @@ export type BureauErrorNotConfiguredSubject =
   'generate' | 'scheduler' | 'durable' | 'persistence' | 'approval';
 
 class BureauError extends Error {
-  readonly code: 'NOT_FOUND' | 'CONFLICT' | 'NOT_CONFIGURED' | 'BAD_REQUEST' | 'RATE_LIMITED';
+  readonly code:
+    | 'NOT_FOUND'
+    | 'CONFLICT'
+    | 'NOT_CONFIGURED'
+    | 'BAD_REQUEST'
+    | 'RATE_LIMITED'
+    | 'UNSUPPORTED_CAPABILITY';
   readonly subject?: BureauErrorNotConfiguredSubject;
 
   // `subject` is required for NOT_CONFIGURED and disallowed for every other
@@ -418,7 +424,13 @@ class BureauError extends Error {
   constructor(message: string, code: 'NOT_CONFIGURED', subject: BureauErrorNotConfiguredSubject);
   constructor(
     message: string,
-    code: 'NOT_FOUND' | 'CONFLICT' | 'NOT_CONFIGURED' | 'BAD_REQUEST' | 'RATE_LIMITED',
+    code:
+      | 'NOT_FOUND'
+      | 'CONFLICT'
+      | 'NOT_CONFIGURED'
+      | 'BAD_REQUEST'
+      | 'RATE_LIMITED'
+      | 'UNSUPPORTED_CAPABILITY',
     subject?: BureauErrorNotConfiguredSubject,
   ) {
     super(message);
@@ -3402,8 +3414,8 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
 
   async function updateSession(
     sessionId: string,
-    name: string,
-    payload?: unknown,
+    _name: string,
+    _payload?: unknown,
   ): Promise<unknown> {
     if (!runtime.durable)
       throw new BureauError('Durable engine not configured', 'NOT_CONFIGURED', 'durable');
@@ -3419,14 +3431,32 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         'CONFLICT',
       );
     }
-    return runtime.durable.engine.update(runId, name, payload);
+    // AB-192 / AB-41 coordinator ruling: the built-in `agentRun` workflow
+    // registers no `ctx.onUpdate` handler, so this call can never reach the
+    // engine successfully. Kept, not withdrawn (AB-42/AB-67 ratify update and
+    // query as the distinct session-verb family) — an unconditional throw,
+    // no detection branch, since there is no handler-registration signal to
+    // check. See `bureau.sessionVerbCapabilities`.
+    throw new BureauError(
+      'updateSession()/querySession() are unsupported: the built-in agentRun workflow registers no ctx.onUpdate/ctx.onQuery handler.',
+      'UNSUPPORTED_CAPABILITY',
+    );
   }
 
-  async function querySession(sessionId: string, name: string, input?: unknown): Promise<unknown> {
+  async function querySession(
+    sessionId: string,
+    _name: string,
+    _input?: unknown,
+  ): Promise<unknown> {
     if (!runtime.durable)
       throw new BureauError('Durable engine not configured', 'NOT_CONFIGURED', 'durable');
-    const runId = await requireSessionRunId(sessionId);
-    return runtime.durable.engine.query(runId, name, input);
+    await requireSessionRunId(sessionId);
+    // AB-192 / AB-41 coordinator ruling: see the identical throw in
+    // `updateSession` above — no `ctx.onQuery` handler is registered either.
+    throw new BureauError(
+      'updateSession()/querySession() are unsupported: the built-in agentRun workflow registers no ctx.onUpdate/ctx.onQuery handler.',
+      'UNSUPPORTED_CAPABILITY',
+    );
   }
 
   function listPendingReviews(): PendingReview[] {
@@ -4094,6 +4124,11 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     signalSession,
     updateSession,
     querySession,
+    // AB-192: constant, not computed from runtime state — the built-in
+    // `agentRun` workflow never registers `ctx.onUpdate`/`ctx.onQuery`
+    // handlers, so `update`/`query` are unsupported today regardless of
+    // configuration. `signal` has a real delivery path (`signalSession`).
+    sessionVerbCapabilities: { signal: true, update: false, query: false },
     listPendingReviews,
     resolveReview,
     setRequestAuthorityValidator(validator) {

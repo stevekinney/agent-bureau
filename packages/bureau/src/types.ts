@@ -702,19 +702,40 @@ export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
 
   /**
    * Send a validated, request/response update to a session's current in-flight run.
-   * Maps to `engine.update(runId, name, payload)`. Returns the update result.
    * Throws `BureauError('NOT_CONFIGURED', subject: 'durable')` when no durable
-   * engine is composed.
+   * engine is composed; throws `BureauError('NOT_FOUND')` when the session has no
+   * active run. Otherwise unconditionally throws `BureauError('UNSUPPORTED_CAPABILITY')`
+   * (AB-41/AB-192): the built-in `agentRun` workflow registers no `ctx.onUpdate`
+   * handler, so this call can never reach `engine.update`. Kept, not withdrawn —
+   * check {@link Bureau.sessionVerbCapabilities} to detect this before calling.
    */
   updateSession(sessionId: string, name: string, payload?: unknown): Promise<unknown>;
 
   /**
    * Query live state from a session's current in-flight run without mutating it.
-   * Maps to `engine.query(runId, name, input)`. Returns the query result.
    * Throws `BureauError('NOT_CONFIGURED', subject: 'durable')` when no durable
-   * engine is composed.
+   * engine is composed; throws `BureauError('NOT_FOUND')` when the session has no
+   * active run. Otherwise unconditionally throws `BureauError('UNSUPPORTED_CAPABILITY')`
+   * (AB-41/AB-192): the built-in `agentRun` workflow registers no `ctx.onQuery`
+   * handler, so this call can never reach `engine.query`. Kept, not withdrawn —
+   * check {@link Bureau.sessionVerbCapabilities} to detect this before calling.
    */
   querySession(sessionId: string, name: string, input?: unknown): Promise<unknown>;
+
+  /**
+   * Synchronous, constant capability discovery for the three session verbs
+   * (AB-192) — lets a caller check `update`/`query` support before calling
+   * either method, rather than only by catching `UNSUPPORTED_CAPABILITY`.
+   * `signal` is `true` (`signalSession` has a real delivery path); `update`
+   * and `query` are `false` because the built-in `agentRun` workflow
+   * registers no `ctx.onUpdate`/`ctx.onQuery` handler. Computed once; not a
+   * function of runtime configuration.
+   */
+  readonly sessionVerbCapabilities: {
+    readonly signal: true;
+    readonly update: false;
+    readonly query: false;
+  };
 
   /**
    * List every parked run awaiting human review (AB-20): armorer's
