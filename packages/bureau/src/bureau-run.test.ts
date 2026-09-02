@@ -165,6 +165,7 @@ describe('bureau.run', () => {
     // not escape bureau.run() as a bare exception (review round 2, Codex).
     const throwingAgent: RunnableAgent<unknown, boolean> = {
       name: 'throws',
+      hasOutput: false,
       run: () => {
         throw new Error('setup exploded');
       },
@@ -287,6 +288,7 @@ describe('bureau.run', () => {
   it('falls back to direct (in-memory) execution for a durable bureau when the agent does not support definition resolution', async () => {
     const nonResolvingAgent: RunnableAgent<never, false> = {
       name: 'plain',
+      hasOutput: false,
       run: (input, context) =>
         createAgent({ generate: mockGenerate('plain hello') }).run(input, context),
     };
@@ -320,6 +322,7 @@ describe('bureau.run', () => {
     const lazyNonResolvingAgent = createLazyAgent(() =>
       Promise.resolve<RunnableAgent<never, false>>({
         name: 'plain',
+        hasOutput: false,
         run: (input, context) =>
           createAgent({ generate: mockGenerate('lazy plain hello') }).run(input, context),
       }),
@@ -447,6 +450,7 @@ describe('bureau.run', () => {
     // permanently blocking cleanup on every subsequent dispose() call too.
     const hostileAgent: RunnableAgent<unknown, boolean> = {
       name: 'hostile',
+      hasOutput: false,
       run: () =>
         ({
           result: () => new Promise<never>(() => {}), // never settles

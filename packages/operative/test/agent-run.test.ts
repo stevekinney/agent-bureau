@@ -15,13 +15,19 @@ import {
   CompletedRunIterationError,
   createAgentRun,
   createDiagnosticAgentRun,
+  isSuccessfulRunResult,
 } from '../src/agent-run';
 import { createChildRunRegistry } from '../src/child-run';
 import { noToolCalls } from '../src/conditions/predicates';
 import { type ActiveRun, createActiveRun as createRun } from '../src/create-run';
 import { AbortAgentRunError, MaximumStepsExceededError } from '../src/errors';
 import { createMockGenerate } from '../src/test/index';
-import type { CleanupAcknowledgement, ClosedOptions, GenerateResponse } from '../src/types';
+import type {
+  CleanupAcknowledgement,
+  ClosedOptions,
+  GenerateResponse,
+  RunResult,
+} from '../src/types';
 
 function textResponse(content: string): GenerateResponse {
   return { content, toolCalls: [] };
@@ -936,5 +942,62 @@ describe('AgentRun non-thenable contract', () => {
     // Confirm: it still has the AgentRun API.
     expect(typeof resolved.result).toBe('function');
     expect(typeof resolved.abort).toBe('function');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// isSuccessfulRunResult — the hasOutput witness parameter (AB-234)
+// ---------------------------------------------------------------------------
+
+describe('isSuccessfulRunResult', () => {
+  function stopResult(overrides: Partial<RunResult> = {}): RunResult {
+    return {
+      conversation: {} as RunResult['conversation'],
+      steps: [],
+      content: 'ok',
+      usage: { prompt: 0, completion: 0, total: 0 },
+      finishReason: 'stop-condition',
+      ...overrides,
+    };
+  }
+
+  it('narrows successfully when schemaValidation is absent and hasOutput is omitted (pre-AB-234 behavior preserved)', () => {
+    expect(isSuccessfulRunResult(stopResult())).toBe(true);
+  });
+
+  it('narrows successfully when schemaValidation is absent and hasOutput is explicitly false', () => {
+    expect(isSuccessfulRunResult(stopResult(), false)).toBe(true);
+  });
+
+  it('rejects when schemaValidation is absent but hasOutput is true — the gap AB-234 closes', () => {
+    // A hand-written `RunnableAgent<O, true>` that never actually attaches
+    // `schemaValidation` at all: before AB-234, this fell through the
+    // `schemaValidation === undefined` branch and narrowed successfully
+    // regardless of the caller's real `H`. Passing the agent's own
+    // `hasOutput` witness closes that.
+    expect(isSuccessfulRunResult(stopResult(), true)).toBe(false);
+  });
+
+  it('still requires the output key when schemaValidation reports success, regardless of hasOutput', () => {
+    const result = stopResult({ schemaValidation: { success: true } });
+    expect(isSuccessfulRunResult(result, true)).toBe(false);
+    expect(isSuccessfulRunResult(result, false)).toBe(false);
+  });
+
+  it('narrows successfully when schemaValidation reports success and output is present', () => {
+    const result = { ...stopResult({ schemaValidation: { success: true } }), output: 'value' };
+    expect(isSuccessfulRunResult(result, true)).toBe(true);
+  });
+
+  it('rejects a failed schemaValidation regardless of hasOutput', () => {
+    const result = stopResult({ schemaValidation: { success: false } });
+    expect(isSuccessfulRunResult(result, true)).toBe(false);
+    expect(isSuccessfulRunResult(result, false)).toBe(false);
+  });
+
+  it('rejects a non-stop-condition finishReason regardless of hasOutput', () => {
+    const result = stopResult({ finishReason: 'aborted' });
+    expect(isSuccessfulRunResult(result, true)).toBe(false);
+    expect(isSuccessfulRunResult(result)).toBe(false);
   });
 });

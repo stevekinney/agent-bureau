@@ -150,7 +150,7 @@ for await (const event of run) {
 const result = await run.result(); // await — same handle
 ```
 
-`createAgent`'s return value satisfies `RunnableAgent<O, H>` (AB-21) — it carries a `readonly name` (`options.name`, defaulting to `'(agent)'` when omitted) and `run` accepts an optional second `AgentRunContext` argument (`{ signal, agentName, traceContext, withTraceContext }`), so it slots into `createLazyAgent` or a future `AgentDefinitions` map without a cast. `context.signal` drives per-run abort, `context.agentName` overrides the run's stamped agent name, and `context.traceContext` becomes the same `parentContext` field `RunOptions` already uses for nested tracing.
+`createAgent`'s return value satisfies `RunnableAgent<O, H>` (AB-21) — it carries a `readonly name` (`options.name`, defaulting to `'(agent)'` when omitted), a `readonly hasOutput: boolean` (AB-234 — `output !== undefined`, the runtime witness for `H`), and `run` accepts an optional second `AgentRunContext` argument (`{ signal, agentName, traceContext, withTraceContext }`), so it slots into `createLazyAgent` or a future `AgentDefinitions` map without a cast. `context.signal` drives per-run abort, `context.agentName` overrides the run's stamped agent name, and `context.traceContext` becomes the same `parentContext` field `RunOptions` already uses for nested tracing.
 
 **`CreateAgentOptions`** — key fields:
 
@@ -310,6 +310,8 @@ const plugin = createLazyAgent(() => import('./agents/plugin'));
 ```
 
 `createLazyAgent`'s return value is an ordinary `RunnableAgent<O, H>` — the same shape `createAgent` produces — so it slots into an `AgentDefinitions` map without unwrapping. The first successful load is cached and shared across concurrent `run()` calls; a load failure clears only that pending load, so a later `run()` retries.
+
+Because this return value is synchronous — built before the loader has ever run — its `hasOutput` witness (AB-234) can't be discovered from the eventually-loaded module in time. Pass `{ hasOutput: true }` in `createLazyAgent`'s second (options) argument when the underlying agent has an `output` schema; it defaults to `false`, matching `H`'s own default.
 
 Each `run()` call owns its own `waiting → started → terminal` state, independent of every other call to the same lazy agent:
 

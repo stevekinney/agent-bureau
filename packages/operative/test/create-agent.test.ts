@@ -57,6 +57,24 @@ describe('createAgent', () => {
     expect(typeof agent.run).toBe('function');
   });
 
+  it('exposes hasOutput: false when no output schema is configured (AB-234)', () => {
+    const agent = createAgent({
+      generate: singleResponse('hello'),
+    });
+
+    expect(agent.hasOutput).toBe(false);
+  });
+
+  it('exposes hasOutput: true when an output schema is configured (AB-234)', () => {
+    const agent = createAgent({
+      generate: singleResponse('{"answer":"hello"}'),
+      output: z.object({ answer: z.string() }),
+      stopWhen: noToolCalls(),
+    });
+
+    expect(agent.hasOutput).toBe(true);
+  });
+
   it('validates configured output and exposes output() at runtime', async () => {
     const agent = createAgent({
       generate: singleResponse('{"answer":"hello"}'),

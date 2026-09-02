@@ -172,7 +172,11 @@ describe('createLazyAgent', () => {
   it('loads a direct agent once and caches it, sharing it across run() calls', () => {
     let loads = 0;
     const fake = createFakeAgentRun();
-    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };
+    const agent: RunnableAgent<string, false> = {
+      name: 'fake',
+      hasOutput: false,
+      run: () => fake.handle,
+    };
     const lazy = createLazyAgent(() => {
       loads += 1;
       return agent;
@@ -194,6 +198,7 @@ describe('createLazyAgent', () => {
       await pending;
       const agent: RunnableAgent<string, false> = {
         name: 'fake',
+        hasOutput: false,
         run: () => fakes[callIndex++]?.handle ?? fakes[0]!.handle,
       };
       return agent;
@@ -219,7 +224,10 @@ describe('createLazyAgent', () => {
       async () => {
         loads += 1;
         if (loads === 1) throw cause;
-        return { name: 'fake', run: () => fake.handle } satisfies RunnableAgent<string, false>;
+        return { name: 'fake', hasOutput: false, run: () => fake.handle } satisfies RunnableAgent<
+          string,
+          false
+        >;
       },
       { label: 'retrying-agent' },
     );
@@ -276,7 +284,11 @@ describe('createLazyAgent', () => {
       string,
       false
     >;
-    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => badHandle };
+    const agent: RunnableAgent<string, false> = {
+      name: 'fake',
+      hasOutput: false,
+      run: () => badHandle,
+    };
     const lazy = createLazyAgent(() => agent, { label: 'bad-handle' });
 
     const run = lazy.run('one');
@@ -300,7 +312,11 @@ describe('createLazyAgent', () => {
       [Symbol.asyncIterator]: () => (async function* () {})(),
       // Deliberately omits `children`/`abortChild`.
     } as unknown as AgentRun<string, false>;
-    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => preAb50Handle };
+    const agent: RunnableAgent<string, false> = {
+      name: 'fake',
+      hasOutput: false,
+      run: () => preAb50Handle,
+    };
     const lazy = createLazyAgent(() => agent, { label: 'pre-ab50-handle' });
 
     const run = lazy.run('one');
@@ -328,7 +344,11 @@ describe('createLazyAgent', () => {
       [Symbol.asyncIterator]: () => (async function* () {})(),
       // Deliberately omits `closed`.
     } as unknown as AgentRun<string, false>;
-    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => preAb204Handle };
+    const agent: RunnableAgent<string, false> = {
+      name: 'fake',
+      hasOutput: false,
+      run: () => preAb204Handle,
+    };
     const lazy = createLazyAgent(() => agent, { label: 'pre-ab204-handle' });
 
     const run = lazy.run('one');
@@ -361,6 +381,7 @@ describe('createLazyAgent', () => {
     // `finalizeSynthetic()`.
     const agent: RunnableAgent<string, false> = {
       name: 'fake',
+      hasOutput: false,
       run: () => null as unknown as AgentRun<string, false>,
     };
     const lazy = createLazyAgent(() => agent, { label: 'null-handle' });
@@ -386,7 +407,11 @@ describe('createLazyAgent', () => {
       [Symbol.asyncIterator]: () => (async function* () {})(),
       // Deliberately omits `closed`.
     } as unknown as AgentRun<string, false>;
-    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => preAb204Handle };
+    const agent: RunnableAgent<string, false> = {
+      name: 'fake',
+      hasOutput: false,
+      run: () => preAb204Handle,
+    };
     const lazy = createLazyAgent(() => agent, { label: 'pre-ab204-handle-throwing-dispose' });
 
     const run = lazy.run('one');
@@ -409,7 +434,11 @@ describe('createLazyAgent', () => {
       [Symbol.asyncIterator]: () => (async function* () {})(),
       // Deliberately omits both `closed` and `[Symbol.dispose]`.
     } as unknown as AgentRun<string, false>;
-    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => noDisposeHandle };
+    const agent: RunnableAgent<string, false> = {
+      name: 'fake',
+      hasOutput: false,
+      run: () => noDisposeHandle,
+    };
     const lazy = createLazyAgent(() => agent, { label: 'no-dispose-handle' });
 
     const run = lazy.run('one');
@@ -422,6 +451,7 @@ describe('createLazyAgent', () => {
   it('wraps a synchronous throw from the underlying run() as an AgentContractError', async () => {
     const agent: RunnableAgent<string, false> = {
       name: 'fake',
+      hasOutput: false,
       run: () => {
         throw new Error('boom');
       },
@@ -453,7 +483,11 @@ describe('createLazyAgent', () => {
     let release!: () => void;
     const pending = new Promise<void>((resolve) => (release = resolve));
     const fake = createFakeAgentRun();
-    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };
+    const agent: RunnableAgent<string, false> = {
+      name: 'fake',
+      hasOutput: false,
+      run: () => fake.handle,
+    };
     const lazy = createLazyAgent(async () => {
       await pending;
       return agent;
@@ -482,6 +516,7 @@ describe('createLazyAgent', () => {
     const fake = createFakeAgentRun();
     const agent: RunnableAgent<string, false> = {
       name: 'fake',
+      hasOutput: false,
       run: () => {
         runCalls += 1;
         return fake.handle;
@@ -506,7 +541,11 @@ describe('createLazyAgent', () => {
     let release!: () => void;
     const pending = new Promise<void>((resolve) => (release = resolve));
     const fake = createFakeAgentRun();
-    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };
+    const agent: RunnableAgent<string, false> = {
+      name: 'fake',
+      hasOutput: false,
+      run: () => fake.handle,
+    };
     const lazy = createLazyAgent(async () => {
       await pending;
       return agent;
@@ -543,7 +582,11 @@ describe('createLazyAgent', () => {
     let release!: () => void;
     const pending = new Promise<void>((resolve) => (release = resolve));
     const fake = createFakeAgentRun();
-    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };
+    const agent: RunnableAgent<string, false> = {
+      name: 'fake',
+      hasOutput: false,
+      run: () => fake.handle,
+    };
     const lazy = createLazyAgent(async () => {
       await pending;
       return agent;
@@ -560,7 +603,11 @@ describe('createLazyAgent', () => {
 
   it('aborts after resolution: stores the handle, then forwards to it exactly once', async () => {
     const fake = createFakeAgentRun();
-    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };
+    const agent: RunnableAgent<string, false> = {
+      name: 'fake',
+      hasOutput: false,
+      run: () => fake.handle,
+    };
     const lazy = createLazyAgent(() => agent);
 
     const run = lazy.run('hello');
@@ -577,7 +624,11 @@ describe('createLazyAgent', () => {
 
   it('closed() delegates to the underlying handle once one exists (AB-204)', async () => {
     const fake = createFakeAgentRun();
-    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };
+    const agent: RunnableAgent<string, false> = {
+      name: 'fake',
+      hasOutput: false,
+      run: () => fake.handle,
+    };
     const lazy = createLazyAgent(() => agent);
 
     const run = lazy.run('hello');
@@ -616,7 +667,11 @@ describe('createLazyAgent', () => {
       [Symbol.dispose]() {},
       [Symbol.asyncIterator]: () => (async function* () {})(),
     } as unknown as AgentRun<string, false>;
-    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => underlyingHandle };
+    const agent: RunnableAgent<string, false> = {
+      name: 'fake',
+      hasOutput: false,
+      run: () => underlyingHandle,
+    };
     const lazy = createLazyAgent(() => agent);
 
     const run = lazy.run('hello');
@@ -642,7 +697,11 @@ describe('createLazyAgent', () => {
     // wrapper's `activeInnerRun` check already fixed
     // (PRRT_kwDORvupsc6enump).
     const fake = createFakeAgentRun();
-    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };
+    const agent: RunnableAgent<string, false> = {
+      name: 'fake',
+      hasOutput: false,
+      run: () => fake.handle,
+    };
     const lazy = createLazyAgent(() => agent);
 
     const run = lazy.run('hello');
@@ -665,7 +724,11 @@ describe('createLazyAgent', () => {
   // disqualifier must still read the signal directly.
   it('closed() disqualifies not-required when context.signal fires after this wrapper has already detached its own listener', async () => {
     const fake = createFakeAgentRun();
-    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };
+    const agent: RunnableAgent<string, false> = {
+      name: 'fake',
+      hasOutput: false,
+      run: () => fake.handle,
+    };
     const lazy = createLazyAgent(() => agent);
     const controller = new AbortController();
 
@@ -684,7 +747,11 @@ describe('createLazyAgent', () => {
 
   it('children()/abortChild() read empty/no-op before resolution and delegate to the underlying handle once resolved', async () => {
     const fake = createFakeAgentRun();
-    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };
+    const agent: RunnableAgent<string, false> = {
+      name: 'fake',
+      hasOutput: false,
+      run: () => fake.handle,
+    };
     const lazy = createLazyAgent(() => agent);
 
     const run = lazy.run('hello');
@@ -710,7 +777,10 @@ describe('createLazyAgent', () => {
     const lazy = createLazyAgent(async () => {
       loads += 1;
       const fake = createFakeAgentRun();
-      return { name: 'fake', run: () => fake.handle } satisfies RunnableAgent<string, false>;
+      return { name: 'fake', hasOutput: false, run: () => fake.handle } satisfies RunnableAgent<
+        string,
+        false
+      >;
     });
 
     const run = lazy.run('hello', { signal: controller.signal });
@@ -731,6 +801,7 @@ describe('createLazyAgent', () => {
     const fake = createFakeAgentRun();
     const agent: RunnableAgent<string, false> = {
       name: 'fake',
+      hasOutput: false,
       run: () => {
         runCalls += 1;
         return fake.handle;
@@ -752,7 +823,11 @@ describe('createLazyAgent', () => {
 
   it('disposes the underlying handle when started, or aborts when still waiting', async () => {
     const fakeStarted = createFakeAgentRun();
-    const startedAgent: RunnableAgent<string, false> = { name: 'a', run: () => fakeStarted.handle };
+    const startedAgent: RunnableAgent<string, false> = {
+      name: 'a',
+      hasOutput: false,
+      run: () => fakeStarted.handle,
+    };
     const startedLazy = createLazyAgent(() => startedAgent);
     const startedRun = startedLazy.run('hello');
     await flushMicrotasks();
@@ -764,7 +839,10 @@ describe('createLazyAgent', () => {
     const fakeWaiting = createFakeAgentRun();
     const waitingLazy = createLazyAgent(async () => {
       await pending;
-      return { name: 'b', run: () => fakeWaiting.handle } satisfies RunnableAgent<string, false>;
+      return { name: 'b', hasOutput: false, run: () => fakeWaiting.handle } satisfies RunnableAgent<
+        string,
+        false
+      >;
     });
     const waitingRun = waitingLazy.run('hello');
     waitingRun[Symbol.dispose]();
@@ -779,7 +857,11 @@ describe('createLazyAgent', () => {
       ...fake.handle,
       output: () => Promise.resolve('typed-value'),
     } as unknown as AgentRun<string, true>;
-    const agent: RunnableAgent<string, true> = { name: 'fake', run: () => withOutput };
+    const agent: RunnableAgent<string, true> = {
+      name: 'fake',
+      hasOutput: true,
+      run: () => withOutput,
+    };
     const lazy = createLazyAgent(() => agent);
 
     const run = lazy.run('hello');
@@ -790,6 +872,7 @@ describe('createLazyAgent', () => {
     const noOutputFake = createFakeAgentRun();
     const noOutputAgent: RunnableAgent<never, false> = {
       name: 'fake',
+      hasOutput: false,
       run: () => noOutputFake.handle,
     };
     const noOutputLazy = createLazyAgent(() => noOutputAgent);
@@ -804,7 +887,11 @@ describe('createLazyAgent', () => {
 
   it('returns an ordinary RunnableAgent with no stateful helper API', () => {
     const fake = createFakeAgentRun();
-    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };
+    const agent: RunnableAgent<string, false> = {
+      name: 'fake',
+      hasOutput: false,
+      run: () => fake.handle,
+    };
     const lazy = createLazyAgent(() => agent, { label: 'named' });
 
     expect(lazy.name).toBe('named');
@@ -821,6 +908,7 @@ describe('createLazyAgent', () => {
       [OPERATIVE_RESOLVE_RUN_OPTIONS]: (input: string) => Promise<RunOptions>;
     } = {
       name: 'durable-agent',
+      hasOutput: false,
       run: () => {
         runCalls += 1;
         return createFakeAgentRun().handle;
@@ -842,7 +930,11 @@ describe('createLazyAgent', () => {
 
   it('rejects definition resolution with an AgentContractError when the underlying agent has none', async () => {
     const fake = createFakeAgentRun();
-    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };
+    const agent: RunnableAgent<string, false> = {
+      name: 'fake',
+      hasOutput: false,
+      run: () => fake.handle,
+    };
     const lazy = createLazyAgent(() => agent);
 
     const resolver = (
@@ -862,7 +954,10 @@ describe('createLazyAgent', () => {
     controller.abort('pre-aborted');
     const lazy = createLazyAgent(async () => {
       const fake = createFakeAgentRun();
-      return { name: 'fake', run: () => fake.handle } satisfies RunnableAgent<string, false>;
+      return { name: 'fake', hasOutput: false, run: () => fake.handle } satisfies RunnableAgent<
+        string,
+        false
+      >;
     });
 
     const seed = new Conversation();
@@ -879,7 +974,10 @@ describe('createLazyAgent', () => {
     controller.abort('pre-aborted');
     const lazy = createLazyAgent(async () => {
       const fake = createFakeAgentRun();
-      return { name: 'fake', run: () => fake.handle } satisfies RunnableAgent<string, false>;
+      return { name: 'fake', hasOutput: false, run: () => fake.handle } satisfies RunnableAgent<
+        string,
+        false
+      >;
     });
 
     const run = lazy.run('hello', { signal: controller.signal });
@@ -893,6 +991,7 @@ describe('createLazyAgent', () => {
       const fake = createFakeAgentRun();
       return {
         name: 'fake',
+        hasOutput: true,
         run: () => fake.handle as unknown as AgentRun<string, true>,
       } satisfies RunnableAgent<string, true>;
     });
@@ -921,7 +1020,11 @@ describe('createLazyAgent', () => {
         };
       },
     } as AgentRun<string, false>;
-    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => throwingHandle };
+    const agent: RunnableAgent<string, false> = {
+      name: 'fake',
+      hasOutput: false,
+      run: () => throwingHandle,
+    };
     const lazy = createLazyAgent(() => agent);
 
     const run = lazy.run('hello');
@@ -951,7 +1054,11 @@ describe('createLazyAgent', () => {
         };
       },
     } as AgentRun<string, false>;
-    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => throwingHandle };
+    const agent: RunnableAgent<string, false> = {
+      name: 'fake',
+      hasOutput: false,
+      run: () => throwingHandle,
+    };
     const lazy = createLazyAgent(() => agent);
 
     const run = lazy.run('hello');
@@ -967,7 +1074,11 @@ describe('createLazyAgent', () => {
     // A second, fresh iteration of a different run exercises early-exit
     // (`return()`), which the first run's already-failed queue cannot.
     const earlyFake = createFakeAgentRun();
-    const earlyAgent: RunnableAgent<string, false> = { name: 'early', run: () => earlyFake.handle };
+    const earlyAgent: RunnableAgent<string, false> = {
+      name: 'early',
+      hasOutput: false,
+      run: () => earlyFake.handle,
+    };
     const earlyLazy = createLazyAgent(() => earlyAgent);
     const earlyRun = earlyLazy.run('hello');
     earlyFake.push(new RunCompletedEvent(successResult('first')));
@@ -980,7 +1091,11 @@ describe('createLazyAgent', () => {
 
   it('stops pumping and propagates return() to the underlying run when the consumer exits early', async () => {
     const fake = createFakeAgentRun();
-    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };
+    const agent: RunnableAgent<string, false> = {
+      name: 'fake',
+      hasOutput: false,
+      run: () => fake.handle,
+    };
     const lazy = createLazyAgent(() => agent);
 
     const run = lazy.run('hello');
@@ -1006,7 +1121,11 @@ describe('createLazyAgent', () => {
 
   it('rejects a second concurrent iteration of the same run with CompletedRunIterationError', async () => {
     const fake = createFakeAgentRun();
-    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };
+    const agent: RunnableAgent<string, false> = {
+      name: 'fake',
+      hasOutput: false,
+      run: () => fake.handle,
+    };
     const lazy = createLazyAgent(() => agent);
 
     const run = lazy.run('hello');
@@ -1022,7 +1141,11 @@ describe('createLazyAgent', () => {
 
   it('rejects re-iterating an already-completed run with CompletedRunIterationError', async () => {
     const fake = createFakeAgentRun();
-    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };
+    const agent: RunnableAgent<string, false> = {
+      name: 'fake',
+      hasOutput: false,
+      run: () => fake.handle,
+    };
     const lazy = createLazyAgent(() => agent);
 
     const run = lazy.run('hello');
@@ -1050,7 +1173,11 @@ describe('createLazyAgent', () => {
         };
       },
     } as AgentRun<string, false>;
-    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => queuelessHandle };
+    const agent: RunnableAgent<string, false> = {
+      name: 'fake',
+      hasOutput: false,
+      run: () => queuelessHandle,
+    };
     const lazy = createLazyAgent(() => agent);
 
     const run = lazy.run('hello');
@@ -1071,7 +1198,11 @@ describe('createLazyAgent', () => {
         return fake.handle[Symbol.asyncIterator]();
       },
     } as AgentRun<string, false>;
-    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => trackedHandle };
+    const agent: RunnableAgent<string, false> = {
+      name: 'fake',
+      hasOutput: false,
+      run: () => trackedHandle,
+    };
     const lazy = createLazyAgent(() => agent);
 
     const run = lazy.run('hello');
@@ -1085,7 +1216,11 @@ describe('createLazyAgent', () => {
 
   it('starts draining the underlying event stream once the consumer iterates, even if that happens after resolution', async () => {
     const fake = createFakeAgentRun();
-    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };
+    const agent: RunnableAgent<string, false> = {
+      name: 'fake',
+      hasOutput: false,
+      run: () => fake.handle,
+    };
     const lazy = createLazyAgent(() => agent);
 
     const run = lazy.run('hello');
@@ -1119,6 +1254,7 @@ describe('createLazyAgent', () => {
     const resolvedOptions = { marker: 'resolved' } as unknown as RunOptions;
     const agent = {
       name: 'stateful',
+      hasOutput: false,
       run: () => createFakeAgentRun().handle,
       [OPERATIVE_RESOLVE_RUN_OPTIONS](this: unknown) {
         // eslint-disable-next-line @typescript-eslint/no-this-alias -- deliberately capturing the receiver to assert on it
@@ -1162,6 +1298,7 @@ describe('createLazyAgent', () => {
     const fake = createFakeAgentRun();
     const agent: RunnableAgent<string, false> = {
       name: 'fake',
+      hasOutput: false,
       run: () => {
         // A custom agent that reacts to the shared signal synchronously,
         // inside its own run() — before this call even returns a handle.
@@ -1181,7 +1318,11 @@ describe('createLazyAgent', () => {
   it('does not forward a signal-driven abort to the underlying handle twice once started', async () => {
     const controller = new AbortController();
     const fake = createFakeAgentRun();
-    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };
+    const agent: RunnableAgent<string, false> = {
+      name: 'fake',
+      hasOutput: false,
+      run: () => fake.handle,
+    };
     const lazy = createLazyAgent(() => agent);
 
     lazy.run('hello', { signal: controller.signal });
@@ -1197,6 +1338,7 @@ describe('createLazyAgent', () => {
     const fake = createFakeAgentRun();
     const agent: RunnableAgent<string, false> = {
       name: 'fake',
+      hasOutput: false,
       run: (_input, context) => {
         observedAgentName = context?.agentName;
         return fake.handle;
@@ -1215,7 +1357,11 @@ describe('createLazyAgent', () => {
 
   it('accepts a loader resolving to a { default } module namespace object, per AB-15', async () => {
     const fake = createFakeAgentRun();
-    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };
+    const agent: RunnableAgent<string, false> = {
+      name: 'fake',
+      hasOutput: false,
+      run: () => fake.handle,
+    };
     const lazy = createLazyAgent(() => Promise.resolve({ default: agent }));
 
     const run = lazy.run('hello');
@@ -1227,7 +1373,11 @@ describe('createLazyAgent', () => {
 
   it('unwraps a module namespace default even when it also exports an unrelated top-level run function', async () => {
     const fake = createFakeAgentRun();
-    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };
+    const agent: RunnableAgent<string, false> = {
+      name: 'fake',
+      hasOutput: false,
+      run: () => fake.handle,
+    };
     let unrelatedRunCalls = 0;
     // A module namespace object: `default` is the real agent, but the module
     // also happens to export an unrelated top-level `run` function (e.g. a
@@ -1260,6 +1410,7 @@ describe('createLazyAgent', () => {
       }) => Promise<RunOptions>;
     } = {
       name: 'fake',
+      hasOutput: false,
       run: () => createFakeAgentRun().handle,
       [OPERATIVE_RESOLVE_RUN_OPTIONS]: (input) => {
         observedOptions = input as unknown as RunOptions;
@@ -1302,6 +1453,7 @@ describe('createLazyAgent', () => {
       ) => Promise<RunOptions>;
     } = {
       name: 'fake',
+      hasOutput: false,
       run: () => createFakeAgentRun().handle,
       [OPERATIVE_RESOLVE_RUN_OPTIONS]: (_input, context) => {
         observedAgentName = context?.agentName;

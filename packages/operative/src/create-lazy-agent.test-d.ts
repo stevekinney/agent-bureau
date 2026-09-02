@@ -31,6 +31,7 @@ function buildRun<O, H extends boolean>(hasOutput: H): AgentRun<O, H> {
 
 const untypedAgent: RunnableAgent<never, false> = {
   name: 'untyped',
+  hasOutput: false,
   run: () => buildRun(false),
 };
 
@@ -39,6 +40,7 @@ type TypedOutput = z.output<typeof _outputSchema>;
 
 const typedAgent: RunnableAgent<TypedOutput, true> = {
   name: 'typed',
+  hasOutput: true,
   run: () => buildRun(true),
 };
 

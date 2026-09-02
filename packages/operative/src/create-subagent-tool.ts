@@ -374,7 +374,13 @@ export function createSubagentTool<
       // budget exceeded, elicitation denied, maximum steps, or a clean stop
       // whose output failed schema validation) rejects here — `toToolOutput`
       // is never invoked with anything but a clean, schema-valid success.
-      if (!isSuccessfulRunResult(result)) {
+      // `agent.hasOutput` (AB-234) is threaded through as the runtime
+      // witness for `THasOutput`: without it, a hand-written
+      // `RunnableAgent<O, true>` that never attaches `schemaValidation` at
+      // all would fall through `isSuccessfulRunResult`'s
+      // `schemaValidation === undefined` branch and narrow successfully —
+      // see that function's doc comment in `agent-run.ts`.
+      if (!isSuccessfulRunResult(result, agent.hasOutput)) {
         throw new SubagentRunError(agentName, result);
       }
 

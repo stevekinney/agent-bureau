@@ -59,6 +59,17 @@ export type LazyAgentLoader<O, H extends boolean> = () =>
 export interface CreateLazyAgentOptions {
   /** Human-readable label included in lazy loading and contract error messages. */
   label?: string;
+  /**
+   * A runtime witness for this lazy agent's `H` (AB-234). `createLazyAgent`
+   * returns a `RunnableAgent` synchronously — before the loader has ever run
+   * — so `hasOutput` cannot be discovered from the loaded module in time.
+   * Pass the same truthful value the underlying, eventually-loaded agent's
+   * own `hasOutput` will report (matching the `H` type argument this call
+   * is instantiated with). Defaults to `false`, matching `H`'s default.
+   * See `RunnableAgent.hasOutput`'s doc comment (`runnable-agent.ts`) for
+   * why this witness exists at all.
+   */
+  hasOutput?: boolean;
 }
 
 // A fresh object per call — never a shared module-level singleton. `RunResult.usage`
@@ -849,6 +860,7 @@ export function createLazyAgent<O = never, H extends boolean = false>(
 
   const agent = {
     name: options.label ?? '(lazy)',
+    hasOutput: options.hasOutput ?? false,
     run(input: AgentInput, context?: AgentRunContext): AgentRun<O, H> {
       return createDeferredAgentRun(resolve, input, context, label);
     },

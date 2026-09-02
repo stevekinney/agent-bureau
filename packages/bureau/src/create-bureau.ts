@@ -20,6 +20,7 @@ import {
   type JSONValue,
   OPERATIVE_RESOLVE_RUN_OPTIONS,
   type RequestHumanInputContext,
+  type RequestHumanInputInput,
   type RunnableAgent,
   type RunOptions,
   type RunReport,
@@ -2187,7 +2188,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         const agentRun = createAgentRun<unknown, boolean>(activeRun, {
           hasOutput: resolvedOptions.output !== undefined,
         });
-        return { name, run: () => agentRun };
+        return { name, hasOutput: resolvedOptions.output !== undefined, run: () => agentRun };
       };
       const deferredRun = createDeferredAgentRun(resolveDurableAgent, input, context, name);
       const guardedRun: AgentRun<unknown, boolean> = {
@@ -2434,7 +2435,15 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
             // synchronously (Copilot review PRRT_kwDORvupsc6P7_8H) — awaiting
             // `Promise.resolve(...)` (a genuine thenable) keeps both
             // require-await and await-thenable satisfied.
-            execute: async (input) => await Promise.resolve(rawHumanInputTool.execute(input)),
+            // AB-234: `input` is annotated explicitly — `RunnableAgent.run`
+            // moving to a property-typed function (contravariant checking)
+            // elsewhere in this file changes how much the checker infers
+            // structurally at this unrelated call site, so `createTool`'s
+            // schema-based overload no longer gets inferred from the
+            // `...rawHumanInputTool` spread without this annotation pinning
+            // it directly to `execute`'s real parameter type.
+            execute: async (input: RequestHumanInputInput) =>
+              await Promise.resolve(rawHumanInputTool.execute(input)),
           }),
         ]);
         runToolbox = combineToolboxes(runRuntime.toolbox, humanInputToolbox);

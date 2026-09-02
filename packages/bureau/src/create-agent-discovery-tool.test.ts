@@ -67,6 +67,7 @@ describe('createAgentDiscoveryTool', () => {
     const catalog = createAgentCatalog({
       lazy: {
         name: '(lazy)',
+        hasOutput: false,
         run: () => {
           lazyLoaded = true;
           throw new Error('the lazy agent must never load for discovery');

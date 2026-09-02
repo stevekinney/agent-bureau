@@ -32,10 +32,16 @@ interface RecordedRunCall {
  */
 function makeMockAgent<O = never, H extends boolean = false>(
   resultFactory: (call: RecordedRunCall) => RunResult<O, H>,
+  // AB-234: defaults to `false`, matching `H`'s own default. A caller
+  // exercising the `hasOutput` runtime witness (e.g. a hand-written
+  // `RunnableAgent<O, true>` that never actually validates output) passes
+  // this explicitly rather than relying on the (compile-time-only) `H`.
+  options: { hasOutput?: boolean } = {},
 ): { agent: RunnableAgent<O, H>; calls: RecordedRunCall[] } {
   const calls: RecordedRunCall[] = [];
   const agent: RunnableAgent<O, H> = {
     name: 'mock-agent',
+    hasOutput: options.hasOutput ?? false,
     run(input, context): AgentRun<O, H> {
       const call: RecordedRunCall = { input, context };
       calls.push(call);
@@ -77,6 +83,7 @@ function makeControllableAgent<O = never, H extends boolean = false>(): {
   });
   const agent: RunnableAgent<O, H> = {
     name: 'controllable-agent',
+    hasOutput: false,
     run(input, context): AgentRun<O, H> {
       calls.push({ input, context });
       return {
@@ -335,6 +342,78 @@ describe('createSubagentTool', () => {
       const error = caughtError as SubagentRunError;
       expect(error.result.finishReason).toBe('stop-condition');
       expect((error.result as { output?: unknown }).output).toBeUndefined();
+    });
+
+    it('rejects with SubagentRunError when a RunnableAgent<O, true> stub never attaches schemaValidation at all, trusting agent.hasOutput over the structural claim (AB-234)', async () => {
+      // Before AB-234, `RunnableAgent`'s `H` was a compile-time-only phantom
+      // parameter: a hand-written `RunnableAgent<O, true>` whose `RunResult`
+      // never attaches `schemaValidation` (not merely a failed or
+      // output-less success — genuinely absent, as a naive third-party
+      // implementation that never wires up schema validation at all would
+      // produce) fell through `isSuccessfulRunResult`'s
+      // `schemaValidation === undefined` branch and narrowed successfully,
+      // reaching `toToolOutput` with no validated `output` on the result at
+      // all. `agent.hasOutput` (the real runtime witness this issue adds)
+      // closes that: `createSubagentTool` now rejects this case instead.
+      const { agent } = makeMockAgent<{ answer: string }, true>(
+        () =>
+          ({
+            conversation: {} as never,
+            content: 'ok',
+            finishReason: 'stop-condition',
+            steps: [],
+            usage: { prompt: 0, completion: 0, total: 0 },
+            // No `schemaValidation` at all — not a failed or output-less
+            // success, just entirely absent, as a stub that never validates
+            // anything would produce.
+          }) as unknown as RunResult<{ answer: string }, true>,
+        { hasOutput: true },
+      );
+      const toToolOutput = (result: SuccessfulRunResult<{ answer: string }, true>) => {
+        throw new Error(
+          `toToolOutput must not be invoked when the agent's own hasOutput witness is true but no schemaValidation was ever attached: ${JSON.stringify(result)}`,
+        );
+      };
+      const tool = createSubagentTool<{ topic: string }, { answer: string }, true, string>({
+        name: 'researcher',
+        description: 'Research a topic',
+        agent,
+        agentName: 'researcher',
+        input: z.object({ topic: z.string() }),
+        toToolOutput,
+      });
+
+      let caughtError: unknown;
+      try {
+        await callRaw(tool, { topic: 'AI' });
+      } catch (error) {
+        caughtError = error;
+      }
+
+      expect(caughtError).toBeInstanceOf(SubagentRunError);
+      const error = caughtError as SubagentRunError;
+      expect(error.result.finishReason).toBe('stop-condition');
+      expect((error.result as { schemaValidation?: unknown }).schemaValidation).toBeUndefined();
+    });
+
+    it('accepts a schema-less RunnableAgent<O, false> whose RunResult never attaches schemaValidation — the ordinary, sound case', async () => {
+      // The counterpart to the test above: when `agent.hasOutput` is
+      // genuinely `false` (the default `makeMockAgent` witness), a result
+      // with no `schemaValidation` at all is the NORMAL, expected shape for
+      // a schema-less agent — `toToolOutput` must still be reached, not
+      // rejected. AB-234's fix must not regress the untyped/schema-less path.
+      const { agent } = makeMockAgent(() => makeSuccessfulResult('plain text result'));
+      const tool = createSubagentTool({
+        name: 'researcher',
+        description: 'Research a topic',
+        agent,
+        agentName: 'researcher',
+        input: z.object({ topic: z.string() }),
+      });
+
+      const result = await callRaw(tool, { topic: 'AI' });
+
+      expect(result).toBe('plain text result');
     });
 
     it('accepts a validated success whose output key is present but holds undefined (e.g. a void/undefined-shaped schema)', async () => {
