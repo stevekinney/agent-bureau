@@ -63,6 +63,7 @@ import {
 import type {
   DefaultToolEvents,
   MinimalAbortSignal,
+  RuntimeToolContext,
   Tool,
   ToolCallWithArguments,
   ToolConfiguration,
@@ -1168,8 +1169,24 @@ export function createTool<
         return handleCancellation(options.signal.reason);
       }
 
+      // Tracks whether this specific tool call is still active, so
+      // `toolContext.progress()` becomes a no-op once the call has settled
+      // or been aborted rather than dispatching a stray event from a
+      // detached callback. Scoped to this invocation only — it never
+      // touches the tool-level `emitter`/`completed` state.
+      let progressActive = true;
+      const deactivateProgress = () => {
+        progressActive = false;
+      };
+      options.signal?.addEventListener('abort', deactivateProgress, { once: true });
+      const reportProgress: RuntimeToolContext['progress'] = (update) => {
+        if (!progressActive || options.signal?.aborted) return;
+        dispatch(new ToolProgressEvent(update));
+      };
+
       const toolContext: ToolContext<E> = {
         dispatch,
+        progress: reportProgress,
         meta,
         toolCall: typedToolCall,
         configuration,
@@ -1205,6 +1222,11 @@ export function createTool<
 
       options[executionCallbackStartSymbol]?.();
       const runner = Promise.resolve(resolvedExecute(parsed, toolContext as unknown as TContext));
+      const stopTrackingProgress = () => {
+        options.signal?.removeEventListener('abort', deactivateProgress);
+        deactivateProgress();
+      };
+      void runner.then(stopTrackingProgress, stopTrackingProgress);
       if (options.parentCompletionHandle) {
         // The callback now owns the parent handle's completion. Report that it
         // is in flight so the parent's owner does not settle it from a result
