@@ -41,6 +41,18 @@
  *   `*.test.ts`; `node:test`'s API is close enough to `bun:test`'s that a `.mjs` scan is a
  *   plausible future extension, but a different module system and potentially different AST
  *   shapes make it a real, separate slice rather than a one-line glob change.
+ * - Also out of scope, both requiring symbol/import binding resolution this script deliberately
+ *   does not do (a lexical AST walk, not a type-checker): a callback passed by reference —
+ *   `it('case', someNamedFunction)` — is not followed to `someNamedFunction`'s body, so a
+ *   conditional early return inside it is invisible to `hasConditionalEarlyReturn`; and an
+ *   aliased import — `import { it as spec } from 'bun:test'; spec.skip(...)` — is not resolved
+ *   back to `bun:test`'s `it`, so `spec` does not match `TEST_CALL_NAMES`. Neither pattern
+ *   appears anywhere in the repository today (checked with
+ *   `git grep -nE "\\b(it|test)\\.(skip|todo|only)?\\(?['"][^'"]*['"]\\s*,\\s*[A-Za-z_][A-Za-z0-9_]*\\s*\\)"`
+ *   and `git grep -nE "import \\{[^}]*\\b(it|test|describe) as \\w+"` against
+ *   `packages/**\/*.test.ts` and `scripts/*.test.ts` — both zero hits), so this is a real
+ *   boundary, not a live gap, and full symbol resolution is a materially larger change than this
+ *   issue's scope.
  * - A conditional early return is a `ReturnStatement` that is either the first statement of an
  *   `IfStatement`'s `then` branch, or the first statement of a block that is that `then` branch,
  *   where the `IfStatement` itself is the first statement of an `it`/`test` (not `describe`)
