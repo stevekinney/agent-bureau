@@ -15,6 +15,12 @@ export {
 } from './active-run-adapter';
 export type { CheckpointStore } from './checkpoint-store';
 export { createCheckpointStore } from './checkpoint-store';
+export type { SignalContinuationInput } from './continuation-input';
+export {
+  buildSignalContinuationInput,
+  isDeniedSignalPayload,
+  renderSignalContinuation,
+} from './continuation-input';
 export type {
   CreateRunEngineOptions,
   RegistryAgnosticEngine,
