@@ -5,6 +5,7 @@ import { z } from 'zod';
 
 import type { EffectiveToolExecutionContext, ToolExecuteOptions, ToolRequestContext } from '../src';
 import { createTool, createToolCall, isTool, lazy, withContext } from '../src';
+import { ToolProgressEvent } from '../src/events';
 import {
   approvalConsumeSymbol,
   type ApprovalResumeState,
@@ -3294,5 +3295,149 @@ describe('isTool', () => {
     });
     const desc = Object.getOwnPropertyDescriptor(tool as any, 'length');
     expect(desc).toBeDefined();
+  });
+});
+
+describe('RuntimeToolContext.progress()', () => {
+  it('dispatches the same progress event shape a hand-constructed dispatch call produces', async () => {
+    const handConstructed: Array<{ percent?: number; message?: string }> = [];
+    const viaProgress: Array<{ percent?: number; message?: string }> = [];
+
+    const handTool = createTool({
+      name: 'hand-dispatch',
+      description: 'dispatches progress by hand',
+      input: z.object({}),
+      async execute(_params, context) {
+        context.dispatch(new ToolProgressEvent({ percent: 50, message: 'halfway' }));
+        return 'done';
+      },
+    });
+    handTool.addEventListener('progress', (event: any) => {
+      handConstructed.push({ percent: event.percent, message: event.message });
+    });
+    await handTool.execute(createToolCall('hand-dispatch', {}));
+
+    const progressTool = createTool({
+      name: 'via-progress',
+      description: 'dispatches progress via context.progress()',
+      input: z.object({}),
+      async execute(_params, context) {
+        context.progress({ percent: 50, message: 'halfway' });
+        return 'done';
+      },
+    });
+    progressTool.addEventListener('progress', (event: any) => {
+      viaProgress.push({ percent: event.percent, message: event.message });
+    });
+    await progressTool.execute(createToolCall('via-progress', {}));
+
+    expect(viaProgress).toEqual(handConstructed);
+    expect(viaProgress).toEqual([{ percent: 50, message: 'halfway' }]);
+  });
+
+  it('carries a checkpoint value through the dispatched event unmodified', async () => {
+    const checkpoints: unknown[] = [];
+    const checkpoint = { step: 3, cursor: 'abc', nested: { ok: true } };
+
+    const tool = createTool({
+      name: 'checkpoint-tool',
+      description: 'reports a structured checkpoint',
+      input: z.object({}),
+      async execute(_params, context) {
+        context.progress({ checkpoint });
+        return 'done';
+      },
+    });
+    tool.addEventListener('progress', (event: any) => {
+      checkpoints.push(event.checkpoint);
+    });
+    await tool.execute(createToolCall('checkpoint-tool', {}));
+
+    expect(checkpoints).toHaveLength(1);
+    expect(checkpoints[0]).toBe(checkpoint);
+    expect(checkpoints[0]).toEqual(checkpoint);
+  });
+
+  it('is a no-op when called after the tool call has completed', async () => {
+    let capturedContext: any;
+    const progressEvents: unknown[] = [];
+
+    const tool = createTool({
+      name: 'post-completion-progress',
+      description: 'stashes the context for later use',
+      input: z.object({}),
+      async execute(_params, context) {
+        capturedContext = context;
+        return 'done';
+      },
+    });
+    tool.addEventListener('progress', (event: any) => {
+      progressEvents.push(event);
+    });
+
+    const result = await tool.execute(createToolCall('post-completion-progress', {}));
+    expect(result.outcome).toBe('success');
+
+    expect(() => capturedContext.progress({ percent: 100 })).not.toThrow();
+    await drainMicrotasks();
+
+    expect(progressEvents).toHaveLength(0);
+  });
+
+  it('is a no-op when called after the tool call has been aborted', async () => {
+    let capturedContext: any;
+    const progressEvents: unknown[] = [];
+
+    const tool = createTool({
+      name: 'post-abort-progress',
+      description: 'stashes the context and never resolves',
+      input: z.object({}),
+      async execute(_params, context) {
+        capturedContext = context;
+        return new Promise<string>(() => {});
+      },
+    });
+    tool.addEventListener('progress', (event: any) => {
+      progressEvents.push(event);
+    });
+
+    const controller = new AbortController();
+    const pending = tool.execute(createToolCall('post-abort-progress', {}), {
+      signal: controller.signal,
+    });
+    await drainMicrotasks();
+    controller.abort('stop');
+    await pending;
+
+    expect(() => capturedContext.progress({ percent: 100 })).not.toThrow();
+    await drainMicrotasks();
+
+    expect(progressEvents).toHaveLength(0);
+  });
+
+  it('does not reset or extend an explicit tool timeout', async () => {
+    const timing = createManualExecutionTiming();
+    let timedOut = false;
+
+    const tool = createTool({
+      name: 'progress-does-not-extend-timeout',
+      description: 'reports progress while waiting for a timeout',
+      input: z.object({}),
+      async execute(_params, context) {
+        context.progress({ percent: 10, message: 'still going' });
+        return new Promise<string>(() => {});
+      },
+    });
+
+    const pending = tool.execute(createToolCall('progress-does-not-extend-timeout', {}), {
+      ...timing.options,
+      timeout: 1000,
+    });
+    await drainMicrotasks();
+    timing.fireTimeout();
+    const result = await pending;
+    if (result.errorCategory === 'timeout') timedOut = true;
+
+    expect(timedOut).toBe(true);
   });
 });

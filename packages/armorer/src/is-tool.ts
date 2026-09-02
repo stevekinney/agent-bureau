@@ -218,7 +218,7 @@ export type DefaultToolEvents = {
     inputDigest?: string;
     outputDigest?: string;
   } & ToolEventDetailContext;
-  progress: { percent?: number; message?: string };
+  progress: { percent?: number; message?: string; checkpoint?: unknown };
   'stream-start': { mode: 'stream' | 'collect' };
   'stream-chunk': { chunk: unknown; index: number };
   'stream-end': { chunks: number; completed: boolean };
@@ -289,6 +289,26 @@ export interface RuntimeToolContext extends CoreToolContext {
   requestContext?: Readonly<ToolRequestContext>;
   effectiveContext?: Readonly<EffectiveToolExecutionContext>;
   dispatch: (event: Event) => boolean;
+  /**
+   * Reports progress or liveness for the current tool call. A typed wrapper
+   * over `dispatch` that constructs and dispatches the existing
+   * `ToolProgressEvent`/`DefaultToolEvents['progress']` event, so tool
+   * authors no longer hand-construct an `Event` themselves.
+   *
+   * `checkpoint` carries an arbitrary, verbatim value an activity-backed
+   * execution can forward to Weft as a heartbeat detail; it is never
+   * re-serialized or reconstructed from `percent`/`message`.
+   *
+   * A no-op once the tool call has completed or been aborted — calling it
+   * outside of an active tool execution never throws, matching the
+   * tolerant-context pattern of this interface's other methods. It never
+   * resets or extends an explicit `timeout`.
+   */
+  progress: <TDetail = unknown>(update: {
+    readonly percent?: number;
+    readonly message?: string;
+    readonly checkpoint?: TDetail;
+  }) => void;
   meta?: { toolName: string; callId?: string };
   toolCall: ToolCallWithArguments;
   configuration: ToolConfiguration;
