@@ -469,10 +469,13 @@ export async function startCloudflareRuntime(
       createFreshR2Bucket(): R2Bucket {
         return createPrefixedR2Bucket(r2Bucket, `${options.identifiers.next()}/`);
       },
-      async shutdown(): Promise<void> {
-        await bootedMiniflare.dispose();
-        await rm(persistDirectory, { recursive: true, force: true });
-      },
+      // Reuses `cleanUpAfterStartupFailure`'s dispose-then-remove ordering:
+      // `rm` must run even when `dispose()` rejects (workerd failing to
+      // terminate cleanly must not leak `persistDirectory`, and must not
+      // stop an `afterEach` loop from processing remaining lanes) — exactly
+      // the same requirement a startup failure has, just with an
+      // unconditionally-defined instance.
+      shutdown: () => cleanUpAfterStartupFailure(bootedMiniflare, persistDirectory),
     };
   } catch (error) {
     try {
