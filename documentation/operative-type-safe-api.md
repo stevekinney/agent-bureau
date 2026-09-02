@@ -448,10 +448,26 @@ _call_, not the agent.
 
 ```ts
 export type AgentOutput<D extends AgentDefinitions, TName extends keyof D> =
-  D[TName] extends RunnableAgent<infer O, boolean> ? O : never;
+  D[TName] extends RunnableAgent<never, false>
+    ? never
+    : D[TName] extends RunnableAgent<infer O, true>
+      ? O
+      : never;
 
 export type AgentHasOutput<D extends AgentDefinitions, TName extends keyof D> =
   D[TName] extends RunnableAgent<unknown, infer H> ? H : false;
+
+// Distributive over TName: `AgentOutput`/`AgentHasOutput` key off the
+// indexed access `D[TName]`, which does not distribute over a union `TName`
+// on its own. Wrapping them directly in `AgentRun<AgentOutput<D, TName>,
+// AgentHasOutput<D, TName>>` would compute O/H once against the collapsed
+// union of every named entry, which can unsoundly resolve a schema'd call to
+// `unwrap(): Promise<string>`. The `TName extends TName ? ... : never` idiom
+// forces per-member distribution instead.
+export type AgentRunForName<
+  D extends AgentDefinitions,
+  TName extends keyof D & string,
+> = TName extends TName ? AgentRun<AgentOutput<D, TName>, AgentHasOutput<D, TName>> : never;
 
 export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
   readonly agents: BureauAgentCatalog<D>;
@@ -460,7 +476,7 @@ export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
     name: TName,
     input: AgentInput,
     options?: BureauRunOptions,
-  ): AgentRun<AgentOutput<D, TName>, AgentHasOutput<D, TName>>;
+  ): AgentRunForName<D, TName>;
 
   // ...administrative operations, see below.
 }
@@ -474,6 +490,12 @@ with no cast anywhere in the call chain. Like `RunnableAgent.run`, this method
 is synchronous — it returns the `AgentRun` immediately, never
 `Promise<AgentRun>` — regardless of whether the named agent happens to be a
 `createLazyAgent` entry still resolving its module.
+
+When `name`'s static type is itself a union spanning both a schema-backed and
+a schema-less agent (a name read from a variable typed `'a' | 'b'`, or a
+generic helper forwarding a caller-supplied literal union), the return type
+distributes per member — `AgentRun<never, false> | AgentRun<{...}, true>` —
+rather than collapsing to one branch.
 
 There is no `createRun` on `Bureau<D>`. `run` replaces it outright; nothing
 else in this API creates a run.

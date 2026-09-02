@@ -51,6 +51,21 @@ describe('bureau.run', () => {
     }
   });
 
+  it('exposes children() and abortChild() on the handle returned by a direct-dispatch (non-durable) run (AB-50, guarded against the createDeferredAgentRun rewrite regressing them)', async () => {
+    const bureau = await createBureau({
+      agents: { echo: createAgent({ generate: mockGenerate() }) },
+    });
+    try {
+      const run = bureau.run('echo', 'hi');
+      expect(typeof run.children).toBe('function');
+      expect(typeof run.abortChild).toBe('function');
+      expect(run.children()).toEqual([]);
+      await run.result();
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
   it('throws BureauError BAD_REQUEST for input that is neither a string nor { conversation }', async () => {
     const bureau = await createBureau({
       agents: { echo: createAgent({ generate: mockGenerate() }) },

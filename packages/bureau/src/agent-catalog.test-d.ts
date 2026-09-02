@@ -132,5 +132,19 @@ async function bureauRunOutputInference() {
   if (bureau.agents.has(name)) {
     bureau.agents.get(name);
   }
+
+  // `bureau.run`'s return type must DISTRIBUTE over a union `name` (review
+  // round 2, Codex — see AgentRunForName's doc comment in ./agent-catalog.ts).
+  // Without distribution, calling with a name typed as a union collapses
+  // AgentHasOutput to `boolean`, which resolves AgentRun's own H-conditional
+  // to its `false` branch regardless of which agent is actually dispatched —
+  // `unwrap()` would then type as `Promise<string>` even when the runtime
+  // call resolves to the schema'd agent, silently lying about the schema
+  // branch's real output shape. Asserting the schema type still appears in
+  // the union return proves the distribution held.
+  const unionName = 'schema' as 'plain' | 'schema';
+  const unionRun = bureau.run(unionName, 'hi');
+  const unionUnwrapped = unionRun.unwrap();
+  expectType<Promise<string> | Promise<{ a: string }>>(unionUnwrapped);
 }
 void bureauRunOutputInference;
