@@ -147,6 +147,109 @@ describe('findSkipFindingsInSource', () => {
     const { findings } = findSkipFindingsInSource(filePath, sourceText);
     expect(findings).toEqual([]);
   });
+
+  it('flags a conditional early return inside an .each-chained test callback (regression: PR #437 review)', () => {
+    const filePath = 'inline.ts';
+    const sourceText = `
+      import { expect, it } from 'bun:test';
+      it.each([1, 2, 3])('handles %i', (value) => {
+        if (value < 0) {
+          return;
+        }
+        expect(value).toBeGreaterThanOrEqual(0);
+      });
+    `;
+    const { findings } = findSkipFindingsInSource(filePath, sourceText);
+    expect(findings).toEqual([
+      {
+        filePath,
+        testIdentifier: `${filePath} > handles %i`,
+        kind: 'conditional-early-return',
+        line: 3,
+      },
+    ]);
+  });
+
+  it('flags it.skip.each as a skip, not as an ordinary test (regression: PR #437 review)', () => {
+    const filePath = 'inline.ts';
+    const sourceText = `
+      import { expect, it } from 'bun:test';
+      it.skip.each([1, 2])('case %i', (value) => {
+        expect(value).toBeGreaterThan(0);
+      });
+    `;
+    const { findings } = findSkipFindingsInSource(filePath, sourceText);
+    expect(findings).toEqual([
+      {
+        filePath,
+        testIdentifier: `${filePath} > case %i`,
+        kind: 'skip',
+        line: 3,
+      },
+    ]);
+  });
+
+  it('does not record a phantom identifier for the intermediate .each(data) factory call, only the real declaration', () => {
+    const filePath = 'inline.ts';
+    const sourceText = `
+      import { expect, it } from 'bun:test';
+      it.each([1, 2])('case %i', (value) => {
+        expect(value).toBeGreaterThan(0);
+      });
+    `;
+    const { allTestIdentifiers } = findSkipFindingsInSource(filePath, sourceText);
+    expect([...allTestIdentifiers]).toEqual([`${filePath} > case %i`]);
+  });
+
+  it('does not treat it.skipIf as a manifestable skip, but does record its identifier and scan its body (regression: PR #437 review)', () => {
+    const filePath = 'inline.ts';
+    const sourceText = `
+      import { expect, it } from 'bun:test';
+      it.skipIf(true)('conditionally skipped by the runtime, not this gate', () => {
+        if (Bun.env['NEVER'] === 'set') {
+          return;
+        }
+        expect(true).toBe(true);
+      });
+    `;
+    const { findings, allTestIdentifiers } = findSkipFindingsInSource(filePath, sourceText);
+    const testIdentifier = `${filePath} > conditionally skipped by the runtime, not this gate`;
+    expect([...allTestIdentifiers]).toEqual([testIdentifier]);
+    expect(findings).toEqual([
+      { filePath, testIdentifier, kind: 'conditional-early-return', line: 3 },
+    ]);
+  });
+
+  it('does not record a phantom identifier for an unresolved it.skipIf(cond) factory call by itself', () => {
+    const filePath = 'inline.ts';
+    const sourceText = `
+      import { it } from 'bun:test';
+      const guarded = it.skipIf(true);
+    `;
+    const { findings, allTestIdentifiers } = findSkipFindingsInSource(filePath, sourceText);
+    expect(findings).toEqual([]);
+    expect([...allTestIdentifiers]).toEqual([]);
+  });
+
+  it('gives two dynamically-titled declarations in the same file distinct identifiers by line', () => {
+    const filePath = 'inline.ts';
+    const sourceText = `
+      import { expect, it } from 'bun:test';
+      const titleA = 'first';
+      const titleB = 'second';
+      it(titleA, () => {
+        expect(true).toBe(true);
+      });
+      it(titleB, () => {
+        expect(true).toBe(true);
+      });
+    `;
+    const { allTestIdentifiers } = findSkipFindingsInSource(filePath, sourceText);
+    expect([...allTestIdentifiers]).toEqual([
+      `${filePath} > <unnamed:5>`,
+      `${filePath} > <unnamed:8>`,
+    ]);
+  });
 });
 
 describe('evaluateSkipManifest', () => {

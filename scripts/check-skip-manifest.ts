@@ -6,7 +6,7 @@
  * absent or declared, with an owner, a reason, an environment predicate, and a removal
  * condition, in `scripts/skip-manifest.json`. This script is that gate.
  *
- * WHY THE TYPESCRIPT COMPILER API, NOT REGULAR EXPRESSIONS. `scripts/documentation-examples.ts`
+ * WHY THE TYPESCRIPT COMPILER API, NOT REGULAR EXPRESSIONS. `scripts/documentation-examples.test.ts`
  * already establishes why: a call inside a string literal or a comment reads identically to real
  * code under a regular expression, and a hand-rolled matcher for nested member access and
  * argument lists accumulates false positives one edge case at a time. The TypeScript compiler is
@@ -15,23 +15,44 @@
  *
  * AST SHAPES MATCHED (also recorded in the pull request body per AB-279's acceptance criteria):
  *
- * - `describe`/`it`/`test`, called either as a bare identifier (`it(...)`) or through a single
- *   property access on that identifier (`it.skip(...)`, `test.only(...)`, `describe.todo(...)`).
- *   This is exactly AB-279's enumerated scope: `describe.skip`, `it.skip`, `test.skip`,
- *   `describe.todo`, `it.todo`, `test.todo`, and `.only` in those three forms, plus the
- *   conditional-return shape below — nothing more. bun:test's runtime API is WIDER than that
- *   list — it also exposes `.skip.each(...)`, `.only.each(...)`, `.skipIf(...)`, `.todoIf(...)`,
- *   and `.if(...)` (confirmed against the installed `bun@1.4.0` at review time; verify again
- *   against whatever version is installed before relying on this). `.skipIf`/`.todoIf` are not
- *   hypothetical: `packages/armorer/test/coding/grep.test.ts` and
- *   `packages/operative/test/package-exports.test.ts` each use `.skipIf` today, and this gate
- *   does not see either call. Deliberately out of scope per the acceptance criteria's literal
- *   enumeration, not because the deeper forms don't exist — recorded as a follow-up in the pull
- *   request body rather than silently expanding this issue's boundary.
+ * - `describe`/`it`/`test`, called bare (`it(...)`), through one `.skip`/`.todo`/`.only`
+ *   property access (`it.skip(...)`, `test.only(...)`, `describe.todo(...)`), through a
+ *   parameterized `.each(...)(...)` invocation, or through `.skip.each(...)(...)` /
+ *   `.only.each(...)(...)`. `resolveTestRoot` walks the callee chain (identifier → optional
+ *   property accesses → optional wrapping call, for `.each`'s two-call shape) to the root
+ *   `describe`/`it`/`test` identifier; a call only counts as a genuine test declaration — one
+ *   this gate reports on or adds to `allTestIdentifiers` — when it also passes a function-like
+ *   argument, which is what distinguishes the real declaration (`it.each(data)('title', fn)`)
+ *   from the intermediate factory call (`it.each(data)`, no callback yet) that produced it.
+ * - `.only` in any of `describe.only`/`it.only`/`test.only`, plain or `.each`-chained, always
+ *   fails — the acceptance criteria's enumerated scope. `.skip`/`.todo` and their `.each` forms
+ *   are manifestable.
+ * - Deliberately still out of scope, verified against the installed `bun@1.4.0` at review time
+ *   (verify again against whatever version is installed before relying on this): `.skipIf(...)`
+ *   and `.todoIf(...)`. Not hypothetical — `packages/armorer/test/coding/grep.test.ts` and
+ *   `packages/operative/test/package-exports.test.ts` each use `.skipIf` today. A `.skipIf`/
+ *   `.todoIf` call resolves through `resolveTestRoot` like any other modifier, so it IS scanned
+ *   for a conditional early return and DOES contribute its identifier to `allTestIdentifiers` (no
+ *   false "orphan" if it is ever named in the manifest) — it just never resolves to a `skip`/
+ *   `todo`/`only` finding, because `skipIf`/`todoIf` are not in `SKIP_LIKE_PROPERTIES`. Recorded
+ *   as a follow-up in the pull request body rather than silently expanding this issue's scope.
+ * - Also out of scope: `*.test.mjs` files (e.g. `packages/integration/test/runtime.test.mjs`,
+ *   run through `node --test`, not `bun:test`). The acceptance criteria's scan glob is literally
+ *   `*.test.ts`; `node:test`'s API is close enough to `bun:test`'s that a `.mjs` scan is a
+ *   plausible future extension, but a different module system and potentially different AST
+ *   shapes make it a real, separate slice rather than a one-line glob change.
  * - A conditional early return is a `ReturnStatement` that is either the first statement of an
  *   `IfStatement`'s `then` branch, or the first statement of a block that is that `then` branch,
- *   where the `IfStatement` itself is the first statement of an `it`/`test` callback's body.
- *   `describe` callbacks are not test bodies and are not scanned for this shape.
+ *   where the `IfStatement` itself is the first statement of an `it`/`test` (not `describe`)
+ *   callback's body — including the callback of an `.each`-chained `it`/`test`.
+ * - A finding's `testIdentifier` embeds the declaration's 1-indexed source line whenever its
+ *   title is not a plain string literal (`<unnamed:LINE>`), rather than a shared `<unnamed>`
+ *   token. Two dynamically-titled or `.each`-templated declarations in the same file would
+ *   otherwise collapse onto one identifier, letting one manifest entry silently authorize both.
+ *   This does not fully close the gap for two *literal, identical* titles under the same
+ *   `describe` chain — the acceptance criteria defines `testIdentifier` as "file path plus the
+ *   full test name," which has no room for a positional discriminator on an otherwise-legitimate
+ *   duplicate literal name; treated as an accepted limitation of that definition, not a bug.
  */
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
@@ -106,36 +127,64 @@ export function parseSkipManifest(value: unknown): SkipManifestEntry[] {
   return value;
 }
 
+interface TestRoot {
+  readonly rootName: string;
+  /** Every property name walked from the root, in order, e.g. `['skip']` or `['only', 'each']`. */
+  readonly modifiers: readonly string[];
+}
+
+/**
+ * Walks a callee expression back to its root `describe`/`it`/`test` identifier, following
+ * property accesses (`.skip`, `.each`, …) and — because `.each(...)` returns a function you then
+ * call again — transparently through one layer of wrapping `CallExpression` (`it.each(data)` as
+ * the callee of the outer `it.each(data)('title', fn)`). Returns `undefined` for anything that
+ * does not bottom out at `describe`/`it`/`test`.
+ */
+function resolveTestRoot(expression: ts.Expression): TestRoot | undefined {
+  if (ts.isIdentifier(expression)) {
+    return TEST_CALL_NAMES.has(expression.text)
+      ? { rootName: expression.text, modifiers: [] }
+      : undefined;
+  }
+  if (ts.isPropertyAccessExpression(expression) && ts.isIdentifier(expression.name)) {
+    const base = resolveTestRoot(expression.expression);
+    if (!base) return undefined;
+    return { rootName: base.rootName, modifiers: [...base.modifiers, expression.name.text] };
+  }
+  if (ts.isCallExpression(expression)) {
+    return resolveTestRoot(expression.expression);
+  }
+  return undefined;
+}
+
 interface TestCallInfo {
   readonly rootName: string;
   readonly skipKind: SkipKind | undefined;
 }
 
-/** Recognizes `describe`/`it`/`test` called bare or through one `.skip`/`.todo`/`.only` property. */
+/**
+ * A `CallExpression` counts as a genuine test declaration — not merely a `.each`/`.skipIf`
+ * factory call that has not been invoked with a callback yet — only once it both resolves to a
+ * `describe`/`it`/`test` root and carries a function-like argument. That second condition is what
+ * tells `it.each(data)('title', fn)` (a declaration) apart from `it.each(data)` alone (not one).
+ */
 function getTestCallInfo(node: ts.CallExpression): TestCallInfo | undefined {
-  const { expression } = node;
+  const root = resolveTestRoot(node.expression);
+  if (!root) return undefined;
+  if (!node.arguments.some(isFunctionLike)) return undefined;
 
-  if (ts.isIdentifier(expression) && TEST_CALL_NAMES.has(expression.text)) {
-    return { rootName: expression.text, skipKind: undefined };
-  }
+  const skipKinds = root.modifiers
+    .map((modifier) => SKIP_LIKE_PROPERTIES[modifier])
+    .filter((kind): kind is SkipKind => kind !== undefined);
 
-  if (
-    ts.isPropertyAccessExpression(expression) &&
-    ts.isIdentifier(expression.expression) &&
-    TEST_CALL_NAMES.has(expression.expression.text) &&
-    ts.isIdentifier(expression.name)
-  ) {
-    const skipKind = SKIP_LIKE_PROPERTIES[expression.name.text];
-    return { rootName: expression.expression.text, skipKind };
-  }
-
-  return undefined;
+  return { rootName: root.rootName, skipKind: skipKinds[0] };
 }
 
-function getTitleArgument(node: ts.CallExpression): string {
+function getTitleArgument(node: ts.CallExpression, sourceFile: ts.SourceFile): string {
   const titleArgument = node.arguments[0];
   if (titleArgument && ts.isStringLiteralLike(titleArgument)) return titleArgument.text;
-  return '<unnamed>';
+  const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
+  return `<unnamed:${line}>`;
 }
 
 function isFunctionLike(node: ts.Node): node is ts.ArrowFunction | ts.FunctionExpression {
@@ -177,7 +226,7 @@ export function findSkipFindings(
     if (ts.isCallExpression(node)) {
       const callInfo = getTestCallInfo(node);
       if (callInfo) {
-        const title = getTitleArgument(node);
+        const title = getTitleArgument(node, sourceFile);
         const fullChain = [...describeChain, title];
         const testIdentifier = `${filePath} > ${fullChain.join(' > ')}`;
         allTestIdentifiers.add(testIdentifier);
