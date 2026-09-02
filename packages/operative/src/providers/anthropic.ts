@@ -15,7 +15,6 @@ import type { ToolChoice } from './structured-output/types.ts';
 import type {
   AnthropicClient,
   AnthropicCountTokensRequest,
-  AnthropicCountTokensResponse,
   AnthropicMessageCreateRequest,
   AnthropicMessageResponse,
   AnthropicProviderOptions,
@@ -27,6 +26,7 @@ import type {
   GenerateResponse,
   StreamingGenerateFunction,
   StreamingHandle,
+  TokenCountResult,
 } from './types.ts';
 
 /**
@@ -620,12 +620,11 @@ export interface AnthropicTokenCountingOperations {
    * supplied — would consume, server-side, before any generation request is
    * made.
    *
-   * **Provisional response shape.** `AB-64` — still in Backlog — is what will
-   * define this package's real context/output-limit fields; see
-   * {@link AnthropicCountTokensResponse} for why this deliberately keeps the
-   * SDK's own field name for now rather than inventing a new one.
+   * Returns AB-64's provider-neutral {@link TokenCountResult}. Anthropic's
+   * `messages.countTokens` reports no cache attribution, so `cachedTokens` is
+   * always absent here — never fabricated as `0`.
    */
-  countTokens(request: AnthropicCountTokensRequest): Promise<AnthropicCountTokensResponse>;
+  countTokens(request: AnthropicCountTokensRequest): Promise<TokenCountResult>;
 }
 
 /**
@@ -675,10 +674,23 @@ export function createAnthropicTokenCounter(
   }
 
   return {
-    async countTokens(request: AnthropicCountTokensRequest): Promise<AnthropicCountTokensResponse> {
+    async countTokens(request: AnthropicCountTokensRequest): Promise<TokenCountResult> {
       try {
         const client = await getClient();
-        return await client.messages.countTokens(request);
+        const response = await client.messages.countTokens(request);
+        // `input_tokens` is optional in this package's structural client type
+        // even though the SDK declares it required, because `baseURL` can
+        // point at a proxy that genuinely omits it. AB-64's `TokenCountResult`
+        // requires `totalTokens`, so the absent case is normalized to `0`
+        // once, here, rather than pushed onto every caller as a `?? 0`.
+        // `cachedTokens` is never set: Anthropic's `messages.countTokens`
+        // reports no cache attribution.
+        const result: TokenCountResult = {
+          totalTokens: response.input_tokens ?? 0,
+          provider: 'anthropic',
+          model: request.model,
+        };
+        return result;
       } catch (error) {
         // getClient() can itself throw from inside this try — the SDK
         // constructor rejects a missing key — and re-wrapping an error that is

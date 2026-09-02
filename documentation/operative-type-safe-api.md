@@ -472,10 +472,26 @@ _call_, not the agent.
 
 ```ts
 export type AgentOutput<D extends AgentDefinitions, TName extends keyof D> =
-  D[TName] extends RunnableAgent<infer O, boolean> ? O : never;
+  D[TName] extends RunnableAgent<never, false>
+    ? never
+    : D[TName] extends RunnableAgent<infer O, true>
+      ? O
+      : never;
 
 export type AgentHasOutput<D extends AgentDefinitions, TName extends keyof D> =
   D[TName] extends RunnableAgent<unknown, infer H> ? H : false;
+
+// Distributive over TName: `AgentOutput`/`AgentHasOutput` key off the
+// indexed access `D[TName]`, which does not distribute over a union `TName`
+// on its own. Wrapping them directly in `AgentRun<AgentOutput<D, TName>,
+// AgentHasOutput<D, TName>>` would compute O/H once against the collapsed
+// union of every named entry, which can unsoundly resolve a schema'd call to
+// `unwrap(): Promise<string>`. The `TName extends TName ? ... : never` idiom
+// forces per-member distribution instead.
+export type AgentRunForName<
+  D extends AgentDefinitions,
+  TName extends keyof D & string,
+> = TName extends TName ? AgentRun<AgentOutput<D, TName>, AgentHasOutput<D, TName>> : never;
 
 export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
   readonly agents: BureauAgentCatalog<D>;
@@ -484,7 +500,7 @@ export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
     name: TName,
     input: AgentInput,
     options?: BureauRunOptions,
-  ): AgentRun<AgentOutput<D, TName>, AgentHasOutput<D, TName>>;
+  ): AgentRunForName<D, TName>;
 
   // ...administrative operations, see below.
 }
@@ -498,6 +514,12 @@ with no cast anywhere in the call chain. Like `RunnableAgent.run`, this method
 is synchronous — it returns the `AgentRun` immediately, never
 `Promise<AgentRun>` — regardless of whether the named agent happens to be a
 `createLazyAgent` entry still resolving its module.
+
+When `name`'s static type is itself a union spanning both a schema-backed and
+a schema-less agent (a name read from a variable typed `'a' | 'b'`, or a
+generic helper forwarding a caller-supplied literal union), the return type
+distributes per member — `AgentRun<never, false> | AgentRun<{...}, true>` —
+rather than collapsing to one branch.
 
 There is no `createRun` on `Bureau<D>`. `run` replaces it outright; nothing
 else in this API creates a run.
@@ -529,6 +551,36 @@ non-conforming exception to the idempotent-abort rule added in
 `CONFLICT` against a run that is not currently running instead of returning an
 already-terminal outcome. AB-37 owns the remediation; until it lands, the
 exception is recorded rather than silently reclassified as conforming.
+
+### Session update/query capability
+
+AB-41's scheduling-and-wait-semantics decision record classified
+`updateSession`/`querySession` as dead on arrival: the built-in `agentRun`
+workflow registers no `ctx.onUpdate`/`ctx.onQuery` handler, so any call
+previously reached `runtime.durable.engine.update()`/`.query()` and failed
+there with an untyped engine error. AB-41's coordinator ruling (recorded
+2026-09-02) resolved the record's own open "register a handler, or remove the
+verbs" fork: **kept, not withdrawn** — AB-42 and AB-67 both ratify
+`updateSession`/`querySession` as the distinct session-verb family alongside
+the newer `submitSessionInput`/`submitSteeringCommand` verbs — **and no
+handler is registered**, since a real `ctx.onUpdate`/`ctx.onQuery` contract
+would be an unowned design choice no decision record grants.
+
+AB-192 implements that ruling as honest typed unavailability. Both methods
+still throw `BureauError('NOT_CONFIGURED', subject: 'durable')` when no
+durable engine is composed and `BureauError('NOT_FOUND')` when the session has
+no active run, unchanged. When a durable engine IS configured and an active
+run exists, both throw unconditionally — with no detection branch, since there
+is no handler-registration signal in the codebase to check —
+`BureauError('UNSUPPORTED_CAPABILITY')`, raised immediately before the
+now-unreachable engine call. The gateway's `POST /:id/update` and
+`GET /:id/query` routes map that code to `501`, alongside their existing
+`NOT_CONFIGURED` 501 case. `Bureau.sessionVerbCapabilities` exposes this as a
+synchronous, constant discovery surface — `{ signal: true, update: false,
+query: false }` — so a caller can check before calling rather than only by
+catching the error. If a future decision record registers a real handler,
+that issue removes this unconditional throw; it does not toggle a branch this
+one introduces.
 
 ### Process-local session timing
 
@@ -625,6 +677,8 @@ An **idempotency key** is a caller-supplied opaque string scoped to a principal 
 That section already exists below — see [Session input admission](#session-input-admission) — because AB-193 is the issue that implemented this contract's types and applied its amendments.
 
 **AB-67 is the second.** It fixes the request and state-transition shapes for `SteeringCommand` (agent-identity, route, model, provider, effort, pause, and resume changes) while every other start operation still lacks a key. Whichever issue implements this contract must add a `## Steering commands` section (placed after Session input admission) carrying the type sketches from AB-67's decision record verbatim, including the classification-table row and the further-widened Session-row scope for AB-50.
+
+**AB-64 is the third.** It fixes the versioned `BackendDescriptor`/`ModelCatalog` surface and the seven generation-state terms (known, available, allowed, compatible, requested, selected, effective), while the five-layer policy precedence, the deterministic selector, and the `SelectionPlan` it produces remain a later issue's scope (AB-66). Whichever issue implements the descriptor and catalog must add a `## Model capability and selection` section (placed after Steering commands) carrying the descriptor/catalog/projection type sketches from AB-64's decision record verbatim.
 
 **One shipped path already accepts one and satisfies these semantics within its documented process-local boundary.** The mounted gateway route `POST /hooks/*` scopes an `Idempotency-Key` to the authenticated principal and hook operation, reserves before starting a Bureau run, replays the original successful or known-failure receipt for an identical canonical request, and returns a typed `IDEMPOTENCY_CONFLICT` for a mismatched reuse (`packages/gateway/src/routes/hooks.ts`). Its receipts remain for the lifetime of the route instance, matching the process-local run-locator lifetime; AB-109 owns durable cross-instance receipts.
 
@@ -1333,23 +1387,51 @@ export interface SteeringCommand {
 A `pause` or `resume` command targets exactly one run: when `runId` is present it must name a non-terminal run owned by `sessionId`, otherwise admission fails with the existing `'run-terminal'` reason; when `runId` is absent and the session has exactly one non-terminal run, the command binds to that run and the effective `runId` is recorded on the accepted command; when `runId` is absent and the session has zero or more than one non-terminal run, admission fails with `SteeringCommandFailure.reason: 'run-ambiguous'`.
 
 ```ts
-/** Populated on every terminal-failure SteeringCommandState (`rejected`,
- *  `superseded`, `failed`), mirroring AB-42's SessionInputFailure. */
-export interface SteeringCommandFailure {
+/** One non-`'superseded-by'` member of SteeringCommandFailure — each of the
+ *  six reasons below is its OWN union member (not grouped into one member
+ *  with a six-literal `reason`), which is what lets `Extract<
+ *  SteeringCommandFailure, { reason: R }>` narrow correctly for a single
+ *  reason or a subset of reasons — grouping them under one wide `reason`
+ *  field, as an earlier draft of this section did, makes that `Extract`
+ *  evaluate to `never` instead. Declares `supersededBy?: never` — an object
+ *  literal is not the only place a stray `supersededBy` can reach this
+ *  type from, and `?: never` (unlike omitting the field) also rejects a
+ *  KNOWN, non-literal `supersededBy: string` value (a builder return, an
+ *  intermediate variable) that excess-property checking never sees. This
+ *  package's `exactOptionalPropertyTypes: false` still lets a literal
+ *  explicit `supersededBy: undefined` through — behaviorally
+ *  indistinguishable from omitting the field, so not a real invariant
+ *  violation. */
+type SteeringCommandFailureOf<R extends string> = {
   readonly failedAt: string; // ISO
-  readonly reason:
-    | 'session-terminal' // the owning session itself went terminal (closed) before application
-    | 'run-terminal' // pause/resume only: the run it targeted ended (aborted or completed) before its gate could apply
-    | 'run-ambiguous' // pause/resume only: no runId given and the session has zero or more than one non-terminal run
-    | 'authorization-revoked'
-    | 'policy-denied'
-    | 'deadline-passed'
-    | 'superseded-by'; // pairs with a successor command's id, same target
-  /** The `id` of the successor command, present exactly when `reason` is
-   *  `'superseded-by'` and absent otherwise. */
-  readonly supersededBy?: string;
-}
+  readonly reason: R;
+  readonly supersededBy?: never;
+};
+
+/** Populated on every terminal-failure SteeringCommandState (`rejected`,
+ *  `superseded`, `failed`), mirroring AB-42's SessionInputFailure.
+ *
+ *  A discriminated union on `reason` (AB-236): the `'superseded-by'` member
+ *  requires `supersededBy`; every other member carries `supersededBy?:
+ *  never`. A literal or non-literal value supplying a real `supersededBy`
+ *  alongside a different reason, or omitting it alongside `'superseded-by'`,
+ *  is a compile error, not just a documented invariant. */
+export type SteeringCommandFailure =
+  | SteeringCommandFailureOf<'session-terminal'> // the owning session itself went terminal (closed) before application
+  | SteeringCommandFailureOf<'run-terminal'> // pause/resume only: the run it targeted ended (aborted or completed) before its gate could apply
+  | SteeringCommandFailureOf<'run-ambiguous'> // pause/resume only: no runId given and the session has zero or more than one non-terminal run
+  | SteeringCommandFailureOf<'authorization-revoked'>
+  | SteeringCommandFailureOf<'policy-denied'>
+  | SteeringCommandFailureOf<'deadline-passed'>
+  | {
+      readonly failedAt: string; // ISO
+      readonly reason: 'superseded-by'; // pairs with a successor command's id, same target
+      /** The `id` of the successor command. */
+      readonly supersededBy: string;
+    };
 ```
+
+**`RunOptions.runId` is required whenever `RunOptions.steering` holds an actual gate (AB-236).** `runStep`'s boundary read stamps `SteeringEffectiveState.appliedAtRunId` from `RunOptions.runId`, and a steering-enabled run with no `runId` would silently never dispatch `steering.applied` — there is no honest fallback value to stamp instead. AB-67's decision record names two ways to close that gap: make `runId` required whenever `steering` is set, or synthesize one through the identifier seam **AB-214** introduces. **AB-214 has not merged**, so `packages/operative/src/types.ts` takes the type-level option — `RunOptions` is a discriminated pair rather than two independently-optional fields: either both `runId` and `steering` are absent/optional, or `runId` is required and `steering` (present or not) may hold a gate. The relationship is one-directional — plenty of callers legitimately supply `runId` with no steering intention at all — but a real `SteeringGate` with no `runId` satisfies neither arm and fails to type-check. **Migration:** any caller constructing a steering-enabled `RunOptions` (directly, or through `executeLoop`/`buildStepDeps`/`createActiveRun`) must now also supply `runId`; a run with no `steering` is unaffected. When AB-214 merges, `createActiveRun` may instead synthesize a `runId` for a steering-enabled run with none supplied, which could relax this constraint — a separate, later decision, not made here.
 
 | Operation                         | Authority                                                                                                                                                                                   | Validation boundary                                                                                                                                                                                                                        | Application boundary                                                                                                                          | Acknowledgement                                                                                                                                                                          | Rejection                                                                                                                                               | Supersession                                                                                                                                                                                                           | Terminal behavior                                                                                                                                                                                                                                                                                          |
 | :-------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------ | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -1397,6 +1479,106 @@ export type SteeringCommandState =
 `requested` is not a state a `SteeringCommand` record is ever observed in: admission is synchronous validate-then-accept-or-reject, so nothing is persisted mid-request. **Supersession rationale.** AB-42 explicitly rejects automatic coalescing for conversational message content, because collapsing two messages can silently drop what a caller said. A `SteeringCommand` targeting `model`/`route`/etc. carries no content to drop; it is a desired value, and two commands for the same target are two different opinions about what that one value should be. Keeping both pending and racing them at the boundary has no coherent semantics, so this record decides last-request-per-target-wins, with the earlier one explicitly marked `superseded` (never silently dropped; it remains inspectable) rather than queued behind the new one or merged into it.
 
 These seven exported types carry no runtime behavior on their own. The `runStep` boundary read, pause/resume gate, and `GenerateContext` threading ship (AB-198), as do the five `OperativeEventMap` events dispatched at these transitions (AB-90/AB-221): `steering.accepted`, `steering.applied`, `steering.rejected`, `steering.superseded`, `steering.failed`. `steering.applied` is dispatched by `runStep` itself, at the boundary above; the other four are exported for `submitSteeringCommand` (Bureau's admission surface, AB-199) to dispatch — `submitSteeringCommand` itself does not ship yet. No `steering.requested` event exists: the `requested` state is never persisted or dispatched standalone.
+
+## Model capability and selection
+
+Decision record for AB-64, implemented by AB-243 (`packages/operative/src/providers/model-catalog.ts`). Seven generation-state terms get one meaning apiece, never used as a synonym for another, transcribed verbatim from AB-64's decision record:
+
+| Term       | Meaning                                                                                                       | Decided at                                 |
+| ---------- | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| known      | What the provider's SDK/API can do, independent of this deployment                                            | `BackendDescriptor` static fields          |
+| available  | Known, and reachable now: credentials configured, health not `unhealthy`                                      | `BackendDescriptor.availability`/`.health` |
+| allowed    | Available, and permitted by every policy layer                                                                | Precedence composition                     |
+| compatible | Allowed, and able to serve this request's modality, tools, schema, effort                                     | `SelectionCandidate.eligible`              |
+| requested  | What the caller asked for: a `policyRef` or an exact override; reuses AB-67's `SteeringRequestedValue`        | `SelectionRequest.requestedValue`          |
+| selected   | What the plan chose after filtering and ranking                                                               | `SelectionPlan.selected`                   |
+| effective  | What the provider actually used (`GenerateResponse.metadata.effectiveEffort` plus the model/provider sibling) | `EffectiveGenerationResult`                |
+
+The `allowed`/`compatible`/`requested`/`selected`/`effective` rows name types AB-66 has not shipped yet (`SelectionCandidate`, `SelectionRequest`, `SelectionPlan`, `EffectiveGenerationResult`); AB-243 ships only the `known`/`available` rows' `BackendDescriptor`/`ModelCatalog` types below.
+
+A versioned `BackendDescriptor` and the `ModelCatalog` it lives in, transcribed verbatim from AB-64's decision record with the 2026-09-02 coordinator amendment applied (`modalities: ModalityMatrix` replaces the three parallel `inputModalities`/`outputModalities`/`acceptedSourceForms` fields, citing AB-70's `Modality`, `MimeFamily`, `ContentSource`, and `ModalityMatrix` vocabulary by name):
+
+```ts
+import type {
+  ContentSource,
+  MediaLimits,
+  MimeFamily,
+  Modality,
+  ModalityMatrix,
+} from 'conversationalist'; // AB-70 vocabulary
+import type { BaseProviderOptions, Effort, ProviderName } from './types.ts';
+
+export type BackendLifecycleState = 'preview' | 'stable' | 'deprecated' | 'retired';
+export interface ModelAlias {
+  readonly alias: string;
+  readonly resolvesTo: string;
+}
+
+export interface EffortSupport {
+  readonly portable: readonly Effort[];
+  readonly nativeMapping:
+    'output_config.effort' | 'reasoning_effort' | 'thinkingConfig.thinkingBudget' | 'unsupported';
+  /** Generated from effort.ts's ANTHROPIC_EFFORT_SUPPORT / OPENAI_REASONING_MODELS / GEMINI_THINKING_MODELS tables, not a second table. */
+  readonly degradesTo: Readonly<Partial<Record<Effort, Effort | undefined>>>;
+}
+
+export interface GeneratedAssetBehavior {
+  readonly modality: Modality;
+  readonly synchronous: boolean;
+  readonly maxConcurrentGenerations?: number;
+}
+
+export interface BackendDescriptor {
+  readonly descriptorVersion: number;
+  readonly provider: ProviderName;
+  readonly endpoint: string;
+  readonly model: string; // provider-native, post-alias
+  readonly aliases: readonly ModelAlias[];
+  readonly lifecycle: BackendLifecycleState;
+  /** AB-70's ModalityMatrix: Record<Modality, { input: boolean; output: boolean; sourceForms: readonly ContentSource['kind'][] }> */
+  readonly modalities: ModalityMatrix;
+  readonly mimeFamilies: readonly MimeFamily[];
+  readonly mediaLimits: readonly MediaLimits[];
+  readonly generatedAssetBehavior?: readonly GeneratedAssetBehavior[];
+  readonly contextWindowTokens: number;
+  readonly maxOutputTokens: number;
+  readonly streaming: boolean;
+  readonly tools: boolean;
+  readonly parallelTools: boolean;
+  readonly structuredOutput: boolean;
+  readonly parameterCompatibility: readonly (keyof BaseProviderOptions)[];
+  readonly caching: boolean; // subsumes ProviderCapabilities.requestControlledContextCaching
+  readonly batchInference: boolean;
+  readonly explicitThinkingRequest: boolean;
+  readonly serverSideTokenCounting: boolean;
+  readonly effort: EffortSupport;
+  /** true for an ambiguous OpenAI endpoint (custom baseURL); capability flags conservatively false, availability 'unknown'. */
+  readonly endpointAmbiguous?: boolean;
+  readonly pricing?: {
+    readonly inputPerMillionTokens: number;
+    readonly outputPerMillionTokens: number;
+    readonly currency: string;
+  };
+  readonly availability: 'available' | 'unavailable' | 'unknown';
+  readonly health: 'healthy' | 'degraded' | 'unhealthy' | 'unknown';
+  readonly source: 'static' | 'provider-reported' | 'operator-override';
+  readonly freshness: string; // ISO timestamp
+}
+
+export interface ModelCatalog {
+  readonly revision: number;
+  readonly descriptors: readonly BackendDescriptor[];
+  readonly generatedAt: string;
+  readonly stale: boolean;
+  readonly projection: CatalogProjection; // AB-34's contract: a caller reads which projection it received, never infers it
+}
+
+export type CatalogProjection = 'general' | 'privileged'; // the vault brief's own vocabulary for this catalog
+```
+
+`voyage` and `ollama` are embedding-only and get no descriptor row. `getProviderCapabilities` (`packages/operative/src/providers/capabilities.ts`) is now a projection over `createModelCatalog`'s descriptor rows, with an identical public signature and bit-for-bit identical answers to its pre-AB-64 behavior — the ambiguous-`baseURL` rule is sourced from `descriptor.endpointAmbiguous`. `createModelCatalog` is synchronous, side-effect-free, performs no network input or output, and returns a deeply frozen catalog at `revision: 1`; `now` is the only clock it reads, defaulting to the wall clock and injectable in tests.
+
+The five-layer policy precedence, the deterministic selector, `SelectionPlan`, and the `'general'`-redacting catalog projection remain AB-66's scope (AB-247/AB-248 in the Model Capability project); this section covers only the descriptor and catalog AB-243 ships.
 
 ## Compile-ready examples
 

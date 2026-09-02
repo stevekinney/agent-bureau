@@ -18,7 +18,7 @@
  */
 import {
   BudgetExceededError,
-  createActiveRun,
+  createAgent,
   createContextAssembler,
   createCostBudgetMonitor,
   createTokenBudget,
@@ -29,7 +29,6 @@ import { createAnthropicProvider } from '@lostgradient/operative/anthropic';
 import { createMockAnthropicClient } from '@lostgradient/operative/providers/test';
 import { createHeadlessPermissionPolicyHooks, createTool, createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
-import { Conversation } from 'conversationalist';
 import { z } from 'zod';
 
 import { createTribunalFixtureRepo } from './fixtures/tribunal-fixture-repo';
@@ -49,15 +48,9 @@ import {
   createTribunalToolboxFixture,
 } from './fixtures/tribunal-toolbox';
 
-function seedConversation(diffSummary: string): Conversation {
-  const conversation = new Conversation();
-  conversation.appendSystemMessage(
-    'You are a Tribunal specialist review agent. Report only confirmed, actionable findings ' +
-      'via record_finding. Do not approve, reject, or modify the pull request.',
-  );
-  conversation.appendUserMessage(diffSummary);
-  return conversation;
-}
+const SPECIALIST_SYSTEM_INSTRUCTIONS =
+  'You are a Tribunal specialist review agent. Report only confirmed, actionable findings ' +
+  'via record_finding. Do not approve, reject, or modify the pull request.';
 
 const FINAL_STRUCTURED_TEXT = JSON.stringify({ findings: [] });
 
@@ -118,19 +111,20 @@ describe('AB-99 Tribunal conformance — single provider (Anthropic mock)', () =
       });
 
       const runId = 'ab99-specialist-run';
-      const activeRun = createActiveRun({
+      const agent = createAgent({
         generate,
+        instructions: SPECIALIST_SYSTEM_INSTRUCTIONS,
         toolbox: gatedToolbox,
-        conversation: seedConversation(
-          `PR touches ${repo.changedFilePath}. Review the change for confirmed, actionable findings.`,
-        ),
-        stopWhen: stopWhen.noToolCalls(),
         output: tribunalOutputSchemaForRole('specialist'),
+        stopWhen: stopWhen.noToolCalls(),
       });
+      const activeRun = agent.run(
+        `PR touches ${repo.changedFilePath}. Review the change for confirmed, actionable findings.`,
+      );
 
       const envelope = captureRunEnvelope(runId, activeRun);
-      const result = await activeRun.result;
-      envelope.dispose();
+      const result = await activeRun.result();
+      await envelope.drained;
 
       expect(result.finishReason).toBe('stop-condition');
       expect(toolboxFixture.collectedFindings).toHaveLength(1);
@@ -153,7 +147,7 @@ describe('AB-99 Tribunal conformance — single provider (Anthropic mock)', () =
         toolPostFrames.every((frame) => frame.type === 'tool-post' && frame.status === 'success'),
       ).toBe(true);
 
-      // Pulled from the last step's GenerateResponse.metadata (AB-91's
+      // Pulled from the last step's GenerateResponse.metadata (AB-64's
       // effective-value reporting), not hardcoded — this is what actually
       // reaches a real RunReport, including the literal `'none'` sentinel
       // the Anthropic/OpenAI adapters set for `effectiveEffort` when no
@@ -249,17 +243,18 @@ describe('AB-99 Tribunal conformance — single provider (Anthropic mock)', () =
         },
       ] satisfies AnthropicMessageResponse[]);
 
-      const activeRun = createActiveRun({
+      const agent = createAgent({
         generate: createAnthropicProvider({ model: 'claude-sonnet-4-20250514', client }),
+        instructions: SPECIALIST_SYSTEM_INSTRUCTIONS,
         toolbox: gatedToolbox,
-        conversation: seedConversation('Review the change.'),
-        stopWhen: stopWhen.noToolCalls(),
         output: tribunalOutputSchemaForRole('specialist'),
+        stopWhen: stopWhen.noToolCalls(),
       });
+      const activeRun = agent.run('Review the change.');
 
       const envelope = captureRunEnvelope('ab99-deny-gate-run', activeRun);
-      const result = await activeRun.result;
-      envelope.dispose();
+      const result = await activeRun.result();
+      await envelope.drained;
 
       expect(result.finishReason).toBe('stop-condition');
       const denialFrame = envelope.frames.find(
@@ -313,15 +308,16 @@ describe('AB-99 Tribunal conformance — single provider (Anthropic mock)', () =
         },
       });
 
-      const activeRun = createActiveRun({
+      const agent = createAgent({
         generate: createAnthropicProvider({ model: 'claude-sonnet-4-20250514', client }),
+        instructions: SPECIALIST_SYSTEM_INSTRUCTIONS,
         toolbox,
-        conversation: seedConversation('Review the change.'),
         stopWhen: [stopWhen.noToolCalls(), budgetMonitor.stopCondition],
         maximumSteps: 10,
       });
+      const activeRun = agent.run('Review the change.');
 
-      const result = await activeRun.result;
+      const result = await activeRun.result();
 
       expect(result.finishReason).toBe('budget-exceeded');
       expect(budgetMonitor.currentCost).toBeGreaterThanOrEqual(0.01);
@@ -374,14 +370,15 @@ describe('AB-99 Tribunal conformance — single provider (Anthropic mock)', () =
         contextBudget: createTokenBudget({ maxTokens: 100_000 }),
       });
 
-      const activeRun = createActiveRun({
+      const agent = createAgent({
         generate,
+        instructions: SPECIALIST_SYSTEM_INSTRUCTIONS,
         toolbox,
-        conversation: seedConversation('Review the change.'),
         stopWhen: stopWhen.noToolCalls(),
       });
+      const activeRun = agent.run('Review the change.');
 
-      const result = await activeRun.result;
+      const result = await activeRun.result();
 
       expect(client._calls).toHaveLength(2);
       // Stable prefix: the system content assembled for step 0 and step 1

@@ -80,7 +80,9 @@ describe('createGateway', () => {
   }
 
   it('creates a gateway with default options', async () => {
-    const bureau = await createBureau();
+    const bureau = await createBureau({
+      agents: {},
+    });
     const gateway = await createGateway(bureau);
     expect(gateway.app).toBeDefined();
     expect(gateway.store).toBeDefined();
@@ -89,7 +91,9 @@ describe('createGateway', () => {
   });
 
   it('uses a custom port', async () => {
-    const bureau = await createBureau();
+    const bureau = await createBureau({
+      agents: {},
+    });
     const gateway = await createGateway(bureau, { port: 9999 });
     expect(gateway.port).toBe(9999);
     bureau.dispose();
@@ -97,7 +101,10 @@ describe('createGateway', () => {
 
   it('uses a provided store', async () => {
     const store = createStore();
-    const bureau = await createBureau({ store });
+    const bureau = await createBureau({
+      agents: {},
+      store,
+    });
     const gateway = await createGateway(bureau);
     expect(gateway.store).toBe(store);
     bureau.dispose();
@@ -108,28 +115,36 @@ describe('createGateway', () => {
   });
 
   it('exposes a start function', async () => {
-    const bureau = await createBureau();
+    const bureau = await createBureau({
+      agents: {},
+    });
     const gateway = await createGateway(bureau);
     expect(typeof gateway.start).toBe('function');
     bureau.dispose();
   });
 
   it('accepts runtime option', async () => {
-    const bureau = await createBureau();
+    const bureau = await createBureau({
+      agents: {},
+    });
     const gateway = await createGateway(bureau, { runtime: 'bun' });
     expect(gateway.app).toBeDefined();
     bureau.dispose();
   });
 
   it('exposes the bureau as a property on the gateway', async () => {
-    const bureau = await createBureau();
+    const bureau = await createBureau({
+      agents: {},
+    });
     const gateway = await createGateway(bureau);
     expect(gateway.bureau).toBe(bureau);
     bureau.dispose();
   });
 
   it('gateway does not dispose the bureau on stop', async () => {
-    const bureau = await createBureau();
+    const bureau = await createBureau({
+      agents: {},
+    });
     let disposed = false;
     const originalDispose = bureau.dispose.bind(bureau);
     bureau.dispose = async () => {

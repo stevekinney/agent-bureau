@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, it, mock } from 'bun:test';
+import { describe, expect, it, mock } from 'bun:test';
 
 import type { RunDetailResponse } from '../../routes/runs';
+import type { GatewayClientEnvironment } from '../client-environment';
 import { createRunDetailStore } from './use-run-detail.svelte.ts';
 
 function makeRunDetail(overrides: Partial<RunDetailResponse> = {}): RunDetailResponse {
@@ -24,11 +25,51 @@ function makeRunDetail(overrides: Partial<RunDetailResponse> = {}): RunDetailRes
   };
 }
 
-const originalFetch = globalThis.fetch;
+/** The fixed value the fake environment's `timers.now()` returns. */
+const FAKE_NOW = 424242;
 
-afterEach(() => {
-  globalThis.fetch = originalFetch;
-});
+/**
+ * Builds a {@link GatewayClientEnvironment} test double with a controllable
+ * `fetch` and a deterministic `timers.now()`. `use-run-detail.svelte.ts`
+ * never touches `WebSocket`, `EventSource`, or the scheduling half of
+ * `timers`, so those throw if a bug ever causes them to be invoked.
+ */
+function createEnvironment(fetchImplementation: typeof fetch): GatewayClientEnvironment {
+  return {
+    fetch: fetchImplementation,
+    WebSocket: class {
+      constructor() {
+        throw new Error('use-run-detail does not construct a WebSocket');
+      }
+    } as unknown as typeof WebSocket,
+    EventSource: class {
+      constructor() {
+        throw new Error('use-run-detail does not construct an EventSource');
+      }
+    } as unknown as typeof EventSource,
+    timers: {
+      setTimeout: () => {
+        throw new Error('use-run-detail does not use timers.setTimeout');
+      },
+      clearTimeout: () => {
+        throw new Error('use-run-detail does not use timers.clearTimeout');
+      },
+      setInterval: () => {
+        throw new Error('use-run-detail does not use timers.setInterval');
+      },
+      clearInterval: () => {
+        throw new Error('use-run-detail does not use timers.clearInterval');
+      },
+      now: () => FAKE_NOW,
+    },
+  };
+}
+
+// Bun's `typeof fetch` also requires a static `preconnect` method that this
+// stub has no use for; the cast documents that this is a deliberate
+// call-should-never-happen sentinel, not a real fetch implementation.
+const unusedFetch = (() =>
+  Promise.reject(new Error('fetch should not be called in this test'))) as unknown as typeof fetch;
 
 describe('createRunDetailStore', () => {
   it('seeds the timeline from the initial run events', () => {
@@ -36,6 +77,7 @@ describe('createRunDetailStore', () => {
       makeRunDetail({
         events: [{ sequence: 1, runId: 'run-1', event: 'run.started', detail: {}, timestamp: 10 }],
       }),
+      createEnvironment(unusedFetch),
     );
 
     expect(store.events).toHaveLength(1);
@@ -44,7 +86,10 @@ describe('createRunDetailStore', () => {
   });
 
   it('ignores frames for a different run id', () => {
-    const store = createRunDetailStore(makeRunDetail({ id: 'run-1' }));
+    const store = createRunDetailStore(
+      makeRunDetail({ id: 'run-1' }),
+      createEnvironment(unusedFetch),
+    );
     store.handleMessage({
       type: 'stream:text-delta',
       runSeq: 1,
@@ -56,7 +101,10 @@ describe('createRunDetailStore', () => {
   });
 
   it('appends event frames to the timeline', () => {
-    const store = createRunDetailStore(makeRunDetail({ id: 'run-1' }));
+    const store = createRunDetailStore(
+      makeRunDetail({ id: 'run-1' }),
+      createEnvironment(unusedFetch),
+    );
     store.handleMessage({
       type: 'event',
       runId: 'run-1',
@@ -77,7 +125,10 @@ describe('createRunDetailStore', () => {
   });
 
   it('accumulates streaming text and clears it on stream:complete', () => {
-    const store = createRunDetailStore(makeRunDetail({ id: 'run-1' }));
+    const store = createRunDetailStore(
+      makeRunDetail({ id: 'run-1' }),
+      createEnvironment(unusedFetch),
+    );
     store.handleMessage({
       type: 'stream:text-delta',
       runSeq: 1,
@@ -91,8 +142,11 @@ describe('createRunDetailStore', () => {
     expect(store.streamingAssistantContent).toBe('');
   });
 
-  it('tracks tool activity by block id and appends a synthetic timeline event on start', () => {
-    const store = createRunDetailStore(makeRunDetail({ id: 'run-1' }));
+  it('tracks tool activity by block id, appending a synthetic timeline event with the injected clock reading on start', () => {
+    const store = createRunDetailStore(
+      makeRunDetail({ id: 'run-1' }),
+      createEnvironment(unusedFetch),
+    );
 
     store.handleMessage({
       type: 'stream:tool-call-start',
@@ -119,11 +173,15 @@ describe('createRunDetailStore', () => {
     });
 
     expect(store.toolActivity).toEqual(['search completed']);
-    expect(store.events.map((event) => event.event)).toContain('stream:tool-call-start');
+    const startEvent = store.events.find((event) => event.event === 'stream:tool-call-start');
+    expect(startEvent?.timestamp).toBe(FAKE_NOW);
   });
 
   it('appends a streaming error to the tool-activity log', () => {
-    const store = createRunDetailStore(makeRunDetail({ id: 'run-1' }));
+    const store = createRunDetailStore(
+      makeRunDetail({ id: 'run-1' }),
+      createEnvironment(unusedFetch),
+    );
     store.handleMessage({ type: 'stream:error', runSeq: 1, runId: 'run-1', error: 'disconnected' });
     expect(store.toolActivity).toEqual(['Streaming error: disconnected']);
   });
@@ -135,9 +193,11 @@ describe('createRunDetailStore', () => {
       events: [{ sequence: 2, runId: 'run-1', event: 'run.completed', detail: {}, timestamp: 20 }],
     });
     const fetchMock = mock(() => Promise.resolve(new Response(JSON.stringify(refreshed))));
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-    const store = createRunDetailStore(makeRunDetail({ id: 'run-1' }));
+    const store = createRunDetailStore(
+      makeRunDetail({ id: 'run-1' }),
+      createEnvironment(fetchMock as unknown as typeof fetch),
+    );
 
     // A synthetic (sequence-less) tool-call-start entry should survive refresh.
     store.handleMessage({
@@ -186,9 +246,11 @@ describe('createRunDetailStore', () => {
       events: [{ sequence: 1, runId: 'run-1', event: 'run.started', detail: {}, timestamp: 10 }],
     });
     const fetchMock = mock(() => Promise.resolve(new Response(JSON.stringify(lagging))));
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-    const store = createRunDetailStore(makeRunDetail({ id: 'run-1' }));
+    const store = createRunDetailStore(
+      makeRunDetail({ id: 'run-1' }),
+      createEnvironment(fetchMock as unknown as typeof fetch),
+    );
 
     store.handleMessage({
       type: 'event',
@@ -221,6 +283,7 @@ describe('createRunDetailStore', () => {
         id: 'run-1',
         events: [{ sequence: 0, runId: 'run-1', event: 'run.started', detail: {}, timestamp: 1 }],
       }),
+      createEnvironment(unusedFetch),
     );
 
     expect(store.events.filter((event) => event.sequence === 0)).toHaveLength(1);

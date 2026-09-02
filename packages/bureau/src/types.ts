@@ -1,4 +1,5 @@
 import type {
+  AgentInput,
   AgentSession,
   CacheOptions,
   EnhancedStreamingOptions,
@@ -16,7 +17,11 @@ import type {
   StopCondition,
   TokenUsage,
 } from '@lostgradient/operative';
-import type { CreateRunEngineOptions } from '@lostgradient/operative/durable';
+import type {
+  CreateRunEngineOptions,
+  SessionInputAdmissionOutcome,
+  SessionInputAdmissionRequest,
+} from '@lostgradient/operative/durable';
 import type { Store } from '@lostgradient/operative/store';
 import type {
   HistoryPolicy,
@@ -49,6 +54,12 @@ import type {
 } from 'lifecycle';
 import type { CreateMemoryOptions, Memory } from 'memory';
 
+import type {
+  AgentDefinitions,
+  AgentNames,
+  AgentRunForName,
+  BureauAgentCatalog,
+} from './agent-catalog';
 import type { AuditTrail } from './audit-trail';
 import type { BureauEventMap } from './events';
 import type { OnlineEvalSampler, OnlineEvalSamplerOptions } from './online-evals';
@@ -241,7 +252,18 @@ export interface PersistenceOptions {
 
 // ── Bureau (headless, no HTTP) ──────────────────────────────────────
 
-export interface BureauOptions {
+export interface BureauOptions<D extends AgentDefinitions = AgentDefinitions> {
+  /**
+   * The typed agent catalog (AB-15, AB-22) — a plain literal map of agent
+   * name to `RunnableAgent`, exposed read-only as {@link Bureau.agents} and
+   * dispatched by name through {@link Bureau.run}. Required — pass `{}` for a
+   * bureau that only uses the session/durability-backed `createRun` surface
+   * and doesn't dispatch through the catalog at all. There is no
+   * register/unregister lifecycle: the map is fixed for the bureau's
+   * lifetime, independent of and additive to `createRun`/`generate`/
+   * `provider` below (a bureau may use either, both, or neither surface).
+   */
+  agents: D;
   generate?: GenerateFunction;
   provider?: ProviderConfiguration;
   providers?: ProviderRouteConfiguration[];
@@ -447,7 +469,46 @@ export interface BureauOptions {
    * the run.
    */
   onDiagnostic?: DiagnosticSink;
+  /**
+   * AB-42/AB-194 — per-session and per-principal backlog caps for pending
+   * `SessionInputRecord`s admitted through {@link Bureau.submitSessionInput}.
+   * Both are validated as positive integers at `createBureau()` construction
+   * time, throwing `BureauError('...', 'BAD_REQUEST')` for a non-positive-integer
+   * value (0, a negative number, or a non-integer). Omitting a field leaves it
+   * unvalidated (no error) — {@link DEFAULT_SESSION_INPUT_BACKLOG_LIMIT} and
+   * {@link DEFAULT_PRINCIPAL_SESSION_INPUT_BACKLOG_LIMIT} are the values the
+   * mailbox-backed admission path will apply for an omitted field once it
+   * lands, not values `createBureau()` resolves or stores today.
+   *
+   * AB-42 fixes only that two independent caps exist over the not-yet-terminal
+   * `SessionInputRecord`s for a session (and, separately, for one principal's
+   * records against that session); it does not fix the numbers, and neither
+   * cap is enforced by this issue's code paths — every reachable outcome here
+   * is a pre-admission rejection, before any record (and so any backlog)
+   * exists. Enforcement lands with the mailbox-backed `ab-42-bureau-b` slice.
+   */
+  sessionInput?: {
+    readonly sessionBacklogLimit?: number;
+    readonly principalBacklogLimit?: number;
+  };
 }
+
+/**
+ * AB-42/AB-194 coordinator-chosen default for
+ * {@link BureauOptions.sessionInput}'s `sessionBacklogLimit` — the per-session
+ * cap over all not-yet-terminal `SessionInputRecord`s, applied when the caller
+ * omits an explicit value. Not itself load-bearing for any AB-42 acceptance
+ * criterion beyond being enforced once the mailbox-backed admission path lands.
+ */
+export const DEFAULT_SESSION_INPUT_BACKLOG_LIMIT = 32;
+
+/**
+ * AB-42/AB-194 coordinator-chosen default for
+ * {@link BureauOptions.sessionInput}'s `principalBacklogLimit` — the per-principal
+ * cap over one principal's `SessionInputRecord`s against a given session,
+ * applied when the caller omits an explicit value.
+ */
+export const DEFAULT_PRINCIPAL_SESSION_INPUT_BACKLOG_LIMIT = 128;
 
 /**
  * Durable history/checkpoint guardrail configuration surfaced on
@@ -542,11 +603,79 @@ export interface ResolveReviewResult {
   result?: unknown;
 }
 
-export interface Bureau {
+/**
+ * Per-call options accepted by {@link Bureau.run} — session/tracing/
+ * attribution concerns that are properties of the CALL, not the agent (AB-15).
+ * There is deliberately no `systemPrompt`, `maximumSteps`, or `maximumTokens`
+ * override here: anything that shapes how the agent runs is fixed on the
+ * catalog agent's own definition (`createAgent({ instructions, ... })`).
+ */
+export interface BureauRunOptions {
+  /**
+   * On the durable dispatch branch (a durable engine composed AND the named
+   * agent supports definition resolution), seeds the `ActiveRun`'s
+   * session-correlation key (defaulting to the minted run id when omitted).
+   * A no-op on the direct/in-memory dispatch branch — `AgentRunContext`
+   * (AB-15) carries no `sessionId` field, so a bare `RunnableAgent.run()`
+   * has nowhere to observe it. Accepted without error on either branch;
+   * unlike `principal`, this is deliberate rather than a gap, since a
+   * caller cannot generally predict in advance which branch a given agent
+   * will take.
+   */
+  sessionId?: string;
+  signal?: AbortSignal;
+  traceContext?: unknown;
+  withTraceContext?: <T>(parentContext: unknown, fn: () => Promise<T>) => Promise<T>;
+  /**
+   * Not yet honored by `bureau.run()`: `AgentRunContext` (AB-15) has no
+   * `principal` field, so a bare `RunnableAgent.run()` has no attribution
+   * surface to record it against — that is `createRun`'s job. Supplying a
+   * value here throws synchronously (`BureauError` `BAD_REQUEST`) rather
+   * than silently discarding it.
+   */
+  principal?: string;
+}
+
+export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
   readonly store: Store;
   readonly memory: Memory | undefined;
   readonly scheduler: Scheduler | undefined;
   readonly ready: boolean;
+
+  /**
+   * The typed agent catalog (AB-15, AB-22) — the immutable, read-only view
+   * over `BureauOptions.agents`. `bureau.agents.has(name)` narrows a literal
+   * string to a known agent name where TypeScript permits it.
+   */
+  readonly agents: BureauAgentCatalog<D>;
+
+  /**
+   * Dispatch to a named catalog agent (AB-15, AB-22) — synchronous, like
+   * `RunnableAgent.run`: it returns the `AgentRun` handle immediately, never
+   * `Promise<AgentRun>`, regardless of whether the named agent is a
+   * `createLazyAgent` entry still resolving. Synchronous throws are limited
+   * to an unknown `name`, a disposed bureau, and malformed `input`/`options`;
+   * every other failure (session, provider, tool, policy, or abort) settles
+   * through the returned handle.
+   *
+   * Independent of `createRun` below: `run` dispatches to a catalog
+   * `RunnableAgent` (agent-owned generate/tools/durability by construction);
+   * `createRun` keeps driving bureau-level `generate`/`provider` through the
+   * session/durable-execution machinery. A bureau may use either, both, or
+   * neither.
+   *
+   * When this bureau has a durable engine composed (a persistent `storage`
+   * backend, or `durableExecution: true`) and the named agent supports the
+   * definition-resolution capability (every `createAgent`/`createLazyAgent`
+   * result does), the run is driven through that SAME durable engine so it
+   * survives a crash and resumes — exactly like a `createRun` run. Otherwise
+   * the agent's own in-memory `run()` is used directly.
+   */
+  run<TName extends AgentNames<D>>(
+    name: TName,
+    input: AgentInput,
+    options?: BureauRunOptions,
+  ): AgentRunForName<D, TName>;
 
   createRun(request: CreateRunRequest): Promise<RunSummary>;
   submitSchedulerTask(request: SubmitSchedulerTaskRequest): Promise<SubmitSchedulerTaskResponse>;
@@ -615,20 +744,66 @@ export interface Bureau {
   signalSession(sessionId: string, name: string, payload?: unknown): Promise<void>;
 
   /**
-   * Send a validated, request/response update to a session's current in-flight run.
-   * Maps to `engine.update(runId, name, payload)`. Returns the update result.
-   * Throws `BureauError('NOT_CONFIGURED', subject: 'durable')` when no durable
-   * engine is composed.
+   * Intended to send a validated, request/response update to a session's
+   * current in-flight run, but currently unsupported: after the existing
+   * `BureauError('NOT_CONFIGURED', subject: 'durable')` (no durable engine
+   * composed) and `BureauError('NOT_FOUND')` (no active run) checks, this
+   * unconditionally throws `BureauError('UNSUPPORTED_CAPABILITY')` (AB-41/
+   * AB-192): the built-in `agentRun` workflow registers no `ctx.onUpdate`
+   * handler, so this call can never reach `engine.update`. Kept, not
+   * withdrawn — check {@link Bureau.sessionVerbCapabilities} to detect this
+   * before calling.
    */
   updateSession(sessionId: string, name: string, payload?: unknown): Promise<unknown>;
 
   /**
-   * Query live state from a session's current in-flight run without mutating it.
-   * Maps to `engine.query(runId, name, input)`. Returns the query result.
-   * Throws `BureauError('NOT_CONFIGURED', subject: 'durable')` when no durable
-   * engine is composed.
+   * Intended to query live state from a session's current in-flight run
+   * without mutating it, but currently unsupported: after the existing
+   * `BureauError('NOT_CONFIGURED', subject: 'durable')` (no durable engine
+   * composed) and `BureauError('NOT_FOUND')` (no active run) checks, this
+   * unconditionally throws `BureauError('UNSUPPORTED_CAPABILITY')` (AB-41/
+   * AB-192): the built-in `agentRun` workflow registers no `ctx.onQuery`
+   * handler, so this call can never reach `engine.query`. Kept, not
+   * withdrawn — check {@link Bureau.sessionVerbCapabilities} to detect this
+   * before calling.
    */
   querySession(sessionId: string, name: string, input?: unknown): Promise<unknown>;
+
+  /**
+   * AB-42/AB-194 — admit a caller's session input as a fifth session verb.
+   * Pre-admission checks run in AB-42's fixed order: authorization, then
+   * session lifecycle, then capability/capacity. An unauthorized caller or an
+   * unknown `sessionId` returns `{ outcome: 'not-found' }` (indistinguishable
+   * by design — the document's authorization-denial rule). An authorized
+   * caller naming a session already in a terminal state returns
+   * `{ outcome: 'session-terminal', sessionId }`.
+   *
+   * Until `ab-42-bureau-b` lands (WFT-84's durable application command
+   * mailbox), every other authorized, non-terminal request unconditionally
+   * returns `{ outcome: 'unsupported-capability', reason:
+   * 'durable-mailbox-unavailable' }` — no `SessionInputRecord` is created and
+   * no `id` is consumed by this method today. `admitted`/`replayed`/
+   * `conflict`/`backlog-exhausted` are structurally unreachable until then.
+   */
+  submitSessionInput(
+    sessionId: string,
+    request: SessionInputAdmissionRequest,
+  ): Promise<SessionInputAdmissionOutcome>;
+
+  /**
+   * Synchronous, constant capability discovery for the three session verbs
+   * (AB-192) — lets a caller check `update`/`query` support before calling
+   * either method, rather than only by catching `UNSUPPORTED_CAPABILITY`.
+   * `signal` is `true` (`signalSession` has a real delivery path); `update`
+   * and `query` are `false` because the built-in `agentRun` workflow
+   * registers no `ctx.onUpdate`/`ctx.onQuery` handler. Computed once; not a
+   * function of runtime configuration.
+   */
+  readonly sessionVerbCapabilities: {
+    readonly signal: true;
+    readonly update: false;
+    readonly query: false;
+  };
 
   /**
    * List every parked run awaiting human review (AB-20): armorer's

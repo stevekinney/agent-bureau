@@ -180,6 +180,7 @@ describe('AB-99 Tribunal conformance — SIGTERM partial result (AB-96)', () => 
     };
 
     const bureau = await createBureau({
+      agents: {},
       generate,
       toolbox: createTestToolbox([addTool]) as unknown as Toolbox,
     });

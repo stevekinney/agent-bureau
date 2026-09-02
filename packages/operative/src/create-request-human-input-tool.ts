@@ -119,13 +119,12 @@ export interface CreateRequestHumanInputToolOptions {
  * // sees. `createHumanWaitContext` (packages/bureau/src/create-bureau.ts)
  * // is exactly this forwarding pattern, with `durable: true` because it is
  * // only ever constructed inside the `runtime.durable` guard.
- * const bureau = createBureau()
- *   .tools({
- *     requestHumanInput: createRequestHumanInputTool({
- *       context: createHumanWaitContext(servicesRef, runId),
- *       emitter,
- *     }),
- *   });
+ * const tools = {
+ *   requestHumanInput: createRequestHumanInputTool({
+ *     context: createHumanWaitContext(servicesRef, runId),
+ *     emitter,
+ *   }),
+ * };
  * ```
  *
  * @example

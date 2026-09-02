@@ -338,13 +338,32 @@ describe('events', () => {
     });
 
     it('constructs SteeringSupersededEvent carrying a SteeringCommandFailure', () => {
+      // AB-236: `reason: 'superseded-by'` requires `supersededBy` (the
+      // successor command's id) — omitting it is now a type error (see
+      // `SteeringCommandFailure`'s discriminated union in
+      // `durable/types.ts`), so this fixture supplies one rather than
+      // relying on a shape the type no longer allows.
       const event = new SteeringSupersededEvent('session-1', 'command-1', {
         failedAt: '2026-09-02T00:00:03.000Z',
         reason: 'superseded-by',
+        supersededBy: 'command-2',
       });
 
       expect(event.type).toBe('steering.superseded');
       expect(event.failure.reason).toBe('superseded-by');
+      expect(event.failure.supersededBy).toBe('command-2');
+    });
+
+    it('rejects at the type level a SteeringSupersededEvent missing supersededBy', () => {
+      // AB-236: `SteeringFailureReason<'superseded-by'>` must require
+      // `supersededBy`, not merely accept it as optional — this is the
+      // exact narrowing gap a non-distributive `Omit`-based helper would
+      // silently reintroduce (see `events.ts`'s `SteeringFailureReason`).
+      // @ts-expect-error -- `reason: 'superseded-by'` requires `supersededBy`.
+      new SteeringSupersededEvent('session-1', 'command-1', {
+        failedAt: 'x',
+        reason: 'superseded-by',
+      });
     });
 
     it('constructs SteeringFailedEvent restricted to session-terminal/run-terminal reasons for pause/resume', () => {

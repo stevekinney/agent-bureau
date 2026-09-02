@@ -14,11 +14,14 @@
  * truthful claim — it was the only capability the catalog advertised that this
  * package did not back.
  *
- * Note the one deliberate divergence from the Gemini counter: the SDK declares
- * `input_tokens` **required**, but this package types it optional and never
- * fabricates a `0`. `baseURL` accepts any origin including a proxy, so the
- * declared response type is not a runtime guarantee, and "absent" and "zero"
- * are different facts to a caller doing budgeting.
+ * The SDK declares `input_tokens` **required**, but this package's structural
+ * client type declares it optional: `baseURL` accepts any origin including a
+ * proxy, so the declared response type is not a runtime guarantee.
+ * `createAnthropicTokenCounter` maps that shape onto AB-64's provider-neutral
+ * `TokenCountResult` at its own boundary — `totalTokens` is normalized to `0`
+ * once there (never pushed onto the caller as a `?? 0`), while `cachedTokens`
+ * is never set at all: Anthropic's `messages.countTokens` reports no cache
+ * attribution, unlike the Gemini counter's `cachedTokens`.
  *
  * Two kinds of test live here, following `provider-gemini-token-counting.test.ts`.
  *
@@ -41,9 +44,13 @@ import { createAnthropicTokenCounter } from '../src/providers/anthropic.ts';
 import { ProviderError } from '../src/providers/errors.ts';
 import type {
   AnthropicCountTokensRequest,
-  AnthropicCountTokensResponse,
   AnthropicTokenCountingClient,
 } from '../src/providers/types.ts';
+
+/** The SDK-shaped response `AnthropicTokenCountingClient.messages.countTokens` returns. */
+interface AnthropicCountTokensResponse {
+  input_tokens?: number;
+}
 
 const PLACEHOLDER_TOKEN = 'placeholder-not-a-real-key-0000';
 
@@ -121,7 +128,13 @@ describe('createAnthropicTokenCounter — injected client', () => {
       messages: [{ role: 'user', content: 'The quick brown fox jumps over the lazy dog.' }],
     };
 
-    expect(await counter.countTokens(request)).toEqual(COUNT_RESPONSE);
+    const result = await counter.countTokens(request);
+    expect(result).toStrictEqual({
+      totalTokens: COUNT_RESPONSE.input_tokens,
+      provider: 'anthropic',
+      model: request.model,
+    });
+    expect(result).not.toHaveProperty('cachedTokens');
     expect(calls).toEqual([{ request }]);
   });
 
@@ -141,10 +154,11 @@ describe('createAnthropicTokenCounter — injected client', () => {
     expect(calls).toEqual([{ request }]);
   });
 
-  it('never fabricates input_tokens when the response omits it', async () => {
+  it('normalizes totalTokens to 0 when the response omits input_tokens', async () => {
     // The SDK declares `input_tokens` required, but `baseURL` accepts any
-    // origin — a proxy can answer with a body that omits it. Absent must stay
-    // absent rather than becoming a `0` a caller would budget against.
+    // origin — a proxy can answer with a body that omits it. AB-64's
+    // `TokenCountResult.totalTokens` is required, so the absent case is
+    // normalized to `0` at this mapping boundary.
     const bareClient: AnthropicTokenCountingClient = {
       messages: {
         async countTokens() {
@@ -159,8 +173,12 @@ describe('createAnthropicTokenCounter — injected client', () => {
       messages: [{ role: 'user', content: 'hi' }],
     });
 
-    expect(result).toEqual({});
-    expect(result.input_tokens).toBeUndefined();
+    expect(result).toStrictEqual({
+      totalTokens: 0,
+      provider: 'anthropic',
+      model: 'claude-sonnet-5',
+    });
+    expect(result).not.toHaveProperty('cachedTokens');
   });
 
   it('preserves a zero count as zero rather than collapsing it into absent', async () => {
@@ -178,7 +196,7 @@ describe('createAnthropicTokenCounter — injected client', () => {
       messages: [{ role: 'user', content: '' }],
     });
 
-    expect(result.input_tokens).toBe(0);
+    expect(result.totalTokens).toBe(0);
   });
 
   it('wraps an SDK failure in a ProviderError', async () => {
@@ -232,7 +250,11 @@ describe('createAnthropicTokenCounter — SDK construction', () => {
         messages: [{ role: 'user', content: 'hi' }],
       });
 
-      expect(result.input_tokens).toBe(COUNT_RESPONSE.input_tokens);
+      expect(result).toStrictEqual({
+        totalTokens: COUNT_RESPONSE.input_tokens,
+        provider: 'anthropic',
+        model: 'claude-sonnet-5',
+      });
       expect(server.requests).toHaveLength(1);
       expect(server.requests[0]?.method).toBe('POST');
       expect(server.requests[0]?.path).toContain('count_tokens');

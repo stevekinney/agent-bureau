@@ -40,7 +40,7 @@ flowchart TD
 - **Shared contracts**: `interoperability` defines JSON-safe tool and embedding contracts, while `lifecycle` supplies typed events, observables, and hooks used across the runtime.
 - **State and action layers**: `conversationalist` owns conversation history, `armorer` owns validated tools, and `@lostgradient/operative/store` records run state and action history from live runs.
 - **Runtime layer**: `operative` is the provider-agnostic agent loop. It takes a `GenerateFunction`, runs the conversation and tool cycle, emits lifecycle events, persists sessions, and coordinates scheduler and durable-run behavior. It also carries the provider factories (`@lostgradient/operative/anthropic`, `@lostgradient/operative/openai`, `@lostgradient/operative/gemini`, plus fallover, routing, streaming, and embeddings under `@lostgradient/operative/providers/*`) that adapt OpenAI, Anthropic, Gemini, and embedding providers into runtime functions.
-- **Composition layer**: `bureau` is `createBureau()` — the fleet-level composition point. It assembles providers, tools, memory, skills, session persistence, durable execution (crash-and-resume runs and schedules), and multi-agent orchestration into one runtime, and exposes an audit trail and typed builder API on top.
+- **Composition layer**: `bureau` is `createBureau()` — the fleet-level composition point. It assembles providers, tools, memory, skills, session persistence, durable execution (crash-and-resume runs and schedules), and multi-agent orchestration into one runtime, and exposes a typed `AgentDefinitions` catalog and an audit trail on top.
 - **Knowledge layers**: `memory` and `skills` add persistent recall and reusable procedural knowledge.
 - **Product and platform layers**: `gateway` exposes the composed runtime through Hono routes, live transport, and Svelte UI pages. `cloudflare` supplies a Workers-ready memory storage backend.
 - **Verification layers**: `evaluation` tests agent behavior, and `integration` verifies that the packages work together from consumer-style import paths and runtimes.
@@ -54,6 +54,7 @@ import { createBureau } from 'bureau';
 import { createGateway } from 'gateway';
 
 const bureau = await createBureau({
+  agents: {},
   storage: { type: 'sqlite', path: 'agent-bureau.sqlite' },
   providers: [
     {
@@ -99,7 +100,7 @@ Each workspace package has a package-level README with its local API, internal m
 | Package                                                     | Role                                                                                                                                                                                                                                                   |
 | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | [`armorer`](packages/armorer/README.md)                     | Validated tools, toolboxes, execution, provider adapters, MCP adapters, middleware, and test helpers.                                                                                                                                                  |
-| [`bureau`](packages/bureau/README.md)                       | `createBureau()` fleet composition: providers, tools, memory, skills, session persistence, durable execution and recovery, the typed multi-agent builder API, and the durable audit trail.                                                             |
+| [`bureau`](packages/bureau/README.md)                       | `createBureau()` fleet composition: providers, tools, memory, skills, session persistence, durable execution and recovery, the typed `AgentDefinitions` catalog, and the durable audit trail.                                                          |
 | [`cloudflare`](packages/cloudflare/README.md)               | Cloudflare Workers memory storage backed by Durable Object SQLite plus Vectorize.                                                                                                                                                                      |
 | [`conversationalist`](packages/conversationalist/README.md) | Immutable conversation state, runtime history management, provider message adapters, compaction, and serialization.                                                                                                                                    |
 | [`evaluation`](packages/evaluation/README.md)               | Behavior evaluation suites, matchers, metrics, large language model judges, and report comparison.                                                                                                                                                     |

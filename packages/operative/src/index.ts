@@ -95,31 +95,16 @@ export type {
   StandaloneAgent,
 } from './create-agent';
 export { createAgent } from './create-agent';
-export type {
-  AgentRegistry,
-  AgentRegistryEntry,
-  AgentRegistryEventMap,
-  AgentRegistryEvents,
-  AgentRegistryQuery,
-  RegistryAgent,
-} from './create-agent-registry';
-export {
-  AgentQueriedEvent,
-  AgentRegisteredEvent,
-  AgentUnregisteredEvent,
-  createAgentDiscoveryTool,
-  createAgentRegistry,
-} from './create-agent-registry';
 export type { CreateContextCompactorOptions } from './create-context-compactor';
 export { createContextCompactor } from './create-context-compactor';
 export type { EarlyStoppingHandlerOptions } from './create-early-stopping-handler';
 export { createEarlyStoppingHandler } from './create-early-stopping-handler';
-export type { CreateHandoffToolOptions } from './create-handoff-tool';
+export type { CreateHandoffToolOptions, HandoffTarget } from './create-handoff-tool';
 export { createHandoffTool, extractHandoffTarget, HANDOFF_MARKER } from './create-handoff-tool';
 export type { CreateIdentityHookOptions } from './create-identity-hook';
 export { createIdentityHook } from './create-identity-hook';
 export type { AgentModule, CreateLazyAgentOptions, LazyAgentLoader } from './create-lazy-agent';
-export { createLazyAgent } from './create-lazy-agent';
+export { createDeferredAgentRun, createLazyAgent } from './create-lazy-agent';
 export type { CreateLazyGenerateOptions, LazyGenerateLoader } from './create-lazy-generate';
 export { createLazyGenerate } from './create-lazy-generate';
 export type { CreateMcpElicitationResponderOptions } from './create-mcp-elicitation-responder';
@@ -156,28 +141,6 @@ export type {
   SubagentSummaryContext,
 } from './create-subagent-tool';
 export { createSubagentTool, defaultSubagentSummarizer } from './create-subagent-tool';
-export type {
-  CreateSupervisorOptions,
-  PipelineStage,
-  RoutingStrategy,
-  Supervisor,
-  SupervisorEventMap,
-  SupervisorEvents,
-  SupervisorResult,
-  SupervisorTaskResult,
-  SynthesisStrategy,
-} from './create-supervisor';
-export {
-  createCapabilityRouting,
-  createFanOutRouting,
-  createRoundRobinRouting,
-  createSupervisor,
-  SynthesisCompletedEvent,
-  SynthesisStartedEvent,
-  TaskCompletedEvent,
-  TaskFailedEvent,
-  TaskRoutedEvent,
-} from './create-supervisor';
 export type {
   AgentRunErrorCode,
   AgentRunErrorKind,
@@ -617,6 +580,7 @@ export type {
   PrepareStepHook,
   RetryOptions,
   RunOptions,
+  RunOptionsBase,
   RunResult,
   RunResultBase,
   SelectToolsHook,

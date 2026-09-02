@@ -72,6 +72,17 @@ export {
   createGeminiProviderStream,
   createGeminiTokenCounter,
 } from './gemini.ts';
+export type {
+  BackendDescriptor,
+  BackendLifecycleState,
+  CatalogProjection,
+  CreateModelCatalogOptions,
+  EffortSupport,
+  GeneratedAssetBehavior,
+  ModelAlias,
+  ModelCatalog,
+} from './model-catalog.ts';
+export { createModelCatalog } from './model-catalog.ts';
 export { createOpenAIProvider, createOpenAIProviderStream } from './openai.ts';
 export type {
   ComplexitySignals,
@@ -128,7 +139,6 @@ export type {
   AnthropicBatchListQuery,
   AnthropicClient,
   AnthropicCountTokensRequest,
-  AnthropicCountTokensResponse,
   AnthropicMessageBatch,
   AnthropicMessageBatchIndividualResponse,
   AnthropicMessageBatchRequestCounts,
@@ -149,7 +159,6 @@ export type {
   GeminiCacheCreatingClient,
   GeminiCachedContent,
   GeminiCountTokensRequest,
-  GeminiCountTokensResponse,
   GeminiCreateBatchJobRequest,
   GeminiCreateCachedContentRequest,
   GeminiDeleteResourceJob,
@@ -178,5 +187,6 @@ export type {
   ProviderName,
   StreamingGenerateFunction,
   StreamingHandle,
+  TokenCountResult,
   TokenUsage,
 } from './types.ts';

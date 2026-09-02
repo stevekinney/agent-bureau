@@ -4,8 +4,8 @@
  * (`effortSchema`, `findingSchema`, `triageDecisionSchema`,
  * `verificationDecisionSchema`, `agentResultSchema`), plus Zod equivalents
  * (AB-18) of the per-role output contracts `tribunal/runner/run-agent.mjs`'s
- * `outputSchemaForRole` sent as a raw JSON Schema before AB-18 removed that
- * input form from `RunOptions.output`.
+ * `outputSchemaForRole` describes; `RunOptions.output` accepts a Zod schema
+ * only.
  *
  * This is intentionally a COPY, not an import — `@tribunal/review-core` is
  * not a dependency of this monorepo and must not become one (agent-bureau
@@ -65,11 +65,11 @@ export const agentResultSchema = z.object({
 export type AgentRunRole = 'triage' | 'specialist' | 'verifier';
 
 /**
- * Per-role `output` Zod schemas (AB-18) — equivalent to the raw JSON Schema
- * per-role output contracts `run-agent.mjs`'s `outputSchemaForRole(role)`
- * used before AB-18 removed raw-JSON-Schema `output` input. `.strict()`
- * mirrors the original `additionalProperties: false`; `.nullable()` on
- * `startLine`/`endLine` mirrors the original `anyOf: [integer, null]`.
+ * Per-role `output` Zod schemas (AB-18) — equivalent to the per-role output
+ * contracts `run-agent.mjs`'s `outputSchemaForRole(role)` describes.
+ * `.strict()` mirrors the original `additionalProperties: false`;
+ * `.nullable()` on `startLine`/`endLine` mirrors the original
+ * `anyOf: [integer, null]`.
  */
 const specialistFindingSchema = z
   .object({
@@ -126,7 +126,7 @@ export function mapRunReportToTribunalAgentResult(
     agentSlug: context.agentSlug,
     findings: context.findings,
     modelUsed: report.effectiveModel ?? 'unknown',
-    // AB-91's provider adapters set `metadata.effectiveEffort` to the
+    // AB-64's provider adapters set `metadata.effectiveEffort` to the
     // literal string `'none'` (not `undefined`) whenever no effort option
     // was supplied — see `createAnthropicProvider`/`createOpenAIProvider`'s
     // `effectiveEffort: resolvedEffort ?? 'none'`. Tribunal's `effortSchema`

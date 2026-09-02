@@ -14,6 +14,7 @@
  */
 import type { TextValueStore } from '@lostgradient/weft/storage';
 
+import type { AgentDefinitions } from './agent-catalog';
 import { resolveDiagnosticSink, serializeActionDetail } from './serialization';
 import type { Bureau, DiagnosticSink } from './types';
 
@@ -146,8 +147,8 @@ function encodeKey(timestampMs: number, sequence: number, runId: string): string
  * @param onDiagnostic - Host sink for operational diagnostics (persistence
  *   failures). Omit to log to the console, matching prior behavior.
  */
-export function createAuditTrail(
-  bureau: Bureau,
+export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
+  bureau: Bureau<D>,
   kv: TextValueStore | undefined,
   onDiagnostic?: DiagnosticSink,
 ): AuditTrail {

@@ -560,6 +560,7 @@ describe('buildPartialRunReport', () => {
 describe('Bureau.getRunReport', () => {
   it('returns a cached succeeded report once the run completes, and emits a run-finished frame', async () => {
     const bureau = await createBureau({
+      agents: {},
       generate: async () => ({ content: 'Done.', toolCalls: [] }),
       toolbox: createEmptyToolbox(),
       stopWhen: stopWhen.noToolCalls(),
@@ -608,6 +609,7 @@ describe('Bureau.getRunReport', () => {
 
   it('returns undefined for an unknown run id', async () => {
     const bureau = await createBureau({
+      agents: {},
       generate: async () => ({ content: 'Done.', toolCalls: [] }),
       toolbox: createEmptyToolbox(),
     });
@@ -656,8 +658,9 @@ describe('Bureau.getRunReport', () => {
     };
 
     const bureau = await createBureau({
+      agents: {},
       generate,
-      toolbox: createTestToolbox([addTool]) as unknown as Toolbox,
+      toolbox: createTestToolbox([addTool]),
     });
 
     const run = await bureau.createRun({ message: 'Add 2 and 3, then keep going' });

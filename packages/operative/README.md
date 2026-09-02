@@ -15,7 +15,7 @@ ESM-only dependency requires Node's unflagged `require(esm)` support. Bun consum
 the SDKs for the provider subpaths you use, and no provider SDK is loaded when its provider is
 unused.
 
-The public package exports are `@lostgradient/operative`, `bureau-types`, `conditions`, `durable`,
+The public package exports are `@lostgradient/operative`, `conditions`, `durable`,
 `guardrails`, `instrumentation`, `retry`, `streaming`, `store`, `test`, `anthropic`, `openai`,
 `gemini`, `providers`, `providers/anthropic`, `providers/openai`, `providers/gemini`,
 `providers/fallover`, `providers/routing`, `providers/streaming`, `providers/embeddings`,
@@ -347,30 +347,31 @@ Like `createAgent`, a plain `ConversationHistory` passed here is SNAPSHOTTED on 
 
 **`RunOptions`** — the complete options bag accepted by `createActiveRun`; key fields:
 
-| Field                 | Type                                                   | Description                                                                                                                                                                                                                                                                                               |
-| --------------------- | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `generate`            | `GenerateFunction`                                     | Required. The caller-supplied LLM call.                                                                                                                                                                                                                                                                   |
-| `toolbox`             | `Toolbox`                                              | Required. Tool registry.                                                                                                                                                                                                                                                                                  |
-| `conversation`        | `Conversation \| ConversationHistory`                  | Required. Seed conversation.                                                                                                                                                                                                                                                                              |
-| `stopWhen`            | `StopCondition \| StopCondition[]`                     | Loop exit predicates.                                                                                                                                                                                                                                                                                     |
-| `maximumSteps`        | `number`                                               | Hard step cap (default: `25`).                                                                                                                                                                                                                                                                            |
-| `prepareStep`         | `PrepareStepHook \| PrepareStepHook[]`                 | Runs before each generate call.                                                                                                                                                                                                                                                                           |
-| `beforeToolExecution` | `BeforeToolExecutionHook \| BeforeToolExecutionHook[]` | Modifies tool call list before execution.                                                                                                                                                                                                                                                                 |
-| `afterToolExecution`  | `AfterToolExecutionHook \| AfterToolExecutionHook[]`   | Inspects/modifies tool results.                                                                                                                                                                                                                                                                           |
-| `onStep`              | `OnStepHook \| OnStepHook[]`                           | Called after each step completes.                                                                                                                                                                                                                                                                         |
-| `retry`               | `RetryOptions`                                         | Transient generate failure retry policy.                                                                                                                                                                                                                                                                  |
-| `backpressure`        | `BackpressureStrategy`                                 | Delay strategy applied before each step.                                                                                                                                                                                                                                                                  |
-| `validateResponse`    | `ValidateResponseHook \| ValidateResponseHook[]`       | Post-generate response validation.                                                                                                                                                                                                                                                                        |
-| `validateToolResult`  | `ValidateToolResultHook \| ValidateToolResultHook[]`   | Post-execute result validation.                                                                                                                                                                                                                                                                           |
-| `selectTools`         | `SelectToolsHook \| SelectToolsHook[]`                 | Per-step dynamic tool filtering.                                                                                                                                                                                                                                                                          |
-| `onElicitation`       | `OnElicitation`                                        | Human-in-the-loop input handler.                                                                                                                                                                                                                                                                          |
-| `contextManagement`   | `ContextManagementOptions`                             | Automatic context compaction.                                                                                                                                                                                                                                                                             |
-| `output`              | `ZodType`                                              | Structured output schema (AB-18) with retry. MUST NOT declare a field intended to carry binary or media content — a generated asset belongs in `RunResult.parts` as a managed-asset reference, never inlined as base64.                                                                                   |
-| `schemaRetries`       | `number`                                               | Retry attempts on schema validation failure.                                                                                                                                                                                                                                                              |
-| `onMaximumSteps`      | `(context) => Promise<string \| void>`                 | Called when the loop exits on `maximumSteps` — a returned string replaces `content`.                                                                                                                                                                                                                      |
-| `hooks`               | `HookRegistry<OperativeHookMap>`                       | Typed priority-ordered hook registry.                                                                                                                                                                                                                                                                     |
-| `signal`              | `AbortSignal`                                          | External cancellation signal.                                                                                                                                                                                                                                                                             |
-| `steering`            | `SteeringGate`                                         | AB-67 runtime steering: `{ sessionId, getDesiredState(), awaitResume() }`, consulted at the entry of every step. `paused: true` blocks the step until `awaitResume()` resolves or `signal` fires. `sessionId` (AB-221) stamps `steering.applied`'s `sessionId` field. Optional — omit for unsteered runs. |
+| Field                 | Type                                                   | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| --------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `generate`            | `GenerateFunction`                                     | Required. The caller-supplied LLM call.                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `toolbox`             | `Toolbox`                                              | Required. Tool registry.                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `conversation`        | `Conversation \| ConversationHistory`                  | Required. Seed conversation.                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `stopWhen`            | `StopCondition \| StopCondition[]`                     | Loop exit predicates.                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `maximumSteps`        | `number`                                               | Hard step cap (default: `25`).                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `prepareStep`         | `PrepareStepHook \| PrepareStepHook[]`                 | Runs before each generate call.                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `beforeToolExecution` | `BeforeToolExecutionHook \| BeforeToolExecutionHook[]` | Modifies tool call list before execution.                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `afterToolExecution`  | `AfterToolExecutionHook \| AfterToolExecutionHook[]`   | Inspects/modifies tool results.                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `onStep`              | `OnStepHook \| OnStepHook[]`                           | Called after each step completes.                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `retry`               | `RetryOptions`                                         | Transient generate failure retry policy.                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `backpressure`        | `BackpressureStrategy`                                 | Delay strategy applied before each step.                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `validateResponse`    | `ValidateResponseHook \| ValidateResponseHook[]`       | Post-generate response validation.                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `validateToolResult`  | `ValidateToolResultHook \| ValidateToolResultHook[]`   | Post-execute result validation.                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `selectTools`         | `SelectToolsHook \| SelectToolsHook[]`                 | Per-step dynamic tool filtering.                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `onElicitation`       | `OnElicitation`                                        | Human-in-the-loop input handler.                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `contextManagement`   | `ContextManagementOptions`                             | Automatic context compaction.                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `output`              | `ZodType`                                              | Structured output schema (AB-18) with retry. MUST NOT declare a field intended to carry binary or media content — a generated asset belongs in `RunResult.parts` as a managed-asset reference, never inlined as base64.                                                                                                                                                                                                                                       |
+| `schemaRetries`       | `number`                                               | Retry attempts on schema validation failure.                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `onMaximumSteps`      | `(context) => Promise<string \| void>`                 | Called when the loop exits on `maximumSteps` — a returned string replaces `content`.                                                                                                                                                                                                                                                                                                                                                                          |
+| `hooks`               | `HookRegistry<OperativeHookMap>`                       | Typed priority-ordered hook registry.                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `signal`              | `AbortSignal`                                          | External cancellation signal.                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `runId`               | `string`                                               | Stable run identity, used to stamp curated `tool.*` bubble events. Optional for a run with no `steering` (only supplied when the run has one, e.g. session-owned runs) — **required whenever `steering` is set** (AB-236): `RunOptions` is a discriminated pair on `runId`/`steering`, not two independently-optional fields, so a steering-enabled `RunOptions` literal with no `runId` is a compile error, not a silently-dropped `steering.applied` event. |
+| `steering`            | `SteeringGate`                                         | AB-67 runtime steering: `{ sessionId, getDesiredState(), awaitResume() }`, consulted at the entry of every step. `paused: true` blocks the step until `awaitResume()` resolves or `signal` fires. `sessionId` (AB-221) stamps `steering.applied`'s `sessionId` field. Optional — omit for unsteered runs; setting it requires `runId` (see above).                                                                                                            |
 
 **`RunResult`:**
 
@@ -900,7 +901,7 @@ const withFallback = createFallbackGenerate({
 
 #### Multi-Agent Patterns
 
-The registry-based patterns below (`createSupervisor`, `createHandoffTool`, `createAgentRegistry`) predate `createAgent` and are built around the older `RegistryAgent` shape — `{ name, run(input, context?): Promise<unknown> }`. A `StandaloneAgent` from `createAgent` does expose `.name` (AB-21; defaults to `'(agent)'` when the `name` option is omitted), but its `.run(input)` returns a non-thenable `AgentRun` rather than a `Promise` directly, so wrap it in a thin adapter (`{ name, run: (input) => agent.run(input).result() }`) wherever one of these APIs expects a `RegistryAgent`.
+`createSupervisor` and `createAgentDiscoveryTool` moved to the `bureau` package (AB-22) — they now operate directly on a `BureauAgentCatalog`/`AgentDescriptor` rather than the older registry types, which no longer exist in this package. See `bureau`'s README for both. `createHandoffTool` stays here; it now takes a `RunnableAgent` (from `createAgent` or `createLazyAgent`) directly instead of a registry adapter.
 
 **Subagents:**
 
@@ -1156,82 +1157,7 @@ cannot be determined from the wrapper, so a wrapped `'completed'` outcome is
 downgraded to `unresolved`/`unknown-effect`; every other outcome passes
 through unchanged.
 
-**Supervisor:**
-
-```typescript
-import {
-  createSupervisor,
-  createRoundRobinRouting,
-  createCapabilityRouting,
-} from '@lostgradient/operative';
-import type { AgentRegistryEntry } from '@lostgradient/operative';
-
-// Agents are wrapped as AgentRegistryEntry objects; `.agent` is a
-// RegistryAgent adapter over each StandaloneAgent (see the note above).
-const agentPool: AgentRegistryEntry[] = [
-  {
-    agent: { name: 'writer', run: (input) => writerAgent.run(input).result() },
-    description: 'Writes prose',
-    capabilities: ['writing'],
-  },
-  {
-    agent: { name: 'researcher', run: (input) => researcherAgent.run(input).result() },
-    description: 'Finds facts',
-    capabilities: ['research'],
-  },
-  {
-    agent: { name: 'editor', run: (input) => editorAgent.run(input).result() },
-    description: 'Edits copy',
-    capabilities: ['editing'],
-  },
-];
-
-const supervisor = createSupervisor({
-  agents: agentPool,
-  routing: createRoundRobinRouting(),
-  // or createCapabilityRouting() for skill-based dispatch
-});
-
-const supervisorResult = await supervisor.delegate('Write a detailed report on climate change.');
-// supervisorResult.synthesis — the merged output
-```
-
-**Supervisor synthesis and context discipline (AB-64):** the built-in
-`synthesis` strategy concatenates every delegated agent's `result.content`
-verbatim, attributed by agent name — it applies no cap. That default is fine
-for a small, fixed agent pool, but it does not carry the same
-context-isolation discipline as `createSubagentTool`'s `'summary'` mode: a
-`createFanOutRouting()` delegation across many agents can accumulate an
-uncapped amount of text into `supervisorResult.synthesis`. For fan-out at
-scale, supply a custom `SynthesisStrategy` that applies the same discipline
-— condense each `SupervisorTaskResult` (optionally via
-`defaultSubagentSummarizer` or your own summarizer) and cap the combined
-output before returning it:
-
-```typescript
-import { createFanOutRouting, defaultSubagentSummarizer } from '@lostgradient/operative';
-import type { SynthesisStrategy } from '@lostgradient/operative';
-
-const cappedSynthesis: SynthesisStrategy = async (results) => {
-  const summaries = await Promise.all(
-    results.map(async (r) => {
-      if (r.error || !r.result) return `[${r.agentName}] Error`;
-      const summary = await defaultSubagentSummarizer(r.result, {
-        agentName: r.agentName,
-        maxTokens: 200,
-      });
-      return `[${r.agentName}] ${summary}`;
-    }),
-  );
-  return summaries.join('\n\n');
-};
-
-const supervisor = createSupervisor({
-  agents: agentPool,
-  routing: createFanOutRouting(),
-  synthesis: cappedSynthesis,
-});
-```
+**Supervisor:** moved to the `bureau` package (AB-22) — see its README for `createSupervisor`, `RoutingStrategy<D>`, and the built-in routing strategies, which now operate on a `BureauAgentCatalog<D>` and metadata-only `AgentDescriptor`s.
 
 **Handoffs:**
 
@@ -1248,7 +1174,7 @@ import {
 const escalateToSupport = createHandoffTool({
   name: 'escalate-to-support',
   description: 'Transfer the conversation to the human support agent.',
-  agent: { name: 'support', run: (input) => supportAgent.run(input).result() },
+  agent: { agentName: 'support', agent: supportAgent },
 });
 
 const triageAgent = createAgent({
@@ -1312,7 +1238,7 @@ if (target) {
 > const escalateToSupport = createHandoffTool({
 >   name: 'escalate-to-support',
 >   description: 'Transfer the conversation to the human support agent.',
->   agent: { name: 'support', run: (input) => supportAgent.run(input).result() },
+>   agent: { agentName: 'support', agent: supportAgent },
 >   input: z.object({ reason: z.string() }),
 > });
 > ```
@@ -1335,28 +1261,7 @@ if (target) {
 >
 > If the target agent needs the reason in its own context, pass it explicitly when you start that agent's run — the handoff mechanism will not carry it across for you.
 
-**Agent Registry:**
-
-```typescript
-import { createAgentRegistry, createAgentDiscoveryTool } from '@lostgradient/operative';
-
-const registry = createAgentRegistry();
-registry.register({
-  agent: { name: 'researcher', run: (input) => researcherAgent.run(input).result() },
-  description: 'Finds facts',
-  capabilities: ['research'],
-  tags: ['research'],
-});
-registry.register({
-  agent: { name: 'writer', run: (input) => writerAgent.run(input).result() },
-  description: 'Writes prose',
-  capabilities: ['writing'],
-  tags: ['writing'],
-});
-
-// Let an orchestrator discover agents dynamically
-const discoveryTool = createAgentDiscoveryTool(registry);
-```
+**Agent discovery:** moved to the `bureau` package (AB-22) — see its README for `createAgentDiscoveryTool`, which now takes a `BureauAgentCatalog<D>` directly rather than a standalone registry.
 
 #### Scheduler
 
@@ -1442,6 +1347,21 @@ const monitor = createCostBudgetMonitor({
   onExceeded: (event) => console.error('Budget exceeded at $' + event.currentCost.toFixed(4)),
 });
 ```
+
+#### Model Catalog (AB-64)
+
+`createModelCatalog` (`@lostgradient/operative/providers`) builds a static, synchronous, side-effect-free `ModelCatalog` — one `BackendDescriptor` row per `(provider, endpoint, model)` this package ships a generate function for. Each descriptor names its `modalities` (an AB-70 `ModalityMatrix`, re-exported from `conversationalist`), context/output limits, effort support and degradation, parameter compatibility, pricing (derived from `defaultPricingTable`, never fabricated), and availability/health. `voyage` and `ollama` are embedding-only and get no row.
+
+```typescript
+import { createModelCatalog } from '@lostgradient/operative/providers';
+
+const catalog = createModelCatalog();
+// catalog.revision, catalog.descriptors, catalog.projection ('privileged')
+
+const anthropicRows = catalog.descriptors.filter((d) => d.provider === 'anthropic');
+```
+
+`getProviderCapabilities` is now implemented as a projection over `createModelCatalog`'s descriptors — its public signature and every previously published answer are unchanged.
 
 #### Structured Output
 
@@ -2227,7 +2147,7 @@ const result = await activeRun.result;
 | `SCHEDULER_ORIGIN_TAG`                     | Tag identifying scheduler-originated durable runs.                           |
 | `SCHEDULER_RUN_ID_PREFIX`                  | Prefix for scheduler-managed run IDs.                                        |
 
-**Exported types:** `DurableActiveRunOptions`, `DurableActiveRunContext`, `RecoveredRunHandle`, `StartDurableRunResultOptions`, `CheckpointStore`, `RunEngine`, `RegistryAgnosticEngine`, `CreateRunEngineOptions`, `RunEngineObservability`, `AgentRunWorkflowInput`, `AgentRunWorkflowResult`, `DurableRunDeps`, `RunCheckpoint`, `RunCursor`, `StepRecord`, `SteeringCommand`, `SteeringCommandFailure`, `SteeringCommandState`, `SteeringDesiredState`, `SteeringEffectiveState`, `SteeringRequestedValue`, `SteeringTargetKind` (AB-67 — the runtime steering contract's type-only surface). `SteeringDesiredState`/`SteeringEffectiveState` are exported here for the contract's shape; the runtime consumer of `SteeringDesiredState` is `RunOptions.steering: SteeringGate` (see the `RunOptions` table above and `GenerateContext.steering` below) — the `runStep` boundary read, pause/resume gate, and `GenerateContext` threading now ship. `submitSteeringCommand` (Bureau's admission surface) does not ship yet. AB-67's 2026-09-02 coordinator amendments: `SteeringCommandFailure` carries `supersededBy?: string`, the successor command's `id`, present exactly when `reason` is `'superseded-by'`; every `SteeringRequestedValue` variant encodes `policyRef`/`override` as an exclusive pair (`policyRef?: never` alongside `override`, `override?: never` alongside `policyRef`), rejecting a literal that supplies both or neither; `SteeringCommand` carries `runId?: string`, binding a `pause`/`resume` command to a session's non-terminal run — present, it must name a non-terminal run owned by the session or admission fails with `'run-terminal'`; absent with exactly one non-terminal run, the command binds to it; absent with zero or more than one, admission fails with the new `SteeringCommandFailure.reason: 'run-ambiguous'`.
+**Exported types:** `DurableActiveRunOptions`, `DurableActiveRunContext`, `RecoveredRunHandle`, `StartDurableRunResultOptions`, `CheckpointStore`, `RunEngine`, `RegistryAgnosticEngine`, `CreateRunEngineOptions`, `RunEngineObservability`, `AgentRunWorkflowInput`, `AgentRunWorkflowResult`, `DurableRunDeps`, `RunCheckpoint`, `RunCursor`, `StepRecord`, `SteeringCommand`, `SteeringCommandFailure`, `SteeringCommandState`, `SteeringDesiredState`, `SteeringEffectiveState`, `SteeringRequestedValue`, `SteeringTargetKind` (AB-67 — the runtime steering contract's type-only surface). `SteeringDesiredState`/`SteeringEffectiveState` are exported here for the contract's shape; the runtime consumer of `SteeringDesiredState` is `RunOptions.steering: SteeringGate` (see the `RunOptions` table above and `GenerateContext.steering` below) — the `runStep` boundary read, pause/resume gate, and `GenerateContext` threading now ship. `submitSteeringCommand` (Bureau's admission surface) does not ship yet. AB-67's 2026-09-02 coordinator amendments, as tightened by AB-236: `SteeringCommandFailure` is a discriminated union on `reason` — the `'superseded-by'` member requires `readonly supersededBy: string` (the successor command's `id`); every other member carries `supersededBy?: never`, so a literal or non-literal value supplying a real `supersededBy` alongside a different reason, or omitting it alongside `'superseded-by'`, fails to type-check rather than merely violating a documented invariant (this package's `exactOptionalPropertyTypes: false` still lets a literal explicit `supersededBy: undefined` through — behaviorally indistinguishable from omitting the field); every `SteeringRequestedValue` variant encodes `policyRef`/`override` as an exclusive pair (`policyRef?: never` alongside `override`, `override?: never` alongside `policyRef`), rejecting a literal that supplies both or neither; `SteeringCommand` carries `runId?: string`, binding a `pause`/`resume` command to a session's non-terminal run — present, it must name a non-terminal run owned by the session or admission fails with `'run-terminal'`; absent with exactly one non-terminal run, the command binds to it; absent with zero or more than one, admission fails with the new `SteeringCommandFailure.reason: 'run-ambiguous'`.
 
 > [!NOTE] Session-input admission types (AB-42, type-only)
 > `@lostgradient/operative/durable` also exports `SessionInputDeliveryMode`, `UserAdmissibleContent`, `SessionInputPayload`, `SessionInputRecord`, `SessionInputAdmissionRequest`, `SessionInputReceipt`, `SessionInputConflict`, `SessionInputAdmissionOutcome`, `SessionInputState`, `SessionInputPromotion`, and `SessionInputFailure` — the request, receipt, and state-transition shapes AB-42's decision record fixes for session-input admission (`submitSessionInput`, illustratively named). These are types only: no runtime `submitSessionInput` implementation ships yet. Per AB-42's coordinator amendments (2026-09-02, applied by AB-202): `SessionInputRecord` and `SessionInputAdmissionRequest` take a `TPayload extends SessionInputPayload` bound rather than an unbounded generic, `SessionInputPayload` accepts only `UserAdmissibleContent`, an explicit allowlist of `TextContent` (with `citations` structurally forbidden via `citations?: never`, not merely omitted), `ImageContent`, and `DocumentContent` — not an `Exclude<>` blacklist, since `conversationalist` is consumed at a `^` semver range and a blacklist would silently admit a future content kind, and `SessionInputConflict.reason` gains `'id-owned-by-other-principal'` for a session-input `id` collision across principals. See `documentation/operative-type-safe-api.md`'s "Session input admission" section for the full contract.
@@ -2246,8 +2166,6 @@ import {
   createMockGenerateOnce,
   createRunRecorder,
   createMockScratchpad,
-  createMockRegistryAgent,
-  createMockAgentRegistry,
   createTestStore,
 } from '@lostgradient/operative/test';
 import type { RunRecorder } from '@lostgradient/operative/test';
@@ -2279,24 +2197,17 @@ const once = createMockGenerateOnce({ content: 'Only once', toolCalls: [] });
 
 // In-memory store for testing operative/store consumers
 const store = createTestStore();
-
-// Mock RegistryAgent for createSupervisor / createAgentRegistry consumer tests
-const mockAgent = createMockRegistryAgent('test-agent', {
-  run: async () => 'custom',
-});
 ```
 
 **Exported:**
 
-| Symbol                                      | Description                                                                                    |
-| ------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `createMockGenerate(responses)`             | Replays `GenerateResponse[]` in sequence; exposes `.calls` and `.callCount`.                   |
-| `createMockGenerateOnce(response)`          | Returns response once; throws on subsequent calls.                                             |
-| `createRunRecorder(activeRun)`              | Records all events from an `ActiveRun` for assertion. Exposes `.events`, `.steps`, `.clear()`. |
-| `createMockScratchpad(initialValues?)`      | In-memory `Scratchpad` for testing scratchpad-dependent agents.                                |
-| `createMockRegistryAgent(name, overrides?)` | Minimal `RegistryAgent` with a stub `run`, for `createSupervisor`/registry consumer tests.     |
-| `createMockAgentRegistry(entries?)`         | Pre-populated `AgentRegistry` for registry consumer tests.                                     |
-| `createTestStore()`                         | In-memory `Store` instance from `@lostgradient/operative/store`.                               |
+| Symbol                                 | Description                                                                                    |
+| -------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `createMockGenerate(responses)`        | Replays `GenerateResponse[]` in sequence; exposes `.calls` and `.callCount`.                   |
+| `createMockGenerateOnce(response)`     | Returns response once; throws on subsequent calls.                                             |
+| `createRunRecorder(activeRun)`         | Records all events from an `ActiveRun` for assertion. Exposes `.events`, `.steps`, `.clear()`. |
+| `createMockScratchpad(initialValues?)` | In-memory `Scratchpad` for testing scratchpad-dependent agents.                                |
+| `createTestStore()`                    | In-memory `Store` instance from `@lostgradient/operative/store`.                               |
 
 | `RunRecorder`
 

@@ -34,6 +34,7 @@ import { createBureau } from 'bureau';
 import { createGateway } from 'gateway';
 
 const bureau = await createBureau({
+  agents: {},
   provider: {
     provider: 'anthropic',
     model: 'claude-opus-4-5',
@@ -60,6 +61,7 @@ Use `createBureau()` (from the `bureau` package) directly when you want the runt
 import { createBureau } from 'bureau';
 
 const bureau = await createBureau({
+  agents: {},
   provider: { provider: 'openai', model: 'gpt-4o', apiKey: process.env.OPENAI_API_KEY },
   maximumSteps: 10,
   systemPrompt: 'You are a coding assistant.',
@@ -112,6 +114,7 @@ import { createBureau } from 'bureau';
 import { createGateway } from 'gateway';
 
 const bureau = await createBureau({
+  agents: {},
   provider: { provider: 'anthropic', model: 'claude-opus-4-5' },
   storage: { type: 'sqlite', path: './bureau.db' },
   // durableExecution defaults to true for sqlite/lmdb; override with false to disable
@@ -170,7 +173,7 @@ A read-only, server-rendered page listing evaluation reports over time (pass rat
 import { createBureau } from 'bureau';
 import { createGateway } from 'gateway';
 
-const bureau = await createBureau();
+const bureau = await createBureau({ agents: {} });
 const gateway = await createGateway(bureau, {
   evaluationReportsDirectory: 'reports/evaluations',
 });
@@ -178,12 +181,13 @@ await gateway.start();
 // Visit http://localhost:5555/evaluations
 ```
 
-### `createBureau(options?): Promise<Bureau>` (from `bureau`, not `gateway`)
+### `createBureau(options): Promise<Bureau>` (from `bureau`, not `gateway`)
 
-Composes the runtime without the HTTP layer. `gateway` does not re-export this — import it from the `bureau` package (`createGateway`'s first argument is a `Bureau` built this way). All `BureauOptions` fields are optional—the bureau starts with no provider configured when `generate`, `provider`, and `providers` are all omitted (`bureau.ready` returns `false`).
+Composes the runtime without the HTTP layer. `gateway` does not re-export this — import it from the `bureau` package (`createGateway`'s first argument is a `Bureau` built this way). `agents` is the only required field (pass `{}` if you don't use the typed catalog — gateway's session-based routing doesn't); otherwise the bureau starts with no provider configured when `generate`, `provider`, and `providers` are all omitted (`bureau.ready` returns `false`).
 
 ```typescript
 interface BureauOptions {
+  agents: AgentDefinitions; // required — the typed agent catalog; pass {} if unused
   generate?: GenerateFunction;
   provider?: ProviderConfiguration; // single provider
   providers?: ProviderRouteConfiguration[]; // multi-provider routing

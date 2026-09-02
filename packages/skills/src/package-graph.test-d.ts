@@ -12,14 +12,14 @@
 // bureau seam requires, or if ToolPolicy diverges from ToolPolicyLike, this
 // file will produce a type error during `bun run check-types`.
 //
-// The seam interfaces are inlined here (not imported from operative/bureau-types)
-// to preserve the dependency direction: skills must NOT import from operative.
+// The seam interfaces are inlined here (not imported from operative) to
+// preserve the dependency direction: skills must NOT import from operative.
 
 import type { SkillProvider, ToolPolicy } from './types';
 
 // ── SkillProviderLike — the seam interface bureau uses ────────────────────────
 //
-// Copied from operative/src/bureau-types.ts (SkillProviderLike).
+// Copied from operative's SkillProviderLike shape.
 // Skills must NOT import from operative. This inline copy proves structural
 // compatibility without creating a forbidden dependency.
 //

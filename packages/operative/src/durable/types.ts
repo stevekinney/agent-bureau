@@ -418,24 +418,77 @@ export interface SteeringCommand {
 }
 
 /**
+ * One non-`'superseded-by'` member of {@link SteeringCommandFailure} —
+ * factored out so each of the six reasons below is its own union member
+ * (not grouped into one member with a six-literal `reason`), which is what
+ * lets `Extract<SteeringCommandFailure, { reason: R }>` narrow correctly
+ * for both a single reason and a subset of reasons (see
+ * `events.ts`'s `SteeringFailureReason`).
+ *
+ * Declares `supersededBy?: never` rather than omitting the field entirely —
+ * the two catch DIFFERENT malformed shapes, and this one guards the more
+ * consequential case. `?: never` rejects a KNOWN, definite `supersededBy:
+ * string` reaching this type through a non-literal value (a builder
+ * function's return, an intermediate variable, anything not a fresh object
+ * literal checked directly against this type) — the shape a real bug looks
+ * like: a successor command's id genuinely attached to the wrong `reason`.
+ * Omitting the field instead only strengthens the LITERAL case (TypeScript
+ * excess-property-checks a fresh object literal against every key the
+ * matched member declares — declared as `never`, an object literal
+ * supplying a real string still gets caught) but weakens the non-literal
+ * one: `Omit`-free structural assignability does not excess-property-check
+ * an intermediate value, so a definite `{ supersededBy: string }`-shaped
+ * value assigned through a variable would slip through undetected if the
+ * field weren't declared at all. The one gap `?: never` cannot close, given
+ * this package's repo-wide `exactOptionalPropertyTypes: false`
+ * (`tsconfig.base.json`): a literal explicit `supersededBy: undefined`
+ * still type-checks — behaviorally identical to omitting the field, so not
+ * a real invariant violation — matching `SteeringRequestedValue`'s
+ * identical `override?: never`/`policyRef?: never` caveat
+ * (`steering-types.check.ts`).
+ */
+type SteeringCommandFailureOf<R extends string> = {
+  readonly failedAt: string; // ISO
+  readonly reason: R;
+  readonly supersededBy?: never;
+};
+
+/**
  * Populated on every terminal-failure `SteeringCommandState` (`rejected`,
  * `superseded`, `failed`), mirroring AB-42's `SessionInputFailure`.
+ *
+ * AB-236 tightens this to a discriminated union on `reason` (AB-67's
+ * 2026-09-02 coordinator amendments fixed `supersededBy` as "present exactly
+ * when `reason` is `'superseded-by'` and absent otherwise" in prose; this
+ * makes that exclusivity a type error instead of a runtime-only invariant).
+ * The `'superseded-by'` member requires `supersededBy`; every other member
+ * carries `supersededBy?: never` (see `SteeringCommandFailureOf`'s doc
+ * comment for the tradeoff that shape makes), so a literal or non-literal
+ * value that supplies a real `supersededBy` alongside a different reason,
+ * or omits it alongside `'superseded-by'`, fails to type-check. See
+ * `steering-types.check.ts` for both malformed shapes pinned with
+ * `@ts-expect-error`.
+ *
+ * A consumer that previously wrote `interface LoggedFailure extends
+ * SteeringCommandFailure { traceId: string }` needs an intersection
+ * instead — `type LoggedFailure = SteeringCommandFailure & { traceId:
+ * string }` — since a TypeScript `interface` cannot `extends` a type
+ * containing a union, matching `RunOptions`'s identical migration note.
  */
-export interface SteeringCommandFailure {
-  readonly failedAt: string; // ISO
-  readonly reason:
-    | 'session-terminal' // the owning session itself went terminal (closed) before application
-    | 'run-terminal' // pause/resume only: the run it targeted ended (aborted or completed) before its gate could apply
-    | 'run-ambiguous' // pause/resume only: no runId given and the session has zero or more than one non-terminal run (AB-67's 2026-09-02 coordinator amendments)
-    | 'authorization-revoked'
-    | 'policy-denied'
-    | 'deadline-passed'
-    | 'superseded-by'; // pairs with a successor command's id, same target
-  /** The `id` of the successor `SteeringCommand`, present exactly when
-   *  `reason` is `'superseded-by'` and absent otherwise (AB-67's 2026-09-02
-   *  coordinator amendments). */
-  readonly supersededBy?: string;
-}
+export type SteeringCommandFailure =
+  | SteeringCommandFailureOf<'session-terminal'> // the owning session itself went terminal (closed) before application
+  | SteeringCommandFailureOf<'run-terminal'> // pause/resume only: the run it targeted ended (aborted or completed) before its gate could apply
+  | SteeringCommandFailureOf<'run-ambiguous'> // pause/resume only: no runId given and the session has zero or more than one non-terminal run (AB-67's 2026-09-02 coordinator amendments)
+  | SteeringCommandFailureOf<'authorization-revoked'>
+  | SteeringCommandFailureOf<'policy-denied'>
+  | SteeringCommandFailureOf<'deadline-passed'>
+  | {
+      readonly failedAt: string; // ISO
+      readonly reason: 'superseded-by'; // pairs with a successor command's id, same target
+      /** The `id` of the successor `SteeringCommand` (AB-67's 2026-09-02
+       *  coordinator amendments). */
+      readonly supersededBy: string;
+    };
 
 /**
  * `SteeringCommand`'s state machine. `requested` is never persisted on its

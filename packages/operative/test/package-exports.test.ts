@@ -1,6 +1,8 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
+import type { HandoffTarget } from '@lostgradient/operative';
+import { createHandoffTool } from '@lostgradient/operative';
 import { describe, expect, it } from 'bun:test';
 
 import conversationalistPackageJson from '../../conversationalist/package.json';
@@ -98,5 +100,18 @@ describe('operative package exports', () => {
   it('the providers/instrumentation subpath is in the exports map', () => {
     const exported = new Set(Object.keys(exports));
     expect(exported.has('./providers/instrumentation')).toBe(true);
+  });
+
+  it('re-exports HandoffTarget from the root barrel alongside createHandoffTool', () => {
+    // Regression for a review finding: createHandoffTool's input shape
+    // (HandoffTarget) was introduced but never re-exported from index.ts, so
+    // consumers could call createHandoffTool but not name its `agent` option
+    // type without reaching into the internal module path.
+    const target: HandoffTarget = {
+      agentName: 'writer',
+      agent: { name: 'writer', run: () => Promise.resolve() as never },
+    };
+    const tool = createHandoffTool({ agent: target });
+    expect(tool.name).toBe('transfer_to_writer');
   });
 });

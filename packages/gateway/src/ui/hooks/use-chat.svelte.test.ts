@@ -1,7 +1,8 @@
 import { getMessageText } from '@lostgradient/chat';
-import { afterEach, describe, expect, it, mock } from 'bun:test';
+import { describe, expect, it, mock } from 'bun:test';
 
 import type { RunSummary } from '../../types';
+import type { GatewayClientEnvironment } from '../client-environment';
 import { createChatStore, type CreateChatStoreOptions } from './use-chat.svelte.ts';
 
 function makeRun(overrides: Partial<RunSummary> = {}): RunSummary {
@@ -21,23 +22,70 @@ function makeRun(overrides: Partial<RunSummary> = {}): RunSummary {
   };
 }
 
-function makeStore(overrides: Partial<CreateChatStoreOptions> = {}) {
+/**
+ * Builds a {@link GatewayClientEnvironment} test double with a controllable
+ * `fetch`. `use-chat.svelte.ts` never touches `WebSocket`, `EventSource`, or
+ * `timers`, so those fields throw if a bug ever causes them to be invoked.
+ */
+function createEnvironment(fetchImplementation: typeof fetch): GatewayClientEnvironment {
+  return {
+    fetch: fetchImplementation,
+    WebSocket: class {
+      constructor() {
+        throw new Error('use-chat does not construct a WebSocket');
+      }
+    } as unknown as typeof WebSocket,
+    EventSource: class {
+      constructor() {
+        throw new Error('use-chat does not construct an EventSource');
+      }
+    } as unknown as typeof EventSource,
+    timers: {
+      setTimeout: () => {
+        throw new Error('use-chat does not use timers.setTimeout');
+      },
+      clearTimeout: () => {
+        throw new Error('use-chat does not use timers.clearTimeout');
+      },
+      setInterval: () => {
+        throw new Error('use-chat does not use timers.setInterval');
+      },
+      clearInterval: () => {
+        throw new Error('use-chat does not use timers.clearInterval');
+      },
+      now: () => {
+        throw new Error('use-chat does not use timers.now');
+      },
+    },
+  };
+}
+
+// Bun's `typeof fetch` also requires a static `preconnect` method that this
+// stub has no use for; the cast documents that this is a deliberate
+// call-should-never-happen sentinel, not a real fetch implementation.
+const unusedFetch = (() =>
+  Promise.reject(new Error('fetch should not be called in this test'))) as unknown as typeof fetch;
+
+function makeStore(
+  overrides: Partial<Omit<CreateChatStoreOptions, 'environment'>> = {},
+  fetchImplementation: typeof fetch = unusedFetch,
+) {
   const subscribe = mock((_runId: string) => {});
   const unsubscribe = mock((_runId: string) => {});
   const onRunCreated = mock((_run: RunSummary) => {});
-  const store = createChatStore({ subscribe, unsubscribe, onRunCreated, ...overrides });
+  const store = createChatStore({
+    subscribe,
+    unsubscribe,
+    onRunCreated,
+    environment: createEnvironment(fetchImplementation),
+    ...overrides,
+  });
   return { store, subscribe, unsubscribe, onRunCreated };
 }
 
 function messageTexts(store: ReturnType<typeof makeStore>['store']): string[] {
   return store.conversation.ids.map((id) => getMessageText(store.conversation.messages[id]!));
 }
-
-const originalFetch = globalThis.fetch;
-
-afterEach(() => {
-  globalThis.fetch = originalFetch;
-});
 
 describe('createChatStore', () => {
   it('starts with an empty conversation', () => {
@@ -51,9 +99,8 @@ describe('createChatStore', () => {
     const fetchMock = mock(() =>
       Promise.resolve(new Response(JSON.stringify(makeRun({ id: 'run-7', sessionId: 'sess-7' })))),
     );
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-    const { store, subscribe, onRunCreated } = makeStore();
+    const { store, subscribe, onRunCreated } = makeStore({}, fetchMock as unknown as typeof fetch);
     await store.send('hello there');
 
     expect(messageTexts(store)).toEqual(['hello there']);
@@ -75,9 +122,8 @@ describe('createChatStore', () => {
       requestInits.push(init);
       return Promise.resolve(new Response(JSON.stringify(responses[call++])));
     });
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-    const { store, subscribe, unsubscribe } = makeStore();
+    const { store, subscribe, unsubscribe } = makeStore({}, fetchMock as unknown as typeof fetch);
     await store.send('first');
     await store.send('second');
 
@@ -92,9 +138,8 @@ describe('createChatStore', () => {
 
   it('records a non-ok response body as the error', async () => {
     const fetchMock = mock(() => Promise.resolve(new Response('rate limited', { status: 429 })));
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-    const { store, subscribe } = makeStore();
+    const { store, subscribe } = makeStore({}, fetchMock as unknown as typeof fetch);
     await store.send('hi');
 
     expect(store.error).toBe('rate limited');
@@ -104,9 +149,8 @@ describe('createChatStore', () => {
 
   it('records a thrown network error', async () => {
     const fetchMock = mock(() => Promise.reject(new Error('offline')));
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-    const { store } = makeStore();
+    const { store } = makeStore({}, fetchMock as unknown as typeof fetch);
     await store.send('hi');
 
     expect(store.error).toBe('offline');
@@ -115,9 +159,8 @@ describe('createChatStore', () => {
 
   it('ignores frames for a run other than the active one', async () => {
     const fetchMock = mock(() => Promise.resolve(new Response(JSON.stringify(makeRun()))));
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-    const { store } = makeStore();
+    const { store } = makeStore({}, fetchMock as unknown as typeof fetch);
     await store.send('hi');
 
     store.handleMessage({
@@ -134,9 +177,8 @@ describe('createChatStore', () => {
     const fetchMock = mock(() =>
       Promise.resolve(new Response(JSON.stringify(makeRun({ id: 'run-1' })))),
     );
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-    const { store } = makeStore();
+    const { store } = makeStore({}, fetchMock as unknown as typeof fetch);
     await store.send('question');
 
     store.handleMessage({
@@ -166,9 +208,8 @@ describe('createChatStore', () => {
     const fetchMock = mock(() =>
       Promise.resolve(new Response(JSON.stringify(makeRun({ id: 'run-1' })))),
     );
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-    const { store } = makeStore();
+    const { store } = makeStore({}, fetchMock as unknown as typeof fetch);
     await store.send('question');
 
     store.handleMessage({
@@ -188,9 +229,8 @@ describe('createChatStore', () => {
     const fetchMock = mock(() =>
       Promise.resolve(new Response(JSON.stringify(makeRun({ id: 'run-1' })))),
     );
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-    const { store } = makeStore();
+    const { store } = makeStore({}, fetchMock as unknown as typeof fetch);
     await store.send('question');
 
     store.handleMessage({
@@ -218,9 +258,8 @@ describe('createChatStore', () => {
     const fetchMock = mock(() =>
       Promise.resolve(new Response(JSON.stringify(makeRun({ id: 'run-1' })))),
     );
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-    const { store } = makeStore();
+    const { store } = makeStore({}, fetchMock as unknown as typeof fetch);
     await store.send('question');
 
     store.handleMessage({
@@ -248,9 +287,8 @@ describe('createChatStore', () => {
     const fetchMock = mock(() =>
       Promise.resolve(new Response(JSON.stringify(makeRun({ id: 'run-1' })))),
     );
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-    const { store } = makeStore();
+    const { store } = makeStore({}, fetchMock as unknown as typeof fetch);
     await store.send('question');
 
     store.handleMessage({
@@ -276,10 +314,9 @@ describe('createChatStore', () => {
     const fetchMock = mock(() =>
       Promise.resolve(new Response(JSON.stringify(makeRun({ id: 'run-1' })))),
     );
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
     const onHumanInputRequested = mock(() => {});
 
-    const { store } = makeStore({ onHumanInputRequested });
+    const { store } = makeStore({ onHumanInputRequested }, fetchMock as unknown as typeof fetch);
     await store.send('question');
 
     store.handleMessage({
@@ -299,10 +336,9 @@ describe('createChatStore', () => {
     const fetchMock = mock(() =>
       Promise.resolve(new Response(JSON.stringify(makeRun({ id: 'run-1' })))),
     );
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
     const onHumanInputRequested = mock(() => {});
 
-    const { store } = makeStore({ onHumanInputRequested });
+    const { store } = makeStore({ onHumanInputRequested }, fetchMock as unknown as typeof fetch);
     await store.send('question');
 
     store.handleMessage({
@@ -322,10 +358,9 @@ describe('createChatStore', () => {
     const fetchMock = mock(() =>
       Promise.resolve(new Response(JSON.stringify(makeRun({ id: 'run-1' })))),
     );
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
     const onHumanInputRequested = mock(() => {});
 
-    const { store } = makeStore({ onHumanInputRequested });
+    const { store } = makeStore({ onHumanInputRequested }, fetchMock as unknown as typeof fetch);
     await store.send('question');
 
     store.handleMessage({
@@ -345,10 +380,9 @@ describe('createChatStore', () => {
     const fetchMock = mock(() =>
       Promise.resolve(new Response(JSON.stringify(makeRun({ id: 'run-1' })))),
     );
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
     const onHumanInputRequested = mock(() => {});
 
-    const { store } = makeStore({ onHumanInputRequested });
+    const { store } = makeStore({ onHumanInputRequested }, fetchMock as unknown as typeof fetch);
     await store.send('question');
 
     store.handleMessage({
@@ -366,9 +400,8 @@ describe('createChatStore', () => {
     const fetchMock = mock(() =>
       Promise.resolve(new Response(JSON.stringify(makeRun({ id: 'run-1' })))),
     );
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-    const { store } = makeStore();
+    const { store } = makeStore({}, fetchMock as unknown as typeof fetch);
     await store.send('first');
     store.handleMessage({
       type: 'stream:tool-call-start',

@@ -113,7 +113,9 @@ export function createSessionsRoutes(bureau: Bureau) {
    * in-flight durable run. Body: `{ name, payload? }`. Returns the update result.
    *
    * Returns 200 with `{ result }` on success; 404 when the session or its run is
-   * not found; 501 when no durable engine is configured.
+   * not found; 501 when no durable engine is configured, OR when a durable
+   * engine IS configured (AB-192: the built-in `agentRun` workflow registers
+   * no `ctx.onUpdate` handler, so this always rejects with `UNSUPPORTED_CAPABILITY`).
    */
   app.post('/:id/update', async (context) => {
     const sessionId = context.req.param('id');
@@ -138,6 +140,11 @@ export function createSessionsRoutes(bureau: Bureau) {
         if (error.code === 'CONFLICT') throw new HTTPException(409, { message: error.message });
         if (error.code === 'NOT_CONFIGURED')
           return context.json({ error: { code: 'NOT_CONFIGURED', message: error.message } }, 501);
+        if (error.code === 'UNSUPPORTED_CAPABILITY')
+          return context.json(
+            { error: { code: 'UNSUPPORTED_CAPABILITY', message: error.message } },
+            501,
+          );
       }
       throw error;
     }
@@ -150,7 +157,9 @@ export function createSessionsRoutes(bureau: Bureau) {
    *
    * Returns 200 with `{ result }` on success; 400 when `name` is missing; 404
    * when the session or its run is not found; 501 when no durable engine is
-   * configured.
+   * configured, OR when a durable engine IS configured (AB-192: the built-in
+   * `agentRun` workflow registers no `ctx.onQuery` handler, so this always
+   * rejects with `UNSUPPORTED_CAPABILITY`).
    */
   app.get('/:id/query', async (context) => {
     const sessionId = context.req.param('id');
@@ -178,6 +187,11 @@ export function createSessionsRoutes(bureau: Bureau) {
         if (error.code === 'NOT_FOUND') throw new HTTPException(404, { message: error.message });
         if (error.code === 'NOT_CONFIGURED')
           return context.json({ error: { code: 'NOT_CONFIGURED', message: error.message } }, 501);
+        if (error.code === 'UNSUPPORTED_CAPABILITY')
+          return context.json(
+            { error: { code: 'UNSUPPORTED_CAPABILITY', message: error.message } },
+            501,
+          );
       }
       throw error;
     }

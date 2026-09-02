@@ -48,6 +48,7 @@ describe('dist bundling (built output, not source)', () => {
       const distModule = (await import(distEntrypoint)) as { createBureau: typeof CreateBureau };
 
       const bureau = await distModule.createBureau({
+        agents: {},
         storage: { type: 'sqlite', path: databasePath },
       });
 
@@ -63,10 +64,10 @@ describe('dist bundling (built output, not source)', () => {
   // Second regression test in this file, same class of bug: `scripts/build.ts`
   // externalized `conversationalist` for BOTH the ESM and CJS build passes.
   // `conversationalist` ships only "bun"/"browser"/"import"/"default" export
-  // conditions — no `require` — but `builder.ts` imports `Conversation` from
-  // it as a real runtime value. A CJS consumer of bureau's advertised
-  // `require: './dist/builder/index.cjs'` export would get an emitted
-  // `require('conversationalist')` that resolves (via the "default"
+  // conditions — no `require` — but `online-evals.ts`/`run-envelope.ts`
+  // import `Conversation` from it as a real runtime value. A CJS consumer of
+  // bureau's advertised `require: './dist/index.cjs'` export would get an
+  // emitted `require('conversationalist')` that resolves (via the "default"
   // condition) to an ES module, which `require()` cannot load synchronously
   // in a CJS module under Node < 22 (`ERR_REQUIRE_ESM`).
   //
@@ -79,11 +80,8 @@ describe('dist bundling (built output, not source)', () => {
   // on Node < 22 without an available runtime to exercise it locally, so
   // this test instead encodes the invariant the fix depends on: the built
   // CJS output must never contain `require("conversationalist")`.
-  it('does not require() conversationalist from the built CJS builder entrypoint', async () => {
-    const cjsSource = await readFile(
-      new URL('../dist/builder/index.cjs', import.meta.url),
-      'utf-8',
-    );
+  it('does not require() conversationalist from the built CJS root entrypoint', async () => {
+    const cjsSource = await readFile(new URL('../dist/index.cjs', import.meta.url), 'utf-8');
     expect(cjsSource).not.toContain('require("conversationalist")');
     expect(cjsSource).not.toContain("require('conversationalist')");
   });

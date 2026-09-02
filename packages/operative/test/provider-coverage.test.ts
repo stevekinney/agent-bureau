@@ -77,7 +77,11 @@ const weatherTool = createTool({
 });
 
 function makeContext(
-  options: { maximumTokens?: number; signal?: AbortSignal } = {},
+  options: {
+    maximumTokens?: number;
+    signal?: AbortSignal;
+    responseFormat?: GenerateContext['responseFormat'];
+  } = {},
 ): GenerateContext {
   return {
     conversation: new Conversation(),
@@ -85,6 +89,7 @@ function makeContext(
     toolbox: createToolbox([weatherTool]),
     maximumTokens: options.maximumTokens,
     signal: options.signal,
+    responseFormat: options.responseFormat,
   };
 }
 
@@ -331,6 +336,32 @@ describe('OpenAI provider coverage', () => {
     const failingClient = createMockOpenAIClient([], [new Error('OpenAI failed')]);
     const failingGenerate = createOpenAIProvider({ model: 'gpt-4o', client: failingClient });
     await expect(failingGenerate(makeContext())).rejects.toMatchObject({ provider: 'openai' });
+  });
+
+  it("falls back to the run's context.responseFormat when no construction-time responseFormat is set", async () => {
+    const client = createMockOpenAIClient([openAITextResponse]);
+    const generate = createOpenAIProvider({ model: 'gpt-4o', client });
+
+    await generate(makeContext({ responseFormat: { type: 'json' } }));
+
+    expect(client._calls[0]).toMatchObject({ response_format: { type: 'json_object' } });
+  });
+
+  it('prefers an explicit construction-time responseFormat over context.responseFormat', async () => {
+    const client = createMockOpenAIClient([openAITextResponse]);
+    const generate = createOpenAIProvider({
+      model: 'gpt-4o',
+      client,
+      responseFormat: { type: 'json' },
+    });
+
+    await generate(
+      makeContext({
+        responseFormat: { type: 'json_schema', schema: { type: 'object' }, name: 'other' },
+      }),
+    );
+
+    expect(client._calls[0]).toMatchObject({ response_format: { type: 'json_object' } });
   });
 
   it('streams text, tool calls, empty responses, usage fallbacks, aborts, and errors', async () => {
@@ -851,6 +882,32 @@ describe('Gemini provider coverage', () => {
     const failingClient = createMockGeminiModel([], [new Error('Gemini failed')]);
     const failingGenerate = createGeminiProvider({ model: 'gemini-pro', client: failingClient });
     await expect(failingGenerate(makeContext())).rejects.toMatchObject({ provider: 'gemini' });
+  });
+
+  it("falls back to the run's context.responseFormat when no construction-time responseFormat is set", async () => {
+    const client = createMockGeminiModel([geminiTextResponse]);
+    const generate = createGeminiProvider({ model: 'gemini-pro', client });
+
+    await generate(makeContext({ responseFormat: { type: 'json' } }));
+
+    expect(client._calls[0]).toMatchObject({
+      config: { responseMimeType: 'application/json' },
+    });
+  });
+
+  it('prefers an explicit construction-time responseFormat over context.responseFormat', async () => {
+    const client = createMockGeminiModel([geminiTextResponse]);
+    const generate = createGeminiProvider({
+      model: 'gemini-pro',
+      client,
+      responseFormat: { type: 'json_schema', schema: { type: 'object' }, name: 'ctor' },
+    });
+
+    await generate(makeContext({ responseFormat: { type: 'json' } }));
+
+    expect(client._calls[0]).toMatchObject({
+      config: { responseMimeType: 'application/json', responseSchema: { type: 'object' } },
+    });
   });
 
   it('streams text, function calls, empty responses, usage fallbacks, aborts, and errors', async () => {

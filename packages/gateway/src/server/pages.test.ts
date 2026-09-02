@@ -248,7 +248,10 @@ describe('SSR pages', () => {
       // `GET /api/v1/reviews` already rejects it.
       const { plaintext } = await apiKeyStore.create({ name: 'no-reviews', scopes: ['runs:read'] });
 
-      const bureau = await createBureau({ persistence: kv });
+      const bureau = await createBureau({
+        agents: {},
+        persistence: kv,
+      });
       const gateway = await createTestGateway(bureau);
 
       const response = await gateway.app.request('/reviews', {
@@ -266,7 +269,10 @@ describe('SSR pages', () => {
         scopes: ['reviews:read'],
       });
 
-      const bureau = await createBureau({ persistence: kv });
+      const bureau = await createBureau({
+        agents: {},
+        persistence: kv,
+      });
       const gateway = await createTestGateway(bureau);
 
       const response = await gateway.app.request('/reviews', {
@@ -284,7 +290,10 @@ describe('SSR pages', () => {
       const apiKeyStore = createApiKeyStore(kv);
       const { plaintext } = await apiKeyStore.create({ name: 'admin' });
 
-      const bureau = await createBureau({ persistence: kv });
+      const bureau = await createBureau({
+        agents: {},
+        persistence: kv,
+      });
       const gateway = await createTestGateway(bureau);
 
       const response = await gateway.app.request('/reviews', {
@@ -304,7 +313,10 @@ describe('SSR pages', () => {
         scopes: ['reviews:read'],
       });
 
-      const bureau = await createBureau({ persistence: kv });
+      const bureau = await createBureau({
+        agents: {},
+        persistence: kv,
+      });
       const gateway = await createTestGateway(bureau);
 
       const response = await gateway.app.request('/usage', {
@@ -319,7 +331,10 @@ describe('SSR pages', () => {
       const apiKeyStore = createApiKeyStore(kv);
       const { plaintext } = await apiKeyStore.create({ name: 'has-runs', scopes: ['runs:read'] });
 
-      const bureau = await createBureau({ persistence: kv });
+      const bureau = await createBureau({
+        agents: {},
+        persistence: kv,
+      });
       const gateway = await createTestGateway(bureau);
 
       const response = await gateway.app.request('/usage', {

@@ -158,9 +158,15 @@ export type {
 export { Conversation } from './history';
 export type {
   ContainerUploadContent,
+  ContentSource,
   DocumentContent,
   DocumentSource,
   ImageContent,
+  MediaLimits,
+  MediaLimitScope,
+  MimeFamily,
+  Modality,
+  ModalityMatrix,
   MultiModalContent,
   RedactedThinkingContent,
   ServerToolResultContent,

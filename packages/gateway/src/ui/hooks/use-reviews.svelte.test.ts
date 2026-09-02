@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, it, mock } from 'bun:test';
+import { describe, expect, it, mock } from 'bun:test';
 
 import type { PendingHumanWaitReview, PendingToolApprovalReview } from '../../types';
+import type { GatewayClientEnvironment } from '../client-environment';
 import { createReviewsStore } from './use-reviews.svelte.ts';
 
 function makeToolApproval(
@@ -40,15 +41,54 @@ function makeHumanWait(overrides: Partial<PendingHumanWaitReview> = {}): Pending
   };
 }
 
-const originalFetch = globalThis.fetch;
+/**
+ * Builds a {@link GatewayClientEnvironment} test double with a controllable
+ * `fetch`. `use-reviews.svelte.ts` never touches `WebSocket`, `EventSource`,
+ * or `timers`, so those fields throw if a bug ever causes them to be
+ * invoked.
+ */
+function createEnvironment(fetchImplementation: typeof fetch): GatewayClientEnvironment {
+  return {
+    fetch: fetchImplementation,
+    WebSocket: class {
+      constructor() {
+        throw new Error('use-reviews does not construct a WebSocket');
+      }
+    } as unknown as typeof WebSocket,
+    EventSource: class {
+      constructor() {
+        throw new Error('use-reviews does not construct an EventSource');
+      }
+    } as unknown as typeof EventSource,
+    timers: {
+      setTimeout: () => {
+        throw new Error('use-reviews does not use timers.setTimeout');
+      },
+      clearTimeout: () => {
+        throw new Error('use-reviews does not use timers.clearTimeout');
+      },
+      setInterval: () => {
+        throw new Error('use-reviews does not use timers.setInterval');
+      },
+      clearInterval: () => {
+        throw new Error('use-reviews does not use timers.clearInterval');
+      },
+      now: () => {
+        throw new Error('use-reviews does not use timers.now');
+      },
+    },
+  };
+}
 
-afterEach(() => {
-  globalThis.fetch = originalFetch;
-});
+// Bun's `typeof fetch` also requires a static `preconnect` method that this
+// stub has no use for; the cast documents that this is a deliberate
+// call-should-never-happen sentinel, not a real fetch implementation.
+const unusedFetch = (() =>
+  Promise.reject(new Error('fetch should not be called in this test'))) as unknown as typeof fetch;
 
 describe('createReviewsStore', () => {
   it('seeds reviews from the initial value', () => {
-    const store = createReviewsStore([makeHumanWait()]);
+    const store = createReviewsStore([makeHumanWait()], createEnvironment(unusedFetch));
     expect(store.reviews).toHaveLength(1);
     expect(store.loading).toBe(false);
     expect(store.pendingId).toBeUndefined();
@@ -59,9 +99,11 @@ describe('createReviewsStore', () => {
     const fetchMock = mock(() =>
       Promise.resolve(new Response(JSON.stringify([makeHumanWait({ id: 'refreshed' })]))),
     );
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-    const store = createReviewsStore([makeHumanWait({ id: 'stale' })]);
+    const store = createReviewsStore(
+      [makeHumanWait({ id: 'stale' })],
+      createEnvironment(fetchMock as unknown as typeof fetch),
+    );
     await store.refresh();
 
     expect(store.reviews.map((review) => review.id)).toEqual(['refreshed']);
@@ -72,9 +114,8 @@ describe('createReviewsStore', () => {
     const fetchMock = mock(() =>
       Promise.resolve(new Response(JSON.stringify({ message: 'nope' }), { status: 500 })),
     );
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-    const store = createReviewsStore([]);
+    const store = createReviewsStore([], createEnvironment(fetchMock as unknown as typeof fetch));
     await store.refresh();
 
     expect(store.error).toBe('nope');
@@ -89,9 +130,11 @@ describe('createReviewsStore', () => {
         new Response(JSON.stringify({ id: review.id, kind: 'human-wait', decision: 'approve' })),
       );
     });
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-    const store = createReviewsStore([review]);
+    const store = createReviewsStore(
+      [review],
+      createEnvironment(fetchMock as unknown as typeof fetch),
+    );
     await store.approve(review.id, { payload: { approved: true } });
 
     expect(store.reviews).toHaveLength(0);
@@ -108,9 +151,11 @@ describe('createReviewsStore', () => {
         new Response(JSON.stringify({ id: review.id, kind: 'tool-approval', decision: 'deny' })),
       );
     });
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-    const store = createReviewsStore([review]);
+    const store = createReviewsStore(
+      [review],
+      createEnvironment(fetchMock as unknown as typeof fetch),
+    );
     await store.deny(review.id, { reason: 'not safe' });
 
     expect(store.reviews).toHaveLength(0);
@@ -119,9 +164,11 @@ describe('createReviewsStore', () => {
   it('keeps a review in the list and records an error when resolve fails', async () => {
     const review = makeHumanWait();
     const fetchMock = mock(() => Promise.resolve(new Response('conflict', { status: 409 })));
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-    const store = createReviewsStore([review]);
+    const store = createReviewsStore(
+      [review],
+      createEnvironment(fetchMock as unknown as typeof fetch),
+    );
     await store.approve(review.id);
 
     expect(store.reviews).toHaveLength(1);

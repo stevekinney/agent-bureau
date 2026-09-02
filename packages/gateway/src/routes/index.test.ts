@@ -12,6 +12,7 @@ function createMockGenerate() {
 describe('route scope guards', () => {
   it('requires runs:read for scheduler reads when API key scopes are present', async () => {
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       scheduler: { enabled: true, idleDelay: 1 },
       toolbox: createToolbox([]),
@@ -28,6 +29,7 @@ describe('route scope guards', () => {
 
   it('requires runs:write for scheduler mutations when API key scopes are present', async () => {
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       scheduler: { enabled: true, idleDelay: 1 },
       toolbox: createToolbox([]),

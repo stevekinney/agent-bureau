@@ -3,8 +3,6 @@ import { describe, expect, it, mock } from 'bun:test';
 import {
   createManualCheckpointStore,
   createManualDurableEngine,
-  createMockAgentRegistry,
-  createMockRegistryAgent,
   createMockScratchpad,
   createStepwiseBlockingGenerate,
   spyEngine,
@@ -22,50 +20,6 @@ describe('createMockScratchpad', () => {
   it('creates an empty scratchpad when no values given', () => {
     const pad = createMockScratchpad();
     expect(pad.toJSON()).toEqual({});
-  });
-});
-
-describe('createMockRegistryAgent', () => {
-  it('creates a mock agent with the given name', () => {
-    const agent = createMockRegistryAgent('test');
-    expect(agent.name).toBe('test');
-  });
-
-  it('run returns mock content', async () => {
-    const agent = createMockRegistryAgent('helper');
-    const result = await agent.run('Hello');
-    expect(result.content).toBe('Mock response from helper');
-    expect(result.finishReason).toBe('stop-condition');
-  });
-
-  it('applies overrides', async () => {
-    const agent = createMockRegistryAgent('custom', {
-      run: async () => ({
-        conversation: {} as never,
-        steps: [],
-        content: 'Custom output',
-        usage: { prompt: 0, completion: 0, total: 0 },
-        finishReason: 'stop-condition' as const,
-      }),
-    });
-    const result = await agent.run('Hi');
-    expect(result.content).toBe('Custom output');
-  });
-});
-
-describe('createMockAgentRegistry', () => {
-  it('creates an empty registry', () => {
-    const registry = createMockAgentRegistry();
-    expect(registry.entries()).toEqual([]);
-  });
-
-  it('creates a pre-populated registry', () => {
-    const agent = createMockRegistryAgent('a');
-    const registry = createMockAgentRegistry([
-      { agent, description: 'Agent A', capabilities: ['x'] },
-    ]);
-    expect(registry.has('a')).toBe(true);
-    expect(registry.entries()).toHaveLength(1);
   });
 });
 

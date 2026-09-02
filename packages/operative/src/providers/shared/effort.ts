@@ -15,7 +15,7 @@ const EFFORT_ORDER: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max'
 
 /**
  * Anthropic `output_config.effort` support by resolved model ID, per the
- * mapping table in AB-91:
+ * mapping table in AB-64:
  * - Fable 5, Sonnet 5, Opus 4.7, Opus 4.8: full `low` .. `max` range, including `xhigh`.
  * - Opus 4.5, Opus 4.6, Sonnet 4.6: `low` .. `max`, no `xhigh`.
  * - Haiku (any generation) and Sonnet 4.5 or earlier: no effort parameter support at all.

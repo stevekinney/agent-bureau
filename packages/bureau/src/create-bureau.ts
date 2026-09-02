@@ -1,17 +1,27 @@
 import {
   type ActiveRun,
+  AgentContractError,
+  type AgentInput,
+  type AgentRun,
+  type AgentRunContext,
   type AgentSession,
   type CombinedOperativeEventMap,
   createActiveRun,
+  createAgentRun,
   createAgentSession,
+  createDeferredAgentRun,
   createFlowController,
   createRequestHumanInputTool,
   createRunFinishedFrame,
   createRunStartedFrame,
+  type DefinitionResolvingAgent,
   type FlowController,
   HumanWaitParkedEvent,
   type JSONValue,
+  OPERATIVE_RESOLVE_RUN_OPTIONS,
   type RequestHumanInputContext,
+  type RunnableAgent,
+  type RunOptions,
   type RunReport,
   SchedulerTaskCompletedEvent,
   SchedulerTaskFailedEvent,
@@ -34,6 +44,8 @@ import {
   type RecoveredRunHandle,
   type ScheduledAgentRunInput,
   SCHEDULER_RUN_ID_PREFIX,
+  type SessionInputAdmissionOutcome,
+  type SessionInputAdmissionRequest,
 } from '@lostgradient/operative/durable';
 import {
   createStore,
@@ -61,9 +73,11 @@ import {
   Conversation,
   type ConversationHistory,
   createConversationHistory,
+  isConversationHistory,
 } from 'conversationalist';
 import { CompletableEventTarget, type TypedEventTarget } from 'lifecycle';
 
+import { type AgentDefinitions, createAgentCatalog } from './agent-catalog';
 import { type AuditTrail, createAuditTrail } from './audit-trail';
 import {
   ActionEvent,
@@ -97,6 +111,7 @@ import {
 import type {
   Bureau,
   BureauOptions,
+  BureauRunOptions,
   ConfigurationResponse,
   CreateRunRequest,
   DiagnosticSink,
@@ -226,6 +241,142 @@ export function hasRecoverableTransportAuthority(metadata: Record<string, JSONVa
   return requiresTransportValidator(
     (legacyAuthority as Record<string, JSONValue>)['authorizationRevision'],
   );
+}
+
+/**
+ * Resolves what a session's metadata records about its most recent run's
+ * authority, per AB-42's coordinator ruling (2026-09-02): reads
+ * `metadata['lastRequestAuthorities'][lastRunId]?.principalId`, falling back
+ * to the legacy `metadata['lastRequestAuthority'].principalId` exactly as
+ * {@link recoveredRequestContextFromMetadata} already does.
+ *
+ * `{ recorded: false }` means the session has recorded no authority at
+ * all — an "open" session, per the ruling. `{ recorded: true, principalId }`
+ * means an authority WAS recorded; `principalId` is `undefined` only when
+ * that recorded authority is itself malformed (missing or non-string
+ * `principalId`), which must fail closed (deny every principal), never be
+ * read as "open" — a corrupted or partially-written persistence record must
+ * not silently grant access. This is why a per-run entry present-but-malformed
+ * does NOT fall back to the legacy field the way a genuinely absent per-run
+ * entry does: once a per-run entry exists, it is authoritative for that run,
+ * so silently falling through past a corrupted record would suppress exactly
+ * the failure this distinction exists to catch — conflating "absent" with
+ * "malformed" is the class of bug this whole function guards against.
+ *
+ * The same reasoning extends to a non-empty-but-uncorrelated
+ * `lastRequestAuthorities` map (see below): it is checked BEFORE the legacy
+ * fallback, not after, because that exact shape is what two concurrent runs
+ * on one session produce, and the legacy field may belong to the OTHER,
+ * unrelated run — see the concurrent-run correlation note below.
+ *
+ * A completed/aborted/errored run's `lastRequestAuthorities[lastRunId]` entry
+ * is pruned on terminal transition (see the cleanup near `remainingAuthorities`
+ * below), while the legacy singular `lastRequestAuthority` is retained — so a
+ * per-run lookup that is GENUINELY ABSENT (no map, no `lastRunId`, or the key
+ * missing from the map) falls back to the legacy field.
+ */
+function isPlainAuthorityRecord(value: JSONValue | undefined): value is Record<string, JSONValue> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function lookupSessionAuthority(
+  metadata: Record<string, JSONValue>,
+):
+  | { readonly recorded: false }
+  | { readonly recorded: true; readonly principalId: string | undefined } {
+  const lastRunId = metadata['lastRunId'];
+  const authorities = metadata['lastRequestAuthorities'];
+  // A PRESENT-but-malformed `lastRequestAuthorities` value (not absent — a
+  // string or array where a map belongs) is itself evidence something was
+  // recorded and corrupted. It must fail closed regardless of `lastRunId` or
+  // a legacy fallback, never be read as "nothing recorded" (open) — the same
+  // fail-closed principle as a malformed per-run/legacy entry below.
+  if (authorities !== undefined && !isPlainAuthorityRecord(authorities)) {
+    return { recorded: true, principalId: undefined };
+  }
+  const perRunEntry =
+    typeof lastRunId === 'string' && lastRunId && authorities !== undefined
+      ? authorities[lastRunId]
+      : undefined;
+  const legacy = metadata['lastRequestAuthority'];
+  let candidate: JSONValue | undefined;
+  if (perRunEntry !== undefined) {
+    candidate = perRunEntry;
+  } else if (authorities !== undefined && Object.keys(authorities).length > 0) {
+    // A valid, non-empty `lastRequestAuthorities` map exists but doesn't
+    // correlate to this run (`lastRunId` missing/corrupt, or the map's
+    // entries are keyed to other runs). Checked BEFORE the legacy fallback,
+    // not after: this exact shape is what two concurrent runs on one session
+    // produce — run B's dispatch overwrites the singular legacy field with
+    // B's authority while A is still running, so trusting legacy here would
+    // authorize B's principal against A's (still-uncorrelated) run. A
+    // non-empty-but-uncorrelated map is recorded-but-uncorrelated evidence,
+    // not "nothing recorded" — fail closed rather than consult a legacy
+    // field that may belong to an unrelated concurrent run.
+    return { recorded: true, principalId: undefined };
+  } else if (legacy !== undefined) {
+    candidate = legacy;
+  } else {
+    return { recorded: false };
+  }
+  if (!isPlainAuthorityRecord(candidate)) {
+    return { recorded: true, principalId: undefined };
+  }
+  const principalId = candidate['principalId'];
+  return { recorded: true, principalId: typeof principalId === 'string' ? principalId : undefined };
+}
+
+/**
+ * The `principalId` recorded for a session's most recent run, per
+ * {@link lookupSessionAuthority}'s rule. Returns `undefined` both when the
+ * session has recorded no authority at all AND when a recorded authority is
+ * malformed — this function alone cannot distinguish the two, so it is
+ * informational only. {@link isSessionAuthorityAuthorized} is the
+ * security-relevant surface: it fails closed (denies) for malformed
+ * authority, never treating it as open the way "genuinely no authority
+ * recorded" is treated.
+ *
+ * Shared by every new Bureau session verb that needs to read a session's
+ * recorded authority (AB-194's `submitSessionInput`, AB-199's
+ * `submitSteeringCommand`) — neither issue owns or invents this mechanism,
+ * both simply read the pre-existing metadata keys `create-bureau.ts` already
+ * writes on every run dispatch.
+ */
+export function recordedSessionAuthorityPrincipalId(
+  metadata: Record<string, JSONValue>,
+): string | undefined {
+  const lookup = lookupSessionAuthority(metadata);
+  return lookup.recorded ? lookup.principalId : undefined;
+}
+
+/**
+ * Whether `principal` is authorized to act on a session recording the given
+ * metadata, per {@link lookupSessionAuthority}'s rule. A session with no
+ * recorded authority at all is treated as open — every principal is
+ * authorized — matching what every existing session verb enforces today
+ * (nothing stronger), per AB-42's coordinator ruling (2026-09-02). A session
+ * with a RECORDED-BUT-MALFORMED authority fails closed: no principal is
+ * authorized, since a corrupted record cannot be verified to match anyone.
+ */
+export function isSessionAuthorityAuthorized(
+  metadata: Record<string, JSONValue>,
+  principal: string,
+): boolean {
+  const lookup = lookupSessionAuthority(metadata);
+  if (!lookup.recorded) return true;
+  return lookup.principalId === principal;
+}
+
+/**
+ * Whether a session's most recent run is in a terminal (non-`'running'`)
+ * state, reading the same `metadata['lastRunStatus']` field
+ * {@link requireSessionRunId} and {@link hasRecoverableTransportAuthority}
+ * already read. Shared by every new Bureau session verb that needs a
+ * terminal-session check (AB-194's `submitSessionInput`, AB-199's
+ * `submitSteeringCommand`).
+ */
+export function isSessionRunTerminal(metadata: Record<string, JSONValue>): boolean {
+  return metadata['lastRunStatus'] !== 'running';
 }
 
 export function isTerminalApprovalBindingError(error: unknown): boolean {
@@ -395,7 +546,13 @@ export type BureauErrorNotConfiguredSubject =
   'generate' | 'scheduler' | 'durable' | 'persistence' | 'approval';
 
 class BureauError extends Error {
-  readonly code: 'NOT_FOUND' | 'CONFLICT' | 'NOT_CONFIGURED' | 'BAD_REQUEST' | 'RATE_LIMITED';
+  readonly code:
+    | 'NOT_FOUND'
+    | 'CONFLICT'
+    | 'NOT_CONFIGURED'
+    | 'BAD_REQUEST'
+    | 'RATE_LIMITED'
+    | 'UNSUPPORTED_CAPABILITY';
   readonly subject?: BureauErrorNotConfiguredSubject;
 
   // `subject` is required for NOT_CONFIGURED and disallowed for every other
@@ -405,7 +562,13 @@ class BureauError extends Error {
   constructor(message: string, code: 'NOT_CONFIGURED', subject: BureauErrorNotConfiguredSubject);
   constructor(
     message: string,
-    code: 'NOT_FOUND' | 'CONFLICT' | 'NOT_CONFIGURED' | 'BAD_REQUEST' | 'RATE_LIMITED',
+    code:
+      | 'NOT_FOUND'
+      | 'CONFLICT'
+      | 'NOT_CONFIGURED'
+      | 'BAD_REQUEST'
+      | 'RATE_LIMITED'
+      | 'UNSUPPORTED_CAPABILITY',
     subject?: BureauErrorNotConfiguredSubject,
   ) {
     super(message);
@@ -503,6 +666,61 @@ function validateCreateRunRequest(request: CreateRunRequest): void {
     if (request.agentName.trim().length === 0) {
       toBadRequest('"agentName" must be a non-empty string');
     }
+  }
+}
+
+/**
+ * AB-15/AB-22: `bureau.run`'s synchronous-throw surface — unknown agent name,
+ * malformed `input`, or malformed `options` — validated BEFORE any async
+ * work (durable-engine dispatch, definition resolution) begins. Everything
+ * else (session, provider, tool, policy, abort) settles through the
+ * returned `AgentRun` handle instead of throwing here.
+ */
+function validateAgentRunInput(input: unknown): asserts input is AgentInput {
+  if (typeof input === 'string') return;
+  if (
+    input !== null &&
+    typeof input === 'object' &&
+    'conversation' in input &&
+    isConversationHistory(input.conversation)
+  ) {
+    return;
+  }
+  toBadRequest(
+    '"input" must be a string or an object with a valid "conversation" ConversationHistory',
+  );
+}
+
+function validateBureauRunOptions(
+  options: BureauRunOptions | undefined,
+): asserts options is BureauRunOptions | undefined {
+  if (options === undefined) return;
+  // `typeof [] === 'object'` — without excluding arrays explicitly, a
+  // JavaScript caller passing `[]` (or any array) as `options` passed this
+  // guard as an empty options bag instead of the synchronous rejection the
+  // contract advertises for malformed options (review round 2, Codex).
+  if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+    toBadRequest('"options" must be an object');
+  }
+  if (options.sessionId !== undefined && typeof options.sessionId !== 'string') {
+    toBadRequest('"options.sessionId" must be a string');
+  }
+  if (options.signal !== undefined && !(options.signal instanceof AbortSignal)) {
+    toBadRequest('"options.signal" must be an AbortSignal');
+  }
+  if (options.withTraceContext !== undefined && typeof options.withTraceContext !== 'function') {
+    toBadRequest('"options.withTraceContext" must be a function');
+  }
+  if (options.principal !== undefined) {
+    // `AgentRunContext` (AB-15) carries no `principal` field — a bare
+    // `RunnableAgent.run()` has no attribution/session system to record it
+    // against (that is `createRun`'s job, not `bureau.run`'s). Silently
+    // discarding a caller-supplied `principal` would look like an accepted
+    // no-op; reject it synchronously instead so the gap is discoverable at
+    // the call site rather than as a missing attribution nobody notices.
+    toBadRequest(
+      '"options.principal" is not supported by bureau.run() — RunnableAgent.run() has no attribution surface to record it against. Use Bureau.createRun() for principal-attributed runs.',
+    );
   }
 }
 
@@ -754,12 +972,57 @@ export async function monitorRecoveredScheduledFire(
   }
 }
 
-export async function createBureau(options: BureauOptions = {}): Promise<Bureau> {
+/**
+ * AB-194 — `BureauOptions.sessionInput`'s `sessionBacklogLimit`/
+ * `principalBacklogLimit` must each be a positive integer when supplied.
+ * Throws `BureauError('...', 'BAD_REQUEST')` for 0, a negative number, or a
+ * non-integer; a `undefined` value (option omitted) passes through untouched.
+ */
+function validateSessionInputBacklogLimit(value: number | undefined, optionName: string): void {
+  if (value === undefined) return;
+  if (!Number.isInteger(value) || value <= 0) {
+    toBadRequest(`"options.sessionInput.${optionName}" must be a positive integer`);
+  }
+}
+
+export async function createBureau<const D extends AgentDefinitions = AgentDefinitions>(
+  options: BureauOptions<D>,
+): Promise<Bureau<D>> {
+  // AB-194: validated here (BAD_REQUEST at construction time) though not yet
+  // enforced — every reachable `submitSessionInput` outcome today is a
+  // pre-admission rejection, before any backlog could exist to check
+  // against. Enforcement lands with the mailbox-backed `ab-42-bureau-b` slice
+  // once WFT-84 ships, using these same validated values (defaulting to
+  // `DEFAULT_SESSION_INPUT_BACKLOG_LIMIT`/`DEFAULT_PRINCIPAL_SESSION_INPUT_BACKLOG_LIMIT`).
+  validateSessionInputBacklogLimit(
+    options.sessionInput?.sessionBacklogLimit,
+    'sessionBacklogLimit',
+  );
+  validateSessionInputBacklogLimit(
+    options.sessionInput?.principalBacklogLimit,
+    'principalBacklogLimit',
+  );
   const diagnose = resolveDiagnosticSink(options.onDiagnostic);
   const ownsStore = !options.store;
   const store: Store = options.store ?? createStore();
   const emitter = new CompletableEventTarget<BureauEventMap>();
+  // Snapshot `agents` synchronously, before the first `await` below — the
+  // "fixed at createBureau() call time" catalog contract otherwise has a
+  // real mutation window: a caller that mutates the SAME `agents` object it
+  // passed in (adds/removes/reassigns a key) between calling createBureau()
+  // and it resolving would leak that change into `bureau.agents`, since
+  // `createRuntimeComposition(options)` is awaited before the catalog used
+  // to be built from `options.agents` (review round 2, Codex). A shallow
+  // copy preserves key insertion order (the definition-order guarantee)
+  // while defeating exactly that window; it does not deep-freeze individual
+  // agent values, which is unchanged/out of scope.
+  const agentsSnapshot: D = { ...options.agents };
   const runtime = await createRuntimeComposition(options);
+  // AB-15/AB-22: the typed agent catalog — a plain literal map, fixed for
+  // the bureau's lifetime, dispatched by name through `bureau.run`.
+  // Independent of `runtime` (bureau-level generate/toolbox/provider
+  // composition, still used by `createRun`).
+  const agentCatalog = createAgentCatalog(agentsSnapshot);
   // AB-13 — declarative flow control (concurrency/rate-limit/singleton). One
   // controller instance shared across BOTH `createRun` (API-triggered) and
   // `submitSchedulerTask` (scheduler-originated), so a per-agent concurrency
@@ -769,6 +1032,13 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     : undefined;
   const runSessionIdentifiers = new WeakMap<ActiveRun, string>();
   const activeRuns = new Set<ActiveRun>();
+  // AB-22: runs dispatched through `bureau.run(...)`, tracked separately from
+  // `activeRuns` above (which holds only bureau-owned `ActiveRun` internals,
+  // not the arbitrary `AgentRun` a catalog `RunnableAgent` may return on the
+  // direct/non-durable dispatch path). `dispose()` aborts every entry here
+  // the same way it aborts `activeRuns`, so a catalog run in flight cannot
+  // outlive the bureau that started it.
+  const catalogRuns = new Set<AgentRun<unknown, boolean>>();
   const runToolboxes = new Set<BureauToolbox>();
   const runToolboxesByRunId = new Map<string, BureauToolbox>();
   let disposePromise: Promise<void> | undefined;
@@ -1740,6 +2010,213 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       const disposeListener = listeners.pop();
       disposeListener?.();
     }
+  }
+
+  /**
+   * AB-15/AB-22: `bureau.run(name, input, options?)` — synchronous dispatch
+   * to a named catalog agent. Independent of `createRunFromRequest` below:
+   * this drives the catalog agent's OWN generate/tools/durability, not
+   * `runtime`'s bureau-level composition.
+   *
+   * Synchronous throws are limited to unknown `name`, a disposed bureau, and
+   * malformed `input`/`options` (validated up front, before any async work).
+   * When this bureau has a durable engine composed AND the named agent
+   * exposes the definition-resolution capability (AB-21's
+   * `OPERATIVE_RESOLVE_RUN_OPTIONS`), the run is driven through that engine;
+   * otherwise the agent's own in-memory `run()` is used directly. Either way
+   * this function itself returns synchronously — the async work (resolving
+   * run options, or awaiting the durable engine's setup) is deferred behind
+   * `createDeferredAgentRun`.
+   *
+   * **Known gap, not yet closed:** the durable branch checkpoints the run
+   * through the engine (it is discoverable via `bureau.listDurableRuns()`
+   * mid-flight — see `bureau-run.test.ts`), but does NOT write the session
+   * record `runtime-composition.ts`'s boot-recovery resolver requires
+   * (`session.metadata.lastRunId`/`lastRunStatus`, keyed by
+   * `runOptions?.sessionId ?? runId`). A process restart therefore does
+   * NOT reattach a catalog run in flight — `recoverAll()`'s resolver finds
+   * no owning session and returns `{ status: 'unavailable' }` for it, same
+   * as any other run with "no recoverable session". This is a real,
+   * open gap (flagged in review), not a documented design choice like the
+   * durable-recovery-failure-is-diagnosed-not-rejected behavior elsewhere in
+   * this file — closing it needs a session write parallel to
+   * `createRunFromRequest`'s, which `bureau.run` currently has no request
+   * context to draw an authority record from.
+   */
+  /**
+   * AB-22 review fix: `catalogRuns` (declared near `activeRuns` above) needs
+   * every handle `runAgent` hands back, on both the durable and direct
+   * dispatch branches, so `dispose()` can abort a catalog run still in
+   * flight the same way it already aborts bureau-owned `ActiveRun`s.
+   * Untracked on terminal settlement so a long-lived bureau does not retain
+   * one entry per historical run forever.
+   */
+  function trackCatalogRun(handle: AgentRun<unknown, boolean>): AgentRun<unknown, boolean> {
+    catalogRuns.add(handle);
+    // `detachBestEffortPromise`, not a bare `void ... .finally(...)`: AB-15's
+    // contract says a well-behaved `RunnableAgent.result()` never rejects
+    // (it settles through `RunResult.error` instead), but "JavaScript
+    // callers" is itself one of this issue's acceptance-criteria categories
+    // — a foreign, non-conforming agent's `result()` genuinely can reject,
+    // and a dropped rejection under `void` would be an unhandled rejection
+    // that is this bureau's fault, not the caller's.
+    detachBestEffortPromise(
+      handle.result().finally(() => {
+        catalogRuns.delete(handle);
+      }),
+    );
+    return handle;
+  }
+
+  function runAgent(
+    name: string,
+    input: AgentInput,
+    runOptions?: BureauRunOptions,
+  ): AgentRun<unknown, boolean> {
+    if (disposePromise) {
+      throw new BureauError('Cannot run an agent: bureau is disposed', 'CONFLICT');
+    }
+    const agent = agentCatalog.find(name);
+    if (!agent) {
+      throw new BureauError(`Unknown agent "${name}"`, 'NOT_FOUND');
+    }
+    validateAgentRunInput(input);
+    validateBureauRunOptions(runOptions);
+
+    const context: AgentRunContext = { agentName: name };
+    if (runOptions?.signal) context.signal = runOptions.signal;
+    if (runOptions?.traceContext !== undefined) context.traceContext = runOptions.traceContext;
+    if (runOptions?.withTraceContext) context.withTraceContext = runOptions.withTraceContext;
+
+    const definitionResolvingAgent = agent as RunnableAgent<unknown, boolean> &
+      DefinitionResolvingAgent;
+    const resolver = definitionResolvingAgent[OPERATIVE_RESOLVE_RUN_OPTIONS];
+
+    if (runtime.durable && typeof resolver === 'function') {
+      const durable = runtime.durable;
+      const runId = `agent-run-${crypto.randomUUID()}`;
+      // Captured so the wrapper below can forward an abort straight to the
+      // dispatched durable `ActiveRun` even in the race `createDeferredAgentRun`
+      // does not close: `resolveDurableAgent` unconditionally starts the
+      // durable engine dispatch (it has no way to observe the outer handle's
+      // already-terminal state — `createDeferredAgentRun` checks that only
+      // AFTER awaiting this resolver, and only to decide whether to call the
+      // synthetic agent's `run()`, not whether to have started it). A caller
+      // that calls `.abort()` on the returned handle before this resolver's
+      // `await resolver(...)` settles would otherwise leave the already-started
+      // durable workflow running, unobserved, forever.
+      let dispatchedActiveRun: ActiveRun | undefined;
+      // Review round 2 (Codex): the previous fix only forwarded abort() to
+      // `dispatchedActiveRun` when it ALREADY existed at the moment abort()
+      // ran — it did nothing when abort() was called (or the handle
+      // disposed) while `resolver(input, context)` was still pending, since
+      // `dispatchedActiveRun` is undefined for that entire window and
+      // nothing re-checks after it's finally assigned. Remember the request
+      // instead, and act on it the instant the ActiveRun exists, whichever
+      // order the two events happen in.
+      let cancellationRequested: { reason: string | undefined; dispose: boolean } | undefined;
+      // `createDeferredAgentRun` resolves a `RunnableAgent` then calls its
+      // `run()` — built for `createLazyAgent`'s "resolve a module" case, but
+      // agnostic to WHY resolution is async. Wrapping the durable-engine
+      // handle (already fully built by the time this resolver settles) in a
+      // one-shot synthetic agent reuses its buffering/abort-forwarding
+      // machinery instead of reimplementing it.
+      const resolveDurableAgent = async (): Promise<RunnableAgent<unknown, boolean>> => {
+        let resolvedOptions: RunOptions;
+        try {
+          // Invoked through `definitionResolvingAgent`, not as a bare
+          // extracted `resolver(...)` call — a resolver implemented as a
+          // method reading instance state via `this` (a custom
+          // `DefinitionResolvingAgent`, not necessarily `createAgent`'s own
+          // arrow-function implementation) would otherwise lose its receiver
+          // under strict-mode ESM. Matches `createLazyAgent`'s own resolver
+          // forwarding for the same reason.
+          resolvedOptions = await definitionResolvingAgent[OPERATIVE_RESOLVE_RUN_OPTIONS]!(
+            input,
+            context,
+          );
+        } catch (error) {
+          // Review round 2 (Codex): `typeof resolver === 'function'` above
+          // is true for EVERY `createLazyAgent`-wrapped agent unconditionally
+          // — the wrapper always exposes this symbol as a proxy that only
+          // discovers, once actually invoked, whether the module it loads
+          // supports durable resolution at all. A lazy-wrapped agent whose
+          // real underlying agent does NOT support it would otherwise always
+          // be routed into this durable branch and fail here, even though
+          // the exact same agent registered eagerly correctly falls back to
+          // direct dispatch (see the "falls back to direct execution" test
+          // above). `AgentContractError` is the established convention this
+          // codebase already throws for "this capability is not supported"
+          // (both here and inside `createLazyAgent`'s own resolver) — catch
+          // exactly that class and fall back to the ORIGINAL catalog agent's
+          // own `run()`, matching what direct registration would have done.
+          // Anything else is a genuine resolver failure and must propagate.
+          if (error instanceof AgentContractError) {
+            return agent;
+          }
+          throw error;
+        }
+        const activeRun = createActiveRun(resolvedOptions, {
+          engine: durable.engine,
+          checkpointStore: durable.checkpointStore,
+          runId,
+          sessionId: runOptions?.sessionId ?? runId,
+        });
+        dispatchedActiveRun = activeRun;
+        if (cancellationRequested) {
+          if (cancellationRequested.dispose) {
+            activeRun[Symbol.dispose]();
+          } else {
+            activeRun.abort(cancellationRequested.reason);
+          }
+        }
+        const agentRun = createAgentRun<unknown, boolean>(activeRun, {
+          hasOutput: resolvedOptions.output !== undefined,
+        });
+        return { name, run: () => agentRun };
+      };
+      const deferredRun = createDeferredAgentRun(resolveDurableAgent, input, context, name);
+      const guardedRun: AgentRun<unknown, boolean> = {
+        ...deferredRun,
+        abort(reason?: string): void {
+          deferredRun.abort(reason);
+          if (dispatchedActiveRun) {
+            // No-op if `activeRun.abort()` already ran via the normal
+            // `underlying.abort()` forwarding path — `AbortController.abort()`
+            // (what `ActiveRun.abort()` calls under the hood) is idempotent.
+            dispatchedActiveRun.abort(reason);
+          } else if (!cancellationRequested) {
+            cancellationRequested = { reason, dispose: false };
+          }
+        },
+        [Symbol.dispose](): void {
+          deferredRun[Symbol.dispose]();
+          if (dispatchedActiveRun) {
+            dispatchedActiveRun[Symbol.dispose]();
+          } else if (!cancellationRequested) {
+            cancellationRequested = { reason: undefined, dispose: true };
+          }
+        },
+      };
+      return trackCatalogRun(guardedRun);
+    }
+
+    // Review round 2 (Codex): a hand-written catalog RunnableAgent is a
+    // valid entry, and one whose run() throws synchronously during per-run
+    // setup must still settle through the returned handle, not escape as a
+    // synchronous throw from bureau.run() itself — AB-22's synchronous-throw
+    // allowlist is unknown name / disposed / malformed input-options only.
+    // `createDeferredAgentRun` already contains exactly this "resolveAgent's
+    // run() throws synchronously" handling (built for createLazyAgent's own
+    // resolved-module case, agnostic to why); reusing it here for an
+    // already-resolved agent avoids duplicating that state machine. The one
+    // externally observable cost is that `agent.run()` itself is invoked one
+    // microtask later than before — compatible with the contract, which
+    // promises a synchronous RETURN of the handle, not synchronous START of
+    // the agent's own work.
+    return trackCatalogRun(
+      createDeferredAgentRun(() => Promise.resolve(agent), input, context, name),
+    );
   }
 
   async function createRunFromRequest(request: CreateRunRequest): Promise<RunSummary> {
@@ -3102,8 +3579,8 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
 
   async function updateSession(
     sessionId: string,
-    name: string,
-    payload?: unknown,
+    _name: string,
+    _payload?: unknown,
   ): Promise<unknown> {
     if (!runtime.durable)
       throw new BureauError('Durable engine not configured', 'NOT_CONFIGURED', 'durable');
@@ -3119,14 +3596,64 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         'CONFLICT',
       );
     }
-    return runtime.durable.engine.update(runId, name, payload);
+    // AB-192 / AB-41 coordinator ruling: the built-in `agentRun` workflow
+    // registers no `ctx.onUpdate` handler, so this call can never reach the
+    // engine successfully. Kept, not withdrawn (AB-42/AB-67 ratify update and
+    // query as the distinct session-verb family) — an unconditional throw,
+    // no detection branch, since there is no handler-registration signal to
+    // check. See `bureau.sessionVerbCapabilities`.
+    throw new BureauError(
+      'updateSession()/querySession() are unsupported: the built-in agentRun workflow registers no ctx.onUpdate/ctx.onQuery handler.',
+      'UNSUPPORTED_CAPABILITY',
+    );
   }
 
-  async function querySession(sessionId: string, name: string, input?: unknown): Promise<unknown> {
+  async function querySession(
+    sessionId: string,
+    _name: string,
+    _input?: unknown,
+  ): Promise<unknown> {
     if (!runtime.durable)
       throw new BureauError('Durable engine not configured', 'NOT_CONFIGURED', 'durable');
-    const runId = await requireSessionRunId(sessionId);
-    return runtime.durable.engine.query(runId, name, input);
+    await requireSessionRunId(sessionId);
+    // AB-192 / AB-41 coordinator ruling: see the identical throw in
+    // `updateSession` above — no `ctx.onQuery` handler is registered either.
+    throw new BureauError(
+      'updateSession()/querySession() are unsupported: the built-in agentRun workflow registers no ctx.onUpdate/ctx.onQuery handler.',
+      'UNSUPPORTED_CAPABILITY',
+    );
+  }
+
+  /**
+   * AB-42/AB-194 — admit a caller's session input. Pre-admission checks run
+   * in AB-42's fixed order: authorization (`not-found`) first, then session
+   * lifecycle (`session-terminal`), then capability/capacity
+   * (`unsupported-capability`) — reversing the first two would let an
+   * unauthorized caller learn a session exists.
+   *
+   * Every reachable outcome here is a pre-admission rejection: no adopted
+   * `@lostgradient/weft` version exposes WFT-84's durable mailbox yet, so
+   * every authorized, non-terminal request unconditionally returns
+   * `unsupported-capability`. No `SessionInputRecord` is created and no `id`
+   * is consumed by this method today.
+   */
+  async function submitSessionInput(
+    sessionId: string,
+    request: SessionInputAdmissionRequest,
+  ): Promise<SessionInputAdmissionOutcome> {
+    // Unlike signalSession/updateSession/querySession, this does NOT throw
+    // BureauError('NOT_CONFIGURED') when no session store is composed: an
+    // ephemeral bureau (no persistence/storage) is a supported configuration,
+    // and every sessionId is necessarily unknown in it — the correct outcome
+    // per this method's own contract is `not-found`, not a throw.
+    const session = runtime.sessionStore ? await runtime.sessionStore.load(sessionId) : undefined;
+    if (!session || !isSessionAuthorityAuthorized(session.metadata, request.principal)) {
+      return { outcome: 'not-found' };
+    }
+    if (isSessionRunTerminal(session.metadata)) {
+      return { outcome: 'session-terminal', sessionId };
+    }
+    return { outcome: 'unsupported-capability', reason: 'durable-mailbox-unavailable' };
   }
 
   function listPendingReviews(): PendingReview[] {
@@ -3604,6 +4131,30 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       runtime.baseToolbox.closeAdmission();
       for (const toolbox of runToolboxes) toolbox.closeAdmission();
       for (const activeRun of activeRuns) activeRun.abort('Bureau disposed');
+      // AB-22 review fix: `bureau.run(...)` dispatches are tracked separately
+      // (see `trackCatalogRun`) since a catalog `RunnableAgent`'s returned
+      // handle is not necessarily backed by a bureau-owned `ActiveRun` — its
+      // `abort()` can be arbitrary, untrusted code. Snapshot before
+      // iterating (a synchronous catalog agent can settle result()
+      // immediately from inside abort(), whose trackCatalogRun cleanup
+      // deletes from catalogRuns mid-iteration), and isolate each call: an
+      // in-flight custom handle throwing from abort() must not reject this
+      // entire dispose() before the unconditional teardown below runs — that
+      // would skip toolbox shutdown, durable-engine disposal, and storage
+      // closure, and since disposePromise is already cached at this point,
+      // every subsequent dispose() call would return the same rejection
+      // forever instead of ever completing cleanup (review round 2, Codex).
+      for (const catalogRun of [...catalogRuns]) {
+        try {
+          catalogRun.abort('Bureau disposed');
+        } catch (error) {
+          diagnose({
+            level: 'error',
+            scope: 'dispose',
+            message: `[bureau] A catalog run's abort() threw during disposal; continuing teardown: ${serializeUnknownError(error)}`,
+          });
+        }
+      }
       const toolboxes = [
         ...new Set([runtime.baseToolbox, ...runToolboxes, ...runToolboxesByRunId.values()]),
       ];
@@ -3727,12 +4278,21 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   let webhookNotifierInstance: WebhookNotifier | undefined;
   let onlineEvalSamplerInstance: OnlineEvalSampler | undefined;
 
-  const bureau: Bureau = {
+  const bureau: Bureau<D> = {
     store,
     memory: runtime.memory,
     scheduler: runtime.scheduler,
     sessionStore: runtime.sessionStore,
     kv: runtime.kv,
+    agents: agentCatalog,
+    // `runAgent`'s runtime signature is deliberately widened (`string`,
+    // `AgentRun<unknown, boolean>`) — it looks the agent up by a plain
+    // runtime string via `agentCatalog.find`, the same widening
+    // `BureauAgentCatalog.find` itself documents. The precise per-`TName`
+    // return type on `Bureau<D>['run']` is a caller-side compile-time
+    // narrowing this cast restores; at runtime the returned `AgentRun` IS
+    // exactly the named entry's own handle, unaffected by the cast.
+    run: runAgent as Bureau<D>['run'],
     get auditTrail(): AuditTrail | undefined {
       return auditTrailInstance;
     },
@@ -3761,6 +4321,12 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     signalSession,
     updateSession,
     querySession,
+    submitSessionInput,
+    // AB-192: constant, not computed from runtime state — the built-in
+    // `agentRun` workflow never registers `ctx.onUpdate`/`ctx.onQuery`
+    // handlers, so `update`/`query` are unsupported today regardless of
+    // configuration. `signal` has a real delivery path (`signalSession`).
+    sessionVerbCapabilities: { signal: true, update: false, query: false },
     listPendingReviews,
     resolveReview,
     setRequestAuthorityValidator(validator) {
@@ -3817,7 +4383,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       return emitter.signal;
     },
     dispose,
-  } satisfies Bureau;
+  } satisfies Bureau<D>;
 
   // Wire the durable audit trail (Layer B) now that we have a bureau to
   // subscribe to. Only created when a KV store is available; ephemeral

@@ -1,5 +1,5 @@
 /**
- * AB-99 — wires an `ActiveRun`'s curated event stream into the versioned
+ * AB-99 — wires an `AgentRun`'s curated event stream into the versioned
  * `RunFrame` sequence (AB-96), replicating `run-agent.mjs`'s NDJSON
  * `{ type: 'event', event }` / `{ type: 'result', result }` line protocol:
  * each frame this collects is one NDJSON line the runner would write to
@@ -12,7 +12,7 @@
  * the conformance target is the runner's wire protocol, not bureau's.
  */
 import type {
-  ActiveRun,
+  AgentRun,
   BuildRunReportInput,
   CombinedOperativeEventMap,
   CombinedOperativeEventType,
@@ -28,6 +28,8 @@ import {
   createToolPostFrame,
   createToolPreFrame,
   mapFinishReasonToStatus,
+  RUN_ENVELOPE_SCHEMA_VERSION,
+  runFrameSchema,
 } from '@lostgradient/operative';
 
 type BuildTribunalRunReportOptionalKeys =
@@ -67,34 +69,60 @@ export interface RunEnvelopeCapture {
   frames: RunFrame[];
   /** The same frames, JSON-stringified — one NDJSON line per frame. */
   lines: NdjsonLine[];
-  /** Detaches every listener this wiring registered. */
-  dispose: () => void;
+  /**
+   * Resolves once the run's event stream has been fully pumped. `AgentRun`
+   * delivers events through one single-consumer `AsyncIterable` rather than
+   * push-based listeners, so — unlike the old `ActiveRun`-based wiring —
+   * delivery is asynchronous relative to `result()`: `result()` can settle
+   * before the final `step.completed` event has been pumped into a frame.
+   * Callers MUST `await` this after `await run.result()` before asserting
+   * on `frames`/`lines`.
+   */
+  drained: Promise<void>;
 }
 
 /**
- * Subscribes to `activeRun`'s curated tool/step events and appends one
- * `RunFrame` (and its NDJSON-serialized line) per event, mirroring
- * `run-agent.mjs`'s `emitEvent()` call sites: `session_start` -> `run-started`,
- * `tool_pre` -> `tool-pre`, a policy denial or settled call -> `tool-post`,
- * `stop`/`error` -> `notification`.
+ * Subscribes to `agentRun`'s curated tool/step events (via its single
+ * `AsyncIterable<RunEvent>` stream — the public `AgentRun` handle, AB-15)
+ * and appends one `RunFrame` (and its NDJSON-serialized line) per event,
+ * mirroring `run-agent.mjs`'s `emitEvent()` call sites: `session_start` ->
+ * `run-started`, `tool_pre` -> `tool-pre`, a policy denial or settled call
+ * -> `tool-post`, `stop`/`error` -> `notification`. Every frame is validated
+ * against `runFrameSchema` and asserted to carry the current
+ * `RUN_ENVELOPE_SCHEMA_VERSION` as it's emitted.
  */
-export function captureRunEnvelope(runId: string, activeRun: ActiveRun): RunEnvelopeCapture {
+export function captureRunEnvelope<O, H extends boolean>(
+  runId: string,
+  agentRun: AgentRun<O, H>,
+): RunEnvelopeCapture {
   const frames: RunFrame[] = [];
   const lines: NdjsonLine[] = [];
-  const disposers: Array<() => void> = [];
   let currentStep = 0;
 
   function emit(frame: RunFrame): void {
-    frames.push(frame);
-    lines.push(JSON.stringify(frame));
+    const parsed = runFrameSchema.parse(frame);
+    if (parsed.schemaVersion !== RUN_ENVELOPE_SCHEMA_VERSION) {
+      throw new Error(
+        `Frame schemaVersion ${parsed.schemaVersion} does not match RUN_ENVELOPE_SCHEMA_VERSION ${RUN_ENVELOPE_SCHEMA_VERSION}`,
+      );
+    }
+    frames.push(parsed);
+    lines.push(JSON.stringify(parsed));
   }
+
+  const listeners = new Map<
+    CombinedOperativeEventType,
+    (event: CombinedOperativeEventMap[CombinedOperativeEventType]) => void
+  >();
 
   function on<K extends CombinedOperativeEventType>(
     type: K,
     listener: (event: CombinedOperativeEventMap[K]) => void,
   ): void {
-    activeRun.addEventListener(type, listener);
-    disposers.push(() => activeRun.removeEventListener(type, listener));
+    listeners.set(
+      type,
+      listener as (event: CombinedOperativeEventMap[CombinedOperativeEventType]) => void,
+    );
   }
 
   emit(createRunStartedFrame({ runId }));
@@ -172,13 +200,30 @@ export function captureRunEnvelope(runId: string, activeRun: ActiveRun): RunEnve
     );
   });
 
-  return {
-    frames,
-    lines,
-    dispose: () => {
-      for (const dispose of disposers) dispose();
-    },
-  };
+  // Drives the iterator manually (rather than `for await`) so only the
+  // ITERATOR's own failure (it throws on an aborted/errored run — the run's
+  // own `result()` promise, awaited by the caller, is the source of truth
+  // for that outcome) is swallowed. A listener throwing — in particular
+  // `emit()`'s `runFrameSchema.parse`/`schemaVersion` check failing on a
+  // malformed frame — must reject `drained` instead of silently vanishing;
+  // a `for await` wrapped in one try/catch cannot make that distinction.
+  const iterator = agentRun[Symbol.asyncIterator]();
+  const drained = (async () => {
+    for (;;) {
+      let step: IteratorResult<CombinedOperativeEventMap[CombinedOperativeEventType]>;
+      try {
+        step = await iterator.next();
+      } catch {
+        return;
+      }
+      if (step.done) return;
+      const event = step.value;
+      const listener = listeners.get(event.type);
+      listener?.(event);
+    }
+  })();
+
+  return { frames, lines, drained };
 }
 
 /**
@@ -191,7 +236,12 @@ export function finishRunEnvelope(
   runId: string,
   report: RunReport,
 ): void {
-  const frame = createRunFinishedFrame({ runId, report });
+  const frame = runFrameSchema.parse(createRunFinishedFrame({ runId, report }));
+  if (frame.schemaVersion !== RUN_ENVELOPE_SCHEMA_VERSION) {
+    throw new Error(
+      `Frame schemaVersion ${frame.schemaVersion} does not match RUN_ENVELOPE_SCHEMA_VERSION ${RUN_ENVELOPE_SCHEMA_VERSION}`,
+    );
+  }
   capture.frames.push(frame);
   capture.lines.push(JSON.stringify(frame));
 }

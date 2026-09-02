@@ -101,8 +101,14 @@ export function createOpenAIProvider(options: OpenAIProviderOptions): GenerateFu
     if (hasTools && options.toolChoice !== 'none') params['tools'] = tools;
     if (hasTools && options.toolChoice && options.toolChoice !== 'none')
       params['tool_choice'] = toOpenAIToolChoice(options.toolChoice);
-    if (options.responseFormat) {
-      const adapted = toOpenAIResponseFormat(options.responseFormat);
+    // Construction-time `options.responseFormat` (an explicit caller
+    // override) wins when set; otherwise fall back to the per-run
+    // `context.responseFormat` the loop derives from `RunOptions.output`
+    // (AB-18), so a run's `output` schema reaches the wire without every
+    // caller having to re-derive and pass it at provider construction.
+    const responseFormat = options.responseFormat ?? context.responseFormat;
+    if (responseFormat) {
+      const adapted = toOpenAIResponseFormat(responseFormat);
       if (adapted !== undefined) params['response_format'] = adapted;
     }
     if (options.requestMetadata) params['metadata'] = options.requestMetadata;
@@ -195,8 +201,14 @@ export function createOpenAIProviderStream(
     if (hasTools && options.toolChoice !== 'none') params['tools'] = tools;
     if (hasTools && options.toolChoice && options.toolChoice !== 'none')
       params['tool_choice'] = toOpenAIToolChoice(options.toolChoice);
-    if (options.responseFormat) {
-      const adapted = toOpenAIResponseFormat(options.responseFormat);
+    // Construction-time `options.responseFormat` (an explicit caller
+    // override) wins when set; otherwise fall back to the per-run
+    // `context.responseFormat` the loop derives from `RunOptions.output`
+    // (AB-18), so a run's `output` schema reaches the wire without every
+    // caller having to re-derive and pass it at provider construction.
+    const responseFormat = options.responseFormat ?? context.responseFormat;
+    if (responseFormat) {
+      const adapted = toOpenAIResponseFormat(responseFormat);
       if (adapted !== undefined) params['response_format'] = adapted;
     }
     if (options.requestMetadata) params['metadata'] = options.requestMetadata;

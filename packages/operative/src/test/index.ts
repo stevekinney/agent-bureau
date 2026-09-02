@@ -1,13 +1,7 @@
-import {
-  type AgentRegistry,
-  type AgentRegistryEntry,
-  createAgentRegistry,
-  type RegistryAgent,
-} from '../create-agent-registry';
 import type { ActiveRun } from '../create-run';
 import { createScratchpad, type Scratchpad } from '../create-scratchpad';
 import type { OperativeEventMap, OperativeEventType } from '../events';
-import type { GenerateFunction, GenerateResponse, RunResult, StepResult } from '../types';
+import type { GenerateFunction, GenerateResponse, StepResult } from '../types';
 
 export {
   createManualCheckpointStore,
@@ -92,37 +86,6 @@ export interface RunRecorder {
 
 export function createMockScratchpad(initialValues?: Record<string, unknown>): Scratchpad {
   return createScratchpad({ initialValues });
-}
-
-/**
- * Creates a minimal mock agent for registry-based tests.
- */
-export function createMockRegistryAgent(
-  name: string,
-  overrides: Partial<RegistryAgent> = {},
-): RegistryAgent {
-  const mockResult: RunResult = {
-    conversation: {} as never,
-    steps: [],
-    content: `Mock response from ${name}`,
-    usage: { prompt: 0, completion: 0, total: 0 },
-    finishReason: 'stop-condition' as const,
-  };
-  return {
-    name,
-    run: async () => mockResult,
-    ...overrides,
-  };
-}
-
-export function createMockAgentRegistry(entries?: AgentRegistryEntry[]): AgentRegistry {
-  const registry = createAgentRegistry();
-  if (entries) {
-    for (const entry of entries) {
-      registry.register(entry);
-    }
-  }
-  return registry;
 }
 
 export function createRunRecorder(activeRun: ActiveRun): RunRecorder {
