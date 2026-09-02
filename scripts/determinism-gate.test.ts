@@ -137,6 +137,16 @@ describe('determinism/no-global-transport-mutation', () => {
     );
     expect(ruleIds).toEqual([]);
   });
+
+  test('flags a TypeScript type-assertion-wrapped target ((globalThis as unknown as Env).fetch = ...)', () => {
+    const ruleIds = lintSourceUnderPackages('(globalThis as unknown as Env).fetch = fake;\n');
+    expect(ruleIds).toEqual(['determinism/no-global-transport-mutation']);
+  });
+
+  test('flags a non-null-asserted target (globalThis!.fetch = ...)', () => {
+    const ruleIds = lintSourceUnderPackages('globalThis!.fetch = fake;\n');
+    expect(ruleIds).toEqual(['determinism/no-global-transport-mutation']);
+  });
 });
 
 describe('scope-aware detection (regression coverage for injected-runtime false positives)', () => {
@@ -159,6 +169,25 @@ describe('scope-aware detection (regression coverage for injected-runtime false 
       'function scheduleRetry(callback) {\n  setTimeout(callback, 1);\n}\n',
     );
     expect(ruleIds).toEqual(['determinism/no-real-runtime-call']);
+  });
+
+  test('flags a host-global-qualified timer call (globalThis.setTimeout)', () => {
+    const ruleIds = lintSourceInDeterministicDirectory(
+      'function scheduleRetry(callback) {\n  globalThis.setTimeout(callback, 1);\n}\n',
+    );
+    expect(ruleIds).toEqual(['determinism/no-real-runtime-call']);
+  });
+
+  test('flags a host-global-qualified timer call (window.setInterval)', () => {
+    const ruleIds = lintSourceInDeterministicDirectory('window.setInterval(callback, 1);\n');
+    expect(ruleIds).toEqual(['determinism/no-real-runtime-call']);
+  });
+
+  test('does not flag globalThis.setTimeout when globalThis is shadowed by a local parameter', () => {
+    const ruleIds = lintSourceInDeterministicDirectory(
+      'function scheduleRetry(globalThis, callback) {\n  globalThis.setTimeout(callback, 1);\n}\n',
+    );
+    expect(ruleIds).toEqual([]);
   });
 });
 

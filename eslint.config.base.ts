@@ -201,6 +201,30 @@ function isTransportMutationScopeFile(
 }
 
 /**
+ * Unwraps a chain of TypeScript type-assertion wrappers (`as`, `satisfies`, `!`, `<T>x`) to reach
+ * the underlying runtime expression: `(globalThis as unknown as Env).fetch = fake` must be
+ * recognized as mutating `globalThis.fetch`, not silently ignored because `left.object` is a
+ * `TSAsExpression` rather than the `Identifier` it wraps. `@typescript-eslint/parser`'s AST nodes
+ * for these four wrapper kinds aren't part of plain ESTree's type union (what `Rule.Node`
+ * describes), so this narrows via each node's `type` string and the one shape all four share (an
+ * `expression` field) rather than pulling in `@typescript-eslint`'s AST types as a second,
+ * parallel type system alongside ESLint's own.
+ */
+function unwrapTypeAssertions(node: Rule.Node): Rule.Node {
+  const wrapperTypes = new Set([
+    'TSAsExpression',
+    'TSSatisfiesExpression',
+    'TSNonNullExpression',
+    'TSTypeAssertion',
+  ]);
+  let current = node;
+  while (wrapperTypes.has((current as { type: string }).type)) {
+    current = (current as unknown as { expression: Rule.Node }).expression;
+  }
+  return current;
+}
+
+/**
  * Static property name of a MemberExpression, dot or bracket form: `x.fetch` and `x['fetch']`
  * both resolve to `'fetch'`; a non-literal computed property (`x[someVariable]`) resolves to
  * `undefined` since its actual value isn't known statically.
@@ -253,7 +277,7 @@ function realRuntimeCallLabel(
 
   if (callee.type === 'MemberExpression') {
     const propertyName = staticMemberPropertyName(callee);
-    const object = callee.object;
+    const object = unwrapTypeAssertions(callee.object);
     if (
       propertyName &&
       object.type === 'Identifier' &&
@@ -265,6 +289,15 @@ function realRuntimeCallLabel(
         pair === 'performance.now' ||
         pair === 'crypto.randomUUID' ||
         pair === 'Math.random'
+      ) {
+        return `${pair}(`;
+      }
+      // A host-global-qualified timer call — globalThis.setTimeout(...), window.setInterval(...),
+      // global.setTimeout(...) — is the exact same real timer as the bare identifier form above;
+      // qualifying it through the object it's already a property of must not be a bypass.
+      if (
+        (object.name === 'globalThis' || object.name === 'window' || object.name === 'global') &&
+        (propertyName === 'setTimeout' || propertyName === 'setInterval')
       ) {
         return `${pair}(`;
       }
@@ -342,18 +375,21 @@ export function createNoGlobalTransportMutationRule(
 
           // `global`/`globalThis` must resolve to the ambient process global, not a local
           // parameter or variable of the same name (e.g. `function install(global: Env) { ... }`)
-          // — otherwise this rule would reject valid injected-environment code.
+          // — otherwise this rule would reject valid injected-environment code. Unwrap a
+          // TypeScript type assertion first: `(globalThis as unknown as Env).fetch = fake` is
+          // the same mutation as `globalThis.fetch = fake`, just cast to a differently typed fake.
+          const object = unwrapTypeAssertions(left.object);
           if (
-            left.object.type !== 'Identifier' ||
-            (left.object.name !== 'globalThis' && left.object.name !== 'global') ||
-            !context.sourceCode.isGlobalReference(left.object)
+            object.type !== 'Identifier' ||
+            (object.name !== 'globalThis' && object.name !== 'global') ||
+            !context.sourceCode.isGlobalReference(object)
           ) {
             return;
           }
 
           context.report({
             node,
-            message: `Direct assignment to ${left.object.name}.${propertyName} mutates process-global transport state (${relativePath}). ${DETERMINISM_ACTION_SENTENCE}`,
+            message: `Direct assignment to ${object.name}.${propertyName} mutates process-global transport state (${relativePath}). ${DETERMINISM_ACTION_SENTENCE}`,
           });
         },
       };
