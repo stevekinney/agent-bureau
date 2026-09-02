@@ -39,7 +39,13 @@ import type {
   RunnableAgent,
 } from './runnable-agent';
 import { OPERATIVE_RESOLVE_RUN_OPTIONS } from './runnable-agent';
-import type { FinishReason, RunResult, TokenUsage } from './types';
+import type {
+  CleanupAcknowledgement,
+  ClosedOptions,
+  FinishReason,
+  RunResult,
+  TokenUsage,
+} from './types';
 
 /**
  * The two shapes a loader may resolve to (AB-15's `AgentModule<O, H>`): the
@@ -300,6 +306,7 @@ function createDeferredAgentRun<O, H extends boolean>(
   let underlying: AgentRun<O, H> | undefined;
   let abortReason: string | undefined;
   let abortForwarded = false;
+  let syntheticClosed: CleanupAcknowledgement | undefined;
 
   const queue = createEventQueue();
 
@@ -595,6 +602,22 @@ function createDeferredAgentRun<O, H extends boolean>(
 
     abortChild(childId: string, reason?: string): void {
       underlying?.abortChild(childId, reason);
+    },
+
+    // AB-204: before `underlying` resolves, awaiting `resultPromise` first
+    // guarantees any real underlying run that DOES resolve by the time this
+    // run terminates gets its own `closed()` consulted — matching every
+    // other member here, which is a no-op/empty default only in that same
+    // pre-resolution window. If no underlying run ever existed (the
+    // `finalizeSynthetic` path — aborted before the wrapped agent resolved),
+    // there is nothing else to await: `completed` is accurate, cached so
+    // repeat calls satisfy `closed()`'s identical-by-reference contract.
+    closed(options?: ClosedOptions): Promise<CleanupAcknowledgement> {
+      return resultPromise.then(() => {
+        if (underlying) return underlying.closed(options);
+        syntheticClosed ??= { status: 'completed' };
+        return syntheticClosed;
+      });
     },
 
     [Symbol.dispose](): void {

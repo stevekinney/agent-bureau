@@ -13,7 +13,7 @@ import {
 import { RunCompletedEvent } from './events';
 import type { RunnableAgent } from './runnable-agent';
 import { OPERATIVE_RESOLVE_RUN_OPTIONS } from './runnable-agent';
-import type { RunOptions, RunResult } from './types';
+import type { CleanupAcknowledgement, RunOptions, RunResult } from './types';
 
 // ---------------------------------------------------------------------------
 // Test doubles
@@ -61,6 +61,9 @@ function createFakeAgentRun(): {
     },
     abortChild(childId: string, reason?: string): void {
       abortChildCalls.push({ childId, reason });
+    },
+    closed(): Promise<CleanupAcknowledgement> {
+      return resultPromise.then(() => ({ status: 'completed' }) as const);
     },
     [Symbol.dispose](): void {
       disposed = true;
@@ -389,6 +392,27 @@ describe('createLazyAgent', () => {
     expect(result.error).toBeInstanceOf(AbortAgentRunError);
   });
 
+  it('closed() resolves completed once settled when no underlying run ever existed, cached across repeat calls (AB-204)', async () => {
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => (release = resolve));
+    const fake = createFakeAgentRun();
+    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };
+    const lazy = createLazyAgent(async () => {
+      await pending;
+      return agent;
+    });
+
+    const run = lazy.run('hello');
+    const closedAcknowledgement = run.closed();
+    run.abort('cancelled before load');
+    release();
+    await run.result();
+
+    const first = await closedAcknowledgement;
+    expect(first).toEqual({ status: 'completed' });
+    expect(await run.closed()).toBe(first);
+  });
+
   it('emits an aborted event followed by completion when abort wins before resolution', async () => {
     let release!: () => void;
     const pending = new Promise<void>((resolve) => (release = resolve));
@@ -423,6 +447,20 @@ describe('createLazyAgent', () => {
     await run.result();
 
     expect(fake.abortCalls).toEqual(['first']);
+  });
+
+  it('closed() delegates to the underlying handle once one exists (AB-204)', async () => {
+    const fake = createFakeAgentRun();
+    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };
+    const lazy = createLazyAgent(() => agent);
+
+    const run = lazy.run('hello');
+    await flushMicrotasks();
+
+    const closedAcknowledgement = run.closed();
+    fake.settle(successResult('done'));
+
+    expect(await closedAcknowledgement).toEqual({ status: 'completed' });
   });
 
   it('children()/abortChild() read empty/no-op before resolution and delegate to the underlying handle once resolved', async () => {
@@ -653,6 +691,7 @@ describe('createLazyAgent', () => {
       abort() {},
       children: () => [],
       abortChild() {},
+      closed: () => Promise.resolve({ status: 'completed' }),
       [Symbol.dispose]() {},
       [Symbol.asyncIterator](): AsyncIterator<RunEvent> {
         return {
@@ -683,6 +722,7 @@ describe('createLazyAgent', () => {
       abort() {},
       children: () => [],
       abortChild() {},
+      closed: () => Promise.resolve({ status: 'completed' }),
       [Symbol.dispose]() {},
       [Symbol.asyncIterator](): AsyncIterator<RunEvent> {
         return {
@@ -781,6 +821,7 @@ describe('createLazyAgent', () => {
       abort() {},
       children: () => [],
       abortChild() {},
+      closed: () => Promise.resolve({ status: 'completed' }),
       [Symbol.dispose]() {},
       [Symbol.asyncIterator](): AsyncIterator<RunEvent> {
         return {

@@ -35,7 +35,7 @@ import {
 import type { OperativeHookMap } from '../hooks';
 import { UnsupportedRunResultVersionError } from '../run-envelope';
 import { createManualDurableEngine, spyEngine } from '../test/durable-engine';
-import { createMockGenerate } from '../test/index';
+import { createManualCheckpointStore, createMockGenerate } from '../test/index';
 import type { RunOptions, RunResult } from '../types';
 import {
   createDurableActiveRun,
@@ -1231,6 +1231,198 @@ describe('createRun with durable routing', () => {
   });
 });
 
+describe('createDurableActiveRun.closed()', () => {
+  it('resolves not-required immediately when first called after a normal completion, with no cancellation and nothing in flight', async () => {
+    const context = await buildContext();
+    try {
+      const activeRun = createDurableActiveRun(context, {
+        runId: 'ac2-durable-not-required',
+        sessionId: 'ac2-durable-not-required',
+        options: runOptions(async () => ({ content: 'done', toolCalls: [] })),
+        prompt: 'Hello',
+      });
+
+      await activeRun.result;
+      await Promise.resolve();
+
+      expect(await activeRun.closed()).toEqual({ status: 'not-required' });
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('resolves completed once the result promise settles normally, without any cancellation', async () => {
+    const context = await buildContext();
+    try {
+      const activeRun = createDurableActiveRun(context, {
+        runId: 'ac1-durable-completed',
+        sessionId: 'ac1-durable-completed',
+        options: runOptions(async () => ({ content: 'done', toolCalls: [] })),
+        prompt: 'Hello',
+      });
+
+      const closedAcknowledgement = activeRun.closed();
+      await activeRun.result;
+
+      expect(await closedAcknowledgement).toEqual({ status: 'completed' });
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('withholds completed until the post-cancel re-read of getDurableRun observes status "cancelled" — never merely because engine.cancel resolved (AC7)', async () => {
+    const { engine } = createManualDurableEngine();
+    let resolveGet!: (state: { status: string } | null) => void;
+    const getPromise = new Promise<{ status: string } | null>((resolve) => {
+      resolveGet = resolve;
+    });
+    // createManualDurableEngine's `cancel` rejects the workflow result with
+    // "Workflow cancelled" (the B6 race) but resolves its own promise — so a
+    // non-throwing `engine.cancel` reaching closed() proves nothing on its
+    // own; only this controllable `get` re-read can unblock it.
+    engine.get = (async () => getPromise) as RegistryAgnosticEngine['get'];
+
+    const runId = 'ac7-cancel-confirmed';
+    const activeRun = createDurableActiveRun(
+      { engine, checkpointStore: createManualCheckpointStore() },
+      {
+        runId,
+        sessionId: runId,
+        options: runOptions(async () => ({ content: 'unused', toolCalls: [] })),
+        prompt: 'Hello',
+      },
+    );
+
+    await Promise.resolve();
+    activeRun.abort();
+
+    const closedAcknowledgement = activeRun.closed();
+    await activeRun.result;
+
+    let settled = false;
+    void closedAcknowledgement.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    resolveGet({ status: 'cancelled' });
+
+    const first = await closedAcknowledgement;
+    expect(first).toEqual({ status: 'completed' });
+    // Idempotent: a repeated call returns the identical cached object.
+    expect(await activeRun.closed()).toBe(first);
+  });
+
+  it('fires its own post-cancel re-read cancellation when abort() ran before the workflow existed, so cancelSettled was never set (AC7)', async () => {
+    const { engine, resolveResult } = createManualDurableEngine();
+    const cancelledIds: string[] = [];
+    // Rejects (run already terminal, matching the comment on
+    // `resolveDurableOutcome`'s fallback call) rather than resolving — this
+    // exercises the `.catch(() => undefined)` swallow, not just the call
+    // itself. Doesn't touch the workflow result (the real `cancel` does that
+    // via `createManualDurableEngine`'s B6 race simulation); this scenario
+    // tests the OTHER way a run ends up cancel-requested-but-settled: the
+    // workflow completed on its own (`resolveResult` below) despite an
+    // abort that arrived before it even existed.
+    engine.cancel = async (id: string) => {
+      cancelledIds.push(id);
+      throw new Error('already terminal');
+    };
+    engine.get = (async () => ({
+      status: 'cancelled',
+    })) as unknown as RegistryAgnosticEngine['get'];
+
+    const runId = 'ac7-abort-before-drive-started';
+    const activeRun = createDurableActiveRun(
+      { engine, checkpointStore: createManualCheckpointStore() },
+      {
+        runId,
+        sessionId: runId,
+        options: runOptions(async () => ({ content: 'unused', toolCalls: [] })),
+        prompt: 'Hello',
+      },
+    );
+
+    // Abort SYNCHRONOUSLY, before the deferred-microtask `drive()` call has
+    // fired — `driveStarted` is still false, so abort()'s own engine.cancel
+    // call is skipped (the workflow doesn't exist yet) and `cancelSettled`
+    // is never set. `resolveDurableOutcome` must fire its own cancel call
+    // instead of awaiting `undefined`.
+    activeRun.abort();
+    expect(cancelledIds).toEqual([]);
+
+    // The manual engine never settles its own result on its own; simulate
+    // the workflow completing normally so `result` (and therefore
+    // `resolveDurableOutcome`) can proceed.
+    resolveResult();
+
+    const closedAcknowledgement = activeRun.closed();
+    await activeRun.result;
+
+    expect(await closedAcknowledgement).toEqual({ status: 'completed' });
+    expect(cancelledIds).toContain(runId);
+  });
+
+  it('resolves unresolved/persistence-failed when the post-cancel re-read throws (coordinator persistence-failed fixture)', async () => {
+    const { engine } = createManualDurableEngine();
+    const readFailure = new Error('storage unavailable');
+    engine.get = async () => {
+      throw readFailure;
+    };
+
+    const runId = 'ac7-persistence-failed-throws';
+    const activeRun = createDurableActiveRun(
+      { engine, checkpointStore: createManualCheckpointStore() },
+      {
+        runId,
+        sessionId: runId,
+        options: runOptions(async () => ({ content: 'unused', toolCalls: [] })),
+        prompt: 'Hello',
+      },
+    );
+
+    await Promise.resolve();
+    activeRun.abort();
+    const closedAcknowledgement = activeRun.closed();
+    await activeRun.result;
+
+    expect(await closedAcknowledgement).toEqual({
+      status: 'unresolved',
+      reason: 'persistence-failed',
+      error: readFailure,
+    });
+  });
+
+  it('resolves unresolved/persistence-failed when the post-cancel re-read returns no record (coordinator persistence-failed fixture)', async () => {
+    const { engine } = createManualDurableEngine();
+    engine.get = async () => null;
+
+    const runId = 'ac7-persistence-failed-null';
+    const activeRun = createDurableActiveRun(
+      { engine, checkpointStore: createManualCheckpointStore() },
+      {
+        runId,
+        sessionId: runId,
+        options: runOptions(async () => ({ content: 'unused', toolCalls: [] })),
+        prompt: 'Hello',
+      },
+    );
+
+    await Promise.resolve();
+    activeRun.abort();
+    const closedAcknowledgement = activeRun.closed();
+    await activeRun.result;
+
+    expect(await closedAcknowledgement).toEqual({
+      status: 'unresolved',
+      reason: 'persistence-failed',
+    });
+  });
+});
+
 describe('createRecoveredRunEventSurface', () => {
   it('rebuilds curated and forwarded toolbox events with recovery stamps and cleanup', () => {
     const callerAbortController = new AbortController();
@@ -1865,6 +2057,154 @@ describe('reattachDurableActiveRun', () => {
 
     // engine.cancel ran exactly once despite both abort() and dispose().
     expect(cancelled).toEqual(['reattach-abort-then-dispose']);
+  });
+});
+
+describe('reattachDurableActiveRun.closed()', () => {
+  it('classifies an EngineDisposedError rejection of a pending result() waiter as unresolved/unreachable, never failed (AC8)', async () => {
+    const context = await buildContext();
+    try {
+      const disposedError = Object.assign(new Error('engine disposed'), {
+        code: 'EngineDisposedError',
+      });
+      const handle = {
+        id: 'reattach-closed-unreachable',
+        result: () => Promise.reject(disposedError),
+      };
+      const recoveredRun = reattachDurableActiveRun(
+        { engine: context.engine, checkpointStore: context.checkpointStore },
+        { runId: 'reattach-closed-unreachable', handle },
+      );
+
+      // The public `result` promise settles quietly (write-free path) rather
+      // than rejecting — see driveReattachedRun's own doc comment — so
+      // closed() cannot classify this from a rejection; it needs the
+      // `reachability` side channel this issue adds.
+      const result = await recoveredRun.result;
+      expect(result.finishReason).toBe('aborted');
+
+      expect(await recoveredRun.closed()).toEqual({ status: 'unresolved', reason: 'unreachable' });
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('resolves not-required immediately for a clean recovered completion with no cancellation and nothing in flight', async () => {
+    const context = await buildContext();
+    try {
+      const handle = {
+        id: 'reattach-closed-not-required',
+        result: () =>
+          Promise.resolve({
+            schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
+            runId: 'reattach-closed-not-required',
+            steps: 0,
+            content: 'done',
+            finishReason: 'stop-condition',
+          }),
+      };
+      const recoveredRun = reattachDurableActiveRun(
+        { engine: context.engine, checkpointStore: context.checkpointStore },
+        { runId: 'reattach-closed-not-required', handle },
+      );
+
+      await recoveredRun.result;
+      await Promise.resolve();
+
+      expect(await recoveredRun.closed()).toEqual({ status: 'not-required' });
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('withholds completed until the post-cancel re-read of getDurableRun observes status "cancelled"', async () => {
+    const context = await buildContext();
+    try {
+      let rejectResult!: (error: unknown) => void;
+      const handle = {
+        id: 'reattach-closed-cancel-confirmed',
+        result: () =>
+          new Promise<unknown>((_resolve, reject) => {
+            rejectResult = reject;
+          }),
+      };
+      let resolveGet!: (state: { status: string } | null) => void;
+      const getPromise = new Promise<{ status: string } | null>((resolve) => {
+        resolveGet = resolve;
+      });
+      const engine = {
+        cancel: async () => {
+          rejectResult(new Error('cancelled'));
+        },
+        get: async () => getPromise,
+      } as unknown as RegistryAgnosticEngine;
+
+      const recoveredRun = reattachDurableActiveRun(
+        { engine, checkpointStore: context.checkpointStore },
+        { runId: 'reattach-closed-cancel-confirmed', handle },
+      );
+
+      await Promise.resolve();
+      recoveredRun.abort();
+      const closedAcknowledgement = recoveredRun.closed();
+      await recoveredRun.result;
+
+      let settled = false;
+      void closedAcknowledgement.then(() => {
+        settled = true;
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(settled).toBe(false);
+
+      resolveGet({ status: 'cancelled' });
+
+      expect(await closedAcknowledgement).toEqual({ status: 'completed' });
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('resolves unresolved/persistence-failed when the post-cancel re-read throws', async () => {
+    const context = await buildContext();
+    try {
+      let rejectResult!: (error: unknown) => void;
+      const handle = {
+        id: 'reattach-closed-persistence-failed',
+        result: () =>
+          new Promise<unknown>((_resolve, reject) => {
+            rejectResult = reject;
+          }),
+      };
+      const readFailure = new Error('storage unavailable');
+      const engine = {
+        cancel: async () => {
+          rejectResult(new Error('cancelled'));
+        },
+        get: async () => {
+          throw readFailure;
+        },
+      } as unknown as RegistryAgnosticEngine;
+
+      const recoveredRun = reattachDurableActiveRun(
+        { engine, checkpointStore: context.checkpointStore },
+        { runId: 'reattach-closed-persistence-failed', handle },
+      );
+
+      await Promise.resolve();
+      recoveredRun.abort();
+      const closedAcknowledgement = recoveredRun.closed();
+      await recoveredRun.result;
+
+      expect(await closedAcknowledgement).toEqual({
+        status: 'unresolved',
+        reason: 'persistence-failed',
+        error: readFailure,
+      });
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
   });
 });
 

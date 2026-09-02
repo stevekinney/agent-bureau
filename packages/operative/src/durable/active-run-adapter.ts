@@ -3,6 +3,7 @@ import type { ToolboxEventMap } from 'armorer';
 import { Conversation, isConversation } from 'conversationalist';
 import { CompletableEventTarget, forwardEvents } from 'lifecycle';
 
+import { createClosedAcknowledgement } from '../closed-acknowledgement';
 import type { ActiveRun } from '../create-run';
 import {
   AbortAgentRunError,
@@ -31,7 +32,7 @@ import {
   startRunLifecycle,
 } from '../run-lifecycle';
 import type { RunState } from '../run-step';
-import type { FinishReason, RunOptions, RunResult } from '../types';
+import type { CleanupAcknowledgement, FinishReason, RunOptions, RunResult } from '../types';
 import type { CheckpointStore } from './checkpoint-store';
 import type { RegistryAgnosticEngine } from './create-run-engine';
 import {
@@ -337,6 +338,9 @@ export function createDurableActiveRun(
   // inert (no events ever fire). Durable per-step conversation streaming is
   // TODO(weft-integration): #10 (in-process streaming progress).
   const cleanups: (() => void)[] = [];
+  // closed()'s not-required fast path (coordinator ruling, AB-204) — see the
+  // identical counter in `create-run.ts`.
+  let inFlightTools = 0;
   const toolboxForward = forwardEvents(options.toolbox, emitter, 'toolbox');
   cleanups.push(() => toolboxForward.stop());
 
@@ -364,6 +368,7 @@ export function createDurableActiveRun(
     };
 
     const onExecuteStart = (e: ToolboxEventMap['execute-start']) => {
+      inFlightTools += 1;
       emitter.dispatchEvent(
         new ToolStartedBubbleEvent(
           { agentName, runId, step: currentStep },
@@ -378,6 +383,7 @@ export function createDurableActiveRun(
     };
 
     const onSettled = (e: ToolboxEventMap['settled']) => {
+      inFlightTools -= 1;
       const hasError = e.error !== undefined;
       const status: 'success' | 'error' = hasError ? 'error' : 'success';
       emitter.dispatchEvent(
@@ -483,7 +489,18 @@ export function createDurableActiveRun(
     })
     .finally(complete);
 
+  // closed()'s AC7 (AB-204): a durable `completed` acknowledgement is
+  // withheld until the post-cancel re-read of `getDurableRun` observes the
+  // committed transition, never merely because `engine.cancel` resolved
+  // without rejecting. `cancelRequested` records that a cancellation was
+  // asked for at all; `cancelSettled` — when abort() itself already fired
+  // `engine.cancel` — lets `closed()` reuse that same call instead of racing
+  // a second one.
+  let cancelRequested = false;
+  let cancelSettled: Promise<void> | undefined;
+
   function abort(reason?: string): void {
+    cancelRequested = true;
     // CRITICAL (B6 — "the link that stops the bill"): fire the AbortController
     // IMMEDIATELY so the in-flight generate() call (inside ctx.memo in the
     // durable workflow) drops its provider connection NOW. This does NOT wait
@@ -505,16 +522,47 @@ export function createDurableActiveRun(
     if (driveStarted) {
       // Fire-and-forget: a failing cancel (run already terminal) is not an
       // error — the AbortController already dropped the in-flight connection.
-      void context.engine.cancel(runId).catch(() => {
+      // Kept on `cancelSettled` too, so closed()'s post-cancel re-read awaits
+      // THIS call rather than firing a redundant one.
+      cancelSettled = context.engine.cancel(runId).catch(() => {
         // Swallow: run may already be terminal. The AbortController signal is
         // the load-bearing stop; engine.cancel is belt-and-suspenders.
       });
     }
   }
 
+  async function resolveDurableOutcome(): Promise<CleanupAcknowledgement> {
+    if (!cancelRequested) return { status: 'completed' };
+    // abort() may have been called before `driveStarted` — the workflow did
+    // not exist yet, so it never fired engine.cancel(). By the time `result`
+    // has settled the workflow certainly exists, so fire it here instead.
+    await (cancelSettled ?? context.engine.cancel(runId).catch(() => undefined));
+    try {
+      const state = await context.engine.get(runId);
+      // `engine.cancel` resolving void is not proof the cancellation record
+      // committed (it is also a documented no-op against an already-terminal
+      // workflow) — only a re-read can disambiguate. `state.status ===
+      // 'cancelled'` is this closed()'s cancellation, any other terminal
+      // status means the workflow settled on its own before the cancel could
+      // apply; either way the durable record exists and cleanup is complete.
+      if (!state) return { status: 'unresolved', reason: 'persistence-failed' };
+      return { status: 'completed' };
+    } catch (error) {
+      return { status: 'unresolved', reason: 'persistence-failed', error };
+    }
+  }
+
+  const closed = createClosedAcknowledgement({
+    result,
+    disqualifiesFastPath: () => cancelRequested,
+    hasInFlightWork: () => inFlightTools > 0,
+    resolveOutcome: resolveDurableOutcome,
+  });
+
   return {
     result,
     abort,
+    closed,
     addEventListener: emitter.addEventListener.bind(emitter),
     removeEventListener: emitter.removeEventListener.bind(emitter),
     on: emitter.on.bind(emitter),
@@ -727,6 +775,15 @@ export function reattachDurableActiveRun(
   // path and does not clobber that owner's status (committee round-3 finding 1).
   let abortCancelled: Promise<boolean> | undefined;
 
+  // closed()'s AC8 (AB-204): a pending `result()` waiter rejected with
+  // `EngineDisposedError` (bureau teardown mid-resume) must classify as
+  // `{ status: 'unresolved', reason: 'unreachable' }`, never `failed` — but
+  // `driveReattachedRun` swallows that rejection into a write-free, resolved
+  // `RunResult` (see its own doc comment), so the public `result` promise
+  // never rejects to signal it. This ref is the side channel: set by
+  // `driveReattachedRun` right before it returns that quiet result.
+  const reachability = { unreachable: false };
+
   function complete(): void {
     toolboxForwardCleanup?.();
     emitter.complete();
@@ -737,7 +794,7 @@ export function reattachDurableActiveRun(
   }
 
   function drive(): Promise<RunResult> {
-    return driveReattachedRun(context, runId, handle, emitter, abortOutcome);
+    return driveReattachedRun(context, runId, handle, emitter, abortOutcome, reachability);
   }
 
   function cancelSucceeded(): boolean {
@@ -770,9 +827,40 @@ export function reattachDurableActiveRun(
   // terminal event — even when `handle.result()` already settled before reattach.
   const result = Promise.resolve().then(drive).finally(complete);
 
+  async function resolveReattachOutcome(): Promise<CleanupAcknowledgement> {
+    if (reachability.unreachable) return { status: 'unresolved', reason: 'unreachable' };
+    if (abortCancelled === undefined) return { status: 'completed' };
+    // Wait for the SAME cancel attempt abort() fired (never rejects: it is
+    // already `.then(cancelSucceeded, cancelFailed)`), then re-read the
+    // durable record — matching `createDurableActiveRun`'s AC7 reasoning: a
+    // non-throwing `engine.cancel` alone is not proof of a committed record.
+    await abortCancelled;
+    try {
+      const state = await context.engine.get(runId);
+      if (!state) return { status: 'unresolved', reason: 'persistence-failed' };
+      return { status: 'completed' };
+    } catch (error) {
+      return { status: 'unresolved', reason: 'persistence-failed', error };
+    }
+  }
+
+  const closed = createClosedAcknowledgement({
+    result,
+    // A cancellation always disqualifies not-required, and so does
+    // `reachability.unreachable` — otherwise the fast path could resolve
+    // not-required for a run `resolveReattachOutcome` would have classified
+    // unresolved/unreachable (AC8), silently hiding the teardown race.
+    disqualifiesFastPath: () => abortCancelled !== undefined || reachability.unreachable,
+    // No toolbox forwarding is owned by this adapter — see `reattach.stopToolboxForward`
+    // above — so no in-flight-tool count is available to track here.
+    hasInFlightWork: () => false,
+    resolveOutcome: resolveReattachOutcome,
+  });
+
   return {
     result,
     abort,
+    closed,
     addEventListener: emitter.addEventListener.bind(emitter),
     removeEventListener: emitter.removeEventListener.bind(emitter),
     on: emitter.on.bind(emitter),
@@ -920,6 +1008,7 @@ async function driveReattachedRun(
   handle: RecoveredRunHandle,
   emitter: OperativeEventEmitter,
   abortOutcome: () => Promise<boolean> | undefined,
+  reachability: { unreachable: boolean },
 ): Promise<RunResult> {
   const runStartTime = performance.now();
 
@@ -994,7 +1083,11 @@ async function driveReattachedRun(
     // services-unavailable, and the resolver ALREADY reconciled that session to
     // `error`. Firing a terminal lifecycle here would clobber what the
     // resolver/teardown owns, so we only log and resolve quiet.
-    if (!(isWeftErrorLike(error) && error.code === 'EngineDisposedError')) {
+    if (isWeftErrorLike(error) && error.code === 'EngineDisposedError') {
+      // AB-204 AC8: closed() classifies this as unresolved/unreachable,
+      // never failed — see `reachability`'s doc comment above.
+      reachability.unreachable = true;
+    } else {
       console.error(
         `[operative] Reattached durable run "${runId}" did not settle cleanly: ${
           error instanceof Error ? error.message : String(error)

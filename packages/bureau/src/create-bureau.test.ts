@@ -4364,6 +4364,9 @@ function createParkedActiveRun(): {
   const activeRun: ActiveRun = {
     result: new Promise<never>(() => {}),
     abort: () => {},
+    // AB-204: mechanical addition — this never-settling stub run has no
+    // cleanup to await, matching `abort`'s never-resolving `result` above.
+    closed: () => new Promise(() => {}),
     addEventListener: emitter.addEventListener.bind(emitter),
     removeEventListener: emitter.removeEventListener.bind(emitter),
     on: emitter.on.bind(emitter),

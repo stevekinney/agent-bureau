@@ -3,6 +3,7 @@ import { Conversation, isConversation } from 'conversationalist';
 import type { ObservableLike, Observer, Subscription } from 'lifecycle';
 import { CompletableEventTarget, forwardEvents } from 'lifecycle';
 
+import { createClosedAcknowledgement } from './closed-acknowledgement';
 import type { DurableActiveRunContext } from './durable/active-run-adapter';
 import { createDurableActiveRun } from './durable/active-run-adapter';
 import type { DurableRunDeps } from './durable/types';
@@ -21,7 +22,7 @@ import {
 } from './events';
 import { executeLoop } from './loop';
 import { toOutputJsonSchema } from './structured-output/response-schema';
-import type { RunOptions, RunResult } from './types';
+import type { CleanupAcknowledgement, ClosedOptions, RunOptions, RunResult } from './types';
 
 /**
  * The internal event-emitting agent loop run. This is the low-level engine
@@ -34,6 +35,13 @@ import type { RunOptions, RunResult } from './types';
 export interface ActiveRun {
   result: Promise<RunResult>;
   abort: (reason?: string) => void;
+  /**
+   * A truthful cleanup acknowledgement (AB-37 / AB-204), backed by the same
+   * settlement `abort()` already uses. Never rejects; idempotent after
+   * genuine settlement — see `closed-acknowledgement.ts` for the full
+   * contract.
+   */
+  closed: (options?: ClosedOptions) => Promise<CleanupAcknowledgement>;
   addEventListener: <K extends CombinedOperativeEventType>(
     type: K,
     listener: (event: CombinedOperativeEventMap[K]) => void,
@@ -145,6 +153,11 @@ export function createActiveRun(options: RunOptions, durable?: DurableRunRouting
 
   const cleanups: (() => void)[] = [];
 
+  // closed()'s not-required fast path (coordinator ruling, AB-204): until
+  // AB-88 ships a `cancellable` snapshot field, in-flight tool executions are
+  // this run's own signal that cleanup is not trivially unnecessary.
+  let inFlightTools = 0;
+
   const toolboxForward = forwardEvents(options.toolbox, emitter, 'toolbox');
   cleanups.push(() => toolboxForward.stop());
 
@@ -177,6 +190,7 @@ export function createActiveRun(options: RunOptions, durable?: DurableRunRouting
 
     // Map 'execute-start' → tool.started (reliably emitted for all tools, regardless of telemetry flag)
     const onExecuteStart = (e: ToolboxEventMap['execute-start']) => {
+      inFlightTools += 1;
       emitter.dispatchEvent(
         new ToolStartedBubbleEvent(
           { agentName, runId, step: currentStep },
@@ -192,6 +206,7 @@ export function createActiveRun(options: RunOptions, durable?: DurableRunRouting
 
     // Map 'settled' → tool.settled (fired after every tool call regardless of outcome)
     const onSettled = (e: ToolboxEventMap['settled']) => {
+      inFlightTools -= 1;
       const hasError = e.error !== undefined;
       const status: 'success' | 'error' = hasError ? 'error' : 'success';
       emitter.dispatchEvent(
@@ -267,7 +282,10 @@ export function createActiveRun(options: RunOptions, durable?: DurableRunRouting
     .then(() => executeLoop(loopOptions, emitter))
     .finally(complete);
 
+  let cancelRequested = false;
+
   function abort(reason?: string): void {
+    cancelRequested = true;
     abortController.abort(reason);
   }
 
@@ -276,9 +294,22 @@ export function createActiveRun(options: RunOptions, durable?: DurableRunRouting
     emitter.complete();
   }
 
+  // The in-memory loop resolves `result` for every terminal shape (stop,
+  // abort, error) — see `run-lifecycle.ts`'s `make*Result` helpers — so
+  // cleanup is `completed` whenever `result` settles at all; a genuine
+  // rejection (e.g. a cleanup listener itself throwing inside `complete()`,
+  // which `.finally()` surfaces as the settlement) is the only `failed` case.
+  const closed = createClosedAcknowledgement({
+    result,
+    disqualifiesFastPath: () => cancelRequested,
+    hasInFlightWork: () => inFlightTools > 0,
+    resolveOutcome: () => Promise.resolve({ status: 'completed' }),
+  });
+
   return {
     result,
     abort,
+    closed,
     addEventListener: emitter.addEventListener.bind(emitter),
     removeEventListener: emitter.removeEventListener.bind(emitter),
     on: emitter.on.bind(emitter),

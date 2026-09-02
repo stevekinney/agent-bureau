@@ -82,6 +82,50 @@ export type FinishReason =
   | 'tripwire';
 
 /**
+ * Discriminates an `unresolved` {@link CleanupAcknowledgement}: "incomplete"
+ * and "timed out" collapse into `'timed-out'`, an unreachable durable worker
+ * into `'unreachable'`, a durable write that could not be confirmed into
+ * `'persistence-failed'`, and unknown side-effect residue into
+ * `'unknown-effect'` — never `'failed'`, which is reserved for a definite,
+ * observed teardown failure.
+ *
+ * Ratified by AB-37's decision record (`documentation/operative-type-safe-api.md`'s
+ * started-work control contract) and implemented by AB-204.
+ */
+export type CleanupAcknowledgementReason =
+  'timed-out' | 'unknown-effect' | 'unreachable' | 'persistence-failed';
+
+/**
+ * The result of awaiting a resource's `closed()` — a truthful cleanup
+ * acknowledgement, distinct from merely firing `abort()`. Reuses armorer's
+ * existing four-value outcome set (`not-required | completed | failed |
+ * unresolved`) rather than inventing a fifth status; `reason` further
+ * classifies an `unresolved` outcome. See {@link ClosedOptions}.
+ */
+export interface CleanupAcknowledgement {
+  readonly status: 'not-required' | 'completed' | 'failed' | 'unresolved';
+  /** Present only when `status` is `'unresolved'`. */
+  readonly reason?: CleanupAcknowledgementReason;
+  readonly error?: unknown;
+}
+
+/**
+ * Options for `closed()`. `signal` bounds one caller's own wait — it does not
+ * cancel the underlying cleanup, and it never writes into the resource's
+ * shared cached acknowledgement (see `closed()`'s own doc comment for the
+ * full idempotency contract).
+ */
+export interface ClosedOptions {
+  /**
+   * Caller-supplied bound: abandons this call's wait and resolves
+   * `{ status: 'unresolved', reason: 'timed-out' }` for THIS caller only,
+   * rather than hanging. A concurrent signal-free call keeps waiting on the
+   * real settlement and observes it once it lands.
+   */
+  readonly signal?: AbortSignal;
+}
+
+/**
  * Context passed to the user-provided generate function.
  */
 export interface GenerateContext {

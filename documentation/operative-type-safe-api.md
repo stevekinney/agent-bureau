@@ -115,8 +115,29 @@ export type AgentRun<O = never, H extends boolean = false> = RunOutcomeBase<O, H
     children(): readonly ChildRunDescriptor[];
     /** Scoped child cancellation (AB-50). Idempotent on an unknown or already-terminal id. */
     abortChild(childId: string, reason?: string): void;
+    /** Cleanup acknowledgement (AB-37, delivered by AB-204). */
+    closed(options?: ClosedOptions): Promise<CleanupAcknowledgement>;
     [Symbol.dispose](): void;
   };
+
+export type CleanupAcknowledgementReason =
+  'timed-out' | 'unknown-effect' | 'unreachable' | 'persistence-failed';
+
+export interface CleanupAcknowledgement {
+  readonly status: 'not-required' | 'completed' | 'failed' | 'unresolved';
+  /** Present only when `status` is `'unresolved'`. */
+  readonly reason?: CleanupAcknowledgementReason;
+  readonly error?: unknown;
+}
+
+export interface ClosedOptions {
+  /**
+   * Caller-supplied bound: abandons this call's wait and resolves
+   * `unresolved`/`timed-out` for THIS caller only, rather than hanging. Does
+   * not write to the shared cached acknowledgement.
+   */
+  readonly signal?: AbortSignal;
+}
 ```
 
 `AgentRun` is deliberately **not** `Promise`/`PromiseLike`. A thenable handle
@@ -492,7 +513,7 @@ for the `run`/`createRun` swap above:
 - **Configuration and tool operations** — `getConfiguration`, `getTools`.
 - **Live-frame operations** — `subscribeLiveFrames`.
 - **Event operations** — `addEventListener`, `removeEventListener`, `on`, `once`, `subscribe`, `toObservable`, `events`.
-- **Completion and disposal operations** — `complete`, `completed`, `signal`, `dispose`, plus the read-only `store`, `memory`, `scheduler`, `ready`, `sessionStore`, `kv`, `auditTrail`, `webhookNotifier`, and `onlineEvalSampler` properties.
+- **Completion and disposal operations** — `complete`, `completed`, `signal`, `dispose`, plus the read-only `store`, `memory`, `scheduler`, `ready`, `sessionStore`, `kv`, `auditTrail`, `webhookNotifier`, and `onlineEvalSampler` properties. `closed()` (AB-37) is delivered on `ActiveRun`, `AgentRun`, and `DiagnosticAgentRun` by AB-204.
 
 None of these depend on `D` — a `Bureau<D>`'s administrative surface is
 identical regardless of which agents were registered, which is why `Bureau`

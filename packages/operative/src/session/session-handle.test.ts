@@ -185,6 +185,70 @@ describe('session.run()', () => {
     expect(typeof run[Symbol.asyncIterator]).toBe('function');
   });
 
+  it('closed() resolves not-required for a clean completion — delegated straight through from the inner run, which is itself first asked only once it has already settled (AB-204)', async () => {
+    const { handle } = createSessionHandleFixture();
+
+    const run = handle.run('hello');
+    const closedAcknowledgement = run.closed();
+    await run.result();
+
+    // This wrapper's own `resolveOutcome` only calls the inner run's
+    // `closed()` for the first time AFTER the outer `resultPromise` (which
+    // itself awaits the inner run's own result) has already settled — so
+    // the inner run's own not-required fast path always applies for an
+    // uncancelled completion, regardless of when THIS wrapper's closed()
+    // was called. `not-required` here is the delegated value, not a
+    // different code path from the "already settled" case below.
+    expect(await closedAcknowledgement).toEqual({ status: 'not-required' });
+  });
+
+  it('closed() resolves not-required when first called after the run already settled with no cancellation (AB-204)', async () => {
+    const { handle } = createSessionHandleFixture();
+
+    const run = handle.run('hello');
+    await run.result();
+    await Promise.resolve();
+
+    expect(await run.closed()).toEqual({ status: 'not-required' });
+  });
+
+  it('closed() delegates a non-not-required outcome from the inner run when the run was aborted (AB-204)', async () => {
+    let signalGenerateStarted!: () => void;
+    const generateStarted = new Promise<void>((resolve) => {
+      signalGenerateStarted = resolve;
+    });
+    const blockingGenerate: GenerateFunction = async ({ signal }) => {
+      signalGenerateStarted();
+      await new Promise<never>((_resolve, reject) => {
+        signal?.addEventListener('abort', () => reject(new Error('session run aborted')), {
+          once: true,
+        });
+      });
+      throw new Error('abort signal was not delivered');
+    };
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const handle = createSessionHandle('closed-delegates-aborted-session', {
+      store,
+      agentName: 'agent',
+      runOptions: createTestRunOptions(blockingGenerate),
+    });
+
+    const run = handle.run('abort me');
+    await generateStarted;
+    run.abort('user stopped it');
+
+    const result = await run.result();
+    expect(result.finishReason).toBe('aborted');
+
+    // The wrapper's own cancellation disqualifies ITS not-required fast
+    // path (cancelRequested), and the inner run's own cancellation
+    // (forwarded via activeInnerRun?.abort()) disqualifies ITS fast path
+    // too — so this exercises the real "await the drain, then delegate"
+    // path end to end, rather than the trivial not-required short-circuit.
+    expect(await run.closed()).toEqual({ status: 'completed' });
+  });
+
   it('appends a RunRef to the session when the run completes', async () => {
     const { handle, store } = createSessionHandleFixture();
 

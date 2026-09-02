@@ -54,7 +54,6 @@ const agentRunPath = resolve(repositoryRoot, 'packages/operative/src/agent-run.t
 const PENDING_IMPLEMENTATION: Readonly<Record<string, string>> = {
   snapshot: 'AB-88',
   subscribeSnapshot: 'AB-88',
-  closed: 'AB-37',
 };
 
 /**
@@ -64,7 +63,6 @@ const PENDING_IMPLEMENTATION: Readonly<Record<string, string>> = {
 const CAPABILITY_OF_MEMBER: Readonly<Record<string, string>> = {
   snapshot: 'Cached snapshot',
   subscribeSnapshot: 'Non-consuming state observation',
-  closed: 'Cleanup acknowledgement',
 };
 
 /**
@@ -1270,7 +1268,6 @@ describe('documentation/operative-type-safe-api.md internal references', () => {
     const described: Record<string, RegExp> = {
       snapshot: /cached snapshot/i,
       subscribeSnapshot: /non-consuming state observation|state observation/i,
-      closed: /cleanup acknowledgement/i,
     };
     const missing = Object.keys(PENDING_IMPLEMENTATION).filter(
       (capability) => !described[capability]?.test(section),

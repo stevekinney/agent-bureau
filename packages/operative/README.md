@@ -392,6 +392,7 @@ interface RunResult {
 | ------------------------------------- | ------------------------------------------------------ |
 | `result: Promise<RunResult>`          | Resolves when the loop completes.                      |
 | `abort(reason?)`                      | Cancels the loop immediately.                          |
+| `closed(options?)`                    | Cleanup acknowledgement — see below.                   |
 | `complete()`                          | Completes the event stream without aborting the loop.  |
 | `addEventListener(type, listener)`    | Standard `EventTarget` listener.                       |
 | `removeEventListener(type, listener)` | Removes a listener.                                    |
@@ -1129,6 +1130,31 @@ the example above, has none: `AgentRunContext` has no `runId` field today, so
 `parentContext.parentRunId` (the construction-time value) is what gets
 stamped on that path. Supply `parentContext.parentRunId` explicitly when you
 need a correct value there.
+
+**Cleanup acknowledgement.** `closed(options?)` (AB-37, delivered by AB-204)
+is on `ActiveRun`, `AgentRun`, and `DiagnosticAgentRun` alike — a truthful
+cleanup acknowledgement, backed by the same settlement `abort()` already
+uses, for a caller that wants more than "I fired `abort()` and hoped":
+
+```typescript
+const cleanup = await run.closed(); // never rejects
+// { status: 'not-required' | 'completed' | 'failed' | 'unresolved', reason?, error? }
+```
+
+`closed()` never rejects and is idempotent: once the underlying cleanup has
+genuinely settled, a repeated call returns the identical cached object by
+reference. `not-required` covers work that never needed cleanup in the first
+place; `completed` is the clean-teardown case; `failed` is a definite,
+observed teardown failure; `unresolved` covers everything the outcome could
+not be determined for, with `reason` distinguishing a caller-side
+`options.signal` timeout (`'timed-out'` — bounds only THIS call's wait, never
+writes into the shared cache) from an unreachable durable worker
+(`'unreachable'`), an unconfirmed durable write (`'persistence-failed'`), or
+unknown side-effect residue (`'unknown-effect'`). On a `DiagnosticAgentRun`
+(a durable run recovered without a trusted live agent definition) durability
+cannot be determined from the wrapper, so a wrapped `'completed'` outcome is
+downgraded to `unresolved`/`unknown-effect`; every other outcome passes
+through unchanged.
 
 **Supervisor:**
 
