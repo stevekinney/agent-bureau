@@ -23,6 +23,7 @@ import { Conversation } from 'conversationalist';
 import type { AgentRun, RunEvent, UnwrappedValue } from './agent-run';
 import { CompletedRunIterationError } from './agent-run';
 import type { ChildRunDescriptor } from './child-run';
+import { createClosedAcknowledgement } from './closed-acknowledgement';
 import type { AgentRunError } from './errors';
 import {
   AbortAgentRunError,
@@ -39,13 +40,7 @@ import type {
   RunnableAgent,
 } from './runnable-agent';
 import { OPERATIVE_RESOLVE_RUN_OPTIONS } from './runnable-agent';
-import type {
-  CleanupAcknowledgement,
-  ClosedOptions,
-  FinishReason,
-  RunResult,
-  TokenUsage,
-} from './types';
+import type { FinishReason, RunResult, TokenUsage } from './types';
 
 /**
  * The two shapes a loader may resolve to (AB-15's `AgentModule<O, H>`): the
@@ -306,7 +301,9 @@ function createDeferredAgentRun<O, H extends boolean>(
   let underlying: AgentRun<O, H> | undefined;
   let abortReason: string | undefined;
   let abortForwarded = false;
-  let syntheticClosed: CleanupAcknowledgement | undefined;
+  // closed()'s not-required fast path (AB-204) — `abortReason` alone can't
+  // serve this: a caller may abort with no reason, leaving it `undefined`.
+  let cancelRequested = false;
 
   const queue = createEventQueue();
 
@@ -351,6 +348,7 @@ function createDeferredAgentRun<O, H extends boolean>(
 
   function requestAbort(reason?: string): void {
     if (state === 'terminal') return;
+    cancelRequested = true;
     abortReason = reason;
     if (state === 'waiting') {
       // Settle the abort immediately rather than waiting for `resolveAgent()`
@@ -604,21 +602,21 @@ function createDeferredAgentRun<O, H extends boolean>(
       underlying?.abortChild(childId, reason);
     },
 
-    // AB-204: before `underlying` resolves, awaiting `resultPromise` first
-    // guarantees any real underlying run that DOES resolve by the time this
-    // run terminates gets its own `closed()` consulted — matching every
-    // other member here, which is a no-op/empty default only in that same
-    // pre-resolution window. If no underlying run ever existed (the
-    // `finalizeSynthetic` path — aborted before the wrapped agent resolved),
-    // there is nothing else to await: `completed` is accurate, cached so
-    // repeat calls satisfy `closed()`'s identical-by-reference contract.
-    closed(options?: ClosedOptions): Promise<CleanupAcknowledgement> {
-      return resultPromise.then(() => {
-        if (underlying) return underlying.closed(options);
-        syntheticClosed ??= { status: 'completed' };
-        return syntheticClosed;
-      });
-    },
+    // AB-204: delegated through the shared helper so a caller-supplied
+    // `options.signal` properly bounds THIS call's wait (races the signal
+    // against settlement) instead of blocking on `resultPromise` no matter
+    // what — the underlying run that DOES resolve by the time this run
+    // terminates still gets its own `closed()` consulted via
+    // `resolveOutcome` below; a `finalizeSynthetic` completion (aborted
+    // before the wrapped agent resolved) has nothing else to await, so
+    // `completed` is accurate.
+    closed: createClosedAcknowledgement({
+      result: resultPromise,
+      disqualifiesFastPath: () => cancelRequested,
+      hasInFlightWork: () => false,
+      resolveOutcome: () =>
+        underlying ? underlying.closed() : Promise.resolve({ status: 'completed' }),
+    }),
 
     [Symbol.dispose](): void {
       if (underlying) {

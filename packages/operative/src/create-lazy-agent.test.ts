@@ -413,6 +413,22 @@ describe('createLazyAgent', () => {
     expect(await run.closed()).toBe(first);
   });
 
+  // Regression: a code-review finding on the AB-204 pull request — closed()
+  // used to await `resultPromise` before ever consulting `options.signal`,
+  // so a caller-supplied timeout could not bound this call's wait; it just
+  // hung until the underlying agent resolved (or never, if the loader hangs).
+  it('closed({ signal }) resolves unresolved/timed-out promptly even while the underlying agent is still loading', async () => {
+    const neverResolves = new Promise<RunnableAgent<string, false>>(() => {});
+    const lazy = createLazyAgent(() => neverResolves);
+
+    const run = lazy.run('hello');
+    const controller = new AbortController();
+    const timedOutCall = run.closed({ signal: controller.signal });
+    controller.abort();
+
+    expect(await timedOutCall).toEqual({ status: 'unresolved', reason: 'timed-out' });
+  });
+
   it('emits an aborted event followed by completion when abort wins before resolution', async () => {
     let release!: () => void;
     const pending = new Promise<void>((resolve) => (release = resolve));
@@ -461,6 +477,20 @@ describe('createLazyAgent', () => {
     fake.settle(successResult('done'));
 
     expect(await closedAcknowledgement).toEqual({ status: 'completed' });
+  });
+
+  it('closed() resolves not-required when first called after the run already settled with no cancellation (AB-204)', async () => {
+    const fake = createFakeAgentRun();
+    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };
+    const lazy = createLazyAgent(() => agent);
+
+    const run = lazy.run('hello');
+    await flushMicrotasks();
+    fake.settle(successResult('done'));
+    await run.result();
+    await Promise.resolve();
+
+    expect(await run.closed()).toEqual({ status: 'not-required' });
   });
 
   it('children()/abortChild() read empty/no-op before resolution and delegate to the underlying handle once resolved', async () => {

@@ -383,7 +383,10 @@ export function createDurableActiveRun(
     };
 
     const onSettled = (e: ToolboxEventMap['settled']) => {
-      inFlightTools -= 1;
+      // Clamped: same reasoning as the identical counter in create-run.ts —
+      // armorer can emit 'settled' with no preceding 'execute-start' for a
+      // tool call cancelled before execution begins.
+      inFlightTools = Math.max(0, inFlightTools - 1);
       const hasError = e.error !== undefined;
       const status: 'success' | 'error' = hasError ? 'error' : 'success';
       emitter.dispatchEvent(

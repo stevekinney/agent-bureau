@@ -206,7 +206,11 @@ export function createActiveRun(options: RunOptions, durable?: DurableRunRouting
 
     // Map 'settled' → tool.settled (fired after every tool call regardless of outcome)
     const onSettled = (e: ToolboxEventMap['settled']) => {
-      inFlightTools -= 1;
+      // Clamped: armorer can emit 'settled' with no preceding 'execute-start'
+      // for a tool call cancelled before execution begins (an already-
+      // aborted signal path), which would otherwise drive this negative and
+      // corrupt hasInFlightWork()'s later reads.
+      inFlightTools = Math.max(0, inFlightTools - 1);
       const hasError = e.error !== undefined;
       const status: 'success' | 'error' = hasError ? 'error' : 'success';
       emitter.dispatchEvent(

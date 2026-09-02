@@ -261,4 +261,39 @@ describe('createClosedAcknowledgement', () => {
     deferred.resolve();
     expect(await pending).toEqual(expected);
   });
+
+  // Regression: a code-review finding on the AB-204 pull request — closed()
+  // never rejects, but resolveOutcome() is caller-supplied and could
+  // previously reject or throw straight through.
+  it('classifies a resolveOutcome() that returns a rejected promise as failed rather than rejecting', async () => {
+    const deferred = createDeferred<void>();
+    const failure = new Error('resolveOutcome rejected');
+    const closed = createClosedAcknowledgement({
+      result: deferred.promise,
+      disqualifiesFastPath: () => false,
+      hasInFlightWork: () => false,
+      resolveOutcome: () => Promise.reject(failure),
+    });
+
+    const pending = closed();
+    deferred.resolve();
+    expect(await pending).toEqual({ status: 'failed', error: failure });
+  });
+
+  it('classifies a resolveOutcome() that throws synchronously as failed rather than rejecting', async () => {
+    const deferred = createDeferred<void>();
+    const failure = new Error('resolveOutcome threw');
+    const closed = createClosedAcknowledgement({
+      result: deferred.promise,
+      disqualifiesFastPath: () => false,
+      hasInFlightWork: () => false,
+      resolveOutcome: (): never => {
+        throw failure;
+      },
+    });
+
+    const pending = closed();
+    deferred.resolve();
+    expect(await pending).toEqual({ status: 'failed', error: failure });
+  });
 });

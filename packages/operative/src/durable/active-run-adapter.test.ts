@@ -1251,6 +1251,44 @@ describe('createDurableActiveRun.closed()', () => {
     }
   });
 
+  // Regression: a code-review finding on the AB-204 pull request — see the
+  // identical fixture in create-run.test.ts for the full rationale.
+  it('does not corrupt in-flight tool tracking when the toolbox emits settled with no preceding execute-start', async () => {
+    const context = await buildContext();
+    try {
+      const tool = createTool({
+        name: 'spurious_settled_tool',
+        description: 'Stands in as the subject of a settled-with-no-start event.',
+        input: z.object({}),
+        execute: async () => 'ok',
+      });
+      const toolbox = createToolbox([tool]);
+      const spuriousCall = { id: 'spurious-call-id', name: tool.name, arguments: {} };
+
+      const activeRun = createDurableActiveRun(context, {
+        runId: 'ac-durable-spurious-settled',
+        sessionId: 'ac-durable-spurious-settled',
+        options: {
+          ...runOptions(async () => ({ content: 'done', toolCalls: [] })),
+          toolbox,
+        },
+        prompt: 'Hello',
+      });
+
+      expect(() => {
+        toolbox.dispatchEvent(new ToolboxSettledEvent({ tool, call: spuriousCall }));
+        toolbox.dispatchEvent(new ToolboxSettledEvent({ tool, call: spuriousCall }));
+      }).not.toThrow();
+
+      const closedAcknowledgement = activeRun.closed();
+      const result = await activeRun.result;
+      expect(result.finishReason).toBe('stop-condition');
+      expect(await closedAcknowledgement).toEqual({ status: 'completed' });
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
   it('resolves completed once the result promise settles normally, without any cancellation', async () => {
     const context = await buildContext();
     try {

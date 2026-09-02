@@ -1,4 +1,4 @@
-import { createTool } from 'armorer';
+import { createTool, ToolboxSettledEvent } from 'armorer';
 import { createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
@@ -221,6 +221,39 @@ describe('ActiveRun.closed()', () => {
       conversation: new Conversation(),
       stopWhen: noToolCalls(),
     });
+
+    const closedAcknowledgement = activeRun.closed();
+    const result = await activeRun.result;
+    expect(result.finishReason).toBe('stop-condition');
+    expect(await closedAcknowledgement).toEqual({ status: 'completed' });
+  });
+
+  // Regression: a code-review finding on the AB-204 pull request — armorer
+  // can emit a `settled` toolbox event with no preceding `execute-start`
+  // (a tool call cancelled before execution begins, e.g. an already-aborted
+  // signal), which would otherwise drive the `inFlightTools` counter
+  // negative and corrupt `hasInFlightWork()`'s later reads. The counter is
+  // clamped at zero so a "settled without a start" is a no-op, not a debt
+  // future real in-flight work can never climb out of.
+  it('does not corrupt in-flight tool tracking when the toolbox emits settled with no preceding execute-start', async () => {
+    const generate = createMockGenerate([textResponse('done')]);
+    const toolbox = createTestToolbox([weatherTool]);
+    const activeRun = createActiveRun({
+      generate,
+      toolbox,
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+    });
+
+    const spuriousCall = {
+      id: 'spurious-call-id',
+      name: weatherTool.name,
+      arguments: { location: 'nowhere' },
+    };
+    expect(() => {
+      toolbox.dispatchEvent(new ToolboxSettledEvent({ tool: weatherTool, call: spuriousCall }));
+      toolbox.dispatchEvent(new ToolboxSettledEvent({ tool: weatherTool, call: spuriousCall }));
+    }).not.toThrow();
 
     const closedAcknowledgement = activeRun.closed();
     const result = await activeRun.result;

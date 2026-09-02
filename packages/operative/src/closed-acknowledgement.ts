@@ -101,15 +101,28 @@ export function createClosedAcknowledgement(
     }
 
     pending = options.result
-      .then(
-        () => options.resolveOutcome(),
-        (error: unknown): CleanupAcknowledgement => ({ status: 'failed', error }),
-      )
+      .then(classifyOutcome, (error: unknown): CleanupAcknowledgement => ({
+        status: 'failed',
+        error,
+      }))
       .then((acknowledgement) => {
         cached = acknowledgement;
         return acknowledgement;
       });
     return pending;
+  }
+
+  // `closed()` never rejects: `resolveOutcome()` is caller-supplied and may
+  // itself throw synchronously or return a rejected promise, so this wraps
+  // it in an `async` boundary (turning a synchronous throw into a
+  // catchable rejection) and classifies any failure `{ status: 'failed',
+  // error }` rather than letting it propagate.
+  async function classifyOutcome(): Promise<CleanupAcknowledgement> {
+    try {
+      return await options.resolveOutcome();
+    } catch (error) {
+      return { status: 'failed', error };
+    }
   }
 
   return function closed(closedOptions?: ClosedOptions): Promise<CleanupAcknowledgement> {
