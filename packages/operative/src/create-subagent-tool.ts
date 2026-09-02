@@ -3,10 +3,12 @@ import { createTool } from 'armorer';
 import type { TypedEventTarget } from 'lifecycle';
 import type { ZodType } from 'zod';
 
-import { GuardrailTripwireError } from './errors';
+import type { SuccessfulRunResult } from './agent-run';
+import { isSuccessfulRunResult } from './agent-run';
+import { SubagentRunError } from './errors';
 import type { OperativeEventMap } from './events';
 import { ChildWorkflowStartedEvent } from './events';
-import type { RunResult } from './types';
+import type { AgentInput, RunnableAgent } from './runnable-agent';
 
 /**
  * Roughly 4 characters per token — the same coarse estimate used by
@@ -38,7 +40,7 @@ function enforceTokenCap(text: string, maxTokens: number): string {
 
 /**
  * Context passed to a `SubagentSummarizer` alongside the sub-agent's
- * `RunResult`.
+ * `SuccessfulRunResult`.
  */
 export interface SubagentSummaryContext {
   /** The sub-agent's name, as passed to `createSubagentTool`. */
@@ -57,17 +59,19 @@ export interface SubagentSummaryContext {
 
 /**
  * Condenses a completed sub-agent run into a string the parent agent's
- * context window can afford. Receives the full `RunResult` — not just
- * `content` — so a custom summarizer can factor in `usage`, `steps`, or
- * `finishReason` when deciding what to keep.
+ * context window can afford. Receives the full `SuccessfulRunResult` — not
+ * just `content` — so a custom summarizer can factor in `usage`, `steps`, or
+ * `output` when deciding what to keep. Only ever invoked on a clean success
+ * (AB-19): every non-success terminal rejects with `SubagentRunError` before
+ * a summarizer is ever reached.
  *
  * A summarizer's return value is NOT trusted as already within budget:
  * `createSubagentTool` hard-caps whatever it returns via `enforceTokenCap`
  * before it reaches the parent, so `summaryTokenCap` holds even if a custom
  * summarizer ignores `maxTokens` entirely.
  */
-export type SubagentSummarizer = (
-  result: RunResult,
+export type SubagentSummarizer<O = unknown, H extends boolean = boolean> = (
+  result: SuccessfulRunResult<O, H>,
   context: SubagentSummaryContext,
 ) => string | Promise<string>;
 
@@ -85,29 +89,57 @@ export const defaultSubagentSummarizer: SubagentSummarizer = (result, { maxToken
 /**
  * Options for creating a tool that delegates execution to a sub-agent.
  *
- * The agent is represented as an async callable that accepts a string input
- * and returns a RunResult. This decouples the tool from any specific agent
- * construction API (defineAgent is gone; createAgent / bureau.agent come in B3).
+ * `TInput` drives `toAgentInput`'s parameter type — the parsed output of
+ * the `input` schema, matching what the parent LLM actually supplied.
+ * `TInput extends object` (rather than reproducing `z.output<TInputSchema>`
+ * against an unresolved schema generic) deliberately mirrors `createTool`'s
+ * own `TInput extends object` / `input?: z.ZodType<TInput>` overload: two
+ * independently-derived deferred conditional types over the same
+ * unresolved generic (this package's vs. armorer's own un-exported
+ * `InferSchemaInput`) are not structurally unifiable by TypeScript even
+ * when semantically identical, so `createSubagentTool` reuses armorer's
+ * own object-schema generic shape instead of re-deriving one. `TOutput`/
+ * `THasOutput` are the child agent's own output generics, carried straight
+ * from `agent: RunnableAgent<TOutput, THasOutput>`; `TToolOutput` is what
+ * `toToolOutput` — and therefore this tool's `execute` — returns, which is
+ * what `createTool` infers the tool's own output type from.
  */
-export interface CreateSubagentToolOptions {
+interface CreateSubagentToolOptionsBase<
+  TInput extends object = Record<string, unknown>,
+  TOutput = unknown,
+  THasOutput extends boolean = boolean,
+> {
   name: string;
   description: string;
-  /** Callable that executes the sub-agent given a string prompt and optional context. */
-  run: (
-    input: string,
-    context: { signal?: AbortSignal; traceContext?: unknown },
-  ) => Promise<RunResult>;
-  /** Agent name, used in error messages. */
-  agentName: string;
-  input: ZodType;
-  mapInput?: (input: unknown) => string;
   /**
-   * Maps the (possibly summarized) `RunResult` to the tool's return value.
-   * Runs AFTER `returnMode`/`summarizer` have already condensed
-   * `result.content` — a custom `mapOutput` still sees the summarized
-   * content by default, not the raw sub-agent output.
+   * The child agent (AB-19). `createAgent`'s returned agent satisfies this
+   * structurally: its `run(input, context?)` is invoked with the exact
+   * `agentName` this tool was constructed with, plus the parent tool call's
+   * `signal` and `traceContext` (as read off the executing `ToolContext` —
+   * present only when the caller built its toolbox with a matching
+   * `context: { traceContext }`; the ordinary agent-loop path does not
+   * populate `ToolContext.traceContext` from a run's own `parentContext`)
+   * and this option bag's own `withTraceContext`.
    */
-  mapOutput?: (result: RunResult) => unknown;
+  agent: RunnableAgent<TOutput, THasOutput>;
+  /**
+   * Names the child. Passed verbatim to `agent.run(input, { agentName, ... })`
+   * and used in `SubagentRunError` and the `ChildWorkflowStartedEvent`'s
+   * `childAgentName`/parent-identity fields — never derived from `agent`
+   * itself, so a caller can name a child independently of any identity the
+   * agent object happens to carry.
+   */
+  agentName: string;
+  input: ZodType<TInput>;
+  /**
+   * Projects the tool's validated arguments to the child's `AgentInput`
+   * (AB-19; renamed from `mapInput`). Receives the input schema's parsed
+   * output — the parsed tool-call arguments, not the raw unvalidated call.
+   * Defaults to `String(input)`, matching the input schema's raw
+   * stringification a caller who supplies no schema-shaped conversion gets
+   * today.
+   */
+  toAgentInput?: (input: TInput) => AgentInput;
   /**
    * AB-64 — controls how much of the sub-agent's context comes back to the
    * parent agent.
@@ -118,30 +150,26 @@ export interface CreateSubagentToolOptions {
    *   tokens — crosses back into the parent's context. This is what keeps a
    *   multi-agent fan-out from blowing up the orchestrator's context window
    *   as sub-agents accumulate.
-   * - `'full'`: `result.content` is returned unmodified, uncapped. Use this
-   *   deliberately — e.g. when the parent genuinely needs the sub-agent's
-   *   verbatim output (structured data extraction, a single close-coupled
-   *   delegation) — not as the default posture for fan-out.
+   * - `'full'`: the successful `RunResult` is passed to `toToolOutput`
+   *   unmodified, uncapped. Use this deliberately — e.g. when the parent
+   *   genuinely needs the sub-agent's verbatim output (structured data
+   *   extraction, a single close-coupled delegation) — not as the default
+   *   posture for fan-out.
    */
   returnMode?: 'summary' | 'full';
   /**
-   * Condenses the sub-agent's `RunResult` into the string returned to the
-   * parent when `returnMode` is `'summary'`. Defaults to
+   * Condenses the sub-agent's `SuccessfulRunResult` into the string returned
+   * to the parent when `returnMode` is `'summary'`. Defaults to
    * `defaultSubagentSummarizer` (character-based truncation). Ignored when
    * `returnMode` is `'full'`.
    */
-  summarizer?: SubagentSummarizer;
+  summarizer?: SubagentSummarizer<TOutput, THasOutput>;
   /**
    * Token budget for the summary returned to the parent when `returnMode`
    * is `'summary'`. Defaults to `500`. Ignored when `returnMode` is
    * `'full'`.
    */
   summaryTokenCap?: number;
-  /**
-   * When true (the default), a sub-agent finishing with `maximum-steps` is
-   * treated as an error and throws. Set to false to accept partial results.
-   */
-  treatMaximumStepsAsError?: boolean;
   /**
    * F1/F3 — parent run context for event emission.
    *
@@ -159,7 +187,65 @@ export interface CreateSubagentToolOptions {
     /** True when the bureau has `.persistence()` configured (durable child workflow). */
     durable: boolean;
   };
+  /**
+   * Wraps the child's `agent.run()` call in the parent's own trace context
+   * (AB-19), exactly as `RunOptions.withTraceContext` wraps generate/tool
+   * calls within a run. Passed straight through to
+   * `agent.run(input, { withTraceContext, ... })` — supplied here, rather
+   * than read off the parent tool call's `ToolContext` (which carries no
+   * such callback), because it is a per-run wrapper, not per-call data.
+   */
+  withTraceContext?: <T>(parentContext: unknown, fn: () => Promise<T>) => Promise<T>;
 }
+
+/**
+ * `toToolOutput`'s presence is conditionally REQUIRED, not merely typed
+ * `TToolOutput | Promise<TToolOutput>` on an always-optional field: with a
+ * single always-optional field, a caller who explicitly pins `TToolOutput`
+ * to something other than `string` (e.g.
+ * `createSubagentTool<Input, Output, boolean, number>({...})`) while still
+ * omitting `toToolOutput` would type-check — even though the omitted-case
+ * runtime default always returns `result.content` (a `string`), silently
+ * mistyped as `TToolOutput`. `string extends TToolOutput` is true only for
+ * the declared default (`TToolOutput = string`) and any other type `string`
+ * itself satisfies, so a caller pinning a different `TToolOutput` MUST
+ * supply `toToolOutput`.
+ */
+type ToToolOutputOption<
+  TOutput,
+  THasOutput extends boolean,
+  TToolOutput,
+> = string extends TToolOutput
+  ? {
+      toToolOutput?: (
+        result: SuccessfulRunResult<TOutput, THasOutput>,
+      ) => TToolOutput | Promise<TToolOutput>;
+    }
+  : {
+      /**
+       * Projects the child's completed run to this tool's return value (AB-19;
+       * renamed from `mapOutput`). A pure projection, not runtime validation —
+       * every non-success terminal has already rejected as `SubagentRunError`
+       * before this is ever called, so it only ever sees a
+       * `SuccessfulRunResult<TOutput, THasOutput>`. Runs AFTER `returnMode`/
+       * `summarizer` have already condensed `result.content` in summary mode —
+       * a custom `toToolOutput` still sees the summarized content by default,
+       * not the raw sub-agent output. Omit it (and `TToolOutput`) entirely
+       * for a schema-less child and the tool returns `result.content` — a
+       * plain string.
+       */
+      toToolOutput: (
+        result: SuccessfulRunResult<TOutput, THasOutput>,
+      ) => TToolOutput | Promise<TToolOutput>;
+    };
+
+export type CreateSubagentToolOptions<
+  TInput extends object = Record<string, unknown>,
+  TOutput = unknown,
+  THasOutput extends boolean = boolean,
+  TToolOutput = string,
+> = CreateSubagentToolOptionsBase<TInput, TOutput, THasOutput> &
+  ToToolOutputOption<TOutput, THasOutput, TToolOutput>;
 
 /**
  * Creates a tool that delegates execution to a sub-agent.
@@ -169,82 +255,95 @@ export interface CreateSubagentToolOptions {
  * observable event (C3 completeness rule — every state transition emits an event
  * and exposes a hook).
  */
-export function createSubagentTool(options: CreateSubagentToolOptions) {
+export function createSubagentTool<
+  TInput extends object = Record<string, unknown>,
+  TOutput = unknown,
+  THasOutput extends boolean = boolean,
+  TToolOutput = string,
+>(options: CreateSubagentToolOptions<TInput, TOutput, THasOutput, TToolOutput>) {
   const {
     name,
     description,
-    run,
+    agent,
     agentName,
     input,
-    mapInput = (params: unknown) => String(params),
-    mapOutput = (result: RunResult) => result.content,
+    // `TInput extends object`, so `parsed` is never itself a string — this
+    // intentionally reproduces the pre-AB-19 default's `String(params)`
+    // fallback (documented above), which for a plain object degrades to
+    // `"[object Object]"`. A caller who wants a real projection supplies
+    // `toAgentInput`; this default exists only so the option can be omitted.
+    // eslint-disable-next-line @typescript-eslint/no-base-to-string
+    toAgentInput = (parsed: TInput): AgentInput => String(parsed),
+    // `TToolOutput` defaults to `string` (see `CreateSubagentToolOptions`),
+    // making this default genuinely correct at its one call site — a
+    // caller who omits `toToolOutput` gets `TToolOutput = string`. The
+    // cast is still required here because this default is written once,
+    // generically, before any particular call site has pinned `TToolOutput`
+    // to `string`; TypeScript can't see that the omitted-option branch and
+    // the `string` default coincide.
+    toToolOutput = (result: SuccessfulRunResult<TOutput, THasOutput>) =>
+      result.content as unknown as TToolOutput,
     returnMode = 'summary',
+    // `defaultSubagentSummarizer` only ever reads `.content` — a field
+    // `RunResultBase` (and therefore every `SuccessfulRunResult<O, H>`
+    // regardless of `O`/`H`) always carries — so it is genuinely safe for
+    // any instantiation, and TypeScript itself accepts the assignment with
+    // no cast (an unparameterized `SuccessfulRunResult`'s `[boolean] extends
+    // [true]` check resolves to the no-`output` branch, which every
+    // `SuccessfulRunResult<TOutput, THasOutput>` structurally satisfies).
     summarizer = defaultSubagentSummarizer,
     summaryTokenCap = 500,
-    treatMaximumStepsAsError = true,
     parentContext,
+    withTraceContext,
   } = options;
 
   return createTool({
     name,
     description,
     input,
-    execute: async (params: unknown, context: ToolContext) => {
-      const prompt = mapInput(params);
+    execute: async (params: TInput, context: ToolContext) => {
+      const agentInput = toAgentInput(params);
 
       // F1 — emit ChildWorkflowStartedEvent before the child run begins.
+      // `ChildWorkflowStartedEvent.input` is (and stays, per this issue's
+      // "preserve child-start events" criterion) a plain string — a
+      // conversation-history `agentInput` is projected to a named, lossy
+      // marker rather than widening the event's field.
       if (parentContext) {
         parentContext.emitter.dispatchEvent(
           new ChildWorkflowStartedEvent({
             parentAgentName: parentContext.parentAgentName,
             parentRunId: parentContext.parentRunId,
             childAgentName: agentName,
-            input: prompt,
+            input: typeof agentInput === 'string' ? agentInput : '[conversation history]',
             durable: parentContext.durable,
           }),
         );
       }
 
-      const result = await run(prompt, {
+      const childRun = agent.run(agentInput, {
+        agentName,
         signal: context.signal,
         traceContext: context.traceContext,
+        withTraceContext,
       });
+      const result = await childRun.result();
 
-      if (result.finishReason === 'error') {
-        throw new Error(`Sub-agent "${agentName}" finished with error`);
-      }
-
-      if (result.finishReason === 'aborted') {
-        throw new Error(`Sub-agent "${agentName}" was aborted`);
-      }
-
-      if (result.finishReason === 'budget-exceeded') {
-        throw new Error(`Sub-agent "${agentName}" exceeded its token budget`);
-      }
-
-      if (result.finishReason === 'elicitation-denied') {
-        throw new Error(`Sub-agent "${agentName}" was denied elicitation`);
-      }
-
-      if (result.finishReason === 'tripwire') {
-        const guardrailName =
-          result.error instanceof GuardrailTripwireError ? result.error.guardrailName : 'unknown';
-        throw new Error(
-          `Sub-agent "${agentName}" was halted by guardrail tripwire "${guardrailName}"`,
-        );
-      }
-
-      if (result.finishReason === 'maximum-steps' && treatMaximumStepsAsError) {
-        throw new Error(`Sub-agent "${agentName}" exceeded maximum steps`);
+      // Every non-success terminal (abort, execution error, tripwire,
+      // budget exceeded, elicitation denied, maximum steps, or a clean stop
+      // whose output failed schema validation) rejects here — `toToolOutput`
+      // is never invoked with anything but a clean, schema-valid success.
+      if (!isSuccessfulRunResult(result)) {
+        throw new SubagentRunError(agentName, result);
       }
 
       if (returnMode === 'full') {
-        return mapOutput(result);
+        return toToolOutput(result);
       }
 
       // AB-64 — condense the sub-agent's context down to a capped summary
       // before it crosses back into the parent. Only `content` is replaced;
-      // `mapOutput` still receives the rest of the RunResult untouched.
+      // `toToolOutput` still receives the rest of the `RunResult` untouched.
       // The summarizer's output is hard-capped here regardless of what it
       // returns — summaryTokenCap is a guarantee enforced by the tool, not
       // a suggestion the summarizer has to honor itself.
@@ -264,7 +363,13 @@ export function createSubagentTool(options: CreateSubagentToolOptions) {
       });
       context.signal?.throwIfAborted();
       const cappedContent = enforceTokenCap(summarizedContent, summaryTokenCap);
-      return mapOutput({ ...result, content: cappedContent });
+      // `result` is already `SuccessfulRunResult<TOutput, THasOutput>` (the
+      // `isSuccessfulRunResult` guard above narrowed it); this spread only
+      // reassigns `content`, a `string` field present on both sides.
+      return toToolOutput({
+        ...result,
+        content: cappedContent,
+      });
     },
   });
 }

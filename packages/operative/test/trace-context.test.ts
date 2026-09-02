@@ -70,22 +70,32 @@ describe('trace context propagation', () => {
   });
 
   describe('createSubagentTool', () => {
-    it('forwards context.traceContext to the run callback', async () => {
+    it('forwards context.traceContext to agent.run', async () => {
       let receivedTraceContext: unknown;
 
       const subTool = createSubagentTool({
         name: 'delegate',
         description: 'Delegate',
         agentName: 'sub',
-        run: async (_input, context) => {
-          receivedTraceContext = context.traceContext;
-          return {
-            conversation: {} as never,
-            steps: [],
-            content: 'done',
-            usage: { prompt: 0, completion: 0, total: 0 },
-            finishReason: 'stop-condition' as const,
-          };
+        agent: {
+          name: 'stub-agent',
+          run: (_input, context) => {
+            receivedTraceContext = context?.traceContext;
+            return {
+              result: () =>
+                Promise.resolve({
+                  conversation: {} as never,
+                  steps: [],
+                  content: 'done',
+                  usage: { prompt: 0, completion: 0, total: 0 },
+                  finishReason: 'stop-condition' as const,
+                }),
+              unwrap: () => Promise.resolve('done'),
+              abort: () => {},
+              [Symbol.dispose]: () => {},
+              [Symbol.asyncIterator]: () => (async function* () {})(),
+            };
+          },
         },
         input: z.object({ task: z.string() }),
       });
@@ -119,15 +129,25 @@ describe('trace context propagation', () => {
         name: 'delegate',
         description: 'Delegate',
         agentName: 'sub',
-        run: async (_input, context) => {
-          receivedTraceContext = context.traceContext;
-          return {
-            conversation: {} as never,
-            steps: [],
-            content: 'done',
-            usage: { prompt: 0, completion: 0, total: 0 },
-            finishReason: 'stop-condition' as const,
-          };
+        agent: {
+          name: 'stub-agent',
+          run: (_input, context) => {
+            receivedTraceContext = context?.traceContext;
+            return {
+              result: () =>
+                Promise.resolve({
+                  conversation: {} as never,
+                  steps: [],
+                  content: 'done',
+                  usage: { prompt: 0, completion: 0, total: 0 },
+                  finishReason: 'stop-condition' as const,
+                }),
+              unwrap: () => Promise.resolve('done'),
+              abort: () => {},
+              [Symbol.dispose]: () => {},
+              [Symbol.asyncIterator]: () => (async function* () {})(),
+            };
+          },
         },
         input: z.object({ task: z.string() }),
       });

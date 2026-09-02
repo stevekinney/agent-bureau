@@ -1,6 +1,7 @@
 import { ZodError, type ZodIssue } from 'zod';
 
 import { isToolCallParseError } from './providers/errors.ts';
+import type { RunResult } from './types';
 
 export type AgentRunErrorKind =
   'load' | 'contract' | 'generate' | 'tool' | 'abort' | 'output' | 'policy';
@@ -17,6 +18,7 @@ export type AgentRunErrorCode =
   | 'MAXIMUM_STEPS'
   | 'NON_JSON_OUTPUT'
   | 'OUTPUT_SCHEMA_CONVERSION_FAILED'
+  | 'SUBAGENT_RUN_FAILED'
   | 'TRIPWIRE'
   | 'UNKNOWN';
 
@@ -380,4 +382,43 @@ export function classifyError(error: unknown): ClassifiedError {
   }
 
   return base;
+}
+
+/**
+ * Raised by `createSubagentTool` (AB-19) when a child agent's run does not
+ * finish as a clean success — any `finishReason` other than
+ * `'stop-condition'` (abort, execution error, tripwire, budget exceeded,
+ * elicitation denied, maximum steps), or a `'stop-condition'` finish whose
+ * `schemaValidation.success` is `false` (invalid output). Carries the
+ * child's full terminal `RunResult` as `.result`, so a caller can inspect
+ * `finishReason`, `error`, `schemaValidation`, `usage`, and `steps` directly
+ * instead of re-deriving them from a generic message string. `toToolOutput`
+ * is never invoked for any terminal this error covers — see
+ * `create-subagent-tool.ts`.
+ */
+export class SubagentRunError extends AgentRunError {
+  /** The child agent's name, as supplied to `createSubagentTool({ agentName })`. */
+  readonly agentName: string;
+  /** The child's full terminal `RunResult` — never a success by construction. */
+  readonly result: RunResult;
+
+  constructor(agentName: string, result: RunResult, cause?: unknown) {
+    // `SubagentRunError` is only ever constructed for a non-success
+    // terminal (see `isSuccessfulRunResult` in `agent-run.ts`); the ONLY
+    // way `finishReason` reaches here as `'stop-condition'` is a clean stop
+    // whose `output` failed schema validation — `result.finishReason` alone
+    // would render that case as the misleading "did not complete
+    // successfully: stop-condition". Label it explicitly instead, and fall
+    // back to the schema-validation error (rather than the unset
+    // `result.error`) as the cause in that same case.
+    const label = result.finishReason === 'stop-condition' ? 'invalid-output' : result.finishReason;
+    super(`Sub-agent "${agentName}" did not complete successfully: ${label}`, {
+      kind: 'tool',
+      code: 'SUBAGENT_RUN_FAILED',
+      cause: cause ?? result.error ?? result.schemaValidation?.error,
+    });
+    this.name = 'SubagentRunError';
+    this.agentName = agentName;
+    this.result = result;
+  }
 }

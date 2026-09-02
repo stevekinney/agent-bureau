@@ -899,7 +899,7 @@ const withFallback = createFallbackGenerate({
 
 #### Multi-Agent Patterns
 
-The registry-based patterns below (`createSupervisor`, `createHandoffTool`, `createAgentRegistry`) predate `createAgent` and are built around the older `RegistryAgent` shape — `{ name, run(input, context?): Promise<unknown> }`. A `StandaloneAgent` from `createAgent` doesn't expose `.name`, and its `.run(input)` returns a non-thenable `AgentRun` rather than a `Promise` directly, so wrap it in a thin adapter (`{ name, run: (input) => agent.run(input).result() }`) wherever one of these APIs expects a `RegistryAgent`.
+The registry-based patterns below (`createSupervisor`, `createHandoffTool`, `createAgentRegistry`) predate `createAgent` and are built around the older `RegistryAgent` shape — `{ name, run(input, context?): Promise<unknown> }`. A `StandaloneAgent` from `createAgent` does expose `.name` (AB-21; defaults to `'(agent)'` when the `name` option is omitted), but its `.run(input)` returns a non-thenable `AgentRun` rather than a `Promise` directly, so wrap it in a thin adapter (`{ name, run: (input) => agent.run(input).result() }`) wherever one of these APIs expects a `RegistryAgent`.
 
 **Subagents:**
 
@@ -911,11 +911,15 @@ const researcherTool = createSubagentTool({
   name: 'research',
   description: 'Delegates a research task to a specialist agent.',
   agentName: 'researcher',
-  run: (prompt) => researcherAgent.run(prompt).result(),
+  // `agent` (AB-19) is a `RunnableAgent` — `researcherAgent` from
+  // `createAgent({...})` satisfies this directly, with no adapter.
+  agent: researcherAgent,
   input: z.object({ query: z.string() }),
-  // mapInput receives the tool's raw, Zod-validated arguments as `unknown` —
-  // narrow to the schema shape declared above.
-  mapInput: (input) => (input as { query: string }).query,
+  // toAgentInput (AB-19; renamed from mapInput) receives the tool's parsed,
+  // Zod-validated arguments — already typed to the schema above, no cast
+  // needed — and returns the child's `AgentInput` (a string, or
+  // `{ conversation }` to resume an existing history).
+  toAgentInput: (input) => input.query,
 });
 
 const orchestrator = createAgent({
@@ -923,6 +927,31 @@ const orchestrator = createAgent({
   tools: { research: researcherTool },
 });
 ```
+
+`createSubagentTool` threads the parent tool call's `signal` and
+`traceContext` — plus this tool's own `agentName` and `withTraceContext`
+option — into `agent.run(input, { agentName, signal, traceContext,
+withTraceContext })`, so a real `createAgent` child aborts when the parent's
+tool call does. `signal` always propagates. `traceContext` is read off the
+executing `ToolContext`, which is populated only when the caller built its
+toolbox with a matching `context: { traceContext }` — the ordinary
+`createAgent`-driven agent loop does not populate a tool's `traceContext`
+from the run's own `parentContext` (that field wraps `generate`/tool
+_execution_ in `withTraceContext`; it isn't copied onto `ToolContext`). Pass
+`withTraceContext` directly on `createSubagentTool`'s own options when the
+child needs its `agent.run()` call wrapped in a trace context.
+
+Every non-success terminal (abort, execution error, tripwire, budget
+exceeded, elicitation denied, maximum steps, or a clean stop whose output
+failed schema validation) rejects with `SubagentRunError`, which carries the
+child's full `RunResult` as `.result` — there is no `treatMaximumStepsAsError`
+toggle to opt out of this. That guarantee holds for a caller that invokes the
+tool's own execute function directly; once the tool call is driven through
+armorer's toolbox (the ordinary agent-loop path), armorer normalizes every
+thrown tool error — including `SubagentRunError` — into a plain, structured
+`ToolError` on the resulting `ToolExecutionResult`, the same as it does for
+every other tool in this codebase. `instanceof SubagentRunError` and
+`.result` are reachable only above that normalization boundary.
 
 **Context isolation (AB-64):** by default, `createSubagentTool` keeps a
 sub-agent's full conversation, steps, and usage out of the parent's context
@@ -939,23 +968,25 @@ controls this:
   sub-agent's exact output (structured extraction, code the parent will
   paste unmodified).
 
-Both modes ultimately hand off to `mapOutput(result)`, which still receives
-the complete `RunResult` — including `conversation`, `steps`, and `usage` —
-so a custom `mapOutput` CAN reach past the summary and return those fields
-directly. `returnMode`/`summaryTokenCap` cap `result.content`, not what a
-custom `mapOutput` chooses to do with the rest of the object; keep that in
-mind if you override `mapOutput`.
+Both modes ultimately hand off to `toToolOutput(result)` (AB-19; renamed from
+`mapOutput`), which receives the complete successful `RunResult` — including
+`conversation`, `steps`, and `usage` — so a custom `toToolOutput` CAN reach
+past the summary and return those fields directly. `toToolOutput` is a pure
+projection, not runtime validation: it is never invoked for a non-success
+terminal, which rejects with `SubagentRunError` before `toToolOutput` is ever
+reached. `returnMode`/`summaryTokenCap` cap `result.content`, not what a
+custom `toToolOutput` chooses to do with the rest of the object; keep that in
+mind if you override it. Omit `toToolOutput` entirely for a schema-less
+child and the tool returns a plain string (`result.content`).
 
 ```typescript
 const researcherTool = createSubagentTool({
   name: 'research',
   description: 'Delegates a research task to a specialist agent.',
   agentName: 'researcher',
-  run: (prompt) => researcherAgent.run(prompt).result(),
+  agent: researcherAgent,
   input: z.object({ query: z.string() }),
-  // mapInput receives the tool's raw, Zod-validated arguments as `unknown` —
-  // narrow to the schema shape declared above.
-  mapInput: (input) => (input as { query: string }).query,
+  toAgentInput: (input) => input.query,
   // returnMode: 'summary' is the default — shown explicitly here.
   returnMode: 'summary',
   summaryTokenCap: 300,

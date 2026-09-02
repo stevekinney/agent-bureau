@@ -4,9 +4,15 @@ export type {
   DiagnosticAgentRun,
   OutputMethod,
   RunEvent,
+  SuccessfulRunResult,
   UnwrappedValue,
 } from './agent-run';
-export { CompletedRunIterationError, createAgentRun, createDiagnosticAgentRun } from './agent-run';
+export {
+  CompletedRunIterationError,
+  createAgentRun,
+  createDiagnosticAgentRun,
+  isSuccessfulRunResult,
+} from './agent-run';
 export type { AgentSession, RunRef } from './agent-session';
 export { createAgentSession, loadAgentSession, saveAgentSession } from './agent-session';
 export type {
@@ -186,6 +192,7 @@ export {
   OutputSchemaConversionError,
   OutputValidationError,
   serializeAgentRunError,
+  SubagentRunError,
 } from './errors';
 export type {
   CombinedOperativeEventMap,
