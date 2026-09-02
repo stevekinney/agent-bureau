@@ -187,6 +187,63 @@ describe('createLazyAgent', () => {
     expect(loads).toBe(1);
   });
 
+  it('hasOutput falls back to the options witness before the loader resolves', () => {
+    const lazy = createLazyAgent(() => new Promise<RunnableAgent<never, false>>(() => {}), {
+      hasOutput: true,
+    });
+
+    expect(lazy.hasOutput).toBe(true);
+  });
+
+  it('hasOutput defaults to false before the loader resolves when no options witness is given', () => {
+    const lazy = createLazyAgent(() => new Promise<RunnableAgent<never, false>>(() => {}));
+
+    expect(lazy.hasOutput).toBe(false);
+  });
+
+  it("hasOutput switches to the loaded agent's own witness once resolved, even without an options witness (AB-234 review — Codex)", async () => {
+    // The gap the review comment flagged: a caller supplying `H = true`
+    // (e.g. `createLazyAgent<Output, true>(loader)`) without ALSO passing
+    // `{ hasOutput: true }` used to leave a permanently `false` witness —
+    // reintroducing exactly the soundness gap AB-234 exists to close, for
+    // every lazy agent whose caller forgot the option. The fix: `hasOutput`
+    // is a live getter that defers to the loaded agent's own witness once
+    // loading completes, regardless of what (or whether) `options.hasOutput`
+    // said.
+    const fake = createFakeAgentRun();
+    const typedAgent: RunnableAgent<string, true> = {
+      name: 'typed',
+      hasOutput: true,
+      run: () => fake.handle as unknown as AgentRun<string, true>,
+    };
+    const lazy = createLazyAgent<string, true>(() => typedAgent);
+
+    expect(lazy.hasOutput).toBe(false); // provisional, before load
+
+    lazy.run('one'); // triggers the load
+    await flushMicrotasks();
+
+    expect(lazy.hasOutput).toBe(true); // reflects the loaded agent's real witness
+  });
+
+  it('hasOutput reflects the loaded agent even when options.hasOutput was wrong', async () => {
+    const fake = createFakeAgentRun();
+    const schemaLessAgent: RunnableAgent<string, false> = {
+      name: 'schema-less',
+      hasOutput: false,
+      run: () => fake.handle,
+    };
+    // Deliberately WRONG: options claims true but the loaded agent is false.
+    const lazy = createLazyAgent(() => schemaLessAgent, { hasOutput: true });
+
+    expect(lazy.hasOutput).toBe(true); // provisional, before load
+
+    lazy.run('one');
+    await flushMicrotasks();
+
+    expect(lazy.hasOutput).toBe(false); // corrected once the real agent loaded
+  });
+
   it('shares the exact pending load across concurrent run() calls', async () => {
     let loads = 0;
     let release!: () => void;

@@ -60,14 +60,17 @@ export interface CreateLazyAgentOptions {
   /** Human-readable label included in lazy loading and contract error messages. */
   label?: string;
   /**
-   * A runtime witness for this lazy agent's `H` (AB-234). `createLazyAgent`
-   * returns a `RunnableAgent` synchronously — before the loader has ever run
-   * — so `hasOutput` cannot be discovered from the loaded module in time.
-   * Pass the same truthful value the underlying, eventually-loaded agent's
-   * own `hasOutput` will report (matching the `H` type argument this call
-   * is instantiated with). Defaults to `false`, matching `H`'s default.
-   * See `RunnableAgent.hasOutput`'s doc comment (`runnable-agent.ts`) for
-   * why this witness exists at all.
+   * A provisional runtime witness for this lazy agent's `H` (AB-234), used
+   * ONLY before the loader has ever resolved. `createLazyAgent` returns a
+   * `RunnableAgent` synchronously — before loading starts — so there is no
+   * real witness to report yet; the returned agent's `hasOutput` getter
+   * falls back to this value until then. Once the underlying agent has
+   * loaded, `hasOutput` switches to reading THAT agent's own `hasOutput`
+   * directly — the real, load-derived truth — so an inaccurate or omitted
+   * `options.hasOutput` cannot leave a permanently wrong witness once
+   * loading completes. Defaults to `false`, matching `H`'s default. See
+   * `RunnableAgent.hasOutput`'s doc comment (`runnable-agent.ts`) for why
+   * this witness exists at all.
    */
   hasOutput?: boolean;
 }
@@ -860,7 +863,24 @@ export function createLazyAgent<O = never, H extends boolean = false>(
 
   const agent = {
     name: options.label ?? '(lazy)',
-    hasOutput: options.hasOutput ?? false,
+    /**
+     * A live witness, not a value frozen at construction time (AB-234
+     * review, Codex: `options.hasOutput` alone left exactly the gap this
+     * issue closes — a caller who supplies `H = true` without also passing
+     * `{ hasOutput: true }` would otherwise get a permanently-`false`
+     * witness even after the underlying, genuinely schema-backed agent has
+     * loaded). Once `resolve()` has settled to a `'loaded'` agent, this
+     * defers to THAT agent's own `hasOutput` — the real, load-derived
+     * truth — falling back to the caller-declared `options.hasOutput`
+     * (default `false`) only for the window before the loader has ever
+     * resolved. Every consumer that matters (`createSubagentTool`'s
+     * post-`result()` narrowing, most notably) reads `hasOutput` only after
+     * awaiting the run's result, by which point loading has necessarily
+     * completed, so this always observes the loaded value in practice.
+     */
+    get hasOutput(): boolean {
+      return state.kind === 'loaded' ? state.agent.hasOutput : (options.hasOutput ?? false);
+    },
     run(input: AgentInput, context?: AgentRunContext): AgentRun<O, H> {
       return createDeferredAgentRun(resolve, input, context, label);
     },
