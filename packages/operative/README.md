@@ -938,13 +938,12 @@ aborts when the parent's tool call does. `signal` always propagates, composed
 with a private per-child `AbortController` so a child-targeted abort (through
 `AgentRun.abortChild()`, or the `ChildRunHandle.abort()` a direct
 `dispatchChildRun` caller retains) never reaches a sibling. `traceContext` is
-read off the executing `ToolContext`, which is populated only when the caller
-built its toolbox with a matching `context: { traceContext }` — the ordinary
-`createAgent`-driven agent loop does not populate a tool's `traceContext`
-from the run's own `parentContext` (that field wraps `generate`/tool
-_execution_ in `withTraceContext`; it isn't copied onto `ToolContext`). Pass
-`withTraceContext` directly on `createSubagentTool`'s own options when the
-child needs its `agent.run()` call wrapped in a trace context.
+read off the executing `ToolContext` (AB-233): the ordinary `createAgent`-driven
+agent loop populates it on every call, from the run's own `parentContext`,
+via `run-step.ts`'s toolbox execute call site — no special toolbox
+construction required. Pass `withTraceContext` directly on
+`createSubagentTool`'s own options when the child needs its `agent.run()`
+call wrapped in a trace context.
 
 Every non-success terminal (abort, execution error, tripwire, budget
 exceeded, elicitation denied, maximum steps, or a clean stop whose output
@@ -1092,6 +1091,44 @@ Omit `registry` on either side and `children()` reads back an empty array and
 `abortChild()` is a no-op — never a throw. `abortChild()` is idempotent on an
 unknown or already-terminal child id, matching `abort()`'s own rule, and
 never propagates to a sibling.
+
+**AB-233 — one registry is enough in the ordinary loop.** The explicit
+`parentContext: { registry }` wiring above remains fully supported (and is
+still what a direct `dispatchChildRun` caller, or a tool built outside the
+ordinary agent loop, needs). But for a `createSubagentTool` reached through
+`createAgent`'s ordinary loop, passing `childRegistry` to `agent.run()` alone
+is now enough — `run-step.ts` threads THAT run's own registry into every
+tool call's per-execution context, and `createSubagentTool` reads it there
+in preference to `parentContext.registry`:
+
+```typescript
+const registry = createChildRunRegistry();
+const researcherTool = createSubagentTool({
+  name: 'research',
+  description: 'Delegates a research task to a specialist agent.',
+  agentName: 'researcher',
+  agent: researcherAgent,
+  input: z.object({ query: z.string() }),
+  toAgentInput: (input) => input.query,
+  // No parentContext.registry needed here.
+});
+
+const run = orchestratorAgent.run('...', { childRegistry: registry });
+```
+
+This also fixes a reuse hazard the construction-time wiring had: build
+`researcherTool` ONCE and run `orchestratorAgent` twice concurrently, each
+with its own `childRegistry` — every call registers its child into THAT
+call's own registry, never a registry frozen at the moment the tool was
+built and never the other run's registry.
+
+`parentRunId` follows the same per-execution-over-construction-time rule,
+but only when the active run actually carries a `runId` — session-owned and
+durable runs (`RunOptions.runId`). A bare `createAgent().run()` call, as in
+the example above, has none: `AgentRunContext` has no `runId` field today, so
+`parentContext.parentRunId` (the construction-time value) is what gets
+stamped on that path. Supply `parentContext.parentRunId` explicitly when you
+need a correct value there.
 
 **Supervisor:**
 

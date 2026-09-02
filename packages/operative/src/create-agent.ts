@@ -486,6 +486,10 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknow
       ...(context?.signal ? { signal: context.signal } : {}),
       ...(context?.traceContext !== undefined ? { parentContext: context.traceContext } : {}),
       ...(context?.withTraceContext ? { withTraceContext: context.withTraceContext } : {}),
+      // AB-233 — also thread `childRegistry` into `RunOptions` itself (not
+      // just `createAgentRun`'s option below), so `run-step.ts` can hand it
+      // to every tool call as `ToolContext.executionContext.childRegistry`.
+      ...(context?.childRegistry ? { childRegistry: context.childRegistry } : {}),
       ...rest,
     };
   }

@@ -5,6 +5,7 @@ import type { HookRegistry } from 'lifecycle';
 import type { ZodType } from 'zod';
 
 import type { BackpressureStrategy } from './backpressure';
+import type { ChildRunRegistry } from './child-run';
 import type { CostEstimate, CostEstimationOptions } from './cost-estimation';
 import type { SteeringDesiredState } from './durable/types';
 import type { OperativeHookMap } from './hooks';
@@ -417,6 +418,17 @@ export interface RunOptions {
    * This keeps operative free of any `@opentelemetry/api` dependency.
    */
   withTraceContext?: <T>(parentContext: unknown, fn: () => Promise<T>) => Promise<T>;
+  /**
+   * AB-233 (per AB-50's reuse gap) — this run's own child registry, threaded
+   * into every tool call's per-execution `ToolContext.executionContext` as
+   * `{ childRegistry, parentRunId: runId }` (see `run-step.ts`'s toolbox
+   * execute call site). `createSubagentTool` reads it there at execute time
+   * rather than from whatever `parentContext.registry` was captured at tool
+   * construction, so a single tool instance reused across two `agent.run()`
+   * calls registers each call's children into THIS run's own registry
+   * instead of whichever run happened to be active when the tool was built.
+   */
+  childRegistry?: ChildRunRegistry;
   /**
    * Default tool choice constraint applied to every step unless overridden
    * by the `selectToolChoice` hook.

@@ -321,6 +321,13 @@ export interface RuntimeToolContext extends CoreToolContext {
   elicit?: ToolElicitationRequester;
   /** Stable locator for this execution and its revisioned state. */
   execution?: ExecutionHandle;
+  /**
+   * Opaque, per-execution data supplied on this call's {@link ToolExecuteOptions.executionContext}.
+   * Reflects the call-time value, falling back to the toolbox's own base
+   * context's `executionContext` (if any) when the call did not supply one.
+   * See {@link ToolExecuteOptions.executionContext} for why this exists.
+   */
+  executionContext?: Readonly<Record<string, unknown>>;
 }
 
 export type ToolContext<_E extends ToolEventsMap = DefaultToolEvents> = RuntimeToolContext;
@@ -348,6 +355,26 @@ export interface ToolExecuteOptions {
   ownerId?: string;
   /** Parent execution used to correlate nested toolbox and tool calls. */
   parentExecutionId?: string;
+  /**
+   * Call-time trace context (e.g. an OpenTelemetry `Context`), threaded into
+   * the per-call {@link RuntimeToolContext.traceContext} for this execution
+   * only. When omitted, `createToolbox` falls back to the toolbox's own
+   * base context (`options.context.traceContext`, if the toolbox was built
+   * with one) rather than leaving `context.traceContext` unset.
+   */
+  traceContext?: unknown;
+  /**
+   * Opaque, per-execution data threaded into {@link RuntimeToolContext.executionContext}
+   * for this call only — never persisted, exported, or interpreted by
+   * armorer itself. Exists so a runtime layered on top (e.g. operative's
+   * agent loop) can hand a tool call-time state that must NOT be captured
+   * once at tool construction and reused across calls — for example a
+   * per-run child registry or the current run's own id, which a tool
+   * reused across two concurrent runs must read fresh on every call rather
+   * than share from whichever run happened to be active when the tool was
+   * built.
+   */
+  executionContext?: Record<string, unknown>;
 }
 
 /**

@@ -17,17 +17,27 @@
  * `documentation/operative-type-safe-api.md`'s Required capabilities
  * table). A registry is not created or consulted automatically — a caller
  * that wants a running `AgentRun` to discover children dispatched from
- * inside its own tool calls constructs one registry and supplies it in two
- * places: `createAgentRun`'s `childRegistry` option (or
- * `AgentRunContext.childRegistry` via `RunnableAgent.run()`), and
- * `createSubagentTool`'s `parentContext.registry`. This mirrors the
- * existing `parentContext.emitter` wiring F1 already requires for
- * `ChildWorkflowStartedEvent` — both are caller-supplied because a tool is
- * constructed once, independent of any particular run, so nothing can
- * inject a run-scoped registry into an already-built tool automatically.
- * `createSubagentTool` call sites that don't need discovery stay exactly as
- * simple as before: `parentContext` (and therefore `registry`) is entirely
- * optional.
+ * inside its own tool calls constructs one registry and supplies it via
+ * `AgentRunContext.childRegistry` (through `RunnableAgent.run()`) or
+ * `createAgentRun`'s equivalent `childRegistry` option.
+ *
+ * AB-233: for a `createSubagentTool` reached through the ordinary
+ * `createAgent`-driven agent loop, that one registry is now enough —
+ * `run-step.ts`'s toolbox execute call site threads THIS run's own
+ * `RunOptions.childRegistry` (derived from `AgentRunContext.childRegistry`)
+ * into every tool call's per-execution `ToolContext.executionContext`, and
+ * `createSubagentTool` reads it from there at execute time, in preference
+ * to `parentContext.registry`. A tool instance built once and reused by
+ * two different `agent.run()` calls therefore registers each call's
+ * children into THAT call's own registry — never a registry captured once
+ * at tool-construction time, and never the other call's registry.
+ * `parentContext.registry` remains supported as a construction-time
+ * default: a direct `dispatchChildRun` caller (bypassing `createSubagentTool`
+ * entirely, or a tool built outside the ordinary loop, where no
+ * per-execution `executionContext` reaches it) still supplies it exactly
+ * as before. `createSubagentTool` call sites that don't need discovery stay
+ * exactly as simple as before: neither `AgentRunContext.childRegistry` nor
+ * `parentContext`/`registry` is required.
  */
 
 import type { RunEvent } from './agent-run';
@@ -144,6 +154,27 @@ interface ChildRunRegistrar {
 
 /** A `ChildRunRegistry` a `dispatchChildRun` caller can also register children into. */
 export type MutableChildRunRegistry = ChildRunRegistry & ChildRunRegistrar;
+
+/**
+ * Structural guard for {@link MutableChildRunRegistry}. Exists so a
+ * per-execution value read off an opaque bag (e.g.
+ * `ToolContext.executionContext['childRegistry']`, AB-233) can be narrowed
+ * from `unknown` at the point of use without a cast — the value's static
+ * type at the point it was stored is often the read-only
+ * {@link ChildRunRegistry} (e.g. `RunOptions.childRegistry`), even though
+ * the concrete object `createChildRunRegistry()` produces always satisfies
+ * the full mutable surface.
+ */
+export function isMutableChildRunRegistry(value: unknown): value is MutableChildRunRegistry {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as Partial<MutableChildRunRegistry>).register === 'function' &&
+    typeof (value as Partial<MutableChildRunRegistry>).settle === 'function' &&
+    typeof (value as Partial<MutableChildRunRegistry>).children === 'function' &&
+    typeof (value as Partial<MutableChildRunRegistry>).abortChild === 'function'
+  );
+}
 
 /**
  * Creates an empty, in-memory child registry. Construct one per run and
