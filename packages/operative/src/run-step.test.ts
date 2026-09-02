@@ -284,6 +284,44 @@ describe('runStep: AB-67 steering boundary read', () => {
     expect(result.finishReason).toBe('stop-condition');
   });
 
+  it('a steering command admitted during tool execution applies at step N+1 entry, never mid-step N', async () => {
+    const gate = createTestSteeringGate({ paused: false, configVersion: 1, route: 'r1' });
+    const observedRoutes: Array<string | undefined> = [];
+
+    const toolThatSteers = createTool({
+      name: 'next',
+      description: 'continue to another step',
+      input: z.object({}),
+      execute: async () => {
+        // Simulate a SteeringCommand admitted during tool execution
+        // (run-step.ts:814-1097 in the decision record's terms) — it must
+        // not be visible to the step already in flight, only to the next
+        // step's boundary read.
+        gate.setDesiredState({ paused: false, configVersion: 2, route: 'r2' });
+        return 'ok';
+      },
+    });
+
+    let calls = 0;
+    const result = await executeLoop({
+      generate: async (context) => {
+        observedRoutes.push(context.steering?.route);
+        calls++;
+        if (calls === 1) {
+          return { content: '', toolCalls: [{ name: 'next', arguments: {} }] };
+        }
+        return textResponse('done');
+      },
+      toolbox: createTestToolbox([toolThatSteers]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      steering: gate,
+    });
+
+    expect(observedRoutes).toEqual(['r1', 'r2']);
+    expect(result.finishReason).toBe('stop-condition');
+  });
+
   it('AB-67: steering desired state survives a beforeGenerate hook that returns a replacement context', async () => {
     const gate = createTestSteeringGate({ paused: false, configVersion: 3, model: 'real-model' });
     const hooks = new HookRegistry<OperativeHookMap>();
