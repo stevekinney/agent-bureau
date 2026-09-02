@@ -541,12 +541,29 @@ export function createDeferredAgentRun<O, H extends boolean>(
       // Best-effort: an otherwise-valid handle missing only `closed()` (or
       // any other single required member) still very likely has a callable
       // `[Symbol.dispose]`; guard rather than assume, since a handle this
-      // malformed could be missing that too.
-      const disposable = handle as unknown as Record<PropertyKey, unknown>;
-      if (isCallable(disposable[Symbol.dispose])) {
+      // malformed could be missing that too. AB-204 review: `handle` can
+      // also be `null`/`undefined`/a primitive — `isValidAgentRunHandle`
+      // already rejects those, but probing `[Symbol.dispose]` on one
+      // directly would throw a raw TypeError outside this `try`, rejecting
+      // this detached resolution task and leaving `resultPromise`/
+      // `closed()` pending forever instead of reaching
+      // `finalizeSynthetic()` below. Guard the shape before probing it.
+      const disposable =
+        handle !== null && typeof handle === 'object'
+          ? (handle as unknown as Record<PropertyKey, unknown>)
+          : undefined;
+      const disposeFn = disposable?.[Symbol.dispose];
+      if (isCallable(disposeFn)) {
         try {
-          (disposable[Symbol.dispose] as () => void).call(handle);
-          invalidHandleDisposalOutcome = { status: 'completed' };
+          disposeFn.call(handle);
+          // AB-204 review: a non-throwing `[Symbol.dispose]()` is not proof
+          // cleanup has actually completed — the built-in `AgentRun`
+          // disposer, for example, only requests cancellation synchronously
+          // and lets provider/tool work continue winding down afterward.
+          // Without the rejected handle's own acknowledgement there is no
+          // way to confirm completion, so this stays `unresolved` rather
+          // than claiming a `completed` this wrapper cannot verify.
+          invalidHandleDisposalOutcome = { status: 'unresolved', reason: 'unknown-effect' };
         } catch (disposalError) {
           // The AgentContractError result itself is unaffected — a
           // throwing disposer doesn't change that outcome, and must not

@@ -340,11 +340,36 @@ describe('createLazyAgent', () => {
     // validator rejected it; the rejection path must still dispose it
     // rather than leaking provider/tool work unobserved.
     expect(disposed).toBe(true);
-    // Regression: a further code-review finding — cleanup here genuinely
-    // succeeded, and closed() must report that rather than silently
-    // defaulting to `not-required` (this scenario is not "nothing needed
-    // cleanup" — cleanup was attempted).
-    expect(await run.closed()).toEqual({ status: 'completed' });
+    // Regression: a code-review finding on the AB-204 pull request —
+    // cleanup was attempted, so this is not "nothing needed cleanup"
+    // (`not-required`); but a non-throwing `[Symbol.dispose]()` is not
+    // proof cleanup has actually completed either (the built-in `AgentRun`
+    // disposer, for example, only requests cancellation synchronously and
+    // lets the underlying work continue winding down) — without the
+    // rejected handle's own acknowledgement, closed() can only report
+    // `unresolved`/`unknown-effect`.
+    expect(await run.closed()).toEqual({ status: 'unresolved', reason: 'unknown-effect' });
+  });
+
+  it('rejects a run() handle that is null, not a raw TypeError probing its disposer', async () => {
+    // Regression: a code-review finding on the AB-204 pull request —
+    // `isValidAgentRunHandle(null)` correctly rejects a null handle, but
+    // probing `[Symbol.dispose]` on it directly (without checking it is an
+    // object first) would throw a raw TypeError outside the disposal
+    // `try`, rejecting the detached resolution task and leaving
+    // `resultPromise`/`closed()` pending forever instead of reaching
+    // `finalizeSynthetic()`.
+    const agent: RunnableAgent<string, false> = {
+      name: 'fake',
+      run: () => null as unknown as AgentRun<string, false>,
+    };
+    const lazy = createLazyAgent(() => agent, { label: 'null-handle' });
+
+    const run = lazy.run('one');
+    const result = await run.result();
+    expect(result.error).toBeInstanceOf(AgentContractError);
+    expect((result.error as AgentContractError).code).toBe('INVALID_AGENT_HANDLE');
+    expect(await run.closed()).toEqual({ status: 'unresolved', reason: 'unknown-effect' });
   });
 
   it('swallows a throwing [Symbol.dispose] on a rejected invalid handle without masking the AgentContractError, but still reports the disposal failure through closed()', async () => {

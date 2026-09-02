@@ -346,11 +346,19 @@ export function createActiveRun(options: RunOptions, durable?: DurableRunRouting
   if (combinedSignal.aborted) {
     abort(typeof combinedSignal.reason === 'string' ? combinedSignal.reason : undefined);
   } else {
-    combinedSignal.addEventListener(
-      'abort',
-      () => abort(typeof combinedSignal.reason === 'string' ? combinedSignal.reason : undefined),
-      { once: true },
-    );
+    const onCombinedSignalAbort = (): void =>
+      abort(typeof combinedSignal.reason === 'string' ? combinedSignal.reason : undefined);
+    combinedSignal.addEventListener('abort', onCombinedSignalAbort, { once: true });
+    // AB-204 review (PRRT_kwDORvupsc6erGS9): `options.signal` can be a
+    // long-lived signal a caller reuses across many runs. Left attached,
+    // this listener fires `abort()` on THIS already-terminal run whenever
+    // that shared signal later aborts for an unrelated reason — retroactively
+    // marking a historical, completed run cancelled (and, in the identical
+    // durable block in `active-run-adapter.ts`, issuing `engine.cancel()`
+    // for an already-terminal workflow). Detach once `result` settles;
+    // while the run is still in flight the listener stays live exactly as
+    // before.
+    cleanups.push(() => combinedSignal.removeEventListener('abort', onCombinedSignalAbort));
   }
 
   function complete(): void {
