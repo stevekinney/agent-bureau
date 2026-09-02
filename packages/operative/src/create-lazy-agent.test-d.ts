@@ -118,6 +118,22 @@ void options;
 const optionsWithSelector: CreateLazyAgentOptions = { select: (module: unknown) => module };
 void optionsWithSelector;
 
+// AB-234 review round 2 (Copilot): `options.hasOutput` is typed as `H`
+// itself, not a bare `boolean` — a value that disagrees with the call's own
+// `H` type argument is a compile-time error, not a silently-accepted
+// mismatch.
+const agreeingHasOutputLazy: RunnableAgent<TypedOutput, true> = createLazyAgent<TypedOutput, true>(
+  () => typedAgent,
+  { hasOutput: true },
+);
+void agreeingHasOutputLazy;
+
+const disagreeingHasOutputLazy = createLazyAgent<TypedOutput, true>(() => typedAgent, {
+  // @ts-expect-error — `hasOutput: false` disagrees with this call's own `H = true` argument.
+  hasOutput: false,
+});
+void disagreeingHasOutputLazy;
+
 // A raw `import(path)` module namespace object — its `default` export is
 // unwrapped automatically (AB-15's `AgentModule<O, H>`); no selector needed.
 const moduleObjectLoader = () => import('./create-lazy-agent-type-fixtures');

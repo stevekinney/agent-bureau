@@ -56,7 +56,7 @@ export type AgentModule<O, H extends boolean> =
 export type LazyAgentLoader<O, H extends boolean> = () =>
   AgentModule<O, H> | PromiseLike<AgentModule<O, H>>;
 
-export interface CreateLazyAgentOptions {
+export interface CreateLazyAgentOptions<H extends boolean = false> {
   /** Human-readable label included in lazy loading and contract error messages. */
   label?: string;
   /**
@@ -68,11 +68,19 @@ export interface CreateLazyAgentOptions {
    * loaded, `hasOutput` switches to reading THAT agent's own `hasOutput`
    * directly — the real, load-derived truth — so an inaccurate or omitted
    * `options.hasOutput` cannot leave a permanently wrong witness once
-   * loading completes. Defaults to `false`, matching `H`'s default. See
+   * loading completes (see the getter's own doc comment below). Defaults to
+   * `false`, matching `H`'s default.
+   *
+   * Typed as `H` itself, not a bare `boolean` (review round 2, Copilot):
+   * `createLazyAgent<Output, true>(loader, { hasOutput: false })` — a value
+   * that disagrees with the call's own `H` argument — is a compile-time
+   * error, not a silently-accepted mismatch, tightening this from "may be
+   * wrong at the type level, corrected at runtime once loaded" to "cannot
+   * be wrong at the type level in the first place." See
    * `RunnableAgent.hasOutput`'s doc comment (`runnable-agent.ts`) for why
    * this witness exists at all.
    */
-  hasOutput?: boolean;
+  hasOutput?: H;
 }
 
 // A fresh object per call — never a shared module-level singleton. `RunResult.usage`
@@ -766,7 +774,7 @@ type LazyAgentState<O, H extends boolean> =
  */
 export function createLazyAgent<O = never, H extends boolean = false>(
   loader: LazyAgentLoader<O, H>,
-  options: CreateLazyAgentOptions = {},
+  options: CreateLazyAgentOptions<H> = {},
 ): RunnableAgent<O, H> {
   const label = options.label ?? 'anonymous';
   let state: LazyAgentState<O, H> = { kind: 'unloaded' };
