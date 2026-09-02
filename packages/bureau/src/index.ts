@@ -1,11 +1,44 @@
+export type {
+  AgentCatalogEntry,
+  AgentDefinitions,
+  AgentHasOutput,
+  AgentNames,
+  AgentOutput,
+  BureauAgentCatalog,
+} from './agent-catalog';
+export { createAgentCatalog } from './agent-catalog';
 export type { AuditEventType, AuditQueryOptions, AuditRecord, AuditTrail } from './audit-trail';
 export { AUDIT_EVENT_TYPES, createAuditTrail } from './audit-trail';
+export { createAgentDiscoveryTool } from './create-agent-discovery-tool';
 export type {
   BureauErrorNotConfiguredSubject,
   RecoveredRunSessionMetadata,
   SessionLoadOutcome,
 } from './create-bureau';
 export { BureauError, classifyRecoveredRun, createBureau } from './create-bureau';
+export type {
+  AgentDescriptor,
+  CreateSupervisorOptions,
+  PipelineStage,
+  RoutingStrategy,
+  Supervisor,
+  SupervisorEventMap,
+  SupervisorEvents,
+  SupervisorEventType,
+  SupervisorResult,
+  SupervisorTaskResult,
+  SynthesisStrategy,
+} from './create-supervisor';
+export {
+  createFanOutRouting,
+  createRoundRobinRouting,
+  createSupervisor,
+  SynthesisCompletedEvent,
+  SynthesisStartedEvent,
+  TaskCompletedEvent,
+  TaskFailedEvent,
+  TaskRoutedEvent,
+} from './create-supervisor';
 export type { BureauEventMap } from './events';
 export { ActionEvent, BureauDisposedEvent, RunRegisteredEvent, RunRemovedEvent } from './events';
 export type {
