@@ -189,6 +189,30 @@ describe('scope-aware detection (regression coverage for injected-runtime false 
     );
     expect(ruleIds).toEqual([]);
   });
+
+  test('flags a host-qualified clock call (globalThis.Date.now())', () => {
+    const ruleIds = lintSourceInDeterministicDirectory('globalThis.Date.now();\n');
+    expect(ruleIds).toEqual(['determinism/no-real-runtime-call']);
+  });
+
+  test('flags a host-qualified randomness call (window.crypto.randomUUID())', () => {
+    const ruleIds = lintSourceInDeterministicDirectory('window.crypto.randomUUID();\n');
+    expect(ruleIds).toEqual(['determinism/no-real-runtime-call']);
+  });
+
+  test('flags a type-asserted bare timer callee ((setTimeout as typeof setTimeout)(...))', () => {
+    const ruleIds = lintSourceInDeterministicDirectory(
+      '(setTimeout as typeof setTimeout)(callback, 1);\n',
+    );
+    expect(ruleIds).toEqual(['determinism/no-real-runtime-call']);
+  });
+
+  test('does not flag globalThis.Date.now() when Date is shadowed inside a destructure', () => {
+    const ruleIds = lintSourceInDeterministicDirectory(
+      'function stamp() {\n  const { Date } = fakes;\n  return Date.now();\n}\n',
+    );
+    expect(ruleIds).toEqual([]);
+  });
 });
 
 describe('parseDeterminismManifest', () => {

@@ -240,13 +240,57 @@ function staticMemberPropertyName(
     : undefined;
 }
 
+/** `globalThis`, `window`, and Node's `global` all name the same process-wide host object. */
+const HOST_GLOBAL_QUALIFIER_NAMES = new Set(['globalThis', 'window', 'global']);
+
+const CLOCK_MEMBER_PAIRS = new Set([
+  'Date.now',
+  'performance.now',
+  'crypto.randomUUID',
+  'Math.random',
+]);
+
+/**
+ * Resolves the "effective global name" of an expression used as a MemberExpression's object, so
+ * `Date.now()`, `globalThis.Date.now()`, and `window.Date.now()` are all recognized as the same
+ * real call: a bare identifier resolving to the ambient global (`Date`) resolves to `'Date'`
+ * directly; a host-global-qualified form (`globalThis.Date`) resolves to `'Date'` too, as long as
+ * the qualifier itself is the ambient global and not shadowed. Anything else — a genuinely
+ * unrelated or non-global expression — resolves to `undefined`. Also unwraps a TypeScript type
+ * assertion first, same reasoning as `unwrapTypeAssertions`'s own doc comment.
+ */
+function resolveGlobalQualifiedName(
+  context: Rule.RuleContext,
+  node: Rule.Node,
+): string | undefined {
+  const unwrapped = unwrapTypeAssertions(node);
+  if (unwrapped.type === 'Identifier') {
+    return context.sourceCode.isGlobalReference(unwrapped) ? unwrapped.name : undefined;
+  }
+  if (unwrapped.type === 'MemberExpression') {
+    const propertyName = staticMemberPropertyName(unwrapped);
+    const object = unwrapTypeAssertions(unwrapped.object);
+    if (
+      propertyName &&
+      object.type === 'Identifier' &&
+      HOST_GLOBAL_QUALIFIER_NAMES.has(object.name) &&
+      context.sourceCode.isGlobalReference(object)
+    ) {
+      return propertyName;
+    }
+  }
+  return undefined;
+}
+
 /**
  * Real-runtime call sites this rule flags, matched by AST shape rather than source text. Every
  * candidate identifier is additionally required to resolve to the ambient global (via ESLint's
  * own `sourceCode.isGlobalReference`, the same check `no-implied-eval` and friends use) — code
  * that destructures an injected runtime (`const { setTimeout } = runtime; setTimeout(...)`) or
  * shadows `Date`/`performance`/`crypto`/`Math` with a local binding is exactly the injection
- * pattern this gate exists to encourage, and must not be flagged for using it.
+ * pattern this gate exists to encourage, and must not be flagged for using it. Every callee is
+ * also unwrapped through `unwrapTypeAssertions` first — `(setTimeout as typeof setTimeout)(...)`
+ * is the same real timer call as the bare form, just cast.
  */
 function realRuntimeCallLabel(
   context: Rule.RuleContext,
@@ -255,18 +299,19 @@ function realRuntimeCallLabel(
   if (!node) return undefined;
 
   if (node.type === 'NewExpression') {
+    const callee = unwrapTypeAssertions(node.callee);
     if (
-      node.callee.type === 'Identifier' &&
-      node.callee.name === 'Date' &&
+      callee.type === 'Identifier' &&
+      callee.name === 'Date' &&
       node.arguments.length === 0 &&
-      context.sourceCode.isGlobalReference(node.callee)
+      context.sourceCode.isGlobalReference(callee)
     ) {
       return 'new Date()';
     }
     return undefined;
   }
 
-  const callee = node.callee;
+  const callee = unwrapTypeAssertions(node.callee);
   if (
     callee.type === 'Identifier' &&
     (callee.name === 'setTimeout' || callee.name === 'setInterval') &&
@@ -277,26 +322,18 @@ function realRuntimeCallLabel(
 
   if (callee.type === 'MemberExpression') {
     const propertyName = staticMemberPropertyName(callee);
-    const object = unwrapTypeAssertions(callee.object);
-    if (
-      propertyName &&
-      object.type === 'Identifier' &&
-      context.sourceCode.isGlobalReference(object)
-    ) {
-      const pair = `${object.name}.${propertyName}`;
-      if (
-        pair === 'Date.now' ||
-        pair === 'performance.now' ||
-        pair === 'crypto.randomUUID' ||
-        pair === 'Math.random'
-      ) {
+    const objectName = resolveGlobalQualifiedName(context, callee.object);
+    if (propertyName && objectName) {
+      const pair = `${objectName}.${propertyName}`;
+      if (CLOCK_MEMBER_PAIRS.has(pair)) {
         return `${pair}(`;
       }
       // A host-global-qualified timer call — globalThis.setTimeout(...), window.setInterval(...),
-      // global.setTimeout(...) — is the exact same real timer as the bare identifier form above;
-      // qualifying it through the object it's already a property of must not be a bypass.
+      // global.setTimeout(...), or the doubly-qualified globalThis.globalThis... form — is the
+      // exact same real timer as the bare identifier form above; qualifying it through the
+      // object it's already a property of must not be a bypass.
       if (
-        (object.name === 'globalThis' || object.name === 'window' || object.name === 'global') &&
+        HOST_GLOBAL_QUALIFIER_NAMES.has(objectName) &&
         (propertyName === 'setTimeout' || propertyName === 'setInterval')
       ) {
         return `${pair}(`;
