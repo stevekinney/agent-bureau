@@ -1153,6 +1153,7 @@ describe('createRun with durable routing', () => {
       totalUsage: { prompt: 42, completion: 17, total: 59 },
       lastContent: 'step 0 content',
       schemaAttempts: 0,
+      lastAppliedConfigVersion: 0,
     });
     await checkpointStore.saveStep(runId, {
       step: 0,
@@ -1482,6 +1483,7 @@ describe('reattachDurableActiveRun', () => {
         totalUsage: { prompt: 42, completion: 17, total: 59 },
         lastContent: 'step 0 content',
         schemaAttempts: 0,
+        lastAppliedConfigVersion: 0,
       });
       await context.checkpointStore.saveStep(runId, {
         step: 0,

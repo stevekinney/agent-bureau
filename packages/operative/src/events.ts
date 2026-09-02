@@ -5,6 +5,7 @@ import type { EventMap, ForwardedEvent, ObservableLike, Observer, Subscription }
 
 import type { CostBudgetExceededEvent, CostBudgetThresholdEvent } from './cost-budget-monitor';
 import { estimateCacheHitRate } from './cost-estimation';
+import type { SteeringCommandFailure, SteeringEffectiveState } from './durable/types';
 import { type AgentRunError, type AgentRunErrorKind, toAgentRunError } from './errors';
 import type { GenerateResponse, RunResult, StepResult, TokenUsage } from './types';
 
@@ -985,6 +986,190 @@ export class WorkflowVersionMismatchEvent extends Event {
 }
 
 // ---------------------------------------------------------------------------
+// Steering events (AB-90 child ab90-01, dispatching AB-67's decision record)
+//
+// AB-67 fixes `SteeringCommandState`'s six values: `requested`, `accepted`,
+// `applied`, `rejected`, `superseded`, `failed`. `requested` is never
+// dispatched standalone — admission is synchronous validate-then-accept-or-
+// reject, so it is satisfied by the transition into `accepted` or a
+// pre-admission rejection outcome, never persisted or observed on its own —
+// so there is no `SteeringRequestedEvent`. The remaining five transitions
+// each get one event class below.
+//
+// This package dispatches ONLY `steering.applied`, from `runStep`
+// (`run-step.ts`) at the AB-67/AB-198 boundary — the one steering
+// transition operative's own code observes. `steering.accepted`,
+// `steering.rejected`, `steering.superseded`, and `steering.failed` are
+// admission/termination outcomes of Bureau's `submitSteeringCommand`
+// (AB-199, Backlog); their classes are exported and added to
+// `OperativeEventMap` here for that issue to dispatch against — this
+// package does not synthesize an admission path or a durable command store.
+//
+// Durability classification, per AB-87's AC5 resolution: `steering.applied`
+// is cursor-advancing (the durable aggregate sequence's authoritative
+// steering marker, once wired through AB-91's `FleetEventFeed`);
+// `steering.accepted` and the three terminal-failure events are not — they
+// describe a desired-state transition, never a step boundary being crossed.
+// ---------------------------------------------------------------------------
+
+/**
+ * Narrows {@link SteeringCommandFailure} to a subset of `reason` values.
+ * `SteeringCommandFailure` is one interface with a seven-member `reason`
+ * union, not a discriminated union of per-reason variants — `Extract<
+ * SteeringCommandFailure, { reason: R }>` would evaluate `T extends U` on
+ * the whole interface at once (broader `reason` vs. narrower `R`), which is
+ * always false and collapses to `never`, not the intended narrowing. This
+ * overrides just the `reason` field instead, keeping every other field
+ * (`failedAt`, the optional `supersededBy`) intact.
+ */
+type SteeringFailureReason<R extends SteeringCommandFailure['reason']> = Omit<
+  SteeringCommandFailure,
+  'reason'
+> & { readonly reason: R };
+
+/**
+ * `requested` → `accepted`: a `SteeringCommand` was admitted and written
+ * into the owning session's desired state. `configVersion` is the
+ * post-increment value (AB-67: increments by exactly one on every command
+ * that reaches `accepted`, whether or not it is ever applied). Not
+ * cursor-advancing — see the block comment above.
+ */
+export class SteeringAcceptedEvent extends Event {
+  static readonly type = 'steering.accepted' as const;
+  readonly sessionId: string;
+  readonly commandId: string;
+  readonly configVersion: number;
+  constructor(sessionId: string, commandId: string, configVersion: number) {
+    super(SteeringAcceptedEvent.type);
+    this.sessionId = sessionId;
+    this.commandId = commandId;
+    this.configVersion = configVersion;
+  }
+}
+
+/**
+ * `accepted` → `applied`: dispatched by `runStep` the moment it observes an
+ * accepted command's `configVersion` at its entry boundary — never mid-step.
+ * `effective` is the exact `SteeringEffectiveState` (AB-67's shape, imported
+ * verbatim) the boundary stamped onto the step; `sessionId` is carried
+ * alongside it because `SteeringEffectiveState` itself carries no
+ * `sessionId` field (see `SteeringGate.sessionId`'s doc comment). Fires at
+ * most once per distinct `configVersion` a run observes — cursor-advancing.
+ */
+export class SteeringAppliedEvent extends Event {
+  static readonly type = 'steering.applied' as const;
+  readonly sessionId: string;
+  readonly effective: SteeringEffectiveState;
+  constructor(sessionId: string, effective: SteeringEffectiveState) {
+    super(SteeringAppliedEvent.type);
+    this.sessionId = sessionId;
+    this.effective = effective;
+  }
+}
+
+/**
+ * `accepted` → `rejected`: a terminal-failure outcome for a command
+ * invalidated after admission (authorization revoked, policy denial, or
+ * deadline passed). Mutually exclusive with `applied`/`superseded`/`failed`
+ * for the same command id. Not cursor-advancing.
+ *
+ * `failure` excludes `session-terminal` too, not just the two reasons owned
+ * by a sibling event (`superseded-by`, always `SteeringSupersededEvent`;
+ * `run-terminal`, always `SteeringFailedEvent`, pause/resume only):
+ * `SteeringCommandState`'s own ratified vocabulary comment reserves
+ * `session-terminal` exclusively for `failed` ("failed // terminal-failure:
+ * SteeringCommandFailure.reason is 'session-terminal' or, pause/resume
+ * only, 'run-terminal'") — a session going terminal before a command is
+ * ever consumed is always `failed`, never `rejected`, so the two stay
+ * mutually exclusive at the type level, not just by convention. `run-ambiguous`
+ * is excluded for a different reason — it is a pre-admission rejection
+ * outcome (a `SteeringCommand` that never reached `accepted`), never one of
+ * this family's `accepted → X` transitions.
+ */
+export class SteeringRejectedEvent extends Event {
+  static readonly type = 'steering.rejected' as const;
+  readonly sessionId: string;
+  readonly commandId: string;
+  readonly failure: SteeringFailureReason<
+    'authorization-revoked' | 'policy-denied' | 'deadline-passed'
+  >;
+  constructor(
+    sessionId: string,
+    commandId: string,
+    failure: SteeringFailureReason<'authorization-revoked' | 'policy-denied' | 'deadline-passed'>,
+  ) {
+    super(SteeringRejectedEvent.type);
+    this.sessionId = sessionId;
+    this.commandId = commandId;
+    this.failure = failure;
+  }
+}
+
+/**
+ * `accepted` → `superseded`: a terminal-failure outcome for a command whose
+ * `target` received a later command that was admitted first (AB-67:
+ * last-desired-value-per-target wins; the earlier command is marked
+ * `superseded`, never silently dropped). Mutually exclusive with
+ * `applied`/`rejected`/`failed` for the same command id. Not
+ * cursor-advancing.
+ */
+export class SteeringSupersededEvent extends Event {
+  static readonly type = 'steering.superseded' as const;
+  readonly sessionId: string;
+  readonly commandId: string;
+  /**
+   * Narrowed to `reason: 'superseded-by'` — the only `SteeringCommandFailure`
+   * variant a supersession ever produces (AB-67: "last-desired-value-per-target
+   * wins" is always a same-target admission race, never a session/run/
+   * authorization/policy/deadline outcome). Narrowing here, rather than
+   * accepting the full union, makes a future admission implementation that
+   * tries to supersede for the wrong reason a compile error instead of a
+   * silently mislabeled event.
+   */
+  readonly failure: SteeringFailureReason<'superseded-by'>;
+  constructor(
+    sessionId: string,
+    commandId: string,
+    failure: SteeringFailureReason<'superseded-by'>,
+  ) {
+    super(SteeringSupersededEvent.type);
+    this.sessionId = sessionId;
+    this.commandId = commandId;
+    this.failure = failure;
+  }
+}
+
+/**
+ * `accepted` → `failed`: a terminal-failure outcome restricted to
+ * `SteeringCommandFailure.reason: 'session-terminal'` (any command) or
+ * `'run-terminal'` (pause/resume only, per AB-67). Mutually exclusive with
+ * `applied`/`rejected`/`superseded` for the same command id. Not
+ * cursor-advancing.
+ *
+ * `failure` is narrowed to exactly those two reasons (`Extract`, not the
+ * full `SteeringCommandFailure` union) so the constructor itself enforces
+ * what this docstring already claimed — a `policy-denied` or
+ * `authorization-revoked` failure belongs on `SteeringRejectedEvent`, and
+ * passing one here is now a compile error rather than a type-level no-op.
+ */
+export class SteeringFailedEvent extends Event {
+  static readonly type = 'steering.failed' as const;
+  readonly sessionId: string;
+  readonly commandId: string;
+  readonly failure: SteeringFailureReason<'session-terminal' | 'run-terminal'>;
+  constructor(
+    sessionId: string,
+    commandId: string,
+    failure: SteeringFailureReason<'session-terminal' | 'run-terminal'>,
+  ) {
+    super(SteeringFailedEvent.type);
+    this.sessionId = sessionId;
+    this.commandId = commandId;
+    this.failure = failure;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Event map: maps event type string to the Event subclass instance
 // ---------------------------------------------------------------------------
 
@@ -1044,6 +1229,12 @@ export interface OperativeEventMap extends EventMap {
   [ChildWorkflowStartedEvent.type]: ChildWorkflowStartedEvent;
   [HandoffOccurredEvent.type]: HandoffOccurredEvent;
   [HumanWaitParkedEvent.type]: HumanWaitParkedEvent;
+  // Steering (AB-90 child ab90-01, AB-67's decision record)
+  [SteeringAcceptedEvent.type]: SteeringAcceptedEvent;
+  [SteeringAppliedEvent.type]: SteeringAppliedEvent;
+  [SteeringRejectedEvent.type]: SteeringRejectedEvent;
+  [SteeringSupersededEvent.type]: SteeringSupersededEvent;
+  [SteeringFailedEvent.type]: SteeringFailedEvent;
 }
 
 export type OperativeEventType = Extract<keyof OperativeEventMap, string>;

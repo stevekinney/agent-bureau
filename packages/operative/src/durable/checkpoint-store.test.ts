@@ -14,6 +14,7 @@ const cursor = (step: number): RunCursor => ({
   totalUsage: { prompt: 0, completion: 0, total: 0 },
   lastContent: '',
   schemaAttempts: 0,
+  lastAppliedConfigVersion: 0,
 });
 
 describe('createCheckpointStore', () => {
@@ -34,6 +35,26 @@ describe('createCheckpointStore', () => {
       await store.saveCursor('run-1', cursor(1));
       await store.saveCursor('run-1', cursor(5));
       expect(await store.loadCursor('run-1')).toEqual(cursor(5));
+    });
+
+    it('defaults lastAppliedConfigVersion to 0 on loadCursor for a pre-AB-221 persisted cursor (not only through loadCheckpoint)', async () => {
+      // Regression: the normalization added for `loadCheckpoint` lived only
+      // in that method, so a caller using the public `loadCursor()` directly
+      // (bypassing `loadCheckpoint`) still got a cursor missing this field.
+      const preAb221Cursor = {
+        step: 2,
+        totalUsage: { prompt: 10, completion: 5, total: 15 },
+        lastContent: 'partial',
+        schemaAttempts: 1,
+      };
+      const underlying = createStore();
+      await underlying.set('durable-run:run-1:cursor', JSON.stringify(preAb221Cursor));
+
+      const store = createCheckpointStore(underlying);
+      expect(await store.loadCursor('run-1')).toEqual({
+        ...preAb221Cursor,
+        lastAppliedConfigVersion: 0,
+      });
     });
   });
 
@@ -139,6 +160,25 @@ describe('createCheckpointStore', () => {
       expect(checkpoint.cursor).toEqual(cursor(0));
       expect(checkpoint.conversation).toBeNull();
       expect(checkpoint.steps).toEqual([]);
+    });
+
+    it('defaults lastAppliedConfigVersion to 0 for a cursor persisted before AB-221 added the field', async () => {
+      // Simulate a pre-AB-221 cursor written by an older process: every field
+      // `RunCursor` had at the time, minus `lastAppliedConfigVersion`. Written
+      // directly through the underlying text-value store so the test does not
+      // depend on `saveCursor`'s current (post-AB-221) `RunCursor` shape.
+      const preAb221Cursor = {
+        step: 2,
+        totalUsage: { prompt: 10, completion: 5, total: 15 },
+        lastContent: 'partial',
+        schemaAttempts: 1,
+      };
+      const underlying = createStore();
+      await underlying.set('durable-run:run-1:cursor', JSON.stringify(preAb221Cursor));
+
+      const store = createCheckpointStore(underlying);
+      const checkpoint = await store.loadCheckpoint('run-1');
+      expect(checkpoint.cursor).toEqual({ ...preAb221Cursor, lastAppliedConfigVersion: 0 });
     });
   });
 
