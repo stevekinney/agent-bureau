@@ -38,9 +38,9 @@ const providerGeneratedPayload: ReadonlyArray<{
 // @ts-expect-error — a `thinking` block is provider-generated, not user-admissible.
 const rejectedPayload: SessionInputPayload = providerGeneratedPayload;
 
-// AB-202 — every remaining admissible `MultiModalContent` kind (text, image,
-// document) must still be assignable to `SessionInputPayload`, so the
-// `Exclude<>` above didn't over-exclude down to `never`.
+// AB-202 — every admissible `MultiModalContent` kind (text without citations,
+// image, document) must still be assignable to `SessionInputPayload`, so the
+// allowlist above didn't over-exclude down to `never`.
 const admissiblePayload: SessionInputPayload = [
   { type: 'text', text: 'Summarize this.' },
   { type: 'image', url: 'https://example.invalid/chart.png' },
@@ -62,6 +62,16 @@ const containerUploadPayload: ReadonlyArray<{ type: 'container_upload'; file_id:
 ];
 // @ts-expect-error — `container_upload` is response-only, not user-admissible.
 const rejectedContainerUploadPayload: SessionInputPayload = containerUploadPayload;
+
+// AB-202 — `citations` is provider-attached response metadata on `TextContent`
+// (Anthropic's `toSdkCitations` throws unless it is `null` or a precisely
+// shaped citation array), so `UserAdmissibleContent` omits it from the
+// admissible text variant. A payload including it directly (triggering excess
+// property checking) must fail to compile.
+const rejectedCitationsPayload: SessionInputPayload = [
+  // @ts-expect-error — `citations` is response metadata, not user-admissible on submitted text.
+  { type: 'text', text: 'x', citations: null },
+];
 
 const deliveryMode: SessionInputDeliveryMode = 'steer';
 const otherDeliveryMode: SessionInputDeliveryMode = 'queue';
@@ -154,6 +164,7 @@ export const sessionInputTypeFixture = {
   admissiblePayload,
   containerUploadPayload,
   rejectedContainerUploadPayload,
+  rejectedCitationsPayload,
   record,
   request,
   receipt,

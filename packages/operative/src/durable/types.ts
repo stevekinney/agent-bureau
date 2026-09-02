@@ -1,13 +1,9 @@
 import type { AnyToolbox, ToolExecutionResult } from 'armorer';
 import type {
-  ContainerUploadContent,
   ConversationSnapshot,
-  MultiModalContent,
-  RedactedThinkingContent,
-  ServerToolResultContent,
-  ServerToolUseContent,
-  ThinkingContent,
-  WebSearchToolResultContent,
+  DocumentContent,
+  ImageContent,
+  TextContent,
 } from 'conversationalist';
 import type { JSONValue, ToolCall } from 'interoperability';
 
@@ -186,31 +182,20 @@ export interface DurableRunDeps {
 /** How an admitted {@link SessionInputRecord} is delivered to the session. */
 export type SessionInputDeliveryMode = 'steer' | 'queue';
 
-/** The subset of {@link MultiModalContent} a caller may submit as session input. Excludes every
- *  block kind a provider adapter cannot safely round-trip as request content, resolved from
- *  `packages/conversationalist/src/multi-modal.ts` and the adapters that serialize it:
- *  `'thinking'` (`ThinkingContent`), `'redacted_thinking'` (`RedactedThinkingContent`),
- *  `'server_tool_use'` (`ServerToolUseContent`), `'web_search_tool_result'`
- *  (`WebSearchToolResultContent`), the `ServerToolResultType` discriminants
- *  (`'code_execution_tool_result'`, `'bash_code_execution_tool_result'`,
- *  `'text_editor_code_execution_tool_result'`, `'web_fetch_tool_result'`), and
- *  `'container_upload'` (`ContainerUploadContent`) — response-only in the Anthropic adapter,
- *  where the stable SDK's request-block union rejects it (throws a `TypeError`;
- *  `packages/conversationalist/src/adapters/anthropic/index.ts`'s block-serialization switch),
- *  and silently dropped by the OpenAI and Gemini adapters, which serialize only text, document,
- *  and image content. Promotion turns a payload into user input, and these kinds are either
- *  rejected, discarded, or misattributed by provider adapters when replayed as if the user had
- *  sent them. Only `TextContent`, `ImageContent`, and `DocumentContent` remain admissible. AB-42's
- *  coordinator amendments (2026-09-02) own this exclusion; AB-70 owns any future widening. */
-export type UserAdmissibleContent = Exclude<
-  MultiModalContent,
-  | ThinkingContent
-  | RedactedThinkingContent
-  | ServerToolUseContent
-  | WebSearchToolResultContent
-  | ServerToolResultContent
-  | ContainerUploadContent
->;
+/** The subset of `MultiModalContent` (`packages/conversationalist/src/multi-modal.ts`) a caller
+ *  may submit as session input: `TextContent` (citation metadata omitted — see below),
+ *  `ImageContent`, and `DocumentContent`. An explicit allowlist, not `Exclude<MultiModalContent,
+ *  ...>` against the provider-generated/response-only kinds (`ThinkingContent`,
+ *  `RedactedThinkingContent`, `ServerToolUseContent`, `WebSearchToolResultContent`,
+ *  `ServerToolResultContent`, `ContainerUploadContent`): `conversationalist` is consumed at a
+ *  `^` semver range, and a blacklist silently admits any new `MultiModalContent` variant a future
+ *  compatible release adds, defeating AB-70's ownership of widening this union deliberately. Every
+ *  excluded kind is either rejected outright (the Anthropic adapter throws serializing
+ *  `container_upload` and the other response-only blocks as request content), silently dropped
+ *  (the OpenAI and Gemini adapters serialize only text, document, and image content), or
+ *  misattributed if replayed as if the user had sent it. AB-42's coordinator amendments
+ *  (2026-09-02) own this exclusion; AB-70 owns any future widening. */
+export type UserAdmissibleContent = Omit<TextContent, 'citations'> | ImageContent | DocumentContent;
 
 /** The message-shaped subset of the document's `AgentInput` this contract accepts: exactly
  *  what one `Message.content` can hold (`string | ReadonlyArray<MultiModalContent>`, matching
