@@ -1,3 +1,7 @@
+import { createRequire } from 'node:module';
+import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import { fixupPluginRules } from '@eslint/compat';
 import js from '@eslint/js';
 import type { Linter, Rule } from 'eslint';
@@ -12,7 +16,17 @@ import unusedImports from 'eslint-plugin-unused-imports';
 import globals from 'globals';
 import tseslint from 'typescript-eslint';
 
-import rawDeterminismManifest from './scripts/determinism-manifest.json' with { type: 'json' };
+// `with { type: 'json' }` import attributes and `import.meta.dirname` both postdate this repo's
+// declared minimum engine (`engines.node: >=18` in package.json — the attribute syntax and
+// `import.meta.dirname` landed in Node 18.20/20.10+, not the 18.0 floor the field declares).
+// `eslint .` loads this file under whatever `node` a contributor's `eslint`'s `#!/usr/bin/env
+// node` shebang resolves to (see the `createDeterminismConfig` comment below), so both need a
+// form that works on the declared floor, not just the Node 22 this repo's CI happens to run.
+// `createRequire` + `fileURLToPath`/`dirname` have been available since Node 12 and work
+// identically under Bun.
+const require = createRequire(import.meta.url);
+const REPO_ROOT = dirname(fileURLToPath(import.meta.url));
+const rawDeterminismManifest: unknown = require('./scripts/determinism-manifest.json');
 
 const commonFiles = '**/*.{js,jsx,cjs,mjs,ts,tsx}';
 
@@ -348,13 +362,27 @@ export function createNoGlobalTransportMutationRule(
 }
 
 /**
+ * Package-relative shorthand for the manifest's test-directory shapes, matched when ESLint's
+ * flat-config `files` globs are resolved relative to an individual package (a per-package
+ * `eslint .` invocation, e.g. from `packages/lifecycle`). `manifest.deterministicDirectories`
+ * itself is repo-root-relative (`packages/*\/src/test/**`) and is matched too, below, so the
+ * `noInlineConfig` scoping works regardless of which cwd invokes it — a bare `eslint .` from the
+ * repository root (as `scripts/check-determinism.ts` effectively does by linting with `cwd:
+ * repoRoot`) needs the repo-root-relative form; a per-package `eslint .` needs this one.
+ */
+const PACKAGE_RELATIVE_DETERMINISTIC_DIRECTORY_GLOBS = [
+  'src/test/**',
+  'test/lifecycle-contract/**',
+];
+
+/**
  * Flat-config entries wiring both determinism rules for `manifest`/`repoRoot`, plus a
- * `noInlineConfig` block scoped to the manifest's test-directory shapes. That scoping is narrow
- * enough to be safe repo-wide (verified empty via `git grep eslint-disable` across
- * `packages/*\/src/test/**` and `packages/integration/test/lifecycle-contract/**` as of this
- * writing) and gives the real-runtime-call rule genuine non-bypass through the ordinary
- * `turbo run lint` path; the transport-mutation rule's non-bypass guarantee comes from
- * `scripts/check-determinism.ts` instead, per the comment above.
+ * `noInlineConfig` block scoped to the manifest's test-directory shapes (both cwd forms, see
+ * above). That scoping is narrow enough to be safe repo-wide (verified empty via `git grep
+ * eslint-disable` across `packages/*\/src/test/**` and `packages/integration/test/
+ * lifecycle-contract/**` as of this writing) and gives the real-runtime-call rule genuine
+ * non-bypass through the ordinary `turbo run lint` path; the transport-mutation rule's
+ * non-bypass guarantee comes from `scripts/check-determinism.ts` instead, per the comment above.
  */
 export function createDeterminismConfig(
   manifest: DeterminismManifest,
@@ -377,7 +405,10 @@ export function createDeterminismConfig(
       },
     },
     {
-      files: ['src/test/**', 'test/lifecycle-contract/**'],
+      files: [
+        ...PACKAGE_RELATIVE_DETERMINISTIC_DIRECTORY_GLOBS,
+        ...manifest.deterministicDirectories,
+      ],
       linterOptions: { noInlineConfig: true },
     },
   ];
@@ -516,12 +547,13 @@ export const baseConfig = [
     },
   })),
 
-  // `import.meta.dirname`, not the Bun-only `import.meta.dir`: `eslint .` runs under whatever
-  // interpreter its `#!/usr/bin/env node` shebang resolves to. Direct `bun <path-to-eslint>`
-  // stays on Bun, but `bun run lint` (what `turbo run lint`/CI actually invokes) forwards to
-  // real Node, where `import.meta.dir` is undefined. `dirname` is the one spelling both runtimes
-  // support.
-  ...createDeterminismConfig(determinismManifest, import.meta.dirname),
+  // `REPO_ROOT` (computed above via `fileURLToPath`/`dirname`), not `import.meta.dir` (Bun-only)
+  // or `import.meta.dirname` (unsupported on this repo's declared Node 18 floor): `eslint .` runs
+  // under whatever interpreter its `#!/usr/bin/env node` shebang resolves to — direct
+  // `bun <path-to-eslint>` stays on Bun, but `bun run lint` (what `turbo run lint`/CI actually
+  // invokes) forwards to real Node, and `fileURLToPath`/`dirname` is the one spelling every
+  // supported Node version and Bun agree on.
+  ...createDeterminismConfig(determinismManifest, REPO_ROOT),
 ];
 
 export const testOverrides = [
