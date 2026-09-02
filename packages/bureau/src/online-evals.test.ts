@@ -97,7 +97,7 @@ function createStubWebhookNotifier(): {
     notify(input) {
       notifications.push(input);
     },
-    dispose() {},
+    async dispose() {},
   };
   return { webhookNotifier, notifications };
 }
@@ -138,7 +138,7 @@ describe('createOnlineEvalSampler', () => {
     expect(sampler.observedCount()).toBe(0);
     expect(sampler.sampledCount()).toBe(0);
     await sampler.flush();
-    sampler.dispose();
+    await sampler.dispose();
   });
 
   it('is a no-op when sampleRate is 0', async () => {
@@ -154,7 +154,7 @@ describe('createOnlineEvalSampler', () => {
 
     expect(sampler.observedCount()).toBe(0);
     expect(records).toHaveLength(0);
-    sampler.dispose();
+    await sampler.dispose();
   });
 
   it('ignores non-run.completed actions', async () => {
@@ -169,7 +169,7 @@ describe('createOnlineEvalSampler', () => {
     await sampler.flush();
 
     expect(sampler.observedCount()).toBe(0);
-    sampler.dispose();
+    await sampler.dispose();
   });
 
   // ── Fraction respected ─────────────────────────────────────────────
@@ -194,7 +194,7 @@ describe('createOnlineEvalSampler', () => {
     expect(records).toHaveLength(2);
     expect(records.map((r) => r['runId'])).toEqual(['run-1', 'run-3']);
 
-    sampler.dispose();
+    await sampler.dispose();
   });
 
   it('never samples a run when sampleRate is 1 regardless of RNG output', async () => {
@@ -211,7 +211,7 @@ describe('createOnlineEvalSampler', () => {
 
     expect(sampler.sampledCount()).toBe(1);
     expect(records).toHaveLength(1);
-    sampler.dispose();
+    await sampler.dispose();
   });
 
   it('samples a run.completed action at most once, even if the action fires twice', async () => {
@@ -231,7 +231,7 @@ describe('createOnlineEvalSampler', () => {
 
     expect(sampler.observedCount()).toBe(1);
     expect(records).toHaveLength(1);
-    sampler.dispose();
+    await sampler.dispose();
   });
 
   // ── Scores recorded ────────────────────────────────────────────────
@@ -260,7 +260,7 @@ describe('createOnlineEvalSampler', () => {
       detail: { judgeName: 'judge-b', pass: false, score: 0.2, message: 'did not match' },
     });
 
-    sampler.dispose();
+    await sampler.dispose();
   });
 
   it('records a failed judge (throws) as a score-0 audit entry instead of crashing', async () => {
@@ -288,7 +288,7 @@ describe('createOnlineEvalSampler', () => {
       detail: { judgeName: 'flaky-judge', pass: false, score: 0 },
     });
 
-    sampler.dispose();
+    await sampler.dispose();
   });
 
   it('skips sampling when the action detail is not a RunResult-shaped object', async () => {
@@ -307,7 +307,7 @@ describe('createOnlineEvalSampler', () => {
     expect(sampler.sampledCount()).toBe(0);
     expect(records).toHaveLength(0);
 
-    sampler.dispose();
+    await sampler.dispose();
   });
 
   // ── Threshold breach fires webhook (neuter-verified) ────────────────
@@ -343,7 +343,7 @@ describe('createOnlineEvalSampler', () => {
       },
     });
 
-    sampler.dispose();
+    await sampler.dispose();
   });
 
   it('does NOT fire a webhook when the score is at or above alertThreshold', async () => {
@@ -365,7 +365,7 @@ describe('createOnlineEvalSampler', () => {
     await sampler.flush();
 
     expect(notifications).toHaveLength(0);
-    sampler.dispose();
+    await sampler.dispose();
   });
 
   it('falls back to firing on pass:false when no alertThreshold is configured', async () => {
@@ -384,7 +384,7 @@ describe('createOnlineEvalSampler', () => {
     expect(notifications).toHaveLength(1);
     expect(notifications[0]?.trigger).toBe('eval.threshold-breached');
 
-    sampler.dispose();
+    await sampler.dispose();
   });
 
   it('does not fire a webhook when no notifier is configured, even on breach', async () => {
@@ -406,7 +406,7 @@ describe('createOnlineEvalSampler', () => {
     await sampler.flush();
 
     expect(records).toHaveLength(1);
-    sampler.dispose();
+    await sampler.dispose();
   });
 
   it('NEUTER: removing the threshold check would fire a webhook for a passing score (guards the guard)', async () => {
@@ -431,7 +431,7 @@ describe('createOnlineEvalSampler', () => {
     await sampler.flush();
 
     expect(notifications).toHaveLength(0);
-    sampler.dispose();
+    await sampler.dispose();
   });
 
   it('stops observing actions after dispose', async () => {
@@ -443,10 +443,268 @@ describe('createOnlineEvalSampler', () => {
       rng: scriptedRng([0]),
     });
 
-    sampler.dispose();
+    await sampler.dispose();
     emit(makeAction({ type: 'run.completed', runId: 'run-1', detail: makeRunResult() }));
     await sampler.flush();
 
     expect(records).toHaveLength(0);
+  });
+
+  // ── Awaitable dispose() and AbortSignal threading (AB-37/AB-206) ────
+
+  it('dispose() returns a promise that resolves only after every in-flight evaluateRun() settles', async () => {
+    const { bureau, emit } = createStubBureau();
+    const { auditTrail, records } = createStubAuditTrail();
+
+    let releaseJudge: (() => void) | undefined;
+    const gatedJudge: OnlineEvalJudge = {
+      name: 'gated-judge',
+      evaluate: () =>
+        new Promise<EvalScore>((resolve) => {
+          releaseJudge = () => resolve({ pass: true, score: 1, message: 'released' });
+        }),
+    };
+    const sampler = createOnlineEvalSampler(bureau, auditTrail, undefined, {
+      judges: [gatedJudge],
+      sampleRate: 1,
+      rng: scriptedRng([0]),
+    });
+
+    emit(makeAction({ type: 'run.completed', runId: 'run-1', detail: makeRunResult() }));
+
+    let disposeResolved = false;
+    const disposePromise = sampler.dispose().then(() => {
+      disposeResolved = true;
+    });
+
+    // Give the gated evaluation's microtasks a chance to run: dispose() must
+    // still be pending because the judge has not been released.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(disposeResolved).toBe(false);
+    expect(records).toHaveLength(0);
+
+    releaseJudge?.();
+    await disposePromise;
+
+    expect(disposeResolved).toBe(true);
+    expect(records).toHaveLength(1);
+  });
+
+  it('threads the owner-issued AbortSignal into every evaluateRun() judge invocation, unblocking a never-settling judge on abort', async () => {
+    const { bureau, emit } = createStubBureau();
+    const { auditTrail, records } = createStubAuditTrail();
+    const controller = new AbortController();
+
+    // A judge that never settles on its own: if `options.signal` were not
+    // actually threaded into this judge's race, `flush()` below would hang
+    // forever instead of resolving once the signal aborts.
+    const neverSettlingJudge: OnlineEvalJudge = {
+      name: 'never-settling-judge',
+      evaluate: () => new Promise<EvalScore>(() => {}),
+    };
+    const sampler = createOnlineEvalSampler(bureau, auditTrail, undefined, {
+      judges: [neverSettlingJudge],
+      sampleRate: 1,
+      rng: scriptedRng([0]),
+      signal: controller.signal,
+    });
+
+    emit(makeAction({ type: 'run.completed', runId: 'run-1', detail: makeRunResult() }));
+
+    // Give the sampler a chance to kick off the judge's evaluation before
+    // aborting it.
+    await Promise.resolve();
+    controller.abort(new Error('shutting down'));
+
+    await sampler.flush();
+
+    expect(records).toHaveLength(0);
+    await sampler.dispose();
+  });
+
+  it('aborting the signal mid-evaluation settles the affected evaluateRun() promptly, skipping remaining judges', async () => {
+    const { bureau, emit } = createStubBureau();
+    const { auditTrail, records } = createStubAuditTrail();
+    const controller = new AbortController();
+
+    let releaseFirstJudge: (() => void) | undefined;
+    const firstJudge: OnlineEvalJudge = {
+      name: 'first-judge',
+      evaluate: () =>
+        new Promise<EvalScore>((resolve) => {
+          releaseFirstJudge = () => resolve({ pass: true, score: 1, message: 'first' });
+        }),
+    };
+    let secondJudgeCalled = false;
+    const secondJudge: OnlineEvalJudge = {
+      name: 'second-judge',
+      evaluate: (): EvalScore => {
+        secondJudgeCalled = true;
+        return { pass: true, score: 1, message: 'second' };
+      },
+    };
+    const sampler = createOnlineEvalSampler(bureau, auditTrail, undefined, {
+      judges: [firstJudge, secondJudge],
+      sampleRate: 1,
+      rng: scriptedRng([0]),
+      signal: controller.signal,
+    });
+
+    emit(makeAction({ type: 'run.completed', runId: 'run-1', detail: makeRunResult() }));
+
+    // Give the sampler a chance to kick off the first judge's evaluation
+    // before aborting mid-evaluation.
+    await Promise.resolve();
+    controller.abort(new Error('shutting down'));
+
+    await sampler.flush();
+
+    expect(secondJudgeCalled).toBe(false);
+    expect(records).toHaveLength(0);
+
+    // The first judge's own promise settling later (as if it had continued
+    // running in the background) must not resurrect the aborted evaluation.
+    releaseFirstJudge?.();
+    await sampler.flush();
+    expect(records).toHaveLength(0);
+
+    await sampler.dispose();
+  });
+
+  it('a judge that aborts the signal as a side effect of starting settles promptly via the already-aborted race branch', async () => {
+    const { bureau, emit } = createStubBureau();
+    const { auditTrail, records } = createStubAuditTrail();
+    const controller = new AbortController();
+
+    // The top-of-loop `if (signal?.aborted) return;` check only catches a
+    // signal already aborted BEFORE this judge starts. This judge instead
+    // aborts as a side effect of its own synchronous invocation — the
+    // signal is still unaborted when the loop check runs, but IS aborted by
+    // the time `raceAgainstAbort`'s internal `whenAborted()` observes it a
+    // few synchronous steps later, exercising that already-aborted-at-race
+    // -time branch rather than the abort-mid-wait one.
+    const selfAbortingJudge: OnlineEvalJudge = {
+      name: 'self-aborting-judge',
+      evaluate: () => {
+        controller.abort(new Error('aborted by the judge itself'));
+        return new Promise<EvalScore>(() => {});
+      },
+    };
+    const sampler = createOnlineEvalSampler(bureau, auditTrail, undefined, {
+      judges: [selfAbortingJudge],
+      sampleRate: 1,
+      rng: scriptedRng([0]),
+      signal: controller.signal,
+    });
+
+    emit(makeAction({ type: 'run.completed', runId: 'run-1', detail: makeRunResult() }));
+    await sampler.flush();
+
+    expect(records).toHaveLength(0);
+    await sampler.dispose();
+  });
+
+  it('an already-aborted signal at evaluation start settles evaluateRun promptly without invoking the judge or recording a score', async () => {
+    const { bureau, emit } = createStubBureau();
+    const { auditTrail, records } = createStubAuditTrail();
+    const controller = new AbortController();
+    controller.abort(new Error('shutting down before evaluation started'));
+
+    // Tracks whether the judge was actually invoked, not just whether the
+    // eventual race against `signal` rejects — `judge.evaluate(runResult)`
+    // is evaluated as a plain argument expression BEFORE `raceAgainstAbort`
+    // runs, so a race-only guard cannot prevent the judge from starting.
+    let judgeInvoked = false;
+    const trackedJudge: OnlineEvalJudge = {
+      name: 'tracked-judge',
+      evaluate: () => {
+        judgeInvoked = true;
+        return { pass: true, score: 1, message: 'ok' };
+      },
+    };
+
+    const sampler = createOnlineEvalSampler(bureau, auditTrail, undefined, {
+      judges: [trackedJudge],
+      sampleRate: 1,
+      rng: scriptedRng([0]),
+      signal: controller.signal,
+    });
+
+    emit(makeAction({ type: 'run.completed', runId: 'run-1', detail: makeRunResult() }));
+    await sampler.flush();
+
+    expect(judgeInvoked).toBe(false);
+    expect(records).toHaveLength(0);
+    await sampler.dispose();
+  });
+
+  it('aborting the signal while the audit write is in flight suppresses the alert fired after it settles', async () => {
+    const { bureau, emit } = createStubBureau();
+    const controller = new AbortController();
+
+    // Gates `auditTrail.record()` so the signal can be aborted WHILE
+    // `recordScore()` is mid-await, after the judge already reported a
+    // threshold breach but before `fireAlert()` would run.
+    let releaseRecord: (() => void) | undefined;
+    const records: Record<string, unknown>[] = [];
+    const auditTrail: AuditTrail = {
+      record(entry) {
+        records.push(entry);
+        return new Promise<void>((resolve) => {
+          releaseRecord = resolve;
+        });
+      },
+      async query() {
+        return [];
+      },
+      dispose() {},
+    };
+    const { webhookNotifier, notifications } = createStubWebhookNotifier();
+
+    const breachingJudge: OnlineEvalJudge = {
+      name: 'breaching-judge',
+      evaluate: () => ({ pass: false, score: 0, message: 'breach' }),
+    };
+    const sampler = createOnlineEvalSampler(bureau, auditTrail, webhookNotifier, {
+      judges: [breachingJudge],
+      sampleRate: 1,
+      rng: scriptedRng([0]),
+      signal: controller.signal,
+    });
+
+    emit(makeAction({ type: 'run.completed', runId: 'run-1', detail: makeRunResult() }));
+
+    // Give the judge's microtasks a chance to run and reach the gated
+    // audit write.
+    while (records.length === 0) {
+      await Promise.resolve();
+    }
+    expect(records).toHaveLength(1);
+
+    controller.abort(new Error('shutting down mid audit write'));
+    releaseRecord?.();
+    await sampler.flush();
+
+    // The audit write itself already landed (best-effort, in flight before
+    // the abort), but the NEW webhook alert enqueued after it must not fire
+    // once the owner has aborted.
+    expect(notifications).toHaveLength(0);
+    await sampler.dispose();
+  });
+
+  it('calling dispose() twice does not throw and the second call resolves promptly', async () => {
+    const { bureau } = createStubBureau();
+    const { auditTrail } = createStubAuditTrail();
+    const sampler = createOnlineEvalSampler(bureau, auditTrail, undefined, {
+      judges: [passingMatcher()],
+      sampleRate: 1,
+      rng: scriptedRng([0]),
+    });
+
+    const firstDispose = await sampler.dispose();
+    expect(firstDispose).toBeUndefined();
+    const secondDispose = await sampler.dispose();
+    expect(secondDispose).toBeUndefined();
   });
 });

@@ -3650,8 +3650,12 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
           // unsubscribed cleanly (the notifier also abandons in-flight backoff
           // waits so a disposed bureau never fires a webhook late).
           auditTrailInstance?.dispose();
-          webhookNotifierInstance?.dispose();
-          onlineEvalSamplerInstance?.dispose();
+          if (webhookNotifierInstance) {
+            detachBestEffortPromise(webhookNotifierInstance.dispose());
+          }
+          if (onlineEvalSamplerInstance) {
+            detachBestEffortPromise(onlineEvalSamplerInstance.dispose());
+          }
           emitter.dispatch(new BureauDisposedEvent());
           storeSubscription.unsubscribe();
           for (const disposeListener of schedulerCleanup) {
