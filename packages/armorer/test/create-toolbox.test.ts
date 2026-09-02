@@ -7018,3 +7018,128 @@ describe('createToolbox', () => {
     });
   });
 });
+
+describe('per-call traceContext and executionContext (AB-233)', () => {
+  it('threads a call-time traceContext into the tool context', async () => {
+    let observedTraceContext: unknown;
+    const toolbox = createToolbox([
+      createTool({
+        name: 'trace-echo',
+        description: 'echoes traceContext',
+        input: z.object({}),
+        async execute(_params, context) {
+          observedTraceContext = context.traceContext;
+          return 'ok';
+        },
+      }),
+    ]);
+
+    const callTimeTraceContext = { traceId: 'call-time-trace' };
+    await toolbox.execute(
+      { id: 'trace-call', name: 'trace-echo', arguments: {} },
+      { traceContext: callTimeTraceContext },
+    );
+
+    expect(observedTraceContext).toBe(callTimeTraceContext);
+  });
+
+  it('threads a call-time executionContext into the tool context', async () => {
+    let observedExecutionContext: unknown;
+    const toolbox = createToolbox([
+      createTool({
+        name: 'execution-context-echo',
+        description: 'echoes executionContext',
+        input: z.object({}),
+        async execute(_params, context) {
+          observedExecutionContext = context.executionContext;
+          return 'ok';
+        },
+      }),
+    ]);
+
+    const callTimeExecutionContext = { childRegistry: { marker: 'registry-a' } };
+    await toolbox.execute(
+      { id: 'execution-context-call', name: 'execution-context-echo', arguments: {} },
+      { executionContext: callTimeExecutionContext },
+    );
+
+    expect(observedExecutionContext).toBe(callTimeExecutionContext);
+  });
+
+  it('falls back to the toolbox base context executionContext when the call supplies none', async () => {
+    let observedExecutionContext: unknown;
+    const baseExecutionContext = { childRegistry: { marker: 'registry-base' } };
+    const toolbox = createToolbox(
+      [
+        createTool({
+          name: 'execution-context-fallback',
+          description: 'echoes executionContext',
+          input: z.object({}),
+          async execute(_params, context) {
+            observedExecutionContext = context.executionContext;
+            return 'ok';
+          },
+        }),
+      ],
+      { context: { executionContext: baseExecutionContext } },
+    );
+
+    await toolbox.execute({
+      id: 'execution-context-fallback-call',
+      name: 'execution-context-fallback',
+      arguments: {},
+    });
+
+    expect(observedExecutionContext).toBe(baseExecutionContext);
+  });
+
+  it('falls back to the toolbox base context traceContext when the call supplies none', async () => {
+    let observedTraceContext: unknown;
+    const baseTraceContext = { traceId: 'base-trace' };
+    const toolbox = createToolbox(
+      [
+        createTool({
+          name: 'trace-fallback',
+          description: 'echoes traceContext',
+          input: z.object({}),
+          async execute(_params, context) {
+            observedTraceContext = context.traceContext;
+            return 'ok';
+          },
+        }),
+      ],
+      { context: { traceContext: baseTraceContext } },
+    );
+
+    await toolbox.execute({ id: 'trace-fallback-call', name: 'trace-fallback', arguments: {} });
+
+    expect(observedTraceContext).toBe(baseTraceContext);
+  });
+
+  it('prefers a call-time traceContext over the toolbox base context', async () => {
+    let observedTraceContext: unknown;
+    const baseTraceContext = { traceId: 'base-trace' };
+    const callTimeTraceContext = { traceId: 'call-time-trace' };
+    const toolbox = createToolbox(
+      [
+        createTool({
+          name: 'trace-override',
+          description: 'echoes traceContext',
+          input: z.object({}),
+          async execute(_params, context) {
+            observedTraceContext = context.traceContext;
+            return 'ok';
+          },
+        }),
+      ],
+      { context: { traceContext: baseTraceContext } },
+    );
+
+    await toolbox.execute(
+      { id: 'trace-override-call', name: 'trace-override', arguments: {} },
+      { traceContext: callTimeTraceContext },
+    );
+
+    expect(observedTraceContext).toBe(callTimeTraceContext);
+  });
+});

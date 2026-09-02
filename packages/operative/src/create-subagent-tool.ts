@@ -6,7 +6,7 @@ import type { ZodType } from 'zod';
 import type { SuccessfulRunResult } from './agent-run';
 import { isSuccessfulRunResult } from './agent-run';
 import type { MutableChildRunRegistry } from './child-run';
-import { dispatchChildRun } from './child-run';
+import { dispatchChildRun, isMutableChildRunRegistry } from './child-run';
 import { SubagentRunError } from './errors';
 import type { OperativeEventMap } from './events';
 import type { AgentInput, RunnableAgent } from './runnable-agent';
@@ -117,10 +117,11 @@ interface CreateSubagentToolOptionsBase<
    * structurally: its `run(input, context?)` is invoked with the exact
    * `agentName` this tool was constructed with, plus the parent tool call's
    * `signal` and `traceContext` (as read off the executing `ToolContext` —
-   * present only when the caller built its toolbox with a matching
-   * `context: { traceContext }`; the ordinary agent-loop path does not
-   * populate `ToolContext.traceContext` from a run's own `parentContext`)
-   * and this option bag's own `withTraceContext`.
+   * AB-233: the ordinary `createAgent`-driven agent loop now populates
+   * `ToolContext.traceContext` from the run's own `parentContext` on every
+   * call, via `run-step.ts`'s toolbox execute call site — no special
+   * toolbox construction required) and this option bag's own
+   * `withTraceContext`.
    */
   agent: RunnableAgent<TOutput, THasOutput>;
   /**
@@ -182,6 +183,17 @@ interface CreateSubagentToolOptionsBase<
    *
    * The `durable` flag must be set to `true` when the child run is started as a
    * Weft child workflow (i.e. when the bureau has `.persistence()` set).
+   *
+   * AB-233: `registry` and `parentRunId` here are construction-time
+   * DEFAULTS only — a tool instance reused across more than one
+   * `agent.run()` call would otherwise share one registry (either run's
+   * `abortChild` could cancel the other's child) and stamp every dispatch
+   * with the same frozen `parentRunId`. On each execution, a per-call
+   * `ToolContext.executionContext.childRegistry`/`.parentRunId` (populated
+   * by the ordinary agent loop's `run-step.ts` from THAT run's own
+   * `RunOptions.childRegistry`/`runId`) takes precedence when present; these
+   * fields remain the fallback for direct `dispatchChildRun` callers and
+   * for tools built outside the ordinary loop.
    */
   parentContext?: {
     emitter: TypedEventTarget<OperativeEventMap>;
@@ -194,7 +206,9 @@ interface CreateSubagentToolOptionsBase<
      * into it, making it discoverable through the matching `AgentRun`'s
      * `children()`/`abortChild()` (see `child-run.ts`'s module docs for how
      * the two are wired together). Omit it and the tool behaves exactly as
-     * it did before AB-50 — discovery is opt-in, not a default.
+     * it did before AB-50 — discovery is opt-in, not a default. See the
+     * AB-233 note above: this is a fallback, superseded per-execution by
+     * `ToolContext.executionContext.childRegistry` when present.
      */
     registry?: MutableChildRunRegistry;
   };
@@ -315,25 +329,44 @@ export function createSubagentTool<
     execute: async (params: TInput, context: ToolContext) => {
       const agentInput = toAgentInput(params);
 
+      // AB-233 — per-execution values (this call's `ToolContext.executionContext`,
+      // populated by the ordinary agent loop's `run-step.ts` from THIS
+      // run's own `RunOptions.childRegistry`/`runId`) take precedence over
+      // `parentContext.registry`/`parentContext.parentRunId`, which are
+      // captured once at tool-construction time. Without this, a single
+      // tool instance reused across two `agent.run()` calls would share one
+      // child registry (either run's `abortChild` could cancel the other's
+      // child) and stamp every dispatch with the same frozen `parentRunId`
+      // regardless of which run actually issued this call.
+      const executionChildRegistry = context.executionContext?.['childRegistry'];
+      const registry = isMutableChildRunRegistry(executionChildRegistry)
+        ? executionChildRegistry
+        : parentContext?.registry;
+      const executionParentRunId = context.executionContext?.['parentRunId'];
+      const parentRunId =
+        typeof executionParentRunId === 'string'
+          ? executionParentRunId
+          : (parentContext?.parentRunId ?? '');
+
       // AB-50 — dispatch through the lower-level child dispatch primitive.
       // It emits `ChildWorkflowStartedEvent` before the child run begins
       // (and the completed/failed/aborted siblings once it settles) when
-      // `parentContext` is supplied, and registers into
-      // `parentContext.registry` when that is supplied too.
+      // `parentContext` is supplied, and registers into `registry` when
+      // that resolves to one (see above).
       // `ChildWorkflowStartedEvent.input` is (and stays, per this issue's
       // "preserve child-start events" criterion) a plain string — a
       // conversation-history `agentInput` is projected to a named, lossy
       // marker rather than widening the event's field.
       const childRun = dispatchChildRun(agent, agentInput, {
         agentName,
-        parentRunId: parentContext?.parentRunId ?? '',
+        parentRunId,
         parentAgentName: parentContext?.parentAgentName,
         signal: context.signal,
         traceContext: context.traceContext,
         withTraceContext,
         emitter: parentContext?.emitter,
         durable: parentContext?.durable,
-        registry: parentContext?.registry,
+        registry,
       });
       const result = await childRun.result();
 
