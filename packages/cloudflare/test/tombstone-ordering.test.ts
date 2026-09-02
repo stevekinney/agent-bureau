@@ -15,6 +15,13 @@ import { createSqliteDouble, type SqliteDouble } from '../src/test/sqlite-double
  * To prove cross-store ordering, the SQL double is wrapped so a status=>'deleted'
  * UPDATE pushes `sql:tombstone` onto a shared event log that the Vectorize fake's
  * `delete` also lands on (as `vectorize:delete`).
+ *
+ * AB-277 fold-or-exclude: stays DOUBLE-ONLY. Proving call ORDER (not just the
+ * end state) requires an instrumented `Sql` wrapper that records into a
+ * shared log with the Vectorize fake — the real Miniflare/workerd lane has no
+ * such interception point, and no double-based positive-path equivalent
+ * exists to fold into `runCloudflareBackendContract` beyond what its own
+ * tombstone case (`behavior-contract.ts`) already covers.
  */
 
 const TENANT = 'tenant-a';

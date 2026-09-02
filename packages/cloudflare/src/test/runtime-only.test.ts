@@ -5,10 +5,13 @@ import { afterEach, describe, expect, it } from 'bun:test';
 
 import { createProcessUniqueIdentifierPrefix } from '../../test/runtime-lane-process-identifier';
 import { createCloudflareR2TextValueStore } from '../create-cloudflare-r2-text-value-store';
+import { CloudflareRuntimeLaneCancelledError, CloudflareUnsupportedApiError } from '../diagnostics';
 import {
   cleanUpAfterStartupFailure,
   type CloudflareRuntimeLane,
   createSqliteStorageProxy,
+  interpretVectorizeProbe,
+  runCancellableLaneOperation,
   startCloudflareRuntime,
 } from './runtime-lane';
 
@@ -48,10 +51,33 @@ describe('Cloudflare real-runtime lane (runtime-only)', () => {
   it(// Only the real Miniflare/workerd Vectorize binding can produce this
   // remote-only failure; the fast double happily answers `query()` locally,
   // so no double can ever assert this message.
-  'reports Vectorize as remote-only, matching the AB-276 coordinator ruling', async () => {
+  'reports Vectorize as a typed unsupported diagnostic, matching the AB-276 coordinator ruling', async () => {
     const lane = await bootLane();
 
-    expect(lane.vectorizeRemoteOnlyError).toMatch(/needs to be run remotely/);
+    expect(lane.vectorizeUnsupported).toBeInstanceOf(CloudflareUnsupportedApiError);
+    expect(lane.vectorizeUnsupported.api).toBe('vectorize.query');
+    expect(lane.vectorizeUnsupported.reason).toBe('vectorize-remote-only');
+    expect(lane.vectorizeUnsupported.owningIssue).toBe('AB-276');
+    expect((lane.vectorizeUnsupported.cause as Error).message).toMatch(/needs to be run remotely/);
+  });
+
+  it(// A real Miniflare probe never unexpectedly succeeds (per the AB-276
+  // coordinator ruling, `vectorize` is always remote-only), so this branch
+  // of `interpretVectorizeProbe` is not organically reachable through
+  // `startCloudflareRuntime` — it is exercised directly here, and the
+  // fallback-message branch (no double can produce EITHER outcome) below it.
+  'interpretVectorizeProbe throws when the probe unexpectedly reports success', () => {
+    expect(() => interpretVectorizeProbe({ ok: true })).toThrow(
+      /unexpectedly succeeded without a remote proxy/,
+    );
+  });
+
+  it('interpretVectorizeProbe falls back to a default message when the probe fails with no error text', () => {
+    const unsupported = interpretVectorizeProbe({ ok: false });
+    expect(unsupported).toBeInstanceOf(CloudflareUnsupportedApiError);
+    expect((unsupported.cause as Error).message).toBe(
+      'Miniflare Vectorize probe failed with no message.',
+    );
   });
 
   it(// A double has no OS process, no on-disk persistence directory, and no
@@ -181,5 +207,122 @@ describe('Cloudflare real-runtime lane (runtime-only)', () => {
       persistDirectoryStillExists = false;
     }
     expect(persistDirectoryStillExists).toBe(false);
+  });
+
+  describe('cancellation', () => {
+    it(// Weft's `Storage`/`TextValueStore` contracts take no `AbortSignal` — a
+    // double has no in-flight async work to cancel in the first place (every
+    // double method resolves synchronously under the hood). Only the real
+    // lane's RPC/HTTP transport has genuine in-flight work, so this exercises
+    // `runCancellableLaneOperation` (the exact function every real-lane call
+    // goes through) directly against a deferred, caller-controlled operation
+    // rather than racing real Miniflare I/O, which would be a flake on a
+    // loaded box, not a deterministic test.
+    'rejects an in-flight operation with a typed cancellation the instant abort fires, without waiting for it to settle', async () => {
+      const controller = new AbortController();
+      let resolveOperation: (() => void) | undefined;
+      const operation = () =>
+        new Promise<string>((resolve) => {
+          resolveOperation = () => resolve('too-late');
+        });
+
+      const pending = runCancellableLaneOperation(
+        controller.signal,
+        'probe-method',
+        'probe-namespace',
+        operation,
+      );
+
+      controller.abort();
+
+      let caught: unknown;
+      try {
+        await pending;
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(CloudflareRuntimeLaneCancelledError);
+      expect((caught as CloudflareRuntimeLaneCancelledError).method).toBe('probe-method');
+      expect((caught as CloudflareRuntimeLaneCancelledError).namespace).toBe('probe-namespace');
+
+      // Resolving the underlying operation after cancellation must not
+      // surface anywhere (no unhandled rejection, no second settlement) —
+      // the caller already moved on with the typed cancellation.
+      resolveOperation?.();
+    });
+
+    it('resolves normally when the signal never fires (the positive control for the cancellation wrapper)', async () => {
+      const controller = new AbortController();
+      const result = await runCancellableLaneOperation(
+        controller.signal,
+        'probe-method',
+        'probe-namespace',
+        () => Promise.resolve('completed'),
+      );
+      expect(result).toBe('completed');
+    });
+
+    it(// `lane.cancel()` aborts the lane's controller without disposing
+    // Miniflare or removing `persistDirectory` — a distinct outcome from
+    // `stop()`/`shutdown()`, asserted here against the real lane's actual
+    // `sqliteStorage`/`r2Bucket` proxies so the wiring (not just the
+    // standalone wrapper above) is proven.
+    'cancels the real lane, rejecting subsequent sqliteStorage and r2Bucket calls with a typed outcome', async () => {
+      const lane = await bootLane();
+      await lane.sqliteStorage.put('pre-cancel', new Uint8Array([1]));
+
+      lane.cancel();
+
+      let sqliteCaught: unknown;
+      try {
+        await lane.sqliteStorage.get('pre-cancel');
+      } catch (error) {
+        sqliteCaught = error;
+      }
+      expect(sqliteCaught).toBeInstanceOf(CloudflareRuntimeLaneCancelledError);
+
+      let r2Caught: unknown;
+      try {
+        await lane.r2Bucket.get('any-key');
+      } catch (error) {
+        r2Caught = error;
+      }
+      expect(r2Caught).toBeInstanceOf(CloudflareRuntimeLaneCancelledError);
+    });
+  });
+
+  describe('stop() and restart()', () => {
+    it(// `stop()` disposes Miniflare but must NOT remove `persistDirectory` —
+    // that is exactly the state `restart()` (and AB-277's restart scenario)
+    // rehydrates from. No double has a process or a persistence directory to
+    // preserve across a stop, so this has no double-based analog.
+    'stops the runtime without removing its persistence directory', async () => {
+      const lane = await bootLane();
+      lanes.pop(); // stopped explicitly below, not via afterEach.
+      const { persistDirectory } = lane;
+
+      await lane.stop();
+
+      const entries = await readdir(persistDirectory);
+      expect(entries.length).toBeGreaterThan(0);
+
+      await rm(persistDirectory, { recursive: true, force: true });
+    });
+
+    it(// The restart scenario itself (writing state, restarting, asserting
+    // record-for-record rehydration) lives in `restart.test.ts` against the
+    // production adapters; this proves the narrower lane-level contract —
+    // `restart()` reuses the SAME namespace/persistDirectory rather than
+    // allocating fresh ones, which is what makes rehydration possible at all.
+    'restart() reuses the same namespace and persistDirectory as the original lane', async () => {
+      const original = await bootLane();
+      lanes.pop(); // the restarted lane replaces it in `lanes` below.
+      const { persistDirectory } = original;
+
+      const restarted = await original.restart();
+      lanes.push(restarted);
+
+      expect(restarted.persistDirectory).toBe(persistDirectory);
+    });
   });
 });

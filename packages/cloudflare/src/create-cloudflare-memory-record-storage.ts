@@ -7,6 +7,7 @@ import type {
 } from 'memory';
 import { z } from 'zod';
 
+import { assertBindingHasMembers, CloudflareSerializationError } from './diagnostics';
 import type { Sql, SqlValue } from './sql';
 import type { VectorizeIndex, VectorizeMetadataValue } from './vectorize';
 
@@ -72,6 +73,67 @@ const vectorJsonSchema = z.array(z.number().finite());
 
 /** Schema for the decoded JSON `metadata` column: an arbitrary string-keyed map. */
 const metadataJsonSchema = z.record(z.string(), z.unknown());
+
+/**
+ * A recursively JSON-serializable value: exactly what survives a
+ * `JSON.stringify`/`JSON.parse` round trip unchanged. Used to validate a
+ * caller's `vector`/`metadata` BEFORE any `sql.exec` runs — `undefined`,
+ * `NaN`/`Infinity`, and non-finite numbers all fail this schema, where a bare
+ * `JSON.stringify` would instead silently drop the key (`undefined`) or write
+ * `null` in place of the number (`NaN`/`Infinity`), producing a write that
+ * "succeeds" but reads back as something the caller never wrote.
+ */
+const jsonSerializableValueSchema: z.ZodType<unknown> = z.lazy(() =>
+  z.union([
+    z.string(),
+    z.number().finite(),
+    z.boolean(),
+    z.null(),
+    z.array(jsonSerializableValueSchema),
+    z.record(z.string(), jsonSerializableValueSchema),
+  ]),
+);
+
+/** Schema for a record's `metadata` at the WRITE boundary (see {@link jsonSerializableValueSchema}). */
+const writableMetadataSchema = z.record(z.string(), jsonSerializableValueSchema);
+
+/** Renders a Zod issue path as a dotted field label. */
+function describeIssuePath(path: readonly PropertyKey[]): string {
+  return path.length === 0 ? '(root)' : path.map(String).join('.');
+}
+
+/**
+ * Validates `vector` is finite in every component, throwing a typed
+ * {@link CloudflareSerializationError} naming the offending index BEFORE any
+ * `sql.exec` runs — so a serialization failure never produces a partial or
+ * truncated write.
+ */
+function validateVectorForWrite(vector: Float32Array): void {
+  const result = z.array(z.number().finite()).safeParse(Array.from(vector));
+  if (result.success) return;
+  const issue = result.error.issues[0];
+  const field = `vector[${issue === undefined ? '?' : describeIssuePath(issue.path)}]`;
+  throw new CloudflareSerializationError(
+    field,
+    issue?.message ?? 'vector contains a non-finite number.',
+  );
+}
+
+/**
+ * Validates `metadata` is recursively JSON-serializable, throwing a typed
+ * {@link CloudflareSerializationError} naming the offending field path BEFORE
+ * any `sql.exec` runs.
+ */
+function validateMetadataForWrite(metadata: Record<string, unknown>): void {
+  const result = writableMetadataSchema.safeParse(metadata);
+  if (result.success) return;
+  const issue = result.error.issues[0];
+  const field = `metadata.${issue === undefined ? '?' : describeIssuePath(issue.path)}`;
+  throw new CloudflareSerializationError(
+    field,
+    issue?.message ?? 'metadata is not JSON-serializable.',
+  );
+}
 
 /**
  * Reconstitute a {@link MemoryRecord} from a canonical SQLite row, decoding the
@@ -163,6 +225,9 @@ export function createCloudflareMemoryRecordStorage(
   options: CreateCloudflareMemoryRecordStorageOptions,
 ): MemoryRecordStorage {
   const { sql, vectorize } = options;
+  assertBindingHasMembers('sql', sql, ['exec']);
+  assertBindingHasMembers('vectorize', vectorize, ['upsert', 'query', 'deleteByIds']);
+
   const table = options.tableName ?? DEFAULT_MEMORY_TABLE_NAME;
 
   // The table name is interpolated into SQL as an identifier (parameter binding
@@ -411,6 +476,8 @@ export function createCloudflareMemoryRecordStorage(
         ...(record.tenantId !== undefined ? { tenantId: record.tenantId } : {}),
         namespace: record.namespace,
       });
+      validateVectorForWrite(record.vector);
+      validateMetadataForWrite(record.metadata);
       const dedupeKey = recordDedupeKey(record);
       sql.exec(
         `INSERT INTO ${table}
@@ -484,6 +551,8 @@ export function createCloudflareMemoryRecordStorage(
         ...(record.tenantId !== undefined ? { tenantId: record.tenantId } : {}),
         namespace: record.namespace,
       });
+      validateVectorForWrite(record.vector);
+      validateMetadataForWrite(record.metadata);
       const existingById = activeRow(tenantId, namespace, record.id);
       sql.exec(
         `INSERT OR IGNORE INTO ${table}
@@ -696,6 +765,8 @@ export function createCloudflareMemoryRecordStorage(
       patch: { content?: string; vector?: Float32Array; metadata?: Record<string, unknown> },
     ): Promise<MemoryRecord | undefined> {
       const { tenantId, namespace } = requireScope(scope);
+      if (patch.vector !== undefined) validateVectorForWrite(patch.vector);
+      if (patch.metadata !== undefined) validateMetadataForWrite(patch.metadata);
       const row = activeRow(tenantId, namespace, id);
       if (row === undefined) return undefined;
 

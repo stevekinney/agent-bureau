@@ -205,8 +205,16 @@ bun run build
 ## `cloudflare` — Main Entry Point
 
 ```typescript
-import { createCloudflareMemoryRecordStorage, DEFAULT_MEMORY_TABLE_NAME } from 'cloudflare';
+import {
+  CloudflareBindingMismatchError,
+  CloudflareRuntimeLaneCancelledError,
+  CloudflareSerializationError,
+  CloudflareUnsupportedApiError,
+  createCloudflareMemoryRecordStorage,
+  DEFAULT_MEMORY_TABLE_NAME,
+} from 'cloudflare';
 import type {
+  CloudflareBindingKind,
   CreateCloudflareMemoryRecordStorageOptions,
   Sql,
   SqlCursor,
@@ -407,6 +415,39 @@ interface R2Bucket {
 
 ---
 
+### Typed diagnostics
+
+Every binding mismatch, unsupported API, and serialization failure the three adapter factories can detect throws one of these — never a generic `Error`, and never a silent fallback to a different backend.
+
+```typescript
+class CloudflareBindingMismatchError extends Error {
+  readonly binding: 'sql' | 'r2Bucket' | 'vectorize';
+  readonly missingMember: string;
+}
+
+class CloudflareUnsupportedApiError extends Error {
+  readonly api: string;
+  readonly reason: string;
+  readonly owningIssue: string;
+}
+
+class CloudflareSerializationError extends Error {
+  readonly field: string;
+}
+
+class CloudflareRuntimeLaneCancelledError extends Error {
+  readonly method: string;
+  readonly namespace: string;
+}
+```
+
+- **`CloudflareBindingMismatchError`** — thrown at CONSTRUCTION time (before any I/O) when an injected `sql`, `bucket`, or `vectorize` binding is missing a required member. `createCloudflareMemoryRecordStorage` validates both `sql` and `vectorize` before touching either, so a mismatched binding never causes a fallback write to the other.
+- **`CloudflareUnsupportedApiError`** — thrown for an adapter path the real runtime does not implement. Today this is `vectorize.query` on the real-runtime conformance lane (`reason: 'vectorize-remote-only'`, `owningIssue: 'AB-276'`) — see `CloudflareRuntimeLane.vectorizeUnsupported` below.
+- **`CloudflareSerializationError`** — thrown by `createCloudflareMemoryRecordStorage`'s `put`/`putOnce`/`update`, BEFORE any `sql.exec` runs, when a record's `vector` contains a non-finite number or `metadata` cannot round-trip through JSON (an `undefined` value, for example). Naming the field (`vector[2]`, `metadata.note`) means a serialization failure never produces a partial or truncated write.
+- **`CloudflareRuntimeLaneCancelledError`** — thrown by the real-runtime lane's `sqliteStorage`/`r2Bucket` proxies once `CloudflareRuntimeLane.cancel()` has been called; see below.
+
+---
+
 ## `cloudflare/test` — Test Utilities
 
 ```typescript
@@ -441,10 +482,14 @@ import { runCloudflareBackendContract } from './src/test/behavior-contract';
 
 - `sqliteStorage: Storage` — a Weft `Storage` proxy backed by real Durable Object SQLite. Durable Object `SqlStorage.exec` is synchronous and only exists inside the Durable Object, so `createCloudflareSqliteStorage` itself runs bundled INTO a worker script (built with `Bun.build` at lane-start, removed afterward); Bun talks to it over `fetch`-based RPC. Every `Storage` method is covered (`get`/`put`/`delete`/`scan`/`batch`/`conditionalBatch`/`has`/`deletePrefix`/`keys`/`count`/`capabilities`).
 - `r2Bucket: R2Bucket` — the real Miniflare-backed R2 binding (`miniflare.getR2Bucket(...)`), handed straight to `createCloudflareR2TextValueStore({ bucket })` unmodified; unlike SQLite, R2's binding methods are already async, so no bundling is needed.
-- `vectorizeRemoteOnlyError: string` — the captured `env.INDEX.query(...)` failure. Per the AB-276 coordinator ruling, Miniflare 4.20260730.0 classifies Vectorize as remote-only with no local emulator (`Binding INDEX needs to be run remotely`), so this lane never wires up a working Vectorize index or a `remoteProxyConnectionString`. `createCloudflareMemoryRecordStorage` (which needs both SQLite and Vectorize) is therefore exercised only against the fast double; the real lane declares `vectorize` an unsupported capability (`owningIssue: 'AB-276'`, `reason: 'vectorize-remote-only'`) rather than faking it.
+- `vectorizeUnsupported: CloudflareUnsupportedApiError` — the captured `env.INDEX.query(...)` failure, as a typed diagnostic (`api: 'vectorize.query'`, `reason: 'vectorize-remote-only'`, `owningIssue: 'AB-276'`, `.cause` carrying the raw Miniflare error). Per the AB-276 coordinator ruling, Miniflare 4.20260730.0 classifies Vectorize as remote-only with no local emulator (`Binding INDEX needs to be run remotely`), so this lane never wires up a working Vectorize index or a `remoteProxyConnectionString`. `createCloudflareMemoryRecordStorage` (which needs both SQLite and Vectorize) is therefore exercised only against the fast double; the real lane declares `vectorize` an unsupported capability rather than faking it.
+- `createFreshSqliteStorage(namespaceSuffix?)` / `createFreshR2Bucket(prefix?)` — with no argument, allocate a NEW namespace/prefix via `identifiers.next()` for per-case isolation. Passed an explicit suffix/prefix, they instead return a SECOND, independent view over the SAME namespace/prefix as an earlier call with that value — the "reopen after close/dispose" shape `runCloudflareBackendContract`'s `reopen()` and `src/test/restart.test.ts` build on.
+- `cancel(): void` — aborts every in-flight and future call through this lane's `sqliteStorage`/`r2Bucket` (and any fresh view) with a typed `CloudflareRuntimeLaneCancelledError`, without disposing Miniflare or removing persisted state.
+- `stop(): Promise<void>` — disposes the Miniflare instance WITHOUT removing the lane's temporary persistence directory — the durable state a subsequent `restart()` rehydrates from.
+- `restart(): Promise<CloudflareRuntimeLane>` — stops this lane and boots a fresh Miniflare instance over the SAME persistence directory and Durable Object namespace / R2 bucket name, returning a new lane whose `sqliteStorage`/`r2Bucket` read the original lane's persisted state back. The original lane object is spent after calling `restart()`; only the returned lane is live.
 - `shutdown(): Promise<void>` — disposes the Miniflare instance and removes the lane's temporary persistence directory. Each lane derives a fresh namespace and directory from an injected `identifiers.next()`, so lanes never share state.
 
-`runCloudflareBackendContract({ label, createBindings, capabilities, now })` (in `src/test/behavior-contract.ts`) runs one shared contract — initialization, schema creation, store/query behavior, serialization boundaries, and tombstones — against whatever `createBindings()` produces. `test/cloudflare-backend-contract.test.ts` calls it once against the fast doubles and once against a real lane, so "the same contract runs against the double and the real runtime" is structurally true. `src/test/runtime-only.test.ts` holds the handful of assertions that genuinely cannot be expressed against a double (the Vectorize remote-only message, real process/storage-directory cleanup on shutdown, the real R2 binding's structural fit, and the RPC transport's own error surfacing).
+`runCloudflareBackendContract({ label, createBindings, capabilities, now })` (in `src/test/behavior-contract.ts`) runs one shared contract — initialization, schema creation, store/query behavior, serialization boundaries, tombstones, and a restart/rehydration proof through `reopen()` — against whatever `createBindings()` produces. `test/cloudflare-backend-contract.test.ts` calls it once against the fast doubles and once against a real lane, so "the same contract runs against the double and the real runtime" is structurally true. `src/test/runtime-only.test.ts` holds the handful of assertions that genuinely cannot be expressed against a double (the Vectorize remote-only diagnostic, real process/storage-directory cleanup on shutdown, the real R2 binding's structural fit, the RPC transport's own error surfacing, and lane cancellation). `src/test/restart.test.ts` holds the full stop-then-restart record-for-record rehydration proof for the real SQLite/R2 lane, plus the equivalent proof for the fast-double Vectorize-backed memory-record backend.
 
 `cloudflare/test` (the package's public test subpath, `src/test/index.ts`) intentionally does **not** re-export `runtime-lane.ts` or `behavior-contract.ts` — importing them directly by relative path keeps Miniflare's dependency graph out of every other `cloudflare/test` consumer.
 

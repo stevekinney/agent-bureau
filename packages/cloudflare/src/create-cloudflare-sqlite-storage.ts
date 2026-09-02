@@ -7,6 +7,7 @@ import {
   type StorageCapabilities,
 } from '@lostgradient/weft/storage/interface';
 
+import { assertBindingHasMembers } from './diagnostics';
 import type { Sql, SqlValue } from './sql';
 
 /**
@@ -139,6 +140,8 @@ export function createCloudflareSqliteStorage(
   options: CreateCloudflareSqliteStorageOptions,
 ): Storage {
   const { sql } = options;
+  assertBindingHasMembers('sql', sql, ['exec']);
+
   const table = options.tableName ?? DEFAULT_SQLITE_STORAGE_TABLE_NAME;
 
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(table)) {
