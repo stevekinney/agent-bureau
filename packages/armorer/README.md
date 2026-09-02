@@ -542,6 +542,13 @@ without colliding with the `error`/`denied` `error.type` convention.
 `armorer.tool.input_digest`/`armorer.tool.output_digest` are the
 non-privileged correlation handles for the omitted arguments/result.
 
+The same sanitization applies on the toolbox-level `error` event fallback
+— the emission site reached instead of `tool.finished` when a tool is
+created without `telemetry: true`. A cancellation there sets a fixed
+`status.message` of `Cancelled` and the same `error.type`/
+`armorer.tool.cancellation_category` pair, rather than the caller's
+`result.error.message`.
+
 Non-standard fields (duration, digests, internal status) are namespaced
 under `armorer.tool.*` rather than `gen_ai.*`, since the conventions do not
 define them and squatting the reserved `gen_ai.*`

@@ -384,6 +384,43 @@ describe('instrument', () => {
     expect(nonRecordingSpan.ended).toBe(false);
   });
 
+  it('sanitizes a cancellation reaching the error fallback the same way as tool.finished (AB-237)', () => {
+    // A tool created without `telemetry: true` never emits `tool.finished`
+    // (armorer/src/create-tool.ts's `finishTelemetry` returns early), so a
+    // cancellation on such a tool reaches only the toolbox-level `error`
+    // fallback below — the primary `tool.finished` listener above never
+    // runs for it. That fallback previously copied `result.error.message`
+    // straight onto `span.status.message`, which is the caller-supplied
+    // abort reason on a cancellation.
+    const manualToolbox = createManualToolbox();
+    const span = createSpan();
+    const tracer = {
+      startSpan() {
+        return span;
+      },
+    } as Tracer;
+    const stop = instrument(manualToolbox as never, { tracer });
+
+    manualToolbox.dispatch('call', {
+      tool: { identity: { name: 'lookup-cancelled-no-telemetry' } },
+      call: { id: 'call-1', arguments: {} },
+    });
+    manualToolbox.dispatch('error', {
+      result: {
+        callId: 'call-1',
+        error: { code: 'CANCELLED', category: 'cancelled', message: 'aborted: do-not-leak' },
+      },
+    });
+    stop();
+
+    expect(span.status).toEqual({ code: SpanStatusCode.UNSET, message: 'Cancelled' });
+    expect(span.attributes['error.type']).toBe('cancelled');
+    expect(span.attributes['armorer.tool.cancellation_category']).toBe('cancelled');
+    expect(JSON.stringify(span.attributes)).not.toContain('do-not-leak');
+    expect(JSON.stringify(span.status)).not.toContain('do-not-leak');
+    expect(span.ended).toBe(true);
+  });
+
   it('forwards no parent context to startSpan when none is supplied, but forwards the exact parent when one is', async () => {
     // Regression for A4. instrument() is responsible for ONE thing here: passing
     // the caller-supplied parentContext through to tracer.startSpan(name, options,
@@ -589,9 +626,25 @@ const ARMORER_ATTRIBUTE_CLASSIFICATION_TABLE: AttributeClassificationRow[] = [
     treatment: 'omitted',
   },
   {
-    callSite: "'error' fallback listener → span.setAttribute(key, value)",
+    callSite: "'error' fallback listener, non-cancelled case → span.setAttribute(key, value)",
     attributeKey: 'error.type',
     sourceValue: 'result.error.code (a category code, not error content)',
+    privileged: false,
+    treatment: 'emitted',
+  },
+  {
+    callSite:
+      "'error' fallback listener, cancelled case → span.setStatus [AB-237: message replaced]",
+    attributeKey: 'status.message',
+    sourceValue:
+      'result.error.message — a caller-supplied abort reason; reached only when a tool omits `telemetry: true`, so `tool.finished` never fires and this fallback is the sole emission site. Replaced with the fixed string "Cancelled" rather than omitted, since `setStatus` always requires a message.',
+    privileged: true,
+    treatment: 'omitted',
+  },
+  {
+    callSite: "'error' fallback listener, cancelled case → span.setAttribute(key, value)",
+    attributeKey: 'error.type / armorer.tool.cancellation_category',
+    sourceValue: "literal 'cancelled' (a category name, not error content)",
     privileged: false,
     treatment: 'emitted',
   },

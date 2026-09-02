@@ -185,7 +185,13 @@ export function instrument(
     }),
   );
 
-  // Fallback for 'error' event
+  // Fallback for 'error' event — reached when a tool was created without
+  // `telemetry: true`, so `tool.finished` never fires and the primary
+  // `tool.finished` listener above never runs (AB-237). This toolbox-level
+  // `error` event fires for every error result regardless of the tool's own
+  // telemetry setting, including a cancellation, so it needs the same
+  // sanitization: `result.error.message` on a cancellation is the
+  // caller-supplied abort reason and must never reach `span.status.message`.
   subscriptions.push(
     toolbox.addEventListener('error', (event) => {
       const { result } = event;
@@ -195,12 +201,18 @@ export function instrument(
           activeSpans.delete(result.callId);
           return;
         }
-        span.setStatus({
-          code: SpanStatusCode.ERROR,
-          message: result.error?.message ?? 'Unknown error',
-        });
-        if (result.error) {
-          span.setAttribute('error.type', result.error.code);
+        if (result.error?.category === 'cancelled') {
+          span.setStatus({ code: SpanStatusCode.UNSET, message: 'Cancelled' });
+          span.setAttribute('error.type', 'cancelled');
+          span.setAttribute('armorer.tool.cancellation_category', 'cancelled');
+        } else {
+          span.setStatus({
+            code: SpanStatusCode.ERROR,
+            message: result.error?.message ?? 'Unknown error',
+          });
+          if (result.error) {
+            span.setAttribute('error.type', result.error.code);
+          }
         }
         span.end();
         activeSpans.delete(result.callId);
