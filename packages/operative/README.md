@@ -15,7 +15,7 @@ ESM-only dependency requires Node's unflagged `require(esm)` support. Bun consum
 the SDKs for the provider subpaths you use, and no provider SDK is loaded when its provider is
 unused.
 
-The public package exports are `@lostgradient/operative`, `bureau-types`, `conditions`, `durable`,
+The public package exports are `@lostgradient/operative`, `conditions`, `durable`,
 `guardrails`, `instrumentation`, `retry`, `streaming`, `store`, `test`, `anthropic`, `openai`,
 `gemini`, `providers`, `providers/anthropic`, `providers/openai`, `providers/gemini`,
 `providers/fallover`, `providers/routing`, `providers/streaming`, `providers/embeddings`,
