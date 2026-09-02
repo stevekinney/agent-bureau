@@ -2,6 +2,7 @@ import type { AnyToolbox, ToolExecutionResult } from 'armorer';
 import type { ConversationSnapshot, MultiModalContent } from 'conversationalist';
 import type { JSONValue, ToolCall } from 'interoperability';
 
+import type { Effort } from '../providers/types';
 import type { EventDispatcher } from '../run-step';
 import type { RunOptions } from '../types';
 
@@ -277,4 +278,124 @@ export interface SessionInputFailure {
     | 'superseded-by' // pairs with `SessionInputRecord.supersedes` on the successor
     | 'caller-canceled'
     | 'promotion-failed';
+}
+
+// AB-67 — the runtime steering contract (decision record, ratified
+// 2026-09-01). Type-only export; no runtime behavior attached. See
+// `documentation/operative-type-safe-api.md`'s "## Steering commands"
+// section for the full contract these types are drawn from verbatim.
+
+/**
+ * The seven configuration-facing operations `SteeringCommand` covers. Agent,
+ * provider, model, route, and effort changes apply no earlier than the entry
+ * of the next `runStep` call; agent-identity applies at step 0 of the
+ * session's next `bureau.run` call; pause and resume gate that same
+ * `runStep` entry. See AB-67's decision record, "Decisions by acceptance
+ * criterion", for the per-operation authority, validation boundary,
+ * application boundary, acknowledgement, rejection, supersession, and
+ * terminal-behavior table.
+ */
+export type SteeringTargetKind =
+  'agent-identity' | 'route' | 'model' | 'provider' | 'effort' | 'pause' | 'resume';
+
+/**
+ * Discriminated by `target`. `pause`/`resume` carry no value: the target
+ * itself is the instruction. Every other target carries exactly one of
+ * `policyRef` (a named, pre-approved policy the AB-66 selector resolves) or
+ * `override` (an exact value); this is a union, not two optional fields a
+ * caller could set simultaneously or omit both.
+ */
+export type SteeringRequestedValue =
+  | { readonly target: 'pause' }
+  | { readonly target: 'resume' }
+  | { readonly target: 'agent-identity'; readonly policyRef: string }
+  | { readonly target: 'agent-identity'; readonly override: string } // a catalog agent name; must be a key of Bureau<D>'s agents map
+  | { readonly target: 'route'; readonly policyRef: string }
+  | { readonly target: 'route'; readonly override: string } // must name a configured RoutingOptions.routes entry
+  | { readonly target: 'model'; readonly policyRef: string }
+  | { readonly target: 'model'; readonly override: string }
+  | { readonly target: 'provider'; readonly policyRef: string }
+  | { readonly target: 'provider'; readonly override: string }
+  | { readonly target: 'effort'; readonly policyRef: string }
+  | { readonly target: 'effort'; readonly override: Effort }; // packages/operative/src/providers/types.ts
+
+/**
+ * A versioned steering command: a caller's request to change one of
+ * agent-identity, route, model, provider, effort, pause, or resume, admitted
+ * against a Bureau session. Parent-owned and addressable on its owning
+ * session, matching AB-42's classification of session input.
+ */
+export interface SteeringCommand {
+  readonly id: string;
+  readonly idOrigin: 'caller' | 'generated'; // same idempotency shape as AB-42's SessionInputRecord
+  readonly sessionId: string; // steering is a Bureau session verb (AB-39's ratified placement), never on AgentRun
+  readonly principal: string;
+  readonly requestedValue: SteeringRequestedValue;
+  /** Optimistic concurrency against the session's own `configVersion` (see
+   *  `SteeringDesiredState` below). Absent means "apply regardless of
+   *  current desired state"; present means "reject as a conflict if
+   *  configVersion has moved past this value." */
+  readonly expectedRevision?: number;
+  readonly requestedAt: string; // ISO
+  readonly deadline?: string; // ISO, same semantics as AB-42's SessionInputRecord.expiresAt
+}
+
+/**
+ * Populated on every terminal-failure `SteeringCommandState` (`rejected`,
+ * `superseded`, `failed`), mirroring AB-42's `SessionInputFailure`.
+ */
+export interface SteeringCommandFailure {
+  readonly failedAt: string; // ISO
+  readonly reason:
+    | 'session-terminal' // the owning session itself went terminal (closed) before application
+    | 'run-terminal' // pause/resume only: the run it targeted ended (aborted or completed) before its gate could apply
+    | 'authorization-revoked'
+    | 'policy-denied'
+    | 'deadline-passed'
+    | 'superseded-by'; // pairs with a successor command's id, same target
+}
+
+/**
+ * `SteeringCommand`'s state machine. `requested` is never persisted on its
+ * own: admission is synchronous validate-then-accept-or-reject, so it exists
+ * only as the pre-admission moment, satisfied by the transition into
+ * `accepted` or a pre-admission rejection outcome.
+ */
+export type SteeringCommandState =
+  | 'requested' // received, not yet validated; exists only as the pre-admission moment, never persisted on its own
+  | 'accepted' // validated, written into desired state, waiting for the next boundary
+  | 'applied' // terminal-success: consumed at a step boundary, effective state stamped
+  | 'rejected' // terminal-failure: invalidated post-admission (authorization revoked, policy denial)
+  | 'superseded' // terminal-failure: a later command for the same target was admitted first
+  | 'failed'; // terminal-failure: SteeringCommandFailure.reason is 'session-terminal' or, pause/resume only, 'run-terminal'
+
+/**
+ * The desired configuration a `SteeringCommand`, once `accepted`, writes
+ * into. `configVersion` increments by exactly one on every command that
+ * reaches `accepted`, whether or not it has been applied yet; it never
+ * decrements and never skips, and is the value `SteeringCommand.expectedRevision`
+ * checks optimistic concurrency against.
+ */
+export interface SteeringDesiredState {
+  readonly agentName?: string;
+  readonly route?: string;
+  readonly model?: string;
+  readonly provider?: string;
+  readonly effort?: Effort;
+  readonly paused: boolean;
+  readonly configVersion: number;
+}
+
+/**
+ * What the step boundary reads out of `SteeringDesiredState` and stamps onto
+ * a step. A separate type from `SteeringDesiredState`, not one type with an
+ * "is this applied yet" flag, because a caller inspecting desired state
+ * mid-flight must not be told a stale `appliedAtStep`.
+ */
+export interface SteeringEffectiveState extends SteeringDesiredState {
+  /** The step index (`loop.ts`'s `step`) whose boundary last consumed this
+   *  state; identical numbering to AB-42's SessionInputPromotion.providerTurn. */
+  readonly appliedAtStep: number;
+  readonly appliedAtRunId: string;
+  readonly appliedAt: string; // ISO
 }

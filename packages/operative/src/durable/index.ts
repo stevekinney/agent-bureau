@@ -59,6 +59,13 @@ export type {
   SessionInputReceipt,
   SessionInputRecord,
   SessionInputState,
+  SteeringCommand,
+  SteeringCommandFailure,
+  SteeringCommandState,
+  SteeringDesiredState,
+  SteeringEffectiveState,
+  SteeringRequestedValue,
+  SteeringTargetKind,
   StepRecord,
 } from './types';
 // AB-10 — workflow versioning for in-flight durable runs
