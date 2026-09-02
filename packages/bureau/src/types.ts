@@ -701,24 +701,28 @@ export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
   signalSession(sessionId: string, name: string, payload?: unknown): Promise<void>;
 
   /**
-   * Send a validated, request/response update to a session's current in-flight run.
-   * Throws `BureauError('NOT_CONFIGURED', subject: 'durable')` when no durable
-   * engine is composed; throws `BureauError('NOT_FOUND')` when the session has no
-   * active run. Otherwise unconditionally throws `BureauError('UNSUPPORTED_CAPABILITY')`
-   * (AB-41/AB-192): the built-in `agentRun` workflow registers no `ctx.onUpdate`
-   * handler, so this call can never reach `engine.update`. Kept, not withdrawn —
-   * check {@link Bureau.sessionVerbCapabilities} to detect this before calling.
+   * Intended to send a validated, request/response update to a session's
+   * current in-flight run, but currently unsupported: after the existing
+   * `BureauError('NOT_CONFIGURED', subject: 'durable')` (no durable engine
+   * composed) and `BureauError('NOT_FOUND')` (no active run) checks, this
+   * unconditionally throws `BureauError('UNSUPPORTED_CAPABILITY')` (AB-41/
+   * AB-192): the built-in `agentRun` workflow registers no `ctx.onUpdate`
+   * handler, so this call can never reach `engine.update`. Kept, not
+   * withdrawn — check {@link Bureau.sessionVerbCapabilities} to detect this
+   * before calling.
    */
   updateSession(sessionId: string, name: string, payload?: unknown): Promise<unknown>;
 
   /**
-   * Query live state from a session's current in-flight run without mutating it.
-   * Throws `BureauError('NOT_CONFIGURED', subject: 'durable')` when no durable
-   * engine is composed; throws `BureauError('NOT_FOUND')` when the session has no
-   * active run. Otherwise unconditionally throws `BureauError('UNSUPPORTED_CAPABILITY')`
-   * (AB-41/AB-192): the built-in `agentRun` workflow registers no `ctx.onQuery`
-   * handler, so this call can never reach `engine.query`. Kept, not withdrawn —
-   * check {@link Bureau.sessionVerbCapabilities} to detect this before calling.
+   * Intended to query live state from a session's current in-flight run
+   * without mutating it, but currently unsupported: after the existing
+   * `BureauError('NOT_CONFIGURED', subject: 'durable')` (no durable engine
+   * composed) and `BureauError('NOT_FOUND')` (no active run) checks, this
+   * unconditionally throws `BureauError('UNSUPPORTED_CAPABILITY')` (AB-41/
+   * AB-192): the built-in `agentRun` workflow registers no `ctx.onQuery`
+   * handler, so this call can never reach `engine.query`. Kept, not
+   * withdrawn — check {@link Bureau.sessionVerbCapabilities} to detect this
+   * before calling.
    */
   querySession(sessionId: string, name: string, input?: unknown): Promise<unknown>;
 
