@@ -570,6 +570,17 @@ export interface ResolveReviewResult {
  * catalog agent's own definition (`createAgent({ instructions, ... })`).
  */
 export interface BureauRunOptions {
+  /**
+   * On the durable dispatch branch (a durable engine composed AND the named
+   * agent supports definition resolution), seeds the `ActiveRun`'s
+   * session-correlation key (defaulting to the minted run id when omitted).
+   * A no-op on the direct/in-memory dispatch branch — `AgentRunContext`
+   * (AB-15) carries no `sessionId` field, so a bare `RunnableAgent.run()`
+   * has nowhere to observe it. Accepted without error on either branch;
+   * unlike `principal`, this is deliberate rather than a gap, since a
+   * caller cannot generally predict in advance which branch a given agent
+   * will take.
+   */
   sessionId?: string;
   signal?: AbortSignal;
   traceContext?: unknown;

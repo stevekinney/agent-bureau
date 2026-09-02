@@ -1859,9 +1859,18 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
    */
   function trackCatalogRun(handle: AgentRun<unknown, boolean>): AgentRun<unknown, boolean> {
     catalogRuns.add(handle);
-    void handle.result().finally(() => {
-      catalogRuns.delete(handle);
-    });
+    // `detachBestEffortPromise`, not a bare `void ... .finally(...)`: AB-15's
+    // contract says a well-behaved `RunnableAgent.result()` never rejects
+    // (it settles through `RunResult.error` instead), but "JavaScript
+    // callers" is itself one of this issue's acceptance-criteria categories
+    // — a foreign, non-conforming agent's `result()` genuinely can reject,
+    // and a dropped rejection under `void` would be an unhandled rejection
+    // that is this bureau's fault, not the caller's.
+    detachBestEffortPromise(
+      handle.result().finally(() => {
+        catalogRuns.delete(handle);
+      }),
+    );
     return handle;
   }
 

@@ -307,7 +307,16 @@ describe('bureau.run', () => {
     }
   });
 
-  it('threads options.sessionId, options.traceContext, and options.withTraceContext through to the dispatched run', async () => {
+  it('threads options.traceContext and options.withTraceContext through to the dispatched run, and accepts (but does not use) options.sessionId on the direct dispatch branch', async () => {
+    // Renamed from a title that also claimed "threads options.sessionId" —
+    // this test's non-durable bureau never actually verified any effect
+    // from sessionId (AgentRunContext, AB-15's ratified shape, has no
+    // sessionId field for a bare RunnableAgent.run() to observe on this
+    // branch at all). sessionId IS consumed on the DURABLE dispatch branch,
+    // as the ActiveRun's session-correlation key — see
+    // BureauRunOptions.sessionId's JSDoc in types.ts and the durable
+    // dispatch test above. Kept here as "accepted without error", which is
+    // the one thing this non-durable case actually demonstrates.
     let sawTraceContext: unknown;
     const withTraceContext = async <T>(
       parentContext: unknown,
