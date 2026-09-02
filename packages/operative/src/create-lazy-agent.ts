@@ -32,6 +32,7 @@ import {
   toAgentRunError,
 } from './errors';
 import { RunAbortedEvent, RunCompletedEvent, RunErrorEvent } from './events';
+import type { AgentGenerationProfile } from './generation-profile';
 import type {
   AgentInput,
   AgentRunContext,
@@ -59,6 +60,15 @@ export type LazyAgentLoader<O, H extends boolean> = () =>
 export interface CreateLazyAgentOptions {
   /** Human-readable label included in lazy loading and contract error messages. */
   label?: string;
+
+  /**
+   * The generation-capability snapshot exposed on the returned agent (AB-64,
+   * AB-245), alongside `name: options.label ?? '(lazy)'`. Never derived
+   * from the underlying agent — a profile read must never trigger a module
+   * load. Omitted means the lazy agent reports `mode: 'opaque'`
+   * (`readGenerationProfile`'s default fallback).
+   */
+  generationProfile?: AgentGenerationProfile;
 }
 
 // A fresh object per call — never a shared module-level singleton. `RunResult.usage`
@@ -849,6 +859,7 @@ export function createLazyAgent<O = never, H extends boolean = false>(
 
   const agent = {
     name: options.label ?? '(lazy)',
+    ...(options.generationProfile ? { generationProfile: options.generationProfile } : {}),
     run(input: AgentInput, context?: AgentRunContext): AgentRun<O, H> {
       return createDeferredAgentRun(resolve, input, context, label);
     },

@@ -341,6 +341,47 @@ const generate: GenerateFunction = makeDeterministicGenerate();
 export default generate;
 `;
 
+// Exercises the Agent generation profile surface (AB-64, AB-245):
+// createModelCatalog (subpath export, mirroring getProviderCapabilities),
+// withBackendDescriptors/readBackendDescriptors, and readGenerationProfile —
+// on a real packed tarball, not just the workspace source.
+const MODEL_CAPABILITY_DEFINITION = `import { createAgent, readGenerationProfile } from '@lostgradient/operative';
+import type { GenerateFunction } from '@lostgradient/operative';
+import {
+  createModelCatalog,
+  readBackendDescriptors,
+  withBackendDescriptors,
+} from '@lostgradient/operative/providers';
+
+import { makeDeterministicGenerate } from './generate';
+import { makeToolbox } from './tools';
+
+export function buildCatalog() {
+  return createModelCatalog({ now: () => '2026-01-01T00:00:00.000Z' });
+}
+
+export function opaqueAgentProfile() {
+  const agent = createAgent({ generate: makeDeterministicGenerate(), toolbox: makeToolbox() });
+  return readGenerationProfile(agent);
+}
+
+export function fixedAgentProfile() {
+  const catalog = buildCatalog();
+  const descriptor = catalog.descriptors.find((row) => row.provider === 'anthropic');
+  if (!descriptor) {
+    throw new Error('expected at least one anthropic descriptor in the seed catalog');
+  }
+  const generate: GenerateFunction = withBackendDescriptors(makeDeterministicGenerate(), [
+    descriptor,
+  ]);
+  const agent = createAgent({ generate, toolbox: makeToolbox() });
+  return {
+    profile: readGenerationProfile(agent),
+    descriptorsOnGenerate: readBackendDescriptors(generate),
+  };
+}
+`;
+
 // A module that does NOT export a valid RunnableAgent/GenerateFunction shape
 // — used to prove the widened dynamic-module runtime guard actually rejects
 // a malformed resolution rather than silently accepting it.
@@ -621,6 +662,11 @@ import { makeDeterministicGenerate } from '../src/generate';
 import { runInlineAgent } from '../src/inline';
 import { lazyAgent } from '../src/lazy-agent';
 import { agentWithLazyGenerate } from '../src/lazy-generate';
+import {
+  buildCatalog,
+  fixedAgentProfile,
+  opaqueAgentProfile,
+} from '../src/model-capability';
 import { makeToolbox } from '../src/tools';
 import {
   widenedMalformedAgent,
@@ -709,6 +755,32 @@ describe('unwrap() return-type contract', () => {
   });
 });
 
+describe('model catalog and Agent generation profile (AB-64, AB-245)', () => {
+  it('builds a frozen, privileged-projection model catalog seed from the packed tarball', () => {
+    const catalog = buildCatalog();
+    expect(catalog.projection).toBe('privileged');
+    expect(catalog.revision).toBe(1);
+    expect(Object.isFrozen(catalog)).toBe(true);
+    expect(Object.isFrozen(catalog.descriptors)).toBe(true);
+    expect(catalog.descriptors.length).toBeGreaterThan(0);
+  });
+
+  it('reports an opaque generation profile for a standalone agent with no attached descriptors', () => {
+    const profile = opaqueAgentProfile();
+    expect(profile.mode).toBe('opaque');
+    expect(profile.descriptors).toEqual([]);
+    expect(profile.selector).toBe('unavailable');
+  });
+
+  it('reports a fixed generation profile once a descriptor is attached to the GenerateFunction', () => {
+    const { profile, descriptorsOnGenerate } = fixedAgentProfile();
+    expect(profile.mode).toBe('fixed');
+    expect(profile.descriptors).toHaveLength(1);
+    expect(descriptorsOnGenerate).toHaveLength(1);
+    expect(profile.descriptors[0]).toEqual(descriptorsOnGenerate[0]);
+  });
+});
+
 describe('removed structured-output legacy field (AB-18)', () => {
   // 'structuredOutput' was never a CreateAgentOptions/createAgent input field
   // — it is a legacy PERSISTED-RECORD field a durable run's report could
@@ -737,6 +809,7 @@ async function writeConsumerSource(directory: string): Promise<void> {
   await Bun.write(join(directory, 'src', 'schemas.ts'), SCHEMAS);
   await Bun.write(join(directory, 'src', 'agent-module.ts'), AGENT_MODULE);
   await Bun.write(join(directory, 'src', 'generate-module.ts'), GENERATE_MODULE);
+  await Bun.write(join(directory, 'src', 'model-capability.ts'), MODEL_CAPABILITY_DEFINITION);
   await Bun.write(join(directory, 'src', 'malformed-module.ts'), MALFORMED_MODULE);
   await Bun.write(join(directory, 'src', 'direct.ts'), DIRECT_DEFINITION);
   await Bun.write(join(directory, 'src', 'inline.ts'), INLINE_DEFINITION);

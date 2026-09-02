@@ -1363,6 +1363,58 @@ const anthropicRows = catalog.descriptors.filter((d) => d.provider === 'anthropi
 
 `getProviderCapabilities` is now implemented as a projection over `createModelCatalog`'s descriptors — its public signature and every previously published answer are unchanged.
 
+#### Agent Generation Profile (AB-64, AB-245)
+
+Every `RunnableAgent` optionally carries an immutable, cached `generationProfile: AgentGenerationProfile` naming which `BackendDescriptor`(s) sit behind its `GenerateFunction` and in which mode: `'fixed'` (exactly one descriptor — a single provider factory), `'routed'` (more than one — e.g. `createRoutingGenerate`), `'selectable'` (candidates named, no selector yet — AB-66), or `'opaque'` (a custom `GenerateFunction` this package can't introspect, never an invented descriptor). Read it with `readGenerationProfile(agent)`, which falls back to a frozen `mode: 'opaque'` profile when an agent carries none — never a network call, a lazy-module load, or any other background work.
+
+```typescript
+import {
+  createAgent,
+  createLazyGenerate,
+  readGenerationProfile,
+  type AgentGenerationProfile,
+} from '@lostgradient/operative';
+import {
+  createAnthropicProvider,
+  createModelCatalog,
+  readBackendDescriptors,
+  withBackendDescriptors,
+} from '@lostgradient/operative/providers';
+
+// createAnthropicProvider/createOpenAIProvider/createGeminiProvider (and their
+// streaming siblings) attach the single seed descriptor matching their
+// resolved model automatically — nothing to do here.
+const generate = createAnthropicProvider({ model: 'claude-sonnet-5', apiKey: '...' });
+const agent = createAgent({ generate });
+agent.generationProfile.mode; // 'fixed'
+
+// A custom GenerateFunction can attach its own descriptor(s) — e.g. one
+// resolved from the seed catalog for a model this package doesn't wrap.
+const catalog = createModelCatalog();
+const customDescriptor = catalog.descriptors.find((d) => d.provider === 'anthropic');
+const custom = withBackendDescriptors(
+  async (context) => {
+    /* ... */
+    return { content: '', toolCalls: [] };
+  },
+  customDescriptor ? [customDescriptor] : [],
+);
+readBackendDescriptors(custom); // the array just attached, never inferred
+
+// A lazy generate function attaches descriptors at construction time — a
+// profile read never triggers the loader.
+const lazyGenerate = createLazyGenerate(
+  () => import('./anthropic-generate.ts').then((m) => m.default),
+  {
+    descriptors: customDescriptor ? [customDescriptor] : [],
+  },
+);
+
+const readOnly: AgentGenerationProfile = readGenerationProfile(agent);
+```
+
+`AgentPreferences` (`requiredCapabilities`, `preferredProviders`, `preferredModels`, `minimumContextWindowTokens`) and `allowedCandidates` reach the profile through two new `createAgent` options, `generationPreferences` and `allowedCandidates` — the latter promotes the mode to `'selectable'`. `selector` always reads `'unavailable'` on a standalone agent (no Bureau, no policy, no catalog to select through); `'available'` is reported only through Bureau's future catalog read (AB-66/AB-247).
+
 #### Structured Output
 
 `output` (AB-18) is the single validated output contract: one Zod schema that

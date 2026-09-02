@@ -11,6 +11,8 @@ import {
   AsyncDefinitionLoadError,
 } from './errors';
 import { RunCompletedEvent } from './events';
+import type { AgentGenerationProfile } from './generation-profile';
+import { readGenerationProfile } from './generation-profile';
 import type { RunnableAgent } from './runnable-agent';
 import { OPERATIVE_RESOLVE_RUN_OPTIONS } from './runnable-agent';
 import type { CleanupAcknowledgement, RunOptions, RunResult } from './types';
@@ -1329,5 +1331,57 @@ describe('createLazyAgent', () => {
     await resolving;
 
     expect(observedAgentName).toBe('original');
+  });
+});
+
+describe('createLazyAgent — generationProfile (AB-64 AC2, AB-245)', () => {
+  it('exposes no generationProfile when options.generationProfile is omitted', () => {
+    const lazy = createLazyAgent(() => {
+      throw new Error('the loader must not run for a capability read');
+    });
+
+    expect(readGenerationProfile(lazy).mode).toBe('opaque');
+  });
+
+  it('exposes the supplied generationProfile without invoking the loader', () => {
+    const profile: AgentGenerationProfile = Object.freeze({
+      mode: 'fixed',
+      revision: 1,
+      projection: 'privileged',
+      descriptors: [],
+      freshness: '2026-09-02T12:00:00.000Z',
+      selector: 'unavailable',
+    });
+    const lazy = createLazyAgent(
+      () => {
+        throw new Error('the loader must not run for a capability read');
+      },
+      { generationProfile: profile },
+    );
+
+    expect(readGenerationProfile(lazy)).toBe(profile);
+  });
+
+  it('reports its name alongside the generationProfile without either forcing a load', () => {
+    const profile: AgentGenerationProfile = Object.freeze({
+      mode: 'opaque',
+      revision: 1,
+      projection: 'privileged',
+      descriptors: [],
+      freshness: '2026-09-02T12:00:00.000Z',
+      selector: 'unavailable',
+    });
+    let loaderCalls = 0;
+    const lazy = createLazyAgent(
+      () => {
+        loaderCalls += 1;
+        throw new Error('unreachable');
+      },
+      { label: 'catalog-agent', generationProfile: profile },
+    );
+
+    expect(lazy.name).toBe('catalog-agent');
+    expect(readGenerationProfile(lazy)).toBe(profile);
+    expect(loaderCalls).toBe(0);
   });
 });

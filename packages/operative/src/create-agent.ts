@@ -7,6 +7,9 @@ import type { AgentRun } from './agent-run';
 import { createAgentRun } from './agent-run';
 import { noToolCalls } from './conditions/predicates';
 import { createActiveRun } from './create-run';
+import type { AgentGenerationProfile, AgentPreferences } from './generation-profile';
+import { readBackendDescriptors } from './providers/backend-descriptor-attachment';
+import type { ProviderName } from './providers/types';
 import type { AgentRunContext, DefinitionResolvingAgent } from './runnable-agent';
 import { OPERATIVE_RESOLVE_RUN_OPTIONS } from './runnable-agent';
 import { toOutputJsonSchema } from './structured-output/response-schema';
@@ -97,6 +100,24 @@ export interface CreateAgentOptionsBase {
    * managed-asset reference part, never inlined as base64 here.
    */
   output?: ZodType<unknown>;
+
+  /**
+   * The Agent-requirements-and-preferences layer of AB-64's precedence
+   * model (AB-245). Populates the returned agent's
+   * `generationProfile.preferences` verbatim; consumed by AB-66's
+   * not-yet-built selector, never by this function.
+   */
+  generationPreferences?: AgentPreferences;
+
+  /**
+   * Candidates a future selector (AB-66) may choose among. Supplying this
+   * promotes the returned agent's `generationProfile.mode` to `'selectable'`
+   * regardless of how many `BackendDescriptor`s `generate` itself carries.
+   * `generationProfile.selector` still always reads `'unavailable'` here —
+   * a `createAgent` agent has no Bureau, no policy configuration, and no
+   * catalog, so it can never select (AB-64's verification walk).
+   */
+  allowedCandidates?: readonly { readonly provider: ProviderName; readonly model: string }[];
 }
 
 /**
@@ -254,6 +275,16 @@ export interface StandaloneAgent<
   readonly name: string;
 
   /**
+   * This agent's immutable generation-capability snapshot (AB-64, AB-245),
+   * computed once at `createAgent()` call time from `options.generate`'s
+   * attached `BackendDescriptor`(s): `'fixed'` for exactly one, `'routed'`
+   * for more than one, `'opaque'` for none — promoted to `'selectable'`
+   * when `options.allowedCandidates` was supplied. Read it with
+   * `readGenerationProfile(agent)` rather than this field directly.
+   */
+  readonly generationProfile: AgentGenerationProfile;
+
+  /**
    * Start a new in-memory run.
    *
    * - `run('some text')` starts a fresh conversation: `instructions` (if
@@ -406,10 +437,41 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknow
     // to `createActiveRun`'s own "no stop conditions at all" behavior only
     // when explicitly overridden with an empty array.
     stopWhen = noToolCalls(),
+    // Consumed only to build `generationProfile` below (AB-245) — neither
+    // field is a `RunOptions` member, so both are destructured out here
+    // rather than left to fall into `...rest` and leak onto the
+    // `RunOptions` bag `buildRunOptions` hands to `createActiveRun`.
+    generationPreferences,
+    allowedCandidates,
     ...rest
   } = options;
 
   const resolvedName = configuredName ?? '(agent)';
+
+  // AB-64 AC2/AB-245: exactly one attached descriptor is `'fixed'`, more
+  // than one is `'routed'` (e.g. `createRoutingGenerate`'s union), none is
+  // `'opaque'` — never invented for a custom `GenerateFunction`. Supplying
+  // `allowedCandidates` promotes the mode to `'selectable'` regardless of
+  // descriptor count. `selector` always reads `'unavailable'`: a
+  // `createAgent` agent has no Bureau, no policy, and no catalog, so it can
+  // never select (AB-64's verification walk).
+  const attachedDescriptors = readBackendDescriptors(generate);
+  const generationProfile: AgentGenerationProfile = Object.freeze({
+    mode: allowedCandidates
+      ? 'selectable'
+      : attachedDescriptors.length === 1
+        ? 'fixed'
+        : attachedDescriptors.length > 1
+          ? 'routed'
+          : 'opaque',
+    revision: 1,
+    projection: 'privileged',
+    descriptors: attachedDescriptors,
+    ...(generationPreferences ? { preferences: generationPreferences } : {}),
+    ...(allowedCandidates ? { allowedCandidates } : {}),
+    freshness: new Date().toISOString(),
+    selector: 'unavailable',
+  });
 
   // Pre-compute tool entries once (pure transform — no per-run state).
   // The map key is canonical — override each tool's inner `.name` with the
@@ -496,6 +558,7 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknow
 
   return {
     name: resolvedName,
+    generationProfile,
     run(
       input: string | { conversation: ConversationHistory },
       context?: AgentRunContext,

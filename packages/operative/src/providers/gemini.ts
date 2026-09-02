@@ -4,7 +4,9 @@ import type { ConversationHistory } from 'conversationalist';
 import { toGeminiMessages } from 'conversationalist/adapters/gemini';
 import { sha256HexSync } from 'interoperability';
 
+import { withBackendDescriptors } from './backend-descriptor-attachment.ts';
 import { ProviderError } from './errors.ts';
+import { createModelCatalog } from './model-catalog.ts';
 import { createCacheAwareAssembly } from './shared/cache-aware-assembly.ts';
 import { resolveGeminiEffort } from './shared/effort.ts';
 import { resolveGeminiApiKey } from './shared/gemini-api-key.ts';
@@ -719,6 +721,17 @@ async function importGeminiClient(options: {
 }
 
 /**
+ * The single `BackendDescriptor` (AB-64 AC2) matching `model` on the
+ * `'generateContent'` endpoint, from the static seed catalog — zero or one
+ * entries, never fabricated.
+ */
+function geminiDescriptorsFor(model: string) {
+  return createModelCatalog().descriptors.filter(
+    (descriptor) => descriptor.provider === 'gemini' && descriptor.model === model,
+  );
+}
+
+/**
  * Creates a GenerateFunction backed by the Google Gemini API.
  *
  * When no `client` (a `GoogleGenAI` instance) is provided, dynamically
@@ -760,7 +773,9 @@ export function createGeminiProvider(options: GeminiProviderOptions): GenerateFu
     importClient,
   });
 
-  return async (context: GenerateContext): Promise<GenerateResponse> => {
+  const generate: GenerateFunction = async (
+    context: GenerateContext,
+  ): Promise<GenerateResponse> => {
     const client = await getClient();
     const tools = await context.toolbox.toGeminiTools();
 
@@ -822,6 +837,8 @@ export function createGeminiProvider(options: GeminiProviderOptions): GenerateFu
       },
     });
   };
+
+  return withBackendDescriptors(generate, geminiDescriptorsFor(resolvedModel));
 }
 
 /**
@@ -868,7 +885,7 @@ export function createGeminiProviderStream(
     importClient,
   });
 
-  return async (
+  const generate: StreamingGenerateFunction = async (
     context: GenerateContext & { streaming: StreamingHandle },
   ): Promise<GenerateResponse> => {
     const client = await getClient();
@@ -950,6 +967,8 @@ export function createGeminiProviderStream(
       },
     });
   };
+
+  return withBackendDescriptors(generate, geminiDescriptorsFor(resolvedModel));
 }
 
 /**

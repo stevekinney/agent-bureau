@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'bun:test';
 
+import {
+  readBackendDescriptors,
+  withBackendDescriptors,
+} from '../backend-descriptor-attachment.ts';
+import type { BackendDescriptor } from '../model-catalog.ts';
+import { createModelCatalog } from '../model-catalog.ts';
 import type { GenerateContext, GenerateFunction, GenerateResponse } from '../types.ts';
 import { createRoutingGenerate } from './create-routing-generate.ts';
 import { makeContext } from './strategies/test-helpers.ts';
@@ -248,5 +254,99 @@ describe('createRoutingGenerate', () => {
       expect(error).toBeInstanceOf(Error);
       expect((error as Error).message).toBe('LLM API failed');
     }
+  });
+});
+
+describe('createRoutingGenerate — descriptor union (AB-64 AC2, AB-245)', () => {
+  const FIXED_NOW = () => '2026-09-02T12:00:00.000Z';
+
+  function descriptorsFor(
+    provider: 'anthropic' | 'openai' | 'gemini',
+  ): readonly BackendDescriptor[] {
+    return createModelCatalog({ now: FIXED_NOW }).descriptors.filter(
+      (descriptor) => descriptor.provider === provider,
+    );
+  }
+
+  function routeWithDescriptors(
+    name: string,
+    content: string,
+    descriptors: readonly BackendDescriptor[],
+  ): ModelRoute {
+    return { name, generate: withBackendDescriptors(makeGenerate(content), descriptors) };
+  }
+
+  it('attaches no descriptors when no route carries any', () => {
+    const generate = createRoutingGenerate({
+      routes: [makeRoute('fast', 'fast-response')],
+      strategy: () => ({ route: 'fast', reason: 'test' }),
+      fallback: 'fast',
+    });
+
+    expect(readBackendDescriptors(generate)).toEqual([]);
+  });
+
+  it('attaches the union of every route’s descriptors', () => {
+    const anthropic = descriptorsFor('anthropic')[0];
+    const openai = descriptorsFor('openai')[0];
+    if (!anthropic || !openai)
+      throw new Error('expected seed descriptors for anthropic and openai');
+
+    const generate = createRoutingGenerate({
+      routes: [
+        routeWithDescriptors('fast', 'fast-response', [openai]),
+        routeWithDescriptors('smart', 'smart-response', [anthropic]),
+      ],
+      strategy: () => ({ route: 'smart', reason: 'test' }),
+      fallback: 'fast',
+    });
+
+    const attached = readBackendDescriptors(generate);
+    expect(attached).toHaveLength(2);
+    expect(attached).toContainEqual(anthropic);
+    expect(attached).toContainEqual(openai);
+  });
+
+  it('deduplicates by (provider, endpoint, model) across routes sharing the same descriptor', () => {
+    const anthropic = descriptorsFor('anthropic')[0];
+    if (!anthropic) throw new Error('expected at least one anthropic seed descriptor');
+
+    const generate = createRoutingGenerate({
+      routes: [
+        routeWithDescriptors('a', 'a-response', [anthropic]),
+        routeWithDescriptors('b', 'b-response', [anthropic]),
+      ],
+      strategy: () => ({ route: 'a', reason: 'test' }),
+      fallback: 'a',
+    });
+
+    expect(readBackendDescriptors(generate)).toEqual([anthropic]);
+  });
+
+  it('orders the union deterministically by (provider, endpoint, model) regardless of route declaration order', () => {
+    const anthropic = descriptorsFor('anthropic')[0];
+    const gemini = descriptorsFor('gemini')[0];
+    if (!anthropic || !gemini)
+      throw new Error('expected seed descriptors for anthropic and gemini');
+
+    const forward = createRoutingGenerate({
+      routes: [
+        routeWithDescriptors('a', 'a-response', [gemini]),
+        routeWithDescriptors('b', 'b-response', [anthropic]),
+      ],
+      strategy: () => ({ route: 'a', reason: 'test' }),
+      fallback: 'a',
+    });
+    const reversed = createRoutingGenerate({
+      routes: [
+        routeWithDescriptors('b', 'b-response', [anthropic]),
+        routeWithDescriptors('a', 'a-response', [gemini]),
+      ],
+      strategy: () => ({ route: 'a', reason: 'test' }),
+      fallback: 'a',
+    });
+
+    expect(readBackendDescriptors(forward)).toEqual(readBackendDescriptors(reversed));
+    expect(readBackendDescriptors(forward)[0]?.provider).toBe('anthropic');
   });
 });
