@@ -1,7 +1,7 @@
 import type {
   FinishReason,
   GenerateFunction,
-  RegistryAgent,
+  RunnableAgent,
   RunResult,
 } from '@lostgradient/operative';
 import type { AnyToolbox } from 'armorer';
@@ -269,7 +269,7 @@ export type EmbedderFunction = (text: string) => Promise<number[]>;
  * Configuration for the agent under evaluation.
  */
 export type EvaluationAgentConfiguration =
-  RegistryAgent | { generate: GenerateFunction; toolbox: AnyToolbox };
+  RunnableAgent<unknown, boolean> | { generate: GenerateFunction; toolbox: AnyToolbox };
 
 /**
  * Options for creating an agent evaluation runner.

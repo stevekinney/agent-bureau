@@ -2,9 +2,21 @@ import { createTool } from 'armorer';
 import type { TypedEventTarget } from 'lifecycle';
 import { z } from 'zod';
 
-import type { RegistryAgent } from './create-agent-registry';
 import type { OperativeEventMap } from './events';
 import { HandoffOccurredEvent } from './events';
+import type { RunnableAgent } from './runnable-agent';
+
+/**
+ * Identifies a handoff target by name, paired with the `RunnableAgent` it
+ * points to. `agentName` (not `agent.name`) is the identity actually used —
+ * a `createLazyAgent` result's `.name` is the placeholder `'(lazy)'` until
+ * it resolves, so the tool needs an identity supplied alongside it rather
+ * than read off the (possibly not-yet-resolved) agent itself (AB-22).
+ */
+export interface HandoffTarget {
+  readonly agentName: string;
+  readonly agent: RunnableAgent<never, boolean>;
+}
 
 /**
  * Marker value embedded in the tool result so callers can extract
@@ -21,7 +33,7 @@ export interface CreateHandoffToolOptions {
   /** Tool description shown to the model. */
   description?: string;
   /** The agent to hand off to. */
-  agent: RegistryAgent;
+  agent: HandoffTarget;
   /** Optional Zod schema for the tool's input. Defaults to an empty object. */
   input?: z.ZodType;
   /**
@@ -86,9 +98,9 @@ export function extractHandoffTarget(
  */
 export function createHandoffTool(options: CreateHandoffToolOptions) {
   const { agent, input = z.object({}), sourceContext } = options;
-  const name = options.name ?? `transfer_to_${agent.name}`;
+  const name = options.name ?? `transfer_to_${agent.agentName}`;
   const description =
-    options.description ?? `Hand off the conversation to the "${agent.name}" agent.`;
+    options.description ?? `Hand off the conversation to the "${agent.agentName}" agent.`;
 
   return createTool({
     name,
@@ -100,7 +112,7 @@ export function createHandoffTool(options: CreateHandoffToolOptions) {
         sourceContext.emitter.dispatchEvent(
           new HandoffOccurredEvent({
             sourceAgentName: sourceContext.sourceAgentName,
-            targetAgentName: agent.name,
+            targetAgentName: agent.agentName,
             sessionId: sourceContext.sessionId,
           }),
         );
@@ -109,7 +121,7 @@ export function createHandoffTool(options: CreateHandoffToolOptions) {
       return Promise.resolve(
         JSON.stringify({
           type: HANDOFF_MARKER,
-          agent: agent.name,
+          agent: agent.agentName,
         }),
       );
     },

@@ -1,33 +1,6 @@
 export type { AuditEventType, AuditQueryOptions, AuditRecord, AuditTrail } from './audit-trail';
 export { AUDIT_EVENT_TYPES, createAuditTrail } from './audit-trail';
 export type {
-  AgentBuilder,
-  AgentConfig,
-  AgentGenerateFunction,
-  AgentInput,
-  AgentNameFor,
-  AgentOptions,
-  AgentRun,
-  AgentTable,
-  AgentToolNames,
-  AgentTools,
-  BureauAgentsInput,
-  BureauBuilder,
-  BureauToolNames,
-  BureauTools,
-  CreateAgentOptions,
-  NormalizeAgents,
-  NormalizeTools,
-  RunEvent,
-  RunResult,
-  SkillPolicy,
-  SkillProviderLike,
-  ToolEntry,
-  ToolEntryInput,
-  ToolMap,
-  ToolMapInput,
-} from './builder-types';
-export type {
   BureauErrorNotConfiguredSubject,
   RecoveredRunSessionMetadata,
   SessionLoadOutcome,

@@ -5,23 +5,22 @@ import { CompletableEventTarget } from 'lifecycle';
 import { z } from 'zod';
 
 import { stopWhen } from './conditions';
-import type { RegistryAgent } from './create-agent-registry';
+import type { HandoffTarget } from './create-handoff-tool';
 import { createHandoffTool, extractHandoffTarget, HANDOFF_MARKER } from './create-handoff-tool';
 import type { CombinedOperativeEventMap } from './events';
 import { HandoffOccurredEvent } from './events';
 import { executeLoop } from './loop';
 import type { GenerateFunction, RunResult } from './types';
 
-function makeAgent(name: string): RegistryAgent {
+function makeAgent(name: string): HandoffTarget {
   return {
-    name,
-    run: async () => ({
-      conversation: {} as never,
-      content: '',
-      finishReason: 'end-turn',
-      steps: [],
-      usage: { prompt: 0, completion: 0, total: 0 },
-    }),
+    agentName: name,
+    agent: {
+      name,
+      run: () => {
+        throw new Error('not invoked — handoff is marker-based, not agent.run()');
+      },
+    },
   };
 }
 

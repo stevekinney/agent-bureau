@@ -35,10 +35,10 @@ class EvaluationTimeoutError extends Error {
 
 /**
  * Race a promise against a hard timeout. `controller.abort()` alone cannot bound
- * a `RegistryAgent.run()` that ignores its signal or hangs before observing it,
- * which would block the suite's concurrency slot past `EvaluationCase.timeout`.
- * This guarantees the await returns within `timeoutMs` even for an uncooperative
- * agent (PRRT_kwDORvupsc6MlG1u).
+ * a `RunnableAgent.run()` whose returned handle ignores its signal or hangs
+ * before observing it, which would block the suite's concurrency slot past
+ * `EvaluationCase.timeout`. This guarantees the await returns within
+ * `timeoutMs` even for an uncooperative agent (PRRT_kwDORvupsc6MlG1u).
  */
 function runWithTimeout<T>(promise: Promise<T>, timeoutMs: number, caseName: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;
@@ -60,8 +60,8 @@ const VALID_FINISH_REASONS: ReadonlySet<RunResult['finishReason']> = new Set([
 ]);
 
 /**
- * Validate a `RegistryAgent.run()` return value (typed `Promise<unknown>`) is a
- * real {@link RunResult} before it is scored. Without this, a miswired agent
+ * Validate a `RunnableAgent.run().result()` return value is a real
+ * {@link RunResult} before it is scored. Without this, a miswired agent
  * returning a plain object with no valid `finishReason` would slip past the
  * failure guard below and pass by default on a case with no output assertion
  * (PRRT_kwDORvupsc6MlG1z). Checks exactly the fields the evaluator reads:
@@ -113,40 +113,40 @@ async function runCase(
           toolbox: options.agent.toolbox,
         }).result;
       } else {
-        // RegistryAgent path: call the agent's run method directly.
-        // RegistryAgent.run() does not accept a systemPrompt — the agent's
-        // instructions are baked in at construction time. Fail loudly rather
-        // than silently dropping the override.
+        // RunnableAgent path: call the agent's synchronous run() to get a
+        // handle, then await its result(). run() does not accept a
+        // systemPrompt — the agent's instructions are baked in at
+        // construction time. Fail loudly rather than silently dropping the
+        // override.
         if (evaluationCase.systemPrompt) {
           throw new Error(
-            `Evaluation case "${evaluationCase.name}" specifies systemPrompt, but RegistryAgent does not support per-case system prompt overrides. Remove the systemPrompt from the case or use the generate+toolbox agent shape instead.`,
+            `Evaluation case "${evaluationCase.name}" specifies systemPrompt, but a RunnableAgent does not support per-case system prompt overrides. Remove the systemPrompt from the case or use the generate+toolbox agent shape instead.`,
           );
         }
 
-        // RegistryAgent.run() accepts only { signal, traceContext } — there is no
-        // per-case step cap. Silently ignoring maxSteps would let cases meant to
-        // catch looping/excessive tool use run under the agent's own/default
-        // limit. Fail loudly, mirroring the systemPrompt rejection above.
+        // RunnableAgent.run() accepts only { signal, traceContext, ... } —
+        // there is no per-case step cap. Silently ignoring maxSteps would
+        // let cases meant to catch looping/excessive tool use run under the
+        // agent's own/default limit. Fail loudly, mirroring the
+        // systemPrompt rejection above.
         if (evaluationCase.maxSteps !== undefined) {
           throw new Error(
-            `Evaluation case "${evaluationCase.name}" specifies maxSteps, but RegistryAgent does not support a per-case step cap (its run() accepts only { signal }). Remove maxSteps from the case or use the generate+toolbox agent shape instead.`,
+            `Evaluation case "${evaluationCase.name}" specifies maxSteps, but a RunnableAgent does not support a per-case step cap (its run() accepts only { signal, traceContext, ... }). Remove maxSteps from the case or use the generate+toolbox agent shape instead.`,
           );
         }
-        // Race the agent's run against a hard timeout (in addition to passing the
-        // abort signal) so an uncooperative RegistryAgent cannot hang the worker
-        // past the case timeout (PRRT_kwDORvupsc6MlG1u).
-        const agentResult = await runWithTimeout(
-          options.agent.run(evaluationCase.input, { signal: controller.signal }),
-          timeout,
-          evaluationCase.name,
-        );
-        // RegistryAgent.run() is typed Promise<unknown>; validate before scoring
-        // so malformed output cannot bypass the failure guard and pass by default
-        // (PRRT_kwDORvupsc6MlG1z).
+        // run() itself is synchronous — it returns the AgentRun handle
+        // immediately. Race its result() against a hard timeout (in
+        // addition to passing the abort signal) so an uncooperative agent
+        // cannot hang the worker past the case timeout
+        // (PRRT_kwDORvupsc6MlG1u).
+        const agentRun = options.agent.run(evaluationCase.input, { signal: controller.signal });
+        const agentResult = await runWithTimeout(agentRun.result(), timeout, evaluationCase.name);
+        // Validate before scoring so malformed output cannot bypass the
+        // failure guard and pass by default (PRRT_kwDORvupsc6MlG1z).
         if (!isRunResult(agentResult)) {
           throw new Error(
-            `Evaluation case "${evaluationCase.name}": RegistryAgent.run() returned a value ` +
-              `that is not a RunResult (missing a valid finishReason / steps / content). ` +
+            `Evaluation case "${evaluationCase.name}": the agent's run().result() returned a ` +
+              `value that is not a RunResult (missing a valid finishReason / steps / content). ` +
               `The agent is likely miswired.`,
           );
         }

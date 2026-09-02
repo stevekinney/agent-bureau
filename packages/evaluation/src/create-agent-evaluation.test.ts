@@ -1,7 +1,8 @@
 import type {
+  AgentRun,
   GenerateFunction,
   GenerateResponse,
-  RegistryAgent,
+  RunnableAgent,
   RunResult,
 } from '@lostgradient/operative';
 import { createMockGenerate } from '@lostgradient/operative/test';
@@ -10,6 +11,32 @@ import { describe, expect, it } from 'bun:test';
 
 import { createAgentEvaluation } from './create-agent-evaluation';
 import type { EvaluationCase } from './types';
+
+/**
+ * Builds a minimal `RunnableAgent<unknown, boolean>` fixture for these tests.
+ * `run()` is synchronous per the AB-15/AB-22 contract; only `.result()` is
+ * exercised by `createAgentEvaluation`, so every other `AgentRun` member is a
+ * stub that throws if a future change starts relying on it.
+ */
+function makeRunnableAgent(
+  name: string,
+  result: () => Promise<unknown>,
+): RunnableAgent<unknown, boolean> {
+  const unused = (): never => {
+    throw new Error(`unexpected call on the ${name} test fixture's AgentRun`);
+  };
+  return {
+    name,
+    run: () =>
+      ({
+        result,
+        unwrap: unused,
+        abort: unused,
+        [Symbol.dispose]: unused,
+        [Symbol.asyncIterator]: unused,
+      }) as unknown as AgentRun<unknown, boolean>,
+  };
+}
 
 function singleResponse(
   content: string,
@@ -520,22 +547,22 @@ describe('createAgentEvaluation', () => {
     expect(report.cases[0]!.error).toBeUndefined();
   });
 
-  it('works with RegistryAgent input', async () => {
-    // RegistryAgent path: the agent's run() is called directly with the input string
-    const registryAgent: RegistryAgent = {
-      name: 'test-agent',
-      run: async (_input: string) => ({
+  it('works with RunnableAgent input', async () => {
+    // RunnableAgent path: the agent's synchronous run() returns a handle whose
+    // result() is awaited.
+    const runnableAgent = makeRunnableAgent('test-agent', () =>
+      Promise.resolve({
         conversation: {} as RunResult['conversation'],
         steps: [],
         content: 'Hello from agent!',
         usage: { prompt: 0, completion: 0, total: 0 },
         finishReason: 'stop-condition' as const,
       }),
-    };
+    );
 
     const evaluation = createAgentEvaluation({
       cases: [{ name: 'registry-agent', input: 'test', expectedOutput: 'Hello from agent!' }],
-      agent: registryAgent,
+      agent: runnableAgent,
     });
 
     const report = await evaluation.run();
@@ -544,14 +571,14 @@ describe('createAgentEvaluation', () => {
     expect(report.cases[0]!.score).toBe(1);
   });
 
-  it('times out a RegistryAgent that hangs past the case timeout (PRRT_kwDORvupsc6MlG1u)', async () => {
+  it('times out a RunnableAgent that hangs past the case timeout (PRRT_kwDORvupsc6MlG1u)', async () => {
     // An agent that ignores its abort signal and never resolves. Without the
     // hard timeout race, the worker would await this forever; with it, the case
     // fails after `timeout` ms.
-    const hangingAgent: RegistryAgent = {
-      name: 'hanging-agent',
-      run: () => new Promise<never>(() => {}), // never resolves, ignores signal
-    };
+    const hangingAgent = makeRunnableAgent(
+      'hanging-agent',
+      () => new Promise<never>(() => {}), // never resolves, ignores signal
+    );
 
     const evaluation = createAgentEvaluation({
       cases: [{ name: 'hangs', input: 'test', timeout: 30 }],
@@ -565,15 +592,14 @@ describe('createAgentEvaluation', () => {
     expect(report.cases[0]!.error).toMatch(/timed out/i);
   });
 
-  it('fails (does not pass by default) when a RegistryAgent returns a non-RunResult (PRRT_kwDORvupsc6MlG1z)', async () => {
+  it('fails (does not pass by default) when a RunnableAgent returns a non-RunResult (PRRT_kwDORvupsc6MlG1z)', async () => {
     // A miswired agent: returns a plain object with `steps` but no valid
     // finishReason. Previously the `as RunResult` cast let this flow through; the
     // failure guard never triggered, and a case with no output assertion passed
     // by default. The validation guard now rejects it as a failed case.
-    const miswiredAgent = {
-      name: 'miswired-agent',
-      run: async (_input: string) => ({ steps: [], somethingElse: true }),
-    } as unknown as RegistryAgent;
+    const miswiredAgent = makeRunnableAgent('miswired-agent', () =>
+      Promise.resolve({ steps: [], somethingElse: true }),
+    );
 
     const evaluation = createAgentEvaluation({
       // No expectedOutput — this is exactly the case that would pass by default.
@@ -597,9 +623,8 @@ describe('createAgentEvaluation', () => {
       // run fell through to output matching and could PASS if its partial content
       // happened to match expectedOutput — a false positive for evaluations meant
       // to catch budget/elicitation failures.
-      const registryAgent: RegistryAgent = {
-        name: 'failing-agent',
-        run: async (_input: string) => ({
+      const runnableAgent = makeRunnableAgent('failing-agent', () =>
+        Promise.resolve({
           conversation: {} as RunResult['conversation'],
           steps: [],
           // Content deliberately MATCHES expectedOutput below to prove the
@@ -608,7 +633,7 @@ describe('createAgentEvaluation', () => {
           usage: { prompt: 0, completion: 0, total: 0 },
           finishReason,
         }),
-      };
+      );
 
       const evaluation = createAgentEvaluation({
         cases: [
@@ -618,7 +643,7 @@ describe('createAgentEvaluation', () => {
             expectedOutput: 'the expected answer',
           },
         ],
-        agent: registryAgent,
+        agent: runnableAgent,
       });
 
       const report = await evaluation.run();
@@ -630,20 +655,19 @@ describe('createAgentEvaluation', () => {
     },
   );
 
-  it('fails with a clear error when RegistryAgent is used with a per-case systemPrompt', async () => {
-    // RegistryAgent.run() has no systemPrompt parameter — its instructions are baked
+  it('fails with a clear error when RunnableAgent is used with a per-case systemPrompt', async () => {
+    // RunnableAgent.run() has no systemPrompt parameter — its instructions are baked
     // in at construction time. Silently dropping the override would give misleading
     // results, so the runner must surface this as an explicit error.
-    const registryAgent: RegistryAgent = {
-      name: 'test-agent',
-      run: async (_input: string) => ({
+    const runnableAgent = makeRunnableAgent('test-agent', () =>
+      Promise.resolve({
         conversation: {} as RunResult['conversation'],
         steps: [],
         content: 'ok',
         usage: { prompt: 0, completion: 0, total: 0 },
         finishReason: 'stop-condition' as const,
       }),
-    };
+    );
 
     const evaluation = createAgentEvaluation({
       cases: [
@@ -653,7 +677,7 @@ describe('createAgentEvaluation', () => {
           systemPrompt: 'Override system prompt',
         },
       ],
-      agent: registryAgent,
+      agent: runnableAgent,
     });
 
     const report = await evaluation.run();
@@ -661,25 +685,24 @@ describe('createAgentEvaluation', () => {
     // The case should fail with an actionable error, not silently drop the systemPrompt
     expect(report.cases[0]!.pass).toBe(false);
     expect(report.cases[0]!.error).toContain('systemPrompt');
-    expect(report.cases[0]!.error).toContain('RegistryAgent');
+    expect(report.cases[0]!.error).toContain('RunnableAgent');
   });
 
-  // Regression: PRRT_kwDORvupsc6Mc3gT — RegistryAgent.run() accepts only
-  // { signal, traceContext } and has no per-case step cap. Silently ignoring a
-  // case's maxSteps would let cases meant to catch looping run under the agent's
-  // own/default limit, so the runner must reject maxSteps for RegistryAgent
-  // cases the same way it rejects systemPrompt.
-  it('fails with a clear error when RegistryAgent is used with a per-case maxSteps (PRRT_kwDORvupsc6Mc3gT)', async () => {
-    const registryAgent: RegistryAgent = {
-      name: 'test-agent',
-      run: async (_input: string) => ({
+  // Regression: PRRT_kwDORvupsc6Mc3gT — RunnableAgent.run() accepts only
+  // { signal, traceContext, ... } and has no per-case step cap. Silently
+  // ignoring a case's maxSteps would let cases meant to catch looping run
+  // under the agent's own/default limit, so the runner must reject maxSteps
+  // for a RunnableAgent case the same way it rejects systemPrompt.
+  it('fails with a clear error when RunnableAgent is used with a per-case maxSteps (PRRT_kwDORvupsc6Mc3gT)', async () => {
+    const runnableAgent = makeRunnableAgent('test-agent', () =>
+      Promise.resolve({
         conversation: {} as RunResult['conversation'],
         steps: [],
         content: 'ok',
         usage: { prompt: 0, completion: 0, total: 0 },
         finishReason: 'stop-condition' as const,
       }),
-    };
+    );
 
     const evaluation = createAgentEvaluation({
       cases: [
@@ -689,7 +712,7 @@ describe('createAgentEvaluation', () => {
           maxSteps: 3,
         },
       ],
-      agent: registryAgent,
+      agent: runnableAgent,
     });
 
     const report = await evaluation.run();
@@ -697,6 +720,6 @@ describe('createAgentEvaluation', () => {
     // The case should fail with an actionable error, not silently drop maxSteps.
     expect(report.cases[0]!.pass).toBe(false);
     expect(report.cases[0]!.error).toContain('maxSteps');
-    expect(report.cases[0]!.error).toContain('RegistryAgent');
+    expect(report.cases[0]!.error).toContain('RunnableAgent');
   });
 });

@@ -95,21 +95,6 @@ export type {
   StandaloneAgent,
 } from './create-agent';
 export { createAgent } from './create-agent';
-export type {
-  AgentRegistry,
-  AgentRegistryEntry,
-  AgentRegistryEventMap,
-  AgentRegistryEvents,
-  AgentRegistryQuery,
-  RegistryAgent,
-} from './create-agent-registry';
-export {
-  AgentQueriedEvent,
-  AgentRegisteredEvent,
-  AgentUnregisteredEvent,
-  createAgentDiscoveryTool,
-  createAgentRegistry,
-} from './create-agent-registry';
 export type { CreateContextCompactorOptions } from './create-context-compactor';
 export { createContextCompactor } from './create-context-compactor';
 export type { EarlyStoppingHandlerOptions } from './create-early-stopping-handler';
@@ -156,28 +141,6 @@ export type {
   SubagentSummaryContext,
 } from './create-subagent-tool';
 export { createSubagentTool, defaultSubagentSummarizer } from './create-subagent-tool';
-export type {
-  CreateSupervisorOptions,
-  PipelineStage,
-  RoutingStrategy,
-  Supervisor,
-  SupervisorEventMap,
-  SupervisorEvents,
-  SupervisorResult,
-  SupervisorTaskResult,
-  SynthesisStrategy,
-} from './create-supervisor';
-export {
-  createCapabilityRouting,
-  createFanOutRouting,
-  createRoundRobinRouting,
-  createSupervisor,
-  SynthesisCompletedEvent,
-  SynthesisStartedEvent,
-  TaskCompletedEvent,
-  TaskFailedEvent,
-  TaskRoutedEvent,
-} from './create-supervisor';
 export type {
   AgentRunErrorCode,
   AgentRunErrorKind,

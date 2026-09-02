@@ -899,7 +899,7 @@ const withFallback = createFallbackGenerate({
 
 #### Multi-Agent Patterns
 
-The registry-based patterns below (`createSupervisor`, `createHandoffTool`, `createAgentRegistry`) predate `createAgent` and are built around the older `RegistryAgent` shape — `{ name, run(input, context?): Promise<unknown> }`. A `StandaloneAgent` from `createAgent` does expose `.name` (AB-21; defaults to `'(agent)'` when the `name` option is omitted), but its `.run(input)` returns a non-thenable `AgentRun` rather than a `Promise` directly, so wrap it in a thin adapter (`{ name, run: (input) => agent.run(input).result() }`) wherever one of these APIs expects a `RegistryAgent`.
+`createSupervisor` and `createAgentDiscoveryTool` moved to the `bureau` package (AB-22) — they now operate directly on a `BureauAgentCatalog`/`AgentDescriptor` rather than the older registry types, which no longer exist in this package. See `bureau`'s README for both. `createHandoffTool` stays here; it now takes a `RunnableAgent` (from `createAgent` or `createLazyAgent`) directly instead of a registry adapter.
 
 **Subagents:**
 
@@ -1093,82 +1093,7 @@ Omit `registry` on either side and `children()` reads back an empty array and
 unknown or already-terminal child id, matching `abort()`'s own rule, and
 never propagates to a sibling.
 
-**Supervisor:**
-
-```typescript
-import {
-  createSupervisor,
-  createRoundRobinRouting,
-  createCapabilityRouting,
-} from '@lostgradient/operative';
-import type { AgentRegistryEntry } from '@lostgradient/operative';
-
-// Agents are wrapped as AgentRegistryEntry objects; `.agent` is a
-// RegistryAgent adapter over each StandaloneAgent (see the note above).
-const agentPool: AgentRegistryEntry[] = [
-  {
-    agent: { name: 'writer', run: (input) => writerAgent.run(input).result() },
-    description: 'Writes prose',
-    capabilities: ['writing'],
-  },
-  {
-    agent: { name: 'researcher', run: (input) => researcherAgent.run(input).result() },
-    description: 'Finds facts',
-    capabilities: ['research'],
-  },
-  {
-    agent: { name: 'editor', run: (input) => editorAgent.run(input).result() },
-    description: 'Edits copy',
-    capabilities: ['editing'],
-  },
-];
-
-const supervisor = createSupervisor({
-  agents: agentPool,
-  routing: createRoundRobinRouting(),
-  // or createCapabilityRouting() for skill-based dispatch
-});
-
-const supervisorResult = await supervisor.delegate('Write a detailed report on climate change.');
-// supervisorResult.synthesis — the merged output
-```
-
-**Supervisor synthesis and context discipline (AB-64):** the built-in
-`synthesis` strategy concatenates every delegated agent's `result.content`
-verbatim, attributed by agent name — it applies no cap. That default is fine
-for a small, fixed agent pool, but it does not carry the same
-context-isolation discipline as `createSubagentTool`'s `'summary'` mode: a
-`createFanOutRouting()` delegation across many agents can accumulate an
-uncapped amount of text into `supervisorResult.synthesis`. For fan-out at
-scale, supply a custom `SynthesisStrategy` that applies the same discipline
-— condense each `SupervisorTaskResult` (optionally via
-`defaultSubagentSummarizer` or your own summarizer) and cap the combined
-output before returning it:
-
-```typescript
-import { createFanOutRouting, defaultSubagentSummarizer } from '@lostgradient/operative';
-import type { SynthesisStrategy } from '@lostgradient/operative';
-
-const cappedSynthesis: SynthesisStrategy = async (results) => {
-  const summaries = await Promise.all(
-    results.map(async (r) => {
-      if (r.error || !r.result) return `[${r.agentName}] Error`;
-      const summary = await defaultSubagentSummarizer(r.result, {
-        agentName: r.agentName,
-        maxTokens: 200,
-      });
-      return `[${r.agentName}] ${summary}`;
-    }),
-  );
-  return summaries.join('\n\n');
-};
-
-const supervisor = createSupervisor({
-  agents: agentPool,
-  routing: createFanOutRouting(),
-  synthesis: cappedSynthesis,
-});
-```
+**Supervisor:** moved to the `bureau` package (AB-22) — see its README for `createSupervisor`, `RoutingStrategy<D>`, and the built-in routing strategies, which now operate on a `BureauAgentCatalog<D>` and metadata-only `AgentDescriptor`s.
 
 **Handoffs:**
 
@@ -1185,7 +1110,7 @@ import {
 const escalateToSupport = createHandoffTool({
   name: 'escalate-to-support',
   description: 'Transfer the conversation to the human support agent.',
-  agent: { name: 'support', run: (input) => supportAgent.run(input).result() },
+  agent: { agentName: 'support', agent: supportAgent },
 });
 
 const triageAgent = createAgent({
@@ -1249,7 +1174,7 @@ if (target) {
 > const escalateToSupport = createHandoffTool({
 >   name: 'escalate-to-support',
 >   description: 'Transfer the conversation to the human support agent.',
->   agent: { name: 'support', run: (input) => supportAgent.run(input).result() },
+>   agent: { agentName: 'support', agent: supportAgent },
 >   input: z.object({ reason: z.string() }),
 > });
 > ```
@@ -1272,28 +1197,7 @@ if (target) {
 >
 > If the target agent needs the reason in its own context, pass it explicitly when you start that agent's run — the handoff mechanism will not carry it across for you.
 
-**Agent Registry:**
-
-```typescript
-import { createAgentRegistry, createAgentDiscoveryTool } from '@lostgradient/operative';
-
-const registry = createAgentRegistry();
-registry.register({
-  agent: { name: 'researcher', run: (input) => researcherAgent.run(input).result() },
-  description: 'Finds facts',
-  capabilities: ['research'],
-  tags: ['research'],
-});
-registry.register({
-  agent: { name: 'writer', run: (input) => writerAgent.run(input).result() },
-  description: 'Writes prose',
-  capabilities: ['writing'],
-  tags: ['writing'],
-});
-
-// Let an orchestrator discover agents dynamically
-const discoveryTool = createAgentDiscoveryTool(registry);
-```
+**Agent discovery:** moved to the `bureau` package (AB-22) — see its README for `createAgentDiscoveryTool`, which now takes a `BureauAgentCatalog<D>` directly rather than a standalone registry.
 
 #### Scheduler
 
@@ -2183,8 +2087,6 @@ import {
   createMockGenerateOnce,
   createRunRecorder,
   createMockScratchpad,
-  createMockRegistryAgent,
-  createMockAgentRegistry,
   createTestStore,
 } from '@lostgradient/operative/test';
 import type { RunRecorder } from '@lostgradient/operative/test';
@@ -2216,24 +2118,17 @@ const once = createMockGenerateOnce({ content: 'Only once', toolCalls: [] });
 
 // In-memory store for testing operative/store consumers
 const store = createTestStore();
-
-// Mock RegistryAgent for createSupervisor / createAgentRegistry consumer tests
-const mockAgent = createMockRegistryAgent('test-agent', {
-  run: async () => 'custom',
-});
 ```
 
 **Exported:**
 
-| Symbol                                      | Description                                                                                    |
-| ------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `createMockGenerate(responses)`             | Replays `GenerateResponse[]` in sequence; exposes `.calls` and `.callCount`.                   |
-| `createMockGenerateOnce(response)`          | Returns response once; throws on subsequent calls.                                             |
-| `createRunRecorder(activeRun)`              | Records all events from an `ActiveRun` for assertion. Exposes `.events`, `.steps`, `.clear()`. |
-| `createMockScratchpad(initialValues?)`      | In-memory `Scratchpad` for testing scratchpad-dependent agents.                                |
-| `createMockRegistryAgent(name, overrides?)` | Minimal `RegistryAgent` with a stub `run`, for `createSupervisor`/registry consumer tests.     |
-| `createMockAgentRegistry(entries?)`         | Pre-populated `AgentRegistry` for registry consumer tests.                                     |
-| `createTestStore()`                         | In-memory `Store` instance from `@lostgradient/operative/store`.                               |
+| Symbol                                 | Description                                                                                    |
+| -------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `createMockGenerate(responses)`        | Replays `GenerateResponse[]` in sequence; exposes `.calls` and `.callCount`.                   |
+| `createMockGenerateOnce(response)`     | Returns response once; throws on subsequent calls.                                             |
+| `createRunRecorder(activeRun)`         | Records all events from an `ActiveRun` for assertion. Exposes `.events`, `.steps`, `.clear()`. |
+| `createMockScratchpad(initialValues?)` | In-memory `Scratchpad` for testing scratchpad-dependent agents.                                |
+| `createTestStore()`                    | In-memory `Store` instance from `@lostgradient/operative/store`.                               |
 
 | `RunRecorder`
 
