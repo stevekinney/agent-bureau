@@ -159,9 +159,15 @@ export interface RunnableAgent<O = never, H extends boolean = false> {
  * terminal (abort, execution error, tripwire, budget, elicitation denial,
  * maximum steps, and invalid output) has already been rejected as a
  * `SubagentRunError` — see `create-subagent-tool.ts`.
+ *
+ * `schemaValidation` is narrowed to `success: true` (absent, or present and
+ * successful) alongside `finishReason` — a `SuccessfulRunResult` can never
+ * structurally carry a failed validation, matching what `isSuccessfulRunResult`
+ * actually checks below rather than only half of it.
  */
 export type SuccessfulRunResult<O = never, H extends boolean = false> = RunResult<O, H> & {
   finishReason: 'stop-condition';
+  schemaValidation?: { success: true; error?: unknown };
 };
 
 /**

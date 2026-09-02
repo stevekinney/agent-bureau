@@ -241,7 +241,14 @@ describe('createSubagentTool', () => {
       }
 
       expect(caughtError).toBeInstanceOf(SubagentRunError);
-      expect((caughtError as SubagentRunError).result.schemaValidation?.success).toBe(false);
+      const error = caughtError as SubagentRunError;
+      expect(error.result.schemaValidation?.success).toBe(false);
+      // The message names the actual failure ("invalid-output"), not the
+      // misleading raw finishReason ("stop-condition") — and the cause
+      // falls back to the schema-validation error when result.error is unset.
+      expect(error.message).toContain('invalid-output');
+      expect(error.message).not.toContain('stop-condition');
+      expect(error.cause).toBe(validationError);
     });
 
     it('no longer accepts treatMaximumStepsAsError — maximum-steps always rejects', async () => {

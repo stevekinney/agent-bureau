@@ -403,10 +403,19 @@ export class SubagentRunError extends AgentRunError {
   readonly result: RunResult;
 
   constructor(agentName: string, result: RunResult, cause?: unknown) {
-    super(`Sub-agent "${agentName}" did not complete successfully: ${result.finishReason}`, {
+    // `SubagentRunError` is only ever constructed for a non-success
+    // terminal (see `isSuccessfulRunResult` in `agent-run.ts`); the ONLY
+    // way `finishReason` reaches here as `'stop-condition'` is a clean stop
+    // whose `output` failed schema validation — `result.finishReason` alone
+    // would render that case as the misleading "did not complete
+    // successfully: stop-condition". Label it explicitly instead, and fall
+    // back to the schema-validation error (rather than the unset
+    // `result.error`) as the cause in that same case.
+    const label = result.finishReason === 'stop-condition' ? 'invalid-output' : result.finishReason;
+    super(`Sub-agent "${agentName}" did not complete successfully: ${label}`, {
       kind: 'tool',
       code: 'SUBAGENT_RUN_FAILED',
-      cause: cause ?? result.error,
+      cause: cause ?? result.error ?? result.schemaValidation?.error,
     });
     this.name = 'SubagentRunError';
     this.agentName = agentName;
