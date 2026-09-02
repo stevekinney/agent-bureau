@@ -617,7 +617,12 @@ function createDeferredAgentRun<O, H extends boolean>(
     // `completed` is accurate.
     closed: createClosedAcknowledgement({
       result: resultPromise,
-      disqualifiesFastPath: () => cancelRequested,
+      // `cancelRequested` alone misses a cancellation delivered through
+      // `context.signal` AFTER this wrapper detaches its own listener
+      // (ownership transfers directly to the underlying agent's run() once
+      // it exists — see `detachSignalListener` above) — reading the signal
+      // directly here still catches that case.
+      disqualifiesFastPath: () => cancelRequested || (signal?.aborted ?? false),
       hasInFlightWork: () => false,
       resolveOutcome: () =>
         underlying ? underlying.closed() : Promise.resolve({ status: 'completed' }),

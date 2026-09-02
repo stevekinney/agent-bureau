@@ -249,6 +249,43 @@ describe('session.run()', () => {
     expect(await run.closed()).toEqual({ status: 'completed' });
   });
 
+  // Regression: a code-review finding on the AB-204 pull request —
+  // `cancelRequested` alone misses a cancellation delivered through the
+  // session's own configured `runOptions.signal` rather than a direct
+  // `run.abort()`/`[Symbol.dispose]()` call.
+  it('closed() disqualifies not-required when the run was cancelled through the configured runOptions.signal rather than abort()', async () => {
+    let signalGenerateStarted!: () => void;
+    const generateStarted = new Promise<void>((resolve) => {
+      signalGenerateStarted = resolve;
+    });
+    const blockingGenerate: GenerateFunction = async ({ signal }) => {
+      signalGenerateStarted();
+      await new Promise<never>((_resolve, reject) => {
+        signal?.addEventListener('abort', () => reject(new Error('session run aborted')), {
+          once: true,
+        });
+      });
+      throw new Error('abort signal was not delivered');
+    };
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const controller = new AbortController();
+    const handle = createSessionHandle('closed-configured-signal-session', {
+      store,
+      agentName: 'agent',
+      runOptions: { ...createTestRunOptions(blockingGenerate), signal: controller.signal },
+    });
+
+    const run = handle.run('abort me via configured signal');
+    await generateStarted;
+    controller.abort('configured signal fired');
+
+    const result = await run.result();
+    expect(result.finishReason).toBe('aborted');
+
+    expect(await run.closed()).not.toEqual({ status: 'not-required' });
+  });
+
   it('appends a RunRef to the session when the run completes', async () => {
     const { handle, store } = createSessionHandleFixture();
 

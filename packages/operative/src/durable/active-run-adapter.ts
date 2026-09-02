@@ -559,7 +559,15 @@ export function createDurableActiveRun(
   }
 
   async function resolveDurableOutcome(): Promise<CleanupAcknowledgement> {
-    if (!cancelRequested) return { status: 'completed' };
+    // `cancelRequested` alone misses a cancellation delivered through
+    // `RunOptions.signal` with `abort()` never called — the same gap the
+    // not-required disqualifier above closes, but here it matters more: a
+    // signal-only cancellation never fired `engine.cancel` (only `abort()`
+    // does that), so skipping straight to `completed` would report a
+    // successful durable acknowledgement for a cancellation that was never
+    // recorded or confirmed. `cancelSettled ?? context.engine.cancel(...)`
+    // below already handles firing that first call when nothing else has.
+    if (!cancelRequested && !combinedSignal.aborted) return { status: 'completed' };
     // abort() may have been called before `driveStarted` — the workflow did
     // not exist yet, so it never fired engine.cancel(). By the time `result`
     // has settled the workflow certainly exists, so fire it here instead.

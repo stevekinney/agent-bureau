@@ -11,7 +11,12 @@
 
 import type { Tool } from 'armorer';
 
-import type { GenerateFunction, PrepareStepHook } from './types';
+import type {
+  CleanupAcknowledgement,
+  ClosedOptions,
+  GenerateFunction,
+  PrepareStepHook,
+} from './types';
 
 /**
  * Any armorer Tool, regardless of its concrete schema/event parameters. The
@@ -259,6 +264,15 @@ export interface AgentRun extends AsyncIterable<RunEvent> {
   result(): Promise<RunResult>;
   /** Abort the in-flight run. Abort signal fires immediately. */
   abort(reason?: string): void;
+  /**
+   * A truthful cleanup acknowledgement (AB-37, delivered by AB-204) — see
+   * the ratified `AgentRun` in `agent-run.ts` for the full contract.
+   * `BureauBuilder.run()` returns the real, full `AgentRun` at runtime;
+   * this narrower spike-shape interface must declare it too so a caller
+   * typed against `BureauBuilder` isn't rejected by the compiler for a
+   * member that genuinely exists at runtime.
+   */
+  closed(options?: ClosedOptions): Promise<CleanupAcknowledgement>;
   /** Dispose the run handle; releases internal resources. */
   [Symbol.dispose](): void;
 }

@@ -518,6 +518,31 @@ describe('createLazyAgent', () => {
     expect(await run.closed()).toEqual({ status: 'not-required' });
   });
 
+  // Regression: a code-review finding on the AB-204 pull request — once
+  // `underlying` exists, this wrapper detaches its own `context.signal`
+  // listener and ownership transfers directly to the underlying agent's
+  // run() (see `detachSignalListener`). A cancellation delivered through
+  // that same signal AFTER detachment never sets `cancelRequested`, so the
+  // disqualifier must still read the signal directly.
+  it('closed() disqualifies not-required when context.signal fires after this wrapper has already detached its own listener', async () => {
+    const fake = createFakeAgentRun();
+    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };
+    const lazy = createLazyAgent(() => agent);
+    const controller = new AbortController();
+
+    const run = lazy.run('hello', { signal: controller.signal });
+    await flushMicrotasks();
+    fake.settle(successResult('done'));
+    await run.result();
+    await Promise.resolve();
+
+    // Fires AFTER settlement — well after this wrapper's own listener
+    // (detached once `underlying` was stored) could ever observe it.
+    controller.abort('fired after detachment');
+
+    expect(await run.closed()).not.toEqual({ status: 'not-required' });
+  });
+
   it('children()/abortChild() read empty/no-op before resolution and delegate to the underlying handle once resolved', async () => {
     const fake = createFakeAgentRun();
     const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };

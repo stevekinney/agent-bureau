@@ -1282,6 +1282,58 @@ describe('createDurableActiveRun.closed()', () => {
     }
   });
 
+  // Regression: a code-review finding on the AB-204 pull request — a
+  // signal-only cancellation (abort() never called) never fires
+  // engine.cancel from abort() itself, so `resolveDurableOutcome` must
+  // still run the full post-cancel re-read dance rather than returning
+  // `completed` the moment it sees `!cancelRequested`. Uses the manual
+  // engine (not the real one) so the workflow genuinely does not settle on
+  // its own before the signal fires — proving cancellation, not a race.
+  it('fires its own post-cancel confirmation when only RunOptions.signal fired, never calling abort() or engine.cancel', async () => {
+    // A signal-only cancellation never fires engine.cancel from abort()
+    // itself (only abort() does that) — this proves resolveDurableOutcome's
+    // fallback still confirms durable cancellation rather than trusting
+    // `!cancelRequested` alone. The workflow settling here (resolveResult)
+    // stands in for the in-process signal drop settling it some other way
+    // (e.g. a B6-style race) — engine.cancel was never called by anyone.
+    const { engine, resolveResult } = createManualDurableEngine();
+    const cancelledIds: string[] = [];
+    const realCancel = engine.cancel.bind(engine);
+    engine.cancel = async (id: string) => {
+      cancelledIds.push(id);
+      return realCancel(id);
+    };
+    engine.get = (async () => ({
+      status: 'cancelled',
+    })) as unknown as RegistryAgnosticEngine['get'];
+
+    const controller = new AbortController();
+    const runId = 'ac-durable-signal-only-cancel';
+    const activeRun = createDurableActiveRun(
+      { engine, checkpointStore: createManualCheckpointStore() },
+      {
+        runId,
+        sessionId: runId,
+        options: {
+          ...runOptions(async () => ({ content: 'unused', toolCalls: [] })),
+          signal: controller.signal,
+        },
+        prompt: 'Hello',
+      },
+    );
+
+    await Promise.resolve();
+    controller.abort();
+    expect(cancelledIds).toEqual([]);
+
+    const closedAcknowledgement = activeRun.closed();
+    resolveResult();
+    await activeRun.result;
+
+    expect(await closedAcknowledgement).toEqual({ status: 'completed' });
+    expect(cancelledIds).toEqual([runId]);
+  });
+
   // Regression: a code-review finding on the AB-204 pull request — see the
   // identical fixture in create-run.test.ts for the full rationale.
   it('does not corrupt in-flight tool tracking when the toolbox emits settled with no preceding execute-start', async () => {

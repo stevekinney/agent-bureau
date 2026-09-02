@@ -871,7 +871,14 @@ export function createSessionHandle(
         // reservation step itself failed), there is nothing else to await.
         closed: createClosedAcknowledgement({
           result: resultPromise,
-          disqualifiesFastPath: () => cancelRequested,
+          // `cancelRequested` alone misses a cancellation delivered through
+          // the session's own configured `runOptions.signal` rather than a
+          // direct `abort()`/`[Symbol.dispose]()` call — matching the
+          // identical fix in create-run.ts / active-run-adapter.ts.
+          disqualifiesFastPath: () =>
+            cancelRequested ||
+            abortController.signal.aborted ||
+            (runOptions.signal?.aborted ?? false),
           hasInFlightWork: () => false,
           resolveOutcome: () =>
             activeInnerRun ? activeInnerRun.closed() : Promise.resolve({ status: 'completed' }),
