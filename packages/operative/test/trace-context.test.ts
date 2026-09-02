@@ -78,6 +78,7 @@ describe('trace context propagation', () => {
         description: 'Delegate',
         agentName: 'sub',
         agent: {
+          name: 'stub-agent',
           run: (_input, context) => {
             receivedTraceContext = context?.traceContext;
             return {
@@ -129,6 +130,7 @@ describe('trace context propagation', () => {
         description: 'Delegate',
         agentName: 'sub',
         agent: {
+          name: 'stub-agent',
           run: (_input, context) => {
             receivedTraceContext = context?.traceContext;
             return {

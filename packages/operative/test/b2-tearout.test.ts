@@ -98,6 +98,7 @@ describe('B2 tearout — remaining surface is coherent', () => {
       description: 'A subagent tool',
       agentName: 'test',
       agent: {
+        name: 'stub-agent',
         run: (input) => ({
           result: () =>
             Promise.resolve({

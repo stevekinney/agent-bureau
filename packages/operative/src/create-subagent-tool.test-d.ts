@@ -5,9 +5,10 @@
 
 import { z } from 'zod';
 
-import type { AgentInput, RunnableAgent, SuccessfulRunResult } from './agent-run';
+import type { SuccessfulRunResult } from './agent-run';
 import { createAgent } from './create-agent';
 import { createSubagentTool } from './create-subagent-tool';
+import type { AgentInput, RunnableAgent } from './runnable-agent';
 
 const inputSchema = z.object({ topic: z.string() });
 
@@ -129,17 +130,17 @@ void createSubagentTool({
 });
 
 // ---------------------------------------------------------------------------
-// 8. `RunnableAgent` narrower-than-`StandaloneAgent` fit: a hand-rolled
-//    object satisfying only the minimal `RunnableAgent` shape (no `.name`)
-//    is still accepted — proving `agent` does not require the full AB-15
-//    `RunnableAgent` (which also carries `name`).
+// 8. `agent` accepts any value structurally satisfying the canonical
+//    `RunnableAgent<O, H>` (AB-15/AB-21, from `./runnable-agent`) — not only
+//    a real `createAgent(...)` result. `createSubagentTool` (AB-19) consumes
+//    that type as-is rather than a locally narrower copy.
 // ---------------------------------------------------------------------------
 
-declare const minimalAgent: RunnableAgent<never, false>;
+declare const handRolledAgent: RunnableAgent<never, false>;
 void createSubagentTool({
-  name: 'minimal-agent',
-  description: 'A hand-rolled RunnableAgent with no .name',
-  agent: minimalAgent,
+  name: 'hand-rolled-agent',
+  description: 'A hand-written RunnableAgent, not a createAgent(...) result',
+  agent: handRolledAgent,
   agentName: 'child',
   input: inputSchema,
 });

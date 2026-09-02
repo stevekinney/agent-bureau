@@ -10,7 +10,7 @@ BREAKING (released as a minor under 0.x convention): Make `createSubagentTool`'s
 
 Every non-success terminal — abort, execution error, tripwire, budget exceeded, elicitation denied, maximum steps, or a clean stop whose output failed schema validation — now rejects with the new `SubagentRunError` (`kind: 'tool'`, code `SUBAGENT_RUN_FAILED`), which carries the child's full terminal `RunResult` as `.result`. `treatMaximumStepsAsError` is removed with no replacement: every non-success terminal always rejects.
 
-New exports: `SubagentRunError`, `RunnableAgent`, `AgentInput`, `AgentRunContext`, `SuccessfulRunResult`, and `isSuccessfulRunResult`. `createAgent`'s returned `StandaloneAgent.run` now accepts an optional second `AgentRunContext` argument (`{ signal, traceContext, withTraceContext, agentName }`), threaded into the run's `RunOptions` — this is additive and backward compatible with every existing `agent.run(input)` call site.
+New exports from this issue: `SubagentRunError`, `SuccessfulRunResult`, and `isSuccessfulRunResult`. `agent` is typed against the canonical `RunnableAgent`/`AgentInput`/`AgentRunContext` AB-21 introduced (`RunnableAgent<TOutput, THasOutput>` from `./runnable-agent`, requiring `readonly name: string`) rather than a separate local copy — `createAgent`'s returned agent already satisfies it, `name` included.
 
 AB-70's `summaryAssetPolicy` amendment to this issue — controlling how non-text `parts` are represented in a capped summary — is deferred to AB-73, which introduces the `parts` field on `RunResult` this amendment depends on; it is not implemented here.
 

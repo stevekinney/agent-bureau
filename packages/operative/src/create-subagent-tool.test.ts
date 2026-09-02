@@ -4,18 +4,13 @@ import { Conversation, type ConversationHistory } from 'conversationalist';
 import { CompletableEventTarget } from 'lifecycle';
 import { z } from 'zod';
 
-import type {
-  AgentInput,
-  AgentRun,
-  AgentRunContext,
-  RunnableAgent,
-  SuccessfulRunResult,
-} from './agent-run';
+import type { AgentRun, SuccessfulRunResult } from './agent-run';
 import { createAgent } from './create-agent';
 import { createSubagentTool, defaultSubagentSummarizer } from './create-subagent-tool';
 import { GuardrailTripwireError, SubagentRunError } from './errors';
 import type { CombinedOperativeEventMap } from './events';
 import { ChildWorkflowStartedEvent } from './events';
+import type { AgentInput, AgentRunContext, RunnableAgent } from './runnable-agent';
 import type { GenerateFunction, GenerateResponse, RunResult } from './types';
 
 // ---------------------------------------------------------------------------
@@ -39,6 +34,7 @@ function makeMockAgent<O = never, H extends boolean = false>(
 ): { agent: RunnableAgent<O, H>; calls: RecordedRunCall[] } {
   const calls: RecordedRunCall[] = [];
   const agent: RunnableAgent<O, H> = {
+    name: 'mock-agent',
     run(input, context): AgentRun<O, H> {
       const call: RecordedRunCall = { input, context };
       calls.push(call);

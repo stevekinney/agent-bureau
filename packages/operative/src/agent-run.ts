@@ -15,8 +15,6 @@
  * architecture.md for the 3-reviewer consensus on this decision.
  */
 
-import type { ConversationHistory } from 'conversationalist';
-
 import type { ActiveRun } from './create-run';
 import type { CombinedOperativeEventMap, CombinedOperativeEventType } from './events';
 import type { RunResult, RunResultBase } from './types';
@@ -106,57 +104,16 @@ export interface DiagnosticAgentRun extends AsyncIterable<RunEvent> {
 }
 
 // ---------------------------------------------------------------------------
-// RunnableAgent — the directional shape AB-19's createSubagentTool consumes
+// SuccessfulRunResult — the narrowed shape createSubagentTool projects
 // ---------------------------------------------------------------------------
-
-/**
- * The input shape every `RunnableAgent.run` accepts (`AB-15`,
- * `operative-type-safe-api.md`). A bare string starts a fresh conversation;
- * `{ conversation }` resumes from an existing `ConversationHistory` — the
- * shape a stateless host holds between requests — and is snapshotted before
- * the run begins.
- */
-export type AgentInput = string | { conversation: ConversationHistory };
-
-/**
- * Per-run context accepted by `RunnableAgent.run` (`AB-15`). `agentName`
- * stamps curated `tool.*` events with the run's identity; `traceContext` and
- * `withTraceContext` nest the run's spans under a parent trace exactly as
- * `RunOptions.parentContext`/`RunOptions.withTraceContext` do internally.
- */
-export interface AgentRunContext {
-  signal?: AbortSignal;
-  traceContext?: unknown;
-  withTraceContext?: <T>(parentContext: unknown, fn: () => Promise<T>) => Promise<T>;
-  agentName?: string;
-}
-
-/**
- * The minimal shape `createSubagentTool` (AB-19) needs from a child agent:
- * something synchronously runnable that hands back an `AgentRun` handle.
- * `createAgent`'s returned `StandaloneAgent<O, H>` satisfies this
- * structurally once its `run()` accepts the optional `AgentRunContext`
- * second parameter.
- *
- * This is intentionally narrower than AB-15's full `RunnableAgent` contract
- * (`operative-type-safe-api.md`'s version also carries a required
- * `readonly name: string`): `createAgent` has no `name` option yet — adding
- * one is AB-20/AB-21/AB-22's registry-unification territory, not this
- * issue's. `createSubagentTool` keeps naming the child through its own
- * `agentName` option instead (see its acceptance criteria). A future
- * `RunnableAgent` that also carries `name` remains structurally assignable
- * here — this interface only withholds a field it doesn't need, never one
- * that would conflict.
- */
-export interface RunnableAgent<O = never, H extends boolean = false> {
-  // A function-VALUED property, not method shorthand (`run(...): ...`).
-  // TypeScript checks method-shorthand parameters bivariantly, which would
-  // let an agent whose `run` only accepts `string` satisfy this interface —
-  // unsound, since a `toAgentInput` returning `{ conversation }` can hand
-  // such an agent an object it cannot actually run. The property form gets
-  // strict (contravariant) parameter checking instead.
-  run: (input: AgentInput, context?: AgentRunContext) => AgentRun<O, H>;
-}
+//
+// `RunnableAgent`/`AgentInput`/`AgentRunContext` (AB-19's directional
+// contract for `createSubagentTool`'s `agent` option) now live in
+// `runnable-agent.ts` — AB-21 landed that file as the canonical,
+// package-wide definition of the same three types (this file originally
+// carried a deliberately-narrower local copy, forward-compatible by design
+// with AB-21's fuller one; see this PR's history). `create-subagent-tool.ts`
+// imports them from there instead of duplicating them here.
 
 /**
  * A `RunResult` narrowed to the one shape `createSubagentTool`'s

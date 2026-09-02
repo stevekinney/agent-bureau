@@ -3,11 +3,12 @@ import { createTool } from 'armorer';
 import type { TypedEventTarget } from 'lifecycle';
 import type { ZodType } from 'zod';
 
-import type { AgentInput, RunnableAgent, SuccessfulRunResult } from './agent-run';
+import type { SuccessfulRunResult } from './agent-run';
 import { isSuccessfulRunResult } from './agent-run';
 import { SubagentRunError } from './errors';
 import type { OperativeEventMap } from './events';
 import { ChildWorkflowStartedEvent } from './events';
+import type { AgentInput, RunnableAgent } from './runnable-agent';
 
 /**
  * Roughly 4 characters per token — the same coarse estimate used by

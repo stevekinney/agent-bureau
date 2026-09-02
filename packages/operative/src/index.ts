@@ -1,12 +1,9 @@
 export type {
-  AgentInput,
   AgentRun,
-  AgentRunContext,
   CreateAgentRunOptions,
   DiagnosticAgentRun,
   OutputMethod,
   RunEvent,
-  RunnableAgent,
   SuccessfulRunResult,
   UnwrappedValue,
 } from './agent-run';
