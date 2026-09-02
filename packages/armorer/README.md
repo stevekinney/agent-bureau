@@ -509,13 +509,14 @@ convention. See the pinned-version note and full mapping table in
 [`operative`'s README](../operative/README.md#otel-genai-semantic-conventions) —
 armorer's tool span is one row of that table.
 
-| Attribute                 | Source                                                            |
-| ------------------------- | ----------------------------------------------------------------- |
-| `gen_ai.operation.name`   | Always `execute_tool`                                             |
-| `gen_ai.tool.name`        | `tool.identity.name`                                              |
-| `gen_ai.tool.call.id`     | `call.id`                                                         |
-| `gen_ai.tool.description` | `tool.description`, when set                                      |
-| `error.type`              | `errorCategory` (or `status`) when the call errored or was denied |
+| Attribute                            | Source                                                                            |
+| ------------------------------------ | --------------------------------------------------------------------------------- |
+| `gen_ai.operation.name`              | Always `execute_tool`                                                             |
+| `gen_ai.tool.name`                   | `tool.identity.name`                                                              |
+| `gen_ai.tool.call.id`                | `call.id`                                                                         |
+| `gen_ai.tool.description`            | `tool.description`, when set                                                      |
+| `error.type`                         | `errorCategory` (or `status`) when the call errored, was denied, or was cancelled |
+| `armorer.tool.cancellation_category` | `errorCategory` (or `status`) when the call was cancelled                         |
 
 `gen_ai.tool.call.arguments` and `gen_ai.tool.call.result` are Opt-In under
 the OTel GenAI conventions precisely because they can carry privileged data
@@ -525,8 +526,19 @@ its `tool.started` event, or the `tool.finished` close). A tool error
 (cancelled, denied, or a thrown value that is not an `Error` instance) is
 likewise never serialized onto a span attribute, since it can itself carry
 argument or result content — only its non-privileged `error.type` category
-is attached, and a genuine `Error` is recorded via the standard OTel
-`recordException` API rather than as an attribute.
+is attached, and for the `error`/`denied` statuses a genuine `Error` is
+recorded via the standard OTel `recordException` API rather than as an
+attribute.
+
+The `cancelled` status is the one exception to `recordException`: the
+error there is derived from a caller-supplied abort reason, and OTel's
+`recordException` serializes an `Error` verbatim onto the exception
+event's `exception.message`/`exception.stacktrace` attributes — which
+would leak that reason. `recordException` is never called for a
+cancellation, on any error shape (`Error` instance or otherwise); only the
+non-privileged category is reported, duplicated onto both `error.type` and
+`armorer.tool.cancellation_category` so a cancellation is queryable
+without colliding with the `error`/`denied` `error.type` convention.
 `armorer.tool.input_digest`/`armorer.tool.output_digest` are the
 non-privileged correlation handles for the omitted arguments/result.
 

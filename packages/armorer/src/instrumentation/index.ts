@@ -125,14 +125,17 @@ export function instrument(
           case 'cancelled': {
             // The cancellation error is derived from a caller-supplied
             // abort reason and may itself carry tool-argument content
-            // (e.g. a message formatted from the reason); omit it and
-            // report only the non-privileged category, matching the
-            // error/denied branch below.
+            // (e.g. an `Error` whose `message` embeds the reason).
+            // `recordException` is never called here — OTel serializes an
+            // `Error` passed to it verbatim onto the `exception.message`/
+            // `exception.stacktrace` event attributes, which would leak
+            // that content (AB-237). Only the non-privileged category is
+            // reported, via `error.type` and
+            // `armorer.tool.cancellation_category`.
             span.setStatus({ code: SpanStatusCode.UNSET, message: 'Cancelled' });
-            attributes['error.type'] = errorCategory ?? status;
-            if (error instanceof Error) {
-              span.recordException(error);
-            }
+            const cancellationCategory = errorCategory ?? status;
+            attributes['error.type'] = cancellationCategory;
+            attributes['armorer.tool.cancellation_category'] = cancellationCategory;
 
             break;
           }

@@ -310,13 +310,18 @@ describe('instrument', () => {
     // reason and is never serialized onto an attribute (AB-230).
     expect(recordedSpans[0]?.attributes).not.toHaveProperty('armorer.tool.cancellation_reason');
     expect(recordedSpans[0]?.attributes['error.type']).toBe('cancelled');
+    expect(recordedSpans[0]?.attributes['armorer.tool.cancellation_category']).toBe('cancelled');
     expect(recordedSpans[0]?.exceptions).toEqual([]);
-    // A genuine Error is still recorded via recordException (not a span
-    // attribute) even on the cancelled path.
+    // A genuine Error is NEVER recorded via recordException on the
+    // cancelled path (AB-237) — OTel would serialize its `message` (and
+    // stack) verbatim onto the exception event's `exception.message`/
+    // `exception.stacktrace` attributes, leaking the caller-supplied
+    // abort reason. Only the non-privileged category is reported.
     expect(recordedSpans[1]?.status).toEqual({ code: SpanStatusCode.UNSET, message: 'Cancelled' });
     expect(recordedSpans[1]?.attributes).not.toHaveProperty('armorer.tool.cancellation_reason');
     expect(recordedSpans[1]?.attributes['error.type']).toBe('cancelled');
-    expect(recordedSpans[1]?.exceptions).toEqual([cancelledError]);
+    expect(recordedSpans[1]?.attributes['armorer.tool.cancellation_category']).toBe('cancelled');
+    expect(recordedSpans[1]?.exceptions).toEqual([]);
     expect(recordedSpans[2]?.status).toEqual({
       code: SpanStatusCode.OK,
       message: 'Paused (Action Required)',
@@ -553,6 +558,22 @@ const ARMORER_ATTRIBUTE_CLASSIFICATION_TABLE: AttributeClassificationRow[] = [
   },
   {
     callSite:
+      "'tool.finished' listener, cancelled case → span.recordException(error) [AB-237: never called]",
+    attributeKey: 'exception.message / exception.stacktrace',
+    sourceValue:
+      'error — a caller-supplied abort reason (possibly an Error instance); recordException is never invoked for the cancelled status, on any error shape',
+    privileged: true,
+    treatment: 'omitted',
+  },
+  {
+    callSite: "'tool.finished' listener, cancelled case → span.setAttributes(attributes)",
+    attributeKey: 'armorer.tool.cancellation_category',
+    sourceValue: 'errorCategory ?? status (a category name, not error content)',
+    privileged: false,
+    treatment: 'emitted',
+  },
+  {
+    callSite:
       "'tool.finished' listener, cancelled/error/denied cases → span.setAttributes(attributes)",
     attributeKey: 'error.type',
     sourceValue: 'errorCategory ?? status (a category name, not error content)',
@@ -614,6 +635,12 @@ describe('AB-230 regression: privileged fixture values never reach a span attrib
     const toolArguments = { query: MARKER, nested: { value: MARKER } };
     const toolResult = { answer: MARKER };
     const toolError = { message: `tool failed on input: ${MARKER}` };
+    // A genuine `Error` instance — the shape that reaches `recordException`
+    // when a caller's abort reason gets wrapped/formatted as an `Error`
+    // (AB-237). A plain object like `toolError` above never triggered
+    // `recordException` in the first place (it fails `instanceof Error`),
+    // so it alone would not have caught this regression.
+    const cancellationError = new Error(`aborted: ${MARKER}`);
 
     manualToolbox.dispatch('call', {
       tool: { identity: { name: 'lookup' } },
@@ -651,22 +678,48 @@ describe('AB-230 regression: privileged fixture values never reach a span attrib
       error: toolError,
       durationMs: 5,
     });
+
+    // AB-237: a cancellation whose abort reason is a genuine `Error`
+    // instance carrying the fixture marker. Before the fix,
+    // `span.recordException(error)` on this path serialized the marker
+    // onto the exception event's `exception.message` attribute.
+    manualToolbox.dispatch('call', {
+      tool: { identity: { name: 'lookup-cancelled-error-instance' } },
+      call: { id: 'call-4', arguments: {} },
+    });
+    manualToolbox.dispatch('tool.finished', {
+      toolCall: { id: 'call-4' },
+      status: 'cancelled',
+      error: cancellationError,
+      errorCategory: 'cancelled',
+      durationMs: 5,
+    });
     stop();
 
-    expect(startedSpans).toHaveLength(3);
+    expect(startedSpans).toHaveLength(4);
     for (const { options, span } of startedSpans) {
-      // Scan every surface a span can expose an attribute through: the
+      // Scan every surface a span can expose content through: the
       // attributes passed to startSpan, the attributes set later via
-      // setAttribute(s), and any addEvent attributes.
+      // setAttribute(s), any addEvent attributes, and (AB-237) any
+      // recorded exception — recordException serializes an Error's
+      // `message`/stack onto exception.message/exception.stacktrace event
+      // attributes, so a fixture marker embedded in an Error's message
+      // must never reach it either.
       expect(containsMarker(options?.attributes)).toBe(false);
       expect(containsMarker(span.attributes)).toBe(false);
       expect(span.events.every((event) => !containsMarker(event.attributes))).toBe(true);
+      expect(span.exceptions.some((exception) => containsMarker(exception))).toBe(false);
+      expect(
+        span.exceptions.some(
+          (exception) => exception instanceof Error && containsMarker(exception.message),
+        ),
+      ).toBe(false);
     }
 
     // AC #4: this scenario does not over-redact — every non-privileged
     // attribute the classification table above claims is still emitted
-    // survives, for every one of the three call outcomes it exercises.
-    const [success, denied, cancelled] = startedSpans;
+    // survives, for every one of the four call outcomes it exercises.
+    const [success, denied, cancelled, cancelledErrorInstance] = startedSpans;
     expect(success?.options?.attributes).toMatchObject({
       'gen_ai.tool.name': 'lookup',
       'gen_ai.tool.call.id': 'call-1',
@@ -677,5 +730,14 @@ describe('AB-230 regression: privileged fixture values never reach a span attrib
     });
     expect(denied?.span.attributes['error.type']).toBe('denied');
     expect(cancelled?.span.attributes['error.type']).toBe('cancelled');
+    expect(cancelled?.span.attributes['armorer.tool.cancellation_category']).toBe('cancelled');
+    // The Error instance never reaches recordException on the cancelled
+    // path — the exception list is empty even though a genuine Error was
+    // supplied.
+    expect(cancelledErrorInstance?.span.exceptions).toEqual([]);
+    expect(cancelledErrorInstance?.span.attributes['error.type']).toBe('cancelled');
+    expect(cancelledErrorInstance?.span.attributes['armorer.tool.cancellation_category']).toBe(
+      'cancelled',
+    );
   });
 });
