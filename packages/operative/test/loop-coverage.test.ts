@@ -556,6 +556,8 @@ describe('executeLoop onStepToolbox (AB-239)', () => {
         selectTools: () => swappedToolbox,
       },
       undefined,
+      undefined,
+      undefined,
       onStepToolbox,
     );
 
