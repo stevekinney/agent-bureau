@@ -3818,7 +3818,10 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // AB-22 review fix: `bureau.run(...)` dispatches are tracked separately
       // (see `trackCatalogRun`) since a catalog `RunnableAgent`'s returned
       // handle is not necessarily backed by a bureau-owned `ActiveRun`.
-      for (const catalogRun of catalogRuns) catalogRun.abort('Bureau disposed');
+      // Snapshot before iterating: a synchronous catalog agent can settle
+      // result() immediately from inside abort(), whose trackCatalogRun
+      // cleanup deletes from catalogRuns mid-iteration.
+      for (const catalogRun of [...catalogRuns]) catalogRun.abort('Bureau disposed');
       const toolboxes = [
         ...new Set([runtime.baseToolbox, ...runToolboxes, ...runToolboxesByRunId.values()]),
       ];
