@@ -45,8 +45,8 @@ const bureau = await createBureau({
 const gateway = await createGateway(bureau, { port: 5555 });
 const server = await gateway.start();
 
-// Shut down cleanly
-server.stop();
+// Shut down cleanly — stop() resolves once the underlying server has closed
+await server.stop();
 bureau.dispose();
 ```
 
@@ -144,7 +144,7 @@ interface Gateway {
   readonly bureau: Bureau;
   readonly store: Store;
   readonly port: number;
-  start(): Promise<{ stop(): void }>;
+  start(): Promise<{ stop(): Promise<void> }>;
 }
 ```
 

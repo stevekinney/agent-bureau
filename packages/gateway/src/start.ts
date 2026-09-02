@@ -230,7 +230,7 @@ async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(`[gateway] received ${signal}, shutting down`);
-    server.stop();
+    await server.stop();
     await gateway.bureau.dispose();
     process.exit(0);
   };

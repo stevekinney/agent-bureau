@@ -1,8 +1,39 @@
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
-import { describe, expect, it } from 'bun:test';
+import { afterEach, describe, expect, it } from 'bun:test';
+import type { Hono } from 'hono';
 
 import { createApiKeyStore } from '../keys/create-api-key-store';
-import { handleWsUpgrade } from './bun-adapter';
+import { createBunAdapter, handleWsUpgrade } from './bun-adapter';
+
+/**
+ * A minimal fake shaped like the subset of Bun's `Server` the adapter
+ * touches (`stop()`), with a controllable `stop()` so tests can observe
+ * that `ServerHandle.stop()` doesn't resolve until the underlying
+ * `Bun.serve()` server has actually finished stopping.
+ */
+function createFakeBunServer() {
+  let releaseStop: (() => void) | undefined;
+  const stopGate = new Promise<void>((resolve) => {
+    releaseStop = resolve;
+  });
+  let stopCalled = false;
+
+  return {
+    server: {
+      stop: () => {
+        stopCalled = true;
+        return stopGate;
+      },
+    },
+    releaseStop: () => releaseStop?.(),
+    wasStopCalled: () => stopCalled,
+  };
+}
+
+/** A Hono-shaped stub — the adapter never calls anything but `fetch`. */
+function fakeApp(): Hono {
+  return { fetch: () => new Response('ok') } as unknown as Hono;
+}
 
 /** A no-op upgrade function — always "succeeds" so we can test auth in isolation. */
 function acceptUpgrade(_request: Request): boolean {
@@ -176,5 +207,67 @@ describe('handleWsUpgrade — upgrade failure', () => {
     const url = new URL(request.url);
     const result = await handleWsUpgrade(request, url, rejectUpgrade, {});
     expect(result?.status).toBe(400);
+  });
+});
+
+describe('createBunAdapter — stop()', () => {
+  const originalServe = Bun.serve;
+
+  afterEach(() => {
+    Bun.serve = originalServe;
+  });
+
+  it("does not resolve until Bun.serve()'s own stop() promise resolves (no wsHandler)", async () => {
+    const fake = createFakeBunServer();
+    // The fake server only needs stop() — Bun.serve()'s real overloaded
+    // generic signature can't be satisfied by a partial object, so this
+    // goes through unknown first.
+    Bun.serve = (() => fake.server) as unknown as typeof Bun.serve;
+
+    const adapter = createBunAdapter();
+    const handle = await adapter.serve(fakeApp(), { port: 0 });
+
+    let resolved = false;
+    const stopPromise = handle.stop().then(() => {
+      resolved = true;
+    });
+
+    await Promise.resolve();
+    expect(fake.wasStopCalled()).toBe(true);
+    expect(resolved).toBe(false);
+
+    fake.releaseStop();
+    await stopPromise;
+    expect(resolved).toBe(true);
+  });
+
+  it("does not resolve until Bun.serve()'s own stop() promise resolves (with wsHandler)", async () => {
+    const fake = createFakeBunServer();
+    // The fake server only needs stop() — Bun.serve()'s real overloaded
+    // generic signature can't be satisfied by a partial object, so this
+    // goes through unknown first.
+    Bun.serve = (() => fake.server) as unknown as typeof Bun.serve;
+
+    const adapter = createBunAdapter();
+    const wsHandler = {
+      dispose: () => {},
+      open: () => {},
+      message: () => {},
+      close: () => {},
+    };
+    const handle = await adapter.serve(fakeApp(), { port: 0, wsHandler });
+
+    let resolved = false;
+    const stopPromise = handle.stop().then(() => {
+      resolved = true;
+    });
+
+    await Promise.resolve();
+    expect(fake.wasStopCalled()).toBe(true);
+    expect(resolved).toBe(false);
+
+    fake.releaseStop();
+    await stopPromise;
+    expect(resolved).toBe(true);
   });
 });

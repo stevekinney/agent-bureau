@@ -37,8 +37,13 @@ export interface SynchronizeResult {
 export interface FileSynchronizer {
   /** Start watching for changes on a polling interval. */
   start(): Promise<void>;
-  /** Stop watching. */
-  stop(): void;
+  /**
+   * Stop watching. Halts future polling immediately, then awaits any
+   * `synchronize()` pass already in flight (whether started by a poll tick
+   * or a direct call) before resolving, so an in-flight synchronization is
+   * drained rather than abandoned.
+   */
+  stop(): Promise<void>;
   /** Synchronize all files once (no watching). */
   synchronize(): Promise<SynchronizeResult>;
 }
@@ -97,6 +102,10 @@ export function createFileSynchronizer(options: FileSynchronizerOptions): FileSy
   let hasInterval = false;
   let synchronizing = false;
   let starting = false;
+  // Tracks the currently in-flight synchronize() call (whether triggered by
+  // a poll tick or invoked directly) so stop() can await it instead of
+  // abandoning it.
+  let inFlightSynchronize: Promise<SynchronizeResult> | undefined;
 
   async function synchronize(): Promise<SynchronizeResult> {
     const result: SynchronizeResult = { added: 0, updated: 0, removed: 0 };
@@ -163,6 +172,25 @@ export function createFileSynchronizer(options: FileSynchronizerOptions): FileSy
     return result;
   }
 
+  /**
+   * Runs synchronize() while tracking it as the in-flight call so stop()
+   * can await it. Used for every synchronize() call — the initial
+   * start()-triggered pass, poll-triggered passes, and direct calls through
+   * the public `synchronize()` method — so stop() drains whichever one is
+   * running rather than abandoning it.
+   */
+  function trackedSynchronize(): Promise<SynchronizeResult> {
+    const result = synchronize();
+    inFlightSynchronize = result;
+    const clearIfCurrent = () => {
+      if (inFlightSynchronize === result) {
+        inFlightSynchronize = undefined;
+      }
+    };
+    result.then(clearIfCurrent).catch(clearIfCurrent);
+    return result;
+  }
+
   async function forgetBySource(sourceIdentifier: string): Promise<void> {
     const ids = entryIdsBySource.get(sourceIdentifier);
     if (!ids) return;
@@ -181,7 +209,7 @@ export function createFileSynchronizer(options: FileSynchronizerOptions): FileSy
       if (hasInterval || starting) return;
       starting = true;
       try {
-        await synchronize();
+        await trackedSynchronize();
         // Only schedule the interval after a successful initial sync.
         // If synchronize() throws, no interval is created — preventing a
         // leaked timer that the caller cannot clean up.
@@ -189,7 +217,7 @@ export function createFileSynchronizer(options: FileSynchronizerOptions): FileSy
           intervalId = setIntervalFunction(() => {
             if (synchronizing) return;
             synchronizing = true;
-            void synchronize()
+            void trackedSynchronize()
               .catch(() => {
                 // Swallow errors during polling — will retry next interval.
               })
@@ -204,13 +232,22 @@ export function createFileSynchronizer(options: FileSynchronizerOptions): FileSy
       }
     },
 
-    stop(): void {
+    async stop(): Promise<void> {
+      // Halt future polling immediately — no new synchronize() calls are
+      // scheduled after this point.
       if (hasInterval) {
         clearIntervalFunction(intervalId);
         hasInterval = false;
       }
+      // Drain (rather than abandon) whichever synchronize() call is
+      // already in flight. Its own errors are the caller's concern (via
+      // the promise returned from synchronize() or the polling catch
+      // above) — stop() only needs to know when it has settled.
+      if (inFlightSynchronize) {
+        await inFlightSynchronize.catch(() => {});
+      }
     },
 
-    synchronize,
+    synchronize: trackedSynchronize,
   };
 }

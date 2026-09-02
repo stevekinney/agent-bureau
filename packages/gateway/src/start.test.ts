@@ -186,7 +186,7 @@ describe('startGateway', () => {
         });
         expect(readyResponse.status).toBe(503);
       } finally {
-        server.stop();
+        await server.stop();
         gateway.bureau.dispose();
       }
     } finally {
@@ -212,7 +212,7 @@ describe('startGateway', () => {
 
     try {
       const { gateway, server } = await startGateway(environment);
-      server.stop();
+      await server.stop();
       gateway.bureau.dispose();
     } finally {
       await rm(rootDirectory, { recursive: true, force: true });

@@ -118,7 +118,7 @@ export interface Gateway {
   readonly bureau: import('bureau').Bureau;
   readonly store: Store;
   readonly port: number;
-  start(): Promise<{ stop(): void }>;
+  start(): Promise<{ stop(): Promise<void> }>;
 }
 
 // ── API Response Types (door-only) ──────────────────────────────────

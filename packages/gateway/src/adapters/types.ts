@@ -49,7 +49,8 @@ export type ServerAdapterOptions = {
 
 /** A handle to a running server that can be stopped. */
 export type ServerHandle = {
-  stop(): void;
+  /** Stops the server. Resolves only once the underlying server has closed. */
+  stop(): Promise<void>;
 };
 
 /**

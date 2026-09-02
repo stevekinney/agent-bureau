@@ -289,7 +289,7 @@ describe('createGateway', () => {
     const runningGateway = await gateway.start();
 
     bureau.setRequestAuthorityValidator(replacementHostValidator);
-    runningGateway.stop();
+    await runningGateway.stop();
 
     expect(getRequestAuthorityValidator()).toBe(replacementHostValidator);
   });
