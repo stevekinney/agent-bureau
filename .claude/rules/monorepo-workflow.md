@@ -47,6 +47,16 @@ Always build before type-checking or testing so downstream packages have fresh t
 - Always use `workspace:*` protocol for internal dependencies.
 - Integration tests live in `packages/integration/` and run via `turbo run integration --filter=integration`.
 
+## The Pre-Commit Hook Is Not The Gate
+
+`lefthook.yml` runs `format` (staged files only), `lint`, and `check-types` — roughly two seconds once Turborepo has those tasks cached. It deliberately does **not** run the test suite.
+
+CI is the authoritative gate: `.github/workflows/ci.yml` runs the full build, lint, type-check, test, coverage, and package-shape matrix on every pull request and blocks the merge. The hook exists for fast local feedback, not to duplicate that.
+
+Do not add the test suite back to the hook. It was removed on evidence, not preference: it cost 60–80s on every commit, duplicated a required CI check, and — because several integration tests do real multi-step runs against a 5s default budget — failed intermittently on a machine shared with other work, for reasons unrelated to the change being committed. `format` was likewise narrowed from an 80–110s whole-repository `prettier --check` to the staged files. See AB-188 for the measurements.
+
+If the hook blocks you, fix the finding — never `--no-verify`, which the working agreements prohibit. If a task is slow because its Turborepo cache is cold, run `turbo run lint check-types` once and the hook replays from cache.
+
 ## Ad Hoc Scripts Against Workspace Package Code
 
 Bun's workspace linking resolves an internal import like `import { Conversation } from 'conversationalist'` to that package's `dist/`, not its `src/`. The `build`/`test`/`check-types` pipeline above is Turborepo-driven: Turborepo's task graph rebuilds stale dependents automatically via `^build`, so those tasks always see current code. A plain `bun run <file>.ts` outside that graph has no such guarantee — it can silently resolve a `dist/` that predates the `src/` you just edited, producing a false-positive bug report against stale, already-fixed code (this happened for real: AB-146).
