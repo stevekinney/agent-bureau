@@ -474,9 +474,11 @@ export interface BureauOptions<D extends AgentDefinitions = AgentDefinitions> {
    * `SessionInputRecord`s admitted through {@link Bureau.submitSessionInput}.
    * Both are validated as positive integers at `createBureau()` construction
    * time, throwing `BureauError('...', 'BAD_REQUEST')` for a non-positive-integer
-   * value (0, a negative number, or a non-integer). Defaults to
-   * {@link DEFAULT_SESSION_INPUT_BACKLOG_LIMIT} and
-   * {@link DEFAULT_PRINCIPAL_SESSION_INPUT_BACKLOG_LIMIT} when omitted.
+   * value (0, a negative number, or a non-integer). Omitting a field leaves it
+   * unvalidated (no error) — {@link DEFAULT_SESSION_INPUT_BACKLOG_LIMIT} and
+   * {@link DEFAULT_PRINCIPAL_SESSION_INPUT_BACKLOG_LIMIT} are the values the
+   * mailbox-backed admission path will apply for an omitted field once it
+   * lands, not values `createBureau()` resolves or stores today.
    *
    * AB-42 fixes only that two independent caps exist over the not-yet-terminal
    * `SessionInputRecord`s for a session (and, separately, for one principal's

@@ -262,14 +262,22 @@ export function recordedSessionAuthorityPrincipalId(
 ): string | undefined {
   const lastRunId = metadata['lastRunId'];
   const authorities = metadata['lastRequestAuthorities'];
-  const candidate =
+  // A completed/aborted/errored run's `lastRequestAuthorities[lastRunId]` entry
+  // is pruned on terminal transition (see the cleanup near `remainingAuthorities`
+  // below), while the legacy singular `lastRequestAuthority` is retained. So the
+  // per-run lookup missing an entry — whether because the map itself is absent
+  // OR because this run's entry was pruned — must fall back to the legacy field,
+  // never be read as "no authority recorded" (which `isSessionAuthorityAuthorized`
+  // treats as an open session, authorizing any principal).
+  const perRunEntry =
     typeof lastRunId === 'string' &&
     lastRunId &&
     authorities &&
     typeof authorities === 'object' &&
     !Array.isArray(authorities)
       ? (authorities as Record<string, JSONValue>)[lastRunId]
-      : metadata['lastRequestAuthority'];
+      : undefined;
+  const candidate = perRunEntry ?? metadata['lastRequestAuthority'];
   if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
     return undefined;
   }

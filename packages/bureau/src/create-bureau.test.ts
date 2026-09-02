@@ -4334,8 +4334,22 @@ describe('recordedSessionAuthorityPrincipalId / isSessionAuthorityAuthorized (AB
   });
 
   it('falls back to the legacy lastRequestAuthority when lastRequestAuthorities has no entry for lastRunId', () => {
+    // Regression: a completed/aborted/errored run's lastRequestAuthorities[lastRunId]
+    // entry is pruned on terminal transition while lastRequestAuthority is retained
+    // (create-bureau.ts's terminal cleanup near `remainingAuthorities`). The map
+    // itself is present here — just missing THIS run's entry — the exact shape a
+    // terminal session actually has, not merely the map's total absence.
     const principalId = recordedSessionAuthorityPrincipalId({
       lastRunId: 'run-1',
+      lastRequestAuthorities: {
+        'some-other-run': {
+          principalId: 'someone-else',
+          tenantId: 'bureau',
+          ownerId: 'agent',
+          capabilities: ['tools:execute'],
+          authorizationRevision: 'bureau:1',
+        },
+      },
       lastRequestAuthority: {
         principalId: 'legacy-alice',
         tenantId: 'bureau',
@@ -4345,6 +4359,21 @@ describe('recordedSessionAuthorityPrincipalId / isSessionAuthorityAuthorized (AB
       },
     });
     expect(principalId).toBe('legacy-alice');
+  });
+
+  it('falls back to the legacy lastRequestAuthority when lastRequestAuthorities is an empty object', () => {
+    const principalId = recordedSessionAuthorityPrincipalId({
+      lastRunId: 'run-1',
+      lastRequestAuthorities: {},
+      lastRequestAuthority: {
+        principalId: 'legacy-carol',
+        tenantId: 'bureau',
+        ownerId: 'agent',
+        capabilities: ['tools:execute'],
+        authorizationRevision: 'bureau:1',
+      },
+    });
+    expect(principalId).toBe('legacy-carol');
   });
 
   it('falls back to the legacy lastRequestAuthority when no lastRunId is recorded', () => {
@@ -4493,6 +4522,46 @@ describe('createBureau submitSessionInput pre-admission checks (AB-194)', () => 
         payload: 'hello',
       });
       expect(outcome).toEqual({ outcome: 'session-terminal', sessionId: run.sessionId });
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('returns not-found (not session-terminal) for an unauthorized caller after the per-run authority entry was pruned by terminal cleanup', async () => {
+    // Regression (Copilot/Codex review): a completed run's
+    // lastRequestAuthorities[lastRunId] entry is pruned on terminal
+    // transition while lastRequestAuthority is retained. Authorization must
+    // still fall back to the retained legacy authority — an unauthorized
+    // caller here must NOT be misread as hitting an "open" session (which
+    // would incorrectly authorize them and leak session-terminal instead of
+    // the required indistinguishable not-found).
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+      stopWhen: stopWhen.noToolCalls(),
+    });
+    try {
+      const run = await bureau.createRun({ message: 'Complete me', principal: 'alice' });
+      await waitForRunCompletion(bureau, run.id);
+
+      const session = await bureau.getSession(run.sessionId);
+      expect(session?.metadata['lastRunStatus']).toBe('completed');
+      const authorities = session?.metadata['lastRequestAuthorities'];
+      expect(
+        authorities && typeof authorities === 'object' && !Array.isArray(authorities)
+          ? (authorities as Record<string, unknown>)[run.id]
+          : undefined,
+      ).toBeUndefined();
+
+      const outcome = await bureau.submitSessionInput(run.sessionId, {
+        principal: 'mallory',
+        deliveryMode: 'steer',
+        payload: 'hello',
+      });
+      expect(outcome).toEqual({ outcome: 'not-found' });
     } finally {
       await bureau.dispose();
     }
