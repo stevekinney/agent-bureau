@@ -141,6 +141,11 @@ export function resolveStartOptions(environment: StartEnvironment): {
 
   return {
     bureau: {
+      // AB-22: gateway dispatches exclusively through `createRun`'s
+      // session-based, dynamic-agent-name surface, not the typed
+      // `AgentDefinitions` catalog — there is no static agent map to
+      // declare at boot. `{}` is the documented empty-catalog form.
+      agents: {},
       storage:
         environment.STORAGE_TYPE === 'memory'
           ? { type: 'memory' }

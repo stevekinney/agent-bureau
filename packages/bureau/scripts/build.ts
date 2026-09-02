@@ -1,6 +1,6 @@
 import { $ } from 'bun';
 
-const entrypoints = ['./src/index.ts', './src/builder/index.ts', './src/test/index.ts'];
+const entrypoints = ['./src/index.ts', './src/test/index.ts'];
 
 const root = './src';
 
@@ -37,8 +37,9 @@ const esmExternal = [
 ];
 
 // `conversationalist` ships only ESM/"bun"/"browser"/"default" export
-// conditions — no `require`. `builder.ts` imports `Conversation` from it as
-// a real runtime value (not just types), so if this CJS pass left it
+// conditions — no `require`. `online-evals.ts`/`run-envelope.ts` import
+// `Conversation` from it as a real runtime value (not just types), so if
+// this CJS pass left it
 // external, the emitted `require('conversationalist')` would resolve (via
 // the "default" condition) to an ES module and throw `ERR_REQUIRE_ESM` in
 // any Node < 22 CJS consumer — a real breakage of `bureau`'s own advertised

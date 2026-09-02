@@ -353,7 +353,7 @@ function isStorageConfiguration(
  * - `ConditionalTextValueStore` → KV-only, no durable storage config.
  * - `undefined` → no persistence.
  */
-function resolvePersistenceOptions(options: BureauOptions): {
+function resolvePersistenceOptions(options: RuntimeCompositionOptions): {
   storageConfig: StorageConfiguration | undefined;
   kvStore: ConditionalTextValueStore | undefined;
   persistenceHistory: PersistenceOptions['history'];
@@ -1217,8 +1217,18 @@ export interface RuntimeComposition {
   }>;
 }
 
+/**
+ * `createRuntimeComposition` builds bureau-level generate/toolbox/
+ * persistence/durability composition — entirely orthogonal to the typed
+ * `agents` catalog (AB-22), which `createBureau` wires separately. Omitting
+ * `agents` here means every existing caller (including the 100+ direct
+ * `createRuntimeComposition({...})` calls in this package's own test suite)
+ * keeps working unchanged; it is not part of this function's contract.
+ */
+export type RuntimeCompositionOptions = Omit<BureauOptions, 'agents'>;
+
 export async function createRuntimeComposition(
-  options: BureauOptions,
+  options: RuntimeCompositionOptions,
   dependencies: RuntimeCompositionDependencies = defaultRuntimeCompositionDependencies,
 ): Promise<RuntimeComposition> {
   const maximumSteps = options.maximumSteps ?? DEFAULT_MAXIMUM_STEPS;

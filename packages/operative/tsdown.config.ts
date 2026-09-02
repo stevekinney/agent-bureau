@@ -8,7 +8,6 @@ import { defineConfig } from 'tsdown';
  */
 const entry = {
   index: './src/index.ts',
-  'bureau-types': './src/bureau-types.ts',
   'conditions/index': './src/conditions/index.ts',
   'durable/index': './src/durable/index.ts',
   'guardrails/index': './src/guardrails/index.ts',

@@ -1,4 +1,4 @@
-import { stopWhen, type Toolbox } from '@lostgradient/operative';
+import { stopWhen } from '@lostgradient/operative';
 import { createStepwiseBlockingGenerate } from '@lostgradient/operative/test';
 import { createTool, createToolbox } from 'armorer';
 import type { ServerWebSocket } from 'bun';
@@ -71,8 +71,9 @@ function runSeqOf(frame: ServerFrame): number | undefined {
 async function setUpBlockedRun() {
   const { generate, releaseStep1 } = createStepwiseBlockingGenerate();
   const bureau = await createBureau({
+    agents: {},
     generate,
-    toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+    toolbox: createToolbox([createNextTool()]),
     stopWhen: stopWhen.noToolCalls(),
   });
 

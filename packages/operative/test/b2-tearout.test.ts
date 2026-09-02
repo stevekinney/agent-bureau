@@ -65,27 +65,21 @@ describe('B2 tearout — remaining surface is coherent', () => {
     expect(typeof operative.createRequestHumanInputTool).toBe('function');
   });
 
-  it('createAgentRegistry is still exported', () => {
-    expect(typeof operative.createAgentRegistry).toBe('function');
-  });
-
-  it('createSupervisor is still exported', () => {
-    expect(typeof operative.createSupervisor).toBe('function');
-  });
-
-  it('RegistryAgent type is available via AgentRegistryEntry', () => {
-    // Create a registry entry with the new RegistryAgent shape to verify types at runtime.
-    const registry = operative.createAgentRegistry();
-    const agent: operative.RegistryAgent = {
-      name: 'test-agent',
-      run: async () => undefined,
-    };
-    registry.register({
-      agent,
-      description: 'A test agent',
-      capabilities: ['test'],
-    });
-    expect(registry.has('test-agent')).toBe(true);
+  it("AB-22: createAgentRegistry, createSupervisor, and AgentRegistry are gone from operative's runtime exports", () => {
+    // AB-22 removed the registry/supervisor surface from operative entirely —
+    // createAgentRegistry, createSupervisor, and AgentRegistry no longer exist
+    // anywhere: AgentDefinitions/BureauAgentCatalog (operative + bureau) and
+    // bureau's createSupervisor/createAgentDiscoveryTool replace them.
+    //
+    // `RegistryAgent` was a TYPE, not a value — it has no runtime export to
+    // assert absent here (a `Object.keys` check only sees value exports).
+    // The type itself no longer exists anywhere in operative's source (its
+    // one declaration site, `create-agent-registry.ts`, is deleted); `rg
+    // -n "interface RegistryAgent" packages/operative/src` finds nothing.
+    const exports = Object.keys(operative);
+    expect(exports).not.toContain('createAgentRegistry');
+    expect(exports).not.toContain('createSupervisor');
+    expect(exports).not.toContain('AgentRegistry');
   });
 
   it('ActiveRun is exported as the internal run engine type', () => {

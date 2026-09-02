@@ -5,23 +5,24 @@ import { CompletableEventTarget } from 'lifecycle';
 import { z } from 'zod';
 
 import { stopWhen } from './conditions';
-import type { RegistryAgent } from './create-agent-registry';
+import { createAgent } from './create-agent';
+import type { HandoffTarget } from './create-handoff-tool';
 import { createHandoffTool, extractHandoffTarget, HANDOFF_MARKER } from './create-handoff-tool';
 import type { CombinedOperativeEventMap } from './events';
 import { HandoffOccurredEvent } from './events';
 import { executeLoop } from './loop';
+import { createMockGenerate } from './test/index';
 import type { GenerateFunction, RunResult } from './types';
 
-function makeAgent(name: string): RegistryAgent {
+function makeAgent(name: string): HandoffTarget {
   return {
-    name,
-    run: async () => ({
-      conversation: {} as never,
-      content: '',
-      finishReason: 'end-turn',
-      steps: [],
-      usage: { prompt: 0, completion: 0, total: 0 },
-    }),
+    agentName: name,
+    agent: {
+      name,
+      run: () => {
+        throw new Error('not invoked — handoff is marker-based, not agent.run()');
+      },
+    },
   };
 }
 
@@ -46,6 +47,22 @@ describe('createHandoffTool', () => {
       const result = JSON.parse(await tool.execute({})) as { type: string; agent: string };
       expect(result.type).toBe(HANDOFF_MARKER);
       expect(result.agent).toBe('writer');
+    });
+
+    it('accepts a schema-backed RunnableAgent as a handoff target (AB-22 variance)', async () => {
+      // Compile-time regression: HandoffTarget.agent must accept a
+      // RunnableAgent<O, true> for ANY concrete O, not just RunnableAgent<never,
+      // boolean>/RunnableAgent<unknown, boolean> — AgentRun<O, H>.unwrap()
+      // returns O itself when H is true, so a homogeneous non-`any` bound
+      // rejects a schema'd agent's incompatible unwrap() return type. This
+      // mirrors AB-15's own AgentDefinitions = Record<string, RunnableAgent<any,
+      // boolean>>. If this stops compiling, HandoffTarget's bound regressed.
+      const schemaAgent = createAgent({
+        generate: createMockGenerate([]),
+        output: z.object({ a: z.string() }),
+      });
+      const tool = createHandoffTool({ agent: { agentName: 'schema-agent', agent: schemaAgent } });
+      expect(tool.name).toBe('transfer_to_schema-agent');
     });
   });
 

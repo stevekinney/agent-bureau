@@ -88,6 +88,7 @@ describe('D6 scheduled-fire path (#109)', () => {
     async () => {
       const calls: RecordedCall[] = [];
       const bureau = await createBureau({
+        agents: {},
         generate: createRecordingGenerate(calls),
         toolbox: createEmptyToolbox(),
         storage: { type: 'memory' },
@@ -139,6 +140,7 @@ describe('D6 scheduled-fire path (#109)', () => {
       try {
         let bureauACall: RecordedCall | undefined;
         const bureauA = await createBureau({
+          agents: {},
           generate: async (context: GenerateContext) => {
             const messages = context.conversation.getMessages();
             bureauACall = {
@@ -186,6 +188,7 @@ describe('D6 scheduled-fire path (#109)', () => {
         });
         let bureauBCall: RecordedCall | undefined;
         const bureauB = await createBureau({
+          agents: {},
           generate: async (context: GenerateContext) => {
             const messages = context.conversation.getMessages();
             bureauBCall = {
@@ -262,6 +265,7 @@ describe('D6 scheduled-fire path (#109)', () => {
       const sessionId = 'daily-digest';
       const calls: RecordedCall[] = [];
       const bureau = await createBureau({
+        agents: {},
         generate: createRecordingGenerate(calls),
         toolbox: createEmptyToolbox(),
         storage: { type: 'memory' },
@@ -320,6 +324,7 @@ describe('D6 scheduled-fire path (#109)', () => {
       const calls: RecordedCall[] = [];
       const recording = createRecordingGenerate(calls);
       const bureau = await createBureau({
+        agents: {},
         generate: async (context: GenerateContext) => {
           await recording(context);
           // Always call the tool → the run never stops on noToolCalls and instead
@@ -333,7 +338,7 @@ describe('D6 scheduled-fire path (#109)', () => {
             input: z.object({}),
             execute: async () => 'ok',
           }),
-        ]) as unknown as Toolbox,
+        ]),
         storage: { type: 'memory' },
         durableExecution: true,
         maximumSteps: 1,

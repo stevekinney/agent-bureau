@@ -259,7 +259,19 @@ function createEventQueue(): EventQueue {
 // createDeferredAgentRun — the per-run handle
 // ---------------------------------------------------------------------------
 
-function createDeferredAgentRun<O, H extends boolean>(
+/**
+ * Wraps an async `resolveAgent()` call in a synchronously-returned `AgentRun`
+ * — buffering events, forwarding `abort()`/`[Symbol.dispose]()`, and settling
+ * `result()`/`unwrap()`/`output()`/iteration once the promise resolves and
+ * the resolved agent's own run settles. `createLazyAgent` uses this to defer
+ * its module load; `bureau` (AB-22) reuses it unchanged to defer its own
+ * async per-run setup (session load, flow-control admission) behind
+ * `Bureau.run`'s required synchronous return, with `resolveAgent` closing
+ * over that setup and handing back a one-shot `RunnableAgent` to delegate
+ * to. A `resolveAgent` rejection settles the handle's `result()` with
+ * `finishReason: 'error'` — it never surfaces as an unhandled rejection.
+ */
+export function createDeferredAgentRun<O, H extends boolean>(
   resolveAgent: () => Promise<RunnableAgent<O, H>>,
   rawInput: AgentInput,
   rawContext: AgentRunContext | undefined,

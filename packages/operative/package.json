@@ -40,9 +40,6 @@
       "default": "./dist/index.js",
       "types": "./dist/index.d.ts"
     },
-    "./bureau-types": {
-      "types": "./dist/bureau-types.d.ts"
-    },
     "./conditions": {
       "bun": "./dist/conditions/index.js",
       "import": "./dist/conditions/index.js",
