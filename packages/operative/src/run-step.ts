@@ -1,6 +1,7 @@
 import type { AnyToolbox, ToolExecutionResult } from 'armorer';
 import { Conversation, materializeToolCalls } from 'conversationalist';
 import type { ToolCall } from 'interoperability';
+import type { HookErrorHandler, HookRegistrationOptions } from 'lifecycle';
 import type { ZodType } from 'zod';
 
 import type { SteeringDesiredState } from './durable/types';
@@ -244,6 +245,37 @@ export function runHookSilently<K extends string>(
       Promise.resolve((entry.handler as (...a: unknown[]) => unknown)(...args)),
     ),
   );
+}
+
+/**
+ * Applies the same error-handling policy `HookRegistry.run()` applies to a
+ * throwing handler — `entry.options.onError`, falling back to the
+ * registry-level `onError` (AB-232) — to a handler invoked by a manual
+ * `getHandlers()` loop such as `beforeGenerate`'s and `afterGenerate`'s
+ * waterfalls below, which cannot use `run()` itself (see the comments at
+ * each call site for why).
+ *
+ * Throws the original error when no error handler applies, or when the
+ * resolved handler returns `'abort'` — the caller's `catch` block should let
+ * that propagate. Returns normally (to skip to the next handler) when the
+ * resolved handler returns `'continue'`.
+ */
+function applyWaterfallHandlerErrorPolicy(
+  error: unknown,
+  hookName: string,
+  handlerIndex: number,
+  entryOptions: HookRegistrationOptions,
+  registryOnError: HookErrorHandler | undefined,
+): void {
+  const errorHandler = entryOptions.onError ?? registryOnError;
+  if (!errorHandler) {
+    throw error;
+  }
+  const decision = errorHandler(error, { hookName, handlerIndex });
+  if (decision === 'abort') {
+    throw error;
+  }
+  // 'continue' — skip to next handler
 }
 
 async function evaluateStopConditions(
@@ -783,11 +815,10 @@ export async function runStep(
           // later handler observing missing or forged desired state.
           // `hooks.run()` has no hook between handlers to do that reapply.
           //
-          // Trade-off: this does not replicate `HookRegistry.run()`'s
-          // registry-level default `onError` — only a handler's own
-          // per-registration `onError` (`entry.options.onError`), matching
-          // `afterGenerate`'s existing manual-iteration precedent below,
-          // which has the identical constraint for the identical reason.
+          // AB-232: a throwing handler is routed through the same policy
+          // `run()` uses — `entry.options.onError`, falling back to the
+          // registry-level `onError` exposed via `hooks.onError` — instead
+          // of bypassing it, via `applyWaterfallHandlerErrorPolicy` above.
           const handlers = hooks.getHandlers('beforeGenerate');
           let beforeGenContext: GenerateContext = {
             conversation,
@@ -798,8 +829,20 @@ export async function runStep(
             signal: stepSignal,
             steering: steeringDesiredState,
           };
-          for (const entry of handlers) {
-            const handlerResult = await entry.handler(beforeGenContext);
+          for (const [index, entry] of handlers.entries()) {
+            let handlerResult: GenerateContext | void;
+            try {
+              handlerResult = await entry.handler(beforeGenContext);
+            } catch (error) {
+              applyWaterfallHandlerErrorPolicy(
+                error,
+                'beforeGenerate',
+                index,
+                entry.options,
+                hooks.onError,
+              );
+              continue;
+            }
             if (handlerResult !== undefined) {
               // AB-67: steering desired-configuration is not hook-overridable.
               // A `beforeGenerate` hook may replace every other field of
@@ -857,16 +900,33 @@ export async function runStep(
         // return value. For afterGenerate, the input is AfterGenerateContext but
         // the return is GenerateResponse — using hooks.run() would feed a
         // GenerateResponse where the next handler expects AfterGenerateContext.
+        //
+        // AB-232: a throwing handler is routed through the same policy
+        // `run()` uses — `entry.options.onError`, falling back to the
+        // registry-level `onError` exposed via `hooks.onError` — instead of
+        // bypassing it, via `applyWaterfallHandlerErrorPolicy` above.
         if (hooks?.has('afterGenerate')) {
           const handlers = hooks.getHandlers('afterGenerate');
-          for (const entry of handlers) {
+          for (const [index, entry] of handlers.entries()) {
             const afterGenContext = {
               conversation,
               step,
               response,
               duration: durationMilliseconds,
             };
-            const handlerResult = await entry.handler(afterGenContext);
+            let handlerResult: GenerateResponse | void;
+            try {
+              handlerResult = await entry.handler(afterGenContext);
+            } catch (error) {
+              applyWaterfallHandlerErrorPolicy(
+                error,
+                'afterGenerate',
+                index,
+                entry.options,
+                hooks.onError,
+              );
+              continue;
+            }
             if (handlerResult !== undefined) {
               response = handlerResult;
             }

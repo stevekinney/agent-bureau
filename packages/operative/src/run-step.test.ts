@@ -609,6 +609,171 @@ describe('runStep: AB-67 steering boundary read', () => {
   });
 });
 
+describe('runStep: AB-232 registry-level onError for manually iterated hook waterfalls', () => {
+  it('routes a throwing beforeGenerate handler to the registry-level onError exactly as run() would', async () => {
+    const hooks = new HookRegistry<OperativeHookMap>({
+      onError: () => 'continue',
+    });
+    let secondHandlerRan = false;
+    let generateSawMaximumTokens: number | undefined;
+
+    hooks.on(
+      'beforeGenerate',
+      () => {
+        throw new Error('first beforeGenerate handler failed');
+      },
+      { priority: 10 },
+    );
+    hooks.on(
+      'beforeGenerate',
+      async (context) => {
+        secondHandlerRan = true;
+        return { ...context, maximumTokens: 42 };
+      },
+      { priority: 5 },
+    );
+
+    const result = await executeLoop({
+      generate: async (context) => {
+        generateSawMaximumTokens = context.maximumTokens;
+        return textResponse('done');
+      },
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      hooks,
+    });
+
+    expect(secondHandlerRan).toBe(true);
+    expect(generateSawMaximumTokens).toBe(42);
+    expect(result.finishReason).not.toBe('error');
+  });
+
+  it('routes a throwing afterGenerate handler to the registry-level onError exactly as run() would', async () => {
+    const hooks = new HookRegistry<OperativeHookMap>({
+      onError: () => 'continue',
+    });
+    let secondHandlerRan = false;
+
+    hooks.on(
+      'afterGenerate',
+      () => {
+        throw new Error('first afterGenerate handler failed');
+      },
+      { priority: 10 },
+    );
+    hooks.on(
+      'afterGenerate',
+      async (context) => {
+        secondHandlerRan = true;
+        return { ...context.response, content: 'rewritten by second handler' };
+      },
+      { priority: 5 },
+    );
+
+    const result = await executeLoop({
+      generate: async () => textResponse('original'),
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      hooks,
+    });
+
+    expect(secondHandlerRan).toBe(true);
+    expect(result.content).toBe('rewritten by second handler');
+  });
+
+  it('re-throws when the registry-level onError decides abort, matching run()', async () => {
+    const hooks = new HookRegistry<OperativeHookMap>({
+      onError: () => 'abort',
+    });
+    let secondHandlerRan = false;
+
+    hooks.on(
+      'beforeGenerate',
+      () => {
+        throw new Error('critical beforeGenerate failure');
+      },
+      { priority: 10 },
+    );
+    hooks.on(
+      'beforeGenerate',
+      async (context) => {
+        secondHandlerRan = true;
+        return context;
+      },
+      { priority: 5 },
+    );
+
+    const result = await executeLoop({
+      generate: async () => textResponse('done'),
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      hooks,
+    });
+
+    expect(secondHandlerRan).toBe(false);
+    expect(result.finishReason).toBe('error');
+    expect(result.error).toBeInstanceOf(Error);
+    expect((result.error as Error).message).toBe('critical beforeGenerate failure');
+  });
+
+  it('propagates the error unchanged when no onError is configured at any level, matching run()', async () => {
+    const hooks = new HookRegistry<OperativeHookMap>();
+
+    hooks.on('afterGenerate', () => {
+      throw new Error('unhandled afterGenerate failure');
+    });
+
+    const result = await executeLoop({
+      generate: async () => textResponse('done'),
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      hooks,
+    });
+
+    expect(result.finishReason).toBe('error');
+    expect((result.error as Error).message).toBe('unhandled afterGenerate failure');
+  });
+
+  it("a handler's own per-registration onError still overrides the registry-level fallback", async () => {
+    const hooks = new HookRegistry<OperativeHookMap>({
+      onError: () => 'continue',
+    });
+    let secondHandlerRan = false;
+
+    hooks.on(
+      'beforeGenerate',
+      () => {
+        throw new Error('per-handler abort wins');
+      },
+      { priority: 10, onError: () => 'abort' },
+    );
+    hooks.on(
+      'beforeGenerate',
+      async (context) => {
+        secondHandlerRan = true;
+        return context;
+      },
+      { priority: 5 },
+    );
+
+    const result = await executeLoop({
+      generate: async () => textResponse('done'),
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      hooks,
+    });
+
+    expect(secondHandlerRan).toBe(false);
+    expect(result.finishReason).toBe('error');
+    expect((result.error as Error).message).toBe('per-handler abort wins');
+  });
+});
+
 describe('runStep: AB-221 steering.applied dispatch', () => {
   function steeringAppliedEvents(recorder: EventDispatcher & { events: Event[] }) {
     return recorder.events.filter(
