@@ -22,7 +22,12 @@ import { Conversation } from 'conversationalist';
 
 import type { AgentRun, RunEvent, UnwrappedValue } from './agent-run';
 import type { AgentRunError } from './errors';
-import { AbortAgentRunError, AgentContractError, AsyncDefinitionLoadError } from './errors';
+import {
+  AbortAgentRunError,
+  AgentContractError,
+  AsyncDefinitionLoadError,
+  toAgentRunError,
+} from './errors';
 import { RunAbortedEvent, RunCompletedEvent, RunErrorEvent } from './events';
 import type {
   AgentInput,
@@ -268,15 +273,17 @@ function createDeferredAgentRun<O, H extends boolean>(
     try {
       agent = await resolveAgent();
     } catch (cause) {
-      const error =
-        cause instanceof AsyncDefinitionLoadError
-          ? cause
-          : new AsyncDefinitionLoadError(
-              'LOAD_FAILED',
-              `Failed to load lazy agent "${label}"`,
-              cause,
-            );
-      finalizeSynthetic(error, 'error', false);
+      // `resolveAgent` (the shared loader cache's `resolve()`) always
+      // rejects with an `AsyncDefinitionLoadError` already — it wraps every
+      // loader failure before this catch ever sees it. `toAgentRunError`
+      // passes an already-`AgentRunError` value through unchanged, so this
+      // is just a type-safe way to hand `finalizeSynthetic` the error
+      // without asserting a specific subclass here.
+      finalizeSynthetic(
+        toAgentRunError(cause, { kind: 'load', code: 'LOAD_FAILED' }),
+        'error',
+        false,
+      );
       return;
     }
 

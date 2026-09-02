@@ -107,6 +107,18 @@ function successResult(content: string): RunResult<string, false> {
   };
 }
 
+/**
+ * Drains the microtask queue deterministically. Used where a test needs the
+ * internal resolution chain (loader -> validate -> agent.run() -> store the
+ * handle) to have fully settled before proceeding, without depending on a
+ * guessed number of `Promise.resolve()` hops — which can shift under
+ * coverage instrumentation or load and produce a flaky branch count rather
+ * than a flaky assertion.
+ */
+function flushMicrotasks(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 async function drain(run: AgentRun<unknown, boolean>): Promise<RunEvent[]> {
   const events: RunEvent[] = [];
   for await (const event of run) {
@@ -291,8 +303,7 @@ describe('createLazyAgent', () => {
 
     const collecting = drain(run);
     release();
-    await Promise.resolve();
-    await Promise.resolve();
+    await flushMicrotasks();
     fake.push(new RunCompletedEvent(successResult('done')));
     fake.settle(successResult('done'));
 
@@ -355,8 +366,7 @@ describe('createLazyAgent', () => {
 
     const run = lazy.run('hello');
     // Give the internal resolution microtask a turn to store the handle.
-    await Promise.resolve();
-    await Promise.resolve();
+    await flushMicrotasks();
 
     run.abort('first');
     run.abort('second');
@@ -418,8 +428,7 @@ describe('createLazyAgent', () => {
     const startedAgent: RunnableAgent<string, false> = { name: 'a', run: () => fakeStarted.handle };
     const startedLazy = createLazyAgent(() => startedAgent);
     const startedRun = startedLazy.run('hello');
-    await Promise.resolve();
-    await Promise.resolve();
+    await flushMicrotasks();
     startedRun[Symbol.dispose]();
     expect(fakeStarted.disposed).toBe(true);
 
@@ -458,8 +467,7 @@ describe('createLazyAgent', () => {
     };
     const noOutputLazy = createLazyAgent(() => noOutputAgent);
     const noOutputRun = noOutputLazy.run('hello') as unknown as AgentRun<never, true>;
-    await Promise.resolve();
-    await Promise.resolve();
+    await flushMicrotasks();
     noOutputFake.settle(successResult('x'));
     await expectRejects(noOutputRun.output(), {
       name: 'AgentContractError',
@@ -591,8 +599,7 @@ describe('createLazyAgent', () => {
     // Give `pump()` a turn to reach the parked `next()` call before the
     // underlying iterator actually rejects — this is the "consumer already
     // waiting" (direct-reject) path, distinct from the buffered path below.
-    await Promise.resolve();
-    await Promise.resolve();
+    await flushMicrotasks();
     releaseNext();
     await expectRejects(collecting, { message: 'iteration failed' });
   });
@@ -618,9 +625,7 @@ describe('createLazyAgent', () => {
     // Let the underlying failure land in the queue BEFORE anyone starts
     // iterating — this exercises the "buffer the error, no active waiter"
     // path (`hasPendingError`) rather than the direct-reject path.
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
+    await flushMicrotasks();
     await expectRejects(drain(run), { message: 'iteration failed' });
 
     // A second, fresh iteration of a different run exercises early-exit
