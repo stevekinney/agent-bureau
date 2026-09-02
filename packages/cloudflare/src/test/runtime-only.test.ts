@@ -17,10 +17,16 @@ import {
  * `behavior-contract.ts` — they exist only here, each with a one-line reason.
  */
 
+// A per-process random component, not just an incrementing counter: this
+// box runs concurrent agent validation, and two processes running this same
+// file would otherwise produce identical `runtime-only-N` sequences,
+// letting one process's still-in-use temporary directory read as a leak
+// from a completely different process's completed attempt.
+const processIdentifierPrefix = crypto.randomUUID();
 let identifierCounter = 0;
 function nextIdentifier(): string {
   identifierCounter += 1;
-  return `runtime-only-${identifierCounter}`;
+  return `runtime-only-${processIdentifierPrefix}-${identifierCounter}`;
 }
 
 const lanes: CloudflareRuntimeLane[] = [];
