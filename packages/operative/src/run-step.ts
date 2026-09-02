@@ -43,6 +43,7 @@ import type {
   RetryOptions,
   RunOptions,
   SelectToolsHook,
+  SteeringGate,
   StepResult,
   StopCondition,
   TokenUsage,
@@ -95,6 +96,12 @@ export interface StepDeps {
   readonly runId: string | undefined;
   readonly durableOperationKeys: boolean;
   readonly defaultToolChoice: ToolChoice | undefined;
+  /**
+   * The AB-67 runtime steering gate, threaded from `RunOptions.steering`.
+   * `undefined` when the run has no steering dependency configured — the
+   * boundary read below is skipped entirely and behavior is unchanged.
+   */
+  readonly steering: SteeringGate | undefined;
   readonly stopConditions: StopCondition[];
   readonly prepareStepHooks: PrepareStepHook[];
   readonly beforeToolExecutionHooks: BeforeToolExecutionHook[];
@@ -151,6 +158,49 @@ export type StepOutcome =
 
 function explicitAbortReason(signal: AbortSignal | undefined): string | undefined {
   return typeof signal?.reason === 'string' ? signal.reason : undefined;
+}
+
+/**
+ * Races a {@link SteeringGate}'s `awaitResume()` against the step's own
+ * `AbortSignal` (AB-67's ratified pause/resume gate). Resolves `aborted:
+ * true` the moment the signal fires — whether it was already aborted, fires
+ * while the gate is awaited, or the gate resolves after an abort already
+ * won the race — and `aborted: false` once a matching `resume` releases the
+ * gate first. Removes its own abort listener in every case, so a step that
+ * pauses and resumes repeatedly never accumulates listeners on a long-lived
+ * run-level signal.
+ *
+ * Exported (alongside {@link normalizeToArray}) so its already-aborted
+ * short-circuit is directly unit-testable: `runStep`'s own call site never
+ * reaches this function with an already-aborted `signal` (its own abort
+ * check immediately precedes the call, with no `await` between them), so
+ * that branch needs a direct test of this function to exercise, not a
+ * `runStep`-level one.
+ */
+export async function awaitResumeOrAbort(
+  gate: SteeringGate,
+  signal: AbortSignal | undefined,
+): Promise<{ aborted: boolean }> {
+  if (signal?.aborted) {
+    return { aborted: true };
+  }
+
+  let onAbort: (() => void) | undefined;
+  const abortPromise = new Promise<'abort'>((resolve) => {
+    if (!signal) return;
+    onAbort = () => resolve('abort');
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+  const resumePromise = gate.awaitResume().then((): 'resume' => 'resume');
+
+  try {
+    const outcome = await Promise.race([resumePromise, abortPromise]);
+    return { aborted: outcome === 'abort' };
+  } finally {
+    if (signal && onAbort) {
+      signal.removeEventListener('abort', onAbort);
+    }
+  }
 }
 
 export function normalizeToArray<T>(value: T | T[] | undefined): T[] {
@@ -392,6 +442,26 @@ export async function runStep(
     return { kind: 'abort', reason: explicitAbortReason(signal) };
   }
 
+  // AB-67 steering boundary: read the session's desired steering state
+  // exactly once per step, at this shared entry point (both the in-memory
+  // `executeLoop` `for` loop and the durable `run-workflow.ts` per-step
+  // `ctx.memo` reach this once per step, never mid-generate, mid-tool-
+  // execution, or on a same-step retry). `deps.steering` is undefined for a
+  // run with no steering dependency configured — that is a complete no-op,
+  // matching today's non-steerable behavior exactly.
+  let steeringDesiredState = deps.steering?.getDesiredState();
+  if (steeringDesiredState?.paused && deps.steering) {
+    const { aborted } = await awaitResumeOrAbort(deps.steering, signal);
+    if (aborted) {
+      return { kind: 'abort', reason: explicitAbortReason(signal) };
+    }
+    // Re-read after the gate releases: a resume may have arrived bundled
+    // with other steering commands (route/model/provider/effort) admitted
+    // while this step was paused, and the boundary should reflect all of
+    // them, not a stale pre-pause snapshot.
+    steeringDesiredState = deps.steering.getDesiredState();
+  }
+
   // Backpressure: wait before proceeding if the strategy requires it
   if (backpressure) {
     const { delay: backpressureDelay } = backpressure.beforeStep();
@@ -580,6 +650,7 @@ export async function runStep(
           toolChoice: stepToolChoice,
           responseFormat: deps.responseFormat,
           maximumTokens: deps.maximumTokens,
+          steering: steeringDesiredState,
         };
 
         if (hooks?.has('beforeGenerate')) {
@@ -590,10 +661,16 @@ export async function runStep(
             toolChoice: stepToolChoice,
             responseFormat: deps.responseFormat,
             signal: stepSignal,
+            steering: steeringDesiredState,
           };
           const beforeGenResult = await hooks.run('beforeGenerate', beforeGenContext);
           if (beforeGenResult !== undefined) {
-            generateContext = beforeGenResult;
+            // AB-67: steering desired-configuration is not hook-overridable.
+            // A `beforeGenerate` hook may replace every other field of
+            // `GenerateContext`, but the session's boundary-read steering
+            // state is re-applied here so a hook can never silently drop or
+            // override it.
+            generateContext = { ...beforeGenResult, steering: steeringDesiredState };
           }
         }
 

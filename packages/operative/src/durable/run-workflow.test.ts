@@ -11,7 +11,7 @@ import { z } from 'zod';
 import { noToolCalls } from '../conditions/predicates';
 import { GuardrailTripwireError } from '../errors';
 import type { OperativeHookMap } from '../hooks';
-import type { GenerateFunction } from '../types';
+import type { GenerateContext, GenerateFunction, SteeringGate } from '../types';
 import { createCheckpointStore } from './checkpoint-store';
 import {
   createRunWorkflow,
@@ -2851,6 +2851,104 @@ describe('durable agentRun workflow', () => {
         expect(checkpoint.cursor.lastContent).toBe('final answer from A');
       } finally {
         b.engine[Symbol.dispose]();
+      }
+    });
+  });
+
+  describe('AB-67: the steering boundary read reaches the durable driver too', () => {
+    /**
+     * `DurableRunDeps.options` IS a `RunOptions` (`types.ts:129`), and the
+     * memo body calls the identical `buildStepDeps(deps.options)` the
+     * in-memory driver calls (`run-workflow.ts:481`) — no separate
+     * construction path exists for the durable driver to fall out of sync
+     * with. These tests exercise that shared call site, not a durable-only
+     * reimplementation.
+     */
+    it('threads DurableRunDeps.options.steering into GenerateContext.steering for the generate call inside ctx.memo', async () => {
+      const { engine } = await buildEngine(new MemoryStorage(), false);
+      const gate: SteeringGate = {
+        getDesiredState: () => ({ paused: false, configVersion: 7, model: 'durable-model' }),
+        awaitResume: () => new Promise<void>(() => {}), // never needed: this run never pauses
+      };
+      let capturedSteering: GenerateContext['steering'];
+      const toolbox = continuingToolbox();
+      const services: DurableRunDeps = {
+        toolbox,
+        options: {
+          generate: async (context) => {
+            capturedSteering = context.steering;
+            return { content: 'done', toolCalls: [] };
+          },
+          toolbox,
+          conversation: createConversationHistory(),
+          stopWhen: noToolCalls(),
+          steering: gate,
+        },
+      };
+
+      try {
+        await runToCompletion(engine, { runId: 'ab-67-steering-thread-durable' }, services);
+        expect(capturedSteering).toEqual({
+          paused: false,
+          configVersion: 7,
+          model: 'durable-model',
+        });
+      } finally {
+        engine[Symbol.dispose]();
+      }
+    });
+
+    it('a paused steering gate blocks the durable driver at the same runStep boundary, then proceeds once resumed', async () => {
+      const { engine } = await buildEngine(new MemoryStorage(), false);
+      let paused = true;
+      let resumeResolvers: Array<() => void> = [];
+      const gate: SteeringGate = {
+        getDesiredState: () => ({ paused, configVersion: paused ? 1 : 2 }),
+        awaitResume: () =>
+          new Promise<void>((resolve) => {
+            resumeResolvers.push(resolve);
+          }),
+      };
+
+      let generateCalls = 0;
+      const toolbox = continuingToolbox();
+      const services: DurableRunDeps = {
+        toolbox,
+        options: {
+          generate: async () => {
+            generateCalls++;
+            return { content: 'done', toolCalls: [] };
+          },
+          toolbox,
+          conversation: createConversationHistory(),
+          stopWhen: noToolCalls(),
+          steering: gate,
+        },
+      };
+
+      try {
+        const resultPromise = runToCompletion(
+          engine,
+          { runId: 'ab-67-steering-pause-durable' },
+          services,
+        );
+
+        // Let the engine drive the workflow generator far enough to reach
+        // and block on the pause gate before asserting it never generated.
+        await yieldToPortableEventLoop();
+        await yieldToPortableEventLoop();
+        expect(generateCalls).toBe(0);
+
+        paused = false;
+        const waiters = resumeResolvers;
+        resumeResolvers = [];
+        for (const resolve of waiters) resolve();
+
+        const result = await resultPromise;
+        expect(generateCalls).toBe(1);
+        expect(result.finishReason).toBe('stop-condition');
+      } finally {
+        engine[Symbol.dispose]();
       }
     });
   });

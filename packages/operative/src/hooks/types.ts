@@ -1,11 +1,21 @@
 import type { AnyToolbox } from 'armorer';
 import type { Conversation } from 'conversationalist';
 
+import type { SteeringDesiredState } from '../durable/types';
 import type { AgentRunError } from '../errors';
 import type { ResponseFormat, ToolChoice } from '../structured-output/types';
 import type { GenerateResponse, RunResult, StepResult, TokenUsage } from '../types';
 
-/** Context passed to beforeGenerate hooks. */
+/**
+ * Context passed to beforeGenerate hooks.
+ *
+ * `steering` is read-only here: it carries the session's desired steering
+ * state (AB-67) as of this step's boundary read, for a hook that wants to
+ * react to it. It is NOT hook-overridable — if this hook returns a
+ * replacement `GenerateContext`, `runStep` re-applies its own boundary-read
+ * `steering` value onto the replacement afterward, so a hook can never
+ * silently drop or override the session's desired steering state.
+ */
 export interface BeforeGenerateContext {
   conversation: Conversation;
   step: number;
@@ -13,6 +23,7 @@ export interface BeforeGenerateContext {
   toolChoice?: ToolChoice;
   responseFormat?: ResponseFormat;
   signal?: AbortSignal;
+  steering?: SteeringDesiredState;
 }
 
 /** Context passed to afterGenerate hooks. */

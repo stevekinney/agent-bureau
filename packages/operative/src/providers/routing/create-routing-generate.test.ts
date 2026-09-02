@@ -142,6 +142,70 @@ describe('createRoutingGenerate', () => {
     expect(routeNames).toEqual(['fast', 'smart']);
   });
 
+  it('AB-67: a steering route override wins over the strategy without calling it', async () => {
+    let strategyCalled = false;
+
+    const generate = createRoutingGenerate({
+      routes: [makeRoute('fast', 'fast-response'), makeRoute('smart', 'smart-response')],
+      strategy: () => {
+        strategyCalled = true;
+        return { route: 'fast', reason: 'test' };
+      },
+      fallback: 'fast',
+    });
+
+    const context = makeContext({
+      steering: { paused: false, configVersion: 1, route: 'smart' },
+    });
+    const result = await generate(context);
+
+    expect(result.content).toBe('smart-response');
+    expect(strategyCalled).toBe(false);
+  });
+
+  it('AB-67: a steering route override that names no configured route falls back, like an unknown strategy route', async () => {
+    const generate = createRoutingGenerate({
+      routes: [makeRoute('fast', 'fast-response')],
+      strategy: () => ({ route: 'fast', reason: 'test' }),
+      fallback: 'fast',
+    });
+
+    const context = makeContext({
+      steering: { paused: false, configVersion: 1, route: 'nonexistent' },
+    });
+    const result = await generate(context);
+
+    expect(result.content).toBe('fast-response');
+  });
+
+  it('AB-67: onRoute reports the steering-overridden route with a steering-attributed reason', async () => {
+    const events: RoutingEvent[] = [];
+
+    const generate = createRoutingGenerate({
+      routes: [makeRoute('fast', 'fast-response'), makeRoute('smart', 'smart-response')],
+      strategy: () => ({ route: 'fast', reason: 'strategy pick' }),
+      fallback: 'fast',
+      onRoute: (event) => events.push(event),
+    });
+
+    await generate(makeContext({ steering: { paused: false, configVersion: 1, route: 'smart' } }));
+
+    expect(events).toHaveLength(1);
+    expect(events[0]!.selectedRoute).toBe('smart');
+    expect(events[0]!.reason).toContain('steering');
+  });
+
+  it('no steering field on the context is a no-op: the strategy decides exactly as it does today', async () => {
+    const generate = createRoutingGenerate({
+      routes: [makeRoute('fast', 'fast-response'), makeRoute('smart', 'smart-response')],
+      strategy: () => ({ route: 'smart', reason: 'test' }),
+      fallback: 'fast',
+    });
+
+    const result = await generate(makeContext());
+    expect(result.content).toBe('smart-response');
+  });
+
   it('propagates errors from the selected generate function', async () => {
     const routes: ModelRoute[] = [
       {

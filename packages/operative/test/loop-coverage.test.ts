@@ -7,9 +7,10 @@ import { z } from 'zod';
 
 import { noToolCalls } from '../src/conditions/predicates';
 import { createActiveRun } from '../src/create-run';
+import type { SteeringDesiredState } from '../src/durable/types';
 import type { OperativeHookMap } from '../src/hooks';
-import { executeLoop } from '../src/loop';
-import type { GenerateResponse } from '../src/types';
+import { buildStepDeps, executeLoop } from '../src/loop';
+import type { GenerateResponse, SteeringGate } from '../src/types';
 const run = (options: Parameters<typeof createActiveRun>[0]) => createActiveRun(options).result;
 
 function textResponse(content: string): GenerateResponse {
@@ -456,5 +457,63 @@ describe('loop helper coverage', () => {
     // it threw (regression: Copilot review on PR #215).
     expect(result.steps).toHaveLength(1);
     expect(result.steps[0]?.toolCalls).toHaveLength(1);
+  });
+
+  describe('AB-67: buildStepDeps threads RunOptions.steering into StepDeps', () => {
+    function makeGate(initial: SteeringDesiredState): SteeringGate {
+      let desired = initial;
+      return {
+        getDesiredState: () => desired,
+        awaitResume: () =>
+          new Promise<void>((resolve) => {
+            desired = { ...desired, paused: false };
+            resolve();
+          }),
+      };
+    }
+
+    it('buildStepDeps carries RunOptions.steering through unchanged (loop.ts:30)', () => {
+      const gate = makeGate({ paused: false, configVersion: 1 });
+      const deps = buildStepDeps({
+        generate: async () => textResponse('unused'),
+        toolbox: createTestToolbox([]),
+        conversation: new Conversation(),
+        steering: gate,
+      });
+
+      expect(deps.steering).toBe(gate);
+    });
+
+    it('buildStepDeps.steering is undefined when RunOptions.steering is omitted — no behavior change for a non-steered run', () => {
+      const deps = buildStepDeps({
+        generate: async () => textResponse('unused'),
+        toolbox: createTestToolbox([]),
+        conversation: new Conversation(),
+      });
+
+      expect(deps.steering).toBeUndefined();
+    });
+
+    it('executeLoop (the in-memory driver calling buildStepDeps at loop.ts:102) honors a paused steering gate at the step boundary', async () => {
+      const gate = makeGate({ paused: true, configVersion: 1 });
+      let generateCalls = 0;
+
+      const result = await executeLoop({
+        generate: async () => {
+          generateCalls++;
+          return textResponse('done');
+        },
+        toolbox: createTestToolbox([]),
+        conversation: new Conversation(),
+        stopWhen: noToolCalls(),
+        steering: gate,
+      });
+
+      // `makeGate`'s `awaitResume` releases synchronously (flips `paused` and
+      // resolves in the same call), so the step proceeds without ever
+      // reaching an unpaused generate call this test would need to wait on.
+      expect(generateCalls).toBe(1);
+      expect(result.finishReason).toBe('stop-condition');
+    });
   });
 });

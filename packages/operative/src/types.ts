@@ -6,6 +6,7 @@ import type { ZodType } from 'zod';
 
 import type { BackpressureStrategy } from './backpressure';
 import type { CostEstimate, CostEstimationOptions } from './cost-estimation';
+import type { SteeringDesiredState } from './durable/types';
 import type { OperativeHookMap } from './hooks';
 import type { RetryMutator } from './retry/types';
 import type { LiveStreamEvent } from './streaming/types';
@@ -94,6 +95,18 @@ export interface GenerateContext {
    * maximumTokens for this call.
    */
   maximumTokens?: number;
+  /**
+   * The session's desired route/model/provider/effort configuration and
+   * pause flag, as read at this step's `runStep` entry boundary (AB-67).
+   * `undefined` when no `RunOptions.steering` gate is configured — a run
+   * with no steering dependency behaves exactly as it does today.
+   *
+   * NOT hook-overridable: `beforeGenerate` may replace the rest of
+   * `GenerateContext`, but `runStep` re-applies this field from its own
+   * boundary read after the hook returns, so a hook can read the session's
+   * desired steering state but never silently drop or override it.
+   */
+  steering?: SteeringDesiredState;
 }
 
 /**
@@ -249,6 +262,33 @@ export type RunResult<O = unknown, H extends boolean = true> = RunResultBase &
   ([H] extends [true] ? { output?: O } : Record<never, never>);
 
 /**
+ * Per-session gate `runStep` consults at its entry boundary (AB-67, "Define
+ * the runtime steering contract") to read desired steering state and, when
+ * `paused: true`, block until released.
+ *
+ * `runStep` never talks to a Bureau session or a durable store directly —
+ * a caller (illustratively, Bureau's `submitSteeringCommand` admission path)
+ * owns the real implementation, writes into desired state on the accept
+ * side of a command, and resolves `awaitResume()` on the accept side of a
+ * `resume`. Absent a `resume` verb ever calling it, `awaitResume()` simply
+ * never resolves on its own — an inert, safe default equivalent to today's
+ * non-steerable behavior.
+ *
+ * Supplied via `RunOptions.steering`. Optional: a run with no `steering`
+ * dependency proceeds exactly as it does today, with no behavior change.
+ */
+export interface SteeringGate {
+  /** Synchronous read of the session's current desired steering state. */
+  getDesiredState(): SteeringDesiredState;
+  /**
+   * Resolves the next time desired state's `paused` flag next reports
+   * `false` (a matching `resume` command is applied). Raced against the
+   * step's own `AbortSignal` by `runStep` — whichever settles first wins.
+   */
+  awaitResume(): Promise<void>;
+}
+
+/**
  * Options for the agent loop.
  */
 export interface RunOptions {
@@ -375,6 +415,14 @@ export interface RunOptions {
    * explicit model.
    */
   costEstimation?: { model: string; pricing?: CostEstimationOptions };
+  /**
+   * The AB-67 runtime steering gate: read at every step's `runStep` entry
+   * boundary to consult desired route/model/provider/effort configuration
+   * and gate a `paused: true` desired state until a matching `resume` (or
+   * the run's `AbortSignal`) releases it. Optional — omit for a run that
+   * never needs to be steered; `runStep` behaves exactly as it does today.
+   */
+  steering?: SteeringGate;
 }
 
 /**
