@@ -1,5 +1,5 @@
 import type { BackendDescriptor } from '@lostgradient/operative/providers';
-import { describe, expect, it } from 'bun:test';
+import { describe, expect, it, spyOn } from 'bun:test';
 import type { MimeFamily, ModalityMatrix } from 'conversationalist';
 
 import {
@@ -313,6 +313,22 @@ describe('createModelCatalogService', () => {
     expect(after.descriptors.every((d) => d.availability === 'unknown')).toBe(true);
   });
 
+  it('freezes a committed row even when descriptorSource returns a mutable object', async () => {
+    // Deliberately NOT frozen: a well-behaved descriptorSource freezes its
+    // own rows (like this file's `descriptor()` helper), but this module
+    // must not assume that (review finding, PR #432).
+    const mutableRow = { ...descriptor('anthropic', 'mutable-row') };
+    expect(Object.isFrozen(mutableRow)).toBe(false);
+    const { service } = createService(() => Promise.resolve([mutableRow]));
+
+    const handle = service.refresh(request());
+    await handle.result();
+
+    const committedRow = service.catalog().descriptors.find((d) => d.model === 'mutable-row');
+    expect(committedRow).toBeDefined();
+    expect(Object.isFrozen(committedRow)).toBe(true);
+  });
+
   it('subscribeSnapshot delivers the current state before registration returns, and terminal state to a late subscriber', async () => {
     const source = deferred<readonly BackendDescriptor[]>();
     const { service } = createService(() => source.promise);
@@ -447,7 +463,7 @@ describe('createModelCatalogService', () => {
   it('reports a synchronous, non-thenable handle from refresh()', () => {
     const { service } = createService(() => Promise.resolve([]));
     const handle = service.refresh(request());
-    expect(typeof (handle as unknown as { then?: unknown }).then).not.toBe('function');
+    expect('then' in handle).toBe(false);
     expect(typeof handle.refreshId).toBe('string');
   });
 
@@ -461,6 +477,18 @@ describe('createModelCatalogService', () => {
     const result = await handle.result();
     expect(result.outcome).toBe('failed');
     expect(result.failureReason).toContain('a plain string rejection');
+  });
+
+  it('unsubscribe() removes its AbortSignal listener rather than leaking it', async () => {
+    const { service } = createService(() => Promise.resolve([]));
+    const handle = service.refresh(request());
+    const controller = new AbortController();
+    const removeEventListenerSpy = spyOn(controller.signal, 'removeEventListener');
+
+    const unsubscribe = handle.subscribeSnapshot(() => {}, { signal: controller.signal });
+    unsubscribe();
+
+    expect(removeEventListenerSpy).toHaveBeenCalledWith('abort', expect.any(Function));
   });
 
   it('subscribeSnapshot auto-unsubscribes when a live signal aborts later', async () => {

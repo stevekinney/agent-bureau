@@ -256,7 +256,16 @@ function mergeDescriptors(
   const omittedPriorRows = priorDescriptors
     .filter((descriptor) => !returnedProviders.has(descriptor.provider))
     .map((descriptor) => Object.freeze({ ...descriptor, availability: 'unknown' as const }));
-  return Object.freeze([...returned, ...omittedPriorRows]);
+  // Freeze each returned row too — `catalog()`'s identity/immutability
+  // contract otherwise depends on `descriptorSource` having frozen its own
+  // rows, which this module cannot assume (review finding, PR #432). A row
+  // that is already frozen is reused by reference rather than cloned, so a
+  // well-behaved `descriptorSource` that already froze its own rows keeps
+  // exact object identity into the committed catalog.
+  const frozenReturnedRows = returned.map((descriptor) =>
+    Object.isFrozen(descriptor) ? descriptor : Object.freeze({ ...descriptor }),
+  );
+  return Object.freeze([...frozenReturnedRows, ...omittedPriorRows]);
 }
 
 interface CreateRefreshHandleOptions {
@@ -391,15 +400,23 @@ function createRefreshHandle(options: CreateRefreshHandleOptions): CatalogRefres
     subscribeOptions?: SubscribeSnapshotOptions,
   ): () => void {
     observers.add(observer);
-    const unsubscribe = (): void => {
+    const signal = subscribeOptions?.signal;
+    const onSignalAbort = (): void => {
       observers.delete(observer);
     };
-    const signal = subscribeOptions?.signal;
+    const unsubscribe = (): void => {
+      observers.delete(observer);
+      // Remove the abort listener too — otherwise a caller that unsubscribes
+      // BEFORE the signal ever aborts leaves the listener (and this
+      // observer's closure) referenced by the signal until it eventually
+      // fires, or forever if it never does (review finding, PR #432).
+      signal?.removeEventListener('abort', onSignalAbort);
+    };
     if (signal) {
       if (signal.aborted) {
         unsubscribe();
       } else {
-        signal.addEventListener('abort', unsubscribe, { once: true });
+        signal.addEventListener('abort', onSignalAbort, { once: true });
       }
     }
     try {
