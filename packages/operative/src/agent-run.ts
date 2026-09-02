@@ -188,21 +188,30 @@ export type SuccessfulRunResult<O = never, H extends boolean = false> = RunResul
  * shape `createSubagentTool` projects through `toToolOutput`. Every other
  * terminal (abort, execution error, tripwire, budget, elicitation denial,
  * maximum steps, or a `stop-condition` whose output failed schema
- * validation) rejects with `SubagentRunError` instead. Mirrors the exact
- * "clean stop" predicate `AgentRun.unwrap()`/`.output()` already use above,
- * so the two surfaces never disagree about what counts as success.
+ * validation) rejects with `SubagentRunError` instead. Enforces
+ * `run-lifecycle.ts:226`'s own invariant — `output` is present exactly when
+ * `finishReason === 'stop-condition' && schemaValidation?.success` — so a
+ * `RunResult` this package constructs is always classified correctly.
  *
- * A successfully validated `schemaValidation` also requires `output` to
- * actually be present on `result`. `run-lifecycle.ts` only ever includes the
- * `output` key when `finishReason === 'stop-condition' &&
- * schemaValidation?.success`, so a `RunResult` this package constructs
- * always satisfies that invariant. But `RunnableAgent` (AB-19) is a public,
- * structural interface — a hand-written implementation is not obligated to
- * uphold an invariant it never saw, and could report a validated,
- * schema-backed success while omitting `output` outright. Without this
- * check that object would still narrow to `SuccessfulRunResult<O, true>`
- * (whose `output: O` is required only at the type level), handing
- * `toToolOutput` an `output` that is typed present but actually absent.
+ * This is NOT the same soundness guarantee `AgentRun.unwrap()`/`.output()`
+ * have above: those close over a runtime `hasOutput` boolean
+ * (`CreateAgentRunOptions.hasOutput`) that is independent of anything on
+ * `result` itself, so they can positively detect "an `H = true` run whose
+ * `schemaValidation` went missing" and throw. `isSuccessfulRunResult` has no
+ * such witness — `RunnableAgent`'s `H` is a compile-time-only phantom
+ * parameter with no runtime representation on the interface (just `run`),
+ * so a hand-written `RunnableAgent<O, true>` that omits `schemaValidation`
+ * entirely is structurally indistinguishable from a genuinely schema-less
+ * (`H = false`) child; both fall through the `schemaValidation === undefined`
+ * branch and narrow successfully. Closing that residual gap needs a runtime
+ * signal for `H` that `RunnableAgent`'s contract doesn't carry (AB-15/AB-19
+ * didn't ratify one) — consistent with `toToolOutput` being documented as
+ * "a projection, not runtime validation" and "separate tool-output
+ * validation" being explicitly out of this issue's scope. What this
+ * function DOES guarantee: whenever `schemaValidation` is present and
+ * reports success, `output` is verified present before narrowing — the
+ * concrete case a hand-written agent could otherwise trip (see the
+ * `'output' in result` check below).
  */
 export function isSuccessfulRunResult<O, H extends boolean>(
   result: RunResult<O, H>,
