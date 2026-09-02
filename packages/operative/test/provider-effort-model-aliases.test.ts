@@ -1,5 +1,5 @@
 /**
- * AB-91 — provider-neutral effort tiers + model alias registry.
+ * AB-64 — provider-neutral effort tiers + model alias registry.
  *
  * Covers, for each of the three shipped providers (Anthropic, OpenAI, Gemini):
  *   - Every model alias resolves to its documented concrete model ID.

@@ -4,10 +4,16 @@
  * Spec: `@google/genai`'s `Models.countTokens(params: CountTokensParameters):
  * Promise<CountTokensResponse>` — `{ model, contents, config? }` in,
  * `{ totalTokens?, cachedContentTokenCount? }` out, both fields optional and
- * never fabricated when the SDK genuinely reports neither. This is Gemini-only
- * per AB-155: Anthropic's own `messages.countTokens` is a real sibling
- * capability but out of scope for this factory, and OpenAI has nothing to
- * import — no synthesized character-ratio estimate stands in for it here.
+ * never fabricated by the SDK when it genuinely reports neither.
+ * `createGeminiTokenCounter` maps that SDK shape onto AB-64's provider-neutral
+ * `TokenCountResult` at its own boundary: `totalTokens` is normalized to `0`
+ * once there (the SDK's optional field becomes `TokenCountResult`'s required
+ * one), while `cachedTokens` keeps the "absent and zero are distinct" rule —
+ * present only when the SDK reports `cachedContentTokenCount`, never
+ * fabricated. This is Gemini-only per AB-155: Anthropic's own
+ * `messages.countTokens` is a real sibling capability but out of scope for
+ * this factory, and OpenAI has nothing to import — no synthesized
+ * character-ratio estimate stands in for it here.
  *
  * Two kinds of test live here, following `provider-batches.test.ts`'s split.
  *
@@ -30,9 +36,14 @@ import { ProviderError } from '../src/providers/errors.ts';
 import { createGeminiTokenCounter } from '../src/providers/gemini.ts';
 import type {
   GeminiCountTokensRequest,
-  GeminiCountTokensResponse,
   GeminiTokenCountingClient,
 } from '../src/providers/types.ts';
+
+/** The SDK-shaped response `GeminiTokenCountingClient.models.countTokens` returns. */
+interface GeminiCountTokensResponse {
+  totalTokens?: number;
+  cachedContentTokenCount?: number;
+}
 
 const PLACEHOLDER_TOKEN = 'placeholder-not-a-real-key-0000';
 
@@ -113,7 +124,12 @@ describe('createGeminiTokenCounter — injected client', () => {
       contents: 'The quick brown fox jumps over the lazy dog.',
     };
 
-    expect(await counter.countTokens(request)).toEqual(COUNT_RESPONSE);
+    expect(await counter.countTokens(request)).toEqual({
+      totalTokens: COUNT_RESPONSE.totalTokens,
+      cachedTokens: COUNT_RESPONSE.cachedContentTokenCount,
+      provider: 'gemini',
+      model: request.model,
+    });
     expect(calls).toEqual([{ request }]);
   });
 
@@ -131,7 +147,7 @@ describe('createGeminiTokenCounter — injected client', () => {
     expect(calls).toEqual([{ request }]);
   });
 
-  it('never fabricates totalTokens when the SDK reports neither field', async () => {
+  it('normalizes totalTokens to 0 and leaves cachedTokens absent when the SDK reports neither field', async () => {
     const bareClient: GeminiTokenCountingClient = {
       models: {
         async countTokens() {
@@ -143,9 +159,29 @@ describe('createGeminiTokenCounter — injected client', () => {
 
     const result = await counter.countTokens({ model: 'gemini-2.0-flash', contents: 'hi' });
 
-    expect(result).toEqual({});
-    expect(result.totalTokens).toBeUndefined();
-    expect(result.cachedContentTokenCount).toBeUndefined();
+    expect(result).toStrictEqual({ totalTokens: 0, provider: 'gemini', model: 'gemini-2.0-flash' });
+    expect(result.totalTokens).toBe(0);
+    expect(result).not.toHaveProperty('cachedTokens');
+  });
+
+  it('reports cachedTokens when the SDK includes cachedContentTokenCount', async () => {
+    const client: GeminiTokenCountingClient = {
+      models: {
+        async countTokens() {
+          return { totalTokens: 12, cachedContentTokenCount: 4 };
+        },
+      },
+    };
+    const counter = createGeminiTokenCounter({ client });
+
+    const result = await counter.countTokens({ model: 'gemini-2.0-flash', contents: 'hi' });
+
+    expect(result).toEqual({
+      totalTokens: 12,
+      cachedTokens: 4,
+      provider: 'gemini',
+      model: 'gemini-2.0-flash',
+    });
   });
 
   it('wraps an SDK failure in a ProviderError', async () => {
@@ -188,11 +224,12 @@ describe('createGeminiTokenCounter — SDK construction', () => {
 
       const result = await counter.countTokens({ model: 'gemini-2.0-flash', contents: 'hi' });
 
-      // Not a strict toEqual: the real SDK response is a `CountTokensResponse`
-      // class instance carrying an extra `sdkHttpResponse` field alongside the
-      // two named here — only those two are this package's concern.
-      expect(result.totalTokens).toBe(COUNT_RESPONSE.totalTokens);
-      expect(result.cachedContentTokenCount).toBe(COUNT_RESPONSE.cachedContentTokenCount);
+      expect(result).toEqual({
+        totalTokens: COUNT_RESPONSE.totalTokens,
+        cachedTokens: COUNT_RESPONSE.cachedContentTokenCount,
+        provider: 'gemini',
+        model: 'gemini-2.0-flash',
+      });
       expect(server.requests).toHaveLength(1);
       expect(server.requests[0]?.path).toContain('countTokens');
 

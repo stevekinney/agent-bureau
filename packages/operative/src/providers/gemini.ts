@@ -16,7 +16,6 @@ import type {
   GeminiCacheCreatingClient,
   GeminiCachedContent,
   GeminiCountTokensRequest,
-  GeminiCountTokensResponse,
   GeminiGenerateContentRequest,
   GeminiGenerativeModel,
   GeminiProviderOptions,
@@ -28,6 +27,7 @@ import type {
   GenerateResponse,
   StreamingGenerateFunction,
   StreamingHandle,
+  TokenCountResult,
 } from './types.ts';
 
 /** A function call as `@google/genai` reports it: every field optional. */
@@ -984,12 +984,9 @@ export interface GeminiTokenCountingOperations {
    * supplied) would consume, server-side, before any generation request is
    * made.
    *
-   * **Provisional response shape.** `AB-64` — still in Backlog — is what will
-   * define this package's real context/output-limit fields; see
-   * {@link GeminiCountTokensResponse} for why this deliberately keeps the
-   * SDK's own field names for now rather than inventing a new one.
+   * Returns AB-64's provider-neutral {@link TokenCountResult}.
    */
-  countTokens(request: GeminiCountTokensRequest): Promise<GeminiCountTokensResponse>;
+  countTokens(request: GeminiCountTokensRequest): Promise<TokenCountResult>;
 }
 
 /**
@@ -1035,10 +1032,24 @@ export function createGeminiTokenCounter(
   }
 
   return {
-    async countTokens(request: GeminiCountTokensRequest): Promise<GeminiCountTokensResponse> {
+    async countTokens(request: GeminiCountTokensRequest): Promise<TokenCountResult> {
       try {
         const client = await getClient();
-        return await client.models.countTokens(request);
+        const response = await client.models.countTokens(request);
+        // `totalTokens` is optional in the SDK, but AB-64's `TokenCountResult`
+        // requires it — normalized to `0` once, here, rather than pushed onto
+        // every caller as a `?? 0`. `cachedTokens` stays optional and is never
+        // fabricated: it is present only when the SDK reports
+        // `cachedContentTokenCount`.
+        const result: TokenCountResult = {
+          totalTokens: response.totalTokens ?? 0,
+          provider: 'gemini',
+          model: request.model,
+          ...(response.cachedContentTokenCount !== undefined
+            ? { cachedTokens: response.cachedContentTokenCount }
+            : {}),
+        };
+        return result;
       } catch (error) {
         // getClient() can itself throw a ProviderError (a missing API key, via
         // resolveGeminiApiKey) from inside this try — re-wrapping that would
