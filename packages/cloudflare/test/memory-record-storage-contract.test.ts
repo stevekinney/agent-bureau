@@ -18,6 +18,12 @@ import { createSqliteDouble } from '../src/test/sqlite-double';
  * Backend-specific concerns (rehydration security, tombstone ordering, decode
  * validation, tenant/namespace required) live in the sibling test files, not
  * here.
+ *
+ * AB-277 fold-or-exclude: stays DOUBLE-ONLY (not folded into
+ * `runCloudflareBackendContract`), same reasoning as
+ * `sqlite-storage-contract.test.ts`: this already runs the `memory` package's
+ * own shared conformance suite, a stronger, more exhaustive "same contract"
+ * proof than duplicating a subset of it here would be.
  */
 runMemoryRecordStorageContract({
   label: 'cloudflare',

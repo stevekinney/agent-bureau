@@ -21,6 +21,12 @@ import { createSqliteDouble } from '../src/test/sqlite-double';
  * A fresh double per `create()` call keeps every case isolated; each double
  * owns its own in-memory `bun:sqlite` database, so there is no cross-test
  * state to reset.
+ *
+ * AB-277 fold-or-exclude: stays DOUBLE-ONLY (not folded into
+ * `runCloudflareBackendContract`). This IS already a shared-contract run —
+ * Weft's own adapter conformance suite, not a bespoke cloudflare assertion —
+ * so folding it into a second, cloudflare-specific contract would duplicate
+ * coverage rather than add any.
  */
 
 const EXPECTED_CAPABILITIES: StorageCapabilities = {

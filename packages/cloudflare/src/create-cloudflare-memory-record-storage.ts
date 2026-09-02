@@ -7,6 +7,7 @@ import type {
 } from 'memory';
 import { z } from 'zod';
 
+import { assertBindingHasMembers, CloudflareSerializationError } from './diagnostics';
 import type { Sql, SqlValue } from './sql';
 import type { VectorizeIndex, VectorizeMetadataValue } from './vectorize';
 
@@ -72,6 +73,129 @@ const vectorJsonSchema = z.array(z.number().finite());
 
 /** Schema for the decoded JSON `metadata` column: an arbitrary string-keyed map. */
 const metadataJsonSchema = z.record(z.string(), z.unknown());
+
+/**
+ * Renders a validation path (string keys / array indices) as a dotted field
+ * label, e.g. `['nested', 0]` -> `nested.0`.
+ */
+function describeFieldPath(path: readonly (string | number)[]): string {
+  return path.length === 0 ? '(root)' : path.join('.');
+}
+
+/**
+ * Validates `vector` is finite in every component, throwing a typed
+ * {@link CloudflareSerializationError} naming the offending index BEFORE any
+ * `sql.exec` runs — so a serialization failure never produces a partial or
+ * truncated write. A plain indexed loop with `Number.isFinite`, not a Zod
+ * array schema: embedding vectors run hundreds to thousands of dimensions,
+ * and this runs on every `put`/`putOnce`/`update`, so avoiding both the
+ * `Array.from(vector)` allocation and a schema-parse pass per write keeps the
+ * hot path cheap.
+ */
+function validateVectorForWrite(vector: Float32Array): void {
+  for (let index = 0; index < vector.length; index += 1) {
+    const value = vector[index];
+    if (value === undefined || !Number.isFinite(value)) {
+      throw new CloudflareSerializationError(
+        `vector[${index}]`,
+        `component at index ${index} is not a finite number (got ${String(value)}).`,
+      );
+    }
+  }
+}
+
+/**
+ * Validates that `value` is recursively JSON-serializable — exactly what
+ * survives a `JSON.stringify`/`JSON.parse` round trip unchanged — throwing a
+ * typed {@link CloudflareSerializationError} naming the offending field path
+ * BEFORE any `sql.exec` runs. `undefined`, non-finite numbers, and values of
+ * an unsupported type all fail explicitly, where a bare `JSON.stringify`
+ * would instead silently drop the key (`undefined`) or write `null` in place
+ * of the number (`NaN`/`Infinity`) — a write that "succeeds" but reads back
+ * as something the caller never wrote.
+ *
+ * A hand-written recursive walk with an explicit `seen` set, not a Zod
+ * schema: `metadata` is `Record<string, unknown>` and can legally contain a
+ * circular reference (`metadata.self = metadata`); Zod's own recursive
+ * validation has no cycle guard and would recurse until the JS engine itself
+ * throws an uncatchable stack-overflow `RangeError` — this walk detects the
+ * cycle explicitly and reports it as the same typed diagnostic every other
+ * unserializable value gets.
+ */
+function validateJsonSerializableValue(
+  value: unknown,
+  path: readonly (string | number)[],
+  seen: WeakSet<object>,
+): void {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
+
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) {
+      throw new CloudflareSerializationError(
+        `metadata.${describeFieldPath(path)}`,
+        `value is not a finite number (got ${String(value)}).`,
+      );
+    }
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    if (seen.has(value)) {
+      throw new CloudflareSerializationError(
+        `metadata.${describeFieldPath(path)}`,
+        'contains a circular reference.',
+      );
+    }
+    seen.add(value);
+    value.forEach((item, index) => validateJsonSerializableValue(item, [...path, index], seen));
+    seen.delete(value);
+    return;
+  }
+
+  if (typeof value === 'object') {
+    // A PLAIN object only: a Date, Map, Set, RegExp, or boxed primitive
+    // reaches here too (`typeof` doesn't distinguish them), and each has
+    // custom `toJSON`/iteration behavior that `Object.entries()` walking its
+    // own properties completely misses — `JSON.stringify(new Date())`
+    // becomes an ISO string, `JSON.stringify(new Map())` becomes `{}`,
+    // silently persisting something different from what the caller gave.
+    // Only `Object.prototype` (`{...}`, `Object.create(null)`) is what this
+    // package's own JSON columns actually round-trip correctly.
+    const prototype: object | null = Object.getPrototypeOf(value) as object | null;
+    if (prototype !== null && prototype !== Object.prototype) {
+      throw new CloudflareSerializationError(
+        `metadata.${describeFieldPath(path)}`,
+        `value is a ${value.constructor?.name ?? 'non-plain object'}, not a plain JSON object.`,
+      );
+    }
+    if (seen.has(value)) {
+      throw new CloudflareSerializationError(
+        `metadata.${describeFieldPath(path)}`,
+        'contains a circular reference.',
+      );
+    }
+    seen.add(value);
+    for (const [key, nested] of Object.entries(value)) {
+      validateJsonSerializableValue(nested, [...path, key], seen);
+    }
+    seen.delete(value);
+    return;
+  }
+
+  throw new CloudflareSerializationError(
+    `metadata.${describeFieldPath(path)}`,
+    `value of type "${typeof value}" is not JSON-serializable.`,
+  );
+}
+
+/**
+ * Validates `metadata` is recursively JSON-serializable, throwing a typed
+ * {@link CloudflareSerializationError} naming the offending field path BEFORE
+ * any `sql.exec` runs.
+ */
+function validateMetadataForWrite(metadata: Record<string, unknown>): void {
+  validateJsonSerializableValue(metadata, [], new WeakSet());
+}
 
 /**
  * Reconstitute a {@link MemoryRecord} from a canonical SQLite row, decoding the
@@ -163,6 +287,9 @@ export function createCloudflareMemoryRecordStorage(
   options: CreateCloudflareMemoryRecordStorageOptions,
 ): MemoryRecordStorage {
   const { sql, vectorize } = options;
+  assertBindingHasMembers('sql', sql, ['exec']);
+  assertBindingHasMembers('vectorize', vectorize, ['upsert', 'query', 'deleteByIds']);
+
   const table = options.tableName ?? DEFAULT_MEMORY_TABLE_NAME;
 
   // The table name is interpolated into SQL as an identifier (parameter binding
@@ -411,6 +538,8 @@ export function createCloudflareMemoryRecordStorage(
         ...(record.tenantId !== undefined ? { tenantId: record.tenantId } : {}),
         namespace: record.namespace,
       });
+      validateVectorForWrite(record.vector);
+      validateMetadataForWrite(record.metadata);
       const dedupeKey = recordDedupeKey(record);
       sql.exec(
         `INSERT INTO ${table}
@@ -484,6 +613,8 @@ export function createCloudflareMemoryRecordStorage(
         ...(record.tenantId !== undefined ? { tenantId: record.tenantId } : {}),
         namespace: record.namespace,
       });
+      validateVectorForWrite(record.vector);
+      validateMetadataForWrite(record.metadata);
       const existingById = activeRow(tenantId, namespace, record.id);
       sql.exec(
         `INSERT OR IGNORE INTO ${table}
@@ -696,6 +827,8 @@ export function createCloudflareMemoryRecordStorage(
       patch: { content?: string; vector?: Float32Array; metadata?: Record<string, unknown> },
     ): Promise<MemoryRecord | undefined> {
       const { tenantId, namespace } = requireScope(scope);
+      if (patch.vector !== undefined) validateVectorForWrite(patch.vector);
+      if (patch.metadata !== undefined) validateMetadataForWrite(patch.metadata);
       const row = activeRow(tenantId, namespace, id);
       if (row === undefined) return undefined;
 

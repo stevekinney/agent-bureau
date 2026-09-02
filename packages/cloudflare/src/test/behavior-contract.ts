@@ -44,6 +44,16 @@ export interface CloudflareContractBindings {
    * outcome instead of exercising it.
    */
   readonly memoryRecordStorage: MemoryRecordStorage | undefined;
+  /**
+   * Builds a NEW set of adapter instances over the SAME underlying
+   * bindings/storage location as this one — never a fresh double or a fresh
+   * namespace. Proves `close()`/`[Symbol.dispose]()` are non-owning no-ops:
+   * a reopened view reads back exactly what the original view wrote,
+   * including a tombstoned record staying gone. Folds AB-276's
+   * `backend-lifecycle.test.ts` close/dispose coverage into this shared
+   * contract (AB-277 coordinator ruling).
+   */
+  reopen(): Promise<CloudflareContractBindings>;
 }
 
 /** Options for {@link runCloudflareBackendContract}. */
@@ -232,6 +242,27 @@ export function runCloudflareBackendContract(options: RunCloudflareBackendContra
         expect(deleteApplied).toBe(true);
         expect(await sqliteStorage.get('conditional:key')).toBeNull();
       });
+
+      it(// Folds `backend-lifecycle.test.ts`'s "close() is a non-owning
+      // no-op" case into the shared contract (AB-277 coordinator ruling):
+      // `[Symbol.dispose]()` never tears down the underlying binding, so a
+      // REOPENED view over the same storage location reads back exactly what
+      // the original view wrote.
+      'rehydrates identically through a reopened view after dispose (restart proof)', async () => {
+        const bindings = await createBindings();
+        await bindings.sqliteStorage.put('restart:kept', new Uint8Array([1, 2, 3]));
+        await bindings.sqliteStorage.put('restart:doomed', new Uint8Array([9]));
+        await bindings.sqliteStorage.delete('restart:doomed');
+        bindings.sqliteStorage[Symbol.dispose]();
+
+        const reopened = await bindings.reopen();
+
+        expect(await reopened.sqliteStorage.get('restart:kept')).toEqual(new Uint8Array([1, 2, 3]));
+        // A hard-deleted key stays absent after reopening — the KV adapter has
+        // no tombstone row of its own (unlike the memory-record backend), so
+        // "stays gone" here means the DELETE itself survives the reopen.
+        expect(await reopened.sqliteStorage.get('restart:doomed')).toBeNull();
+      });
     });
 
     describe('R2 text value store', () => {
@@ -273,6 +304,21 @@ export function runCloudflareBackendContract(options: RunCloudflareBackendContra
         await r2Store.set('r2:serialization', value);
 
         expect(await r2Store.get('r2:serialization')).toBe(value);
+      });
+
+      it(// Same fold as the SQLite case above: `close()` is a documented
+      // non-owning no-op on this adapter too.
+      'rehydrates identically through a reopened view after close (restart proof)', async () => {
+        const bindings = await createBindings();
+        await bindings.r2Store.set('r2-restart:kept', 'still here');
+        await bindings.r2Store.set('r2-restart:doomed', 'gone soon');
+        await bindings.r2Store.delete('r2-restart:doomed');
+        await bindings.r2Store.close();
+
+        const reopened = await bindings.reopen();
+
+        expect(await reopened.r2Store.get('r2-restart:kept')).toBe('still here');
+        expect(await reopened.r2Store.get('r2-restart:doomed')).toBeNull();
       });
     });
 
@@ -350,6 +396,42 @@ export function runCloudflareBackendContract(options: RunCloudflareBackendContra
         expect(hits.map((hit) => hit.id)).toEqual([survivor.id]);
 
         await memoryRecordStorage.close();
+      });
+
+      it(// Same fold as the SQLite/R2 cases above, extended to this backend's
+      // two-store join: a reopened `init()` re-runs schema creation and the
+      // dedupe-key migration IDEMPOTENTLY (both are `CREATE ... IF NOT
+      // EXISTS`/already-backfilled no-ops the second time), and the
+      // tombstoned record stays gone — the restart proof `restart.test.ts`
+      // gives the real SQLite/R2 lane, run here for the fast-double Vectorize
+      // lane per the AB-277 coordinator ruling.
+      'rehydrates identically (record + tombstone) through a reopened view, with an idempotent re-init (restart proof)', async () => {
+        const bindings = await createBindings();
+        const memoryRecordStorage = await requireMemoryRecordStorage(() =>
+          Promise.resolve(bindings),
+        );
+        await memoryRecordStorage.init();
+
+        const kept = memoryRecordInput(now(), {
+          id: 'restart-kept',
+          metadata: { dedupeKey: 'k1' },
+        });
+        const doomed = memoryRecordInput(now(), { id: 'restart-doomed' });
+        await memoryRecordStorage.put(kept);
+        await memoryRecordStorage.put(doomed);
+        await memoryRecordStorage.delete(doomed.id, memoryScope());
+        await memoryRecordStorage.close();
+
+        const reopened = await bindings.reopen();
+        const reopenedStorage = await requireMemoryRecordStorage(() => Promise.resolve(reopened));
+        // Re-running init() (the restart entry point) must be idempotent.
+        await reopenedStorage.init();
+        await reopenedStorage.init();
+
+        const rehydratedKept = await reopenedStorage.get(kept.id, memoryScope());
+        expect(rehydratedKept?.content).toBe(kept.content);
+        expect(await reopenedStorage.getByDedupeKey!(memoryScope(), 'k1')).toBeDefined();
+        expect(await reopenedStorage.get(doomed.id, memoryScope())).toBeUndefined();
       });
     });
   });

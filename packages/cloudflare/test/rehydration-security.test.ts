@@ -14,6 +14,12 @@ import { createSqliteDouble, type SqliteDouble } from '../src/test/sqlite-double
  * rows (tenant + namespace + version). These tests drive the ADVERSARIAL fake to
  * inject each poison class and prove searchByVector surfaces NONE of them — only
  * correctly-scoped, current, active rows.
+ *
+ * AB-277 fold-or-exclude: stays DOUBLE-ONLY. `FakeVectorize.injectPoison` has
+ * no real-Vectorize or production-adapter equivalent — a correct binding
+ * (real or double) never returns a cross-tenant/stale/deleted/absent hit in
+ * the first place, so this whole file exercises a capability only the
+ * adversarial fake exposes.
  */
 
 const TENANT = 'tenant-a';
