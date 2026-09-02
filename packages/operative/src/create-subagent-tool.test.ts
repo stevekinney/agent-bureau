@@ -1,3 +1,4 @@
+import { createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import { Conversation, type ConversationHistory } from 'conversationalist';
 import { CompletableEventTarget } from 'lifecycle';
@@ -1040,6 +1041,71 @@ describe('createSubagentTool', () => {
       expect(result.usage).toEqual(usage);
       expect(result.steps).toBe(steps);
       expect(result.costEstimate?.totalCost).toBe(0.03);
+    });
+  });
+
+  describe('AB-19 — SubagentRunError visibility through the real toolbox/agent-loop path', () => {
+    it("is thrown with full identity from rawExecute, the boundary this tool's own code controls", async () => {
+      const { agent } = makeMockAgent((): RunResult => ({
+        conversation: {} as never,
+        content: '',
+        finishReason: 'error',
+        steps: [],
+        usage: { prompt: 0, completion: 0, total: 0 },
+      }));
+      const tool = createSubagentTool({
+        name: 'researcher',
+        description: 'Research a topic',
+        agent,
+        agentName: 'researcher',
+        input: z.object({ topic: z.string() }),
+      });
+
+      let caughtError: unknown;
+      try {
+        await callRaw(tool, { topic: 'AI' });
+      } catch (error) {
+        caughtError = error;
+      }
+      expect(caughtError).toBeInstanceOf(SubagentRunError);
+      expect((caughtError as SubagentRunError).result.finishReason).toBe('error');
+    });
+
+    it('is normalized to a plain ToolError by armorer once driven through a real toolbox — a pre-existing, package-wide armorer behavior for every thrown tool error, not specific to this one', async () => {
+      const { agent } = makeMockAgent((): RunResult => ({
+        conversation: {} as never,
+        content: '',
+        finishReason: 'error',
+        steps: [],
+        usage: { prompt: 0, completion: 0, total: 0 },
+      }));
+      const tool = createSubagentTool({
+        name: 'researcher',
+        description: 'Research a topic',
+        agent,
+        agentName: 'researcher',
+        input: z.object({ topic: z.string() }),
+      });
+      const toolbox = createToolbox([tool]);
+
+      const [result] = await toolbox.execute([
+        { id: 'call-1', name: 'researcher', arguments: { topic: 'AI' } },
+      ]);
+
+      expect(result?.outcome).toBe('error');
+      // `armorer`'s `executeInner` catch handler (packages/armorer/src/create-tool.ts)
+      // reconstructs every thrown tool error into a plain, structured
+      // `ToolError` — {code, category, retryable, message} — for the
+      // `ToolExecutionResult` an LLM-facing agent loop actually sees. This
+      // is systemic across every tool in this codebase, not a gap AB-19
+      // introduced or can fix here: `instanceof SubagentRunError` and
+      // `.result` are reachable only by a caller that invokes the tool's
+      // `rawExecute`/underlying function directly (see the test above),
+      // never through this standard toolbox path. Preserving custom error
+      // identity through armorer's toolbox pipeline is a separate,
+      // package-wide armorer concern.
+      expect(result?.error).not.toBeInstanceOf(SubagentRunError);
+      expect(result?.error).toMatchObject({ category: expect.any(String) });
     });
   });
 });

@@ -928,14 +928,29 @@ const orchestrator = createAgent({
 ```
 
 `createSubagentTool` threads the parent tool call's `signal` and
-`traceContext` — plus this tool's own `agentName` — into
-`agent.run(input, { agentName, signal, traceContext, withTraceContext })`,
-so a real `createAgent` child aborts when the parent's tool call does and
-carries the same trace context. Every non-success terminal (abort, execution
-error, tripwire, budget exceeded, elicitation denied, maximum steps, or a
-clean stop whose output failed schema validation) rejects with
-`SubagentRunError`, which carries the child's full `RunResult` as `.result`
-— there is no `treatMaximumStepsAsError` toggle to opt out of this.
+`traceContext` — plus this tool's own `agentName` and `withTraceContext`
+option — into `agent.run(input, { agentName, signal, traceContext,
+withTraceContext })`, so a real `createAgent` child aborts when the parent's
+tool call does. `signal` always propagates. `traceContext` is read off the
+executing `ToolContext`, which is populated only when the caller built its
+toolbox with a matching `context: { traceContext }` — the ordinary
+`createAgent`-driven agent loop does not populate a tool's `traceContext`
+from the run's own `parentContext` (that field wraps `generate`/tool
+_execution_ in `withTraceContext`; it isn't copied onto `ToolContext`). Pass
+`withTraceContext` directly on `createSubagentTool`'s own options when the
+child needs its `agent.run()` call wrapped in a trace context.
+
+Every non-success terminal (abort, execution error, tripwire, budget
+exceeded, elicitation denied, maximum steps, or a clean stop whose output
+failed schema validation) rejects with `SubagentRunError`, which carries the
+child's full `RunResult` as `.result` — there is no `treatMaximumStepsAsError`
+toggle to opt out of this. That guarantee holds for a caller that invokes the
+tool's own execute function directly; once the tool call is driven through
+armorer's toolbox (the ordinary agent-loop path), armorer normalizes every
+thrown tool error — including `SubagentRunError` — into a plain, structured
+`ToolError` on the resulting `ToolExecutionResult`, the same as it does for
+every other tool in this codebase. `instanceof SubagentRunError` and
+`.result` are reachable only above that normalization boundary.
 
 **Context isolation (AB-64):** by default, `createSubagentTool` keeps a
 sub-agent's full conversation, steps, and usage out of the parent's context

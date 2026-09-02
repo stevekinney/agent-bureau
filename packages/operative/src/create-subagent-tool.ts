@@ -103,11 +103,10 @@ export const defaultSubagentSummarizer: SubagentSummarizer = (result, { maxToken
  * `toToolOutput` — and therefore this tool's `execute` — returns, which is
  * what `createTool` infers the tool's own output type from.
  */
-export interface CreateSubagentToolOptions<
+interface CreateSubagentToolOptionsBase<
   TInput extends object = Record<string, unknown>,
   TOutput = unknown,
   THasOutput extends boolean = boolean,
-  TToolOutput = string,
 > {
   name: string;
   description: string;
@@ -115,9 +114,11 @@ export interface CreateSubagentToolOptions<
    * The child agent (AB-19). `createAgent`'s returned agent satisfies this
    * structurally: its `run(input, context?)` is invoked with the exact
    * `agentName` this tool was constructed with, plus the parent tool call's
-   * `signal`, `traceContext`, and this option bag's own `withTraceContext` —
-   * so a `createAgent` child receives identical signal, trace context, and
-   * `withTraceContext` propagation to what the parent run itself sees.
+   * `signal` and `traceContext` (as read off the executing `ToolContext` —
+   * present only when the caller built its toolbox with a matching
+   * `context: { traceContext }`; the ordinary agent-loop path does not
+   * populate `ToolContext.traceContext` from a run's own `parentContext`)
+   * and this option bag's own `withTraceContext`.
    */
   agent: RunnableAgent<TOutput, THasOutput>;
   /**
@@ -138,20 +139,6 @@ export interface CreateSubagentToolOptions<
    * today.
    */
   toAgentInput?: (input: TInput) => AgentInput;
-  /**
-   * Projects the child's completed run to this tool's return value (AB-19;
-   * renamed from `mapOutput`). A pure projection, not runtime validation —
-   * every non-success terminal has already rejected as `SubagentRunError`
-   * before this is ever called, so it only ever sees a
-   * `SuccessfulRunResult<TOutput, THasOutput>`. Runs AFTER `returnMode`/
-   * `summarizer` have already condensed `result.content` in summary mode —
-   * a custom `toToolOutput` still sees the summarized content by default,
-   * not the raw sub-agent output. Defaults to `(result) => result.content`,
-   * so a schema-less child with no `toToolOutput` returns a string.
-   */
-  toToolOutput?: (
-    result: SuccessfulRunResult<TOutput, THasOutput>,
-  ) => TToolOutput | Promise<TToolOutput>;
   /**
    * AB-64 — controls how much of the sub-agent's context comes back to the
    * parent agent.
@@ -209,6 +196,55 @@ export interface CreateSubagentToolOptions<
    */
   withTraceContext?: <T>(parentContext: unknown, fn: () => Promise<T>) => Promise<T>;
 }
+
+/**
+ * `toToolOutput`'s presence is conditionally REQUIRED, not merely typed
+ * `TToolOutput | Promise<TToolOutput>` on an always-optional field: with a
+ * single always-optional field, a caller who explicitly pins `TToolOutput`
+ * to something other than `string` (e.g.
+ * `createSubagentTool<Input, Output, boolean, number>({...})`) while still
+ * omitting `toToolOutput` would type-check — even though the omitted-case
+ * runtime default always returns `result.content` (a `string`), silently
+ * mistyped as `TToolOutput`. `string extends TToolOutput` is true only for
+ * the declared default (`TToolOutput = string`) and any other type `string`
+ * itself satisfies, so a caller pinning a different `TToolOutput` MUST
+ * supply `toToolOutput`.
+ */
+type ToToolOutputOption<
+  TOutput,
+  THasOutput extends boolean,
+  TToolOutput,
+> = string extends TToolOutput
+  ? {
+      toToolOutput?: (
+        result: SuccessfulRunResult<TOutput, THasOutput>,
+      ) => TToolOutput | Promise<TToolOutput>;
+    }
+  : {
+      /**
+       * Projects the child's completed run to this tool's return value (AB-19;
+       * renamed from `mapOutput`). A pure projection, not runtime validation —
+       * every non-success terminal has already rejected as `SubagentRunError`
+       * before this is ever called, so it only ever sees a
+       * `SuccessfulRunResult<TOutput, THasOutput>`. Runs AFTER `returnMode`/
+       * `summarizer` have already condensed `result.content` in summary mode —
+       * a custom `toToolOutput` still sees the summarized content by default,
+       * not the raw sub-agent output. Omit it (and `TToolOutput`) entirely
+       * for a schema-less child and the tool returns `result.content` — a
+       * plain string.
+       */
+      toToolOutput: (
+        result: SuccessfulRunResult<TOutput, THasOutput>,
+      ) => TToolOutput | Promise<TToolOutput>;
+    };
+
+export type CreateSubagentToolOptions<
+  TInput extends object = Record<string, unknown>,
+  TOutput = unknown,
+  THasOutput extends boolean = boolean,
+  TToolOutput = string,
+> = CreateSubagentToolOptionsBase<TInput, TOutput, THasOutput> &
+  ToToolOutputOption<TOutput, THasOutput, TToolOutput>;
 
 /**
  * Creates a tool that delegates execution to a sub-agent.
@@ -328,17 +364,11 @@ export function createSubagentTool<
       const cappedContent = enforceTokenCap(summarizedContent, summaryTokenCap);
       // `result` is already `SuccessfulRunResult<TOutput, THasOutput>` (the
       // `isSuccessfulRunResult` guard above narrowed it); this spread only
-      // reassigns `content`, a `string` field present on both sides. The
-      // cast is needed because `THasOutput`/`TOutput` are still unresolved
-      // generics here, so TypeScript can't algebraically prove the fresh
-      // spread's conditional-intersection shape equals the (differently
-      // arranged) conditional-intersection shape it started from, even
-      // though the runtime object is structurally identical to `result`
-      // apart from `content`.
+      // reassigns `content`, a `string` field present on both sides.
       return toToolOutput({
         ...result,
         content: cappedContent,
-      } as SuccessfulRunResult<TOutput, THasOutput>);
+      });
     },
   });
 }

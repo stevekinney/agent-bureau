@@ -19,7 +19,7 @@ import type { ConversationHistory } from 'conversationalist';
 
 import type { ActiveRun } from './create-run';
 import type { CombinedOperativeEventMap, CombinedOperativeEventType } from './events';
-import type { RunResult } from './types';
+import type { RunResult, RunResultBase } from './types';
 
 // ---------------------------------------------------------------------------
 // RunEvent — the event type yielded by AgentRun's async iterator
@@ -149,7 +149,13 @@ export interface AgentRunContext {
  * that would conflict.
  */
 export interface RunnableAgent<O = never, H extends boolean = false> {
-  run(input: AgentInput, context?: AgentRunContext): AgentRun<O, H>;
+  // A function-VALUED property, not method shorthand (`run(...): ...`).
+  // TypeScript checks method-shorthand parameters bivariantly, which would
+  // let an agent whose `run` only accepts `string` satisfy this interface —
+  // unsound, since a `toAgentInput` returning `{ conversation }` can hand
+  // such an agent an object it cannot actually run. The property form gets
+  // strict (contravariant) parameter checking instead.
+  run: (input: AgentInput, context?: AgentRunContext) => AgentRun<O, H>;
 }
 
 /**
@@ -164,11 +170,18 @@ export interface RunnableAgent<O = never, H extends boolean = false> {
  * successful) alongside `finishReason` — a `SuccessfulRunResult` can never
  * structurally carry a failed validation, matching what `isSuccessfulRunResult`
  * actually checks below rather than only half of it.
+ *
+ * Built from `RunResultBase` rather than intersecting `RunResult<O, H>`
+ * (whose `output` is always optional, `H`-gated or not) so the `H extends
+ * true` branch can REQUIRE `output: O` instead of merely allowing it:
+ * `run-lifecycle.ts` only ever includes the `output` key at all when
+ * `finishReason === 'stop-condition' && schemaValidation?.success`, so once
+ * both of those hold for an `H = true` agent, `output` is always present.
  */
-export type SuccessfulRunResult<O = never, H extends boolean = false> = RunResult<O, H> & {
+export type SuccessfulRunResult<O = never, H extends boolean = false> = RunResultBase & {
   finishReason: 'stop-condition';
   schemaValidation?: { success: true; error?: unknown };
-};
+} & ([H] extends [true] ? { output: O } : Record<never, never>);
 
 /**
  * True when `result` is a clean, schema-valid stop — the only terminal
