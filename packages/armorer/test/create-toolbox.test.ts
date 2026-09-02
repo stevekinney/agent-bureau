@@ -6139,6 +6139,43 @@ describe('createToolbox', () => {
 
       expect(blocked.length).toBeGreaterThan(0);
     });
+
+    it('dispatches a companion error event carrying the same rejected result for loop-blocked, mirroring budget-exceeded (AB-231)', async () => {
+      const toolbox = createToolbox([makeConfiguration()], {
+        loopDetection: { warningThreshold: 2, blockThreshold: 4, windowSize: 30 },
+      });
+
+      const blocked: Array<{
+        result: { error?: { code?: string; category?: string } };
+      }> = [];
+      const errors: Array<{
+        result: { error?: { code?: string; category?: string } };
+      }> = [];
+      toolbox.addEventListener('loop-blocked', (e) => blocked.push(e as (typeof blocked)[number]));
+      toolbox.addEventListener('error', (e) => errors.push(e as (typeof errors)[number]));
+
+      let blockedResult: Awaited<ReturnType<typeof toolbox.execute>> | undefined;
+      for (let i = 0; i < 5; i++) {
+        const result = await toolbox.execute({
+          id: `blce-${i}`,
+          name: 'sum',
+          arguments: { a: 1, b: 2 },
+        });
+        if (result.error?.category === 'conflict' && result.error?.code === 'LOOP_BLOCKED') {
+          blockedResult = result;
+          break;
+        }
+      }
+
+      expect(blocked.length).toBeGreaterThan(0);
+      expect(blockedResult).toBeDefined();
+      expect(errors.length).toBeGreaterThan(0);
+      const companionError = errors.find(
+        (e) => e.result.error?.code === 'LOOP_BLOCKED' && e.result.error?.category === 'conflict',
+      );
+      expect(companionError).toBeDefined();
+      expect(companionError?.result).toEqual(blockedResult);
+    });
   });
 
   describe('createLoopDetector', () => {

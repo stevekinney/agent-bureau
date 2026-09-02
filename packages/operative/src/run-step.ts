@@ -5,7 +5,7 @@ import type { HookErrorHandler, HookRegistrationOptions } from 'lifecycle';
 import type { ZodType } from 'zod';
 
 import type { SteeringDesiredState } from './durable/types';
-import { type AgentRunErrorKind, GuardrailTripwireError } from './errors';
+import { type AgentRunErrorKind, GuardrailTripwireError, reclassifyToolError } from './errors';
 import {
   BackpressureAppliedEvent,
   BackpressureReleasedEvent,
@@ -1245,8 +1245,14 @@ export async function runStep(
             deps.collectAsync,
             'Tool execution failed before a result could be produced',
           );
-          emitter?.dispatch(new RunErrorEvent(step, error, 'tool'));
-          return { kind: 'error', error, errorKind: 'tool' };
+          // Re-classify a toolbox-level, failFast BUDGET_EXCEEDED rejection
+          // to `BudgetExceededError` here, upstream of `makeErrorResult`'s
+          // `instanceof` classification, so the run's `finishReason`
+          // resolves to `'budget-exceeded'` instead of falling through to
+          // `'error'` (AB-231).
+          const runError = reclassifyToolError(error);
+          emitter?.dispatch(new RunErrorEvent(step, runError, 'tool'));
+          return { kind: 'error', error: runError, errorKind: 'tool' };
         }
       }
 

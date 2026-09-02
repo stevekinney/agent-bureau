@@ -480,3 +480,63 @@ describe('RunOptions.maximumTokens → GenerateContext.maximumTokens', () => {
     }
   });
 });
+
+describe('toolbox budget-exceeded reconciliation (AB-231)', () => {
+  it("sets run.completed's finishReason to 'budget-exceeded' for a toolbox-level, failFast per-call budget rejection", async () => {
+    const generate = createMockGenerate([
+      toolCallResponse([weatherToolCall('Denver')]),
+      toolCallResponse([weatherToolCall('Boulder')]),
+      textResponse('Done'),
+    ]);
+
+    const toolbox = createToolbox([weatherTool], {
+      budget: { maxCalls: 1 },
+    });
+
+    const activeRun = createActiveRun({
+      generate,
+      toolbox,
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      executeOptions: { errorMode: 'failFast' },
+    });
+
+    const budgetExceededEvents: unknown[] = [];
+    toolbox.addEventListener('budget-exceeded', (e) => budgetExceededEvents.push(e));
+
+    const result = await activeRun.result;
+
+    expect(budgetExceededEvents).toHaveLength(1);
+    expect(result.finishReason).toBe('budget-exceeded');
+  });
+
+  it("does not reclassify an unrelated tool error, leaving finishReason as 'error'", async () => {
+    const failingTool = createTool({
+      name: 'always_fails',
+      description: 'Always throws',
+      input: z.object({}),
+      execute: async () => {
+        throw new Error('boom');
+      },
+    });
+
+    const generate = createMockGenerate([
+      toolCallResponse([{ name: 'always_fails', arguments: {} }]),
+      textResponse('Done'),
+    ]);
+
+    const toolbox = createToolbox([failingTool]);
+
+    const activeRun = createActiveRun({
+      generate,
+      toolbox,
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      executeOptions: { errorMode: 'failFast' },
+    });
+
+    const result = await activeRun.result;
+
+    expect(result.finishReason).toBe('error');
+  });
+});

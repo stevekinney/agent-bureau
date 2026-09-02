@@ -22,7 +22,9 @@ export {
   resolveCapabilityTier,
 } from './approval-policy';
 export { combineToolboxes } from './combine-toolboxes';
+export type { ToolboxBudgetExceededToolError } from './core/errors';
 export type { ToolError, ToolErrorCategory } from './core/errors';
+export { isToolboxBudgetExceededToolError, TOOLBOX_BUDGET_EXCEEDED_MARKER } from './core/errors';
 export type {
   EffectiveToolExecutionContext,
   ExternalExecutionProjection,

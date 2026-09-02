@@ -19,7 +19,13 @@ import {
 } from './approval-binding';
 import type { ApprovalPolicyConfiguration } from './approval-policy';
 import { approvalStatusToDecision, evaluateCapabilityApproval } from './approval-policy';
-import { isToolError, type ToolError, type ToolErrorCategory } from './core/errors';
+import {
+  isToolError,
+  TOOLBOX_BUDGET_EXCEEDED_MARKER,
+  type ToolboxBudgetExceededToolError,
+  type ToolError,
+  type ToolErrorCategory,
+} from './core/errors';
 import {
   type InspectorDetailLevel,
   inspectRegistry,
@@ -1266,7 +1272,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
 
           const budgetReason = checkBudget(budget, budgetStart, budgetCalls);
           if (budgetReason) {
-            const toolError = createToolError('conflict', budgetReason, 'BUDGET_EXCEEDED', false);
+            const toolError = createToolboxBudgetExceededToolError(budgetReason);
             const denied: ToolExecutionResult = {
               callId: toolCall.id,
               outcome: 'error',
@@ -1318,6 +1324,13 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
                 errorMessage: toolError.message,
                 errorCategory: toolError.category,
               };
+              // Companion `error` event, mirroring the `budget-exceeded`
+              // rejection immediately above: without it, a `loop-blocked`
+              // rejection is invisible to operative's `tool.error`
+              // forwarders (`create-run.ts`, `active-run-adapter.ts`), which
+              // observe the toolbox only through this normalized `error`
+              // event, never `loop-blocked` directly (AB-231).
+              emit('error', { tool, result: blocked });
               return blocked;
             }
             if (loopResult.detected) {
@@ -3230,6 +3243,21 @@ function createToolError(
   retryable: boolean,
 ): ToolError {
   return { code, category, retryable, message };
+}
+
+/**
+ * Builds the `ToolError` for the toolbox's own `checkBudget` rejection,
+ * stamped with {@link TOOLBOX_BUDGET_EXCEEDED_MARKER} so a consumer (for
+ * example operative's toolbox-level to run-level `BudgetExceededError`
+ * reclassification, AB-231) can distinguish this genuine toolbox-accounting
+ * rejection from a tool-defined error whose `code` happens to also
+ * normalize to `'BUDGET_EXCEEDED'`.
+ */
+function createToolboxBudgetExceededToolError(message: string): ToolboxBudgetExceededToolError {
+  return {
+    ...createToolError('conflict', message, 'BUDGET_EXCEEDED', false),
+    [TOOLBOX_BUDGET_EXCEEDED_MARKER]: true,
+  };
 }
 
 function extractErrorCode(error: unknown): string | undefined {
