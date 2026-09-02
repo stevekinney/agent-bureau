@@ -621,6 +621,24 @@ describe('createBureau', () => {
     expect(bureau.ready).toBe(true);
   });
 
+  it('rejects the factory (not just createRuntimeComposition) on an initialization failure', async () => {
+    // AB-22: "initialization ... failures reject the factory." createBureau
+    // awaits createRuntimeComposition(options) with no surrounding try/catch
+    // (unlike durable-run RECOVERY below, which is deliberately caught and
+    // diagnosed so a single corrupted workflow can't block boot) — a
+    // synchronous validation throw inside composition must propagate as a
+    // rejection of createBureau's own returned promise, not just of
+    // createRuntimeComposition called directly.
+    expect(
+      createBureau({
+        agents: {},
+        generate: createMockGenerate(),
+        durableExecution: true,
+        persistence: textValueStore(new MemoryStorage()),
+      }),
+    ).rejects.toThrow(/durableExecution: true is incompatible/);
+  });
+
   it('uses a provided store when one is supplied', async () => {
     const store = createStore();
     const bureau = await createBureau({
