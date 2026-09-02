@@ -340,9 +340,15 @@ describe('createLazyAgent', () => {
     // validator rejected it; the rejection path must still dispose it
     // rather than leaking provider/tool work unobserved.
     expect(disposed).toBe(true);
+    // Regression: a further code-review finding — cleanup here genuinely
+    // succeeded, and closed() must report that rather than silently
+    // defaulting to `not-required` (this scenario is not "nothing needed
+    // cleanup" — cleanup was attempted).
+    expect(await run.closed()).toEqual({ status: 'completed' });
   });
 
-  it('swallows a throwing [Symbol.dispose] on a rejected invalid handle without masking the AgentContractError', async () => {
+  it('swallows a throwing [Symbol.dispose] on a rejected invalid handle without masking the AgentContractError, but still reports the disposal failure through closed()', async () => {
+    const disposalError = new Error('disposer itself is broken');
     const preAb204Handle = {
       result: () => Promise.resolve(successResult('x')),
       unwrap: () => Promise.resolve('x'),
@@ -350,7 +356,7 @@ describe('createLazyAgent', () => {
       children: () => [],
       abortChild: () => {},
       [Symbol.dispose]: () => {
-        throw new Error('disposer itself is broken');
+        throw disposalError;
       },
       [Symbol.asyncIterator]: () => (async function* () {})(),
       // Deliberately omits `closed`.
@@ -362,6 +368,30 @@ describe('createLazyAgent', () => {
     const result = await run.result();
     expect(result.error).toBeInstanceOf(AgentContractError);
     expect((result.error as AgentContractError).code).toBe('INVALID_AGENT_HANDLE');
+    // Regression: a code-review finding on the AB-204 pull request — a
+    // throwing disposer means cleanup genuinely failed; closed() must not
+    // silently claim `completed`/`not-required` for that.
+    expect(await run.closed()).toEqual({ status: 'failed', error: disposalError });
+  });
+
+  it('reports closed() as unresolved/unknown-effect for a rejected invalid handle with no disposer to call at all', async () => {
+    const noDisposeHandle = {
+      result: () => Promise.resolve(successResult('x')),
+      unwrap: () => Promise.resolve('x'),
+      abort: () => {},
+      children: () => [],
+      abortChild: () => {},
+      [Symbol.asyncIterator]: () => (async function* () {})(),
+      // Deliberately omits both `closed` and `[Symbol.dispose]`.
+    } as unknown as AgentRun<string, false>;
+    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => noDisposeHandle };
+    const lazy = createLazyAgent(() => agent, { label: 'no-dispose-handle' });
+
+    const run = lazy.run('one');
+    const result = await run.result();
+    expect(result.error).toBeInstanceOf(AgentContractError);
+
+    expect(await run.closed()).toEqual({ status: 'unresolved', reason: 'unknown-effect' });
   });
 
   it('wraps a synchronous throw from the underlying run() as an AgentContractError', async () => {

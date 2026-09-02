@@ -40,7 +40,7 @@ import type {
   RunnableAgent,
 } from './runnable-agent';
 import { OPERATIVE_RESOLVE_RUN_OPTIONS } from './runnable-agent';
-import type { FinishReason, RunResult, TokenUsage } from './types';
+import type { CleanupAcknowledgement, FinishReason, RunResult, TokenUsage } from './types';
 
 /**
  * The two shapes a loader may resolve to (AB-15's `AgentModule<O, H>`): the
@@ -309,6 +309,12 @@ function createDeferredAgentRun<O, H extends boolean>(
   // closed()'s not-required fast path (AB-204) — `abortReason` alone can't
   // serve this: a caller may abort with no reason, leaving it `undefined`.
   let cancelRequested = false;
+  // Set only on the invalid-handle rejection path below, to the REAL
+  // outcome of the best-effort disposal attempted there — never silently
+  // defaulted to `completed` the way a genuine "no underlying run ever
+  // existed" synthetic completion is, since cleanup here was attempted
+  // (and may have failed) rather than genuinely unnecessary.
+  let invalidHandleDisposalOutcome: CleanupAcknowledgement | undefined;
 
   const queue = createEventQueue();
 
@@ -528,11 +534,18 @@ function createDeferredAgentRun<O, H extends boolean>(
       if (isCallable(disposable[Symbol.dispose])) {
         try {
           (disposable[Symbol.dispose] as () => void).call(handle);
-        } catch {
-          // Swallow: the handle is already being reported as contractually
-          // invalid: a throwing disposer doesn't change that outcome, and
-          // must not mask it.
+          invalidHandleDisposalOutcome = { status: 'completed' };
+        } catch (disposalError) {
+          // The AgentContractError result itself is unaffected — a
+          // throwing disposer doesn't change that outcome, and must not
+          // mask it — but closed() must still be able to report that
+          // cleanup genuinely failed, not silently claim `completed`.
+          invalidHandleDisposalOutcome = { status: 'failed', error: disposalError };
         }
+      } else {
+        // No disposer to call at all: cleanup here is genuinely
+        // undetermined, not "nothing needed cleanup".
+        invalidHandleDisposalOutcome = { status: 'unresolved', reason: 'unknown-effect' };
       }
       finalizeSynthetic(
         new AgentContractError(`Lazy agent "${label}" returned an invalid run handle`, handle),
@@ -638,10 +651,13 @@ function createDeferredAgentRun<O, H extends boolean>(
       // (ownership transfers directly to the underlying agent's run() once
       // it exists — see `detachSignalListener` above) — reading the signal
       // directly here still catches that case.
-      disqualifiesFastPath: () => cancelRequested || (signal?.aborted ?? false),
+      disqualifiesFastPath: () =>
+        cancelRequested || (signal?.aborted ?? false) || invalidHandleDisposalOutcome !== undefined,
       hasInFlightWork: () => false,
       resolveOutcome: () =>
-        underlying ? underlying.closed() : Promise.resolve({ status: 'completed' }),
+        underlying
+          ? underlying.closed()
+          : Promise.resolve(invalidHandleDisposalOutcome ?? { status: 'completed' }),
     }),
 
     [Symbol.dispose](): void {

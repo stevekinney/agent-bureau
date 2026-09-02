@@ -102,12 +102,15 @@ export type CleanupAcknowledgementReason =
  * unresolved`) rather than inventing a fifth status; `reason` further
  * classifies an `unresolved` outcome. See {@link ClosedOptions}.
  */
-export interface CleanupAcknowledgement {
-  readonly status: 'not-required' | 'completed' | 'failed' | 'unresolved';
-  /** Present only when `status` is `'unresolved'`. */
-  readonly reason?: CleanupAcknowledgementReason;
-  readonly error?: unknown;
-}
+export type CleanupAcknowledgement =
+  | { readonly status: 'not-required' }
+  | { readonly status: 'completed' }
+  | { readonly status: 'failed'; readonly error?: unknown }
+  | {
+      readonly status: 'unresolved';
+      readonly reason: CleanupAcknowledgementReason;
+      readonly error?: unknown;
+    };
 
 /**
  * Options for `closed()`. `signal` bounds one caller's own wait — it does not

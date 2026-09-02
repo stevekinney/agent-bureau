@@ -123,12 +123,15 @@ export type AgentRun<O = never, H extends boolean = false> = RunOutcomeBase<O, H
 export type CleanupAcknowledgementReason =
   'timed-out' | 'unknown-effect' | 'unreachable' | 'persistence-failed';
 
-export interface CleanupAcknowledgement {
-  readonly status: 'not-required' | 'completed' | 'failed' | 'unresolved';
-  /** Present only when `status` is `'unresolved'`. */
-  readonly reason?: CleanupAcknowledgementReason;
-  readonly error?: unknown;
-}
+export type CleanupAcknowledgement =
+  | { readonly status: 'not-required' }
+  | { readonly status: 'completed' }
+  | { readonly status: 'failed'; readonly error?: unknown }
+  | {
+      readonly status: 'unresolved';
+      readonly reason: CleanupAcknowledgementReason;
+      readonly error?: unknown;
+    };
 
 export interface ClosedOptions {
   /**
