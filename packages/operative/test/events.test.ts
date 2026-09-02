@@ -5,7 +5,7 @@ import { z } from 'zod';
 
 import { noToolCalls } from '../src/conditions/predicates';
 import { createActiveRun } from '../src/create-run';
-import type { SteeringCommandFailure, SteeringEffectiveState } from '../src/durable/types';
+import type { SteeringEffectiveState } from '../src/durable/types';
 import {
   AgentScheduledEvent,
   BudgetExceededEvent,
@@ -23,7 +23,7 @@ import {
   WakeupScheduledEvent,
 } from '../src/events';
 import { createMockGenerate, createRunRecorder } from '../src/test/index';
-import type { GenerateResponse } from '../src/types';
+import type { GenerateResponse, SteeringGate } from '../src/types';
 
 const weatherTool = createTool({
   name: 'get_weather',
@@ -286,11 +286,16 @@ describe('events', () => {
       appliedAtRunId: 'run-1',
       appliedAt: '2026-09-02T00:00:00.000Z',
     };
-    const sessionTerminalFailure: SteeringCommandFailure = {
+    // Typed with the literal `reason`, not widened to `SteeringCommandFailure`:
+    // `session-terminal` is valid on both `SteeringRejectedEvent` and
+    // `SteeringFailedEvent` (AB-67 — either can fail this way depending on
+    // whether the command ever reached a boundary), so this narrower literal
+    // type satisfies both constructors' narrowed `failure` parameters below.
+    const sessionTerminalFailure: { failedAt: string; reason: 'session-terminal' } = {
       failedAt: '2026-09-02T00:00:01.000Z',
       reason: 'session-terminal',
     };
-    const runTerminalFailure: SteeringCommandFailure = {
+    const runTerminalFailure: { failedAt: string; reason: 'run-terminal' } = {
       failedAt: '2026-09-02T00:00:02.000Z',
       reason: 'run-terminal',
     };
@@ -342,6 +347,56 @@ describe('events', () => {
       expect(sessionTerminal.type).toBe('steering.failed');
       expect(sessionTerminal.failure.reason).toBe('session-terminal');
       expect(runTerminal.failure.reason).toBe('run-terminal');
+    });
+
+    it('rejects at the type level a SteeringFailedEvent constructed with a non-terminal reason', () => {
+      // AB-67/AB-221: `SteeringFailedEvent` is restricted to
+      // `session-terminal` (any command) or `run-terminal` (pause/resume
+      // only) — its own docstring already claimed this, but the
+      // constructor accepted the full `SteeringCommandFailure` union. A
+      // reason valid on `SteeringRejectedEvent` (e.g. `policy-denied`) must
+      // not type-check here.
+      // @ts-expect-error -- 'policy-denied' is not a SteeringFailedEvent reason
+      new SteeringFailedEvent('session-1', 'command-1', { failedAt: 'x', reason: 'policy-denied' });
+    });
+
+    it('rejects at the type level a SteeringSupersededEvent constructed with a non-supersession reason', () => {
+      // AB-67: superseded is exclusively "a later command for the same
+      // target was admitted first" — always `SteeringCommandFailure.reason:
+      // 'superseded-by'`. No other reason describes a supersession.
+      // @ts-expect-error -- 'authorization-revoked' is not a superseded reason
+      new SteeringSupersededEvent('session-1', 'command-1', {
+        failedAt: 'x',
+        reason: 'authorization-revoked',
+      });
+    });
+
+    it('createRunRecorder captures steering.applied (AB-90/AB-221 test-utility regression)', async () => {
+      // Regression: `createRunRecorder`'s hard-coded `eventTypes` list
+      // (`src/test/index.ts`) predates AB-221's steering event family. A
+      // consumer test using this exported, supported recorder to assert
+      // `steering.applied` fired would silently see no such event and could
+      // wrongly conclude the feature never fired.
+      const gate: SteeringGate = {
+        sessionId: 'session-1',
+        getDesiredState: () => ({ paused: false, configVersion: 1, model: 'real-model' }),
+        awaitResume: () => new Promise(() => undefined),
+      };
+
+      const activeRun = createActiveRun({
+        generate: createMockGenerate([{ content: 'done', toolCalls: [] }]),
+        toolbox: createToolbox([]),
+        conversation: new Conversation(),
+        stopWhen: noToolCalls(),
+        steering: gate,
+        runId: 'run-1',
+      });
+
+      const recorder = createRunRecorder(activeRun);
+      await activeRun.result;
+
+      const applied = recorder.events.filter((event) => event.type === 'steering.applied');
+      expect(applied).toHaveLength(1);
     });
 
     it('exercises every steering event type as a valid OperativeEventType', () => {
