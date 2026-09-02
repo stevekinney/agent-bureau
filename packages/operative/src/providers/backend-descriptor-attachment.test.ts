@@ -134,4 +134,29 @@ describe('withBackendDescriptors', () => {
     }).toThrow();
     expect(readBackendDescriptors(generate)[0]?.model).toBe('custom-model');
   });
+
+  it('traverses into a nested mutable array even when the descriptor root is already shallow-frozen (review)', () => {
+    // Object.freeze({ ...descriptor, aliases: mutableAliases }) — the root
+    // is frozen, but the aliases array it points at is a fully separate,
+    // still-mutable object. deepFreeze must not treat "root already frozen"
+    // as a signal to skip traversing into it.
+    const seed = anthropicDescriptor();
+    const mutableAliases = [{ alias: 'shallow-alias', resolvesTo: seed.model }];
+    const shallowFrozen: BackendDescriptor = Object.freeze({
+      ...seed,
+      aliases: mutableAliases,
+    });
+    expect(Object.isFrozen(shallowFrozen)).toBe(true);
+    expect(Object.isFrozen(mutableAliases)).toBe(false);
+
+    const generate = withBackendDescriptors(noopGenerate(), [shallowFrozen]);
+    const [attached] = readBackendDescriptors(generate);
+    if (!attached) throw new Error('expected exactly one attached descriptor');
+
+    expect(Object.isFrozen(attached.aliases)).toBe(true);
+    expect(() => mutableAliases.push({ alias: 'injected', resolvesTo: seed.model })).toThrow();
+    expect(readBackendDescriptors(generate)[0]?.aliases).toEqual([
+      { alias: 'shallow-alias', resolvesTo: seed.model },
+    ]);
+  });
 });

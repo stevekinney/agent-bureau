@@ -43,32 +43,40 @@ const EMPTY_DESCRIPTORS: readonly BackendDescriptor[] = Object.freeze([]);
 
 /**
  * Recursively freezes `value`'s own object graph in place: `value` itself,
- * then every own-property value reachable from it, depth-first. Used to
- * close the mutation vector a hand-built `BackendDescriptor` can otherwise
- * carry — `createModelCatalog`'s own seed rows are already deeply frozen at
- * their source, so this is a no-op for them (`Object.isFrozen` short-circuits
- * every already-frozen node), and only does real work for a descriptor a
- * caller constructed itself and passed to `withBackendDescriptors` unfrozen.
+ * then every own-property value reachable from it, depth-first — including
+ * beneath a node that is already frozen. That last part matters: a node can
+ * be shallow-frozen (`Object.freeze({ ...descriptor, aliases: mutableAliases
+ * })`) while a property it holds is still a fully mutable array or object,
+ * so skipping traversal once `Object.isFrozen(value)` is true — rather than
+ * only skipping the redundant `Object.freeze(value)` call itself — would
+ * leave exactly that nested structure open to later mutation. `createModelCatalog`'s
+ * own seed rows are already deeply frozen at their source, so this still
+ * does no real freezing work for them; it only costs a full property-value
+ * walk confirming that.
+ *
  * Freezes the caller's own object graph in place rather than copying it
  * first — the same "freeze on receipt, preserve reference identity" pattern
  * `create-lazy-agent.ts`'s `freezeGenerationProfile` already uses for the
- * analogous `generationProfile` case.
+ * analogous `generationProfile` case. `seen` guards against revisiting the
+ * same object twice — a shared frozen sub-object reachable from more than
+ * one property (or, in principle, a reference cycle) — rather than against
+ * infinite recursion in the ordinary case, since `BackendDescriptor`'s own
+ * shape has none.
  *
  * The `Record<string, unknown>` cast is a narrow, standard reflection
  * pattern for a generic recursive-freeze helper: `Object.getOwnPropertyNames`
  * only ever returns real own-property keys of `value`, so indexing through
  * them is safe regardless of `value`'s static shape.
  */
-function deepFreeze<T>(value: T): T {
-  if (
-    value !== null &&
-    (typeof value === 'object' || typeof value === 'function') &&
-    !Object.isFrozen(value)
-  ) {
-    Object.freeze(value);
-    for (const key of Object.getOwnPropertyNames(value)) {
-      deepFreeze((value as Record<string, unknown>)[key]);
-    }
+function deepFreeze<T>(value: T, seen: WeakSet<object> = new WeakSet()): T {
+  if (value === null || (typeof value !== 'object' && typeof value !== 'function')) {
+    return value;
+  }
+  if (seen.has(value)) return value;
+  seen.add(value);
+  if (!Object.isFrozen(value)) Object.freeze(value);
+  for (const key of Object.getOwnPropertyNames(value)) {
+    deepFreeze((value as Record<string, unknown>)[key], seen);
   }
   return value;
 }
