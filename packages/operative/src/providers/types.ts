@@ -89,8 +89,25 @@ export interface BaseProviderOptions {
  */
 export interface AnthropicClient {
   messages: {
-    create(params: AnthropicMessageCreateRequest): Promise<AnthropicMessageResponse>;
+    create(
+      params: AnthropicMessageCreateRequest,
+      options?: AnthropicRequestOptions,
+    ): Promise<AnthropicMessageResponse>;
   };
+}
+
+/**
+ * The subset of the SDK's per-request `RequestOptions` that operative passes
+ * as `messages.create`'s second argument.
+ *
+ * `signal` lives here and NOT on {@link AnthropicMessageCreateRequest}: the
+ * SDK only honors an abort signal handed to it as request options — a signal
+ * placed in the body is JSON-serialized into `{}` and ignored, which is how
+ * `run.abort()` used to leave the upstream stream open (AB-189).
+ */
+export interface AnthropicRequestOptions {
+  /** Aborts the in-flight HTTP request, closing a streaming response early. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -98,14 +115,9 @@ export interface AnthropicClient {
  *
  * Mirrors `MessageCreateParamsBase` in the installed `@anthropic-ai/sdk`
  * (0.122.0): `model`, `messages`, and `max_tokens` are required, everything
- * else is optional. `signal` has no counterpart on the real SDK's params
- * type — it exists only because `providers/anthropic.ts` currently folds
- * `context.signal` into the same body object it builds the rest of the
- * request from, rather than passing it as the SDK's separate `options`
- * argument. That is a pre-existing quirk, not something this type
- * introduces; widening `signal` here keeps behavior byte-for-byte instead of
- * silently dropping the field once this interface stops being
- * `Record<string, unknown>`.
+ * else is optional. There is deliberately no `signal` field: the abort
+ * signal travels in {@link AnthropicRequestOptions}, the SDK's separate
+ * `options` argument, because a signal in the body is ignored (AB-189).
  *
  * Every optional field is declared even though this package never inspects
  * some of them. An object literal passed at a call site is subject to excess
@@ -161,11 +173,6 @@ export interface AnthropicMessageCreateRequest {
   top_p?: unknown;
   /** `string` in the SDK; header param, not a body field. */
   user_profile_id?: unknown;
-  /**
-   * No counterpart on the SDK's `MessageCreateParamsBase` — see the interface
-   * doc comment above.
-   */
-  signal?: unknown;
 }
 
 /**
@@ -777,6 +784,7 @@ export interface AnthropicStreamingClient {
      */
     create(
       params: AnthropicMessageCreateRequest,
+      options?: AnthropicRequestOptions,
     ): AsyncIterable<AnthropicStreamEvent> | Promise<AsyncIterable<AnthropicStreamEvent>>;
   };
 }

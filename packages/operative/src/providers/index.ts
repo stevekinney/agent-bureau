@@ -136,6 +136,7 @@ export type {
   AnthropicMessageCreateRequest,
   AnthropicMessageResponse,
   AnthropicProviderOptions,
+  AnthropicRequestOptions,
   AnthropicStreamEvent,
   AnthropicStreamingClient,
   AnthropicThinkingConfig,
