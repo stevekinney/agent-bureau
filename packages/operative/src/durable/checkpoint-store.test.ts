@@ -36,6 +36,26 @@ describe('createCheckpointStore', () => {
       await store.saveCursor('run-1', cursor(5));
       expect(await store.loadCursor('run-1')).toEqual(cursor(5));
     });
+
+    it('defaults lastAppliedConfigVersion to 0 on loadCursor for a pre-AB-221 persisted cursor (not only through loadCheckpoint)', async () => {
+      // Regression: the normalization added for `loadCheckpoint` lived only
+      // in that method, so a caller using the public `loadCursor()` directly
+      // (bypassing `loadCheckpoint`) still got a cursor missing this field.
+      const preAb221Cursor = {
+        step: 2,
+        totalUsage: { prompt: 10, completion: 5, total: 15 },
+        lastContent: 'partial',
+        schemaAttempts: 1,
+      };
+      const underlying = createStore();
+      await underlying.set('durable-run:run-1:cursor', JSON.stringify(preAb221Cursor));
+
+      const store = createCheckpointStore(underlying);
+      expect(await store.loadCursor('run-1')).toEqual({
+        ...preAb221Cursor,
+        lastAppliedConfigVersion: 0,
+      });
+    });
   });
 
   describe('conversation snapshot', () => {
