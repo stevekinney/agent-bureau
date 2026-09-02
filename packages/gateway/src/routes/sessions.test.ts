@@ -315,6 +315,54 @@ describe('sessions routes', () => {
       expect(response.status).toBe(409);
     });
 
+    // AB-192: updateSession/querySession unconditionally throw
+    // BureauError('UNSUPPORTED_CAPABILITY') once a durable engine is
+    // configured (the built-in agentRun workflow registers no
+    // ctx.onUpdate/ctx.onQuery handler). The gateway must map that code to
+    // 501, distinct from the NOT_CONFIGURED-no-engine-at-all 501 case above.
+
+    it('POST /api/v1/sessions/:id/update returns 501 with code UNSUPPORTED_CAPABILITY when the built-in workflow has no update handler', async () => {
+      const stubBureau = makeStubBureau({
+        updateSession: async () => {
+          throw new BureauError(
+            'updateSession()/querySession() are unsupported: the built-in agentRun workflow registers no ctx.onUpdate/ctx.onQuery handler.',
+            'UNSUPPORTED_CAPABILITY',
+          );
+        },
+      });
+      const gateway = await createTestGateway(stubBureau, { authToken: AUTH_TOKEN });
+
+      const response = await requestJSON(gateway, '/api/v1/sessions/my-session/update', {
+        method: 'POST',
+        headers: sessionWriteHeaders,
+        body: JSON.stringify({ name: 'adjust-params' }),
+      });
+
+      expect(response.status).toBe(501);
+      const body = await response.json();
+      expect(body.error.code).toBe('UNSUPPORTED_CAPABILITY');
+    });
+
+    it('GET /api/v1/sessions/:id/query returns 501 with code UNSUPPORTED_CAPABILITY when the built-in workflow has no query handler', async () => {
+      const stubBureau = makeStubBureau({
+        querySession: async () => {
+          throw new BureauError(
+            'updateSession()/querySession() are unsupported: the built-in agentRun workflow registers no ctx.onUpdate/ctx.onQuery handler.',
+            'UNSUPPORTED_CAPABILITY',
+          );
+        },
+      });
+      const gateway = await createTestGateway(stubBureau, { authToken: AUTH_TOKEN });
+
+      const response = await requestJSON(gateway, '/api/v1/sessions/my-session/query?name=check', {
+        headers: authHeaders,
+      });
+
+      expect(response.status).toBe(501);
+      const body = await response.json();
+      expect(body.error.code).toBe('UNSUPPORTED_CAPABILITY');
+    });
+
     it('GET /api/v1/sessions/:id/query returns 200 when handler returns undefined', async () => {
       // A query handler that legitimately returns undefined must not be treated
       // as "not configured". Before the fix the route responded 501 in this case.

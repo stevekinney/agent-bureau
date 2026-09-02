@@ -4234,6 +4234,81 @@ describe('createBureau session signal/update/query without durable engine', () =
   });
 });
 
+describe('createBureau session update/query capability unavailability (AB-192)', () => {
+  // AB-41 coordinator ruling: updateSession/querySession are kept, not
+  // withdrawn, but the built-in agentRun workflow registers no
+  // ctx.onUpdate/ctx.onQuery handler, so both unconditionally throw
+  // BureauError('UNSUPPORTED_CAPABILITY') once a durable engine IS configured
+  // and the session has an active run — never reaching engine.update/query.
+
+  it('updateSession throws UNSUPPORTED_CAPABILITY when a durable engine is configured', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: () => new Promise<never>(() => {}),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+    try {
+      const run = await bureau.createRun({ message: 'Wait for a signal' });
+      await pollUntil(async () => {
+        const session = await bureau.getSession(run.sessionId);
+        return session?.metadata['lastRunStatus'] === 'running';
+      });
+
+      const error = await bureau.updateSession(run.sessionId, 'any-update').then(
+        () => undefined,
+        (rejection) => rejection,
+      );
+
+      expect(error).toBeInstanceOf(BureauError);
+      expect((error as BureauError).code).toBe('UNSUPPORTED_CAPABILITY');
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('querySession throws UNSUPPORTED_CAPABILITY when a durable engine is configured', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: () => new Promise<never>(() => {}),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+    try {
+      const run = await bureau.createRun({ message: 'Wait for a signal' });
+      await pollUntil(async () => {
+        const session = await bureau.getSession(run.sessionId);
+        return session?.metadata['lastRunStatus'] === 'running';
+      });
+
+      const error = await bureau.querySession(run.sessionId, 'any-query').then(
+        () => undefined,
+        (rejection) => rejection,
+      );
+
+      expect(error).toBeInstanceOf(BureauError);
+      expect((error as BureauError).code).toBe('UNSUPPORTED_CAPABILITY');
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('exposes sessionVerbCapabilities reporting update and query as unsupported', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+    try {
+      expect(bureau.sessionVerbCapabilities).toEqual({ signal: true, update: false, query: false });
+    } finally {
+      await bureau.dispose();
+    }
+  });
+});
+
 describe('createBureau session signal/update/query with terminal sessions', () => {
   // Regression for findings PRRT_kwDORvupsc6MT46y and PRRT_kwDORvupsc6MUE_7:
   // requireSessionRunId must check lastRunStatus, not just lastRunId. A completed,

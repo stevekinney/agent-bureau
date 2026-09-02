@@ -528,6 +528,36 @@ non-conforming exception to the idempotent-abort rule added in
 already-terminal outcome. AB-37 owns the remediation; until it lands, the
 exception is recorded rather than silently reclassified as conforming.
 
+### Session update/query capability
+
+AB-41's scheduling-and-wait-semantics decision record classified
+`updateSession`/`querySession` as dead on arrival: the built-in `agentRun`
+workflow registers no `ctx.onUpdate`/`ctx.onQuery` handler, so any call
+previously reached `runtime.durable.engine.update()`/`.query()` and failed
+there with an untyped engine error. AB-41's coordinator ruling (recorded
+2026-09-02) resolved the record's own open "register a handler, or remove the
+verbs" fork: **kept, not withdrawn** — AB-42 and AB-67 both ratify
+`updateSession`/`querySession` as the distinct session-verb family alongside
+the newer `submitSessionInput`/`submitSteeringCommand` verbs — **and no
+handler is registered**, since a real `ctx.onUpdate`/`ctx.onQuery` contract
+would be an unowned design choice no decision record grants.
+
+AB-192 implements that ruling as honest typed unavailability. Both methods
+still throw `BureauError('NOT_CONFIGURED', subject: 'durable')` when no
+durable engine is composed and `BureauError('NOT_FOUND')` when the session has
+no active run, unchanged. When a durable engine IS configured and an active
+run exists, both throw unconditionally — with no detection branch, since there
+is no handler-registration signal in the codebase to check —
+`BureauError('UNSUPPORTED_CAPABILITY')`, raised immediately before the
+now-unreachable engine call. The gateway's `POST /:id/update` and
+`GET /:id/query` routes map that code to `501`, alongside their existing
+`NOT_CONFIGURED` 501 case. `Bureau.sessionVerbCapabilities` exposes this as a
+synchronous, constant discovery surface — `{ signal: true, update: false,
+query: false }` — so a caller can check before calling rather than only by
+catching the error. If a future decision record registers a real handler,
+that issue removes this unconditional throw; it does not toggle a branch this
+one introduces.
+
 ### Process-local session timing
 
 `SessionHandle.sleep()` and `SessionHandle.monitor()` are host-process conveniences. `sleep()` delays the caller with a local timer, while `monitor()` runs a local loop whose individual `AgentRun` ticks may use the configured durable engine. Supplying a durable engine does not persist either the delay or the monitor controller: process exit loses the outstanding timer and monitor loop.
