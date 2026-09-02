@@ -3,6 +3,31 @@ import type { Hono } from 'hono';
 import type { ServerAdapter, ServerAdapterOptions, ServerHandle } from './types';
 
 /**
+ * The subset of Node's `http.Server` (what `@hono/node-server`'s `serve()`
+ * returns) that `stop()` needs: a `close()` that accepts an optional
+ * error-first callback, invoked once the server has actually closed.
+ */
+export type CloseableServer = {
+  close(callback?: (error?: Error) => void): unknown;
+};
+
+/**
+ * Promisifies a Node-style `close(callback)` server shutdown. Extracted so
+ * it can be tested independently of `@hono/node-server`'s dynamic import.
+ */
+export function promisifyClose(server: CloseableServer): Promise<void> {
+  return new Promise((resolve, reject) => {
+    server.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
+/**
  * Creates a server adapter that uses @hono/node-server for HTTP
  * handling and its serve-static middleware for file serving.
  *
@@ -49,11 +74,11 @@ export function createNodeAdapter(): ServerAdapter {
         serve: (options: { fetch: Hono['fetch']; port: number; hostname?: string }) => unknown;
       };
 
-      const server = mod.serve({ fetch: app.fetch, port, hostname }) as { close(): void };
+      const server = mod.serve({ fetch: app.fetch, port, hostname }) as CloseableServer;
 
       return {
         stop() {
-          server.close();
+          return promisifyClose(server);
         },
       };
     },

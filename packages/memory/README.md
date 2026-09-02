@@ -766,7 +766,10 @@ interface FileSynchronizerOptions {
 
 interface FileSynchronizer {
   start(): Promise<void>;
-  stop(): void;
+  // Halts future polling immediately, then awaits any synchronize() pass
+  // already in flight (whether started by a poll tick or a direct call)
+  // before resolving — an in-flight synchronization is drained, not abandoned.
+  stop(): Promise<void>;
   synchronize(): Promise<SynchronizeResult>;
 }
 
@@ -793,7 +796,7 @@ await synchronizer.start(); // Begin polling
 const result = await synchronizer.synchronize();
 // result => { added: 3, updated: 1, removed: 0 }
 
-synchronizer.stop();
+await synchronizer.stop(); // resolves once any in-flight synchronize() settles
 ```
 
 ---

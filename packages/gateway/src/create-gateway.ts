@@ -327,8 +327,8 @@ export async function createGateway(
     });
 
     return {
-      stop() {
-        handle.stop();
+      async stop() {
+        await handle.stop();
         wsHandler.dispose();
         unsubscribeLiveFrames();
         bureau.removeEventListener('run.removed', clearRunBufferOnRemoval);

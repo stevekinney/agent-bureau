@@ -130,7 +130,7 @@ export function createBunAdapter(): ServerAdapter {
 
         return {
           stop() {
-            void server.stop();
+            return server.stop();
           },
         };
       }
@@ -148,7 +148,7 @@ export function createBunAdapter(): ServerAdapter {
 
       return {
         stop() {
-          void server.stop();
+          return server.stop();
         },
       };
     },

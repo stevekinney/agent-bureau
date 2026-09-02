@@ -133,7 +133,85 @@ describe('createFileSynchronizer', () => {
     await synchronizer.start();
     expect(await memory.count()).toBeGreaterThan(0);
 
-    synchronizer.stop();
+    await synchronizer.stop();
+  });
+
+  it('stop() awaits an in-flight synchronize() call before resolving', async () => {
+    await writeFile(join(tempDir, 'note.md'), 'Content.');
+
+    const synchronizer = createFileSynchronizer({ memory, directory: tempDir });
+
+    let releaseRememberOnce: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      releaseRememberOnce = resolve;
+    });
+    const originalRememberOnce = memory.rememberOnce.bind(memory);
+    Object.assign(memory, {
+      rememberOnce: async (...args: Parameters<Memory['rememberOnce']>) => {
+        await gate;
+        return originalRememberOnce(...args);
+      },
+    });
+
+    const synchronizePromise = synchronizer.synchronize();
+
+    let stopResolved = false;
+    const stopPromise = synchronizer.stop().then(() => {
+      stopResolved = true;
+    });
+
+    // Give the in-flight synchronize() a chance to run and stop() a chance
+    // to (incorrectly) resolve early — it must not, since rememberOnce is
+    // still gated.
+    await drainMicrotasks();
+    expect(stopResolved).toBe(false);
+
+    releaseRememberOnce?.();
+    await synchronizePromise;
+    await stopPromise;
+    expect(stopResolved).toBe(true);
+  });
+
+  it('stop() resolves (not rejects) even when the in-flight synchronize() rejects', async () => {
+    await writeFile(join(tempDir, 'note.md'), 'Content.');
+
+    const synchronizer = createFileSynchronizer({ memory, directory: tempDir });
+
+    const failure = new Error('rememberOnce failed');
+    Object.assign(memory, {
+      rememberOnce: async () => {
+        throw failure;
+      },
+    });
+
+    const synchronizePromise = synchronizer.synchronize();
+    // stop() must settle even though the in-flight synchronize() it is
+    // draining rejects — the rejection is the caller of synchronize()'s
+    // concern (asserted below), not stop()'s.
+    const stopPromise = synchronizer.stop();
+
+    let synchronizeError: unknown;
+    try {
+      await synchronizePromise;
+    } catch (error) {
+      synchronizeError = error;
+    }
+    expect(synchronizeError).toBe(failure);
+
+    await stopPromise;
+  });
+
+  it('stop() resolves promptly when no synchronize() call is in flight', async () => {
+    const synchronizer = createFileSynchronizer({ memory, directory: tempDir });
+
+    const start = performance.now();
+    await synchronizer.stop();
+    const elapsed = performance.now() - start;
+
+    // No in-flight synchronize() and no polling interval — stop() has
+    // nothing to wait on. A generous bound guards against an artificial
+    // wait being introduced without making the test timing-sensitive.
+    expect(elapsed).toBeLessThan(200);
   });
 
   it('swallows polling errors and releases the synchronizing lock for future ticks', async () => {
@@ -193,7 +271,7 @@ describe('createFileSynchronizer', () => {
     }
     await drainMicrotasks();
 
-    synchronizer.stop();
+    await synchronizer.stop();
     expect(await memory.count()).toBeGreaterThan(0);
   });
 
@@ -219,7 +297,7 @@ describe('createFileSynchronizer', () => {
     // were created, the leaked one would keep a reference alive — but we
     // cannot directly observe the interval count, so we verify no error
     // is thrown and stop completes cleanly.
-    synchronizer.stop();
+    await synchronizer.stop();
   });
 
   it('allows restart after stop even if start was called concurrently', async () => {
@@ -233,12 +311,12 @@ describe('createFileSynchronizer', () => {
 
     // Concurrent start calls.
     await Promise.all([synchronizer.start(), synchronizer.start()]);
-    synchronizer.stop();
+    await synchronizer.stop();
 
     // Should be able to start again after stopping.
     await synchronizer.start();
     expect(await memory.count()).toBeGreaterThan(0);
-    synchronizer.stop();
+    await synchronizer.stop();
   });
 
   it('skips unchanged files on re-sync', async () => {
