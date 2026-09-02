@@ -252,6 +252,54 @@ describe('createSubagentTool', () => {
       expect(error.cause).toBe(validationError);
     });
 
+    it('rejects with SubagentRunError, never invoking toToolOutput, when a schema-backed child structurally claims success but omits output', async () => {
+      // A hand-written `RunnableAgent<O, true>` is not obligated to satisfy
+      // the internal invariant `run-lifecycle.ts` enforces (`output` is only
+      // ever included alongside `finishReason === 'stop-condition' &&
+      // schemaValidation?.success`) — nothing stops a third-party
+      // implementation from reporting a successful, schema-valid stop while
+      // omitting `output` outright. `isSuccessfulRunResult` must reject this
+      // at runtime rather than let a structurally-typed but factually absent
+      // `output` reach `toToolOutput`.
+      const { agent } = makeMockAgent<{ answer: string }, true>(
+        () =>
+          ({
+            conversation: {} as never,
+            content: 'ok',
+            finishReason: 'stop-condition',
+            steps: [],
+            usage: { prompt: 0, completion: 0, total: 0 },
+            schemaValidation: { success: true },
+            // `output` deliberately omitted despite the claimed success.
+          }) as unknown as RunResult<{ answer: string }, true>,
+      );
+      const toToolOutput = (result: SuccessfulRunResult<{ answer: string }, true>) => {
+        throw new Error(
+          `toToolOutput must not be invoked when output is missing: ${JSON.stringify(result)}`,
+        );
+      };
+      const tool = createSubagentTool<{ topic: string }, { answer: string }, true, string>({
+        name: 'researcher',
+        description: 'Research a topic',
+        agent,
+        agentName: 'researcher',
+        input: z.object({ topic: z.string() }),
+        toToolOutput,
+      });
+
+      let caughtError: unknown;
+      try {
+        await callRaw(tool, { topic: 'AI' });
+      } catch (error) {
+        caughtError = error;
+      }
+
+      expect(caughtError).toBeInstanceOf(SubagentRunError);
+      const error = caughtError as SubagentRunError;
+      expect(error.result.finishReason).toBe('stop-condition');
+      expect((error.result as { output?: unknown }).output).toBeUndefined();
+    });
+
     it('no longer accepts treatMaximumStepsAsError — maximum-steps always rejects', async () => {
       const { agent } = makeMockAgent((): RunResult => ({
         conversation: {} as never,

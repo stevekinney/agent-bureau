@@ -191,13 +191,26 @@ export type SuccessfulRunResult<O = never, H extends boolean = false> = RunResul
  * validation) rejects with `SubagentRunError` instead. Mirrors the exact
  * "clean stop" predicate `AgentRun.unwrap()`/`.output()` already use above,
  * so the two surfaces never disagree about what counts as success.
+ *
+ * A successfully validated `schemaValidation` also requires `output` to
+ * actually be present on `result`. `run-lifecycle.ts` only ever includes the
+ * `output` key when `finishReason === 'stop-condition' &&
+ * schemaValidation?.success`, so a `RunResult` this package constructs
+ * always satisfies that invariant. But `RunnableAgent` (AB-19) is a public,
+ * structural interface — a hand-written implementation is not obligated to
+ * uphold an invariant it never saw, and could report a validated,
+ * schema-backed success while omitting `output` outright. Without this
+ * check that object would still narrow to `SuccessfulRunResult<O, true>`
+ * (whose `output: O` is required only at the type level), handing
+ * `toToolOutput` an `output` that is typed present but actually absent.
  */
 export function isSuccessfulRunResult<O, H extends boolean>(
   result: RunResult<O, H>,
 ): result is SuccessfulRunResult<O, H> {
   return (
     result.finishReason === 'stop-condition' &&
-    (result.schemaValidation === undefined || result.schemaValidation.success)
+    (result.schemaValidation === undefined ||
+      (result.schemaValidation.success && 'output' in result && result.output !== undefined))
   );
 }
 
