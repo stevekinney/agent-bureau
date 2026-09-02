@@ -300,6 +300,37 @@ describe('createSubagentTool', () => {
       expect((error.result as { output?: unknown }).output).toBeUndefined();
     });
 
+    it('accepts a validated success whose output key is present but holds undefined (e.g. a void/undefined-shaped schema)', async () => {
+      // The presence check added above must key on `'output' in result`, not
+      // `result.output !== undefined` — `run-lifecycle.ts` includes the
+      // `output` key whenever `finishReason === 'stop-condition' &&
+      // schemaValidation?.success`, regardless of what that validated value
+      // actually is. A schema whose valid output IS `undefined` (`z.void()`,
+      // `z.undefined()`, an optional root) must still reach `toToolOutput`,
+      // not be misclassified as "output missing".
+      const { agent } = makeMockAgent<undefined, true>(() => ({
+        conversation: {} as never,
+        content: 'ok',
+        finishReason: 'stop-condition',
+        steps: [],
+        usage: { prompt: 0, completion: 0, total: 0 },
+        schemaValidation: { success: true },
+        output: undefined,
+      }));
+      const tool = createSubagentTool<{ topic: string }, undefined, true, string>({
+        name: 'researcher',
+        description: 'Research a topic',
+        agent,
+        agentName: 'researcher',
+        input: z.object({ topic: z.string() }),
+        toToolOutput: (result) => `output was ${String(result.output)}`,
+      });
+
+      const result = await callRaw(tool, { topic: 'AI' });
+
+      expect(result).toBe('output was undefined');
+    });
+
     it('no longer accepts treatMaximumStepsAsError — maximum-steps always rejects', async () => {
       const { agent } = makeMockAgent((): RunResult => ({
         conversation: {} as never,

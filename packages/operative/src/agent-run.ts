@@ -210,7 +210,7 @@ export function isSuccessfulRunResult<O, H extends boolean>(
   return (
     result.finishReason === 'stop-condition' &&
     (result.schemaValidation === undefined ||
-      (result.schemaValidation.success && 'output' in result && result.output !== undefined))
+      (result.schemaValidation.success && 'output' in result))
   );
 }
 
