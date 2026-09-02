@@ -93,10 +93,13 @@ export interface CreateAgentScheduleOptions {
   /**
    * The Weft engine to register the schedule on. Must be the same engine the
    * bureau built over its `.persistence()` store. Typed as {@link SchedulingEngine}
-   * — the narrow scheduling-only surface — rather than the full
-   * `RegistryAgnosticEngine`, since this function only ever calls `schedule` and
-   * `getSchedule`; widening the parameter to the full engine type would force a
-   * cast back down at every call site instead of accepting what's actually used.
+   * — the narrow scheduling-only surface (`schedule`, `getSchedule`,
+   * `listSchedules`, `pauseSchedule`, `resumeSchedule`, `cancelSchedule`) —
+   * rather than the full `RegistryAgnosticEngine`, since this module never
+   * needs anything else the full engine exposes (workflow start/signal/query,
+   * recovery, disposal, …); widening the parameter to the full engine type
+   * would force a cast back down at every call site instead of accepting
+   * exactly the surface actually used.
    */
   engine: SchedulingEngine;
   /**
