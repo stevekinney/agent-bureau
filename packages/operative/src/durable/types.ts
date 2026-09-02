@@ -420,22 +420,36 @@ export interface SteeringCommand {
 /**
  * Populated on every terminal-failure `SteeringCommandState` (`rejected`,
  * `superseded`, `failed`), mirroring AB-42's `SessionInputFailure`.
+ *
+ * AB-236 tightens this to a discriminated union on `reason` (AB-67's
+ * 2026-09-02 coordinator amendments fixed `supersededBy` as "present exactly
+ * when `reason` is `'superseded-by'` and absent otherwise" in prose; this
+ * makes that exclusivity a type error instead of a runtime-only invariant).
+ * The `'superseded-by'` member requires `supersededBy`; every other member
+ * carries `supersededBy?: never`, so a literal that supplies it alongside a
+ * different reason — or omits it alongside `'superseded-by'` — fails to
+ * type-check. See `steering-types.check.ts` for both malformed shapes
+ * pinned with `@ts-expect-error`.
  */
-export interface SteeringCommandFailure {
-  readonly failedAt: string; // ISO
-  readonly reason:
-    | 'session-terminal' // the owning session itself went terminal (closed) before application
-    | 'run-terminal' // pause/resume only: the run it targeted ended (aborted or completed) before its gate could apply
-    | 'run-ambiguous' // pause/resume only: no runId given and the session has zero or more than one non-terminal run (AB-67's 2026-09-02 coordinator amendments)
-    | 'authorization-revoked'
-    | 'policy-denied'
-    | 'deadline-passed'
-    | 'superseded-by'; // pairs with a successor command's id, same target
-  /** The `id` of the successor `SteeringCommand`, present exactly when
-   *  `reason` is `'superseded-by'` and absent otherwise (AB-67's 2026-09-02
-   *  coordinator amendments). */
-  readonly supersededBy?: string;
-}
+export type SteeringCommandFailure =
+  | {
+      readonly failedAt: string; // ISO
+      readonly reason:
+        | 'session-terminal' // the owning session itself went terminal (closed) before application
+        | 'run-terminal' // pause/resume only: the run it targeted ended (aborted or completed) before its gate could apply
+        | 'run-ambiguous' // pause/resume only: no runId given and the session has zero or more than one non-terminal run (AB-67's 2026-09-02 coordinator amendments)
+        | 'authorization-revoked'
+        | 'policy-denied'
+        | 'deadline-passed';
+      readonly supersededBy?: never;
+    }
+  | {
+      readonly failedAt: string; // ISO
+      readonly reason: 'superseded-by'; // pairs with a successor command's id, same target
+      /** The `id` of the successor `SteeringCommand` (AB-67's 2026-09-02
+       *  coordinator amendments). */
+      readonly supersededBy: string;
+    };
 
 /**
  * `SteeringCommand`'s state machine. `requested` is never persisted on its

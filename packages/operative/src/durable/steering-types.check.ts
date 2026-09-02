@@ -103,6 +103,22 @@ export const steeringCommandFailureSuperseded: SteeringCommandFailure = {
   supersededBy: 'successor-command-id',
 };
 
+// AB-236 tightens `SteeringCommandFailure` to a discriminated union on
+// `reason`: the `'superseded-by'` member requires `supersededBy`, and every
+// other member forbids it (`supersededBy?: never`). Both malformed
+// combinations must fail to type-check.
+// @ts-expect-error — `reason: 'superseded-by'` requires `supersededBy`.
+export const steeringCommandFailureSupersededMissingId: SteeringCommandFailure = {
+  failedAt: new Date(0).toISOString(),
+  reason: 'superseded-by',
+};
+// @ts-expect-error — a non-`'superseded-by'` reason must not carry `supersededBy`.
+export const steeringCommandFailureNonSupersededWithId: SteeringCommandFailure = {
+  failedAt: new Date(0).toISOString(),
+  reason: 'policy-denied',
+  supersededBy: 'successor-command-id',
+};
+
 export const steeringCommandFailureReasons: readonly SteeringCommandFailure['reason'][] = [
   'session-terminal',
   'run-terminal',

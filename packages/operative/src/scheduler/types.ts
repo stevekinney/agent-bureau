@@ -22,7 +22,16 @@ export function isHigherPriority(a: SchedulerPriority, b: SchedulerPriority): bo
   return PRIORITY_WEIGHT[a] < PRIORITY_WEIGHT[b];
 }
 
-export type SchedulerRunOptions = Omit<RunOptions, 'generate' | 'toolbox'> &
+/**
+ * `Omit<T, K>` collapses a union `T` into one merged, looser shape (it maps
+ * over `K`, not over `T`'s members) — for `RunOptions`, that would flatten
+ * away the AB-236 `runId`/`steering` discriminated pair. This distributes
+ * `Omit` over each union member first, so `SchedulerRunOptions` keeps that
+ * pairing intact.
+ */
+type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : never;
+
+export type SchedulerRunOptions = DistributiveOmit<RunOptions, 'generate' | 'toolbox'> &
   Partial<Pick<RunOptions, 'generate' | 'toolbox'>>;
 
 /**
