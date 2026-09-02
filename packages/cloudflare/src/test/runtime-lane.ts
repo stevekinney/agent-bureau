@@ -143,8 +143,19 @@ export async function runCancellableLaneOperation<T>(
     signal.addEventListener('abort', onAbort, { once: true });
   });
 
+  // Started unconditionally, and separately observed here: if `cancellation`
+  // wins the race below, this promise's eventual settlement is never awaited
+  // by the race itself, and an unobserved rejection would otherwise surface
+  // as a process-level "unhandled rejection" long after the caller has moved
+  // on with the typed cancellation. This handler exists ONLY to mark it
+  // observed — the caller never sees its result once cancellation has won.
+  const operationPromise = operation();
+  operationPromise.catch(() => {
+    // Intentionally empty.
+  });
+
   try {
-    return await Promise.race([operation(), cancellation]);
+    return await Promise.race([operationPromise, cancellation]);
   } finally {
     if (onAbort !== undefined) signal.removeEventListener('abort', onAbort);
   }
@@ -390,7 +401,19 @@ async function callStorageRpc(
 export function createSqliteStorageProxy(
   dispatchFetch: StorageRpcTransport,
   namespace: string,
+  signal?: AbortSignal,
 ): Storage {
+  // Wraps `callStorageRpc` with cancellation, tagging the typed cancellation
+  // error with the ACTUAL RPC method being cancelled (`get`, `put`, `scan`,
+  // ...) rather than a single constant label — a caller reading
+  // `CloudflareRuntimeLaneCancelledError.method` can otherwise never tell
+  // which operation was in flight.
+  function call(method: StorageRpcMethod, args: unknown[]): Promise<unknown> {
+    return runCancellableLaneOperation(signal, method, namespace, () =>
+      callStorageRpc(dispatchFetch, namespace, method, args),
+    );
+  }
+
   return {
     capabilities(): StorageCapabilities {
       // Mirrors `createCloudflareSqliteStorage`'s own declared capabilities;
@@ -407,23 +430,20 @@ export function createSqliteStorageProxy(
     },
 
     async get(key: string): Promise<Uint8Array | null> {
-      const result = await callStorageRpc(dispatchFetch, namespace, 'get', [key]);
+      const result = await call('get', [key]);
       return result === null ? null : Uint8Array.from(result as number[]);
     },
 
     async put(key: string, value: Uint8Array): Promise<void> {
-      await callStorageRpc(dispatchFetch, namespace, 'put', [key, Array.from(value)]);
+      await call('put', [key, Array.from(value)]);
     },
 
     async delete(key: string): Promise<void> {
-      await callStorageRpc(dispatchFetch, namespace, 'delete', [key]);
+      await call('delete', [key]);
     },
 
     async *scan(prefix: string, options?: ScanOptions): AsyncIterable<[string, Uint8Array]> {
-      const rows = (await callStorageRpc(dispatchFetch, namespace, 'scan', [prefix, options])) as [
-        string,
-        number[],
-      ][];
+      const rows = (await call('scan', [prefix, options])) as [string, number[]][];
       for (const [key, bytes] of rows) yield [key, Uint8Array.from(bytes)];
     },
 
@@ -433,7 +453,7 @@ export function createSqliteStorageProxy(
           ? { type: 'put', key: operation.key, value: Array.from(operation.value) }
           : { type: 'delete', key: operation.key },
       );
-      await callStorageRpc(dispatchFetch, namespace, 'batch', [encoded]);
+      await call('batch', [encoded]);
     },
 
     async conditionalBatch(
@@ -450,29 +470,23 @@ export function createSqliteStorageProxy(
           ? { type: 'put', key: operation.key, value: Array.from(operation.value) }
           : { type: 'delete', key: operation.key },
       );
-      return (await callStorageRpc(dispatchFetch, namespace, 'conditionalBatch', [
-        encodedConditions,
-        encodedOperations,
-      ])) as boolean;
+      return (await call('conditionalBatch', [encodedConditions, encodedOperations])) as boolean;
     },
 
     async count(prefix: string): Promise<number> {
-      return (await callStorageRpc(dispatchFetch, namespace, 'count', [prefix])) as number;
+      return (await call('count', [prefix])) as number;
     },
 
     async has(key: string): Promise<boolean> {
-      return (await callStorageRpc(dispatchFetch, namespace, 'has', [key])) as boolean;
+      return (await call('has', [key])) as boolean;
     },
 
     async deletePrefix(prefix: string): Promise<number> {
-      return (await callStorageRpc(dispatchFetch, namespace, 'deletePrefix', [prefix])) as number;
+      return (await call('deletePrefix', [prefix])) as number;
     },
 
     async *keys(prefix: string, options?: ScanOptions): AsyncIterable<string> {
-      const result = (await callStorageRpc(dispatchFetch, namespace, 'keys', [
-        prefix,
-        options,
-      ])) as string[];
+      const result = (await call('keys', [prefix, options])) as string[];
       for (const key of result) yield key;
     },
 
@@ -529,11 +543,21 @@ interface BootedLaneCore {
  * Extracted from {@link startCloudflareRuntime} so {@link CloudflareRuntimeLane.restart}
  * can boot a second instance over the SAME `persistDirectory`/`identifier`
  * without duplicating the boot sequence.
+ *
+ * `onMiniflareConstructed` fires the moment `new Miniflare(...)` succeeds —
+ * BEFORE `await miniflare.ready`, the Vectorize probe, or `getR2Bucket()`,
+ * every one of which can still reject. Without this hook a caller only
+ * learns about the instance from this function's RETURN value, so a failure
+ * after construction but before return would leave a live, undisposed
+ * Miniflare/workerd process with nothing left pointing at it. Callers use it
+ * to track the instance for their own cleanup path regardless of how far
+ * booting gets.
  */
 async function bootLaneCore(
   packageRoot: string,
   identifier: string,
   persistDirectory: string,
+  onMiniflareConstructed: (instance: InstanceType<MiniflareModule['Miniflare']>) => void,
 ): Promise<BootedLaneCore> {
   const { Miniflare } = await import('miniflare');
 
@@ -549,6 +573,7 @@ async function bootLaneCore(
     r2Persist: path.join(persistDirectory, 'r2'),
     vectorize: { INDEX: { index_name: `cloudflare-runtime-lane-${identifier}` } },
   });
+  onMiniflareConstructed(miniflare);
 
   await miniflare.ready;
 
@@ -580,30 +605,29 @@ function assembleLane(
 ): CloudflareRuntimeLane {
   const { miniflare, namespace, dispatchFetch, rawR2Bucket, vectorizeUnsupported } = core;
   const controller = new AbortController();
-  const cancellableDispatchFetch = withCancellableTransport(
-    dispatchFetch,
-    controller.signal,
-    namespace,
-  );
   const r2Bucket = withCancellableR2Bucket(rawR2Bucket, controller.signal);
 
   let stopped = false;
   async function stop(): Promise<void> {
     if (stopped) return;
-    stopped = true;
     controller.abort();
     await miniflare.dispose();
+    // Marked stopped only AFTER disposal succeeds: if `dispose()` rejects,
+    // `stopped` stays `false` so a later `stop()`/`shutdown()` call retries
+    // disposal instead of silently treating the still-live instance as gone.
+    stopped = true;
   }
 
   return {
-    sqliteStorage: createSqliteStorageProxy(cancellableDispatchFetch, namespace),
+    sqliteStorage: createSqliteStorageProxy(dispatchFetch, namespace, controller.signal),
     r2Bucket,
     vectorizeUnsupported,
     persistDirectory,
     createFreshSqliteStorage(namespaceSuffix?: string): Storage {
       return createSqliteStorageProxy(
-        cancellableDispatchFetch,
+        dispatchFetch,
         `${namespace}-${namespaceSuffix ?? options.identifiers.next()}`,
+        controller.signal,
       );
     },
     createFreshR2Bucket(prefix?: string): R2Bucket {
@@ -615,8 +639,27 @@ function assembleLane(
     stop,
     async restart(): Promise<CloudflareRuntimeLane> {
       await stop();
-      const restartedCore = await bootLaneCore(packageRoot, identifier, persistDirectory);
-      return assembleLane(restartedCore, options, packageRoot, identifier, persistDirectory);
+      // Tracks the restarted Miniflare instance from the moment
+      // `bootLaneCore` constructs it (not just on full success), so a
+      // failure partway through boot (readiness, the Vectorize probe,
+      // `getR2Bucket`) still disposes the live instance instead of leaking
+      // it — `persistDirectory` is deliberately NOT removed on this path,
+      // since it is the durable state this restart exists to rehydrate.
+      let restartedMiniflare: InstanceType<MiniflareModule['Miniflare']> | undefined;
+      try {
+        const restartedCore = await bootLaneCore(
+          packageRoot,
+          identifier,
+          persistDirectory,
+          (instance) => {
+            restartedMiniflare = instance;
+          },
+        );
+        return assembleLane(restartedCore, options, packageRoot, identifier, persistDirectory);
+      } catch (error) {
+        await disposeAfterRestartFailure(restartedMiniflare);
+        throw error;
+      }
     },
     // Reuses `cleanUpAfterStartupFailure`'s dispose-then-remove ordering:
     // `rm` must run even when `dispose()` rejects (workerd failing to
@@ -630,16 +673,6 @@ function assembleLane(
       stopped = true;
     },
   };
-}
-
-/** Wraps `dispatchFetch` so every RPC call rejects with a typed cancellation once `signal` fires. */
-export function withCancellableTransport(
-  dispatchFetch: StorageRpcTransport,
-  signal: AbortSignal,
-  namespace: string,
-): StorageRpcTransport {
-  return (input, init) =>
-    runCancellableLaneOperation(signal, 'sqlite-rpc', namespace, () => dispatchFetch(input, init));
 }
 
 /** Wraps a real `R2Bucket` binding so every call rejects with a typed cancellation once `signal` fires. */
@@ -688,8 +721,9 @@ export async function startCloudflareRuntime(
   // leaking `persistDirectory` or a live Miniflare/workerd instance.
   let miniflare: InstanceType<MiniflareModule['Miniflare']> | undefined;
   try {
-    const core = await bootLaneCore(packageRoot, identifier, persistDirectory);
-    miniflare = core.miniflare;
+    const core = await bootLaneCore(packageRoot, identifier, persistDirectory, (instance) => {
+      miniflare = instance;
+    });
     return assembleLane(core, options, packageRoot, identifier, persistDirectory);
   } catch (error) {
     try {
@@ -721,6 +755,29 @@ export async function cleanUpAfterStartupFailure(
     if (miniflareInstance !== undefined) await miniflareInstance.dispose();
   } finally {
     await rm(persistDirectory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Best-effort disposal of a Miniflare instance a failed {@link CloudflareRuntimeLane.restart}
+ * managed to construct before boot failed. UNLIKE {@link cleanUpAfterStartupFailure},
+ * this never removes `persistDirectory` — a restart failure must not destroy
+ * the durable state the restart was trying to rehydrate from. Exported (same
+ * reasoning as `cleanUpAfterStartupFailure`) so `runtime-only.test.ts` can
+ * exercise this "an instance WAS constructed before boot failed" branch
+ * directly with a disposable stub — a genuine late-stage restart-boot failure
+ * (readiness/probe/`getR2Bucket` rejecting) is not reproducible on demand
+ * against a real Miniflare instance.
+ */
+export async function disposeAfterRestartFailure(
+  miniflareInstance: { dispose(): Promise<void> } | undefined,
+): Promise<void> {
+  if (miniflareInstance === undefined) return;
+  try {
+    await miniflareInstance.dispose();
+  } catch {
+    // Best-effort: must not replace the original boot error the caller
+    // is already propagating.
   }
 }
 

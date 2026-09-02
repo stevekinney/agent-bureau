@@ -1,5 +1,6 @@
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import path from 'node:path';
 
 import { afterEach, describe, expect, it } from 'bun:test';
 
@@ -10,6 +11,7 @@ import {
   cleanUpAfterStartupFailure,
   type CloudflareRuntimeLane,
   createSqliteStorageProxy,
+  disposeAfterRestartFailure,
   interpretVectorizeProbe,
   runCancellableLaneOperation,
   startCloudflareRuntime,
@@ -117,6 +119,26 @@ describe('Cloudflare real-runtime lane (runtime-only)', () => {
     expect(await store.get('runtime-only:r2-key')).toBe('runtime-only-value');
   });
 
+  it(// `test/cloudflare-backend-contract.test.ts` always passes an explicit
+  // discriminant (needed for its own `reopen()` proof), so this is the only
+  // place the NO-ARGUMENT form — which allocates a namespace/prefix from
+  // `identifiers.next()` itself, rather than the caller supplying one — gets
+  // exercised: two no-argument calls must land on two different,
+  // non-colliding namespaces/prefixes.
+  'createFreshSqliteStorage()/createFreshR2Bucket() with no argument allocate distinct namespaces/prefixes', async () => {
+    const lane = await bootLane();
+
+    const firstSqlite = lane.createFreshSqliteStorage();
+    const secondSqlite = lane.createFreshSqliteStorage();
+    await firstSqlite.put('probe', new Uint8Array([1]));
+    expect(await secondSqlite.get('probe')).toBeNull();
+
+    const firstBucket = createCloudflareR2TextValueStore({ bucket: lane.createFreshR2Bucket() });
+    const secondBucket = createCloudflareR2TextValueStore({ bucket: lane.createFreshR2Bucket() });
+    await firstBucket.set('probe', 'value');
+    expect(await secondBucket.get('probe')).toBeNull();
+  });
+
   it(// The RPC transport that lets Bun call into the Durable Object's
   // synchronous `SqlStorage.exec` is itself real-lane-only infrastructure
   // (see `runtime-lane.ts`'s module doc) — a legitimate call through the
@@ -209,6 +231,32 @@ describe('Cloudflare real-runtime lane (runtime-only)', () => {
     expect(persistDirectoryStillExists).toBe(false);
   });
 
+  it(// A genuine late-stage `restart()` boot failure (readiness/probe/
+  // `getR2Bucket` rejecting after `new Miniflare()` succeeds) is not
+  // reproducible on demand — `disposeAfterRestartFailure` is exported so
+  // this "an instance WAS constructed before restart-boot failed" branch is
+  // exercised directly, with a disposable stub, same reasoning as
+  // `cleanUpAfterStartupFailure`'s own test above. UNLIKE that function,
+  // this one must never touch the filesystem: a restart failure must not
+  // destroy the durable state the restart was trying to rehydrate from.
+  'disposeAfterRestartFailure disposes an already-constructed instance without touching the filesystem', async () => {
+    let disposeCallCount = 0;
+    await disposeAfterRestartFailure({ dispose: () => Promise.resolve(void disposeCallCount++) });
+    expect(disposeCallCount).toBe(1);
+  });
+
+  it('disposeAfterRestartFailure is a no-op when no instance was constructed', async () => {
+    const result = await disposeAfterRestartFailure(undefined);
+    expect(result).toBeUndefined();
+  });
+
+  it('disposeAfterRestartFailure swallows a disposal failure rather than replacing the original boot error', async () => {
+    const result = await disposeAfterRestartFailure({
+      dispose: () => Promise.reject(new Error('dispose failed')),
+    });
+    expect(result).toBeUndefined();
+  });
+
   describe('cancellation', () => {
     it(// Weft's `Storage`/`TextValueStore` contracts take no `AbortSignal` — a
     // double has no in-flight async work to cancel in the first place (every
@@ -260,6 +308,42 @@ describe('Cloudflare real-runtime lane (runtime-only)', () => {
         () => Promise.resolve('completed'),
       );
       expect(result).toBe('completed');
+    });
+
+    it(// The "positive control" above resolves normally, and the in-flight
+    // test resolves its losing operation late — neither exercises the
+    // REJECTION path of the internal swallow-handler that keeps a losing
+    // operation's eventual rejection from surfacing as a process-level
+    // unhandled rejection. This drives that path directly: reject the
+    // losing operation, after cancellation has already won the race.
+    'swallows a later REJECTION from the losing operation instead of surfacing an unhandled rejection', async () => {
+      const controller = new AbortController();
+      let rejectOperation: ((error: Error) => void) | undefined;
+      const operation = () =>
+        new Promise<string>((_resolve, reject) => {
+          rejectOperation = reject;
+        });
+
+      const pending = runCancellableLaneOperation(
+        controller.signal,
+        'probe-method',
+        'probe-namespace',
+        operation,
+      );
+      controller.abort();
+
+      let caught: unknown;
+      try {
+        await pending;
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(CloudflareRuntimeLaneCancelledError);
+
+      rejectOperation?.(new Error('too-late-rejection'));
+      // Give the swallow-handler's microtask a turn; if it were missing,
+      // Bun would report an unhandled rejection for this test.
+      await Promise.resolve();
     });
 
     it(// `lane.cancel()` aborts the lane's controller without disposing
@@ -323,6 +407,51 @@ describe('Cloudflare real-runtime lane (runtime-only)', () => {
       lanes.push(restarted);
 
       expect(restarted.persistDirectory).toBe(persistDirectory);
+    });
+
+    it(// A genuine LATE-stage restart-boot failure (readiness/probe/
+    // `getR2Bucket` rejecting after `new Miniflare()` succeeds) isn't
+    // reproducible on demand, same as the analogous first-boot case above —
+    // but an EARLY, pre-`new Miniflare()` restart-boot failure is: this
+    // boots a lane against a custom root that symlinks the real
+    // `src`/`node_modules` (so the FIRST boot succeeds normally), then
+    // breaks only the `src` symlink before calling `restart()`, so
+    // `restart()`'s own bundling step fails for real and its catch block
+    // (which propagates the error and disposes any instance that WAS
+    // constructed, via `disposeAfterRestartFailure`) runs for real.
+    'propagates a restart-time boot failure without disposing a never-constructed instance', async () => {
+      const realPackageRoot = path.resolve(import.meta.dir, '..', '..');
+      const customRoot = await mkdtemp(`${tmpdir()}/cloudflare-restart-failure-root-`);
+      const srcLinkPath = path.join(customRoot, 'src');
+      await symlink(path.join(realPackageRoot, 'src'), srcLinkPath);
+      await symlink(
+        path.join(realPackageRoot, 'node_modules'),
+        path.join(customRoot, 'node_modules'),
+      );
+
+      const identifier = nextIdentifier();
+      const lane = await startCloudflareRuntime({
+        identifiers: { next: () => identifier },
+        packageRoot: customRoot,
+      });
+
+      // Breaks ONLY the second (restart-time) boot's bundling step; the
+      // first boot above already completed successfully.
+      await rm(srcLinkPath, { force: true });
+
+      let thrown: unknown;
+      try {
+        await lane.restart();
+      } catch (error) {
+        thrown = error;
+      } finally {
+        // `restart()` failed, so `lane` itself is still the live instance —
+        // no replacement lane was ever returned to take over cleanup.
+        await lane.shutdown();
+        await rm(customRoot, { recursive: true, force: true });
+      }
+
+      expect(thrown).toBeInstanceOf(Error);
     });
   });
 });

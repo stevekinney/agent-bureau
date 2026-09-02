@@ -214,6 +214,68 @@ describe('serialization-failure diagnostics', () => {
     }
   });
 
+  it('rejects a non-finite number nested inside metadata, naming the nested field path', async () => {
+    const storage = createCloudflareMemoryRecordStorage({
+      sql: createSqliteDouble(),
+      vectorize: createFakeVectorize(),
+    });
+    await storage.init();
+
+    try {
+      await storage.put(
+        memoryRecord({
+          id: 'nested-non-finite',
+          metadata: { nested: { score: Number.NaN } },
+        }),
+      );
+      throw new Error('expected put() to reject');
+    } catch (error) {
+      expect(error).toBeInstanceOf(CloudflareSerializationError);
+      expect((error as CloudflareSerializationError).field).toBe('metadata.nested.score');
+    }
+  });
+
+  it('rejects metadata containing a circular array reference instead of overflowing the call stack', async () => {
+    const storage = createCloudflareMemoryRecordStorage({
+      sql: createSqliteDouble(),
+      vectorize: createFakeVectorize(),
+    });
+    await storage.init();
+
+    const cyclicArray: unknown[] = [];
+    cyclicArray.push(cyclicArray);
+
+    try {
+      await storage.put(memoryRecord({ id: 'cyclic-array', metadata: { list: cyclicArray } }));
+      throw new Error('expected put() to reject');
+    } catch (error) {
+      expect(error).toBeInstanceOf(CloudflareSerializationError);
+      // The array itself is added to `seen` before its own elements are
+      // walked, so the cycle is detected one level deeper, at the
+      // self-referencing element (index 0), not at `metadata.list` itself.
+      expect((error as CloudflareSerializationError).field).toBe('metadata.list.0');
+    }
+  });
+
+  it('rejects metadata containing a circular object reference instead of overflowing the call stack', async () => {
+    const storage = createCloudflareMemoryRecordStorage({
+      sql: createSqliteDouble(),
+      vectorize: createFakeVectorize(),
+    });
+    await storage.init();
+
+    const cyclic: Record<string, unknown> = {};
+    cyclic['self'] = cyclic;
+
+    try {
+      await storage.put(memoryRecord({ id: 'cyclic-object', metadata: cyclic }));
+      throw new Error('expected put() to reject');
+    } catch (error) {
+      expect(error).toBeInstanceOf(CloudflareSerializationError);
+      expect((error as CloudflareSerializationError).field).toBe('metadata.self');
+    }
+  });
+
   it('rejects a non-finite vector on putOnce and on update, naming the field, before any write', async () => {
     const storage = createCloudflareMemoryRecordStorage({
       sql: createSqliteDouble(),

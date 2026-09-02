@@ -75,47 +75,101 @@ const vectorJsonSchema = z.array(z.number().finite());
 const metadataJsonSchema = z.record(z.string(), z.unknown());
 
 /**
- * A recursively JSON-serializable value: exactly what survives a
- * `JSON.stringify`/`JSON.parse` round trip unchanged. Used to validate a
- * caller's `vector`/`metadata` BEFORE any `sql.exec` runs — `undefined`,
- * `NaN`/`Infinity`, and non-finite numbers all fail this schema, where a bare
- * `JSON.stringify` would instead silently drop the key (`undefined`) or write
- * `null` in place of the number (`NaN`/`Infinity`), producing a write that
- * "succeeds" but reads back as something the caller never wrote.
+ * Renders a validation path (string keys / array indices) as a dotted field
+ * label, e.g. `['nested', 0]` -> `nested.0`.
  */
-const jsonSerializableValueSchema: z.ZodType<unknown> = z.lazy(() =>
-  z.union([
-    z.string(),
-    z.number().finite(),
-    z.boolean(),
-    z.null(),
-    z.array(jsonSerializableValueSchema),
-    z.record(z.string(), jsonSerializableValueSchema),
-  ]),
-);
-
-/** Schema for a record's `metadata` at the WRITE boundary (see {@link jsonSerializableValueSchema}). */
-const writableMetadataSchema = z.record(z.string(), jsonSerializableValueSchema);
-
-/** Renders a Zod issue path as a dotted field label. */
-function describeIssuePath(path: readonly PropertyKey[]): string {
-  return path.length === 0 ? '(root)' : path.map(String).join('.');
+function describeFieldPath(path: readonly (string | number)[]): string {
+  return path.length === 0 ? '(root)' : path.join('.');
 }
 
 /**
  * Validates `vector` is finite in every component, throwing a typed
  * {@link CloudflareSerializationError} naming the offending index BEFORE any
  * `sql.exec` runs — so a serialization failure never produces a partial or
- * truncated write.
+ * truncated write. A plain indexed loop with `Number.isFinite`, not a Zod
+ * array schema: embedding vectors run hundreds to thousands of dimensions,
+ * and this runs on every `put`/`putOnce`/`update`, so avoiding both the
+ * `Array.from(vector)` allocation and a schema-parse pass per write keeps the
+ * hot path cheap.
  */
 function validateVectorForWrite(vector: Float32Array): void {
-  const result = z.array(z.number().finite()).safeParse(Array.from(vector));
-  if (result.success) return;
-  const issue = result.error.issues[0];
-  const field = `vector[${issue === undefined ? '?' : describeIssuePath(issue.path)}]`;
+  for (let index = 0; index < vector.length; index += 1) {
+    const value = vector[index];
+    if (value === undefined || !Number.isFinite(value)) {
+      throw new CloudflareSerializationError(
+        `vector[${index}]`,
+        `component at index ${index} is not a finite number (got ${String(value)}).`,
+      );
+    }
+  }
+}
+
+/**
+ * Validates that `value` is recursively JSON-serializable — exactly what
+ * survives a `JSON.stringify`/`JSON.parse` round trip unchanged — throwing a
+ * typed {@link CloudflareSerializationError} naming the offending field path
+ * BEFORE any `sql.exec` runs. `undefined`, non-finite numbers, and values of
+ * an unsupported type all fail explicitly, where a bare `JSON.stringify`
+ * would instead silently drop the key (`undefined`) or write `null` in place
+ * of the number (`NaN`/`Infinity`) — a write that "succeeds" but reads back
+ * as something the caller never wrote.
+ *
+ * A hand-written recursive walk with an explicit `seen` set, not a Zod
+ * schema: `metadata` is `Record<string, unknown>` and can legally contain a
+ * circular reference (`metadata.self = metadata`); Zod's own recursive
+ * validation has no cycle guard and would recurse until the JS engine itself
+ * throws an uncatchable stack-overflow `RangeError` — this walk detects the
+ * cycle explicitly and reports it as the same typed diagnostic every other
+ * unserializable value gets.
+ */
+function validateJsonSerializableValue(
+  value: unknown,
+  path: readonly (string | number)[],
+  seen: WeakSet<object>,
+): void {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
+
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) {
+      throw new CloudflareSerializationError(
+        `metadata.${describeFieldPath(path)}`,
+        `value is not a finite number (got ${String(value)}).`,
+      );
+    }
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    if (seen.has(value)) {
+      throw new CloudflareSerializationError(
+        `metadata.${describeFieldPath(path)}`,
+        'contains a circular reference.',
+      );
+    }
+    seen.add(value);
+    value.forEach((item, index) => validateJsonSerializableValue(item, [...path, index], seen));
+    seen.delete(value);
+    return;
+  }
+
+  if (typeof value === 'object') {
+    if (seen.has(value)) {
+      throw new CloudflareSerializationError(
+        `metadata.${describeFieldPath(path)}`,
+        'contains a circular reference.',
+      );
+    }
+    seen.add(value);
+    for (const [key, nested] of Object.entries(value)) {
+      validateJsonSerializableValue(nested, [...path, key], seen);
+    }
+    seen.delete(value);
+    return;
+  }
+
   throw new CloudflareSerializationError(
-    field,
-    issue?.message ?? 'vector contains a non-finite number.',
+    `metadata.${describeFieldPath(path)}`,
+    `value of type "${typeof value}" is not JSON-serializable.`,
   );
 }
 
@@ -125,14 +179,7 @@ function validateVectorForWrite(vector: Float32Array): void {
  * any `sql.exec` runs.
  */
 function validateMetadataForWrite(metadata: Record<string, unknown>): void {
-  const result = writableMetadataSchema.safeParse(metadata);
-  if (result.success) return;
-  const issue = result.error.issues[0];
-  const field = `metadata.${issue === undefined ? '?' : describeIssuePath(issue.path)}`;
-  throw new CloudflareSerializationError(
-    field,
-    issue?.message ?? 'metadata is not JSON-serializable.',
-  );
+  validateJsonSerializableValue(metadata, [], new WeakSet());
 }
 
 /**
