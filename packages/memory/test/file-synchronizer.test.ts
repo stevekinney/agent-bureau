@@ -204,14 +204,17 @@ describe('createFileSynchronizer', () => {
   it('stop() resolves promptly when no synchronize() call is in flight', async () => {
     const synchronizer = createFileSynchronizer({ memory, directory: tempDir });
 
-    const start = performance.now();
-    await synchronizer.stop();
-    const elapsed = performance.now() - start;
+    let resolved = false;
+    void synchronizer.stop().then(() => {
+      resolved = true;
+    });
 
     // No in-flight synchronize() and no polling interval — stop() has
-    // nothing to wait on. A generous bound guards against an artificial
-    // wait being introduced without making the test timing-sensitive.
-    expect(elapsed).toBeLessThan(200);
+    // nothing to wait on, so it settles within a couple of microtask
+    // turns. An artificial wait (a real timer, an unresolved gate) would
+    // not settle by this point, unlike the wall-clock bound this replaces.
+    await drainMicrotasks();
+    expect(resolved).toBe(true);
   });
 
   it('swallows polling errors and releases the synchronizing lock for future ticks', async () => {

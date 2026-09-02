@@ -219,6 +219,9 @@ describe('createBunAdapter — stop()', () => {
 
   it("does not resolve until Bun.serve()'s own stop() promise resolves (no wsHandler)", async () => {
     const fake = createFakeBunServer();
+    // The fake server only needs stop() — Bun.serve()'s real overloaded
+    // generic signature can't be satisfied by a partial object, so this
+    // goes through unknown first.
     Bun.serve = (() => fake.server) as unknown as typeof Bun.serve;
 
     const adapter = createBunAdapter();
@@ -240,6 +243,9 @@ describe('createBunAdapter — stop()', () => {
 
   it("does not resolve until Bun.serve()'s own stop() promise resolves (with wsHandler)", async () => {
     const fake = createFakeBunServer();
+    // The fake server only needs stop() — Bun.serve()'s real overloaded
+    // generic signature can't be satisfied by a partial object, so this
+    // goes through unknown first.
     Bun.serve = (() => fake.server) as unknown as typeof Bun.serve;
 
     const adapter = createBunAdapter();

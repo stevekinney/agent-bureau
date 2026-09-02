@@ -328,7 +328,12 @@ export async function createGateway(
 
     return {
       async stop() {
-        await handle.stop();
+        // Start the server's own drain (stops accepting new connections,
+        // then waits for in-flight requests/WebSocket connections to close)
+        // before running the rest of teardown, rather than after — cleanup
+        // that doesn't depend on the listener being fully drained shouldn't
+        // be serialized behind it.
+        const stopping = handle.stop();
         wsHandler.dispose();
         unsubscribeLiveFrames();
         bureau.removeEventListener('run.removed', clearRunBufferOnRemoval);
@@ -346,6 +351,7 @@ export async function createGateway(
             bureau.setRequestAuthorityValidator(replacementValidator);
           }
         }
+        await stopping;
       },
     };
   }
