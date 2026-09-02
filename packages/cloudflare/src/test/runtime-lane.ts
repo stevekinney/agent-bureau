@@ -241,21 +241,19 @@ export default {
 
 /** Bundles the Durable Object glue script (and the real adapter it imports) for workerd. */
 async function buildDurableObjectWorkerScript(packageRoot: string): Promise<string> {
-  const sqliteAdapterEntryPath = path.join(
-    packageRoot,
-    'src',
-    'create-cloudflare-sqlite-storage.ts',
-  );
-  const glueSource = buildDurableObjectGlueSource(sqliteAdapterEntryPath);
+  // A relative specifier, not an absolute path: `packageRoot/node_modules`
+  // is not guaranteed to exist (a workspace-linked package root need not
+  // have its own), and an absolute path baked into the glue source is not
+  // portable across platforms (Windows drive letters). The glue file lives
+  // directly under `packageRoot` (which always exists), so a plain relative
+  // import resolves the same way Bun would resolve it from any other file
+  // in the package.
+  const glueSource = buildDurableObjectGlueSource('./src/create-cloudflare-sqlite-storage.ts');
 
   // The entry file needs a real path so Bun.build can resolve the relative
   // import above; it never becomes part of `src/` and is removed immediately
   // after bundling, so it carries no coverage obligation of its own.
-  const glueTempPath = path.join(
-    packageRoot,
-    'node_modules',
-    `.runtime-lane-glue-${crypto.randomUUID()}.ts`,
-  );
+  const glueTempPath = path.join(packageRoot, `.runtime-lane-glue-${crypto.randomUUID()}.ts`);
   await Bun.write(glueTempPath, glueSource);
   try {
     const build = await Bun.build({
@@ -477,7 +475,12 @@ export async function startCloudflareRuntime(
       },
     };
   } catch (error) {
-    await cleanUpAfterStartupFailure(miniflare, persistDirectory);
+    try {
+      await cleanUpAfterStartupFailure(miniflare, persistDirectory);
+    } catch {
+      // A cleanup failure (e.g. `dispose()` also rejecting) must not replace
+      // the original startup error — cleanup is best-effort here.
+    }
     throw error;
   }
 }
@@ -494,8 +497,14 @@ export async function cleanUpAfterStartupFailure(
   miniflareInstance: { dispose(): Promise<void> } | undefined,
   persistDirectory: string,
 ): Promise<void> {
-  if (miniflareInstance !== undefined) await miniflareInstance.dispose();
-  await rm(persistDirectory, { recursive: true, force: true });
+  // `rm` runs even when `dispose()` itself rejects (a partially started
+  // runtime can fail to shut down cleanly) — the directory removal must not
+  // be skipped just because disposal was unclean.
+  try {
+    if (miniflareInstance !== undefined) await miniflareInstance.dispose();
+  } finally {
+    await rm(persistDirectory, { recursive: true, force: true });
+  }
 }
 
 /**

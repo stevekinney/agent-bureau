@@ -1,4 +1,4 @@
-import { mkdtemp, readdir } from 'node:fs/promises';
+import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 
 import { afterEach, describe, expect, it } from 'bun:test';
@@ -111,28 +111,43 @@ describe('Cloudflare real-runtime lane (runtime-only)', () => {
   // genuine bundling failure isn't otherwise reproducible on demand).
   'cleans up its persistence directory and any booted Miniflare instance when startup fails', async () => {
     const failingIdentifier = nextIdentifier();
+    // A real (but incomplete) package root, not a hardcoded absolute path:
+    // on a host where the test process can write to the filesystem root,
+    // the earlier version of this test would have created directories under
+    // `/` before bundling failed and never cleaned them up; `mkdtemp` keeps
+    // this test's own filesystem footprint self-contained and portable.
+    const fakePackageRoot = await mkdtemp(`${tmpdir()}/cloudflare-fake-package-root-`);
+
+    // Snapshot matching entries BEFORE the attempt: residue from an
+    // interrupted earlier run, or another concurrent process using the same
+    // deterministic identifier (this box runs concurrent agent validation),
+    // must not be misread as something this attempt leaked.
+    const matchesThisAttempt = (entry: string): boolean =>
+      entry.includes(`cloudflare-runtime-lane-${failingIdentifier}-`);
+    const beforeEntries = await readdir(tmpdir());
+    const before = new Set(beforeEntries.filter(matchesThisAttempt));
 
     let thrown: unknown;
     try {
       await startCloudflareRuntime({
         identifiers: { next: () => failingIdentifier },
-        packageRoot: '/nonexistent-cloudflare-package-root-for-failure-testing',
+        packageRoot: fakePackageRoot,
       });
     } catch (error) {
       thrown = error;
+    } finally {
+      await rm(fakePackageRoot, { recursive: true, force: true });
     }
 
     expect(thrown).toBeInstanceOf(Error);
 
     // The failed lane never returned, so its `persistDirectory` was never
-    // observable from here — recover the exact path it would have used
-    // (deterministic from the injected identifier) and confirm it does
-    // not exist.
-    const entries = await readdir(tmpdir());
-    const leaked = entries.filter((entry) =>
-      entry.includes(`cloudflare-runtime-lane-${failingIdentifier}-`),
-    );
-    expect(leaked).toEqual([]);
+    // observable from here — assert no entry matching this attempt's
+    // identifier survives beyond the pre-attempt baseline.
+    const afterEntries = await readdir(tmpdir());
+    const after = afterEntries.filter(matchesThisAttempt);
+    const leakedByThisAttempt = after.filter((entry) => !before.has(entry));
+    expect(leakedByThisAttempt).toEqual([]);
   });
 
   it(// A real startup failure late enough to have already constructed a
