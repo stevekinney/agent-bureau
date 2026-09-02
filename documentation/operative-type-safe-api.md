@@ -572,6 +572,8 @@ An **idempotency key** is a caller-supplied opaque string scoped to a principal 
 
 **AB-42 is the first exception.** It fixes the request, receipt, and state-transition shapes for one operative-level start operation, session-input admission (`SessionInputRecord`, `SessionInputReceipt`, `SessionInputState`), while every other start operation remains as described above. Whichever issue implements this contract must add a `## Session input admission` section (placed after Illustrative examples) carrying the type sketches from AB-42's decision record verbatim, including the classification-table row, the widened Session-row scope for AB-50, and the Not decided paragraph, all edited below.
 
+That section already exists below — see [Session input admission](#session-input-admission) — because AB-193 is the issue that implemented this contract's types and applied its amendments.
+
 **One shipped path already accepts one and satisfies these semantics within its documented process-local boundary.** The mounted gateway route `POST /hooks/*` scopes an `Idempotency-Key` to the authenticated principal and hook operation, reserves before starting a Bureau run, replays the original successful or known-failure receipt for an identical canonical request, and returns a typed `IDEMPOTENCY_CONFLICT` for a mismatched reuse (`packages/gateway/src/routes/hooks.ts`). Its receipts remain for the lifetime of the route instance, matching the process-local run-locator lifetime; AB-109 owns durable cross-instance receipts.
 
 ### The unowned-background-work rule
