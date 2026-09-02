@@ -616,6 +616,11 @@ describe('createAgentEvaluation', () => {
         abortChild: () => {
           throw new Error('not used by this test');
         },
+        // AB-204: closed() joined AgentRun after this fixture was first
+        // written. Not exercised by this test, so a safe no-op.
+        closed: () => {
+          throw new Error('not used by this test');
+        },
         [Symbol.dispose]: () => {
           disposeCalls += 1;
         },
@@ -655,6 +660,11 @@ describe('createAgentEvaluation', () => {
         },
         children: () => [],
         abortChild: () => {
+          throw new Error('not used by this test');
+        },
+        // AB-204: closed() joined AgentRun after this fixture was first
+        // written. Not exercised by this test, so a safe no-op.
+        closed: () => {
           throw new Error('not used by this test');
         },
         [Symbol.dispose]: () => {

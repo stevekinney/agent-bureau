@@ -23,6 +23,7 @@ import { Conversation } from 'conversationalist';
 import type { AgentRun, RunEvent, UnwrappedValue } from './agent-run';
 import { CompletedRunIterationError } from './agent-run';
 import type { ChildRunDescriptor } from './child-run';
+import { createClosedAcknowledgement } from './closed-acknowledgement';
 import type { AgentRunError } from './errors';
 import {
   AbortAgentRunError,
@@ -39,7 +40,7 @@ import type {
   RunnableAgent,
 } from './runnable-agent';
 import { OPERATIVE_RESOLVE_RUN_OPTIONS } from './runnable-agent';
-import type { FinishReason, RunResult, TokenUsage } from './types';
+import type { CleanupAcknowledgement, FinishReason, RunResult, TokenUsage } from './types';
 
 /**
  * The two shapes a loader may resolve to (AB-15's `AgentModule<O, H>`): the
@@ -100,6 +101,11 @@ function isValidAgentRunHandle(value: unknown): value is AgentRun<unknown, boole
     isCallable(candidate['abort']) &&
     isCallable(candidate['children']) &&
     isCallable(candidate['abortChild']) &&
+    // AB-204: an untyped or older lazy-loaded agent whose handle predates
+    // `closed()` would otherwise pass this check and then throw a raw
+    // TypeError the first time this wrapper's own `closed()` delegates to
+    // it, instead of the contract failure this validator exists to surface.
+    isCallable(candidate['closed']) &&
     isCallable(candidate[Symbol.asyncIterator]) &&
     isCallable(candidate[Symbol.dispose])
   );
@@ -312,6 +318,15 @@ export function createDeferredAgentRun<O, H extends boolean>(
   let underlying: AgentRun<O, H> | undefined;
   let abortReason: string | undefined;
   let abortForwarded = false;
+  // closed()'s not-required fast path (AB-204) — `abortReason` alone can't
+  // serve this: a caller may abort with no reason, leaving it `undefined`.
+  let cancelRequested = false;
+  // Set only on the invalid-handle rejection path below, to the REAL
+  // outcome of the best-effort disposal attempted there — never silently
+  // defaulted to `completed` the way a genuine "no underlying run ever
+  // existed" synthetic completion is, since cleanup here was attempted
+  // (and may have failed) rather than genuinely unnecessary.
+  let invalidHandleDisposalOutcome: CleanupAcknowledgement | undefined;
 
   const queue = createEventQueue();
 
@@ -356,6 +371,7 @@ export function createDeferredAgentRun<O, H extends boolean>(
 
   function requestAbort(reason?: string): void {
     if (state === 'terminal') return;
+    cancelRequested = true;
     abortReason = reason;
     if (state === 'waiting') {
       // Settle the abort immediately rather than waiting for `resolveAgent()`
@@ -520,6 +536,46 @@ export function createDeferredAgentRun<O, H extends boolean>(
     }
 
     if (!isValidAgentRunHandle(handle)) {
+      // `agent.run()` has already started this handle's underlying work —
+      // provider/tool calls can continue unobserved if nothing disposes it.
+      // Best-effort: an otherwise-valid handle missing only `closed()` (or
+      // any other single required member) still very likely has a callable
+      // `[Symbol.dispose]`; guard rather than assume, since a handle this
+      // malformed could be missing that too. AB-204 review: `handle` can
+      // also be `null`/`undefined`/a primitive — `isValidAgentRunHandle`
+      // already rejects those, but probing `[Symbol.dispose]` on one
+      // directly would throw a raw TypeError outside this `try`, rejecting
+      // this detached resolution task and leaving `resultPromise`/
+      // `closed()` pending forever instead of reaching
+      // `finalizeSynthetic()` below. Guard the shape before probing it.
+      const disposable =
+        handle !== null && typeof handle === 'object'
+          ? (handle as unknown as Record<PropertyKey, unknown>)
+          : undefined;
+      const disposeFn = disposable?.[Symbol.dispose];
+      if (isCallable(disposeFn)) {
+        try {
+          disposeFn.call(handle);
+          // AB-204 review: a non-throwing `[Symbol.dispose]()` is not proof
+          // cleanup has actually completed — the built-in `AgentRun`
+          // disposer, for example, only requests cancellation synchronously
+          // and lets provider/tool work continue winding down afterward.
+          // Without the rejected handle's own acknowledgement there is no
+          // way to confirm completion, so this stays `unresolved` rather
+          // than claiming a `completed` this wrapper cannot verify.
+          invalidHandleDisposalOutcome = { status: 'unresolved', reason: 'unknown-effect' };
+        } catch (disposalError) {
+          // The AgentContractError result itself is unaffected — a
+          // throwing disposer doesn't change that outcome, and must not
+          // mask it — but closed() must still be able to report that
+          // cleanup genuinely failed, not silently claim `completed`.
+          invalidHandleDisposalOutcome = { status: 'failed', error: disposalError };
+        }
+      } else {
+        // No disposer to call at all: cleanup here is genuinely
+        // undetermined, not "nothing needed cleanup".
+        invalidHandleDisposalOutcome = { status: 'unresolved', reason: 'unknown-effect' };
+      }
       finalizeSynthetic(
         new AgentContractError(`Lazy agent "${label}" returned an invalid run handle`, handle),
         'error',
@@ -609,7 +665,46 @@ export function createDeferredAgentRun<O, H extends boolean>(
       underlying?.abortChild(childId, reason);
     },
 
+    // AB-204: delegated through the shared helper so a caller-supplied
+    // `options.signal` properly bounds THIS call's wait (races the signal
+    // against settlement) instead of blocking on `resultPromise` no matter
+    // what — the underlying run that DOES resolve by the time this run
+    // terminates still gets its own `closed()` consulted via
+    // `resolveOutcome` below; a `finalizeSynthetic` completion (aborted
+    // before the wrapped agent resolved) has nothing else to await, so
+    // `completed` is accurate.
+    closed: createClosedAcknowledgement({
+      result: resultPromise,
+      // `cancelRequested` alone misses a cancellation delivered through
+      // `context.signal` AFTER this wrapper detaches its own listener
+      // (ownership transfers directly to the underlying agent's run() once
+      // it exists — see `detachSignalListener` above) — reading the signal
+      // directly here still catches that case.
+      //
+      // AB-204 review (PRRT_kwDORvupsc6esJjg): `underlying !== undefined`
+      // must ALSO disqualify the fast path, even with no cancellation at
+      // all — an underlying run can fulfill `result()` with a nontrivial
+      // cleanup outcome on its own (e.g. a durable Bureau path hitting an
+      // engine disposal it classifies `unresolved`/`unreachable` with no
+      // cancellation involved). Without this, `evaluateNotRequired()` would
+      // return `not-required` without ever consulting `underlying.closed()`
+      // below, hiding that outcome — the same class of bug the session
+      // wrapper's `activeInnerRun` check (PRRT_kwDORvupsc6enump) already
+      // fixed for `SessionHandle`.
+      disqualifiesFastPath: () =>
+        cancelRequested ||
+        (signal?.aborted ?? false) ||
+        invalidHandleDisposalOutcome !== undefined ||
+        underlying !== undefined,
+      hasInFlightWork: () => false,
+      resolveOutcome: () =>
+        underlying
+          ? underlying.closed()
+          : Promise.resolve(invalidHandleDisposalOutcome ?? { status: 'completed' }),
+    }),
+
     [Symbol.dispose](): void {
+      cancelRequested = true;
       if (underlying) {
         underlying[Symbol.dispose]();
         return;

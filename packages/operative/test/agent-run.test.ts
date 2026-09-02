@@ -21,7 +21,7 @@ import { noToolCalls } from '../src/conditions/predicates';
 import { type ActiveRun, createActiveRun as createRun } from '../src/create-run';
 import { AbortAgentRunError, MaximumStepsExceededError } from '../src/errors';
 import { createMockGenerate } from '../src/test/index';
-import type { GenerateResponse } from '../src/types';
+import type { CleanupAcknowledgement, ClosedOptions, GenerateResponse } from '../src/types';
 
 function textResponse(content: string): GenerateResponse {
   return { content, toolCalls: [] };
@@ -39,6 +39,7 @@ function createResolvedActiveRun(result: Awaited<ActiveRun['result']>): ActiveRu
   return {
     result: Promise.resolve(result),
     abort: () => undefined,
+    closed: () => Promise.resolve({ status: 'completed' }) as Promise<CleanupAcknowledgement>,
     [Symbol.dispose]: () => undefined,
     toObservable: () => ({
       subscribe() {
@@ -46,6 +47,39 @@ function createResolvedActiveRun(result: Awaited<ActiveRun['result']>): ActiveRu
       },
     }),
   } as unknown as ActiveRun;
+}
+
+/**
+ * An `ActiveRun` stub whose `closed()` returns a caller-supplied
+ * acknowledgement (optionally per-call, honoring `options.signal` the way
+ * the real `closed-acknowledgement.ts` contract requires) — for testing
+ * `AgentRun.closed()`/`DiagnosticAgentRun.closed()` delegation (AB-204 AC5,
+ * AC6) against every outcome without depending on a real run's timing.
+ */
+function createActiveRunWithClosed(
+  acknowledgement: CleanupAcknowledgement,
+  overrides: Partial<ActiveRun> = {},
+): { activeRun: ActiveRun; closedCalls: (ClosedOptions | undefined)[] } {
+  const closedCalls: (ClosedOptions | undefined)[] = [];
+  const activeRun = {
+    result: new Promise(() => {}),
+    abort: () => undefined,
+    closed: (options?: ClosedOptions): Promise<CleanupAcknowledgement> => {
+      closedCalls.push(options);
+      if (options?.signal?.aborted) {
+        return Promise.resolve({ status: 'unresolved', reason: 'timed-out' });
+      }
+      return Promise.resolve(acknowledgement);
+    },
+    [Symbol.dispose]: () => undefined,
+    toObservable: () => ({
+      subscribe() {
+        return { unsubscribe: () => undefined };
+      },
+    }),
+    ...overrides,
+  } as unknown as ActiveRun;
+  return { activeRun, closedCalls };
 }
 
 // ---------------------------------------------------------------------------
@@ -347,6 +381,152 @@ describe('createDiagnosticAgentRun()', () => {
     expect(run.children()[0]?.agentName).toBe('researcher');
     run.abortChild('child-1', 'stop it');
     expect(abortCalls).toEqual(['stop it']);
+  });
+
+  // AB-204 AC6 — durability is undeterminable from a recovered `ActiveRun`
+  // wrapper (declared gap, AB-88). `'completed'` is the one status that
+  // would otherwise assert the durable boundary this handle cannot vouch
+  // for, so it is downgraded; every other outcome passes through unchanged.
+  describe('closed()', () => {
+    it('downgrades a wrapped "completed" acknowledgement to unresolved/unknown-effect', async () => {
+      const { activeRun } = createActiveRunWithClosed({ status: 'completed' });
+      const run = createDiagnosticAgentRun(activeRun);
+
+      expect(await run.closed()).toEqual({ status: 'unresolved', reason: 'unknown-effect' });
+    });
+
+    it.each([
+      ['not-required', { status: 'not-required' }],
+      ['failed', { status: 'failed', error: new Error('teardown failed') }],
+      ['unresolved/persistence-failed', { status: 'unresolved', reason: 'persistence-failed' }],
+      ['unresolved/unreachable', { status: 'unresolved', reason: 'unreachable' }],
+    ] as const)(
+      'passes a wrapped %s acknowledgement through unchanged',
+      async (_label, expected) => {
+        const { activeRun } = createActiveRunWithClosed(expected);
+        const run = createDiagnosticAgentRun(activeRun);
+
+        expect(await run.closed()).toEqual(expected);
+      },
+    );
+
+    it('caches the downgraded acknowledgement: repeated calls return the identical object by reference', async () => {
+      const { activeRun } = createActiveRunWithClosed({ status: 'completed' });
+      const run = createDiagnosticAgentRun(activeRun);
+
+      const first = await run.closed();
+      const second = await run.closed();
+      expect(second).toBe(first);
+    });
+
+    it('does not cache a per-call signal timeout, racing the caller-supplied signal against the shared settlement rather than forwarding it to the wrapped closed()', async () => {
+      const { activeRun, closedCalls } = createActiveRunWithClosed({ status: 'completed' });
+      const run = createDiagnosticAgentRun(activeRun);
+
+      const controller = new AbortController();
+      controller.abort();
+      const timedOut = await run.closed({ signal: controller.signal });
+      expect(timedOut).toEqual({ status: 'unresolved', reason: 'timed-out' });
+      // The wrapped call is invoked with no signal — this wrapper races the
+      // caller's own signal against the shared settlement itself, so an
+      // abandoned wait here never depends on (or corrupts) a concurrent
+      // signal-free call's memoized transform.
+      expect(closedCalls).toEqual([undefined]);
+
+      // A later signal-free call is unaffected by the abandoned one, and
+      // still applies the completed → unknown-effect downgrade.
+      expect(await run.closed()).toEqual({ status: 'unresolved', reason: 'unknown-effect' });
+    });
+
+    it('resolves the identical cached downgraded object for a signal-bearing call made after genuine settlement', async () => {
+      const { activeRun } = createActiveRunWithClosed({ status: 'completed' });
+      const run = createDiagnosticAgentRun(activeRun);
+
+      const first = await run.closed();
+      const controller = new AbortController();
+      controller.abort();
+      const second = await run.closed({ signal: controller.signal });
+
+      expect(second).toBe(first);
+    });
+
+    it('shares the identical downgraded object across two concurrent calls made before the transform settles', async () => {
+      const { activeRun } = createActiveRunWithClosed({ status: 'completed' });
+      const run = createDiagnosticAgentRun(activeRun);
+
+      const [first, second] = await Promise.all([run.closed(), run.closed()]);
+      expect(second).toBe(first);
+    });
+
+    it('resolves unresolved/timed-out for a signal that fires after the call starts but before settlement wins', async () => {
+      let releaseUnderlying!: (acknowledgement: CleanupAcknowledgement) => void;
+      const underlyingClosed = new Promise<CleanupAcknowledgement>((resolve) => {
+        releaseUnderlying = resolve;
+      });
+      const activeRun = {
+        result: new Promise(() => {}),
+        abort: () => undefined,
+        closed: () => underlyingClosed,
+        [Symbol.dispose]: () => undefined,
+        toObservable: () => ({ subscribe: () => ({ unsubscribe: () => undefined }) }),
+      } as unknown as ActiveRun;
+      const run = createDiagnosticAgentRun(activeRun);
+
+      const controller = new AbortController();
+      const timedOutCall = run.closed({ signal: controller.signal });
+      controller.abort();
+
+      expect(await timedOutCall).toEqual({ status: 'unresolved', reason: 'timed-out' });
+
+      // Settling the real cleanup afterward is unaffected by the abandoned wait.
+      releaseUnderlying({ status: 'completed' });
+      expect(await run.closed()).toEqual({ status: 'unresolved', reason: 'unknown-effect' });
+    });
+
+    it('resolves a signal-bearing call with the real transformed value when settlement wins before the signal fires', async () => {
+      const { activeRun } = createActiveRunWithClosed({ status: 'completed' });
+      const run = createDiagnosticAgentRun(activeRun);
+
+      const controller = new AbortController();
+      const result = await run.closed({ signal: controller.signal });
+      expect(result).toEqual({ status: 'unresolved', reason: 'unknown-effect' });
+    });
+  });
+});
+
+// AB-204 AC5 — `AgentRun.closed()` delegates to the wrapped `ActiveRun.closed()`
+// and returns the identical `CleanupAcknowledgement` the wrapped call produces.
+describe('AgentRun.closed()', () => {
+  it.each([
+    ['not-required', { status: 'not-required' }],
+    ['completed', { status: 'completed' }],
+    ['failed', { status: 'failed', error: new Error('teardown failed') }],
+    ['unresolved/unknown-effect', { status: 'unresolved', reason: 'unknown-effect' }],
+  ] as const)(
+    'delegates to the wrapped ActiveRun.closed() and returns %s unchanged',
+    async (_label, expected) => {
+      const { activeRun } = createActiveRunWithClosed(expected);
+      const run = createAgentRun(activeRun);
+
+      expect(await run.closed()).toBe(await activeRun.closed());
+      expect(await run.closed()).toEqual(expected);
+    },
+  );
+
+  it('forwards its options.signal to the wrapped ActiveRun.closed()', async () => {
+    const { activeRun, closedCalls } = createActiveRunWithClosed({ status: 'completed' });
+    const run = createAgentRun(activeRun);
+    const controller = new AbortController();
+
+    await run.closed({ signal: controller.signal });
+
+    expect(closedCalls).toEqual([{ signal: controller.signal }]);
+  });
+
+  it('resolves closed() against a real run once it settles', async () => {
+    const run = makeRun([textResponse('done')]);
+    await run.result();
+    expect(await run.closed()).toEqual({ status: 'not-required' });
   });
 });
 

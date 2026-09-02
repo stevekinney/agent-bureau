@@ -7,6 +7,7 @@ import type { AgentRun } from '../agent-run';
 import { createAgentRun } from '../agent-run';
 import type { AgentSession, RunRef } from '../agent-session';
 import { createAgentSession } from '../agent-session';
+import { createClosedAcknowledgement } from '../closed-acknowledgement';
 import type { ActiveRun } from '../create-run';
 import { createActiveRun } from '../create-run';
 import { reattachDurableActiveRun } from '../durable/active-run-adapter';
@@ -867,11 +868,16 @@ export function createSessionHandle(
         return innerResult;
       })();
 
+      // closed()'s not-required fast path (AB-204) — see the identical flag
+      // in create-run.ts / active-run-adapter.ts.
+      let cancelRequested = false;
+
       // Build the ActiveRun surface backed by the outer emitter so createAgentRun
       // can subscribe to events and abort the run.
       const activeRunWrapper: ActiveRun = {
         result: resultPromise,
         abort(reason?: string): void {
+          cancelRequested = true;
           // Always fire the outer AbortController — this cancels the in-flight
           // generate call (stops billing). Then forward to the inner run so that
           // on the durable path `engine.cancel()` is also triggered, stopping
@@ -879,6 +885,33 @@ export function createSessionHandle(
           abortController.abort(reason);
           activeInnerRun?.abort(reason);
         },
+        // Delegates to the inner run's own `closed()` once one exists — this
+        // wrapper adds no cleanup of its own beyond what `createActiveRun`/
+        // `reattachDurableActiveRun` already track for the inner run. If
+        // `resultPromise` settles without one ever having been created (the
+        // reservation step itself failed), there is nothing else to await.
+        closed: createClosedAcknowledgement({
+          result: resultPromise,
+          // `cancelRequested` alone misses a cancellation delivered through
+          // the session's own configured `runOptions.signal` rather than a
+          // direct `abort()`/`[Symbol.dispose]()` call — matching the
+          // identical fix in create-run.ts / active-run-adapter.ts.
+          // `activeInnerRun !== null` disqualifies unconditionally too: once
+          // a real inner run exists, its own closed() already correctly
+          // implements not-required semantics — this wrapper's OWN fast
+          // path applies only to the "reservation itself failed, no inner
+          // run ever created" case, never bypassing a real inner run's
+          // acknowledgement (which can be unresolved/unreachable even with
+          // no cancellation requested — a disposed durable engine mid-run).
+          disqualifiesFastPath: () =>
+            cancelRequested ||
+            abortController.signal.aborted ||
+            (runOptions.signal?.aborted ?? false) ||
+            activeInnerRun !== null,
+          hasInFlightWork: () => false,
+          resolveOutcome: () =>
+            activeInnerRun ? activeInnerRun.closed() : Promise.resolve({ status: 'completed' }),
+        }),
         addEventListener: outerEmitter.addEventListener.bind(outerEmitter),
         removeEventListener: outerEmitter.removeEventListener.bind(outerEmitter),
         on: outerEmitter.on.bind(outerEmitter),
@@ -888,6 +921,7 @@ export function createSessionHandle(
         toObservable: outerEmitter.toObservable.bind(outerEmitter),
         complete: outerEmitter.complete.bind(outerEmitter),
         [Symbol.dispose](): void {
+          cancelRequested = true;
           // Mirror abort(): fire the outer AbortController (stops billing) and
           // forward to the inner run so engine.cancel() is also triggered for
           // workflows parked in ctx.sleep or ctx.waitForSignal.

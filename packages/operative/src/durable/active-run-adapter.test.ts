@@ -35,7 +35,7 @@ import {
 import type { OperativeHookMap } from '../hooks';
 import { UnsupportedRunResultVersionError } from '../run-envelope';
 import { createManualDurableEngine, spyEngine } from '../test/durable-engine';
-import { createMockGenerate } from '../test/index';
+import { createManualCheckpointStore, createMockGenerate } from '../test/index';
 import type { RunOptions, RunResult } from '../types';
 import {
   createDurableActiveRun,
@@ -597,6 +597,43 @@ describe('createRun with durable routing', () => {
     const result = await activeRun.result;
 
     expect(result.finishReason).toBe('aborted');
+  });
+
+  // Regression: a code-review finding on the AB-204 pull request —
+  // driveDurableRun swallows an EngineDisposedError rejection of a FRESH
+  // (non-reattached) run into a quiet, write-free, resolved RunResult (see
+  // its own doc comment) — closed() cannot see this from the settled
+  // `result` alone and must classify it unresolved/unreachable, matching
+  // reattachDurableActiveRun's identical AC8 handling, never
+  // completed/not-required.
+  it('closed() classifies a fresh run whose engine was disposed as unresolved/unreachable, never completed or not-required', async () => {
+    const disposedError = Object.assign(new Error('engine disposed'), {
+      code: 'EngineDisposedError',
+    });
+    const engine = {
+      start: async () => ({
+        result: () => Promise.reject(disposedError),
+      }),
+    } as unknown as RegistryAgnosticEngine;
+    const context = {
+      engine,
+      checkpointStore: {
+        loadCheckpoint: async () => {
+          throw new Error('unused');
+        },
+      },
+    } as never;
+
+    const activeRun = createDurableActiveRun(context, {
+      runId: 'durable-engine-disposed-closed',
+      sessionId: 'durable-engine-disposed-closed',
+      options: runOptions(async () => ({ content: 'unused', toolCalls: [] })),
+    });
+
+    await activeRun.result;
+    await Promise.resolve();
+
+    expect(await activeRun.closed()).toEqual({ status: 'unresolved', reason: 'unreachable' });
   });
 
   it('classifies a durable workflow timeout as an execution deadline error', async () => {
@@ -1228,6 +1265,437 @@ describe('createRun with durable routing', () => {
     // Falls back gracefully — no throw, result still reflects the abort
     expect(result.finishReason).toBe('aborted');
     expect(result.steps).toHaveLength(0);
+  });
+});
+
+describe('createDurableActiveRun.closed()', () => {
+  it('resolves not-required immediately when first called after a normal completion, with no cancellation and nothing in flight', async () => {
+    const context = await buildContext();
+    try {
+      const activeRun = createDurableActiveRun(context, {
+        runId: 'ac2-durable-not-required',
+        sessionId: 'ac2-durable-not-required',
+        options: runOptions(async () => ({ content: 'done', toolCalls: [] })),
+        prompt: 'Hello',
+      });
+
+      await activeRun.result;
+      await Promise.resolve();
+
+      expect(await activeRun.closed()).toEqual({ status: 'not-required' });
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  // Regression: a code-review finding on the AB-204 pull request —
+  // `cancelRequested` alone tracks only a direct `abort()` call, missing a
+  // cancellation delivered through `RunOptions.signal` (which
+  // `AgentRunContext.signal`/`createAgent` forward), so a run cancelled
+  // that way could wrongly resolve not-required despite genuinely being
+  // cancelled.
+  it('disqualifies not-required when the run was cancelled through RunOptions.signal rather than abort()', async () => {
+    const context = await buildContext();
+    try {
+      const controller = new AbortController();
+      const activeRun = createDurableActiveRun(context, {
+        runId: 'ac-durable-external-signal',
+        sessionId: 'ac-durable-external-signal',
+        options: {
+          ...runOptions(async () => ({ content: 'unused', toolCalls: [] })),
+          signal: controller.signal,
+        },
+        prompt: 'Hello',
+      });
+
+      controller.abort();
+      await activeRun.result;
+      await Promise.resolve();
+
+      const acknowledgement = await activeRun.closed();
+      expect(acknowledgement).not.toEqual({ status: 'not-required' });
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  // Regression: a code-review finding on the AB-204 pull request — a
+  // signal-only cancellation (abort() never called) never fires
+  // engine.cancel from abort() itself, so `resolveDurableOutcome` must
+  // still run the full post-cancel re-read dance rather than returning
+  // `completed` the moment it sees `!cancelRequested`. Uses the manual
+  // engine (not the real one) so the workflow genuinely does not settle on
+  // its own before the signal fires — proving cancellation, not a race.
+  // Regression: a code-review finding on the AB-204 pull request — a
+  // workflow parked in `ctx.sleep`/`ctx.waitForSignal` cannot advance on
+  // the in-process signal alone; only `engine.cancel()` can unblock it.
+  // Deferring that call to `resolveDurableOutcome`'s fallback (which only
+  // runs after `result` has settled) would deadlock closed() AND `result`
+  // forever for a signal-only cancellation. `engine.cancel` must fire the
+  // moment the signal fires — proven here by asserting it fires
+  // SYNCHRONOUSLY-ISH with controller.abort(), well before `closed()` is
+  // ever called, and before the manual engine's own `result` has any other
+  // way to settle.
+  it('fires engine.cancel the moment RunOptions.signal aborts, never calling abort() directly, unblocking a workflow that cannot otherwise advance', async () => {
+    const { engine } = createManualDurableEngine();
+    const cancelledIds: string[] = [];
+    const realCancel = engine.cancel.bind(engine);
+    engine.cancel = async (id: string) => {
+      cancelledIds.push(id);
+      return realCancel(id);
+    };
+    engine.get = (async () => ({
+      status: 'cancelled',
+    })) as unknown as RegistryAgnosticEngine['get'];
+
+    const controller = new AbortController();
+    const runId = 'ac-durable-signal-only-cancel';
+    const activeRun = createDurableActiveRun(
+      { engine, checkpointStore: createManualCheckpointStore() },
+      {
+        runId,
+        sessionId: runId,
+        options: {
+          ...runOptions(async () => ({ content: 'unused', toolCalls: [] })),
+          signal: controller.signal,
+        },
+        prompt: 'Hello',
+      },
+    );
+
+    await Promise.resolve();
+    controller.abort();
+    // engine.cancel is async (its own body awaits nothing before the
+    // push), so a single microtask tick is enough to observe it fired —
+    // no closed() call, and no other trigger, was involved.
+    await Promise.resolve();
+    expect(cancelledIds).toEqual([runId]);
+
+    // The manual engine's `cancel` rejects the workflow result as its own
+    // side effect (the B6 race simulation) — that is what actually lets
+    // `result` (and therefore closed()) settle here, not anything closed()
+    // itself drove.
+    const closedAcknowledgement = activeRun.closed();
+    await activeRun.result;
+
+    expect(await closedAcknowledgement).toEqual({ status: 'completed' });
+    expect(cancelledIds).toEqual([runId]);
+  });
+
+  it('routes an already-aborted RunOptions.signal into abort() too, even when the signal was aborted before this ActiveRun was even created', async () => {
+    const context = await buildContext();
+    try {
+      const controller = new AbortController();
+      controller.abort('already gone before creation');
+
+      const activeRun = createDurableActiveRun(context, {
+        runId: 'ac-durable-pre-aborted-signal',
+        sessionId: 'ac-durable-pre-aborted-signal',
+        options: {
+          ...runOptions(async () => ({ content: 'unused', toolCalls: [] })),
+          signal: controller.signal,
+        },
+        prompt: 'Hello',
+      });
+
+      await activeRun.result;
+      await Promise.resolve();
+
+      const acknowledgement = await activeRun.closed();
+      expect(acknowledgement).not.toEqual({ status: 'not-required' });
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  // Regression: a code-review finding on the AB-204 pull request — see the
+  // identical fixture in create-run.test.ts for the full rationale.
+  it('does not corrupt in-flight tool tracking when the toolbox emits settled with no preceding execute-start', async () => {
+    const context = await buildContext();
+    try {
+      const tool = createTool({
+        name: 'spurious_settled_tool',
+        description: 'Stands in as the subject of a settled-with-no-start event.',
+        input: z.object({}),
+        execute: async () => 'ok',
+      });
+      const toolbox = createToolbox([tool]);
+      const spuriousCall = { id: 'spurious-call-id', name: tool.name, arguments: {} };
+
+      const activeRun = createDurableActiveRun(context, {
+        runId: 'ac-durable-spurious-settled',
+        sessionId: 'ac-durable-spurious-settled',
+        options: {
+          ...runOptions(async () => ({ content: 'done', toolCalls: [] })),
+          toolbox,
+        },
+        prompt: 'Hello',
+      });
+
+      expect(() => {
+        toolbox.dispatchEvent(new ToolboxSettledEvent({ tool, call: spuriousCall }));
+        toolbox.dispatchEvent(new ToolboxSettledEvent({ tool, call: spuriousCall }));
+      }).not.toThrow();
+
+      const closedAcknowledgement = activeRun.closed();
+      const result = await activeRun.result;
+      expect(result.finishReason).toBe('stop-condition');
+      expect(await closedAcknowledgement).toEqual({ status: 'completed' });
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('resolves completed once the result promise settles normally, without any cancellation', async () => {
+    const context = await buildContext();
+    try {
+      const activeRun = createDurableActiveRun(context, {
+        runId: 'ac1-durable-completed',
+        sessionId: 'ac1-durable-completed',
+        options: runOptions(async () => ({ content: 'done', toolCalls: [] })),
+        prompt: 'Hello',
+      });
+
+      const closedAcknowledgement = activeRun.closed();
+      await activeRun.result;
+
+      expect(await closedAcknowledgement).toEqual({ status: 'completed' });
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('withholds completed until the post-cancel re-read of getDurableRun observes status "cancelled" — never merely because engine.cancel resolved (AC7)', async () => {
+    const { engine } = createManualDurableEngine();
+    let resolveGet!: (state: { status: string } | null) => void;
+    const getPromise = new Promise<{ status: string } | null>((resolve) => {
+      resolveGet = resolve;
+    });
+    // createManualDurableEngine's `cancel` rejects the workflow result with
+    // "Workflow cancelled" (the B6 race) but resolves its own promise — so a
+    // non-throwing `engine.cancel` reaching closed() proves nothing on its
+    // own; only this controllable `get` re-read can unblock it.
+    engine.get = (async () => getPromise) as RegistryAgnosticEngine['get'];
+
+    const runId = 'ac7-cancel-confirmed';
+    const activeRun = createDurableActiveRun(
+      { engine, checkpointStore: createManualCheckpointStore() },
+      {
+        runId,
+        sessionId: runId,
+        options: runOptions(async () => ({ content: 'unused', toolCalls: [] })),
+        prompt: 'Hello',
+      },
+    );
+
+    await Promise.resolve();
+    activeRun.abort();
+
+    const closedAcknowledgement = activeRun.closed();
+    await activeRun.result;
+
+    let settled = false;
+    void closedAcknowledgement.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    resolveGet({ status: 'cancelled' });
+
+    const first = await closedAcknowledgement;
+    expect(first).toEqual({ status: 'completed' });
+    // Idempotent: a repeated call returns the identical cached object.
+    expect(await activeRun.closed()).toBe(first);
+  });
+
+  it('fires its own post-cancel re-read cancellation when abort() ran before the workflow existed, so cancelSettled was never set (AC7)', async () => {
+    const { engine, resolveResult } = createManualDurableEngine();
+    const cancelledIds: string[] = [];
+    // Rejects (run already terminal, matching the comment on
+    // `resolveDurableOutcome`'s fallback call) rather than resolving — this
+    // exercises the `.catch(() => undefined)` swallow, not just the call
+    // itself. Doesn't touch the workflow result (the real `cancel` does that
+    // via `createManualDurableEngine`'s B6 race simulation); this scenario
+    // tests the OTHER way a run ends up cancel-requested-but-settled: the
+    // workflow completed on its own (`resolveResult` below) despite an
+    // abort that arrived before it even existed.
+    engine.cancel = async (id: string) => {
+      cancelledIds.push(id);
+      throw new Error('already terminal');
+    };
+    engine.get = (async () => ({
+      status: 'cancelled',
+    })) as unknown as RegistryAgnosticEngine['get'];
+
+    const runId = 'ac7-abort-before-drive-started';
+    const activeRun = createDurableActiveRun(
+      { engine, checkpointStore: createManualCheckpointStore() },
+      {
+        runId,
+        sessionId: runId,
+        options: runOptions(async () => ({ content: 'unused', toolCalls: [] })),
+        prompt: 'Hello',
+      },
+    );
+
+    // Abort SYNCHRONOUSLY, before the deferred-microtask `drive()` call has
+    // fired — `driveStarted` is still false, so abort()'s own engine.cancel
+    // call is skipped (the workflow doesn't exist yet) and `cancelSettled`
+    // is never set. `resolveDurableOutcome` must fire its own cancel call
+    // instead of awaiting `undefined`.
+    activeRun.abort();
+    expect(cancelledIds).toEqual([]);
+
+    // The manual engine never settles its own result on its own; simulate
+    // the workflow completing normally so `result` (and therefore
+    // `resolveDurableOutcome`) can proceed.
+    resolveResult();
+
+    const closedAcknowledgement = activeRun.closed();
+    await activeRun.result;
+
+    expect(await closedAcknowledgement).toEqual({ status: 'completed' });
+    expect(cancelledIds).toContain(runId);
+  });
+
+  it('resolves unresolved/persistence-failed when the post-cancel re-read throws (coordinator persistence-failed fixture)', async () => {
+    const { engine } = createManualDurableEngine();
+    const readFailure = new Error('storage unavailable');
+    engine.get = async () => {
+      throw readFailure;
+    };
+
+    const runId = 'ac7-persistence-failed-throws';
+    const activeRun = createDurableActiveRun(
+      { engine, checkpointStore: createManualCheckpointStore() },
+      {
+        runId,
+        sessionId: runId,
+        options: runOptions(async () => ({ content: 'unused', toolCalls: [] })),
+        prompt: 'Hello',
+      },
+    );
+
+    await Promise.resolve();
+    activeRun.abort();
+    const closedAcknowledgement = activeRun.closed();
+    await activeRun.result;
+
+    expect(await closedAcknowledgement).toEqual({
+      status: 'unresolved',
+      reason: 'persistence-failed',
+      error: readFailure,
+    });
+  });
+
+  it('resolves unresolved/persistence-failed when the post-cancel re-read returns no record (coordinator persistence-failed fixture)', async () => {
+    const { engine } = createManualDurableEngine();
+    engine.get = async () => null;
+
+    const runId = 'ac7-persistence-failed-null';
+    const activeRun = createDurableActiveRun(
+      { engine, checkpointStore: createManualCheckpointStore() },
+      {
+        runId,
+        sessionId: runId,
+        options: runOptions(async () => ({ content: 'unused', toolCalls: [] })),
+        prompt: 'Hello',
+      },
+    );
+
+    await Promise.resolve();
+    activeRun.abort();
+    const closedAcknowledgement = activeRun.closed();
+    await activeRun.result;
+
+    expect(await closedAcknowledgement).toEqual({
+      status: 'unresolved',
+      reason: 'persistence-failed',
+    });
+  });
+
+  // Regression: a code-review finding on the AB-204 pull request —
+  // `engine.cancel` resolving is not proof the cancellation record
+  // committed; a post-cancel re-read that still reports a NONTERMINAL
+  // status (not just a missing record) must not be reported completed.
+  it('resolves unresolved/persistence-failed when the post-cancel re-read reports a nonterminal status', async () => {
+    const { engine } = createManualDurableEngine();
+    engine.get = (async () => ({ status: 'running' })) as unknown as RegistryAgnosticEngine['get'];
+
+    const runId = 'ac7-persistence-failed-nonterminal';
+    const activeRun = createDurableActiveRun(
+      { engine, checkpointStore: createManualCheckpointStore() },
+      {
+        runId,
+        sessionId: runId,
+        options: runOptions(async () => ({ content: 'unused', toolCalls: [] })),
+        prompt: 'Hello',
+      },
+    );
+
+    await Promise.resolve();
+    activeRun.abort();
+    const closedAcknowledgement = activeRun.closed();
+    await activeRun.result;
+
+    expect(await closedAcknowledgement).toEqual({
+      status: 'unresolved',
+      reason: 'persistence-failed',
+    });
+  });
+
+  // Regression: a code-review finding on the AB-204 pull request — a second
+  // abort() (e.g. explicit abort() followed by dispose()) must not
+  // overwrite `cancelSettled` with a fresh, possibly slower or
+  // non-resolving, redundant `engine.cancel` call; closed() must keep
+  // waiting on the FIRST one.
+  it('does not fire a second engine.cancel call — and does not wait on one — when abort() is called twice after the workflow started', async () => {
+    const { engine, rejectResult } = createManualDurableEngine();
+    const cancelCalls: string[] = [];
+    let resolveFirstCancel!: () => void;
+    const firstCancelGate = new Promise<void>((resolve) => {
+      resolveFirstCancel = resolve;
+    });
+    engine.cancel = async (id: string) => {
+      cancelCalls.push(id);
+      if (cancelCalls.length === 1) {
+        await firstCancelGate;
+        // The real `cancel` rejects the workflow result as a side effect
+        // (the B6 race) — replicate that so the run still settles.
+        rejectResult(new Error('Workflow cancelled'));
+        return;
+      }
+      throw new Error('a second engine.cancel call should never have been made');
+    };
+    engine.get = (async () => ({
+      status: 'cancelled',
+    })) as unknown as RegistryAgnosticEngine['get'];
+
+    const runId = 'ac7-cancel-settled-idempotent';
+    const activeRun = createDurableActiveRun(
+      { engine, checkpointStore: createManualCheckpointStore() },
+      {
+        runId,
+        sessionId: runId,
+        options: runOptions(async () => ({ content: 'unused', toolCalls: [] })),
+        prompt: 'Hello',
+      },
+    );
+
+    await Promise.resolve();
+    activeRun.abort();
+    activeRun.abort();
+    expect(cancelCalls).toEqual([runId]);
+
+    const closedAcknowledgement = activeRun.closed();
+    resolveFirstCancel();
+    await activeRun.result;
+
+    expect(await closedAcknowledgement).toEqual({ status: 'completed' });
+    expect(cancelCalls).toEqual([runId]);
   });
 });
 
@@ -1865,6 +2333,194 @@ describe('reattachDurableActiveRun', () => {
 
     // engine.cancel ran exactly once despite both abort() and dispose().
     expect(cancelled).toEqual(['reattach-abort-then-dispose']);
+  });
+});
+
+describe('reattachDurableActiveRun.closed()', () => {
+  it('classifies an EngineDisposedError rejection of a pending result() waiter as unresolved/unreachable, never failed (AC8)', async () => {
+    const context = await buildContext();
+    try {
+      const disposedError = Object.assign(new Error('engine disposed'), {
+        code: 'EngineDisposedError',
+      });
+      const handle = {
+        id: 'reattach-closed-unreachable',
+        result: () => Promise.reject(disposedError),
+      };
+      const recoveredRun = reattachDurableActiveRun(
+        { engine: context.engine, checkpointStore: context.checkpointStore },
+        { runId: 'reattach-closed-unreachable', handle },
+      );
+
+      // The public `result` promise settles quietly (write-free path) rather
+      // than rejecting — see driveReattachedRun's own doc comment — so
+      // closed() cannot classify this from a rejection; it needs the
+      // `reachability` side channel this issue adds.
+      const result = await recoveredRun.result;
+      expect(result.finishReason).toBe('aborted');
+
+      expect(await recoveredRun.closed()).toEqual({ status: 'unresolved', reason: 'unreachable' });
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('resolves not-required immediately for a clean recovered completion with no cancellation and nothing in flight', async () => {
+    const context = await buildContext();
+    try {
+      const handle = {
+        id: 'reattach-closed-not-required',
+        result: () =>
+          Promise.resolve({
+            schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
+            runId: 'reattach-closed-not-required',
+            steps: 0,
+            content: 'done',
+            finishReason: 'stop-condition',
+          }),
+      };
+      const recoveredRun = reattachDurableActiveRun(
+        { engine: context.engine, checkpointStore: context.checkpointStore },
+        { runId: 'reattach-closed-not-required', handle },
+      );
+
+      await recoveredRun.result;
+      await Promise.resolve();
+
+      expect(await recoveredRun.closed()).toEqual({ status: 'not-required' });
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('withholds completed until the post-cancel re-read of getDurableRun observes status "cancelled"', async () => {
+    const context = await buildContext();
+    try {
+      let rejectResult!: (error: unknown) => void;
+      const handle = {
+        id: 'reattach-closed-cancel-confirmed',
+        result: () =>
+          new Promise<unknown>((_resolve, reject) => {
+            rejectResult = reject;
+          }),
+      };
+      let resolveGet!: (state: { status: string } | null) => void;
+      const getPromise = new Promise<{ status: string } | null>((resolve) => {
+        resolveGet = resolve;
+      });
+      const engine = {
+        cancel: async () => {
+          rejectResult(new Error('cancelled'));
+        },
+        get: async () => getPromise,
+      } as unknown as RegistryAgnosticEngine;
+
+      const recoveredRun = reattachDurableActiveRun(
+        { engine, checkpointStore: context.checkpointStore },
+        { runId: 'reattach-closed-cancel-confirmed', handle },
+      );
+
+      await Promise.resolve();
+      recoveredRun.abort();
+      const closedAcknowledgement = recoveredRun.closed();
+      await recoveredRun.result;
+
+      let settled = false;
+      void closedAcknowledgement.then(() => {
+        settled = true;
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(settled).toBe(false);
+
+      resolveGet({ status: 'cancelled' });
+
+      expect(await closedAcknowledgement).toEqual({ status: 'completed' });
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('resolves unresolved/persistence-failed when the post-cancel re-read throws', async () => {
+    const context = await buildContext();
+    try {
+      let rejectResult!: (error: unknown) => void;
+      const handle = {
+        id: 'reattach-closed-persistence-failed',
+        result: () =>
+          new Promise<unknown>((_resolve, reject) => {
+            rejectResult = reject;
+          }),
+      };
+      const readFailure = new Error('storage unavailable');
+      const engine = {
+        cancel: async () => {
+          rejectResult(new Error('cancelled'));
+        },
+        get: async () => {
+          throw readFailure;
+        },
+      } as unknown as RegistryAgnosticEngine;
+
+      const recoveredRun = reattachDurableActiveRun(
+        { engine, checkpointStore: context.checkpointStore },
+        { runId: 'reattach-closed-persistence-failed', handle },
+      );
+
+      await Promise.resolve();
+      recoveredRun.abort();
+      const closedAcknowledgement = recoveredRun.closed();
+      await recoveredRun.result;
+
+      expect(await closedAcknowledgement).toEqual({
+        status: 'unresolved',
+        reason: 'persistence-failed',
+        error: readFailure,
+      });
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  // Regression: a code-review finding on the AB-204 pull request — see
+  // `createDurableActiveRun.closed()`'s identical fixture for the full
+  // rationale.
+  it('resolves unresolved/persistence-failed when the post-cancel re-read reports a nonterminal status', async () => {
+    const context = await buildContext();
+    try {
+      let rejectResult!: (error: unknown) => void;
+      const handle = {
+        id: 'reattach-closed-nonterminal',
+        result: () =>
+          new Promise<unknown>((_resolve, reject) => {
+            rejectResult = reject;
+          }),
+      };
+      const engine = {
+        cancel: async () => {
+          rejectResult(new Error('cancelled'));
+        },
+        get: async () => ({ status: 'running' }),
+      } as unknown as RegistryAgnosticEngine;
+
+      const recoveredRun = reattachDurableActiveRun(
+        { engine, checkpointStore: context.checkpointStore },
+        { runId: 'reattach-closed-nonterminal', handle },
+      );
+
+      await Promise.resolve();
+      recoveredRun.abort();
+      const closedAcknowledgement = recoveredRun.closed();
+      await recoveredRun.result;
+
+      expect(await closedAcknowledgement).toEqual({
+        status: 'unresolved',
+        reason: 'persistence-failed',
+      });
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
   });
 });
 

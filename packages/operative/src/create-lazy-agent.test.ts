@@ -13,7 +13,7 @@ import {
 import { RunCompletedEvent } from './events';
 import type { RunnableAgent } from './runnable-agent';
 import { OPERATIVE_RESOLVE_RUN_OPTIONS } from './runnable-agent';
-import type { RunOptions, RunResult } from './types';
+import type { CleanupAcknowledgement, RunOptions, RunResult } from './types';
 
 // ---------------------------------------------------------------------------
 // Test doubles
@@ -61,6 +61,9 @@ function createFakeAgentRun(): {
     },
     abortChild(childId: string, reason?: string): void {
       abortChildCalls.push({ childId, reason });
+    },
+    closed(): Promise<CleanupAcknowledgement> {
+      return resultPromise.then(() => ({ status: 'completed' }) as const);
     },
     [Symbol.dispose](): void {
       disposed = true;
@@ -306,6 +309,116 @@ describe('createLazyAgent', () => {
     expect((result.error as AgentContractError).code).toBe('INVALID_AGENT_HANDLE');
   });
 
+  it('rejects a run() handle missing closed() (AB-204) as an AgentContractError, not a raw TypeError', async () => {
+    // Regression: a code-review finding on the AB-204 pull request — an
+    // untyped or older lazy-loaded handle predating closed() would
+    // otherwise pass this guard and only fail later, as a raw
+    // `TypeError: underlying.closed is not a function`, the first time
+    // this wrapper's own closed() delegates to it.
+    let disposed = false;
+    const preAb204Handle = {
+      result: () => Promise.resolve(successResult('x')),
+      unwrap: () => Promise.resolve('x'),
+      abort: () => {},
+      children: () => [],
+      abortChild: () => {},
+      [Symbol.dispose]: () => {
+        disposed = true;
+      },
+      [Symbol.asyncIterator]: () => (async function* () {})(),
+      // Deliberately omits `closed`.
+    } as unknown as AgentRun<string, false>;
+    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => preAb204Handle };
+    const lazy = createLazyAgent(() => agent, { label: 'pre-ab204-handle' });
+
+    const run = lazy.run('one');
+    const result = await run.result();
+    expect(result.error).toBeInstanceOf(AgentContractError);
+    expect((result.error as AgentContractError).code).toBe('INVALID_AGENT_HANDLE');
+    // Regression: a code-review finding on the AB-204 pull request —
+    // agent.run() already started this handle's underlying work before the
+    // validator rejected it; the rejection path must still dispose it
+    // rather than leaking provider/tool work unobserved.
+    expect(disposed).toBe(true);
+    // Regression: a code-review finding on the AB-204 pull request —
+    // cleanup was attempted, so this is not "nothing needed cleanup"
+    // (`not-required`); but a non-throwing `[Symbol.dispose]()` is not
+    // proof cleanup has actually completed either (the built-in `AgentRun`
+    // disposer, for example, only requests cancellation synchronously and
+    // lets the underlying work continue winding down) — without the
+    // rejected handle's own acknowledgement, closed() can only report
+    // `unresolved`/`unknown-effect`.
+    expect(await run.closed()).toEqual({ status: 'unresolved', reason: 'unknown-effect' });
+  });
+
+  it('rejects a run() handle that is null, not a raw TypeError probing its disposer', async () => {
+    // Regression: a code-review finding on the AB-204 pull request —
+    // `isValidAgentRunHandle(null)` correctly rejects a null handle, but
+    // probing `[Symbol.dispose]` on it directly (without checking it is an
+    // object first) would throw a raw TypeError outside the disposal
+    // `try`, rejecting the detached resolution task and leaving
+    // `resultPromise`/`closed()` pending forever instead of reaching
+    // `finalizeSynthetic()`.
+    const agent: RunnableAgent<string, false> = {
+      name: 'fake',
+      run: () => null as unknown as AgentRun<string, false>,
+    };
+    const lazy = createLazyAgent(() => agent, { label: 'null-handle' });
+
+    const run = lazy.run('one');
+    const result = await run.result();
+    expect(result.error).toBeInstanceOf(AgentContractError);
+    expect((result.error as AgentContractError).code).toBe('INVALID_AGENT_HANDLE');
+    expect(await run.closed()).toEqual({ status: 'unresolved', reason: 'unknown-effect' });
+  });
+
+  it('swallows a throwing [Symbol.dispose] on a rejected invalid handle without masking the AgentContractError, but still reports the disposal failure through closed()', async () => {
+    const disposalError = new Error('disposer itself is broken');
+    const preAb204Handle = {
+      result: () => Promise.resolve(successResult('x')),
+      unwrap: () => Promise.resolve('x'),
+      abort: () => {},
+      children: () => [],
+      abortChild: () => {},
+      [Symbol.dispose]: () => {
+        throw disposalError;
+      },
+      [Symbol.asyncIterator]: () => (async function* () {})(),
+      // Deliberately omits `closed`.
+    } as unknown as AgentRun<string, false>;
+    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => preAb204Handle };
+    const lazy = createLazyAgent(() => agent, { label: 'pre-ab204-handle-throwing-dispose' });
+
+    const run = lazy.run('one');
+    const result = await run.result();
+    expect(result.error).toBeInstanceOf(AgentContractError);
+    expect((result.error as AgentContractError).code).toBe('INVALID_AGENT_HANDLE');
+    // Regression: a code-review finding on the AB-204 pull request — a
+    // throwing disposer means cleanup genuinely failed; closed() must not
+    // silently claim `completed`/`not-required` for that.
+    expect(await run.closed()).toEqual({ status: 'failed', error: disposalError });
+  });
+
+  it('reports closed() as unresolved/unknown-effect for a rejected invalid handle with no disposer to call at all', async () => {
+    const noDisposeHandle = {
+      result: () => Promise.resolve(successResult('x')),
+      unwrap: () => Promise.resolve('x'),
+      abort: () => {},
+      children: () => [],
+      abortChild: () => {},
+      [Symbol.asyncIterator]: () => (async function* () {})(),
+      // Deliberately omits both `closed` and `[Symbol.dispose]`.
+    } as unknown as AgentRun<string, false>;
+    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => noDisposeHandle };
+    const lazy = createLazyAgent(() => agent, { label: 'no-dispose-handle' });
+
+    const run = lazy.run('one');
+    const result = await run.result();
+    expect(result.error).toBeInstanceOf(AgentContractError);
+
+    expect(await run.closed()).toEqual({ status: 'unresolved', reason: 'unknown-effect' });
+  });
+
   it('wraps a synchronous throw from the underlying run() as an AgentContractError', async () => {
     const agent: RunnableAgent<string, false> = {
       name: 'fake',
@@ -389,6 +502,43 @@ describe('createLazyAgent', () => {
     expect(result.error).toBeInstanceOf(AbortAgentRunError);
   });
 
+  it('closed() resolves completed once settled when no underlying run ever existed, cached across repeat calls (AB-204)', async () => {
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => (release = resolve));
+    const fake = createFakeAgentRun();
+    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };
+    const lazy = createLazyAgent(async () => {
+      await pending;
+      return agent;
+    });
+
+    const run = lazy.run('hello');
+    const closedAcknowledgement = run.closed();
+    run.abort('cancelled before load');
+    release();
+    await run.result();
+
+    const first = await closedAcknowledgement;
+    expect(first).toEqual({ status: 'completed' });
+    expect(await run.closed()).toBe(first);
+  });
+
+  // Regression: a code-review finding on the AB-204 pull request — closed()
+  // used to await `resultPromise` before ever consulting `options.signal`,
+  // so a caller-supplied timeout could not bound this call's wait; it just
+  // hung until the underlying agent resolved (or never, if the loader hangs).
+  it('closed({ signal }) resolves unresolved/timed-out promptly even while the underlying agent is still loading', async () => {
+    const neverResolves = new Promise<RunnableAgent<string, false>>(() => {});
+    const lazy = createLazyAgent(() => neverResolves);
+
+    const run = lazy.run('hello');
+    const controller = new AbortController();
+    const timedOutCall = run.closed({ signal: controller.signal });
+    controller.abort();
+
+    expect(await timedOutCall).toEqual({ status: 'unresolved', reason: 'timed-out' });
+  });
+
   it('emits an aborted event followed by completion when abort wins before resolution', async () => {
     let release!: () => void;
     const pending = new Promise<void>((resolve) => (release = resolve));
@@ -423,6 +573,113 @@ describe('createLazyAgent', () => {
     await run.result();
 
     expect(fake.abortCalls).toEqual(['first']);
+  });
+
+  it('closed() delegates to the underlying handle once one exists (AB-204)', async () => {
+    const fake = createFakeAgentRun();
+    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };
+    const lazy = createLazyAgent(() => agent);
+
+    const run = lazy.run('hello');
+    await flushMicrotasks();
+
+    const closedAcknowledgement = run.closed();
+    fake.settle(successResult('done'));
+
+    expect(await closedAcknowledgement).toEqual({ status: 'completed' });
+  });
+
+  // Regression: a code-review finding on the AB-204 pull request —
+  // [Symbol.dispose]() delegates straight to the underlying handle's own
+  // disposer without setting cancelRequested when underlying already
+  // exists, so a first closed() call after settlement could wrongly take
+  // the not-required fast path and skip delegation, potentially hiding a
+  // real underlying cleanup outcome. Uses a handle whose closed() reports
+  // something distinguishable from both `completed` and `not-required` to
+  // prove delegation genuinely happened.
+  it('marks the wrapper as cancelled when [Symbol.dispose]() is called after resolution, disqualifying the not-required fast path', async () => {
+    const closedFailure = {
+      status: 'failed',
+      error: new Error('underlying cleanup failed'),
+    } as const;
+    let resultSettled!: (result: RunResult<string, false>) => void;
+    const resultPromise = new Promise<RunResult<string, false>>((resolve) => {
+      resultSettled = resolve;
+    });
+    const underlyingHandle = {
+      result: () => resultPromise,
+      unwrap: () => resultPromise.then((r) => r.content),
+      abort() {},
+      children: () => [],
+      abortChild() {},
+      closed: () => Promise.resolve(closedFailure),
+      [Symbol.dispose]() {},
+      [Symbol.asyncIterator]: () => (async function* () {})(),
+    } as unknown as AgentRun<string, false>;
+    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => underlyingHandle };
+    const lazy = createLazyAgent(() => agent);
+
+    const run = lazy.run('hello');
+    await flushMicrotasks();
+
+    run[Symbol.dispose]();
+    resultSettled(successResult('done'));
+    await run.result();
+    await Promise.resolve();
+
+    expect(await run.closed()).toEqual(closedFailure);
+  });
+
+  it('closed() delegates to the underlying run once it exists, even with no cancellation (AB-204)', async () => {
+    // Regression: a code-review finding on the AB-204 pull request
+    // (PRRT_kwDORvupsc6esJjg) — once `underlying` exists, its own
+    // acknowledgement must always be consulted, even with no cancellation
+    // at all. An underlying run can fulfill `result()` with a nontrivial
+    // cleanup outcome entirely on its own (e.g. a durable Bureau path
+    // hitting an engine disposal it classifies `unresolved`/`unreachable`
+    // with no cancellation involved); taking the `not-required` fast path
+    // here instead would silently hide that. Same class of bug the session
+    // wrapper's `activeInnerRun` check already fixed
+    // (PRRT_kwDORvupsc6enump).
+    const fake = createFakeAgentRun();
+    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };
+    const lazy = createLazyAgent(() => agent);
+
+    const run = lazy.run('hello');
+    await flushMicrotasks();
+    fake.settle(successResult('done'));
+    await run.result();
+    await Promise.resolve();
+
+    // `createFakeAgentRun`'s `closed()` resolves `completed` once its
+    // result settles — this proves `underlying.closed()` was actually
+    // consulted, not a `not-required` fast path that never called it.
+    expect(await run.closed()).toEqual({ status: 'completed' });
+  });
+
+  // Regression: a code-review finding on the AB-204 pull request — once
+  // `underlying` exists, this wrapper detaches its own `context.signal`
+  // listener and ownership transfers directly to the underlying agent's
+  // run() (see `detachSignalListener`). A cancellation delivered through
+  // that same signal AFTER detachment never sets `cancelRequested`, so the
+  // disqualifier must still read the signal directly.
+  it('closed() disqualifies not-required when context.signal fires after this wrapper has already detached its own listener', async () => {
+    const fake = createFakeAgentRun();
+    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };
+    const lazy = createLazyAgent(() => agent);
+    const controller = new AbortController();
+
+    const run = lazy.run('hello', { signal: controller.signal });
+    await flushMicrotasks();
+    fake.settle(successResult('done'));
+    await run.result();
+    await Promise.resolve();
+
+    // Fires AFTER settlement — well after this wrapper's own listener
+    // (detached once `underlying` was stored) could ever observe it.
+    controller.abort('fired after detachment');
+
+    expect(await run.closed()).not.toEqual({ status: 'not-required' });
   });
 
   it('children()/abortChild() read empty/no-op before resolution and delegate to the underlying handle once resolved', async () => {
@@ -653,6 +910,7 @@ describe('createLazyAgent', () => {
       abort() {},
       children: () => [],
       abortChild() {},
+      closed: () => Promise.resolve({ status: 'completed' }),
       [Symbol.dispose]() {},
       [Symbol.asyncIterator](): AsyncIterator<RunEvent> {
         return {
@@ -683,6 +941,7 @@ describe('createLazyAgent', () => {
       abort() {},
       children: () => [],
       abortChild() {},
+      closed: () => Promise.resolve({ status: 'completed' }),
       [Symbol.dispose]() {},
       [Symbol.asyncIterator](): AsyncIterator<RunEvent> {
         return {
@@ -781,6 +1040,7 @@ describe('createLazyAgent', () => {
       abort() {},
       children: () => [],
       abortChild() {},
+      closed: () => Promise.resolve({ status: 'completed' }),
       [Symbol.dispose]() {},
       [Symbol.asyncIterator](): AsyncIterator<RunEvent> {
         return {

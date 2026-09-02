@@ -18,7 +18,7 @@
 import type { ChildRunDescriptor, ChildRunRegistry } from './child-run';
 import type { ActiveRun } from './create-run';
 import type { CombinedOperativeEventMap, CombinedOperativeEventType } from './events';
-import type { RunResult, RunResultBase } from './types';
+import type { CleanupAcknowledgement, ClosedOptions, RunResult, RunResultBase } from './types';
 
 export type { ChildRunDescriptor, ChildRunRegistry } from './child-run';
 
@@ -112,6 +112,14 @@ export type AgentRun<O = never, H extends boolean = false> = AsyncIterable<RunEv
     abortChild(childId: string, reason?: string): void;
 
     /**
+     * A truthful cleanup acknowledgement (AB-37 / AB-204). Delegates to the
+     * wrapped `ActiveRun.closed()` and returns the identical
+     * `CleanupAcknowledgement` object the wrapped call produces — never
+     * rejects, and idempotent after genuine settlement.
+     */
+    closed(options?: ClosedOptions): Promise<CleanupAcknowledgement>;
+
+    /**
      * Dispose the run handle and release internal resources. Equivalent to
      * `abort()` when the run is still in flight.
      */
@@ -126,6 +134,16 @@ export interface DiagnosticAgentRun extends AsyncIterable<RunEvent> {
   children(): readonly ChildRunDescriptor[];
   /** See `AgentRun.abortChild()` — AB-34 applies the same capability here. */
   abortChild(childId: string, reason?: string): void;
+  /**
+   * A cleanup acknowledgement (AB-37 / AB-204). Durability is undeterminable
+   * from a recovered wrapper (declared gap, AB-88), so a wrapped
+   * `ActiveRun.closed()` outcome of `'completed'` — the one status that would
+   * assert the durable boundary this handle cannot vouch for — is downgraded
+   * to `{ status: 'unresolved', reason: 'unknown-effect' }`. Every other
+   * outcome (`not-required`, `failed`, or an already-`unresolved` result)
+   * passes through identically.
+   */
+  closed(options?: ClosedOptions): Promise<CleanupAcknowledgement>;
   [Symbol.dispose](): void;
 }
 
@@ -369,6 +387,10 @@ export function createAgentRun<O = never, H extends boolean = false>(
       childRegistry?.abortChild(childId, reason);
     },
 
+    closed(options?: ClosedOptions): Promise<CleanupAcknowledgement> {
+      return activeRun.closed(options);
+    },
+
     [Symbol.dispose](): void {
       activeRun[Symbol.dispose]();
     },
@@ -526,5 +548,62 @@ export function createDiagnosticAgentRun(
   };
   delete run.unwrap;
   delete run.output;
+
+  // Durability cannot be determined from an `ActiveRun` wrapper alone
+  // (declared gap, AB-88 owns handle identity). `closed()` therefore never
+  // asserts the wrapped call's `'completed'` on this handle's behalf — that
+  // status is the one that would otherwise promise a durable boundary this
+  // recovered handle cannot vouch for. Every other outcome (`not-required`,
+  // `failed`, or an already-`unresolved` result) is returned unchanged. A
+  // per-call `signal` timeout (`{ status: 'unresolved', reason: 'timed-out' }`)
+  // is inherently call-scoped, never a genuine settlement, so it passes
+  // through uncached, matching the wrapped `ActiveRun.closed()` contract.
+  let cachedDiagnosticAcknowledgement: CleanupAcknowledgement | undefined;
+  // The pending TRANSFORM itself is memoized, not just its eventual value —
+  // two concurrent calls before the first transformation finishes must
+  // share the identical downgraded object once it settles, rather than
+  // each independently allocating their own `unresolved`/`unknown-effect`
+  // literal. Called with no signal: a signal-bearing call races ITS OWN
+  // wait against this shared promise below instead of forwarding the
+  // signal into a second, separate `activeRun.closed()` invocation.
+  let pendingDiagnosticAcknowledgement: Promise<CleanupAcknowledgement> | undefined;
+  function getPendingDiagnosticAcknowledgement(): Promise<CleanupAcknowledgement> {
+    if (cachedDiagnosticAcknowledgement) return Promise.resolve(cachedDiagnosticAcknowledgement);
+    pendingDiagnosticAcknowledgement ??= activeRun.closed().then((acknowledgement) => {
+      const resolved: CleanupAcknowledgement =
+        acknowledgement.status === 'completed'
+          ? { status: 'unresolved', reason: 'unknown-effect' }
+          : acknowledgement;
+      cachedDiagnosticAcknowledgement = resolved;
+      return resolved;
+    });
+    return pendingDiagnosticAcknowledgement;
+  }
+
+  run.closed = (closedOptions?: ClosedOptions): Promise<CleanupAcknowledgement> => {
+    const settlement = getPendingDiagnosticAcknowledgement();
+    const signal = closedOptions?.signal;
+    if (!signal) return settlement;
+
+    if (cachedDiagnosticAcknowledgement) return Promise.resolve(cachedDiagnosticAcknowledgement);
+    if (signal.aborted) return Promise.resolve({ status: 'unresolved', reason: 'timed-out' });
+
+    return new Promise<CleanupAcknowledgement>((resolve) => {
+      let callSettled = false;
+      const onAbort = (): void => {
+        if (callSettled) return;
+        callSettled = true;
+        resolve({ status: 'unresolved', reason: 'timed-out' });
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+      void settlement.then((acknowledgement) => {
+        if (callSettled) return;
+        callSettled = true;
+        signal.removeEventListener('abort', onAbort);
+        resolve(acknowledgement);
+      });
+    });
+  };
+
   return run;
 }
