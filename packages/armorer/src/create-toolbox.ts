@@ -1318,6 +1318,13 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
                 errorMessage: toolError.message,
                 errorCategory: toolError.category,
               };
+              // Companion `error` event, mirroring the `budget-exceeded`
+              // rejection immediately above: without it, a `loop-blocked`
+              // rejection is invisible to operative's `tool.error`
+              // forwarders (`create-run.ts`, `active-run-adapter.ts`), which
+              // observe the toolbox only through this normalized `error`
+              // event, never `loop-blocked` directly (AB-231).
+              emit('error', { tool, result: blocked });
               return blocked;
             }
             if (loopResult.detected) {

@@ -10,6 +10,8 @@ import {
   AbortAgentRunError,
   AgentRunError,
   agentRunErrorToJSON,
+  BudgetExceededError,
+  reclassifyToolError,
   serializeAgentRunError,
 } from '../src/errors';
 import { createMockGenerate } from '../src/test/index';
@@ -279,5 +281,47 @@ describe('error handling', () => {
     expect(eventError?.kind).toBe('generate');
     expect(eventError?.code).toBe('UNKNOWN');
     expect(eventError?.cause).toBe(thrownError);
+  });
+});
+
+describe('reclassifyToolError (AB-231)', () => {
+  it('reclassifies a thrown armorer ToolError carrying code BUDGET_EXCEEDED as a BudgetExceededError', () => {
+    const toolError = {
+      code: 'BUDGET_EXCEEDED',
+      category: 'conflict',
+      retryable: false,
+      message: 'Budget exceeded: max calls 1',
+    };
+
+    const result = reclassifyToolError(toolError);
+
+    expect(result).toBeInstanceOf(BudgetExceededError);
+    expect((result as BudgetExceededError).message).toBe('Budget exceeded: max calls 1');
+  });
+
+  it('leaves a ToolError with a different code unchanged', () => {
+    const toolError = {
+      code: 'EXECUTION_ERROR',
+      category: 'internal',
+      retryable: false,
+      message: 'boom',
+    };
+
+    expect(reclassifyToolError(toolError)).toBe(toolError);
+  });
+
+  it('leaves a non-ToolError value unchanged', () => {
+    const plainError = new Error('not a tool error');
+    expect(reclassifyToolError(plainError)).toBe(plainError);
+  });
+
+  it('leaves a ToolError-shaped object missing required fields unchanged', () => {
+    const almostToolError = { code: 'BUDGET_EXCEEDED', message: 'missing fields' };
+    expect(reclassifyToolError(almostToolError)).toBe(almostToolError);
+  });
+
+  it('leaves null and primitive values unchanged', () => {
+    expect(reclassifyToolError(null)).toBeNull();
+    expect(reclassifyToolError('a string error')).toBe('a string error');
   });
 });

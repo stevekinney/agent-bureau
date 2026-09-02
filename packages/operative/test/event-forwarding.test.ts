@@ -283,4 +283,44 @@ describe('event forwarding', () => {
     expect(events).toContain('tool.progress');
     expect(events).toContain('tool.policy-denied');
   });
+
+  it('forwards a loop-blocked rejection to the run layer as a non-silent toolbox.error signal (AB-231)', async () => {
+    const responses: GenerateResponse[] = [];
+    for (let i = 0; i < 5; i++) {
+      responses.push(toolCallResponse([weatherToolCall('Denver')]));
+    }
+    responses.push(textResponse('Done.'));
+    const generate = createMockGenerate(responses);
+
+    const toolbox = createToolbox([weatherTool], {
+      loopDetection: { warningThreshold: 2, blockThreshold: 4, windowSize: 30 },
+    });
+    const conversation = new Conversation();
+
+    const activeRun = createActiveRun({
+      generate,
+      toolbox,
+      conversation,
+      stopWhen: noToolCalls(),
+    });
+
+    const forwardedErrorEvents: Array<{ originalEvent: unknown }> = [];
+    activeRun.addEventListener('toolbox.error', (event) => {
+      forwardedErrorEvents.push(event as { originalEvent: unknown });
+    });
+
+    await activeRun.result;
+
+    expect(forwardedErrorEvents.length).toBeGreaterThan(0);
+    const loopBlockedError = forwardedErrorEvents.find((e) => {
+      const original = e.originalEvent as {
+        result?: { error?: { code?: string }; errorCategory?: string };
+      };
+      return (
+        original.result?.error?.code === 'LOOP_BLOCKED' &&
+        original.result?.errorCategory === 'conflict'
+      );
+    });
+    expect(loopBlockedError).toBeDefined();
+  });
 });

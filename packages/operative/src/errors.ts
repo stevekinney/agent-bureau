@@ -1,3 +1,4 @@
+import type { ToolError } from 'armorer';
 import { ZodError, type ZodIssue } from 'zod';
 
 import { isToolCallParseError } from './providers/errors.ts';
@@ -145,6 +146,46 @@ export class BudgetExceededError extends AgentRunError {
     super(message ?? '', { kind: 'policy', code: 'BUDGET_EXCEEDED' });
     this.name = 'BudgetExceededError';
   }
+}
+
+/**
+ * Narrows an unknown thrown value to an armorer {@link ToolError} carrying
+ * `code: 'BUDGET_EXCEEDED'` — the shape `create-toolbox.ts`'s `checkBudget`
+ * path throws in `failFast` mode. Armorer's `ToolError` is a plain object
+ * (not an `Error` subclass), so this checks the interface's required fields
+ * rather than using `instanceof`.
+ */
+function isBudgetExceededToolError(error: unknown): error is ToolError {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    'category' in error &&
+    'message' in error &&
+    'retryable' in error &&
+    error.code === 'BUDGET_EXCEEDED'
+  );
+}
+
+/**
+ * Re-classifies a thrown armorer `ToolError` carrying `code: 'BUDGET_EXCEEDED'`
+ * as a {@link BudgetExceededError} before it reaches {@link toAgentRunError} /
+ * `makeErrorResult`'s `instanceof` classification (AB-231).
+ *
+ * A toolbox-level, per-call, `failFast` budget rejection
+ * (`packages/armorer/src/create-toolbox.ts`'s `checkBudget` path) throws a
+ * generic `ToolError` stamped `code: 'BUDGET_EXCEEDED'`, not a
+ * `BudgetExceededError` — armorer sits below operative in the dependency
+ * graph (operative depends on armorer, never the reverse), so it cannot
+ * construct or throw operative's `BudgetExceededError` directly. Without this
+ * reclassification, `makeErrorResult`'s `runError instanceof
+ * BudgetExceededError` check falls through and `run.completed`'s
+ * `finishReason` resolves to `'error'` instead of `'budget-exceeded'`, losing
+ * the toolbox rejection's budget semantics at the run boundary. Any other
+ * error is returned unchanged.
+ */
+export function reclassifyToolError(error: unknown): unknown {
+  return isBudgetExceededToolError(error) ? new BudgetExceededError(error.message) : error;
 }
 
 /** Raised when a lazily loaded agent definition cannot be resolved. */
