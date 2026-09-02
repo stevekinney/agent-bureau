@@ -355,7 +355,7 @@ export type SteeringTargetKind =
  * `override` (an exact value), encoded as an exclusive pair — `policyRef?:
  * never` on the `override` arm and `override?: never` on the `policyRef`
  * arm — rather than two same-discriminant variants, so a literal supplying
- * both, or neither, fields the type checker rejects at compile time (AB-67's
+ * both fields, or neither, is rejected by the type checker at compile time (AB-67's
  * 2026-09-02 coordinator amendments). The runtime admission check that
  * exactly one is present stays as defense in depth.
  */
