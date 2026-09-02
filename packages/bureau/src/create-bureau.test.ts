@@ -4333,13 +4333,18 @@ describe('recordedSessionAuthorityPrincipalId / isSessionAuthorityAuthorized (AB
     expect(principalId).toBe('alice');
   });
 
-  it('falls back to the legacy lastRequestAuthority when lastRequestAuthorities has no entry for lastRunId', () => {
-    // Regression: a completed/aborted/errored run's lastRequestAuthorities[lastRunId]
-    // entry is pruned on terminal transition while lastRequestAuthority is retained
-    // (create-bureau.ts's terminal cleanup near `remainingAuthorities`). The map
-    // itself is present here — just missing THIS run's entry — the exact shape a
-    // terminal session actually has, not merely the map's total absence.
-    const principalId = recordedSessionAuthorityPrincipalId({
+  it('does NOT fall back to legacy when lastRequestAuthorities is non-empty but uncorrelated to lastRunId (concurrent-run shape) — fails closed instead', () => {
+    // Regression (Codex review, fifth pass): a non-empty map holding some
+    // OTHER run's entry, alongside a legacy field, is exactly the shape two
+    // concurrent runs on one session produce — run B's dispatch overwrites
+    // the singular legacy field with B's authority while A is still running;
+    // A's own terminal cleanup later prunes only A's key, leaving B's
+    // (unrelated) entry and B's legacy authority behind. Trusting legacy
+    // here would authorize B's principal against A's terminal session. This
+    // is checked BEFORE the legacy fallback specifically to prevent that:
+    // a non-empty-but-uncorrelated map fails closed rather than consulting
+    // an unrelated concurrent run's legacy authority.
+    const metadata = {
       lastRunId: 'run-1',
       lastRequestAuthorities: {
         'some-other-run': {
@@ -4357,8 +4362,10 @@ describe('recordedSessionAuthorityPrincipalId / isSessionAuthorityAuthorized (AB
         capabilities: ['tools:execute'],
         authorizationRevision: 'bureau:1',
       },
-    });
-    expect(principalId).toBe('legacy-alice');
+    };
+    expect(recordedSessionAuthorityPrincipalId(metadata)).toBeUndefined();
+    expect(isSessionAuthorityAuthorized(metadata, 'legacy-alice')).toBe(false);
+    expect(isSessionAuthorityAuthorized(metadata, 'someone-else')).toBe(false);
   });
 
   it('falls back to the legacy lastRequestAuthority when lastRequestAuthorities is an empty object', () => {

@@ -258,10 +258,16 @@ export function hasRecoverableTransportAuthority(metadata: Record<string, JSONVa
  * read as "open" — a corrupted or partially-written persistence record must
  * not silently grant access. This is why a per-run entry present-but-malformed
  * does NOT fall back to the legacy field the way a genuinely absent per-run
- * entry does: falling back would suppress a valid legacy authority's absence
- * of relevance here (the per-run entry, once written, is authoritative for
- * that run) and conflating "absent" with "malformed" is exactly the class of
- * bug this distinction exists to prevent.
+ * entry does: once a per-run entry exists, it is authoritative for that run,
+ * so silently falling through past a corrupted record would suppress exactly
+ * the failure this distinction exists to catch — conflating "absent" with
+ * "malformed" is the class of bug this whole function guards against.
+ *
+ * The same reasoning extends to a non-empty-but-uncorrelated
+ * `lastRequestAuthorities` map (see below): it is checked BEFORE the legacy
+ * fallback, not after, because that exact shape is what two concurrent runs
+ * on one session produce, and the legacy field may belong to the OTHER,
+ * unrelated run — see the concurrent-run correlation note below.
  *
  * A completed/aborted/errored run's `lastRequestAuthorities[lastRunId]` entry
  * is pruned on terminal transition (see the cleanup near `remainingAuthorities`
@@ -296,15 +302,20 @@ function lookupSessionAuthority(
   let candidate: JSONValue | undefined;
   if (perRunEntry !== undefined) {
     candidate = perRunEntry;
-  } else if (legacy !== undefined) {
-    candidate = legacy;
   } else if (authorities !== undefined && Object.keys(authorities).length > 0) {
     // A valid, non-empty `lastRequestAuthorities` map exists but doesn't
     // correlate to this run (`lastRunId` missing/corrupt, or the map's
-    // entries are keyed to other runs) and no legacy fallback exists either.
-    // That is recorded-but-uncorrelated evidence, not "nothing recorded" —
-    // fail closed rather than read it as an open session.
+    // entries are keyed to other runs). Checked BEFORE the legacy fallback,
+    // not after: this exact shape is what two concurrent runs on one session
+    // produce — run B's dispatch overwrites the singular legacy field with
+    // B's authority while A is still running, so trusting legacy here would
+    // authorize B's principal against A's (still-uncorrelated) run. A
+    // non-empty-but-uncorrelated map is recorded-but-uncorrelated evidence,
+    // not "nothing recorded" — fail closed rather than consult a legacy
+    // field that may belong to an unrelated concurrent run.
     return { recorded: true, principalId: undefined };
+  } else if (legacy !== undefined) {
+    candidate = legacy;
   } else {
     return { recorded: false };
   }
