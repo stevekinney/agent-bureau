@@ -236,10 +236,13 @@ export class ToolProgressEvent extends Event {
   static readonly type = 'progress' as const;
   readonly percent?: number;
   readonly message?: string;
-  constructor(detail: { percent?: number; message?: string }) {
+  /** Verbatim checkpoint value; never re-serialized or reconstructed. */
+  readonly checkpoint?: unknown;
+  constructor(detail: { percent?: number; message?: string; checkpoint?: unknown }) {
     super(ToolProgressEvent.type);
     this.percent = detail.percent;
     this.message = detail.message;
+    this.checkpoint = detail.checkpoint;
   }
 }
 
