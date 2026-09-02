@@ -64,9 +64,14 @@ runCloudflareBackendContract({
     },
   ],
   createBindings(): Promise<CloudflareContractBindings> {
+    // A fresh Durable Object namespace and a fresh R2 key prefix per case —
+    // not `realLane.sqliteStorage`/`realLane.r2Bucket` directly — so each
+    // contract case runs against a clean slate, the same isolation the fast
+    // double gets from a fresh `createSqliteDouble()`/`createFakeR2()` per
+    // call, without paying to boot a whole new lane per case.
     return Promise.resolve({
-      sqliteStorage: realLane.sqliteStorage,
-      r2Store: createCloudflareR2TextValueStore({ bucket: realLane.r2Bucket }),
+      sqliteStorage: realLane.createFreshSqliteStorage(),
+      r2Store: createCloudflareR2TextValueStore({ bucket: realLane.createFreshR2Bucket() }),
       memoryRecordStorage: undefined,
     });
   },

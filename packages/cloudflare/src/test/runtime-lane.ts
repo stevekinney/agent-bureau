@@ -10,7 +10,7 @@ import type {
   StorageCapabilities,
 } from '@lostgradient/weft/storage/interface';
 
-import type { R2Bucket } from '../r2';
+import type { R2Bucket, R2ListOptions, R2ListResult } from '../r2';
 
 /**
  * Injects the identifier this lane derives its Durable Object namespace and
@@ -28,6 +28,15 @@ export interface CloudflareRuntimeLaneIdentifierSource {
 export interface StartCloudflareRuntimeOptions {
   /** Supplies the namespace/storage-directory identifier for this lane. */
   identifiers: CloudflareRuntimeLaneIdentifierSource;
+  /**
+   * Overrides the `packages/cloudflare` root `buildDurableObjectWorkerScript`
+   * bundles `create-cloudflare-sqlite-storage.ts` from. Defaults to this
+   * module's real package root; the only legitimate reason to override it is
+   * to test the startup-failure cleanup path (`runtime-only.test.ts`) with a
+   * root that cannot resolve the adapter, since a genuine bundling failure
+   * isn't otherwise reproducible on demand.
+   */
+  packageRoot?: string;
 }
 
 /**
@@ -48,6 +57,20 @@ export interface CloudflareRuntimeLane {
   readonly vectorizeRemoteOnlyError: string;
   /** The temporary directory this lane's Durable Object and R2 state live in. */
   readonly persistDirectory: string;
+  /**
+   * A fresh, isolated `Storage` view over a NEW Durable Object namespace
+   * under this lane — for a contract runner that needs a clean slate per
+   * case without paying to boot a whole new lane. Independent of
+   * {@link sqliteStorage}, which stays fixed to this lane's original
+   * namespace.
+   */
+  createFreshSqliteStorage(): Storage;
+  /**
+   * A fresh, isolated `R2Bucket` view over this lane's one underlying R2
+   * bucket, namespaced by a unique key prefix. Independent of
+   * {@link r2Bucket}, which stays unprefixed.
+   */
+  createFreshR2Bucket(): R2Bucket;
   /**
    * Disposes the underlying Miniflare instance and removes
    * {@link persistDirectory}. Awaits only the runtime's own readiness/disposal
@@ -95,6 +118,9 @@ interface StorageRpcResponse {
 export interface StorageRpcTransport {
   (input: string, init?: { method?: string; body?: string }): Promise<{ json(): Promise<unknown> }>;
 }
+
+/** The dynamically-imported `miniflare` module's own type, used only for `Miniflare`'s instance type. */
+type MiniflareModule = typeof import('miniflare');
 
 /**
  * Builds the Durable Object worker script that runs `createCloudflareSqliteStorage`
@@ -393,43 +419,110 @@ export async function startCloudflareRuntime(
 ): Promise<CloudflareRuntimeLane> {
   const { Miniflare } = await import('miniflare');
 
-  const packageRoot = path.resolve(import.meta.dir, '..', '..');
+  const packageRoot = options.packageRoot ?? path.resolve(import.meta.dir, '..', '..');
   const identifier = options.identifiers.next();
   const persistDirectory = await mkdtemp(
     path.join(tmpdir(), `cloudflare-runtime-lane-${identifier}-`),
   );
-  const namespace = `lane-${identifier}`;
-  const script = await buildDurableObjectWorkerScript(packageRoot);
 
-  const miniflare = new Miniflare({
-    modules: [{ type: 'ESModule', path: 'runtime-lane-worker.mjs', contents: script }],
-    compatibilityDate: '2026-07-30',
-    durableObjects: { STORE: { className: 'RuntimeLaneStore', useSQLite: true } },
-    durableObjectsPersist: path.join(persistDirectory, 'durable-objects'),
-    r2Buckets: { BUCKET: `cloudflare-runtime-lane-${identifier}` },
-    r2Persist: path.join(persistDirectory, 'r2'),
-    vectorize: { INDEX: { index_name: `cloudflare-runtime-lane-${identifier}` } },
-  });
+  // Everything from here on can fail (bundling, `ready`, the Vectorize
+  // probe, `getR2Bucket`). If it does, no lane is ever returned to the
+  // caller, so nothing could call `shutdown()` — clean up here instead of
+  // leaking `persistDirectory` or a live Miniflare/workerd instance.
+  let miniflare: InstanceType<MiniflareModule['Miniflare']> | undefined;
+  try {
+    const namespace = `lane-${identifier}`;
+    const script = await buildDurableObjectWorkerScript(packageRoot);
 
-  await miniflare.ready;
+    miniflare = new Miniflare({
+      modules: [{ type: 'ESModule', path: 'runtime-lane-worker.mjs', contents: script }],
+      compatibilityDate: '2026-07-30',
+      durableObjects: { STORE: { className: 'RuntimeLaneStore', useSQLite: true } },
+      durableObjectsPersist: path.join(persistDirectory, 'durable-objects'),
+      r2Buckets: { BUCKET: `cloudflare-runtime-lane-${identifier}` },
+      r2Persist: path.join(persistDirectory, 'r2'),
+      vectorize: { INDEX: { index_name: `cloudflare-runtime-lane-${identifier}` } },
+    });
 
-  const dispatchFetch: StorageRpcTransport = miniflare.dispatchFetch.bind(miniflare);
+    await miniflare.ready;
 
-  const probeResponse = await dispatchFetch('http://cloudflare-runtime-lane/vectorize-probe');
-  const probeBody = (await probeResponse.json()) as StorageRpcResponse;
-  const vectorizeRemoteOnlyError =
-    probeBody.error ?? 'Miniflare Vectorize binding unexpectedly succeeded without a remote proxy.';
+    const dispatchFetch: StorageRpcTransport = miniflare.dispatchFetch.bind(miniflare);
 
-  const r2Bucket: R2Bucket = await miniflare.getR2Bucket('BUCKET');
+    const probeResponse = await dispatchFetch('http://cloudflare-runtime-lane/vectorize-probe');
+    const probeBody = (await probeResponse.json()) as StorageRpcResponse;
+    const vectorizeRemoteOnlyError =
+      probeBody.error ??
+      'Miniflare Vectorize binding unexpectedly succeeded without a remote proxy.';
 
+    const r2Bucket: R2Bucket = await miniflare.getR2Bucket('BUCKET');
+    const bootedMiniflare = miniflare;
+
+    return {
+      sqliteStorage: createSqliteStorageProxy(dispatchFetch, namespace),
+      r2Bucket,
+      vectorizeRemoteOnlyError,
+      persistDirectory,
+      createFreshSqliteStorage(): Storage {
+        return createSqliteStorageProxy(
+          dispatchFetch,
+          `${namespace}-${options.identifiers.next()}`,
+        );
+      },
+      createFreshR2Bucket(): R2Bucket {
+        return createPrefixedR2Bucket(r2Bucket, `${options.identifiers.next()}/`);
+      },
+      async shutdown(): Promise<void> {
+        await bootedMiniflare.dispose();
+        await rm(persistDirectory, { recursive: true, force: true });
+      },
+    };
+  } catch (error) {
+    await cleanUpAfterStartupFailure(miniflare, persistDirectory);
+    throw error;
+  }
+}
+
+/**
+ * Cleans up after `startCloudflareRuntime` fails partway through: disposes
+ * `miniflareInstance` when construction got far enough to produce one, then
+ * always removes `persistDirectory`. Extracted so the "was a Miniflare
+ * instance actually constructed before the failure" branch is directly
+ * testable without needing to force a failure at each specific point inside
+ * `startCloudflareRuntime` that could produce one.
+ */
+export async function cleanUpAfterStartupFailure(
+  miniflareInstance: { dispose(): Promise<void> } | undefined,
+  persistDirectory: string,
+): Promise<void> {
+  if (miniflareInstance !== undefined) await miniflareInstance.dispose();
+  await rm(persistDirectory, { recursive: true, force: true });
+}
+
+/**
+ * Wraps a shared R2 bucket binding so every key is transparently namespaced
+ * under `prefix`. Miniflare's R2 buckets are fixed at construction (one
+ * `BUCKET` binding per lane), so per-contract-case isolation for R2 — unlike
+ * the Durable Object SQLite proxy, which gets a genuinely fresh namespace per
+ * case — is a key prefix rather than a fresh underlying bucket.
+ */
+function createPrefixedR2Bucket(bucket: R2Bucket, prefix: string): R2Bucket {
   return {
-    sqliteStorage: createSqliteStorageProxy(dispatchFetch, namespace),
-    r2Bucket,
-    vectorizeRemoteOnlyError,
-    persistDirectory,
-    async shutdown(): Promise<void> {
-      await miniflare.dispose();
-      await rm(persistDirectory, { recursive: true, force: true });
+    head: (key: string) => bucket.head(`${prefix}${key}`),
+    get: (key: string) => bucket.get(`${prefix}${key}`),
+    put: (key: string, value: string) => bucket.put(`${prefix}${key}`, value),
+    delete: (key: string) => bucket.delete(`${prefix}${key}`),
+    async list(listOptions?: R2ListOptions): Promise<R2ListResult> {
+      const result = await bucket.list({
+        ...listOptions,
+        prefix: `${prefix}${listOptions?.prefix ?? ''}`,
+      });
+      return {
+        ...result,
+        objects: result.objects.map((object) => ({
+          ...object,
+          key: object.key.slice(prefix.length),
+        })),
+      };
     },
   };
 }

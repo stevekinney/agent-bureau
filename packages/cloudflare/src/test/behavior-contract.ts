@@ -237,6 +237,14 @@ export function runCloudflareBackendContract(options: RunCloudflareBackendContra
         expect(await r2Store.get('r2:contract-key')).toBeNull();
       });
 
+      it('reports has() for present and absent keys', async () => {
+        const { r2Store } = await createBindings();
+        await r2Store.set('r2:has-present', 'value');
+
+        expect(await r2Store.has('r2:has-present')).toBe(true);
+        expect(await r2Store.has('r2:has-absent')).toBe(false);
+      });
+
       it('lists keys under a prefix', async () => {
         const { r2Store } = await createBindings();
 

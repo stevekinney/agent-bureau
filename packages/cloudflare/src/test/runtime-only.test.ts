@@ -1,9 +1,11 @@
-import { readdir } from 'node:fs/promises';
+import { mkdtemp, readdir } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 
 import { afterEach, describe, expect, it } from 'bun:test';
 
 import { createCloudflareR2TextValueStore } from '../create-cloudflare-r2-text-value-store';
 import {
+  cleanUpAfterStartupFailure,
   type CloudflareRuntimeLane,
   createSqliteStorageProxy,
   startCloudflareRuntime,
@@ -100,5 +102,62 @@ describe('Cloudflare real-runtime lane (runtime-only)', () => {
       caughtMessage = error instanceof Error ? error.message : String(error);
     }
     expect(caughtMessage).toBe('simulated worker failure');
+  });
+
+  it(// A double never boots a process or allocates a persistence directory,
+  // so there is nothing to leak on a construction failure — only the real
+  // lane needs to prove that a failed `startCloudflareRuntime()` still
+  // cleans up (`packageRoot` is a test-only override for exactly this: a
+  // genuine bundling failure isn't otherwise reproducible on demand).
+  'cleans up its persistence directory and any booted Miniflare instance when startup fails', async () => {
+    const failingIdentifier = nextIdentifier();
+
+    let thrown: unknown;
+    try {
+      await startCloudflareRuntime({
+        identifiers: { next: () => failingIdentifier },
+        packageRoot: '/nonexistent-cloudflare-package-root-for-failure-testing',
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(Error);
+
+    // The failed lane never returned, so its `persistDirectory` was never
+    // observable from here — recover the exact path it would have used
+    // (deterministic from the injected identifier) and confirm it does
+    // not exist.
+    const entries = await readdir(tmpdir());
+    const leaked = entries.filter((entry) =>
+      entry.includes(`cloudflare-runtime-lane-${failingIdentifier}-`),
+    );
+    expect(leaked).toEqual([]);
+  });
+
+  it(// A real startup failure late enough to have already constructed a
+  // Miniflare instance (`ready`/the Vectorize probe/`getR2Bucket`, all
+  // after `new Miniflare()` succeeds) isn't reproducible on demand the way
+  // the bundling failure above is — `cleanUpAfterStartupFailure` is
+  // exported from `runtime-lane.ts` specifically so this "an instance WAS
+  // constructed" branch is exercised directly, with a disposable stub, no
+  // real runtime failure is a double substitute for.
+  'disposes an already-constructed Miniflare instance during startup-failure cleanup', async () => {
+    let disposeCallCount = 0;
+    const persistDirectory = await mkdtemp(`${tmpdir()}/cleanup-branch-probe-`);
+
+    await cleanUpAfterStartupFailure(
+      { dispose: () => Promise.resolve(void disposeCallCount++) },
+      persistDirectory,
+    );
+
+    expect(disposeCallCount).toBe(1);
+    let persistDirectoryStillExists = true;
+    try {
+      await readdir(persistDirectory);
+    } catch {
+      persistDirectoryStillExists = false;
+    }
+    expect(persistDirectoryStillExists).toBe(false);
   });
 });
