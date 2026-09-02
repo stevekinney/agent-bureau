@@ -5,6 +5,7 @@ import { z } from 'zod';
 
 import { noToolCalls } from '../src/conditions/predicates';
 import { createActiveRun } from '../src/create-run';
+import type { SteeringCommandFailure, SteeringEffectiveState } from '../src/durable/types';
 import {
   AgentScheduledEvent,
   BudgetExceededEvent,
@@ -14,6 +15,11 @@ import {
   SessionDeletedEvent,
   SessionLoadedEvent,
   SessionSavedEvent,
+  SteeringAcceptedEvent,
+  SteeringAppliedEvent,
+  SteeringFailedEvent,
+  SteeringRejectedEvent,
+  SteeringSupersededEvent,
   WakeupScheduledEvent,
 } from '../src/events';
 import { createMockGenerate, createRunRecorder } from '../src/test/index';
@@ -269,5 +275,91 @@ describe('events', () => {
     expect(wakeup.type).toBe('schedule.wakeup');
     expect(wakeup.duration).toBe(5000);
     expect(wakeup.note).toBe('resume work');
+  });
+
+  describe('steering events (AB-90 child ab90-01 / AB-221, AB-67 decision record)', () => {
+    const effective: SteeringEffectiveState = {
+      paused: false,
+      configVersion: 3,
+      model: 'gpt-5',
+      appliedAtStep: 2,
+      appliedAtRunId: 'run-1',
+      appliedAt: '2026-09-02T00:00:00.000Z',
+    };
+    const sessionTerminalFailure: SteeringCommandFailure = {
+      failedAt: '2026-09-02T00:00:01.000Z',
+      reason: 'session-terminal',
+    };
+    const runTerminalFailure: SteeringCommandFailure = {
+      failedAt: '2026-09-02T00:00:02.000Z',
+      reason: 'run-terminal',
+    };
+
+    it('constructs SteeringAcceptedEvent with the exact type name and payload', () => {
+      const event = new SteeringAcceptedEvent('session-1', 'command-1', 3);
+
+      expect(event.type).toBe('steering.accepted');
+      expect(event.sessionId).toBe('session-1');
+      expect(event.commandId).toBe('command-1');
+      expect(event.configVersion).toBe(3);
+    });
+
+    it('constructs SteeringAppliedEvent with the exact type name and the SteeringEffectiveState payload verbatim', () => {
+      const event = new SteeringAppliedEvent('session-1', effective);
+
+      expect(event.type).toBe('steering.applied');
+      expect(event.sessionId).toBe('session-1');
+      expect(event.effective).toEqual(effective);
+    });
+
+    it('constructs SteeringRejectedEvent carrying a SteeringCommandFailure', () => {
+      const event = new SteeringRejectedEvent('session-1', 'command-1', sessionTerminalFailure);
+
+      expect(event.type).toBe('steering.rejected');
+      expect(event.sessionId).toBe('session-1');
+      expect(event.commandId).toBe('command-1');
+      expect(event.failure).toEqual(sessionTerminalFailure);
+    });
+
+    it('constructs SteeringSupersededEvent carrying a SteeringCommandFailure', () => {
+      const event = new SteeringSupersededEvent('session-1', 'command-1', {
+        failedAt: '2026-09-02T00:00:03.000Z',
+        reason: 'superseded-by',
+      });
+
+      expect(event.type).toBe('steering.superseded');
+      expect(event.failure.reason).toBe('superseded-by');
+    });
+
+    it('constructs SteeringFailedEvent restricted to session-terminal/run-terminal reasons for pause/resume', () => {
+      const sessionTerminal = new SteeringFailedEvent(
+        'session-1',
+        'command-1',
+        sessionTerminalFailure,
+      );
+      const runTerminal = new SteeringFailedEvent('session-1', 'command-2', runTerminalFailure);
+
+      expect(sessionTerminal.type).toBe('steering.failed');
+      expect(sessionTerminal.failure.reason).toBe('session-terminal');
+      expect(runTerminal.failure.reason).toBe('run-terminal');
+    });
+
+    it('exercises every steering event type as a valid OperativeEventType', () => {
+      const types: OperativeEventType[] = [
+        SteeringAcceptedEvent.type,
+        SteeringAppliedEvent.type,
+        SteeringRejectedEvent.type,
+        SteeringSupersededEvent.type,
+        SteeringFailedEvent.type,
+      ];
+
+      expect(types).toEqual([
+        'steering.accepted',
+        'steering.applied',
+        'steering.rejected',
+        'steering.superseded',
+        'steering.failed',
+      ]);
+    });
   });
 });

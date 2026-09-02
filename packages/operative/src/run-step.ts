@@ -18,6 +18,7 @@ import {
   ResponseSchemaFailedEvent,
   ResponseValidatedEvent,
   RunErrorEvent,
+  SteeringAppliedEvent,
   StepAbortedEvent,
   StepCompletedEvent,
   StepGeneratedEvent,
@@ -127,6 +128,14 @@ export interface RunState {
   lastContent: string;
   /** Run-scoped count of structured-output schema retries already consumed. */
   schemaAttempts: number;
+  /**
+   * The `configVersion` `SteeringAppliedEvent` last fired for, on this run.
+   * AB-221: `steering.applied` fires once per accepted command — once per
+   * distinct `configVersion` this run observes at the boundary — never once
+   * per step. `0` (the default, un-steered `SteeringDesiredState.configVersion`)
+   * never fires: it means no command has ever been accepted.
+   */
+  lastAppliedConfigVersion: number;
 }
 
 /**
@@ -478,6 +487,43 @@ export async function runStep(
       return { kind: 'abort', reason: explicitAbortReason(signal) };
     }
     steeringDesiredState = { ...deps.steering.getDesiredState() };
+  }
+
+  // AB-221: dispatch `steering.applied` here — the exact `runStep` boundary
+  // AB-67 fixes as the application point for every steering target other
+  // than agent-identity. Fires at most once per distinct `configVersion`
+  // this run observes: `configVersion` increments by exactly one per
+  // accepted command (AB-67), so "once per accepted command" is exactly
+  // "once per distinct configVersion observed here" — `RunState.lastAppliedConfigVersion`
+  // is the dedupe key, carried across steps for both drivers (in-memory:
+  // the same `RunState` instance persists across the loop; durable: threaded
+  // through `RunCursor.lastAppliedConfigVersion` like `schemaAttempts`).
+  // `configVersion === 0` is the un-steered default (no command ever
+  // accepted) and never fires.
+  //
+  // `deps.runId` is required to stamp `SteeringEffectiveState.appliedAtRunId`
+  // (a required field — there is no honest way to leave it unset). AB-67
+  // ties steering to Bureau session/run identity throughout, so a real
+  // steering-enabled run always supplies one (the durable driver always
+  // does; only a bare in-memory `executeLoop` caller could omit it) — a
+  // steering-gated run with no `runId` silently does not fire this event,
+  // a declared, tested gap rather than a fabricated run id.
+  if (
+    deps.steering &&
+    steeringDesiredState &&
+    steeringDesiredState.configVersion > 0 &&
+    steeringDesiredState.configVersion !== runState.lastAppliedConfigVersion &&
+    deps.runId !== undefined
+  ) {
+    runState.lastAppliedConfigVersion = steeringDesiredState.configVersion;
+    emitter?.dispatch(
+      new SteeringAppliedEvent(deps.steering.sessionId, {
+        ...steeringDesiredState,
+        appliedAtStep: step,
+        appliedAtRunId: deps.runId,
+        appliedAt: new Date().toISOString(),
+      }),
+    );
   }
 
   // Backpressure: wait before proceeding if the strategy requires it
