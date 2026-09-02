@@ -1233,6 +1233,8 @@ const runChunked = createChunkedTask({
 await runChunked(scheduler);
 ```
 
+**Callback promises are tracked and awaited, not fired-and-forgotten (AB-208).** A scheduler task's `onComplete`/`onPreempted` callback can return a promise; `Scheduler.stop()` awaits every such promise (in the same pass it already awaits durable cancellations) before its own returned promise resolves, so a stopped scheduler is a real boundary for anything the callback closes over — a rejection after the owner stopped is captured and reported as a `task.failed` event rather than becoming an unhandled rejection. `createChunkedTask`'s `onComplete`/`onError` callbacks are likewise awaited before `submitChunkedWork`'s returned promise settles. `createHeartbeat(...).stop()` returns `Promise<void>`, resolving once the in-flight `tick()` (and its `onTick` callback promise) settles — calling it on an already-stopped heartbeat is a no-op that resolves promptly.
+
 #### Cost Estimation and Budget
 
 ```typescript

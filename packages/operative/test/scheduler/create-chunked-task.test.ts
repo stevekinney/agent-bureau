@@ -299,4 +299,98 @@ describe('createChunkedTask', () => {
     expect(failures).toHaveLength(1);
     expect(failures[0]?.state).toEqual({ count: 0 });
   });
+
+  describe('AB-208: submitChunkedWork awaits pending onComplete/onError promises', () => {
+    it('does not settle until a pending onComplete promise settles', async () => {
+      const scheduler = createTestScheduler();
+      scheduler.start();
+
+      let onCompleteSettled = false;
+      let releaseOnComplete!: () => void;
+      const onCompleteGate = new Promise<void>((resolve) => {
+        releaseOnComplete = resolve;
+      });
+
+      const submitChunked = createChunkedTask<{ count: number }>({
+        name: 'on-complete-pending',
+        initialState: { count: 0 },
+        processChunk: async (state) => ({
+          state: { count: state.count + 1 },
+          done: state.count + 1 >= 1,
+        }),
+        onComplete: async () => {
+          await onCompleteGate;
+          onCompleteSettled = true;
+        },
+      });
+
+      let settled = false;
+      const resultPromise = submitChunked(scheduler).then((state) => {
+        settled = true;
+        return state;
+      });
+
+      // Give the loop every opportunity to (incorrectly) resolve early.
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(onCompleteSettled).toBe(false);
+      expect(settled).toBe(false);
+
+      releaseOnComplete();
+      const finalState = await resultPromise;
+
+      expect(onCompleteSettled).toBe(true);
+      expect(settled).toBe(true);
+      expect(finalState).toEqual({ count: 1 });
+
+      await scheduler.stop();
+    });
+
+    it('does not settle the rejection until a pending onError promise settles, on the failure path', async () => {
+      const scheduler = createTestScheduler();
+      scheduler.start();
+
+      let onErrorSettled = false;
+      let releaseOnError!: () => void;
+      const onErrorGate = new Promise<void>((resolve) => {
+        releaseOnError = resolve;
+      });
+
+      const submitChunked = createChunkedTask<{ count: number }>({
+        name: 'on-error-pending',
+        initialState: { count: 0 },
+        processChunk: async () => {
+          throw new Error('chunk-failed-pending');
+        },
+        onError: async () => {
+          await onErrorGate;
+          onErrorSettled = true;
+        },
+      });
+
+      let settled = false;
+      const resultPromise = submitChunked(scheduler).catch((error: unknown) => {
+        settled = true;
+        throw error;
+      });
+      // Prevent this promise from being reported as an unhandled rejection
+      // while we assert the pre-settle state below.
+      resultPromise.catch(() => {});
+
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(onErrorSettled).toBe(false);
+      expect(settled).toBe(false);
+
+      releaseOnError();
+      await expect(resultPromise).rejects.toThrow('chunk-failed-pending');
+
+      expect(onErrorSettled).toBe(true);
+      expect(settled).toBe(true);
+
+      await scheduler.stop();
+    });
+  });
 });
