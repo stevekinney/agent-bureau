@@ -58,6 +58,22 @@ function makeTask(
   };
 }
 
+/** A manually controlled promise, for callback fixtures that must not settle
+ *  on their own — the test decides exactly when. */
+function createDeferred<T = void>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (error: unknown) => void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((_resolve, _reject) => {
+    resolve = _resolve;
+    reject = _reject;
+  });
+  return { promise, resolve, reject };
+}
+
 function createMinimalScheduler(overrides: Partial<Parameters<typeof createScheduler>[0]> = {}) {
   return createScheduler({
     generate: createMockGenerate([textResponse('default')]),
@@ -841,5 +857,140 @@ describe('createScheduler', () => {
       maximumSteps: 1,
     }));
     await scheduler.stop();
+  });
+
+  describe('AB-208: tracked and awaited onComplete/onPreempted callbacks', () => {
+    /** Like `createBlockingGenerate`, but exposes a promise that resolves the
+     *  moment `generate()` is actually invoked (and has registered its abort
+     *  listener) — a deterministic barrier for "the background task is
+     *  genuinely mid-step and preemptable", in place of a real sleep. */
+    function createBlockingGenerateWithEntrySignal(): {
+      generate: GenerateFunction;
+      resolve: (response: GenerateResponse) => void;
+      entered: Promise<void>;
+    } {
+      const entrySignal = createDeferred<void>();
+      let resolver: ((response: GenerateResponse) => void) | undefined;
+      const promise = new Promise<GenerateResponse>((resolve) => {
+        resolver = resolve;
+      });
+
+      const generate: GenerateFunction = async (context) => {
+        entrySignal.resolve();
+        if (context.signal?.aborted) return textResponse('aborted');
+        return Promise.race([
+          promise,
+          new Promise<GenerateResponse>((resolve) => {
+            context.signal?.addEventListener('abort', () => resolve(textResponse('aborted')), {
+              once: true,
+            });
+          }),
+        ]);
+      };
+
+      return { generate, resolve: resolver!, entered: entrySignal.promise };
+    }
+
+    it("stop()'s returned promise does not resolve until a pending onComplete promise settles", async () => {
+      const deferred = createDeferred<void>();
+      let onCompleteSettled = false;
+
+      const scheduler = createMinimalScheduler({ idleDelay: 1 });
+      scheduler.start();
+
+      const task: SchedulerTask = {
+        id: 'onc-pending',
+        priority: 'immediate',
+        onComplete: () =>
+          deferred.promise.then(() => {
+            onCompleteSettled = true;
+          }),
+        createRun: () => ({
+          generate: createMockGenerate([textResponse('done')]),
+          toolbox: createTestToolbox([]),
+          conversation: new Conversation(),
+          maximumSteps: 1,
+        }),
+      };
+
+      const result = await scheduler.submit(task);
+      expect(result?.content).toBe('done');
+
+      let stopSettled = false;
+      const stopPromise = scheduler.stop().then(() => {
+        stopSettled = true;
+      });
+
+      // Give stop() every opportunity to (incorrectly) resolve early.
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(onCompleteSettled).toBe(false);
+      expect(stopSettled).toBe(false);
+
+      deferred.resolve();
+      await stopPromise;
+
+      expect(onCompleteSettled).toBe(true);
+      expect(stopSettled).toBe(true);
+    });
+
+    it('captures an onPreempted rejection into a task.failed event instead of an unhandled rejection', async () => {
+      const {
+        generate: slowGenerate,
+        resolve: resolveGenerate,
+        entered,
+      } = createBlockingGenerateWithEntrySignal();
+      const deferred = createDeferred<void>();
+      const rejectionError = new Error('onPreempted callback blew up');
+      const failedEvents: Array<{ taskId: string; error: unknown }> = [];
+
+      const scheduler = createMinimalScheduler({ idleDelay: 1 });
+      scheduler.addEventListener('task.failed', (event) => {
+        failedEvents.push({ taskId: event.taskId, error: event.error });
+      });
+      scheduler.start();
+
+      const bgTaskId = 'onp-reject-bg';
+      const bgResult = scheduler.submit({
+        id: bgTaskId,
+        priority: 'background',
+        requeue: false,
+        onPreempted: () => deferred.promise,
+        createRun: () => ({
+          generate: slowGenerate,
+          toolbox: createTestToolbox([]),
+          conversation: new Conversation(),
+          maximumSteps: 5,
+        }),
+      });
+
+      await entered;
+
+      const immResult = scheduler.submitImmediate(() => ({
+        generate: createMockGenerate([textResponse('immediate-done')]),
+        toolbox: createTestToolbox([]),
+        conversation: new Conversation(),
+        maximumSteps: 1,
+      }));
+
+      resolveGenerate(textResponse('bg-step-done'));
+
+      const immRunResult = await immResult;
+      expect(immRunResult.content).toBe('immediate-done');
+      expect(await bgResult).toBeNull();
+
+      // stop() is called while the onPreempted callback's promise is still
+      // pending — it must wait for it, and the later rejection must not
+      // escape as an unhandled rejection.
+      const stopPromise = scheduler.stop();
+      deferred.reject(rejectionError);
+
+      await expect(stopPromise).resolves.toBeUndefined();
+      expect(failedEvents).toContainEqual({
+        taskId: `scheduler-onPreempted-${bgTaskId}`,
+        error: rejectionError,
+      });
+    });
   });
 });

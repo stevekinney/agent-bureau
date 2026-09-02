@@ -191,6 +191,23 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
   // resolves null, not throws).
   const cancelledRunningTasks = new Set<string>();
 
+  // `onComplete`/`onPreempted` callback promises, tracked so `stop()` can await
+  // them in the same pass it already awaits `durableCancellations` (AB-208) —
+  // a fire-and-forget callback would let stop() return while the callback (and
+  // any credential-scoped `services` it closes over) is still running. Each
+  // tracked promise is pre-caught so a rejection after the owner stopped is
+  // reported into the shutdown report (a TaskFailedEvent) rather than becoming
+  // an unhandled rejection.
+  const trackedCallbackPromises = new Set<Promise<void>>();
+
+  function trackCallback(source: string, outcome: void | Promise<void>): void {
+    const settled = Promise.resolve(outcome).catch((error: unknown) => {
+      emitEvent(new TaskFailedEvent(source, error));
+    });
+    trackedCallbackPromises.add(settled);
+    void settled.finally(() => trackedCallbackPromises.delete(settled));
+  }
+
   function emitEvent(event: Event): void {
     emitter.dispatchEvent(event);
   }
@@ -559,7 +576,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
       }
     }
 
-    void task.onPreempted?.('preempted');
+    trackCallback(`scheduler-onPreempted-${task.id}`, task.onPreempted?.('preempted'));
     return true;
   }
 
@@ -601,7 +618,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
       resolvePreemptedTaskNull(task.id);
     }
 
-    void task.onPreempted?.('preempted');
+    trackCallback(`scheduler-onPreempted-${task.id}`, task.onPreempted?.('preempted'));
     return true;
   }
 
@@ -757,7 +774,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
           taskResolvers.delete(task.id);
           resolver.resolve(runResult);
         }
-        void task.onComplete?.(runResult);
+        trackCallback(`scheduler-onComplete-${task.id}`, task.onComplete?.(runResult));
       } else {
         // Task was aborted (e.g., via external signal) without going through preemptTask.
         // Resolve the submit() promise with null so it doesn't hang forever.
@@ -909,7 +926,16 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     // finding 3): if `engine.cancel` rejects, the run may not have terminalized and
     // its API-key services may still be alive — a real shutdown failure, distinct
     // from the expected result()-rejection of a successfully cancelled run above.
-    const cancelOutcomes = await Promise.allSettled(durableCancellations);
+    //
+    // The same pass also awaits every tracked `onComplete`/`onPreempted` callback
+    // promise (AB-208) — a fire-and-forget callback would let stop() return while
+    // it (and any credential-scoped `services` it closes over) is still running.
+    // Each tracked promise is pre-caught by `trackCallback`, so it never rejects
+    // here — a rejection was already reported as its own TaskFailedEvent.
+    const cancelOutcomes = await Promise.allSettled([
+      ...durableCancellations,
+      ...trackedCallbackPromises,
+    ]);
     for (const outcome of cancelOutcomes) {
       if (outcome.status === 'rejected') {
         emitEvent(new TaskFailedEvent('scheduler-stop-cancel', outcome.reason));

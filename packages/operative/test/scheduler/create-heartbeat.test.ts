@@ -63,8 +63,11 @@ function createTestScheduler() {
   } as Scheduler;
 }
 
+// AB-208: `tick()` now awaits its `onTick` callback (and `stop()` awaits the
+// in-flight tick) before settling, adding microtask hops beyond what the
+// original fixed count covered — widened accordingly.
 async function flushAsyncWork(): Promise<void> {
-  for (let iteration = 0; iteration < 5; iteration++) {
+  for (let iteration = 0; iteration < 20; iteration++) {
     await Promise.resolve();
   }
 }
@@ -436,5 +439,100 @@ describe('createHeartbeat', () => {
     expect(heartbeat.consecutiveFailures).toBe(1);
     expect(failures).toHaveLength(1);
     expect(failures[0]).toBeInstanceOf(Error);
+  });
+
+  describe('AB-208: stop() awaits the in-flight tick() and its onTick promise', () => {
+    it('returns a Promise<void> that resolves only after the in-flight tick() (and its onTick callback promise) settle', async () => {
+      let releaseSubmit!: (result: RunResult) => void;
+      const submitGate = new Promise<RunResult>((resolve) => {
+        releaseSubmit = resolve;
+      });
+
+      let onTickSettled = false;
+      let releaseOnTick!: () => void;
+      const onTickGate = new Promise<void>((resolve) => {
+        releaseOnTick = resolve;
+      });
+
+      const scheduler = {
+        submit: async () => submitGate,
+      } as Scheduler;
+
+      const heartbeat = createHeartbeat({
+        scheduler,
+        interval: 10_000,
+        createHeartbeatRun: async () => ({
+          generate: createMockGenerate([textResponse('ignored')]),
+          toolbox: createTestToolbox([]),
+          conversation: new Conversation(),
+          maximumSteps: 1,
+        }),
+        onTick: async () => {
+          await onTickGate;
+          onTickSettled = true;
+        },
+      });
+
+      const tickPromise = heartbeat.tick();
+
+      let stopSettled = false;
+      const stopPromise = heartbeat.stop().then(() => {
+        stopSettled = true;
+      });
+
+      // Give stop() every opportunity to (incorrectly) resolve before the
+      // in-flight tick — and its onTick callback — actually settle.
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(stopSettled).toBe(false);
+
+      releaseSubmit({
+        conversation: new Conversation(),
+        steps: [],
+        content: 'ignored',
+        usage: { prompt: 0, completion: 0, total: 0 },
+        finishReason: 'stop-condition',
+      } satisfies RunResult);
+
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(stopSettled).toBe(false);
+      expect(onTickSettled).toBe(false);
+
+      releaseOnTick();
+      await stopPromise;
+      await tickPromise;
+
+      expect(onTickSettled).toBe(true);
+      expect(stopSettled).toBe(true);
+    });
+
+    it('is a no-op that resolves promptly when the heartbeat is already stopped', async () => {
+      const scheduler = {
+        submit: async () =>
+          ({
+            conversation: new Conversation(),
+            steps: [],
+            content: 'ignored',
+            usage: { prompt: 0, completion: 0, total: 0 },
+            finishReason: 'stop-condition',
+          }) satisfies RunResult,
+      } as Scheduler;
+
+      const heartbeat = createHeartbeat({
+        scheduler,
+        createHeartbeatRun: async () => ({
+          generate: createMockGenerate([textResponse('ignored')]),
+          toolbox: createTestToolbox([]),
+          conversation: new Conversation(),
+          maximumSteps: 1,
+        }),
+      });
+
+      // Never started, so it is already "stopped".
+      await expect(heartbeat.stop()).resolves.toBeUndefined();
+      await expect(heartbeat.stop()).resolves.toBeUndefined();
+    });
   });
 });

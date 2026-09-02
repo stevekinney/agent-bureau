@@ -109,7 +109,7 @@ export function createChunkedTask<TState>(
           const error = new Error(
             `Chunked task "${name}": exceeded ${maxPreemptionRetries} preemption retries`,
           );
-          void onError?.(error, currentState);
+          await onError?.(error, currentState);
           throw error;
         }
         continue;
@@ -117,14 +117,14 @@ export function createChunkedTask<TState>(
 
       // Check if the chunk itself errored
       if (chunkError) {
-        void onError?.(chunkError, stateForChunk);
+        await onError?.(chunkError, stateForChunk);
         if (chunkError instanceof Error) throw chunkError;
         throw new Error('Chunk processing failed');
       }
 
       if (!chunkResult) {
         const error = new Error(`Chunked task "${name}": processChunk did not produce a result`);
-        void onError?.(error, stateForChunk);
+        await onError?.(error, stateForChunk);
         throw error;
       }
 
@@ -132,7 +132,7 @@ export function createChunkedTask<TState>(
       preemptionRetries = 0; // Reset retry budget for the next chunk
 
       if (chunkResult.done) {
-        void onComplete?.(currentState);
+        await onComplete?.(currentState);
         return currentState;
       }
     }
