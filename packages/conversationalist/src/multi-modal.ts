@@ -221,3 +221,62 @@ export function copyContent(
   }
   return content.map(copyMultiModalContent);
 }
+
+// ── AB-70 portable content and modality vocabulary ──────────────────────
+//
+// Transcribed verbatim from AB-70's "Portable content and modality
+// vocabulary" section (ratified 2026-09-01), additive only. Nothing above
+// this marker is renamed, reshaped, or removed by this addition; AB-72 owns
+// the eventual replacement of `MultiModalContent`/`ImageContent`/
+// `DocumentContent`/`DocumentSource`. These six type-only names exist so
+// AB-64's `BackendDescriptor` (and later AB-72/AB-75) can cite one shared
+// vocabulary instead of inventing a parallel one. See
+// `multi-modal-vocabulary.test-d.ts` for the compile-time shape proof.
+
+/** The six portable content modalities a backend or provider can carry. */
+export type Modality = 'text' | 'image' | 'audio' | 'video' | 'document' | 'file';
+
+// A MIME "family" is the type before the slash, plus the handful of container
+// formats that need their own bucket because they carry mixed content.
+export type MimeFamily =
+  | 'text'
+  | 'image'
+  | 'audio'
+  | 'video'
+  | 'document' // application/pdf and other paginated/structured document containers
+  | 'application' // generic binary / octet-stream and non-document application/* types
+  | 'font'
+  | 'model'; // 3D/model/* MIME types, carried as generic `file` parts
+
+// The nine ingress source forms, mapped onto ContentSource's discriminant.
+export type ContentSource =
+  | { kind: 'inline'; data: string; encoding: 'base64' | 'utf8' }
+  | { kind: 'data-url'; url: string }
+  | { kind: 'remote-url'; url: string } // deny-by-default hardened fetch is deployment configuration
+  | { kind: 'local-file'; path: string } // host-process only; never crosses a network boundary
+  | { kind: 'upload'; uploadId: string } // prior to becoming a ManagedAsset
+  | { kind: 'provider-file'; provider: string; providerFileId: string }
+  | { kind: 'mcp-resource'; serverId: string; uri: string }
+  | { kind: 'a2a-reference'; agentCardUrl: string; artifactId: string }
+  | { kind: 'managed-asset'; assetId: string; revision?: number };
+
+export type MediaLimitScope = 'per-part' | 'aggregate';
+
+export interface MediaLimits {
+  scope: MediaLimitScope;
+  modality: Modality;
+  maxBytes?: number;
+  maxDurationSeconds?: number; // audio/video
+  maxPixels?: number; // image/video, guards decompression/pixel-bomb inputs
+  maxPageCount?: number; // document
+}
+
+/**
+ * Capability discovery: each provider adapter and Gateway-advertised
+ * protocol exposes a `ModalityMatrix`, consumed by AB-64's backend
+ * descriptor (`BackendDescriptor.modalities`).
+ */
+export type ModalityMatrix = Record<
+  Modality,
+  { input: boolean; output: boolean; sourceForms: readonly ContentSource['kind'][] }
+>;

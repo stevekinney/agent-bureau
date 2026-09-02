@@ -72,6 +72,17 @@ export {
   createGeminiProviderStream,
   createGeminiTokenCounter,
 } from './gemini.ts';
+export type {
+  BackendDescriptor,
+  BackendLifecycleState,
+  CatalogProjection,
+  CreateModelCatalogOptions,
+  EffortSupport,
+  GeneratedAssetBehavior,
+  ModelAlias,
+  ModelCatalog,
+} from './model-catalog.ts';
+export { createModelCatalog } from './model-catalog.ts';
 export { createOpenAIProvider, createOpenAIProviderStream } from './openai.ts';
 export type {
   ComplexitySignals,

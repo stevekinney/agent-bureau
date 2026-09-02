@@ -1,3 +1,4 @@
+import { createModelCatalog } from './model-catalog.ts';
 import type { ProviderName } from './types.ts';
 
 /**
@@ -45,27 +46,6 @@ const NO_CAPABILITIES: ProviderCapabilities = {
   requestControlledContextCaching: false,
   serverSideTokenCounting: false,
 };
-
-/**
- * The base URL the `openai` SDK would use when no explicit one is passed.
- *
- * `openai` 7.8.0's `client.d.ts` documents the option as
- * "Defaults to process.env['OPENAI_BASE_URL']" and again as
- * `@param {string} [opts.baseURL=process.env['OPENAI_BASE_URL'] ??
- * https://api.openai.com/v1]`, so a client constructed with no `baseURL` — the
- * way `createOpenAIBatchClient` constructs its own — silently picks this up.
- * Reading it here is what keeps the capability report about the *effective*
- * endpoint rather than about the options object.
- *
- * A read, not a mutation, so this stays side-effect-free; and synchronous, so
- * {@link getProviderCapabilities} stays callable mid-request-assembly.
- * `Bun.env` and `process.env` are the same values, checked in that order to
- * match `providers/shared/gemini-api-key.ts`, which is the package's existing
- * environment-reading shape.
- */
-function readOpenAIBaseUrlOverride(): string | undefined {
-  return typeof Bun !== 'undefined' ? Bun.env['OPENAI_BASE_URL'] : process.env['OPENAI_BASE_URL'];
-}
 
 /**
  * Reports which of the four capabilities a provider supports.
@@ -136,13 +116,19 @@ function readOpenAIBaseUrlOverride(): string | undefined {
  * the build. And it is not memoizable across a change to `process.env` — call
  * it when you need the answer instead of caching it at module load.
  *
- * ## Provisional
+ * ## Descriptor projection (AB-64)
  *
- * This whole surface is provisional pending AB-64. It is a hand-maintained
- * table keyed on a provider name, which is exactly the kind of thing AB-64 is
- * expected to replace with something derived. When AB-64 lands, revise this
- * rather than defending it: no caller should be broken by it going away, and
- * nothing here is worth preserving for its own sake.
+ * This surface is now a projection over `createModelCatalog`'s static
+ * `BackendDescriptor` seed (`./model-catalog.ts`), ratified by AB-64's
+ * decision record. It is no longer the hand-maintained table this function's
+ * body used to be — it groups the catalog's descriptor rows for `provider`
+ * and folds each of the four flags across them (`caching` stands in for
+ * `requestControlledContextCaching`) — but the public signature, the
+ * conservative-ambiguous-`baseURL` rule, and every previously published
+ * answer are unchanged: see `model-catalog.test.ts`'s characterization
+ * matrix, which asserts bit-for-bit identical output against this function's
+ * pre-AB-64 behavior for all five `ProviderName` values across four
+ * environment states.
  *
  * @param provider - The provider to report on.
  * @param options.baseURL - The base URL that would be passed to the provider
@@ -155,27 +141,18 @@ export function getProviderCapabilities(
 ): ProviderCapabilities {
   switch (provider) {
     case 'anthropic':
-      return {
-        batchInference: true,
-        explicitThinkingRequest: true,
-        requestControlledContextCaching: true,
-        serverSideTokenCounting: true,
-      };
     case 'openai':
+    case 'gemini': {
+      const rows = createModelCatalog({ openAIBaseURL: options?.baseURL }).descriptors.filter(
+        (descriptor) => descriptor.provider === provider,
+      );
       return {
-        ...NO_CAPABILITIES,
-        // The effective endpoint, not the options object: an unset `baseURL`
-        // leaves the SDK to honor `OPENAI_BASE_URL`, which points at exactly
-        // the OpenAI-compatible servers this rule is conservative about.
-        batchInference: !(options?.baseURL || readOpenAIBaseUrlOverride()),
+        batchInference: rows.every((row) => row.batchInference),
+        explicitThinkingRequest: rows.every((row) => row.explicitThinkingRequest),
+        requestControlledContextCaching: rows.every((row) => row.caching),
+        serverSideTokenCounting: rows.every((row) => row.serverSideTokenCounting),
       };
-    case 'gemini':
-      return {
-        batchInference: true,
-        explicitThinkingRequest: false,
-        requestControlledContextCaching: true,
-        serverSideTokenCounting: true,
-      };
+    }
     case 'voyage':
     case 'ollama':
       return NO_CAPABILITIES;
