@@ -3,6 +3,7 @@ import { Conversation, materializeToolCalls } from 'conversationalist';
 import type { ToolCall } from 'interoperability';
 import type { ZodType } from 'zod';
 
+import type { SteeringDesiredState } from './durable/types';
 import { type AgentRunErrorKind, GuardrailTripwireError } from './errors';
 import {
   BackpressureAppliedEvent,
@@ -474,29 +475,24 @@ export async function runStep(
   // become visible to this step's already-captured context — the exact
   // same-step leak the mid-step-admission acceptance criterion forbids.
   //
-  // The pause check is a loop, not a single `if`: a `resume` releasing
-  // `awaitResume()` does not guarantee the freshly re-read state is
-  // unpaused — a new `pause` can be admitted in the same turn a command
-  // handler resolves the previous one's waiters. Keep waiting while the
-  // state we just read is still `paused: true`, so the most recently
-  // desired pause always wins.
-  let steeringDesiredState = deps.steering ? { ...deps.steering.getDesiredState() } : undefined;
-  while (steeringDesiredState?.paused && deps.steering) {
-    const { aborted } = await awaitResumeOrAbort(deps.steering, signal);
-    if (aborted) {
-      return { kind: 'abort', reason: explicitAbortReason(signal) };
-    }
-    steeringDesiredState = { ...deps.steering.getDesiredState() };
-  }
-
-  // AB-221: dispatch `steering.applied` here — the exact `runStep` boundary
-  // AB-67 fixes as the application point for every steering target other
-  // than agent-identity. Fires at most once per distinct `configVersion`
-  // this run observes: `configVersion` increments by exactly one per
-  // accepted command (AB-67), so "once per accepted command" is exactly
-  // "once per distinct configVersion observed here" — `RunState.lastAppliedConfigVersion`
-  // is the dedupe key, carried across steps for both drivers (in-memory:
-  // the same `RunState` instance persists across the loop; durable: threaded
+  // AB-221: dispatch `steering.applied` for a desired state this boundary
+  // just read, deduplicated by `configVersion` — extracted so it can run
+  // after EVERY boundary read below, not only after the pause-wait loop
+  // exits. This matters for pause/resume specifically: AB-67's pause row
+  // fixes the application boundary as "entry of runStep" and its terminal
+  // behavior as "applied at the boundary" — the read itself is what applies
+  // a pause, independent of whether the driver then blocks waiting for a
+  // resume. Firing only once, after the loop, would silently skip the
+  // `applied` event for every `configVersion` that was paused-and-read but
+  // then superseded by a later command before the loop exited — under-
+  // counting exactly the command class this boundary exists to gate.
+  //
+  // Fires at most once per distinct `configVersion` this run observes:
+  // `configVersion` increments by exactly one per accepted command (AB-67),
+  // so "once per accepted command" is exactly "once per distinct
+  // `configVersion` observed here" — `RunState.lastAppliedConfigVersion` is
+  // the dedupe key, carried across steps for both drivers (in-memory: the
+  // same `RunState` instance persists across the loop; durable: threaded
   // through `RunCursor.lastAppliedConfigVersion` like `schemaAttempts`).
   // `configVersion === 0` is the un-steered default (no command ever
   // accepted) and never fires.
@@ -508,22 +504,49 @@ export async function runStep(
   // does; only a bare in-memory `executeLoop` caller could omit it) — a
   // steering-gated run with no `runId` silently does not fire this event,
   // a declared, tested gap rather than a fabricated run id.
-  if (
-    deps.steering &&
-    steeringDesiredState &&
-    steeringDesiredState.configVersion > 0 &&
-    steeringDesiredState.configVersion !== runState.lastAppliedConfigVersion &&
-    deps.runId !== undefined
-  ) {
-    runState.lastAppliedConfigVersion = steeringDesiredState.configVersion;
-    emitter?.dispatch(
-      new SteeringAppliedEvent(deps.steering.sessionId, {
-        ...steeringDesiredState,
-        appliedAtStep: step,
-        appliedAtRunId: deps.runId,
-        appliedAt: new Date().toISOString(),
-      }),
-    );
+  //
+  // NOT solved here: a session whose `configVersion` a PRIOR run already
+  // applied. `RunState.lastAppliedConfigVersion` is per-run, so a new run
+  // starting fresh re-observes and re-fires for a `configVersion` an
+  // earlier run on the same session already applied. Deduping across runs
+  // needs the `SteeringGate` itself to remember what it has applied — that
+  // is AB-199's `SteeringGate` implementation's responsibility, not this
+  // boundary's.
+  const steeringGate = deps.steering;
+  const maybeDispatchSteeringApplied = (state: SteeringDesiredState) => {
+    if (
+      steeringGate &&
+      state.configVersion > 0 &&
+      state.configVersion !== runState.lastAppliedConfigVersion &&
+      deps.runId !== undefined
+    ) {
+      runState.lastAppliedConfigVersion = state.configVersion;
+      emitter?.dispatch(
+        new SteeringAppliedEvent(steeringGate.sessionId, {
+          ...state,
+          appliedAtStep: step,
+          appliedAtRunId: deps.runId,
+          appliedAt: new Date().toISOString(),
+        }),
+      );
+    }
+  };
+
+  // The pause check is a loop, not a single `if`: a `resume` releasing
+  // `awaitResume()` does not guarantee the freshly re-read state is
+  // unpaused — a new `pause` can be admitted in the same turn a command
+  // handler resolves the previous one's waiters. Keep waiting while the
+  // state we just read is still `paused: true`, so the most recently
+  // desired pause always wins.
+  let steeringDesiredState = steeringGate ? { ...steeringGate.getDesiredState() } : undefined;
+  if (steeringDesiredState) maybeDispatchSteeringApplied(steeringDesiredState);
+  while (steeringDesiredState?.paused && steeringGate) {
+    const { aborted } = await awaitResumeOrAbort(steeringGate, signal);
+    if (aborted) {
+      return { kind: 'abort', reason: explicitAbortReason(signal) };
+    }
+    steeringDesiredState = { ...steeringGate.getDesiredState() };
+    maybeDispatchSteeringApplied(steeringDesiredState);
   }
 
   // Backpressure: wait before proceeding if the strategy requires it

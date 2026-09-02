@@ -741,7 +741,7 @@ describe('runStep: AB-221 steering.applied dispatch', () => {
     expect(applied.map((event) => event.effective.appliedAtStep)).toEqual([0, 2]);
   });
 
-  it('does not fire on the step where a paused gate blocks and then resumes to the SAME already-observed configVersion', async () => {
+  it('does not re-fire on a second step for the SAME already-observed configVersion', async () => {
     const recorder = createEventRecorder();
     const gate = createTestSteeringGate({ paused: false, configVersion: 1 });
     let calls = 0;
@@ -767,5 +767,88 @@ describe('runStep: AB-221 steering.applied dispatch', () => {
     // configVersion never changed after step 0's boundary read, so step 1
     // must not re-fire for the same already-applied configVersion.
     expect(steeringAppliedEvents(recorder)).toHaveLength(1);
+  });
+
+  it('fires for a pause AND its resume — the pause boundary read is itself an application, not only the resume', async () => {
+    const recorder = createEventRecorder();
+    const gate = createTestSteeringGate({ paused: true, configVersion: 1 });
+
+    const resultPromise = executeLoop(
+      {
+        generate: async () => textResponse('done'),
+        toolbox: createTestToolbox([]),
+        conversation: new Conversation(),
+        stopWhen: noToolCalls(),
+        steering: gate,
+        runId: 'run-1',
+      },
+      recorder,
+    );
+
+    // Let the loop reach and block on the pause gate — the pause's own
+    // `steering.applied` (configVersion 1) must already have fired here,
+    // before any resume, per AB-67's pause row: "applied at the boundary".
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(steeringAppliedEvents(recorder).map((event) => event.effective.configVersion)).toEqual([
+      1,
+    ]);
+
+    gate.setDesiredState({ paused: false, configVersion: 2 });
+    await resultPromise;
+
+    const applied = steeringAppliedEvents(recorder);
+    expect(applied.map((event) => event.effective.configVersion)).toEqual([1, 2]);
+    // Both observed at step 0's boundary: the pause blocked step 0 itself,
+    // not a later step.
+    expect(applied.map((event) => event.effective.appliedAtStep)).toEqual([0, 0]);
+  });
+
+  it('never fires for a configVersion that was superseded before the boundary ever read it (an unobserved intermediate value)', async () => {
+    const recorder = createEventRecorder();
+    const gate = createTestSteeringGate({ paused: true, configVersion: 1 });
+
+    const resultPromise = executeLoop(
+      {
+        generate: async () => textResponse('done'),
+        toolbox: createTestToolbox([]),
+        conversation: new Conversation(),
+        stopWhen: noToolCalls(),
+        steering: gate,
+        runId: 'run-1',
+      },
+      recorder,
+    );
+
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // A resume (cv2) immediately superseded by a re-pause (cv3) in the same
+    // synchronous turn, exactly as the pre-existing "re-checks paused after
+    // a resume" boundary-read test drives it — cv2 is never observed by
+    // `getDesiredState()` at all, so it must never fire `steering.applied`.
+    gate.setDesiredState({ paused: false, configVersion: 2 });
+    gate.setDesiredState({ paused: true, configVersion: 3 });
+
+    // More ticks than the batch above: enough for `awaitResumeOrAbort`'s own
+    // internal microtask chain (its `.then()`, its `Promise.race`, its own
+    // `async` return) to fully unwind and the boundary to actually call
+    // `getDesiredState()` again before this test moves on — verified
+    // empirically against `createTestSteeringGate`'s resolution chain, not
+    // guessed.
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    gate.setDesiredState({ paused: false, configVersion: 4 });
+    await resultPromise;
+
+    const applied = steeringAppliedEvents(recorder);
+    expect(applied.map((event) => event.effective.configVersion)).toEqual([1, 3, 4]);
   });
 });
