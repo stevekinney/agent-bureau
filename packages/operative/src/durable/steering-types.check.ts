@@ -114,12 +114,16 @@ export const steeringCommandFailureReasons: readonly SteeringCommandFailure['rea
 ];
 
 // AB-67's 2026-09-02 coordinator amendments: `policyRef` and `override` are
-// encoded as an exclusive pair. A literal supplying both, or neither, must
-// be rejected by the type checker.
+// encoded as an exclusive pair. A literal supplying both non-`undefined`
+// values, or neither field, must be rejected by the type checker. (This
+// package's `exactOptionalPropertyTypes: false` means an explicit
+// `override: undefined` alongside `policyRef` would still type-check —
+// semantically indistinguishable from omitting `override` — so this fixture
+// exercises the non-`undefined` case the type actually rejects.)
 export const routeBothValue: SteeringRequestedValue = {
   target: 'route',
   policyRef: 'default-route',
-  // @ts-expect-error — a `SteeringRequestedValue` literal must not supply both `policyRef` and `override`.
+  // @ts-expect-error — a `SteeringRequestedValue` literal must not supply both `policyRef` and a non-`undefined` `override`.
   override: 'primary',
 };
 // @ts-expect-error — a `SteeringRequestedValue` literal for a non-pause/resume target must supply `policyRef` or `override`.
