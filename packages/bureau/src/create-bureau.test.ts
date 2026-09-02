@@ -7328,7 +7328,7 @@ describe('Bureau.modelCatalog (AB-246)', () => {
     await Promise.resolve();
     expect(disposeSettled).toBe(false);
     // abort() was never called: the refresh is still genuinely running.
-    expect(handle.snapshot().state).toBe('pending');
+    expect(handle.snapshot().status).toBe('pending');
 
     resolveSource([]);
     await disposePromise;

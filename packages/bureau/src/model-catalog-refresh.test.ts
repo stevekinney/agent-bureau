@@ -140,7 +140,10 @@ describe('createModelCatalogService', () => {
     const after = service.catalog();
     expect(after.revision).toBe(before.revision + 1);
     expect(after.stale).toBe(false);
-    expect(after.descriptors).toContain(newRow);
+    // Committed rows are cloned and deep-frozen rather than reused by
+    // reference (a defensive copy, since descriptorSource's own row might
+    // not be frozen at all), so check by value rather than identity.
+    expect(after.descriptors.some((d) => d.model === newRow.model)).toBe(true);
   });
 
   it('a failed refresh leaves the prior catalog active with stale: true, returned by reference identity', async () => {
@@ -226,6 +229,12 @@ describe('createModelCatalogService', () => {
 
     expect(second.refreshId).toBe(first.refreshId);
     expect(second).toBe(first);
+
+    // descriptorSource is invoked from a deferred microtask (so a
+    // synchronously-throwing source can never strand the in-flight slot —
+    // see the sibling "does not strand the in-flight slot" test), so give
+    // it one tick before asserting the single invocation.
+    await Promise.resolve();
     expect(invocations).toBe(1);
 
     source.resolve([descriptor('anthropic', 'model-coalesced')]);
@@ -336,7 +345,7 @@ describe('createModelCatalogService', () => {
 
     const deliveries: string[] = [];
     handle.subscribeSnapshot((snapshot) => {
-      deliveries.push(snapshot.state);
+      deliveries.push(snapshot.status);
     });
     // Delivered synchronously, before any await.
     expect(deliveries).toEqual(['pending']);
@@ -347,7 +356,7 @@ describe('createModelCatalogService', () => {
 
     const lateDeliveries: string[] = [];
     handle.subscribeSnapshot((snapshot) => {
-      lateDeliveries.push(snapshot.state);
+      lateDeliveries.push(snapshot.status);
     });
     expect(lateDeliveries).toEqual(['settled']);
   });
@@ -366,7 +375,7 @@ describe('createModelCatalogService', () => {
     const handle = service.refresh(request());
 
     const deliveries: string[] = [];
-    const unsubscribe = handle.subscribeSnapshot((snapshot) => deliveries.push(snapshot.state));
+    const unsubscribe = handle.subscribeSnapshot((snapshot) => deliveries.push(snapshot.status));
     unsubscribe();
 
     source.resolve([descriptor('anthropic', 'still-committed')]);
@@ -385,10 +394,30 @@ describe('createModelCatalogService', () => {
     handle.subscribeSnapshot(() => {
       throw new Error('observer bug');
     });
-    handle.subscribeSnapshot((snapshot) => secondObserverDeliveries.push(snapshot.state));
+    handle.subscribeSnapshot((snapshot) => secondObserverDeliveries.push(snapshot.status));
 
     await handle.result();
     expect(secondObserverDeliveries).toEqual(['pending', 'settled']);
+  });
+
+  it('two subscriptions with the SAME observer function are independently disposable', async () => {
+    const { service } = createService(() => Promise.resolve([]));
+    const handle = service.refresh(request());
+
+    const deliveries: string[] = [];
+    const sharedObserver = (snapshot: { status: string }): void => {
+      deliveries.push(snapshot.status);
+    };
+    const unsubscribeFirst = handle.subscribeSnapshot(sharedObserver);
+    handle.subscribeSnapshot(sharedObserver);
+    // Two registrations delivered the pending state independently.
+    expect(deliveries).toEqual(['pending', 'pending']);
+
+    unsubscribeFirst();
+    await handle.result();
+    // Only the SECOND registration is still active — one terminal delivery,
+    // not zero (both collapsed) and not two (unsubscribe removed neither).
+    expect(deliveries).toEqual(['pending', 'pending', 'settled']);
   });
 
   describe('closed() cleanup acknowledgement', () => {
@@ -440,6 +469,36 @@ describe('createModelCatalogService', () => {
       const handle = service.refresh(request());
       const outcome = await handle.closed();
       expect(outcome).toBeDefined();
+    });
+
+    it('resolves "completed" — an observer throwing only on the initial (non-terminal) delivery does not count', async () => {
+      const { service } = createService(() => Promise.resolve([]));
+      const handle = service.refresh(request());
+      // Throws on registration (the pending-state delivery) but not again —
+      // that initial delivery is the read-then-subscribe gap closer, not
+      // terminal teardown, so it must not affect closed().
+      let calls = 0;
+      handle.subscribeSnapshot(() => {
+        calls += 1;
+        if (calls === 1) throw new Error('only on first delivery');
+      });
+      await handle.result();
+      expect(calls).toBe(2); // pending delivery + terminal delivery
+      expect(await handle.closed()).toBe('completed');
+    });
+
+    it('is fixed at settlement — a throwing observer subscribed AFTER settlement does not flip it', async () => {
+      const { service } = createService(() => Promise.resolve([]));
+      const handle = service.refresh(request());
+      await handle.result();
+      const before = await handle.closed();
+      expect(before).toBe('completed');
+
+      handle.subscribeSnapshot(() => {
+        throw new Error('late observer bug');
+      });
+
+      expect(await handle.closed()).toBe('completed');
     });
   });
 
@@ -498,7 +557,7 @@ describe('createModelCatalogService', () => {
     const controller = new AbortController();
 
     const deliveries: string[] = [];
-    handle.subscribeSnapshot((snapshot) => deliveries.push(snapshot.state), {
+    handle.subscribeSnapshot((snapshot) => deliveries.push(snapshot.status), {
       signal: controller.signal,
     });
     expect(deliveries).toEqual(['pending']);
@@ -518,7 +577,7 @@ describe('createModelCatalogService', () => {
     const handle = service.refresh(request());
 
     const deliveries: string[] = [];
-    handle.subscribeSnapshot((snapshot) => deliveries.push(snapshot.state), {
+    handle.subscribeSnapshot((snapshot) => deliveries.push(snapshot.status), {
       signal: controller.signal,
     });
     // The synchronous initial delivery still happens...
@@ -535,5 +594,133 @@ describe('createModelCatalogService', () => {
     expect(service.inFlightRefresh()).toBe(handle);
     await handle.result();
     expect(service.inFlightRefresh()).toBeUndefined();
+  });
+
+  it('a descriptorSource that throws SYNCHRONOUSLY does not strand the in-flight slot', async () => {
+    let invocations = 0;
+    const { service } = createService(() => {
+      invocations += 1;
+      throw new Error('synchronous misbehavior');
+    });
+
+    const handle = service.refresh(request());
+    // `refresh()` must have reserved the in-flight slot before the
+    // synchronous throw had any chance to run and clear it again.
+    expect(service.inFlightRefresh()).toBe(handle);
+
+    const result = await handle.result();
+    expect(result.outcome).toBe('failed');
+    expect(result.failureReason).toContain('synchronous misbehavior');
+    // The slot cleared once this refresh settled...
+    expect(service.inFlightRefresh()).toBeUndefined();
+
+    // ...so a SECOND refresh() genuinely starts a new attempt rather than
+    // returning the same permanently-failed handle forever.
+    const second = service.refresh(request('request-2'));
+    expect(second).not.toBe(handle);
+    await second.result();
+    expect(invocations).toBe(2);
+  });
+
+  it('abort() is a no-op once the refresh has already settled normally', async () => {
+    const { service } = createService(() => Promise.resolve([]));
+    const handle = service.refresh(request());
+    await handle.result();
+    const completedResult = await handle.result();
+    expect(completedResult.outcome).toBe('completed');
+
+    handle.abort('too late');
+    const stillCompletedResult = await handle.result();
+    expect(stillCompletedResult).toBe(completedResult);
+    expect(await handle.closed()).toBe('completed'); // not 'unresolved'
+  });
+
+  it('clears the in-flight slot BEFORE terminal observers run, so an observer-triggered refresh() is a genuinely new attempt', async () => {
+    let invocations = 0;
+    const { service } = createService(() => {
+      invocations += 1;
+      return Promise.resolve([]);
+    });
+
+    const handle = service.refresh(request());
+    let chainedHandle: ReturnType<typeof service.refresh> | undefined;
+    handle.subscribeSnapshot((snapshot) => {
+      if (snapshot.status === 'settled') {
+        chainedHandle = service.refresh(request('chained'));
+      }
+    });
+
+    await handle.result();
+    expect(chainedHandle).toBeDefined();
+    expect(chainedHandle).not.toBe(handle);
+    await chainedHandle?.result();
+    expect(invocations).toBe(2);
+  });
+
+  it('freezes the terminal result object before publishing and resolving it', async () => {
+    const { service } = createService(() => Promise.resolve([]));
+    const handle = service.refresh(request());
+    const result = await handle.result();
+    expect(Object.isFrozen(result)).toBe(true);
+    expect(Object.isFrozen(handle.snapshot().result)).toBe(true);
+  });
+
+  it('settles as failed, rather than hanging, when the commit path itself throws', async () => {
+    // Succeeds for call #1 (startedAt, at handle creation) and #3+ (the
+    // completedAt the failure path itself needs), but throws specifically
+    // on call #2 — commit()'s generatedAt — to isolate a commit-path
+    // failure from every other now() call site.
+    let calls = 0;
+    const now = (): string => {
+      calls += 1;
+      if (calls === 2) throw new Error('clock unavailable');
+      return `2026-09-02T00:00:0${calls}.000Z`;
+    };
+    const newRefreshId = (): string => 'commit-throw-refresh';
+    const service = createModelCatalogService({
+      seed: Object.freeze({
+        revision: 1,
+        descriptors: Object.freeze([descriptor('anthropic', 'model-a')]),
+        generatedAt: '2026-09-02T00:00:00.000Z',
+        stale: false,
+        projection: 'privileged',
+      }),
+      descriptorSource: () => Promise.resolve([descriptor('anthropic', 'model-b')]),
+      now,
+      newRefreshId,
+    });
+
+    const handle = service.refresh(request());
+    const result = await handle.result();
+    expect(result.outcome).toBe('failed');
+    expect(result.failureReason).toContain('clock unavailable');
+    expect(await handle.closed()).toBe('completed');
+  });
+
+  it('snapshot structurally satisfies the StartedWorkSnapshot floor', async () => {
+    const { service } = createService(() => Promise.resolve([]));
+    const handle = service.refresh(request());
+    const pending = handle.snapshot();
+
+    expect(pending.id).toBe(handle.refreshId);
+    expect(pending.kind).toBe('model-catalog-refresh');
+    expect(typeof pending.startedAt).toBe('string');
+    expect(typeof pending.revision).toBe('number');
+    expect(pending.status).toBe('pending');
+    expect(typeof pending.lastTransitionAt).toBe('string');
+    expect(pending.projection).toBe('privileged');
+    expect(pending.ownership).toBe('independent');
+    expect(pending.detached).toBe(false);
+    expect(pending.durability).toBe('process-local');
+    expect(pending.cancellable).toBe(true);
+    expect(pending.result).toBeUndefined();
+
+    await handle.result();
+    const settled = handle.snapshot();
+    expect(settled.status).toBe('settled');
+    expect(settled.cancellable).toBe(false);
+    expect(settled.result).toBeDefined();
+    expect(settled.revision).toBeGreaterThan(pending.revision);
+    expect(settled.lastTransitionAt >= settled.startedAt).toBe(true);
   });
 });

@@ -4138,15 +4138,18 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // connection; a second pass is a no-op.
     if (disposePromise) return disposePromise;
 
+    // AB-246/AB-64 (2026-09-02 amendment): a model-catalog refresh is
+    // INDEPENDENTLY owned by Bureau's catalog, not parent-owned by a run — so
+    // it isn't touched by the run/toolbox teardown below, and `dispose()`
+    // awaits it here rather than aborting it out from under a caller who may
+    // still be awaiting the same handle. Captured synchronously, BEFORE the
+    // teardown below runs, but awaited only at the very end (not blocking
+    // admission closure, active-run cancellation, or backend teardown — a
+    // slow or never-settling refresh must not stall the rest of `dispose()`,
+    // per review finding on PR #432).
+    const modelCatalogRefreshPromise = modelCatalog.inFlightRefresh()?.result();
+
     disposePromise = (async () => {
-      // AB-246/AB-64 (2026-09-02 amendment): a model-catalog refresh is
-      // INDEPENDENTLY owned by Bureau's catalog, not parent-owned by a run —
-      // so it isn't touched by the run/toolbox teardown below. `dispose()`
-      // is the stop path a caller actually takes (`Bureau.shutdown()` per
-      // AB-207 doesn't exist yet), so it awaits any in-flight refresh here
-      // rather than aborting it out from under a caller who may still be
-      // awaiting the same handle.
-      await modelCatalog.inFlightRefresh()?.result();
       // Stop admission before cancelling runs. The canonical toolbox is the
       // owner of local execution lifecycle; await its shutdown as the
       // quiescence fence before releasing durable resources.
@@ -4288,6 +4291,9 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           }
         }
       }
+      // Awaited last: everything above (admission, active runs, toolbox
+      // shutdown, backend teardown) already ran without waiting on this.
+      await modelCatalogRefreshPromise;
     })();
     return disposePromise;
   }

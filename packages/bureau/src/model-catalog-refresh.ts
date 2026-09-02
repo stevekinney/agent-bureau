@@ -4,12 +4,13 @@ import type { BackendDescriptor, ModelCatalog } from '@lostgradient/operative/pr
  * Bureau-local model-catalog refresh mechanism.
  *
  * Conforms to AB-34's universal started-work control contract (see
- * `documentation/operative-type-safe-api.md` § "Required capabilities") as
- * ratified by AB-64's decision record and its `## Coordinator amendments
- * (2026-09-02)` section: a catalog refresh is **independently owned** by
- * Bureau's catalog (not parent-owned by a run), so its cleanup
- * acknowledgement is this module's own `CatalogRefreshHandle.closed()`, and
- * `Bureau.dispose()` awaits any in-flight refresh before reporting (AB-37).
+ * `documentation/operative-type-safe-api.md` § "Required capabilities" and
+ * § "The common facts") as ratified by AB-64's decision record and its
+ * `## Coordinator amendments (2026-09-02)` section: a catalog refresh is
+ * **independently owned** by Bureau's catalog (not parent-owned by a run),
+ * so its cleanup acknowledgement is this module's own
+ * `CatalogRefreshHandle.closed()`, and `Bureau.dispose()` awaits any
+ * in-flight refresh before reporting (AB-37).
  *
  * Naming follows AB-34's binding constraints: the observation method is
  * `subscribeSnapshot`, never `subscribe` (which already means event
@@ -45,6 +46,24 @@ import type { BackendDescriptor, ModelCatalog } from '@lostgradient/operative/pr
  * honestly `true`. Repeated reads between represented changes still return
  * one identical object, satisfying AB-34's diff-by-identity requirement in
  * every interval where nothing changed.
+ *
+ * **`CatalogRefreshSnapshot` structurally satisfies `StartedWorkSnapshot`**
+ * (`documentation/operative-type-safe-api.md` § "The common facts") — the
+ * `id`/`kind`/`startedAt`/`revision`/`status`/`lastTransitionAt`/
+ * `projection`/`ownership`/`detached`/`durability`/`cancellable`/`result`
+ * floor, structurally (never nominally, per that section's own rule), plus
+ * this module's own extra field (`previousRevision`) beyond the floor.
+ * `owner`/`parentId` are omitted: this handle has no principal and no
+ * Bureau-issued locator to report, which is the doc's own stated meaning of
+ * an absent optional owner — a truthful "no authorization context", not
+ * missing data. `projection` is always `'privileged'`: this Bureau-internal
+ * administrative handle has no authorization/redaction split of its own
+ * (distinct from `ModelCatalog.projection`, which mod-02e's `'general'`
+ * projection function operates over separately). `detached` is always
+ * `false`: this handle has no owner/parent construct to detach FROM.
+ * `durability` is always `'process-local'`: the refresh OPERATION's own
+ * lifecycle state is not itself persisted (only the descriptors it commits
+ * are, via whatever backs `ModelCatalog`).
  */
 
 /** AB-64's `CatalogRefreshRequest`, field names unchanged. */
@@ -75,22 +94,32 @@ export interface CatalogRefreshResult {
 export type CatalogRefreshCleanupAcknowledgement =
   'not-required' | 'completed' | 'failed' | 'unresolved';
 
-export type CatalogRefreshHandleState = 'pending' | 'settled';
+export type CatalogRefreshStatus = 'pending' | 'settled';
 
 /**
  * A `CatalogRefreshHandle`'s own cached, immutable, monotonic-revision
- * snapshot (AB-34's "Cached snapshot" capability). `revision` here counts
+ * snapshot (AB-34's "Cached snapshot" capability), structurally satisfying
+ * `StartedWorkSnapshot` — see the module-level JSDoc. `revision` here counts
  * transitions of THIS handle's own state (1 while pending, 2 once settled)
  * — it is deliberately a different number from `ModelCatalog.revision`,
  * which counts committed catalog generations. `previousRevision` is carried
  * on every snapshot so the two numbers are never confused for one another.
  */
 export interface CatalogRefreshSnapshot {
-  readonly refreshId: string;
+  readonly id: string;
+  readonly kind: 'model-catalog-refresh';
+  readonly startedAt: string;
   readonly revision: number;
-  readonly state: CatalogRefreshHandleState;
+  readonly status: CatalogRefreshStatus;
+  readonly lastTransitionAt: string;
+  readonly projection: 'privileged';
+  readonly ownership: 'independent';
+  readonly detached: false;
+  readonly durability: 'process-local';
+  /** `true` while pending (abort still has effect); `false` once settled. */
+  readonly cancellable: boolean;
   readonly previousRevision: number;
-  /** Present once `state === 'settled'`. */
+  /** Present once `status === 'settled'`. */
   readonly result?: CatalogRefreshResult;
 }
 
@@ -117,8 +146,9 @@ export interface CatalogRefreshHandle {
    * synchronously, before this call returns — closing the read-then-
    * subscribe gap. Returns an unsubscribe function; disposing one
    * subscription never affects the underlying refresh or any other
-   * observer. Subscribing after the refresh has settled delivers the
-   * terminal snapshot immediately.
+   * observer, including a second subscription registered with the exact
+   * same observer function. Subscribing after the refresh has settled
+   * delivers the terminal snapshot immediately.
    */
   subscribeSnapshot(
     observer: CatalogRefreshSnapshotObserver,
@@ -126,7 +156,9 @@ export interface CatalogRefreshHandle {
   ): () => void;
   /**
    * Idempotent, never throws. Requests cancellation; does not itself wait
-   * for teardown — see {@link closed}.
+   * for teardown — see {@link closed}. A no-op once the refresh has already
+   * settled (by any means — completion, failure, or a prior abort): aborting
+   * already-terminal work has no additional effect.
    */
   abort(reason?: string): void;
   /** Never rejects. Resolves with the refresh's typed terminal result. */
@@ -143,16 +175,19 @@ export interface CatalogRefreshHandle {
    *   actually settle (see AB-246's acceptance criteria), so this handle
    *   cannot honestly confirm whether `descriptorSource`'s own eventual
    *   effect was released.
-   * - `'failed'` — an observer registered via {@link subscribeSnapshot}
-   *   threw while being notified. Notifying observers of the terminal
-   *   state is part of this handle's own teardown, so a throwing observer
-   *   is a genuine cleanup failure, not a `descriptorSource` business
-   *   failure (a `descriptorSource` rejection is a normal `'completed'`
-   *   cleanup — the *refresh* failed, but this handle's own teardown
-   *   didn't).
+   * - `'failed'` — an observer threw while being notified of the TERMINAL
+   *   transition specifically (not the initial current-state delivery a
+   *   fresh `subscribeSnapshot` call makes, pending or settled). Notifying
+   *   observers of the terminal transition is part of this handle's own
+   *   teardown, so a throwing observer there is a genuine cleanup failure,
+   *   not a `descriptorSource` business failure (a `descriptorSource`
+   *   rejection is a normal `'completed'` cleanup — the *refresh* failed,
+   *   but this handle's own teardown didn't). This outcome is fixed at the
+   *   moment the refresh settles; a `subscribeSnapshot` call — throwing or
+   *   not — made after that moment cannot change it.
    * - `'completed'` — every other case: the refresh committed, or
    *   `descriptorSource` resolved or rejected on its own, and no observer
-   *   threw.
+   *   threw during the terminal transition.
    */
   closed(): Promise<CatalogRefreshCleanupAcknowledgement>;
 }
@@ -242,11 +277,32 @@ function describeFailure(cause: unknown): string {
 }
 
 /**
+ * Recursively freezes an object graph, mutating in place and returning the
+ * SAME top-level reference (never cloning) — freezing an already-frozen
+ * value is a harmless no-op, so this is safe to call unconditionally on
+ * every row this module commits, whether or not `descriptorSource` already
+ * froze it. Needed because `BackendDescriptor` carries nested mutable
+ * structures (`aliases`, `modalities`, `mediaLimits`, `effort.degradesTo`,
+ * `pricing`) that a shallow `Object.freeze` on the row itself does not
+ * protect — a caller retaining a reference to one of those could otherwise
+ * mutate a published catalog row without a new object or revision (review
+ * finding, PR #432).
+ */
+function deepFreeze<T>(value: T): T {
+  if (value === null || typeof value !== 'object') return value;
+  const record = value as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    deepFreeze(record[key]);
+  }
+  return Object.freeze(value);
+}
+
+/**
  * Merges a `descriptorSource` result into the prior descriptor set for the
  * partial-provider-failure rule: the committed set is exactly the returned
  * rows, PLUS the prior rows for every provider the source omitted, with
  * those omitted rows' `availability` overridden to `'unknown'` rather than
- * dropped.
+ * dropped. Every committed row is deep-frozen (see {@link deepFreeze}).
  */
 function mergeDescriptors(
   priorDescriptors: readonly BackendDescriptor[],
@@ -255,16 +311,8 @@ function mergeDescriptors(
   const returnedProviders = new Set(returned.map((descriptor) => descriptor.provider));
   const omittedPriorRows = priorDescriptors
     .filter((descriptor) => !returnedProviders.has(descriptor.provider))
-    .map((descriptor) => Object.freeze({ ...descriptor, availability: 'unknown' as const }));
-  // Freeze each returned row too — `catalog()`'s identity/immutability
-  // contract otherwise depends on `descriptorSource` having frozen its own
-  // rows, which this module cannot assume (review finding, PR #432). A row
-  // that is already frozen is reused by reference rather than cloned, so a
-  // well-behaved `descriptorSource` that already froze its own rows keeps
-  // exact object identity into the committed catalog.
-  const frozenReturnedRows = returned.map((descriptor) =>
-    Object.isFrozen(descriptor) ? descriptor : Object.freeze({ ...descriptor }),
-  );
+    .map((descriptor) => deepFreeze({ ...descriptor, availability: 'unknown' as const }));
+  const frozenReturnedRows = returned.map((descriptor) => deepFreeze({ ...descriptor }));
   return Object.freeze([...frozenReturnedRows, ...omittedPriorRows]);
 }
 
@@ -287,35 +335,65 @@ interface CreateRefreshHandleOptions {
    * else committed more recently, so it is not stale).
    */
   readonly markStaleIfUnchanged: () => void;
-  /** Clears the service's in-flight slot once this refresh settles. */
+  /**
+   * Clears the service's in-flight slot for this refresh. Called BEFORE the
+   * terminal snapshot is delivered to observers, so an observer that reacts
+   * to settlement by calling `service.refresh()` again starts a genuinely
+   * new refresh rather than coalescing onto the one that just finished
+   * (review finding, PR #432). Idempotent-safe to call even if this
+   * refresh's slot was never actually occupied (see the synchronous-source
+   * race note on {@link createRefreshHandle}).
+   */
   readonly onSettled: () => void;
+  /**
+   * Synchronously reserves this handle as the service's in-flight refresh.
+   * Called once, before `descriptorSource` is ever invoked, closing a race
+   * where a `descriptorSource` that throws SYNCHRONOUSLY would otherwise
+   * settle this handle before `refresh()` had a chance to assign it to the
+   * service's `inFlight` slot — permanently stranding the slot on an
+   * already-settled handle (review finding, PR #432).
+   */
+  readonly reserveInFlight: (handle: CatalogRefreshHandle) => void;
 }
 
 function createRefreshHandle(options: CreateRefreshHandleOptions): CatalogRefreshHandle {
   const { refreshId, request, previousRevision } = options;
   const controller = new AbortController();
-  const observers = new Set<CatalogRefreshSnapshotObserver>();
+  // Keyed by a unique token per subscription, never by the observer
+  // function itself — two `subscribeSnapshot(sameFn)` calls must stay
+  // independently disposable (review finding, PR #432).
+  const observers = new Map<symbol, CatalogRefreshSnapshotObserver>();
   const resultDeferred = createDeferred<CatalogRefreshResult>();
+  const startedAt = options.now();
 
   let handleRevision = 1;
   let resultSettled = false;
   let aborted = false;
   let staleConflict = false;
-  let observerThrew = false;
+  let terminalObserverThrew = false;
   let currentSnapshot: CatalogRefreshSnapshot = Object.freeze({
-    refreshId,
+    id: refreshId,
+    kind: 'model-catalog-refresh' as const,
+    startedAt,
     revision: handleRevision,
-    state: 'pending' as const,
+    status: 'pending' as const,
+    lastTransitionAt: startedAt,
+    projection: 'privileged' as const,
+    ownership: 'independent' as const,
+    detached: false as const,
+    durability: 'process-local' as const,
+    cancellable: true,
     previousRevision,
   });
 
-  function notify(next: CatalogRefreshSnapshot): void {
+  /** Delivers `next` to every current observer, isolating a throwing one. */
+  function deliver(next: CatalogRefreshSnapshot, onObserverThrow?: () => void): void {
     currentSnapshot = next;
-    for (const observer of [...observers]) {
+    for (const observer of [...observers.values()]) {
       try {
         observer(next);
       } catch {
-        observerThrew = true;
+        onObserverThrow?.();
       }
     }
   }
@@ -328,36 +406,50 @@ function createRefreshHandle(options: CreateRefreshHandleOptions): CatalogRefres
     if (result.outcome === 'failed') {
       options.markStaleIfUnchanged();
     }
+    // Clear the in-flight slot BEFORE notifying observers of the terminal
+    // transition, so an observer that reacts by starting a new refresh
+    // isn't incorrectly coalesced onto this now-finished one.
+    options.onSettled();
+    const lastTransitionAt = options.now();
     handleRevision += 1;
-    notify(
+    deliver(
       Object.freeze({
-        refreshId,
+        id: refreshId,
+        kind: 'model-catalog-refresh' as const,
+        startedAt,
         revision: handleRevision,
-        state: 'settled' as const,
+        status: 'settled' as const,
+        lastTransitionAt,
+        projection: 'privileged' as const,
+        ownership: 'independent' as const,
+        detached: false as const,
+        durability: 'process-local' as const,
+        cancellable: false,
         previousRevision,
-        result,
+        result: deepFreeze(result),
       }),
+      () => {
+        terminalObserverThrew = true;
+      },
     );
     resultDeferred.resolve(result);
-    options.onSettled();
   }
 
   function abort(reason?: string): void {
-    if (aborted) return; // idempotent, never throws
+    if (aborted || resultSettled) return; // idempotent, never throws, and a
+    // no-op once the refresh is already terminal by any means.
     aborted = true;
     controller.abort(reason);
-    if (!resultSettled) {
-      resolveResult({
-        id: refreshId,
-        outcome: 'failed',
-        previousRevision,
-        failureReason: reason ? `Refresh aborted: ${reason}` : 'Refresh aborted',
-        completedAt: options.now(),
-      });
-    }
+    resolveResult({
+      id: refreshId,
+      outcome: 'failed',
+      previousRevision,
+      failureReason: reason ? `Refresh aborted: ${reason}` : 'Refresh aborted',
+      completedAt: options.now(),
+    });
   }
 
-  void (async () => {
+  async function runRefresh(): Promise<void> {
     let descriptors: readonly BackendDescriptor[];
     try {
       descriptors = await options.descriptorSource(request, controller.signal);
@@ -373,39 +465,54 @@ function createRefreshHandle(options: CreateRefreshHandleOptions): CatalogRefres
     }
     if (resultSettled) return; // aborted (or otherwise settled) while awaiting
 
-    if (options.getCatalogRevision() !== previousRevision) {
-      staleConflict = true;
+    try {
+      if (options.getCatalogRevision() !== previousRevision) {
+        staleConflict = true;
+        resolveResult({
+          id: refreshId,
+          outcome: 'failed',
+          previousRevision,
+          failureReason: `Revision conflict: the catalog moved to a newer revision while this refresh was in flight (expected revision ${previousRevision})`,
+          completedAt: options.now(),
+        });
+        return;
+      }
+
+      const committed = options.commit(descriptors);
+      resolveResult({
+        id: refreshId,
+        outcome: 'completed',
+        previousRevision,
+        newRevision: committed.revision,
+        completedAt: committed.generatedAt,
+      });
+    } catch (cause) {
+      // Commit-path failure (e.g. `now()` or descriptor normalization
+      // throwing) must still settle this handle — otherwise `result()`,
+      // `closed()`, and `Bureau.dispose()`'s await on an in-flight refresh
+      // hang forever (review finding, PR #432).
       resolveResult({
         id: refreshId,
         outcome: 'failed',
         previousRevision,
-        failureReason: `Revision conflict: the catalog moved to a newer revision while this refresh was in flight (expected revision ${previousRevision})`,
+        failureReason: describeFailure(cause),
         completedAt: options.now(),
       });
-      return;
     }
-
-    const committed = options.commit(descriptors);
-    resolveResult({
-      id: refreshId,
-      outcome: 'completed',
-      previousRevision,
-      newRevision: committed.revision,
-      completedAt: committed.generatedAt,
-    });
-  })();
+  }
 
   function subscribeSnapshot(
     observer: CatalogRefreshSnapshotObserver,
     subscribeOptions?: SubscribeSnapshotOptions,
   ): () => void {
-    observers.add(observer);
+    const token = Symbol('catalog-refresh-observer');
+    observers.set(token, observer);
     const signal = subscribeOptions?.signal;
     const onSignalAbort = (): void => {
-      observers.delete(observer);
+      observers.delete(token);
     };
     const unsubscribe = (): void => {
-      observers.delete(observer);
+      observers.delete(token);
       // Remove the abort listener too — otherwise a caller that unsubscribes
       // BEFORE the signal ever aborts leaves the listener (and this
       // observer's closure) referenced by the signal until it eventually
@@ -419,24 +526,29 @@ function createRefreshHandle(options: CreateRefreshHandleOptions): CatalogRefres
         signal.addEventListener('abort', onSignalAbort, { once: true });
       }
     }
+    // The initial "closing the read-then-subscribe gap" delivery is
+    // deliberately NOT part of the terminal-teardown accounting `closed()`
+    // reads: it happens for every fresh subscription (pending OR settled),
+    // not only at the moment this refresh actually settles, so a throw here
+    // must not flip `closed()`'s outcome (review finding, PR #432).
     try {
       observer(currentSnapshot);
     } catch {
-      observerThrew = true;
+      // Swallowed deliberately — see above.
     }
     return unsubscribe;
   }
 
   function closed(): Promise<CatalogRefreshCleanupAcknowledgement> {
     return resultDeferred.promise.then((): CatalogRefreshCleanupAcknowledgement => {
-      if (observerThrew) return 'failed';
+      if (terminalObserverThrew) return 'failed';
       if (aborted) return 'unresolved';
       if (staleConflict) return 'not-required';
       return 'completed';
     });
   }
 
-  return {
+  const handle: CatalogRefreshHandle = {
     refreshId,
     snapshot: () => currentSnapshot,
     subscribeSnapshot,
@@ -444,6 +556,16 @@ function createRefreshHandle(options: CreateRefreshHandleOptions): CatalogRefres
     result: () => resultDeferred.promise,
     closed,
   };
+
+  // Reserve the in-flight slot BEFORE any chance of `descriptorSource`
+  // running (including a synchronous throw) — see `reserveInFlight`'s
+  // JSDoc. `runRefresh` itself is deferred to a microtask for the same
+  // reason: this guarantees `reserveInFlight` has already run by the time
+  // `descriptorSource` is ever invoked, synchronous-throw included.
+  options.reserveInFlight(handle);
+  void Promise.resolve().then(runRefresh);
+
+  return handle;
 }
 
 /**
@@ -478,7 +600,7 @@ export function createModelCatalogService(
     if (inFlight) return inFlight;
     const refreshId = serviceOptions.newRefreshId();
     const previousRevision = catalog.revision;
-    const handle = createRefreshHandle({
+    return createRefreshHandle({
       refreshId,
       request,
       previousRevision,
@@ -490,9 +612,10 @@ export function createModelCatalogService(
       onSettled: () => {
         if (inFlight?.refreshId === refreshId) inFlight = undefined;
       },
+      reserveInFlight: (handle) => {
+        inFlight = handle;
+      },
     });
-    inFlight = handle;
-    return handle;
   }
 
   function replaceCatalog(descriptors: readonly BackendDescriptor[]): ModelCatalog {
@@ -501,7 +624,7 @@ export function createModelCatalogService(
       revision: catalog.revision + 1,
       descriptors: Object.freeze(
         descriptors.map((descriptor) =>
-          Object.freeze({ ...descriptor, source: 'operator-override' as const }),
+          deepFreeze({ ...descriptor, source: 'operator-override' as const }),
         ),
       ),
       generatedAt,
