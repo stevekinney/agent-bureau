@@ -67,8 +67,14 @@ const EMPTY_DESCRIPTORS: readonly BackendDescriptor[] = Object.freeze([]);
  * pattern for a generic recursive-freeze helper: `Object.getOwnPropertyNames`
  * only ever returns real own-property keys of `value`, so indexing through
  * them is safe regardless of `value`'s static shape.
+ *
+ * Exported (not re-exported through a package barrel — a plain cross-module
+ * import, same as `runnable-agent.ts`'s `OPERATIVE_RESOLVE_RUN_OPTIONS`) so
+ * `create-lazy-agent.ts`'s `freezeGenerationProfile` can reuse it for the
+ * descriptors a caller-supplied `AgentGenerationProfile` carries, rather
+ * than duplicating this traversal there.
  */
-function deepFreeze<T>(value: T, seen: WeakSet<object> = new WeakSet()): T {
+export function deepFreeze<T>(value: T, seen: WeakSet<object> = new WeakSet()): T {
   if (value === null || (typeof value !== 'object' && typeof value !== 'function')) {
     return value;
   }

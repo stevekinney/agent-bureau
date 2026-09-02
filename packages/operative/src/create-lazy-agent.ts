@@ -33,6 +33,7 @@ import {
 } from './errors';
 import { RunAbortedEvent, RunCompletedEvent, RunErrorEvent } from './events';
 import type { AgentGenerationProfile } from './generation-profile';
+import { deepFreeze } from './providers/backend-descriptor-attachment';
 import type {
   AgentInput,
   AgentRunContext,
@@ -752,21 +753,30 @@ type LazyAgentState<O, H extends boolean> =
 
 /**
  * Deep-freezes a caller-supplied `AgentGenerationProfile` before it is
- * exposed on the returned agent, and forces `selector: 'unavailable'`
- * regardless of what the caller's profile claims. `generationProfile` is
- * documented as an immutable snapshot; unlike `createAgent` (which builds
- * the object itself from scratch), `createLazyAgent` receives it ready-made
- * from the caller, so freezing the nested collections here — in place,
- * their references shared with (never copied from) the caller's own objects
- * — is what actually closes the mutation vector for a caller who built the
- * profile by hand rather than through `createAgent`. The top-level object
- * IS a fresh shallow copy (never the caller's own object): AB-64's
- * verification walk fixes `selector: 'unavailable'` permanently for a
- * standalone or lazy agent, which has no Bureau, no policy, and no catalog
- * to select through, so a caller-supplied `'available'` must never survive
- * unchanged — reusing the caller's object in place would make forcing this
- * one field impossible without also being able to mutate a field the
- * `Object.freeze` below has already locked.
+ * exposed on the returned agent, and forces `selector: 'unavailable'` and
+ * `projection: 'privileged'` regardless of what the caller's profile claims.
+ * `generationProfile` is documented as an immutable snapshot; unlike
+ * `createAgent` (which builds the object itself from scratch),
+ * `createLazyAgent` receives it ready-made from the caller, so freezing the
+ * nested collections here — in place, their references shared with (never
+ * copied from) the caller's own objects — is what actually closes the
+ * mutation vector for a caller who built the profile by hand rather than
+ * through `createAgent`. Each attached descriptor's own object graph is
+ * deep-frozen too, via `backend-descriptor-attachment.ts`'s `deepFreeze`
+ * (shared rather than duplicated) — freezing only the containing
+ * `descriptors` array would leave a hand-built descriptor's own fields
+ * (`model`, `aliases`, …) mutable.
+ *
+ * The top-level object IS a fresh shallow copy (never the caller's own
+ * object): AB-64's verification walk fixes `selector: 'unavailable'`
+ * permanently for a standalone or lazy agent, which has no Bureau, no
+ * policy, and no catalog to select through, and fixes `projection:
+ * 'privileged'` for any profile read directly off an agent (the caller
+ * already holds the `GenerateFunction` and therefore its descriptors) — so
+ * a caller-supplied `'available'` selector or `'general'` projection must
+ * never survive unchanged. Reusing the caller's object in place would make
+ * forcing these two fields impossible without also being able to mutate a
+ * field the `Object.freeze` below has already locked.
  */
 function freezeGenerationProfile(profile: AgentGenerationProfile): AgentGenerationProfile {
   if (profile.preferences) {
@@ -785,8 +795,9 @@ function freezeGenerationProfile(profile: AgentGenerationProfile): AgentGenerati
     for (const candidate of profile.allowedCandidates) Object.freeze(candidate);
     Object.freeze(profile.allowedCandidates);
   }
+  for (const descriptor of profile.descriptors) deepFreeze(descriptor);
   Object.freeze(profile.descriptors);
-  return Object.freeze({ ...profile, selector: 'unavailable' });
+  return Object.freeze({ ...profile, projection: 'privileged', selector: 'unavailable' });
 }
 
 /**
