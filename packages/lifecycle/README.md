@@ -327,8 +327,12 @@ A priority-ordered registry for named async hooks. `M` maps hook names to their 
 - **`run(hookName, ...args)`**: Executes all handlers for the hook in priority order and returns the final transformed value (or `undefined` if no handler returned one).
 - **`has(hookName)`**: Returns `true` if at least one handler is registered for the hook.
 - **`clear(hookName?)`**: Removes all handlers for the named hook, or all handlers across every hook when called without arguments.
-- **`getHandlers(hookName)`**: Returns registered handlers sorted by priority descending—used internally by `mergeHookRegistries`.
+- **`getHandlers(hookName)`**: Returns registered handlers sorted by priority descending—used internally by `mergeHookRegistries`, and by callers that need to iterate handlers manually (see `onError` below).
 - **`getHookNames()`**: Returns all hook names that have at least one registered handler.
+
+**Accessors:**
+
+- **`onError`**: `HookErrorHandler | undefined`—the registry-wide error fallback passed to the constructor, if any. `run()` already applies this automatically (falling back to it when a handler has no per-registration `onError`); this accessor exists for a caller that iterates `getHandlers()` results manually instead of calling `run()`—for example to interleave other work between handlers—so it can apply the identical `entry.options.onError ?? registry.onError` fallback rather than silently bypassing it.
 
 `HookRegistrationOptions`:
 
