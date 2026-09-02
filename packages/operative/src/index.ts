@@ -269,6 +269,14 @@ export {
 } from './events';
 // F1/F2/F3 — durable multi-agent transition events
 export { ChildWorkflowStartedEvent, HandoffOccurredEvent, HumanWaitParkedEvent } from './events';
+// AB-90 child ab90-01 / AB-221 — steering events (AB-67's decision record)
+export {
+  SteeringAcceptedEvent,
+  SteeringAppliedEvent,
+  SteeringFailedEvent,
+  SteeringRejectedEvent,
+  SteeringSupersededEvent,
+} from './events';
 // D6 — scheduling events
 export type {
   CreateScheduleSelfToolOptions,

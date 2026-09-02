@@ -184,3 +184,18 @@ describe('HookRegistry error handling', () => {
     expect(result).toBe('input-after-async');
   });
 });
+
+describe('HookRegistry.onError accessor', () => {
+  it('exposes the registry-level onError handler configured at construction', () => {
+    const onError: HookErrorHandler = () => 'continue';
+    const registry = new HookRegistry<TestHooks>({ onError });
+
+    expect(registry.onError).toBe(onError);
+  });
+
+  it('is undefined when no registry-level onError was configured', () => {
+    const registry = new HookRegistry<TestHooks>();
+
+    expect(registry.onError).toBeUndefined();
+  });
+});

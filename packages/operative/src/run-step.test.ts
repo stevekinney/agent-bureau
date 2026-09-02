@@ -24,10 +24,23 @@ import { z } from 'zod';
 
 import { noToolCalls } from './conditions/predicates';
 import type { SteeringDesiredState } from './durable/types';
+import { SteeringAppliedEvent } from './events';
 import type { OperativeHookMap } from './hooks';
-import { executeLoop } from './loop';
-import { awaitResumeOrAbort } from './run-step';
+import { buildStepDeps, executeLoop } from './loop';
+import { awaitResumeOrAbort, type EventDispatcher, type RunState, runStep } from './run-step';
 import type { GenerateContext, GenerateResponse, SteeringGate } from './types';
+
+/** A minimal {@link EventDispatcher} test double that records every dispatched event. */
+function createEventRecorder(): EventDispatcher & { events: Event[] } {
+  const events: Event[] = [];
+  return {
+    events,
+    dispatch(event) {
+      events.push(event);
+      return true;
+    },
+  };
+}
 
 function textResponse(content: string): GenerateResponse {
   return { content, toolCalls: [] };
@@ -54,6 +67,7 @@ function createTestSteeringGate(initial: SteeringDesiredState): SteeringGate & {
   let resumeWaiters: Array<() => void> = [];
 
   return {
+    sessionId: 'test-session',
     getDesiredState: () => desired,
     setDesiredState(next) {
       desired = next;
@@ -92,6 +106,7 @@ describe('awaitResumeOrAbort (the pause-gate/AbortSignal race runStep consults)'
     controller.abort('already gone');
     let awaitResumeCalls = 0;
     const gate: SteeringGate = {
+      sessionId: 'test-session',
       getDesiredState: () => ({ paused: true, configVersion: 1 }),
       awaitResume: () => {
         awaitResumeCalls++;
@@ -108,6 +123,7 @@ describe('awaitResumeOrAbort (the pause-gate/AbortSignal race runStep consults)'
   it('resolves aborted: true when the signal fires mid-wait, before the gate resolves', async () => {
     const controller = new AbortController();
     const gate: SteeringGate = {
+      sessionId: 'test-session',
       getDesiredState: () => ({ paused: true, configVersion: 1 }),
       awaitResume: () => new Promise<void>(() => {}), // never resolves on its own
     };
@@ -122,6 +138,7 @@ describe('awaitResumeOrAbort (the pause-gate/AbortSignal race runStep consults)'
   it('resolves aborted: false once the gate resolves before any abort', async () => {
     let resolveGate: (() => void) | undefined;
     const gate: SteeringGate = {
+      sessionId: 'test-session',
       getDesiredState: () => ({ paused: false, configVersion: 2 }),
       awaitResume: () =>
         new Promise<void>((resolve) => {
@@ -138,6 +155,7 @@ describe('awaitResumeOrAbort (the pause-gate/AbortSignal race runStep consults)'
 
   it('resolves aborted: false with no signal at all — resume is the only possible outcome', async () => {
     const gate: SteeringGate = {
+      sessionId: 'test-session',
       getDesiredState: () => ({ paused: false, configVersion: 1 }),
       awaitResume: () => Promise.resolve(),
     };
@@ -269,6 +287,7 @@ describe('runStep: AB-67 steering boundary read', () => {
     // assignability), so no cast is needed to model that here.
     const state = { paused: false, configVersion: 1, route: 'r1' };
     const gate: SteeringGate = {
+      sessionId: 'test-session',
       getDesiredState: () => state, // SAME object reference every call
       awaitResume: () => new Promise<void>(() => {}),
     };
@@ -587,5 +606,446 @@ describe('runStep: AB-67 steering boundary read', () => {
     const expected = { paused: false, configVersion: 1, model: 'real-model' };
     expect(secondHandlerSawSteering).toEqual(expected);
     expect(generateSawSteering).toEqual(expected);
+  });
+});
+
+describe('runStep: AB-232 registry-level onError for manually iterated hook waterfalls', () => {
+  it('routes a throwing beforeGenerate handler to the registry-level onError exactly as run() would', async () => {
+    const hooks = new HookRegistry<OperativeHookMap>({
+      onError: () => 'continue',
+    });
+    let secondHandlerRan = false;
+    let generateSawMaximumTokens: number | undefined;
+
+    hooks.on(
+      'beforeGenerate',
+      () => {
+        throw new Error('first beforeGenerate handler failed');
+      },
+      { priority: 10 },
+    );
+    hooks.on(
+      'beforeGenerate',
+      async (context) => {
+        secondHandlerRan = true;
+        return { ...context, maximumTokens: 42 };
+      },
+      { priority: 5 },
+    );
+
+    const result = await executeLoop({
+      generate: async (context) => {
+        generateSawMaximumTokens = context.maximumTokens;
+        return textResponse('done');
+      },
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      hooks,
+    });
+
+    expect(secondHandlerRan).toBe(true);
+    expect(generateSawMaximumTokens).toBe(42);
+    expect(result.finishReason).not.toBe('error');
+  });
+
+  it('routes a throwing afterGenerate handler to the registry-level onError exactly as run() would', async () => {
+    const hooks = new HookRegistry<OperativeHookMap>({
+      onError: () => 'continue',
+    });
+    let secondHandlerRan = false;
+
+    hooks.on(
+      'afterGenerate',
+      () => {
+        throw new Error('first afterGenerate handler failed');
+      },
+      { priority: 10 },
+    );
+    hooks.on(
+      'afterGenerate',
+      async (context) => {
+        secondHandlerRan = true;
+        return { ...context.response, content: 'rewritten by second handler' };
+      },
+      { priority: 5 },
+    );
+
+    const result = await executeLoop({
+      generate: async () => textResponse('original'),
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      hooks,
+    });
+
+    expect(secondHandlerRan).toBe(true);
+    expect(result.content).toBe('rewritten by second handler');
+  });
+
+  it('re-throws when the registry-level onError decides abort, matching run()', async () => {
+    const hooks = new HookRegistry<OperativeHookMap>({
+      onError: () => 'abort',
+    });
+    let secondHandlerRan = false;
+
+    hooks.on(
+      'beforeGenerate',
+      () => {
+        throw new Error('critical beforeGenerate failure');
+      },
+      { priority: 10 },
+    );
+    hooks.on(
+      'beforeGenerate',
+      async (context) => {
+        secondHandlerRan = true;
+        return context;
+      },
+      { priority: 5 },
+    );
+
+    const result = await executeLoop({
+      generate: async () => textResponse('done'),
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      hooks,
+    });
+
+    expect(secondHandlerRan).toBe(false);
+    expect(result.finishReason).toBe('error');
+    expect(result.error).toBeInstanceOf(Error);
+    expect((result.error as Error).message).toBe('critical beforeGenerate failure');
+  });
+
+  it('propagates the error unchanged when no onError is configured at any level, matching run()', async () => {
+    const hooks = new HookRegistry<OperativeHookMap>();
+
+    hooks.on('afterGenerate', () => {
+      throw new Error('unhandled afterGenerate failure');
+    });
+
+    const result = await executeLoop({
+      generate: async () => textResponse('done'),
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      hooks,
+    });
+
+    expect(result.finishReason).toBe('error');
+    expect((result.error as Error).message).toBe('unhandled afterGenerate failure');
+  });
+
+  it("a handler's own per-registration onError still overrides the registry-level fallback", async () => {
+    const hooks = new HookRegistry<OperativeHookMap>({
+      onError: () => 'continue',
+    });
+    let secondHandlerRan = false;
+
+    hooks.on(
+      'beforeGenerate',
+      () => {
+        throw new Error('per-handler abort wins');
+      },
+      { priority: 10, onError: () => 'abort' },
+    );
+    hooks.on(
+      'beforeGenerate',
+      async (context) => {
+        secondHandlerRan = true;
+        return context;
+      },
+      { priority: 5 },
+    );
+
+    const result = await executeLoop({
+      generate: async () => textResponse('done'),
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      hooks,
+    });
+
+    expect(secondHandlerRan).toBe(false);
+    expect(result.finishReason).toBe('error');
+    expect((result.error as Error).message).toBe('per-handler abort wins');
+  });
+});
+
+describe('runStep: AB-221 steering.applied dispatch', () => {
+  function steeringAppliedEvents(recorder: EventDispatcher & { events: Event[] }) {
+    return recorder.events.filter(
+      (event): event is SteeringAppliedEvent => event instanceof SteeringAppliedEvent,
+    );
+  }
+
+  it('never fires for a run with no steering dependency', async () => {
+    const recorder = createEventRecorder();
+
+    await executeLoop(
+      {
+        generate: async () => textResponse('done'),
+        toolbox: createTestToolbox([]),
+        conversation: new Conversation(),
+        stopWhen: noToolCalls(),
+        runId: 'run-1',
+      },
+      recorder,
+    );
+
+    expect(steeringAppliedEvents(recorder)).toHaveLength(0);
+  });
+
+  it('never fires when configVersion is 0 — the un-steered default, no command ever accepted', async () => {
+    const recorder = createEventRecorder();
+    const gate = createTestSteeringGate({ paused: false, configVersion: 0 });
+
+    await executeLoop(
+      {
+        generate: async () => textResponse('done'),
+        toolbox: createTestToolbox([]),
+        conversation: new Conversation(),
+        stopWhen: noToolCalls(),
+        steering: gate,
+        runId: 'run-1',
+      },
+      recorder,
+    );
+
+    expect(steeringAppliedEvents(recorder)).toHaveLength(0);
+  });
+
+  it('never fires when the run has no runId to stamp appliedAtRunId with', async () => {
+    const recorder = createEventRecorder();
+    const gate = createTestSteeringGate({ paused: false, configVersion: 1, model: 'real-model' });
+
+    await executeLoop(
+      {
+        generate: async () => textResponse('done'),
+        toolbox: createTestToolbox([]),
+        conversation: new Conversation(),
+        stopWhen: noToolCalls(),
+        steering: gate,
+        // no runId
+      },
+      recorder,
+    );
+
+    expect(steeringAppliedEvents(recorder)).toHaveLength(0);
+  });
+
+  it('does not advance lastAppliedConfigVersion when there is no emitter to dispatch to', async () => {
+    // Regression: `runStep` used to advance `runState.lastAppliedConfigVersion`
+    // unconditionally (guarded only by `deps.runId !== undefined`), then
+    // dispatch through `emitter?.dispatch(...)`. With no `emitter` at all,
+    // that silently "consumed" the configVersion in `RunState` — no event
+    // was ever observed, but a later step (or, durably, a resumed run) that
+    // DOES have an emitter would then see `configVersion` already marked
+    // applied and never fire `steering.applied` for it either. Call
+    // `runStep` directly (not through `executeLoop`) so `runState` stays a
+    // handle this test owns and can inspect after the call.
+    const gate = createTestSteeringGate({ paused: false, configVersion: 1, model: 'real-model' });
+    const deps = buildStepDeps({
+      generate: async () => textResponse('done'),
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      steering: gate,
+      runId: 'run-1',
+    });
+    const runState: RunState = {
+      steps: [],
+      totalUsage: { prompt: 0, completion: 0, total: 0 },
+      lastContent: '',
+      schemaAttempts: 0,
+      lastAppliedConfigVersion: 0,
+    };
+
+    await runStep(deps, runState, new Conversation(), 0, undefined);
+
+    expect(runState.lastAppliedConfigVersion).toBe(0);
+  });
+
+  it('fires once at the boundary for an already-accepted command, with sessionId and the exact SteeringEffectiveState payload', async () => {
+    const recorder = createEventRecorder();
+    const gate = createTestSteeringGate({
+      paused: false,
+      configVersion: 1,
+      model: 'real-model',
+    });
+
+    await executeLoop(
+      {
+        generate: async () => textResponse('done'),
+        toolbox: createTestToolbox([]),
+        conversation: new Conversation(),
+        stopWhen: noToolCalls(),
+        steering: gate,
+        runId: 'run-1',
+      },
+      recorder,
+    );
+
+    const applied = steeringAppliedEvents(recorder);
+    expect(applied).toHaveLength(1);
+    const [event] = applied;
+    if (!event) throw new Error('expected a steering.applied event');
+    expect(event.sessionId).toBe('test-session');
+    expect(event.effective).toEqual({
+      paused: false,
+      configVersion: 1,
+      model: 'real-model',
+      appliedAtStep: 0,
+      appliedAtRunId: 'run-1',
+      appliedAt: event.effective.appliedAt,
+    });
+    expect(new Date(event.effective.appliedAt).toISOString()).toBe(event.effective.appliedAt);
+  });
+
+  it('fires exactly once per distinct configVersion across multiple steps, never once per step', async () => {
+    const recorder = createEventRecorder();
+    const gate = createTestSteeringGate({ paused: false, configVersion: 1, route: 'r1' });
+    let calls = 0;
+
+    const result = await executeLoop(
+      {
+        generate: async () => {
+          calls++;
+          if (calls === 1) {
+            return { content: '', toolCalls: [{ name: 'next', arguments: {} }] };
+          }
+          if (calls === 2) {
+            // A second accepted command lands between step 0 and step 1.
+            gate.setDesiredState({ paused: false, configVersion: 2, route: 'r2' });
+            return { content: '', toolCalls: [{ name: 'next', arguments: {} }] };
+          }
+          return textResponse('done');
+        },
+        toolbox: createTestToolbox([nextTool]),
+        conversation: new Conversation(),
+        stopWhen: noToolCalls(),
+        steering: gate,
+        runId: 'run-1',
+      },
+      recorder,
+    );
+
+    expect(result.finishReason).toBe('stop-condition');
+    const applied = steeringAppliedEvents(recorder);
+    expect(applied.map((event) => event.effective.configVersion)).toEqual([1, 2]);
+    expect(applied.map((event) => event.effective.appliedAtStep)).toEqual([0, 2]);
+  });
+
+  it('does not re-fire on a second step for the SAME already-observed configVersion', async () => {
+    const recorder = createEventRecorder();
+    const gate = createTestSteeringGate({ paused: false, configVersion: 1 });
+    let calls = 0;
+
+    await executeLoop(
+      {
+        generate: async () => {
+          calls++;
+          if (calls === 1) {
+            return { content: '', toolCalls: [{ name: 'next', arguments: {} }] };
+          }
+          return textResponse('done');
+        },
+        toolbox: createTestToolbox([nextTool]),
+        conversation: new Conversation(),
+        stopWhen: noToolCalls(),
+        steering: gate,
+        runId: 'run-1',
+      },
+      recorder,
+    );
+
+    // configVersion never changed after step 0's boundary read, so step 1
+    // must not re-fire for the same already-applied configVersion.
+    expect(steeringAppliedEvents(recorder)).toHaveLength(1);
+  });
+
+  it('fires for a pause AND its resume — the pause boundary read is itself an application, not only the resume', async () => {
+    const recorder = createEventRecorder();
+    const gate = createTestSteeringGate({ paused: true, configVersion: 1 });
+
+    const resultPromise = executeLoop(
+      {
+        generate: async () => textResponse('done'),
+        toolbox: createTestToolbox([]),
+        conversation: new Conversation(),
+        stopWhen: noToolCalls(),
+        steering: gate,
+        runId: 'run-1',
+      },
+      recorder,
+    );
+
+    // Let the loop reach and block on the pause gate — the pause's own
+    // `steering.applied` (configVersion 1) must already have fired here,
+    // before any resume, per AB-67's pause row: "applied at the boundary".
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(steeringAppliedEvents(recorder).map((event) => event.effective.configVersion)).toEqual([
+      1,
+    ]);
+
+    gate.setDesiredState({ paused: false, configVersion: 2 });
+    await resultPromise;
+
+    const applied = steeringAppliedEvents(recorder);
+    expect(applied.map((event) => event.effective.configVersion)).toEqual([1, 2]);
+    // Both observed at step 0's boundary: the pause blocked step 0 itself,
+    // not a later step.
+    expect(applied.map((event) => event.effective.appliedAtStep)).toEqual([0, 0]);
+  });
+
+  it('never fires for a configVersion that was superseded before the boundary ever read it (an unobserved intermediate value)', async () => {
+    const recorder = createEventRecorder();
+    const gate = createTestSteeringGate({ paused: true, configVersion: 1 });
+
+    const resultPromise = executeLoop(
+      {
+        generate: async () => textResponse('done'),
+        toolbox: createTestToolbox([]),
+        conversation: new Conversation(),
+        stopWhen: noToolCalls(),
+        steering: gate,
+        runId: 'run-1',
+      },
+      recorder,
+    );
+
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // A resume (cv2) immediately superseded by a re-pause (cv3) in the same
+    // synchronous turn, exactly as the pre-existing "re-checks paused after
+    // a resume" boundary-read test drives it — cv2 is never observed by
+    // `getDesiredState()` at all, so it must never fire `steering.applied`.
+    gate.setDesiredState({ paused: false, configVersion: 2 });
+    gate.setDesiredState({ paused: true, configVersion: 3 });
+
+    // More ticks than the batch above: enough for `awaitResumeOrAbort`'s own
+    // internal microtask chain (its `.then()`, its `Promise.race`, its own
+    // `async` return) to fully unwind and the boundary to actually call
+    // `getDesiredState()` again before this test moves on — verified
+    // empirically against `createTestSteeringGate`'s resolution chain, not
+    // guessed.
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    gate.setDesiredState({ paused: false, configVersion: 4 });
+    await resultPromise;
+
+    const applied = steeringAppliedEvents(recorder);
+    expect(applied.map((event) => event.effective.configVersion)).toEqual([1, 3, 4]);
   });
 });

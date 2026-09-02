@@ -5,6 +5,7 @@ import { z } from 'zod';
 
 import { noToolCalls } from '../src/conditions/predicates';
 import { createActiveRun } from '../src/create-run';
+import type { SteeringEffectiveState } from '../src/durable/types';
 import {
   AgentScheduledEvent,
   BudgetExceededEvent,
@@ -14,10 +15,15 @@ import {
   SessionDeletedEvent,
   SessionLoadedEvent,
   SessionSavedEvent,
+  SteeringAcceptedEvent,
+  SteeringAppliedEvent,
+  SteeringFailedEvent,
+  SteeringRejectedEvent,
+  SteeringSupersededEvent,
   WakeupScheduledEvent,
 } from '../src/events';
 import { createMockGenerate, createRunRecorder } from '../src/test/index';
-import type { GenerateResponse } from '../src/types';
+import type { GenerateResponse, SteeringGate } from '../src/types';
 
 const weatherTool = createTool({
   name: 'get_weather',
@@ -269,5 +275,157 @@ describe('events', () => {
     expect(wakeup.type).toBe('schedule.wakeup');
     expect(wakeup.duration).toBe(5000);
     expect(wakeup.note).toBe('resume work');
+  });
+
+  describe('steering events (AB-90 child ab90-01 / AB-221, AB-67 decision record)', () => {
+    const effective: SteeringEffectiveState = {
+      paused: false,
+      configVersion: 3,
+      model: 'gpt-5',
+      appliedAtStep: 2,
+      appliedAtRunId: 'run-1',
+      appliedAt: '2026-09-02T00:00:00.000Z',
+    };
+    // Typed with the literal `reason`, not widened to `SteeringCommandFailure`.
+    // `session-terminal` belongs exclusively to `SteeringFailedEvent`
+    // (AB-67's `SteeringCommandState` vocabulary comment); `rejected` never
+    // carries it.
+    const sessionTerminalFailure: { failedAt: string; reason: 'session-terminal' } = {
+      failedAt: '2026-09-02T00:00:01.000Z',
+      reason: 'session-terminal',
+    };
+    const runTerminalFailure: { failedAt: string; reason: 'run-terminal' } = {
+      failedAt: '2026-09-02T00:00:02.000Z',
+      reason: 'run-terminal',
+    };
+    const policyDeniedFailure: { failedAt: string; reason: 'policy-denied' } = {
+      failedAt: '2026-09-02T00:00:06.000Z',
+      reason: 'policy-denied',
+    };
+
+    it('constructs SteeringAcceptedEvent with the exact type name and payload', () => {
+      const event = new SteeringAcceptedEvent('session-1', 'command-1', 3);
+
+      expect(event.type).toBe('steering.accepted');
+      expect(event.sessionId).toBe('session-1');
+      expect(event.commandId).toBe('command-1');
+      expect(event.configVersion).toBe(3);
+    });
+
+    it('constructs SteeringAppliedEvent with the exact type name and the SteeringEffectiveState payload verbatim', () => {
+      const event = new SteeringAppliedEvent('session-1', effective);
+
+      expect(event.type).toBe('steering.applied');
+      expect(event.sessionId).toBe('session-1');
+      expect(event.effective).toEqual(effective);
+    });
+
+    it('constructs SteeringRejectedEvent carrying a SteeringCommandFailure', () => {
+      const event = new SteeringRejectedEvent('session-1', 'command-1', policyDeniedFailure);
+
+      expect(event.type).toBe('steering.rejected');
+      expect(event.sessionId).toBe('session-1');
+      expect(event.commandId).toBe('command-1');
+      expect(event.failure).toEqual(policyDeniedFailure);
+    });
+
+    it('rejects at the type level a SteeringRejectedEvent constructed with session-terminal (exclusively a SteeringFailedEvent reason)', () => {
+      // @ts-expect-error -- 'session-terminal' belongs to SteeringFailedEvent only
+      new SteeringRejectedEvent('session-1', 'command-1', {
+        failedAt: 'x',
+        reason: 'session-terminal',
+      });
+    });
+
+    it('constructs SteeringSupersededEvent carrying a SteeringCommandFailure', () => {
+      const event = new SteeringSupersededEvent('session-1', 'command-1', {
+        failedAt: '2026-09-02T00:00:03.000Z',
+        reason: 'superseded-by',
+      });
+
+      expect(event.type).toBe('steering.superseded');
+      expect(event.failure.reason).toBe('superseded-by');
+    });
+
+    it('constructs SteeringFailedEvent restricted to session-terminal/run-terminal reasons for pause/resume', () => {
+      const sessionTerminal = new SteeringFailedEvent(
+        'session-1',
+        'command-1',
+        sessionTerminalFailure,
+      );
+      const runTerminal = new SteeringFailedEvent('session-1', 'command-2', runTerminalFailure);
+
+      expect(sessionTerminal.type).toBe('steering.failed');
+      expect(sessionTerminal.failure.reason).toBe('session-terminal');
+      expect(runTerminal.failure.reason).toBe('run-terminal');
+    });
+
+    it('rejects at the type level a SteeringFailedEvent constructed with a non-terminal reason', () => {
+      // AB-67/AB-221: `SteeringFailedEvent` is restricted to
+      // `session-terminal` (any command) or `run-terminal` (pause/resume
+      // only) — its own docstring already claimed this, but the
+      // constructor accepted the full `SteeringCommandFailure` union. A
+      // reason valid on `SteeringRejectedEvent` (e.g. `policy-denied`) must
+      // not type-check here.
+      // @ts-expect-error -- 'policy-denied' is not a SteeringFailedEvent reason
+      new SteeringFailedEvent('session-1', 'command-1', { failedAt: 'x', reason: 'policy-denied' });
+    });
+
+    it('rejects at the type level a SteeringSupersededEvent constructed with a non-supersession reason', () => {
+      // AB-67: superseded is exclusively "a later command for the same
+      // target was admitted first" — always `SteeringCommandFailure.reason:
+      // 'superseded-by'`. No other reason describes a supersession.
+      // @ts-expect-error -- 'authorization-revoked' is not a superseded reason
+      new SteeringSupersededEvent('session-1', 'command-1', {
+        failedAt: 'x',
+        reason: 'authorization-revoked',
+      });
+    });
+
+    it('createRunRecorder captures steering.applied (AB-90/AB-221 test-utility regression)', async () => {
+      // Regression: `createRunRecorder`'s hard-coded `eventTypes` list
+      // (`src/test/index.ts`) predates AB-221's steering event family. A
+      // consumer test using this exported, supported recorder to assert
+      // `steering.applied` fired would silently see no such event and could
+      // wrongly conclude the feature never fired.
+      const gate: SteeringGate = {
+        sessionId: 'session-1',
+        getDesiredState: () => ({ paused: false, configVersion: 1, model: 'real-model' }),
+        awaitResume: () => new Promise(() => undefined),
+      };
+
+      const activeRun = createActiveRun({
+        generate: createMockGenerate([{ content: 'done', toolCalls: [] }]),
+        toolbox: createToolbox([]),
+        conversation: new Conversation(),
+        stopWhen: noToolCalls(),
+        steering: gate,
+        runId: 'run-1',
+      });
+
+      const recorder = createRunRecorder(activeRun);
+      await activeRun.result;
+
+      const applied = recorder.events.filter((event) => event.type === 'steering.applied');
+      expect(applied).toHaveLength(1);
+    });
+
+    it('exercises every steering event type as a valid OperativeEventType', () => {
+      const types: OperativeEventType[] = [
+        SteeringAcceptedEvent.type,
+        SteeringAppliedEvent.type,
+        SteeringRejectedEvent.type,
+        SteeringSupersededEvent.type,
+        SteeringFailedEvent.type,
+      ];
+
+      expect(types).toEqual([
+        'steering.accepted',
+        'steering.applied',
+        'steering.rejected',
+        'steering.superseded',
+        'steering.failed',
+      ]);
+    });
   });
 });

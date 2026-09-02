@@ -234,6 +234,7 @@ describe('createRunEngine', () => {
         totalUsage: { prompt: 0, completion: 0, total: 0 },
         lastContent: '',
         schemaAttempts: 0,
+        lastAppliedConfigVersion: 0,
       };
       await checkpointStore.saveCursor('run-x', fullCursor);
       expect(await checkpointStore.loadCursor('run-x')).toEqual(fullCursor);
@@ -416,6 +417,7 @@ describe('createRunEngine', () => {
         totalUsage: { prompt: 0, completion: 0, total: 0 },
         lastContent: '',
         schemaAttempts: 0,
+        lastAppliedConfigVersion: 0,
         workflowVersion: 'v1',
       });
 
@@ -485,6 +487,7 @@ describe('createRunEngine', () => {
         totalUsage: { prompt: 0, completion: 0, total: 0 },
         lastContent: '',
         schemaAttempts: 0,
+        lastAppliedConfigVersion: 0,
         workflowVersion: 'v1',
       });
 

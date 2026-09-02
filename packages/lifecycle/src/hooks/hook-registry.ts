@@ -1,4 +1,9 @@
-import type { HookMap, HookRegistrationOptions, HookRegistryOptions } from './types';
+import type {
+  HookErrorHandler,
+  HookMap,
+  HookRegistrationOptions,
+  HookRegistryOptions,
+} from './types';
 
 interface RegisteredHandler<F> {
   handler: F;
@@ -116,5 +121,16 @@ export class HookRegistry<M extends HookMap> {
    */
   getHookNames(): ReadonlyArray<keyof M & string> {
     return [...this.handlers.keys()] as Array<keyof M & string>;
+  }
+
+  /**
+   * The registry-wide error fallback, if configured — the same handler
+   * `run()` falls back to when a handler has no per-registration `onError`.
+   * Exposed so a caller that iterates `getHandlers()` results manually
+   * (rather than calling `run()`) can apply the identical fallback instead
+   * of bypassing it, without `run()` itself gaining a second code path.
+   */
+  get onError(): HookErrorHandler | undefined {
+    return this.registryOptions.onError;
   }
 }

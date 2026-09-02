@@ -1,8 +1,10 @@
 import type { AnyToolbox, ToolExecutionResult } from 'armorer';
 import { Conversation, materializeToolCalls } from 'conversationalist';
 import type { ToolCall } from 'interoperability';
+import type { HookErrorHandler, HookRegistrationOptions } from 'lifecycle';
 import type { ZodType } from 'zod';
 
+import type { SteeringDesiredState } from './durable/types';
 import { type AgentRunErrorKind, GuardrailTripwireError, reclassifyToolError } from './errors';
 import {
   BackpressureAppliedEvent,
@@ -18,6 +20,7 @@ import {
   ResponseSchemaFailedEvent,
   ResponseValidatedEvent,
   RunErrorEvent,
+  SteeringAppliedEvent,
   StepAbortedEvent,
   StepCompletedEvent,
   StepGeneratedEvent,
@@ -127,6 +130,14 @@ export interface RunState {
   lastContent: string;
   /** Run-scoped count of structured-output schema retries already consumed. */
   schemaAttempts: number;
+  /**
+   * The `configVersion` `SteeringAppliedEvent` last fired for, on this run.
+   * AB-221: `steering.applied` fires once per accepted command — once per
+   * distinct `configVersion` this run observes at the boundary — never once
+   * per step. `0` (the default, un-steered `SteeringDesiredState.configVersion`)
+   * never fires: it means no command has ever been accepted.
+   */
+  lastAppliedConfigVersion: number;
 }
 
 /**
@@ -234,6 +245,37 @@ export function runHookSilently<K extends string>(
       Promise.resolve((entry.handler as (...a: unknown[]) => unknown)(...args)),
     ),
   );
+}
+
+/**
+ * Applies the same error-handling policy `HookRegistry.run()` applies to a
+ * throwing handler — `entry.options.onError`, falling back to the
+ * registry-level `onError` (AB-232) — to a handler invoked by a manual
+ * `getHandlers()` loop such as `beforeGenerate`'s and `afterGenerate`'s
+ * waterfalls below, which cannot use `run()` itself (see the comments at
+ * each call site for why).
+ *
+ * Throws the original error when no error handler applies, or when the
+ * resolved handler returns `'abort'` — the caller's `catch` block should let
+ * that propagate. Returns normally (to skip to the next handler) when the
+ * resolved handler returns `'continue'`.
+ */
+function applyWaterfallHandlerErrorPolicy(
+  error: unknown,
+  hookName: string,
+  handlerIndex: number,
+  entryOptions: HookRegistrationOptions,
+  registryOnError: HookErrorHandler | undefined,
+): void {
+  const errorHandler = entryOptions.onError ?? registryOnError;
+  if (!errorHandler) {
+    throw error;
+  }
+  const decision = errorHandler(error, { hookName, handlerIndex });
+  if (decision === 'abort') {
+    throw error;
+  }
+  // 'continue' — skip to next handler
 }
 
 async function evaluateStopConditions(
@@ -465,19 +507,112 @@ export async function runStep(
   // become visible to this step's already-captured context — the exact
   // same-step leak the mid-step-admission acceptance criterion forbids.
   //
+  // AB-221: dispatch `steering.applied` for a desired state this boundary
+  // just read, deduplicated by `configVersion` — extracted so it can run
+  // after EVERY boundary read below, not only after the pause-wait loop
+  // exits. This matters for pause/resume specifically: AB-67's pause row
+  // fixes the application boundary as "entry of runStep" and its terminal
+  // behavior as "applied at the boundary" — the read itself is what applies
+  // a pause, independent of whether the driver then blocks waiting for a
+  // resume. Firing only once, after the loop, would silently skip the
+  // `applied` event for every `configVersion` that was paused-and-read but
+  // then superseded by a later command before the loop exited — under-
+  // counting exactly the command class this boundary exists to gate.
+  //
+  // Fires at most once per distinct `configVersion` this run observes:
+  // `configVersion` increments by exactly one per accepted command (AB-67),
+  // so "once per accepted command" is exactly "once per distinct
+  // `configVersion` observed here" — `RunState.lastAppliedConfigVersion` is
+  // the dedupe key, carried across steps for both drivers (in-memory: the
+  // same `RunState` instance persists across the loop; durable: threaded
+  // through `RunCursor.lastAppliedConfigVersion` like `schemaAttempts`).
+  // `configVersion === 0` is the un-steered default (no command ever
+  // accepted) and never fires.
+  //
+  // `deps.runId` is required to stamp `SteeringEffectiveState.appliedAtRunId`
+  // (a required field — there is no honest way to leave it unset). AB-67
+  // ties steering to Bureau session/run identity throughout, so a real
+  // steering-enabled run always supplies one (the durable driver always
+  // does; only a bare in-memory `executeLoop` caller could omit it) — a
+  // steering-gated run with no `runId` silently does not fire this event,
+  // a declared, tested gap rather than a fabricated run id.
+  //
+  // NOT solved here, same root cause for both: `SteeringDesiredState` is an
+  // AGGREGATE — one `configVersion` covering every steerable field at once,
+  // with no per-target or applied-history information (AB-67's ratified
+  // shape) — so this boundary cannot distinguish "this bump changed a field
+  // that applies now" from "this bump changed a field that applies later"
+  // or "from a field this run already consumed."
+  //
+  // - A session whose `configVersion` a PRIOR run already applied.
+  //   `RunState.lastAppliedConfigVersion` is per-run, so a new run starting
+  //   fresh re-observes and re-fires for a `configVersion` an earlier run
+  //   on the same session already applied.
+  // - `agentName` (an `agent-identity` command): AB-67 fixes its effective
+  //   boundary as the FIRST STEP OF THE SESSION'S NEXT RUN, not the current
+  //   run's next boundary read — "agent-identity commands stay `accepted`
+  //   and carry forward to the next run's boundary." This boundary has no
+  //   way to know a `configVersion` bump was identity-only (or identity
+  //   bundled with an in-run field like `route`) versus purely an in-run
+  //   field, so it currently reports EVERY bump as applied to the current
+  //   run, including one that should not take effect until the next run.
+  //   Diffing the previous and current `SteeringDesiredState` snapshots
+  //   in-place to detect "only `agentName` changed" would still be wrong
+  //   for the bundled case — the stamped `SteeringEffectiveState.agentName`
+  //   would claim effect for a run whose already-resolved agent, toolbox,
+  //   generator, and hooks never actually changed.
+  //
+  // Both need the `SteeringGate` itself — read-only from this boundary's
+  // side (`getDesiredState()`/`awaitResume()`) — to carry target- and
+  // history-aware write-side state: which fields are due now versus at the
+  // next run boundary, and what a prior run already consumed. That is
+  // AB-199's `SteeringGate` implementation's responsibility, not this
+  // boundary's; AB-221's own scope excludes reopening AB-67's
+  // `SteeringDesiredState`/`RunOptions` shapes to add it.
+  const steeringGate = deps.steering;
+  const maybeDispatchSteeringApplied = (state: SteeringDesiredState) => {
+    if (
+      steeringGate &&
+      state.configVersion > 0 &&
+      state.configVersion !== runState.lastAppliedConfigVersion &&
+      deps.runId !== undefined &&
+      // Advancing the dedupe cursor must be conditioned on an emitter
+      // actually being present to dispatch to, exactly like `deps.runId`
+      // above. `emitter?.dispatch(...)` alone would silently "consume" a
+      // `configVersion` with no emitter (a real, if narrow, caller shape —
+      // `executeLoop`'s `emitter` parameter is optional) — the event never
+      // fires anywhere, yet the cursor reports it applied, so nothing ever
+      // gets a chance to observe it, this run or a later one sharing the
+      // same durable cursor.
+      emitter !== undefined
+    ) {
+      runState.lastAppliedConfigVersion = state.configVersion;
+      emitter.dispatch(
+        new SteeringAppliedEvent(steeringGate.sessionId, {
+          ...state,
+          appliedAtStep: step,
+          appliedAtRunId: deps.runId,
+          appliedAt: new Date().toISOString(),
+        }),
+      );
+    }
+  };
+
   // The pause check is a loop, not a single `if`: a `resume` releasing
   // `awaitResume()` does not guarantee the freshly re-read state is
   // unpaused — a new `pause` can be admitted in the same turn a command
   // handler resolves the previous one's waiters. Keep waiting while the
   // state we just read is still `paused: true`, so the most recently
   // desired pause always wins.
-  let steeringDesiredState = deps.steering ? { ...deps.steering.getDesiredState() } : undefined;
-  while (steeringDesiredState?.paused && deps.steering) {
-    const { aborted } = await awaitResumeOrAbort(deps.steering, signal);
+  let steeringDesiredState = steeringGate ? { ...steeringGate.getDesiredState() } : undefined;
+  if (steeringDesiredState) maybeDispatchSteeringApplied(steeringDesiredState);
+  while (steeringDesiredState?.paused && steeringGate) {
+    const { aborted } = await awaitResumeOrAbort(steeringGate, signal);
     if (aborted) {
       return { kind: 'abort', reason: explicitAbortReason(signal) };
     }
-    steeringDesiredState = { ...deps.steering.getDesiredState() };
+    steeringDesiredState = { ...steeringGate.getDesiredState() };
+    maybeDispatchSteeringApplied(steeringDesiredState);
   }
 
   // Backpressure: wait before proceeding if the strategy requires it
@@ -680,11 +815,10 @@ export async function runStep(
           // later handler observing missing or forged desired state.
           // `hooks.run()` has no hook between handlers to do that reapply.
           //
-          // Trade-off: this does not replicate `HookRegistry.run()`'s
-          // registry-level default `onError` — only a handler's own
-          // per-registration `onError` (`entry.options.onError`), matching
-          // `afterGenerate`'s existing manual-iteration precedent below,
-          // which has the identical constraint for the identical reason.
+          // AB-232: a throwing handler is routed through the same policy
+          // `run()` uses — `entry.options.onError`, falling back to the
+          // registry-level `onError` exposed via `hooks.onError` — instead
+          // of bypassing it, via `applyWaterfallHandlerErrorPolicy` above.
           const handlers = hooks.getHandlers('beforeGenerate');
           let beforeGenContext: GenerateContext = {
             conversation,
@@ -695,8 +829,20 @@ export async function runStep(
             signal: stepSignal,
             steering: steeringDesiredState,
           };
-          for (const entry of handlers) {
-            const handlerResult = await entry.handler(beforeGenContext);
+          for (const [index, entry] of handlers.entries()) {
+            let handlerResult: GenerateContext | void;
+            try {
+              handlerResult = await entry.handler(beforeGenContext);
+            } catch (error) {
+              applyWaterfallHandlerErrorPolicy(
+                error,
+                'beforeGenerate',
+                index,
+                entry.options,
+                hooks.onError,
+              );
+              continue;
+            }
             if (handlerResult !== undefined) {
               // AB-67: steering desired-configuration is not hook-overridable.
               // A `beforeGenerate` hook may replace every other field of
@@ -754,16 +900,33 @@ export async function runStep(
         // return value. For afterGenerate, the input is AfterGenerateContext but
         // the return is GenerateResponse — using hooks.run() would feed a
         // GenerateResponse where the next handler expects AfterGenerateContext.
+        //
+        // AB-232: a throwing handler is routed through the same policy
+        // `run()` uses — `entry.options.onError`, falling back to the
+        // registry-level `onError` exposed via `hooks.onError` — instead of
+        // bypassing it, via `applyWaterfallHandlerErrorPolicy` above.
         if (hooks?.has('afterGenerate')) {
           const handlers = hooks.getHandlers('afterGenerate');
-          for (const entry of handlers) {
+          for (const [index, entry] of handlers.entries()) {
             const afterGenContext = {
               conversation,
               step,
               response,
               duration: durationMilliseconds,
             };
-            const handlerResult = await entry.handler(afterGenContext);
+            let handlerResult: GenerateResponse | void;
+            try {
+              handlerResult = await entry.handler(afterGenContext);
+            } catch (error) {
+              applyWaterfallHandlerErrorPolicy(
+                error,
+                'afterGenerate',
+                index,
+                entry.options,
+                hooks.onError,
+              );
+              continue;
+            }
             if (handlerResult !== undefined) {
               response = handlerResult;
             }
