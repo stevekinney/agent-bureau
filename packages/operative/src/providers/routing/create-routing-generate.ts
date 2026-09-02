@@ -118,7 +118,16 @@ function unionDescriptors(
  * AB-65's territory, not this pattern's.
  */
 export function createRoutingGenerate(options: RoutingOptions): GenerateFunction {
-  const { routes, strategy, onRoute, fallback } = options;
+  const { strategy, onRoute, fallback } = options;
+  // Snapshot each route object at construction time — copying `name`/
+  // `generate`/`costPerMillionTokens` onto a fresh object — rather than
+  // reusing `options.routes`'s own objects. Without this, a caller mutating
+  // a route in place after construction (e.g. reassigning
+  // `options.routes[0].generate`) would make dispatch (which reads through
+  // `routeMap`, which references those same objects) silently diverge from
+  // the descriptor union already computed below from the ORIGINAL
+  // `generate`, advertising a backend the agent no longer actually invokes.
+  const routes = options.routes.map((route) => ({ ...route }));
   const routeMap = new Map(routes.map((r) => [r.name, r]));
 
   const generate: GenerateFunction = async (

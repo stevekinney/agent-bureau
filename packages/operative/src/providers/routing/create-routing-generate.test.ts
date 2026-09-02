@@ -453,4 +453,27 @@ describe('createRoutingGenerate — descriptor union (AB-64 AC2, AB-245)', () =>
 
     expect(readBackendDescriptors(generate)).toEqual([openai]);
   });
+
+  it('is unaffected by a caller mutating a route object after construction (review)', () => {
+    const anthropic = descriptorsFor('anthropic')[0];
+    const openai = descriptorsFor('openai')[0];
+    if (!anthropic || !openai)
+      throw new Error('expected seed descriptors for anthropic and openai');
+
+    const route = routeWithDescriptors('fast', 'original-response', [anthropic]);
+    const routes = [route];
+
+    const generate = createRoutingGenerate({
+      routes,
+      strategy: () => ({ route: 'fast', reason: 'test' }),
+      fallback: 'fast',
+    });
+
+    // Mutate the caller's own route object in place — a fresh generate
+    // function that would advertise different descriptors — after
+    // construction.
+    route.generate = routeWithDescriptors('fast', 'replaced-response', [openai]).generate;
+
+    expect(readBackendDescriptors(generate)).toEqual([anthropic]);
+  });
 });

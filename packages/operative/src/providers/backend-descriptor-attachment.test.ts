@@ -6,6 +6,7 @@
 import { describe, expect, it } from 'bun:test';
 
 import { readBackendDescriptors, withBackendDescriptors } from './backend-descriptor-attachment.ts';
+import type { BackendDescriptor } from './model-catalog.ts';
 import { createModelCatalog } from './model-catalog.ts';
 import type { GenerateFunction } from './types.ts';
 
@@ -70,5 +71,67 @@ describe('withBackendDescriptors', () => {
   it('attaches an empty descriptor list without throwing, for a model with no seed row', () => {
     const generate = withBackendDescriptors(noopGenerate(), []);
     expect(readBackendDescriptors(generate)).toEqual([]);
+  });
+
+  it('deep-freezes a hand-built (not pre-frozen) descriptor on attachment, closing per-field mutation too (review)', () => {
+    // createModelCatalog's own seed rows are already deeply frozen at their
+    // source, so the interesting case is a caller-constructed descriptor
+    // that starts out fully mutable.
+    const modalityEntry = { input: false, output: false, sourceForms: [] };
+    const custom: BackendDescriptor = {
+      descriptorVersion: 1,
+      provider: 'anthropic',
+      endpoint: 'messages',
+      model: 'custom-model',
+      aliases: [{ alias: 'custom-alias', resolvesTo: 'custom-model' }],
+      lifecycle: 'stable',
+      modalities: {
+        text: { input: true, output: true, sourceForms: ['inline'] },
+        image: modalityEntry,
+        document: modalityEntry,
+        audio: modalityEntry,
+        video: modalityEntry,
+        file: modalityEntry,
+      },
+      mimeFamilies: [],
+      mediaLimits: [],
+      contextWindowTokens: 1000,
+      maxOutputTokens: 100,
+      streaming: true,
+      tools: true,
+      parallelTools: true,
+      structuredOutput: true,
+      parameterCompatibility: [],
+      caching: false,
+      batchInference: false,
+      explicitThinkingRequest: false,
+      serverSideTokenCounting: false,
+      effort: { portable: [], nativeMapping: 'unsupported', degradesTo: {} },
+      availability: 'available',
+      health: 'unknown',
+      source: 'static',
+      freshness: '2026-01-01T00:00:00.000Z',
+    };
+    expect(Object.isFrozen(custom)).toBe(false);
+
+    const generate = withBackendDescriptors(noopGenerate(), [custom]);
+    const [attached] = readBackendDescriptors(generate);
+    if (!attached) throw new Error('expected exactly one attached descriptor');
+
+    expect(Object.isFrozen(attached)).toBe(true);
+    expect(Object.isFrozen(attached.aliases)).toBe(true);
+    expect(Object.isFrozen(attached.aliases[0])).toBe(true);
+    expect(Object.isFrozen(attached.modalities)).toBe(true);
+    expect(Object.isFrozen(attached.modalities.text)).toBe(true);
+    expect(Object.isFrozen(attached.effort)).toBe(true);
+
+    // Since custom is frozen IN PLACE (not copied), the caller's own
+    // reference is now the same frozen object — mutating a field on it
+    // throws in strict mode and, regardless, must never change what a
+    // later read reports.
+    expect(() => {
+      (custom as { model: string }).model = 'mutated';
+    }).toThrow();
+    expect(readBackendDescriptors(generate)[0]?.model).toBe('custom-model');
   });
 });
