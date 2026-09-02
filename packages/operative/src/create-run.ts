@@ -410,12 +410,23 @@ export function createActiveRun(
       // always labeled 'tool-progress', never 'provider-io', even when the
       // tool internally wraps a provider call — the tool-call `StallPolicy`
       // row is the one this pulse is recorded against.
-      liveness.recordToolProgressPulse({
-        toolCallId: e.call.id,
-        toolName: e.call.name,
-        percent: e.percent,
-        message: e.message,
-      });
+      //
+      // AB-214 review (PRRT_kwDORvupsc6es7pO): only record a pulse for a
+      // tool call THIS run itself dispatched — mirrors the identical
+      // `ownedToolCallIds` guard `onExecuteStart`/`onSettled` already use.
+      // A caller can supply the SAME `Toolbox` instance to more than one
+      // concurrent run (`create-agent.ts`), and the toolbox's `progress`
+      // event is toolbox-wide, not scoped to any one run — without this
+      // guard, run B's tool progress would falsely mark run A's tool-call
+      // watchdog as active or recovered.
+      if (ownedToolCallIds.has(e.call.id)) {
+        liveness.recordToolProgressPulse({
+          toolCallId: e.call.id,
+          toolName: e.call.name,
+          percent: e.percent,
+          message: e.message,
+        });
+      }
     };
 
     const onPolicyDenied = (e: ToolboxEventMap['policy-denied']) => {

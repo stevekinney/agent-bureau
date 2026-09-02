@@ -133,7 +133,15 @@ export function createStallWatchdog(
         missedPulseCount = 0;
       }
     } else {
-      missedPulseCount += 1;
+      // AB-214 review (PRRT_kwDORvupsc6es7pv): an event-loop delay can fire
+      // this callback several whole check intervals late without crossing
+      // the suspension cutoff — counting only one missed pulse regardless
+      // would under-report real silence (e.g. a five-minute stall on a
+      // 38-second tool-call interval reads as one miss, not ~eight).
+      // `gap` already measures real elapsed time since the last check, so
+      // the number of FULL intervals it covers is how many pulses were
+      // actually missed in this single, late-firing callback.
+      missedPulseCount += Math.max(1, checkIntervalMs > 0 ? Math.floor(gap / checkIntervalMs) : 1);
     }
 
     lastCheckAt = now;
@@ -156,6 +164,20 @@ export function createStallWatchdog(
       // AC8/AC5: an evidence entry whose attempt is less than the
       // watchdog's current attempt is discarded, never merged.
       if (attemptEstablished && attempt < currentAttempt) return;
+
+      // AB-214 review (PRRT_kwDORvupsc6es7pY): a NEWER attempt starting
+      // must not inherit a stale, older attempt's governing-activity rank,
+      // activity timestamp, or accrued missed-pulse count — otherwise a
+      // high-rank pulse from the old attempt (e.g. a task-attempt
+      // heartbeat) can permanently outrank every pulse the new attempt
+      // ever sends, and stale missed-pulse accrual can misclassify the
+      // fresh attempt before it has had a chance to prove itself.
+      if (attemptEstablished && attempt > currentAttempt) {
+        highestRankSeen = -1;
+        activityAt = undefined;
+        missedPulseCount = 0;
+        hasActivityPulse = false;
+      }
 
       attemptEstablished = true;
       currentAttempt = Math.max(currentAttempt, attempt);

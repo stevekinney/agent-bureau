@@ -379,21 +379,40 @@ export function createActiveRunLiveness(options: ActiveRunLivenessOptions): Acti
       // will never invoke.
       const alreadyAborted = subscribeOptions?.signal?.aborted ?? false;
 
+      if (alreadyAborted || status === 'terminal') {
+        record.closed = true;
+        try {
+          observer(readSnapshot());
+        } catch {
+          // Same isolation as `notify()` above.
+        }
+        return {
+          unsubscribe,
+          get closed() {
+            return record.closed;
+          },
+        };
+      }
+
+      // AB-214 review (PRRT_kwDORvupsc6es7pq): register BEFORE the
+      // synchronous initial delivery, not after — otherwise an observer
+      // that itself synchronously triggers a revision change (e.g. calling
+      // `run.abort()` after inspecting the current snapshot) reopens the
+      // exact read-then-subscribe gap this API promises to close: the
+      // resulting notification would run while this observer is still
+      // absent from `subscribers`, and it would be stuck on the
+      // already-stale snapshot it was handed until some unrelated later
+      // transition. Registering first means that reentrant notification
+      // reaches this observer too (as a nested, in-order second call).
+      subscribers.add(record);
+      subscribeOptions?.signal?.addEventListener('abort', unsubscribe, { once: true });
+
       try {
         observer(readSnapshot());
       } catch {
         // Same isolation as `notify()` above — a throwing observer must
         // not prevent registration bookkeeping or propagate into the
         // caller of `subscribeSnapshot` itself.
-      }
-
-      if (alreadyAborted) {
-        record.closed = true;
-      } else if (status !== 'terminal') {
-        subscribers.add(record);
-        subscribeOptions?.signal?.addEventListener('abort', unsubscribe, { once: true });
-      } else {
-        record.closed = true;
       }
 
       return {

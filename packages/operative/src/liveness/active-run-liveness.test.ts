@@ -82,6 +82,29 @@ describe('createActiveRunLiveness', () => {
     liveness.dispose();
   });
 
+  it('a subscriber that triggers a revision change from inside its own initial synchronous delivery still observes it (AB-214 review PRRT_kwDORvupsc6es7pq)', () => {
+    const clock = createManualClock();
+    const liveness = createActiveRunLiveness({ id: 'run-1', durability: 'process-local', clock });
+
+    const received: string[] = [];
+    liveness.subscribeSnapshot((snapshot) => {
+      received.push(snapshot.status);
+      // Reentrant: the observer itself synchronously triggers a revision
+      // change during its own initial delivery, exactly as a caller
+      // inspecting the snapshot and then calling run.abort() would.
+      if (snapshot.status === 'running') {
+        liveness.setStatus('aborting');
+      }
+    });
+
+    // Registering BEFORE the synchronous initial delivery means this
+    // reentrant transition reaches the same observer as a nested second
+    // call, not a missed notification.
+    expect(received).toEqual(['running', 'aborting']);
+
+    liveness.dispose();
+  });
+
   it('delivers a new snapshot on every revision change', () => {
     const clock = createManualClock();
     const liveness = createActiveRunLiveness({ id: 'run-1', durability: 'process-local', clock });

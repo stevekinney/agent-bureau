@@ -236,6 +236,41 @@ describe('createStallWatchdog', () => {
     watchdog.dispose();
   });
 
+  it('resets governing-activity rank and accrued missed-pulse count when a newer attempt starts (AB-214 review PRRT_kwDORvupsc6es7pY)', () => {
+    const clock = createManualClock();
+    const policy = toolCallPolicy(1000);
+    const watchdog = createStallWatchdog(policy, clock);
+    const interval = checkIntervalOf(policy);
+
+    // Attempt 1's high-rank pulse (task-attempt-heartbeat, rank 5) governs.
+    watchdog.recordPulse('task-attempt-heartbeat', 1);
+    clock.advance(interval);
+    clock.advance(interval);
+    expect(watchdog.assess().missedPulseCount).toBeGreaterThan(0);
+
+    // Attempt 2 starts with only a lower-rank pulse (tool-progress, rank 3).
+    // Without the reset, attempt 1's rank-5 activity timestamp would keep
+    // outranking it forever, and the missed-pulse count accrued under
+    // attempt 1 would misclassify attempt 2 before it ever gets a chance.
+    watchdog.recordPulse('tool-progress', 2);
+
+    const assessment = watchdog.assess();
+    expect(assessment.missedPulseCount).toBe(0);
+    expect(assessment.reachability).toBe('reachable');
+    expect(assessment.progress).toBe('progressing');
+
+    // A further attempt-2 tick with no new pulse now accrues normally
+    // against attempt 2's own fresh state (the attempt-2 pulse landed
+    // exactly at the second check's timestamp, so that check still reads
+    // as fresh — the FOLLOWING one is the first with no attempt-2 activity).
+    clock.advance(interval);
+    expect(watchdog.assess().missedPulseCount).toBe(0);
+    clock.advance(interval);
+    expect(watchdog.assess().missedPulseCount).toBe(1);
+
+    watchdog.dispose();
+  });
+
   it('establishes attempt fencing from a lease-renewal-only first pulse (attemptEstablished is source-independent)', () => {
     const clock = createManualClock();
     const watchdog = createStallWatchdog(toolCallPolicy(1000), clock);
@@ -278,6 +313,22 @@ describe('createStallWatchdog', () => {
 
     clock.advance(interval); // a normal check window with no new pulse
     expect(watchdog.assess().missedPulseCount).toBe(1);
+
+    watchdog.dispose();
+  });
+
+  it('counts every full interval a delayed callback covers, not just one, below the suspension cutoff (AB-214 review PRRT_kwDORvupsc6es7pv)', () => {
+    const clock = createManualClock();
+    const policy = toolCallPolicy(1000);
+    const watchdog = createStallWatchdog(policy, clock);
+    const interval = checkIntervalOf(policy);
+
+    // No pulse ever recorded — the very first scheduled check fires late,
+    // after roughly 3.5 intervals' worth of real elapsed time (well under
+    // the 10x suspension cutoff), and must count ~3 missed pulses, not 1.
+    clock.advance(interval * 3 + Math.floor(interval / 2));
+
+    expect(watchdog.assess().missedPulseCount).toBe(3);
 
     watchdog.dispose();
   });
