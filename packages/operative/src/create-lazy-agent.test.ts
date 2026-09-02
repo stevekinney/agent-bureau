@@ -25,10 +25,12 @@ function createFakeAgentRun(): {
   push: (event: RunEvent) => void;
   settle: (result: RunResult<string, false>) => void;
   abortCalls: (string | undefined)[];
+  abortChildCalls: { childId: string; reason: string | undefined }[];
   disposed: boolean;
   returnCalls: number;
 } {
   const abortCalls: (string | undefined)[] = [];
+  const abortChildCalls: { childId: string; reason: string | undefined }[] = [];
   let disposed = false;
   let returnCalls = 0;
   const buffered: RunEvent[] = [];
@@ -53,6 +55,12 @@ function createFakeAgentRun(): {
     },
     abort(reason?: string): void {
       abortCalls.push(reason);
+    },
+    children(): readonly never[] {
+      return [];
+    },
+    abortChild(childId: string, reason?: string): void {
+      abortChildCalls.push({ childId, reason });
     },
     [Symbol.dispose](): void {
       disposed = true;
@@ -85,6 +93,7 @@ function createFakeAgentRun(): {
 
   return {
     handle,
+    abortChildCalls,
     push(event) {
       if (waitResolve) {
         const resolve = waitResolve;
@@ -390,6 +399,27 @@ describe('createLazyAgent', () => {
     await run.result();
 
     expect(fake.abortCalls).toEqual(['first']);
+  });
+
+  it('children()/abortChild() read empty/no-op before resolution and delegate to the underlying handle once resolved', async () => {
+    const fake = createFakeAgentRun();
+    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };
+    const lazy = createLazyAgent(() => agent);
+
+    const run = lazy.run('hello');
+
+    // Before the internal resolution microtask has run, there is no
+    // underlying handle yet — both read as the safe, opt-in default.
+    expect(run.children()).toEqual([]);
+    expect(() => run.abortChild('child-1', 'too soon')).not.toThrow();
+
+    await flushMicrotasks();
+
+    run.abortChild('child-1', 'now resolved');
+    fake.settle(successResult('done'));
+    await run.result();
+
+    expect(fake.abortChildCalls).toEqual([{ childId: 'child-1', reason: 'now resolved' }]);
   });
 
   it('honors an already-aborted context.signal without calling the loader', async () => {

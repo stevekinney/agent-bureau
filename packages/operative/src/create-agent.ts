@@ -499,6 +499,8 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknow
       const activeRun = createActiveRun(buildRunOptions(input, context));
       return createAgentRun<unknown, boolean>(activeRun, {
         hasOutput: output !== undefined,
+        // AB-50 — opt-in: only present when the caller supplied one.
+        ...(context?.childRegistry ? { childRegistry: context.childRegistry } : {}),
       });
     },
     // AB-21's definition-resolution protocol: resolves the same `RunOptions`

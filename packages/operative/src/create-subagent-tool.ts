@@ -5,9 +5,10 @@ import type { ZodType } from 'zod';
 
 import type { SuccessfulRunResult } from './agent-run';
 import { isSuccessfulRunResult } from './agent-run';
+import type { MutableChildRunRegistry } from './child-run';
+import { dispatchChildRun } from './child-run';
 import { SubagentRunError } from './errors';
 import type { OperativeEventMap } from './events';
-import { ChildWorkflowStartedEvent } from './events';
 import type { AgentInput, RunnableAgent } from './runnable-agent';
 
 /**
@@ -171,11 +172,13 @@ interface CreateSubagentToolOptionsBase<
    */
   summaryTokenCap?: number;
   /**
-   * F1/F3 — parent run context for event emission.
+   * F1/F3 — parent run context for event emission and child discovery.
    *
-   * When provided, a `ChildWorkflowStartedEvent` is dispatched on the emitter
-   * each time the subagent tool executes, carrying the parent agent name, parent
-   * run id, child agent name, input, and whether the child is durable.
+   * When provided, `dispatchChildRun` (AB-50) dispatches the
+   * `multiagent.child-workflow.*` started/completed/failed/aborted events on
+   * the emitter each time the subagent tool executes, carrying the parent
+   * agent name, parent run id, child agent name, child run id, and (on the
+   * started event) input and durability.
    *
    * The `durable` flag must be set to `true` when the child run is started as a
    * Weft child workflow (i.e. when the bureau has `.persistence()` set).
@@ -186,6 +189,14 @@ interface CreateSubagentToolOptionsBase<
     parentRunId: string;
     /** True when the bureau has `.persistence()` configured (durable child workflow). */
     durable: boolean;
+    /**
+     * AB-50 — when supplied, every child this tool dispatches registers
+     * into it, making it discoverable through the matching `AgentRun`'s
+     * `children()`/`abortChild()` (see `child-run.ts`'s module docs for how
+     * the two are wired together). Omit it and the tool behaves exactly as
+     * it did before AB-50 — discovery is opt-in, not a default.
+     */
+    registry?: MutableChildRunRegistry;
   };
   /**
    * Wraps the child's `agent.run()` call in the parent's own trace context
@@ -304,28 +315,25 @@ export function createSubagentTool<
     execute: async (params: TInput, context: ToolContext) => {
       const agentInput = toAgentInput(params);
 
-      // F1 — emit ChildWorkflowStartedEvent before the child run begins.
+      // AB-50 — dispatch through the lower-level child dispatch primitive.
+      // It emits `ChildWorkflowStartedEvent` before the child run begins
+      // (and the completed/failed/aborted siblings once it settles) when
+      // `parentContext` is supplied, and registers into
+      // `parentContext.registry` when that is supplied too.
       // `ChildWorkflowStartedEvent.input` is (and stays, per this issue's
       // "preserve child-start events" criterion) a plain string — a
       // conversation-history `agentInput` is projected to a named, lossy
       // marker rather than widening the event's field.
-      if (parentContext) {
-        parentContext.emitter.dispatchEvent(
-          new ChildWorkflowStartedEvent({
-            parentAgentName: parentContext.parentAgentName,
-            parentRunId: parentContext.parentRunId,
-            childAgentName: agentName,
-            input: typeof agentInput === 'string' ? agentInput : '[conversation history]',
-            durable: parentContext.durable,
-          }),
-        );
-      }
-
-      const childRun = agent.run(agentInput, {
+      const childRun = dispatchChildRun(agent, agentInput, {
         agentName,
+        parentRunId: parentContext?.parentRunId ?? '',
+        parentAgentName: parentContext?.parentAgentName,
         signal: context.signal,
         traceContext: context.traceContext,
         withTraceContext,
+        emitter: parentContext?.emitter,
+        durable: parentContext?.durable,
+        registry: parentContext?.registry,
       });
       const result = await childRun.result();
 

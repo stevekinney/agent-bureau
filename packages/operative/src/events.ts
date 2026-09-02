@@ -836,6 +836,15 @@ export class ChildWorkflowStartedEvent extends Event {
   readonly parentRunId: string;
   /** The subagent's name. */
   readonly childAgentName: string;
+  /**
+   * The child's own run id (AB-50), distinct from `parentRunId` — the
+   * correlation key `ChildWorkflowCompletedEvent`/`ChildWorkflowFailedEvent`/
+   * `ChildWorkflowAbortedEvent` share with this event. Optional so a caller
+   * constructing this event directly (as existing tests and any code
+   * predating AB-50 do) is not forced to invent one; `dispatchChildRun`
+   * always supplies it.
+   */
+  readonly childRunId: string | undefined;
   /** The prompt sent to the subagent. */
   readonly input: string;
   /** True when the child is a durable Weft child workflow; false for in-process. */
@@ -845,6 +854,7 @@ export class ChildWorkflowStartedEvent extends Event {
     parentAgentName: string;
     parentRunId: string;
     childAgentName: string;
+    childRunId?: string;
     input: string;
     durable: boolean;
   }) {
@@ -852,8 +862,92 @@ export class ChildWorkflowStartedEvent extends Event {
     this.parentAgentName = data.parentAgentName;
     this.parentRunId = data.parentRunId;
     this.childAgentName = data.childAgentName;
+    this.childRunId = data.childRunId;
     this.input = data.input;
     this.durable = data.durable;
+  }
+}
+
+/**
+ * Fields common to every `multiagent.child-workflow.*` terminal event
+ * (completed/failed/aborted) — the parent-child correlation a caller needs
+ * to attribute a terminal transition to the child it came from, matching
+ * `ChildWorkflowStartedEvent`'s own identity fields.
+ */
+export interface ChildWorkflowCorrelation {
+  readonly parentAgentName: string;
+  readonly parentRunId: string;
+  readonly childAgentName: string;
+  readonly childRunId: string;
+}
+
+/**
+ * Emitted when a child run dispatched via `dispatchChildRun` (and therefore
+ * `createSubagentTool`) reaches a clean stop (`finishReason ===
+ * 'stop-condition'`), whether or not its output passed schema validation —
+ * `createSubagentTool` classifies that narrower case as a `SubagentRunError`
+ * on its own return value, but the child's own lifecycle still completed.
+ */
+export class ChildWorkflowCompletedEvent extends Event implements ChildWorkflowCorrelation {
+  static readonly type = 'multiagent.child-workflow.completed' as const;
+  readonly parentAgentName: string;
+  readonly parentRunId: string;
+  readonly childAgentName: string;
+  readonly childRunId: string;
+  constructor(data: ChildWorkflowCorrelation) {
+    super(ChildWorkflowCompletedEvent.type);
+    this.parentAgentName = data.parentAgentName;
+    this.parentRunId = data.parentRunId;
+    this.childAgentName = data.childAgentName;
+    this.childRunId = data.childRunId;
+  }
+}
+
+/**
+ * Emitted when a child run terminates with a non-aborted failure —
+ * `finishReason` other than `'stop-condition'` or `'aborted'` (an execution
+ * error, a tripwire, budget exceeded, elicitation denied, or maximum
+ * steps), or an unexpected rejection from the child's own `result()`.
+ */
+export class ChildWorkflowFailedEvent extends Event implements ChildWorkflowCorrelation {
+  static readonly type = 'multiagent.child-workflow.failed' as const;
+  readonly parentAgentName: string;
+  readonly parentRunId: string;
+  readonly childAgentName: string;
+  readonly childRunId: string;
+  /** The child's terminal `finishReason`, or the rejection's message. */
+  readonly reason: string;
+  constructor(data: ChildWorkflowCorrelation & { reason: string }) {
+    super(ChildWorkflowFailedEvent.type);
+    this.parentAgentName = data.parentAgentName;
+    this.parentRunId = data.parentRunId;
+    this.childAgentName = data.childAgentName;
+    this.childRunId = data.childRunId;
+    this.reason = data.reason;
+  }
+}
+
+/**
+ * Emitted when a child run terminates because it (or its parent) was
+ * aborted — `finishReason === 'aborted'`. Fires for both a child-targeted
+ * `abort()` and a propagated parent abort; a caller distinguishes the two
+ * by which signal it observed firing, not from this event.
+ */
+export class ChildWorkflowAbortedEvent extends Event implements ChildWorkflowCorrelation {
+  static readonly type = 'multiagent.child-workflow.aborted' as const;
+  readonly parentAgentName: string;
+  readonly parentRunId: string;
+  readonly childAgentName: string;
+  readonly childRunId: string;
+  /** The abort reason, when the aborting signal carried a string one. */
+  readonly reason: string | undefined;
+  constructor(data: ChildWorkflowCorrelation & { reason?: string }) {
+    super(ChildWorkflowAbortedEvent.type);
+    this.parentAgentName = data.parentAgentName;
+    this.parentRunId = data.parentRunId;
+    this.childAgentName = data.childAgentName;
+    this.childRunId = data.childRunId;
+    this.reason = data.reason;
   }
 }
 
@@ -1227,6 +1321,10 @@ export interface OperativeEventMap extends EventMap {
   [SessionMonitorDoneEvent.type]: SessionMonitorDoneEvent;
   // Phase F — durable multi-agent transition events (C3 completeness rule)
   [ChildWorkflowStartedEvent.type]: ChildWorkflowStartedEvent;
+  // AB-50 — child dispatch lifecycle correlation (started above; terminal below)
+  [ChildWorkflowCompletedEvent.type]: ChildWorkflowCompletedEvent;
+  [ChildWorkflowFailedEvent.type]: ChildWorkflowFailedEvent;
+  [ChildWorkflowAbortedEvent.type]: ChildWorkflowAbortedEvent;
   [HandoffOccurredEvent.type]: HandoffOccurredEvent;
   [HumanWaitParkedEvent.type]: HumanWaitParkedEvent;
   // Steering (AB-90 child ab90-01, AB-67's decision record)

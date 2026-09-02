@@ -22,6 +22,7 @@ import { Conversation } from 'conversationalist';
 
 import type { AgentRun, RunEvent, UnwrappedValue } from './agent-run';
 import { CompletedRunIterationError } from './agent-run';
+import type { ChildRunDescriptor } from './child-run';
 import type { AgentRunError } from './errors';
 import {
   AbortAgentRunError,
@@ -571,6 +572,18 @@ function createDeferredAgentRun<O, H extends boolean>(
 
     abort(reason?: string): void {
       requestAbort(reason);
+    },
+
+    // AB-50 — before `underlying` resolves there is no real child registry
+    // to read yet (the wrapped run hasn't started), so `children()` reads
+    // empty and `abortChild()` is a no-op, matching `AgentRun`'s own opt-in
+    // default. Once resolved, both delegate straight through.
+    children(): readonly ChildRunDescriptor[] {
+      return underlying ? underlying.children() : [];
+    },
+
+    abortChild(childId: string, reason?: string): void {
+      underlying?.abortChild(childId, reason);
     },
 
     [Symbol.dispose](): void {
