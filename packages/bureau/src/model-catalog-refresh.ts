@@ -277,24 +277,24 @@ function describeFailure(cause: unknown): string {
 }
 
 /**
- * Recursively freezes an object graph, mutating in place and returning the
- * SAME top-level reference (never cloning) — freezing an already-frozen
- * value is a harmless no-op, so this is safe to call unconditionally on
- * every row this module commits, whether or not `descriptorSource` already
- * froze it. Needed because `BackendDescriptor` carries nested mutable
- * structures (`aliases`, `modalities`, `mediaLimits`, `effort.degradesTo`,
- * `pricing`) that a shallow `Object.freeze` on the row itself does not
- * protect — a caller retaining a reference to one of those could otherwise
- * mutate a published catalog row without a new object or revision (review
- * finding, PR #432).
+ * Recursively CLONES an object graph and freezes the clone at every level,
+ * never mutating the input. A prior revision of this helper froze the input
+ * in place, which — for a nested array/object a live `descriptorSource`
+ * keeps a mutable reference to across calls (a cached `aliases`/`modalities`
+ * table, say) — froze the SOURCE's own live state, so its next update would
+ * throw on write. Cloning first means this module's immutability guarantee
+ * never reaches back into caller-owned state (review finding, PR #432).
  */
-function deepFreeze<T>(value: T): T {
+function deepCloneAndFreeze<T>(value: T): T {
   if (value === null || typeof value !== 'object') return value;
-  const record = value as Record<string, unknown>;
-  for (const key of Object.keys(record)) {
-    deepFreeze(record[key]);
+  if (Array.isArray(value)) {
+    return Object.freeze(value.map((item: unknown) => deepCloneAndFreeze(item))) as T;
   }
-  return Object.freeze(value);
+  const clone: Record<string, unknown> = {};
+  for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+    clone[key] = deepCloneAndFreeze(nested);
+  }
+  return Object.freeze(clone) as T;
 }
 
 /**
@@ -302,7 +302,8 @@ function deepFreeze<T>(value: T): T {
  * partial-provider-failure rule: the committed set is exactly the returned
  * rows, PLUS the prior rows for every provider the source omitted, with
  * those omitted rows' `availability` overridden to `'unknown'` rather than
- * dropped. Every committed row is deep-frozen (see {@link deepFreeze}).
+ * dropped. Every committed row is cloned and deep-frozen (see
+ * {@link deepCloneAndFreeze}).
  */
 function mergeDescriptors(
   priorDescriptors: readonly BackendDescriptor[],
@@ -311,8 +312,8 @@ function mergeDescriptors(
   const returnedProviders = new Set(returned.map((descriptor) => descriptor.provider));
   const omittedPriorRows = priorDescriptors
     .filter((descriptor) => !returnedProviders.has(descriptor.provider))
-    .map((descriptor) => deepFreeze({ ...descriptor, availability: 'unknown' as const }));
-  const frozenReturnedRows = returned.map((descriptor) => deepFreeze({ ...descriptor }));
+    .map((descriptor) => deepCloneAndFreeze({ ...descriptor, availability: 'unknown' as const }));
+  const frozenReturnedRows = returned.map((descriptor) => deepCloneAndFreeze({ ...descriptor }));
   return Object.freeze([...frozenReturnedRows, ...omittedPriorRows]);
 }
 
@@ -366,6 +367,24 @@ function createRefreshHandle(options: CreateRefreshHandleOptions): CatalogRefres
   const resultDeferred = createDeferred<CatalogRefreshResult>();
   const startedAt = options.now();
 
+  /**
+   * A non-throwing `now()` for every FAILURE-path timestamp below. `abort()`
+   * has a documented never-throws contract, and every other failure path
+   * here is itself the "something already went wrong" branch — a second
+   * failure from a misbehaving injected clock at that point must not
+   * cascade into an unsettled handle (never resolving `result()`/`closed()`)
+   * or a thrown exception from `abort()` (review finding, PR #432). Falls
+   * back to `startedAt`, the one clock read this module already knows
+   * succeeded.
+   */
+  function safeNow(): string {
+    try {
+      return options.now();
+    } catch {
+      return startedAt;
+    }
+  }
+
   let handleRevision = 1;
   let resultSettled = false;
   let aborted = false;
@@ -410,8 +429,22 @@ function createRefreshHandle(options: CreateRefreshHandleOptions): CatalogRefres
     // transition, so an observer that reacts by starting a new refresh
     // isn't incorrectly coalesced onto this now-finished one.
     options.onSettled();
-    const lastTransitionAt = options.now();
+    // Reuses `result.completedAt` rather than a fresh `now()` call: every
+    // call site building `result` already computed a timestamp
+    // successfully (via `safeNow()` on failure paths, or `commit()`'s
+    // return value on success) BEFORE calling this function — a second,
+    // separately fallible `now()` call here, made AFTER `resultSettled` is
+    // already `true`, could throw and strand this handle unsettled forever
+    // with no way to retry (the settle-once guard above would swallow a
+    // second `resolveResult` call) (review finding, PR #432).
+    const lastTransitionAt = result.completedAt;
     handleRevision += 1;
+    // Frozen ONCE and shared by both the snapshot's `result` field and the
+    // value `result()` resolves with — otherwise those would be two
+    // different objects (one frozen, one not), and a caller mutating the
+    // unfrozen one from result() would silently diverge from the one the
+    // snapshot published (review finding, PR #432).
+    const frozenResult = deepCloneAndFreeze(result);
     deliver(
       Object.freeze({
         id: refreshId,
@@ -426,13 +459,13 @@ function createRefreshHandle(options: CreateRefreshHandleOptions): CatalogRefres
         durability: 'process-local' as const,
         cancellable: false,
         previousRevision,
-        result: deepFreeze(result),
+        result: frozenResult,
       }),
       () => {
         terminalObserverThrew = true;
       },
     );
-    resultDeferred.resolve(result);
+    resultDeferred.resolve(frozenResult);
   }
 
   function abort(reason?: string): void {
@@ -445,7 +478,7 @@ function createRefreshHandle(options: CreateRefreshHandleOptions): CatalogRefres
       outcome: 'failed',
       previousRevision,
       failureReason: reason ? `Refresh aborted: ${reason}` : 'Refresh aborted',
-      completedAt: options.now(),
+      completedAt: safeNow(),
     });
   }
 
@@ -459,7 +492,7 @@ function createRefreshHandle(options: CreateRefreshHandleOptions): CatalogRefres
         outcome: 'failed',
         previousRevision,
         failureReason: describeFailure(cause),
-        completedAt: options.now(),
+        completedAt: safeNow(),
       });
       return;
     }
@@ -473,7 +506,7 @@ function createRefreshHandle(options: CreateRefreshHandleOptions): CatalogRefres
           outcome: 'failed',
           previousRevision,
           failureReason: `Revision conflict: the catalog moved to a newer revision while this refresh was in flight (expected revision ${previousRevision})`,
-          completedAt: options.now(),
+          completedAt: safeNow(),
         });
         return;
       }
@@ -496,7 +529,7 @@ function createRefreshHandle(options: CreateRefreshHandleOptions): CatalogRefres
         outcome: 'failed',
         previousRevision,
         failureReason: describeFailure(cause),
-        completedAt: options.now(),
+        completedAt: safeNow(),
       });
     }
   }
@@ -575,7 +608,12 @@ function createRefreshHandle(options: CreateRefreshHandleOptions): CatalogRefres
 export function createModelCatalogService(
   serviceOptions: CreateModelCatalogServiceOptions,
 ): ModelCatalogService {
-  let catalog: ModelCatalog = serviceOptions.seed;
+  // Clone and deep-freeze the seed at construction — a caller-supplied
+  // `ModelCatalog` is not guaranteed to already be frozen (or frozen only
+  // shallowly), and `catalog()`'s cached-immutable-read guarantee otherwise
+  // depends on the caller having done that themselves (review finding, PR
+  // #432).
+  let catalog: ModelCatalog = deepCloneAndFreeze(serviceOptions.seed);
   let inFlight: CatalogRefreshHandle | undefined;
 
   function markStaleIfUnchanged(previousRevision: number): void {
@@ -624,7 +662,7 @@ export function createModelCatalogService(
       revision: catalog.revision + 1,
       descriptors: Object.freeze(
         descriptors.map((descriptor) =>
-          deepFreeze({ ...descriptor, source: 'operator-override' as const }),
+          deepCloneAndFreeze({ ...descriptor, source: 'operator-override' as const }),
         ),
       ),
       generatedAt,

@@ -76,6 +76,11 @@ import {
   wireFlowControlSchedulerEvents,
   wireStreamEventTargetFrames,
 } from './create-bureau';
+import type {
+  CatalogRefreshHandle,
+  CatalogRefreshRequest,
+  ModelCatalogService,
+} from './model-catalog-refresh';
 import { createModelCatalogService } from './model-catalog-refresh';
 import { createMemoryPersistHook, createRuntimeComposition } from './runtime-composition';
 import { waitForCondition, waitForRunState } from './test';
@@ -7291,7 +7296,12 @@ describe('Bureau.modelCatalog (AB-246)', () => {
     const bureau = await createBureau({ agents: {}, modelCatalog });
     try {
       expect(bureau.modelCatalog).toBe(modelCatalog);
-      expect(bureau.modelCatalog.catalog()).toBe(seed);
+      // The service clones and deep-freezes its seed at construction (a
+      // defensive copy, since a caller-supplied ModelCatalog is not
+      // guaranteed to already be frozen), so check by value rather than
+      // object identity.
+      expect(bureau.modelCatalog.catalog().revision).toBe(seed.revision);
+      expect(bureau.modelCatalog.catalog().descriptors.length).toBe(seed.descriptors.length);
     } finally {
       bureau.dispose();
     }
@@ -7357,5 +7367,57 @@ describe('Bureau.modelCatalog (AB-246)', () => {
     await bureau.dispose();
     await bureau.dispose();
     expect(bureau.modelCatalog.inFlightRefresh()).toBeUndefined();
+  });
+
+  it("dispose() awaits closed(), not just result() — a caller-supplied service's slower cleanup acknowledgement still blocks completion", async () => {
+    const seedCatalog = createModelCatalog({ now: () => '2026-09-02T00:00:00.000Z' });
+    let resolveClosed!: (value: 'completed') => void;
+    const closedPromise = new Promise<'completed'>((resolve) => {
+      resolveClosed = resolve;
+    });
+
+    const fakeHandle: CatalogRefreshHandle = {
+      refreshId: 'fake-refresh',
+      snapshot: () => {
+        throw new Error('not exercised by this test');
+      },
+      subscribeSnapshot: () => () => {},
+      abort: () => {},
+      // result() resolves IMMEDIATELY (a pre-resolved promise) — only
+      // closed() is deliberately slow, so a `dispose()` that captured
+      // result() instead would resolve too early.
+      result: () =>
+        Promise.resolve({
+          id: 'fake-refresh',
+          outcome: 'completed' as const,
+          previousRevision: seedCatalog.revision,
+          newRevision: seedCatalog.revision + 1,
+          completedAt: '2026-09-02T00:00:01.000Z',
+        }),
+      closed: () => closedPromise,
+    };
+
+    const fakeModelCatalog: ModelCatalogService = {
+      catalog: () => seedCatalog,
+      refresh: (_request: CatalogRefreshRequest) => fakeHandle,
+      replaceCatalog: () => seedCatalog,
+      inFlightRefresh: () => fakeHandle,
+    };
+
+    const bureau = await createBureau({ agents: {}, modelCatalog: fakeModelCatalog });
+
+    let disposeSettled = false;
+    const disposePromise = bureau.dispose().then(() => {
+      disposeSettled = true;
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(disposeSettled).toBe(false);
+
+    resolveClosed('completed');
+    await disposePromise;
+    expect(disposeSettled).toBe(true);
   });
 });

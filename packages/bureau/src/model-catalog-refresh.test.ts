@@ -596,6 +596,37 @@ describe('createModelCatalogService', () => {
     expect(service.inFlightRefresh()).toBeUndefined();
   });
 
+  it('abort() never throws even when the injected clock fails', async () => {
+    const source = deferred<readonly BackendDescriptor[]>();
+    let calls = 0;
+    const now = (): string => {
+      calls += 1;
+      // Succeeds for call #1 (startedAt at handle creation); throws for
+      // every call after that, including abort()'s own completedAt read.
+      if (calls > 1) throw new Error('clock unavailable');
+      return '2026-09-02T00:00:00.000Z';
+    };
+    const service = createModelCatalogService({
+      seed: Object.freeze({
+        revision: 1,
+        descriptors: Object.freeze([descriptor('anthropic', 'model-a')]),
+        generatedAt: '2026-09-02T00:00:00.000Z',
+        stale: false,
+        projection: 'privileged',
+      }),
+      descriptorSource: () => source.promise,
+      now,
+      newRefreshId: () => 'abort-clock-failure-refresh',
+    });
+
+    const handle = service.refresh(request());
+    expect(() => handle.abort('stop')).not.toThrow();
+
+    const result = await handle.result();
+    expect(result.outcome).toBe('failed');
+    expect(await handle.closed()).toBe('unresolved');
+  });
+
   it('a descriptorSource that throws SYNCHRONOUSLY does not strand the in-flight slot', async () => {
     let invocations = 0;
     const { service } = createService(() => {
@@ -663,6 +694,57 @@ describe('createModelCatalogService', () => {
     const result = await handle.result();
     expect(Object.isFrozen(result)).toBe(true);
     expect(Object.isFrozen(handle.snapshot().result)).toBe(true);
+    // Not just independently frozen — the SAME object, so a caller can't
+    // observe result() and the snapshot's result field diverging.
+    expect(handle.snapshot().result).toBe(result);
+  });
+
+  it('clones and freezes a caller-supplied seed rather than exposing it directly', () => {
+    const mutableSeedDescriptors = [{ ...descriptor('anthropic', 'seed-row') }];
+    expect(Object.isFrozen(mutableSeedDescriptors[0])).toBe(false);
+    const unfrozenSeed = {
+      revision: 1,
+      descriptors: mutableSeedDescriptors,
+      generatedAt: '2026-09-02T00:00:00.000Z',
+      stale: false,
+      projection: 'privileged' as const,
+    };
+
+    const service = createModelCatalogService({
+      seed: unfrozenSeed,
+      descriptorSource: () => Promise.resolve([]),
+      now: createClock(),
+      newRefreshId: createIdMinter('seed-freeze-refresh'),
+    });
+
+    const catalog = service.catalog();
+    expect(catalog).not.toBe(unfrozenSeed);
+    expect(Object.isFrozen(catalog)).toBe(true);
+    expect(Object.isFrozen(catalog.descriptors)).toBe(true);
+    expect(Object.isFrozen(catalog.descriptors[0])).toBe(true);
+    // The caller's own array/row objects are untouched — this module
+    // cloned rather than mutating them in place.
+    expect(Object.isFrozen(mutableSeedDescriptors[0])).toBe(false);
+  });
+
+  it('does not mutate a live descriptorSource-owned nested object graph when committing', async () => {
+    // Simulates a live source that retains and reuses the SAME nested
+    // `aliases` array reference across calls (a cached lookup table, say).
+    const sharedAliases = [{ alias: 'shared-alias', resolvesTo: 'model-a' }];
+    const row = descriptor('anthropic', 'model-a', { aliases: sharedAliases });
+    const { service } = createService(() => Promise.resolve([row]));
+
+    const handle = service.refresh(request());
+    await handle.result();
+
+    // The committed copy is frozen...
+    const committedRow = service.catalog().descriptors.find((d) => d.model === 'model-a');
+    expect(Object.isFrozen(committedRow?.aliases)).toBe(true);
+    // ...but the SOURCE's own array is untouched and still mutable, so a
+    // live source can keep updating its own cache across future refreshes.
+    expect(Object.isFrozen(sharedAliases)).toBe(false);
+    sharedAliases.push({ alias: 'added-later', resolvesTo: 'model-a' });
+    expect(sharedAliases).toHaveLength(2);
   });
 
   it('settles as failed, rather than hanging, when the commit path itself throws', async () => {

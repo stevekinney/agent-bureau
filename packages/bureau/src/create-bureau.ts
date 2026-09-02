@@ -4146,8 +4146,14 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // teardown below runs, but awaited only at the very end (not blocking
     // admission closure, active-run cancellation, or backend teardown — a
     // slow or never-settling refresh must not stall the rest of `dispose()`,
-    // per review finding on PR #432).
-    const modelCatalogRefreshPromise = modelCatalog.inFlightRefresh()?.result();
+    // per review finding on PR #432). Awaits `closed()`, not `result()`: the
+    // started-work contract lets a handle's cleanup acknowledgement settle
+    // AFTER its result (result() only means the refresh's business outcome
+    // is known; closed() means teardown actually finished), and a caller-
+    // supplied `ModelCatalogService` is explicitly allowed to do that — so
+    // only awaiting `closed()` observes the real cleanup fence (review
+    // finding, PR #432).
+    const modelCatalogRefreshClosedPromise = modelCatalog.inFlightRefresh()?.closed();
 
     disposePromise = (async () => {
       // Stop admission before cancelling runs. The canonical toolbox is the
@@ -4293,7 +4299,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       }
       // Awaited last: everything above (admission, active runs, toolbox
       // shutdown, backend teardown) already ran without waiting on this.
-      await modelCatalogRefreshPromise;
+      await modelCatalogRefreshClosedPromise;
     })();
     return disposePromise;
   }
