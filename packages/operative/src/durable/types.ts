@@ -194,8 +194,18 @@ export type SessionInputDeliveryMode = 'steer' | 'queue';
  *  `container_upload` and the other response-only blocks as request content), silently dropped
  *  (the OpenAI and Gemini adapters serialize only text, document, and image content), or
  *  misattributed if replayed as if the user had sent it. AB-42's coordinator amendments
- *  (2026-09-02) own this exclusion; AB-70 owns any future widening. */
-export type UserAdmissibleContent = Omit<TextContent, 'citations'> | ImageContent | DocumentContent;
+ *  (2026-09-02) own this exclusion; AB-70 owns any future widening.
+ *
+ *  The text branch forbids `citations` structurally (`citations?: never`), not merely via
+ *  `Omit<TextContent, 'citations'>`: because TypeScript is structurally typed, `Omit<>` alone
+ *  only drops the property requirement — a caller holding a value already typed as `TextContent`
+ *  (with `citations` set) is still assignable to `Omit<TextContent, 'citations'>`, since excess
+ *  properties on a non-literal source go unchecked. `citations?: never` makes any non-`undefined`
+ *  `citations` a type error at every call site, literal or not. */
+export type UserAdmissibleContent =
+  | (Omit<TextContent, 'citations'> & { readonly citations?: never })
+  | ImageContent
+  | DocumentContent;
 
 /** The message-shaped subset of the document's `AgentInput` this contract accepts: exactly
  *  what one `Message.content` can hold (`string | ReadonlyArray<MultiModalContent>`, matching

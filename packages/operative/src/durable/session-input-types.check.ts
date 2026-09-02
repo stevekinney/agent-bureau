@@ -9,6 +9,8 @@
  * accidental field rename or shape drift fails `check-types` immediately.
  * There is no runtime behavior to assert here — the compiler is the test.
  */
+import type { TextContent } from 'conversationalist';
+
 import type {
   SessionInputAdmissionOutcome,
   SessionInputAdmissionRequest,
@@ -72,6 +74,14 @@ const rejectedCitationsPayload: SessionInputPayload = [
   // @ts-expect-error — `citations` is response metadata, not user-admissible on submitted text.
   { type: 'text', text: 'x', citations: null },
 ];
+
+// AB-202 — `citations` must be rejected structurally (`citations?: never`), not merely by
+// `Omit<>`: a value already typed as `TextContent` (non-literal, so excess-property checking
+// does not apply) with `citations` set must still fail to satisfy `SessionInputPayload`.
+const typedTextWithCitations: TextContent = { type: 'text', text: 'x', citations: null };
+// @ts-expect-error — a `TextContent`-typed value carrying `citations` is not user-admissible,
+// even though excess-property checking doesn't apply to a non-literal source.
+const rejectedTypedCitationsPayload: SessionInputPayload = [typedTextWithCitations];
 
 const deliveryMode: SessionInputDeliveryMode = 'steer';
 const otherDeliveryMode: SessionInputDeliveryMode = 'queue';
@@ -165,6 +175,8 @@ export const sessionInputTypeFixture = {
   containerUploadPayload,
   rejectedContainerUploadPayload,
   rejectedCitationsPayload,
+  typedTextWithCitations,
+  rejectedTypedCitationsPayload,
   record,
   request,
   receipt,
