@@ -131,6 +131,16 @@ export interface StepDeps {
    * never calls `closed()`) — hooks still run exactly the same either way.
    */
   readonly hookTracker?: (promise: Promise<unknown>) => void;
+  /**
+   * AB-204: when supplied, called with the ids of the `ToolCall`s this run
+   * is about to dispatch to `Toolbox.execute()`, right before the call —
+   * see `create-run.ts`'s `ownedToolCallIds` for why: a caller-shared
+   * `Toolbox` (`create-agent.ts` explicitly preserves one across runs)
+   * emits toolbox-wide `execute-start`/`settled` events, so without this a
+   * run's in-flight tool accounting would also count another concurrent
+   * run's calls on the same toolbox.
+   */
+  readonly trackToolCallIds?: (ids: readonly string[]) => void;
 }
 
 /**
@@ -1189,6 +1199,15 @@ export async function runStep(
 
     if (callsToExecute.length > 0) {
       emitter?.dispatch(new ToolsExecutingEvent(step, callsToExecute));
+      // AB-204 review (PRRT_kwDORvupsc6erisq): when the caller supplies the
+      // same `Toolbox` instance to more than one concurrent run (a pattern
+      // `create-agent.ts` explicitly preserves), a run's own toolbox-wide
+      // `execute-start`/`settled` listeners would otherwise also count
+      // another run's tool calls, so one run's `closed()` could wait on
+      // work it doesn't own. `trackToolCallIds` records the exact call ids
+      // THIS run is about to dispatch so `createActiveRun`'s in-flight
+      // accounting can filter to only its own work.
+      deps.trackToolCallIds?.(callsToExecute.map((call) => call.id));
 
       try {
         // AB-233 — thread the active trace context and a per-execution

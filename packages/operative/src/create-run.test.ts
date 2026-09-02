@@ -1,4 +1,4 @@
-import { createTool, ToolboxExecuteStartEvent, ToolboxSettledEvent } from 'armorer';
+import { createTool, ToolboxSettledEvent } from 'armorer';
 import { createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
@@ -314,43 +314,58 @@ describe('ActiveRun.closed()', () => {
 
   // Regression: a code-review finding on the AB-204 pull request
   // (PRRT_kwDORvupsc6elvRf) — a `failFast` parallel tool batch can settle
-  // `result` while a sibling tool call is still executing. Simulated here
-  // directly via the toolbox's own events (matching the "settled without a
-  // preceding execute-start" test above) rather than a real failFast batch,
-  // since the observable contract is the same either way: `resolveOutcome`
-  // must not report `completed` while `inFlightTools` is still nonzero.
-  it('does not resolve completed while a tool call is still in flight when result settles, and resolves once it drains', async () => {
-    const generate = createMockGenerate([textResponse('done')]);
-    const toolbox = createTestToolbox([weatherTool]);
+  // `result` (via `makeErrorResult`, as soon as one call in the batch
+  // rejects) while a sibling call in the same batch is still executing.
+  // `slowTool` deliberately never observes its own cancellation signal, so
+  // it stays "in flight" until the test releases it — matching an
+  // uncooperative real-world tool, not merely a timing coincidence.
+  it('does not resolve completed while a sibling tool call in a failFast batch is still in flight, and resolves once it drains', async () => {
+    let releaseSlowTool: (() => void) | undefined;
+    const slowGate = new Promise<void>((resolve) => {
+      releaseSlowTool = resolve;
+    });
+    const slowTool = createTool({
+      name: 'slow_tool',
+      description: 'Stays in flight until the test releases it',
+      input: z.object({}),
+      execute: async () => {
+        await slowGate;
+        return { done: true };
+      },
+    });
+    const failingTool = createTool({
+      name: 'failing_tool',
+      description: 'Rejects immediately',
+      input: z.object({}),
+      execute: async () => {
+        throw new Error('boom');
+      },
+    });
+
+    const generate = createMockGenerate([
+      toolCallResponse([
+        { name: 'slow_tool', arguments: {} },
+        { name: 'failing_tool', arguments: {} },
+      ]),
+    ]);
+    const toolbox = createTestToolbox([slowTool, failingTool]);
     const activeRun = createActiveRun({
       generate,
       toolbox,
       conversation: new Conversation(),
       stopWhen: noToolCalls(),
+      executeOptions: { errorMode: 'failFast' },
     });
-
-    const inFlightCall = {
-      id: 'sibling-call-id',
-      name: weatherTool.name,
-      arguments: { location: 'nowhere' },
-    };
-    toolbox.dispatchEvent(
-      new ToolboxExecuteStartEvent({
-        tool: weatherTool,
-        call: inFlightCall,
-        params: inFlightCall.arguments,
-      }),
-    );
 
     const closedAcknowledgement = activeRun.closed();
     const result = await activeRun.result;
-    expect(result.finishReason).toBe('stop-condition');
+    expect(result.finishReason).toBe('error');
 
     let settledFlag = false;
     void closedAcknowledgement.then(() => {
       settledFlag = true;
     });
-    // `awaitToolDrain()` genuinely never settles until the sibling tool's
+    // `awaitToolDrain()` genuinely never settles until `slow_tool`'s own
     // `settled` event arrives (its promise is only ever resolved from
     // `onSettled`, never on a timer) — so this isn't a fixed-tick race
     // against the fix: without the fix `resolveOutcome` reaches `completed`
@@ -362,12 +377,123 @@ describe('ActiveRun.closed()', () => {
     }
     expect(settledFlag).toBe(false);
 
-    toolbox.dispatchEvent(
-      new ToolboxSettledEvent({ tool: weatherTool, call: inFlightCall, result: { ok: true } }),
-    );
+    releaseSlowTool?.();
 
     expect(await closedAcknowledgement).toEqual({ status: 'completed' });
     expect(settledFlag).toBe(true);
+  });
+
+  // Regression: a code-review finding on the AB-204 pull request
+  // (PRRT_kwDORvupsc6erisq) — a caller can supply the SAME `Toolbox`
+  // instance to more than one concurrent run (`create-agent.ts` explicitly
+  // preserves the supplied toolbox across `.run()` calls). Without scoping
+  // `inFlightTools` to calls this run itself dispatched, run A's `closed()`
+  // would also wait on run B's unrelated, still-executing tool call.
+  it('does not wait on another run sharing the same toolbox', async () => {
+    let releaseOtherRunTool: (() => void) | undefined;
+    const otherRunGate = new Promise<void>((resolve) => {
+      releaseOtherRunTool = resolve;
+    });
+    const sharedTool = createTool({
+      name: 'shared_tool',
+      description: 'Used by two concurrent runs on the same toolbox',
+      input: z.object({}),
+      execute: async () => {
+        await otherRunGate;
+        return { done: true };
+      },
+    });
+    const toolbox = createTestToolbox([sharedTool]);
+
+    // Run B: starts a call on the shared toolbox and never lets it settle
+    // for the duration of this test.
+    createActiveRun({
+      generate: createMockGenerate([toolCallResponse([{ name: 'shared_tool', arguments: {} }])]),
+      toolbox,
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+    });
+
+    // Run A: completes cleanly with no tool calls of its own, on the SAME
+    // toolbox instance run B is still using.
+    const generate = createMockGenerate([textResponse('done')]);
+    const activeRun = createActiveRun({
+      generate,
+      toolbox,
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+    });
+
+    const closedAcknowledgement = activeRun.closed();
+    const result = await activeRun.result;
+    expect(result.finishReason).toBe('stop-condition');
+
+    // Run A owns no in-flight tool calls, so its own closed() must settle
+    // promptly even though run B's `shared_tool` call is still executing on
+    // the same toolbox.
+    expect(await closedAcknowledgement).toEqual({ status: 'completed' });
+
+    releaseOtherRunTool?.();
+  });
+
+  // Regression: a code-review finding on the AB-204 pull request
+  // (PRRT_kwDORvupsc6erisn) — the toolbox's `execute-start`/`settled`
+  // listeners used to be bound to `abortController.signal`, so `abort()`
+  // stripped them immediately, synchronously, on the same tick — before an
+  // uncooperative tool already in flight (one that doesn't observe its own
+  // cancellation) could ever emit its `settled` event. `inFlightTools`
+  // would then never reach zero and `awaitToolDrain()` would hang forever.
+  it('does not hang closed() forever after abort() while a tool call is in flight (armorer settles the cancelled call asynchronously)', async () => {
+    // Armorer settles an in-flight call promptly once its execution signal
+    // aborts — it does not wait for the tool's own promise — but that
+    // `settled` event still arrives on a LATER microtask than the
+    // synchronous `abortController.abort()` call. Binding this run's own
+    // `execute-start`/`settled` listeners to `abortController.signal` (the
+    // pre-fix shape) tore them down on the exact same, earlier tick,
+    // missing that later `settled` event entirely and hanging
+    // `awaitToolDrain()`/`closed()` forever — verified by temporarily
+    // reintroducing the signal binding, which makes this same test time out.
+    let notifyToolStarted: (() => void) | undefined;
+    const toolStarted = new Promise<void>((resolve) => {
+      notifyToolStarted = resolve;
+    });
+    const neverSettlesOnItsOwn = new Promise<never>(() => {});
+    const stubbornTool = createTool({
+      name: 'stubborn_tool',
+      description: 'Ignores cancellation; only armorer settles this call',
+      input: z.object({}),
+      execute: async () => {
+        notifyToolStarted?.();
+        await neverSettlesOnItsOwn;
+        return { done: true };
+      },
+    });
+    const generate = createMockGenerate([
+      toolCallResponse([{ name: 'stubborn_tool', arguments: {} }]),
+    ]);
+    const toolbox = createTestToolbox([stubbornTool]);
+    const activeRun = createActiveRun({
+      generate,
+      toolbox,
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+    });
+
+    // Wait until the tool's own execute() has actually started (not just a
+    // fixed tick count) before aborting, so the run is genuinely aborted
+    // while a real call is in flight rather than before it was dispatched.
+    await toolStarted;
+
+    activeRun.abort('stop');
+
+    const closedAcknowledgement = activeRun.closed();
+    const result = await activeRun.result;
+    expect(result.finishReason).toBe('aborted');
+
+    // Armorer's own asynchronous cancellation-settlement of the in-flight
+    // call is what drains `inFlightTools` here (the tool's own promise
+    // never resolves) — `closed()` must observe it rather than hang.
+    expect(await closedAcknowledgement).toEqual({ status: 'completed' });
   });
 
   // Regression: a code-review finding on the AB-204 pull request

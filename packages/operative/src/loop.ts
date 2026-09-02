@@ -101,6 +101,9 @@ export async function executeLoop(
   // `onLLMInput`/`onLLMOutput` inside `runStep`) before acknowledging
   // cleanup — see `create-run.ts`'s `pendingHookPromises`.
   hookTracker?: (promise: Promise<unknown>) => void,
+  // AB-204: forwarded to `buildStepDeps`'s output — see
+  // `StepDeps.trackToolCallIds` and `create-run.ts`'s `ownedToolCallIds`.
+  trackToolCallIds?: (ids: readonly string[]) => void,
 ): Promise<RunResult> {
   const { maximumSteps = DEFAULT_MAXIMUM_STEPS, hooks, onMaximumSteps, costEstimation } = options;
 
@@ -108,7 +111,7 @@ export async function executeLoop(
     ? options.conversation
     : new Conversation(options.conversation);
 
-  const deps = { ...buildStepDeps(options), hookTracker };
+  const deps = { ...buildStepDeps(options), hookTracker, trackToolCallIds };
   const runState = createRunState();
 
   const runStartTime = performance.now();
