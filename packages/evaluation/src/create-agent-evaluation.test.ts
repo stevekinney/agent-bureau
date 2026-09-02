@@ -608,6 +608,14 @@ describe('createAgentEvaluation', () => {
         abort: () => {
           abortCalls += 1;
         },
+        // AB-50: children()/abortChild() joined AgentRun after this fixture
+        // was first written. Not exercised by this test (the hanging agent
+        // never dispatches a child), so a safe no-op matching the same
+        // "empty registry" default createSubagentTool documents.
+        children: () => [],
+        abortChild: () => {
+          throw new Error('not used by this test');
+        },
         [Symbol.dispose]: () => {
           disposeCalls += 1;
         },
