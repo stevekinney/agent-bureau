@@ -6145,8 +6145,12 @@ describe('createToolbox', () => {
         loopDetection: { warningThreshold: 2, blockThreshold: 4, windowSize: 30 },
       });
 
-      const blocked: Array<{ result: { errorCategory?: string; error?: { code?: string } } }> = [];
-      const errors: Array<{ result: { errorCategory?: string; error?: { code?: string } } }> = [];
+      const blocked: Array<{
+        result: { error?: { code?: string; category?: string } };
+      }> = [];
+      const errors: Array<{
+        result: { error?: { code?: string; category?: string } };
+      }> = [];
       toolbox.addEventListener('loop-blocked', (e) => blocked.push(e as (typeof blocked)[number]));
       toolbox.addEventListener('error', (e) => errors.push(e as (typeof errors)[number]));
 
@@ -6157,7 +6161,7 @@ describe('createToolbox', () => {
           name: 'sum',
           arguments: { a: 1, b: 2 },
         });
-        if (result.errorCategory === 'conflict' && result.error?.code === 'LOOP_BLOCKED') {
+        if (result.error?.category === 'conflict' && result.error?.code === 'LOOP_BLOCKED') {
           blockedResult = result;
           break;
         }
@@ -6167,7 +6171,7 @@ describe('createToolbox', () => {
       expect(blockedResult).toBeDefined();
       expect(errors.length).toBeGreaterThan(0);
       const companionError = errors.find(
-        (e) => e.result.error?.code === 'LOOP_BLOCKED' && e.result.errorCategory === 'conflict',
+        (e) => e.result.error?.code === 'LOOP_BLOCKED' && e.result.error?.category === 'conflict',
       );
       expect(companionError).toBeDefined();
       expect(companionError?.result).toEqual(blockedResult);

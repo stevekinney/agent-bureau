@@ -153,17 +153,18 @@ export class BudgetExceededError extends AgentRunError {
  * `code: 'BUDGET_EXCEEDED'` — the shape `create-toolbox.ts`'s `checkBudget`
  * path throws in `failFast` mode. Armorer's `ToolError` is a plain object
  * (not an `Error` subclass), so this checks the interface's required fields
- * rather than using `instanceof`.
+ * — with the same runtime-type validation as armorer's own `isToolError`,
+ * not just key presence — rather than using `instanceof`.
  */
 function isBudgetExceededToolError(error: unknown): error is ToolError {
+  if (typeof error !== 'object' || error === null) return false;
+  const candidate = error as ToolError;
   return (
-    typeof error === 'object' &&
-    error !== null &&
-    'code' in error &&
-    'category' in error &&
-    'message' in error &&
-    'retryable' in error &&
-    error.code === 'BUDGET_EXCEEDED'
+    typeof candidate.code === 'string' &&
+    typeof candidate.category === 'string' &&
+    typeof candidate.retryable === 'boolean' &&
+    typeof candidate.message === 'string' &&
+    candidate.code === 'BUDGET_EXCEEDED'
   );
 }
 

@@ -314,11 +314,11 @@ describe('event forwarding', () => {
     expect(forwardedErrorEvents.length).toBeGreaterThan(0);
     const loopBlockedError = forwardedErrorEvents.find((e) => {
       const original = e.originalEvent as {
-        result?: { error?: { code?: string }; errorCategory?: string };
+        result?: { error?: { code?: string; category?: string } };
       };
       return (
         original.result?.error?.code === 'LOOP_BLOCKED' &&
-        original.result?.errorCategory === 'conflict'
+        original.result?.error?.category === 'conflict'
       );
     });
     expect(loopBlockedError).toBeDefined();
