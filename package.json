@@ -16,6 +16,7 @@
     "test": "bun run check-changesets && turbo run test && bun run test:scripts",
     "test:scripts": "bun test scripts",
     "verify:armorer:consumer": "bun run scripts/verify-armorer-consumer.ts --mode local",
+    "test:consumer:operative": "bun run scripts/verify-operative-consumer.ts --mode local",
     "prepare": "lefthook install",
     "validate": "bun run check-changesets && turbo run format:check lint check-types test --concurrency=2 && prettier --check \"**/*.{ts,tsx,js,jsx,mjs,cjs,json,md,yml,yaml}\" && bun run test:scripts",
     "changeset": "changeset",
