@@ -10,7 +10,7 @@ import { z } from 'zod';
 
 import { createAgentSession } from '../agent-session';
 import { createCheckpointStore } from '../durable/checkpoint-store';
-import type { AnyRunEngine } from '../durable/create-run-engine';
+import type { RegistryAgnosticEngine } from '../durable/create-run-engine';
 import { createRunEngine } from '../durable/create-run-engine';
 import { AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION } from '../durable/run-workflow';
 import type {
@@ -69,7 +69,10 @@ function createTestRunOptions(generate: GenerateFunction = createInstantGenerate
   };
 }
 
-function createSessionHandleFixture(overrides?: { sessionId?: string; engine?: AnyRunEngine }) {
+function createSessionHandleFixture(overrides?: {
+  sessionId?: string;
+  engine?: RegistryAgnosticEngine;
+}) {
   const sessionId = overrides?.sessionId ?? 'test-session';
   const kv = textValueStore(new MemoryStorage());
   const store = createSessionStore(kv);
@@ -521,7 +524,7 @@ describe('session.run()', () => {
       signal: async () => {},
       update: async () => {},
       query: async () => {},
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
 
     const fakeCheckpointStore = {
       loadCheckpoint: async (_runId: string) => ({
@@ -691,7 +694,7 @@ describe('session.cancel()', () => {
       signal: async () => {},
       update: async () => {},
       query: async () => {},
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
 
     const kv = textValueStore(new MemoryStorage());
     const store = createSessionStore(kv);
@@ -741,7 +744,7 @@ describe('session.cancel()', () => {
       signal: async () => {},
       update: async () => {},
       query: async () => {},
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
 
     const generateStartedResolvers: Array<() => void> = [];
     const generateStarted = [0, 1].map(
@@ -809,7 +812,7 @@ describe('session.cancel()', () => {
       signal: async () => {},
       update: async () => {},
       query: async () => {},
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
 
     const baseStore = createSessionStore(textValueStore(new MemoryStorage()));
     const session = createAgentSession({
@@ -1060,7 +1063,7 @@ describe('session.sleep()', () => {
     const abortController = new AbortController();
     const kv = textValueStore(new MemoryStorage());
     const store = createSessionStore(kv);
-    const engine = {} as AnyRunEngine;
+    const engine = {} as RegistryAgnosticEngine;
     const handle = createSessionHandle('abort-local-sleep-session', {
       store,
       agentName: 'test-agent',
@@ -1194,7 +1197,7 @@ describe('session.signal()', () => {
 
     const fakeEngine = {
       signal: async () => {},
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
 
     const h = createSessionHandle('signal-terminal', {
       store,
@@ -1223,7 +1226,7 @@ describe('session.signal()', () => {
       signal: async (id: string, name: string, payload: unknown) => {
         signalCalls.push({ id, name, payload });
       },
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
 
     const kv = textValueStore(new MemoryStorage());
     const store = createSessionStore(kv);
@@ -1271,7 +1274,7 @@ describe('session.signal()', () => {
       signal: async (id: string, name: string, payload: unknown) => {
         signalCalls.push({ id, name, payload });
       },
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
 
     const kv = textValueStore(new MemoryStorage());
     const store = createSessionStore(kv);
@@ -1367,7 +1370,7 @@ describe('session.update()', () => {
   it('calls engine.update and returns the result', async () => {
     const fakeEngine = {
       update: mock(async (_id: string, _name: string, _payload: unknown) => ({ ok: true })),
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
 
     const kv = textValueStore(new MemoryStorage());
     const store = createSessionStore(kv);
@@ -1416,7 +1419,7 @@ describe('session.update()', () => {
         targetedIds.push({ verb: 'query', id });
         return { ok: true };
       },
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
 
     const generateStartedResolvers: Array<() => void> = [];
     const generateStarted = [0, 1].map(
@@ -1490,7 +1493,7 @@ describe('session.update()', () => {
         targetedIds.push({ verb: 'query', id });
         return { ok: true };
       },
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
 
     const baseStore = createSessionStore(textValueStore(new MemoryStorage()));
     const session = createAgentSession({
@@ -1587,7 +1590,7 @@ describe('session.query()', () => {
   it('throws NoRunningRunError when the session has no runs', async () => {
     const fakeEngine = {
       query: mock(async () => ({})),
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
 
     const kv = textValueStore(new MemoryStorage());
     const store = createSessionStore(kv);
@@ -1622,7 +1625,7 @@ describe('session.query()', () => {
   it('calls engine.query with the last run id and returns the result', async () => {
     const fakeEngine = {
       query: mock(async (_id: string, _name: string) => ({ step: 3 })),
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
 
     const kv = textValueStore(new MemoryStorage());
     const store = createSessionStore(kv);
@@ -1660,7 +1663,7 @@ describe('session.query()', () => {
   it('works on a terminal run (durable fidelity)', async () => {
     const fakeEngine = {
       query: mock(async () => ({ step: 5, status: 'completed' })),
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
 
     const kv = textValueStore(new MemoryStorage());
     const store = createSessionStore(kv);
@@ -1907,7 +1910,7 @@ describe('session verb event dispatch (C3 completeness rule)', () => {
 
     const fakeEngine = {
       signal: mock(async () => {}),
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
 
     const h = createSessionHandle('signal-event-session', {
       store,
@@ -1952,7 +1955,7 @@ describe('session verb event dispatch (C3 completeness rule)', () => {
 
     const fakeEngine = {
       update: mock(async () => ({ ok: true })),
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
 
     const h = createSessionHandle('update-event-session', {
       store,
@@ -1997,7 +2000,7 @@ describe('session verb event dispatch (C3 completeness rule)', () => {
 
     const fakeEngine = {
       query: mock(async () => ({ step: 3 })),
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
 
     const h = createSessionHandle('query-event-session', {
       store,
@@ -2165,7 +2168,7 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
           result: () => new Promise<unknown>(() => {}),
         };
       },
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
     const fakeCheckpointStore = {
       loadCheckpoint: async (_runId: string) => ({
         conversation: null,
@@ -2227,7 +2230,7 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
           result: () => new Promise<unknown>(() => {}),
         };
       },
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
     const fakeCheckpointStore = {
       loadCheckpoint: async (_runId: string) => ({
         conversation: null,
@@ -2645,7 +2648,7 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
       signal: async () => {},
       update: async () => {},
       query: async () => {},
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
 
     const kv = textValueStore(new MemoryStorage());
     const store = createSessionStore(kv);
@@ -2707,7 +2710,7 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
       signal: async () => {},
       update: async () => {},
       query: async () => {},
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
 
     const kv = textValueStore(new MemoryStorage());
     const store = createSessionStore(kv);
@@ -2761,7 +2764,7 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
       signal: async () => {},
       update: async () => {},
       query: async () => {},
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
 
     const kv = textValueStore(new MemoryStorage());
     const store = createSessionStore(kv);
@@ -2878,7 +2881,7 @@ describe('AB-28: recover() reconciles a RunRef whose recovered run is already te
           finishReason: 'stop-condition',
         },
       }),
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
     const fakeCheckpointStore = {
       loadCheckpoint: async (_id: string) => ({
         conversation: recoveredConversation.snapshot(),
@@ -2929,7 +2932,7 @@ describe('AB-28: recover() reconciles a RunRef whose recovered run is already te
           errorMessage: 'boom',
         },
       }),
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
     const fakeCheckpointStore = {
       loadCheckpoint: async (_id: string) => ({
         conversation: null,
@@ -2974,7 +2977,7 @@ describe('AB-28: recover() reconciles a RunRef whose recovered run is already te
           finishReason: 'stop-condition',
         },
       }),
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
     const fakeCheckpointStore = {
       loadCheckpoint: async () => ({
         conversation: null,
@@ -3012,7 +3015,7 @@ describe('AB-28: recover() reconciles a RunRef whose recovered run is already te
         throw alreadyTerminalError(runId, 'cancelled');
       },
       get: async (id: string) => ({ id, status: 'cancelled' }),
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
     const fakeCheckpointStore = {
       loadCheckpoint: async (_id: string) => ({
         conversation: null,
@@ -3045,7 +3048,7 @@ describe('AB-28: recover() reconciles a RunRef whose recovered run is already te
         throw alreadyTerminalError(runId, 'failed');
       },
       get: async (id: string) => ({ id, status: 'failed', error: 'engine blew up' }),
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
     const fakeCheckpointStore = {
       loadCheckpoint: async (_id: string) => {
         throw new Error('no checkpoint was ever written for this run');
@@ -3081,7 +3084,7 @@ describe('AB-28: recover() reconciles a RunRef whose recovered run is already te
         throw new Error('transient resume failure');
       },
       get: async (id: string) => ({ id, status: 'suspended' }),
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
     const fakeCheckpointStore = {
       loadCheckpoint: async (_id: string) => ({
         conversation: null,
@@ -3116,7 +3119,7 @@ describe('AB-28: recover() reconciles a RunRef whose recovered run is already te
       get: async () => {
         throw new Error('storage unavailable');
       },
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
     const fakeCheckpointStore = {
       loadCheckpoint: async (_id: string) => ({
         conversation: null,
@@ -3166,7 +3169,7 @@ describe('AB-28: recover() reconciles a RunRef whose recovered run is already te
           },
         };
       },
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
     const fakeCheckpointStore = {
       loadCheckpoint: async (_id: string) => ({
         conversation: recoveredConversation.snapshot(),
@@ -3644,7 +3647,7 @@ describe('regression: abort() forwards to the durable inner run (PRRT_kwDORvupsc
       signal: async () => {},
       update: async () => {},
       query: async () => {},
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
 
     const fakeCheckpointStore = {
       loadCheckpoint: async (_runId: string) => ({
@@ -3738,7 +3741,7 @@ describe('regression: [Symbol.dispose]() forwards to the durable inner run (PRRT
       signal: async () => {},
       update: async () => {},
       query: async () => {},
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
 
     const fakeCheckpointStore = {
       loadCheckpoint: async (_runId: string) => ({
@@ -3799,7 +3802,7 @@ describe('regression: cancel() only persists aborted status when engine.cancel()
       signal: async () => {},
       update: async () => {},
       query: async () => {},
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
 
     const kv = textValueStore(new MemoryStorage());
     const store = createSessionStore(kv);

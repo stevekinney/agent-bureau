@@ -44,7 +44,7 @@ import {
   startDurableRunResult,
 } from './active-run-adapter';
 import { createCheckpointStore } from './checkpoint-store';
-import type { AnyRunEngine } from './create-run-engine';
+import type { RegistryAgnosticEngine } from './create-run-engine';
 import { createRunEngine } from './create-run-engine';
 import { AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION, createRunWorkflow } from './run-workflow';
 
@@ -578,7 +578,7 @@ describe('createRun with durable routing', () => {
       start: async () => ({
         result: () => Promise.reject(disposedError),
       }),
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
     const context = {
       engine,
       checkpointStore: {
@@ -608,7 +608,7 @@ describe('createRun with durable routing', () => {
         result: () => Promise.reject(timeoutError),
       }),
       get: async () => ({ status: 'timed-out' }),
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
     const context = {
       engine,
       checkpointStore: {
@@ -636,7 +636,7 @@ describe('createRun with durable routing', () => {
       start: async () => ({
         result: () => Promise.reject(unexpectedError),
       }),
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
     const context = {
       engine,
       checkpointStore: {
@@ -1377,7 +1377,7 @@ describe('reattachDurableActiveRun', () => {
           cancelled.push(id);
           rejectResult?.(new Error('cancelled'));
         },
-      } as unknown as AnyRunEngine;
+      } as unknown as RegistryAgnosticEngine;
 
       const events: string[] = [];
       const recoveredRun = reattachDurableActiveRun(
@@ -1421,7 +1421,7 @@ describe('reattachDurableActiveRun', () => {
       };
       const engine = {
         cancel: async () => {},
-      } as unknown as AnyRunEngine;
+      } as unknown as RegistryAgnosticEngine;
 
       const recoveredRun = reattachDurableActiveRun(
         { engine, checkpointStore: context.checkpointStore },
@@ -1503,7 +1503,7 @@ describe('reattachDurableActiveRun', () => {
           cancelled.push(id);
           rejectResult?.(new Error('cancelled'));
         },
-      } as unknown as AnyRunEngine;
+      } as unknown as RegistryAgnosticEngine;
 
       const recoveredRun = reattachDurableActiveRun(
         { engine, checkpointStore: context.checkpointStore },
@@ -1541,7 +1541,7 @@ describe('reattachDurableActiveRun', () => {
       cancel: async () => {
         rejectResult?.(new Error('cancelled'));
       },
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
     const checkpointStore = {
       loadConversation: async () => {
         throw new Error('checkpoint unavailable');
@@ -1577,7 +1577,7 @@ describe('reattachDurableActiveRun', () => {
           rejectResult?.(new Error('resolver-owned failure'));
           throw new Error('cancel failed');
         },
-      } as unknown as AnyRunEngine;
+      } as unknown as RegistryAgnosticEngine;
       const events: string[] = [];
 
       const recoveredRun = reattachDurableActiveRun(
@@ -1621,7 +1621,7 @@ describe('reattachDurableActiveRun', () => {
       const engine = {
         get: async () => ({ status: 'timed-out', terminationReason: 'history-circuit-breaker' }),
         cancel: async () => {},
-      } as unknown as AnyRunEngine;
+      } as unknown as RegistryAgnosticEngine;
 
       let completedFinishReason: RunResult['finishReason'] | undefined;
       const recoveredRun = reattachDurableActiveRun(
@@ -1659,7 +1659,7 @@ describe('reattachDurableActiveRun', () => {
           throw new Error('state unavailable');
         },
         cancel: async () => {},
-      } as unknown as AnyRunEngine;
+      } as unknown as RegistryAgnosticEngine;
 
       const recoveredRun = reattachDurableActiveRun(
         { engine, checkpointStore: context.checkpointStore },
@@ -1686,7 +1686,7 @@ describe('reattachDurableActiveRun', () => {
     const engine = {
       get: async () => ({ status: 'timed-out', terminationReason: 'history-circuit-breaker' }),
       cancel: async () => {},
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
     const checkpointStore = {
       loadConversation: async () => {
         throw new Error('checkpoint unavailable');
@@ -1718,7 +1718,7 @@ describe('reattachDurableActiveRun', () => {
       };
       const engine = {
         cancel: async () => {},
-      } as unknown as AnyRunEngine;
+      } as unknown as RegistryAgnosticEngine;
 
       const recoveredRun = reattachDurableActiveRun(
         { engine, checkpointStore: context.checkpointStore },
@@ -1752,7 +1752,7 @@ describe('reattachDurableActiveRun', () => {
       };
       const engine = {
         cancel: async () => {},
-      } as unknown as AnyRunEngine;
+      } as unknown as RegistryAgnosticEngine;
 
       const recoveredRun = reattachDurableActiveRun(
         { engine, checkpointStore: context.checkpointStore },
@@ -1784,7 +1784,7 @@ describe('reattachDurableActiveRun', () => {
       };
       const engine = {
         cancel: async () => {},
-      } as unknown as AnyRunEngine;
+      } as unknown as RegistryAgnosticEngine;
 
       const recoveredRun = reattachDurableActiveRun(
         { engine, checkpointStore: context.checkpointStore },
@@ -1818,7 +1818,7 @@ describe('reattachDurableActiveRun', () => {
         cancelled.push(id);
         rejectResult?.(new Error('cancelled'));
       },
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
 
     const recoveredRun = reattachDurableActiveRun(
       { engine, checkpointStore: {} as never },
@@ -1849,7 +1849,7 @@ describe('reattachDurableActiveRun', () => {
         cancelled.push(id);
         rejectResult?.(new Error('cancelled'));
       },
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
 
     const recoveredRun = reattachDurableActiveRun(
       { engine, checkpointStore: {} as never },

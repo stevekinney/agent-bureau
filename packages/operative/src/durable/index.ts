@@ -16,8 +16,8 @@ export {
 export type { CheckpointStore } from './checkpoint-store';
 export { createCheckpointStore } from './checkpoint-store';
 export type {
-  AnyRunEngine,
   CreateRunEngineOptions,
+  RegistryAgnosticEngine,
   RunEngine,
   RunEngineObservability,
 } from './create-run-engine';

@@ -3,6 +3,7 @@ import type {
   CheckpointSizeWarningEvent,
   HistoryPolicy,
   PayloadSizePolicy,
+  RegistryAgnosticEngine,
   WorkflowLogRecord,
   WorkflowServicesResolution,
   WorkflowServicesResolverInfo,
@@ -56,6 +57,66 @@ export interface CreateRunEngineOptions {
    * mid-flight. Pass `false` for isolated tests.
    */
   recover?: boolean;
+
+  /**
+   * Single-writer ownership posture over the shared durable store (AB-178).
+   * Defaults to `'none'` — today's behavior: one engine per store, enforced by
+   * infrastructure convention (one replica, a `Recreate` deploy) rather than
+   * the engine itself, exactly as AB-39 recorded.
+   *
+   * Pass `'workflow-lease'` to let more than one engine share a store safely:
+   * Weft claims each workflow for exactly one engine before its generator
+   * runs (per-workflow fencing, not a single store-wide lock), so a second
+   * engine racing to resume the same workflow fails closed with
+   * `WorkflowClaimUnavailableError` instead of double-executing it.
+   *
+   * Two things to weigh before opting in:
+   * - **Storage requirement.** The backend must support the `conditionalBatch`
+   *   capability. `MemoryStorage` and `SQLiteStorage` both do; verify any
+   *   other backend before enabling this.
+   * - **Known weft 0.23.1 defect — incompatible with the scheduler's
+   *   suspend/resume preemption path.** `engine.suspend(workflowId)` releases
+   *   the workflow's ownership claim as a side effect of reusing the
+   *   terminal-commit code path (`commitExternalTerminalWorkflowStateOperations`
+   *   → `buildExternalTerminalRotationFragment`), even though suspend is
+   *   documented as non-terminal and later resumable. A same-engine
+   *   `engine.resume(workflowId)` right after then throws
+   *   `WorkflowClaimUnavailableError` (`holder-absent`) instead of silently
+   *   re-acquiring, because `acquireStandaloneClaimBeforeResume` trusts its
+   *   stale cached epoch and never falls through to a fresh `registry.acquire()`.
+   *   Reproduced directly against `@lostgradient/weft@0.23.1` with no
+   *   agent-bureau code involved. This breaks `createScheduler`'s
+   *   `suspendAndDetach` → `resumeDurableRunResult` preemption flow
+   *   (`packages/operative/src/scheduler/create-scheduler.ts`), so do not set
+   *   `ownership: 'workflow-lease'` on an engine a scheduler with preemption
+   *   attaches to until weft fixes this. `'none'` is unaffected — this is why
+   *   `'none'` stays the default rather than `'workflow-lease'` becoming
+   *   unconditional.
+   *
+   * `'lease'` (Weft's single store-wide lock) is intentionally not exposed
+   * here: it solves a different problem (clean handoff during a rolling
+   * deploy of ONE engine) than AB-178's ask (several engines sharing one
+   * store), and per Weft's own docs is incompatible with
+   * `backgroundTasks: 'manual'`, unlike `'workflow-lease'`.
+   */
+  ownership?: 'none' | 'workflow-lease';
+
+  /**
+   * Per-workflow claim time-to-live under `ownership: 'workflow-lease'`
+   * (default 30s, Weft's own default). Ignored when `ownership` is not
+   * `'workflow-lease'`. Lowering this shortens how long a surviving engine
+   * must wait before it can adopt a crashed engine's claimed workflows —
+   * mainly useful for tests exercising crash-and-adopt without a real 30s
+   * wait.
+   */
+  workflowClaimTtlMs?: number;
+
+  /**
+   * Per-workflow claim renewal interval under `ownership: 'workflow-lease'`
+   * (default 5s, Weft's own default). Ignored when `ownership` is not
+   * `'workflow-lease'`.
+   */
+  workflowClaimRenewIntervalMs?: number;
 
   /**
    * Select how Weft's periodic maintenance is driven. The default
@@ -206,26 +267,23 @@ export interface RunEngineObservability {
 }
 
 /**
- * A durable run engine, widened over its workflow/activity type parameters.
- *
- * `Engine`'s generics are invariant, so the precisely-typed engine
- * `Engine.create` returns is not assignable to the bare `Engine` default. The
- * durable run layer only ever calls `engine.start(name, input)` and disposal —
- * it never inspects the registered workflow/activity types — so widening here
- * is safe. `Engine` is a weft type we don't control; armorer's `Toolbox` has
- * the analogous erased-supertype problem solved properly via `AnyToolbox`
- * (see `create-toolbox.ts`) — this `any` is scoped to weft's invariant
- * generics only.
+ * Re-exported for convenience so durable-layer callers can import the engine
+ * type from the same module that builds it, rather than reaching into
+ * `@lostgradient/weft` directly. This is the upstream registry-erased engine
+ * type (Weft's `Engine` with its two chained-builder registration methods,
+ * `register`/`registerWorkflows`, removed) — see its JSDoc in
+ * `@lostgradient/weft` for why the removal, rather than widening the registry
+ * generics, is what makes a concretely narrowed `Engine.create({ workflows })`
+ * result assignable here without a cast.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- Engine generics are invariant; the run layer never inspects the type parameters.
-export type AnyRunEngine = Engine<any, any>;
+export type { RegistryAgnosticEngine };
 
 /**
  * The durable run engine plus the checkpoint store it was built with, so callers
  * can read/write checkpoints through the same view the activities use.
  */
 export interface RunEngine {
-  engine: AnyRunEngine;
+  engine: RegistryAgnosticEngine;
   checkpointStore: CheckpointStore;
   /**
    * Present only when {@link CreateRunEngineOptions.observability} was enabled.
@@ -259,6 +317,15 @@ export interface RunEngine {
  * threaded into the engine; a `history.maxEvents` breach surfaces as a
  * `timed-out` terminal with `terminationReason: 'history-circuit-breaker'`, which
  * the active-run adapter classifies as `error` (not a deadline timeout).
+ *
+ * **Multi-process safety (AB-178).** {@link CreateRunEngineOptions.ownership}
+ * is host-configurable, defaulting to `'none'` (today's behavior, unchanged).
+ * Passing `'workflow-lease'` claims every workflow for exactly one engine
+ * before its generator runs, so a second engine pointed at the same store
+ * fails closed on that workflow instead of double-executing it — see the
+ * `ownership` field in the `Engine.create` call below for why this is
+ * opt-in rather than the new default, and for the storage capability it
+ * requires.
  */
 export async function createRunEngine(options: CreateRunEngineOptions): Promise<RunEngine> {
   const checkpointStore =
@@ -309,6 +376,20 @@ export async function createRunEngine(options: CreateRunEngineOptions): Promise<
   const engine = await Engine.create({
     storage: options.storage,
     recover: options.recover ?? true,
+    // AB-178 — fenced per-workflow ownership, host-configurable rather than
+    // unconditional. Defaults to `'none'` (today's behavior) because
+    // `'workflow-lease'` has a reproduced weft 0.23.1 defect that breaks the
+    // scheduler's same-engine suspend/resume preemption path — see
+    // `CreateRunEngineOptions.ownership`'s JSDoc for the full defect and the
+    // storage-capability requirement. A host that does not rely on that
+    // preemption path, or that has verified it is unaffected, can opt in.
+    ownership: options.ownership ?? 'none',
+    ...(options.workflowClaimTtlMs !== undefined
+      ? { workflowClaimTtl: options.workflowClaimTtlMs }
+      : {}),
+    ...(options.workflowClaimRenewIntervalMs !== undefined
+      ? { workflowClaimRenewInterval: options.workflowClaimRenewIntervalMs }
+      : {}),
     ...(options.backgroundTasks !== undefined ? { backgroundTasks: options.backgroundTasks } : {}),
     ...(startScheduler !== undefined ? { startScheduler } : {}),
     ...(options.schedulerPollIntervalMs !== undefined
@@ -358,7 +439,7 @@ export async function createRunEngine(options: CreateRunEngineOptions): Promise<
  * every span op a no-op.
  */
 function wireObservability(
-  engine: AnyRunEngine,
+  engine: RegistryAgnosticEngine,
   observability: boolean | Omit<ObservabilityOptions, 'eventTarget'>,
 ): RunEngineObservability {
   const baseOptions = observability === true ? {} : observability;

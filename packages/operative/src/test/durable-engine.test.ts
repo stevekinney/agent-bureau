@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { Conversation, createConversationHistory } from 'conversationalist';
 
-import type { AnyRunEngine } from '../durable/create-run-engine';
+import type { RegistryAgnosticEngine } from '../durable/create-run-engine';
 import {
   createManualCheckpointStore,
   createManualDurableEngine,
@@ -21,7 +21,7 @@ describe('durable engine test helpers', () => {
       cancel: async (id: string) => {
         delegated.push(`cancel:${id}`);
       },
-    } as unknown as AnyRunEngine;
+    } as unknown as RegistryAgnosticEngine;
 
     const spy = spyEngine(engine);
 
