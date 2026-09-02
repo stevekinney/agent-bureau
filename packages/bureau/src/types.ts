@@ -64,6 +64,7 @@ import type { AuditTrail } from './audit-trail';
 import type { BureauEventMap } from './events';
 import type { ModelCatalogService } from './model-catalog-refresh';
 import type { OnlineEvalSampler, OnlineEvalSamplerOptions } from './online-evals';
+import type { SteeringCommandAdmissionOutcome, SteeringCommandRequest } from './steering';
 import type { WebhookNotifier, WebhookNotifierOptions } from './webhook-notifier';
 
 // ── Provider Configuration ───────────────────────────────────────────
@@ -808,6 +809,44 @@ export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
     sessionId: string,
     request: SessionInputAdmissionRequest,
   ): Promise<SessionInputAdmissionOutcome>;
+
+  /**
+   * AB-67/AB-199 — admit a `pause` or `resume` steering command as a sixth
+   * session verb, scoped to an in-memory (process-local) session. Reads
+   * authority and terminal status through the same mechanism
+   * `submitSessionInput` uses ({@link isSessionAuthorityAuthorized},
+   * {@link isSessionRunTerminal}): an unauthorized caller or unknown
+   * `sessionId` returns `{ outcome: 'not-found' }`; an authorized caller
+   * naming an already-terminal session returns `{ outcome: 'session-terminal',
+   * sessionId }`.
+   *
+   * Every target other than `pause`/`resume` returns `{ outcome:
+   * 'unsupported-capability', reason: 'selector-unavailable' }` — `ab-67-
+   * bureau-b` owns admitting them (`policyRef` resolution through AB-66's
+   * selector, `override`-against-catalog validation). A `pause`/`resume`
+   * request against a session with `runtime.durable` configured likewise
+   * returns `unsupported-capability`, with `reason:
+   * 'durable-steering-unavailable'`: this method never holds process-local
+   * pause/resume state a restart would lose.
+   *
+   * A `pause` against an authorized, non-terminal, in-memory session is
+   * accepted, increments the session's `configVersion` by exactly one, and
+   * is idempotent against a second `pause` while the first is still
+   * `accepted`/`applied` (no second increment). A `resume` against a session
+   * that is not currently paused is accepted as a no-op, matching the
+   * idempotent-abort precedent at
+   * `documentation/operative-type-safe-api.md:765`. An `accepted`
+   * pause/resume transitions to `failed` with `SteeringCommandFailure.reason
+   * = 'run-terminal'` if the targeted run aborts or completes before its
+   * `runStep` boundary is reached. An exact retry of the same
+   * `(principal, id)` with an identical `requestedValue` replays the
+   * original command's current state; a same-`id`, different-`requestedValue`
+   * reuse returns a typed conflict.
+   */
+  submitSteeringCommand(
+    sessionId: string,
+    request: SteeringCommandRequest,
+  ): Promise<SteeringCommandAdmissionOutcome>;
 
   /**
    * Synchronous, constant capability discovery for the three session verbs

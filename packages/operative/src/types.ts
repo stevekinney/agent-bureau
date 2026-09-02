@@ -350,6 +350,27 @@ export interface SteeringGate {
    * way — it just does not get to release resources any earlier.
    */
   awaitResume(signal?: AbortSignal): Promise<void>;
+  /**
+   * The highest `SteeringDesiredState.configVersion` this gate has already
+   * observed applied by ANY run on the owning session (AB-67's ratified
+   * "applied once consumed by a step boundary in any current or future run"
+   * rule, `documentation/operative-type-safe-api.md`'s classification
+   * table). `RunState.lastAppliedConfigVersion` is per-run and starts at 0
+   * for every fresh run (`createRunState()`), so a brand-new run on a
+   * session whose `configVersion` a PRIOR run already applied would
+   * otherwise re-observe and re-fire `steering.applied` for it (a gap
+   * `ab-67-runstep`'s own boundary read explicitly names and defers to this
+   * gate — see `run-step.ts`'s `maybeDispatchSteeringApplied` comment).
+   *
+   * Optional: a gate that doesn't implement cross-run memory (or an absent
+   * `steering` dependency entirely) simply seeds every fresh run's dedupe
+   * cursor at 0 — today's behavior, unchanged. `executeLoop` and the
+   * durable workflow driver each call this once, at the start of a BRAND
+   * NEW run only (never on a durable resume, which carries its own cursor
+   * forward via `RunCursor.lastAppliedConfigVersion`), to seed
+   * `RunState.lastAppliedConfigVersion`.
+   */
+  getAppliedFloor?(): number;
 }
 
 /**

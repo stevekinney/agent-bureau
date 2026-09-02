@@ -28,6 +28,7 @@ import {
   type SessionListOptions,
   type SessionStore,
   type SessionSummary,
+  SteeringAppliedEvent,
   type StreamEventMap,
   TaskCancelledEvent,
   TaskDispatchedEvent,
@@ -110,6 +111,14 @@ import {
   serializeRunState,
   serializeUnknownError,
 } from './serialization';
+import {
+  type BureauSteeringGate,
+  createSteeringCommandLedger,
+  createSteeringGate,
+  type ImplementedSteeringCommand,
+  type SteeringCommandAdmissionOutcome,
+  type SteeringCommandRequest,
+} from './steering';
 import type {
   Bureau,
   BureauOptions,
@@ -1097,6 +1106,26 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // never persisted durably. Entries are removed on `deleteRun` so this map
   // does not outlive the run it describes.
   const runAttribution = new Map<string, RunAttribution>();
+  // AB-67/AB-199 — one SteeringGate per session, created (or reused)
+  // EAGERLY by `createRunFromRequest` at the start of every in-memory run —
+  // NOT lazily on the first `submitSteeringCommand` call, which would miss
+  // every run already in flight by the time a caller first pauses it (see
+  // the identical note at `createRunFromRequest`'s own gate lookup, and
+  // `steering.ts`'s `createSteeringGate` doc comment). `submitSteeringCommand`
+  // also creates one on demand for the (rare) case a caller pauses a session
+  // whose current run started before this map existed at all (recovery
+  // paths), but in ordinary operation the run-start path always wins the
+  // race. Held for the bureau's lifetime, like the other per-session maps
+  // above, EXCEPT this one is explicitly cleaned up on `deleteSession` (see
+  // `deleteSession` below) so a reused session id never inherits a deleted
+  // session's pause state / command history / applied floor.
+  const steeringGates = new Map<string, BureauSteeringGate>();
+  // AB-67/AB-199 — the bureau-wide `(principal, id)` idempotency ledger
+  // every session's gate shares (see `steering.ts`'s `createSteeringGate`
+  // `ledger` parameter doc comment): a same-`(principal, id)` retry against
+  // a DIFFERENT session must resolve to `session-mismatch`, not be silently
+  // admitted as an unrelated command in that other session's own ledger.
+  const steeringCommandLedger = createSteeringCommandLedger();
   // Keep the exact host-supplied (or bureau-derived) context for approval
   // resumption. Approval bindings identify the original caller, but are not a
   // substitute for the complete request context and must not mint authority.
@@ -2443,6 +2472,36 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         };
       }
 
+      // AB-67/AB-199 — steering is scoped to in-memory (process-local)
+      // sessions only: a durably-configured bureau's `submitSteeringCommand`
+      // always rejects pause/resume as `unsupported-capability`, so a
+      // durable run never needs a gate. An in-memory run's gate is created
+      // (or reused) HERE, eagerly, before `createActiveRun` — not lazily
+      // inside `submitSteeringCommand` — because a pause admitted mid-run
+      // must gate THIS run's own `runStep` boundary; a gate created only on
+      // first use would miss every run already started before the first
+      // `submitSteeringCommand` call for its session. A gate with no
+      // `pause`/`resume` ever admitted against it is inert: `getDesiredState()`
+      // stays `{ paused: false, configVersion: 0 }`, which `run-step.ts`'s
+      // `maybeDispatchSteeringApplied` never fires for (`configVersion > 0`
+      // guard) — identical to today's no-`steering`-dependency behavior.
+      // `promoteForNewRun()` promotes any agent-identity bump a prior run
+      // deferred (AB-199's coordinator amendments, 2026-09-02 addendum); a
+      // no-op when nothing was pending.
+      let steeringGate: BureauSteeringGate | undefined;
+      if (!runtime.durable) {
+        steeringGate = steeringGates.get(sessionId);
+        if (!steeringGate) {
+          steeringGate = createSteeringGate(sessionId, steeringCommandLedger);
+          steeringGates.set(sessionId, steeringGate);
+        }
+      }
+      steeringGate?.promoteForNewRun(runId);
+      // AB-67/AB-199 — a per-run VIEW of the shared session gate (see
+      // `steering.ts`'s `forRun` doc comment): a pause bound to a DIFFERENT
+      // concurrent run on this same session must never block this one.
+      const runSteeringGate = steeringGate?.forRun(runId);
+
       const activeRun = createActiveRun(
         {
           generate: runRuntime.generate,
@@ -2452,6 +2511,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           maximumTokens: request.maximumTokens,
           stopWhen: options.stopWhen,
           prepareStep: runRuntime.prepareStep,
+          ...(runSteeringGate ? { steering: runSteeringGate } : {}),
           onStep: [
             ...runRuntime.onStep,
             async (stepResult) => {
@@ -2534,10 +2594,33 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         });
       }
 
+      // AB-67/AB-199 — the write side of cross-run steering dedupe:
+      // `SteeringGate.getAppliedFloor()` (the read side `run-step.ts`
+      // consults) only reflects reality once something raises it.
+      // `runStep` dispatches `SteeringAppliedEvent` on this exact run's
+      // emitter the moment it observes a `configVersion` at its boundary
+      // (`run-step.ts`'s `maybeDispatchSteeringApplied`), so listening here
+      // is the one place that fires for both drivers identically.
+      if (steeringGate) {
+        activeRun.addEventListener(SteeringAppliedEvent.type, (event) => {
+          steeringGate.recordApplied(
+            event.effective.appliedAtRunId,
+            event.effective.configVersion,
+            event.effective.appliedAt,
+          );
+        });
+      }
+
       activeRun.once('run.completed', (event) => {
         activeRuns.delete(activeRun);
         runToolboxes.delete(runToolbox);
         disposeRegisteredStreamListeners(disposeStreamListeners);
+        // AB-67's ratified Abort row: a session's pause/resume never carries
+        // into a future run. Any command still `accepted` and bound to this
+        // run transitions to `failed`/`'run-terminal'` the moment the run
+        // reaches ANY terminal state — completed here, aborted in the
+        // sibling listener below.
+        steeringGate?.failAcceptedForRun(runId, new Date().toISOString());
         flowController?.settle(runId);
         queueMicrotask(() => releaseTerminalRunReviewState(runId));
 
@@ -2582,6 +2665,8 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         disposeRegisteredStreamListeners(disposeStreamListeners);
         flowController?.settle(runId);
         queueMicrotask(() => releaseTerminalRunReviewState(runId));
+        // See the identical call in the `run.completed` listener above.
+        steeringGate?.failAcceptedForRun(runId, new Date().toISOString());
 
         const report = buildTerminalReportFromAbortedEvent(runId, {
           usage: event.usage,
@@ -3540,6 +3625,18 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       }
     }
     await sessionStore.delete(id);
+    // AB-67/AB-199 review findings (PR #430 — Codex P2): a deleted session's
+    // steering gate — and its entries in the shared, bureau-wide idempotency
+    // ledger — must not survive to be inherited by a session id that gets
+    // reused later, or a stale pause/configVersion/command-ledger entry
+    // would block or mis-replay against the logically new session. Both
+    // removals happen ONLY AFTER `sessionStore.delete` above has actually
+    // succeeded ("Keep the gate until session deletion succeeds") — a
+    // rejected deletion leaves the still-live session's gate and ledger
+    // entries untouched, rather than orphaning a replacement gate a
+    // subsequent `submitSteeringCommand` call would otherwise create.
+    steeringGates.get(id)?.purgeFromLedger();
+    steeringGates.delete(id);
   }
 
   /**
@@ -3668,6 +3765,85 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       return { outcome: 'session-terminal', sessionId };
     }
     return { outcome: 'unsupported-capability', reason: 'durable-mailbox-unavailable' };
+  }
+
+  /**
+   * AB-67/AB-199 — admit a `pause`/`resume` steering command. Pre-admission
+   * checks reuse `submitSessionInput`'s fixed order (authorization, then
+   * session lifecycle, then capability): an unauthorized caller or unknown
+   * `sessionId` returns `not-found`; an authorized caller naming an
+   * already-terminal session returns `session-terminal`. Every target other
+   * than `pause`/`resume`, and a durably-configured bureau's `pause`/
+   * `resume`, returns `unsupported-capability` before this session's
+   * `SteeringGate` is ever consulted or created — see
+   * `SteeringCommandAdmissionOutcome`'s doc comment for the exact reasons.
+   */
+  async function submitSteeringCommand(
+    sessionId: string,
+    request: SteeringCommandRequest,
+  ): Promise<SteeringCommandAdmissionOutcome> {
+    const session = runtime.sessionStore ? await runtime.sessionStore.load(sessionId) : undefined;
+    if (!session || !isSessionAuthorityAuthorized(session.metadata, request.principal)) {
+      return { outcome: 'not-found' };
+    }
+
+    // AB-67/AB-199 review finding (PR #430 — Codex P2): genuinely enumerate
+    // this session's live runs through the store's own run registry, rather
+    // than inferring cardinality/liveness from the single
+    // `metadata['lastRunId']` field — a field that "identifies only the
+    // most recently persisted writer, not the sole non-terminal run" under
+    // real concurrent runs. `store.getState().runs` + `getRunSessionIdentifier`
+    // is Bureau's own existing live-run registry (used identically by
+    // `listRuns`/`listPendingReviews` above), not new infrastructure.
+    // Computed BEFORE the terminal check below (review finding, PR #430 —
+    // Codex P2, "Consult live runs before declaring the session terminal"):
+    // `metadata['lastRunStatus']` reflects only the MOST RECENTLY persisted
+    // run's own completion, which can go terminal while an OLDER, still
+    // non-terminal concurrent run on the same session remains genuinely
+    // live — a metadata-only check would reject a command explicitly
+    // targeting that still-live run.
+    const liveRunIds: string[] = [];
+    for (const [runId, runState] of store.getState().runs) {
+      if (runState.status === 'running' && getRunSessionIdentifier(runState) === sessionId) {
+        liveRunIds.push(runId);
+      }
+    }
+    if (isSessionRunTerminal(session.metadata) && liveRunIds.length === 0) {
+      return { outcome: 'session-terminal', sessionId };
+    }
+    if (request.requestedValue.target !== 'pause' && request.requestedValue.target !== 'resume') {
+      return { outcome: 'unsupported-capability', reason: 'selector-unavailable' };
+    }
+    if (runtime.durable) {
+      return { outcome: 'unsupported-capability', reason: 'durable-steering-unavailable' };
+    }
+
+    let gate = steeringGates.get(sessionId);
+    if (!gate) {
+      gate = createSteeringGate(sessionId, steeringCommandLedger);
+      steeringGates.set(sessionId, gate);
+    }
+
+    const now = new Date().toISOString();
+    const id = request.id ?? crypto.randomUUID();
+    const command: ImplementedSteeringCommand = {
+      id,
+      idOrigin: request.id !== undefined ? 'caller' : 'generated',
+      sessionId,
+      principal: request.principal,
+      // Narrowed by the `target !== 'pause' && target !== 'resume'` early
+      // return above — TypeScript tracks this back through `request.requestedValue`
+      // without a cast because `request` is never reassigned.
+      requestedValue: request.requestedValue,
+      requestedAt: now,
+      ...(request.expectedRevision !== undefined
+        ? { expectedRevision: request.expectedRevision }
+        : {}),
+      ...(request.deadline !== undefined ? { deadline: request.deadline } : {}),
+      ...(request.runId !== undefined ? { runId: request.runId } : {}),
+    };
+
+    return gate.admit(command, { liveRunIds, now });
   }
 
   function listPendingReviews(): PendingReview[] {
@@ -4357,6 +4533,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     updateSession,
     querySession,
     submitSessionInput,
+    submitSteeringCommand,
     // AB-192: constant, not computed from runtime state — the built-in
     // `agentRun` workflow never registers `ctx.onUpdate`/`ctx.onQuery`
     // handlers, so `update`/`query` are unsupported today regardless of
