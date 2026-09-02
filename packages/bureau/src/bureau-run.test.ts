@@ -147,7 +147,15 @@ describe('bureau.run', () => {
     }
   });
 
-  it('drives the run through the durable engine when one is composed, and it survives a crash simulation', async () => {
+  it('drives the run through the durable engine when one is composed, checkpointed and discoverable via listDurableRuns', async () => {
+    // Title deliberately does NOT claim "survives a crash simulation" — this
+    // test only proves the run went through the durable engine and is
+    // checkpointed/discoverable mid-flight. It does NOT simulate a process
+    // restart and reattach, because that currently does not work for a
+    // catalog run: see the "Known gap, not yet closed" note on `runAgent`'s
+    // doc comment in create-bureau.ts (no session record is written for a
+    // catalog dispatch, so boot recovery's resolver has no owning session to
+    // find and returns `{ status: 'unavailable' }`).
     const bureau = await createBureau({
       agents: { echo: createAgent({ generate: mockGenerate('durable hello') }) },
       // No bureau-level generate/provider needed — `run()` dispatches through
@@ -168,6 +176,57 @@ describe('bureau.run', () => {
       // engine's own durable-run listing — proof this went through the
       // durable engine, not the agent's in-memory loop.
       expect(after?.items.some((item) => item.id.startsWith('agent-run-'))).toBe(true);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('forwards abort() to the dispatched durable ActiveRun (AB-22 review fix: the outer wrapper going terminal must not leave the already-started durable workflow running unobserved)', async () => {
+    let releaseGenerate: (() => void) | undefined;
+    const pending = new Promise<void>((resolve) => {
+      releaseGenerate = resolve;
+    });
+    const bureau = await createBureau({
+      agents: {
+        echo: createAgent({
+          generate: async () => {
+            await pending;
+            return { content: 'too late', toolCalls: [] };
+          },
+        }),
+      },
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+    try {
+      const run = bureau.run('echo', 'hi');
+      // Abort immediately — before the resolver-then-createActiveRun chain
+      // inside `runAgent`'s durable branch has necessarily settled. Without
+      // forwarding this to the dispatched ActiveRun directly, the durable
+      // workflow would keep running (and eventually call the generate
+      // function with real side effects) even though this handle already
+      // reports itself terminal.
+      run.abort('caller cancelled immediately');
+      releaseGenerate?.();
+      const result = await run.result();
+      expect(result.finishReason).toBe('aborted');
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('disposes the dispatched durable ActiveRun through Symbol.dispose', async () => {
+    const bureau = await createBureau({
+      agents: { echo: createAgent({ generate: mockGenerate('durable hello') }) },
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+    try {
+      const run = bureau.run('echo', 'hi');
+      await run.result();
+      expect(() => {
+        run[Symbol.dispose]();
+      }).not.toThrow();
     } finally {
       await bureau.dispose();
     }

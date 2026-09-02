@@ -140,7 +140,31 @@ async function runCase(
         // cannot hang the worker past the case timeout
         // (PRRT_kwDORvupsc6MlG1u).
         const agentRun = options.agent.run(evaluationCase.input, { signal: controller.signal });
-        const agentResult = await runWithTimeout(agentRun.result(), timeout, evaluationCase.name);
+        let agentResult: RunResult;
+        try {
+          agentResult = await runWithTimeout(agentRun.result(), timeout, evaluationCase.name);
+        } catch (raceError) {
+          // `runWithTimeout` racing `agentRun.result()` returns as soon as
+          // the timeout wins — it never tells the LOSING side to stop.
+          // `controller.abort()` (the other timer above) only reaches the
+          // agent if its `run()` actually honors `context.signal`; an agent
+          // that ignores it would otherwise keep executing — consuming
+          // concurrency and side effects — after this case is already
+          // marked timed out. Call the handle's own `abort()` directly as a
+          // second, signal-independent line of defense, and dispose it so
+          // its resources are released regardless of which path the agent
+          // took. Both are no-ops if the agent already settled/aborted
+          // cleanly on its own. Swallow a failure from either — this is
+          // best-effort cleanup on a possibly-uncooperative agent's handle;
+          // it must never replace the real timeout error being propagated.
+          try {
+            agentRun.abort('Evaluation case timed out');
+            agentRun[Symbol.dispose]();
+          } catch {
+            // Best-effort — see comment above.
+          }
+          throw raceError;
+        }
         // Validate before scoring so malformed output cannot bypass the
         // failure guard and pass by default (PRRT_kwDORvupsc6MlG1z).
         if (!isRunResult(agentResult)) {

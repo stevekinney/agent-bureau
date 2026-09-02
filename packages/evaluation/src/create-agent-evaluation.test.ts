@@ -592,6 +592,43 @@ describe('createAgentEvaluation', () => {
     expect(report.cases[0]!.error).toMatch(/timed out/i);
   });
 
+  it('aborts and disposes the AgentRun handle when a timeout wins the race, even though the agent ignores its signal', async () => {
+    // A losing timeout race alone does not stop the agent's own in-flight
+    // work if it ignores context.signal — the handle's own abort()/dispose()
+    // are the only remaining, signal-independent way to tell it to stop.
+    let abortCalls = 0;
+    let disposeCalls = 0;
+    const hangingAgent: RunnableAgent<unknown, boolean> = {
+      name: 'hanging-agent',
+      run: (): AgentRun<unknown, boolean> => ({
+        result: () => new Promise<never>(() => {}), // never resolves, ignores signal
+        unwrap: () => {
+          throw new Error('not used by this test');
+        },
+        abort: () => {
+          abortCalls += 1;
+        },
+        [Symbol.dispose]: () => {
+          disposeCalls += 1;
+        },
+        [Symbol.asyncIterator]: () => {
+          throw new Error('not used by this test');
+        },
+      }),
+    };
+
+    const evaluation = createAgentEvaluation({
+      cases: [{ name: 'hangs', input: 'test', timeout: 30 }],
+      agent: hangingAgent,
+    });
+
+    const report = await evaluation.run();
+
+    expect(report.cases[0]!.error).toMatch(/timed out/i);
+    expect(abortCalls).toBe(1);
+    expect(disposeCalls).toBe(1);
+  });
+
   it('fails (does not pass by default) when a RunnableAgent returns a non-RunResult (PRRT_kwDORvupsc6MlG1z)', async () => {
     // A miswired agent: returns a plain object with `steps` but no valid
     // finishReason. Previously the `as RunResult` cast let this flow through; the

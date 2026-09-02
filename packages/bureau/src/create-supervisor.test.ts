@@ -426,6 +426,34 @@ describe('createSupervisor', () => {
 
       expect(supervisor.delegate('task')).rejects.toThrow();
     });
+
+    it('rejects delegation without invoking any agent when the signal aborts during an asynchronous routing strategy', async () => {
+      const controller = new AbortController();
+      const worker = makeAgent('worker');
+      const catalog = createAgentCatalog({ worker: worker.fixture });
+      const supervisor = createSupervisor({
+        agents: catalog,
+        // Routing itself awaits external state (an LLM-based router, a
+        // policy lookup) — the pre-routing `throwIfAborted()` check has
+        // already passed by the time this resolves, so only a check AFTER
+        // awaiting the strategy can catch an abort that lands in this
+        // window.
+        routing: async () => {
+          controller.abort();
+          await Promise.resolve();
+          return 'worker' as const;
+        },
+        signal: controller.signal,
+      });
+
+      expect(supervisor.delegate('task')).rejects.toThrow();
+      // Give the rejected delegation's microtasks a turn, then confirm the
+      // routed agent was never actually invoked — this is the behavior the
+      // rejection needs to prove, not just that SOME error surfaced.
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(worker.receivedInputs).toEqual([]);
+    });
   });
 
   describe('custom synthesis', () => {

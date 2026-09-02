@@ -106,4 +106,28 @@ describe('createAgentCatalog', () => {
 
     expect(Object.isFrozen(catalog)).toBe(true);
   });
+
+  it('freezes each entry it hands out, not just the outer catalog — entries(), query(), and get()/find() cannot be desynchronized by mutating a returned entry', () => {
+    const writer = agent('writer');
+    const catalog = createAgentCatalog({ writer });
+
+    const fromEntries = catalog.entries()[0]!;
+    const fromQuery = catalog.query(() => true)[0]!;
+    expect(Object.isFrozen(fromEntries)).toBe(true);
+    expect(Object.isFrozen(fromQuery)).toBe(true);
+
+    expect(() => {
+      // @ts-expect-error — `AgentCatalogEntry` is a read-only interface;
+      // this is exactly the "ordinary runtime reflection" case being
+      // guarded against, not a type-checked call site.
+      fromEntries.name = 'renamed';
+    }).toThrow(TypeError);
+
+    // The attempted mutation above did not go through — every read surface
+    // still agrees with the original definition.
+    expect(catalog.names()).toEqual(['writer']);
+    expect(catalog.has('writer')).toBe(true);
+    expect(catalog.has('renamed')).toBe(false);
+    expect(catalog.get('writer')).toBe(writer);
+  });
 });

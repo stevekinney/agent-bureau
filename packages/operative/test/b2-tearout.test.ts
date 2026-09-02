@@ -65,11 +65,17 @@ describe('B2 tearout — remaining surface is coherent', () => {
     expect(typeof operative.createRequestHumanInputTool).toBe('function');
   });
 
-  it('AB-22: createAgentRegistry, createSupervisor, and RegistryAgent are gone from operative', () => {
+  it("AB-22: createAgentRegistry, createSupervisor, and AgentRegistry are gone from operative's runtime exports", () => {
     // AB-22 removed the registry/supervisor surface from operative entirely —
-    // createAgentRegistry, createSupervisor, and RegistryAgent no longer exist
+    // createAgentRegistry, createSupervisor, and AgentRegistry no longer exist
     // anywhere: AgentDefinitions/BureauAgentCatalog (operative + bureau) and
     // bureau's createSupervisor/createAgentDiscoveryTool replace them.
+    //
+    // `RegistryAgent` was a TYPE, not a value — it has no runtime export to
+    // assert absent here (a `Object.keys` check only sees value exports).
+    // The type itself no longer exists anywhere in operative's source (its
+    // one declaration site, `create-agent-registry.ts`, is deleted); `rg
+    // -n "interface RegistryAgent" packages/operative/src` finds nothing.
     const exports = Object.keys(operative);
     expect(exports).not.toContain('createAgentRegistry');
     expect(exports).not.toContain('createSupervisor');

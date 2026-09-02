@@ -229,7 +229,7 @@ const supervisor = createSupervisor({
   routing: createFanOutRouting(), // or a custom `RoutingStrategy<D>`
 });
 
-const { results, synthesis } = await supervisor.delegate('Draft a Q3 summary.');
+const { agentResults, synthesis } = await supervisor.delegate('Draft a Q3 summary.');
 
 const discoveryTool = createAgentDiscoveryTool(bureau.agents);
 ```

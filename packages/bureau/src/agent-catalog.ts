@@ -137,8 +137,17 @@ export function createAgentCatalog<D extends AgentDefinitions>(agents: D): Burea
   // cannot itself prove `Object.entries(agents)[i][1] extends D[TName]` for
   // a generic `D`, since `Object.entries`'s signature necessarily widens to
   // the Record's value bound.
+  // Each entry is frozen individually, not just the outer `catalog` object
+  // below — `entries()`/`query()` hand these exact objects out (not copies),
+  // so a caller mutating a returned entry's `name`/`agent` would otherwise
+  // desynchronize `names()`/`has()`/`get()`/`find()` from what `query()`
+  // returns, despite the catalog's "fixed for the bureau's lifetime"
+  // contract. This is real protection for a JavaScript caller or a
+  // TypeScript caller reaching past the type system; freezing only the
+  // catalog object would leave every entry it hands out just as mutable as
+  // before.
   const entries = Object.entries(agents).map(
-    ([name, agent]) => ({ name, agent }) as AgentCatalogEntry<D>,
+    ([name, agent]) => Object.freeze({ name, agent }) as AgentCatalogEntry<D>,
   );
   const byName = new Map<string, AgentCatalogEntry<D>>(entries.map((entry) => [entry.name, entry]));
 

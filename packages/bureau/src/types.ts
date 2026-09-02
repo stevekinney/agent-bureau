@@ -574,6 +574,13 @@ export interface BureauRunOptions {
   signal?: AbortSignal;
   traceContext?: unknown;
   withTraceContext?: <T>(parentContext: unknown, fn: () => Promise<T>) => Promise<T>;
+  /**
+   * Not yet honored by `bureau.run()`: `AgentRunContext` (AB-15) has no
+   * `principal` field, so a bare `RunnableAgent.run()` has no attribution
+   * surface to record it against — that is `createRun`'s job. Supplying a
+   * value here throws synchronously (`BureauError` `BAD_REQUEST`) rather
+   * than silently discarding it.
+   */
   principal?: string;
 }
 

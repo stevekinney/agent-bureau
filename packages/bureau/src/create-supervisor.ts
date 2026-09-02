@@ -261,6 +261,16 @@ export function createSupervisor<D extends AgentDefinitions>(
 
     const agentNames = await resolveRoutedNames(task);
 
+    // Recheck after the (possibly asynchronous) routing strategy resolves —
+    // a caller-supplied `RoutingStrategy` may itself await external state (a
+    // policy lookup, an LLM-based router), so the check above can be stale
+    // by the time routing actually decides. Without this second check, an
+    // abort requested during that window would still increment the
+    // delegation count, dispatch `task.routed`, and invoke every selected
+    // agent — even one that does not independently honor `signal` — instead
+    // of rejecting the delegation before any of that starts.
+    signal?.throwIfAborted();
+
     delegationCount += agentNames.length;
 
     if (delegationCount > maximumDelegations) {

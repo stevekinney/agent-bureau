@@ -69,6 +69,7 @@ import {
   Conversation,
   type ConversationHistory,
   createConversationHistory,
+  isConversationHistory,
 } from 'conversationalist';
 import { CompletableEventTarget, type TypedEventTarget } from 'lifecycle';
 
@@ -529,12 +530,13 @@ function validateAgentRunInput(input: unknown): asserts input is AgentInput {
     input !== null &&
     typeof input === 'object' &&
     'conversation' in input &&
-    input.conversation !== null &&
-    typeof input.conversation === 'object'
+    isConversationHistory(input.conversation)
   ) {
     return;
   }
-  toBadRequest('"input" must be a string or an object with a "conversation" property');
+  toBadRequest(
+    '"input" must be a string or an object with a valid "conversation" ConversationHistory',
+  );
 }
 
 function validateBureauRunOptions(
@@ -553,8 +555,16 @@ function validateBureauRunOptions(
   if (options.withTraceContext !== undefined && typeof options.withTraceContext !== 'function') {
     toBadRequest('"options.withTraceContext" must be a function');
   }
-  if (options.principal !== undefined && typeof options.principal !== 'string') {
-    toBadRequest('"options.principal" must be a string');
+  if (options.principal !== undefined) {
+    // `AgentRunContext` (AB-15) carries no `principal` field — a bare
+    // `RunnableAgent.run()` has no attribution/session system to record it
+    // against (that is `createRun`'s job, not `bureau.run`'s). Silently
+    // discarding a caller-supplied `principal` would look like an accepted
+    // no-op; reject it synchronously instead so the gap is discoverable at
+    // the call site rather than as a missing attribution nobody notices.
+    toBadRequest(
+      '"options.principal" is not supported by bureau.run() — RunnableAgent.run() has no attribution surface to record it against. Use Bureau.createRun() for principal-attributed runs.',
+    );
   }
 }
 
@@ -828,6 +838,13 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     : undefined;
   const runSessionIdentifiers = new WeakMap<ActiveRun, string>();
   const activeRuns = new Set<ActiveRun>();
+  // AB-22: runs dispatched through `bureau.run(...)`, tracked separately from
+  // `activeRuns` above (which holds only bureau-owned `ActiveRun` internals,
+  // not the arbitrary `AgentRun` a catalog `RunnableAgent` may return on the
+  // direct/non-durable dispatch path). `dispose()` aborts every entry here
+  // the same way it aborts `activeRuns`, so a catalog run in flight cannot
+  // outlive the bureau that started it.
+  const catalogRuns = new Set<AgentRun<unknown, boolean>>();
   const runToolboxes = new Set<BureauToolbox>();
   const runToolboxesByRunId = new Map<string, BureauToolbox>();
   let disposePromise: Promise<void> | undefined;
@@ -1811,12 +1828,43 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
    * malformed `input`/`options` (validated up front, before any async work).
    * When this bureau has a durable engine composed AND the named agent
    * exposes the definition-resolution capability (AB-21's
-   * `OPERATIVE_RESOLVE_RUN_OPTIONS`), the run is driven through that engine
-   * so it survives a crash; otherwise the agent's own in-memory `run()` is
-   * used directly. Either way this function itself returns synchronously —
-   * the async work (resolving run options, or awaiting the durable engine's
-   * setup) is deferred behind `createDeferredAgentRun`.
+   * `OPERATIVE_RESOLVE_RUN_OPTIONS`), the run is driven through that engine;
+   * otherwise the agent's own in-memory `run()` is used directly. Either way
+   * this function itself returns synchronously — the async work (resolving
+   * run options, or awaiting the durable engine's setup) is deferred behind
+   * `createDeferredAgentRun`.
+   *
+   * **Known gap, not yet closed:** the durable branch checkpoints the run
+   * through the engine (it is discoverable via `bureau.listDurableRuns()`
+   * mid-flight — see `bureau-run.test.ts`), but does NOT write the session
+   * record `runtime-composition.ts`'s boot-recovery resolver requires
+   * (`session.metadata.lastRunId`/`lastRunStatus`, keyed by
+   * `runOptions?.sessionId ?? runId`). A process restart therefore does
+   * NOT reattach a catalog run in flight — `recoverAll()`'s resolver finds
+   * no owning session and returns `{ status: 'unavailable' }` for it, same
+   * as any other run with "no recoverable session". This is a real,
+   * open gap (flagged in review), not a documented design choice like the
+   * durable-recovery-failure-is-diagnosed-not-rejected behavior elsewhere in
+   * this file — closing it needs a session write parallel to
+   * `createRunFromRequest`'s, which `bureau.run` currently has no request
+   * context to draw an authority record from.
    */
+  /**
+   * AB-22 review fix: `catalogRuns` (declared near `activeRuns` above) needs
+   * every handle `runAgent` hands back, on both the durable and direct
+   * dispatch branches, so `dispose()` can abort a catalog run still in
+   * flight the same way it already aborts bureau-owned `ActiveRun`s.
+   * Untracked on terminal settlement so a long-lived bureau does not retain
+   * one entry per historical run forever.
+   */
+  function trackCatalogRun(handle: AgentRun<unknown, boolean>): AgentRun<unknown, boolean> {
+    catalogRuns.add(handle);
+    void handle.result().finally(() => {
+      catalogRuns.delete(handle);
+    });
+    return handle;
+  }
+
   function runAgent(
     name: string,
     input: AgentInput,
@@ -1844,6 +1892,17 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     if (runtime.durable && typeof resolver === 'function') {
       const durable = runtime.durable;
       const runId = `agent-run-${crypto.randomUUID()}`;
+      // Captured so the wrapper below can forward an abort straight to the
+      // dispatched durable `ActiveRun` even in the race `createDeferredAgentRun`
+      // does not close: `resolveDurableAgent` unconditionally starts the
+      // durable engine dispatch (it has no way to observe the outer handle's
+      // already-terminal state — `createDeferredAgentRun` checks that only
+      // AFTER awaiting this resolver, and only to decide whether to call the
+      // synthetic agent's `run()`, not whether to have started it). A caller
+      // that calls `.abort()` on the returned handle before this resolver's
+      // `await resolver(...)` settles would otherwise leave the already-started
+      // durable workflow running, unobserved, forever.
+      let dispatchedActiveRun: ActiveRun | undefined;
       // `createDeferredAgentRun` resolves a `RunnableAgent` then calls its
       // `run()` — built for `createLazyAgent`'s "resolve a module" case, but
       // agnostic to WHY resolution is async. Wrapping the durable-engine
@@ -1858,15 +1917,31 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           runId,
           sessionId: runOptions?.sessionId ?? runId,
         });
+        dispatchedActiveRun = activeRun;
         const agentRun = createAgentRun<unknown, boolean>(activeRun, {
           hasOutput: resolvedOptions.output !== undefined,
         });
         return { name, run: () => agentRun };
       };
-      return createDeferredAgentRun(resolveDurableAgent, input, context, name);
+      const deferredRun = createDeferredAgentRun(resolveDurableAgent, input, context, name);
+      const guardedRun: AgentRun<unknown, boolean> = {
+        ...deferredRun,
+        abort(reason?: string): void {
+          deferredRun.abort(reason);
+          // No-op if `activeRun.abort()` already ran via the normal
+          // `underlying.abort()` forwarding path — `AbortController.abort()`
+          // (what `ActiveRun.abort()` calls under the hood) is idempotent.
+          dispatchedActiveRun?.abort(reason);
+        },
+        [Symbol.dispose](): void {
+          deferredRun[Symbol.dispose]();
+          dispatchedActiveRun?.abort();
+        },
+      };
+      return trackCatalogRun(guardedRun);
     }
 
-    return agent.run(input, context);
+    return trackCatalogRun(agent.run(input, context));
   }
 
   async function createRunFromRequest(request: CreateRunRequest): Promise<RunSummary> {
@@ -3731,6 +3806,10 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       runtime.baseToolbox.closeAdmission();
       for (const toolbox of runToolboxes) toolbox.closeAdmission();
       for (const activeRun of activeRuns) activeRun.abort('Bureau disposed');
+      // AB-22 review fix: `bureau.run(...)` dispatches are tracked separately
+      // (see `trackCatalogRun`) since a catalog `RunnableAgent`'s returned
+      // handle is not necessarily backed by a bureau-owned `ActiveRun`.
+      for (const catalogRun of catalogRuns) catalogRun.abort('Bureau disposed');
       const toolboxes = [
         ...new Set([runtime.baseToolbox, ...runToolboxes, ...runToolboxesByRunId.values()]),
       ];
