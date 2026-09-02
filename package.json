@@ -15,6 +15,7 @@
     "integration": "turbo run integration --filter=integration",
     "lint": "turbo run lint",
     "test": "bun run check-changesets && turbo run test && bun run test:scripts",
+    "test:cloudflare-conformance": "turbo run test --filter=cloudflare",
     "test:scripts": "bun test scripts",
     "verify:armorer:consumer": "bun run scripts/verify-armorer-consumer.ts --mode local",
     "test:consumer:operative": "bun run scripts/verify-operative-consumer.ts --mode local",

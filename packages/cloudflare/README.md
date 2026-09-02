@@ -428,6 +428,26 @@ import type {
 
 `createSqliteDouble()` also backs `createCloudflareSqliteStorage` in tests — it satisfies the same `Sql` interface, so `createCloudflareSqliteStorage({ sql: createSqliteDouble() })` exercises the real SQL the Durable Object binding would run.
 
+### Real-runtime conformance lane (`bun run test:cloudflare-conformance`)
+
+The fakes above are the fast lane: they satisfy the `Sql`/`R2Bucket`/`VectorizeIndex` interfaces structurally but never run inside an actual Workers runtime. `src/test/runtime-lane.ts` and `src/test/behavior-contract.ts` add a real lane on top, pinned to `miniflare@4.20260730.0` (exact version, not a range) as a `devDependency`:
+
+```typescript
+import { startCloudflareRuntime } from './src/test/runtime-lane'; // not re-exported from `cloudflare/test`
+import { runCloudflareBackendContract } from './src/test/behavior-contract';
+```
+
+`startCloudflareRuntime({ identifiers })` boots a local Miniflare instance with a Durable Object SQLite binding, an R2 binding, and a Vectorize binding, and returns a `CloudflareRuntimeLane`:
+
+- `sqliteStorage: Storage` — a Weft `Storage` proxy backed by real Durable Object SQLite. Durable Object `SqlStorage.exec` is synchronous and only exists inside the Durable Object, so `createCloudflareSqliteStorage` itself runs bundled INTO a worker script (built with `Bun.build` at lane-start, removed afterward); Bun talks to it over `fetch`-based RPC. Every `Storage` method is covered (`get`/`put`/`delete`/`scan`/`batch`/`conditionalBatch`/`has`/`deletePrefix`/`keys`/`count`/`capabilities`).
+- `r2Bucket: R2Bucket` — the real Miniflare-backed R2 binding (`miniflare.getR2Bucket(...)`), handed straight to `createCloudflareR2TextValueStore({ bucket })` unmodified; unlike SQLite, R2's binding methods are already async, so no bundling is needed.
+- `vectorizeRemoteOnlyError: string` — the captured `env.INDEX.query(...)` failure. Per the AB-276 coordinator ruling, Miniflare 4.20260730.0 classifies Vectorize as remote-only with no local emulator (`Binding INDEX needs to be run remotely`), so this lane never wires up a working Vectorize index or a `remoteProxyConnectionString`. `createCloudflareMemoryRecordStorage` (which needs both SQLite and Vectorize) is therefore exercised only against the fast double; the real lane declares `vectorize` an unsupported capability (`owningIssue: 'AB-276'`, `reason: 'vectorize-remote-only'`) rather than faking it.
+- `shutdown(): Promise<void>` — disposes the Miniflare instance and removes the lane's temporary persistence directory. Each lane derives a fresh namespace and directory from an injected `identifiers.next()`, so lanes never share state.
+
+`runCloudflareBackendContract({ label, createBindings, capabilities })` (in `src/test/behavior-contract.ts`) runs one shared contract — initialization, schema creation, store/query behavior, serialization boundaries, and tombstones — against whatever `createBindings()` produces. `test/cloudflare-backend-contract.test.ts` calls it once against the fast doubles and once against a real lane, so "the same contract runs against the double and the real runtime" is structurally true. `src/test/runtime-only.test.ts` holds the handful of assertions that genuinely cannot be expressed against a double (the Vectorize remote-only message, real process/storage-directory cleanup on shutdown, the real R2 binding's structural fit, and the RPC transport's own error surfacing).
+
+`cloudflare/test` (the package's public test subpath, `src/test/index.ts`) intentionally does **not** re-export `runtime-lane.ts` or `behavior-contract.ts` — importing them directly by relative path keeps Miniflare's dependency graph out of every other `cloudflare/test` consumer.
+
 ### `createFakeR2(options?): FakeR2`
 
 A recording, in-memory `R2Bucket` fake. Unlike the real binding it can't exist under `bun:test`, so `createCloudflareR2TextValueStore` takes an injectable `R2Bucket`; this fake satisfies that interface with a `Map`, and paginates `list()` in fixed-size pages (default 3, override via `options.pageSize`) even though the whole bucket fits in memory — so tests exercise the adapter's real cursor-follow loop, not a single-page shortcut.
