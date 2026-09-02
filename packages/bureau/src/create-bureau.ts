@@ -44,6 +44,8 @@ import {
   type RecoveredRunHandle,
   type ScheduledAgentRunInput,
   SCHEDULER_RUN_ID_PREFIX,
+  type SessionInputAdmissionOutcome,
+  type SessionInputAdmissionRequest,
 } from '@lostgradient/operative/durable';
 import {
   createStore,
@@ -239,6 +241,142 @@ export function hasRecoverableTransportAuthority(metadata: Record<string, JSONVa
   return requiresTransportValidator(
     (legacyAuthority as Record<string, JSONValue>)['authorizationRevision'],
   );
+}
+
+/**
+ * Resolves what a session's metadata records about its most recent run's
+ * authority, per AB-42's coordinator ruling (2026-09-02): reads
+ * `metadata['lastRequestAuthorities'][lastRunId]?.principalId`, falling back
+ * to the legacy `metadata['lastRequestAuthority'].principalId` exactly as
+ * {@link recoveredRequestContextFromMetadata} already does.
+ *
+ * `{ recorded: false }` means the session has recorded no authority at
+ * all — an "open" session, per the ruling. `{ recorded: true, principalId }`
+ * means an authority WAS recorded; `principalId` is `undefined` only when
+ * that recorded authority is itself malformed (missing or non-string
+ * `principalId`), which must fail closed (deny every principal), never be
+ * read as "open" — a corrupted or partially-written persistence record must
+ * not silently grant access. This is why a per-run entry present-but-malformed
+ * does NOT fall back to the legacy field the way a genuinely absent per-run
+ * entry does: once a per-run entry exists, it is authoritative for that run,
+ * so silently falling through past a corrupted record would suppress exactly
+ * the failure this distinction exists to catch — conflating "absent" with
+ * "malformed" is the class of bug this whole function guards against.
+ *
+ * The same reasoning extends to a non-empty-but-uncorrelated
+ * `lastRequestAuthorities` map (see below): it is checked BEFORE the legacy
+ * fallback, not after, because that exact shape is what two concurrent runs
+ * on one session produce, and the legacy field may belong to the OTHER,
+ * unrelated run — see the concurrent-run correlation note below.
+ *
+ * A completed/aborted/errored run's `lastRequestAuthorities[lastRunId]` entry
+ * is pruned on terminal transition (see the cleanup near `remainingAuthorities`
+ * below), while the legacy singular `lastRequestAuthority` is retained — so a
+ * per-run lookup that is GENUINELY ABSENT (no map, no `lastRunId`, or the key
+ * missing from the map) falls back to the legacy field.
+ */
+function isPlainAuthorityRecord(value: JSONValue | undefined): value is Record<string, JSONValue> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function lookupSessionAuthority(
+  metadata: Record<string, JSONValue>,
+):
+  | { readonly recorded: false }
+  | { readonly recorded: true; readonly principalId: string | undefined } {
+  const lastRunId = metadata['lastRunId'];
+  const authorities = metadata['lastRequestAuthorities'];
+  // A PRESENT-but-malformed `lastRequestAuthorities` value (not absent — a
+  // string or array where a map belongs) is itself evidence something was
+  // recorded and corrupted. It must fail closed regardless of `lastRunId` or
+  // a legacy fallback, never be read as "nothing recorded" (open) — the same
+  // fail-closed principle as a malformed per-run/legacy entry below.
+  if (authorities !== undefined && !isPlainAuthorityRecord(authorities)) {
+    return { recorded: true, principalId: undefined };
+  }
+  const perRunEntry =
+    typeof lastRunId === 'string' && lastRunId && authorities !== undefined
+      ? authorities[lastRunId]
+      : undefined;
+  const legacy = metadata['lastRequestAuthority'];
+  let candidate: JSONValue | undefined;
+  if (perRunEntry !== undefined) {
+    candidate = perRunEntry;
+  } else if (authorities !== undefined && Object.keys(authorities).length > 0) {
+    // A valid, non-empty `lastRequestAuthorities` map exists but doesn't
+    // correlate to this run (`lastRunId` missing/corrupt, or the map's
+    // entries are keyed to other runs). Checked BEFORE the legacy fallback,
+    // not after: this exact shape is what two concurrent runs on one session
+    // produce — run B's dispatch overwrites the singular legacy field with
+    // B's authority while A is still running, so trusting legacy here would
+    // authorize B's principal against A's (still-uncorrelated) run. A
+    // non-empty-but-uncorrelated map is recorded-but-uncorrelated evidence,
+    // not "nothing recorded" — fail closed rather than consult a legacy
+    // field that may belong to an unrelated concurrent run.
+    return { recorded: true, principalId: undefined };
+  } else if (legacy !== undefined) {
+    candidate = legacy;
+  } else {
+    return { recorded: false };
+  }
+  if (!isPlainAuthorityRecord(candidate)) {
+    return { recorded: true, principalId: undefined };
+  }
+  const principalId = candidate['principalId'];
+  return { recorded: true, principalId: typeof principalId === 'string' ? principalId : undefined };
+}
+
+/**
+ * The `principalId` recorded for a session's most recent run, per
+ * {@link lookupSessionAuthority}'s rule. Returns `undefined` both when the
+ * session has recorded no authority at all AND when a recorded authority is
+ * malformed — this function alone cannot distinguish the two, so it is
+ * informational only. {@link isSessionAuthorityAuthorized} is the
+ * security-relevant surface: it fails closed (denies) for malformed
+ * authority, never treating it as open the way "genuinely no authority
+ * recorded" is treated.
+ *
+ * Shared by every new Bureau session verb that needs to read a session's
+ * recorded authority (AB-194's `submitSessionInput`, AB-199's
+ * `submitSteeringCommand`) — neither issue owns or invents this mechanism,
+ * both simply read the pre-existing metadata keys `create-bureau.ts` already
+ * writes on every run dispatch.
+ */
+export function recordedSessionAuthorityPrincipalId(
+  metadata: Record<string, JSONValue>,
+): string | undefined {
+  const lookup = lookupSessionAuthority(metadata);
+  return lookup.recorded ? lookup.principalId : undefined;
+}
+
+/**
+ * Whether `principal` is authorized to act on a session recording the given
+ * metadata, per {@link lookupSessionAuthority}'s rule. A session with no
+ * recorded authority at all is treated as open — every principal is
+ * authorized — matching what every existing session verb enforces today
+ * (nothing stronger), per AB-42's coordinator ruling (2026-09-02). A session
+ * with a RECORDED-BUT-MALFORMED authority fails closed: no principal is
+ * authorized, since a corrupted record cannot be verified to match anyone.
+ */
+export function isSessionAuthorityAuthorized(
+  metadata: Record<string, JSONValue>,
+  principal: string,
+): boolean {
+  const lookup = lookupSessionAuthority(metadata);
+  if (!lookup.recorded) return true;
+  return lookup.principalId === principal;
+}
+
+/**
+ * Whether a session's most recent run is in a terminal (non-`'running'`)
+ * state, reading the same `metadata['lastRunStatus']` field
+ * {@link requireSessionRunId} and {@link hasRecoverableTransportAuthority}
+ * already read. Shared by every new Bureau session verb that needs a
+ * terminal-session check (AB-194's `submitSessionInput`, AB-199's
+ * `submitSteeringCommand`).
+ */
+export function isSessionRunTerminal(metadata: Record<string, JSONValue>): boolean {
+  return metadata['lastRunStatus'] !== 'running';
 }
 
 export function isTerminalApprovalBindingError(error: unknown): boolean {
@@ -834,9 +972,36 @@ export async function monitorRecoveredScheduledFire(
   }
 }
 
+/**
+ * AB-194 — `BureauOptions.sessionInput`'s `sessionBacklogLimit`/
+ * `principalBacklogLimit` must each be a positive integer when supplied.
+ * Throws `BureauError('...', 'BAD_REQUEST')` for 0, a negative number, or a
+ * non-integer; a `undefined` value (option omitted) passes through untouched.
+ */
+function validateSessionInputBacklogLimit(value: number | undefined, optionName: string): void {
+  if (value === undefined) return;
+  if (!Number.isInteger(value) || value <= 0) {
+    toBadRequest(`"options.sessionInput.${optionName}" must be a positive integer`);
+  }
+}
+
 export async function createBureau<const D extends AgentDefinitions = AgentDefinitions>(
   options: BureauOptions<D>,
 ): Promise<Bureau<D>> {
+  // AB-194: validated here (BAD_REQUEST at construction time) though not yet
+  // enforced — every reachable `submitSessionInput` outcome today is a
+  // pre-admission rejection, before any backlog could exist to check
+  // against. Enforcement lands with the mailbox-backed `ab-42-bureau-b` slice
+  // once WFT-84 ships, using these same validated values (defaulting to
+  // `DEFAULT_SESSION_INPUT_BACKLOG_LIMIT`/`DEFAULT_PRINCIPAL_SESSION_INPUT_BACKLOG_LIMIT`).
+  validateSessionInputBacklogLimit(
+    options.sessionInput?.sessionBacklogLimit,
+    'sessionBacklogLimit',
+  );
+  validateSessionInputBacklogLimit(
+    options.sessionInput?.principalBacklogLimit,
+    'principalBacklogLimit',
+  );
   const diagnose = resolveDiagnosticSink(options.onDiagnostic);
   const ownsStore = !options.store;
   const store: Store = options.store ?? createStore();
@@ -3459,6 +3624,38 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     );
   }
 
+  /**
+   * AB-42/AB-194 — admit a caller's session input. Pre-admission checks run
+   * in AB-42's fixed order: authorization (`not-found`) first, then session
+   * lifecycle (`session-terminal`), then capability/capacity
+   * (`unsupported-capability`) — reversing the first two would let an
+   * unauthorized caller learn a session exists.
+   *
+   * Every reachable outcome here is a pre-admission rejection: no adopted
+   * `@lostgradient/weft` version exposes WFT-84's durable mailbox yet, so
+   * every authorized, non-terminal request unconditionally returns
+   * `unsupported-capability`. No `SessionInputRecord` is created and no `id`
+   * is consumed by this method today.
+   */
+  async function submitSessionInput(
+    sessionId: string,
+    request: SessionInputAdmissionRequest,
+  ): Promise<SessionInputAdmissionOutcome> {
+    // Unlike signalSession/updateSession/querySession, this does NOT throw
+    // BureauError('NOT_CONFIGURED') when no session store is composed: an
+    // ephemeral bureau (no persistence/storage) is a supported configuration,
+    // and every sessionId is necessarily unknown in it — the correct outcome
+    // per this method's own contract is `not-found`, not a throw.
+    const session = runtime.sessionStore ? await runtime.sessionStore.load(sessionId) : undefined;
+    if (!session || !isSessionAuthorityAuthorized(session.metadata, request.principal)) {
+      return { outcome: 'not-found' };
+    }
+    if (isSessionRunTerminal(session.metadata)) {
+      return { outcome: 'session-terminal', sessionId };
+    }
+    return { outcome: 'unsupported-capability', reason: 'durable-mailbox-unavailable' };
+  }
+
   function listPendingReviews(): PendingReview[] {
     const now = Date.now();
     const reviews: PendingReview[] = [];
@@ -4124,6 +4321,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     signalSession,
     updateSession,
     querySession,
+    submitSessionInput,
     // AB-192: constant, not computed from runtime state — the built-in
     // `agentRun` workflow never registers `ctx.onUpdate`/`ctx.onQuery`
     // handlers, so `update`/`query` are unsupported today regardless of

@@ -64,10 +64,13 @@ import {
   emptyRecoveredStepMetadata,
   hasRecoverableTransportAuthority,
   isRecoverableScheduledFireInput,
+  isSessionAuthorityAuthorized,
+  isSessionRunTerminal,
   isTerminalApprovalBindingError,
   loadExistingScheduledSessionId,
   monitorRecoveredScheduledFire,
   omitKeysWithPrefix,
+  recordedSessionAuthorityPrincipalId,
   recoveredRequestContextFromMetadata,
   wireFlowControlSchedulerEvents,
   wireStreamEventTargetFrames,
@@ -4306,6 +4309,494 @@ describe('createBureau session update/query capability unavailability (AB-192)',
     } finally {
       await bureau.dispose();
     }
+  });
+});
+
+describe('recordedSessionAuthorityPrincipalId / isSessionAuthorityAuthorized (AB-194)', () => {
+  it('returns undefined when the session has recorded no authority at all', () => {
+    expect(recordedSessionAuthorityPrincipalId({})).toBeUndefined();
+  });
+
+  it('reads the per-run principalId from lastRequestAuthorities keyed by lastRunId', () => {
+    const principalId = recordedSessionAuthorityPrincipalId({
+      lastRunId: 'run-1',
+      lastRequestAuthorities: {
+        'run-1': {
+          principalId: 'alice',
+          tenantId: 'bureau',
+          ownerId: 'agent',
+          capabilities: ['tools:execute'],
+          authorizationRevision: 'bureau:1',
+        },
+      },
+    });
+    expect(principalId).toBe('alice');
+  });
+
+  it('does NOT fall back to legacy when lastRequestAuthorities is non-empty but uncorrelated to lastRunId (concurrent-run shape) — fails closed instead', () => {
+    // Regression (Codex review, fifth pass): a non-empty map holding some
+    // OTHER run's entry, alongside a legacy field, is exactly the shape two
+    // concurrent runs on one session produce — run B's dispatch overwrites
+    // the singular legacy field with B's authority while A is still running;
+    // A's own terminal cleanup later prunes only A's key, leaving B's
+    // (unrelated) entry and B's legacy authority behind. Trusting legacy
+    // here would authorize B's principal against A's terminal session. This
+    // is checked BEFORE the legacy fallback specifically to prevent that:
+    // a non-empty-but-uncorrelated map fails closed rather than consulting
+    // an unrelated concurrent run's legacy authority.
+    const metadata = {
+      lastRunId: 'run-1',
+      lastRequestAuthorities: {
+        'some-other-run': {
+          principalId: 'someone-else',
+          tenantId: 'bureau',
+          ownerId: 'agent',
+          capabilities: ['tools:execute'],
+          authorizationRevision: 'bureau:1',
+        },
+      },
+      lastRequestAuthority: {
+        principalId: 'legacy-alice',
+        tenantId: 'bureau',
+        ownerId: 'agent',
+        capabilities: ['tools:execute'],
+        authorizationRevision: 'bureau:1',
+      },
+    };
+    expect(recordedSessionAuthorityPrincipalId(metadata)).toBeUndefined();
+    expect(isSessionAuthorityAuthorized(metadata, 'legacy-alice')).toBe(false);
+    expect(isSessionAuthorityAuthorized(metadata, 'someone-else')).toBe(false);
+  });
+
+  it('falls back to the legacy lastRequestAuthority when lastRequestAuthorities is an empty object', () => {
+    const principalId = recordedSessionAuthorityPrincipalId({
+      lastRunId: 'run-1',
+      lastRequestAuthorities: {},
+      lastRequestAuthority: {
+        principalId: 'legacy-carol',
+        tenantId: 'bureau',
+        ownerId: 'agent',
+        capabilities: ['tools:execute'],
+        authorizationRevision: 'bureau:1',
+      },
+    });
+    expect(principalId).toBe('legacy-carol');
+  });
+
+  it('falls back to the legacy lastRequestAuthority when no lastRunId is recorded', () => {
+    const principalId = recordedSessionAuthorityPrincipalId({
+      lastRequestAuthority: {
+        principalId: 'legacy-bob',
+        tenantId: 'bureau',
+        ownerId: 'agent',
+        capabilities: ['tools:execute'],
+        authorizationRevision: 'bureau:1',
+      },
+    });
+    expect(principalId).toBe('legacy-bob');
+  });
+
+  it('returns undefined when the recorded authority candidate is malformed', () => {
+    expect(
+      recordedSessionAuthorityPrincipalId({
+        lastRunId: 'run-1',
+        lastRequestAuthorities: { 'run-1': 'not-an-object' },
+      }),
+    ).toBeUndefined();
+    expect(
+      recordedSessionAuthorityPrincipalId({
+        lastRequestAuthority: ['not-an-object'],
+      }),
+    ).toBeUndefined();
+    expect(
+      recordedSessionAuthorityPrincipalId({
+        lastRunId: 'run-1',
+        lastRequestAuthorities: { 'run-1': { principalId: 42 } },
+      }),
+    ).toBeUndefined();
+  });
+
+  it('treats a session with no recorded authority as open (every principal authorized)', () => {
+    expect(isSessionAuthorityAuthorized({}, 'anyone')).toBe(true);
+  });
+
+  it('authorizes the exact recorded principal and rejects every other principal', () => {
+    const metadata = {
+      lastRunId: 'run-1',
+      lastRequestAuthorities: {
+        'run-1': {
+          principalId: 'alice',
+          tenantId: 'bureau',
+          ownerId: 'agent',
+          capabilities: ['tools:execute'],
+          authorizationRevision: 'bureau:1',
+        },
+      },
+    };
+    expect(isSessionAuthorityAuthorized(metadata, 'alice')).toBe(true);
+    expect(isSessionAuthorityAuthorized(metadata, 'mallory')).toBe(false);
+  });
+
+  it('fails closed (denies every principal) when the per-run authority entry is malformed, even with a valid legacy fallback available', () => {
+    // Regression (Codex review): a recorded-but-malformed per-run entry must
+    // NOT be conflated with "no authority recorded at all" (which
+    // isSessionAuthorityAuthorized treats as open) and must NOT silently
+    // fall back to a legacy field that happens to be valid — a corrupted or
+    // partially-written record denies access rather than granting it.
+    const metadata = {
+      lastRunId: 'run-1',
+      lastRequestAuthorities: {
+        'run-1': { principalId: 42 },
+      },
+      lastRequestAuthority: {
+        principalId: 'legacy-alice',
+        tenantId: 'bureau',
+        ownerId: 'agent',
+        capabilities: ['tools:execute'],
+        authorizationRevision: 'bureau:1',
+      },
+    };
+    expect(isSessionAuthorityAuthorized(metadata, 'legacy-alice')).toBe(false);
+    expect(isSessionAuthorityAuthorized(metadata, 'anyone-else')).toBe(false);
+    expect(recordedSessionAuthorityPrincipalId(metadata)).toBeUndefined();
+  });
+
+  it('fails closed (denies every principal) when lastRequestAuthorities itself is a malformed container, even with no legacy fallback at all', () => {
+    // Regression (Codex review, second pass): a PRESENT-but-malformed
+    // lastRequestAuthorities value (an array or string, not a map) is itself
+    // evidence something was recorded and corrupted — it must fail closed
+    // regardless of lastRunId or a legacy field, never be read as "nothing
+    // recorded" (which would authorize any principal).
+    expect(
+      isSessionAuthorityAuthorized(
+        { lastRunId: 'run-1', lastRequestAuthorities: ['not-a-map'] },
+        'anyone',
+      ),
+    ).toBe(false);
+    expect(
+      isSessionAuthorityAuthorized(
+        { lastRunId: 'run-1', lastRequestAuthorities: 'not-a-map' },
+        'anyone',
+      ),
+    ).toBe(false);
+    expect(
+      recordedSessionAuthorityPrincipalId({
+        lastRunId: 'run-1',
+        lastRequestAuthorities: ['not-a-map'],
+      }),
+    ).toBeUndefined();
+  });
+
+  it('fails closed (denies every principal) when a non-empty lastRequestAuthorities map cannot be correlated to lastRunId and no legacy fallback exists', () => {
+    // Regression (Codex review, third pass): a valid, NON-EMPTY
+    // lastRequestAuthorities map that simply doesn't name an entry for this
+    // lastRunId (missing/corrupt lastRunId, or entries keyed to other runs)
+    // is recorded-but-uncorrelated evidence, not "nothing recorded" — it
+    // must fail closed too, when there is no legacy field to fall back to.
+    const metadataMissingLastRunId = {
+      lastRequestAuthorities: {
+        'some-run': {
+          principalId: 'someone',
+          tenantId: 'bureau',
+          ownerId: 'agent',
+          capabilities: ['tools:execute'],
+          authorizationRevision: 'bureau:1',
+        },
+      },
+    };
+    expect(isSessionAuthorityAuthorized(metadataMissingLastRunId, 'anyone')).toBe(false);
+    expect(recordedSessionAuthorityPrincipalId(metadataMissingLastRunId)).toBeUndefined();
+
+    const metadataUncorrelatedLastRunId = {
+      lastRunId: 'run-not-in-map',
+      lastRequestAuthorities: {
+        'some-other-run': {
+          principalId: 'someone',
+          tenantId: 'bureau',
+          ownerId: 'agent',
+          capabilities: ['tools:execute'],
+          authorizationRevision: 'bureau:1',
+        },
+      },
+    };
+    expect(isSessionAuthorityAuthorized(metadataUncorrelatedLastRunId, 'anyone')).toBe(false);
+  });
+});
+
+describe('isSessionRunTerminal (AB-194)', () => {
+  it('is false when lastRunStatus is running', () => {
+    expect(isSessionRunTerminal({ lastRunStatus: 'running' })).toBe(false);
+  });
+
+  it('is true for every non-running status, including absent', () => {
+    expect(isSessionRunTerminal({ lastRunStatus: 'completed' })).toBe(true);
+    expect(isSessionRunTerminal({ lastRunStatus: 'error' })).toBe(true);
+    expect(isSessionRunTerminal({ lastRunStatus: 'aborted' })).toBe(true);
+    expect(isSessionRunTerminal({})).toBe(true);
+  });
+});
+
+describe('createBureau submitSessionInput pre-admission checks (AB-194)', () => {
+  // AB-42's fixed pre-admission check order: authorization, then session
+  // lifecycle, then capability/capacity. No adopted @lostgradient/weft
+  // version exposes WFT-84's durable mailbox yet, so every authorized,
+  // non-terminal request unconditionally returns 'unsupported-capability' —
+  // 'admitted'/'replayed'/'conflict'/'backlog-exhausted' are structurally
+  // unreachable until ab-42-bureau-b lands. A `runtime.durable` with no
+  // mailbox composed is exactly today's real configuration, per the issue's
+  // testing plan — no mailbox double needed.
+
+  it('returns not-found for an unknown sessionId', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+    try {
+      const outcome = await bureau.submitSessionInput('unknown-session', {
+        principal: 'alice',
+        deliveryMode: 'steer',
+        payload: 'hello',
+      });
+      expect(outcome).toEqual({ outcome: 'not-found' });
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('returns not-found (not a NOT_CONFIGURED throw) when no session store is composed', async () => {
+    // Regression (Codex review): an ephemeral bureau (no persistence/storage)
+    // is a supported configuration, unlike signalSession/updateSession/
+    // querySession which throw BureauError('NOT_CONFIGURED') in that case.
+    // Every sessionId is necessarily unknown without a session store, so the
+    // correct outcome per this method's own contract is not-found.
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+    try {
+      const outcome = await bureau.submitSessionInput('any-session', {
+        principal: 'alice',
+        deliveryMode: 'steer',
+        payload: 'hello',
+      });
+      expect(outcome).toEqual({ outcome: 'not-found' });
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('returns not-found for an unauthorized caller, indistinguishable from an unknown session', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: () => new Promise<never>(() => {}),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+    try {
+      const run = await bureau.createRun({ message: 'Wait for a signal', principal: 'alice' });
+      await pollUntil(async () => {
+        const session = await bureau.getSession(run.sessionId);
+        return session?.metadata['lastRunStatus'] === 'running';
+      });
+
+      const outcome = await bureau.submitSessionInput(run.sessionId, {
+        principal: 'mallory',
+        deliveryMode: 'steer',
+        payload: 'hello',
+      });
+      expect(outcome).toEqual({ outcome: 'not-found' });
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('returns session-terminal for an authorized caller naming an already-terminal session', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+      stopWhen: stopWhen.noToolCalls(),
+    });
+    try {
+      const run = await bureau.createRun({ message: 'Complete me', principal: 'alice' });
+      await waitForRunCompletion(bureau, run.id);
+
+      const session = await bureau.getSession(run.sessionId);
+      expect(session?.metadata['lastRunStatus']).toBe('completed');
+
+      const outcome = await bureau.submitSessionInput(run.sessionId, {
+        principal: 'alice',
+        deliveryMode: 'steer',
+        payload: 'hello',
+      });
+      expect(outcome).toEqual({ outcome: 'session-terminal', sessionId: run.sessionId });
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('returns not-found (not session-terminal) for an unauthorized caller after the per-run authority entry was pruned by terminal cleanup', async () => {
+    // Regression (Copilot/Codex review): a completed run's
+    // lastRequestAuthorities[lastRunId] entry is pruned on terminal
+    // transition while lastRequestAuthority is retained. Authorization must
+    // still fall back to the retained legacy authority — an unauthorized
+    // caller here must NOT be misread as hitting an "open" session (which
+    // would incorrectly authorize them and leak session-terminal instead of
+    // the required indistinguishable not-found).
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+      stopWhen: stopWhen.noToolCalls(),
+    });
+    try {
+      const run = await bureau.createRun({ message: 'Complete me', principal: 'alice' });
+      await waitForRunCompletion(bureau, run.id);
+
+      const session = await bureau.getSession(run.sessionId);
+      expect(session?.metadata['lastRunStatus']).toBe('completed');
+      const authorities = session?.metadata['lastRequestAuthorities'];
+      expect(
+        authorities && typeof authorities === 'object' && !Array.isArray(authorities)
+          ? (authorities as Record<string, unknown>)[run.id]
+          : undefined,
+      ).toBeUndefined();
+
+      const outcome = await bureau.submitSessionInput(run.sessionId, {
+        principal: 'mallory',
+        deliveryMode: 'steer',
+        payload: 'hello',
+      });
+      expect(outcome).toEqual({ outcome: 'not-found' });
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('returns unsupported-capability for an authorized, non-terminal-session request', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: () => new Promise<never>(() => {}),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+    try {
+      const run = await bureau.createRun({ message: 'Wait for a signal', principal: 'alice' });
+      await pollUntil(async () => {
+        const session = await bureau.getSession(run.sessionId);
+        return session?.metadata['lastRunStatus'] === 'running';
+      });
+
+      const outcome = await bureau.submitSessionInput(run.sessionId, {
+        principal: 'alice',
+        deliveryMode: 'steer',
+        payload: 'hello',
+      });
+      expect(outcome).toEqual({
+        outcome: 'unsupported-capability',
+        reason: 'durable-mailbox-unavailable',
+      });
+
+      const sessionAfter = await bureau.getSession(run.sessionId);
+      // No SessionInputRecord created, no id consumed — the session's
+      // metadata is untouched by this call beyond the pre-existing keys.
+      expect(sessionAfter?.metadata['lastRunStatus']).toBe('running');
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('returns unsupported-capability for an open session (no recorded authority) with any principal', async () => {
+    const storage = await resolveStorage({ type: 'memory' });
+    const sessionStore = createSessionStore(textValueStore(storage));
+    await sessionStore.save(
+      createAgentSession({
+        id: 'session-open',
+        agentName: 'open-agent',
+        conversationHistory: createConversationHistory({ id: 'session-open' }),
+        metadata: {
+          lastRunId: 'run-open',
+          lastRunStatus: 'running',
+        },
+      }),
+    );
+
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage,
+      durableExecution: true,
+    });
+    try {
+      const outcome = await bureau.submitSessionInput('session-open', {
+        principal: 'anyone-at-all',
+        deliveryMode: 'steer',
+        payload: 'hello',
+      });
+      expect(outcome).toEqual({
+        outcome: 'unsupported-capability',
+        reason: 'durable-mailbox-unavailable',
+      });
+    } finally {
+      await bureau.dispose();
+    }
+  });
+});
+
+describe('createBureau sessionInput backlog-limit validation (AB-194)', () => {
+  it('accepts a positive integer sessionBacklogLimit and principalBacklogLimit', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      sessionInput: { sessionBacklogLimit: 5, principalBacklogLimit: 10 },
+    });
+    await bureau.dispose();
+  });
+
+  it('applies the exported defaults when sessionInput is omitted', async () => {
+    // The defaults themselves are not load-bearing beyond being enforced
+    // once the mailbox-backed admission path lands — this verifies
+    // construction succeeds with no sessionInput option at all.
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+    await bureau.dispose();
+  });
+
+  it.each([
+    ['sessionBacklogLimit', 0],
+    ['sessionBacklogLimit', -1],
+    ['sessionBacklogLimit', 1.5],
+    ['principalBacklogLimit', 0],
+    ['principalBacklogLimit', -1],
+    ['principalBacklogLimit', 1.5],
+  ])('rejects a non-positive-integer %s (%p) at construction time', async (key, value) => {
+    const error = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      sessionInput: { [key]: value },
+    }).then(
+      () => undefined,
+      (rejection) => rejection,
+    );
+
+    expect(error).toBeInstanceOf(BureauError);
+    expect((error as BureauError).code).toBe('BAD_REQUEST');
   });
 });
 

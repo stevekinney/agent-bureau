@@ -97,6 +97,10 @@ export type {
   ToolPolicy,
   ToolSummary,
 } from './types';
+export {
+  DEFAULT_PRINCIPAL_SESSION_INPUT_BACKLOG_LIMIT,
+  DEFAULT_SESSION_INPUT_BACKLOG_LIMIT,
+} from './types';
 export type {
   WebhookDeliveryRecord,
   WebhookNotifier,
