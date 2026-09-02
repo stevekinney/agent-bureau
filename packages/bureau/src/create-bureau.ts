@@ -244,31 +244,38 @@ export function hasRecoverableTransportAuthority(metadata: Record<string, JSONVa
 }
 
 /**
- * The `principalId` recorded for a session's most recent run, per AB-42's
- * coordinator ruling (2026-09-02): reads `metadata['lastRequestAuthorities'][lastRunId]?.principalId`,
- * falling back to the legacy `metadata['lastRequestAuthority'].principalId`
- * exactly as {@link recoveredRequestContextFromMetadata} already does. Returns
- * `undefined` when the session has recorded no authority at all — an "open"
- * session, per the ruling.
+ * Resolves what a session's metadata records about its most recent run's
+ * authority, per AB-42's coordinator ruling (2026-09-02): reads
+ * `metadata['lastRequestAuthorities'][lastRunId]?.principalId`, falling back
+ * to the legacy `metadata['lastRequestAuthority'].principalId` exactly as
+ * {@link recoveredRequestContextFromMetadata} already does.
  *
- * Shared by every new Bureau session verb that needs to authorize against a
- * session's recorded authority (AB-194's `submitSessionInput`, AB-199's
- * `submitSteeringCommand`) — neither issue owns or invents this mechanism,
- * both simply read the pre-existing metadata keys `create-bureau.ts` already
- * writes on every run dispatch.
+ * `{ recorded: false }` means the session has recorded no authority at
+ * all — an "open" session, per the ruling. `{ recorded: true, principalId }`
+ * means an authority WAS recorded; `principalId` is `undefined` only when
+ * that recorded authority is itself malformed (missing or non-string
+ * `principalId`), which must fail closed (deny every principal), never be
+ * read as "open" — a corrupted or partially-written persistence record must
+ * not silently grant access. This is why a per-run entry present-but-malformed
+ * does NOT fall back to the legacy field the way a genuinely absent per-run
+ * entry does: falling back would suppress a valid legacy authority's absence
+ * of relevance here (the per-run entry, once written, is authoritative for
+ * that run) and conflating "absent" with "malformed" is exactly the class of
+ * bug this distinction exists to prevent.
+ *
+ * A completed/aborted/errored run's `lastRequestAuthorities[lastRunId]` entry
+ * is pruned on terminal transition (see the cleanup near `remainingAuthorities`
+ * below), while the legacy singular `lastRequestAuthority` is retained — so a
+ * per-run lookup that is GENUINELY ABSENT (no map, no `lastRunId`, or the key
+ * missing from the map) falls back to the legacy field.
  */
-export function recordedSessionAuthorityPrincipalId(
+function lookupSessionAuthority(
   metadata: Record<string, JSONValue>,
-): string | undefined {
+):
+  | { readonly recorded: false }
+  | { readonly recorded: true; readonly principalId: string | undefined } {
   const lastRunId = metadata['lastRunId'];
   const authorities = metadata['lastRequestAuthorities'];
-  // A completed/aborted/errored run's `lastRequestAuthorities[lastRunId]` entry
-  // is pruned on terminal transition (see the cleanup near `remainingAuthorities`
-  // below), while the legacy singular `lastRequestAuthority` is retained. So the
-  // per-run lookup missing an entry — whether because the map itself is absent
-  // OR because this run's entry was pruned — must fall back to the legacy field,
-  // never be read as "no authority recorded" (which `isSessionAuthorityAuthorized`
-  // treats as an open session, authorizing any principal).
   const perRunEntry =
     typeof lastRunId === 'string' &&
     lastRunId &&
@@ -277,27 +284,56 @@ export function recordedSessionAuthorityPrincipalId(
     !Array.isArray(authorities)
       ? (authorities as Record<string, JSONValue>)[lastRunId]
       : undefined;
-  const candidate = perRunEntry ?? metadata['lastRequestAuthority'];
+  const candidate = perRunEntry !== undefined ? perRunEntry : metadata['lastRequestAuthority'];
+  if (candidate === undefined) {
+    return { recorded: false };
+  }
   if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
-    return undefined;
+    return { recorded: true, principalId: undefined };
   }
   const principalId = (candidate as Record<string, JSONValue>)['principalId'];
-  return typeof principalId === 'string' ? principalId : undefined;
+  return { recorded: true, principalId: typeof principalId === 'string' ? principalId : undefined };
+}
+
+/**
+ * The `principalId` recorded for a session's most recent run, per
+ * {@link lookupSessionAuthority}'s rule. Returns `undefined` both when the
+ * session has recorded no authority at all AND when a recorded authority is
+ * malformed — this function alone cannot distinguish the two, so it is
+ * informational only. {@link isSessionAuthorityAuthorized} is the
+ * security-relevant surface: it fails closed (denies) for malformed
+ * authority, never treating it as open the way "genuinely no authority
+ * recorded" is treated.
+ *
+ * Shared by every new Bureau session verb that needs to read a session's
+ * recorded authority (AB-194's `submitSessionInput`, AB-199's
+ * `submitSteeringCommand`) — neither issue owns or invents this mechanism,
+ * both simply read the pre-existing metadata keys `create-bureau.ts` already
+ * writes on every run dispatch.
+ */
+export function recordedSessionAuthorityPrincipalId(
+  metadata: Record<string, JSONValue>,
+): string | undefined {
+  const lookup = lookupSessionAuthority(metadata);
+  return lookup.recorded ? lookup.principalId : undefined;
 }
 
 /**
  * Whether `principal` is authorized to act on a session recording the given
- * metadata, per {@link recordedSessionAuthorityPrincipalId}'s rule. A session
- * with no recorded authority at all is treated as open — every principal is
+ * metadata, per {@link lookupSessionAuthority}'s rule. A session with no
+ * recorded authority at all is treated as open — every principal is
  * authorized — matching what every existing session verb enforces today
- * (nothing stronger), per AB-42's coordinator ruling (2026-09-02).
+ * (nothing stronger), per AB-42's coordinator ruling (2026-09-02). A session
+ * with a RECORDED-BUT-MALFORMED authority fails closed: no principal is
+ * authorized, since a corrupted record cannot be verified to match anyone.
  */
 export function isSessionAuthorityAuthorized(
   metadata: Record<string, JSONValue>,
   principal: string,
 ): boolean {
-  const recorded = recordedSessionAuthorityPrincipalId(metadata);
-  return recorded === undefined || recorded === principal;
+  const lookup = lookupSessionAuthority(metadata);
+  if (!lookup.recorded) return true;
+  return lookup.principalId === principal;
 }
 
 /**
@@ -3574,7 +3610,12 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     sessionId: string,
     request: SessionInputAdmissionRequest,
   ): Promise<SessionInputAdmissionOutcome> {
-    const session = await requireSessionStore().load(sessionId);
+    // Unlike signalSession/updateSession/querySession, this does NOT throw
+    // BureauError('NOT_CONFIGURED') when no session store is composed: an
+    // ephemeral bureau (no persistence/storage) is a supported configuration,
+    // and every sessionId is necessarily unknown in it — the correct outcome
+    // per this method's own contract is `not-found`, not a throw.
+    const session = runtime.sessionStore ? await runtime.sessionStore.load(sessionId) : undefined;
     if (!session || !isSessionAuthorityAuthorized(session.metadata, request.principal)) {
       return { outcome: 'not-found' };
     }

@@ -4429,6 +4429,30 @@ describe('recordedSessionAuthorityPrincipalId / isSessionAuthorityAuthorized (AB
     expect(isSessionAuthorityAuthorized(metadata, 'alice')).toBe(true);
     expect(isSessionAuthorityAuthorized(metadata, 'mallory')).toBe(false);
   });
+
+  it('fails closed (denies every principal) when the per-run authority entry is malformed, even with a valid legacy fallback available', () => {
+    // Regression (Codex review): a recorded-but-malformed per-run entry must
+    // NOT be conflated with "no authority recorded at all" (which
+    // isSessionAuthorityAuthorized treats as open) and must NOT silently
+    // fall back to a legacy field that happens to be valid — a corrupted or
+    // partially-written record denies access rather than granting it.
+    const metadata = {
+      lastRunId: 'run-1',
+      lastRequestAuthorities: {
+        'run-1': { principalId: 42 },
+      },
+      lastRequestAuthority: {
+        principalId: 'legacy-alice',
+        tenantId: 'bureau',
+        ownerId: 'agent',
+        capabilities: ['tools:execute'],
+        authorizationRevision: 'bureau:1',
+      },
+    };
+    expect(isSessionAuthorityAuthorized(metadata, 'legacy-alice')).toBe(false);
+    expect(isSessionAuthorityAuthorized(metadata, 'anyone-else')).toBe(false);
+    expect(recordedSessionAuthorityPrincipalId(metadata)).toBeUndefined();
+  });
 });
 
 describe('isSessionRunTerminal (AB-194)', () => {
@@ -4464,6 +4488,29 @@ describe('createBureau submitSessionInput pre-admission checks (AB-194)', () => 
     });
     try {
       const outcome = await bureau.submitSessionInput('unknown-session', {
+        principal: 'alice',
+        deliveryMode: 'steer',
+        payload: 'hello',
+      });
+      expect(outcome).toEqual({ outcome: 'not-found' });
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('returns not-found (not a NOT_CONFIGURED throw) when no session store is composed', async () => {
+    // Regression (Codex review): an ephemeral bureau (no persistence/storage)
+    // is a supported configuration, unlike signalSession/updateSession/
+    // querySession which throw BureauError('NOT_CONFIGURED') in that case.
+    // Every sessionId is necessarily unknown without a session store, so the
+    // correct outcome per this method's own contract is not-found.
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+    try {
+      const outcome = await bureau.submitSessionInput('any-session', {
         principal: 'alice',
         deliveryMode: 'steer',
         payload: 'hello',
