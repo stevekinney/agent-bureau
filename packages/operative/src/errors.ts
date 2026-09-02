@@ -12,6 +12,7 @@ export type AgentRunErrorCode =
   | 'ABORTED'
   | 'BUDGET_EXCEEDED'
   | 'ELICITATION_DENIED'
+  | 'INVALID_AGENT_HANDLE'
   | 'INVALID_OUTPUT'
   | 'MAXIMUM_STEPS'
   | 'NON_JSON_OUTPUT'
@@ -149,6 +150,23 @@ export class AsyncDefinitionLoadError extends AgentRunError {
   constructor(code: AsyncDefinitionLoadCode, message: string, cause?: unknown) {
     super(message, { kind: 'load', code, cause });
     this.name = 'AsyncDefinitionLoadError';
+  }
+}
+
+/**
+ * Raised (AB-21) when a value that was supposed to be a `RunnableAgent`, or
+ * the run handle its `run()` method returned, does not satisfy the contract:
+ * a resolved value with no callable `run`, or a handle missing `result`,
+ * `abort`, an async iterator, or `[Symbol.dispose]`. Distinct from
+ * {@link AsyncDefinitionLoadError} — the loader itself succeeded here; what
+ * it produced (or what that agent's `run()` produced) is the wrong shape.
+ * Not retried by `createLazyAgent`'s shared load cache: the load itself
+ * didn't fail, so there is nothing to reload.
+ */
+export class AgentContractError extends AgentRunError {
+  constructor(message: string, cause?: unknown) {
+    super(message, { kind: 'contract', code: 'INVALID_AGENT_HANDLE', cause });
+    this.name = 'AgentContractError';
   }
 }
 

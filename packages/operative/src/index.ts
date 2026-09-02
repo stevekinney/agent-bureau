@@ -102,6 +102,8 @@ export type { CreateHandoffToolOptions } from './create-handoff-tool';
 export { createHandoffTool, extractHandoffTarget, HANDOFF_MARKER } from './create-handoff-tool';
 export type { CreateIdentityHookOptions } from './create-identity-hook';
 export { createIdentityHook } from './create-identity-hook';
+export type { CreateLazyAgentOptions, LazyAgentLoader } from './create-lazy-agent';
+export { createLazyAgent } from './create-lazy-agent';
 export type { CreateLazyGenerateOptions, LazyGenerateLoader } from './create-lazy-generate';
 export { createLazyGenerate } from './create-lazy-generate';
 export type { CreateMcpElicitationResponderOptions } from './create-mcp-elicitation-responder';
@@ -171,6 +173,7 @@ export type {
 } from './errors';
 export {
   AbortAgentRunError,
+  AgentContractError,
   AgentRunError,
   agentRunErrorToJSON,
   AsyncDefinitionLoadError,
@@ -227,6 +230,14 @@ export {
   UsageAccumulatedEvent,
 } from './events';
 export { ContextBudgetWarningEvent } from './events';
+export type {
+  AgentInput,
+  AgentRunContext,
+  DefinitionResolvingAgent,
+  ResolveRunOptions,
+  RunnableAgent,
+} from './runnable-agent';
+export { OPERATIVE_RESOLVE_RUN_OPTIONS } from './runnable-agent';
 // C3 — curated tool.* bubble events
 export type { ToolEventStamp } from './events';
 export {

@@ -287,6 +287,34 @@ await monitoring; // rejects with AbortError
 
 Use a Weft-backed run wakeup or signal when a current run must survive restart, and use a Bureau recurring schedule when future runs must survive restart. Session timing does not switch to those durable capabilities implicitly.
 
+#### `createLazyAgent(loader, options?)`
+
+Type-preserving lazy loading for a whole `RunnableAgent` (AB-21) — instructions, tools, and output schema together, not just the `generate` function (`createLazyGenerate` covers that narrower case: `createAgent({ generate: createLazyGenerate(loader) })`). It defers `import()`ing an agent's module until the first `run()` call, while still returning an `AgentRun` handle synchronously:
+
+```typescript
+import { createLazyAgent } from '@lostgradient/operative';
+
+// Callers select the export inside the loader — there is no `{ default }`
+// unwrapping and no selector overload.
+const researcher = createLazyAgent(() =>
+  import('./agents/researcher').then((module) => module.researcher),
+);
+
+const run = researcher.run('Summarize the Q3 report.'); // synchronous — no await here
+const result = await run.result(); // the module loads on first run(), then is cached
+```
+
+`createLazyAgent`'s return value is an ordinary `RunnableAgent<O, H>` — the same shape `createAgent` produces — so it slots into an `AgentDefinitions` map without unwrapping. The first successful load is cached and shared across concurrent `run()` calls; a load failure clears only that pending load, so a later `run()` retries.
+
+Each `run()` call owns its own `waiting → started → terminal` state, independent of every other call to the same lazy agent:
+
+- Events emitted before the underlying agent resolves are buffered and replayed to the returned handle's async iterator.
+- `run.abort(reason)` called before resolution completes means the underlying agent's `run()` is never called at all — a fast abort, not a delayed one.
+- `run.abort(reason)` called after resolution forwards to the real handle exactly once.
+- `result()`, `unwrap()`, and `output()` delegate to the real handle once it exists.
+
+A loader that throws or rejects surfaces `AsyncDefinitionLoadError` (the same error `createLazyGenerate` uses, kind `'load'`). A loader that resolves to something that isn't a valid `RunnableAgent` — or whose `run()` returns something that isn't a valid `AgentRun` (missing `result`, `abort`, iteration, or `[Symbol.dispose]`) — surfaces `AgentContractError` (kind `'contract'`, code `'INVALID_AGENT_HANDLE'`) instead: the load itself succeeded, so this isn't retried on the next `run()` call. Either failure is delivered both ways — the returned `AgentRun`'s `result()` resolves with `finishReason: 'error'` (or `'aborted'`) and the matching event, and its async iterator yields that one event before completing.
+
 #### `createActiveRun(options)`
 
 The full-control factory behind `createAgent`, `createSessionHandle`, and bureau-owned agents alike — documented, public API, not an internal implementation detail. It accepts the complete `RunOptions` bag directly: an existing `Conversation` instance (not just a `ConversationHistory`), a pre-built `Toolbox`, hooks, and durable routing (engine + checkpoint store + run id). `bureau` and `evaluation` both depend on it as first-party consumers.

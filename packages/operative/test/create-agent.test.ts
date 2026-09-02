@@ -21,6 +21,7 @@ import { z } from 'zod';
 import { noToolCalls, pendingApproval } from '../src/conditions/predicates';
 import { createAgent } from '../src/create-agent';
 import { MaximumStepsExceededError, OutputSchemaConversionError } from '../src/errors';
+import { OPERATIVE_RESOLVE_RUN_OPTIONS } from '../src/runnable-agent';
 import type { ConversationHistory, GenerateFunction, GenerateResponse } from '../src/types';
 
 // ---------------------------------------------------------------------------
@@ -1000,5 +1001,28 @@ describe('createAgent — default stopWhen', () => {
     // overridden, the loop runs to maximumSteps instead of stopping after
     // step 0 the way the (unset) default would have.
     expect(result.finishReason).toBe('maximum-steps');
+  });
+
+  it('exposes the AB-21 definition-resolution protocol without starting an in-memory run', async () => {
+    let runCalls = 0;
+    const generate: GenerateFunction = async () => {
+      runCalls += 1;
+      return textResponse('should not run');
+    };
+    const agent = createAgent({ generate, instructions: 'be terse' });
+
+    const resolver = (
+      agent as typeof agent & {
+        [OPERATIVE_RESOLVE_RUN_OPTIONS]: (
+          input: string,
+        ) => Promise<{ generate: GenerateFunction; conversation: Conversation }>;
+      }
+    )[OPERATIVE_RESOLVE_RUN_OPTIONS];
+
+    const runOptions = await resolver('hello');
+
+    expect(runOptions.generate).toBe(generate);
+    expect(runOptions.conversation.hasSystemMessage()).toBe(true);
+    expect(runCalls).toBe(0);
   });
 });
