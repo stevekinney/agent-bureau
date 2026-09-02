@@ -11,7 +11,12 @@ import {
 import { DEFAULT_MAXIMUM_STEPS, runStep } from '../run-step';
 import type { FinishReason } from '../types';
 import type { CheckpointStore } from './checkpoint-store';
-import { buildSignalContinuationInput, renderSignalContinuation } from './continuation-input';
+import {
+  buildSignalContinuationInput,
+  buildWakeupContinuationInput,
+  renderSignalContinuation,
+  renderWakeupContinuation,
+} from './continuation-input';
 import { isScheduledAgentRunInput, type ScheduledAgentRunInput } from './schedule-agent';
 import { createStorageActivities } from './storage-activities';
 import type {
@@ -199,10 +204,17 @@ export interface AgentRunWorkflowResult {
    */
   output?: unknown;
   /**
-   * The note from a `scheduleWakeup` call, when the agent self-scheduled a
-   * wakeup during this run (D6 — self-scheduling tools). Carries the note the
-   * agent attached to the wakeup request so the next run knows why it resumed.
-   * Absent when no wakeup was scheduled.
+   * D6/AB-45 — The note from the LAST `scheduleWakeup` call the run genuinely
+   * parked on and woke from (`yield* ctx.sleep(duration)` completed). Mirrors
+   * `humanWaitSignal`'s contract exactly: a historical fact ("this run did
+   * sleep on this wakeup"), not a live-park indicator — it remains set on the
+   * FINAL result even after the fired wakeup continued the run with one more
+   * generation step (or several, if the continuation itself re-parked), and
+   * regardless of how the run eventually terminates. Absent when no wakeup
+   * was ever genuinely parked on (including when a `scheduleWakeup` call was
+   * pending at the moment of a terminal failure — that wakeup never fires,
+   * see `isFailureOutcome`'s gate on the park block below) or when the fired
+   * wakeup carried no note.
    */
   wakeupNote?: string;
   /**
@@ -471,6 +483,14 @@ export function createRunWorkflow(
         // regardless of how the run eventually terminates.
         let lastHumanWaitSignal: string | undefined;
 
+        // AB-45 — the note from a `scheduleWakeup` park this run genuinely
+        // slept on and woke from, kept for the FINAL result's `wakeupNote`
+        // field even after the run continues past that park (`pendingWakeup`
+        // itself is cleared the moment the sleep resolves — see the park
+        // block below — so the result can't just read it). Mirrors
+        // `lastHumanWaitSignal`'s contract exactly.
+        let lastWakeupNote: string | undefined;
+
         // AB-44/AB-45 — outer resume loop. AB-41's decision record: a delivered
         // signal (this issue) or a fired wakeup (AB-45) CONTINUES the same run
         // with one more agent generation step, never merely delaying terminal
@@ -705,6 +725,13 @@ export function createRunWorkflow(
               stoppedEarly = true;
               break;
             }
+            // AB-45 — same fix, mirrored for `scheduleWakeup`: a `next`/
+            // `continue` outcome must not race another generation call past a
+            // fresh `pendingWakeup` before the post-loop park block ever runs.
+            if (stepResult.pendingWakeup !== undefined) {
+              stoppedEarly = true;
+              break;
+            }
             // `next` / `continue` — loop to the next step.
           }
 
@@ -792,11 +819,78 @@ export function createRunWorkflow(
             finishReason === 'budget-exceeded' ||
             finishReason === 'tripwire';
           if (!isFailureOutcome && pendingWakeup !== undefined) {
-            // AB-45's scope: a fired wakeup still only delays terminal completion
-            // today. `break` keeps that behavior unchanged — only the
-            // signal branch below continues the run.
-            yield* ctx.sleep(pendingWakeup.duration);
-            break;
+            // === D6/AB-45 — self-scheduled wakeup (scheduleWakeup tool) ===
+            // AB-45 — resume agent reasoning after a durable wakeup, per AB-41's
+            // decision record: a fired wakeup CONTINUES the same run with one
+            // more generation step; it never merely delays terminal completion.
+            // `ctx.sleep` is itself the checkpointed durable operation — a crash
+            // either side of this `yield*` is safe: before it, recovery re-issues
+            // the same sleep (Weft re-arms the same timer, per AB-41's "Recovery:
+            // `ctx.sleep` is checkpointed; recovery re-arms it"); after it (but
+            // before the commits below land), recovery re-issues the memoized
+            // work below from its checkpoint, never registering a second timer or
+            // duplicating the resumed step.
+            const requestedDuration = pendingWakeup.duration;
+            const note = pendingWakeup.note;
+            yield* ctx.sleep(requestedDuration);
+
+            // Consumed: clear the hoisted local so a cycle that ends WITHOUT the
+            // continuation step re-scheduling a wakeup does not re-enter this
+            // branch and sleep again on the same already-fired request. Record
+            // the note separately for the final result — see `lastWakeupNote`'s
+            // declaration above.
+            pendingWakeup = undefined;
+            lastWakeupNote = note;
+
+            // `firedAt` must be a plain, checkpointed value — reading
+            // `Date.now()`/`new Date().toISOString()` directly in workflow-body
+            // code would be non-deterministic across replay. `ctx.memo` here
+            // commits it once and short-circuits to the same value on replay.
+            // Keyed by `cursor.step`, matching `signal-delivered-at-${step}`: a
+            // re-park needs at least one more committed step first, so each park
+            // cycle gets its own key — distinct from the signal branch's key
+            // prefix so a step that re-parks on the OTHER primitive next cannot
+            // collide with this step's own memo.
+            const firedAt = yield* ctx.memo(
+              `wakeup-fired-at-${cursor.step}`,
+              // eslint-disable-next-line @typescript-eslint/require-await -- ctx.memo requires an async callback; this one has no await of its own.
+              async () => new Date().toISOString(),
+            );
+
+            const continuationInput = buildWakeupContinuationInput(
+              requestedDuration,
+              note,
+              firedAt,
+            );
+            const renderedMessage = renderWakeupContinuation(continuationInput);
+
+            const resumedConversation = Conversation.from(snapshot);
+            resumedConversation.appendUserMessage(renderedMessage);
+            snapshot = resumedConversation.snapshot();
+            yield* ctx.run('saveConversation', { runId, snapshot });
+
+            // AC — "the final run result is produced only after the resumed
+            // agent reaches a normal terminal condition; timer release alone
+            // does not finalize the pre-wakeup result": this cycle's terminal
+            // locals (set by whichever outcome — commonly `stop`, via a
+            // `stopWhen` that triggered right on the `scheduleWakeup` tool call
+            // — broke the step loop above) were only ever PROVISIONAL: the real
+            // terminal outcome is now whatever the continuation step(s), run by
+            // looping this outer `while` again, produce. Reset every
+            // terminal-outcome local before continuing so a continuation that
+            // never itself reaches a genuine terminal condition (e.g.
+            // `maximumSteps` is already exhausted) falls through to the
+            // ordinary `maximum-steps` handling below rather than returning the
+            // stale pre-wakeup outcome.
+            finishReason = 'maximum-steps';
+            errorMessage = undefined;
+            abortReason = undefined;
+            schemaValidation = undefined;
+            output = undefined;
+            tripwire = undefined;
+            stoppedEarly = false;
+
+            continue;
           } else if (!isFailureOutcome && pendingHumanWait !== undefined) {
             // === F3 — HITL human-input gate (requestHumanInput tool) ===
             // AB-44 — resume agent reasoning with the delivered signal payload,
@@ -875,15 +969,6 @@ export function createRunWorkflow(
 
         ctx.setAttribute('runId', runId);
 
-        // Recomputed against the FINAL `finishReason` (the loop above may have
-        // reset/reclassified it across one or more signal-delivered resumes).
-        const isFinalFailureOutcome =
-          finishReason === 'error' ||
-          finishReason === 'aborted' ||
-          finishReason === 'elicitation-denied' ||
-          finishReason === 'budget-exceeded' ||
-          finishReason === 'tripwire';
-
         return {
           schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
           runId,
@@ -895,19 +980,24 @@ export function createRunWorkflow(
           ...(schemaValidation !== undefined ? { schemaValidation } : {}),
           ...(schemaValidation?.success ? { output } : {}),
           ...(tripwire !== undefined ? { tripwire } : {}),
-          // Only include wakeup metadata on a non-failure outcome: a
-          // failed/aborted run never actually parks on `ctx.sleep` (the park
-          // block above is gated on `!isFailureOutcome`), so surfacing stale
-          // wakeup state would mislead callers.
-          ...(!isFinalFailureOutcome && pendingWakeup?.note !== undefined
-            ? { wakeupNote: pendingWakeup.note }
-            : {}),
+          // `wakeupNote` reports the note from the LAST `scheduleWakeup` park
+          // this run genuinely slept on and woke from — a historical fact
+          // recorded only inside the `yield* ctx.sleep(...)` branch above once
+          // it has actually resolved (AB-45), so, like `humanWaitSignal`, it
+          // is reported regardless of how the run eventually terminates: an
+          // outcome the continuation reaches AFTER a real park is not "stale".
+          // A `pendingWakeup` still set at THIS point (never consumed) means
+          // the run hit a terminal failure before parking — `isFailureOutcome`
+          // gated the park block above, so that wakeup never fired and
+          // `lastWakeupNote` was never set; no metadata leaks through.
+          ...(lastWakeupNote !== undefined ? { wakeupNote: lastWakeupNote } : {}),
           // `humanWaitSignal` reports the LAST signal this run genuinely
           // parked on and was released for — a historical fact recorded only
           // inside the `yield* ctx.waitForSignal(...)` branch above once it
-          // has actually resolved, so (unlike `wakeupNote`) it is reported
-          // regardless of how the run eventually terminates: an outcome the
-          // continuation reaches AFTER a real park is not "stale".
+          // has actually resolved, mirroring `wakeupNote` above: it is
+          // reported regardless of how the run eventually terminates, since
+          // an outcome the continuation reaches AFTER a real park is not
+          // "stale".
           ...(lastHumanWaitSignal !== undefined ? { humanWaitSignal: lastHumanWaitSignal } : {}),
         } satisfies AgentRunWorkflowResult;
       })

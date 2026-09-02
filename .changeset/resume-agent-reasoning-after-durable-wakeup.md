@@ -1,0 +1,11 @@
+---
+'@lostgradient/operative': minor
+---
+
+Resume agent reasoning after a durable `scheduleWakeup` timer fires, instead of the timer merely delaying terminal completion.
+
+Per AB-41's ratified decision record, the durable `agentRun` workflow now continues the same run with one more agent generation step once `ctx.sleep(duration)` resolves, seeded by a deterministic `[wakeup] Resumed after sleeping {duration}. Note: {note}` conversation message — never merely delaying terminal completion. A `scheduleWakeup` tool call now commits its step and parks before another generation call can run without the wakeup (previously the loop could run additional generation calls before the post-loop park block was ever reached, mirroring the same fix AB-44 made for `requestHumanInput`). Re-parking from within the continuation step is supported: if it itself calls `scheduleWakeup` again, the workflow parks again rather than returning. The final `AgentRunWorkflowResult` is produced only after the resumed agent reaches a normal terminal condition — a fired wakeup alone never finalizes a pre-wakeup result. Persistent recovery re-arms the same `ctx.sleep` timer and executes the continuation exactly once, including when recovery observes an already-passed deadline (a "late" timer) — Weft's own checkpointed `ctx.sleep` makes this correct with no additional bookkeeping.
+
+`packages/operative/src/durable/continuation-input.ts` gains `WakeupContinuationInput` (AB-41's ratified shape: `kind`, `firedAt`, `requestedDuration`, `note?`), `buildWakeupContinuationInput`, `renderWakeupContinuation`, and a shared `renderDurationLabel` helper (also used by `scheduleWakeup`'s own tool-result message), all re-exported from `@lostgradient/operative/durable`.
+
+`AgentRunWorkflowResult.wakeupNote` now reports the note from the LAST `scheduleWakeup` park the run genuinely slept on and woke from as a historical fact, persisting across the run's eventual termination — mirroring `humanWaitSignal`'s contract exactly — rather than only appearing when a wakeup happened to still be pending (unconsumed) at return time, which is no longer reachable once a park always continues the run. `create-schedule-wakeup-tool.ts`'s documentation is updated to describe the continuation behavior instead of "surfaced to the next run."

@@ -69,6 +69,42 @@ async function buildEngine(
 }
 
 /**
+ * Same as {@link buildEngine}, but with Weft's own background timer poller
+ * started (`startScheduler: true`) and sped up (`schedulerPollIntervalMs`) so
+ * a short-duration `ctx.sleep` in a AB-45 wakeup test actually fires within
+ * the test's timeout, rather than sitting un-polled forever — `buildEngine`
+ * itself leaves the scheduler off by default (`shouldStartEngineScheduler`
+ * only auto-starts it when `recover !== false`, which every crash-simulation
+ * test in this file relies on to keep a "hung" run genuinely parked with no
+ * background activity).
+ */
+async function buildWakeupEngine(
+  storage: Storage,
+  recover: boolean,
+  resolveWorkflowServices?: ServicesResolver,
+) {
+  const checkpointStore = createCheckpointStore(
+    textValueStore(storage, { disposeUnderlyingStorage: false }),
+  );
+  const runWorkflow = createRunWorkflow(checkpointStore, {});
+  const activities = createStorageActivities(checkpointStore);
+  const engine = await Engine.create({
+    storage,
+    recover,
+    startScheduler: true,
+    schedulerPollIntervalMs: 10,
+    ...(resolveWorkflowServices ? { resolveWorkflowServices } : {}),
+    workflows: { agentRun: runWorkflow },
+    activities: {
+      saveCursor: activities.saveCursor,
+      saveConversation: activities.saveConversation,
+      recordStep: activities.recordStep,
+    },
+  });
+  return { engine, checkpointStore };
+}
+
+/**
  * Build the per-run {@link DurableRunDeps} the workflow reads as `ctx.services`.
  * One shared toolbox instance backs both `toolbox` and `options.toolbox` (the
  * memo overrides `options.toolbox` with the top-level one anyway).
@@ -512,12 +548,19 @@ describe('durable agentRun workflow', () => {
       }
     });
 
-    it('a durable tripwire does not park even with a pending scheduleWakeup from an earlier step', async () => {
-      // Mirrors the existing 'returns the error result immediately without
-      // parking' regression above, for the tripwire finish reason specifically
-      // — the isFailureOutcome gate that excludes 'tripwire' from the
-      // post-loop park block is the thing under test here.
-      const { engine } = await buildEngine(new MemoryStorage(), false);
+    it('a durable tripwire does not re-park even after a scheduleWakeup continuation fires', async () => {
+      // AB-45 update: under the pre-AB-45 "wakeup only delays completion"
+      // behavior this test set a huge un-fired wakeup duration and expected a
+      // LATER step's own tripwire to short-circuit it. Under AB-45's
+      // commit-and-park fix, `scheduleWakeup` now parks BEFORE any later
+      // generation call can run — so the tripwire-triggering step can only
+      // be the CONTINUATION after a genuinely fired wakeup. This test now
+      // exercises exactly that: the wakeup fires (short real duration), the
+      // continuation step returns PII and trips the guardrail — proving the
+      // `isFailureOutcome` gate that excludes 'tripwire' from the post-loop
+      // park block still holds for the continuation's own outcome (no
+      // second park attempt after the tripwire).
+      const { engine } = await buildWakeupEngine(new MemoryStorage(), false);
 
       const depsContainer: { ref: DurableRunDeps | undefined } = { ref: undefined };
       const wakeupTool = createTool({
@@ -544,7 +587,7 @@ describe('durable agentRun workflow', () => {
             if (c === 0) {
               return {
                 content: '',
-                toolCalls: [{ name: 'scheduleWakeup', arguments: { duration: 999_999_999 } }],
+                toolCalls: [{ name: 'scheduleWakeup', arguments: { duration: 20 } }],
               };
             }
             return { content: 'user@example.com', toolCalls: [] };
@@ -575,7 +618,11 @@ describe('durable agentRun workflow', () => {
         );
 
         expect(result.finishReason).toBe('tripwire');
-        expect(result.wakeupNote).toBeUndefined();
+        expect(call).toBe(2);
+        // AB-45: `wakeupNote` IS reported — the wakeup genuinely fired before
+        // the continuation step tripped the guardrail; this is a historical
+        // fact, not a live-park indicator (see `wakeupNote`'s own JSDoc).
+        expect(result.wakeupNote).toBe('check later');
         expect(result.humanWaitSignal).toBeUndefined();
       } finally {
         engine[Symbol.dispose]();
@@ -2055,6 +2102,393 @@ describe('durable agentRun workflow', () => {
     });
   });
 
+  describe('D6/AB-45 — self-scheduled wakeup (pendingWakeup + ctx.sleep)', () => {
+    /**
+     * Proves that setting `deps.pendingWakeup` in a tool causes the run
+     * workflow to park via `yield* ctx.sleep(duration)` IMMEDIATELY after
+     * that step commits (AB-45's "commits its step and parks before another
+     * generation call can run" fix, mirroring AB-44's identical fix for
+     * `requestHumanInput` — the tool call alone does not satisfy
+     * `noToolCalls()`, so without the fix the loop would run another
+     * generation call before ever reaching the park), and that the timer
+     * firing CONTINUES the same run with one more generation step (AB-41's
+     * decision record) seeded by the deterministic
+     * `[wakeup] Resumed after sleeping ...` conversation message AB-45 owns —
+     * never merely delaying terminal completion.
+     *
+     * Uses a short REAL duration (not the huge 999_999_999 placeholder the
+     * park-only tests above use) because these tests need the timer to
+     * actually fire: `ctx.sleep` is Weft's own durable timer over the real
+     * clock under `Engine.create` (no fake-clock `TestEngine` is used
+     * elsewhere in this file), so a short wall-clock wait is the deterministic
+     * choice available here — bounded by `await handle.result()` with no
+     * poll cap, since the durable timer itself (not the test) owns the wait.
+     */
+    it('parks via ctx.sleep before another generation call runs, then resumes reasoning after the timer fires', async () => {
+      const storage = new MemoryStorage();
+      const { engine, checkpointStore } = await buildWakeupEngine(storage, false);
+
+      const depsContainer: { ref: DurableRunDeps | undefined } = { ref: undefined };
+      const wakeupTool = createTool({
+        name: 'scheduleWakeup',
+        description: 'Schedule a wakeup',
+        input: z.object({ duration: z.number(), note: z.string().optional() }),
+        execute: async (params) => {
+          if (depsContainer.ref) {
+            depsContainer.ref.pendingWakeup = {
+              duration: params.duration,
+              ...(params.note !== undefined ? { note: params.note } : {}),
+            };
+          }
+          return 'scheduled';
+        },
+      });
+      const wakeupToolbox = createToolbox([wakeupTool]) as unknown as RegistryToolbox;
+
+      // Step counter so the generate function knows which step it is on. With
+      // the fix, generate call 1 can ONLY happen as the continuation step
+      // AFTER the timer fires — never as an immediate follow-on to call 0's
+      // tool call.
+      let stepCallCount = 0;
+      const services: DurableRunDeps = {
+        options: {
+          generate: async () => {
+            const callIndex = stepCallCount++;
+            if (callIndex === 0) {
+              return {
+                content: '',
+                toolCalls: [
+                  { name: 'scheduleWakeup', arguments: { duration: 20, note: 'check later' } },
+                ],
+              };
+            }
+            return { content: 'done after wakeup', toolCalls: [] };
+          },
+          toolbox: wakeupToolbox,
+          conversation: createConversationHistory(),
+          stopWhen: noToolCalls(),
+          maximumSteps: 5,
+        },
+        toolbox: wakeupToolbox,
+      };
+      depsContainer.ref = services;
+
+      try {
+        const handle = await engine.start(
+          'agentRun',
+          {
+            runId: 'wakeup-run',
+            sessionId: 'wakeup-run',
+            agentName: 'wakeup-agent',
+            prompt: 'start',
+          },
+          { id: 'wakeup-run', services },
+        );
+
+        // Let the workflow run the first step and reach ctx.sleep.
+        let parked = false;
+        for (let i = 0; i < 50; i++) {
+          await yieldToPortableEventLoop();
+          const snap = await handle.snapshot();
+          if (snap?.status === 'running' && depsContainer.ref?.pendingWakeup !== undefined) {
+            parked = true;
+            break;
+          }
+        }
+
+        expect(parked).toBe(true);
+        // AB-45 — the fix: exactly one generate call happened before the
+        // park. Without the fix, a second (immediate, pre-sleep) generate
+        // call would already have run by now.
+        expect(stepCallCount).toBe(1);
+
+        // Wait for the 20ms timer to fire and the continuation step to run.
+        const result = await handle.result();
+        expect(result.finishReason).toBe('stop-condition');
+        // The continuation step actually ran (not just the pre-park step).
+        expect(stepCallCount).toBe(2);
+        // AB-45: wakeupNote carries the note attached to the wakeup that fired.
+        expect(result.wakeupNote).toBe('check later');
+
+        const finalSnap = await handle.snapshot();
+        expect(finalSnap?.status).toBe('completed');
+
+        // AB-45 AC — "timer release produces a deterministic continuation
+        // input containing the requested duration [and] optional note": the
+        // persisted transcript carries the synthetic user message with the
+        // fixed, parseable format AB-41's decision ratifies.
+        const checkpoint = await checkpointStore.loadCheckpoint('wakeup-run');
+        const conversation = Conversation.from(checkpoint.conversation!);
+        const messages = conversation.getMessages();
+        const continuationMessage = messages.find(
+          (message) =>
+            message.role === 'user' &&
+            message.content === '[wakeup] Resumed after sleeping 20ms. Note: check later',
+        );
+        expect(continuationMessage).toBeDefined();
+        // The original prompt is still present, before the continuation message.
+        expect(messages[0]?.content).toBe('start');
+      } finally {
+        engine[Symbol.dispose]();
+      }
+    });
+
+    it('re-parks when the continuation step itself calls scheduleWakeup again', async () => {
+      const storage = new MemoryStorage();
+      const { engine } = await buildWakeupEngine(storage, false);
+
+      const depsContainer: { ref: DurableRunDeps | undefined } = { ref: undefined };
+      const wakeupTool = createTool({
+        name: 'scheduleWakeup',
+        description: 'Schedule a wakeup',
+        input: z.object({ duration: z.number() }),
+        execute: async (params) => {
+          if (depsContainer.ref) {
+            depsContainer.ref.pendingWakeup = { duration: params.duration };
+          }
+          return 'scheduled';
+        },
+      });
+      const wakeupToolbox = createToolbox([wakeupTool]) as unknown as RegistryToolbox;
+
+      let stepCallCount = 0;
+      const services: DurableRunDeps = {
+        options: {
+          generate: async () => {
+            const callIndex = stepCallCount++;
+            if (callIndex < 2) {
+              // First two steps: sleep for 20ms each.
+              return {
+                content: '',
+                toolCalls: [{ name: 'scheduleWakeup', arguments: { duration: 20 } }],
+              };
+            }
+            return { content: 'done', toolCalls: [] };
+          },
+          toolbox: wakeupToolbox,
+          conversation: createConversationHistory(),
+          stopWhen: noToolCalls(),
+          maximumSteps: 5,
+        },
+        toolbox: wakeupToolbox,
+      };
+      depsContainer.ref = services;
+
+      try {
+        const handle = await engine.start(
+          'agentRun',
+          {
+            runId: 're-park-run',
+            sessionId: 're-park-run',
+            agentName: 'wakeup-agent',
+            prompt: 'start',
+          },
+          { id: 're-park-run', services },
+        );
+
+        const result = await handle.result();
+        expect(result.finishReason).toBe('stop-condition');
+        // Two wakeups fired, then the third generate call ended the run.
+        expect(stepCallCount).toBe(3);
+      } finally {
+        engine[Symbol.dispose]();
+      }
+    });
+
+    it('cancelling the run while parked on ctx.sleep ends it as aborted, not hung', async () => {
+      const storage = new MemoryStorage();
+      const { engine } = await buildEngine(storage, false);
+
+      const depsContainer: { ref: DurableRunDeps | undefined } = { ref: undefined };
+      const wakeupTool = createTool({
+        name: 'scheduleWakeup',
+        description: 'Schedule a wakeup',
+        input: z.object({ duration: z.number() }),
+        execute: async (params) => {
+          if (depsContainer.ref) {
+            depsContainer.ref.pendingWakeup = { duration: params.duration };
+          }
+          return 'scheduled';
+        },
+      });
+      const wakeupToolbox = createToolbox([wakeupTool]) as unknown as RegistryToolbox;
+
+      const services: DurableRunDeps = {
+        options: {
+          generate: async () => ({
+            content: '',
+            // A very long sleep — the test cancels before it would ever fire.
+            toolCalls: [{ name: 'scheduleWakeup', arguments: { duration: 999_999_999 } }],
+          }),
+          toolbox: wakeupToolbox,
+          conversation: createConversationHistory(),
+          stopWhen: noToolCalls(),
+        },
+        toolbox: wakeupToolbox,
+      };
+      depsContainer.ref = services;
+
+      try {
+        const handle = await engine.start(
+          'agentRun',
+          {
+            runId: 'cancel-wakeup-run',
+            sessionId: 'cancel-wakeup-run',
+            agentName: 'wakeup-agent',
+            prompt: 'start',
+          },
+          { id: 'cancel-wakeup-run', services },
+        );
+
+        let parked = false;
+        for (let i = 0; i < 50; i++) {
+          await yieldToPortableEventLoop();
+          const snap = await handle.snapshot();
+          if (snap?.status === 'running' && depsContainer.ref?.pendingWakeup !== undefined) {
+            parked = true;
+            break;
+          }
+        }
+        expect(parked).toBe(true);
+
+        // Cancel the durable workflow itself via Weft's own cancellation, the
+        // ONLY mechanism this run's `scheduleWakeup` park exposes (AB-41's
+        // decision: "Cancellation: none once parked; only `abortRun` on the
+        // whole run").
+        await handle.cancel();
+
+        let settled = false;
+        for (let i = 0; i < 50; i++) {
+          await yieldToPortableEventLoop();
+          const snap = await handle.snapshot();
+          if (
+            snap?.status === 'cancelled' ||
+            snap?.status === 'completed' ||
+            snap?.status === 'failed'
+          ) {
+            settled = true;
+            break;
+          }
+        }
+        expect(settled).toBe(true);
+        const finalSnap = await handle.snapshot();
+        expect(finalSnap?.status).not.toBe('running');
+      } finally {
+        engine[Symbol.dispose]();
+      }
+    });
+
+    it('a late timer (recovered after the deadline has already passed) still continues the run exactly once', async () => {
+      // AB-41's decision record: "Missed-fire: not applicable; a durable
+      // sleep fires as soon as the process observes its deadline has passed
+      // on recovery." Crash while parked on a short sleep, wait past the
+      // deadline in wall-clock time, then recover on a fresh engine — the
+      // recovered run must observe the already-passed deadline and continue
+      // exactly once, not duplicate the resumed step or hang.
+      const storage = new MemoryStorage();
+      const runId = 'late-wakeup-run';
+
+      const depsA: { ref: DurableRunDeps | undefined } = { ref: undefined };
+      const wakeupTool = createTool({
+        name: 'scheduleWakeup',
+        description: 'Schedule a wakeup',
+        input: z.object({ duration: z.number() }),
+        execute: async (params) => {
+          if (depsA.ref) {
+            depsA.ref.pendingWakeup = { duration: params.duration, note: 'late note' };
+          }
+          return 'scheduled';
+        },
+      });
+      const wakeupToolbox = createToolbox([wakeupTool]) as unknown as RegistryToolbox;
+
+      let stepCallCountA = 0;
+      const servicesA: DurableRunDeps = {
+        options: {
+          generate: async () => {
+            const callIndex = stepCallCountA++;
+            if (callIndex === 0) {
+              return {
+                content: '',
+                toolCalls: [{ name: 'scheduleWakeup', arguments: { duration: 20 } }],
+              };
+            }
+            return { content: 'unused-on-a', toolCalls: [] };
+          },
+          toolbox: wakeupToolbox,
+          conversation: createConversationHistory(),
+          stopWhen: noToolCalls(),
+        },
+        toolbox: wakeupToolbox,
+      };
+      depsA.ref = servicesA;
+
+      const a = await buildEngine(storage, false);
+      const handleA = await a.engine.start(
+        'agentRun',
+        { runId, sessionId: runId, agentName: 'wakeup-agent', prompt: 'start', maximumSteps: 5 },
+        { id: runId, services: servicesA },
+      );
+      void handleA.result().catch(() => {});
+
+      let parkedOnA = false;
+      for (let i = 0; i < 100; i++) {
+        await yieldToPortableEventLoop();
+        const snap = await handleA.snapshot();
+        if (snap?.status === 'running') {
+          const cp = await a.checkpointStore.loadCheckpoint(runId);
+          if (cp.steps.length >= 1) {
+            parkedOnA = true;
+            break;
+          }
+        }
+      }
+      expect(parkedOnA).toBe(true);
+
+      // Simulate crash, and let the 20ms deadline pass in real wall-clock
+      // time BEFORE recovery starts, proving the deadline is observed as
+      // already-passed rather than re-armed from zero.
+      a.engine[Symbol.dispose]();
+      await new Promise((resolve) => setTimeout(resolve, 40));
+
+      let generateCallCountB = 0;
+      const b = await buildWakeupEngine(storage, false, (_info) => ({
+        status: 'available',
+        services: (() => {
+          const freshToolbox = createToolbox([wakeupTool]) as unknown as RegistryToolbox;
+          const freshServices: DurableRunDeps = {
+            options: {
+              generate: async () => {
+                generateCallCountB++;
+                return { content: 'done-on-b', toolCalls: [] };
+              },
+              toolbox: freshToolbox,
+              conversation: createConversationHistory(),
+              stopWhen: noToolCalls(),
+            },
+            toolbox: freshToolbox,
+          };
+          return freshServices;
+        })(),
+      }));
+
+      try {
+        const handles = await b.engine.recoverAll();
+        expect(handles.length).toBe(1);
+        const recoveredHandle = handles[0]!;
+
+        const result = normalizeAgentRunWorkflowResult(await recoveredHandle.result());
+        expect(result.finishReason).toBe('stop-condition');
+        // Continues exactly once — never registers a second timer or
+        // duplicates the resumed step.
+        expect(generateCallCountB).toBe(1);
+        expect(result.wakeupNote).toBe('late note');
+      } finally {
+        b.engine[Symbol.dispose]();
+      }
+    });
+  });
+
   describe('Park request mutual exclusivity (PRRT_kwDORvupsc6MZ-vk)', () => {
     /**
      * REGRESSION TESTS for the "pick only one durable park request" finding.
@@ -2068,25 +2502,38 @@ describe('durable agentRun workflow', () => {
      * the last-set one governs parking.
      *
      * Fix: the accumulation loop now clears the OTHER local whenever one is updated
-     * (last-write-wins, cross-step mutual exclusivity).  The post-loop parking
-     * section uses `else if` as defense-in-depth so the two primitives can never
-     * both execute.
+     * (last-write-wins). The post-loop parking section uses `else if` as
+     * defense-in-depth so the two primitives can never both execute.
+     *
+     * AB-45 update: under AB-45's commit-and-park fix, `scheduleWakeup` now
+     * forces an immediate break exactly like `requestHumanInput` already did
+     * (AB-44) — so a CROSS-step override ("step 0 calls scheduleWakeup, step 1
+     * calls requestHumanInput") is no longer reachable: step 0's wakeup parks
+     * the run before step 1 could ever run. Same-step mutual exclusivity (one
+     * step's tool calls include BOTH tools) is still reachable and is what the
+     * test below exercises — the accumulation loop's own inline comment at
+     * `run-workflow.ts` (the `pendingWakeup`/`pendingHumanWait` accumulation
+     * block) has always described exactly this case: "if the agent called both
+     * tools ... the `pendingHumanWait` check runs second, so it clears a
+     * same-step `pendingWakeup`". Cross-step override is still reachable
+     * ACROSS park cycles instead (a fired wakeup's continuation step calls
+     * `requestHumanInput`) — covered by the "re-parks when the continuation
+     * step itself calls scheduleWakeup again" test in the D6/AB-45 describe
+     * block above, mirrored for the other primitive.
      */
 
-    it('only parks on ctx.waitForSignal when requestHumanInput overrides an earlier scheduleWakeup (cross-step)', async () => {
-      // Step 0: emit a scheduleWakeup tool call (sets deps.pendingWakeup).
-      // Step 1 (same run, maximumSteps=2): emit a requestHumanInput tool call
-      //   (sets deps.pendingHumanWait).
+    it('only parks on ctx.waitForSignal when a single step calls both scheduleWakeup and requestHumanInput', async () => {
+      // One step's tool calls include BOTH scheduleWakeup (very long, unfired
+      // duration) AND requestHumanInput. Per the accumulation order,
+      // pendingHumanWait is checked SECOND and so overrides the same-step
+      // pendingWakeup — only ctx.waitForSignal should fire.
       //
-      // After the loop, pendingHumanWait was set LAST → it must be the governing
-      // park.  The workflow should park on ctx.waitForSignal, NOT ctx.sleep.
-      //
-      // Without the fix: both locals are non-undefined, the two independent `if`
-      // branches fire, the workflow sleeps (very long) and then waits for signal —
-      // observable as a crash or extremely long test timeout.
-      // With the fix: the wakeup local is cleared when humanWait is accumulated,
-      // so only waitForSignal fires, the run parks (status='running'), and a
-      // subsequent engine.signal releases it to 'completed'.
+      // Without the fix: both locals are non-undefined, the two independent
+      // `if` branches fire, the workflow sleeps (very long) and then waits
+      // for signal — observable as a crash or extremely long test timeout.
+      // With the fix: the wakeup local is cleared when humanWait is
+      // accumulated, so only waitForSignal fires, the run parks
+      // (status='running'), and a subsequent engine.signal releases it.
 
       const storage = new MemoryStorage();
       const runId = 'eeeeeeee-0000-4000-8000-000000000005';
@@ -2132,22 +2579,23 @@ describe('durable agentRun workflow', () => {
           generate: async () => {
             const call = stepCallCount++;
             if (call === 0) {
-              // Step 0: schedule a very long wakeup (so if ctx.sleep fires, the test hangs).
+              // Single step: both tool calls, in one generation response —
+              // the agent scheduled a wakeup AND requested human input in
+              // the same turn. A very long wakeup duration so if ctx.sleep
+              // somehow fired, the test would hang.
               return {
                 content: '',
-                toolCalls: [{ name: 'scheduleWakeup', arguments: { duration: 999_999_999 } }],
+                toolCalls: [
+                  { name: 'scheduleWakeup', arguments: { duration: 999_999_999 } },
+                  { name: 'requestHumanInput', arguments: { signalName } },
+                ],
               };
             }
-            // Step 1: override with human-input request.
-            return {
-              content: '',
-              toolCalls: [{ name: 'requestHumanInput', arguments: { signalName } }],
-            };
+            // Continuation call (after signal delivery): finish.
+            return { content: 'done after human input', toolCalls: [] };
           },
           toolbox,
           conversation: createConversationHistory(),
-          // noToolCalls() would stop the run after the first tool-free step; both
-          // steps here emit tool calls, so the run exits via maximumSteps (=2).
           stopWhen: noToolCalls(),
           maximumSteps: 5,
         },
@@ -2159,8 +2607,7 @@ describe('durable agentRun workflow', () => {
       try {
         const handle = await engine.start(
           'agentRun',
-          // maximumSteps=2 in workflow input: step 0 (wakeup) + step 1 (hitl) exit the loop.
-          { runId, sessionId: runId, agentName: 'test-agent', prompt: 'start', maximumSteps: 2 },
+          { runId, sessionId: runId, agentName: 'test-agent', prompt: 'start' },
           { id: runId, services },
         );
 
@@ -2181,16 +2628,19 @@ describe('durable agentRun workflow', () => {
 
         // The run must be parked on the signal, not sleeping.
         expect(parked).toBe(true);
+        // Only ONE step committed before the park — both tool calls landed
+        // in that single step.
+        expect(stepCallCount).toBe(1);
 
         // Send the human signal to release the parked run.
         await engine.signal(runId, signalName, { approved: true });
 
-        // The released run re-enters the step loop (maximumSteps not exhausted yet
-        // relative to where we are — the run should complete via maximum-steps or
-        // stop-condition depending on the next generate).  Either way it should reach
-        // 'completed' without hanging on ctx.sleep.
+        // The released run continues with one more generation step
+        // (AB-44) — the continuation's plain content (no tool calls)
+        // satisfies noToolCalls().
         const result = await handle.result();
-        expect(['stop-condition', 'maximum-steps']).toContain(result.finishReason);
+        expect(result.finishReason).toBe('stop-condition');
+        expect(stepCallCount).toBe(2);
 
         // Crucially: humanWaitSignal is present and wakeupNote is absent — only the
         // human-wait path fired.
@@ -2201,28 +2651,30 @@ describe('durable agentRun workflow', () => {
       }
     });
 
-    it('AB-44 — a stale pendingWakeup from an earlier step does not resurface and re-park the continuation step', async () => {
+    it('AB-45 — a stale pendingWakeup from an earlier park does not resurface and re-park the next continuation step', async () => {
       // REGRESSION: `deps.pendingWakeup` is sticky (`scheduleWakeup` only ever
-      // SETS it; nothing clears it once consumed), exactly like
-      // `pendingHumanWait`. Before AB-44 this never mattered — nothing ran
-      // after a park. Now a delivered signal continues the run with more
-      // steps, so without clearing BOTH slots at the top of each step's memo,
-      // a continuation step's memoized result would still carry a PRIOR
-      // step's `pendingWakeup` (from a `scheduleWakeup` call two parks ago) as
-      // if it were its own — re-triggering `ctx.sleep` on a wakeup the agent
-      // never asked for on this step, hanging the run.
+      // SETS it; nothing clears it once consumed) — a live `DurableRunDeps`
+      // object outlives any single step's `ctx.memo`. AB-45's wakeup
+      // continuation loop clears the HOISTED `pendingWakeup` local the moment
+      // its sleep resolves (see the wakeup park block's "Consumed:" comment),
+      // but if a later step's memoized result failed to clear the per-step
+      // `deps.pendingWakeup` slot at its own start, that later step's memo
+      // would still report a PRIOR park's `pendingWakeup` as if it were its
+      // own — re-triggering `ctx.sleep` on a wakeup the agent never asked for
+      // on that step, hanging the run.
       //
-      // Step 0: scheduleWakeup(999_999_999) — sets pendingWakeup.
-      // Step 1: requestHumanInput — mutual exclusivity clears the LOCAL
-      //   pendingWakeup, but NOT `deps.pendingWakeup` on the shared services
-      //   object; the workflow parks on ctx.waitForSignal.
+      // Step 0: scheduleWakeup(20ms) — sets pendingWakeup, fires, continues.
+      // Step 1 (continuation): scheduleWakeup(999_999_999) — sets a NEW
+      //   pendingWakeup, then requestHumanInput OVERRIDES it (same-step mutual
+      //   exclusivity clears the LOCAL pendingWakeup); the workflow parks on
+      //   ctx.waitForSignal.
       // (signal delivered)
-      // Step 2 (continuation): plain content, no tool calls. Its memo must
-      //   report `pendingWakeup: undefined` (the per-step clear), not step
-      //   0's stale value — otherwise the run would `ctx.sleep(999_999_999)`
-      //   here and this test would hang.
+      // Step 2 (second continuation): plain content, no tool calls. Its memo
+      //   must report `pendingWakeup: undefined` (the per-step clear), not
+      //   step 1's stale 999_999_999 value — otherwise the run would
+      //   `ctx.sleep(999_999_999)` here and this test would hang.
       const storage = new MemoryStorage();
-      const runId = 'ab44-stale-wakeup-clear';
+      const runId = 'ab45-stale-wakeup-clear';
       const signalName = 'human-response';
 
       const depsContainer: { ref: DurableRunDeps | undefined } = { ref: undefined };
@@ -2256,21 +2708,28 @@ describe('durable agentRun workflow', () => {
           generate: async () => {
             const c = call++;
             if (c === 0) {
+              // Step 0: a short, real wakeup that will actually fire.
               return {
                 content: '',
-                toolCalls: [{ name: 'scheduleWakeup', arguments: { duration: 999_999_999 } }],
+                toolCalls: [{ name: 'scheduleWakeup', arguments: { duration: 20 } }],
               };
             }
             if (c === 1) {
+              // Step 1 (continuation after the wakeup fires): a huge wakeup
+              // AND a human-input request in the same step — the human-input
+              // request wins (same-step mutual exclusivity).
               return {
                 content: '',
-                toolCalls: [{ name: 'requestHumanInput', arguments: { signalName } }],
+                toolCalls: [
+                  { name: 'scheduleWakeup', arguments: { duration: 999_999_999 } },
+                  { name: 'requestHumanInput', arguments: { signalName } },
+                ],
               };
             }
-            // Continuation step (call 2): plain content, no tool calls. If the
-            // bug is present, this step's memo would still see step 0's
-            // `pendingWakeup` and the workflow would sleep here instead of
-            // returning.
+            // Second continuation step (call 2): plain content, no tool
+            // calls. If the bug is present, this step's memo would still
+            // see step 1's `pendingWakeup` and the workflow would sleep
+            // here instead of returning.
             return { content: 'done after two parks', toolCalls: [] };
           },
           toolbox,
@@ -2282,7 +2741,7 @@ describe('durable agentRun workflow', () => {
       };
       depsContainer.ref = services;
 
-      const { engine } = await buildEngine(storage, false);
+      const { engine } = await buildWakeupEngine(storage, false);
       try {
         const handle = await engine.start(
           'agentRun',
@@ -2290,11 +2749,18 @@ describe('durable agentRun workflow', () => {
           { id: runId, services },
         );
 
+        // First park: ctx.sleep(20ms) fires on its own; poll until the
+        // SECOND park (ctx.waitForSignal, after step 1 commits) is reached.
+        // A real (not microtask-only) wait per iteration is needed here — the
+        // wakeup fires off `buildWakeupEngine`'s REAL background scheduler
+        // poll interval, so `yieldToPortableEventLoop()` alone (a same-tick
+        // microtask flush) can complete 200 iterations well inside one 10ms
+        // poll cycle without ever observing the fired state.
         let parked = false;
-        for (let i = 0; i < 100; i++) {
-          await yieldToPortableEventLoop();
+        for (let i = 0; i < 200; i++) {
+          await new Promise((resolve) => setTimeout(resolve, 5));
           const snap = await handle.snapshot();
-          if (snap?.status === 'running') {
+          if (snap?.status === 'running' && call >= 2) {
             parked = true;
             break;
           }
@@ -2310,9 +2776,9 @@ describe('durable agentRun workflow', () => {
         expect(result.finishReason).toBe('stop-condition');
         expect(result.content).toBe('done after two parks');
         expect(result.humanWaitSignal).toBe(signalName);
-        // The wakeup from step 0 never governs the final park — it was
-        // superseded by the human-wait request in step 1, and must not
-        // resurface as a fresh request in step 2.
+        // The wakeup from step 1 never governs the final park — it was
+        // superseded by the human-wait request in the SAME step, and must
+        // not resurface as a fresh request in step 2.
         expect(result.wakeupNote).toBeUndefined();
       } finally {
         engine[Symbol.dispose]();
@@ -2357,7 +2823,7 @@ describe('durable agentRun workflow', () => {
       };
       depsContainer.ref = services;
 
-      const { engine } = await buildEngine(storage, false);
+      const { engine } = await buildWakeupEngine(storage, false);
       try {
         const handle = await engine.start(
           'agentRun',
@@ -2407,12 +2873,18 @@ describe('durable agentRun workflow', () => {
      * because both update `finishReason` before reaching the park section.
      */
 
-    it('returns the error result immediately without parking when a step errors after scheduleWakeup', async () => {
-      // Step 0: call scheduleWakeup (very long duration so if the park fires the
-      //         test hangs). `pendingWakeup` is set in deps.
-      // Step 1: generate throws → outcome.kind === 'error', finishReason = 'error'.
-      // Expected: run completes with finishReason: 'error', no wakeupNote, no park.
-      const { engine } = await buildEngine(new MemoryStorage(), false);
+    it('returns the error result immediately without re-parking when the continuation step errors after scheduleWakeup fires', async () => {
+      // AB-45 update: under the new commit-and-park semantics, `scheduleWakeup`
+      // parks BEFORE any later generation call can run — so the failing step
+      // can only be the CONTINUATION after a genuinely fired wakeup (short
+      // real duration, not the old un-fired 999_999_999 placeholder).
+      // Step 0: call scheduleWakeup(20ms). `pendingWakeup` is set and fires.
+      // Continuation step: generate throws → outcome.kind === 'error',
+      //   finishReason = 'error'. Expected: run completes with
+      //   finishReason: 'error', wakeupNote carries the fired wakeup's note
+      //   (historical fact — the wakeup genuinely fired before the failure),
+      //   and no re-park.
+      const { engine } = await buildWakeupEngine(new MemoryStorage(), false);
 
       const depsContainer: { ref: DurableRunDeps | undefined } = { ref: undefined };
       const wakeupTool = createTool({
@@ -2439,7 +2911,7 @@ describe('durable agentRun workflow', () => {
             if (c === 0) {
               return {
                 content: '',
-                toolCalls: [{ name: 'scheduleWakeup', arguments: { duration: 999_999_999 } }],
+                toolCalls: [{ name: 'scheduleWakeup', arguments: { duration: 20 } }],
               };
             }
             throw new Error('generate failed after wakeup');
@@ -2459,22 +2931,32 @@ describe('durable agentRun workflow', () => {
           services,
         );
 
-        // Must complete immediately as an error — NOT park on ctx.sleep.
+        // Must complete immediately as an error — NOT re-park on ctx.sleep.
         expect(result.finishReason).toBe('error');
         expect(result.errorMessage).toBe('generate failed after wakeup');
-        // Park metadata must be absent — the run did not park.
-        expect(result.wakeupNote).toBeUndefined();
+        expect(call).toBe(2);
+        expect(result.wakeupNote).toBe('check later');
         expect(result.humanWaitSignal).toBeUndefined();
       } finally {
         engine[Symbol.dispose]();
       }
     });
 
-    it('returns the abort result immediately without parking when a step aborts after scheduleWakeup', async () => {
-      // Step 0: call scheduleWakeup (very long duration). `pendingWakeup` is set.
-      // Then abort the run via the AbortController signal.
-      // Expected: run completes with finishReason: 'aborted', no park.
-      const { engine } = await buildEngine(new MemoryStorage(), false);
+    it('returns the abort result immediately without re-parking after scheduleWakeup fires and the run is aborted', async () => {
+      // AB-45 update: `options.signal` (the run's own `AbortController`) is
+      // checked at the TOP of each step (`run-step.ts`'s `if (signal?.aborted)
+      // return { kind: 'abort' }`) — it is NOT wired into Weft's `ctx.sleep`,
+      // so aborting mid-tool-execution does not interrupt an in-flight sleep;
+      // it is only observed the NEXT time a step begins. Under the new
+      // commit-and-park semantics that next step is the wakeup's OWN
+      // continuation (short real duration so it actually fires), which
+      // immediately sees the signal aborted and returns 'abort' with no
+      // generate call.
+      // Step 0: call scheduleWakeup(20ms) and abort the run's signal.
+      // Continuation step: aborts before generate runs.
+      // Expected: run completes with finishReason: 'aborted', wakeupNote
+      //   carries the fired wakeup's note, no re-park.
+      const { engine } = await buildWakeupEngine(new MemoryStorage(), false);
 
       const controller = new AbortController();
       const depsContainer: { ref: DurableRunDeps | undefined } = { ref: undefined };
@@ -2496,12 +2978,16 @@ describe('durable agentRun workflow', () => {
       });
       const toolbox = createToolbox([wakeupTool]) as unknown as RegistryToolbox;
 
+      let generateCallCount = 0;
       const services: DurableRunDeps = {
         options: {
-          generate: async () => ({
-            content: '',
-            toolCalls: [{ name: 'scheduleWakeup', arguments: { duration: 999_999_999 } }],
-          }),
+          generate: async () => {
+            generateCallCount++;
+            return {
+              content: '',
+              toolCalls: [{ name: 'scheduleWakeup', arguments: { duration: 20 } }],
+            };
+          },
           toolbox,
           conversation: createConversationHistory(),
           stopWhen: noToolCalls(),
@@ -2518,11 +3004,14 @@ describe('durable agentRun workflow', () => {
           services,
         );
 
-        // Must complete as aborted — NOT park on ctx.sleep.
+        // Must complete as aborted — NOT re-park on ctx.sleep.
         expect(result.finishReason).toBe('aborted');
-        // Park metadata must be absent — the run did not park.
-        expect(result.wakeupNote).toBeUndefined();
+        expect(result.wakeupNote).toBe('check later');
         expect(result.humanWaitSignal).toBeUndefined();
+        // The continuation step's `generate` was never called — the abort
+        // check at the top of the step short-circuited it before generate
+        // could run a second time.
+        expect(generateCallCount).toBe(1);
       } finally {
         engine[Symbol.dispose]();
       }
@@ -2628,12 +3117,20 @@ describe('durable agentRun workflow', () => {
       }
     });
 
-    it('returns the error result immediately without parking when onMaximumSteps handler errors after scheduleWakeup', async () => {
-      // The loop exhausts maximumSteps (no early exit), so stoppedEarly stays false.
-      // Step 0: scheduleWakeup sets pendingWakeup.
+    it('returns the error result immediately without re-parking when onMaximumSteps handler errors after scheduleWakeup fires', async () => {
+      // AB-45 update: `maximumSteps: 1` means the inner step loop has room
+      // for exactly one step. Step 0 calls scheduleWakeup and — under the new
+      // commit-and-park semantics — parks immediately (short real duration so
+      // it actually fires). The wakeup's own continuation loop resets
+      // `stoppedEarly = false` before looping the outer `while` again, but the
+      // inner `for` loop's bound (`step < maximumSteps`) is already exhausted
+      // at `cursor.step === 1 === maximumSteps`, so it does not execute at
+      // all on the second pass — `stoppedEarly` stays `false`, and
+      // `onMaximumSteps` runs exactly as the pre-wakeup exhaustion case would.
       // onMaximumSteps handler throws → finishReason = 'error'.
-      // Expected: run completes with finishReason: 'error', no park, no wakeupNote.
-      const { engine } = await buildEngine(new MemoryStorage(), false);
+      // Expected: run completes with finishReason: 'error', no re-park,
+      // wakeupNote carries the fired wakeup's note.
+      const { engine } = await buildWakeupEngine(new MemoryStorage(), false);
 
       const depsContainer: { ref: DurableRunDeps | undefined } = { ref: undefined };
       const wakeupTool = createTool({
@@ -2656,7 +3153,7 @@ describe('durable agentRun workflow', () => {
         options: {
           generate: async () => ({
             content: '',
-            toolCalls: [{ name: 'scheduleWakeup', arguments: { duration: 999_999_999 } }],
+            toolCalls: [{ name: 'scheduleWakeup', arguments: { duration: 20 } }],
           }),
           toolbox,
           conversation: createConversationHistory(),
@@ -2676,11 +3173,10 @@ describe('durable agentRun workflow', () => {
           services,
         );
 
-        // Must complete as an error — NOT park on ctx.sleep despite pendingWakeup being set.
+        // Must complete as an error — NOT re-park on ctx.sleep.
         expect(result.finishReason).toBe('error');
         expect(result.errorMessage).toBe('handler exploded after wakeup scheduled');
-        // Park metadata must be absent.
-        expect(result.wakeupNote).toBeUndefined();
+        expect(result.wakeupNote).toBe('wake me later');
         expect(result.humanWaitSignal).toBeUndefined();
       } finally {
         engine[Symbol.dispose]();
