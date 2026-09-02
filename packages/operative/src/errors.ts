@@ -1,6 +1,7 @@
 import { ZodError, type ZodIssue } from 'zod';
 
 import { isToolCallParseError } from './providers/errors.ts';
+import type { RunResult } from './types';
 
 export type AgentRunErrorKind =
   'load' | 'contract' | 'generate' | 'tool' | 'abort' | 'output' | 'policy';
@@ -17,6 +18,7 @@ export type AgentRunErrorCode =
   | 'MAXIMUM_STEPS'
   | 'NON_JSON_OUTPUT'
   | 'OUTPUT_SCHEMA_CONVERSION_FAILED'
+  | 'SUBAGENT_RUN_FAILED'
   | 'TRIPWIRE'
   | 'UNKNOWN';
 
@@ -380,4 +382,34 @@ export function classifyError(error: unknown): ClassifiedError {
   }
 
   return base;
+}
+
+/**
+ * Raised by `createSubagentTool` (AB-19) when a child agent's run does not
+ * finish as a clean success — any `finishReason` other than
+ * `'stop-condition'` (abort, execution error, tripwire, budget exceeded,
+ * elicitation denied, maximum steps), or a `'stop-condition'` finish whose
+ * `schemaValidation.success` is `false` (invalid output). Carries the
+ * child's full terminal `RunResult` as `.result`, so a caller can inspect
+ * `finishReason`, `error`, `schemaValidation`, `usage`, and `steps` directly
+ * instead of re-deriving them from a generic message string. `toToolOutput`
+ * is never invoked for any terminal this error covers — see
+ * `create-subagent-tool.ts`.
+ */
+export class SubagentRunError extends AgentRunError {
+  /** The child agent's name, as supplied to `createSubagentTool({ agentName })`. */
+  readonly agentName: string;
+  /** The child's full terminal `RunResult` — never a success by construction. */
+  readonly result: RunResult;
+
+  constructor(agentName: string, result: RunResult, cause?: unknown) {
+    super(`Sub-agent "${agentName}" did not complete successfully: ${result.finishReason}`, {
+      kind: 'tool',
+      code: 'SUBAGENT_RUN_FAILED',
+      cause: cause ?? result.error,
+    });
+    this.name = 'SubagentRunError';
+    this.agentName = agentName;
+    this.result = result;
+  }
 }

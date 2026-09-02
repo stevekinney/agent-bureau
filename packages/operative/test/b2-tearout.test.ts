@@ -97,13 +97,22 @@ describe('B2 tearout — remaining surface is coherent', () => {
       name: 'test-subagent',
       description: 'A subagent tool',
       agentName: 'test',
-      run: async (input: string) => ({
-        conversation: {} as never,
-        steps: [],
-        content: `Result: ${input}`,
-        usage: { prompt: 0, completion: 0, total: 0 },
-        finishReason: 'stop-condition' as const,
-      }),
+      agent: {
+        run: (input) => ({
+          result: () =>
+            Promise.resolve({
+              conversation: {} as never,
+              steps: [],
+              content: `Result: ${String(input)}`,
+              usage: { prompt: 0, completion: 0, total: 0 },
+              finishReason: 'stop-condition' as const,
+            }),
+          unwrap: () => Promise.resolve(`Result: ${String(input)}`),
+          abort: () => {},
+          [Symbol.dispose]: () => {},
+          [Symbol.asyncIterator]: () => (async function* () {})(),
+        }),
+      },
       input: z.object({ query: z.string() }),
     });
     expect(tool.name).toBe('test-subagent');

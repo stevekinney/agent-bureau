@@ -910,11 +910,15 @@ const researcherTool = createSubagentTool({
   name: 'research',
   description: 'Delegates a research task to a specialist agent.',
   agentName: 'researcher',
-  run: (prompt) => researcherAgent.run(prompt).result(),
+  // `agent` (AB-19) is a `RunnableAgent` — `researcherAgent` from
+  // `createAgent({...})` satisfies this directly, with no adapter.
+  agent: researcherAgent,
   input: z.object({ query: z.string() }),
-  // mapInput receives the tool's raw, Zod-validated arguments as `unknown` —
-  // narrow to the schema shape declared above.
-  mapInput: (input) => (input as { query: string }).query,
+  // toAgentInput (AB-19; renamed from mapInput) receives the tool's parsed,
+  // Zod-validated arguments — already typed to the schema above, no cast
+  // needed — and returns the child's `AgentInput` (a string, or
+  // `{ conversation }` to resume an existing history).
+  toAgentInput: (input) => input.query,
 });
 
 const orchestrator = createAgent({
@@ -922,6 +926,16 @@ const orchestrator = createAgent({
   tools: { research: researcherTool },
 });
 ```
+
+`createSubagentTool` threads the parent tool call's `signal` and
+`traceContext` — plus this tool's own `agentName` — into
+`agent.run(input, { agentName, signal, traceContext, withTraceContext })`,
+so a real `createAgent` child aborts when the parent's tool call does and
+carries the same trace context. Every non-success terminal (abort, execution
+error, tripwire, budget exceeded, elicitation denied, maximum steps, or a
+clean stop whose output failed schema validation) rejects with
+`SubagentRunError`, which carries the child's full `RunResult` as `.result`
+— there is no `treatMaximumStepsAsError` toggle to opt out of this.
 
 **Context isolation (AB-64):** by default, `createSubagentTool` keeps a
 sub-agent's full conversation, steps, and usage out of the parent's context
@@ -938,23 +952,25 @@ controls this:
   sub-agent's exact output (structured extraction, code the parent will
   paste unmodified).
 
-Both modes ultimately hand off to `mapOutput(result)`, which still receives
-the complete `RunResult` — including `conversation`, `steps`, and `usage` —
-so a custom `mapOutput` CAN reach past the summary and return those fields
-directly. `returnMode`/`summaryTokenCap` cap `result.content`, not what a
-custom `mapOutput` chooses to do with the rest of the object; keep that in
-mind if you override `mapOutput`.
+Both modes ultimately hand off to `toToolOutput(result)` (AB-19; renamed from
+`mapOutput`), which receives the complete successful `RunResult` — including
+`conversation`, `steps`, and `usage` — so a custom `toToolOutput` CAN reach
+past the summary and return those fields directly. `toToolOutput` is a pure
+projection, not runtime validation: it is never invoked for a non-success
+terminal, which rejects with `SubagentRunError` before `toToolOutput` is ever
+reached. `returnMode`/`summaryTokenCap` cap `result.content`, not what a
+custom `toToolOutput` chooses to do with the rest of the object; keep that in
+mind if you override it. Omit `toToolOutput` entirely for a schema-less
+child and the tool returns a plain string (`result.content`).
 
 ```typescript
 const researcherTool = createSubagentTool({
   name: 'research',
   description: 'Delegates a research task to a specialist agent.',
   agentName: 'researcher',
-  run: (prompt) => researcherAgent.run(prompt).result(),
+  agent: researcherAgent,
   input: z.object({ query: z.string() }),
-  // mapInput receives the tool's raw, Zod-validated arguments as `unknown` —
-  // narrow to the schema shape declared above.
-  mapInput: (input) => (input as { query: string }).query,
+  toAgentInput: (input) => input.query,
   // returnMode: 'summary' is the default — shown explicitly here.
   returnMode: 'summary',
   summaryTokenCap: 300,

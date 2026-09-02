@@ -15,6 +15,8 @@
  * architecture.md for the 3-reviewer consensus on this decision.
  */
 
+import type { ConversationHistory } from 'conversationalist';
+
 import type { ActiveRun } from './create-run';
 import type { CombinedOperativeEventMap, CombinedOperativeEventType } from './events';
 import type { RunResult } from './types';
@@ -101,6 +103,83 @@ export interface DiagnosticAgentRun extends AsyncIterable<RunEvent> {
   result(): Promise<RunResult<unknown, false>>;
   abort(reason?: string): void;
   [Symbol.dispose](): void;
+}
+
+// ---------------------------------------------------------------------------
+// RunnableAgent — the directional shape AB-19's createSubagentTool consumes
+// ---------------------------------------------------------------------------
+
+/**
+ * The input shape every `RunnableAgent.run` accepts (`AB-15`,
+ * `operative-type-safe-api.md`). A bare string starts a fresh conversation;
+ * `{ conversation }` resumes from an existing `ConversationHistory` — the
+ * shape a stateless host holds between requests — and is snapshotted before
+ * the run begins.
+ */
+export type AgentInput = string | { conversation: ConversationHistory };
+
+/**
+ * Per-run context accepted by `RunnableAgent.run` (`AB-15`). `agentName`
+ * stamps curated `tool.*` events with the run's identity; `traceContext` and
+ * `withTraceContext` nest the run's spans under a parent trace exactly as
+ * `RunOptions.parentContext`/`RunOptions.withTraceContext` do internally.
+ */
+export interface AgentRunContext {
+  signal?: AbortSignal;
+  traceContext?: unknown;
+  withTraceContext?: <T>(parentContext: unknown, fn: () => Promise<T>) => Promise<T>;
+  agentName?: string;
+}
+
+/**
+ * The minimal shape `createSubagentTool` (AB-19) needs from a child agent:
+ * something synchronously runnable that hands back an `AgentRun` handle.
+ * `createAgent`'s returned `StandaloneAgent<O, H>` satisfies this
+ * structurally once its `run()` accepts the optional `AgentRunContext`
+ * second parameter.
+ *
+ * This is intentionally narrower than AB-15's full `RunnableAgent` contract
+ * (`operative-type-safe-api.md`'s version also carries a required
+ * `readonly name: string`): `createAgent` has no `name` option yet — adding
+ * one is AB-20/AB-21/AB-22's registry-unification territory, not this
+ * issue's. `createSubagentTool` keeps naming the child through its own
+ * `agentName` option instead (see its acceptance criteria). A future
+ * `RunnableAgent` that also carries `name` remains structurally assignable
+ * here — this interface only withholds a field it doesn't need, never one
+ * that would conflict.
+ */
+export interface RunnableAgent<O = never, H extends boolean = false> {
+  run(input: AgentInput, context?: AgentRunContext): AgentRun<O, H>;
+}
+
+/**
+ * A `RunResult` narrowed to the one shape `createSubagentTool`'s
+ * `toToolOutput` projection is ever invoked with: a clean stop with no
+ * failed schema validation. `toToolOutput` runs after every non-success
+ * terminal (abort, execution error, tripwire, budget, elicitation denial,
+ * maximum steps, and invalid output) has already been rejected as a
+ * `SubagentRunError` — see `create-subagent-tool.ts`.
+ */
+export type SuccessfulRunResult<O = never, H extends boolean = false> = RunResult<O, H> & {
+  finishReason: 'stop-condition';
+};
+
+/**
+ * True when `result` is a clean, schema-valid stop — the only terminal
+ * shape `createSubagentTool` projects through `toToolOutput`. Every other
+ * terminal (abort, execution error, tripwire, budget, elicitation denial,
+ * maximum steps, or a `stop-condition` whose output failed schema
+ * validation) rejects with `SubagentRunError` instead. Mirrors the exact
+ * "clean stop" predicate `AgentRun.unwrap()`/`.output()` already use above,
+ * so the two surfaces never disagree about what counts as success.
+ */
+export function isSuccessfulRunResult<O, H extends boolean>(
+  result: RunResult<O, H>,
+): result is SuccessfulRunResult<O, H> {
+  return (
+    result.finishReason === 'stop-condition' &&
+    (result.schemaValidation === undefined || result.schemaValidation.success)
+  );
 }
 
 // ---------------------------------------------------------------------------
