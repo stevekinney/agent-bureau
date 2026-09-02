@@ -153,6 +153,21 @@ function validateJsonSerializableValue(
   }
 
   if (typeof value === 'object') {
+    // A PLAIN object only: a Date, Map, Set, RegExp, or boxed primitive
+    // reaches here too (`typeof` doesn't distinguish them), and each has
+    // custom `toJSON`/iteration behavior that `Object.entries()` walking its
+    // own properties completely misses — `JSON.stringify(new Date())`
+    // becomes an ISO string, `JSON.stringify(new Map())` becomes `{}`,
+    // silently persisting something different from what the caller gave.
+    // Only `Object.prototype` (`{...}`, `Object.create(null)`) is what this
+    // package's own JSON columns actually round-trip correctly.
+    const prototype: object | null = Object.getPrototypeOf(value) as object | null;
+    if (prototype !== null && prototype !== Object.prototype) {
+      throw new CloudflareSerializationError(
+        `metadata.${describeFieldPath(path)}`,
+        `value is a ${value.constructor?.name ?? 'non-plain object'}, not a plain JSON object.`,
+      );
+    }
     if (seen.has(value)) {
       throw new CloudflareSerializationError(
         `metadata.${describeFieldPath(path)}`,

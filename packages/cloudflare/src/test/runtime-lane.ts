@@ -605,7 +605,7 @@ function assembleLane(
 ): CloudflareRuntimeLane {
   const { miniflare, namespace, dispatchFetch, rawR2Bucket, vectorizeUnsupported } = core;
   const controller = new AbortController();
-  const r2Bucket = withCancellableR2Bucket(rawR2Bucket, controller.signal);
+  const r2Bucket = withCancellableR2Bucket(rawR2Bucket, controller.signal, namespace);
 
   let stopped = false;
   async function stop(): Promise<void> {
@@ -675,20 +675,31 @@ function assembleLane(
   };
 }
 
-/** Wraps a real `R2Bucket` binding so every call rejects with a typed cancellation once `signal` fires. */
-export function withCancellableR2Bucket(bucket: R2Bucket, signal: AbortSignal): R2Bucket {
+/**
+ * Wraps a real `R2Bucket` binding so every call rejects with a typed
+ * cancellation once `signal` fires. `namespace` identifies the LANE this
+ * bucket belongs to (not the R2 key/prefix an individual call touches) —
+ * `CloudflareRuntimeLaneCancelledError.namespace` names which lane was
+ * cancelled, the same meaning `createSqliteStorageProxy`'s cancellation
+ * carries, so a caller can tell which lane an R2 cancellation came from
+ * rather than reading back the key it just passed in.
+ */
+export function withCancellableR2Bucket(
+  bucket: R2Bucket,
+  signal: AbortSignal,
+  namespace: string,
+): R2Bucket {
   return {
     head: (key: string) =>
-      runCancellableLaneOperation(signal, 'r2.head', key, () => bucket.head(key)),
-    get: (key: string) => runCancellableLaneOperation(signal, 'r2.get', key, () => bucket.get(key)),
+      runCancellableLaneOperation(signal, 'r2.head', namespace, () => bucket.head(key)),
+    get: (key: string) =>
+      runCancellableLaneOperation(signal, 'r2.get', namespace, () => bucket.get(key)),
     put: (key: string, value: string) =>
-      runCancellableLaneOperation(signal, 'r2.put', key, () => bucket.put(key, value)),
+      runCancellableLaneOperation(signal, 'r2.put', namespace, () => bucket.put(key, value)),
     delete: (key: string) =>
-      runCancellableLaneOperation(signal, 'r2.delete', key, () => bucket.delete(key)),
+      runCancellableLaneOperation(signal, 'r2.delete', namespace, () => bucket.delete(key)),
     list: (options?: R2ListOptions) =>
-      runCancellableLaneOperation(signal, 'r2.list', options?.prefix ?? '', () =>
-        bucket.list(options),
-      ),
+      runCancellableLaneOperation(signal, 'r2.list', namespace, () => bucket.list(options)),
   };
 }
 

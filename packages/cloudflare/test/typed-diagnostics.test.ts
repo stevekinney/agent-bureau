@@ -214,6 +214,60 @@ describe('serialization-failure diagnostics', () => {
     }
   });
 
+  it('rejects a non-plain object nested in metadata (a Date) instead of silently stringifying it', async () => {
+    const storage = createCloudflareMemoryRecordStorage({
+      sql: createSqliteDouble(),
+      vectorize: createFakeVectorize(),
+    });
+    await storage.init();
+
+    try {
+      await storage.put(memoryRecord({ id: 'date-metadata', metadata: { created: new Date(0) } }));
+      throw new Error('expected put() to reject');
+    } catch (error) {
+      expect(error).toBeInstanceOf(CloudflareSerializationError);
+      expect((error as CloudflareSerializationError).field).toBe('metadata.created');
+    }
+  });
+
+  it('rejects a non-plain object nested in metadata (a Map) instead of silently erasing it', async () => {
+    const storage = createCloudflareMemoryRecordStorage({
+      sql: createSqliteDouble(),
+      vectorize: createFakeVectorize(),
+    });
+    await storage.init();
+
+    try {
+      await storage.put(
+        memoryRecord({ id: 'map-metadata', metadata: { lookup: new Map([['a', 1]]) } }),
+      );
+      throw new Error('expected put() to reject');
+    } catch (error) {
+      expect(error).toBeInstanceOf(CloudflareSerializationError);
+      expect((error as CloudflareSerializationError).field).toBe('metadata.lookup');
+    }
+  });
+
+  it('POSITIVE CONTROL: a plain object created with Object.create(null) is accepted as metadata', async () => {
+    const storage = createCloudflareMemoryRecordStorage({
+      sql: createSqliteDouble(),
+      vectorize: createFakeVectorize(),
+    });
+    await storage.init();
+
+    const nullProtoNested: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+    nullProtoNested['value'] = 'plain';
+
+    await storage.put(
+      memoryRecord({ id: 'null-proto-metadata', metadata: { nested: nullProtoNested } }),
+    );
+    const fetched = await storage.get('null-proto-metadata', {
+      tenantId: 'diagnostics-tenant',
+      namespace: 'diagnostics-namespace',
+    });
+    expect(fetched?.metadata).toEqual({ nested: { value: 'plain' } });
+  });
+
   it('rejects a non-finite number nested inside metadata, naming the nested field path', async () => {
     const storage = createCloudflareMemoryRecordStorage({
       sql: createSqliteDouble(),

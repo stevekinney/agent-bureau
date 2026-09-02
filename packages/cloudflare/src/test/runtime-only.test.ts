@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from 'bun:test';
 import { createProcessUniqueIdentifierPrefix } from '../../test/runtime-lane-process-identifier';
 import { createCloudflareR2TextValueStore } from '../create-cloudflare-r2-text-value-store';
 import { CloudflareRuntimeLaneCancelledError, CloudflareUnsupportedApiError } from '../diagnostics';
+import { createFakeR2 } from './fake-r2';
 import {
   cleanUpAfterStartupFailure,
   type CloudflareRuntimeLane,
@@ -15,6 +16,7 @@ import {
   interpretVectorizeProbe,
   runCancellableLaneOperation,
   startCloudflareRuntime,
+  withCancellableR2Bucket,
 } from './runtime-lane';
 
 /**
@@ -372,6 +374,30 @@ describe('Cloudflare real-runtime lane (runtime-only)', () => {
         r2Caught = error;
       }
       expect(r2Caught).toBeInstanceOf(CloudflareRuntimeLaneCancelledError);
+      // `.namespace` names the CANCELLED LANE, not the R2 key the call
+      // happened to touch — `'any-key'` must never leak through as if it
+      // were the namespace.
+      expect((r2Caught as CloudflareRuntimeLaneCancelledError).namespace).not.toBe('any-key');
+    });
+
+    it(// A caller reading `CloudflareRuntimeLaneCancelledError.namespace` off
+    // an R2 cancellation needs it to name the cancelled LANE — the same
+    // meaning the SQLite proxy's cancellation carries — not the R2 key an
+    // individual call happened to touch, which would otherwise be
+    // indistinguishable from (and easily confused with) the lane identity.
+    'withCancellableR2Bucket reports the LANE namespace, not the R2 key, on a cancelled call', async () => {
+      const controller = new AbortController();
+      controller.abort();
+      const bucket = withCancellableR2Bucket(createFakeR2(), controller.signal, 'lane-namespace');
+
+      let caught: unknown;
+      try {
+        await bucket.get('some-r2-key');
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(CloudflareRuntimeLaneCancelledError);
+      expect((caught as CloudflareRuntimeLaneCancelledError).namespace).toBe('lane-namespace');
     });
   });
 
