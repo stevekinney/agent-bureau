@@ -29,8 +29,16 @@ export function isToolError(value: unknown): value is ToolError {
  * than trusting `code` alone. Symbol-keyed, so it is invisible to
  * `JSON.stringify`, `Object.keys`, and structured-clone serialization — it
  * never leaks into telemetry, logs, or the wire.
+ *
+ * Registered via `Symbol.for` (the global symbol registry), not a bare
+ * `Symbol()`, so it resolves to the identical runtime symbol across
+ * separate module instances of armorer — a mixed ESM/CJS host, or a
+ * dependency graph that resolves more than one armorer copy, would
+ * otherwise give each copy its own private `Symbol()` and silently break
+ * the provenance check for exactly the toolbox/operative pair this marker
+ * exists to bridge.
  */
-export const TOOLBOX_BUDGET_EXCEEDED_MARKER: unique symbol = Symbol(
+export const TOOLBOX_BUDGET_EXCEEDED_MARKER: unique symbol = Symbol.for(
   'armorer.toolbox-budget-exceeded',
 );
 

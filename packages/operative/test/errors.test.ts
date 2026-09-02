@@ -315,6 +315,10 @@ describe('reclassifyToolError (AB-231)', () => {
 
     expect(result).toBeInstanceOf(BudgetExceededError);
     expect((result as BudgetExceededError).message).toBe('Budget exceeded: max calls 1');
+    expect((result as BudgetExceededError).cause).toBe(thrown);
+    expect(((result as BudgetExceededError).cause as { code?: string }).code).toBe(
+      'BUDGET_EXCEEDED',
+    );
   });
 
   it("does not reclassify a tool-defined error whose code coincidentally also normalizes to 'BUDGET_EXCEEDED' (no toolbox-accounting provenance marker)", async () => {

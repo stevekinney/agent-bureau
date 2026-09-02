@@ -142,8 +142,8 @@ export class ElicitationDeniedError extends AgentRunError {
 }
 
 export class BudgetExceededError extends AgentRunError {
-  constructor(message?: string) {
-    super(message ?? '', { kind: 'policy', code: 'BUDGET_EXCEEDED' });
+  constructor(message?: string, cause?: unknown) {
+    super(message ?? '', { kind: 'policy', code: 'BUDGET_EXCEEDED', cause });
     this.name = 'BudgetExceededError';
   }
 }
@@ -173,9 +173,17 @@ export class BudgetExceededError extends AgentRunError {
  * toolbox's own `checkBudget` throw site ever attaches, so a
  * coincidentally-named tool-defined error is never reclassified. Any other
  * error is returned unchanged.
+ *
+ * The original ToolError is threaded through as `cause`, matching what
+ * `toAgentRunError` already does for every other generically-wrapped tool
+ * error - so `RunResult.error`, `onRunError`, and `serializeAgentRunError`
+ * still expose the underlying `code`/`category`/`retryable` diagnostics
+ * after reclassification, not just the `BudgetExceededError`'s own message.
  */
 export function reclassifyToolError(error: unknown): unknown {
-  return isToolboxBudgetExceededToolError(error) ? new BudgetExceededError(error.message) : error;
+  return isToolboxBudgetExceededToolError(error)
+    ? new BudgetExceededError(error.message, error)
+    : error;
 }
 
 /** Raised when a lazily loaded agent definition cannot be resolved. */
