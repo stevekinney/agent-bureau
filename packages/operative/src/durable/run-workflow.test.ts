@@ -10,7 +10,9 @@ import { z } from 'zod';
 
 import { noToolCalls } from '../conditions/predicates';
 import { GuardrailTripwireError } from '../errors';
+import { SteeringAppliedEvent } from '../events';
 import type { OperativeHookMap } from '../hooks';
+import type { EventDispatcher } from '../run-step';
 import type { GenerateContext, GenerateFunction, SteeringGate } from '../types';
 import { createCheckpointStore } from './checkpoint-store';
 import {
@@ -3390,6 +3392,59 @@ describe('durable agentRun workflow', () => {
           configVersion: 7,
           model: 'durable-model',
         });
+      } finally {
+        engine[Symbol.dispose]();
+      }
+    });
+
+    it('AB-221: steering.applied fires exactly once across multiple durable steps for an unchanged configVersion, not once per step', async () => {
+      // RunCursor.lastAppliedConfigVersion is the piece specific to this
+      // driver — a fresh RunState is built inside EVERY ctx.memo call
+      // (run-workflow.ts), so without threading the dedupe key through the
+      // checkpoint the same way schemaAttempts already is, this would fire
+      // once per step instead of once per accepted command.
+      const { engine } = await buildEngine(new MemoryStorage(), false);
+      const gate: SteeringGate = {
+        sessionId: 'test-session',
+        getDesiredState: () => ({ paused: false, configVersion: 7, model: 'durable-model' }),
+        awaitResume: () => new Promise<void>(() => {}), // never needed: this run never pauses
+      };
+      const events: Event[] = [];
+      const emitter: EventDispatcher = {
+        dispatch(event) {
+          events.push(event);
+          return true;
+        },
+      };
+      let calls = 0;
+      const toolbox = continuingToolbox();
+      const services: DurableRunDeps = {
+        toolbox,
+        emitter,
+        options: {
+          generate: async () => {
+            calls++;
+            if (calls === 1) {
+              return { content: '', toolCalls: [{ name: 'next', arguments: {} }] };
+            }
+            return { content: 'done', toolCalls: [] };
+          },
+          toolbox,
+          conversation: createConversationHistory(),
+          stopWhen: noToolCalls(),
+          steering: gate,
+        },
+      };
+
+      try {
+        await runToCompletion(engine, { runId: 'ab-221-steering-applied-durable' }, services);
+        expect(calls).toBe(2);
+        const applied = events.filter(
+          (event): event is SteeringAppliedEvent => event instanceof SteeringAppliedEvent,
+        );
+        expect(applied).toHaveLength(1);
+        expect(applied[0]?.effective.configVersion).toBe(7);
+        expect(applied[0]?.effective.appliedAtStep).toBe(0);
       } finally {
         engine[Symbol.dispose]();
       }
