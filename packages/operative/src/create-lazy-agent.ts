@@ -95,7 +95,17 @@ function isValidAgentRunHandle(value: unknown): value is AgentRun<unknown, boole
 
 function isRunnableAgent(value: unknown): value is RunnableAgent<unknown, boolean> {
   if (value === null || typeof value !== 'object') return false;
-  return isCallable((value as Record<PropertyKey, unknown>)['run']);
+  const candidate = value as Record<PropertyKey, unknown>;
+  // `RunnableAgent` requires a string `name` (`runnable-agent.ts`), not just
+  // a callable `run`. Without checking `name` too, a raw `import(path)`
+  // module namespace that happens to export both a `default` agent AND an
+  // unrelated top-level function named `run` (e.g. a helper re-exported
+  // alongside the agent) would itself satisfy this predicate — so `resolve()`
+  // would treat the whole module namespace as the agent and bypass the
+  // `default` unwrapping, later invoking the unrelated `run` with
+  // `AgentInput`. A module namespace object has no `name` binding, so this
+  // check rejects it and falls through to the `default` unwrapping branch.
+  return isCallable(candidate['run']) && typeof candidate['name'] === 'string';
 }
 
 // ---------------------------------------------------------------------------
@@ -109,6 +119,14 @@ interface EventQueue {
   push(event: RunEvent): void;
   complete(): void;
   fail(error: unknown): void;
+  /**
+   * Registers a callback invoked exactly once, the first time the
+   * consumer's iterator `return()` is called (an early `break`/`return`
+   * out of a `for await`). Lets the pump loop that feeds this queue stop
+   * draining the underlying run and propagate `return()` to it in turn,
+   * instead of continuing to buffer events nobody will ever read.
+   */
+  onReturn(callback: () => void): void;
   [Symbol.asyncIterator](): AsyncIterator<RunEvent>;
 }
 
@@ -125,8 +143,12 @@ function createEventQueue(): EventQueue {
   // consumers or replaying a finished stream.
   let iterating = false;
   let consumed = false;
+  let onReturnCallback: (() => void) | null = null;
 
   return {
+    onReturn(callback) {
+      onReturnCallback = callback;
+    },
     push(event) {
       if (done) return;
       if (waitResolve) {
@@ -203,6 +225,17 @@ function createEventQueue(): EventQueue {
         return(): Promise<IteratorResult<RunEvent>> {
           iterating = false;
           consumed = true;
+          // Mark the queue itself done — `push()` becomes a no-op from here
+          // on, so a pump that hasn't yet noticed `onReturn` can't keep
+          // growing `buffered` — and notify the registered pump exactly
+          // once so it stops draining the underlying run and propagates
+          // `return()` to it in turn.
+          if (!done) {
+            done = true;
+            const callback = onReturnCallback;
+            onReturnCallback = null;
+            callback?.();
+          }
           return Promise.resolve({ value: undefined as unknown as RunEvent, done: true });
         },
       };
@@ -357,14 +390,30 @@ function createDeferredAgentRun<O, H extends boolean>(
     if (!consumerRequestedIteration) return;
     eventsPumpStarted = true;
     const handle = underlying;
+    // Manual iteration (rather than `for await...of handle`) so an early
+    // `return()` from OUR queue's consumer can interrupt the pump loop
+    // between `next()` calls and propagate `return()` onto the underlying
+    // run's iterator — stopping it from draining further, instead of
+    // continuing to pull and buffer events nobody will ever read.
+    const iterator = handle[Symbol.asyncIterator]();
+    let stoppedByConsumer = false;
+    queue.onReturn(() => {
+      stoppedByConsumer = true;
+      void iterator.return?.();
+    });
     void (async () => {
       try {
-        for await (const event of handle) {
-          queue.push(event);
+        while (!stoppedByConsumer) {
+          const result = await iterator.next();
+          if (stoppedByConsumer) break;
+          if (result.done) {
+            queue.complete();
+            return;
+          }
+          queue.push(result.value);
         }
-        queue.complete();
       } catch (error) {
-        queue.fail(error);
+        if (!stoppedByConsumer) queue.fail(error);
       }
     })();
   }
@@ -633,6 +682,13 @@ export function createLazyAgent<O = never, H extends boolean = false>(
       typeof rawInput === 'string'
         ? rawInput
         : { conversation: structuredClone(rawInput.conversation) };
+    // Shallow-copy `context` too, before the loader is awaited — same
+    // reasoning as `createDeferredAgentRun`'s own context copy. Without
+    // this, a caller mutating `signal`/`agentName`/`traceContext`/
+    // `withTraceContext` on the object it passed in while the load is
+    // still pending would leak into the resolved `RunOptions`, unlike both
+    // `run()` and an eager (already-loaded) resolver.
+    const resolvedContext: AgentRunContext | undefined = context ? { ...context } : undefined;
     const agent = await resolve();
     // Validate the same contract `run()` does — a `null`/non-object load
     // result would otherwise throw a raw `TypeError` here instead of the
@@ -657,7 +713,7 @@ export function createLazyAgent<O = never, H extends boolean = false>(
     // resolver implemented as a method that reads instance state via `this`
     // (a custom `DefinitionResolvingAgent`, not necessarily `createAgent`'s
     // own arrow-function implementation) still gets `agent` as its receiver.
-    return definitionResolvingAgent[OPERATIVE_RESOLVE_RUN_OPTIONS]!(input, context);
+    return definitionResolvingAgent[OPERATIVE_RESOLVE_RUN_OPTIONS]!(input, resolvedContext);
   };
 
   const agent = {

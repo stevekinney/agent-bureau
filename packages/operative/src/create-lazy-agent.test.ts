@@ -26,9 +26,11 @@ function createFakeAgentRun(): {
   settle: (result: RunResult<string, false>) => void;
   abortCalls: (string | undefined)[];
   disposed: boolean;
+  returnCalls: number;
 } {
   const abortCalls: (string | undefined)[] = [];
   let disposed = false;
+  let returnCalls = 0;
   const buffered: RunEvent[] = [];
   let done = false;
   let waitResolve: ((value: IteratorResult<RunEvent>) => void) | null = null;
@@ -67,6 +69,16 @@ function createFakeAgentRun(): {
             waitResolve = resolve;
           });
         },
+        return(): Promise<IteratorResult<RunEvent>> {
+          returnCalls += 1;
+          done = true;
+          if (waitResolve) {
+            const resolve = waitResolve;
+            waitResolve = null;
+            resolve({ value: undefined, done: true });
+          }
+          return Promise.resolve({ value: undefined as unknown as RunEvent, done: true });
+        },
       };
     },
   } as AgentRun<string, false>;
@@ -94,6 +106,9 @@ function createFakeAgentRun(): {
     abortCalls,
     get disposed() {
       return disposed;
+    },
+    get returnCalls() {
+      return returnCalls;
     },
   };
 }
@@ -646,6 +661,32 @@ describe('createLazyAgent', () => {
     await earlyRun.result();
   });
 
+  it('stops pumping and propagates return() to the underlying run when the consumer exits early', async () => {
+    const fake = createFakeAgentRun();
+    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };
+    const lazy = createLazyAgent(() => agent);
+
+    const run = lazy.run('hello');
+    fake.push(new RunCompletedEvent(successResult('first')));
+    for await (const _event of run) {
+      break;
+    }
+    await flushMicrotasks();
+
+    // The pump loop must have stopped draining `fake` and forwarded the
+    // early exit onto its iterator — not kept pulling and buffering events
+    // nobody will ever read.
+    expect(fake.returnCalls).toBe(1);
+
+    // The queue itself is marked done by the early return, so a later
+    // iteration attempt is rejected the same way re-iterating an already
+    // completed run is, rather than silently splitting or replaying events.
+    expect(() => run[Symbol.asyncIterator]()).toThrowError(CompletedRunIterationError);
+
+    fake.settle(successResult('first'));
+    await run.result();
+  });
+
   it('rejects a second concurrent iteration of the same run with CompletedRunIterationError', async () => {
     const fake = createFakeAgentRun();
     const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };
@@ -864,6 +905,31 @@ describe('createLazyAgent', () => {
     expect(result.content).toBe('done');
   });
 
+  it('unwraps a module namespace default even when it also exports an unrelated top-level run function', async () => {
+    const fake = createFakeAgentRun();
+    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };
+    let unrelatedRunCalls = 0;
+    // A module namespace object: `default` is the real agent, but the module
+    // also happens to export an unrelated top-level `run` function (e.g. a
+    // helper re-exported alongside the agent). The namespace object itself
+    // has no `name`, so `isRunnableAgent` must reject it and fall through to
+    // unwrapping `default` — never invoke the unrelated `run`.
+    const moduleNamespace = {
+      default: agent,
+      run: (): void => {
+        unrelatedRunCalls += 1;
+      },
+    };
+    const lazy = createLazyAgent(() => Promise.resolve(moduleNamespace));
+
+    const run = lazy.run('hello');
+    fake.settle(successResult('done'));
+    const result = await run.result();
+
+    expect(result.content).toBe('done');
+    expect(unrelatedRunCalls).toBe(0);
+  });
+
   it('snapshots resolveRunOptions input before awaiting the loader', async () => {
     let release!: () => void;
     const pending = new Promise<void>((resolve) => (release = resolve));
@@ -903,5 +969,45 @@ describe('createLazyAgent', () => {
       (observedOptions as unknown as { conversation: { marker: string } } | undefined)?.conversation
         .marker,
     ).toBe('original');
+  });
+
+  it('snapshots resolveRunOptions context before awaiting the loader', async () => {
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => (release = resolve));
+    let observedAgentName: string | undefined;
+    const agent: RunnableAgent<never, false> & {
+      [OPERATIVE_RESOLVE_RUN_OPTIONS]: (
+        input: string,
+        context?: { agentName?: string },
+      ) => Promise<RunOptions>;
+    } = {
+      name: 'fake',
+      run: () => createFakeAgentRun().handle,
+      [OPERATIVE_RESOLVE_RUN_OPTIONS]: (_input, context) => {
+        observedAgentName = context?.agentName;
+        return Promise.resolve({} as RunOptions);
+      },
+    };
+    const lazy = createLazyAgent(async () => {
+      await pending;
+      return agent;
+    });
+
+    const resolver = (
+      lazy as RunnableAgent<never, false> & {
+        [OPERATIVE_RESOLVE_RUN_OPTIONS]: (
+          input: string,
+          context?: { agentName?: string },
+        ) => Promise<RunOptions>;
+      }
+    )[OPERATIVE_RESOLVE_RUN_OPTIONS];
+
+    const mutableContext = { agentName: 'original' };
+    const resolving = resolver('hello', mutableContext);
+    mutableContext.agentName = 'mutated-during-load';
+    release();
+    await resolving;
+
+    expect(observedAgentName).toBe('original');
   });
 });
