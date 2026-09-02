@@ -62,6 +62,7 @@ import type {
 } from './agent-catalog';
 import type { AuditTrail } from './audit-trail';
 import type { BureauEventMap } from './events';
+import type { ModelCatalogService } from './model-catalog-refresh';
 import type { OnlineEvalSampler, OnlineEvalSamplerOptions } from './online-evals';
 import type { WebhookNotifier, WebhookNotifierOptions } from './webhook-notifier';
 
@@ -491,6 +492,16 @@ export interface BureauOptions<D extends AgentDefinitions = AgentDefinitions> {
     readonly sessionBacklogLimit?: number;
     readonly principalBacklogLimit?: number;
   };
+  /**
+   * AB-246 — the model-catalog refresh service exposed as
+   * {@link Bureau.modelCatalog}. Omit to let `createBureau` construct a
+   * default `ModelCatalogService` over `@lostgradient/operative/providers`'s
+   * static `createModelCatalog()` seed; pass one explicitly to share a
+   * catalog across bureaus or to supply a non-default `descriptorSource`
+   * (see `model-catalog-refresh.ts`'s `CatalogDescriptorSource` — the seam a
+   * future live provider probe attaches to).
+   */
+  modelCatalog?: ModelCatalogService;
 }
 
 /**
@@ -641,6 +652,14 @@ export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
   readonly memory: Memory | undefined;
   readonly scheduler: Scheduler | undefined;
   readonly ready: boolean;
+  /**
+   * AB-246 — the model-catalog refresh service (AB-64's catalog, AB-34's
+   * started-work control contract). Present regardless of `D`, matching the
+   * rule that Bureau's administrative surface does not depend on the
+   * registered agent set. `dispose()` awaits any in-flight refresh here
+   * before reporting.
+   */
+  readonly modelCatalog: ModelCatalogService;
 
   /**
    * The typed agent catalog (AB-15, AB-22) — the immutable, read-only view

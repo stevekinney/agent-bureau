@@ -47,6 +47,7 @@ import {
   type SessionInputAdmissionOutcome,
   type SessionInputAdmissionRequest,
 } from '@lostgradient/operative/durable';
+import { createModelCatalog } from '@lostgradient/operative/providers';
 import {
   createStore,
   RunRegisteredEvent as StoreRunRegisteredEvent,
@@ -86,6 +87,7 @@ import {
   RunRegisteredEvent,
   RunRemovedEvent,
 } from './events';
+import { createModelCatalogService } from './model-catalog-refresh';
 import { createOnlineEvalSampler, type OnlineEvalSampler } from './online-evals';
 import {
   buildPartialRunReport,
@@ -1023,6 +1025,18 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // Independent of `runtime` (bureau-level generate/toolbox/provider
   // composition, still used by `createRun`).
   const agentCatalog = createAgentCatalog(agentsSnapshot);
+  // AB-246 — the model-catalog refresh service. Independent of `runtime`.
+  // When the caller doesn't supply one, the default `descriptorSource`
+  // re-derives `@lostgradient/operative/providers`'s static seed — this is
+  // the seam a future live provider probe attaches to (out of scope here).
+  const modelCatalog =
+    options.modelCatalog ??
+    createModelCatalogService({
+      seed: createModelCatalog(),
+      descriptorSource: () => Promise.resolve(createModelCatalog().descriptors),
+      now: () => new Date().toISOString(),
+      newRefreshId: () => `catalog-refresh-${crypto.randomUUID()}`,
+    });
   // AB-13 — declarative flow control (concurrency/rate-limit/singleton). One
   // controller instance shared across BOTH `createRun` (API-triggered) and
   // `submitSchedulerTask` (scheduler-originated), so a per-agent concurrency
@@ -4124,6 +4138,23 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // connection; a second pass is a no-op.
     if (disposePromise) return disposePromise;
 
+    // AB-246/AB-64 (2026-09-02 amendment): a model-catalog refresh is
+    // INDEPENDENTLY owned by Bureau's catalog, not parent-owned by a run — so
+    // it isn't touched by the run/toolbox teardown below, and `dispose()`
+    // awaits it here rather than aborting it out from under a caller who may
+    // still be awaiting the same handle. Captured synchronously, BEFORE the
+    // teardown below runs, but awaited only at the very end (not blocking
+    // admission closure, active-run cancellation, or backend teardown — a
+    // slow or never-settling refresh must not stall the rest of `dispose()`,
+    // per review finding on PR #432). Awaits `closed()`, not `result()`: the
+    // started-work contract lets a handle's cleanup acknowledgement settle
+    // AFTER its result (result() only means the refresh's business outcome
+    // is known; closed() means teardown actually finished), and a caller-
+    // supplied `ModelCatalogService` is explicitly allowed to do that — so
+    // only awaiting `closed()` observes the real cleanup fence (review
+    // finding, PR #432).
+    const modelCatalogRefreshClosedPromise = modelCatalog.inFlightRefresh()?.closed();
+
     disposePromise = (async () => {
       // Stop admission before cancelling runs. The canonical toolbox is the
       // owner of local execution lifecycle; await its shutdown as the
@@ -4266,6 +4297,9 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           }
         }
       }
+      // Awaited last: everything above (admission, active runs, toolbox
+      // shutdown, backend teardown) already ran without waiting on this.
+      await modelCatalogRefreshClosedPromise;
     })();
     return disposePromise;
   }
@@ -4285,6 +4319,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     sessionStore: runtime.sessionStore,
     kv: runtime.kv,
     agents: agentCatalog,
+    modelCatalog,
     // `runAgent`'s runtime signature is deliberately widened (`string`,
     // `AgentRun<unknown, boolean>`) — it looks the agent up by a plain
     // runtime string via `agentCatalog.find`, the same widening

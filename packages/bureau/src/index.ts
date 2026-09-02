@@ -43,6 +43,21 @@ export {
 export type { BureauEventMap } from './events';
 export { ActionEvent, BureauDisposedEvent, RunRegisteredEvent, RunRemovedEvent } from './events';
 export type {
+  CatalogDescriptorSource,
+  CatalogRefreshCleanupAcknowledgement,
+  CatalogRefreshHandle,
+  CatalogRefreshOutcome,
+  CatalogRefreshRequest,
+  CatalogRefreshResult,
+  CatalogRefreshSnapshot,
+  CatalogRefreshSnapshotObserver,
+  CatalogRefreshStatus,
+  CreateModelCatalogServiceOptions,
+  ModelCatalogService,
+  SubscribeSnapshotOptions,
+} from './model-catalog-refresh';
+export { createModelCatalogService } from './model-catalog-refresh';
+export type {
   EvalScore,
   OnlineEvalJudge,
   OnlineEvalSampler,
