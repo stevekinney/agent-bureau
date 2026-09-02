@@ -80,6 +80,7 @@ export const steeringCommand: SteeringCommand = {
   expectedRevision: 3,
   requestedAt: new Date(0).toISOString(),
   deadline: new Date(0).toISOString(),
+  runId: 'run-id',
 };
 
 export const steeringCommandNoOptionals: SteeringCommand = {
@@ -96,14 +97,37 @@ export const steeringCommandFailure: SteeringCommandFailure = {
   reason: 'session-terminal',
 };
 
+export const steeringCommandFailureSuperseded: SteeringCommandFailure = {
+  failedAt: new Date(0).toISOString(),
+  reason: 'superseded-by',
+  supersededBy: 'successor-command-id',
+};
+
 export const steeringCommandFailureReasons: readonly SteeringCommandFailure['reason'][] = [
   'session-terminal',
   'run-terminal',
+  'run-ambiguous',
   'authorization-revoked',
   'policy-denied',
   'deadline-passed',
   'superseded-by',
 ];
+
+// AB-67's 2026-09-02 coordinator amendments: `policyRef` and `override` are
+// encoded as an exclusive pair. A literal supplying both non-`undefined`
+// values, or neither field, must be rejected by the type checker. (This
+// package's `exactOptionalPropertyTypes: false` means an explicit
+// `override: undefined` alongside `policyRef` would still type-check —
+// semantically indistinguishable from omitting `override` — so this fixture
+// exercises the non-`undefined` case the type actually rejects.)
+export const routeBothValue: SteeringRequestedValue = {
+  target: 'route',
+  policyRef: 'default-route',
+  // @ts-expect-error — a `SteeringRequestedValue` literal must not supply both `policyRef` and a non-`undefined` `override`.
+  override: 'primary',
+};
+// @ts-expect-error — a `SteeringRequestedValue` literal for a non-pause/resume target must supply `policyRef` or `override`.
+export const routeNeitherValue: SteeringRequestedValue = { target: 'route' };
 
 export const steeringCommandStates: readonly SteeringCommandState[] = [
   'requested',
