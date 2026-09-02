@@ -20,6 +20,7 @@ import {
   ToolStartedBubbleEvent,
 } from './events';
 import { executeLoop } from './loop';
+import { toOutputJsonSchema } from './structured-output/response-schema';
 import type { RunOptions, RunResult } from './types';
 
 /**
@@ -90,6 +91,14 @@ export interface ActiveRun {
  * Without `durable`, the in-memory loop runs.
  */
 export function createActiveRun(options: RunOptions, durable?: DurableRunRouting): ActiveRun {
+  // AB-18: an unrepresentable `output` schema fails synchronously here,
+  // before either driver's async work begins — `createAgent` already runs
+  // this same guard at its own call time; this covers `createActiveRun`
+  // callers who bypass `createAgent` (bureau, sessions, durable routing).
+  if (options.output) {
+    toOutputJsonSchema(options.output);
+  }
+
   if (durable) {
     return createDurableActiveRun(
       { engine: durable.engine, checkpointStore: durable.checkpointStore },

@@ -7,6 +7,7 @@ import type { AgentRun } from './agent-run';
 import { createAgentRun } from './agent-run';
 import { noToolCalls } from './conditions/predicates';
 import { createActiveRun } from './create-run';
+import { toOutputJsonSchema } from './structured-output/response-schema';
 import type {
   ContextManagementOptions,
   ConversationHistory,
@@ -70,7 +71,19 @@ export interface CreateAgentOptionsBase {
   /** Context window management (compaction). */
   contextManagement?: ContextManagementOptions;
 
-  /** Zod schema for the validated terminal `output` value. */
+  /**
+   * Zod schema for the validated terminal `output` value (AB-18) — the
+   * single validated output contract. Drives type inference
+   * (`z.output<typeof schema>`), the provider-native JSON Schema sent to the
+   * model, and runtime validation of the model's final text. There is no
+   * separate `responseSchema`/`responseJsonSchema` pair and no non-Zod
+   * Standard Schema branch.
+   *
+   * MUST NOT declare a field intended to carry binary or media content
+   * (AB-70's amendment to this issue) — `output` is JSON-only, and a
+   * generated asset a run produces belongs in `RunResult.parts` as a
+   * managed-asset reference part, never inlined as base64 here.
+   */
   output?: ZodType<unknown>;
 }
 
@@ -192,6 +205,16 @@ function validateCreateAgentOptions(options: CreateAgentOptions): void {
         'hooks). Configure permissions directly on the toolbox you pass, via ' +
         '`createHeadlessPermissionPolicyHooks`, instead.',
     );
+  }
+
+  // AB-18: an unrepresentable `output` schema fails FAST, synchronously, at
+  // `createAgent()` call time — not on `await run.result()` after a run has
+  // already started. `toOutputJsonSchema` throws `OutputSchemaConversionError`
+  // for a schema `z.toJSONSchema` can't convert; its result is discarded here
+  // (the loop recomputes it per run via `resolveResponseFormat`, a cheap
+  // re-derivation once this guard has already proven the schema convertible).
+  if (options.output) {
+    toOutputJsonSchema(options.output);
   }
 }
 
@@ -413,7 +436,7 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknow
         toolbox,
         conversation,
         stopWhen,
-        ...(output ? { responseSchema: output } : {}),
+        output,
         ...rest,
       };
 

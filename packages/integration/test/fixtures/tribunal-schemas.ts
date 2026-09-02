@@ -2,9 +2,10 @@
  * AB-99 — a literal copy of the Zod validators Tribunal's runner result must
  * satisfy, taken from `/Users/stevekinney/Developer/tribunal/packages/review-core/src/schemas.ts`
  * (`effortSchema`, `findingSchema`, `triageDecisionSchema`,
- * `verificationDecisionSchema`, `agentResultSchema`), plus the raw JSON
- * Schema per-role output contracts copied from
- * `tribunal/runner/run-agent.mjs`'s `outputSchemaForRole`.
+ * `verificationDecisionSchema`, `agentResultSchema`), plus Zod equivalents
+ * (AB-18) of the per-role output contracts `tribunal/runner/run-agent.mjs`'s
+ * `outputSchemaForRole` sent as a raw JSON Schema before AB-18 removed that
+ * input form from `RunOptions.output`.
  *
  * This is intentionally a COPY, not an import — `@tribunal/review-core` is
  * not a dependency of this monorepo and must not become one (agent-bureau
@@ -64,60 +65,33 @@ export const agentResultSchema = z.object({
 export type AgentRunRole = 'triage' | 'specialist' | 'verifier';
 
 /**
- * Raw JSON Schema (AB-95) per-role output contracts — copied verbatim from
- * `run-agent.mjs`'s `outputSchemaForRole(role)`. Passed straight through as
- * `RunOptions.responseSchema` (a "raw JSON Schema object" per the matrix in
- * `@lostgradient/operative/structured-output/response-schema.ts`).
+ * Per-role `output` Zod schemas (AB-18) — equivalent to the raw JSON Schema
+ * per-role output contracts `run-agent.mjs`'s `outputSchemaForRole(role)`
+ * used before AB-18 removed raw-JSON-Schema `output` input. `.strict()`
+ * mirrors the original `additionalProperties: false`; `.nullable()` on
+ * `startLine`/`endLine` mirrors the original `anyOf: [integer, null]`.
  */
-export function tribunalOutputSchemaForRole(role: AgentRunRole): Record<string, unknown> {
-  if (role === 'triage') {
-    return {
-      type: 'object',
-      additionalProperties: false,
-      required: ['skip', 'reason', 'riskFlags'],
-      properties: {
-        skip: { type: 'boolean' },
-        reason: { type: 'string' },
-        riskFlags: { type: 'array', items: { type: 'string' } },
-      },
-    };
-  }
-  if (role === 'verifier') {
-    return {
-      type: 'object',
-      additionalProperties: false,
-      required: ['verified', 'note'],
-      properties: {
-        verified: { type: 'boolean' },
-        note: { type: 'string' },
-      },
-    };
-  }
-  return {
-    type: 'object',
-    additionalProperties: false,
-    required: ['findings'],
-    properties: {
-      findings: {
-        type: 'array',
-        items: {
-          type: 'object',
-          additionalProperties: false,
-          required: ['path', 'startLine', 'endLine', 'side', 'severity', 'title', 'body'],
-          properties: {
-            path: { type: 'string' },
-            startLine: { anyOf: [{ type: 'integer', minimum: 1 }, { type: 'null' }] },
-            endLine: { anyOf: [{ type: 'integer', minimum: 1 }, { type: 'null' }] },
-            side: { enum: ['LEFT', 'RIGHT'] },
-            severity: { enum: ['info', 'warning', 'error'] },
-            title: { type: 'string' },
-            body: { type: 'string' },
-            suggestion: { type: 'string' },
-          },
-        },
-      },
-    },
-  };
+const specialistFindingSchema = z
+  .object({
+    path: z.string(),
+    startLine: z.number().int().min(1).nullable(),
+    endLine: z.number().int().min(1).nullable(),
+    side: z.enum(['LEFT', 'RIGHT']),
+    severity: z.enum(['info', 'warning', 'error']),
+    title: z.string(),
+    body: z.string(),
+    suggestion: z.string().optional(),
+  })
+  .strict();
+
+const specialistOutputSchema = z.object({ findings: z.array(specialistFindingSchema) }).strict();
+const triageOutputSchema = triageDecisionSchema.strict();
+const verifierOutputSchema = verificationDecisionSchema.strict();
+
+export function tribunalOutputSchemaForRole(role: AgentRunRole): z.ZodType {
+  if (role === 'triage') return triageOutputSchema;
+  if (role === 'verifier') return verifierOutputSchema;
+  return specialistOutputSchema;
 }
 
 export interface FindingLike {

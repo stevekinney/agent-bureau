@@ -1,19 +1,20 @@
 import { describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
-import { zodToJsonSchema } from '../../src/structured-output/zod-to-json-schema.ts';
+import { OutputSchemaConversionError } from '../../src/errors.ts';
+import { toOutputJsonSchema } from '../../src/structured-output/response-schema.ts';
 
-describe('zodToJsonSchema', () => {
+describe('toOutputJsonSchema', () => {
   it('converts z.string() to { type: "string" }', () => {
-    expect(zodToJsonSchema(z.string())).toMatchObject({ type: 'string' });
+    expect(toOutputJsonSchema(z.string())).toMatchObject({ type: 'string' });
   });
 
   it('converts z.number() to { type: "number" }', () => {
-    expect(zodToJsonSchema(z.number())).toMatchObject({ type: 'number' });
+    expect(toOutputJsonSchema(z.number())).toMatchObject({ type: 'number' });
   });
 
   it('converts z.boolean() to { type: "boolean" }', () => {
-    expect(zodToJsonSchema(z.boolean())).toMatchObject({ type: 'boolean' });
+    expect(toOutputJsonSchema(z.boolean())).toMatchObject({ type: 'boolean' });
   });
 
   it('converts z.object() with required properties', () => {
@@ -21,7 +22,7 @@ describe('zodToJsonSchema', () => {
       name: z.string(),
       age: z.number(),
     });
-    const result = zodToJsonSchema(schema);
+    const result = toOutputJsonSchema(schema);
     expect(result).toMatchObject({
       type: 'object',
       required: expect.arrayContaining(['name', 'age']),
@@ -36,7 +37,7 @@ describe('zodToJsonSchema', () => {
       name: z.string(),
       nickname: z.optional(z.string()),
     });
-    const result = zodToJsonSchema(schema);
+    const result = toOutputJsonSchema(schema);
     expect(result).toMatchObject({ type: 'object' });
     const required = result['required'] as string[];
     expect(required).toContain('name');
@@ -45,7 +46,7 @@ describe('zodToJsonSchema', () => {
 
   it('converts z.array() with items', () => {
     const schema = z.array(z.string());
-    expect(zodToJsonSchema(schema)).toMatchObject({
+    expect(toOutputJsonSchema(schema)).toMatchObject({
       type: 'array',
       items: { type: 'string' },
     });
@@ -53,27 +54,27 @@ describe('zodToJsonSchema', () => {
 
   it('converts z.enum() to { type: "string", enum: [...] }', () => {
     const schema = z.enum(['red', 'green', 'blue']);
-    expect(zodToJsonSchema(schema)).toMatchObject({
+    expect(toOutputJsonSchema(schema)).toMatchObject({
       type: 'string',
       enum: ['red', 'green', 'blue'],
     });
   });
 
   it('converts z.literal() with a string to { const: value }', () => {
-    expect(zodToJsonSchema(z.literal('hello'))).toMatchObject({ const: 'hello' });
+    expect(toOutputJsonSchema(z.literal('hello'))).toMatchObject({ const: 'hello' });
   });
 
   it('converts z.literal() with a number to { const: value }', () => {
-    expect(zodToJsonSchema(z.literal(42))).toMatchObject({ const: 42 });
+    expect(toOutputJsonSchema(z.literal(42))).toMatchObject({ const: 42 });
   });
 
   it('converts z.literal() with a boolean to { const: value }', () => {
-    expect(zodToJsonSchema(z.literal(true))).toMatchObject({ const: true });
+    expect(toOutputJsonSchema(z.literal(true))).toMatchObject({ const: true });
   });
 
   it('converts z.union() to { anyOf: [...] }', () => {
     const schema = z.union([z.string(), z.number()]);
-    const result = zodToJsonSchema(schema);
+    const result = toOutputJsonSchema(schema);
     expect(result).toHaveProperty('anyOf');
     const anyOf = result['anyOf'] as Array<Record<string, unknown>>;
     expect(anyOf).toHaveLength(2);
@@ -88,7 +89,7 @@ describe('zodToJsonSchema', () => {
         city: z.string(),
       }),
     });
-    const result = zodToJsonSchema(schema);
+    const result = toOutputJsonSchema(schema);
     expect(result).toMatchObject({ type: 'object' });
     // The nested object may be inlined or referenced via $defs
     expect(result['properties']).toBeDefined();
@@ -101,14 +102,48 @@ describe('zodToJsonSchema', () => {
         name: z.string(),
       }),
     );
-    const result = zodToJsonSchema(schema);
+    const result = toOutputJsonSchema(schema);
     expect(result).toMatchObject({ type: 'array' });
     expect(result['items']).toBeDefined();
   });
 
   it('strips $schema and ~standard metadata', () => {
-    const result = zodToJsonSchema(z.string());
+    const result = toOutputJsonSchema(z.string());
     expect(result).not.toHaveProperty('$schema');
     expect(result).not.toHaveProperty('~standard');
+  });
+
+  it('throws OutputSchemaConversionError synchronously for an unrepresentable schema, with no generic-object fallback', () => {
+    expect(() => toOutputJsonSchema(z.date())).toThrow(OutputSchemaConversionError);
+    try {
+      toOutputJsonSchema(z.date());
+      throw new Error('expected toOutputJsonSchema to throw');
+    } catch (error) {
+      expect(error).toBeInstanceOf(OutputSchemaConversionError);
+      expect((error as InstanceType<typeof OutputSchemaConversionError>).code).toBe(
+        'OUTPUT_SCHEMA_CONVERSION_FAILED',
+      );
+      expect((error as InstanceType<typeof OutputSchemaConversionError>).cause).toBeDefined();
+    }
+  });
+
+  it('memoizes by schema identity — repeated calls on the same schema return the same object', () => {
+    const schema = z.object({ answer: z.string() });
+    const first = toOutputJsonSchema(schema);
+    const second = toOutputJsonSchema(schema);
+    expect(second).toBe(first);
+  });
+
+  it('does not cross-contaminate two structurally-identical but distinct schema instances', () => {
+    const a = z.object({ answer: z.string() });
+    const b = z.object({ answer: z.string() });
+    expect(toOutputJsonSchema(a)).toEqual(toOutputJsonSchema(b));
+    expect(toOutputJsonSchema(a)).not.toBe(toOutputJsonSchema(b));
+  });
+
+  it('keeps throwing for an unrepresentable schema on every call, not just the first', () => {
+    const schema = z.date();
+    expect(() => toOutputJsonSchema(schema)).toThrow(OutputSchemaConversionError);
+    expect(() => toOutputJsonSchema(schema)).toThrow(OutputSchemaConversionError);
   });
 });

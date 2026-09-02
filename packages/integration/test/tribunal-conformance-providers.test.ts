@@ -2,14 +2,19 @@
  * AB-99 — Tribunal runner conformance harness (two-provider parity).
  *
  * The SAME agent definition — same Tribunal-shaped toolbox, same AB-94
- * headless permission gate, same AB-95 raw-JSON-Schema structured output —
- * run against two independent provider adapters (Anthropic-mock and
- * OpenAI-mock). Only the `generate: GenerateFunction` swaps; every other
+ * headless permission gate, same AB-18 `output` Zod schema structured
+ * output — run against two independent provider adapters (Anthropic-mock
+ * and OpenAI-mock). Only the `generate: GenerateFunction` swaps; every other
  * option is shared between the two runs, proving `RunOptions` genuinely
  * abstracts over the provider.
  */
 import type { GenerateFunction } from '@lostgradient/operative';
-import { createActiveRun, resolveResponseFormat, stopWhen } from '@lostgradient/operative';
+import {
+  createActiveRun,
+  resolveResponseFormat,
+  stopWhen,
+  toOutputJsonSchema,
+} from '@lostgradient/operative';
 import type { AnthropicClient, AnthropicMessageResponse } from '@lostgradient/operative/anthropic';
 import { createAnthropicProvider } from '@lostgradient/operative/anthropic';
 import type { OpenAIChatCompletion, OpenAIClient } from '@lostgradient/operative/openai';
@@ -109,20 +114,17 @@ function buildOpenAIGenerate(): { generate: GenerateFunction; client: OpenAIClie
       usage: { prompt_tokens: 40, completion_tokens: 10, total_tokens: 50 },
     },
   ] satisfies OpenAIChatCompletion[]);
-  // Unlike `RunOptions.responseSchema` (client-side validation, resolved
-  // fresh per-call by the loop as `context.responseFormat`), the OpenAI
-  // adapter only sends a provider-native `response_format` when
+  // Unlike `RunOptions.output` (client-side validation, resolved fresh
+  // per-call by the loop as `context.responseFormat`), the OpenAI adapter
+  // only sends a provider-native `response_format` when
   // `OpenAIProviderOptions.responseFormat` is set at CONSTRUCTION time —
   // it never reads `context.responseFormat`. So a caller must derive the
   // same `ResponseFormat` (via `resolveResponseFormat`, the exact function
   // the loop itself uses) and pass it here for the schema to actually reach
   // the wire, not just be validated locally after the fact.
-  const responseFormat = resolveResponseFormat(
-    tribunalOutputSchemaForRole('specialist'),
-    undefined,
-  );
+  const responseFormat = resolveResponseFormat(tribunalOutputSchemaForRole('specialist'));
   if (!responseFormat) {
-    throw new Error('resolveResponseFormat unexpectedly returned undefined for a raw JSON Schema');
+    throw new Error('resolveResponseFormat unexpectedly returned undefined for an output schema');
   }
   return {
     generate: createOpenAIProvider({ model: 'gpt-4o', client, responseFormat }),
@@ -145,7 +147,7 @@ async function runAgainstProvider(
     toolbox,
     conversation: seedConversation(),
     stopWhen: stopWhen.noToolCalls(),
-    responseSchema: tribunalOutputSchemaForRole('specialist'),
+    output: tribunalOutputSchemaForRole('specialist'),
   });
 
   const result = await activeRun.result;
@@ -202,7 +204,7 @@ describe('AB-99 Tribunal conformance — two-provider parity', () => {
 
       // Provider config (client + model) is the ONLY thing that differed —
       // both runs collected the identical finding via the identical tool
-      // definition and the identical AB-95 response schema.
+      // definition and the identical AB-18 `output` schema.
       expect(anthropicToolbox.collectedFindings).toEqual(openaiToolbox.collectedFindings);
 
       // Wire-level check (not just local post-hoc validation): the OpenAI
@@ -218,15 +220,15 @@ describe('AB-99 Tribunal conformance — two-provider parity', () => {
           { type?: string; json_schema?: { schema?: unknown } } | undefined;
         expect(responseFormat?.type).toBe('json_schema');
         expect(responseFormat?.json_schema?.schema).toEqual(
-          tribunalOutputSchemaForRole('specialist'),
+          toOutputJsonSchema(tribunalOutputSchemaForRole('specialist')),
         );
       }
 
       // Anthropic's Messages API has no request-level structured-output
       // field at all (no `response_format`/`tool_choice`-forced-JSON
-      // wiring in `createAnthropicProvider` today) — `responseSchema`
+      // wiring in `createAnthropicProvider` today) — `output` schema
       // enforcement on that provider is CLIENT-SIDE ONLY
-      // (`validateResponseSchema`, after the fact). Assert that honestly
+      // (`validateOutput`, after the fact). Assert that honestly
       // rather than implying wire-level enforcement this provider doesn't
       // have: no recorded call carries anything schema-shaped.
       const anthropicCalls = (

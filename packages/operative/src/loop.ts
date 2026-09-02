@@ -28,7 +28,7 @@ export type { EventDispatcher } from './run-step';
  * never fork the step implementation.
  */
 export function buildStepDeps(options: RunOptions): StepDeps {
-  const responseFormat = resolveResponseFormat(options.responseSchema, options.responseJsonSchema);
+  const responseFormat = resolveResponseFormat(options.output);
 
   const stopConditions: StopCondition[] = !options.stopWhen
     ? []
@@ -47,7 +47,7 @@ export function buildStepDeps(options: RunOptions): StepDeps {
     onElicitation: options.onElicitation,
     hooks: options.hooks,
     contextManagement: options.contextManagement,
-    responseSchema: options.responseSchema,
+    output: options.output,
     responseFormat,
     maximumTokens: options.maximumTokens,
     schemaRetries: options.schemaRetries ?? 0,

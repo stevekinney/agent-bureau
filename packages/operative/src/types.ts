@@ -9,7 +9,6 @@ import type { CostEstimate, CostEstimationOptions } from './cost-estimation';
 import type { OperativeHookMap } from './hooks';
 import type { RetryMutator } from './retry/types';
 import type { LiveStreamEvent } from './streaming/types';
-import type { ResponseSchemaInput } from './structured-output/response-schema';
 import type { ResponseFormat, ToolChoice } from './structured-output/types';
 
 export type { AnyToolbox, Toolbox, ToolExecuteOptions, ToolExecutionResult } from 'armorer';
@@ -233,14 +232,11 @@ export interface RunResultBase {
   error?: unknown;
   schemaValidation?: { success: boolean; error?: unknown };
   /**
-   * The `responseSchema`-validated structured output, present when the run
-   * stopped after a `responseSchema` was applied AND validation succeeded
-   * (`schemaValidation.success === true`). Distinct from `content` (the raw
-   * model text) — this is the parsed-and-validated value: the Zod-parsed
-   * object for a Zod schema, the Standard Schema validator's `value` for a
-   * non-Zod validator, or the `z.fromJSONSchema`-parsed object for a raw
-   * JSON Schema. Absent when there's no `responseSchema`, or when
-   * validation failed.
+   * The `output`-schema-validated structured output (AB-18), present when
+   * the run stopped after an `output` Zod schema was applied AND validation
+   * succeeded (`schemaValidation.success === true`). Distinct from `content`
+   * (the raw model text) — this is the Zod-parsed value. Absent when
+   * there's no `output` schema, or when validation failed.
    */
 }
 
@@ -301,31 +297,19 @@ export interface RunOptions {
   hooks?: HookRegistry<OperativeHookMap>;
   contextManagement?: ContextManagementOptions;
   /**
-   * The schema the final response must satisfy. Accepts, in order of
-   * preference:
+   * The Zod schema the final response must satisfy (AB-18) — the single
+   * validated output contract. Validated with `.parseAsync()`; its
+   * provider-native JSON Schema is derived automatically via
+   * `z.toJSONSchema(schema, { io: 'input' })`. There is no raw JSON Schema
+   * input and no non-Zod Standard Schema branch — see
+   * `structured-output/response-schema.ts`.
    *
-   * - A Zod schema (the documented default) — validated with `.parse()`;
-   *   its provider-native JSON Schema is derived automatically.
-   * - A raw JSON Schema object — validated via `z.fromJSONSchema(schema).parse()`
-   *   and sent to the provider as-is.
-   * - Any other Standard Schema-conforming validator (Valibot, ArkType, ...)
-   *   — validated via its `~standard.validate()`. Has no general JSON Schema
-   *   export, so supply `responseJsonSchema` too if provider-native
-   *   structured output is needed; otherwise the provider only gets a
-   *   generic `{ type: 'json' }` hint and `~standard.validate()` is the sole
-   *   enforcement.
-   *
-   * See `structured-output/response-schema.ts` for the full validation +
-   * JSON-Schema-generation matrix.
+   * An `output` schema MUST NOT declare a field intended to carry binary or
+   * media content (AB-70's amendment to this issue): a generated asset a
+   * run produces belongs in `RunResult.parts` as a managed-asset reference
+   * part, never inlined as base64 inside the schema-validated `output`.
    */
-  responseSchema?: ResponseSchemaInput;
-  /**
-   * Provider-native JSON Schema for `responseSchema` when it's a non-Zod
-   * Standard Schema validator (ignored for a Zod schema or a raw JSON
-   * Schema `responseSchema`, both of which already carry — or ARE — a JSON
-   * Schema).
-   */
-  responseJsonSchema?: Record<string, unknown>;
+  output?: ZodType<unknown>;
   schemaRetries?: number;
   /**
    * Custom message factory for schema validation retries. Called when the

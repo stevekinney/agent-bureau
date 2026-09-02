@@ -1,3 +1,5 @@
+import { ZodError, type ZodIssue } from 'zod';
+
 import { isToolCallParseError } from './providers/errors.ts';
 
 export type AgentRunErrorKind =
@@ -12,6 +14,8 @@ export type AgentRunErrorCode =
   | 'ELICITATION_DENIED'
   | 'INVALID_OUTPUT'
   | 'MAXIMUM_STEPS'
+  | 'NON_JSON_OUTPUT'
+  | 'OUTPUT_SCHEMA_CONVERSION_FAILED'
   | 'TRIPWIRE'
   | 'UNKNOWN';
 
@@ -157,23 +161,73 @@ export class AbortAgentRunError extends AgentRunError {
 }
 
 /**
- * Raised when a `responseSchema` that is a non-Zod Standard Schema validator
- * (Valibot, ArkType, ...) rejects the model's structured output. Carries the
- * validator's raw `issues` array (per the Standard Schema spec) so callers
- * that inspect the error programmatically don't need to guess the shape.
+ * Raised (AB-18) when a run's `output` Zod schema rejects a candidate that
+ * WAS valid JSON — the model returned JSON, but its shape didn't satisfy the
+ * schema. Distinct from {@link NonJsonOutputError}, which covers the case
+ * where the model's final text wasn't JSON at all. Carries the underlying
+ * Zod validation failure as `cause`.
  */
-export class StandardSchemaValidationError extends AgentRunError {
-  readonly issues: ReadonlyArray<{ message: string; path?: ReadonlyArray<PropertyKey> }>;
+export class OutputValidationError extends AgentRunError {
+  /**
+   * `cause.issues` when `cause` is a `ZodError` (the ordinary case — `output`
+   * only ever accepts a Zod schema), empty otherwise. Exposed as a
+   * first-class field so a caller can inspect per-field failures without
+   * narrowing `cause` itself.
+   */
+  readonly issues: readonly ZodIssue[];
 
-  constructor(issues: ReadonlyArray<{ message: string; path?: ReadonlyArray<PropertyKey> }>) {
-    super(
-      issues.length > 0
-        ? `Response failed schema validation: ${issues.map((issue) => issue.message).join('; ')}`
-        : 'Response failed schema validation',
-      { kind: 'output', code: 'INVALID_OUTPUT' },
-    );
-    this.name = 'StandardSchemaValidationError';
-    this.issues = issues;
+  constructor(cause: unknown) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    super(`Response failed output schema validation: ${detail}`, {
+      kind: 'output',
+      code: 'INVALID_OUTPUT',
+      cause,
+    });
+    this.name = 'OutputValidationError';
+    this.issues = cause instanceof ZodError ? cause.issues : [];
+  }
+}
+
+/**
+ * Raised (AB-18) in two cases: a run's final text is not valid JSON and —
+ * once validated as the raw string against the `output` schema — still
+ * fails (a schema of exactly `z.string()` can legitimately accept non-JSON
+ * text; this error is reserved for the case where that also fails); or an
+ * already-decoded candidate handed directly to `validateOutputValue` fails
+ * the recursive JSONValue contract (a cycle, a sparse array, a `Date`, ...).
+ * `text` carries the raw model output in the first case, or a best-effort
+ * (`JSON.stringify`, falling back to `String()`) description of the
+ * offending candidate in the second.
+ */
+export class NonJsonOutputError extends AgentRunError {
+  readonly text: string;
+
+  constructor(text: string, cause?: unknown) {
+    super(`Agent response was not valid JSON: ${text.slice(0, 200)}`, {
+      kind: 'output',
+      code: 'NON_JSON_OUTPUT',
+      cause,
+    });
+    this.name = 'NonJsonOutputError';
+    this.text = text;
+  }
+}
+
+/**
+ * Raised (AB-18) synchronously when an `output` Zod schema cannot be
+ * converted to a provider-facing JSON Schema via `z.toJSONSchema`. There is
+ * no generic-object fallback — an unrepresentable schema is an authoring
+ * error the caller must fix, not something silently degraded at runtime.
+ */
+export class OutputSchemaConversionError extends AgentRunError {
+  constructor(cause: unknown) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    super(`The output schema could not be converted to a JSON Schema: ${detail}`, {
+      kind: 'contract',
+      code: 'OUTPUT_SCHEMA_CONVERSION_FAILED',
+      cause,
+    });
+    this.name = 'OutputSchemaConversionError';
   }
 }
 

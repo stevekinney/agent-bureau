@@ -107,9 +107,9 @@ describe('durable result-only run helpers preserve output (regression PRRT_kwDOR
   // (`driveDurableRun`/`driveReattachedRun`, used by `createDurableActiveRun`
   // and `reattachDurableActiveRun`) carried it through. A preemptable
   // scheduler run driven by the result-only helpers therefore silently lost
-  // its validated `responseSchema` output.
+  // its validated `output` schema output.
 
-  it('startDurableRunResult: a completed run with a responseSchema carries output', async () => {
+  it('startDurableRunResult: a completed run with an output schema carries output', async () => {
     const storage = new MemoryStorage();
     const checkpointStore = createCheckpointStore(
       textValueStore(storage, { disposeUnderlyingStorage: false }),
@@ -131,7 +131,7 @@ describe('durable result-only run helpers preserve output (regression PRRT_kwDOR
             toolbox: createTestToolbox([]),
             conversation: new Conversation(),
             stopWhen: stopWhen.noToolCalls(),
-            responseSchema: answerSchema,
+            output: answerSchema,
           },
         },
       );
@@ -175,7 +175,7 @@ describe('durable result-only run helpers preserve output (regression PRRT_kwDOR
     expect(result.output).toBeUndefined();
   });
 
-  it('NEUTER CHECK: no responseSchema means no output on the same code path', async () => {
+  it('NEUTER CHECK: no output schema means no output on the same code path', async () => {
     const storage = new MemoryStorage();
     const checkpointStore = createCheckpointStore(
       textValueStore(storage, { disposeUnderlyingStorage: false }),
@@ -271,7 +271,7 @@ describe('durable result-only run helpers preserve output (regression PRRT_kwDOR
             toolbox: createTestToolbox([]),
             conversation: new Conversation(),
             stopWhen: stopWhen.noToolCalls(),
-            responseSchema: answerSchema,
+            output: answerSchema,
           },
           toolbox: createTestToolbox([]),
         },
