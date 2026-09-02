@@ -1214,6 +1214,10 @@ export function createTool<
         ...(options.stream !== undefined ? { stream: options.stream } : {}),
         ...(options.elicit ? { elicit: options.elicit } : {}),
         ...(options.executionHandle ? { execution: options.executionHandle } : {}),
+        ...(options.traceContext !== undefined ? { traceContext: options.traceContext } : {}),
+        ...(options.executionContext !== undefined
+          ? { executionContext: options.executionContext }
+          : {}),
       };
 
       // `TContext` may be a subtype of `ToolContext<E>` (e.g. with extra fields).

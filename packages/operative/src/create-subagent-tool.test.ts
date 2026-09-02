@@ -5,6 +5,7 @@ import { CompletableEventTarget } from 'lifecycle';
 import { z } from 'zod';
 
 import type { AgentRun, SuccessfulRunResult } from './agent-run';
+import { createChildRunRegistry } from './child-run';
 import { createAgent } from './create-agent';
 import { createSubagentTool, defaultSubagentSummarizer } from './create-subagent-tool';
 import { GuardrailTripwireError, SubagentRunError } from './errors';
@@ -58,6 +59,42 @@ function makeMockAgent<O = never, H extends boolean = false>(
   return { agent, calls };
 }
 
+/**
+ * A `RunnableAgent` test double whose `run()` result never settles until
+ * `settle()` is called — needed to assert on a registry entry's `'running'`
+ * status before completion (e.g. a cross-run `abortChild` must not settle a
+ * still-in-flight sibling).
+ */
+function makeControllableAgent<O = never, H extends boolean = false>(): {
+  agent: RunnableAgent<O, H>;
+  calls: RecordedRunCall[];
+  settle: (result: RunResult<O, H>) => void;
+} {
+  const calls: RecordedRunCall[] = [];
+  let resolveResult: ((result: RunResult<O, H>) => void) | undefined;
+  const resultPromise = new Promise<RunResult<O, H>>((resolve) => {
+    resolveResult = resolve;
+  });
+  const agent: RunnableAgent<O, H> = {
+    name: 'controllable-agent',
+    run(input, context): AgentRun<O, H> {
+      calls.push({ input, context });
+      return {
+        result: () => resultPromise,
+        unwrap: () => resultPromise.then((result) => result.content as never),
+        abort: () => {},
+        [Symbol.dispose]: () => {},
+        [Symbol.asyncIterator]: () => (async function* () {})(),
+      } as unknown as AgentRun<O, H>;
+    },
+  };
+  return {
+    agent,
+    calls,
+    settle: (result) => resolveResult?.(result),
+  };
+}
+
 function makeSuccessfulResult(content = 'ok'): SuccessfulRunResult {
   return {
     conversation: {} as never,
@@ -85,7 +122,11 @@ function makeEmitter() {
 function callRaw(
   tool: unknown,
   params: unknown,
-  context: { signal?: AbortSignal; traceContext?: unknown } = {},
+  context: {
+    signal?: AbortSignal;
+    traceContext?: unknown;
+    executionContext?: Record<string, unknown>;
+  } = {},
 ): Promise<unknown> {
   return (tool as { rawExecute: (p: unknown, c: unknown) => Promise<unknown> }).rawExecute(
     params,
@@ -1191,6 +1232,250 @@ describe('createSubagentTool', () => {
       // package-wide armorer concern.
       expect(result?.error).not.toBeInstanceOf(SubagentRunError);
       expect(result?.error).toMatchObject({ category: expect.any(String) });
+    });
+  });
+
+  describe('AB-233 — per-execution traceContext and childRegistry/parentRunId', () => {
+    it("observes the parent run's traceContext in the ordinary createAgent loop, with no toolbox-construction workaround", async () => {
+      const { agent: child, calls } = makeMockAgent(() => makeSuccessfulResult('child result'));
+      const tool = createSubagentTool({
+        name: 'delegate',
+        description: 'Delegate',
+        agent: child,
+        agentName: 'child',
+        input: z.object({ q: z.string() }),
+      });
+
+      let generateCalls = 0;
+      const parent = createAgent({
+        generate: async () => {
+          generateCalls++;
+          if (generateCalls === 1) {
+            return {
+              content: '',
+              toolCalls: [{ id: 'call-1', name: 'delegate', arguments: { q: 'hi' } }],
+            };
+          }
+          return textResponse('done');
+        },
+        tools: { delegate: tool },
+      });
+
+      const parentTraceContext = { traceId: 'parent-trace' };
+      const result = await parent.run('go', { traceContext: parentTraceContext }).result();
+
+      expect(result.finishReason).toBe('stop-condition');
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.context?.traceContext).toBe(parentTraceContext);
+    });
+
+    it("reads a per-call executionContext.childRegistry over parentContext.registry's construction-time default", async () => {
+      const { agent: child } = makeMockAgent(() => makeSuccessfulResult());
+      const constructionTimeRegistry = createChildRunRegistry();
+      const tool = createSubagentTool({
+        name: 'delegate',
+        description: 'Delegate',
+        agent: child,
+        agentName: 'child',
+        input: z.object({ q: z.string() }),
+        parentContext: {
+          emitter: makeEmitter(),
+          parentAgentName: 'orchestrator',
+          parentRunId: 'construction-time-run',
+          durable: false,
+          registry: constructionTimeRegistry,
+        },
+      });
+
+      const callTimeRegistry = createChildRunRegistry();
+      await callRaw(tool, { q: 'hi' }, { executionContext: { childRegistry: callTimeRegistry } });
+
+      expect(callTimeRegistry.children()).toHaveLength(1);
+      expect(constructionTimeRegistry.children()).toHaveLength(0);
+    });
+
+    it('falls back to parentContext.registry/parentRunId when the per-call executionContext values do not satisfy the guard', async () => {
+      const { agent: child } = makeMockAgent(() => makeSuccessfulResult());
+      const constructionTimeRegistry = createChildRunRegistry();
+      const emitter = makeEmitter();
+      const received: ChildWorkflowStartedEvent[] = [];
+      emitter.addEventListener(ChildWorkflowStartedEvent.type, (event) => received.push(event));
+
+      const tool = createSubagentTool({
+        name: 'delegate',
+        description: 'Delegate',
+        agent: child,
+        agentName: 'child',
+        input: z.object({ q: z.string() }),
+        parentContext: {
+          emitter,
+          parentAgentName: 'orchestrator',
+          parentRunId: 'construction-time-run',
+          durable: false,
+          registry: constructionTimeRegistry,
+        },
+      });
+
+      // `childRegistry` here is a plain object, not a `MutableChildRunRegistry`
+      // (no `register`/`settle`/`children`/`abortChild`), and `parentRunId`
+      // is a number, not a string — both fail their respective checks, so
+      // `createSubagentTool` falls back to the construction-time defaults.
+      await callRaw(
+        tool,
+        { q: 'hi' },
+        {
+          executionContext: {
+            childRegistry: { notARegistry: true },
+            parentRunId: 42,
+          },
+        },
+      );
+
+      expect(constructionTimeRegistry.children()).toHaveLength(1);
+      expect(received).toHaveLength(1);
+      expect(received[0]?.parentRunId).toBe('construction-time-run');
+    });
+
+    it('registers two concurrent runs of one reused tool instance into distinct registries, with no cross-run abortChild', async () => {
+      // AB-50's reuse gap: a single `createSubagentTool` instance is reused
+      // by two different `agent.run()` calls (the ordinary pattern for a
+      // tool defined once and shared by every run of an agent). Each run
+      // supplies its OWN `childRegistry` per-execution — proving neither
+      // run's `abortChild` reaches the other's child.
+      const childA = makeControllableAgent();
+      const childB = makeControllableAgent();
+      const toolA = createSubagentTool({
+        name: 'delegate',
+        description: 'Delegate',
+        agent: childA.agent,
+        agentName: 'child',
+        input: z.object({ q: z.string() }),
+      });
+      const toolB = createSubagentTool({
+        name: 'delegate',
+        description: 'Delegate',
+        agent: childB.agent,
+        agentName: 'child',
+        input: z.object({ q: z.string() }),
+      });
+
+      const registryA = createChildRunRegistry();
+      const registryB = createChildRunRegistry();
+
+      // Both calls dispatch (and register) synchronously up front — neither
+      // agent's `run()` result settles until `.settle()` is called below —
+      // so both registrations are visible before either call resolves.
+      const pendingA = callRaw(
+        toolA,
+        { q: 'run-a-call' },
+        { executionContext: { childRegistry: registryA } },
+      );
+      const pendingB = callRaw(
+        toolB,
+        { q: 'run-b-call' },
+        { executionContext: { childRegistry: registryB } },
+      );
+
+      // `createTool`'s `rawExecute` resolves the (possibly lazy) execute
+      // function through a microtask before invoking it, so registration —
+      // synchronous within `dispatchChildRun` once the tool's own `execute`
+      // body runs — lands a tick later than the `callRaw(...)` call itself.
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(registryA.children()).toHaveLength(1);
+      expect(registryB.children()).toHaveLength(1);
+      const childInA = registryA.children()[0];
+      const childInB = registryB.children()[0];
+      expect(childInA?.id).not.toBe(childInB?.id);
+
+      // Aborting through registry A must never reach the child registered
+      // through registry B.
+      if (childInB) registryA.abortChild(childInB.id, 'cross-run abort attempt');
+      expect(registryB.children()[0]?.status).toBe('running');
+      expect(childB.calls[0]?.context?.signal?.aborted).toBe(false);
+
+      childA.settle(makeSuccessfulResult());
+      childB.settle(makeSuccessfulResult());
+      await Promise.all([pendingA, pendingB]);
+    });
+
+    it("reads a per-call executionContext.parentRunId over parentContext.parentRunId's construction-time default", async () => {
+      const { agent: child } = makeMockAgent(() => makeSuccessfulResult());
+      const emitter = makeEmitter();
+      const received: ChildWorkflowStartedEvent[] = [];
+      emitter.addEventListener(ChildWorkflowStartedEvent.type, (event) => received.push(event));
+
+      const tool = createSubagentTool({
+        name: 'delegate',
+        description: 'Delegate',
+        agent: child,
+        agentName: 'child',
+        input: z.object({ q: z.string() }),
+        parentContext: {
+          emitter,
+          parentAgentName: 'orchestrator',
+          parentRunId: 'construction-time-run',
+          durable: false,
+        },
+      });
+
+      await callRaw(tool, { q: 'hi' }, { executionContext: { parentRunId: 'run-b-actual' } });
+
+      expect(received).toHaveLength(1);
+      expect(received[0]?.parentRunId).toBe('run-b-actual');
+    });
+
+    it('registers two concurrent createAgent runs of one reused tool instance into their own childRegistry (via AgentRunContext, through the ordinary loop)', async () => {
+      // Same reuse gap as above, driven through the real `createAgent`
+      // ordinary loop end to end (not `callRaw`): `AgentRunContext.childRegistry`
+      // reaches `run-step.ts`'s toolbox execute call site via
+      // `RunOptions.childRegistry`, which builds this call's
+      // `executionContext.childRegistry` — not from whichever registry
+      // happened to be captured on `tool`'s `parentContext` (there is none
+      // here) at construction time.
+      const { agent: child, calls } = makeMockAgent(() => makeSuccessfulResult('child result'));
+      const tool = createSubagentTool({
+        name: 'delegate',
+        description: 'Delegate',
+        agent: child,
+        agentName: 'child',
+        input: z.object({ q: z.string() }),
+      });
+
+      function makeParent() {
+        let generateCalls = 0;
+        return createAgent({
+          generate: async () => {
+            generateCalls++;
+            if (generateCalls === 1) {
+              return {
+                content: '',
+                toolCalls: [{ id: 'call-1', name: 'delegate', arguments: { q: 'hi' } }],
+              };
+            }
+            return textResponse('done');
+          },
+          tools: { delegate: tool },
+        });
+      }
+
+      const registryA = createChildRunRegistry();
+      const registryB = createChildRunRegistry();
+      const parentA = makeParent();
+      const parentB = makeParent();
+
+      // Two concurrent runs of the SAME tool instance, each supplying its
+      // own run's childRegistry through `AgentRunContext`.
+      await Promise.all([
+        parentA.run('go', { childRegistry: registryA }).result(),
+        parentB.run('go', { childRegistry: registryB }).result(),
+      ]);
+
+      expect(calls).toHaveLength(2);
+      expect(registryA.children()).toHaveLength(1);
+      expect(registryB.children()).toHaveLength(1);
+      expect(registryA.children()[0]?.id).not.toBe(registryB.children()[0]?.id);
     });
   });
 });

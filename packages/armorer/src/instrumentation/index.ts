@@ -125,14 +125,17 @@ export function instrument(
           case 'cancelled': {
             // The cancellation error is derived from a caller-supplied
             // abort reason and may itself carry tool-argument content
-            // (e.g. a message formatted from the reason); omit it and
-            // report only the non-privileged category, matching the
-            // error/denied branch below.
+            // (e.g. an `Error` whose `message` embeds the reason).
+            // `recordException` is never called here — OTel serializes an
+            // `Error` passed to it verbatim onto the `exception.message`/
+            // `exception.stacktrace` event attributes, which would leak
+            // that content (AB-237). Only the non-privileged category is
+            // reported, via `error.type` and
+            // `armorer.tool.cancellation_category`.
             span.setStatus({ code: SpanStatusCode.UNSET, message: 'Cancelled' });
-            attributes['error.type'] = errorCategory ?? status;
-            if (error instanceof Error) {
-              span.recordException(error);
-            }
+            const cancellationCategory = errorCategory ?? status;
+            attributes['error.type'] = cancellationCategory;
+            attributes['armorer.tool.cancellation_category'] = cancellationCategory;
 
             break;
           }
@@ -182,7 +185,13 @@ export function instrument(
     }),
   );
 
-  // Fallback for 'error' event
+  // Fallback for 'error' event — reached when a tool was created without
+  // `telemetry: true`, so `tool.finished` never fires and the primary
+  // `tool.finished` listener above never runs (AB-237). This toolbox-level
+  // `error` event fires for every error result regardless of the tool's own
+  // telemetry setting, including a cancellation, so it needs the same
+  // sanitization: `result.error.message` on a cancellation is the
+  // caller-supplied abort reason and must never reach `span.status.message`.
   subscriptions.push(
     toolbox.addEventListener('error', (event) => {
       const { result } = event;
@@ -192,12 +201,18 @@ export function instrument(
           activeSpans.delete(result.callId);
           return;
         }
-        span.setStatus({
-          code: SpanStatusCode.ERROR,
-          message: result.error?.message ?? 'Unknown error',
-        });
-        if (result.error) {
-          span.setAttribute('error.type', result.error.code);
+        if (result.error?.category === 'cancelled') {
+          span.setStatus({ code: SpanStatusCode.UNSET, message: 'Cancelled' });
+          span.setAttribute('error.type', 'cancelled');
+          span.setAttribute('armorer.tool.cancellation_category', 'cancelled');
+        } else {
+          span.setStatus({
+            code: SpanStatusCode.ERROR,
+            message: result.error?.message ?? 'Unknown error',
+          });
+          if (result.error) {
+            span.setAttribute('error.type', result.error.code);
+          }
         }
         span.end();
         activeSpans.delete(result.callId);

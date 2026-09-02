@@ -1448,6 +1448,18 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
             typeof options?.durableOperationKey === 'function'
               ? options.durableOperationKey(toolCall, callIndex)
               : options?.durableOperationKey;
+          // Call-time `traceContext`/`executionContext` win; when the call
+          // supplies neither, fall back to the toolbox's own base context
+          // (`options.context` at toolbox construction) so a tool still
+          // observes a toolbox-wide value rather than seeing `undefined`.
+          const resolvedTraceContext =
+            options?.traceContext !== undefined
+              ? options.traceContext
+              : baseContext['traceContext'];
+          const resolvedExecutionContext =
+            options?.executionContext !== undefined
+              ? options.executionContext
+              : (baseContext['executionContext'] as Record<string, unknown> | undefined);
           const executeOptions: InternalToolExecuteOptionsWithMirror =
             options?.signal ||
             options?.timeout !== undefined ||
@@ -1458,6 +1470,8 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
             options?.setTimeoutFunction !== undefined ||
             options?.clearTimeoutFunction !== undefined ||
             durableOperationKey !== undefined ||
+            resolvedTraceContext !== undefined ||
+            resolvedExecutionContext !== undefined ||
             (options !== undefined && approvalResumeSymbol in options) ||
             (options !== undefined && approvalConsumeSymbol in options) ||
             (options !== undefined && policyAuthorizationOnlySymbol in options)
@@ -1473,6 +1487,12 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
                     : {}),
                   ...(options?.clearTimeoutFunction
                     ? { clearTimeoutFunction: options.clearTimeoutFunction }
+                    : {}),
+                  ...(resolvedTraceContext !== undefined
+                    ? { traceContext: resolvedTraceContext }
+                    : {}),
+                  ...(resolvedExecutionContext !== undefined
+                    ? { executionContext: resolvedExecutionContext }
                     : {}),
                   ownerId: executionHandle.snapshot().ownerId,
                   parentExecutionId: executionHandle.id,
@@ -2529,6 +2549,12 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
           timeout: toolContext.timeout,
           stream: toolContext.stream,
           ...(toolContext.elicit !== undefined ? { elicit: toolContext.elicit } : {}),
+          ...(toolContext.traceContext !== undefined
+            ? { traceContext: toolContext.traceContext }
+            : {}),
+          ...(toolContext.executionContext !== undefined
+            ? { executionContext: toolContext.executionContext }
+            : {}),
         });
       },
     };

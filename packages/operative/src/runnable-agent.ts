@@ -38,10 +38,14 @@ export interface AgentRunContext {
   agentName?: string;
   /**
    * AB-50 — backs the returned `AgentRun`'s `children()`/`abortChild()`.
-   * Opt-in: supply the same registry to every `createSubagentTool` this run
-   * may dispatch through (its `parentContext.registry`) to make this run's
-   * children discoverable. See `child-run.ts`'s module docs for why this
-   * can't be wired automatically from `run()` alone.
+   * Opt-in. AB-233: for a `createSubagentTool` reached through the ordinary
+   * `createAgent`-driven agent loop, supplying it here alone is enough —
+   * `run-step.ts` threads THIS run's own registry into every tool call's
+   * per-execution context, and `createSubagentTool` reads it there in
+   * preference to whatever `parentContext.registry` it was constructed
+   * with. See `child-run.ts`'s module docs for the full mechanism and the
+   * construction-time fallback that remains for direct `dispatchChildRun`
+   * callers.
    */
   childRegistry?: ChildRunRegistry;
 }

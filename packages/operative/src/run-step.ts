@@ -97,6 +97,12 @@ export interface StepDeps {
   readonly parentContext: unknown;
   readonly withTraceContext: RunOptions['withTraceContext'];
   readonly runId: string | undefined;
+  /**
+   * AB-233 — this run's own child registry, passed to every tool call as
+   * `ToolContext.executionContext.childRegistry` (see the toolbox execute
+   * call site below), not captured once at tool-construction time.
+   */
+  readonly childRegistry: RunOptions['childRegistry'];
   readonly durableOperationKeys: boolean;
   readonly defaultToolChoice: ToolChoice | undefined;
   /**
@@ -1155,36 +1161,48 @@ export async function runStep(
       emitter?.dispatch(new ToolsExecutingEvent(step, callsToExecute));
 
       try {
+        // AB-233 — thread the active trace context and a per-execution
+        // `executionContext` (this run's child registry and its own run id)
+        // through to every tool call. `executionContext` merges the
+        // caller's own `deps.executeOptions.executionContext` (if any)
+        // under the run-derived fields, so a caller-supplied key survives
+        // unless it collides with `childRegistry`/`parentRunId`.
+        const toolboxExecuteOptions = {
+          ...deps.executeOptions,
+          signal: stepSignal,
+          ...(deps.parentContext !== undefined ? { traceContext: deps.parentContext } : {}),
+          ...(deps.childRegistry !== undefined || deps.runId !== undefined
+            ? {
+                executionContext: {
+                  ...deps.executeOptions?.executionContext,
+                  ...(deps.childRegistry !== undefined
+                    ? { childRegistry: deps.childRegistry }
+                    : {}),
+                  ...(deps.runId !== undefined ? { parentRunId: deps.runId } : {}),
+                },
+              }
+            : {}),
+          ...(deps.durableOperationKeys &&
+          deps.runId !== undefined &&
+          deps.executeOptions?.durableOperationKey === undefined
+            ? {
+                durableOperationKey: (call: ToolCall, index: number) =>
+                  `schedule-safe:${deps.runId}:step-${step}:tool-${index}:${call.name}`,
+              }
+            : {}),
+        };
+
         const executeResult =
           deps.parentContext !== undefined && deps.withTraceContext !== undefined
             ? await deps.withTraceContext(deps.parentContext, () =>
-                stepToolbox.execute(callsToExecute as Parameters<typeof stepToolbox.execute>[0], {
-                  ...deps.executeOptions,
-                  signal: stepSignal,
-                  ...(deps.durableOperationKeys &&
-                  deps.runId !== undefined &&
-                  deps.executeOptions?.durableOperationKey === undefined
-                    ? {
-                        durableOperationKey: (call: ToolCall, index: number) =>
-                          `schedule-safe:${deps.runId}:step-${step}:tool-${index}:${call.name}`,
-                      }
-                    : {}),
-                }),
+                stepToolbox.execute(
+                  callsToExecute as Parameters<typeof stepToolbox.execute>[0],
+                  toolboxExecuteOptions,
+                ),
               )
             : await stepToolbox.execute(
                 callsToExecute as Parameters<typeof stepToolbox.execute>[0],
-                {
-                  ...deps.executeOptions,
-                  signal: stepSignal,
-                  ...(deps.durableOperationKeys &&
-                  deps.runId !== undefined &&
-                  deps.executeOptions?.durableOperationKey === undefined
-                    ? {
-                        durableOperationKey: (call: ToolCall, index: number) =>
-                          `schedule-safe:${deps.runId}:step-${step}:tool-${index}:${call.name}`,
-                      }
-                    : {}),
-                },
+                toolboxExecuteOptions,
               );
 
         results = Array.isArray(executeResult) ? executeResult : [executeResult];
