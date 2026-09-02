@@ -37,11 +37,11 @@ import type { AgentRun, RunnableAgent } from '@lostgradient/operative';
  * concrete type (`D[TName]`), not from this bound, so lookups through the
  * catalog stay precisely typed regardless of this union's own imprecision.
  */
-export type AgentDefinitions = Record<
-  string,
+export type AnyRunnableAgent =
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- required for the has-output union member; see comment above.
-  RunnableAgent<never, false> | RunnableAgent<any, true>
->;
+  RunnableAgent<never, false> | RunnableAgent<any, true>;
+
+export type AgentDefinitions = Record<string, AnyRunnableAgent>;
 
 /** The literal agent names of `D`, widened to `string` for runtime use. */
 export type AgentNames<D extends AgentDefinitions> = keyof D & string;
@@ -124,10 +124,18 @@ export interface BureauAgentCatalog<D extends AgentDefinitions> {
   /**
    * Runtime lookup for a name that arrived as a plain `string` (an HTTP path
    * parameter, a webhook payload). TypeScript cannot narrow a runtime string
-   * back to a literal key, so the return type is the widened
-   * `RunnableAgent<unknown, boolean>`.
+   * back to a literal key, so the return type widens to `AnyRunnableAgent` —
+   * `AgentDefinitions`' own two-member union value bound, not the collapsed
+   * `RunnableAgent<unknown, boolean>` (review finding, PRRT_kwDORvupsc6elgnG):
+   * that single-instantiation shape forces `AgentRun<O, H>.unwrap()`'s
+   * `H`-conditional to pick its `false` branch regardless of which agent
+   * actually matched, so `find(name)!.run(...).unwrap()` was unsoundly typed
+   * `Promise<string>` even when the runtime match is schema-backed and
+   * returns the parsed object. The two-member union sidesteps the
+   * conditional the same way `AgentDefinitions` itself does — see its doc
+   * comment.
    */
-  find(name: string): RunnableAgent<unknown, boolean> | undefined;
+  find(name: string): AnyRunnableAgent | undefined;
   /**
    * Narrows a runtime `string` to a known literal key of `D` where
    * TypeScript permits it (a type predicate) — `if (catalog.has(name))`

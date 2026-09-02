@@ -4,6 +4,7 @@ export type {
   AgentHasOutput,
   AgentNames,
   AgentOutput,
+  AgentRunForName,
   BureauAgentCatalog,
 } from './agent-catalog';
 export { createAgentCatalog } from './agent-catalog';
@@ -60,6 +61,7 @@ export type {
   Bureau,
   BureauEventType,
   BureauOptions,
+  BureauRunOptions,
   CacheConfiguration,
   ConfigurationResponse,
   CreateRunRequest,

@@ -7,11 +7,17 @@
 // (`RunnableAgent<never, false> | RunnableAgent<any, true>`), not one
 // instantiation of `RunnableAgent<O, H>`.
 
+import type { RunnableAgent } from '@lostgradient/operative';
 import { createAgent, createLazyAgent } from '@lostgradient/operative';
 import { createMockGenerate } from '@lostgradient/operative/test';
 import { z } from 'zod';
 
-import type { AgentDefinitions, AgentHasOutput, AgentOutput } from './agent-catalog';
+import type {
+  AgentDefinitions,
+  AgentHasOutput,
+  AgentOutput,
+  BureauAgentCatalog,
+} from './agent-catalog';
 import { createBureau } from './create-bureau';
 
 const plainAgent = createAgent({ generate: createMockGenerate([]), name: 'plain' });
@@ -77,6 +83,11 @@ function expectEquals<A, B>(..._args: Equals<A, B> extends true ? [] : [never]):
   // Type-only assertion helper — no runtime behavior. Called with zero
   // arguments; a `false` Equals<A, B> makes the parameter list `[never]`,
   // so a zero-argument call fails to compile.
+}
+function expectNotEquals<A, B>(..._args: Equals<A, B> extends true ? [never] : []): void {
+  // Inverse of expectEquals — a `true` Equals<A, B> (an unwanted match)
+  // makes the parameter list `[never]`, so a zero-argument call fails to
+  // compile.
 }
 
 // A schema'd agent's output type is preserved EXACTLY as `{ a: string }` —
@@ -153,5 +164,34 @@ async function bureauRunOutputInference() {
   // this a real tripwire.
   expectEquals<typeof unionUnwrapped, Promise<string> | Promise<{ a: string }>>();
   void unionUnwrapped;
+
+  // `find()`'s return type must widen to `AnyRunnableAgent` — the same
+  // two-member union `AgentDefinitions` itself bounds values to — not the
+  // collapsed `RunnableAgent<unknown, boolean>` (review finding,
+  // PRRT_kwDORvupsc6elgnG). That single-instantiation shape forces
+  // `AgentRun<O, H>.unwrap()`'s H-conditional to pick its `false` branch
+  // regardless of which agent actually matched, so `find(name)!.run(...
+  // ).unwrap()` would be unsoundly typed `Promise<string>` even for a
+  // schema-backed runtime match.
+  //
+  // Checked as a direct assignability tripwire, not the `Equals` trick used
+  // above: `AnyRunnableAgent`'s schema branch carries `any` (see its own
+  // doc comment for why), and `any` inside either side of that
+  // distributive-conditional comparison makes it unreliable — every
+  // manually-verified variant (including comparing this exact pair) either
+  // passed or failed independent of which return type `find()` actually
+  // declared. A plain assignment does not have that failure mode: the
+  // regressed `RunnableAgent<unknown, boolean>` has `H` widened to
+  // `boolean`, which is a plausible-looking but wrong regression to check
+  // for directly against `AnyRunnableAgent` itself: `AnyRunnableAgent`'s
+  // schema branch carries `any` (see its own doc comment for why), and
+  // `any` appearing in either side of an assignability or exact-equality
+  // check involving conditional types makes both unreliable in ways that
+  // don't track whether the ACTUAL regression (the collapsed
+  // single-instantiation return type) is present. Comparing directly
+  // against that regressed shape — `RunnableAgent<unknown, boolean>`, which
+  // contains no `any` — sidesteps that unreliability entirely.
+  type FindReturnType = Exclude<ReturnType<BureauAgentCatalog<Definitions>['find']>, undefined>;
+  expectNotEquals<FindReturnType, RunnableAgent<unknown, boolean>>();
 }
 void bureauRunOutputInference;
