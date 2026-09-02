@@ -404,6 +404,12 @@ describe('createSupervisor', () => {
 
       expect(result.agentResults).toHaveLength(1);
       expect(result.agentResults[0]!.error).toBeInstanceOf(Error);
+      // Pins the source of the failure to catalog.get()'s own throw (the
+      // ONLY unknown-agent guard left in runAgent after resolveRoutedNames'
+      // has() guard was removed as redundant) — not a .run() throw or a
+      // .result() rejection, both of which would also land in this same
+      // catch block and read as "covered" without this assertion.
+      expect((result.agentResults[0]!.error as Error).message).toMatch(/unknown agent "ghost"/i);
     });
   });
 
