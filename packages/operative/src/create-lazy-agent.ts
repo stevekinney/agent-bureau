@@ -101,6 +101,11 @@ function isValidAgentRunHandle(value: unknown): value is AgentRun<unknown, boole
     isCallable(candidate['abort']) &&
     isCallable(candidate['children']) &&
     isCallable(candidate['abortChild']) &&
+    // AB-204: an untyped or older lazy-loaded agent whose handle predates
+    // `closed()` would otherwise pass this check and then throw a raw
+    // TypeError the first time this wrapper's own `closed()` delegates to
+    // it, instead of the contract failure this validator exists to surface.
+    isCallable(candidate['closed']) &&
     isCallable(candidate[Symbol.asyncIterator]) &&
     isCallable(candidate[Symbol.dispose])
   );

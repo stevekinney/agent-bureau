@@ -110,6 +110,31 @@ describe('ActiveRun.closed()', () => {
     expect(await activeRun.closed()).toEqual({ status: 'completed' });
   });
 
+  // Regression: a code-review finding on the AB-204 pull request —
+  // `cancelRequested` alone tracks only a direct `abort()` call, missing a
+  // cancellation delivered through `RunOptions.signal` (which
+  // `AgentRunContext.signal`/`createAgent` forward without ever calling
+  // this ActiveRun's own `abort()`).
+  it('disqualifies the not-required fast path when the run was cancelled through RunOptions.signal rather than abort()', async () => {
+    const controller = new AbortController();
+    const generate = createMockGenerate([textResponse('should not run')]);
+    const toolbox = createTestToolbox([]);
+    const activeRun = createActiveRun({
+      generate,
+      toolbox,
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      signal: controller.signal,
+    });
+
+    controller.abort('cancelled via caller signal');
+    const result = await activeRun.result;
+    expect(result.finishReason).toBe('aborted');
+    await Promise.resolve();
+
+    expect(await activeRun.closed()).not.toEqual({ status: 'not-required' });
+  });
+
   it('calling closed() twice after settlement returns the identical object by reference', async () => {
     const generate = createMockGenerate([textResponse('done')]);
     const toolbox = createTestToolbox([]);

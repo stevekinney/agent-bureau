@@ -309,6 +309,31 @@ describe('createLazyAgent', () => {
     expect((result.error as AgentContractError).code).toBe('INVALID_AGENT_HANDLE');
   });
 
+  it('rejects a run() handle missing closed() (AB-204) as an AgentContractError, not a raw TypeError', async () => {
+    // Regression: a code-review finding on the AB-204 pull request — an
+    // untyped or older lazy-loaded handle predating closed() would
+    // otherwise pass this guard and only fail later, as a raw
+    // `TypeError: underlying.closed is not a function`, the first time
+    // this wrapper's own closed() delegates to it.
+    const preAb204Handle = {
+      result: () => Promise.resolve(successResult('x')),
+      unwrap: () => Promise.resolve('x'),
+      abort: () => {},
+      children: () => [],
+      abortChild: () => {},
+      [Symbol.dispose]: () => {},
+      [Symbol.asyncIterator]: () => (async function* () {})(),
+      // Deliberately omits `closed`.
+    } as unknown as AgentRun<string, false>;
+    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => preAb204Handle };
+    const lazy = createLazyAgent(() => agent, { label: 'pre-ab204-handle' });
+
+    const run = lazy.run('one');
+    const result = await run.result();
+    expect(result.error).toBeInstanceOf(AgentContractError);
+    expect((result.error as AgentContractError).code).toBe('INVALID_AGENT_HANDLE');
+  });
+
   it('wraps a synchronous throw from the underlying run() as an AgentContractError', async () => {
     const agent: RunnableAgent<string, false> = {
       name: 'fake',

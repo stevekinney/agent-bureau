@@ -130,6 +130,12 @@ export function createClosedAcknowledgement(
     const signal = closedOptions?.signal;
     if (!signal) return settlement;
 
+    // A genuine settlement already cached means there is no remaining wait
+    // for the signal to bound — honor the post-settlement idempotency
+    // guarantee (the identical cached object) rather than manufacturing a
+    // fresh `unresolved`/`timed-out` result for an already-aborted signal.
+    if (cached) return Promise.resolve(cached);
+
     if (signal.aborted) {
       return Promise.resolve({ status: 'unresolved', reason: 'timed-out' });
     }

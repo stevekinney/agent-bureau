@@ -65,6 +65,26 @@ export const SCHEDULER_ORIGIN_TAG = 'bureau:scheduler-origin' as const;
  */
 export const SCHEDULER_RUN_ID_PREFIX = 'scheduler-run-' as const;
 
+/**
+ * Terminal `WorkflowStatus` values (Weft `identity.ts`) — everything that is
+ * NOT one of `'pending' | 'running' | 'suspended'`. Used by `closed()`'s
+ * post-cancel re-read (AC7 / a code-review finding on the AB-204 pull
+ * request): `engine.cancel` resolving is not proof the cancellation record
+ * committed, and a re-read that still reports a NONTERMINAL status means
+ * the workflow has not actually stopped yet — reporting `completed` there
+ * would let a caller proceed while the workflow is still active.
+ */
+const TERMINAL_WORKFLOW_STATUSES = new Set<string>([
+  'completed',
+  'failed',
+  'cancelled',
+  'timed-out',
+]);
+
+function isTerminalWorkflowStatus(status: string): boolean {
+  return TERMINAL_WORKFLOW_STATUSES.has(status);
+}
+
 /** Dependencies the adapter needs from bureau composition. */
 export interface DurableActiveRunContext {
   engine: RegistryAgnosticEngine;
@@ -526,8 +546,12 @@ export function createDurableActiveRun(
       // Fire-and-forget: a failing cancel (run already terminal) is not an
       // error — the AbortController already dropped the in-flight connection.
       // Kept on `cancelSettled` too, so closed()'s post-cancel re-read awaits
-      // THIS call rather than firing a redundant one.
-      cancelSettled = context.engine.cancel(runId).catch(() => {
+      // THIS call rather than firing a redundant one. `??=`, not `=`: a
+      // second abort() (e.g. an explicit abort() followed by dispose())
+      // must not overwrite an already-in-flight (or already-settled) first
+      // cancellation with a fresh, possibly slower or non-settling, one —
+      // closed() would otherwise wait on the wrong promise.
+      cancelSettled ??= context.engine.cancel(runId).catch(() => {
         // Swallow: run may already be terminal. The AbortController signal is
         // the load-bearing stop; engine.cancel is belt-and-suspenders.
       });
@@ -545,10 +569,17 @@ export function createDurableActiveRun(
       // `engine.cancel` resolving void is not proof the cancellation record
       // committed (it is also a documented no-op against an already-terminal
       // workflow) — only a re-read can disambiguate. `state.status ===
-      // 'cancelled'` is this closed()'s cancellation, any other terminal
-      // status means the workflow settled on its own before the cancel could
-      // apply; either way the durable record exists and cleanup is complete.
-      if (!state) return { status: 'unresolved', reason: 'persistence-failed' };
+      // 'cancelled'` is this closed()'s cancellation, any OTHER TERMINAL
+      // status means the workflow settled on its own before the cancel
+      // could apply; either way the durable record exists and cleanup is
+      // complete. A NONTERMINAL status (pending/running/suspended) means
+      // the cancellation has not actually taken effect yet — reporting
+      // `completed` there would let a caller proceed while the workflow is
+      // still active, so this stays `unresolved`/`persistence-failed`
+      // instead (the durable write could not yet be confirmed).
+      if (!state || !isTerminalWorkflowStatus(state.status)) {
+        return { status: 'unresolved', reason: 'persistence-failed' };
+      }
       return { status: 'completed' };
     } catch (error) {
       return { status: 'unresolved', reason: 'persistence-failed', error };
@@ -557,7 +588,10 @@ export function createDurableActiveRun(
 
   const closed = createClosedAcknowledgement({
     result,
-    disqualifiesFastPath: () => cancelRequested,
+    // `cancelRequested` alone misses a cancellation that arrived through
+    // `RunOptions.signal` rather than a direct `abort()` call —
+    // `combinedSignal` covers both, matching create-run.ts's identical fix.
+    disqualifiesFastPath: () => cancelRequested || combinedSignal.aborted,
     hasInFlightWork: () => inFlightTools > 0,
     resolveOutcome: resolveDurableOutcome,
   });
@@ -840,7 +874,12 @@ export function reattachDurableActiveRun(
     await abortCancelled;
     try {
       const state = await context.engine.get(runId);
-      if (!state) return { status: 'unresolved', reason: 'persistence-failed' };
+      // See `createDurableActiveRun`'s identical `resolveDurableOutcome`
+      // reasoning: a nonterminal status means the cancellation has not
+      // actually taken effect yet.
+      if (!state || !isTerminalWorkflowStatus(state.status)) {
+        return { status: 'unresolved', reason: 'persistence-failed' };
+      }
       return { status: 'completed' };
     } catch (error) {
       return { status: 'unresolved', reason: 'persistence-failed', error };

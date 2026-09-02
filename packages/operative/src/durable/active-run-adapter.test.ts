@@ -1251,6 +1251,37 @@ describe('createDurableActiveRun.closed()', () => {
     }
   });
 
+  // Regression: a code-review finding on the AB-204 pull request —
+  // `cancelRequested` alone tracks only a direct `abort()` call, missing a
+  // cancellation delivered through `RunOptions.signal` (which
+  // `AgentRunContext.signal`/`createAgent` forward), so a run cancelled
+  // that way could wrongly resolve not-required despite genuinely being
+  // cancelled.
+  it('disqualifies not-required when the run was cancelled through RunOptions.signal rather than abort()', async () => {
+    const context = await buildContext();
+    try {
+      const controller = new AbortController();
+      const activeRun = createDurableActiveRun(context, {
+        runId: 'ac-durable-external-signal',
+        sessionId: 'ac-durable-external-signal',
+        options: {
+          ...runOptions(async () => ({ content: 'unused', toolCalls: [] })),
+          signal: controller.signal,
+        },
+        prompt: 'Hello',
+      });
+
+      controller.abort();
+      await activeRun.result;
+      await Promise.resolve();
+
+      const acknowledgement = await activeRun.closed();
+      expect(acknowledgement).not.toEqual({ status: 'not-required' });
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
   // Regression: a code-review finding on the AB-204 pull request — see the
   // identical fixture in create-run.test.ts for the full rationale.
   it('does not corrupt in-flight tool tracking when the toolbox emits settled with no preceding execute-start', async () => {
@@ -1458,6 +1489,87 @@ describe('createDurableActiveRun.closed()', () => {
       status: 'unresolved',
       reason: 'persistence-failed',
     });
+  });
+
+  // Regression: a code-review finding on the AB-204 pull request —
+  // `engine.cancel` resolving is not proof the cancellation record
+  // committed; a post-cancel re-read that still reports a NONTERMINAL
+  // status (not just a missing record) must not be reported completed.
+  it('resolves unresolved/persistence-failed when the post-cancel re-read reports a nonterminal status', async () => {
+    const { engine } = createManualDurableEngine();
+    engine.get = (async () => ({ status: 'running' })) as unknown as RegistryAgnosticEngine['get'];
+
+    const runId = 'ac7-persistence-failed-nonterminal';
+    const activeRun = createDurableActiveRun(
+      { engine, checkpointStore: createManualCheckpointStore() },
+      {
+        runId,
+        sessionId: runId,
+        options: runOptions(async () => ({ content: 'unused', toolCalls: [] })),
+        prompt: 'Hello',
+      },
+    );
+
+    await Promise.resolve();
+    activeRun.abort();
+    const closedAcknowledgement = activeRun.closed();
+    await activeRun.result;
+
+    expect(await closedAcknowledgement).toEqual({
+      status: 'unresolved',
+      reason: 'persistence-failed',
+    });
+  });
+
+  // Regression: a code-review finding on the AB-204 pull request — a second
+  // abort() (e.g. explicit abort() followed by dispose()) must not
+  // overwrite `cancelSettled` with a fresh, possibly slower or
+  // non-resolving, redundant `engine.cancel` call; closed() must keep
+  // waiting on the FIRST one.
+  it('does not fire a second engine.cancel call — and does not wait on one — when abort() is called twice after the workflow started', async () => {
+    const { engine, rejectResult } = createManualDurableEngine();
+    const cancelCalls: string[] = [];
+    let resolveFirstCancel!: () => void;
+    const firstCancelGate = new Promise<void>((resolve) => {
+      resolveFirstCancel = resolve;
+    });
+    engine.cancel = async (id: string) => {
+      cancelCalls.push(id);
+      if (cancelCalls.length === 1) {
+        await firstCancelGate;
+        // The real `cancel` rejects the workflow result as a side effect
+        // (the B6 race) — replicate that so the run still settles.
+        rejectResult(new Error('Workflow cancelled'));
+        return;
+      }
+      throw new Error('a second engine.cancel call should never have been made');
+    };
+    engine.get = (async () => ({
+      status: 'cancelled',
+    })) as unknown as RegistryAgnosticEngine['get'];
+
+    const runId = 'ac7-cancel-settled-idempotent';
+    const activeRun = createDurableActiveRun(
+      { engine, checkpointStore: createManualCheckpointStore() },
+      {
+        runId,
+        sessionId: runId,
+        options: runOptions(async () => ({ content: 'unused', toolCalls: [] })),
+        prompt: 'Hello',
+      },
+    );
+
+    await Promise.resolve();
+    activeRun.abort();
+    activeRun.abort();
+    expect(cancelCalls).toEqual([runId]);
+
+    const closedAcknowledgement = activeRun.closed();
+    resolveFirstCancel();
+    await activeRun.result;
+
+    expect(await closedAcknowledgement).toEqual({ status: 'completed' });
+    expect(cancelCalls).toEqual([runId]);
   });
 });
 
@@ -2239,6 +2351,46 @@ describe('reattachDurableActiveRun.closed()', () => {
         status: 'unresolved',
         reason: 'persistence-failed',
         error: readFailure,
+      });
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  // Regression: a code-review finding on the AB-204 pull request — see
+  // `createDurableActiveRun.closed()`'s identical fixture for the full
+  // rationale.
+  it('resolves unresolved/persistence-failed when the post-cancel re-read reports a nonterminal status', async () => {
+    const context = await buildContext();
+    try {
+      let rejectResult!: (error: unknown) => void;
+      const handle = {
+        id: 'reattach-closed-nonterminal',
+        result: () =>
+          new Promise<unknown>((_resolve, reject) => {
+            rejectResult = reject;
+          }),
+      };
+      const engine = {
+        cancel: async () => {
+          rejectResult(new Error('cancelled'));
+        },
+        get: async () => ({ status: 'running' }),
+      } as unknown as RegistryAgnosticEngine;
+
+      const recoveredRun = reattachDurableActiveRun(
+        { engine, checkpointStore: context.checkpointStore },
+        { runId: 'reattach-closed-nonterminal', handle },
+      );
+
+      await Promise.resolve();
+      recoveredRun.abort();
+      const closedAcknowledgement = recoveredRun.closed();
+      await recoveredRun.result;
+
+      expect(await closedAcknowledgement).toEqual({
+        status: 'unresolved',
+        reason: 'persistence-failed',
       });
     } finally {
       context.engine[Symbol.dispose]();

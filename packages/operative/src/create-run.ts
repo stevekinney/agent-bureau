@@ -305,7 +305,10 @@ export function createActiveRun(options: RunOptions, durable?: DurableRunRouting
   // which `.finally()` surfaces as the settlement) is the only `failed` case.
   const closed = createClosedAcknowledgement({
     result,
-    disqualifiesFastPath: () => cancelRequested,
+    // `cancelRequested` alone misses a cancellation that arrived through
+    // `RunOptions.signal` (e.g. `AgentRunContext.signal`) rather than a
+    // direct `abort()` call — `combinedSignal` covers both.
+    disqualifiesFastPath: () => cancelRequested || combinedSignal.aborted,
     hasInFlightWork: () => inFlightTools > 0,
     resolveOutcome: () => Promise.resolve({ status: 'completed' }),
   });

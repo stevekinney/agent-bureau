@@ -175,6 +175,31 @@ describe('createClosedAcknowledgement', () => {
     });
   });
 
+  // Regression: a code-review finding on the AB-204 pull request — a
+  // genuinely settled, cached acknowledgement has no remaining wait for a
+  // signal to bound; an already-aborted signal on a call made AFTER
+  // settlement must still return the identical cached object, honoring
+  // the post-settlement idempotency guarantee.
+  it('returns the identical cached acknowledgement for an already-aborted signal when cleanup already genuinely settled', async () => {
+    const deferred = createDeferred<void>();
+    const closed = createClosedAcknowledgement({
+      result: deferred.promise,
+      disqualifiesFastPath: () => false,
+      hasInFlightWork: () => false,
+      resolveOutcome: () => Promise.resolve({ status: 'completed' }),
+    });
+
+    const pending = closed();
+    deferred.resolve();
+    const first = await pending;
+
+    const controller = new AbortController();
+    controller.abort();
+    const second = await closed({ signal: controller.signal });
+
+    expect(second).toBe(first);
+  });
+
   it('resolves unresolved/timed-out for a call whose own signal fires before settlement, without writing that outcome into the shared cache', async () => {
     const deferred = createDeferred<void>();
     const closed = createClosedAcknowledgement({

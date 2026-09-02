@@ -559,18 +559,49 @@ export function createDiagnosticAgentRun(
   // is inherently call-scoped, never a genuine settlement, so it passes
   // through uncached, matching the wrapped `ActiveRun.closed()` contract.
   let cachedDiagnosticAcknowledgement: CleanupAcknowledgement | undefined;
-  run.closed = (closedOptions?: ClosedOptions): Promise<CleanupAcknowledgement> => {
+  // The pending TRANSFORM itself is memoized, not just its eventual value —
+  // two concurrent calls before the first transformation finishes must
+  // share the identical downgraded object once it settles, rather than
+  // each independently allocating their own `unresolved`/`unknown-effect`
+  // literal. Called with no signal: a signal-bearing call races ITS OWN
+  // wait against this shared promise below instead of forwarding the
+  // signal into a second, separate `activeRun.closed()` invocation.
+  let pendingDiagnosticAcknowledgement: Promise<CleanupAcknowledgement> | undefined;
+  function getPendingDiagnosticAcknowledgement(): Promise<CleanupAcknowledgement> {
     if (cachedDiagnosticAcknowledgement) return Promise.resolve(cachedDiagnosticAcknowledgement);
-    return activeRun.closed(closedOptions).then((acknowledgement) => {
-      if (acknowledgement.status === 'unresolved' && acknowledgement.reason === 'timed-out') {
-        return acknowledgement;
-      }
+    pendingDiagnosticAcknowledgement ??= activeRun.closed().then((acknowledgement) => {
       const resolved: CleanupAcknowledgement =
         acknowledgement.status === 'completed'
           ? { status: 'unresolved', reason: 'unknown-effect' }
           : acknowledgement;
       cachedDiagnosticAcknowledgement = resolved;
       return resolved;
+    });
+    return pendingDiagnosticAcknowledgement;
+  }
+
+  run.closed = (closedOptions?: ClosedOptions): Promise<CleanupAcknowledgement> => {
+    const settlement = getPendingDiagnosticAcknowledgement();
+    const signal = closedOptions?.signal;
+    if (!signal) return settlement;
+
+    if (cachedDiagnosticAcknowledgement) return Promise.resolve(cachedDiagnosticAcknowledgement);
+    if (signal.aborted) return Promise.resolve({ status: 'unresolved', reason: 'timed-out' });
+
+    return new Promise<CleanupAcknowledgement>((resolve) => {
+      let callSettled = false;
+      const onAbort = (): void => {
+        if (callSettled) return;
+        callSettled = true;
+        resolve({ status: 'unresolved', reason: 'timed-out' });
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+      void settlement.then((acknowledgement) => {
+        if (callSettled) return;
+        callSettled = true;
+        signal.removeEventListener('abort', onAbort);
+        resolve(acknowledgement);
+      });
     });
   };
 

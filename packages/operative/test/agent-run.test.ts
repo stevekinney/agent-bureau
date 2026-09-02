@@ -419,7 +419,7 @@ describe('createDiagnosticAgentRun()', () => {
       expect(second).toBe(first);
     });
 
-    it('does not cache a per-call signal timeout, and still delegates to the wrapped closed() with that signal', async () => {
+    it('does not cache a per-call signal timeout, racing the caller-supplied signal against the shared settlement rather than forwarding it to the wrapped closed()', async () => {
       const { activeRun, closedCalls } = createActiveRunWithClosed({ status: 'completed' });
       const run = createDiagnosticAgentRun(activeRun);
 
@@ -427,11 +427,69 @@ describe('createDiagnosticAgentRun()', () => {
       controller.abort();
       const timedOut = await run.closed({ signal: controller.signal });
       expect(timedOut).toEqual({ status: 'unresolved', reason: 'timed-out' });
-      expect(closedCalls).toEqual([{ signal: controller.signal }]);
+      // The wrapped call is invoked with no signal — this wrapper races the
+      // caller's own signal against the shared settlement itself, so an
+      // abandoned wait here never depends on (or corrupts) a concurrent
+      // signal-free call's memoized transform.
+      expect(closedCalls).toEqual([undefined]);
 
       // A later signal-free call is unaffected by the abandoned one, and
       // still applies the completed → unknown-effect downgrade.
       expect(await run.closed()).toEqual({ status: 'unresolved', reason: 'unknown-effect' });
+    });
+
+    it('resolves the identical cached downgraded object for a signal-bearing call made after genuine settlement', async () => {
+      const { activeRun } = createActiveRunWithClosed({ status: 'completed' });
+      const run = createDiagnosticAgentRun(activeRun);
+
+      const first = await run.closed();
+      const controller = new AbortController();
+      controller.abort();
+      const second = await run.closed({ signal: controller.signal });
+
+      expect(second).toBe(first);
+    });
+
+    it('shares the identical downgraded object across two concurrent calls made before the transform settles', async () => {
+      const { activeRun } = createActiveRunWithClosed({ status: 'completed' });
+      const run = createDiagnosticAgentRun(activeRun);
+
+      const [first, second] = await Promise.all([run.closed(), run.closed()]);
+      expect(second).toBe(first);
+    });
+
+    it('resolves unresolved/timed-out for a signal that fires after the call starts but before settlement wins', async () => {
+      let releaseUnderlying!: (acknowledgement: CleanupAcknowledgement) => void;
+      const underlyingClosed = new Promise<CleanupAcknowledgement>((resolve) => {
+        releaseUnderlying = resolve;
+      });
+      const activeRun = {
+        result: new Promise(() => {}),
+        abort: () => undefined,
+        closed: () => underlyingClosed,
+        [Symbol.dispose]: () => undefined,
+        toObservable: () => ({ subscribe: () => ({ unsubscribe: () => undefined }) }),
+      } as unknown as ActiveRun;
+      const run = createDiagnosticAgentRun(activeRun);
+
+      const controller = new AbortController();
+      const timedOutCall = run.closed({ signal: controller.signal });
+      controller.abort();
+
+      expect(await timedOutCall).toEqual({ status: 'unresolved', reason: 'timed-out' });
+
+      // Settling the real cleanup afterward is unaffected by the abandoned wait.
+      releaseUnderlying({ status: 'completed' });
+      expect(await run.closed()).toEqual({ status: 'unresolved', reason: 'unknown-effect' });
+    });
+
+    it('resolves a signal-bearing call with the real transformed value when settlement wins before the signal fires', async () => {
+      const { activeRun } = createActiveRunWithClosed({ status: 'completed' });
+      const run = createDiagnosticAgentRun(activeRun);
+
+      const controller = new AbortController();
+      const result = await run.closed({ signal: controller.signal });
+      expect(result).toEqual({ status: 'unresolved', reason: 'unknown-effect' });
     });
   });
 });
