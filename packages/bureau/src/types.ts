@@ -17,7 +17,11 @@ import type {
   StopCondition,
   TokenUsage,
 } from '@lostgradient/operative';
-import type { CreateRunEngineOptions } from '@lostgradient/operative/durable';
+import type {
+  CreateRunEngineOptions,
+  SessionInputAdmissionOutcome,
+  SessionInputAdmissionRequest,
+} from '@lostgradient/operative/durable';
 import type { Store } from '@lostgradient/operative/store';
 import type {
   HistoryPolicy,
@@ -465,7 +469,44 @@ export interface BureauOptions<D extends AgentDefinitions = AgentDefinitions> {
    * the run.
    */
   onDiagnostic?: DiagnosticSink;
+  /**
+   * AB-42/AB-194 — per-session and per-principal backlog caps for pending
+   * `SessionInputRecord`s admitted through {@link Bureau.submitSessionInput}.
+   * Both are validated as positive integers at `createBureau()` construction
+   * time, throwing `BureauError('...', 'BAD_REQUEST')` for a non-positive-integer
+   * value (0, a negative number, or a non-integer). Defaults to
+   * {@link DEFAULT_SESSION_INPUT_BACKLOG_LIMIT} and
+   * {@link DEFAULT_PRINCIPAL_SESSION_INPUT_BACKLOG_LIMIT} when omitted.
+   *
+   * AB-42 fixes only that two independent caps exist over the not-yet-terminal
+   * `SessionInputRecord`s for a session (and, separately, for one principal's
+   * records against that session); it does not fix the numbers, and neither
+   * cap is enforced by this issue's code paths — every reachable outcome here
+   * is a pre-admission rejection, before any record (and so any backlog)
+   * exists. Enforcement lands with the mailbox-backed `ab-42-bureau-b` slice.
+   */
+  sessionInput?: {
+    readonly sessionBacklogLimit?: number;
+    readonly principalBacklogLimit?: number;
+  };
 }
+
+/**
+ * AB-42/AB-194 coordinator-chosen default for
+ * {@link BureauOptions.sessionInput}'s `sessionBacklogLimit` — the per-session
+ * cap over all not-yet-terminal `SessionInputRecord`s, applied when the caller
+ * omits an explicit value. Not itself load-bearing for any AB-42 acceptance
+ * criterion beyond being enforced once the mailbox-backed admission path lands.
+ */
+export const DEFAULT_SESSION_INPUT_BACKLOG_LIMIT = 32;
+
+/**
+ * AB-42/AB-194 coordinator-chosen default for
+ * {@link BureauOptions.sessionInput}'s `principalBacklogLimit` — the per-principal
+ * cap over one principal's `SessionInputRecord`s against a given session,
+ * applied when the caller omits an explicit value.
+ */
+export const DEFAULT_PRINCIPAL_SESSION_INPUT_BACKLOG_LIMIT = 128;
 
 /**
  * Durable history/checkpoint guardrail configuration surfaced on
@@ -725,6 +766,27 @@ export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
    * before calling.
    */
   querySession(sessionId: string, name: string, input?: unknown): Promise<unknown>;
+
+  /**
+   * AB-42/AB-194 — admit a caller's session input as a fifth session verb.
+   * Pre-admission checks run in AB-42's fixed order: authorization, then
+   * session lifecycle, then capability/capacity. An unauthorized caller or an
+   * unknown `sessionId` returns `{ outcome: 'not-found' }` (indistinguishable
+   * by design — the document's authorization-denial rule). An authorized
+   * caller naming a session already in a terminal state returns
+   * `{ outcome: 'session-terminal', sessionId }`.
+   *
+   * Until `ab-42-bureau-b` lands (WFT-84's durable application command
+   * mailbox), every other authorized, non-terminal request unconditionally
+   * returns `{ outcome: 'unsupported-capability', reason:
+   * 'durable-mailbox-unavailable' }` — no `SessionInputRecord` is created and
+   * no `id` is consumed by this method today. `admitted`/`replayed`/
+   * `conflict`/`backlog-exhausted` are structurally unreachable until then.
+   */
+  submitSessionInput(
+    sessionId: string,
+    request: SessionInputAdmissionRequest,
+  ): Promise<SessionInputAdmissionOutcome>;
 
   /**
    * Synchronous, constant capability discovery for the three session verbs

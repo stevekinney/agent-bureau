@@ -44,6 +44,8 @@ import {
   type RecoveredRunHandle,
   type ScheduledAgentRunInput,
   SCHEDULER_RUN_ID_PREFIX,
+  type SessionInputAdmissionOutcome,
+  type SessionInputAdmissionRequest,
 } from '@lostgradient/operative/durable';
 import {
   createStore,
@@ -239,6 +241,67 @@ export function hasRecoverableTransportAuthority(metadata: Record<string, JSONVa
   return requiresTransportValidator(
     (legacyAuthority as Record<string, JSONValue>)['authorizationRevision'],
   );
+}
+
+/**
+ * The `principalId` recorded for a session's most recent run, per AB-42's
+ * coordinator ruling (2026-09-02): reads `metadata['lastRequestAuthorities'][lastRunId]?.principalId`,
+ * falling back to the legacy `metadata['lastRequestAuthority'].principalId`
+ * exactly as {@link recoveredRequestContextFromMetadata} already does. Returns
+ * `undefined` when the session has recorded no authority at all — an "open"
+ * session, per the ruling.
+ *
+ * Shared by every new Bureau session verb that needs to authorize against a
+ * session's recorded authority (AB-194's `submitSessionInput`, AB-199's
+ * `submitSteeringCommand`) — neither issue owns or invents this mechanism,
+ * both simply read the pre-existing metadata keys `create-bureau.ts` already
+ * writes on every run dispatch.
+ */
+export function recordedSessionAuthorityPrincipalId(
+  metadata: Record<string, JSONValue>,
+): string | undefined {
+  const lastRunId = metadata['lastRunId'];
+  const authorities = metadata['lastRequestAuthorities'];
+  const candidate =
+    typeof lastRunId === 'string' &&
+    lastRunId &&
+    authorities &&
+    typeof authorities === 'object' &&
+    !Array.isArray(authorities)
+      ? (authorities as Record<string, JSONValue>)[lastRunId]
+      : metadata['lastRequestAuthority'];
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+    return undefined;
+  }
+  const principalId = (candidate as Record<string, JSONValue>)['principalId'];
+  return typeof principalId === 'string' ? principalId : undefined;
+}
+
+/**
+ * Whether `principal` is authorized to act on a session recording the given
+ * metadata, per {@link recordedSessionAuthorityPrincipalId}'s rule. A session
+ * with no recorded authority at all is treated as open — every principal is
+ * authorized — matching what every existing session verb enforces today
+ * (nothing stronger), per AB-42's coordinator ruling (2026-09-02).
+ */
+export function isSessionAuthorityAuthorized(
+  metadata: Record<string, JSONValue>,
+  principal: string,
+): boolean {
+  const recorded = recordedSessionAuthorityPrincipalId(metadata);
+  return recorded === undefined || recorded === principal;
+}
+
+/**
+ * Whether a session's most recent run is in a terminal (non-`'running'`)
+ * state, reading the same `metadata['lastRunStatus']` field
+ * {@link requireSessionRunId} and {@link hasRecoverableTransportAuthority}
+ * already read. Shared by every new Bureau session verb that needs a
+ * terminal-session check (AB-194's `submitSessionInput`, AB-199's
+ * `submitSteeringCommand`).
+ */
+export function isSessionRunTerminal(metadata: Record<string, JSONValue>): boolean {
+  return metadata['lastRunStatus'] !== 'running';
 }
 
 export function isTerminalApprovalBindingError(error: unknown): boolean {
@@ -834,9 +897,36 @@ export async function monitorRecoveredScheduledFire(
   }
 }
 
+/**
+ * AB-194 — `BureauOptions.sessionInput`'s `sessionBacklogLimit`/
+ * `principalBacklogLimit` must each be a positive integer when supplied.
+ * Throws `BureauError('...', 'BAD_REQUEST')` for 0, a negative number, or a
+ * non-integer; a `undefined` value (option omitted) passes through untouched.
+ */
+function validateSessionInputBacklogLimit(value: number | undefined, optionName: string): void {
+  if (value === undefined) return;
+  if (!Number.isInteger(value) || value <= 0) {
+    toBadRequest(`"options.sessionInput.${optionName}" must be a positive integer`);
+  }
+}
+
 export async function createBureau<const D extends AgentDefinitions = AgentDefinitions>(
   options: BureauOptions<D>,
 ): Promise<Bureau<D>> {
+  // AB-194: validated here (BAD_REQUEST at construction time) though not yet
+  // enforced — every reachable `submitSessionInput` outcome today is a
+  // pre-admission rejection, before any backlog could exist to check
+  // against. Enforcement lands with the mailbox-backed `ab-42-bureau-b` slice
+  // once WFT-84 ships, using these same validated values (defaulting to
+  // `DEFAULT_SESSION_INPUT_BACKLOG_LIMIT`/`DEFAULT_PRINCIPAL_SESSION_INPUT_BACKLOG_LIMIT`).
+  validateSessionInputBacklogLimit(
+    options.sessionInput?.sessionBacklogLimit,
+    'sessionBacklogLimit',
+  );
+  validateSessionInputBacklogLimit(
+    options.sessionInput?.principalBacklogLimit,
+    'principalBacklogLimit',
+  );
   const diagnose = resolveDiagnosticSink(options.onDiagnostic);
   const ownsStore = !options.store;
   const store: Store = options.store ?? createStore();
@@ -3459,6 +3549,33 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     );
   }
 
+  /**
+   * AB-42/AB-194 — admit a caller's session input. Pre-admission checks run
+   * in AB-42's fixed order: authorization (`not-found`) first, then session
+   * lifecycle (`session-terminal`), then capability/capacity
+   * (`unsupported-capability`) — reversing the first two would let an
+   * unauthorized caller learn a session exists.
+   *
+   * Every reachable outcome here is a pre-admission rejection: no adopted
+   * `@lostgradient/weft` version exposes WFT-84's durable mailbox yet, so
+   * every authorized, non-terminal request unconditionally returns
+   * `unsupported-capability`. No `SessionInputRecord` is created and no `id`
+   * is consumed by this method today.
+   */
+  async function submitSessionInput(
+    sessionId: string,
+    request: SessionInputAdmissionRequest,
+  ): Promise<SessionInputAdmissionOutcome> {
+    const session = await requireSessionStore().load(sessionId);
+    if (!session || !isSessionAuthorityAuthorized(session.metadata, request.principal)) {
+      return { outcome: 'not-found' };
+    }
+    if (isSessionRunTerminal(session.metadata)) {
+      return { outcome: 'session-terminal', sessionId };
+    }
+    return { outcome: 'unsupported-capability', reason: 'durable-mailbox-unavailable' };
+  }
+
   function listPendingReviews(): PendingReview[] {
     const now = Date.now();
     const reviews: PendingReview[] = [];
@@ -4124,6 +4241,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     signalSession,
     updateSession,
     querySession,
+    submitSessionInput,
     // AB-192: constant, not computed from runtime state — the built-in
     // `agentRun` workflow never registers `ctx.onUpdate`/`ctx.onQuery`
     // handlers, so `update`/`query` are unsupported today regardless of
