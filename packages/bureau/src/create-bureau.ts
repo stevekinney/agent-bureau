@@ -292,8 +292,20 @@ function lookupSessionAuthority(
     typeof lastRunId === 'string' && lastRunId && authorities !== undefined
       ? authorities[lastRunId]
       : undefined;
-  const candidate = perRunEntry !== undefined ? perRunEntry : metadata['lastRequestAuthority'];
-  if (candidate === undefined) {
+  const legacy = metadata['lastRequestAuthority'];
+  let candidate: JSONValue | undefined;
+  if (perRunEntry !== undefined) {
+    candidate = perRunEntry;
+  } else if (legacy !== undefined) {
+    candidate = legacy;
+  } else if (authorities !== undefined && Object.keys(authorities).length > 0) {
+    // A valid, non-empty `lastRequestAuthorities` map exists but doesn't
+    // correlate to this run (`lastRunId` missing/corrupt, or the map's
+    // entries are keyed to other runs) and no legacy fallback exists either.
+    // That is recorded-but-uncorrelated evidence, not "nothing recorded" —
+    // fail closed rather than read it as an open session.
+    return { recorded: true, principalId: undefined };
+  } else {
     return { recorded: false };
   }
   if (!isPlainAuthorityRecord(candidate)) {

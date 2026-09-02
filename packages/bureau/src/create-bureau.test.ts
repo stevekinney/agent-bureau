@@ -4479,6 +4479,41 @@ describe('recordedSessionAuthorityPrincipalId / isSessionAuthorityAuthorized (AB
       }),
     ).toBeUndefined();
   });
+
+  it('fails closed (denies every principal) when a non-empty lastRequestAuthorities map cannot be correlated to lastRunId and no legacy fallback exists', () => {
+    // Regression (Codex review, third pass): a valid, NON-EMPTY
+    // lastRequestAuthorities map that simply doesn't name an entry for this
+    // lastRunId (missing/corrupt lastRunId, or entries keyed to other runs)
+    // is recorded-but-uncorrelated evidence, not "nothing recorded" — it
+    // must fail closed too, when there is no legacy field to fall back to.
+    const metadataMissingLastRunId = {
+      lastRequestAuthorities: {
+        'some-run': {
+          principalId: 'someone',
+          tenantId: 'bureau',
+          ownerId: 'agent',
+          capabilities: ['tools:execute'],
+          authorizationRevision: 'bureau:1',
+        },
+      },
+    };
+    expect(isSessionAuthorityAuthorized(metadataMissingLastRunId, 'anyone')).toBe(false);
+    expect(recordedSessionAuthorityPrincipalId(metadataMissingLastRunId)).toBeUndefined();
+
+    const metadataUncorrelatedLastRunId = {
+      lastRunId: 'run-not-in-map',
+      lastRequestAuthorities: {
+        'some-other-run': {
+          principalId: 'someone',
+          tenantId: 'bureau',
+          ownerId: 'agent',
+          capabilities: ['tools:execute'],
+          authorizationRevision: 'bureau:1',
+        },
+      },
+    };
+    expect(isSessionAuthorityAuthorized(metadataUncorrelatedLastRunId, 'anyone')).toBe(false);
+  });
 });
 
 describe('isSessionRunTerminal (AB-194)', () => {
