@@ -3,7 +3,7 @@
  * isolated Bun/TypeScript consumer outside the monorepo workspace (AB-23).
  *
  * Usage:
- *   bun run scripts/verify-operative-consumer.ts --mode local
+ *   bun run scripts/verify-operative-consumer.ts --mode local [--pack-siblings]
  *   bun run scripts/verify-operative-consumer.ts --mode registry --version <version>
  *
  * Local mode packs `packages/operative` with `npm pack` and installs that
@@ -11,10 +11,36 @@
  * `@lostgradient/operative@<version>` from the public npm registry instead —
  * everything else about the consumer and its assertions is identical.
  *
+ * AB-287: local mode proves the artifact boundary, not the registry state.
+ * Operative's workspace-sibling dependencies (currently `armorer` and
+ * `conversationalist` — detected dynamically from `packages/operative`'s own
+ * `dependencies`, matched against every `packages/*` manifest's `name`) can
+ * have source ahead of what is published: a coordinated cross-package change
+ * lands in the sibling's source before a Version Packages pull request ever
+ * publishes it, and registry-resolving that sibling in the isolated consumer
+ * would compile against the STALE published surface. For each sibling, this
+ * script packs it locally instead of letting it resolve from the registry
+ * when: its exact workspace version string is not among the registry's
+ * published versions (`npm view <name> versions --json`; a 404 for a
+ * never-published package counts as "not on the registry"); OR a pending
+ * `.changeset/*.md` targets it (the version string alone cannot see a
+ * changeset that bumps a version identical to what is already published —
+ * exactly AB-243's `conversationalist@1.1.0` case, where source drifted
+ * ahead of the registry with no version bump yet); OR `--pack-siblings` is
+ * passed, which forces every sibling to be packed regardless of the above.
+ * A packed sibling is installed into the consumer by absolute tarball path
+ * (`npm pack --ignore-scripts`, same as operative itself), and the lockfile
+ * assertion requires EVERY resolved occurrence of that package name —
+ * including a nested, importer-prefixed key Bun did not dedupe — to point at
+ * the tarball, not only the first one found. A sibling that needs no packing
+ * keeps resolving from the registry with the existing plain-semver
+ * assertion. Registry mode is unaffected: it never packs anything.
+ *
  * Both modes prove: the tarball/release resolves its own transitive
  * dependencies from npm with no `workspace:`/repository-path/override/patch/
- * link resolution anywhere else in the consumer's `bun.lock`; the public
- * surface compiles and runs for direct, inline, barrel, literal
+ * link resolution anywhere else in the consumer's `bun.lock` (aside from a
+ * packed sibling's own tarball path, which is asserted separately); the
+ * public surface compiles and runs for direct, inline, barrel, literal
  * dynamic-import, `createLazyAgent`, and `createLazyGenerate` agent
  * definitions; output inference and the `.output()`/`unwrap()` accessor are
  * present only when an `output` schema is supplied; the widened
@@ -33,6 +59,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { $ } from 'bun';
+
+import { readPendingChangesets } from './check-changesets';
 
 const root = join(import.meta.dir, '..');
 const packageDirectory = join(root, 'packages', 'operative');
@@ -72,14 +100,144 @@ async function runExpectingFailure(
   return { exitCode: result.exitCode, output: `${result.stdout}${result.stderr}` };
 }
 
-async function packLocal(staging: string): Promise<string> {
+/** Packs the package at `directory` with `npm pack --ignore-scripts` and returns the tarball's absolute path. */
+async function packDirectory(directory: string, staging: string): Promise<string> {
   const stdout = await runForStdout(
     ['npm', 'pack', '--json', '--ignore-scripts', '--pack-destination', staging],
-    packageDirectory,
+    directory,
   );
   const filename = (JSON.parse(stdout) as Array<{ filename: string }>)[0]?.filename;
-  if (!filename) throw new Error('npm pack produced no tarball');
+  if (!filename) throw new Error(`npm pack produced no tarball for ${directory}`);
   return join(staging, filename);
+}
+
+async function packLocal(staging: string): Promise<string> {
+  return packDirectory(packageDirectory, staging);
+}
+
+// ---------------------------------------------------------------------------
+// AB-287: workspace-sibling detection for local mode.
+// ---------------------------------------------------------------------------
+
+type PackageManifest = {
+  name: string;
+  version: string;
+  dependencies?: Record<string, string>;
+};
+
+async function readPackageManifest(directory: string): Promise<PackageManifest> {
+  return (await Bun.file(join(directory, 'package.json')).json()) as PackageManifest;
+}
+
+/** Every `packages/*` workspace manifest, keyed by its `name` field. */
+async function readWorkspaceManifestsByName(): Promise<
+  Map<string, { directory: string; manifest: PackageManifest }>
+> {
+  const byName = new Map<string, { directory: string; manifest: PackageManifest }>();
+  const glob = new Bun.Glob('packages/*/package.json');
+  for await (const manifestPath of glob.scan({ cwd: root, onlyFiles: true })) {
+    const directory = join(root, manifestPath, '..');
+    const manifest = await readPackageManifest(directory);
+    byName.set(manifest.name, { directory, manifest });
+  }
+  return byName;
+}
+
+/**
+ * Operative's own `dependencies` entries that resolve to another package IN
+ * this monorepo (matched on the dependency's NAME against every
+ * `packages/*` manifest's `name` field, not on directory name — a scoped
+ * sibling stays correctly matched either way). `@lostgradient/weft` is an
+ * external dependency (its own separate repository, per CLAUDE.md) and is
+ * never a workspace sibling here, even though it is scoped like operative
+ * itself.
+ */
+async function findWorkspaceSiblings(): Promise<
+  Array<{ name: string; directory: string; version: string }>
+> {
+  const operativeManifest = await readPackageManifest(packageDirectory);
+  const workspaceManifests = await readWorkspaceManifestsByName();
+  const siblings: Array<{ name: string; directory: string; version: string }> = [];
+  for (const dependencyName of Object.keys(operativeManifest.dependencies ?? {})) {
+    const workspacePackage = workspaceManifests.get(dependencyName);
+    if (!workspacePackage) continue;
+    siblings.push({
+      name: dependencyName,
+      directory: workspacePackage.directory,
+      version: workspacePackage.manifest.version,
+    });
+  }
+  return siblings;
+}
+
+/**
+ * The exact versions `npm view <name> versions --json` reports as published.
+ * `npm view` prints a bare JSON string (not an array) when exactly one
+ * version is published, and exits non-zero with an E404 when the package has
+ * never been published at all — both are normalized here rather than left
+ * for the caller to special-case.
+ */
+async function getRegistryVersions(name: string): Promise<string[]> {
+  const result = await runExpectingFailure(['npm', 'view', name, 'versions', '--json'], root);
+  if (result.exitCode !== 0) {
+    if (/E404/.test(result.output)) return [];
+    throw new Error(`npm view ${name} versions failed:\n${result.output}`);
+  }
+  const parsed = JSON.parse(result.output) as string | string[];
+  return Array.isArray(parsed) ? parsed : [parsed];
+}
+
+type SiblingPackReason = 'not-on-registry' | 'pending-changeset' | 'forced';
+
+type SiblingDecision = {
+  name: string;
+  directory: string;
+  version: string;
+  pack: boolean;
+  reason: SiblingPackReason | 'registry';
+};
+
+/**
+ * Pure decision function (no I/O) — pack a workspace sibling when its exact
+ * workspace version is not among the registry's published versions, when a
+ * pending changeset targets it (a changeset can bump a version identical to
+ * what is already published, which the version check alone cannot see — the
+ * conversationalist@1.1.0 case this issue exists for), or when forced.
+ */
+export function decideSiblingPacking(
+  siblings: readonly { name: string; directory: string; version: string }[],
+  registryVersionsByName: ReadonlyMap<string, readonly string[]>,
+  changesetTargetNames: ReadonlySet<string>,
+  forcePackAll: boolean,
+): SiblingDecision[] {
+  return siblings.map((sibling) => {
+    if (forcePackAll) return { ...sibling, pack: true, reason: 'forced' };
+    const registryVersions = registryVersionsByName.get(sibling.name) ?? [];
+    if (!registryVersions.includes(sibling.version)) {
+      return { ...sibling, pack: true, reason: 'not-on-registry' };
+    }
+    if (changesetTargetNames.has(sibling.name)) {
+      return { ...sibling, pack: true, reason: 'pending-changeset' };
+    }
+    return { ...sibling, pack: false, reason: 'registry' };
+  });
+}
+
+async function resolveSiblingDecisions(forcePackAll: boolean): Promise<SiblingDecision[]> {
+  const siblings = await findWorkspaceSiblings();
+  const changesets = await readPendingChangesets(root);
+  const changesetTargetNames = new Set(
+    changesets.flatMap((changeset) => changeset.releases.map((release) => release.name)),
+  );
+  const registryVersionsByName = new Map<string, readonly string[]>(
+    await Promise.all(
+      siblings.map(async (sibling): Promise<[string, readonly string[]]> => [
+        sibling.name,
+        forcePackAll ? [] : await getRegistryVersions(sibling.name),
+      ]),
+    ),
+  );
+  return decideSiblingPacking(siblings, registryVersionsByName, changesetTargetNames, forcePackAll);
 }
 
 // ---------------------------------------------------------------------------
@@ -583,10 +741,18 @@ async function writeConsumerSource(directory: string): Promise<void> {
   }
 }
 
-/** Bare-package deps every consumer file needs: armorer + zod (declared directly, not left phantom). */
-const CONSUMER_DEPENDENCY_RANGES = { armorer: '^2.3.0', zod: '^4.4.3' };
+/** Bare-package deps every consumer file needs, declared directly rather than left phantom. */
+const CONSUMER_DEPENDENCY_RANGES = {
+  armorer: '^2.3.0',
+  conversationalist: '^1.1.0',
+  zod: '^4.4.3',
+};
 
-async function writeConsumerManifest(directory: string, operativeSpecifier: string): Promise<void> {
+async function writeConsumerManifest(
+  directory: string,
+  operativeSpecifier: string,
+  siblingSpecifiers: Readonly<Record<string, string>>,
+): Promise<void> {
   await Bun.write(
     join(directory, 'package.json'),
     JSON.stringify(
@@ -597,8 +763,21 @@ async function writeConsumerManifest(directory: string, operativeSpecifier: stri
         dependencies: {
           '@lostgradient/operative': operativeSpecifier,
           ...CONSUMER_DEPENDENCY_RANGES,
+          ...siblingSpecifiers,
         },
         devDependencies: { typescript: '6.0.3', '@types/bun': '1.3.14' },
+        // The packed `@lostgradient/operative` tarball's OWN manifest still
+        // declares a plain semver range for each packed sibling (e.g.
+        // `"conversationalist": "^1.1.0"`) — a range a REGISTRY-resolved
+        // 1.1.0 also satisfies. Without an override, Bun resolves that
+        // nested reference independently of the direct dependency above and
+        // installs it from the registry as a separate, importer-prefixed
+        // entry (`"@lostgradient/operative/conversationalist"`), silently
+        // defeating the whole point of packing it. `overrides` forces every
+        // transitive reference to a packed sibling's name onto its own
+        // local tarball, matching `verify-bureau-tarball-boundary.ts`'s
+        // established pattern for the identical problem.
+        ...(Object.keys(siblingSpecifiers).length > 0 ? { overrides: siblingSpecifiers } : {}),
       },
       null,
       2,
@@ -611,13 +790,17 @@ async function writeConsumerManifest(directory: string, operativeSpecifier: stri
  * lockfile is JSON5-ish — trailing commas — so a plain `JSON.parse` doesn't
  * round-trip it) and asserts: `@lostgradient/operative` resolves to the
  * expected local tarball path (local mode) or registry version (registry
- * mode), and every OTHER resolved package carries a plain semver version
- * with no `workspace:`, `link:`, `patch:`, or local filesystem path.
+ * mode); EVERY resolved occurrence of a packed workspace sibling (AB-287) —
+ * including a nested, importer-prefixed key Bun did not dedupe onto the
+ * top-level entry — resolves to that sibling's own tarball path; and every
+ * OTHER resolved package carries a plain semver version with no
+ * `workspace:`, `link:`, `patch:`, or local filesystem path.
  */
 async function verifyLockfile(
   directory: string,
   mode: 'local' | 'registry',
   expected: { tarball?: string; version?: string },
+  packedSiblings: ReadonlyMap<string, string>,
 ): Promise<void> {
   const lockText = await Bun.file(join(directory, 'bun.lock')).text();
   const packagesStart = lockText.indexOf('"packages": {');
@@ -628,6 +811,7 @@ async function verifyLockfile(
     .filter((line) => /^\s*"[^"]+":\s*\[/.test(line));
 
   let sawOperative = false;
+  const sawPackedSibling = new Set<string>();
   for (const line of lines) {
     // The lock KEY (`"<key>": [...`) is not always the resolved package's
     // own name — a transitive dependency Bun could not dedupe gets an
@@ -665,6 +849,17 @@ async function verifyLockfile(
       continue;
     }
 
+    const packedTarball = resolvedName ? packedSiblings.get(resolvedName) : undefined;
+    if (resolvedName && packedTarball !== undefined) {
+      if (resolvedVersion !== packedTarball) {
+        throw new Error(
+          `Packed workspace sibling ${resolvedName} did not resolve to its tarball ${packedTarball} at every occurrence:\n${line}`,
+        );
+      }
+      sawPackedSibling.add(resolvedName);
+      continue;
+    }
+
     // Positively assert a plain registry semver rather than blacklisting
     // known non-registry substrings: a local tarball/directory resolution
     // outside the repository root (`name@/tmp/dependency.tgz`, an absolute
@@ -679,6 +874,11 @@ async function verifyLockfile(
     }
   }
   if (!sawOperative) throw new Error('bun.lock never resolved @lostgradient/operative at all');
+  for (const [name, tarball] of packedSiblings) {
+    if (!sawPackedSibling.has(name)) {
+      throw new Error(`bun.lock never resolved packed workspace sibling ${name} to ${tarball}`);
+    }
+  }
 }
 
 async function verifyRemovedApiProbesFailCompilation(directory: string): Promise<void> {
@@ -713,15 +913,17 @@ async function verifyConsumer(
   mode: 'local' | 'registry',
   operativeSpecifier: string,
   expected: { tarball?: string; version?: string },
+  siblingSpecifiers: Readonly<Record<string, string>> = {},
+  packedSiblings: ReadonlyMap<string, string> = new Map(),
 ): Promise<void> {
-  await writeConsumerManifest(directory, operativeSpecifier);
+  await writeConsumerManifest(directory, operativeSpecifier, siblingSpecifiers);
   await writeConsumerSource(directory);
 
   // Produces bun.lock — a fresh consumer has none yet.
   await run(['bun', 'install'], directory);
   // The reproducibility assertion the issue names explicitly.
   await run(['bun', 'install', '--frozen-lockfile'], directory);
-  await verifyLockfile(directory, mode, expected);
+  await verifyLockfile(directory, mode, expected, packedSiblings);
 
   await run(['bunx', 'tsc', '--noEmit'], directory);
   await run(['bun', 'test'], directory);
@@ -733,24 +935,56 @@ async function main(): Promise<void> {
   const mode = modeIndex !== -1 ? Bun.argv[modeIndex + 1] : undefined;
   if (mode !== 'local' && mode !== 'registry') {
     throw new Error(
-      'Usage: bun run scripts/verify-operative-consumer.ts --mode local\n' +
+      'Usage: bun run scripts/verify-operative-consumer.ts --mode local [--pack-siblings]\n' +
         '       bun run scripts/verify-operative-consumer.ts --mode registry --version <version>',
     );
   }
 
   if (mode === 'local') {
+    const forcePackSiblings = Bun.argv.includes('--pack-siblings');
+
+    // Building operative (`^build`) already builds every workspace sibling
+    // it depends on, so a packed sibling's own `dist/` is guaranteed fresh
+    // by the time it is packed below — no separate build step needed.
     await run(['turbo', 'run', 'build', '--filter=@lostgradient/operative'], root);
     await run(['bun', 'run', 'scripts/check-package-shape.ts', 'operative'], root);
+
+    const siblingDecisions = await resolveSiblingDecisions(forcePackSiblings);
 
     const staging = await mkdtemp(join(tmpdir(), 'operative-consumer-pack-'));
     const directory = await mkdtemp(join(tmpdir(), 'operative-consumer-local-'));
     try {
       const tarball = await packLocal(staging);
-      await verifyConsumer(directory, 'local', `file:${tarball}`, { tarball });
+
+      const siblingSpecifiers: Record<string, string> = {};
+      const packedSiblings = new Map<string, string>();
+      for (const decision of siblingDecisions) {
+        if (!decision.pack) continue;
+        const siblingTarball = await packDirectory(decision.directory, staging);
+        siblingSpecifiers[decision.name] = `file:${siblingTarball}`;
+        packedSiblings.set(decision.name, siblingTarball);
+      }
+
+      await verifyConsumer(
+        directory,
+        'local',
+        `file:${tarball}`,
+        { tarball },
+        siblingSpecifiers,
+        packedSiblings,
+      );
+
+      const packedSummary =
+        packedSiblings.size === 0
+          ? 'no workspace siblings packed (every sibling resolves from the registry)'
+          : `packed workspace siblings: ${siblingDecisions
+              .filter((decision) => decision.pack)
+              .map((decision) => `${decision.name}@${decision.version} (${decision.reason})`)
+              .join(', ')}`;
       console.log(
         'Operative consumer verification (local) passed: tarball, lockfile boundary, ' +
           'direct/inline/barrel/dynamic-import/lazy definitions, output inference, ' +
-          'widened-module runtime guards, and removed-API compile failures.',
+          `widened-module runtime guards, and removed-API compile failures. AB-287: ${packedSummary}.`,
       );
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -778,7 +1012,9 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((error: unknown) => {
-  console.error(error);
-  process.exit(1);
-});
+if (import.meta.main) {
+  main().catch((error: unknown) => {
+    console.error(error);
+    process.exit(1);
+  });
+}
