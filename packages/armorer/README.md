@@ -509,19 +509,30 @@ convention. See the pinned-version note and full mapping table in
 [`operative`'s README](../operative/README.md#otel-genai-semantic-conventions) —
 armorer's tool span is one row of that table.
 
-| Attribute                    | Source                                                            |
-| ---------------------------- | ----------------------------------------------------------------- |
-| `gen_ai.operation.name`      | Always `execute_tool`                                             |
-| `gen_ai.tool.name`           | `tool.identity.name`                                              |
-| `gen_ai.tool.call.id`        | `call.id`                                                         |
-| `gen_ai.tool.call.arguments` | `call.arguments`, stringified                                     |
-| `gen_ai.tool.call.result`    | Result on success, stringified                                    |
-| `gen_ai.tool.description`    | `tool.description`, when set                                      |
-| `error.type`                 | `errorCategory` (or `status`) when the call errored or was denied |
+| Attribute                 | Source                                                            |
+| ------------------------- | ----------------------------------------------------------------- |
+| `gen_ai.operation.name`   | Always `execute_tool`                                             |
+| `gen_ai.tool.name`        | `tool.identity.name`                                              |
+| `gen_ai.tool.call.id`     | `call.id`                                                         |
+| `gen_ai.tool.description` | `tool.description`, when set                                      |
+| `error.type`              | `errorCategory` (or `status`) when the call errored or was denied |
 
-Non-standard fields (duration, digests, cancellation reason, internal
-status) are namespaced under `armorer.tool.*` rather than `gen_ai.*`, since
-the conventions do not define them and squatting the reserved `gen_ai.*`
+`gen_ai.tool.call.arguments` and `gen_ai.tool.call.result` are Opt-In under
+the OTel GenAI conventions precisely because they can carry privileged data
+— tool arguments and tool results. This package does not opt in: neither
+attribute is emitted, on any status, by any emission site (the `call` span,
+its `tool.started` event, or the `tool.finished` close). A tool error
+(cancelled, denied, or a thrown value that is not an `Error` instance) is
+likewise never serialized onto a span attribute, since it can itself carry
+argument or result content — only its non-privileged `error.type` category
+is attached, and a genuine `Error` is recorded via the standard OTel
+`recordException` API rather than as an attribute.
+`armorer.tool.input_digest`/`armorer.tool.output_digest` are the
+non-privileged correlation handles for the omitted arguments/result.
+
+Non-standard fields (duration, digests, internal status) are namespaced
+under `armorer.tool.*` rather than `gen_ai.*`, since the conventions do not
+define them and squatting the reserved `gen_ai.*`
 vocabulary would confuse a generic OTel GenAI backend.
 
 ## Middleware
