@@ -99,7 +99,7 @@ export type { CreateContextCompactorOptions } from './create-context-compactor';
 export { createContextCompactor } from './create-context-compactor';
 export type { EarlyStoppingHandlerOptions } from './create-early-stopping-handler';
 export { createEarlyStoppingHandler } from './create-early-stopping-handler';
-export type { CreateHandoffToolOptions } from './create-handoff-tool';
+export type { CreateHandoffToolOptions, HandoffTarget } from './create-handoff-tool';
 export { createHandoffTool, extractHandoffTarget, HANDOFF_MARKER } from './create-handoff-tool';
 export type { CreateIdentityHookOptions } from './create-identity-hook';
 export { createIdentityHook } from './create-identity-hook';

@@ -159,9 +159,18 @@ async function runCase(
           // it must never replace the real timeout error being propagated.
           try {
             agentRun.abort('Evaluation case timed out');
-            agentRun[Symbol.dispose]();
           } catch {
             // Best-effort — see comment above.
+          } finally {
+            // Isolated from abort() above: an uncooperative abort()
+            // implementation that throws must never prevent disposal —
+            // otherwise resources only disposal releases leak for the rest
+            // of the process (PRRT_kwDORvupsc6elFWL).
+            try {
+              agentRun[Symbol.dispose]();
+            } catch {
+              // Best-effort — see comment above.
+            }
           }
           throw raceError;
         }

@@ -215,7 +215,21 @@ export function createSupervisor<D extends AgentDefinitions>(
     try {
       const context: AgentRunContext = { agentName, ...(signal ? { signal } : {}) };
       const run = catalog.get(agentName).run(task, context);
-      const runResult = (await run.result()) as RunResult;
+      const settled: unknown = await run.result();
+      // Validate before classifying so a hand-written or JavaScript catalog
+      // agent whose handle resolves to a structurally incomplete object
+      // (e.g. `{}`) cannot slip past `isFailureResult` — which would read
+      // `undefined.finishReason` as falsy — and be synthesized as a
+      // success (PRRT_kwDORvupsc6elFWQ).
+      if (!isRunResult(settled)) {
+        const error = new Error(
+          `Agent "${agentName}" returned a value that is not a RunResult (missing a valid ` +
+            `finishReason / steps / content). The agent is likely miswired.`,
+        );
+        events.dispatch(new TaskFailedEvent(task, agentName, error));
+        return { task, agentName, error };
+      }
+      const runResult = settled;
       if (isFailureResult(runResult)) {
         const error =
           runResult.error instanceof Error
@@ -369,6 +383,34 @@ const FAILURE_FINISH_REASONS: ReadonlySet<RunResult['finishReason']> = new Set([
 
 function isFailureResult(result: RunResult): boolean {
   return FAILURE_FINISH_REASONS.has(result.finishReason);
+}
+
+/** Every `FinishReason` — success and failure alike — a real `RunResult` can carry. */
+const VALID_FINISH_REASONS: ReadonlySet<RunResult['finishReason']> = new Set([
+  'stop-condition',
+  'maximum-steps',
+  'aborted',
+  'error',
+  'elicitation-denied',
+  'budget-exceeded',
+  'tripwire',
+]);
+
+/**
+ * Validates that an agent handle's `run().result()` return value is a real
+ * {@link RunResult} before it is classified as a completed or failed
+ * delegation. Checks exactly the fields this module reads: `finishReason` (a
+ * known literal, needed by {@link isFailureResult}), `steps` (an array), and
+ * `content` (a string, used by the default synthesis strategy).
+ */
+function isRunResult(value: unknown): value is RunResult {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    VALID_FINISH_REASONS.has(candidate['finishReason'] as RunResult['finishReason']) &&
+    Array.isArray(candidate['steps']) &&
+    typeof candidate['content'] === 'string'
+  );
 }
 
 // ---------------------------------------------------------------------------

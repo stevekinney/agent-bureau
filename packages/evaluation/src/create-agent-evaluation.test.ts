@@ -637,6 +637,46 @@ describe('createAgentEvaluation', () => {
     expect(disposeCalls).toBe(1);
   });
 
+  it('still disposes the AgentRun handle when its abort() throws on a timed-out case (PRRT_kwDORvupsc6elFWL)', async () => {
+    // An uncooperative abort() implementation must not prevent disposal —
+    // otherwise resources only [Symbol.dispose]() releases leak for the rest
+    // of the process. abort() and dispose() are isolated so a throw from the
+    // first still lets the second run.
+    let disposeCalls = 0;
+    const uncooperativeAgent: RunnableAgent<unknown, boolean> = {
+      name: 'uncooperative-agent',
+      run: (): AgentRun<unknown, boolean> => ({
+        result: () => new Promise<never>(() => {}), // never resolves, ignores signal
+        unwrap: () => {
+          throw new Error('not used by this test');
+        },
+        abort: () => {
+          throw new Error('abort() is uncooperative and always throws');
+        },
+        children: () => [],
+        abortChild: () => {
+          throw new Error('not used by this test');
+        },
+        [Symbol.dispose]: () => {
+          disposeCalls += 1;
+        },
+        [Symbol.asyncIterator]: () => {
+          throw new Error('not used by this test');
+        },
+      }),
+    };
+
+    const evaluation = createAgentEvaluation({
+      cases: [{ name: 'hangs', input: 'test', timeout: 30 }],
+      agent: uncooperativeAgent,
+    });
+
+    const report = await evaluation.run();
+
+    expect(report.cases[0]!.error).toMatch(/timed out/i);
+    expect(disposeCalls).toBe(1);
+  });
+
   it('fails (does not pass by default) when a RunnableAgent returns a non-RunResult (PRRT_kwDORvupsc6MlG1z)', async () => {
     // A miswired agent: returns a plain object with `steps` but no valid
     // finishReason. Previously the `as RunResult` cast let this flow through; the

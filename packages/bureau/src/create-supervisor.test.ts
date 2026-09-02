@@ -298,6 +298,33 @@ describe('createSupervisor', () => {
       expect(failedEvents).toHaveLength(0);
       expect(result.agentResults[0]?.error).toBeUndefined();
     });
+
+    it('reports a failure (not a synthesized success) when the agent handle resolves to a structurally incomplete result (PRRT_kwDORvupsc6elFWQ)', async () => {
+      // A hand-written or JavaScript catalog agent can resolve to any value;
+      // `{}` has no finishReason, so the predecessor cast let it fall
+      // through `isFailureResult` (reading `undefined.finishReason` as
+      // falsy) and be dispatched as a TaskCompletedEvent.
+      const worker = makeAgent(
+        'worker',
+        () => Promise.resolve({} as RunResult), // structurally incomplete
+      );
+      const catalog = createAgentCatalog({ worker: worker.fixture });
+      const supervisor = createSupervisor({ agents: catalog, routing: () => 'worker' });
+
+      const completedEvents: TaskCompletedEvent[] = [];
+      const failedEvents: TaskFailedEvent[] = [];
+      supervisor.addEventListener(TaskCompletedEvent.type, (e) => completedEvents.push(e));
+      supervisor.addEventListener(TaskFailedEvent.type, (e) => failedEvents.push(e));
+
+      const result = await supervisor.delegate('do something');
+
+      expect(completedEvents).toHaveLength(0);
+      expect(failedEvents).toHaveLength(1);
+      const agentResult = result.agentResults[0];
+      expect(agentResult?.error).toBeInstanceOf(Error);
+      expect((agentResult?.error as Error).message).toMatch(/not a RunResult/i);
+      expect(agentResult?.result).toBeUndefined();
+    });
   });
 
   describe('delegateAll', () => {
