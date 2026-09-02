@@ -2,6 +2,7 @@ import type {
   AnthropicClient,
   AnthropicMessageCreateRequest,
   AnthropicMessageResponse,
+  AnthropicRequestOptions,
   AnthropicStreamEvent,
   AnthropicStreamingClient,
   GeminiGenerateContentRequest,
@@ -16,6 +17,8 @@ import type {
 
 export interface MockAnthropicClient extends AnthropicClient {
   _calls: AnthropicMessageCreateRequest[];
+  /** The request-options argument of each call, index-aligned with `_calls`. */
+  _requestOptions: Array<AnthropicRequestOptions | undefined>;
   _responses: AnthropicMessageResponse[];
   _errors: Error[];
 }
@@ -28,16 +31,22 @@ export function createMockAnthropicClient(
   errors: Error[] = [],
 ): MockAnthropicClient {
   const calls: AnthropicMessageCreateRequest[] = [];
+  const requestOptions: Array<AnthropicRequestOptions | undefined> = [];
   let responseIndex = 0;
   let errorIndex = 0;
 
   return {
     _calls: calls,
+    _requestOptions: requestOptions,
     _responses: responses,
     _errors: errors,
     messages: {
-      async create(params: AnthropicMessageCreateRequest): Promise<AnthropicMessageResponse> {
+      async create(
+        params: AnthropicMessageCreateRequest,
+        options?: AnthropicRequestOptions,
+      ): Promise<AnthropicMessageResponse> {
         calls.push(params);
+        requestOptions.push(options);
         const error = errors[errorIndex];
         if (error && errorIndex < errors.length) {
           errorIndex++;
@@ -149,6 +158,8 @@ export function createMockGeminiModel(
 
 export interface MockAnthropicStreamingClient extends AnthropicStreamingClient {
   _calls: AnthropicMessageCreateRequest[];
+  /** The request-options argument of each call, index-aligned with `_calls`. */
+  _requestOptions: Array<AnthropicRequestOptions | undefined>;
   _eventSequences: AnthropicStreamEvent[][];
   _errors: Error[];
 }
@@ -172,17 +183,23 @@ export function createMockAnthropicStreamingClient(
   options?: { errorAfterEvents?: number },
 ): MockAnthropicStreamingClient {
   const calls: AnthropicMessageCreateRequest[] = [];
+  const requestOptions: Array<AnthropicRequestOptions | undefined> = [];
   let sequenceIndex = 0;
   let errorIndex = 0;
   const errorAfterEvents = options?.errorAfterEvents;
 
   return {
     _calls: calls,
+    _requestOptions: requestOptions,
     _eventSequences: eventSequences,
     _errors: errors,
     messages: {
-      create(params: AnthropicMessageCreateRequest): AsyncIterable<AnthropicStreamEvent> {
+      create(
+        params: AnthropicMessageCreateRequest,
+        callOptions?: AnthropicRequestOptions,
+      ): AsyncIterable<AnthropicStreamEvent> {
         calls.push(params);
+        requestOptions.push(callOptions);
         const error = errors[errorIndex];
         if (error && errorIndex < errors.length && errorAfterEvents === undefined) {
           errorIndex++;

@@ -322,10 +322,12 @@ export function createAnthropicProvider(options: AnthropicProviderOptions): Gene
     if (common.temperature !== undefined) params['temperature'] = common.temperature;
     if (common.topP !== undefined) params['top_p'] = common.topP;
     if (common.stopSequences) params['stop_sequences'] = common.stopSequences;
-    if (context.signal) params['signal'] = context.signal;
+    // The signal goes in the SDK's request options, never the body — a body
+    // `signal` is serialized away and the request outlives `run.abort()`.
+    const requestOptions = context.signal ? { signal: context.signal } : undefined;
 
     try {
-      const response = await client.messages.create(params);
+      const response = await client.messages.create(params, requestOptions);
 
       const textParts: string[] = [];
       for (const block of response.content) {
@@ -438,11 +440,14 @@ export function createAnthropicProviderStream(
     if (common.temperature !== undefined) params['temperature'] = common.temperature;
     if (common.topP !== undefined) params['top_p'] = common.topP;
     if (common.stopSequences) params['stop_sequences'] = common.stopSequences;
-    if (context.signal) params['signal'] = context.signal;
+    // See createAnthropicProvider: request options, not the body. This is
+    // what lets an abort actually close the streaming connection instead of
+    // parking the `for await` below until the model finishes on its own.
+    const requestOptions = context.signal ? { signal: context.signal } : undefined;
 
     try {
       // Await handles both sync (mock) and async (real SDK APIPromise) returns
-      const stream = await Promise.resolve(client.messages.create(params));
+      const stream = await Promise.resolve(client.messages.create(params, requestOptions));
 
       let accumulatedText = '';
       let inputTokens: number | undefined;
