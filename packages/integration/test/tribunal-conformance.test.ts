@@ -6,7 +6,7 @@
  * cwd-jailed read tools (armorer/coding, AB-90), a Tribunal-shaped armorer
  * toolbox (`get_changed_files`, `read_base_file` via `git show`,
  * `record_finding` with collect-don't-post semantics), AB-94 deny-gate
- * enforcement, AB-95 raw-JSON-Schema structured output, AB-96's NDJSON
+ * enforcement, AB-18 `output` Zod schema structured output, AB-96's NDJSON
  * frame relay + terminal envelope (asserted against a copy of Tribunal's
  * `agentResultSchema`), a budget stop, and AB-98's stable-prefix assembly
  * (verified via observed cache-read behavior on a re-run against the mock).
@@ -125,7 +125,7 @@ describe('AB-99 Tribunal conformance — single provider (Anthropic mock)', () =
           `PR touches ${repo.changedFilePath}. Review the change for confirmed, actionable findings.`,
         ),
         stopWhen: stopWhen.noToolCalls(),
-        responseSchema: tribunalOutputSchemaForRole('specialist'),
+        output: tribunalOutputSchemaForRole('specialist'),
       });
 
       const envelope = captureRunEnvelope(runId, activeRun);
@@ -254,7 +254,7 @@ describe('AB-99 Tribunal conformance — single provider (Anthropic mock)', () =
         toolbox: gatedToolbox,
         conversation: seedConversation('Review the change.'),
         stopWhen: stopWhen.noToolCalls(),
-        responseSchema: tribunalOutputSchemaForRole('specialist'),
+        output: tribunalOutputSchemaForRole('specialist'),
       });
 
       const envelope = captureRunEnvelope('ab99-deny-gate-run', activeRun);

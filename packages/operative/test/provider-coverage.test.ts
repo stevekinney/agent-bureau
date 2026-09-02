@@ -134,6 +134,9 @@ describe('provider helper coverage', () => {
     expect(toGeminiResponseFormat({ type: 'json' })).toEqual({
       responseMimeType: 'application/json',
     });
+    // `responseSchema` here is Gemini's OWN `GenerationConfig` field name
+    // (unrelated to AB-18's `RunOptions.output`/`responseSchema` rename) —
+    // this asserts the shape `toGeminiResponseFormat` sends the SDK.
     expect(toGeminiResponseFormat({ type: 'json_schema', schema: { type: 'object' } })).toEqual({
       responseMimeType: 'application/json',
       responseSchema: { type: 'object' },

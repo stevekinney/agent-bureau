@@ -29,8 +29,7 @@ import {
 } from './events';
 import type { ErrorRecoveryAction } from './hooks/types';
 import { addJitter } from './retry/jitter';
-import type { ResponseSchemaInput } from './structured-output/response-schema';
-import { validateResponseSchema } from './structured-output/response-schema';
+import { validateOutput } from './structured-output/response-schema';
 import type { ToolChoice } from './structured-output/types';
 import type {
   AfterToolExecutionHook,
@@ -85,7 +84,7 @@ export interface StepDeps {
   readonly onElicitation: OnElicitation | undefined;
   readonly hooks: RunOptions['hooks'];
   readonly contextManagement: ContextManagementOptions | undefined;
-  readonly responseSchema: ResponseSchemaInput | undefined;
+  readonly output: ZodType<unknown> | undefined;
   readonly responseFormat: GenerateContext['responseFormat'];
   /** Per-request output token cap passed through to every GenerateContext. */
   readonly maximumTokens: number | undefined;
@@ -1147,16 +1146,12 @@ export async function runStep(
 
   runState.steps.push(stepResult);
 
-  // Structured output enforcement: validate on final step
-  if (shouldStop && deps.responseSchema) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(runState.lastContent);
-    } catch {
-      parsed = runState.lastContent;
-    }
-
-    const validation = await validateResponseSchema(deps.responseSchema, parsed);
+  // Structured output enforcement: validate on final step. Each candidate
+  // (`runState.lastContent`) is parsed with `parseAsync` exactly once here;
+  // a retry re-enters this branch on the NEW final text, never re-validating
+  // the same candidate (AB-18).
+  if (shouldStop && deps.output) {
+    const validation = await validateOutput(deps.output, runState.lastContent);
     if (validation.success) {
       return {
         kind: 'stop',

@@ -1,110 +1,140 @@
-import { isStandardSchema, type StandardSchemaV1 } from 'interoperability';
+import { isJSONValue } from 'interoperability';
 import { z, ZodType } from 'zod';
 
-import { StandardSchemaValidationError } from '../errors';
+import { NonJsonOutputError, OutputSchemaConversionError, OutputValidationError } from '../errors';
 import type { ResponseFormat } from './types';
-import { zodToJsonSchema } from './zod-to-json-schema';
-
-/**
- * Everything `RunOptions.responseSchema` accepts, in order of preference:
- *
- * | Kind                                    | Validation                        | Provider JSON Schema                          |
- * | ---------------------------------------- | ---------------------------------- | ---------------------------------------------- |
- * | Zod schema (documented default)          | `schema.parse()`                   | `zodToJsonSchema(schema)` (automatic)          |
- * | Raw JSON Schema object                   | `z.fromJSONSchema(schema).parse()` | the object itself                              |
- * | Non-Zod Standard Schema (Valibot, ArkType, ...) | `schema['~standard'].validate()` | `RunOptions.responseJsonSchema` if supplied, else `{ type: 'json' }` (no provider-native schema) |
- *
- * A Zod schema satisfies `isStandardSchema` too (Zod v4 implements the spec),
- * so it is always checked first via `instanceof ZodType`.
- */
-export type ResponseSchemaInput = ZodType | StandardSchemaV1 | Record<string, unknown>;
-
-export function isZodResponseSchema(schema: ResponseSchemaInput): schema is ZodType {
-  return schema instanceof ZodType;
-}
-
-/** True for a non-Zod Standard Schema validator — a raw JSON Schema object has no `~standard`. */
-export function isNonZodStandardResponseSchema(
-  schema: ResponseSchemaInput,
-): schema is StandardSchemaV1 {
-  return !isZodResponseSchema(schema) && isStandardSchema(schema);
-}
 
 export type ResponseSchemaValidationResult =
   { success: true; value: unknown } | { success: false; error: unknown };
 
 /**
- * Validates `input` (the model's parsed structured output) against a
- * {@link ResponseSchemaInput} of any accepted kind. Always async — a
- * Standard Schema validator's `validate()` may itself be async — so callers
- * must `await` even for the (synchronous) Zod and raw-JSON-Schema paths.
+ * Memoizes {@link toOutputJsonSchema} by schema identity. A `ZodType` is an
+ * immutable value once constructed, so `z.toJSONSchema` is pure over it —
+ * caching is purely an optimization, never a correctness concern. Load-
+ * bearing for the common per-run path: `createAgent`'s synchronous guard,
+ * `createActiveRun`'s synchronous guard, and `buildStepDeps` (called once
+ * per run, including every retry) each independently derive the SAME
+ * schema's JSON Schema; without this, a run pays the conversion cost up to
+ * three times for one unchanging schema. A `WeakMap` lets a schema that's
+ * no longer referenced elsewhere be collected along with its cached entry.
  */
-export async function validateResponseSchema(
-  schema: ResponseSchemaInput,
-  input: unknown,
-): Promise<ResponseSchemaValidationResult> {
-  if (isZodResponseSchema(schema)) {
-    try {
-      return { success: true, value: schema.parse(input) };
-    } catch (error) {
-      return { success: false, error };
-    }
-  }
+const jsonSchemaCache = new WeakMap<ZodType<unknown>, Record<string, unknown>>();
 
-  if (isNonZodStandardResponseSchema(schema)) {
-    const result = await schema['~standard'].validate(input);
-    if (result.issues) {
-      const issues = result.issues.map((issue) => ({
-        message: issue.message,
-        ...(issue.path
-          ? {
-              path: issue.path.map((segment) =>
-                typeof segment === 'object' ? segment.key : segment,
-              ),
-            }
-          : {}),
-      }));
-      return { success: false, error: new StandardSchemaValidationError(issues) };
-    }
-    return { success: true, value: result.value };
-  }
+/**
+ * Converts a run's `output` Zod schema to the JSON Schema shape providers
+ * expect, via Zod v4's built-in `toJSONSchema`. `io: 'input'` — the schema
+ * describes what the MODEL must produce (the schema's input side), not what
+ * a caller gets back after any `.transform()`s run.
+ *
+ * Synchronous, and throws {@link OutputSchemaConversionError} for an
+ * unrepresentable schema (AB-18) — there is no generic-object fallback. A
+ * schema that can't become a JSON Schema is an authoring error to fix, not
+ * something to silently degrade.
+ */
+export function toOutputJsonSchema(schema: ZodType<unknown>): Record<string, unknown> {
+  const cached = jsonSchemaCache.get(schema);
+  if (cached) return cached;
 
-  // Raw JSON Schema object (AB-95) — validated via Zod's own JSON Schema
-  // importer, so the same ZodError shape and `schemaRetries` repair loop
-  // apply as the native Zod path.
   try {
-    const zodSchema = z.fromJSONSchema(schema);
-    return { success: true, value: zodSchema.parse(input) };
+    const converted = z.toJSONSchema(schema, { io: 'input' }) as Record<string, unknown>;
+    const { $schema: _schema, '~standard': _standard, ...rest } = converted;
+    jsonSchemaCache.set(schema, rest);
+    return rest;
   } catch (error) {
-    return { success: false, error };
+    throw new OutputSchemaConversionError(error);
   }
 }
 
 /**
- * Derives the provider-facing `ResponseFormat` for a {@link ResponseSchemaInput},
- * per the matrix documented on that type. `responseJsonSchema` is the caller-
- * supplied JSON Schema for the "non-Zod Standard Schema" row.
+ * Derives the provider-facing `ResponseFormat` for a run's `output` Zod
+ * schema. `undefined` when the run has no `output` schema — the run then
+ * gets no `ResponseFormat` hint and providers fall back to their default
+ * (free-form text).
  */
 export function resolveResponseFormat(
-  schema: ResponseSchemaInput | undefined,
-  responseJsonSchema: Record<string, unknown> | undefined,
+  schema: ZodType<unknown> | undefined,
 ): ResponseFormat | undefined {
   if (!schema) return undefined;
+  return { type: 'json_schema', schema: toOutputJsonSchema(schema), name: 'response' };
+}
 
-  if (isZodResponseSchema(schema)) {
-    return { type: 'json_schema', schema: zodToJsonSchema(schema), name: 'response' };
+/**
+ * Validates an already-parsed candidate against a run's `output` Zod schema
+ * (AB-18) — the entry point for a caller that HOLDS a decoded value rather
+ * than raw text (a durable checkpoint's persisted `output: JSONValue`, or a
+ * provider whose native structured-output mode returns a decoded object
+ * instead of a JSON string). Enforces the recursive {@link isJSONValue}
+ * contract (finite numbers, dense arrays, no cycles, no exotic objects —
+ * see `interoperability`'s `assertJSONValue`) BEFORE handing the candidate
+ * to the schema: a candidate that fails it is a {@link NonJsonOutputError},
+ * since it did not describe a value JSON can even represent. A candidate
+ * that passes but fails the schema is an {@link OutputValidationError}.
+ *
+ * {@link validateOutput} (the `text: string` entry point) delegates here
+ * for its JSON-parsed branch — `JSON.parse`'s own output always satisfies
+ * `isJSONValue` by construction (the JSON grammar has no token for a
+ * `Date`, `Map`, `Set`, `bigint`, `undefined`, a sparse hole, or a
+ * back-reference), so that call site never actually fails this check; it
+ * is callers reaching this function directly with a value that did NOT
+ * come from `JSON.parse` where the check is load-bearing.
+ */
+export async function validateOutputValue(
+  schema: ZodType<unknown>,
+  candidate: unknown,
+): Promise<ResponseSchemaValidationResult> {
+  if (!isJSONValue(candidate)) {
+    return {
+      success: false,
+      error: new NonJsonOutputError(safeDescribe(candidate)),
+    };
   }
 
-  if (isNonZodStandardResponseSchema(schema)) {
-    if (responseJsonSchema) {
-      return { type: 'json_schema', schema: responseJsonSchema, name: 'response' };
+  try {
+    const value = await schema.parseAsync(candidate);
+    return { success: true, value };
+  } catch (error) {
+    return { success: false, error: new OutputValidationError(error) };
+  }
+}
+
+function safeDescribe(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+/**
+ * Validates a run's final text against its `output` Zod schema (AB-18).
+ *
+ * When `text` is valid JSON, the parsed value is delegated to
+ * {@link validateOutputValue} — a schema mismatch there is an
+ * {@link OutputValidationError}. When `text` is NOT valid JSON, the raw
+ * string itself is validated against the schema directly (so a schema of
+ * exactly `z.string()` can still succeed) — a mismatch there is a
+ * {@link NonJsonOutputError}, since the underlying cause is that the model
+ * didn't return JSON at all.
+ *
+ * Each candidate is parsed with `schema.parseAsync` exactly once; a retry
+ * (driven by the caller re-invoking this on new text) validates the NEW
+ * candidate again, never the same one twice.
+ */
+export async function validateOutput(
+  schema: ZodType<unknown>,
+  text: string,
+): Promise<ResponseSchemaValidationResult> {
+  let candidate: unknown;
+  try {
+    candidate = JSON.parse(text);
+  } catch {
+    try {
+      const value = await schema.parseAsync(text);
+      return { success: true, value };
+    } catch (error) {
+      return { success: false, error: new NonJsonOutputError(text, error) };
     }
-    // No JSON Schema available for an arbitrary Standard Schema validator —
-    // fall back to a plain JSON response-format hint. `~standard.validate`
-    // still enforces the schema locally via `validateResponseSchema`.
-    return { type: 'json' };
   }
 
-  // Raw JSON Schema object — pass it straight through to the provider.
-  return { type: 'json_schema', schema, name: 'response' };
+  return validateOutputValue(schema, candidate);
 }

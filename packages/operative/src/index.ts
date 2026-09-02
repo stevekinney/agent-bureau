@@ -179,8 +179,10 @@ export {
   ElicitationDeniedError,
   GuardrailTripwireError,
   MaximumStepsExceededError,
+  NonJsonOutputError,
+  OutputSchemaConversionError,
+  OutputValidationError,
   serializeAgentRunError,
-  StandardSchemaValidationError,
 } from './errors';
 export type {
   CombinedOperativeEventMap,
@@ -530,16 +532,14 @@ export {
 } from './streaming/index';
 export type {
   ResponseFormat,
-  ResponseSchemaInput,
   ResponseSchemaValidationResult,
   ToolChoice,
 } from './structured-output/index';
 export {
-  isNonZodStandardResponseSchema,
-  isZodResponseSchema,
   resolveResponseFormat,
-  validateResponseSchema,
-  zodToJsonSchema,
+  toOutputJsonSchema,
+  validateOutput,
+  validateOutputValue,
 } from './structured-output/index';
 export type {
   AfterGenerateHook,

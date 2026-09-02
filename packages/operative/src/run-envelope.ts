@@ -205,7 +205,7 @@ export interface RunReport {
 
 /**
  * Zod schema for the terminal {@link RunReport}. `output` is a
- * generic `jsonValueSchema` — the run's `responseSchema` shape is caller-
+ * generic `jsonValueSchema` — the run's `output` schema shape is caller-
  * defined, so the envelope only guarantees JSON-safety, not the caller's
  * specific structured-output schema.
  */

@@ -3,6 +3,7 @@ import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
 import { z } from 'zod';
 
+import { OutputSchemaConversionError } from '../../src/errors';
 import { createScheduler } from '../../src/scheduler/create-scheduler';
 import type { SchedulerEventType } from '../../src/scheduler/events';
 import { sleep } from '../../src/scheduler/sleep';
@@ -536,7 +537,7 @@ describe('createScheduler', () => {
     expect(runResult.content).toBe('dispatched');
   });
 
-  it('dispatch() propagates rejected immediate runs and emits task.failed', async () => {
+  it('dispatch() throws synchronously for a schema-authoring error, before the task is registered', () => {
     const scheduler = createMinimalScheduler({ idleDelay: 1 });
     const failedTaskIds: string[] = [];
 
@@ -544,25 +545,57 @@ describe('createScheduler', () => {
       failedTaskIds.push(event.taskId);
     });
 
+    // `z.custom()` has no JSON Schema representation, so `createActiveRun`'s
+    // AB-18 guard (`toOutputJsonSchema`) throws a synchronous
+    // `OutputSchemaConversionError` immediately inside `dispatch()`'s
+    // synchronous body — before a task id is generated or registered in the
+    // running map. Distinct from an IN-RUN error (e.g. a throwing
+    // `generate`), which resolves `result` with `finishReason: 'error'`
+    // instead of throwing or rejecting, and distinct from a factory that
+    // throws for an unrelated reason, which `submit()` (not `dispatch()`)
+    // catches and turns into a `task.failed` event — see 'handles task
+    // factory errors gracefully' above.
+    expect(() =>
+      scheduler.dispatch(() => ({
+        generate: createMockGenerate([textResponse('unused')]),
+        toolbox: createTestToolbox([]),
+        conversation: new Conversation(),
+        maximumSteps: 1,
+        output: z.custom(() => true),
+      })),
+    ).toThrow(OutputSchemaConversionError);
+
+    // No task was ever registered, so no task.failed event fires either.
+    expect(failedTaskIds).toHaveLength(0);
+  });
+
+  it('dispatch() propagates a genuinely rejected result (an uncaught array-form selectTools hook) and emits task.failed', async () => {
+    const scheduler = createMinimalScheduler({ idleDelay: 1 });
+    const failedTaskIds: string[] = [];
+
+    scheduler.addEventListener('task.failed', (event) => {
+      failedTaskIds.push(event.taskId);
+    });
+
+    // The array-form `selectTools` hook (unlike the HookRegistry `selectTools`
+    // event, and unlike every other per-step hook array) is invoked directly
+    // in `runStep` with no surrounding try/catch, so a throwing hook here is
+    // one of the few remaining ways `executeLoop`'s promise — and therefore
+    // `activeRun.result` — genuinely rejects rather than resolving with an
+    // error `RunResult`. This is what distinguishes this test from an IN-RUN
+    // error (a throwing `generate`), which resolves with `finishReason:
+    // 'error'` instead of rejecting.
     const { result } = scheduler.dispatch(() => ({
       generate: createMockGenerate([textResponse('unused')]),
       toolbox: createTestToolbox([]),
       conversation: new Conversation(),
       maximumSteps: 1,
-      // `z.custom()` has no JSON Schema representation, so deriving the
-      // provider `responseFormat` throws SYNCHRONOUSLY during run setup
-      // (`buildStepDeps`), before the per-step try/catch exists to convert
-      // it into a resolved error `RunResult` — this is what actually
-      // rejects `result`, distinguishing this test from an in-run error
-      // (e.g. a throwing `generate`), which resolves with
-      // `finishReason: 'error'` instead. (Previously this used
-      // `responseSchema: {} as never`; that stopped triggering a throw once
-      // `responseSchema` legitimately accepts a plain JSON Schema object —
-      // `{}` is now a valid, if permissive, JSON Schema.)
-      responseSchema: z.custom(() => true),
+      selectTools: () => {
+        throw new Error('selectTools boom');
+      },
     }));
 
-    await expect(result).rejects.toThrow();
+    await expect(result).rejects.toThrow('selectTools boom');
     expect(failedTaskIds).toHaveLength(1);
   });
 

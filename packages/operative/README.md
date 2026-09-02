@@ -291,7 +291,7 @@ Use a Weft-backed run wakeup or signal when a current run must survive restart, 
 
 The full-control factory behind `createAgent`, `createSessionHandle`, and bureau-owned agents alike — documented, public API, not an internal implementation detail. It accepts the complete `RunOptions` bag directly: an existing `Conversation` instance (not just a `ConversationHistory`), a pre-built `Toolbox`, hooks, and durable routing (engine + checkpoint store + run id). `bureau` and `evaluation` both depend on it as first-party consumers.
 
-Most callers should reach for `createAgent({...}).run(...)` instead — it wraps `createActiveRun` in the higher-level `AgentRun` handle and covers the common cases. Reach for `createActiveRun` directly when you need something `createAgent` doesn't expose: an already-live `Conversation` instance, durable routing, hooks (`prepareStep`, `onStep`, `validateResponse`, …), structured output via `responseSchema`, or a pre-built emitter to bind tool dispatches to.
+Most callers should reach for `createAgent({...}).run(...)` instead — it wraps `createActiveRun` in the higher-level `AgentRun` handle and covers the common cases. Reach for `createActiveRun` directly when you need something `createAgent` doesn't expose: an already-live `Conversation` instance, durable routing, hooks (`prepareStep`, `onStep`, `validateResponse`, …), structured output via `output`, or a pre-built emitter to bind tool dispatches to.
 
 ```typescript
 import { createActiveRun, stopWhen } from '@lostgradient/operative';
@@ -313,29 +313,29 @@ Like `createAgent`, a plain `ConversationHistory` passed here is SNAPSHOTTED on 
 
 **`RunOptions`** — the complete options bag accepted by `createActiveRun`; key fields:
 
-| Field                 | Type                                                   | Description                                                                          |
-| --------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------------ |
-| `generate`            | `GenerateFunction`                                     | Required. The caller-supplied LLM call.                                              |
-| `toolbox`             | `Toolbox`                                              | Required. Tool registry.                                                             |
-| `conversation`        | `Conversation \| ConversationHistory`                  | Required. Seed conversation.                                                         |
-| `stopWhen`            | `StopCondition \| StopCondition[]`                     | Loop exit predicates.                                                                |
-| `maximumSteps`        | `number`                                               | Hard step cap (default: `25`).                                                       |
-| `prepareStep`         | `PrepareStepHook \| PrepareStepHook[]`                 | Runs before each generate call.                                                      |
-| `beforeToolExecution` | `BeforeToolExecutionHook \| BeforeToolExecutionHook[]` | Modifies tool call list before execution.                                            |
-| `afterToolExecution`  | `AfterToolExecutionHook \| AfterToolExecutionHook[]`   | Inspects/modifies tool results.                                                      |
-| `onStep`              | `OnStepHook \| OnStepHook[]`                           | Called after each step completes.                                                    |
-| `retry`               | `RetryOptions`                                         | Transient generate failure retry policy.                                             |
-| `backpressure`        | `BackpressureStrategy`                                 | Delay strategy applied before each step.                                             |
-| `validateResponse`    | `ValidateResponseHook \| ValidateResponseHook[]`       | Post-generate response validation.                                                   |
-| `validateToolResult`  | `ValidateToolResultHook \| ValidateToolResultHook[]`   | Post-execute result validation.                                                      |
-| `selectTools`         | `SelectToolsHook \| SelectToolsHook[]`                 | Per-step dynamic tool filtering.                                                     |
-| `onElicitation`       | `OnElicitation`                                        | Human-in-the-loop input handler.                                                     |
-| `contextManagement`   | `ContextManagementOptions`                             | Automatic context compaction.                                                        |
-| `responseSchema`      | `ZodType`                                              | Structured output schema with retry.                                                 |
-| `schemaRetries`       | `number`                                               | Retry attempts on schema validation failure.                                         |
-| `onMaximumSteps`      | `(context) => Promise<string \| void>`                 | Called when the loop exits on `maximumSteps` — a returned string replaces `content`. |
-| `hooks`               | `HookRegistry<OperativeHookMap>`                       | Typed priority-ordered hook registry.                                                |
-| `signal`              | `AbortSignal`                                          | External cancellation signal.                                                        |
+| Field                 | Type                                                   | Description                                                                                                                                                                                                             |
+| --------------------- | ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `generate`            | `GenerateFunction`                                     | Required. The caller-supplied LLM call.                                                                                                                                                                                 |
+| `toolbox`             | `Toolbox`                                              | Required. Tool registry.                                                                                                                                                                                                |
+| `conversation`        | `Conversation \| ConversationHistory`                  | Required. Seed conversation.                                                                                                                                                                                            |
+| `stopWhen`            | `StopCondition \| StopCondition[]`                     | Loop exit predicates.                                                                                                                                                                                                   |
+| `maximumSteps`        | `number`                                               | Hard step cap (default: `25`).                                                                                                                                                                                          |
+| `prepareStep`         | `PrepareStepHook \| PrepareStepHook[]`                 | Runs before each generate call.                                                                                                                                                                                         |
+| `beforeToolExecution` | `BeforeToolExecutionHook \| BeforeToolExecutionHook[]` | Modifies tool call list before execution.                                                                                                                                                                               |
+| `afterToolExecution`  | `AfterToolExecutionHook \| AfterToolExecutionHook[]`   | Inspects/modifies tool results.                                                                                                                                                                                         |
+| `onStep`              | `OnStepHook \| OnStepHook[]`                           | Called after each step completes.                                                                                                                                                                                       |
+| `retry`               | `RetryOptions`                                         | Transient generate failure retry policy.                                                                                                                                                                                |
+| `backpressure`        | `BackpressureStrategy`                                 | Delay strategy applied before each step.                                                                                                                                                                                |
+| `validateResponse`    | `ValidateResponseHook \| ValidateResponseHook[]`       | Post-generate response validation.                                                                                                                                                                                      |
+| `validateToolResult`  | `ValidateToolResultHook \| ValidateToolResultHook[]`   | Post-execute result validation.                                                                                                                                                                                         |
+| `selectTools`         | `SelectToolsHook \| SelectToolsHook[]`                 | Per-step dynamic tool filtering.                                                                                                                                                                                        |
+| `onElicitation`       | `OnElicitation`                                        | Human-in-the-loop input handler.                                                                                                                                                                                        |
+| `contextManagement`   | `ContextManagementOptions`                             | Automatic context compaction.                                                                                                                                                                                           |
+| `output`              | `ZodType`                                              | Structured output schema (AB-18) with retry. MUST NOT declare a field intended to carry binary or media content — a generated asset belongs in `RunResult.parts` as a managed-asset reference, never inlined as base64. |
+| `schemaRetries`       | `number`                                               | Retry attempts on schema validation failure.                                                                                                                                                                            |
+| `onMaximumSteps`      | `(context) => Promise<string \| void>`                 | Called when the loop exits on `maximumSteps` — a returned string replaces `content`.                                                                                                                                    |
+| `hooks`               | `HookRegistry<OperativeHookMap>`                       | Typed priority-ordered hook registry.                                                                                                                                                                                   |
+| `signal`              | `AbortSignal`                                          | External cancellation signal.                                                                                                                                                                                           |
 
 **`RunResult`:**
 
@@ -347,7 +347,7 @@ interface RunResult {
   usage: TokenUsage; // { prompt, completion, total }
   finishReason: FinishReason; // 'stop-condition' | 'maximum-steps' | 'aborted' | 'error' | …
   error?: unknown;
-  schemaValidation?: { success: boolean; error?: unknown }; // present when responseSchema is set
+  schemaValidation?: { success: boolean; error?: unknown }; // present when `output` is set
 }
 ```
 
@@ -1221,6 +1221,13 @@ const monitor = createCostBudgetMonitor({
 
 #### Structured Output
 
+`output` (AB-18) is the single validated output contract: one Zod schema that
+drives inference, the provider-native JSON Schema (via
+`z.toJSONSchema(schema, { io: 'input' })`), and runtime validation. There is
+no separate `responseSchema`/`responseJsonSchema` pair, no non-Zod Standard
+Schema branch, and no raw JSON Schema input — a caller who needs the latter
+converts it to a Zod schema first.
+
 ```typescript
 import { createActiveRun, stopWhen } from '@lostgradient/operative';
 import { z } from 'zod';
@@ -1236,10 +1243,39 @@ const activeRun = createActiveRun({
   toolbox,
   conversation,
   stopWhen: stopWhen.noToolCalls(),
-  responseSchema: OutputSchema,
+  output: OutputSchema,
   schemaRetries: 2,
 });
 ```
+
+An unrepresentable schema (e.g. `z.date()`, `z.custom()`) throws a
+synchronous `OutputSchemaConversionError` — there is no generic-object
+fallback; both `createAgent` and `createActiveRun` run this check at their
+own (synchronous) call time, before a run ever starts. The final text is
+parsed with `JSON.parse` when it's valid JSON (and the parsed value is
+checked against the recursive JSON-value contract: finite numbers, dense
+arrays, no cycles, no exotic objects); otherwise the raw string itself is
+validated against the schema, so `output: z.string()` still works for a
+non-JSON reply. A schema mismatch on JSON throws `OutputValidationError`
+(its `.issues` field exposes the underlying `ZodError`'s per-field issues);
+non-JSON text that still fails validation throws `NonJsonOutputError`.
+
+`validateOutputValue(schema, candidate)` runs that same JSON-value-then-schema
+contract directly on an already-decoded value, for a caller that holds one
+rather than raw text — a durable checkpoint's persisted `output`, or a
+provider whose native structured-output mode returns a decoded object.
+`validateOutput(schema, text)` (the text-based entry point above) delegates
+to it for its JSON-parsed branch.
+
+> [!IMPORTANT]
+> An `output` schema **must not** declare a field intended to carry binary
+> or media content (the AB-70 amendment to this issue). Structured output is
+> JSON-only — `output` is never permitted to contain a `PortableContentPart`
+> or a base64 blob. A generated asset (an image, a file, audio) a run
+> produces belongs in `RunResult.parts` as a managed-asset reference part
+> (`{ source: { kind: 'managed-asset', assetId } }`), never inlined as
+> base64 inside the schema-validated `output`. `output` and conversational
+> content are orthogonal and may both be present on a successful result.
 
 #### Scratchpad
 

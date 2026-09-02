@@ -167,7 +167,7 @@ export interface AgentRunWorkflowResult {
   abortReason?: string;
   /**
    * The structured-output validation outcome, when the run stopped after a
-   * `responseSchema` was applied. Mirrors `RunResult.schemaValidation` on the
+   * `output` was applied. Mirrors `RunResult.schemaValidation` on the
    * in-memory path; `success` — the load-bearing bit — is preserved exactly.
    *
    * KNOWN SEAM (structural fidelity of `error`): the in-memory path puts the
@@ -185,8 +185,8 @@ export interface AgentRunWorkflowResult {
    */
   schemaValidation?: { success: boolean; error?: string };
   /**
-   * The `responseSchema`-validated structured output, when the run stopped
-   * after a `responseSchema` was applied AND validation succeeded. Mirrors
+   * The `output`-validated structured output, when the run stopped
+   * after a `output` was applied AND validation succeeded. Mirrors
    * `RunResult.output` on the in-memory path. Unlike
    * `schemaValidation.error`, this is already plain (JSON-parsed and
    * validated) data, so it crosses the checkpoint boundary unchanged — no

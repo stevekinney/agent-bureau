@@ -297,7 +297,19 @@ function elideArrayCycles(
   return changed ? elided : value;
 }
 
-function assertJSONValue(value: unknown, path: string): asserts value is JSONValue {
+/**
+ * Asserts that `value` is a recursive {@link JSONValue}: finite numbers only;
+ * dense arrays (every index present, no own keys beyond indices and
+ * `length`); plain objects (`Object.prototype` or null prototype) with
+ * enumerable string own keys only — no symbols, no non-enumerable custom
+ * properties; and no cycles anywhere in the structure. `undefined`, `Date`,
+ * `Map`, `Set`, `bigint`, functions, and class instances are all rejected.
+ *
+ * Exported (AB-18) so operative's structured `output` validation can reuse
+ * this exact contract instead of re-implementing it — see
+ * {@link isJSONValue} for the non-throwing predicate form.
+ */
+export function assertJSONValue(value: unknown, path = '$'): asserts value is JSONValue {
   const stack = new WeakSet<object>();
 
   const walk = (current: unknown, currentPath: string) => {
@@ -319,6 +331,15 @@ function assertJSONValue(value: unknown, path: string): asserts value is JSONVal
       if (stack.has(current)) {
         throw new TypeError(`Circular reference detected at ${currentPath}`);
       }
+      // A dense array has exactly `length` own enumerable string keys — the
+      // indices `0..length-1` — and nothing else. A sparse array (a hole)
+      // omits an index from `Object.keys`; an array carrying an extra own
+      // property (e.g. `arr.foo = 'bar'`) adds one. Both fail this count
+      // check before any element is walked.
+      const ownKeys = Object.keys(current);
+      if (ownKeys.length !== current.length) {
+        throw new TypeError(`Sparse array or non-index own property at ${currentPath}`);
+      }
       stack.add(current);
       for (let index = 0; index < current.length; index += 1) {
         walk(current[index], `${currentPath}[${index}]`);
@@ -333,11 +354,19 @@ function assertJSONValue(value: unknown, path: string): asserts value is JSONVal
       }
 
       const record = current;
+      if (Object.getOwnPropertySymbols(record).length > 0) {
+        throw new TypeError(`Symbol-keyed property at ${currentPath}`);
+      }
+      const enumerableKeys = Object.keys(record);
+      const allOwnKeys = Object.getOwnPropertyNames(record);
+      if (enumerableKeys.length !== allOwnKeys.length) {
+        throw new TypeError(`Non-enumerable own property at ${currentPath}`);
+      }
       if (stack.has(record)) {
         throw new TypeError(`Circular reference detected at ${currentPath}`);
       }
       stack.add(record);
-      for (const key of Object.keys(record)) {
+      for (const key of enumerableKeys) {
         walk(record[key], `${currentPath}.${key}`);
       }
       stack.delete(record);
@@ -345,6 +374,20 @@ function assertJSONValue(value: unknown, path: string): asserts value is JSONVal
   };
 
   walk(value, path);
+}
+
+/**
+ * Non-throwing predicate form of {@link assertJSONValue}. Prefer the
+ * `assert` form when a caller wants the failure reason; this form is for
+ * plain boolean guards.
+ */
+export function isJSONValue(value: unknown): value is JSONValue {
+  try {
+    assertJSONValue(value);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

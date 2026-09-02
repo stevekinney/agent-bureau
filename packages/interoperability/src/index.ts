@@ -15,6 +15,8 @@ export {
 } from './hash';
 export type { MaterializeToolCallOptions, MaterializeToolResultOptions } from './materialization';
 export {
+  assertJSONValue,
+  isJSONValue,
   materializeToolCall,
   materializeToolCalls,
   materializeToolResult,

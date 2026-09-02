@@ -10,7 +10,7 @@ export type ToolChoice = 'auto' | 'required' | 'none' | { tool: string };
 
 /**
  * Provider-agnostic response format description, computed by the loop
- * when a `responseSchema` is present. Providers can use this to enable
+ * when an `output` schema is present. Providers can use this to enable
  * native structured output support.
  *
  * - `{ type: 'text' }`: Free-form text (default).

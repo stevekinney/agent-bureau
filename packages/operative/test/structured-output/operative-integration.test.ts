@@ -104,8 +104,8 @@ describe('toolChoice in operative loop', () => {
   });
 });
 
-describe('responseSchema to responseFormat bridge', () => {
-  it('computes responseFormat from responseSchema and passes it to generate', async () => {
+describe('output schema to responseFormat bridge', () => {
+  it('computes responseFormat from output and passes it to generate', async () => {
     const schema = z.object({
       name: z.string(),
       age: z.number(),
@@ -122,7 +122,7 @@ describe('responseSchema to responseFormat bridge', () => {
       toolbox: createTestToolbox([]),
       conversation,
       stopWhen: () => true,
-      responseSchema: schema,
+      output: schema,
     });
 
     expect(calls).toHaveLength(1);
@@ -143,7 +143,7 @@ describe('responseSchema to responseFormat bridge', () => {
     }
   });
 
-  it('does not set responseFormat when responseSchema is not provided', async () => {
+  it('does not set responseFormat when output is not provided', async () => {
     const { generate, calls } = createTestGenerate([finalResponse]);
     const conversation = new Conversation(createConversationHistory());
     conversation.appendUserMessage('Hello');

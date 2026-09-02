@@ -207,7 +207,7 @@ async function reconstructRunResult(
     ...(terminalError ? { error: terminalError } : {}),
     ...(schemaValidation ? { schemaValidation } : {}),
     // Mirror the in-memory loop and `finalizeRunResult`: a successful
-    // `responseSchema` run's validated value must survive result-only durable
+    // `output` run's validated value must survive result-only durable
     // paths (`resumeDurableRunResult`, `startDurableRunResult`), not just the
     // full lifecycle/finalize path (`driveReattachedRun`/`driveDurableRun`).
     ...('output' in summary ? { output: summary.output } : {}),
@@ -1306,7 +1306,7 @@ interface FinalizeArgs {
    */
   schemaValidation?: { success: boolean; error?: string };
   /**
-   * The `responseSchema`-validated structured output carried out of the
+   * The `output`-validated structured output carried out of the
    * workflow, mirroring `RunResult.output` on the in-memory path.
    * Unlike `schemaValidation.error`, this crosses the checkpoint as plain
    * (already-JSON) data, so no reconstruction is needed here.

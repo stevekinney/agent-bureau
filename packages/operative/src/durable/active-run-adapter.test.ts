@@ -832,7 +832,7 @@ describe('createRun with durable routing', () => {
   });
 
   it('carries schemaValidation through to the durable RunResult (durable parity)', async () => {
-    // A run with a `responseSchema` produces `RunResult.schemaValidation` on the
+    // A run with a `output` produces `RunResult.schemaValidation` on the
     // in-memory path; the durable path must surface the SAME shape. The live
     // validation error is reduced to a message across the checkpoint.
     const context = await buildContext();
@@ -843,7 +843,7 @@ describe('createRun with durable routing', () => {
           toolbox: createToolbox([]),
           conversation: createConversationHistory(),
           stopWhen: stopWhen.noToolCalls(),
-          responseSchema: z.object({ answer: z.string() }),
+          output: z.object({ answer: z.string() }),
         },
         { ...context, runId: 'schema-run', prompt: 'Hello' },
       );
@@ -859,7 +859,7 @@ describe('createRun with durable routing', () => {
   });
 
   it('carries output through to the durable RunResult (durable parity)', async () => {
-    // A run with a `responseSchema` produces `RunResult.output` on the
+    // A run with a `output` produces `RunResult.output` on the
     // in-memory path (AB-95's "distinct field" requirement); the durable path
     // must surface the SAME validated value, unchanged (it's already plain JSON,
     // so unlike `schemaValidation.error` it needs no reconstruction).
@@ -871,7 +871,7 @@ describe('createRun with durable routing', () => {
           toolbox: createToolbox([]),
           conversation: createConversationHistory(),
           stopWhen: stopWhen.noToolCalls(),
-          responseSchema: z.object({ answer: z.string() }),
+          output: z.object({ answer: z.string() }),
         },
         { ...context, runId: 'structured-output-run', prompt: 'Hello' },
       );
@@ -897,7 +897,7 @@ describe('createRun with durable routing', () => {
           toolbox: createToolbox([]),
           conversation: createConversationHistory(),
           stopWhen: stopWhen.noToolCalls(),
-          responseSchema: z.object({ answer: z.string() }),
+          output: z.object({ answer: z.string() }),
           schemaRetries: 0,
         },
         { ...context, runId: 'structured-output-fail-run', prompt: 'Hello' },

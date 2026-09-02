@@ -20,7 +20,7 @@ import { z } from 'zod';
 
 import { noToolCalls, pendingApproval } from '../src/conditions/predicates';
 import { createAgent } from '../src/create-agent';
-import { MaximumStepsExceededError } from '../src/errors';
+import { MaximumStepsExceededError, OutputSchemaConversionError } from '../src/errors';
 import type { ConversationHistory, GenerateFunction, GenerateResponse } from '../src/types';
 
 // ---------------------------------------------------------------------------
@@ -65,6 +65,19 @@ describe('createAgent', () => {
 
     const run = agent.run('test');
     expect(await run.output()).toEqual({ answer: 'hello' });
+  });
+
+  it('throws OutputSchemaConversionError synchronously at createAgent() call time for an unrepresentable output schema (AB-18)', () => {
+    // `z.date()` has no JSON Schema representation. This must fail here, at
+    // `createAgent()`, not later on `await run.result()` — a schema-authoring
+    // error is a config mistake to catch immediately, not a runtime surprise.
+    expect(() =>
+      createAgent({
+        generate: singleResponse('{}'),
+        output: z.date(),
+        stopWhen: noToolCalls(),
+      }),
+    ).toThrow(OutputSchemaConversionError);
   });
 
   it('rejects unwrap with a maximum-steps policy error', async () => {

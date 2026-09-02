@@ -7,7 +7,7 @@
  * 1. A "webhook event handler"-shaped run — arbitrary instructions, no PR/
  *    diff context, no review-specific tools — proving Phase-Two generalized
  *    runs (not just PR review) are first-class on the same primitives.
- * 2. A non-`specialist` role (`triage`) with its own AB-95 raw-JSON-Schema
+ * 2. A non-`specialist` role (`triage`) with its own AB-18 `output` Zod schema
  *    output contract, validated against Tribunal's `triageDecisionSchema`.
  * 3. The AB-96 SIGTERM partial-report path — `bureau`'s shipped
  *    `getRunReport()` helper, called synchronously right after `abortRun()`,
@@ -125,7 +125,7 @@ describe('AB-99 Tribunal conformance — generality (non-PR runs)', () => {
       toolbox: createToolbox([]) as unknown as Toolbox,
       conversation,
       stopWhen: stopWhen.noToolCalls(),
-      responseSchema: tribunalOutputSchemaForRole('triage'),
+      output: tribunalOutputSchemaForRole('triage'),
     });
 
     const result = await activeRun.result;
