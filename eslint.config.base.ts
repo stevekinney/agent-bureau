@@ -299,12 +299,11 @@ function realRuntimeCallLabel(
   if (!node) return undefined;
 
   if (node.type === 'NewExpression') {
-    const callee = unwrapTypeAssertions(node.callee);
+    // resolveGlobalQualifiedName unwraps and handles both the bare `Date` identifier and a
+    // host-global-qualified form (`new globalThis.Date()`, `new window.Date()`) uniformly.
     if (
-      callee.type === 'Identifier' &&
-      callee.name === 'Date' &&
-      node.arguments.length === 0 &&
-      context.sourceCode.isGlobalReference(callee)
+      resolveGlobalQualifiedName(context, node.callee) === 'Date' &&
+      node.arguments.length === 0
     ) {
       return 'new Date()';
     }
@@ -399,7 +398,9 @@ export function createNoGlobalTransportMutationRule(
 
       return {
         AssignmentExpression(node) {
-          if (node.operator !== '=') return;
+          // Every assignment operator (=, ??=, ||=, +=, ...) writes the left-hand target, so a
+          // compound form (`globalThis.fetch ??= fake`) mutates process-global transport state
+          // exactly like plain `=` does — narrowing to `=` only would let it bypass this rule.
           const left = node.left;
           if (left.type !== 'MemberExpression') return;
 

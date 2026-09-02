@@ -147,6 +147,16 @@ describe('determinism/no-global-transport-mutation', () => {
     const ruleIds = lintSourceUnderPackages('globalThis!.fetch = fake;\n');
     expect(ruleIds).toEqual(['determinism/no-global-transport-mutation']);
   });
+
+  test('flags a nullish-coalescing compound assignment (globalThis.fetch ??= fake)', () => {
+    const ruleIds = lintSourceUnderPackages('globalThis.fetch ??= fake;\n');
+    expect(ruleIds).toEqual(['determinism/no-global-transport-mutation']);
+  });
+
+  test('flags a logical-or compound assignment (globalThis.WebSocket ||= Fake)', () => {
+    const ruleIds = lintSourceUnderPackages('globalThis.WebSocket ||= Fake;\n');
+    expect(ruleIds).toEqual(['determinism/no-global-transport-mutation']);
+  });
 });
 
 describe('scope-aware detection (regression coverage for injected-runtime false positives)', () => {
@@ -212,6 +222,16 @@ describe('scope-aware detection (regression coverage for injected-runtime false 
       'function stamp() {\n  const { Date } = fakes;\n  return Date.now();\n}\n',
     );
     expect(ruleIds).toEqual([]);
+  });
+
+  test('flags a host-qualified Date constructor (new globalThis.Date())', () => {
+    const ruleIds = lintSourceInDeterministicDirectory('new globalThis.Date();\n');
+    expect(ruleIds).toEqual(['determinism/no-real-runtime-call']);
+  });
+
+  test('flags a host-qualified Date constructor (new window.Date())', () => {
+    const ruleIds = lintSourceInDeterministicDirectory('new window.Date();\n');
+    expect(ruleIds).toEqual(['determinism/no-real-runtime-call']);
   });
 });
 
