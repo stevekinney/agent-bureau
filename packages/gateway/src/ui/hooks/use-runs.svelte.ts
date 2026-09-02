@@ -1,4 +1,5 @@
 import type { RunSummary, ServerFrame } from '../../types';
+import type { GatewayClientEnvironment } from '../client-environment';
 
 /**
  * Reactive store for the dashboard's collection of run summaries.
@@ -20,12 +21,16 @@ export interface RunsStore {
 
 /**
  * Creates a {@link RunsStore} seeded with the server-provided initial runs.
+ * `environment` provides `fetch` instead of reading it off a global.
  */
-export function createRunsStore(initialRuns: RunSummary[]): RunsStore {
+export function createRunsStore(
+  initialRuns: RunSummary[],
+  environment: GatewayClientEnvironment,
+): RunsStore {
   let runs = $state<RunSummary[]>(initialRuns);
 
   async function refresh(): Promise<void> {
-    const response = await fetch('/api/v1/runs');
+    const response = await environment.fetch('/api/v1/runs');
     const data = (await response.json()) as RunSummary[];
     runs = data;
   }

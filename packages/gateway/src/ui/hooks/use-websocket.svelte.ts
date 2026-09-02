@@ -1,4 +1,10 @@
 import type { ClientFrame, ServerFrame } from '../../types';
+import {
+  clearScheduledTimeout,
+  type GatewayClientEnvironment,
+  scheduleTimeout,
+  type TimeoutHandle,
+} from '../client-environment';
 
 export type ConnectionStatus = 'connecting' | 'connected' | 'disconnected';
 
@@ -8,6 +14,8 @@ export interface CreateWebSocketOptions {
   authToken?: string;
   onMessage?: (frame: ServerFrame) => void;
   reconnectInterval?: number;
+  /** Transport and timer primitives, injected rather than read off globals. */
+  environment: GatewayClientEnvironment;
 }
 
 export interface WebSocketStore {
@@ -72,13 +80,14 @@ export function createWebSocket({
   authToken,
   onMessage,
   reconnectInterval = 3000,
+  environment,
 }: CreateWebSocketOptions): WebSocketStore {
   let status = $state<ConnectionStatus>('disconnected');
 
   // Plain locals: none of these drive UI, so they must NOT be `$state`.
   let ws: WebSocket | null = null;
   let eventSource: EventSource | null = null;
-  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let reconnectTimer: TimeoutHandle | null = null;
   let active = false;
   const desiredRunIds = new Set<string>();
   let shouldUseEventStream = false;
@@ -145,7 +154,7 @@ export function createWebSocket({
 
   function clearReconnectTimer(): void {
     if (reconnectTimer !== null) {
-      clearTimeout(reconnectTimer);
+      clearScheduledTimeout(environment, reconnectTimer);
       reconnectTimer = null;
     }
   }
@@ -161,7 +170,7 @@ export function createWebSocket({
 
     status = 'connecting';
     const reconnectIds = reconnectRunIds();
-    const source = new EventSource(
+    const source = new environment.EventSource(
       buildEventStreamUrl(
         eventStreamUrl,
         authToken,
@@ -212,7 +221,7 @@ export function createWebSocket({
     const connectionUrl = authToken
       ? `${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(authToken)}`
       : url;
-    const socket = new WebSocket(connectionUrl);
+    const socket = new environment.WebSocket(connectionUrl);
     ws = socket;
     let opened = false;
 
@@ -260,7 +269,7 @@ export function createWebSocket({
       }
 
       status = 'disconnected';
-      reconnectTimer = setTimeout(connect, reconnectInterval);
+      reconnectTimer = scheduleTimeout(environment, connect, reconnectInterval);
     });
   }
 
@@ -283,7 +292,7 @@ export function createWebSocket({
       desiredRunIds.delete(frame.runId);
     }
 
-    if (ws?.readyState === WebSocket.OPEN) {
+    if (ws?.readyState === environment.WebSocket.OPEN) {
       ws.send(JSON.stringify(frame));
       return;
     }

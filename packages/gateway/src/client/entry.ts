@@ -8,6 +8,7 @@ import { hydrate } from 'svelte';
 import type { RunDetailResponse } from '../routes/runs';
 import type { ConfigurationResponse, RunSummary } from '../types';
 import App from '../ui/app.svelte';
+import { createBrowserClientEnvironment } from '../ui/client-environment';
 
 /**
  * The canonical hydration payload injected by the server into
@@ -48,6 +49,11 @@ if (root) {
     props: {
       initialData: toInitialData(window.__INITIAL_DATA__),
       pathname: window.location.pathname,
+      // Constructed exactly once, reading the real browser globals, and
+      // passed down through the app tree (AB-273): production behavior is
+      // unchanged from reading `fetch`/`WebSocket`/`EventSource`/timers
+      // directly, but every consumer now takes them as a parameter.
+      environment: createBrowserClientEnvironment(),
     },
   });
 }

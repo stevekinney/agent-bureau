@@ -1,6 +1,18 @@
+import { readdirSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 
 import type { ServerFrame } from '../../types';
+import {
+  clearScheduledInterval,
+  createBrowserClientEnvironment,
+  type GatewayClientEnvironment,
+  type RuntimeTimers,
+  scheduleInterval,
+  type TimeoutHandle,
+} from '../client-environment';
 import { createWebSocket } from './use-websocket.svelte.ts';
 
 // ── Controllable transport fakes ────────────────────────────────────
@@ -80,8 +92,6 @@ class FakeEventSource extends FakeEventTarget {
   }
 }
 
-const originalWebSocket = globalThis.WebSocket;
-const originalEventSource = globalThis.EventSource;
 const originalWindow = (globalThis as { window?: unknown }).window;
 
 function lastSocket(): FakeWebSocket {
@@ -96,12 +106,85 @@ function lastSource(): FakeEventSource {
   return source;
 }
 
+/**
+ * Timers double that never actually schedules anything — `setTimeout` is a
+ * no-op returning a sentinel handle, so tests that don't exercise the
+ * reconnect-timer path never wait on anything real. Tests that do exercise
+ * it build their own controllable timers with {@link createControllableTimers}.
+ */
+function createInertTimers(): RuntimeTimers {
+  return {
+    setTimeout: () => 0 as unknown as TimeoutHandle,
+    clearTimeout: () => {},
+    setInterval: () => {
+      throw new Error('createWebSocket does not use timers.setInterval');
+    },
+    clearInterval: () => {},
+    now: () => 0,
+  };
+}
+
+/**
+ * A deterministic, fully controllable `timers.setTimeout`/`clearTimeout`
+ * double for the reconnect-timing tests: no real delay is ever waited on —
+ * the scheduled callback fires only when the test calls
+ * {@link fireScheduledTimeout} explicitly.
+ */
+function createControllableTimers(): {
+  timers: RuntimeTimers;
+  fireScheduledTimeout: () => void;
+  scheduledDelay: () => number | undefined;
+  scheduledCount: () => number;
+} {
+  let scheduled: { callback: () => void; delay: number | undefined } | undefined;
+  let scheduledCount = 0;
+  const timers: RuntimeTimers = {
+    setTimeout: (callback, milliseconds) => {
+      scheduled = { callback, delay: milliseconds };
+      scheduledCount += 1;
+      return scheduledCount as unknown as TimeoutHandle;
+    },
+    clearTimeout: () => {
+      scheduled = undefined;
+    },
+    setInterval: () => {
+      throw new Error('createWebSocket does not use timers.setInterval');
+    },
+    clearInterval: () => {},
+    now: () => 0,
+  };
+  return {
+    timers,
+    fireScheduledTimeout: () => {
+      const pending = scheduled;
+      scheduled = undefined;
+      pending?.callback();
+    },
+    scheduledDelay: () => scheduled?.delay,
+    scheduledCount: () => scheduledCount,
+  };
+}
+
+// Bun's `typeof fetch` also requires a static `preconnect` method this stub
+// has no use for; the cast documents that this is a deliberate
+// call-should-never-happen sentinel, not a real fetch implementation.
+const unusedFetch = (() =>
+  Promise.reject(new Error('createWebSocket does not use fetch'))) as unknown as typeof fetch;
+
+function createEnvironment(timers: RuntimeTimers = createInertTimers()): GatewayClientEnvironment {
+  return {
+    fetch: unusedFetch,
+    WebSocket: FakeWebSocket as unknown as typeof WebSocket,
+    EventSource: FakeEventSource as unknown as typeof EventSource,
+    timers,
+  };
+}
+
 beforeEach(() => {
   FakeWebSocket.instances = [];
   FakeEventSource.instances = [];
-  globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
-  globalThis.EventSource = FakeEventSource as unknown as typeof EventSource;
-  // `buildEventStreamUrl` reads window.location.origin.
+  // `buildEventStreamUrl` reads window.location.origin — unrelated to the
+  // injected transport environment, so this stays a direct global stub.
   Object.defineProperty(globalThis, 'window', {
     configurable: true,
     value: { location: { origin: 'http://localhost' } },
@@ -109,8 +192,6 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  globalThis.WebSocket = originalWebSocket;
-  globalThis.EventSource = originalEventSource;
   Object.defineProperty(globalThis, 'window', {
     configurable: true,
     value: originalWindow,
@@ -119,7 +200,11 @@ afterEach(() => {
 
 describe('createWebSocket', () => {
   it('starts disconnected and connects on start()', () => {
-    const store = createWebSocket({ url: '/ws', eventStreamUrl: '/api/v1/events' });
+    const store = createWebSocket({
+      url: '/ws',
+      eventStreamUrl: '/api/v1/events',
+      environment: createEnvironment(),
+    });
     expect(store.status).toBe('disconnected');
 
     store.start();
@@ -137,6 +222,7 @@ describe('createWebSocket', () => {
       url: '/ws',
       eventStreamUrl: '/api/v1/events',
       authToken: 'secret',
+      environment: createEnvironment(),
     });
     store.start();
     expect(lastSocket().url).toBe('/ws?token=secret');
@@ -144,7 +230,11 @@ describe('createWebSocket', () => {
   });
 
   it('flushes pending subscriptions when the socket opens', () => {
-    const store = createWebSocket({ url: '/ws', eventStreamUrl: '/api/v1/events' });
+    const store = createWebSocket({
+      url: '/ws',
+      eventStreamUrl: '/api/v1/events',
+      environment: createEnvironment(),
+    });
     store.start();
     store.subscribe('run-1');
     store.subscribe('run-2');
@@ -159,7 +249,11 @@ describe('createWebSocket', () => {
   });
 
   it('sends frames immediately over an open socket', () => {
-    const store = createWebSocket({ url: '/ws', eventStreamUrl: '/api/v1/events' });
+    const store = createWebSocket({
+      url: '/ws',
+      eventStreamUrl: '/api/v1/events',
+      environment: createEnvironment(),
+    });
     store.start();
     lastSocket().open();
 
@@ -173,7 +267,12 @@ describe('createWebSocket', () => {
 
   it('forwards parsed frames to onMessage and ignores malformed ones', () => {
     const onMessage = mock((_frame: ServerFrame) => {});
-    const store = createWebSocket({ url: '/ws', eventStreamUrl: '/api/v1/events', onMessage });
+    const store = createWebSocket({
+      url: '/ws',
+      eventStreamUrl: '/api/v1/events',
+      onMessage,
+      environment: createEnvironment(),
+    });
     store.start();
     lastSocket().open();
 
@@ -186,7 +285,11 @@ describe('createWebSocket', () => {
   });
 
   it('falls back to the event stream when the socket closes before opening', () => {
-    const store = createWebSocket({ url: '/ws', eventStreamUrl: '/api/v1/events' });
+    const store = createWebSocket({
+      url: '/ws',
+      eventStreamUrl: '/api/v1/events',
+      environment: createEnvironment(),
+    });
     store.start();
     store.subscribe('run-1');
 
@@ -206,6 +309,7 @@ describe('createWebSocket', () => {
       url: '/ws',
       eventStreamUrl: '/api/v1/events',
       authToken: 'tok',
+      environment: createEnvironment(),
     });
     store.start();
     store.subscribe('run-1');
@@ -215,44 +319,40 @@ describe('createWebSocket', () => {
     store.stop();
   });
 
-  it('schedules a reconnect after an established socket closes', () => {
-    const setTimeoutSpy = mock((handler: () => void, _ms?: number) => {
-      // Return a sentinel handle; capture the handler for assertion below.
-      pendingReconnect = handler;
-      return 1 as unknown as ReturnType<typeof setTimeout>;
+  it('schedules a reconnect after an established socket closes, driven deterministically by the injected timers', () => {
+    const { timers, fireScheduledTimeout, scheduledDelay, scheduledCount } =
+      createControllableTimers();
+
+    const store = createWebSocket({
+      url: '/ws',
+      eventStreamUrl: '/api/v1/events',
+      reconnectInterval: 1234,
+      environment: createEnvironment(timers),
     });
-    let pendingReconnect: (() => void) | undefined;
-    const originalSetTimeout = globalThis.setTimeout;
-    globalThis.setTimeout = setTimeoutSpy as unknown as typeof setTimeout;
+    store.start();
+    lastSocket().open();
+    expect(store.status).toBe('connected');
 
-    try {
-      const store = createWebSocket({
-        url: '/ws',
-        eventStreamUrl: '/api/v1/events',
-        reconnectInterval: 1234,
-      });
-      store.start();
-      lastSocket().open();
-      expect(store.status).toBe('connected');
+    lastSocket().fireClose();
+    expect(store.status).toBe('disconnected');
+    expect(scheduledCount()).toBe(1);
+    expect(scheduledDelay()).toBe(1234);
 
-      lastSocket().fireClose();
-      expect(store.status).toBe('disconnected');
-      expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
-      expect(setTimeoutSpy.mock.calls[0]?.[1]).toBe(1234);
+    // Firing the scheduled reconnect opens a fresh socket — no real timer
+    // was ever waited on to reach this point.
+    const before = FakeWebSocket.instances.length;
+    fireScheduledTimeout();
+    expect(FakeWebSocket.instances.length).toBe(before + 1);
 
-      // Firing the scheduled reconnect opens a fresh socket.
-      const before = FakeWebSocket.instances.length;
-      pendingReconnect?.();
-      expect(FakeWebSocket.instances.length).toBe(before + 1);
-
-      store.stop();
-    } finally {
-      globalThis.setTimeout = originalSetTimeout;
-    }
+    store.stop();
   });
 
   it('does not reconnect or change status after stop()', () => {
-    const store = createWebSocket({ url: '/ws', eventStreamUrl: '/api/v1/events' });
+    const store = createWebSocket({
+      url: '/ws',
+      eventStreamUrl: '/api/v1/events',
+      environment: createEnvironment(),
+    });
     store.start();
     const socket = lastSocket();
     socket.open();
@@ -270,7 +370,11 @@ describe('createWebSocket', () => {
   });
 
   it('reopens the event stream on send when already in fallback mode', () => {
-    const store = createWebSocket({ url: '/ws', eventStreamUrl: '/api/v1/events' });
+    const store = createWebSocket({
+      url: '/ws',
+      eventStreamUrl: '/api/v1/events',
+      environment: createEnvironment(),
+    });
     store.start();
     store.subscribe('run-1');
     lastSocket().fireClose();
@@ -289,7 +393,13 @@ describe('createWebSocket', () => {
   // (in addition to '*') or every run update received while disconnected is
   // silently lost until a manual refresh.
   it('carries per-run cursors alongside a wildcard subscription on reconnect', () => {
-    const store = createWebSocket({ url: '/ws', eventStreamUrl: '/api/v1/events' });
+    const { timers, fireScheduledTimeout } = createControllableTimers();
+
+    const store = createWebSocket({
+      url: '/ws',
+      eventStreamUrl: '/api/v1/events',
+      environment: createEnvironment(timers),
+    });
     store.start();
     store.subscribe('*');
     lastSocket().open();
@@ -320,35 +430,159 @@ describe('createWebSocket', () => {
 
     // Kill the socket after it was established — falls to the reconnect
     // timer path (not the immediate SSE-fallback path).
-    const setTimeoutSpy = mock((handler: () => void, _ms?: number) => {
-      pendingReconnect = handler;
-      return 1 as unknown as ReturnType<typeof setTimeout>;
-    });
-    let pendingReconnect: (() => void) | undefined;
+    lastSocket().fireClose();
+    fireScheduledTimeout();
+    lastSocket().open();
+
+    const sentSubscribes = lastSocket().sent.map(
+      (raw) => JSON.parse(raw) as Record<string, unknown>,
+    );
+    const byRunId = new Map(sentSubscribes.map((frame) => [frame['runId'], frame['since']]));
+
+    // '*' stays subscribed (with no cursor of its own — there's no stable
+    // buffered position across an open-ended run set).
+    expect(byRunId.get('*')).toBeUndefined();
+    expect(byRunId.has('*')).toBe(true);
+    // Each concrete run carries its own last-seen cursor so the door can
+    // replay exactly what was missed while disconnected.
+    expect(byRunId.get('run-a')).toBe(3);
+    expect(byRunId.get('run-b')).toBe(5);
+
+    store.stop();
+  });
+});
+
+describe('createBrowserClientEnvironment', () => {
+  it('wires fetch, WebSocket, and EventSource straight to the real globals', () => {
+    const environment = createBrowserClientEnvironment();
+    expect(environment.fetch).toBe(globalThis.fetch);
+    expect(environment.WebSocket).toBe(globalThis.WebSocket);
+    expect(environment.EventSource).toBe(globalThis.EventSource);
+  });
+
+  it('wires timers.setTimeout/clearTimeout and timers.setInterval/clearInterval to the real global timer functions', () => {
     const originalSetTimeout = globalThis.setTimeout;
-    globalThis.setTimeout = setTimeoutSpy as unknown as typeof setTimeout;
+    const originalClearTimeout = globalThis.clearTimeout;
+    const originalSetInterval = globalThis.setInterval;
+    const originalClearInterval = globalThis.clearInterval;
+    const setTimeoutSpy = mock((callback: () => void, ms?: number) =>
+      originalSetTimeout(callback, ms),
+    );
+    const clearTimeoutSpy = mock((handle: ReturnType<typeof globalThis.setTimeout>) =>
+      originalClearTimeout(handle),
+    );
+    const setIntervalSpy = mock((callback: () => void, ms?: number) =>
+      originalSetInterval(callback, ms),
+    );
+    const clearIntervalSpy = mock((handle: ReturnType<typeof globalThis.setInterval>) =>
+      originalClearInterval(handle),
+    );
+    globalThis.setTimeout = setTimeoutSpy as unknown as typeof globalThis.setTimeout;
+    globalThis.clearTimeout = clearTimeoutSpy as unknown as typeof globalThis.clearTimeout;
+    globalThis.setInterval = setIntervalSpy as unknown as typeof globalThis.setInterval;
+    globalThis.clearInterval = clearIntervalSpy as unknown as typeof globalThis.clearInterval;
 
     try {
-      lastSocket().fireClose();
-      pendingReconnect?.();
-      lastSocket().open();
+      const environment = createBrowserClientEnvironment();
+      // Scheduled and cleared in the same tick — no real delay is ever
+      // waited on to reach these assertions.
+      const timeoutHandle = environment.timers.setTimeout(() => {}, 10);
+      environment.timers.clearTimeout(timeoutHandle);
+      const intervalHandle = environment.timers.setInterval(() => {}, 10);
+      environment.timers.clearInterval(intervalHandle);
 
-      const sentSubscribes = lastSocket().sent.map(
-        (raw) => JSON.parse(raw) as Record<string, unknown>,
-      );
-      const byRunId = new Map(sentSubscribes.map((frame) => [frame['runId'], frame['since']]));
-
-      // '*' stays subscribed (with no cursor of its own — there's no stable
-      // buffered position across an open-ended run set).
-      expect(byRunId.get('*')).toBeUndefined();
-      expect(byRunId.has('*')).toBe(true);
-      // Each concrete run carries its own last-seen cursor so the door can
-      // replay exactly what was missed while disconnected.
-      expect(byRunId.get('run-a')).toBe(3);
-      expect(byRunId.get('run-b')).toBe(5);
+      expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
+      expect(setTimeoutSpy.mock.calls[0]?.[1]).toBe(10);
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(timeoutHandle);
+      expect(setIntervalSpy).toHaveBeenCalledTimes(1);
+      expect(setIntervalSpy.mock.calls[0]?.[1]).toBe(10);
+      expect(clearIntervalSpy).toHaveBeenCalledWith(intervalHandle);
     } finally {
       globalThis.setTimeout = originalSetTimeout;
-      store.stop();
+      globalThis.clearTimeout = originalClearTimeout;
+      globalThis.setInterval = originalSetInterval;
+      globalThis.clearInterval = originalClearInterval;
     }
+  });
+
+  it('reads the current wall-clock time from Date.now()', () => {
+    const environment = createBrowserClientEnvironment();
+    const before = Date.now();
+    const reading = environment.timers.now();
+    const after = Date.now();
+    expect(reading).toBeGreaterThanOrEqual(before);
+    expect(reading).toBeLessThanOrEqual(after);
+  });
+});
+
+describe('scheduleInterval / clearScheduledInterval', () => {
+  it('forwards to timers.setInterval and timers.clearInterval', () => {
+    let capturedDelay: number | undefined;
+    let cleared: unknown;
+    const timers: RuntimeTimers = {
+      setTimeout: () => {
+        throw new Error('not used by this test');
+      },
+      clearTimeout: () => {},
+      setInterval: (_callback, milliseconds) => {
+        capturedDelay = milliseconds;
+        return 7 as unknown as TimeoutHandle;
+      },
+      clearInterval: (handle) => {
+        cleared = handle;
+      },
+      now: () => 0,
+    };
+    const environment = createEnvironment(timers);
+
+    const handle = scheduleInterval(environment, () => {}, 500);
+    expect(capturedDelay).toBe(500);
+    expect(handle).toBe(7 as unknown as TimeoutHandle);
+
+    clearScheduledInterval(environment, handle);
+    expect(cleared).toBe(7);
+  });
+});
+
+describe('no global transport assignment', () => {
+  it('does not assign to globalThis.fetch, globalThis.WebSocket, or globalThis.EventSource anywhere under packages/gateway/src/ui', () => {
+    const uiDirectory = join(dirname(fileURLToPath(import.meta.url)), '..');
+    const forbiddenAssignment = /(globalThis|global)\.(fetch|WebSocket|EventSource)\s*=/;
+    const offenders: string[] = [];
+    const scanned: string[] = [];
+
+    function walk(directory: string): void {
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        const fullPath = join(directory, entry.name);
+        if (entry.isDirectory()) {
+          walk(fullPath);
+          continue;
+        }
+        if (!entry.name.endsWith('.ts') && !entry.name.endsWith('.svelte')) continue;
+        scanned.push(fullPath);
+        const contents = readFileSync(fullPath, 'utf-8');
+        if (forbiddenAssignment.test(contents)) {
+          offenders.push(fullPath);
+        }
+      }
+    }
+
+    walk(uiDirectory);
+
+    // Guard against a vacuous pass: prove the walk actually found the five
+    // hook test files (and this file itself) before trusting an empty
+    // `offenders` list.
+    const scannedBasenames = scanned.map((path) => path.split('/').pop());
+    for (const expectedFile of [
+      'use-chat.svelte.test.ts',
+      'use-reviews.svelte.test.ts',
+      'use-run-detail.svelte.test.ts',
+      'use-runs.svelte.test.ts',
+      'use-websocket.svelte.test.ts',
+    ]) {
+      expect(scannedBasenames).toContain(expectedFile);
+    }
+
+    expect(offenders).toEqual([]);
   });
 });

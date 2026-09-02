@@ -9,6 +9,12 @@
     PendingReview,
     RunSummary,
   } from '../types';
+  import {
+    clearScheduledInterval,
+    createBrowserClientEnvironment,
+    type GatewayClientEnvironment,
+    scheduleInterval,
+  } from './client-environment';
   import { createChatStore } from './hooks/use-chat.svelte';
   import { createReviewsStore } from './hooks/use-reviews.svelte';
   import { createRunDetailStore } from './hooks/use-run-detail.svelte';
@@ -43,7 +49,22 @@
    * out to their handlers, drives route-scoped subscriptions, and routes
    * between the six pages inside the shared {@link Layout}.
    */
-  let { initialData, pathname }: { initialData: InitialData; pathname: string } = $props();
+  let {
+    initialData,
+    pathname,
+    environment = createBrowserClientEnvironment(),
+  }: {
+    initialData: InitialData;
+    pathname: string;
+    /**
+     * Transport and timer primitives. Optional so existing SSR/hydration
+     * call sites need no change: it defaults to the real browser globals,
+     * read once here, exactly reproducing the pre-AB-273 behavior. The
+     * browser entry point passes this explicitly instead of relying on the
+     * default.
+     */
+    environment?: GatewayClientEnvironment;
+  } = $props();
 
   const EMPTY_RUN_DETAIL: RunDetailResponse = {
     id: '',
@@ -89,6 +110,12 @@
 
   let route = $derived(matchRoute(pathname));
 
+  // `environment` never changes after the initial render — the browser entry
+  // point constructs it once — so it is captured into a plain local (never
+  // `$state`) rather than read as a reactive prop at each store-construction
+  // call site below. `untrack` makes that one-time read explicit.
+  const clientEnvironment = untrack(() => environment);
+
   // Stores are constructed in dependency order: runs and run-detail first, then
   // chat (which upserts created runs into the runs list), then the websocket
   // whose onMessage fans frames out to all three. The fan-out closure only runs
@@ -98,9 +125,12 @@
   // live frames). `untrack` expresses that deliberate one-time read so it isn't
   // mistaken for a reactive dependency. It is isomorphic, so the SSR and client
   // seeds stay identical.
-  const runsStore = createRunsStore(untrack(() => initialData.runs ?? []));
-  const runDetailStore = createRunDetailStore(untrack(() => initialData.run ?? EMPTY_RUN_DETAIL));
-  const reviewsStore = createReviewsStore(untrack(() => initialData.reviews ?? []));
+  const runsStore = createRunsStore(untrack(() => initialData.runs ?? []), clientEnvironment);
+  const runDetailStore = createRunDetailStore(
+    untrack(() => initialData.run ?? EMPTY_RUN_DETAIL),
+    clientEnvironment,
+  );
+  const reviewsStore = createReviewsStore(untrack(() => initialData.reviews ?? []), clientEnvironment);
 
   const websocketProtocol =
     typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -116,6 +146,7 @@
     // queue immediately instead of waiting for the next poll tick so the
     // chat surface's inline form appears promptly.
     onHumanInputRequested: () => void reviewsStore.refresh(),
+    environment: clientEnvironment,
   });
 
   const websocket = createWebSocket({
@@ -126,6 +157,7 @@
       runDetailStore.handleMessage(frame);
       chatStore.handleMessage(frame);
     },
+    environment: clientEnvironment,
   });
 
   let isDashboardRoute = $derived(route?.name === 'dashboard');
@@ -182,8 +214,12 @@
   // REVIEWS_POLL_INTERVAL_MS above for why this is polling, not a live feed).
   $effect(() => {
     if (!shouldPollReviews) return;
-    const interval = setInterval(() => void reviewsStore.refresh(), REVIEWS_POLL_INTERVAL_MS);
-    return () => clearInterval(interval);
+    const interval = scheduleInterval(
+      clientEnvironment,
+      () => void reviewsStore.refresh(),
+      REVIEWS_POLL_INTERVAL_MS,
+    );
+    return () => clearScheduledInterval(clientEnvironment, interval);
   });
 
   // Entering the chat route with an already-active run (e.g. the chat store

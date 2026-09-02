@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, it, mock } from 'bun:test';
+import { describe, expect, it, mock } from 'bun:test';
 
 import type { RunSummary, ServerFrame } from '../../types';
+import type { GatewayClientEnvironment } from '../client-environment';
 import { createRunsStore } from './use-runs.svelte.ts';
 
 function makeRun(overrides: Partial<RunSummary> = {}): RunSummary {
@@ -20,34 +21,78 @@ function makeRun(overrides: Partial<RunSummary> = {}): RunSummary {
   };
 }
 
-const originalFetch = globalThis.fetch;
+/**
+ * Builds a {@link GatewayClientEnvironment} test double with a controllable
+ * `fetch`. `use-runs.svelte.ts` never touches `WebSocket`, `EventSource`, or
+ * `timers`, so those fields throw if a bug ever causes them to be invoked.
+ */
+function createEnvironment(fetchImplementation: typeof fetch): GatewayClientEnvironment {
+  return {
+    fetch: fetchImplementation,
+    WebSocket: class {
+      constructor() {
+        throw new Error('use-runs does not construct a WebSocket');
+      }
+    } as unknown as typeof WebSocket,
+    EventSource: class {
+      constructor() {
+        throw new Error('use-runs does not construct an EventSource');
+      }
+    } as unknown as typeof EventSource,
+    timers: {
+      setTimeout: () => {
+        throw new Error('use-runs does not use timers.setTimeout');
+      },
+      clearTimeout: () => {
+        throw new Error('use-runs does not use timers.clearTimeout');
+      },
+      setInterval: () => {
+        throw new Error('use-runs does not use timers.setInterval');
+      },
+      clearInterval: () => {
+        throw new Error('use-runs does not use timers.clearInterval');
+      },
+      now: () => {
+        throw new Error('use-runs does not use timers.now');
+      },
+    },
+  };
+}
 
-afterEach(() => {
-  globalThis.fetch = originalFetch;
-});
+// Bun's `typeof fetch` also requires a static `preconnect` method that this
+// stub has no use for; the cast documents that this is a deliberate
+// call-should-never-happen sentinel, not a real fetch implementation.
+const unusedFetch = (() =>
+  Promise.reject(new Error('fetch should not be called in this test'))) as unknown as typeof fetch;
 
 describe('createRunsStore', () => {
   it('seeds runs from the initial value and exposes them reactively', () => {
-    const store = createRunsStore([makeRun()]);
+    const store = createRunsStore([makeRun()], createEnvironment(unusedFetch));
     expect(store.runs).toHaveLength(1);
     expect(store.runs[0]?.id).toBe('run-1');
   });
 
   it('upserts a new run at the head', () => {
-    const store = createRunsStore([makeRun({ id: 'run-1' })]);
+    const store = createRunsStore([makeRun({ id: 'run-1' })], createEnvironment(unusedFetch));
     store.upsertRun(makeRun({ id: 'run-2' }));
     expect(store.runs.map((run) => run.id)).toEqual(['run-2', 'run-1']);
   });
 
   it('upserts an existing run in place', () => {
-    const store = createRunsStore([makeRun({ id: 'run-1', status: 'running' })]);
+    const store = createRunsStore(
+      [makeRun({ id: 'run-1', status: 'running' })],
+      createEnvironment(unusedFetch),
+    );
     store.upsertRun(makeRun({ id: 'run-1', status: 'completed' }));
     expect(store.runs).toHaveLength(1);
     expect(store.runs[0]?.status).toBe('completed');
   });
 
   it('accumulates usage and advances steps on step.completed', () => {
-    const store = createRunsStore([makeRun({ id: 'run-1', steps: 0 })]);
+    const store = createRunsStore(
+      [makeRun({ id: 'run-1', steps: 0 })],
+      createEnvironment(unusedFetch),
+    );
     const frame: ServerFrame = {
       type: 'event',
       runId: 'run-1',
@@ -65,7 +110,7 @@ describe('createRunsStore', () => {
   });
 
   it('marks a run completed with its finish reason', () => {
-    const store = createRunsStore([makeRun({ id: 'run-1' })]);
+    const store = createRunsStore([makeRun({ id: 'run-1' })], createEnvironment(unusedFetch));
     store.handleMessage({
       type: 'event',
       runId: 'run-1',
@@ -81,7 +126,7 @@ describe('createRunsStore', () => {
   });
 
   it('marks a run errored with its error message', () => {
-    const store = createRunsStore([makeRun({ id: 'run-1' })]);
+    const store = createRunsStore([makeRun({ id: 'run-1' })], createEnvironment(unusedFetch));
     store.handleMessage({
       type: 'event',
       runId: 'run-1',
@@ -97,7 +142,7 @@ describe('createRunsStore', () => {
   });
 
   it('marks a run aborted and preserves the typed abort error string', () => {
-    const store = createRunsStore([makeRun({ id: 'run-1' })]);
+    const store = createRunsStore([makeRun({ id: 'run-1' })], createEnvironment(unusedFetch));
     store.handleMessage({
       type: 'event',
       runId: 'run-1',
@@ -113,7 +158,10 @@ describe('createRunsStore', () => {
   });
 
   it('ignores non-event frames', () => {
-    const store = createRunsStore([makeRun({ id: 'run-1', actionCount: 0 })]);
+    const store = createRunsStore(
+      [makeRun({ id: 'run-1', actionCount: 0 })],
+      createEnvironment(unusedFetch),
+    );
     store.handleMessage({ type: 'pong' });
     expect(store.runs[0]?.actionCount).toBe(0);
   });
@@ -121,9 +169,8 @@ describe('createRunsStore', () => {
   it('refreshes when an unseen run.started frame arrives', async () => {
     const fetched: RunSummary[] = [makeRun({ id: 'run-9' })];
     const fetchMock = mock(() => Promise.resolve(new Response(JSON.stringify(fetched))));
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-    const store = createRunsStore([]);
+    const store = createRunsStore([], createEnvironment(fetchMock as unknown as typeof fetch));
     store.handleMessage({
       type: 'event',
       runId: 'run-9',
@@ -144,9 +191,11 @@ describe('createRunsStore', () => {
 
   it('does not refresh when a run.started frame matches an existing run', async () => {
     const fetchMock = mock(() => Promise.resolve(new Response('[]')));
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-    const store = createRunsStore([makeRun({ id: 'run-1' })]);
+    const store = createRunsStore(
+      [makeRun({ id: 'run-1' })],
+      createEnvironment(fetchMock as unknown as typeof fetch),
+    );
     store.handleMessage({
       type: 'event',
       runId: 'run-1',
@@ -165,9 +214,11 @@ describe('createRunsStore', () => {
     const fetchMock = mock(() =>
       Promise.resolve(new Response(JSON.stringify([makeRun({ id: 'refreshed' })]))),
     );
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-    const store = createRunsStore([makeRun({ id: 'stale' })]);
+    const store = createRunsStore(
+      [makeRun({ id: 'stale' })],
+      createEnvironment(fetchMock as unknown as typeof fetch),
+    );
     await store.refresh();
 
     expect(store.runs.map((run) => run.id)).toEqual(['refreshed']);
