@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import { DurableCapabilityUnavailableError } from './durable/durable-capability-unavailable-error';
 import type { PendingWakeup } from './durable/types';
 
 /**
@@ -50,6 +51,18 @@ export interface ScheduleWakeupResult {
 export interface ScheduleWakeupContext {
   /** Mutable slot — the tool writes the wakeup request here. */
   pendingWakeup: PendingWakeup | undefined;
+  /**
+   * Whether this run has a compatible durable execution context attached
+   * (a bureau with a durable engine, regardless of whether its checkpoint
+   * store is persistent or `MemoryStorage` — either way `ctx.sleep` can park
+   * the workflow for the lifetime of the process). `execute` throws
+   * {@link DurableCapabilityUnavailableError} instead of writing the pending
+   * slot when this is `false`, per AB-41's decision record: an unavailable
+   * capability rejects with a stable typed error rather than returning a
+   * success-shaped no-op. Required (not optional/defaulted) so every
+   * construction site states its durability explicitly.
+   */
+  durable: boolean;
 }
 
 /**
@@ -76,21 +89,39 @@ export interface CreateScheduleWakeupToolOptions {
  *
  * This is an **opt-in built-in tool** — the bureau or agent explicitly adds it
  * to the toolbox (no ambient grant). It only works in a durable run; calling it
- * in an in-memory run is a no-op (no error, just no parking).
+ * when `context.durable` is `false` throws
+ * {@link DurableCapabilityUnavailableError} instead of writing the pending
+ * slot (AB-41 / AB-43). A bureau that already knows durability is unavailable
+ * at composition time should prefer omitting this tool from the effective
+ * toolbox entirely rather than relying on the thrown error.
  *
  * @example
  * ```ts
- * // In bureau setup (Phase E):
+ * // In bureau setup (Phase E): forward reads/writes onto the REAL
+ * // `DurableRunDeps` object rather than spreading it — a spread detaches
+ * // the tool's context from the object the durable workflow actually reads,
+ * // so `pendingWakeup` would be written to a copy the workflow never sees
+ * // (mirror Bureau's own `createHumanWaitContext` forwarding pattern).
  * const bureau = createBureau()
  *   .tools({
- *     scheduleWakeup: createScheduleWakeupTool({ context: durableRunDeps }),
+ *     scheduleWakeup: createScheduleWakeupTool({
+ *       context: {
+ *         get pendingWakeup() {
+ *           return durableRunDeps.pendingWakeup;
+ *         },
+ *         set pendingWakeup(value) {
+ *           durableRunDeps.pendingWakeup = value;
+ *         },
+ *         durable: true,
+ *       },
+ *     }),
  *   });
  * ```
  *
  * @example
  * ```ts
  * // Standalone (test):
- * const ctx = { pendingWakeup: undefined };
+ * const ctx = { pendingWakeup: undefined, durable: true };
  * const tool = createScheduleWakeupTool({ context: ctx });
  * await tool.execute({ in: '6h', note: 'Check deploy' });
  * expect(ctx.pendingWakeup?.duration).toBe('6h');
@@ -135,6 +166,10 @@ export function createScheduleWakeupTool(options: CreateScheduleWakeupToolOption
      * @returns A confirmation result surfaced to the LLM.
      */
     execute(input: ScheduleWakeupInput): ScheduleWakeupResult {
+      if (!context.durable) {
+        throw new DurableCapabilityUnavailableError('scheduleWakeup');
+      }
+
       context.pendingWakeup = {
         duration: input.in,
         ...(input.note !== undefined ? { note: input.note } : {}),

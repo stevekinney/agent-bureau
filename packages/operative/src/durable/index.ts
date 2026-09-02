@@ -22,6 +22,7 @@ export type {
   RunEngineObservability,
 } from './create-run-engine';
 export { createRunEngine } from './create-run-engine';
+export { DurableCapabilityUnavailableError } from './durable-capability-unavailable-error';
 export type {
   AgentRunWorkflowInput,
   AgentRunWorkflowResult,

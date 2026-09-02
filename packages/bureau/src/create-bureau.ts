@@ -706,6 +706,10 @@ export function createHumanWaitContext(
       }
     },
     runId,
+    // Only ever constructed inside the `options.humanInput && runtime.durable`
+    // guard below, so this context always backs a real durable run
+    // (AB-41 / AB-43 — the durability signal threaded into the tool's context).
+    durable: true,
   };
 }
 

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import { DurableCapabilityUnavailableError } from './durable/durable-capability-unavailable-error';
 import type { PendingHumanWait } from './durable/types';
 import { HumanWaitParkedEvent } from './events';
 
@@ -52,6 +53,19 @@ export interface RequestHumanInputContext {
    * park event to a specific run. Falls back to `''` when omitted.
    */
   runId?: string;
+  /**
+   * Whether this run has a compatible durable execution context attached
+   * (a bureau with a durable engine, regardless of whether its checkpoint
+   * store is persistent or `MemoryStorage` — either way `ctx.waitForSignal`
+   * can park the workflow for the lifetime of the process). `execute` throws
+   * {@link DurableCapabilityUnavailableError} instead of writing the pending
+   * slot (and never dispatches `HumanWaitParkedEvent`) when this is `false`,
+   * per AB-41's decision record: an unavailable capability rejects with a
+   * stable typed error rather than returning a success-shaped no-op.
+   * Required (not optional/defaulted) so every construction site states its
+   * durability explicitly.
+   */
+  durable: boolean;
 }
 
 /**
@@ -84,25 +98,40 @@ export interface CreateRequestHumanInputToolOptions {
  *
  * This is an **opt-in built-in tool** — the bureau or agent explicitly adds it
  * to the toolbox (no ambient grant). It only works in a durable run; calling it
- * in an in-memory run is a no-op (no error, just no parking).
+ * when `context.durable` is `false` throws
+ * {@link DurableCapabilityUnavailableError} instead of writing the pending
+ * slot or dispatching a park event (AB-41 / AB-43). A bureau that already
+ * knows durability is unavailable at composition time should prefer omitting
+ * this tool from the effective toolbox entirely rather than relying on the
+ * thrown error.
  *
  * C3 completeness: when an `emitter` is provided, a `HumanWaitParkedEvent` is
  * dispatched BEFORE the tool result is returned so observers see the park event
- * synchronously with the tool call.
+ * synchronously with the tool call. No event is dispatched when the run is
+ * rejected as unavailable — a rejection is not a park.
  *
  * @example
  * ```ts
- * // In bureau setup (Phase E):
+ * // In bureau setup (Phase E): forward reads/writes onto the REAL
+ * // `DurableRunDeps` object rather than spreading it — a spread detaches
+ * // the tool's context from the object the durable workflow actually reads,
+ * // so `pendingHumanWait` would be written to a copy the workflow never
+ * // sees. `createHumanWaitContext` (packages/bureau/src/create-bureau.ts)
+ * // is exactly this forwarding pattern, with `durable: true` because it is
+ * // only ever constructed inside the `runtime.durable` guard.
  * const bureau = createBureau()
  *   .tools({
- *     requestHumanInput: createRequestHumanInputTool({ context: durableRunDeps, emitter }),
+ *     requestHumanInput: createRequestHumanInputTool({
+ *       context: createHumanWaitContext(servicesRef, runId),
+ *       emitter,
+ *     }),
  *   });
  * ```
  *
  * @example
  * ```ts
  * // Standalone (test):
- * const ctx = { pendingHumanWait: undefined };
+ * const ctx = { pendingHumanWait: undefined, durable: true };
  * const tool = createRequestHumanInputTool({ context: ctx });
  * await tool.execute({ signalName: 'human-response', prompt: 'Approve this?' });
  * expect(ctx.pendingHumanWait?.signalName).toBe('human-response');
@@ -141,6 +170,10 @@ export function createRequestHumanInputTool(options: CreateRequestHumanInputTool
     }),
 
     execute(input: RequestHumanInputInput): RequestHumanInputResult {
+      if (!context.durable) {
+        throw new DurableCapabilityUnavailableError('requestHumanInput');
+      }
+
       context.pendingHumanWait = {
         signalName: input.signalName,
         ...(input.prompt !== undefined ? { prompt: input.prompt } : {}),

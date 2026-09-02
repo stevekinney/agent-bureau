@@ -15,6 +15,7 @@ import {
   createAgentSession,
   createSessionStore,
   DEFAULT_MAXIMUM_STEPS,
+  DurableCapabilityUnavailableError,
   HumanWaitParkedEvent,
   RunAbortedEvent,
   SchedulerTaskCompletedEvent,
@@ -6340,5 +6341,157 @@ describe('createBureau human input wiring — real durable park (F3)', () => {
     } finally {
       bureau.dispose();
     }
+  });
+});
+
+// ── AB-41 / AB-43: requestHumanInput availability across durability
+// configurations ───────────────────────────────────────────────────────
+//
+// AB-41's decision record ratifies the durable-only park tools' contract: an
+// unavailable capability is absent from the effective toolbox (preferred) or
+// rejects with a stable typed `DurableCapabilityUnavailableError` (the
+// standalone `createAgent` fallback, covered by
+// packages/operative/src/create-request-human-input-tool.test.ts and
+// create-schedule-wakeup-tool.test.ts). These tests cover the Bureau side of
+// the four named configurations: a Bureau with no durable engine omits the
+// tool; a Bureau with a durable engine backed by ephemeral MemoryStorage or
+// by persistent SQLite storage both include it and actually park (the
+// signal is `!!runtime.durable`, independent of checkpoint persistence).
+describe('createBureau requestHumanInput availability across durability configurations (AB-43)', () => {
+  it('createHumanWaitContext always signals durable: true (only ever constructed inside the runtime.durable guard)', () => {
+    const context = createHumanWaitContext({}, 'run-1');
+    expect(context.durable).toBe(true);
+  });
+
+  it('config 2 — omits requestHumanInput from the effective toolbox when no durable engine is attached', async () => {
+    const seenTools: string[] = [];
+    const generate: GenerateFunction = async (context) => {
+      seenTools.push(...context.toolbox.tools().map((tool) => tool.name));
+      return { content: 'no park here', toolCalls: [] };
+    };
+
+    const bureau = await createBureau({
+      generate,
+      toolbox: createEmptyToolbox(),
+      humanInput: true,
+      stopWhen: stopWhen.noToolCalls(),
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'no durable engine attached' });
+      await waitForRunCompletion(bureau, run.id);
+
+      expect(seenTools).not.toContain('requestHumanInput');
+    } finally {
+      bureau.dispose();
+    }
+  });
+
+  it('config 3 — includes requestHumanInput and actually parks over ephemeral (MemoryStorage) durable storage', async () => {
+    const seenTools: string[] = [];
+    const generate = createSequentialGenerate([
+      {
+        content: '',
+        toolCalls: [
+          { id: 'call-1', name: 'requestHumanInput', arguments: { signalName: 'human-response' } },
+        ],
+      },
+    ]);
+    const wrappedGenerate: GenerateFunction = async (context) => {
+      seenTools.push(...context.toolbox.tools().map((tool) => tool.name));
+      return generate(context);
+    };
+
+    const bureau = await createBureau({
+      generate: wrappedGenerate,
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+      humanInput: true,
+      stopWhen: stopWhen.toolCalled('requestHumanInput'),
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'park over ephemeral memory storage' });
+      await pollUntil(() => bureau.listPendingReviews().some((review) => review.runId === run.id));
+
+      // Discovery: the model's first step already saw requestHumanInput as an
+      // available tool (AC — discovery reveals availability before invocation).
+      expect(seenTools).toContain('requestHumanInput');
+
+      const [review] = bureau.listPendingReviews();
+      expect(review?.kind).toBe('human-wait');
+    } finally {
+      bureau.dispose();
+    }
+  });
+
+  it('config 4 — includes requestHumanInput and actually parks over persistent (SQLite) durable storage', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `ab-43-persistent-park-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+
+    try {
+      const seenTools: string[] = [];
+      const generate = createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [
+            {
+              id: 'call-1',
+              name: 'requestHumanInput',
+              arguments: { signalName: 'human-response' },
+            },
+          ],
+        },
+      ]);
+      const wrappedGenerate: GenerateFunction = async (context) => {
+        seenTools.push(...context.toolbox.tools().map((tool) => tool.name));
+        return generate(context);
+      };
+
+      const bureau = await createBureau({
+        generate: wrappedGenerate,
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        humanInput: true,
+        stopWhen: stopWhen.toolCalled('requestHumanInput'),
+      });
+
+      try {
+        const run = await bureau.createRun({ message: 'park over persistent sqlite storage' });
+        await pollUntil(() =>
+          bureau.listPendingReviews().some((review) => review.runId === run.id),
+        );
+
+        // Discovery: the model's first step already saw requestHumanInput as an
+        // available tool (AC — discovery reveals availability before invocation).
+        expect(seenTools).toContain('requestHumanInput');
+
+        const [review] = bureau.listPendingReviews();
+        expect(review?.kind).toBe('human-wait');
+      } finally {
+        bureau.dispose();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('a standalone requestHumanInput tool (no Bureau composition) rejects DurableCapabilityUnavailableError rather than omitting itself', () => {
+    // Config 1 belongs to operative's factory-level tests
+    // (create-request-human-input-tool.test.ts); this asserts only that the
+    // SAME error class Bureau's composition never needs (because it prefers
+    // omission) is the one a standalone caller sees, keeping both halves of
+    // the "omit, or throw" contract anchored to one exported type.
+    expect(DurableCapabilityUnavailableError).toBeDefined();
+    const error = new DurableCapabilityUnavailableError('requestHumanInput');
+    expect(error.code).toBe('DurableCapabilityUnavailableError');
+    expect(error.category).toBe('unavailable');
+    expect(error.retryable).toBe(false);
   });
 });
