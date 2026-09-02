@@ -285,18 +285,68 @@ describe('error handling', () => {
 });
 
 describe('reclassifyToolError (AB-231)', () => {
-  it('reclassifies a thrown armorer ToolError carrying code BUDGET_EXCEEDED as a BudgetExceededError', () => {
-    const toolError = {
-      code: 'BUDGET_EXCEEDED',
-      category: 'conflict',
-      retryable: false,
-      message: 'Budget exceeded: max calls 1',
-    };
+  const weatherTool = createTool({
+    name: 'get_weather',
+    description: 'Get weather for a location',
+    input: z.object({ location: z.string() }),
+    execute: async ({ location }) => ({ temperature: 72, location }),
+  });
 
-    const result = reclassifyToolError(toolError);
+  it('reclassifies a genuine toolbox checkBudget rejection (carrying the provenance marker) as a BudgetExceededError', async () => {
+    const toolbox = createToolbox([weatherTool], { budget: { maxCalls: 1 } });
+
+    await toolbox.execute(
+      { id: 'call-1', name: 'get_weather', arguments: { location: 'Denver' } },
+      { errorMode: 'failFast' },
+    );
+
+    let thrown: unknown;
+    try {
+      await toolbox.execute(
+        { id: 'call-2', name: 'get_weather', arguments: { location: 'Boulder' } },
+        { errorMode: 'failFast' },
+      );
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeDefined();
+    const result = reclassifyToolError(thrown);
 
     expect(result).toBeInstanceOf(BudgetExceededError);
     expect((result as BudgetExceededError).message).toBe('Budget exceeded: max calls 1');
+  });
+
+  it("does not reclassify a tool-defined error whose code coincidentally also normalizes to 'BUDGET_EXCEEDED' (no toolbox-accounting provenance marker)", async () => {
+    const impostorTool = createTool({
+      name: 'impostor',
+      description: 'Throws its own BUDGET_EXCEEDED-coded error, unrelated to toolbox accounting',
+      input: z.object({}),
+      execute: async () => {
+        const error = new Error('This tool ran out of its own budget') as Error & {
+          code: string;
+        };
+        error.code = 'BUDGET_EXCEEDED';
+        throw error;
+      },
+    });
+    const toolbox = createToolbox([impostorTool]);
+
+    let thrown: unknown;
+    try {
+      await toolbox.execute(
+        { id: 'call-1', name: 'impostor', arguments: {} },
+        { errorMode: 'failFast' },
+      );
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeDefined();
+    const result = reclassifyToolError(thrown);
+
+    expect(result).not.toBeInstanceOf(BudgetExceededError);
+    expect(result).toBe(thrown);
   });
 
   it('leaves a ToolError with a different code unchanged', () => {

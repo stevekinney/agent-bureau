@@ -1,4 +1,4 @@
-import type { ToolError } from 'armorer';
+import { isToolboxBudgetExceededToolError } from 'armorer';
 import { ZodError, type ZodIssue } from 'zod';
 
 import { isToolCallParseError } from './providers/errors.ts';
@@ -149,44 +149,33 @@ export class BudgetExceededError extends AgentRunError {
 }
 
 /**
- * Narrows an unknown thrown value to an armorer {@link ToolError} carrying
- * `code: 'BUDGET_EXCEEDED'` — the shape `create-toolbox.ts`'s `checkBudget`
- * path throws in `failFast` mode. Armorer's `ToolError` is a plain object
- * (not an `Error` subclass), so this checks the interface's required fields
- * — with the same runtime-type validation as armorer's own `isToolError`,
- * not just key presence — rather than using `instanceof`.
- */
-function isBudgetExceededToolError(error: unknown): error is ToolError {
-  if (typeof error !== 'object' || error === null) return false;
-  const candidate = error as ToolError;
-  return (
-    typeof candidate.code === 'string' &&
-    typeof candidate.category === 'string' &&
-    typeof candidate.retryable === 'boolean' &&
-    typeof candidate.message === 'string' &&
-    candidate.code === 'BUDGET_EXCEEDED'
-  );
-}
-
-/**
- * Re-classifies a thrown armorer `ToolError` carrying `code: 'BUDGET_EXCEEDED'`
- * as a {@link BudgetExceededError} before it reaches {@link toAgentRunError} /
- * `makeErrorResult`'s `instanceof` classification (AB-231).
+ * Re-classifies a thrown armorer `ToolError` carrying the toolbox's own
+ * budget-accounting provenance marker as a {@link BudgetExceededError}
+ * before it reaches {@link toAgentRunError} / `makeErrorResult`'s
+ * `instanceof` classification (AB-231).
  *
  * A toolbox-level, per-call, `failFast` budget rejection
  * (`packages/armorer/src/create-toolbox.ts`'s `checkBudget` path) throws a
  * generic `ToolError` stamped `code: 'BUDGET_EXCEEDED'`, not a
  * `BudgetExceededError` — armorer sits below operative in the dependency
  * graph (operative depends on armorer, never the reverse), so it cannot
- * construct or throw operative's `BudgetExceededError` directly. Without this
- * reclassification, `makeErrorResult`'s `runError instanceof
+ * construct or throw operative's `BudgetExceededError` directly. Without
+ * this reclassification, `makeErrorResult`'s `runError instanceof
  * BudgetExceededError` check falls through and `run.completed`'s
- * `finishReason` resolves to `'error'` instead of `'budget-exceeded'`, losing
- * the toolbox rejection's budget semantics at the run boundary. Any other
+ * `finishReason` resolves to `'error'` instead of `'budget-exceeded'`,
+ * losing the toolbox rejection's budget semantics at the run boundary.
+ *
+ * `ToolError.code` alone is public, user-controlled data — a tool's own
+ * `execute()` can throw an error whose `code` also normalizes to
+ * `'BUDGET_EXCEEDED'` without being a toolbox-accounting rejection at all.
+ * `isToolboxBudgetExceededToolError` checks armorer's
+ * `TOOLBOX_BUDGET_EXCEEDED_MARKER` provenance marker, which only the
+ * toolbox's own `checkBudget` throw site ever attaches, so a
+ * coincidentally-named tool-defined error is never reclassified. Any other
  * error is returned unchanged.
  */
 export function reclassifyToolError(error: unknown): unknown {
-  return isBudgetExceededToolError(error) ? new BudgetExceededError(error.message) : error;
+  return isToolboxBudgetExceededToolError(error) ? new BudgetExceededError(error.message) : error;
 }
 
 /** Raised when a lazily loaded agent definition cannot be resolved. */

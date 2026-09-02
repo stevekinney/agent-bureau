@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'bun:test';
 
-import { isToolError } from '../src/core';
+import {
+  isToolboxBudgetExceededToolError,
+  isToolError,
+  TOOLBOX_BUDGET_EXCEEDED_MARKER,
+} from '../src/core';
 import { errorString, normalizeError } from '../src/errors';
 
 describe('errors', () => {
@@ -52,5 +56,36 @@ describe('errors', () => {
         message: 'boom',
       }),
     ).toBe(false);
+  });
+});
+
+describe('isToolboxBudgetExceededToolError (AB-231)', () => {
+  it('accepts a ToolError carrying the toolbox budget-exceeded provenance marker', () => {
+    const marked = {
+      code: 'BUDGET_EXCEEDED',
+      category: 'conflict',
+      retryable: false,
+      message: 'Budget exceeded: max calls 1',
+      [TOOLBOX_BUDGET_EXCEEDED_MARKER]: true,
+    };
+
+    expect(isToolboxBudgetExceededToolError(marked)).toBe(true);
+  });
+
+  it('rejects a ToolError with a matching code but no provenance marker (a tool-defined BUDGET_EXCEEDED error)', () => {
+    const unmarked = {
+      code: 'BUDGET_EXCEEDED',
+      category: 'conflict',
+      retryable: false,
+      message: 'This tool ran out of its own budget',
+    };
+
+    expect(isToolboxBudgetExceededToolError(unmarked)).toBe(false);
+  });
+
+  it('rejects a value that is not a ToolError at all', () => {
+    expect(isToolboxBudgetExceededToolError(null)).toBe(false);
+    expect(isToolboxBudgetExceededToolError('boom')).toBe(false);
+    expect(isToolboxBudgetExceededToolError(new Error('boom'))).toBe(false);
   });
 });
