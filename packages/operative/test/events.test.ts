@@ -286,11 +286,10 @@ describe('events', () => {
       appliedAtRunId: 'run-1',
       appliedAt: '2026-09-02T00:00:00.000Z',
     };
-    // Typed with the literal `reason`, not widened to `SteeringCommandFailure`:
-    // `session-terminal` is valid on both `SteeringRejectedEvent` and
-    // `SteeringFailedEvent` (AB-67 — either can fail this way depending on
-    // whether the command ever reached a boundary), so this narrower literal
-    // type satisfies both constructors' narrowed `failure` parameters below.
+    // Typed with the literal `reason`, not widened to `SteeringCommandFailure`.
+    // `session-terminal` belongs exclusively to `SteeringFailedEvent`
+    // (AB-67's `SteeringCommandState` vocabulary comment); `rejected` never
+    // carries it.
     const sessionTerminalFailure: { failedAt: string; reason: 'session-terminal' } = {
       failedAt: '2026-09-02T00:00:01.000Z',
       reason: 'session-terminal',
@@ -298,6 +297,10 @@ describe('events', () => {
     const runTerminalFailure: { failedAt: string; reason: 'run-terminal' } = {
       failedAt: '2026-09-02T00:00:02.000Z',
       reason: 'run-terminal',
+    };
+    const policyDeniedFailure: { failedAt: string; reason: 'policy-denied' } = {
+      failedAt: '2026-09-02T00:00:06.000Z',
+      reason: 'policy-denied',
     };
 
     it('constructs SteeringAcceptedEvent with the exact type name and payload', () => {
@@ -318,12 +321,20 @@ describe('events', () => {
     });
 
     it('constructs SteeringRejectedEvent carrying a SteeringCommandFailure', () => {
-      const event = new SteeringRejectedEvent('session-1', 'command-1', sessionTerminalFailure);
+      const event = new SteeringRejectedEvent('session-1', 'command-1', policyDeniedFailure);
 
       expect(event.type).toBe('steering.rejected');
       expect(event.sessionId).toBe('session-1');
       expect(event.commandId).toBe('command-1');
-      expect(event.failure).toEqual(sessionTerminalFailure);
+      expect(event.failure).toEqual(policyDeniedFailure);
+    });
+
+    it('rejects at the type level a SteeringRejectedEvent constructed with session-terminal (exclusively a SteeringFailedEvent reason)', () => {
+      // @ts-expect-error -- 'session-terminal' belongs to SteeringFailedEvent only
+      new SteeringRejectedEvent('session-1', 'command-1', {
+        failedAt: 'x',
+        reason: 'session-terminal',
+      });
     });
 
     it('constructs SteeringSupersededEvent carrying a SteeringCommandFailure', () => {

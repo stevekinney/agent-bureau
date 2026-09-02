@@ -1069,31 +1069,34 @@ export class SteeringAppliedEvent extends Event {
 
 /**
  * `accepted` → `rejected`: a terminal-failure outcome for a command
- * invalidated after admission (authorization revoked, policy denial,
- * deadline passed, or its owning session going terminal). Mutually
- * exclusive with `applied`/`superseded`/`failed` for the same command id.
- * Not cursor-advancing.
+ * invalidated after admission (authorization revoked, policy denial, or
+ * deadline passed). Mutually exclusive with `applied`/`superseded`/`failed`
+ * for the same command id. Not cursor-advancing.
  *
- * `failure` excludes exactly the two reasons owned by a sibling event:
- * `superseded-by` (always `SteeringSupersededEvent`) and `run-terminal`
- * (always `SteeringFailedEvent`, pause/resume only). `run-ambiguous` is
- * excluded too — it is a pre-admission rejection outcome (a `SteeringCommand`
- * that never reached `accepted`), never one of this family's `accepted → X`
- * transitions.
+ * `failure` excludes `session-terminal` too, not just the two reasons owned
+ * by a sibling event (`superseded-by`, always `SteeringSupersededEvent`;
+ * `run-terminal`, always `SteeringFailedEvent`, pause/resume only):
+ * `SteeringCommandState`'s own ratified vocabulary comment reserves
+ * `session-terminal` exclusively for `failed` ("failed // terminal-failure:
+ * SteeringCommandFailure.reason is 'session-terminal' or, pause/resume
+ * only, 'run-terminal'") — a session going terminal before a command is
+ * ever consumed is always `failed`, never `rejected`, so the two stay
+ * mutually exclusive at the type level, not just by convention. `run-ambiguous`
+ * is excluded for a different reason — it is a pre-admission rejection
+ * outcome (a `SteeringCommand` that never reached `accepted`), never one of
+ * this family's `accepted → X` transitions.
  */
 export class SteeringRejectedEvent extends Event {
   static readonly type = 'steering.rejected' as const;
   readonly sessionId: string;
   readonly commandId: string;
   readonly failure: SteeringFailureReason<
-    'session-terminal' | 'authorization-revoked' | 'policy-denied' | 'deadline-passed'
+    'authorization-revoked' | 'policy-denied' | 'deadline-passed'
   >;
   constructor(
     sessionId: string,
     commandId: string,
-    failure: SteeringFailureReason<
-      'session-terminal' | 'authorization-revoked' | 'policy-denied' | 'deadline-passed'
-    >,
+    failure: SteeringFailureReason<'authorization-revoked' | 'policy-denied' | 'deadline-passed'>,
   ) {
     super(SteeringRejectedEvent.type);
     this.sessionId = sessionId;
