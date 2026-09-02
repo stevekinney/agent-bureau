@@ -73,3 +73,9 @@ jobs:
 
       - name: Package-shape gate (no foundation leaks, no undeclared externals)
         run: bun run check-package-shape
+
+      - name: Operative packed-consumer verification (AB-23)
+        run: bun run test:consumer:operative
+
+      - name: Bureau tarball-boundary verification (AB-23)
+        run: bun run verify:bureau:tarball-boundary

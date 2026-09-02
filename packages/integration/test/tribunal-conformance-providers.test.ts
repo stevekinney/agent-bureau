@@ -9,12 +9,7 @@
  * abstracts over the provider.
  */
 import type { GenerateFunction } from '@lostgradient/operative';
-import {
-  createActiveRun,
-  resolveResponseFormat,
-  stopWhen,
-  toOutputJsonSchema,
-} from '@lostgradient/operative';
+import { createActiveRun, stopWhen, toOutputJsonSchema } from '@lostgradient/operative';
 import type { AnthropicClient, AnthropicMessageResponse } from '@lostgradient/operative/anthropic';
 import { createAnthropicProvider } from '@lostgradient/operative/anthropic';
 import type { OpenAIChatCompletion, OpenAIClient } from '@lostgradient/operative/openai';
@@ -114,20 +109,12 @@ function buildOpenAIGenerate(): { generate: GenerateFunction; client: OpenAIClie
       usage: { prompt_tokens: 40, completion_tokens: 10, total_tokens: 50 },
     },
   ] satisfies OpenAIChatCompletion[]);
-  // Unlike `RunOptions.output` (client-side validation, resolved fresh
-  // per-call by the loop as `context.responseFormat`), the OpenAI adapter
-  // only sends a provider-native `response_format` when
-  // `OpenAIProviderOptions.responseFormat` is set at CONSTRUCTION time —
-  // it never reads `context.responseFormat`. So a caller must derive the
-  // same `ResponseFormat` (via `resolveResponseFormat`, the exact function
-  // the loop itself uses) and pass it here for the schema to actually reach
-  // the wire, not just be validated locally after the fact.
-  const responseFormat = resolveResponseFormat(tribunalOutputSchemaForRole('specialist'));
-  if (!responseFormat) {
-    throw new Error('resolveResponseFormat unexpectedly returned undefined for an output schema');
-  }
+  // The OpenAI adapter derives its wire-level `response_format` from the
+  // run's own `output` schema (`RunOptions.output`, AB-18) when the
+  // provider isn't constructed with an explicit override — no separate
+  // derivation needed here.
   return {
-    generate: createOpenAIProvider({ model: 'gpt-4o', client, responseFormat }),
+    generate: createOpenAIProvider({ model: 'gpt-4o', client }),
     client,
   };
 }
@@ -208,10 +195,9 @@ describe('AB-99 Tribunal conformance — two-provider parity', () => {
       expect(anthropicToolbox.collectedFindings).toEqual(openaiToolbox.collectedFindings);
 
       // Wire-level check (not just local post-hoc validation): the OpenAI
-      // request actually carried the resolved `response_format` —
-      // `json_schema` with Tribunal's specialist findings schema, `strict:
-      // true`. Every recorded call must carry it, since it's a
-      // construction-time provider option (see `buildOpenAIGenerate`).
+      // request actually carried a `response_format` derived from the run's
+      // `output` schema — `json_schema` with Tribunal's specialist findings
+      // schema, `strict: true`. Every recorded call must carry it.
       const openaiCalls = (openai.client as unknown as { _calls: Array<Record<string, unknown>> })
         ._calls;
       expect(openaiCalls.length).toBeGreaterThan(0);

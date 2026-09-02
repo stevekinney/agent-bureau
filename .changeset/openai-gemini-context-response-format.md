@@ -1,0 +1,5 @@
+---
+'@lostgradient/operative': patch
+---
+
+Fixed the OpenAI and Gemini adapters (`createOpenAIProvider`/`createOpenAIProviderStream`, `createGeminiProvider`/`createGeminiProviderStream`) so a run's `RunOptions.output` Zod schema (AB-18) reaches the wire on its own. Previously, the loop always derived the correct per-run `context.responseFormat` from `output`, but both adapters read only the construction-time `OpenAIProviderOptions.responseFormat`/`GeminiProviderOptions.responseFormat` — a caller had to separately derive and pass a matching `ResponseFormat` to the provider constructor for `output` to become a provider-native `response_format`/`responseSchema` request field, or it was validated client-side only. Both adapters now fall back to `context.responseFormat` when no construction-time override is set; an explicit construction-time `responseFormat` still wins when both are present. Anthropic's `createAnthropicProvider` is unaffected — the Messages API has no request-level structured-output field to wire up.

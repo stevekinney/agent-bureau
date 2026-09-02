@@ -773,7 +773,13 @@ export function createGeminiProvider(options: GeminiProviderOptions): GenerateFu
           cachedContent: content.cachedContent,
           tools,
           toolChoice: options.toolChoice,
-          responseFormat: options.responseFormat,
+          // Construction-time `options.responseFormat` (an explicit caller
+          // override) wins when set; otherwise fall back to the per-run
+          // `context.responseFormat` the loop derives from
+          // `RunOptions.output` (AB-18), so a run's `output` schema reaches
+          // the wire without every caller having to re-derive and pass it
+          // at provider construction.
+          responseFormat: options.responseFormat ?? context.responseFormat,
           maximumTokens: context.maximumTokens ?? common.maximumTokens,
           temperature: common.temperature,
           topP: common.topP,
@@ -878,7 +884,13 @@ export function createGeminiProviderStream(
           cachedContent: content.cachedContent,
           tools,
           toolChoice: options.toolChoice,
-          responseFormat: options.responseFormat,
+          // Construction-time `options.responseFormat` (an explicit caller
+          // override) wins when set; otherwise fall back to the per-run
+          // `context.responseFormat` the loop derives from
+          // `RunOptions.output` (AB-18), so a run's `output` schema reaches
+          // the wire without every caller having to re-derive and pass it
+          // at provider construction.
+          responseFormat: options.responseFormat ?? context.responseFormat,
           maximumTokens: context.maximumTokens ?? common.maximumTokens,
           temperature: common.temperature,
           topP: common.topP,
