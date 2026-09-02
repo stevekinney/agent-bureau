@@ -974,15 +974,40 @@ asynchronous, and durable exactly when the session's own backing store is.
 ```ts
 export type SessionInputDeliveryMode = 'steer' | 'queue';
 
+/** The subset of `MultiModalContent` (`packages/conversationalist/src/multi-modal.ts`) a caller
+ *  may submit as session input: `TextContent` (citation metadata omitted — see below),
+ *  `ImageContent`, and `DocumentContent`. An explicit allowlist, not `Exclude<MultiModalContent,
+ *  ...>` against the provider-generated/response-only kinds (`ThinkingContent`,
+ *  `RedactedThinkingContent`, `ServerToolUseContent`, `WebSearchToolResultContent`,
+ *  `ServerToolResultContent`, `ContainerUploadContent`): `conversationalist` is consumed at a `^`
+ *  semver range, and a blacklist silently admits any new `MultiModalContent` variant a future
+ *  compatible release adds, defeating AB-70's ownership of widening this union deliberately. Every
+ *  excluded kind is either rejected outright (the Anthropic adapter throws serializing
+ *  `container_upload` and the other response-only blocks as request content), silently dropped
+ *  (the OpenAI and Gemini adapters serialize only text, document, and image content), or
+ *  misattributed if replayed as if the user had sent it.
+ *
+ *  The text branch forbids `citations` structurally (`citations?: never`), not merely via
+ *  `Omit<TextContent, 'citations'>`: TypeScript's structural typing means `Omit<>` alone only
+ *  drops the property requirement — a value already typed as `TextContent` (with `citations`
+ *  set) is still assignable to `Omit<TextContent, 'citations'>`, since excess properties on a
+ *  non-literal source go unchecked. `citations?: never` makes any non-`undefined` `citations` a
+ *  type error at every call site, literal or not. */
+export type UserAdmissibleContent =
+  | (Omit<TextContent, 'citations'> & { readonly citations?: never })
+  | ImageContent
+  | DocumentContent;
+
 /** The message-shaped subset of the document's `AgentInput` this contract accepts: exactly
  *  what one `Message.content` can hold (`string | ReadonlyArray<MultiModalContent>`, matching
- *  `packages/conversationalist/src/types.ts:140`). The `{ conversation }` variant of `AgentInput`
- *  is out of scope for session-input admission; a caller with a full conversation to inject uses
- *  Bureau's conversation-replacement surface. AB-70 owns any future widening of the multimodal
- *  content within this message-shaped constraint. */
-export type SessionInputPayload = string | ReadonlyArray<MultiModalContent>;
+ *  `packages/conversationalist/src/types.ts:140`), narrowed to `UserAdmissibleContent`. The
+ *  `{ conversation }` variant of `AgentInput` is out of scope for session-input admission; a
+ *  caller with a full conversation to inject uses Bureau's conversation-replacement surface.
+ *  AB-70 owns any future widening of the admissible content within this message-shaped
+ *  constraint. */
+export type SessionInputPayload = string | ReadonlyArray<UserAdmissibleContent>;
 
-export interface SessionInputRecord<TPayload = SessionInputPayload> {
+export interface SessionInputRecord<TPayload extends SessionInputPayload = SessionInputPayload> {
   /** Caller-supplied idempotency identity, or server-generated when the caller omits one. */
   readonly id: string;
   readonly idOrigin: 'caller' | 'generated';
@@ -1003,6 +1028,12 @@ export interface SessionInputRecord<TPayload = SessionInputPayload> {
 ```
 
 `admission revision` is the per-record `revision` on the receipt, not a session-wide counter; it increments on every state transition of this record, reusing this document's `StartedWorkSnapshot.revision` vocabulary.
+
+**Coordinator amendments (2026-09-02).** Three findings raised during AB-193's review (Codex reviewer on pull request #397) were real gaps in the ratified record above; the coordinator resolved them, and AB-202 applies the resulting type changes:
+
+- **Bounded payload generic.** `SessionInputRecord<TPayload extends SessionInputPayload = SessionInputPayload>` and `SessionInputAdmissionRequest<TPayload extends SessionInputPayload = SessionInputPayload>`. An explicit type argument can narrow the payload, never widen it past the admissible union. Future widening remains AB-70's, by widening `SessionInputPayload` itself.
+- **User-admissible payload only.** `SessionInputPayload` allowlists only `TextContent` (minus `citations`), `ImageContent`, and `DocumentContent` — see `UserAdmissibleContent` above, an explicit union rather than an `Exclude<>` blacklist so a future `conversationalist` release cannot silently widen it. Promotion turns a payload into user input, and every excluded kind is either rejected outright (the Anthropic adapter throws on `container_upload` and the other response-only blocks, and on malformed `citations`), discarded (the OpenAI and Gemini adapters silently drop `container_upload`), or misattributed by provider adapters. The exclusion is type-level in operative and enforced at runtime by the gateway request schema (AB-196), which rejects them with 400; Bureau's `submitSessionInput` treats a payload containing them as malformed and never admits it.
+- **Identifier uniqueness within a session.** A session-input `id` is unique within its `sessionId` regardless of principal. The idempotency key stays `(principal, 'session-input', id)` for replay detection by the same principal; a different principal submitting an `id` that already exists in the session receives the `conflict` outcome with `SessionInputConflict.reason: 'id-owned-by-other-principal'` (see below) and the existing record is untouched. This keeps `id` sufficient as the record's child identity in the session's ownership graph (the AB-50 amendment) without a composite identifier.
 
 ### Exact retry of the same identifier and payload returns the original receipt and does not duplicate a run or model-visible message; conflicting reuse returns a typed conflict
 
@@ -1026,7 +1057,9 @@ export type SessionInputAdmissionOutcome =
  *  `resolvePrincipal(context)`, `hooks.ts:152`) attaches it from the authenticated request. The
  *  gateway body schema for `POST /sessions/:id/input` is `Omit<SessionInputAdmissionRequest,
  *  'principal'>`; a body-supplied `principal` is never trusted. */
-export interface SessionInputAdmissionRequest<TPayload = SessionInputPayload> {
+export interface SessionInputAdmissionRequest<
+  TPayload extends SessionInputPayload = SessionInputPayload,
+> {
   readonly id?: string;
   readonly principal: string;
   readonly deliveryMode: SessionInputDeliveryMode;
@@ -1050,12 +1083,18 @@ export interface SessionInputReceipt {
 
 export interface SessionInputConflict {
   readonly id: string;
-  readonly reason: 'session-mismatch' | 'delivery-mode-mismatch' | 'payload-mismatch';
+  /** `'id-owned-by-other-principal'`: a different `principal` submitted an `id` that already
+   *  exists in the session; see the "Identifier uniqueness within a session" amendment above. */
+  readonly reason:
+    | 'session-mismatch'
+    | 'delivery-mode-mismatch'
+    | 'payload-mismatch'
+    | 'id-owned-by-other-principal';
   readonly originalReceipt: SessionInputReceipt;
 }
 ```
 
-`replayed` and `conflict` both key off `(principal, 'session-input', id)`. A different `sessionId`, `deliveryMode`, or `payloadDigest` under the same key reports the corresponding mismatch reason; an exact match replays the original receipt. A different `principal` is a different scope entirely. This is `hooks.ts`'s `requestFingerprint` check (`hooks.ts:169-186`) generalized, and the first operation to spend the idempotency-key semantics this document left unowned at the line noted in [Started-work control contract](#started-work-control-contract). A concurrent identical retry while admission is in flight shares the same in-flight promise, as `hooks.ts`'s reservation-before-start pattern does (`:163-196`).
+`replayed` and `conflict` both key off `(principal, 'session-input', id)`. A different `sessionId`, `deliveryMode`, or `payloadDigest` under the same key reports the corresponding mismatch reason; an exact match replays the original receipt. A different `principal` is a different scope for replay detection (a colliding `id` across principals is the `'id-owned-by-other-principal'` conflict; see the coordinator amendments above). This is `hooks.ts`'s `requestFingerprint` check (`hooks.ts:169-186`) generalized, and the first operation to spend the idempotency-key semantics this document left unowned at the line noted in [Started-work control contract](#started-work-control-contract). A concurrent identical retry while admission is in flight shares the same in-flight promise, as `hooks.ts`'s reservation-before-start pattern does (`:163-196`).
 
 `not-found` covers both "no such session" and "caller unauthorized", indistinguishable by design per this document's authorization-denial rule. `session-terminal` fires only for an authorized caller whose session exists but is already terminal, mirroring this document's `expired`-versus-not-found split. Neither carries a record; both are pre-admission rejections. Pre-admission checks run in a fixed order: authorization (`not-found`) first, then session lifecycle (`session-terminal`), then capability and capacity (`unsupported-capability`, `backlog-exhausted`); reversing the first two would let an unauthorized caller learn a session exists.
 

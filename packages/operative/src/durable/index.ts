@@ -76,6 +76,7 @@ export type {
   SteeringRequestedValue,
   SteeringTargetKind,
   StepRecord,
+  UserAdmissibleContent,
 } from './types';
 // AB-10 — workflow versioning for in-flight durable runs
 export { WorkflowVersionMismatchEvent } from '../events';

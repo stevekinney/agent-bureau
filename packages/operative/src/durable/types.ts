@@ -1,5 +1,10 @@
 import type { AnyToolbox, ToolExecutionResult } from 'armorer';
-import type { ConversationSnapshot, MultiModalContent } from 'conversationalist';
+import type {
+  ConversationSnapshot,
+  DocumentContent,
+  ImageContent,
+  TextContent,
+} from 'conversationalist';
 import type { JSONValue, ToolCall } from 'interoperability';
 
 import type { Effort } from '../providers/types';
@@ -179,15 +184,45 @@ export interface DurableRunDeps {
 /** How an admitted {@link SessionInputRecord} is delivered to the session. */
 export type SessionInputDeliveryMode = 'steer' | 'queue';
 
+/** The subset of `MultiModalContent` (`packages/conversationalist/src/multi-modal.ts`) a caller
+ *  may submit as session input: `TextContent` (citation metadata omitted — see below),
+ *  `ImageContent`, and `DocumentContent`. An explicit allowlist, not `Exclude<MultiModalContent,
+ *  ...>` against the provider-generated/response-only kinds (`ThinkingContent`,
+ *  `RedactedThinkingContent`, `ServerToolUseContent`, `WebSearchToolResultContent`,
+ *  `ServerToolResultContent`, `ContainerUploadContent`): `conversationalist` is consumed at a
+ *  `^` semver range, and a blacklist silently admits any new `MultiModalContent` variant a future
+ *  compatible release adds, defeating AB-70's ownership of widening this union deliberately. Every
+ *  excluded kind is either rejected outright (the Anthropic adapter throws serializing
+ *  `container_upload` and the other response-only blocks as request content), silently dropped
+ *  (the OpenAI and Gemini adapters serialize only text, document, and image content), or
+ *  misattributed if replayed as if the user had sent it. AB-42's coordinator amendments
+ *  (2026-09-02) own this exclusion; AB-70 owns any future widening.
+ *
+ *  The text branch forbids `citations` structurally (`citations?: never`), not merely via
+ *  `Omit<TextContent, 'citations'>`: because TypeScript is structurally typed, `Omit<>` alone
+ *  only drops the property requirement — a caller holding a value already typed as `TextContent`
+ *  (with `citations` set) is still assignable to `Omit<TextContent, 'citations'>`, since excess
+ *  properties on a non-literal source go unchecked. `citations?: never` makes any non-`undefined`
+ *  `citations` a type error at every call site, literal or not. */
+export type UserAdmissibleContent =
+  | (Omit<TextContent, 'citations'> & { readonly citations?: never })
+  | ImageContent
+  | DocumentContent;
+
 /** The message-shaped subset of the document's `AgentInput` this contract accepts: exactly
  *  what one `Message.content` can hold (`string | ReadonlyArray<MultiModalContent>`, matching
- *  `packages/conversationalist/src/types.ts:140`). The `{ conversation }` variant of `AgentInput`
+ *  `packages/conversationalist/src/types.ts:140`), narrowed to {@link UserAdmissibleContent} per
+ *  AB-42's coordinator amendments (2026-09-02). The `{ conversation }` variant of `AgentInput`
  *  is out of scope for session-input admission; a caller with a full conversation to inject uses
- *  Bureau's conversation-replacement surface. AB-70 owns any future widening of the multimodal
+ *  Bureau's conversation-replacement surface. AB-70 owns any future widening of the admissible
  *  content within this message-shaped constraint. */
-export type SessionInputPayload = string | ReadonlyArray<MultiModalContent>;
+export type SessionInputPayload = string | ReadonlyArray<UserAdmissibleContent>;
 
-export interface SessionInputRecord<TPayload = SessionInputPayload> {
+/** Per AB-42's coordinator amendments (2026-09-02): `TPayload` is bounded by
+ *  {@link SessionInputPayload} so an explicit type argument can narrow the payload (e.g. to
+ *  `string`, or to a single {@link UserAdmissibleContent} member) but never widen it past the
+ *  user-admissible union. */
+export interface SessionInputRecord<TPayload extends SessionInputPayload = SessionInputPayload> {
   /** Caller-supplied idempotency identity, or server-generated when the caller omits one. */
   readonly id: string;
   readonly idOrigin: 'caller' | 'generated';
@@ -211,8 +246,12 @@ export interface SessionInputRecord<TPayload = SessionInputPayload> {
  *  here, matching `BureauRunOptions.principal`'s placement; the calling layer (the gateway's
  *  `resolvePrincipal(context)`, `hooks.ts:152`) attaches it from the authenticated request. The
  *  gateway body schema for `POST /sessions/:id/input` is `Omit<SessionInputAdmissionRequest,
- *  'principal'>`; a body-supplied `principal` is never trusted. */
-export interface SessionInputAdmissionRequest<TPayload = SessionInputPayload> {
+ *  'principal'>`; a body-supplied `principal` is never trusted. Per AB-42's coordinator
+ *  amendments (2026-09-02), `TPayload` is bounded by {@link SessionInputPayload}, matching
+ *  {@link SessionInputRecord}. */
+export interface SessionInputAdmissionRequest<
+  TPayload extends SessionInputPayload = SessionInputPayload,
+> {
   readonly id?: string;
   readonly principal: string;
   readonly deliveryMode: SessionInputDeliveryMode;
@@ -236,7 +275,16 @@ export interface SessionInputReceipt {
 
 export interface SessionInputConflict {
   readonly id: string;
-  readonly reason: 'session-mismatch' | 'delivery-mode-mismatch' | 'payload-mismatch';
+  /** `'id-owned-by-other-principal'` is per AB-42's coordinator amendments (2026-09-02): a
+   *  session-input `id` is unique within its `sessionId` regardless of principal. A different
+   *  `principal` submitting an `id` that already exists in the session gets this reason, and the
+   *  existing record is untouched; the idempotency key stays `(principal, 'session-input', id)`
+   *  for replay detection by the same principal. */
+  readonly reason:
+    | 'session-mismatch'
+    | 'delivery-mode-mismatch'
+    | 'payload-mismatch'
+    | 'id-owned-by-other-principal';
   readonly originalReceipt: SessionInputReceipt;
 }
 
