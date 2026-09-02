@@ -1,11 +1,37 @@
+# The pre-commit hook checks what is being committed, cheaply.
+#
+# The authoritative gate is CI (`.github/workflows/ci.yml`), which runs the full
+# build, lint, type-check, test, coverage and package-shape matrix on every pull
+# request and blocks the merge. Anything duplicated here therefore has to earn
+# its runtime, and two steps were not earning theirs:
+#
+#   format  ran `prettier --check` across every file in the repository on every
+#           commit. Measured at 80-110s, never cached, and entirely independent
+#           of what was actually staged. It now checks the staged files only,
+#           which lands well under a second.
+#
+#   test    ran the whole monorepo suite: 60-80s when it passed, and a coin flip
+#           on a machine shared with other work, because several integration
+#           tests do real multi-step runs against a 5s default budget and tip
+#           over on load that has nothing to do with the change being committed.
+#           CI runs that same suite on a dedicated runner and gates the merge.
+#           See AB-188 for the measurements.
+#
+# `lint` and `check-types` stay. Both are deterministic — they cannot fail for
+# reasons unrelated to the diff — and Turborepo replays them from cache in about
+# a second once they have been run while iterating.
 pre-commit:
   parallel: false
   commands:
     format:
-      run: bun run format:check
+      # The union of every package's `format:check` glob, not just the root
+      # script's — `packages/gateway` adds `css`, and dropping it here would
+      # have let a styles-only commit skip formatting entirely. `.svelte` is
+      # deliberately absent: there is no `prettier-plugin-svelte` in this
+      # repository, so those files are not formattable by any existing script.
+      glob: '*.{ts,tsx,js,jsx,mjs,cjs,json,md,yml,yaml,css}'
+      run: bunx prettier --check {staged_files}
     lint:
       run: bun run lint
     check-types:
       run: bun run check-types
-    test:
-      run: bun run test
