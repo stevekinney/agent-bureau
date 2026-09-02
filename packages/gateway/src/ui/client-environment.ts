@@ -46,18 +46,34 @@ export interface GatewayClientEnvironment {
  * once and passes the result down through {@link App}'s `environment` prop,
  * so a running gateway behaves exactly as it did when the UI read these
  * globals directly at call time.
+ *
+ * The four timer functions and `Date.now` are captured into local bindings
+ * here, at construction, rather than re-read off `globalThis`/`Date` inside
+ * each closure at call time. Without that capture, anything that later
+ * replaces the global timer functions — a fake-timer harness, or code that
+ * temporarily swaps and restores them — would change what an
+ * already-constructed environment's `timers` resolves to mid-lifetime: a
+ * reconnect or polling timer could be scheduled through one implementation
+ * and cleared through another, leaking it past `stop()`/unmount and
+ * defeating the isolation this environment exists to provide.
  */
 export function createBrowserClientEnvironment(): GatewayClientEnvironment {
+  const nativeSetTimeout = globalThis.setTimeout;
+  const nativeClearTimeout = globalThis.clearTimeout;
+  const nativeSetInterval = globalThis.setInterval;
+  const nativeClearInterval = globalThis.clearInterval;
+  const nativeNow = Date.now;
+
   return {
     fetch: globalThis.fetch,
     WebSocket: globalThis.WebSocket,
     EventSource: globalThis.EventSource,
     timers: {
-      setTimeout: (callback, milliseconds) => globalThis.setTimeout(callback, milliseconds),
-      clearTimeout: (handle) => globalThis.clearTimeout(handle),
-      setInterval: (callback, milliseconds) => globalThis.setInterval(callback, milliseconds),
-      clearInterval: (handle) => globalThis.clearInterval(handle),
-      now: () => Date.now(),
+      setTimeout: (callback, milliseconds) => nativeSetTimeout(callback, milliseconds),
+      clearTimeout: (handle) => nativeClearTimeout(handle),
+      setInterval: (callback, milliseconds) => nativeSetInterval(callback, milliseconds),
+      clearInterval: (handle) => nativeClearInterval(handle),
+      now: () => nativeNow(),
     },
   };
 }
