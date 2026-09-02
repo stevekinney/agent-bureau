@@ -649,6 +649,11 @@ describe('createLazyAgent', () => {
       children: () => [],
       abortChild() {},
       closed: () => Promise.resolve(closedFailure),
+      snapshot: () => stubLivenessSnapshot('cancelled-after-resolution'),
+      subscribeSnapshot: (observer: (snapshot: AgentRunLivenessSnapshot) => void) => {
+        observer(stubLivenessSnapshot('cancelled-after-resolution'));
+        return { unsubscribe: () => {}, closed: false };
+      },
       [Symbol.dispose]() {},
       [Symbol.asyncIterator]: () => (async function* () {})(),
     } as unknown as AgentRun<string, false>;
@@ -752,24 +757,84 @@ describe('createLazyAgent', () => {
     expect(beforeSnapshot.status).toBe('created');
     expect(beforeSnapshot.id).toBe('lazy-liveness');
 
+    // AB-214 review (PRRT_kwDORvupsc6esZSA): a subscription registered
+    // before `underlying` resolves must stay OPEN and keep receiving
+    // updates once it does — not close itself off after the one synchronous
+    // synthetic snapshot.
     const beforeReceived: string[] = [];
     const beforeSubscription = run.subscribeSnapshot((snapshot) =>
       beforeReceived.push(snapshot.status),
     );
     expect(beforeReceived).toEqual(['created']);
-    expect(beforeSubscription.closed).toBe(true);
-    expect(() => beforeSubscription.unsubscribe()).not.toThrow();
+    expect(beforeSubscription.closed).toBe(false);
 
     await flushMicrotasks();
 
-    // Once resolved, both delegate straight through to the underlying handle.
+    // Once resolved, both delegate straight through to the underlying
+    // handle — including the PRE-EXISTING subscription above, which was
+    // transferred to a real one rather than left stuck on 'created'.
     expect(run.snapshot().id).toBe('fake-handle');
+    // The transferred subscription received the real handle's own status
+    // ('running', per `stubLivenessSnapshot`) as its second delivery.
+    expect(beforeReceived).toEqual(['created', 'running']);
     const afterReceived: string[] = [];
     run.subscribeSnapshot((snapshot) => afterReceived.push(snapshot.id));
     expect(afterReceived).toEqual(['fake-handle']);
 
+    expect(() => beforeSubscription.unsubscribe()).not.toThrow();
+    expect(beforeSubscription.closed).toBe(true);
+
     fake.settle(successResult('done'));
     await run.result();
+  });
+
+  it('AB-214 review (PRRT_kwDORvupsc6esZSF): notifies a pending subscriber with a synthetic terminal snapshot when the run finalizes with no underlying handle', async () => {
+    const controller = new AbortController();
+    const lazy = createLazyAgent(
+      () =>
+        new Promise<RunnableAgent<string, false>>(() => {
+          // Never resolves — this run stays 'waiting' until aborted.
+        }),
+      { label: 'never-resolves' },
+    );
+
+    const run = lazy.run('hello', { signal: controller.signal });
+
+    const received: string[] = [];
+    const subscription = run.subscribeSnapshot((snapshot) => received.push(snapshot.status));
+    expect(received).toEqual(['created']);
+    expect(subscription.closed).toBe(false);
+
+    // A second, already-closed-by-then subscriber exercises the
+    // `record.closed` skip branch inside `notifySyntheticTerminal`.
+    const alreadyClosed = run.subscribeSnapshot(() => {});
+    alreadyClosed.unsubscribe();
+
+    // A throwing subscriber must not stop the others from being notified
+    // (same observer-isolation contract as `ActiveRunLiveness`).
+    const throwingReceived: string[] = [];
+    run.subscribeSnapshot((snapshot) => {
+      throwingReceived.push(snapshot.status);
+      throw new Error('a badly behaved subscriber');
+    });
+
+    controller.abort('cancelled while waiting for the loader');
+    await run.result();
+
+    expect(received).toEqual(['created', 'terminal']);
+    expect(throwingReceived).toEqual(['created', 'terminal']);
+    expect(subscription.closed).toBe(true);
+    expect(run.snapshot().status).toBe('terminal');
+
+    // A subscription registered AFTER the synthetic terminal finalize must
+    // deliver the terminal snapshot once and close immediately, same as
+    // `ActiveRunLiveness`'s own already-terminal contract.
+    const afterReceived: string[] = [];
+    const afterSubscription = run.subscribeSnapshot((snapshot) =>
+      afterReceived.push(snapshot.status),
+    );
+    expect(afterReceived).toEqual(['terminal']);
+    expect(afterSubscription.closed).toBe(true);
   });
 
   it('honors an already-aborted context.signal without calling the loader', async () => {

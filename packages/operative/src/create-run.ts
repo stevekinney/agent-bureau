@@ -103,6 +103,13 @@ export interface ActiveRun {
 export interface CreateActiveRunDependencies {
   identifiers?: RunIdentifierSeam;
   clock?: StallWatchdogClock;
+  /**
+   * The authenticated principal or Bureau identifier that owns this run
+   * (`LivenessSnapshot.owner`, AC4). Absent for a standalone run (AB-88's
+   * standalone-run resolution) — Bureau supplies its own `request.principal`
+   * here when starting a run.
+   */
+  owner?: string;
 }
 
 /**
@@ -165,6 +172,7 @@ export function createActiveRun(
         options,
         prompt: durable.prompt,
         ...(dependencies?.clock ? { livenessClock: dependencies.clock } : {}),
+        ...(dependencies?.owner !== undefined ? { livenessOwner: dependencies.owner } : {}),
         ...(durable.emitter
           ? {
               emitter: durable.emitter,
@@ -204,6 +212,7 @@ export function createActiveRun(
     id: runId,
     durability: 'process-local',
     clock: dependencies?.clock,
+    owner: dependencies?.owner,
   });
 
   const loopOptions: RunOptions = {
@@ -316,6 +325,11 @@ export function createActiveRun(
       // still fire for every toolbox call regardless, unchanged.
       if (ownedToolCallIds.has(e.call.id)) {
         inFlightTools += 1;
+        // AB-214 review (PRRT_kwDORvupsc6esZRy): the tool-call watchdog
+        // exists only while a tool call this run owns is actually in
+        // flight — an idle run producing no tool-progress events must not
+        // be reported stalled/unreachable for it.
+        liveness.beginToolCall();
       }
       emitter.dispatchEvent(
         new ToolStartedBubbleEvent(
@@ -344,6 +358,7 @@ export function createActiveRun(
         // aborted signal path), which would otherwise drive this negative and
         // corrupt hasInFlightWork()'s later reads.
         inFlightTools = Math.max(0, inFlightTools - 1);
+        liveness.endToolCall();
         if (inFlightTools === 0 && toolDrainWaiters.length > 0) {
           const waiters = toolDrainWaiters;
           toolDrainWaiters = [];
@@ -466,8 +481,11 @@ export function createActiveRun(
     )
     .then(
       (runResult) => {
-        liveness.setResult(runResult);
-        liveness.setStatus('terminal');
+        // Atomic (AB-214 review PRRT_kwDORvupsc6esZSx): attach `result` and
+        // transition to `terminal` as one revision, never two, so no
+        // subscriber ever observes `status: 'running'` with a populated
+        // `result`.
+        liveness.settle(runResult);
         return runResult;
       },
       (error: unknown) => {
@@ -513,7 +531,12 @@ export function createActiveRun(
   function complete(): void {
     for (const cleanup of cleanups) cleanup();
     emitter.complete();
-    liveness.dispose();
+    // `complete()` is documented to complete only the event stream, not to
+    // abort or otherwise end the underlying run (AB-214 review
+    // PRRT_kwDORvupsc6esZSM) — liveness disposal happens exclusively via
+    // `setStatus('terminal')`/`settle()` above, which always run before this
+    // `.finally(complete)` callback does. No separate `liveness.dispose()`
+    // call belongs here.
   }
 
   // The in-memory loop resolves `result` for every terminal shape (stop,

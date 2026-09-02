@@ -23,6 +23,15 @@ export interface ActiveRunLivenessOptions {
   readonly id: string;
   readonly durability: 'process-local' | 'durable';
   readonly clock?: StallWatchdogClock;
+  /**
+   * The authenticated principal or Bureau identifier that owns this run
+   * (AC4's `owner` field) — absent for a standalone (non-Bureau) run, per
+   * AB-88's standalone-run resolution. Distinct from `projection`, which is
+   * always `'redacted'` regardless of `owner` (AB-88's single-projection
+   * ruling): `owner` records who started the run, `projection` records what
+   * detail level THIS caller sees.
+   */
+  readonly owner?: string;
 }
 
 /**
@@ -36,21 +45,42 @@ export interface ActiveRunLivenessOptions {
  * `agent-run.provider-turn` and `tool-call`) into a single agent-run-level
  * `LivenessSnapshot`: the worse of the two governs `reachability`/
  * `progress`/`missedPulseCount`, and their evidence merges chronologically.
+ * The tool watchdog exists only while at least one tool call is in flight
+ * (`beginToolCall`/`endToolCall`) — an idle run with no active tool call
+ * cannot be reported stalled/unreachable purely because it produced no
+ * `tool-progress` event (AB-214 review PRRT_kwDORvupsc6esZRy).
  *
  * `subscribeSnapshot` pushes a new snapshot to every subscriber on each
  * explicit revision-advancing call (`recordProviderPulse`,
- * `recordToolProgressPulse`, `setStatus`, `setResult`) — not on pure elapsed
+ * `recordToolProgressPulse`, `setStatus`, `settle`) — not on pure elapsed
  * time with no new evidence. A caller wanting up-to-the-millisecond
  * staleness without a driving event calls `snapshot()` directly, which
- * always recomputes from the watchdogs' current state.
+ * always recomputes from the watchdogs' current state, EXCEPT that repeated
+ * reads at the same `revision` return the identical cached object by
+ * reference (the "Cached snapshot" capability's identity-stability
+ * contract, `documentation/operative-type-safe-api.md`) — a real state
+ * change always advances `revision` first, so identity and freshness never
+ * disagree.
  */
 export interface ActiveRunLiveness extends LivenessObservable<AgentRunLivenessSnapshot> {
   recordProviderPulse(detail?: unknown): void;
   recordToolProgressPulse(
     detail?: { toolCallId?: string; toolName?: string } & Record<string, unknown>,
   ): void;
+  /** Starts the tool watchdog if this is the first in-flight tool call. */
+  beginToolCall(): void;
+  /** Stops (disposes) the tool watchdog once no tool call remains in flight. */
+  endToolCall(): void;
   setStatus(status: LivenessLifecycleStatus): void;
-  setResult(result: unknown): void;
+  /**
+   * Atomically attaches the terminal `result` and transitions `status` to
+   * `'terminal'` as ONE revision (AB-214 review PRRT_kwDORvupsc6esZSx) — a
+   * successful settlement must never publish an intermediate snapshot with
+   * `status: 'running'` and a populated `result`, which would let a
+   * subscriber observe completion before the lifecycle dimension says it
+   * occurred.
+   */
+  settle(result: unknown): void;
   dispose(): void;
 }
 
@@ -102,16 +132,29 @@ function deriveAssessment(
   return 'healthy';
 }
 
+/**
+ * The default production clock. `now()` uses `performance.now()` — a
+ * monotonic source, unaffected by a wall-clock adjustment — rather than
+ * `Date.now()` (AB-214 review PRRT_kwDORvupsc6esZS3): every cadence/grace/
+ * jitter/suspension computation this module performs assumes a
+ * monotonically increasing clock, and a backward wall-clock step could
+ * otherwise make a fresh pulse compare as older than a stale one. Wall-clock
+ * ISO timestamps (`startedAt`, `lastTransitionAt`) stay on `Date`
+ * separately — they are for display, never for cadence math.
+ */
 const realClock: StallWatchdogClock = {
-  now: () => Date.now(),
+  now: () => performance.now(),
   setTimeout: (callback, ms) => setTimeout(callback, ms),
   clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
 };
 
+interface SubscriberRecord {
+  readonly observer: (snapshot: AgentRunLivenessSnapshot) => void;
+  closed: boolean;
+}
+
 export function createActiveRunLiveness(options: ActiveRunLivenessOptions): ActiveRunLiveness {
   const clock = options.clock ?? realClock;
-  const agentWatchdog: StallWatchdog = createStallWatchdog(AGENT_RUN_PROVIDER_TURN_POLICY, clock);
-  const toolWatchdog: StallWatchdog = createStallWatchdog(TOOL_CALL_POLICY, clock);
 
   const startedAt = new Date().toISOString();
   let revision = 0;
@@ -120,23 +163,42 @@ export function createActiveRunLiveness(options: ActiveRunLivenessOptions): Acti
   let result: unknown;
   let hasResult = false;
   let disposed = false;
+  let toolCallsInFlight = 0;
 
-  const subscribers = new Set<(snapshot: AgentRunLivenessSnapshot) => void>();
+  const subscribers = new Set<SubscriberRecord>();
 
-  function buildSnapshot(): AgentRunLivenessSnapshot {
+  const agentWatchdog: StallWatchdog = createStallWatchdog(AGENT_RUN_PROVIDER_TURN_POLICY, clock, {
+    onAssessmentChange: advance,
+  });
+  let toolWatchdog: StallWatchdog | undefined;
+
+  function ensureToolWatchdog(): StallWatchdog {
+    if (!toolWatchdog) {
+      toolWatchdog = createStallWatchdog(TOOL_CALL_POLICY, clock, { onAssessmentChange: advance });
+    }
+    return toolWatchdog;
+  }
+
+  let cachedSnapshot: AgentRunLivenessSnapshot | undefined;
+  let cachedRevision = -1;
+
+  function computeSnapshot(): AgentRunLivenessSnapshot {
     const agentAssessment = agentWatchdog.assess();
-    const toolAssessment = toolWatchdog.assess();
-    const reachability = worstReachability(
-      agentAssessment.reachability,
-      toolAssessment.reachability,
-    );
-    const progress = worstProgress(agentAssessment.progress, toolAssessment.progress);
+    const toolAssessment = toolWatchdog?.assess();
+    const reachability = toolAssessment
+      ? worstReachability(agentAssessment.reachability, toolAssessment.reachability)
+      : agentAssessment.reachability;
+    const progress = toolAssessment
+      ? worstProgress(agentAssessment.progress, toolAssessment.progress)
+      : agentAssessment.progress;
     const missedPulseCount = Math.max(
       agentAssessment.missedPulseCount,
-      toolAssessment.missedPulseCount,
+      toolAssessment?.missedPulseCount ?? 0,
     );
-    const evidence = [...agentAssessment.evidence, ...toolAssessment.evidence].sort(
-      (a, b) => a.at - b.at,
+    const evidence = Object.freeze(
+      [...agentAssessment.evidence, ...(toolAssessment?.evidence ?? [])].sort(
+        (a, b) => a.at - b.at,
+      ),
     );
 
     const lastHeartbeatAt = lastAt(evidence, [
@@ -155,9 +217,16 @@ export function createActiveRunLiveness(options: ActiveRunLivenessOptions): Acti
     ]);
     const lastProgressAt = lastAt(evidence, ['tool-progress']);
 
-    return {
+    // AC1: terminal work collapses reachability/progress to 'not-applicable'
+    // — a completed run must not go on reporting whatever live-work
+    // dimension its watchdogs held immediately before disposal (AB-214
+    // review PRRT_kwDORvupsc6esZS8).
+    const isTerminal = status === 'terminal';
+
+    return Object.freeze({
       id: options.id,
       kind: 'agent-run',
+      ...(options.owner !== undefined ? { owner: options.owner } : {}),
       startedAt,
       revision,
       status,
@@ -169,8 +238,8 @@ export function createActiveRunLiveness(options: ActiveRunLivenessOptions): Acti
       cancellable: status !== 'terminal' && status !== 'aborting',
       ...(hasResult ? { result } : {}),
       attempt: 0,
-      reachability,
-      progress,
+      reachability: isTerminal ? 'not-applicable' : reachability,
+      progress: isTerminal ? 'not-applicable' : progress,
       assessment: deriveAssessment(status, reachability, progress),
       observedAt: clock.now(),
       ...(lastHeartbeatAt !== undefined ? { lastHeartbeatAt } : {}),
@@ -179,18 +248,45 @@ export function createActiveRunLiveness(options: ActiveRunLivenessOptions): Acti
       missedPulseCount,
       policyVersion: LIVENESS_POLICY_VERSION,
       evidence,
-    };
+    });
+  }
+
+  // "Cached snapshot" capability (documentation/operative-type-safe-api.md):
+  // repeated reads before a represented change return the identical object
+  // by reference. A represented change always advances `revision` first
+  // (via `advance()`), so caching keyed on `revision` is exact — never
+  // stale, never a false identity match.
+  function readSnapshot(): AgentRunLivenessSnapshot {
+    if (cachedSnapshot && cachedRevision === revision) {
+      return cachedSnapshot;
+    }
+    cachedSnapshot = computeSnapshot();
+    cachedRevision = revision;
+    return cachedSnapshot;
   }
 
   function notify(): void {
     if (disposed && status !== 'terminal') return;
-    const snapshot = buildSnapshot();
-    for (const subscriber of [...subscribers]) {
-      subscriber(snapshot);
+    const snapshot = readSnapshot();
+    for (const record of [...subscribers]) {
+      if (record.closed) continue;
+      try {
+        record.observer(snapshot);
+      } catch {
+        // A throwing subscriber must not escape into the caller driving
+        // this revision (AB-214 review PRRT_kwDORvupsc6esZRt) — a
+        // monitoring callback failing must never strand the run it
+        // observes or replace a successful settlement with the observer's
+        // own error. Swallow it here; the observer's own bug is the
+        // observer's problem, not this run's.
+      }
     }
     if (status === 'terminal') {
       // Already-terminal work delivers one terminal snapshot and no further
-      // calls — clear every subscriber after this final broadcast.
+      // calls — close every subscription record (not just the Set) so a
+      // `Subscription.closed` reader sees the true state (AB-214 review
+      // PRRT_kwDORvupsc6esjju), then clear the Set.
+      for (const record of subscribers) record.closed = true;
       subscribers.clear();
     }
   }
@@ -204,7 +300,7 @@ export function createActiveRunLiveness(options: ActiveRunLivenessOptions): Acti
     if (disposed) return;
     disposed = true;
     agentWatchdog.dispose();
-    toolWatchdog.dispose();
+    toolWatchdog?.dispose();
   }
 
   return {
@@ -218,8 +314,25 @@ export function createActiveRunLiveness(options: ActiveRunLivenessOptions): Acti
       detail?: { toolCallId?: string; toolName?: string } & Record<string, unknown>,
     ): void {
       if (disposed) return;
-      toolWatchdog.recordPulse('tool-progress', 0, detail);
+      ensureToolWatchdog().recordPulse('tool-progress', 0, detail);
       advance();
+    },
+
+    beginToolCall(): void {
+      if (disposed) return;
+      toolCallsInFlight += 1;
+      if (toolCallsInFlight === 1) {
+        ensureToolWatchdog();
+      }
+    },
+
+    endToolCall(): void {
+      if (disposed) return;
+      toolCallsInFlight = Math.max(0, toolCallsInFlight - 1);
+      if (toolCallsInFlight === 0 && toolWatchdog) {
+        toolWatchdog.dispose();
+        toolWatchdog = undefined;
+      }
     },
 
     setStatus(next: LivenessLifecycleStatus): void {
@@ -233,39 +346,60 @@ export function createActiveRunLiveness(options: ActiveRunLivenessOptions): Acti
       advance();
     },
 
-    setResult(value: unknown): void {
+    settle(value: unknown): void {
+      if (status === 'terminal') return;
       result = value;
       hasResult = true;
+      status = 'terminal';
+      lastTransitionAt = new Date().toISOString();
+      disposeWatchdogs();
       advance();
     },
 
     snapshot(): AgentRunLivenessSnapshot {
-      return buildSnapshot();
+      return readSnapshot();
     },
 
     subscribeSnapshot(
       observer: (snapshot: AgentRunLivenessSnapshot) => void,
       subscribeOptions?: { signal?: AbortSignal },
     ): Subscription {
-      let closed = false;
-      observer(buildSnapshot());
-
-      if (status !== 'terminal') {
-        subscribers.add(observer);
-      }
+      const record: SubscriberRecord = { observer, closed: false };
 
       function unsubscribe(): void {
-        if (closed) return;
-        closed = true;
-        subscribers.delete(observer);
+        if (record.closed) return;
+        record.closed = true;
+        subscribers.delete(record);
       }
 
-      subscribeOptions?.signal?.addEventListener('abort', unsubscribe, { once: true });
+      // An already-aborted signal must never deliver more than the
+      // synchronous initial snapshot below (AB-214 review
+      // PRRT_kwDORvupsc6esUt9 / PRRT_kwDORvupsc6esZSg) — checked before
+      // registration, not left to a listener that an already-fired signal
+      // will never invoke.
+      const alreadyAborted = subscribeOptions?.signal?.aborted ?? false;
+
+      try {
+        observer(readSnapshot());
+      } catch {
+        // Same isolation as `notify()` above — a throwing observer must
+        // not prevent registration bookkeeping or propagate into the
+        // caller of `subscribeSnapshot` itself.
+      }
+
+      if (alreadyAborted) {
+        record.closed = true;
+      } else if (status !== 'terminal') {
+        subscribers.add(record);
+        subscribeOptions?.signal?.addEventListener('abort', unsubscribe, { once: true });
+      } else {
+        record.closed = true;
+      }
 
       return {
         unsubscribe,
         get closed() {
-          return closed;
+          return record.closed;
         },
       };
     },

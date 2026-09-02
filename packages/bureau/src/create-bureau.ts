@@ -2607,6 +2607,11 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
               ...(humanInputOnServices ? { onServices: humanInputOnServices } : {}),
             }
           : undefined,
+        // AB-214 review (PRRT_kwDORvupsc6esZTF): thread the authenticated
+        // principal starting this run into `LivenessSnapshot.owner` — AC4
+        // reserves an absent owner for a standalone (non-Bureau) run, and a
+        // Bureau-started run always has one to give.
+        request.principal !== undefined ? { owner: request.principal } : undefined,
       );
       activeRuns.add(activeRun);
       runToolboxes.add(runToolbox);

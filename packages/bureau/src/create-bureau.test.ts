@@ -762,6 +762,32 @@ describe('createBureau', () => {
     expect(parsed.liveness.id).toBe(summary.id);
   });
 
+  it('AB-88/AB-214 review (PRRT_kwDORvupsc6esZTF): getRun(id).liveness.owner carries the authenticated principal that started the run', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    const summary = await bureau.createRun({ message: 'Hello', principal: 'user-42' });
+    const detail = bureau.getRun(summary.id);
+
+    expect(detail?.liveness.owner).toBe('user-42');
+  });
+
+  it('AB-88/AB-214: getRun(id).liveness.owner is absent when the run has no authenticated principal', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    const summary = await bureau.createRun({ message: 'Hello' });
+    const detail = bureau.getRun(summary.id);
+
+    expect(detail?.liveness.owner).toBeUndefined();
+  });
+
   it('AB-88/AB-214: subscribeRunSnapshot delivers the current snapshot synchronously, then live updates', async () => {
     const bureau = await createBureau({
       agents: {},

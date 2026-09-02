@@ -1,8 +1,12 @@
 import { describe, expect, it } from 'bun:test';
 
 import { createActiveRunLiveness } from './active-run-liveness';
-import { LIVENESS_POLICY_VERSION } from './policies';
+import { LIVENESS_POLICY_VERSION, TOOL_CALL_POLICY } from './policies';
 import type { StallWatchdogClock } from './watchdog';
+
+/** `cadenceMs + graceMs + jitterMs` — see the identical helper in `watchdog.test.ts`. */
+const TOOL_CHECK_INTERVAL_MS =
+  (TOOL_CALL_POLICY.cadenceMs ?? 0) + TOOL_CALL_POLICY.graceMs + TOOL_CALL_POLICY.jitterMs;
 
 function createManualClock(): StallWatchdogClock & { advance(ms: number): void } {
   let time = 0;
@@ -135,12 +139,12 @@ describe('createActiveRunLiveness', () => {
     expect(liveness.snapshot().revision).toBe(terminalRevision);
   });
 
-  it('setResult attaches the result to the snapshot', () => {
+  it('settle attaches the result to the snapshot and transitions to terminal atomically', () => {
     const clock = createManualClock();
     const liveness = createActiveRunLiveness({ id: 'run-1', durability: 'process-local', clock });
 
     expect(liveness.snapshot().result).toBeUndefined();
-    liveness.setResult({ finishReason: 'stop' });
+    liveness.settle({ finishReason: 'stop' });
 
     expect(liveness.snapshot().result).toEqual({ finishReason: 'stop' });
     liveness.dispose();
@@ -159,7 +163,7 @@ describe('createActiveRunLiveness', () => {
 
     // Further activity (which is a no-op post-terminal at the recorder
     // level too) must not deliver a second call to this subscriber.
-    liveness.setResult({ finishReason: 'stop' });
+    liveness.settle({ finishReason: 'stop' });
     expect(received).toEqual(['terminal']);
   });
 
@@ -174,7 +178,7 @@ describe('createActiveRunLiveness', () => {
 
     expect(received).toEqual(['running', 'terminal']);
 
-    liveness.setResult({ finishReason: 'stop' });
+    liveness.settle({ finishReason: 'stop' });
     expect(received).toEqual(['running', 'terminal']);
   });
 
@@ -210,18 +214,42 @@ describe('createActiveRunLiveness', () => {
     liveness.dispose();
   });
 
+  it('an already-aborted AbortSignal never registers the observer for further delivery (AB-214 review PRRT_kwDORvupsc6esUt9)', () => {
+    const clock = createManualClock();
+    const liveness = createActiveRunLiveness({ id: 'run-1', durability: 'process-local', clock });
+    const controller = new AbortController();
+    controller.abort('already gone');
+
+    const received: number[] = [];
+    const subscription = liveness.subscribeSnapshot(
+      (snapshot) => received.push(snapshot.revision),
+      { signal: controller.signal },
+    );
+
+    // The synchronous initial delivery still happens (the contract's
+    // "current snapshot before returning" guarantee), but the subscription
+    // itself is already closed — no further revision reaches it.
+    expect(received).toEqual([0]);
+    expect(subscription.closed).toBe(true);
+
+    liveness.recordProviderPulse();
+    expect(received).toEqual([0]);
+
+    liveness.dispose();
+  });
+
   it('sets raw progress to stalled once tool-call silence crosses the missed-pulse threshold, collapsing assessment to unreachable', () => {
     const clock = createManualClock();
     const liveness = createActiveRunLiveness({ id: 'run-1', durability: 'process-local', clock });
 
     liveness.recordToolProgressPulse({ toolCallId: 'call-1' });
-    // TOOL_CALL_POLICY: cadence 30000, threshold 3. The pulse at t=0 covers
-    // the first tick (it lands exactly at the watchdog's construction-time
-    // baseline), so three MISSED ticks require a fourth advance.
-    clock.advance(30_000);
-    clock.advance(30_000);
-    clock.advance(30_000);
-    clock.advance(30_000);
+    // TOOL_CALL_POLICY: threshold 3. The pulse at t=0 covers the first
+    // per-check window (it lands exactly at the watchdog's construction-time
+    // baseline), so three MISSED windows require a fourth advance.
+    clock.advance(TOOL_CHECK_INTERVAL_MS);
+    clock.advance(TOOL_CHECK_INTERVAL_MS);
+    clock.advance(TOOL_CHECK_INTERVAL_MS);
+    clock.advance(TOOL_CHECK_INTERVAL_MS);
 
     const snapshot = liveness.snapshot();
     // AC1's collapse rule: 'stalled' is legal only with 'reachable'/'late';
@@ -246,8 +274,8 @@ describe('createActiveRunLiveness', () => {
     // is 'late' rather than 'unreachable' — one missed tick short of the
     // threshold still reads 'late'/'idle', not yet 'stalled'.
     liveness.recordToolProgressPulse({ toolCallId: 'call-1' });
-    clock.advance(30_000);
-    clock.advance(30_000);
+    clock.advance(TOOL_CHECK_INTERVAL_MS);
+    clock.advance(TOOL_CHECK_INTERVAL_MS);
 
     const snapshot = liveness.snapshot();
     expect(snapshot.reachability).toBe('late');
@@ -292,5 +320,59 @@ describe('createActiveRunLiveness', () => {
     liveness.recordToolProgressPulse();
 
     expect(liveness.snapshot().evidence).toEqual([]);
+  });
+
+  it('beginToolCall()/endToolCall() start and stop the tool watchdog only while a tool call is in flight (AB-214 review PRRT_kwDORvupsc6esZRy)', () => {
+    const clock = createManualClock();
+    const liveness = createActiveRunLiveness({ id: 'run-1', durability: 'process-local', clock });
+
+    // Before any tool call, an idle run producing no tool-progress events
+    // must not be marked stalled/unreachable purely from elapsed time — the
+    // tool watchdog does not exist yet, so only the no-cadence agent-run
+    // watchdog governs (still 'unknown': no provider pulse has arrived
+    // either).
+    clock.advance(TOOL_CHECK_INTERVAL_MS * 5);
+    expect(liveness.snapshot().reachability).toBe('unknown');
+    expect(liveness.snapshot().missedPulseCount).toBe(0);
+
+    liveness.beginToolCall();
+    clock.advance(TOOL_CHECK_INTERVAL_MS);
+    expect(liveness.snapshot().missedPulseCount).toBe(1);
+
+    liveness.endToolCall();
+    // Once the tool call ends, the watchdog is disposed — further elapsed
+    // time must not accrue more missed pulses.
+    clock.advance(TOOL_CHECK_INTERVAL_MS * 5);
+    expect(liveness.snapshot().missedPulseCount).toBe(1);
+
+    liveness.dispose();
+  });
+
+  it('beginToolCall()/endToolCall() reference-count overlapping tool calls, keeping the watchdog alive until the last one ends', () => {
+    const clock = createManualClock();
+    const liveness = createActiveRunLiveness({ id: 'run-1', durability: 'process-local', clock });
+
+    liveness.beginToolCall();
+    liveness.beginToolCall();
+    liveness.endToolCall();
+    // One call is still in flight — the watchdog must not have been
+    // disposed yet.
+    clock.advance(TOOL_CHECK_INTERVAL_MS);
+    expect(liveness.snapshot().missedPulseCount).toBe(1);
+
+    liveness.endToolCall();
+    clock.advance(TOOL_CHECK_INTERVAL_MS * 5);
+    expect(liveness.snapshot().missedPulseCount).toBe(1);
+
+    liveness.dispose();
+  });
+
+  it('beginToolCall()/endToolCall() are no-ops after dispose', () => {
+    const clock = createManualClock();
+    const liveness = createActiveRunLiveness({ id: 'run-1', durability: 'process-local', clock });
+    liveness.dispose();
+
+    expect(() => liveness.beginToolCall()).not.toThrow();
+    expect(() => liveness.endToolCall()).not.toThrow();
   });
 });

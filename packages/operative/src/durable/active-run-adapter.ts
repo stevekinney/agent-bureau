@@ -147,6 +147,8 @@ export interface DurableActiveRunOptions {
    * and get the real `Date.now()`/`setTimeout` clock.
    */
   livenessClock?: StallWatchdogClock;
+  /** See `CreateActiveRunDependencies.owner` (`create-run.ts`) — threaded through unchanged for a durable run. */
+  livenessOwner?: string;
 }
 
 /**
@@ -360,6 +362,7 @@ export function createDurableActiveRun(
     id: runId,
     durability: 'durable',
     clock: durableRun.livenessClock,
+    owner: durableRun.livenessOwner,
   });
 
   // Forward toolbox events with the `toolbox` prefix, as createRun does. The
@@ -408,6 +411,10 @@ export function createDurableActiveRun(
 
     const onExecuteStart = (e: ToolboxEventMap['execute-start']) => {
       inFlightTools += 1;
+      // AB-214 review (PRRT_kwDORvupsc6esZRy): the tool-call watchdog exists
+      // only while a tool call is actually in flight — see the identical
+      // reasoning in `create-run.ts`.
+      liveness.beginToolCall();
       emitter.dispatchEvent(
         new ToolStartedBubbleEvent(
           { agentName, runId, step: currentStep },
@@ -426,6 +433,7 @@ export function createDurableActiveRun(
       // armorer can emit 'settled' with no preceding 'execute-start' for a
       // tool call cancelled before execution begins.
       inFlightTools = Math.max(0, inFlightTools - 1);
+      liveness.endToolCall();
       const hasError = e.error !== undefined;
       const status: 'success' | 'error' = hasError ? 'error' : 'success';
       emitter.dispatchEvent(
@@ -504,7 +512,10 @@ export function createDurableActiveRun(
   function complete(): void {
     for (const cleanup of cleanups) cleanup();
     emitter.complete();
-    liveness.dispose();
+    // Liveness disposal happens exclusively via `setStatus('terminal')`/
+    // `settle()` below, which always run before this `.finally(complete)`
+    // callback does (AB-214 review PRRT_kwDORvupsc6esZSM) — no separate
+    // dispose call belongs here.
   }
 
   // closed()'s AC8-equivalent for a FRESH (non-reattached) run (AB-204): a
@@ -568,8 +579,7 @@ export function createDurableActiveRun(
     })
     .then(
       (runResult) => {
-        liveness.setResult(runResult);
-        liveness.setStatus('terminal');
+        liveness.settle(runResult);
         return runResult;
       },
       (error: unknown) => {
@@ -970,7 +980,9 @@ export function reattachDurableActiveRun(
   function complete(): void {
     toolboxForwardCleanup?.();
     emitter.complete();
-    liveness.dispose();
+    // See the identical reasoning in the fresh-run `complete()` above
+    // (AB-214 review PRRT_kwDORvupsc6esZSM) — no separate dispose call
+    // belongs here.
   }
 
   function abortOutcome(): Promise<boolean> | undefined {
@@ -1014,8 +1026,7 @@ export function reattachDurableActiveRun(
     .then(drive)
     .then(
       (runResult) => {
-        liveness.setResult(runResult);
-        liveness.setStatus('terminal');
+        liveness.settle(runResult);
         return runResult;
       },
       (error: unknown) => {
