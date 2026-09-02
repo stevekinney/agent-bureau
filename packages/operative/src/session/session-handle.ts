@@ -183,8 +183,12 @@ export interface SessionHandle {
 
   /**
    * Fire-and-forget signal into the in-flight run's workflow. The agent loop's
-   * `ctx.waitForSignal` consumes it. Releases parked HITL waits. Requires a
-   * durable engine and a currently-running run.
+   * `ctx.waitForSignal` consumes it. Releases a `requestHumanInput` park and
+   * (AB-44 — resume agent reasoning with a delivered signal payload) CONTINUES
+   * the same run: the delivered payload is rendered into the conversation as a
+   * deterministic `[signal:{name}] {payload}` user-role message and one more
+   * agent generation step runs before the run's final result is produced.
+   * Requires a durable engine and a currently-running run.
    */
   signal(name: string, payload?: unknown): Promise<void>;
 

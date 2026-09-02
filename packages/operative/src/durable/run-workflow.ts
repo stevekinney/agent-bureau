@@ -11,6 +11,7 @@ import {
 import { DEFAULT_MAXIMUM_STEPS, runStep } from '../run-step';
 import type { FinishReason } from '../types';
 import type { CheckpointStore } from './checkpoint-store';
+import { buildSignalContinuationInput, renderSignalContinuation } from './continuation-input';
 import { isScheduledAgentRunInput, type ScheduledAgentRunInput } from './schedule-agent';
 import { createStorageActivities } from './storage-activities';
 import type {
@@ -205,10 +206,16 @@ export interface AgentRunWorkflowResult {
    */
   wakeupNote?: string;
   /**
-   * F3 — The signal name the run parked on via `requestHumanInput`. Present
-   * when the agent called `requestHumanInput({ signalName })` during this run
-   * and the workflow parked via `yield* ctx.waitForSignal(signalName)`. Callers
-   * can surface this so the next run knows which signal triggered its resume.
+   * F3 — The LAST signal name the run genuinely parked on via
+   * `requestHumanInput` and was released for. Present once the workflow has
+   * completed a `yield* ctx.waitForSignal(signalName)` (AB-44 — resume agent
+   * reasoning with a delivered signal payload). This is a historical fact
+   * ("this run did park on this signal"), not a live-park indicator — it
+   * remains set on the FINAL result even after the delivered payload
+   * continued the run with one more generation step (or several, if the
+   * continuation itself re-parked), and regardless of how the run eventually
+   * terminates. Callers can surface this so a later inspection knows which
+   * signal most recently drove the run's resume.
    */
   humanWaitSignal?: string;
   /**
@@ -454,290 +461,404 @@ export function createRunWorkflow(
         let pendingWakeup: PendingWakeup | undefined;
         let pendingHumanWait: PendingHumanWait | undefined;
 
-        while (cursor.step < maximumSteps) {
-          // === The whole step runs inside `ctx.memo`, keyed by step index. This is
-          // what makes the in-process step durable across RECOVERY (not just the
-          // happy path): on a crash + recoverAll, Weft restarts the generator from
-          // the top and short-circuits each `ctx.memo` to its checkpointed result
-          // WITHOUT re-running the function — so every COMPLETED step's generate +
-          // tool execution is skipped, and only the in-flight (un-memoized) step
-          // re-runs. Without memo, the in-process generate would re-execute from
-          // step 0 on recovery (re-charging the LLM), because plain in-process code
-          // is re-run during replay. The memo's return value is the plain, cloneable
-          // step projection — no `Conversation` instance, no live error. ===
-          const stepIndex = cursor.step;
-          const carriedAccumulators = {
-            totalUsage: cursor.totalUsage,
-            lastContent: cursor.lastContent,
-            schemaAttempts: cursor.schemaAttempts,
-          };
-          const stepResult = yield* ctx.memo(`step-${stepIndex}`, async () => {
-            const deps = runDepsFrom(ctx.services);
-            const conversation = Conversation.from(snapshot);
-            // Build StepDeps from the run's options (one code path with executeLoop),
-            // overriding only the toolbox with the per-run (variance-widened) one
-            // the engine supplied via `ctx.services`.
-            const stepDeps = {
-              ...buildStepDeps(deps.options),
-              toolbox: deps.toolbox,
-              runId,
-              durableOperationKeys: true,
+        // AB-44 — F3 signal-payload resume. The signal name a `requestHumanInput`
+        // park most recently, successfully waited on and was released for, kept
+        // for the FINAL result's `humanWaitSignal` field even after the run
+        // continues past that park (`pendingHumanWait` itself is cleared the
+        // moment its signal is consumed — see the park block below — so the
+        // result can't just read it). This is a historical fact ("this run did
+        // park on this signal"), not a live-park indicator, so it is reported
+        // regardless of how the run eventually terminates.
+        let lastHumanWaitSignal: string | undefined;
+
+        // AB-44/AB-45 — outer resume loop. AB-41's decision record: a delivered
+        // signal (this issue) or a fired wakeup (AB-45) CONTINUES the same run
+        // with one more agent generation step, never merely delaying terminal
+        // completion. The inner step loop below runs until a genuine terminal
+        // outcome or `maximumSteps`; the durable-park block after it either ends
+        // the workflow (no pending park, or `AB-45`'s still-terminal
+        // `ctx.sleep`) or — for a delivered signal — appends the continuation
+        // message and `continue`s this outer loop to run more steps. Re-parking
+        // from within a continuation step is therefore just the outer loop
+        // running again; no separate code path.
+        while (true) {
+          while (cursor.step < maximumSteps) {
+            // === The whole step runs inside `ctx.memo`, keyed by step index. This is
+            // what makes the in-process step durable across RECOVERY (not just the
+            // happy path): on a crash + recoverAll, Weft restarts the generator from
+            // the top and short-circuits each `ctx.memo` to its checkpointed result
+            // WITHOUT re-running the function — so every COMPLETED step's generate +
+            // tool execution is skipped, and only the in-flight (un-memoized) step
+            // re-runs. Without memo, the in-process generate would re-execute from
+            // step 0 on recovery (re-charging the LLM), because plain in-process code
+            // is re-run during replay. The memo's return value is the plain, cloneable
+            // step projection — no `Conversation` instance, no live error. ===
+            const stepIndex = cursor.step;
+            const carriedAccumulators = {
+              totalUsage: cursor.totalUsage,
+              lastContent: cursor.lastContent,
+              schemaAttempts: cursor.schemaAttempts,
             };
-            // Carry the accumulators forward; start `steps` empty so this iteration
-            // accumulates exactly the one StepResult it produces (and nothing that
-            // would otherwise need to cross a yield).
-            const runState = createRunState();
-            runState.totalUsage = { ...carriedAccumulators.totalUsage };
-            runState.lastContent = carriedAccumulators.lastContent;
-            runState.schemaAttempts = carriedAccumulators.schemaAttempts;
+            const stepResult = yield* ctx.memo(`step-${stepIndex}`, async () => {
+              const deps = runDepsFrom(ctx.services);
+              // AB-44 — clear the run-scoped `pendingHumanWait` slot BEFORE this
+              // step runs, in this no-`yield*` region where `deps` is live. The
+              // slot is sticky (`requestHumanInput` only ever sets it; nothing
+              // clears it once its signal is delivered), so without this reset a
+              // step that does NOT call `requestHumanInput` would still report the
+              // PRIOR step's park request as its own — every step after a park
+              // would see it as freshly set and park again. Clearing here means
+              // this step's memoized `pendingHumanWait` reflects only what THIS
+              // step's own tool call (if any) set; cross-step accumulation still
+              // happens via the hoisted `pendingHumanWait` local outside the loop
+              // (last-write-wins), which is unaffected by this per-step reset.
+              deps.pendingHumanWait = undefined;
+              const conversation = Conversation.from(snapshot);
+              // Build StepDeps from the run's options (one code path with executeLoop),
+              // overriding only the toolbox with the per-run (variance-widened) one
+              // the engine supplied via `ctx.services`.
+              const stepDeps = {
+                ...buildStepDeps(deps.options),
+                toolbox: deps.toolbox,
+                runId,
+                durableOperationKeys: true,
+              };
+              // Carry the accumulators forward; start `steps` empty so this iteration
+              // accumulates exactly the one StepResult it produces (and nothing that
+              // would otherwise need to cross a yield).
+              const runState = createRunState();
+              runState.totalUsage = { ...carriedAccumulators.totalUsage };
+              runState.lastContent = carriedAccumulators.lastContent;
+              runState.schemaAttempts = carriedAccumulators.schemaAttempts;
 
-            const outcome = await runStep(
-              stepDeps,
-              runState,
-              conversation,
-              stepIndex,
-              deps.emitter,
-            );
-
-            // Project the (at most one) pushed StepResult to a plain StepRecord —
-            // dropping the live Conversation instance — and re-snapshot the
-            // transcript. Everything returned here is plain and cloneable.
-            const pushed = runState.steps[runState.steps.length - 1];
-            const stepMetadata = pushed
-              ? {
-                  ...(pushed.metadata ?? {}),
-                  ...(deps.getStepMetadata?.() ?? {}),
-                }
-              : undefined;
-            const record: StepRecord | null = pushed
-              ? {
-                  step: pushed.step,
-                  content: pushed.content,
-                  toolCalls: pushed.toolCalls,
-                  results: pushed.results,
-                  ...(pushed.usage ? { usage: pushed.usage } : {}),
-                  ...(stepMetadata && Object.keys(stepMetadata).length > 0
-                    ? { metadata: stepMetadata }
-                    : {}),
-                  final: pushed.final,
-                }
-              : null;
-
-            // Serialize terminal metadata here, inside the function, where the live
-            // (non-cloneable) error object and validation error still exist. Only
-            // plain data is memoized. The error finish reason is CLASSIFIED here
-            // (elicitation-denied / budget-exceeded / error) because the error's
-            // class identity does not survive serialization — matching the
-            // in-memory `makeErrorResult`. The `schemaValidation` is carried so a
-            // durable run produces the SAME `RunResult.schemaValidation` shape as
-            // the in-memory loop (its live error is reduced to a message).
-            //
-            // pendingWakeup and pendingHumanWait are read from `deps` HERE (where
-            // the tool's live mutation already landed) and embedded in the memoized
-            // return value. This is critical for recovery correctness: if the process
-            // crashes after this memo commits but before the post-loop park executes,
-            // Weft re-runs the generator and short-circuits this memo to its
-            // checkpointed result — which includes the park request. The post-loop
-            // code reads these from the accumulated step results rather than from the
-            // rebuilt `ctx.services`, which would be freshly constructed (unset) on
-            // recovery. `PendingWakeup`/`PendingHumanWait` are plain, cloneable
-            // objects (duration is number|string, signalName is string), so they
-            // cross the checkpoint boundary safely.
-            return {
-              outcome: { kind: outcome.kind },
-              errorMessage: outcome.kind === 'error' ? serializeError(outcome.error) : undefined,
-              errorFinishReason:
-                outcome.kind === 'error' ? classifyErrorFinishReason(outcome.error) : undefined,
-              tripwire: outcome.kind === 'error' ? tripwireDetailFrom(outcome.error) : undefined,
-              abortReason: outcome.kind === 'abort' ? outcome.reason : undefined,
-              stopFinishReason: outcome.kind === 'stop' ? outcome.finishReason : undefined,
-              schemaValidation:
-                outcome.kind === 'stop' && outcome.schemaValidation
-                  ? {
-                      success: outcome.schemaValidation.success,
-                      ...(outcome.schemaValidation.error !== undefined
-                        ? { error: serializeError(outcome.schemaValidation.error) }
-                        : {}),
-                    }
-                  : undefined,
-              output: outcome.kind === 'stop' ? outcome.output : undefined,
-              record,
-              conversationSnapshot: conversation.snapshot(),
-              nextAccumulators: {
-                totalUsage: runState.totalUsage,
-                lastContent: runState.lastContent,
-                schemaAttempts: runState.schemaAttempts,
-              },
-              pendingWakeup: deps.pendingWakeup,
-              pendingHumanWait: deps.pendingHumanWait,
-            };
-          });
-
-          snapshot = stepResult.conversationSnapshot;
-
-          // Accumulate park requests from this step's memoized result. Last-write-
-          // wins across steps, matching the in-process tool semantics (a later
-          // `scheduleWakeup`/`requestHumanInput` call overwrites a prior one).
-          //
-          // MUTUAL EXCLUSIVITY INVARIANT: `pendingWakeup` and `pendingHumanWait`
-          // are mutually exclusive — only one park type governs after the loop
-          // (DurableRunDeps contract). Enforced here by clearing the OTHER local
-          // whenever one is set, so the last-set value wins even across steps.
-          // Within a single step's memo result, both could be present if the agent
-          // called both tools (an unusual but valid sequence); the `pendingHumanWait`
-          // check runs second, so it clears a same-step `pendingWakeup`, matching
-          // the reasonable user expectation that an explicit human-input request
-          // supersedes an autonomous wakeup schedule.
-          if (stepResult.pendingWakeup !== undefined) {
-            pendingWakeup = stepResult.pendingWakeup;
-            pendingHumanWait = undefined;
-          }
-          if (stepResult.pendingHumanWait !== undefined) {
-            pendingHumanWait = stepResult.pendingHumanWait;
-            pendingWakeup = undefined;
-          }
-
-          // === Durable commits — all plain data. Order: transcript, then the
-          // step record (if any), then the advanced cursor last, so a crash
-          // between commits never advances the cursor past un-persisted state. ===
-          yield* ctx.run('saveConversation', { runId, snapshot });
-          if (stepResult.record !== null) {
-            yield* ctx.run('recordStep', { runId, record: stepResult.record });
-          }
-
-          const { outcome } = stepResult;
-
-          // A `stop`, `next`, or `continue` all mean the step at `cursor.step`
-          // finished its turn — the cursor advances, matching the in-memory `for`
-          // loop where both a fall-through and a `continue` run the increment (a
-          // skipped step, per-step abort, or schema-retry consumes a step index).
-          // An `abort`/`error` aborts mid-step with no completed record, so the
-          // cursor stays put: a resumed run re-attempts this same step. `steps` in
-          // the result is therefore the count of completed steps, identical to
-          // `RunResult.steps.length` in `executeLoop`.
-          const aborted = outcome.kind === 'abort' || outcome.kind === 'error';
-          cursor = {
-            ...cursor,
-            step: aborted ? cursor.step : cursor.step + 1,
-            ...stepResult.nextAccumulators,
-          };
-          yield* ctx.run('saveCursor', { runId, cursor });
-
-          if (outcome.kind === 'stop') {
-            finishReason = stepResult.stopFinishReason ?? 'stop-condition';
-            schemaValidation = stepResult.schemaValidation;
-            output = stepResult.output;
-            stoppedEarly = true;
-            break;
-          }
-          if (outcome.kind === 'abort') {
-            finishReason = 'aborted';
-            abortReason = stepResult.abortReason;
-            stoppedEarly = true;
-            break;
-          }
-          if (outcome.kind === 'error') {
-            // Use the finish reason CLASSIFIED inside the memo (where the error's
-            // class identity was still live) so a durable run distinguishes
-            // elicitation-denied / budget-exceeded from a plain error, matching
-            // the in-memory loop.
-            finishReason = stepResult.errorFinishReason ?? 'error';
-            errorMessage = stepResult.errorMessage;
-            tripwire = stepResult.tripwire;
-            stoppedEarly = true;
-            break;
-          }
-          // `next` / `continue` — loop to the next step.
-        }
-
-        // === onMaximumSteps tail — parity with executeLoop ===
-        // When the loop exhausted `maximumSteps` without a terminal outcome (stop
-        // / abort / error), call `options.onMaximumSteps` exactly once, mirroring
-        // executeLoop lines 141-158. Wrapped in `ctx.memo` so a crash-then-
-        // recover does NOT re-charge the LLM call: Weft short-circuits the memo
-        // to its checkpointed result on replay, just as it does for per-step
-        // memos. `finishReason` stays `'maximum-steps'` regardless of the handler
-        // return value — matching the in-memory path. On error, dispatch
-        // RunErrorEvent (parity with executeLoop) and short-circuit the return.
-        if (!stoppedEarly) {
-          const finalStep = cursor.step;
-          const tail = yield* ctx.memo('on-maximum-steps', async () => {
-            const deps = runDepsFrom(ctx.services);
-            const handler = deps.options.onMaximumSteps;
-            if (!handler) return { kind: 'noop' as const };
-            const conversation = Conversation.from(snapshot);
-            try {
-              const finalContent = await handler({
+              const outcome = await runStep(
+                stepDeps,
+                runState,
                 conversation,
-                step: finalStep,
-                signal: deps.options.signal,
-              });
-              if (typeof finalContent !== 'string') return { kind: 'noop' as const };
-              conversation.appendAssistantMessage(finalContent);
-              return {
-                kind: 'content' as const,
-                finalContent,
-                conversationSnapshot: conversation.snapshot(),
-              };
-            } catch (error) {
-              deps.emitter?.dispatch(new RunErrorEvent(finalStep, error, 'policy'));
-              return {
-                kind: 'error' as const,
-                errorMessage: serializeError(error),
-                errorFinishReason: classifyErrorFinishReason(error),
-              };
-            }
-          });
+                stepIndex,
+                deps.emitter,
+              );
 
-          if (tail.kind === 'content') {
-            snapshot = tail.conversationSnapshot;
-            cursor = { ...cursor, lastContent: tail.finalContent };
+              // Project the (at most one) pushed StepResult to a plain StepRecord —
+              // dropping the live Conversation instance — and re-snapshot the
+              // transcript. Everything returned here is plain and cloneable.
+              const pushed = runState.steps[runState.steps.length - 1];
+              const stepMetadata = pushed
+                ? {
+                    ...(pushed.metadata ?? {}),
+                    ...(deps.getStepMetadata?.() ?? {}),
+                  }
+                : undefined;
+              const record: StepRecord | null = pushed
+                ? {
+                    step: pushed.step,
+                    content: pushed.content,
+                    toolCalls: pushed.toolCalls,
+                    results: pushed.results,
+                    ...(pushed.usage ? { usage: pushed.usage } : {}),
+                    ...(stepMetadata && Object.keys(stepMetadata).length > 0
+                      ? { metadata: stepMetadata }
+                      : {}),
+                    final: pushed.final,
+                  }
+                : null;
+
+              // Serialize terminal metadata here, inside the function, where the live
+              // (non-cloneable) error object and validation error still exist. Only
+              // plain data is memoized. The error finish reason is CLASSIFIED here
+              // (elicitation-denied / budget-exceeded / error) because the error's
+              // class identity does not survive serialization — matching the
+              // in-memory `makeErrorResult`. The `schemaValidation` is carried so a
+              // durable run produces the SAME `RunResult.schemaValidation` shape as
+              // the in-memory loop (its live error is reduced to a message).
+              //
+              // pendingWakeup and pendingHumanWait are read from `deps` HERE (where
+              // the tool's live mutation already landed) and embedded in the memoized
+              // return value. This is critical for recovery correctness: if the process
+              // crashes after this memo commits but before the post-loop park executes,
+              // Weft re-runs the generator and short-circuits this memo to its
+              // checkpointed result — which includes the park request. The post-loop
+              // code reads these from the accumulated step results rather than from the
+              // rebuilt `ctx.services`, which would be freshly constructed (unset) on
+              // recovery. `PendingWakeup`/`PendingHumanWait` are plain, cloneable
+              // objects (duration is number|string, signalName is string), so they
+              // cross the checkpoint boundary safely.
+              return {
+                outcome: { kind: outcome.kind },
+                errorMessage: outcome.kind === 'error' ? serializeError(outcome.error) : undefined,
+                errorFinishReason:
+                  outcome.kind === 'error' ? classifyErrorFinishReason(outcome.error) : undefined,
+                tripwire: outcome.kind === 'error' ? tripwireDetailFrom(outcome.error) : undefined,
+                abortReason: outcome.kind === 'abort' ? outcome.reason : undefined,
+                stopFinishReason: outcome.kind === 'stop' ? outcome.finishReason : undefined,
+                schemaValidation:
+                  outcome.kind === 'stop' && outcome.schemaValidation
+                    ? {
+                        success: outcome.schemaValidation.success,
+                        ...(outcome.schemaValidation.error !== undefined
+                          ? { error: serializeError(outcome.schemaValidation.error) }
+                          : {}),
+                      }
+                    : undefined,
+                output: outcome.kind === 'stop' ? outcome.output : undefined,
+                record,
+                conversationSnapshot: conversation.snapshot(),
+                nextAccumulators: {
+                  totalUsage: runState.totalUsage,
+                  lastContent: runState.lastContent,
+                  schemaAttempts: runState.schemaAttempts,
+                },
+                pendingWakeup: deps.pendingWakeup,
+                pendingHumanWait: deps.pendingHumanWait,
+              };
+            });
+
+            snapshot = stepResult.conversationSnapshot;
+
+            // Accumulate park requests from this step's memoized result. Last-write-
+            // wins across steps, matching the in-process tool semantics (a later
+            // `scheduleWakeup`/`requestHumanInput` call overwrites a prior one).
+            //
+            // MUTUAL EXCLUSIVITY INVARIANT: `pendingWakeup` and `pendingHumanWait`
+            // are mutually exclusive — only one park type governs after the loop
+            // (DurableRunDeps contract). Enforced here by clearing the OTHER local
+            // whenever one is set, so the last-set value wins even across steps.
+            // Within a single step's memo result, both could be present if the agent
+            // called both tools (an unusual but valid sequence); the `pendingHumanWait`
+            // check runs second, so it clears a same-step `pendingWakeup`, matching
+            // the reasonable user expectation that an explicit human-input request
+            // supersedes an autonomous wakeup schedule.
+            if (stepResult.pendingWakeup !== undefined) {
+              pendingWakeup = stepResult.pendingWakeup;
+              pendingHumanWait = undefined;
+            }
+            if (stepResult.pendingHumanWait !== undefined) {
+              pendingHumanWait = stepResult.pendingHumanWait;
+              pendingWakeup = undefined;
+            }
+
+            // === Durable commits — all plain data. Order: transcript, then the
+            // step record (if any), then the advanced cursor last, so a crash
+            // between commits never advances the cursor past un-persisted state. ===
             yield* ctx.run('saveConversation', { runId, snapshot });
+            if (stepResult.record !== null) {
+              yield* ctx.run('recordStep', { runId, record: stepResult.record });
+            }
+
+            const { outcome } = stepResult;
+
+            // A `stop`, `next`, or `continue` all mean the step at `cursor.step`
+            // finished its turn — the cursor advances, matching the in-memory `for`
+            // loop where both a fall-through and a `continue` run the increment (a
+            // skipped step, per-step abort, or schema-retry consumes a step index).
+            // An `abort`/`error` aborts mid-step with no completed record, so the
+            // cursor stays put: a resumed run re-attempts this same step. `steps` in
+            // the result is therefore the count of completed steps, identical to
+            // `RunResult.steps.length` in `executeLoop`.
+            const aborted = outcome.kind === 'abort' || outcome.kind === 'error';
+            cursor = {
+              ...cursor,
+              step: aborted ? cursor.step : cursor.step + 1,
+              ...stepResult.nextAccumulators,
+            };
             yield* ctx.run('saveCursor', { runId, cursor });
-          } else if (tail.kind === 'error') {
-            finishReason = tail.errorFinishReason;
-            errorMessage = tail.errorMessage;
+
+            if (outcome.kind === 'stop') {
+              finishReason = stepResult.stopFinishReason ?? 'stop-condition';
+              schemaValidation = stepResult.schemaValidation;
+              output = stepResult.output;
+              stoppedEarly = true;
+              break;
+            }
+            if (outcome.kind === 'abort') {
+              finishReason = 'aborted';
+              abortReason = stepResult.abortReason;
+              stoppedEarly = true;
+              break;
+            }
+            if (outcome.kind === 'error') {
+              // Use the finish reason CLASSIFIED inside the memo (where the error's
+              // class identity was still live) so a durable run distinguishes
+              // elicitation-denied / budget-exceeded from a plain error, matching
+              // the in-memory loop.
+              finishReason = stepResult.errorFinishReason ?? 'error';
+              errorMessage = stepResult.errorMessage;
+              tripwire = stepResult.tripwire;
+              stoppedEarly = true;
+              break;
+            }
+            // AB-44 — a `requestHumanInput` tool call must commit its step and
+            // park BEFORE another generation call can run without the requested
+            // input. A `next`/`continue` outcome alone (e.g. `stopWhen` doesn't
+            // trigger because the step's only content was the tool call) would
+            // otherwise keep looping into another step immediately, racing the
+            // park. Check the fresh per-step value, not the cross-step
+            // accumulator: only THIS step's own tool call should force the park.
+            if (stepResult.pendingHumanWait !== undefined) {
+              stoppedEarly = true;
+              break;
+            }
+            // `next` / `continue` — loop to the next step.
           }
+
+          // === onMaximumSteps tail — parity with executeLoop ===
+          // When the loop exhausted `maximumSteps` without a terminal outcome (stop
+          // / abort / error), call `options.onMaximumSteps` exactly once, mirroring
+          // executeLoop lines 141-158. Wrapped in `ctx.memo` so a crash-then-
+          // recover does NOT re-charge the LLM call: Weft short-circuits the memo
+          // to its checkpointed result on replay, just as it does for per-step
+          // memos. `finishReason` stays `'maximum-steps'` regardless of the handler
+          // return value — matching the in-memory path. On error, dispatch
+          // RunErrorEvent (parity with executeLoop) and short-circuit the return.
+          if (!stoppedEarly) {
+            const finalStep = cursor.step;
+            const tail = yield* ctx.memo('on-maximum-steps', async () => {
+              const deps = runDepsFrom(ctx.services);
+              const handler = deps.options.onMaximumSteps;
+              if (!handler) return { kind: 'noop' as const };
+              const conversation = Conversation.from(snapshot);
+              try {
+                const finalContent = await handler({
+                  conversation,
+                  step: finalStep,
+                  signal: deps.options.signal,
+                });
+                if (typeof finalContent !== 'string') return { kind: 'noop' as const };
+                conversation.appendAssistantMessage(finalContent);
+                return {
+                  kind: 'content' as const,
+                  finalContent,
+                  conversationSnapshot: conversation.snapshot(),
+                };
+              } catch (error) {
+                deps.emitter?.dispatch(new RunErrorEvent(finalStep, error, 'policy'));
+                return {
+                  kind: 'error' as const,
+                  errorMessage: serializeError(error),
+                  errorFinishReason: classifyErrorFinishReason(error),
+                };
+              }
+            });
+
+            if (tail.kind === 'content') {
+              snapshot = tail.conversationSnapshot;
+              cursor = { ...cursor, lastContent: tail.finalContent };
+              yield* ctx.run('saveConversation', { runId, snapshot });
+              yield* ctx.run('saveCursor', { runId, cursor });
+            } else if (tail.kind === 'error') {
+              finishReason = tail.errorFinishReason;
+              errorMessage = tail.errorMessage;
+            }
+          }
+
+          // === Durable park — exactly one of wakeup or human-wait fires (never both). ===
+          // `pendingWakeup` / `pendingHumanWait` were accumulated above from step memo
+          // results — they are checkpointed values, NOT `ctx.services` fields. This is
+          // the fix for the durable-recovery bug: on a crash AFTER the step memo commits
+          // but BEFORE this park executes, Weft replays the generator and short-circuits
+          // each memo to its checkpointed result. `ctx.services` is rebuilt fresh on
+          // recovery (with both fields unset), so reading from services here would
+          // silently skip the park. Reading from the hoisted locals (fed from
+          // checkpointed step results) survives recovery correctly.
+          //
+          // The two locals are kept MUTUALLY EXCLUSIVE by the accumulation loop above:
+          // setting one clears the other. The `else if` below is defense-in-depth —
+          // it guarantees exactly one park primitive fires regardless of accumulation
+          // state, so the workflow cannot sleep AND then wait for a signal in sequence.
+          //
+          // CRITICAL: Only park on non-failed stop-condition / maximum-steps outcomes. A terminal
+          // failure (`error`, `aborted`, `elicitation-denied`, `budget-exceeded`,
+          // `tripwire`) must return immediately — parking on a failed/aborted run
+          // would leave the Weft workflow status as `running` until the sleep/signal
+          // fires, hiding the real outcome and blocking the caller from seeing the
+          // error result. This covers both a failing step (outcome.kind === 'abort' |
+          // 'error') and a failing `onMaximumSteps` handler (tail.kind === 'error'),
+          // because both update `finishReason` before we reach this point. A tripped
+          // guardrail is a hard halt by definition — it must never park. Also gates a
+          // signal racing a terminal failure (AC): if THIS cycle's step failed, the
+          // workflow returns immediately even though a signal may already be sitting
+          // in Weft's buffer for `pendingHumanWait.signalName` — it is never consumed.
+          const isFailureOutcome =
+            finishReason === 'error' ||
+            finishReason === 'aborted' ||
+            finishReason === 'elicitation-denied' ||
+            finishReason === 'budget-exceeded' ||
+            finishReason === 'tripwire';
+          if (!isFailureOutcome && pendingWakeup !== undefined) {
+            // AB-45's scope: a fired wakeup still only delays terminal completion
+            // today. `break` keeps that behavior unchanged — only the
+            // signal branch below continues the run.
+            yield* ctx.sleep(pendingWakeup.duration);
+            break;
+          } else if (!isFailureOutcome && pendingHumanWait !== undefined) {
+            // === F3 — HITL human-input gate (requestHumanInput tool) ===
+            // AB-44 — resume agent reasoning with the delivered signal payload,
+            // per AB-41's decision record: a delivered signal CONTINUES the same
+            // run with one more generation step; it never merely unparks into an
+            // immediate return. `ctx.waitForSignal` is itself the checkpointed
+            // durable operation — Weft buffers a signal sent before this line is
+            // reached and delivers it the instant the workflow arrives here (its
+            // buffering guarantee), and a crash either side of this `yield*` is
+            // safe: before it, recovery re-issues the same wait; after it (but
+            // before the commits below land), recovery re-issues the memoized
+            // work below from its checkpoint, never re-consuming the signal or
+            // dropping the resumed turn.
+            const signalName = pendingHumanWait.signalName;
+            const payload = yield* ctx.waitForSignal(signalName);
+
+            // Consumed: clear the hoisted local so a cycle that ends WITHOUT the
+            // continuation step re-requesting human input does not re-enter this
+            // branch and wait on the same already-delivered signal again. Record
+            // the signal name separately for the final result — see
+            // `lastHumanWaitSignal`'s declaration above.
+            pendingHumanWait = undefined;
+            lastHumanWaitSignal = signalName;
+
+            const continuationInput = buildSignalContinuationInput(signalName, payload);
+            const renderedMessage = renderSignalContinuation(continuationInput);
+
+            const resumedConversation = Conversation.from(snapshot);
+            resumedConversation.appendUserMessage(renderedMessage);
+            snapshot = resumedConversation.snapshot();
+            yield* ctx.run('saveConversation', { runId, snapshot });
+
+            // AC — "signal delivery alone does not finalize the pre-signal
+            // result": this cycle's terminal locals (set by whichever outcome
+            // — commonly `stop`, via a `stopWhen` that triggered right on the
+            // `requestHumanInput` tool call — broke the step loop above) were
+            // only ever PROVISIONAL: the real terminal outcome is now whatever
+            // the continuation step(s), run by looping this outer `while` again,
+            // produce. Reset every terminal-outcome local before continuing so
+            // a continuation that never itself reaches a genuine terminal
+            // condition (e.g. `maximumSteps` is already exhausted) falls
+            // through to the ordinary `maximum-steps` handling below rather
+            // than returning the stale pre-signal outcome.
+            finishReason = 'maximum-steps';
+            errorMessage = undefined;
+            abortReason = undefined;
+            schemaValidation = undefined;
+            output = undefined;
+            tripwire = undefined;
+            stoppedEarly = false;
+
+            continue;
+          }
+
+          // Neither park primitive is pending (or the outcome was a failure) —
+          // this run cycle's outcome is genuinely terminal.
+          break;
         }
 
-        // === Durable park — exactly one of wakeup or human-wait fires (never both). ===
-        // `pendingWakeup` / `pendingHumanWait` were accumulated above from step memo
-        // results — they are checkpointed values, NOT `ctx.services` fields. This is
-        // the fix for the durable-recovery bug: on a crash AFTER the step memo commits
-        // but BEFORE this park executes, Weft replays the generator and short-circuits
-        // each memo to its checkpointed result. `ctx.services` is rebuilt fresh on
-        // recovery (with both fields unset), so reading from services here would
-        // silently skip the park. Reading from the hoisted locals (fed from
-        // checkpointed step results) survives recovery correctly.
-        //
-        // The two locals are kept MUTUALLY EXCLUSIVE by the accumulation loop above:
-        // setting one clears the other. The `else if` below is defense-in-depth —
-        // it guarantees exactly one park primitive fires regardless of accumulation
-        // state, so the workflow cannot sleep AND then wait for a signal in sequence.
-        //
-        // CRITICAL: Only park on non-failed stop-condition / maximum-steps outcomes. A terminal
-        // failure (`error`, `aborted`, `elicitation-denied`, `budget-exceeded`,
-        // `tripwire`) must return immediately — parking on a failed/aborted run
-        // would leave the Weft workflow status as `running` until the sleep/signal
-        // fires, hiding the real outcome and blocking the caller from seeing the
-        // error result. This covers both a failing step (outcome.kind === 'abort' |
-        // 'error') and a failing `onMaximumSteps` handler (tail.kind === 'error'),
-        // because both update `finishReason` before we reach this point. A tripped
-        // guardrail is a hard halt by definition — it must never park.
-        const isFailureOutcome =
+        ctx.setAttribute('runId', runId);
+
+        // Recomputed against the FINAL `finishReason` (the loop above may have
+        // reset/reclassified it across one or more signal-delivered resumes).
+        const isFinalFailureOutcome =
           finishReason === 'error' ||
           finishReason === 'aborted' ||
           finishReason === 'elicitation-denied' ||
           finishReason === 'budget-exceeded' ||
           finishReason === 'tripwire';
-        if (!isFailureOutcome && pendingWakeup !== undefined) {
-          yield* ctx.sleep(pendingWakeup.duration);
-        } else if (!isFailureOutcome && pendingHumanWait !== undefined) {
-          // === F3 — HITL human-input gate (requestHumanInput tool) ===
-          yield* ctx.waitForSignal(pendingHumanWait.signalName);
-        }
-
-        ctx.setAttribute('runId', runId);
 
         return {
           schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
@@ -750,15 +871,20 @@ export function createRunWorkflow(
           ...(schemaValidation !== undefined ? { schemaValidation } : {}),
           ...(schemaValidation?.success ? { output } : {}),
           ...(tripwire !== undefined ? { tripwire } : {}),
-          // Only include park metadata on non-failure outcomes: a failed/aborted run
-          // never actually parks (the park block above is gated on !isFailureOutcome),
-          // so surfacing stale park state in the result would mislead callers.
-          ...(!isFailureOutcome && pendingWakeup?.note !== undefined
+          // Only include wakeup metadata on a non-failure outcome: a
+          // failed/aborted run never actually parks on `ctx.sleep` (the park
+          // block above is gated on `!isFailureOutcome`), so surfacing stale
+          // wakeup state would mislead callers.
+          ...(!isFinalFailureOutcome && pendingWakeup?.note !== undefined
             ? { wakeupNote: pendingWakeup.note }
             : {}),
-          ...(!isFailureOutcome && pendingHumanWait !== undefined
-            ? { humanWaitSignal: pendingHumanWait.signalName }
-            : {}),
+          // `humanWaitSignal` reports the LAST signal this run genuinely
+          // parked on and was released for — a historical fact recorded only
+          // inside the `yield* ctx.waitForSignal(...)` branch above once it
+          // has actually resolved, so (unlike `wakeupNote`) it is reported
+          // regardless of how the run eventually terminates: an outcome the
+          // continuation reaches AFTER a real park is not "stale".
+          ...(lastHumanWaitSignal !== undefined ? { humanWaitSignal: lastHumanWaitSignal } : {}),
         } satisfies AgentRunWorkflowResult;
       })
   );

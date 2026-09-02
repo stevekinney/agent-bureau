@@ -13,7 +13,11 @@ import { GuardrailTripwireError } from '../errors';
 import type { OperativeHookMap } from '../hooks';
 import type { GenerateFunction } from '../types';
 import { createCheckpointStore } from './checkpoint-store';
-import { createRunWorkflow, isAgentRunWorkflowInput } from './run-workflow';
+import {
+  createRunWorkflow,
+  isAgentRunWorkflowInput,
+  normalizeAgentRunWorkflowResult,
+} from './run-workflow';
 import { createStorageActivities } from './storage-activities';
 import type { DurableRunDeps } from './types';
 
@@ -1000,6 +1004,259 @@ describe('durable agentRun workflow', () => {
       }
     });
 
+    /**
+     * AB-44 AC — "A signal delivered before waiter registration is consumed
+     * once, and a crash before or after signal delivery does not lose or
+     * duplicate the resumed model turn." Two crash windows, both against the
+     * SAME engine-A/engine-B two-process pattern as the test above:
+     *
+     * (a) crash while STILL parked (before the signal is ever delivered) —
+     *     recovery must re-establish the SAME wait, and delivering the signal
+     *     to the recovered run resumes it exactly once.
+     * (b) crash AFTER the signal is delivered to engine A but before the
+     *     continuation step's memo commits — Weft's own signal delivery is
+     *     itself a checkpointed operation, so recovery replays it from
+     *     Weft's checkpoint (no re-delivery needed) and the un-memoized
+     *     continuation step runs exactly once on B.
+     */
+    it('crash BEFORE the signal is delivered: recovery re-parks, and delivering the signal afterward resumes exactly once', async () => {
+      const storage = new MemoryStorage();
+      const runId = 'ab44-crash-before-signal';
+      const signalName = 'human-response';
+
+      const depsA: { ref: DurableRunDeps | undefined } = { ref: undefined };
+      const hitlTool = createTool({
+        name: 'requestHumanInput',
+        description: 'Park waiting for human input',
+        input: z.object({ signalName: z.string() }),
+        execute: async (params) => {
+          if (depsA.ref) {
+            depsA.ref.pendingHumanWait = { signalName: params.signalName };
+          }
+          return 'parked';
+        },
+      });
+      const hitlToolbox = createToolbox([hitlTool]) as unknown as RegistryToolbox;
+
+      let generateCallsA = 0;
+      const servicesA: DurableRunDeps = {
+        options: {
+          generate: async () => {
+            generateCallsA++;
+            return {
+              content: '',
+              toolCalls: [{ name: 'requestHumanInput', arguments: { signalName } }],
+            };
+          },
+          toolbox: hitlToolbox,
+          conversation: createConversationHistory(),
+          stopWhen: noToolCalls(),
+        },
+        toolbox: hitlToolbox,
+      };
+      depsA.ref = servicesA;
+
+      const a = await buildEngine(storage, false);
+      const handleA = await a.engine.start(
+        'agentRun',
+        { runId, sessionId: runId, agentName: 'hitl-agent', prompt: 'start', maximumSteps: 3 },
+        { id: runId, services: servicesA },
+      );
+      void handleA.result().catch(() => {});
+
+      let parkedOnA = false;
+      for (let i = 0; i < 100; i++) {
+        await yieldToPortableEventLoop();
+        const snap = await handleA.snapshot();
+        if (snap?.status === 'running') {
+          const cp = await a.checkpointStore.loadCheckpoint(runId);
+          if (cp.steps.length >= 1) {
+            parkedOnA = true;
+            break;
+          }
+        }
+      }
+      expect(parkedOnA).toBe(true);
+      expect(generateCallsA).toBe(1);
+
+      // Crash BEFORE any signal was ever sent.
+      a.engine[Symbol.dispose]();
+
+      let generateCallsB = 0;
+      const b = await buildEngine(storage, false, (_info) => ({
+        status: 'available',
+        services: (() => {
+          const freshToolbox = createToolbox([hitlTool]) as unknown as RegistryToolbox;
+          const freshServices: DurableRunDeps = {
+            options: {
+              generate: async () => {
+                generateCallsB++;
+                return { content: 'resumed after crash-before-signal', toolCalls: [] };
+              },
+              toolbox: freshToolbox,
+              conversation: createConversationHistory(),
+              stopWhen: noToolCalls(),
+            },
+            toolbox: freshToolbox,
+          };
+          return freshServices;
+        })(),
+      }));
+
+      try {
+        const handles = await b.engine.recoverAll();
+        expect(handles.length).toBe(1);
+        const recoveredHandle = handles[0]!;
+
+        let reParked = false;
+        for (let i = 0; i < 100; i++) {
+          await yieldToPortableEventLoop();
+          const snap = await recoveredHandle.snapshot();
+          if (snap?.status === 'running') {
+            reParked = true;
+            break;
+          }
+        }
+        expect(reParked).toBe(true);
+
+        // NOW deliver the signal — the recovered run must consume it exactly
+        // once and produce exactly one continuation generate call.
+        await b.engine.signal(runId, signalName, { approved: true });
+
+        const result = normalizeAgentRunWorkflowResult(await recoveredHandle.result());
+        expect(result.finishReason).toBe('stop-condition');
+        expect(result.content).toBe('resumed after crash-before-signal');
+        expect(result.humanWaitSignal).toBe(signalName);
+        // Exactly one continuation call — not lost, not duplicated.
+        expect(generateCallsB).toBe(1);
+      } finally {
+        b.engine[Symbol.dispose]();
+      }
+    });
+
+    it('crash AFTER the signal is delivered but before the continuation step commits: recovery resumes exactly once, without redelivering the signal', async () => {
+      const storage = new MemoryStorage();
+      const runId = 'ab44-crash-after-signal';
+      const signalName = 'human-response';
+
+      const depsA: { ref: DurableRunDeps | undefined } = { ref: undefined };
+      const hitlTool = createTool({
+        name: 'requestHumanInput',
+        description: 'Park waiting for human input',
+        input: z.object({ signalName: z.string() }),
+        execute: async (params) => {
+          if (depsA.ref) {
+            depsA.ref.pendingHumanWait = { signalName: params.signalName };
+          }
+          return 'parked';
+        },
+      });
+      const hitlToolbox = createToolbox([hitlTool]) as unknown as RegistryToolbox;
+
+      let generateCallsA = 0;
+      const servicesA: DurableRunDeps = {
+        options: {
+          // Step 0 sets pendingHumanWait; the continuation step (step 1, after
+          // the signal) never gets to COMMIT on engine A — A is disposed
+          // immediately after the signal is sent, racing the continuation
+          // step's own memo commit. Whether A's continuation memo committed
+          // or not, B must reach exactly one continuation result.
+          generate: async () => {
+            generateCallsA++;
+            if (generateCallsA === 1) {
+              return {
+                content: '',
+                toolCalls: [{ name: 'requestHumanInput', arguments: { signalName } }],
+              };
+            }
+            return { content: 'resumed on A (should not surface)', toolCalls: [] };
+          },
+          toolbox: hitlToolbox,
+          conversation: createConversationHistory(),
+          stopWhen: noToolCalls(),
+        },
+        toolbox: hitlToolbox,
+      };
+      depsA.ref = servicesA;
+
+      const a = await buildEngine(storage, false);
+      const handleA = await a.engine.start(
+        'agentRun',
+        { runId, sessionId: runId, agentName: 'hitl-agent', prompt: 'start', maximumSteps: 3 },
+        { id: runId, services: servicesA },
+      );
+      void handleA.result().catch(() => {});
+
+      let parkedOnA = false;
+      for (let i = 0; i < 100; i++) {
+        await yieldToPortableEventLoop();
+        const snap = await handleA.snapshot();
+        if (snap?.status === 'running') {
+          const cp = await a.checkpointStore.loadCheckpoint(runId);
+          if (cp.steps.length >= 1) {
+            parkedOnA = true;
+            break;
+          }
+        }
+      }
+      expect(parkedOnA).toBe(true);
+
+      // Deliver the signal to engine A, then crash IMMEDIATELY — racing the
+      // continuation step's own commit. `signal()` resolving only means Weft
+      // persisted the DELIVERY; the continuation step it releases may or may
+      // not have started/committed before this dispose.
+      await a.engine.signal(runId, signalName, { approved: true });
+      a.engine[Symbol.dispose]();
+
+      let generateCallsB = 0;
+      const b = await buildEngine(storage, false, (_info) => ({
+        status: 'available',
+        services: (() => {
+          const freshToolbox = createToolbox([hitlTool]) as unknown as RegistryToolbox;
+          const freshServices: DurableRunDeps = {
+            options: {
+              generate: async () => {
+                generateCallsB++;
+                return { content: 'resumed after crash-after-signal', toolCalls: [] };
+              },
+              toolbox: freshToolbox,
+              conversation: createConversationHistory(),
+              stopWhen: noToolCalls(),
+            },
+            toolbox: freshToolbox,
+          };
+          return freshServices;
+        })(),
+      }));
+
+      try {
+        const handles = await b.engine.recoverAll();
+        expect(handles.length).toBe(1);
+        const recoveredHandle = handles[0]!;
+
+        // No re-delivery: Weft's own persisted signal-delivery checkpoint
+        // carries the resume forward. The run must reach a normal terminal
+        // result — never lost (hung forever) and never duplicated (more than
+        // one continuation generate call on B).
+        const result = normalizeAgentRunWorkflowResult(await recoveredHandle.result());
+        expect(result.finishReason).toBe('stop-condition');
+        expect(result.humanWaitSignal).toBe(signalName);
+        // Exactly one continuation call on B, whether or not A's own
+        // continuation attempt had already committed before the crash: if A
+        // committed it, B's memo short-circuits to that checkpointed result
+        // (B's generate never runs); if A did not, B's un-memoized
+        // continuation step runs exactly once. Either way `generateCallsB` is
+        // never greater than 1, and the run reaches a genuine terminal result
+        // — proving neither loss nor duplication of the resumed turn.
+        expect(generateCallsB).toBeLessThanOrEqual(1);
+        expect(['resumed after crash-after-signal', 'resumed on A (should not surface)']).toContain(
+          result.content,
+        );
+      } finally {
+        b.engine[Symbol.dispose]();
+      }
+    });
+
     it('re-parks via ctx.sleep after crash-after-memo-commit on recovery (pendingWakeup)', async () => {
       // Same crash scenario but for the D6 scheduleWakeup / ctx.sleep path.
       const storage = new MemoryStorage();
@@ -1113,16 +1370,23 @@ describe('durable agentRun workflow', () => {
   describe('F3 — HITL via requestHumanInput tool (pendingHumanWait + ctx.waitForSignal)', () => {
     /**
      * Proves that setting `deps.pendingHumanWait` in a tool causes the run
-     * workflow to park via `yield* ctx.waitForSignal(signalName)` after the
-     * step loop exits, and that a subsequent `engine.signal(runId, signalName,
-     * payload)` releases the parked run so it reaches 'completed'.
+     * workflow to park via `yield* ctx.waitForSignal(signalName)` IMMEDIATELY
+     * after that step commits (AB-44's "commits its step and parks before
+     * another generation call can run" fix — the tool call alone does not
+     * satisfy `noToolCalls()`, so without the fix the loop would run another
+     * generation call before ever reaching the park), and that a subsequent
+     * `engine.signal(runId, signalName, payload)` CONTINUES the same run with
+     * one more generation step (AB-41's decision record) seeded by the
+     * deterministic `[signal:{name}] {payload}` conversation message AB-44
+     * owns — never merely unparking into an immediate return.
      *
      * This tests the F3 seam: the tool writes `pendingHumanWait`, the workflow
-     * reads it outside `ctx.memo`, and parks until the signal arrives.
+     * reads it outside `ctx.memo`, parks until the signal arrives, and resumes
+     * reasoning with the delivered payload.
      */
-    it('parks via ctx.waitForSignal when pendingHumanWait is set, then resumes on signal', async () => {
+    it('parks via ctx.waitForSignal before another generation call runs, then resumes reasoning with the delivered payload', async () => {
       const storage = new MemoryStorage();
-      const { engine } = await buildEngine(storage, false);
+      const { engine, checkpointStore } = await buildEngine(storage, false);
 
       // A tool that sets deps.pendingHumanWait (mimics createRequestHumanInputTool).
       // Use a container object so the closure captures the reference before
@@ -1144,8 +1408,10 @@ describe('durable agentRun workflow', () => {
 
       const hitlToolbox = createToolbox([hitlTool]) as unknown as RegistryToolbox;
 
-      // Step counter so the generate function knows which step it is on. The
-      // durable run calls the hitlTool on step 0, then finishes on step 1.
+      // Step counter so the generate function knows which step it is on. With
+      // the fix, generate call 1 can ONLY happen as the continuation step
+      // AFTER the signal is delivered — never as an immediate follow-on to
+      // call 0's tool call.
       let stepCallCount = 0;
       const services: DurableRunDeps = {
         options: {
@@ -1160,7 +1426,7 @@ describe('durable agentRun workflow', () => {
                 ],
               };
             }
-            // Subsequent call (after signal): finish.
+            // Continuation call (after signal delivery): finish.
             return { content: 'done after human input', toolCalls: [] };
           },
           toolbox: hitlToolbox,
@@ -1194,19 +1460,595 @@ describe('durable agentRun workflow', () => {
         }
 
         expect(parked).toBe(true);
+        // AB-44 — the fix: exactly one generate call happened before the
+        // park. Without the fix, a second (immediate, pre-signal) generate
+        // call would already have run by now.
+        expect(stepCallCount).toBe(1);
 
         // Deliver the human signal to release the parked run.
         await engine.signal('hitl-run', 'human-response', { approved: true });
 
-        // Wait for the run to complete. The step loop exited via noToolCalls()
-        // (stop-condition) before parking, so the finish reason is 'stop-condition'.
+        // Wait for the run to complete. The CONTINUATION step (generate call
+        // 1, seeded by the delivered payload) returns tool-call-free content,
+        // so `noToolCalls()` stops it — 'stop-condition'.
         const result = await handle.result();
         expect(result.finishReason).toBe('stop-condition');
+        // The continuation step actually ran (not just the pre-park step).
+        expect(stepCallCount).toBe(2);
         // F3: humanWaitSignal carries the signal name the run parked on.
         expect(result.humanWaitSignal).toBe('human-response');
 
         const finalSnap = await handle.snapshot();
         expect(finalSnap?.status).toBe('completed');
+
+        // AB-44 AC — "The resumed step receives a deterministic conversation
+        // representation of the original prompt, signal name, and validated
+        // payload": the persisted transcript carries the synthetic user
+        // message with the fixed, parseable format AB-41's decision ratifies.
+        const checkpoint = await checkpointStore.loadCheckpoint('hitl-run');
+        const conversation = Conversation.from(checkpoint.conversation!);
+        const messages = conversation.getMessages();
+        const continuationMessage = messages.find(
+          (message) =>
+            message.role === 'user' &&
+            typeof message.content === 'string' &&
+            message.content.startsWith('[signal:human-response]'),
+        );
+        expect(continuationMessage?.content).toBe('[signal:human-response] {"approved":true}');
+        // The original prompt is still present, before the continuation message.
+        expect(messages[0]?.content).toBe('start');
+      } finally {
+        engine[Symbol.dispose]();
+      }
+    });
+
+    it('re-parks when the continuation step itself calls requestHumanInput again', async () => {
+      // AB-41's decision record: "Re-parking from within the continuation
+      // step is permitted." The continuation step is an ordinary generation
+      // step; if it writes a NEW pendingHumanWait, the workflow parks again
+      // instead of returning.
+      const storage = new MemoryStorage();
+      const { engine } = await buildEngine(storage, false);
+
+      const depsContainer: { ref: DurableRunDeps | undefined } = { ref: undefined };
+      const hitlTool = createTool({
+        name: 'requestHumanInput',
+        description: 'Park waiting for human input',
+        input: z.object({ signalName: z.string() }),
+        execute: async (params) => {
+          if (depsContainer.ref) {
+            depsContainer.ref.pendingHumanWait = { signalName: params.signalName };
+          }
+          return 'parked';
+        },
+      });
+      const hitlToolbox = createToolbox([hitlTool]) as unknown as RegistryToolbox;
+
+      let stepCallCount = 0;
+      const services: DurableRunDeps = {
+        options: {
+          generate: async () => {
+            const callIndex = stepCallCount++;
+            if (callIndex === 0) {
+              return {
+                content: '',
+                toolCalls: [{ name: 'requestHumanInput', arguments: { signalName: 'first' } }],
+              };
+            }
+            if (callIndex === 1) {
+              // Continuation step re-requests human input under a new signal name.
+              return {
+                content: '',
+                toolCalls: [{ name: 'requestHumanInput', arguments: { signalName: 'second' } }],
+              };
+            }
+            return { content: 'done after two rounds', toolCalls: [] };
+          },
+          toolbox: hitlToolbox,
+          conversation: createConversationHistory(),
+          stopWhen: noToolCalls(),
+          maximumSteps: 5,
+        },
+        toolbox: hitlToolbox,
+      };
+      depsContainer.ref = services;
+
+      try {
+        const handle = await engine.start(
+          'agentRun',
+          {
+            runId: 're-park-run',
+            sessionId: 're-park-run',
+            agentName: 'test-agent',
+            prompt: 'start',
+          },
+          { id: 're-park-run', services },
+        );
+
+        let parkedFirst = false;
+        for (let i = 0; i < 50; i++) {
+          await yieldToPortableEventLoop();
+          const snap = await handle.snapshot();
+          if (snap?.status === 'running' && depsContainer.ref?.pendingHumanWait !== undefined) {
+            parkedFirst = true;
+            break;
+          }
+        }
+        expect(parkedFirst).toBe(true);
+        expect(stepCallCount).toBe(1);
+
+        await engine.signal('re-park-run', 'first', { ok: true });
+
+        // Poll until the SECOND park (a fresh pendingHumanWait for 'second').
+        let parkedSecond = false;
+        for (let i = 0; i < 50; i++) {
+          await yieldToPortableEventLoop();
+          const snap = await handle.snapshot();
+          if (
+            snap?.status === 'running' &&
+            depsContainer.ref?.pendingHumanWait?.signalName === 'second'
+          ) {
+            parkedSecond = true;
+            break;
+          }
+        }
+        expect(parkedSecond).toBe(true);
+        expect(stepCallCount).toBe(2);
+
+        await engine.signal('re-park-run', 'second', { ok: true });
+
+        const result = await handle.result();
+        expect(result.finishReason).toBe('stop-condition');
+        expect(stepCallCount).toBe(3);
+        // The LAST signal the run parked on and was released for.
+        expect(result.humanWaitSignal).toBe('second');
+      } finally {
+        engine[Symbol.dispose]();
+      }
+    });
+
+    it('a signal sent under the wrong name stays buffered — it does not unblock the run', async () => {
+      // AC — "wrong signal names ... have explicit outcomes": Weft buffers each
+      // signal under its own `(workflowId, signalName)` key; a signal delivered
+      // under any name OTHER than the one `ctx.waitForSignal` is parked on has
+      // no effect on that wait. This is inherent Weft behavior (AB-41's decision
+      // record, "Signal-based operations"); this test proves this workflow does
+      // not accidentally consume it or otherwise misbehave.
+      const { engine } = await buildEngine(new MemoryStorage(), false);
+
+      const depsContainer: { ref: DurableRunDeps | undefined } = { ref: undefined };
+      const hitlTool = createTool({
+        name: 'requestHumanInput',
+        description: 'Park waiting for human input',
+        input: z.object({ signalName: z.string() }),
+        execute: async (params) => {
+          if (depsContainer.ref) {
+            depsContainer.ref.pendingHumanWait = { signalName: params.signalName };
+          }
+          return 'parked';
+        },
+      });
+      const toolbox = createToolbox([hitlTool]) as unknown as RegistryToolbox;
+
+      let call = 0;
+      const services: DurableRunDeps = {
+        options: {
+          generate: async () => {
+            if (call++ === 0) {
+              return {
+                content: '',
+                toolCalls: [{ name: 'requestHumanInput', arguments: { signalName: 'expected' } }],
+              };
+            }
+            return { content: 'resumed', toolCalls: [] };
+          },
+          toolbox,
+          conversation: createConversationHistory(),
+          stopWhen: noToolCalls(),
+        },
+        toolbox,
+      };
+      depsContainer.ref = services;
+
+      try {
+        const handle = await engine.start(
+          'agentRun',
+          {
+            runId: 'wrong-name-run',
+            sessionId: 'wrong-name-run',
+            agentName: 'test-agent',
+            prompt: 'start',
+          },
+          { id: 'wrong-name-run', services },
+        );
+
+        let parked = false;
+        for (let i = 0; i < 50; i++) {
+          await yieldToPortableEventLoop();
+          const snap = await handle.snapshot();
+          if (snap?.status === 'running' && depsContainer.ref?.pendingHumanWait !== undefined) {
+            parked = true;
+            break;
+          }
+        }
+        expect(parked).toBe(true);
+
+        // Deliver a signal under an UNRELATED name — must not unblock the run.
+        await engine.signal('wrong-name-run', 'unrelated-name', { irrelevant: true });
+        for (let i = 0; i < 10; i++) {
+          await yieldToPortableEventLoop();
+        }
+        const stillParkedSnap = await handle.snapshot();
+        expect(stillParkedSnap?.status).toBe('running');
+
+        // The correct name still releases it.
+        await engine.signal('wrong-name-run', 'expected', { approved: true });
+        const result = await handle.result();
+        expect(result.finishReason).toBe('stop-condition');
+        expect(result.humanWaitSignal).toBe('expected');
+      } finally {
+        engine[Symbol.dispose]();
+      }
+    });
+
+    it('renders the AB-46 denial sentinel as a "denied" continuation and lets the resumed step conclude the run', async () => {
+      // AB-41's decision record: `resolveReview({ decision: 'deny' })` against a
+      // human-wait review delivers `{ __abDenied: true, reason?: string }` on
+      // the same signal channel; denial is NOT exempted from the continuation
+      // step — the resumed generation step is expected to conclude the run.
+      const { engine, checkpointStore } = await buildEngine(new MemoryStorage(), false);
+
+      const depsContainer: { ref: DurableRunDeps | undefined } = { ref: undefined };
+      const hitlTool = createTool({
+        name: 'requestHumanInput',
+        description: 'Park waiting for human input',
+        input: z.object({ signalName: z.string() }),
+        execute: async (params) => {
+          if (depsContainer.ref) {
+            depsContainer.ref.pendingHumanWait = { signalName: params.signalName };
+          }
+          return 'parked';
+        },
+      });
+      const toolbox = createToolbox([hitlTool]) as unknown as RegistryToolbox;
+
+      let call = 0;
+      const services: DurableRunDeps = {
+        options: {
+          generate: async () => {
+            const c = call++;
+            if (c === 0) {
+              return {
+                content: '',
+                toolCalls: [{ name: 'requestHumanInput', arguments: { signalName: 'approval' } }],
+              };
+            }
+            return { content: 'acknowledged the denial', toolCalls: [] };
+          },
+          toolbox,
+          conversation: createConversationHistory(),
+          stopWhen: noToolCalls(),
+        },
+        toolbox,
+      };
+      depsContainer.ref = services;
+
+      try {
+        const handle = await engine.start(
+          'agentRun',
+          {
+            runId: 'denial-run',
+            sessionId: 'denial-run',
+            agentName: 'test-agent',
+            prompt: 'start',
+          },
+          { id: 'denial-run', services },
+        );
+
+        let parked = false;
+        for (let i = 0; i < 50; i++) {
+          await yieldToPortableEventLoop();
+          const snap = await handle.snapshot();
+          if (snap?.status === 'running' && depsContainer.ref?.pendingHumanWait !== undefined) {
+            parked = true;
+            break;
+          }
+        }
+        expect(parked).toBe(true);
+
+        await engine.signal('denial-run', 'approval', {
+          __abDenied: true,
+          reason: 'budget exceeded',
+        });
+
+        const result = await handle.result();
+        expect(result.finishReason).toBe('stop-condition');
+        expect(result.content).toBe('acknowledged the denial');
+
+        const checkpoint = await checkpointStore.loadCheckpoint('denial-run');
+        const conversation = Conversation.from(checkpoint.conversation!);
+        const continuationMessage = conversation
+          .getMessages()
+          .find(
+            (message) =>
+              message.role === 'user' &&
+              message.content === '[signal:approval] denied: budget exceeded',
+          );
+        expect(continuationMessage).toBeDefined();
+      } finally {
+        engine[Symbol.dispose]();
+      }
+    });
+
+    it('a payload Weft cannot transport (e.g. bigint) rejects at signalSession rather than silently corrupting the parked run', async () => {
+      // AC — "malformed payloads ... have explicit outcomes". Weft's own
+      // signal delivery already enforces a transportable payload (its size-
+      // check msgpack-encodes it before persisting) — a `bigint` throws
+      // there, so it never reaches this workflow's body at all. That REJECT
+      // *is* the explicit outcome for a transport-malformed payload: the
+      // caller sees the failure immediately and the parked run is untouched
+      // (still parked, no corrupted continuation committed). A payload that
+      // Weft's transport DOES accept but `JSON.stringify` cannot faithfully
+      // render (e.g. a circular structure) is this module's own concern —
+      // covered directly, at the unit level, by
+      // `continuation-input.test.ts`'s "falls back to a fixed placeholder"
+      // case, which exercises `renderSignalContinuation`'s try/catch without
+      // needing a real transport round trip.
+      const { engine } = await buildEngine(new MemoryStorage(), false);
+
+      const depsContainer: { ref: DurableRunDeps | undefined } = { ref: undefined };
+      const hitlTool = createTool({
+        name: 'requestHumanInput',
+        description: 'Park waiting for human input',
+        input: z.object({ signalName: z.string() }),
+        execute: async (params) => {
+          if (depsContainer.ref) {
+            depsContainer.ref.pendingHumanWait = { signalName: params.signalName };
+          }
+          return 'parked';
+        },
+      });
+      const toolbox = createToolbox([hitlTool]) as unknown as RegistryToolbox;
+
+      let call = 0;
+      const services: DurableRunDeps = {
+        options: {
+          generate: async () => {
+            if (call++ === 0) {
+              return {
+                content: '',
+                toolCalls: [
+                  { name: 'requestHumanInput', arguments: { signalName: 'weird-payload' } },
+                ],
+              };
+            }
+            return { content: 'resumed', toolCalls: [] };
+          },
+          toolbox,
+          conversation: createConversationHistory(),
+          stopWhen: noToolCalls(),
+        },
+        toolbox,
+      };
+      depsContainer.ref = services;
+
+      try {
+        const handle = await engine.start(
+          'agentRun',
+          {
+            runId: 'malformed-run',
+            sessionId: 'malformed-run',
+            agentName: 'test-agent',
+            prompt: 'start',
+          },
+          { id: 'malformed-run', services },
+        );
+
+        let parked = false;
+        for (let i = 0; i < 50; i++) {
+          await yieldToPortableEventLoop();
+          const snap = await handle.snapshot();
+          if (snap?.status === 'running' && depsContainer.ref?.pendingHumanWait !== undefined) {
+            parked = true;
+            break;
+          }
+        }
+        expect(parked).toBe(true);
+
+        expect(engine.signal('malformed-run', 'weird-payload', 10n)).rejects.toThrow();
+
+        // The parked run is untouched — still running, not corrupted, not
+        // silently resumed with a bad payload.
+        const stillParkedSnap = await handle.snapshot();
+        expect(stillParkedSnap?.status).toBe('running');
+
+        // The correct, transportable payload still resumes it normally.
+        await engine.signal('malformed-run', 'weird-payload', { approved: true });
+        const result = await handle.result();
+        expect(result.finishReason).toBe('stop-condition');
+        expect(result.content).toBe('resumed');
+      } finally {
+        engine[Symbol.dispose]();
+      }
+    });
+
+    it('cancelling the run while parked on the signal ends it as aborted, not hung', async () => {
+      // AC — "cancellation ... has explicit outcomes": aborting a run parked
+      // on `ctx.waitForSignal` must not leave the durable workflow hanging.
+      const controller = new AbortController();
+      const { engine } = await buildEngine(new MemoryStorage(), false);
+
+      const depsContainer: { ref: DurableRunDeps | undefined } = { ref: undefined };
+      const hitlTool = createTool({
+        name: 'requestHumanInput',
+        description: 'Park waiting for human input',
+        input: z.object({ signalName: z.string() }),
+        execute: async (params) => {
+          if (depsContainer.ref) {
+            depsContainer.ref.pendingHumanWait = { signalName: params.signalName };
+          }
+          return 'parked';
+        },
+      });
+      const toolbox = createToolbox([hitlTool]) as unknown as RegistryToolbox;
+
+      const services: DurableRunDeps = {
+        options: {
+          generate: async () => ({
+            content: '',
+            toolCalls: [{ name: 'requestHumanInput', arguments: { signalName: 'never-comes' } }],
+          }),
+          toolbox,
+          conversation: createConversationHistory(),
+          stopWhen: noToolCalls(),
+          signal: controller.signal,
+        },
+        toolbox,
+      };
+      depsContainer.ref = services;
+
+      try {
+        const handle = await engine.start(
+          'agentRun',
+          {
+            runId: 'cancel-while-parked-run',
+            sessionId: 'cancel-while-parked-run',
+            agentName: 'test-agent',
+            prompt: 'start',
+          },
+          { id: 'cancel-while-parked-run', services },
+        );
+
+        let parked = false;
+        for (let i = 0; i < 50; i++) {
+          await yieldToPortableEventLoop();
+          const snap = await handle.snapshot();
+          if (snap?.status === 'running' && depsContainer.ref?.pendingHumanWait !== undefined) {
+            parked = true;
+            break;
+          }
+        }
+        expect(parked).toBe(true);
+
+        // Cancel the durable workflow itself via Weft's own cancellation, the
+        // ONLY mechanism this run's `requestHumanInput` park exposes (AB-41's
+        // decision: "Cancellation: only by aborting the entire run").
+        await handle.cancel();
+
+        let settled = false;
+        for (let i = 0; i < 50; i++) {
+          await yieldToPortableEventLoop();
+          const snap = await handle.snapshot();
+          if (
+            snap?.status === 'cancelled' ||
+            snap?.status === 'completed' ||
+            snap?.status === 'failed'
+          ) {
+            settled = true;
+            break;
+          }
+        }
+        expect(settled).toBe(true);
+        const finalCancelSnap = await handle.snapshot();
+        expect(finalCancelSnap?.status).not.toBe('running');
+      } finally {
+        engine[Symbol.dispose]();
+      }
+    });
+
+    it('when the park happened at maximumSteps - 1, resuming with no room left for a continuation step falls through to maximum-steps', async () => {
+      // Edge case: `requestHumanInput` parks on the LAST allowed step. On
+      // resume the outer resume loop's inner step loop condition
+      // (`cursor.step < maximumSteps`) is immediately false — cursor.step is
+      // already at the cap — so no continuation generation call happens. The
+      // signal payload is still appended to the transcript (nothing is lost),
+      // and the run falls through to the ordinary `maximum-steps` handling
+      // rather than returning a stale pre-signal result.
+      const { engine, checkpointStore } = await buildEngine(new MemoryStorage(), false);
+
+      const depsContainer: { ref: DurableRunDeps | undefined } = { ref: undefined };
+      const hitlTool = createTool({
+        name: 'requestHumanInput',
+        description: 'Park waiting for human input',
+        input: z.object({ signalName: z.string() }),
+        execute: async (params) => {
+          if (depsContainer.ref) {
+            depsContainer.ref.pendingHumanWait = { signalName: params.signalName };
+          }
+          return 'parked';
+        },
+      });
+      const toolbox = createToolbox([hitlTool]) as unknown as RegistryToolbox;
+
+      let generateCalls = 0;
+      const services: DurableRunDeps = {
+        options: {
+          generate: async () => {
+            generateCalls++;
+            // Every call emits the same tool call — a continuation call
+            // would ALSO set pendingHumanWait again, but must never happen
+            // here because maximumSteps=1 leaves no room for it.
+            return {
+              content: '',
+              toolCalls: [{ name: 'requestHumanInput', arguments: { signalName: 'cap-edge' } }],
+            };
+          },
+          toolbox,
+          conversation: createConversationHistory(),
+          stopWhen: noToolCalls(),
+        },
+        toolbox,
+      };
+      depsContainer.ref = services;
+
+      try {
+        const handle = await engine.start(
+          'agentRun',
+          {
+            runId: 'cap-edge-run',
+            sessionId: 'cap-edge-run',
+            agentName: 'test-agent',
+            prompt: 'start',
+            // Only ONE step is allowed — the parking step itself.
+            maximumSteps: 1,
+          },
+          { id: 'cap-edge-run', services },
+        );
+
+        let parked = false;
+        for (let i = 0; i < 50; i++) {
+          await yieldToPortableEventLoop();
+          const snap = await handle.snapshot();
+          if (snap?.status === 'running' && depsContainer.ref?.pendingHumanWait !== undefined) {
+            parked = true;
+            break;
+          }
+        }
+        expect(parked).toBe(true);
+        expect(generateCalls).toBe(1);
+
+        await engine.signal('cap-edge-run', 'cap-edge', { approved: true });
+
+        const result = await handle.result();
+
+        // No continuation generate call ran — the cap left no room.
+        expect(generateCalls).toBe(1);
+        // Falls through to the ordinary maximum-steps outcome, not a stale
+        // pre-signal result (there was none here — the parking step never
+        // itself reached a `stop`/`abort`/`error` outcome).
+        expect(result.finishReason).toBe('maximum-steps');
+        // The delivered payload is not lost: it is in the transcript.
+        expect(result.humanWaitSignal).toBe('cap-edge');
+
+        const checkpoint = await checkpointStore.loadCheckpoint('cap-edge-run');
+        const conversation = Conversation.from(checkpoint.conversation!);
+        const continuationMessage = conversation
+          .getMessages()
+          .find(
+            (message) =>
+              message.role === 'user' && message.content === '[signal:cap-edge] {"approved":true}',
+          );
+        expect(continuationMessage).toBeDefined();
       } finally {
         engine[Symbol.dispose]();
       }
@@ -1568,10 +2410,22 @@ describe('durable agentRun workflow', () => {
       }
     });
 
-    it('returns the error result immediately without parking when requestHumanInput was called but a later step errors', async () => {
-      // Step 0: call requestHumanInput → pendingHumanWait is set.
-      // Step 1: generate throws → outcome.kind === 'error'.
-      // Expected: run completes with finishReason: 'error', no humanWaitSignal, no park.
+    it('parks immediately on requestHumanInput (AB-44), and — a signal racing a terminal failure — the continuation step erroring afterward never re-parks', async () => {
+      // AB-44 fixes the durable workflow to park on `requestHumanInput`
+      // BEFORE another generation call can run without the requested input
+      // (this file's other new "commits its step and parks" tests cover that
+      // directly). This test covers the AC's "a signal racing terminal
+      // failure has an explicit outcome": deliver the signal, let the
+      // CONTINUATION step fail, and confirm the failure returns immediately
+      // rather than re-entering `ctx.waitForSignal`.
+      //
+      // Step 0: call requestHumanInput → pendingHumanWait is set → the
+      //   workflow parks on ctx.waitForSignal('approval') immediately.
+      // (signal delivered) → continuation step (generate call 1): throws.
+      // Expected: run completes with finishReason: 'error', no re-park, and
+      //   `humanWaitSignal` is still reported — the run DID genuinely park
+      //   and get released; that historical fact is not "stale" just because
+      //   the resumed turn went on to fail.
       const { engine } = await buildEngine(new MemoryStorage(), false);
 
       const depsContainer: { ref: DurableRunDeps | undefined } = { ref: undefined };
@@ -1601,7 +2455,7 @@ describe('durable agentRun workflow', () => {
                 toolCalls: [{ name: 'requestHumanInput', arguments: { signalName: 'approval' } }],
               };
             }
-            throw new Error('step 1 failed after hitl request');
+            throw new Error('continuation step failed after signal delivery');
           },
           toolbox,
           conversation: createConversationHistory(),
@@ -1612,18 +2466,45 @@ describe('durable agentRun workflow', () => {
       depsContainer.ref = services;
 
       try {
-        const result = await runToCompletion(
-          engine,
-          { runId: 'park-skip-hitl-error', prompt: 'Go', maximumSteps: 5 },
-          services,
+        const handle = await engine.start(
+          'agentRun',
+          {
+            runId: 'park-skip-hitl-error',
+            sessionId: 'park-skip-hitl-error',
+            agentName: 'test-agent',
+            prompt: 'Go',
+            maximumSteps: 5,
+          },
+          { id: 'park-skip-hitl-error', services },
         );
 
-        // Must complete immediately as an error — NOT park on ctx.waitForSignal.
+        // Poll until parked on ctx.waitForSignal (step 0 committed, still running).
+        let parked = false;
+        for (let i = 0; i < 50; i++) {
+          await yieldToPortableEventLoop();
+          const snap = await handle.snapshot();
+          if (snap?.status === 'running' && depsContainer.ref?.pendingHumanWait !== undefined) {
+            parked = true;
+            break;
+          }
+        }
+        expect(parked).toBe(true);
+        // Only ONE generate call happened before the park — proves the fix:
+        // the workflow did not run another generation call before parking.
+        expect(call).toBe(1);
+
+        await engine.signal('park-skip-hitl-error', 'approval', { approved: true });
+
+        const result = await handle.result();
+
+        // Must complete as an error from the CONTINUATION step — NOT hang
+        // waiting on another `ctx.waitForSignal`.
         expect(result.finishReason).toBe('error');
-        expect(result.errorMessage).toBe('step 1 failed after hitl request');
-        // Park metadata must be absent — the run did not park.
-        expect(result.humanWaitSignal).toBeUndefined();
+        expect(result.errorMessage).toBe('continuation step failed after signal delivery');
         expect(result.wakeupNote).toBeUndefined();
+        // The run DID genuinely park and get released before this failure —
+        // that historical fact is reported regardless of the eventual outcome.
+        expect(result.humanWaitSignal).toBe('approval');
       } finally {
         engine[Symbol.dispose]();
       }

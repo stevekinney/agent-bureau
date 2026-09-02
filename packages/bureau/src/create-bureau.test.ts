@@ -6239,6 +6239,9 @@ describe('createBureau human input wiring — real durable park (F3)', () => {
           },
         ],
       },
+      // AB-44 — approving the review delivers the signal, which now CONTINUES
+      // the run with one more generation step (never just unparks it).
+      { content: 'refund approved and processed', toolCalls: [] },
     ]);
 
     const bureau = await createBureau({
@@ -6247,7 +6250,11 @@ describe('createBureau human input wiring — real durable park (F3)', () => {
       storage: { type: 'memory' },
       durableExecution: true,
       humanInput: true,
-      stopWhen: stopWhen.toolCalled('requestHumanInput'),
+      // `toolCalled('requestHumanInput')` stops the FIRST step right on the
+      // park request; `noToolCalls()` stops the CONTINUATION step (AB-44 —
+      // the resumed run's next generation step, which never itself calls
+      // requestHumanInput again here) once it settles on plain content.
+      stopWhen: stopWhen.some(stopWhen.toolCalled('requestHumanInput'), stopWhen.noToolCalls()),
     });
 
     try {
