@@ -588,7 +588,7 @@ describe('createSteeringGate', () => {
       expect(gate.forRun('unrelated-run').getAppliedFloor?.()).toBe(0);
     });
 
-    it('agentName is session-wide (the already-promoted identity), unaffected by which run reads it', () => {
+    it("agentName reflects only the identity captured at THIS run's own promotion, not a run that has not promoted yet", () => {
       const gate = createSteeringGate('session-1');
       gate.admit(
         {
@@ -603,7 +603,106 @@ describe('createSteeringGate', () => {
       );
       gate.promoteForNewRun('run-a');
       expect(gate.forRun('run-a').getDesiredState().agentName).toBe('reviewer');
+      // run-b has never been promoted — it must not inherit run-a's
+      // already-promoted identity merely by asking.
+      expect(gate.forRun('run-b').getDesiredState().agentName).toBeUndefined();
+
+      // Once run-b is ALSO promoted, it captures whatever is effective at
+      // that moment — the same 'reviewer' identity, since nothing new is
+      // pending.
+      gate.promoteForNewRun('run-b');
       expect(gate.forRun('run-b').getDesiredState().agentName).toBe('reviewer');
+    });
+
+    it('a promotion for a NEW, concurrent run does not retroactively change an ALREADY-RUNNING run\'s own agentName (PR #430 review, Codex P2 — "Scope promoted agent identities to runs started afterward")', () => {
+      const gate = createSteeringGate('session-1');
+      gate.promoteForNewRun('run-a'); // run-a starts with no identity set yet
+      expect(gate.forRun('run-a').getDesiredState().agentName).toBeUndefined();
+
+      // An identity command is admitted mid-run-a — deferred, not effective
+      // for run-a itself (see the "agent-identity deferral" suite above).
+      gate.admit(
+        {
+          id: 'identity-1',
+          idOrigin: 'caller',
+          sessionId: 'session-1',
+          principal: 'alice',
+          requestedValue: { target: 'agent-identity', override: 'reviewer' },
+          requestedAt: NOW,
+        },
+        { liveRunIds: ['run-a'], now: NOW },
+      );
+
+      // A concurrent run-b starts and promotes it into effect for ITSELF.
+      gate.promoteForNewRun('run-b');
+      expect(gate.forRun('run-b').getDesiredState().agentName).toBe('reviewer');
+
+      // run-a, already in flight before run-b's promotion, must not observe
+      // run-b's newly-promoted identity mid-run.
+      expect(gate.forRun('run-a').getDesiredState().agentName).toBeUndefined();
+    });
+  });
+
+  describe('promoteForNewRun rejects an expired pending identity instead of promoting it (PR #430 review, Codex P2 — "Reject expired identities before promoting them")', () => {
+    it("fails a still-accepted identity command whose deadline passed before the next run's own promotion, rather than making it effective", () => {
+      const gate = createSteeringGate('session-1');
+      const identity = gate.admit(
+        {
+          id: 'identity-1',
+          idOrigin: 'caller',
+          sessionId: 'session-1',
+          principal: 'alice',
+          requestedValue: { target: 'agent-identity', override: 'reviewer' },
+          requestedAt: NOW,
+          deadline: '2026-09-02T00:00:02.000Z',
+        },
+        { liveRunIds: [], now: NOW }, // NOW = 00:00:01, before the deadline
+      );
+      expect(identity.outcome).toBe('accepted');
+
+      // The next run's own promotion arrives after the deadline passed.
+      const promotionNow = '2026-09-02T00:00:05.000Z';
+      gate.promoteForNewRun('run-1', promotionNow);
+
+      // The identity never became effective for run-1.
+      expect(gate.forRun('run-1').getDesiredState().agentName).toBeUndefined();
+
+      const replay = gate.admit(
+        {
+          id: 'identity-1',
+          idOrigin: 'caller',
+          sessionId: 'session-1',
+          principal: 'alice',
+          requestedValue: { target: 'agent-identity', override: 'reviewer' },
+          requestedAt: NOW,
+          deadline: '2026-09-02T00:00:02.000Z',
+        },
+        { liveRunIds: [], now: promotionNow },
+      );
+      expect(replay).toEqual({
+        outcome: 'replayed',
+        command: expect.objectContaining({
+          state: 'failed',
+          failure: { failedAt: promotionNow, reason: 'deadline-passed' },
+        }),
+      });
+    });
+
+    it('promotes normally, with no deadline set on the pending identity', () => {
+      const gate = createSteeringGate('session-1');
+      gate.admit(
+        {
+          id: 'identity-1',
+          idOrigin: 'caller',
+          sessionId: 'session-1',
+          principal: 'alice',
+          requestedValue: { target: 'agent-identity', override: 'reviewer' },
+          requestedAt: NOW,
+        },
+        { liveRunIds: [], now: NOW },
+      );
+      gate.promoteForNewRun('run-1'); // no explicit `now` — defaults internally
+      expect(gate.forRun('run-1').getDesiredState().agentName).toBe('reviewer');
     });
   });
 
@@ -727,8 +826,12 @@ describe('createSteeringGate', () => {
       expect(outcome.outcome).toBe('accepted');
 
       // A new run's own boundary read arrives after the deadline has passed.
+      // `run-2` itself starts (and promotes) BEFORE the deadline passes —
+      // its own `promoteForNewRun` deadline check must not fire yet, so the
+      // command survives to be caught at `recordApplied` time instead, per
+      // this test's own name.
       const boundaryNow = '2026-09-02T00:00:05.000Z';
-      gate.promoteForNewRun('run-2'); // baseline now covers identity-1's version
+      gate.promoteForNewRun('run-2', NOW); // baseline now covers identity-1's version
       const runVersion = gate.forRun('run-2').getDesiredState().configVersion;
       gate.recordApplied('run-2', runVersion, boundaryNow);
 
@@ -1170,6 +1273,254 @@ describe('createSteeringGate', () => {
         now: NOW,
       });
       expect(outcome.outcome).toBe('conflict');
+    });
+  });
+
+  describe('per-run applied-version floor, not the session-wide floor (PR #430 review, Codex P2 — "Avoid treating noncontiguous applied versions as a floor")', () => {
+    it("a second idempotent pause for a still-unapplied run is not misreported as applied merely because a DIFFERENT run's own boundary raised the session-wide floor past its version", () => {
+      const gate = createSteeringGate('session-1');
+      const pauseA = gate.admit(pauseCommand({ id: 'pause-a' }), {
+        liveRunIds: ['run-a'],
+        now: NOW,
+      }); // configVersion 1
+      expect(pauseA.outcome).toBe('accepted');
+      const pauseB = gate.admit(pauseCommand({ id: 'pause-b', runId: 'run-b' }), {
+        liveRunIds: ['run-a', 'run-b'],
+        now: NOW,
+      }); // configVersion 2
+      expect(pauseB.outcome).toBe('accepted');
+      if (pauseB.outcome !== 'accepted') return;
+
+      // run-b's own boundary applies first, raising the SESSION-WIDE floor
+      // to 2 — but run-a's own pause (version 1) has not itself been
+      // observed by run-a's own boundary yet.
+      gate.recordApplied('run-b', pauseB.command.configVersion, NOW);
+      expect(gate.getAppliedFloor()).toBe(2);
+
+      // A second, idempotent pause against run-a (still paused, version 1)
+      // must stay 'accepted' — run-a's own boundary has not observed it,
+      // even though the session-wide floor (raised by an unrelated run) is
+      // already past version 1.
+      const idempotentA = gate.admit(pauseCommand({ id: 'pause-a-2' }), {
+        liveRunIds: ['run-a'],
+        now: NOW,
+      });
+      expect(idempotentA.outcome).toBe('accepted');
+      if (idempotentA.outcome === 'accepted') {
+        expect(idempotentA.command.state).toBe('accepted');
+      }
+
+      // Only run-a's own boundary correctly promotes it.
+      gate.recordApplied('run-a', 1, NOW);
+      const replay = gate.admit(pauseCommand({ id: 'pause-a' }), {
+        liveRunIds: ['run-a'],
+        now: NOW,
+      });
+      expect(replay).toEqual({
+        outcome: 'replayed',
+        command: expect.objectContaining({ state: 'applied' }),
+      });
+    });
+  });
+
+  describe('ownership of a run\'s pause transition on expiry (PR #430 review, Codex P2 — "Do not release pauses owned by another command")', () => {
+    it('an expired idempotent-replay pause does not release a run whose pause another, still-valid command owns', () => {
+      const gate = createSteeringGate('session-1');
+      const owner = gate.admit(pauseCommand({ id: 'owner' }), {
+        liveRunIds: ['run-1'],
+        now: NOW,
+      }); // no deadline — the actual owning transition
+      expect(owner.outcome).toBe('accepted');
+      expect(gate.forRun('run-1').getDesiredState().paused).toBe(true);
+
+      // A second, idempotent pause carrying its OWN, shorter deadline —
+      // still 'accepted' since the run has not reached a boundary yet.
+      const replay = gate.admit(
+        { ...pauseCommand({ id: 'replay' }), deadline: '2026-09-02T00:00:02.000Z' },
+        { liveRunIds: ['run-1'], now: NOW }, // NOW = 00:00:01, before the deadline
+      );
+      expect(replay.outcome).toBe('accepted');
+      if (owner.outcome !== 'accepted') return;
+
+      // The boundary read arrives after the REPLAY's deadline has passed —
+      // but the OWNER never had a deadline at all.
+      const boundaryNow = '2026-09-02T00:00:05.000Z';
+      gate.recordApplied('run-1', owner.command.configVersion, boundaryNow);
+
+      // The owning command applied normally; the run stays paused — the
+      // replay's own expiry must not revert a pause it never created.
+      expect(gate.forRun('run-1').getDesiredState().paused).toBe(true);
+
+      const ownerReplay = gate.admit(pauseCommand({ id: 'owner' }), {
+        liveRunIds: ['run-1'],
+        now: boundaryNow,
+      });
+      expect(ownerReplay).toEqual({
+        outcome: 'replayed',
+        command: expect.objectContaining({ state: 'applied' }),
+      });
+
+      // The replay itself is the one that failed.
+      const replayCheck = gate.admit(
+        { ...pauseCommand({ id: 'replay' }), deadline: '2026-09-02T00:00:02.000Z' },
+        { liveRunIds: ['run-1'], now: boundaryNow },
+      );
+      expect(replayCheck).toEqual({
+        outcome: 'replayed',
+        command: expect.objectContaining({
+          state: 'failed',
+          failure: { failedAt: boundaryNow, reason: 'deadline-passed' },
+        }),
+      });
+    });
+  });
+
+  describe('a skipped pause is superseded, never later misreported as applied (PR #430 review, Codex P2 — "Do not mark skipped steering versions as applied")', () => {
+    it("a pause overtaken by a resume before the run's own boundary ever observed it is superseded, not applied", () => {
+      const gate = createSteeringGate('session-1');
+      const pause = gate.admit(pauseCommand({ id: 'p1' }), { liveRunIds: ['run-1'], now: NOW }); // v1
+      expect(pause.outcome).toBe('accepted');
+
+      // A resume overtakes it — the run's boundary will only ever observe
+      // v2, never v1.
+      const resume = gate.admit(resumeCommand({ id: 'r1' }), {
+        liveRunIds: ['run-1'],
+        now: NOW,
+      }); // v2
+      expect(resume.outcome).toBe('accepted');
+      if (resume.outcome !== 'accepted') return;
+
+      const replayP1 = gate.admit(pauseCommand({ id: 'p1' }), { liveRunIds: ['run-1'], now: NOW });
+      expect(replayP1).toEqual({
+        outcome: 'replayed',
+        command: expect.objectContaining({
+          state: 'superseded',
+          failure: { failedAt: NOW, reason: 'superseded-by', supersededBy: 'r1' },
+        }),
+      });
+
+      // The run's own boundary now reports v2 — recordApplied applies r1,
+      // and must never retroactively mark the already-superseded p1 applied.
+      gate.recordApplied('run-1', resume.command.configVersion, NOW);
+      const replayP1Again = gate.admit(pauseCommand({ id: 'p1' }), {
+        liveRunIds: ['run-1'],
+        now: NOW,
+      });
+      expect(replayP1Again).toEqual({
+        outcome: 'replayed',
+        command: expect.objectContaining({ state: 'superseded' }),
+      });
+      const replayR1 = gate.admit(resumeCommand({ id: 'r1' }), {
+        liveRunIds: ['run-1'],
+        now: NOW,
+      });
+      expect(replayR1).toEqual({
+        outcome: 'replayed',
+        command: expect.objectContaining({ state: 'applied' }),
+      });
+    });
+  });
+
+  describe('malformed deadline (PR #430 review, Codex P2 — "Reject malformed deadline timestamps")', () => {
+    it('rejects a command whose deadline does not parse to a valid instant', () => {
+      const gate = createSteeringGate('session-1');
+      const outcome = gate.admit(
+        { ...pauseCommand(), deadline: 'not-a-date' },
+        { liveRunIds: ['run-1'], now: NOW },
+      );
+      expect(outcome).toEqual({
+        outcome: 'rejected',
+        failure: { failedAt: NOW, reason: 'deadline-passed' },
+      });
+      expect(gate.getDesiredState()).toEqual({ paused: false, configVersion: 0 });
+    });
+  });
+
+  describe('unresolved policyRef identity commands (PR #430 review, Codex P2 — "Reject unresolved policyRef identity commands")', () => {
+    it('rejects an agent-identity command carrying only a policyRef as unsupported-capability', () => {
+      const gate = createSteeringGate('session-1');
+      const outcome = gate.admit(
+        {
+          id: 'identity-1',
+          idOrigin: 'caller',
+          sessionId: 'session-1',
+          principal: 'alice',
+          requestedValue: { target: 'agent-identity', policyRef: 'catalog:reviewer' },
+          requestedAt: NOW,
+        },
+        { liveRunIds: [], now: NOW },
+      );
+      expect(outcome).toEqual({
+        outcome: 'unsupported-capability',
+        reason: 'selector-unavailable',
+      });
+      // No ledger entry was created — a resolved override with the same id
+      // is a genuinely new admission, not a replay of a rejected one.
+      expect(gate.getDesiredState()).toEqual({ paused: false, configVersion: 0 });
+      const followUp = gate.admit(
+        {
+          id: 'identity-1',
+          idOrigin: 'caller',
+          sessionId: 'session-1',
+          principal: 'alice',
+          requestedValue: { target: 'agent-identity', override: 'reviewer' },
+          requestedAt: NOW,
+        },
+        { liveRunIds: [], now: NOW },
+      );
+      expect(followUp.outcome).toBe('accepted');
+    });
+  });
+
+  describe('settleForDeletion (PR #430 review, Codex P2 — "Settle paused runs before deleting their steering gate")', () => {
+    it("releases a paused run's waiter and fails its accepted command when the gate is discarded", async () => {
+      const gate = createSteeringGate('session-1');
+      gate.promoteForNewRun('run-1');
+      const outcome = gate.admit(pauseCommand(), { liveRunIds: ['run-1'], now: NOW });
+      expect(outcome.outcome).toBe('accepted');
+      expect(gate.forRun('run-1').getDesiredState().paused).toBe(true);
+
+      const waiter = gate.forRun('run-1').awaitResume();
+      let resolved = false;
+      void waiter.then(() => {
+        resolved = true;
+      });
+
+      const deletedAt = '2026-09-02T00:00:05.000Z';
+      gate.settleForDeletion(deletedAt);
+
+      expect(gate.forRun('run-1').getDesiredState().paused).toBe(false);
+      await waiter;
+      expect(resolved).toBe(true);
+
+      const replay = gate.admit(pauseCommand(), { liveRunIds: ['run-1'], now: NOW });
+      expect(replay).toEqual({
+        outcome: 'replayed',
+        command: expect.objectContaining({
+          state: 'failed',
+          failure: { failedAt: deletedAt, reason: 'run-terminal' },
+        }),
+      });
+    });
+
+    it('releases every run this gate tracks, including one that never paused', () => {
+      const gate = createSteeringGate('session-1');
+      gate.promoteForNewRun('run-1');
+      gate.promoteForNewRun('run-2');
+      gate.admit(pauseCommand(), { liveRunIds: ['run-1'], now: NOW });
+
+      gate.settleForDeletion(NOW);
+
+      expect(gate.forRun('run-1').getDesiredState().paused).toBe(false);
+      // run-2 never paused, but its bookkeeping is released too — a fresh
+      // read shows the default, never a stale baseline.
+      expect(gate.forRun('run-2').getDesiredState()).toEqual({ paused: false, configVersion: 0 });
+    });
+
+    it('is a no-op when this gate has no runs to settle', () => {
+      const gate = createSteeringGate('session-1');
+      gate.settleForDeletion(NOW);
+      expect(gate.getDesiredState()).toEqual({ paused: false, configVersion: 0 });
     });
   });
 });

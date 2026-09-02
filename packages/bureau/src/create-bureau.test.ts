@@ -5123,6 +5123,63 @@ describe('createBureau submitSteeringCommand (AB-67/AB-199)', () => {
     }
   });
 
+  it('deleteSession while a run is genuinely paused releases it at the runStep boundary instead of leaving its steering channel — and the run itself — stuck forever (PR #430 review, Codex P2, "Settle paused runs before deleting their steering gate")', async () => {
+    let releaseTool: (() => void) | undefined;
+    const toolGate = new Promise<void>((resolve) => {
+      releaseTool = resolve;
+    });
+    const nextTool = createTool({
+      name: 'next',
+      description: 'continue',
+      input: z.object({}),
+      execute: async () => {
+        await toolGate;
+        return 'ok';
+      },
+    });
+    const generate = createSequentialGenerate([
+      { content: 'step 0', toolCalls: [{ name: 'next', arguments: {} }] },
+      { content: 'done', toolCalls: [] },
+    ]);
+
+    const bureau = await createBureau({
+      agents: {},
+      generate,
+      toolbox: createToolbox([nextTool]),
+      storage: { type: 'memory' },
+      stopWhen: stopWhen.noToolCalls(),
+    });
+    try {
+      const run = await bureau.createRun({ message: 'go', principal: 'alice' });
+      await pollUntil(() => generate.callCount === 1);
+
+      const pause = await bureau.submitSteeringCommand(run.sessionId, {
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+      });
+      expect(pause.outcome).toBe('accepted');
+      releaseTool!();
+
+      // Step 1's boundary is now reached, but the pause blocks it.
+      for (let i = 0; i < 10; i++) {
+        await yieldToPortableEventLoop();
+      }
+      expect(generate.callCount).toBe(1);
+
+      // The session is deleted WHILE the run remains paused — no later
+      // `submitSteeringCommand` could ever reach a resume through the
+      // now-deleted session, so this must be the moment the paused run is
+      // released, not left blocked on a promise the discarded gate alone
+      // held.
+      await bureau.deleteSession(run.sessionId);
+
+      await waitForRunCompletion(bureau, run.id);
+      expect(generate.callCount).toBe(2);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
   it('a second run on the same session does not re-fire steering.applied for a configVersion a prior run already applied (cross-run dedupe, end-to-end)', async () => {
     let releaseTool: (() => void) | undefined;
     const toolGate = new Promise<void>((resolve) => {

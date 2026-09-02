@@ -232,8 +232,15 @@ export interface BureauSteeringGate extends SteeringGate {
    * per-run VERSION still session-wide, so a pause bound to run A still
    * inflated run B's own reported `configVersion`, which in turn caused
    * `recordApplied` to misapply run A's still-unconsumed pause command).
-   * `agentName` reflects only the identity ALREADY PROMOTED for this run
-   * (never a `pendingAgentName` deferred to a future run — see
+   * `agentName` reflects only the identity `promoteForNewRun(runId, ...)`
+   * ACTUALLY CAPTURED for THIS run at ITS OWN promotion — never the live,
+   * session-wide `agentName` a LATER promotion for a different, concurrent
+   * run may since have changed (review finding, PR #430 — Codex P2, "Scope
+   * promoted agent identities to runs started afterward": run A already
+   * active, an identity command admitted, then concurrent run B starts and
+   * promotes it — A's own view must keep reporting whatever was effective
+   * when A itself started, never B's newly-promoted name). Never a
+   * `pendingAgentName` deferred to a future run either (see
    * `promoteForNewRun`'s doc comment). `getAppliedFloor()` is session-wide
    * (unaffected by which run reads it — it exists purely to seed a brand
    * new run's dedupe cursor) and passes through unchanged.
@@ -309,8 +316,25 @@ export interface BureauSteeringGate extends SteeringGate {
    * agent-identity `configVersion` admitted before this call is already part
    * of `runId`'s starting state; every one admitted after is deferred to a
    * FUTURE run's own baseline.
+   *
+   * Rejects (rather than promotes) a still-`accepted` pending agent-identity
+   * command whose `deadline` already passed by `now` — its effect is
+   * genuinely deferred until this exact moment, so an expired deadline must
+   * prevent it from EVER taking effect, the identical application-time
+   * deadline enforcement {@link recordApplied} performs for a command whose
+   * effect is not deferred (review finding, PR #430 — Codex P2, "Reject
+   * expired identities before promoting them"). `now` defaults to the
+   * current wall-clock time when omitted (every existing caller that never
+   * sets a deadline is unaffected either way).
+   *
+   * Also captures the just-promoted (or already-effective) `agentName` —
+   * never `undefined` when one exists — into a PER-RUN record `forRun`
+   * reads from, so a LATER promotion for a different, concurrent run never
+   * retroactively changes what an ALREADY-RUNNING run's own `forRun` view
+   * reports (review finding, PR #430 — Codex P2, "Scope promoted agent
+   * identities to runs started afterward").
    */
-  promoteForNewRun(runId: string): void;
+  promoteForNewRun(runId: string, now?: string): void;
   /** Called by the run's own `run.completed`/`run.aborted` listeners:
    *  transitions every still-`accepted` `pause`/`resume` command bound to
    *  `runId` to `failed`/`'run-terminal'` (AB-67's ratified Abort row: a
@@ -335,6 +359,24 @@ export interface BureauSteeringGate extends SteeringGate {
    * genuinely new command into the new session's fresh gate).
    */
   purgeFromLedger(): void;
+  /**
+   * Releases every run this gate still has bookkeeping for — paused or not
+   * — the moment `deleteSession` decides to discard this gate entirely:
+   * every still-`accepted` `pause`/`resume` command bound to one of those
+   * runs transitions to `failed`/`'run-terminal'`, `pausedRunIds` is
+   * cleared for each, and every `awaitResume()` waiter (the run's own
+   * `runStep`, genuinely blocked on this gate) is released. Without this, a
+   * PAUSED run's steering channel simply vanishes with the gate: every
+   * later `submitSteeringCommand` against the (now-deleted) session already
+   * returns `not-found`, so nothing could ever resume it again, and its
+   * `runStep` would await a promise this gate's own closure held forever
+   * (review finding, PR #430 — Codex P2, "Settle paused runs before
+   * deleting their steering gate"). Called by `deleteSession` AFTER the
+   * underlying persistent deletion succeeds (the same ordering
+   * {@link purgeFromLedger}'s own doc comment already fixes for this gate)
+   * and BEFORE that same `purgeFromLedger` call.
+   */
+  settleForDeletion(now: string): void;
 }
 
 /**
@@ -398,7 +440,13 @@ function snapshotOf(stored: StoredSteeringCommand): SteeringCommandSnapshot {
     requestedAt: stored.requestedAt,
     state: stored.state,
     configVersion: stored.configVersion,
-    ...(stored.failure !== undefined ? { failure: stored.failure } : {}),
+    // Also copied, not the ledger's own live object — the same rationale as
+    // `requestedValue` above applies one level deeper: a caller mutating a
+    // failed/superseded snapshot's own nested `failure` object (`reason`,
+    // `failedAt`, `supersededBy`) must never rewrite the stored command's
+    // failure record itself (review finding, PR #430 — Codex P2, "Copy
+    // failures when returning command snapshots").
+    ...(stored.failure !== undefined ? { failure: { ...stored.failure } } : {}),
   };
 }
 
@@ -513,6 +561,39 @@ export function createSteeringGate(
   // per run rather than reading the single session-wide `effectiveConfigVersion`.
   const runBaseline = new Map<string, number>();
   const runLastPauseVersion = new Map<string, number>();
+  // The highest configVersion `recordApplied` has actually OBSERVED at a
+  // boundary for this run — distinct from the session-wide `appliedFloor`,
+  // which a DIFFERENT, concurrent run's own `recordApplied` call also
+  // raises. `record()`'s own initial-state check for a NEW pause/resume
+  // command reads THIS, not `appliedFloor`: a second pause admitted for run
+  // A must never be recorded `applied` at admission time merely because
+  // some unrelated run B's boundary happened to advance the session-wide
+  // floor past A's own (still genuinely un-observed) version (review
+  // finding, PR #430 — Codex P2, "Avoid treating noncontiguous applied
+  // versions as a floor").
+  const runAppliedVersion = new Map<string, number>();
+  // The (principal, id) of the pause/resume command that actually OWNS this
+  // run's current pause-state transition — the one real state change,
+  // distinct from any same-version idempotent no-op replay recorded
+  // alongside it (see `record()`'s own doc comment on `alreadyAtTarget`).
+  // Two roles:
+  //  - `admit()` supersedes the PREVIOUS owner the moment a NEW transition
+  //    replaces it (review finding, PR #430 — Codex P2, "Do not mark
+  //    skipped steering versions as applied": a pause the run's boundary
+  //    never actually observed, because a resume overtook it first, must
+  //    not later be misreported as `applied`).
+  //  - `recordApplied`'s deadline-expiry branch only releases `pausedRunIds`
+  //    when the EXPIRING command is this run's actual owner — a duplicate
+  //    idempotent replay sharing the owner's configVersion but carrying its
+  //    own (possibly earlier) deadline must never revert a pause it did not
+  //    itself create (review finding, PR #430 — Codex P2, "Do not release
+  //    pauses owned by another command").
+  const runOwningCommand = new Map<string, { principal: string; id: string }>();
+  // The agentName `promoteForNewRun(runId, ...)` actually captured FOR THAT
+  // RUN — never the live, session-wide `agentName` below, which a LATER
+  // promotion for a different, concurrent run can change out from under an
+  // already-running one (see `forRun`'s own doc comment).
+  const runAgentName = new Map<string, string>();
   // The highest configVersion any agent-identity command has reached
   // (pending or already promoted) — the ONLY session-scoped target this gate
   // implements. `promoteForNewRun` seeds a new run's baseline from THIS, not
@@ -580,6 +661,17 @@ export function createSteeringGate(
     configVersion: number,
     now: string,
   ): StoredSteeringCommand {
+    const target = command.requestedValue.target;
+    // Run-scoped (pause/resume) commands compare against THIS run's own
+    // observed-applied version, never the session-wide `appliedFloor` — see
+    // `runAppliedVersion`'s own doc comment. Session-scoped agent-identity
+    // has no per-run version of its own, so it keeps comparing against the
+    // session-wide floor (a run-agnostic maximum is the only floor that
+    // makes sense for a target with no run to scope it to).
+    const alreadyObservedAt =
+      (target === 'pause' || target === 'resume') && runId !== undefined
+        ? (runAppliedVersion.get(runId) ?? 0)
+        : appliedFloor;
     const stored: StoredSteeringCommand = {
       id: command.id,
       sessionId: command.sessionId,
@@ -593,7 +685,7 @@ export function createSteeringGate(
       requestedAt: now,
       deadline: command.deadline,
       configVersion,
-      state: configVersion <= appliedFloor ? 'applied' : 'accepted',
+      state: configVersion <= alreadyObservedAt ? 'applied' : 'accepted',
       failure: undefined,
     };
     ledgerSet(command.principal, command.id, stored);
@@ -631,6 +723,7 @@ export function createSteeringGate(
       return {
         sessionId,
         getDesiredState() {
+          const promotedAgentName = runAgentName.get(runId);
           return {
             paused: pausedRunIds.has(runId),
             // Scoped to THIS run: its own baseline plus any pause/resume
@@ -638,10 +731,15 @@ export function createSteeringGate(
             // concurrent, different run's own pause/resume (see this
             // interface's own `forRun` doc comment).
             configVersion: runVisibleVersion(runId),
-            // The already-PROMOTED identity, never `pendingAgentName` — a
-            // deferred identity change is not yet effective for any run
-            // still in flight (see `promoteForNewRun`'s doc comment).
-            ...(agentName !== undefined ? { agentName } : {}),
+            // The identity captured for THIS run at ITS OWN
+            // `promoteForNewRun` call, never the live, session-wide
+            // `agentName` — a LATER promotion for a different, concurrent
+            // run must not retroactively change what this run reports (see
+            // this interface's own `forRun` doc comment). Also never
+            // `pendingAgentName` — a deferred identity change is not yet
+            // effective for any run still in flight (see
+            // `promoteForNewRun`'s doc comment).
+            ...(promotedAgentName !== undefined ? { agentName: promotedAgentName } : {}),
           };
         },
         awaitResume(signal?: AbortSignal): Promise<void> {
@@ -707,14 +805,21 @@ export function createSteeringGate(
         };
       }
 
-      if (
-        command.deadline !== undefined &&
-        Date.parse(context.now) > Date.parse(command.deadline)
-      ) {
-        return {
-          outcome: 'rejected',
-          failure: { failedAt: context.now, reason: 'deadline-passed' },
-        };
+      if (command.deadline !== undefined) {
+        const deadlineMs = Date.parse(command.deadline);
+        // A malformed (non-ISO, unparseable) deadline parses to `NaN`, and
+        // every comparison against `NaN` is `false` — so a naive `now >
+        // deadline` check silently ADMITS a command whose deadline could
+        // not even be understood, rather than rejecting it (review finding,
+        // PR #430 — Codex P2, "Reject malformed deadline timestamps"). Fails
+        // closed: an unparseable deadline is treated exactly like one
+        // already in the past.
+        if (Number.isNaN(deadlineMs) || Date.parse(context.now) > deadlineMs) {
+          return {
+            outcome: 'rejected',
+            failure: { failedAt: context.now, reason: 'deadline-passed' },
+          };
+        }
       }
       if (command.expectedRevision !== undefined && command.expectedRevision !== rawConfigVersion) {
         return {
@@ -769,11 +874,54 @@ export function createSteeringGate(
           releaseUnboundWaitersIfFullyResumed();
         }
         const stored = record(command, boundRunId, version, context.now);
+        // This is a genuinely NEW transition for `boundRunId` — the run's
+        // next boundary read will observe THIS version, never an earlier
+        // one. A previous owning command still `accepted` (the run's own
+        // boundary never reached it before this transition overtook it) is
+        // now stale: mark it `superseded`, the same terminal-failure AB-67
+        // already fixes for exactly this "a later command replaces an
+        // earlier one before it ever applied" shape (review finding, PR
+        // #430 — Codex P2, "Do not mark skipped steering versions as
+        // applied"). See `runOwningCommand`'s own doc comment.
+        const previousOwner = runOwningCommand.get(boundRunId);
+        if (previousOwner !== undefined) {
+          const prior = ledgerGet(previousOwner.principal, previousOwner.id);
+          if (prior && prior.state === 'accepted') {
+            prior.state = 'superseded';
+            prior.failure = {
+              failedAt: context.now,
+              reason: 'superseded-by',
+              supersededBy: command.id,
+            };
+          }
+        }
+        runOwningCommand.set(boundRunId, { principal: command.principal, id: command.id });
         return { outcome: 'accepted', command: snapshotOf(stored) };
       }
 
-      // agent-identity: bumps the raw counter (AB-67: "increments by exactly
-      // one on every command that reaches accepted") but does NOT advance
+      // agent-identity: reachable only via a direct `admit()` call, never
+      // through `submitSteeringCommand` (see `ImplementedSteeringCommand`'s
+      // doc comment). Resolving a `policyRef` against AB-66's catalog is
+      // `ab-67-bureau-b` (AB-200)'s job, explicitly out of THIS issue's own
+      // scope — admitting a `policyRef` command here anyway would silently
+      // accept a command that never actually changes `agentName` (nothing
+      // in this module resolves a `policyRef` to a concrete name), a
+      // command that LOOKS admitted but has no real effect (review finding,
+      // PR #430 — Codex P2, "Reject unresolved policyRef identity
+      // commands"). Only the `override` variant — a caller-supplied,
+      // already-concrete agent name needing no catalog resolution — is
+      // admitted; `policyRef` returns the identical `unsupported-capability`
+      // reason `submitSteeringCommand` itself already returns for every
+      // other target `ab-67-bureau-b` owns.
+      if (
+        !('override' in command.requestedValue) ||
+        command.requestedValue.override === undefined
+      ) {
+        return { outcome: 'unsupported-capability', reason: 'selector-unavailable' };
+      }
+
+      // Bumps the raw counter (AB-67: "increments by exactly one on every
+      // command that reaches accepted") but does NOT advance
       // `effectiveConfigVersion` — its application boundary is step 0 of the
       // session's NEXT run, not this boundary read, so `getDesiredState()`
       // must not report it as current until `promoteForNewRun()` runs.
@@ -794,8 +942,8 @@ export function createSteeringGate(
           };
         }
       }
-      pendingAgentName =
-        'override' in command.requestedValue ? command.requestedValue.override : pendingAgentName;
+      // Guaranteed present — the `policyRef` variant already returned above.
+      pendingAgentName = command.requestedValue.override;
       const stored = record(command, undefined, version, context.now);
       pendingIdentityKey = { principal: command.principal, id: command.id };
       lastIdentityVersion = version;
@@ -804,6 +952,12 @@ export function createSteeringGate(
 
     recordApplied(runId: string, configVersion: number, now: string): void {
       if (configVersion > appliedFloor) appliedFloor = configVersion;
+      // The per-run counterpart of `appliedFloor` above — see its own doc
+      // comment for why `record()` must read THIS, not the session-wide
+      // floor, for a run-scoped pause/resume command.
+      if (configVersion > (runAppliedVersion.get(runId) ?? 0)) {
+        runAppliedVersion.set(runId, configVersion);
+      }
       // An agent-identity command is eligible for THIS run only if it was
       // already committed by the time `runId` STARTED — its own baseline —
       // never merely at or below whatever `configVersion` this boundary
@@ -811,6 +965,7 @@ export function createSteeringGate(
       // still-deferred identity command by an in-run pause/resume bound to
       // this same run). See this method's own doc comment.
       const baseline = runBaseline.get(runId) ?? 0;
+      const owner = runOwningCommand.get(runId);
       for (const principalMap of ledger.values()) {
         for (const stored of principalMap.values()) {
           if (stored.sessionId !== sessionId) continue;
@@ -820,7 +975,19 @@ export function createSteeringGate(
           const isPause = stored.runId === runId && stored.requestedValue.target === 'pause';
           const eligible = isIdentity
             ? stored.configVersion <= baseline
-            : stored.runId === runId && stored.configVersion <= configVersion;
+            : // Exact match, not `<=`: a pause/resume the run's boundary
+              // never actually observed — because a LATER transition on the
+              // same run overtook it first, before this boundary ever fired
+              // — must not be misreported as `applied` merely because its
+              // version is numerically at or below the version this
+              // boundary DID observe. `admit()`'s `runOwningCommand`
+              // supersession already marks that stale command `superseded`
+              // the moment it is overtaken (so it is normally no longer
+              // `accepted` by the time this runs at all); this exact match
+              // is the belt to that suspenders (review finding, PR #430 —
+              // Codex P2, "Do not mark skipped steering versions as
+              // applied").
+              stored.runId === runId && stored.configVersion === configVersion;
           if (!eligible) continue;
           // Deadline expiry at application time applies to agent-identity
           // (deferred effect — the deadline must prevent it from ever taking
@@ -838,7 +1005,16 @@ export function createSteeringGate(
             stored.deadline !== undefined &&
             Date.parse(now) > Date.parse(stored.deadline)
           ) {
-            if (isPause && pausedRunIds.has(runId)) {
+            // Only the command that actually OWNS this run's current pause
+            // transition may revert it on expiry. A duplicate idempotent
+            // replay sharing the owner's `configVersion` but carrying its
+            // own, earlier deadline never itself created the paused state
+            // and must not release a pause another, still-valid command
+            // owns (review finding, PR #430 — Codex P2, "Do not release
+            // pauses owned by another command").
+            const isOwner =
+              owner !== undefined && owner.principal === stored.principal && owner.id === stored.id;
+            if (isPause && isOwner && pausedRunIds.has(runId)) {
               pausedRunIds.delete(runId);
               releaseWaitersFor(runId);
               releaseUnboundWaitersIfFullyResumed();
@@ -852,7 +1028,29 @@ export function createSteeringGate(
       }
     },
 
-    promoteForNewRun(runId: string): void {
+    promoteForNewRun(runId: string, now: string = new Date().toISOString()): void {
+      // A still-`accepted` pending identity command whose deadline already
+      // passed by `now` must be REJECTED, never promoted — its effect is
+      // genuinely deferred until this exact moment, so a deadline that
+      // passed in the interim must prevent it from ever taking effect,
+      // mirroring `recordApplied`'s own identical application-time deadline
+      // enforcement for a command whose effect is not deferred (review
+      // finding, PR #430 — Codex P2, "Reject expired identities before
+      // promoting them": promotion previously committed the desired-state
+      // change unconditionally, before any deadline check ever ran).
+      if (pendingIdentityKey !== undefined) {
+        const pending = ledgerGet(pendingIdentityKey.principal, pendingIdentityKey.id);
+        if (
+          pending &&
+          pending.state === 'accepted' &&
+          pending.deadline !== undefined &&
+          Date.parse(now) > Date.parse(pending.deadline)
+        ) {
+          pending.state = 'failed';
+          pending.failure = { failedAt: now, reason: 'deadline-passed' };
+          pendingAgentName = undefined;
+        }
+      }
       if (pendingAgentName !== undefined) {
         agentName = pendingAgentName;
         pendingAgentName = undefined;
@@ -872,41 +1070,29 @@ export function createSteeringGate(
       // Seeded from `lastIdentityVersion`, not `rawConfigVersion` — see
       // `lastIdentityVersion`'s own doc comment.
       runBaseline.set(runId, lastIdentityVersion);
+      // Captured for THIS run specifically — see `runAgentName`'s and
+      // `forRun`'s own doc comments for why a later promotion for a
+      // different run must never change what this run reports.
+      if (agentName !== undefined) runAgentName.set(runId, agentName);
     },
 
     failAcceptedForRun(runId: string, now: string): void {
-      for (const principalMap of ledger.values()) {
-        for (const stored of principalMap.values()) {
-          if (
-            stored.sessionId === sessionId &&
-            stored.state === 'accepted' &&
-            stored.runId === runId &&
-            (stored.requestedValue.target === 'pause' || stored.requestedValue.target === 'resume')
-          ) {
-            stored.state = 'failed';
-            stored.failure = { failedAt: now, reason: 'run-terminal' };
-          }
-        }
-      }
-      // Unconditional: a pause bound to this run must release even when its
-      // owning command already reached `applied` (recordApplied can beat
-      // this listener — see failAcceptedForRun's own doc comment).
-      if (pausedRunIds.has(runId)) {
-        pausedRunIds.delete(runId);
-        releaseWaitersFor(runId);
-        releaseUnboundWaitersIfFullyResumed();
-      }
-      // Every in-memory run this gate has ever seen otherwise leaves a
-      // permanent `runBaseline`/`runLastPauseVersion`/`waitersByRunId`
-      // entry, growing unboundedly for a long-lived session that runs many
-      // sequential runs (review finding, PR #430 — Codex P2, "Remove
-      // terminal runs from gate bookkeeping"). Safe to drop here: this run
-      // is now terminal, so nothing will call `forRun(runId)`,
-      // `recordApplied(runId, ...)`, or `awaitResume()` through this run's
-      // view again.
-      runBaseline.delete(runId);
-      runLastPauseVersion.delete(runId);
-      waitersByRunId.delete(runId);
+      releaseRun(runId, now);
+    },
+
+    settleForDeletion(now: string): void {
+      // Every run this gate still has ANY bookkeeping for — not only
+      // `pausedRunIds` — since a run that started but never paused still
+      // holds a `runBaseline`/`runOwningCommand`/`waitersByRunId` entry this
+      // gate is about to discard along with everything else (see this
+      // method's own interface doc comment).
+      const runIds = new Set<string>([
+        ...pausedRunIds,
+        ...runBaseline.keys(),
+        ...runLastPauseVersion.keys(),
+        ...waitersByRunId.keys(),
+      ]);
+      for (const runId of runIds) releaseRun(runId, now);
     },
 
     purgeFromLedger(): void {
@@ -918,6 +1104,49 @@ export function createSteeringGate(
       }
     },
   };
+
+  // Shared by `failAcceptedForRun` (one terminating run) and
+  // `settleForDeletion` (every run this gate still tracks, at once): fails
+  // every still-`accepted` pause/resume bound to `runId`, unconditionally
+  // releases its pause binding and waiters, and drops every per-run
+  // bookkeeping entry — see `failAcceptedForRun`'s own interface doc
+  // comment for why the release is unconditional even once `recordApplied`
+  // has already promoted the command, and `settleForDeletion`'s for why a
+  // deleted session's paused run must not be left with no way to ever
+  // resume.
+  function releaseRun(runId: string, now: string): void {
+    for (const principalMap of ledger.values()) {
+      for (const stored of principalMap.values()) {
+        if (
+          stored.sessionId === sessionId &&
+          stored.state === 'accepted' &&
+          stored.runId === runId &&
+          (stored.requestedValue.target === 'pause' || stored.requestedValue.target === 'resume')
+        ) {
+          stored.state = 'failed';
+          stored.failure = { failedAt: now, reason: 'run-terminal' };
+        }
+      }
+    }
+    if (pausedRunIds.has(runId)) {
+      pausedRunIds.delete(runId);
+      releaseWaitersFor(runId);
+      releaseUnboundWaitersIfFullyResumed();
+    }
+    // Every in-memory run this gate has ever seen otherwise leaves a
+    // permanent bookkeeping entry, growing unboundedly for a long-lived
+    // session that runs many sequential runs (review finding, PR #430 —
+    // Codex P2, "Remove terminal runs from gate bookkeeping"). Safe to drop
+    // here: this run is now terminal, so nothing will call
+    // `forRun(runId)`, `recordApplied(runId, ...)`, or `awaitResume()`
+    // through this run's view again.
+    runBaseline.delete(runId);
+    runLastPauseVersion.delete(runId);
+    runAppliedVersion.delete(runId);
+    runOwningCommand.delete(runId);
+    runAgentName.delete(runId);
+    waitersByRunId.delete(runId);
+  }
 
   return gate;
 }

@@ -2496,7 +2496,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           steeringGates.set(sessionId, steeringGate);
         }
       }
-      steeringGate?.promoteForNewRun(runId);
+      steeringGate?.promoteForNewRun(runId, new Date().toISOString());
       // AB-67/AB-199 — a per-run VIEW of the shared session gate (see
       // `steering.ts`'s `forRun` doc comment): a pause bound to a DIFFERENT
       // concurrent run on this same session must never block this one.
@@ -3635,7 +3635,18 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // rejected deletion leaves the still-live session's gate and ledger
     // entries untouched, rather than orphaning a replacement gate a
     // subsequent `submitSteeringCommand` call would otherwise create.
-    steeringGates.get(id)?.purgeFromLedger();
+    //
+    // `settleForDeletion` runs FIRST, before the gate is discarded: a run
+    // still paused when its session is deleted would otherwise have its
+    // steering channel simply vanish with the gate — every later
+    // `submitSteeringCommand` against the now-deleted session already
+    // returns `not-found`, so nothing could ever resume it, and its
+    // `runStep` would await a promise this gate's own closure held forever
+    // (review finding, PR #430 — Codex P2, "Settle paused runs before
+    // deleting their steering gate").
+    const steeringGate = steeringGates.get(id);
+    steeringGate?.settleForDeletion(new Date().toISOString());
+    steeringGate?.purgeFromLedger();
     steeringGates.delete(id);
   }
 
