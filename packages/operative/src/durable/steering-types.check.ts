@@ -118,6 +118,21 @@ export const steeringCommandFailureNonSupersededWithId: SteeringCommandFailure =
   reason: 'policy-denied',
   supersededBy: 'successor-command-id',
 };
+// This package's `exactOptionalPropertyTypes: false` means `supersededBy?:
+// never` forbids OMITTED-vs-required exclusivity but not an EXPLICIT
+// `supersededBy: undefined` — that still type-checks, indistinguishable at
+// the type level from omitting it (see `SteeringCommandFailureOf`'s doc
+// comment in `types.ts`, and `SteeringRequestedValue`'s identical
+// `override`/`policyRef` caveat below). Pinned here, not as a
+// `@ts-expect-error`, precisely because it is NOT an error under this
+// package's compiler settings — a future flip to
+// `exactOptionalPropertyTypes: true` would make this fail, at which point
+// this const should gain the directive.
+export const steeringCommandFailureNonSupersededExplicitUndefined: SteeringCommandFailure = {
+  failedAt: new Date(0).toISOString(),
+  reason: 'policy-denied',
+  supersededBy: undefined,
+};
 
 export const steeringCommandFailureReasons: readonly SteeringCommandFailure['reason'][] = [
   'session-terminal',

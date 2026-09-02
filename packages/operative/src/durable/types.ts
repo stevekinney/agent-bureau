@@ -417,12 +417,27 @@ export interface SteeringCommand {
   readonly runId?: string;
 }
 
-/** One non-`'superseded-by'` member of {@link SteeringCommandFailure} —
- *  factored out so each of the six reasons below is its own union member
- *  (not grouped into one member with a six-literal `reason`), which is what
- *  lets `Extract<SteeringCommandFailure, { reason: R }>` narrow correctly
- *  for both a single reason and a subset of reasons (see
- *  `events.ts`'s `SteeringFailureReason`). */
+/**
+ * One non-`'superseded-by'` member of {@link SteeringCommandFailure} —
+ * factored out so each of the six reasons below is its own union member
+ * (not grouped into one member with a six-literal `reason`), which is what
+ * lets `Extract<SteeringCommandFailure, { reason: R }>` narrow correctly
+ * for both a single reason and a subset of reasons (see
+ * `events.ts`'s `SteeringFailureReason`).
+ *
+ * `supersededBy?: never` forbids the property when it is OMITTED, but this
+ * package builds with `exactOptionalPropertyTypes: false` (a repo-wide
+ * setting, `tsconfig.base.json`), under which `?: never` still accepts an
+ * EXPLICIT `supersededBy: undefined` — indistinguishable at the type level
+ * from omitting it, but observable at runtime via `'supersededBy' in
+ * failure`. This is the same caveat `SteeringRequestedValue`'s
+ * `override?: never`/`policyRef?: never` pair already documents (see
+ * `steering-types.check.ts`) — not a gap specific to this type, and not
+ * fixable short of a repo-wide `exactOptionalPropertyTypes: true` flip,
+ * which is out of this issue's scope. A runtime consumer that cares about
+ * the distinction should check `'supersededBy' in failure`, not merely
+ * `failure.supersededBy !== undefined`.
+ */
 type SteeringCommandFailureOf<R extends string> = {
   readonly failedAt: string; // ISO
   readonly reason: R;

@@ -1309,6 +1309,19 @@ export interface SteeringCommand {
 A `pause` or `resume` command targets exactly one run: when `runId` is present it must name a non-terminal run owned by `sessionId`, otherwise admission fails with the existing `'run-terminal'` reason; when `runId` is absent and the session has exactly one non-terminal run, the command binds to that run and the effective `runId` is recorded on the accepted command; when `runId` is absent and the session has zero or more than one non-terminal run, admission fails with `SteeringCommandFailure.reason: 'run-ambiguous'`.
 
 ```ts
+/** One non-`'superseded-by'` member of SteeringCommandFailure — each of the
+ *  six reasons below is its OWN union member (not grouped into one member
+ *  with a six-literal `reason`), which is what lets `Extract<
+ *  SteeringCommandFailure, { reason: R }>` narrow correctly for a single
+ *  reason or a subset of reasons — grouping them under one wide `reason`
+ *  field, as an earlier draft of this section did, makes that `Extract`
+ *  evaluate to `never` instead. */
+type SteeringCommandFailureOf<R extends string> = {
+  readonly failedAt: string; // ISO
+  readonly reason: R;
+  readonly supersededBy?: never;
+};
+
 /** Populated on every terminal-failure SteeringCommandState (`rejected`,
  *  `superseded`, `failed`), mirroring AB-42's SessionInputFailure.
  *
@@ -1318,17 +1331,12 @@ A `pause` or `resume` command targets exactly one run: when `runId` is present i
  *  different reason, or omitting it alongside `'superseded-by'`, is a
  *  compile error, not just a documented invariant. */
 export type SteeringCommandFailure =
-  | {
-      readonly failedAt: string; // ISO
-      readonly reason:
-        | 'session-terminal' // the owning session itself went terminal (closed) before application
-        | 'run-terminal' // pause/resume only: the run it targeted ended (aborted or completed) before its gate could apply
-        | 'run-ambiguous' // pause/resume only: no runId given and the session has zero or more than one non-terminal run
-        | 'authorization-revoked'
-        | 'policy-denied'
-        | 'deadline-passed';
-      readonly supersededBy?: never;
-    }
+  | SteeringCommandFailureOf<'session-terminal'> // the owning session itself went terminal (closed) before application
+  | SteeringCommandFailureOf<'run-terminal'> // pause/resume only: the run it targeted ended (aborted or completed) before its gate could apply
+  | SteeringCommandFailureOf<'run-ambiguous'> // pause/resume only: no runId given and the session has zero or more than one non-terminal run
+  | SteeringCommandFailureOf<'authorization-revoked'>
+  | SteeringCommandFailureOf<'policy-denied'>
+  | SteeringCommandFailureOf<'deadline-passed'>
   | {
       readonly failedAt: string; // ISO
       readonly reason: 'superseded-by'; // pairs with a successor command's id, same target
