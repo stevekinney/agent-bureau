@@ -312,11 +312,14 @@ describe('bureau.run', () => {
     // this test's non-durable bureau never actually verified any effect
     // from sessionId (AgentRunContext, AB-15's ratified shape, has no
     // sessionId field for a bare RunnableAgent.run() to observe on this
-    // branch at all). sessionId IS consumed on the DURABLE dispatch branch,
-    // as the ActiveRun's session-correlation key — see
-    // BureauRunOptions.sessionId's JSDoc in types.ts and the durable
-    // dispatch test above. Kept here as "accepted without error", which is
-    // the one thing this non-durable case actually demonstrates.
+    // branch at all). It is accepted without error here, which is the one
+    // thing this non-durable case actually demonstrates. `runAgent`'s
+    // durable branch DOES pass it to createActiveRun as the session-
+    // correlation key (`sessionId: runOptions?.sessionId ?? runId` in
+    // create-bureau.ts) — a source-level fact, not asserted by any test:
+    // weft's WorkflowSummary (what listDurableRuns() returns) carries no
+    // sessionId field to check it against, so verifying this would need a
+    // lower-level engine handle this suite does not otherwise reach for.
     let sawTraceContext: unknown;
     const withTraceContext = async <T>(
       parentContext: unknown,
