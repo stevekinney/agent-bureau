@@ -1143,4 +1143,34 @@ describe('createAgent — generationProfile', () => {
 
     expect(agent.generationProfile.projection).toBe('privileged');
   });
+
+  it('is not retroactively mutated by later changes to the caller’s generationPreferences object or its arrays (review)', () => {
+    const generate: GenerateFunction = async () => textResponse('hi');
+    const preferences = { preferredProviders: ['anthropic' as const], preferredModels: ['a'] };
+    const agent = createAgent({ generate, generationPreferences: preferences });
+
+    preferences.preferredProviders.push('openai');
+    preferences.preferredModels.push('b');
+    // @ts-expect-error — intentionally reassigning a caller-side field to prove it doesn't alias.
+    preferences.minimumContextWindowTokens = 999;
+
+    expect(agent.generationProfile.preferences?.preferredProviders).toEqual(['anthropic']);
+    expect(agent.generationProfile.preferences?.preferredModels).toEqual(['a']);
+    expect(agent.generationProfile.preferences?.minimumContextWindowTokens).toBeUndefined();
+    expect(Object.isFrozen(agent.generationProfile.preferences)).toBe(true);
+    expect(Object.isFrozen(agent.generationProfile.preferences?.preferredProviders)).toBe(true);
+  });
+
+  it('is not retroactively mutated by later changes to the caller’s allowedCandidates array (review)', () => {
+    const generate: GenerateFunction = async () => textResponse('hi');
+    const candidates = [{ provider: 'anthropic' as const, model: 'claude-opus-4-6' }];
+    const agent = createAgent({ generate, allowedCandidates: candidates });
+
+    candidates.push({ provider: 'openai', model: 'gpt-4o' });
+
+    expect(agent.generationProfile.allowedCandidates).toEqual([
+      { provider: 'anthropic', model: 'claude-opus-4-6' },
+    ]);
+    expect(Object.isFrozen(agent.generationProfile.allowedCandidates)).toBe(true);
+  });
 });

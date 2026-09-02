@@ -751,6 +751,36 @@ type LazyAgentState<O, H extends boolean> =
   | { kind: 'loaded'; agent: RunnableAgent<O, H> };
 
 /**
+ * Deep-freezes a caller-supplied `AgentGenerationProfile` before it is
+ * exposed on the returned agent. `generationProfile` is documented as an
+ * immutable snapshot; unlike `createAgent` (which builds the object itself
+ * from scratch), `createLazyAgent` receives it ready-made from the caller,
+ * so freezing here — in place, preserving reference identity for
+ * `readGenerationProfile` — is what actually closes the mutation vector for
+ * a caller who built the profile by hand rather than through `createAgent`.
+ */
+function freezeGenerationProfile(profile: AgentGenerationProfile): AgentGenerationProfile {
+  if (profile.preferences) {
+    if (profile.preferences.requiredCapabilities) {
+      Object.freeze(profile.preferences.requiredCapabilities);
+    }
+    if (profile.preferences.preferredProviders) {
+      Object.freeze(profile.preferences.preferredProviders);
+    }
+    if (profile.preferences.preferredModels) {
+      Object.freeze(profile.preferences.preferredModels);
+    }
+    Object.freeze(profile.preferences);
+  }
+  if (profile.allowedCandidates) {
+    for (const candidate of profile.allowedCandidates) Object.freeze(candidate);
+    Object.freeze(profile.allowedCandidates);
+  }
+  Object.freeze(profile.descriptors);
+  return Object.freeze(profile);
+}
+
+/**
  * Lazily loads and memoizes a `RunnableAgent`, sharing its first load across
  * concurrent calls and returning `RunnableAgent<O, H>` itself — the same
  * shape as an eagerly-constructed agent, so it slots into an
@@ -859,7 +889,9 @@ export function createLazyAgent<O = never, H extends boolean = false>(
 
   const agent = {
     name: options.label ?? '(lazy)',
-    ...(options.generationProfile ? { generationProfile: options.generationProfile } : {}),
+    ...(options.generationProfile
+      ? { generationProfile: freezeGenerationProfile(options.generationProfile) }
+      : {}),
     run(input: AgentInput, context?: AgentRunContext): AgentRun<O, H> {
       return createDeferredAgentRun(resolve, input, context, label);
     },

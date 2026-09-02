@@ -217,6 +217,38 @@ export type CreateAgentToolConfiguration =
 export type CreateAgentOptions = CreateAgentOptionsBase & CreateAgentToolConfiguration;
 
 /**
+ * Defensively copies and deep-freezes `preferences` before it becomes part
+ * of the cached, frozen `generationProfile` snapshot. `Object.freeze` on the
+ * profile object alone is shallow — without this, a caller holding the same
+ * `AgentPreferences` object (or one of its array fields) it passed to
+ * `generationPreferences` could mutate it after `createAgent()` returns and
+ * retroactively change what the already-constructed agent reports.
+ */
+function freezeGenerationPreferences(preferences: AgentPreferences): AgentPreferences {
+  return Object.freeze({
+    ...(preferences.requiredCapabilities
+      ? { requiredCapabilities: Object.freeze([...preferences.requiredCapabilities]) }
+      : {}),
+    ...(preferences.preferredProviders
+      ? { preferredProviders: Object.freeze([...preferences.preferredProviders]) }
+      : {}),
+    ...(preferences.preferredModels
+      ? { preferredModels: Object.freeze([...preferences.preferredModels]) }
+      : {}),
+    ...(preferences.minimumContextWindowTokens !== undefined
+      ? { minimumContextWindowTokens: preferences.minimumContextWindowTokens }
+      : {}),
+  });
+}
+
+/** Same rationale as {@link freezeGenerationPreferences}, for `allowedCandidates`. */
+function freezeAllowedCandidates(
+  candidates: NonNullable<CreateAgentOptionsBase['allowedCandidates']>,
+): NonNullable<CreateAgentOptionsBase['allowedCandidates']> {
+  return Object.freeze(candidates.map((candidate) => Object.freeze({ ...candidate })));
+}
+
+/**
  * Validates the mutually-exclusive option combinations in
  * `CreateAgentOptions` once, at `createAgent()` call time (not per-run).
  */
@@ -467,8 +499,10 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknow
     revision: 1,
     projection: 'privileged',
     descriptors: attachedDescriptors,
-    ...(generationPreferences ? { preferences: generationPreferences } : {}),
-    ...(allowedCandidates ? { allowedCandidates } : {}),
+    ...(generationPreferences
+      ? { preferences: freezeGenerationPreferences(generationPreferences) }
+      : {}),
+    ...(allowedCandidates ? { allowedCandidates: freezeAllowedCandidates(allowedCandidates) } : {}),
     freshness: new Date().toISOString(),
     selector: 'unavailable',
   });

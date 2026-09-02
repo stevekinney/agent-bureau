@@ -47,7 +47,7 @@ const EMPTY_DESCRIPTORS: readonly BackendDescriptor[] = Object.freeze([]);
  * write `return withBackendDescriptors(generate, descriptors);` as a tail
  * expression. `descriptors` is defensively copied and frozen before
  * attachment, so a caller's later mutation of the array it passed in can
- * never retroactively change what a already-constructed generate function
+ * never retroactively change what an already-constructed generate function
  * reports.
  */
 export function withBackendDescriptors<T extends DescriptorBearingFunction>(

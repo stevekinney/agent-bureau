@@ -1,3 +1,7 @@
+import {
+  readBackendDescriptors,
+  withBackendDescriptors,
+} from '../backend-descriptor-attachment.ts';
 import type { GenerateContext, GenerateFunction, GenerateResponse } from '../types.ts';
 import { createRoutingGenerate } from './create-routing-generate.ts';
 import type { RoutingMetrics, RoutingMetricsResult, RoutingOptions } from './types.ts';
@@ -87,5 +91,11 @@ export function withRoutingMetrics(options: RoutingOptions): RoutingMetricsResul
     },
   };
 
-  return { generate: wrappedGenerate, metrics };
+  // Propagates innerGenerate's attached descriptors (AB-64, AB-245) — the
+  // routing union createRoutingGenerate already computed — onto the
+  // metrics-tracking wrapper, so wrapping with withRoutingMetrics doesn't
+  // silently downgrade the reported generation profile to 'opaque'.
+  const generate = withBackendDescriptors(wrappedGenerate, readBackendDescriptors(innerGenerate));
+
+  return { generate, metrics };
 }

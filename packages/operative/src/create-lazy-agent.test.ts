@@ -13,6 +13,8 @@ import {
 import { RunCompletedEvent } from './events';
 import type { AgentGenerationProfile } from './generation-profile';
 import { readGenerationProfile } from './generation-profile';
+import type { BackendDescriptor } from './providers/model-catalog';
+import type { ProviderName } from './providers/types';
 import type { RunnableAgent } from './runnable-agent';
 import { OPERATIVE_RESOLVE_RUN_OPTIONS } from './runnable-agent';
 import type { CleanupAcknowledgement, RunOptions, RunResult } from './types';
@@ -1383,5 +1385,62 @@ describe('createLazyAgent — generationProfile (AB-64 AC2, AB-245)', () => {
     expect(lazy.name).toBe('catalog-agent');
     expect(readGenerationProfile(lazy)).toBe(profile);
     expect(loaderCalls).toBe(0);
+  });
+
+  it('freezes a caller-supplied (not pre-frozen) generationProfile on receipt, closing the mutation vector (review)', () => {
+    const preferences: {
+      requiredCapabilities: (keyof BackendDescriptor)[];
+      preferredProviders: ProviderName[];
+      preferredModels: string[];
+    } = {
+      requiredCapabilities: ['streaming'],
+      preferredProviders: ['anthropic'],
+      preferredModels: ['claude-opus-4-6'],
+    };
+    const allowedCandidates: { provider: ProviderName; model: string }[] = [
+      { provider: 'anthropic', model: 'claude-opus-4-6' },
+    ];
+    // Deliberately NOT Object.freeze()'d — a caller who built this by hand,
+    // not through createAgent, might hand createLazyAgent a fully mutable
+    // object.
+    const mutableProfile: AgentGenerationProfile = {
+      mode: 'selectable',
+      revision: 1,
+      projection: 'privileged',
+      descriptors: [],
+      preferences,
+      allowedCandidates,
+      freshness: '2026-09-02T12:00:00.000Z',
+      selector: 'unavailable',
+    };
+
+    const lazy = createLazyAgent(
+      () => {
+        throw new Error('the loader must not run for a capability read');
+      },
+      { generationProfile: mutableProfile },
+    );
+
+    const exposed = readGenerationProfile(lazy);
+    expect(Object.isFrozen(exposed)).toBe(true);
+    expect(Object.isFrozen(exposed.preferences)).toBe(true);
+    expect(Object.isFrozen(exposed.preferences?.requiredCapabilities)).toBe(true);
+    expect(Object.isFrozen(exposed.preferences?.preferredProviders)).toBe(true);
+    expect(Object.isFrozen(exposed.preferences?.preferredModels)).toBe(true);
+    expect(Object.isFrozen(exposed.allowedCandidates)).toBe(true);
+
+    // Mutating the ORIGINAL objects the caller still holds a reference to
+    // must not silently change what a later read reports — freezing in
+    // place is exactly what prevents that.
+    expect(() => preferences.requiredCapabilities.push('tools')).toThrow();
+    expect(() => preferences.preferredProviders.push('openai')).toThrow();
+    expect(() => preferences.preferredModels.push('claude-sonnet-5')).toThrow();
+    expect(() => allowedCandidates.push({ provider: 'openai', model: 'gpt-4o' })).toThrow();
+    expect(exposed.preferences?.requiredCapabilities).toEqual(['streaming']);
+    expect(exposed.preferences?.preferredProviders).toEqual(['anthropic']);
+    expect(exposed.preferences?.preferredModels).toEqual(['claude-opus-4-6']);
+    expect(exposed.allowedCandidates).toEqual([
+      { provider: 'anthropic', model: 'claude-opus-4-6' },
+    ]);
   });
 });
