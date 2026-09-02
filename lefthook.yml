@@ -24,7 +24,12 @@ pre-commit:
   parallel: false
   commands:
     format:
-      glob: '*.{ts,tsx,js,jsx,mjs,cjs,json,md,yml,yaml}'
+      # The union of every package's `format:check` glob, not just the root
+      # script's — `packages/gateway` adds `css`, and dropping it here would
+      # have let a styles-only commit skip formatting entirely. `.svelte` is
+      # deliberately absent: there is no `prettier-plugin-svelte` in this
+      # repository, so those files are not formattable by any existing script.
+      glob: '*.{ts,tsx,js,jsx,mjs,cjs,json,md,yml,yaml,css}'
       run: bunx prettier --check {staged_files}
     lint:
       run: bun run lint
