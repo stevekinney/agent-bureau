@@ -97,11 +97,23 @@ export interface CreateScheduleWakeupToolOptions {
  *
  * @example
  * ```ts
- * // In bureau setup (Phase E):
+ * // In bureau setup (Phase E): forward reads/writes onto the REAL
+ * // `DurableRunDeps` object rather than spreading it — a spread detaches
+ * // the tool's context from the object the durable workflow actually reads,
+ * // so `pendingWakeup` would be written to a copy the workflow never sees
+ * // (mirror Bureau's own `createHumanWaitContext` forwarding pattern).
  * const bureau = createBureau()
  *   .tools({
  *     scheduleWakeup: createScheduleWakeupTool({
- *       context: { ...durableRunDeps, durable: true },
+ *       context: {
+ *         get pendingWakeup() {
+ *           return durableRunDeps.pendingWakeup;
+ *         },
+ *         set pendingWakeup(value) {
+ *           durableRunDeps.pendingWakeup = value;
+ *         },
+ *         durable: true,
+ *       },
  *     }),
  *   });
  * ```
