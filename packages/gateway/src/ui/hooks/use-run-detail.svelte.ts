@@ -1,5 +1,6 @@
 import type { RunDetailResponse } from '../../routes/runs';
 import type { ServerFrame } from '../../types';
+import type { GatewayClientEnvironment } from '../client-environment';
 import {
   INITIAL_TOOL_ACTIVITY_STATE,
   reduceToolActivity,
@@ -48,9 +49,15 @@ function timelineFromRun(run: RunDetailResponse): TimelineEvent[] {
 }
 
 /**
- * Creates a {@link RunDetailStore} seeded with the server-provided initial run.
+ * Creates a {@link RunDetailStore} seeded with the server-provided initial
+ * run. `environment` provides the transport and timing primitives (`fetch`
+ * for {@link RunDetailStore.refresh}, `timers.now()` for the synthetic
+ * tool-call-start timeline timestamp) instead of reading them off globals.
  */
-export function createRunDetailStore(initialRun: RunDetailResponse): RunDetailStore {
+export function createRunDetailStore(
+  initialRun: RunDetailResponse,
+  environment: GatewayClientEnvironment,
+): RunDetailStore {
   let run = $state<RunDetailResponse>(initialRun);
   let events = $state<TimelineEvent[]>(timelineFromRun(initialRun));
   let streamingAssistantContent = $state('');
@@ -68,7 +75,7 @@ export function createRunDetailStore(initialRun: RunDetailResponse): RunDetailSt
       return;
     }
 
-    const response = await fetch(`/api/v1/runs/${runId}`);
+    const response = await environment.fetch(`/api/v1/runs/${runId}`);
     if (!response.ok) {
       return;
     }
@@ -136,7 +143,7 @@ export function createRunDetailStore(initialRun: RunDetailResponse): RunDetailSt
           {
             event: frame.type,
             detail: { toolName: frame.toolName, blockId: frame.blockId },
-            timestamp: Date.now(),
+            timestamp: environment.timers.now(),
           },
         ];
         break;

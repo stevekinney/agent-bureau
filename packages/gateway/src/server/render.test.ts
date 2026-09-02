@@ -4,6 +4,7 @@ import { Conversation, createConversationHistory } from 'conversationalist';
 import { assembleRunTimeline, type RunDetailResponse } from '../routes/runs';
 import type { UsageResponse } from '../routes/usage';
 import type { PendingReview } from '../types';
+import { createBrowserClientEnvironment } from '../ui/client-environment';
 import { createReviewsStore } from '../ui/hooks/use-reviews.svelte';
 import RunDetailPage from '../ui/pages/run-detail.svelte';
 import UsagePage from '../ui/pages/usage.svelte';
@@ -418,7 +419,7 @@ describe('renderPage with a populated run-detail page', () => {
       requestedAt: 0,
       ageMilliseconds: 5000,
     };
-    const reviews = createReviewsStore([parkedReview]);
+    const reviews = createReviewsStore([parkedReview], createBrowserClientEnvironment());
 
     const html = await renderPage({
       title: 'Run run-populated',
@@ -448,7 +449,7 @@ describe('renderPage with a populated run-detail page', () => {
       requestedAt: 0,
       ageMilliseconds: 5000,
     };
-    const reviews = createReviewsStore([otherRunReview]);
+    const reviews = createReviewsStore([otherRunReview], createBrowserClientEnvironment());
 
     const html = await renderPage({
       title: 'Run run-populated',

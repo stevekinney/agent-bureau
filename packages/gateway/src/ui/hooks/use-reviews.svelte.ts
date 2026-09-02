@@ -1,4 +1,5 @@
 import type { PendingReview, ResolveReviewResult } from '../../types';
+import type { GatewayClientEnvironment } from '../client-environment';
 
 /**
  * Reactive store for the review queue page (AB-20). Unlike the runs store,
@@ -37,9 +38,12 @@ async function parseErrorMessage(response: Response): Promise<string> {
 
 /**
  * Creates a {@link ReviewsStore} seeded with the server-provided initial
- * reviews.
+ * reviews. `environment` provides `fetch` instead of reading it off a global.
  */
-export function createReviewsStore(initialReviews: PendingReview[]): ReviewsStore {
+export function createReviewsStore(
+  initialReviews: PendingReview[],
+  environment: GatewayClientEnvironment,
+): ReviewsStore {
   let reviews = $state<PendingReview[]>(initialReviews);
   let loading = $state(false);
   let pendingId = $state<string | undefined>(undefined);
@@ -48,7 +52,7 @@ export function createReviewsStore(initialReviews: PendingReview[]): ReviewsStor
   async function refresh(): Promise<void> {
     loading = true;
     try {
-      const response = await fetch('/api/v1/reviews');
+      const response = await environment.fetch('/api/v1/reviews');
       if (!response.ok) {
         error = await parseErrorMessage(response);
         return;
@@ -69,11 +73,14 @@ export function createReviewsStore(initialReviews: PendingReview[]): ReviewsStor
   ): Promise<ResolveReviewResult | undefined> {
     pendingId = id;
     try {
-      const response = await fetch(`/api/v1/reviews/${encodeURIComponent(id)}/${decision}`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
-      });
+      const response = await environment.fetch(
+        `/api/v1/reviews/${encodeURIComponent(id)}/${decision}`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        },
+      );
       if (!response.ok) {
         error = await parseErrorMessage(response);
         return undefined;

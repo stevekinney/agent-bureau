@@ -6,6 +6,7 @@ import {
 } from '@lostgradient/chat';
 
 import type { RunSummary, ServerFrame } from '../../types';
+import type { GatewayClientEnvironment } from '../client-environment';
 import {
   INITIAL_TOOL_ACTIVITY_STATE,
   reduceToolActivity,
@@ -33,6 +34,8 @@ export interface CreateChatStoreOptions {
    * without waiting for the next poll tick.
    */
   onHumanInputRequested?: () => void;
+  /** Transport primitives, injected rather than read off globals. */
+  environment: GatewayClientEnvironment;
 }
 
 /**
@@ -109,6 +112,7 @@ export function createChatStore({
   subscribe,
   unsubscribe,
   onHumanInputRequested,
+  environment,
 }: CreateChatStoreOptions): ChatStore {
   let conversation = $state<ConversationHistory>(createConversation());
   let runId = $state<string | undefined>(undefined);
@@ -135,7 +139,7 @@ export function createChatStore({
     conversation = appendUserMessage(conversation, message);
 
     try {
-      const response = await fetch('/api/v1/runs', {
+      const response = await environment.fetch('/api/v1/runs', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
