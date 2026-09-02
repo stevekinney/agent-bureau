@@ -1361,23 +1361,51 @@ export interface SteeringCommand {
 A `pause` or `resume` command targets exactly one run: when `runId` is present it must name a non-terminal run owned by `sessionId`, otherwise admission fails with the existing `'run-terminal'` reason; when `runId` is absent and the session has exactly one non-terminal run, the command binds to that run and the effective `runId` is recorded on the accepted command; when `runId` is absent and the session has zero or more than one non-terminal run, admission fails with `SteeringCommandFailure.reason: 'run-ambiguous'`.
 
 ```ts
-/** Populated on every terminal-failure SteeringCommandState (`rejected`,
- *  `superseded`, `failed`), mirroring AB-42's SessionInputFailure. */
-export interface SteeringCommandFailure {
+/** One non-`'superseded-by'` member of SteeringCommandFailure — each of the
+ *  six reasons below is its OWN union member (not grouped into one member
+ *  with a six-literal `reason`), which is what lets `Extract<
+ *  SteeringCommandFailure, { reason: R }>` narrow correctly for a single
+ *  reason or a subset of reasons — grouping them under one wide `reason`
+ *  field, as an earlier draft of this section did, makes that `Extract`
+ *  evaluate to `never` instead. Declares `supersededBy?: never` — an object
+ *  literal is not the only place a stray `supersededBy` can reach this
+ *  type from, and `?: never` (unlike omitting the field) also rejects a
+ *  KNOWN, non-literal `supersededBy: string` value (a builder return, an
+ *  intermediate variable) that excess-property checking never sees. This
+ *  package's `exactOptionalPropertyTypes: false` still lets a literal
+ *  explicit `supersededBy: undefined` through — behaviorally
+ *  indistinguishable from omitting the field, so not a real invariant
+ *  violation. */
+type SteeringCommandFailureOf<R extends string> = {
   readonly failedAt: string; // ISO
-  readonly reason:
-    | 'session-terminal' // the owning session itself went terminal (closed) before application
-    | 'run-terminal' // pause/resume only: the run it targeted ended (aborted or completed) before its gate could apply
-    | 'run-ambiguous' // pause/resume only: no runId given and the session has zero or more than one non-terminal run
-    | 'authorization-revoked'
-    | 'policy-denied'
-    | 'deadline-passed'
-    | 'superseded-by'; // pairs with a successor command's id, same target
-  /** The `id` of the successor command, present exactly when `reason` is
-   *  `'superseded-by'` and absent otherwise. */
-  readonly supersededBy?: string;
-}
+  readonly reason: R;
+  readonly supersededBy?: never;
+};
+
+/** Populated on every terminal-failure SteeringCommandState (`rejected`,
+ *  `superseded`, `failed`), mirroring AB-42's SessionInputFailure.
+ *
+ *  A discriminated union on `reason` (AB-236): the `'superseded-by'` member
+ *  requires `supersededBy`; every other member carries `supersededBy?:
+ *  never`. A literal or non-literal value supplying a real `supersededBy`
+ *  alongside a different reason, or omitting it alongside `'superseded-by'`,
+ *  is a compile error, not just a documented invariant. */
+export type SteeringCommandFailure =
+  | SteeringCommandFailureOf<'session-terminal'> // the owning session itself went terminal (closed) before application
+  | SteeringCommandFailureOf<'run-terminal'> // pause/resume only: the run it targeted ended (aborted or completed) before its gate could apply
+  | SteeringCommandFailureOf<'run-ambiguous'> // pause/resume only: no runId given and the session has zero or more than one non-terminal run
+  | SteeringCommandFailureOf<'authorization-revoked'>
+  | SteeringCommandFailureOf<'policy-denied'>
+  | SteeringCommandFailureOf<'deadline-passed'>
+  | {
+      readonly failedAt: string; // ISO
+      readonly reason: 'superseded-by'; // pairs with a successor command's id, same target
+      /** The `id` of the successor command. */
+      readonly supersededBy: string;
+    };
 ```
+
+**`RunOptions.runId` is required whenever `RunOptions.steering` holds an actual gate (AB-236).** `runStep`'s boundary read stamps `SteeringEffectiveState.appliedAtRunId` from `RunOptions.runId`, and a steering-enabled run with no `runId` would silently never dispatch `steering.applied` — there is no honest fallback value to stamp instead. AB-67's decision record names two ways to close that gap: make `runId` required whenever `steering` is set, or synthesize one through the identifier seam **AB-214** introduces. **AB-214 has not merged**, so `packages/operative/src/types.ts` takes the type-level option — `RunOptions` is a discriminated pair rather than two independently-optional fields: either both `runId` and `steering` are absent/optional, or `runId` is required and `steering` (present or not) may hold a gate. The relationship is one-directional — plenty of callers legitimately supply `runId` with no steering intention at all — but a real `SteeringGate` with no `runId` satisfies neither arm and fails to type-check. **Migration:** any caller constructing a steering-enabled `RunOptions` (directly, or through `executeLoop`/`buildStepDeps`/`createActiveRun`) must now also supply `runId`; a run with no `steering` is unaffected. When AB-214 merges, `createActiveRun` may instead synthesize a `runId` for a steering-enabled run with none supplied, which could relax this constraint — a separate, later decision, not made here.
 
 | Operation                         | Authority                                                                                                                                                                                   | Validation boundary                                                                                                                                                                                                                        | Application boundary                                                                                                                          | Acknowledgement                                                                                                                                                                          | Rejection                                                                                                                                               | Supersession                                                                                                                                                                                                           | Terminal behavior                                                                                                                                                                                                                                                                                          |
 | :-------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------ | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

@@ -49,11 +49,32 @@ const FAILURE_FINISH_REASONS: ReadonlySet<FinishReason> = new Set([
 ]);
 
 /**
+ * Plain `Omit<T, K>` maps over `K`, not over `T` — for a union `T` it
+ * collapses every member into one merged, looser shape. That would flatten
+ * away `RunOptions`'s AB-236 `runId`/`steering` discriminated pair (see the
+ * identical note on `scheduler/types.ts`'s `SchedulerRunOptions`). This
+ * distributes `Omit` over each union member first, via the naked type
+ * parameter `T extends unknown ? ... : never` distributes on.
+ */
+type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : never;
+
+/**
  * Options passed to `createSessionHandle` that define the agent's run behavior.
  * These are the portions of `RunOptions` that are constant across every `run()`
  * call within the session (the LLM backend, toolbox, hooks, limits, etc.).
+ *
+ * Omits `runId` as well as `conversation`: a session's `runId` is always
+ * DERIVED (`deriveRunId(sessionId, sequence)`, below) and stamped onto
+ * `runOptionsWithSignal` inside `run()`, overwriting whatever this bag
+ * carries — a caller can never meaningfully supply one. Without this
+ * omission, `RunOptions`'s AB-236 `runId`/`steering` pairing would force a
+ * caller configuring a steering-enabled session to invent a throwaway
+ * `runId` that gets silently discarded and cannot represent the session's
+ * actual (and multiple, sequence-numbered) run identities. `steering`
+ * itself is unaffected — a session-scoped `SteeringGate` config is exactly
+ * what this option bag is for.
  */
-export type SessionRunOptions = Omit<RunOptions, 'conversation'>;
+export type SessionRunOptions = DistributiveOmit<RunOptions, 'conversation' | 'runId'>;
 
 /**
  * Options for `session.monitor()` — a process-local conditional watch loop that runs

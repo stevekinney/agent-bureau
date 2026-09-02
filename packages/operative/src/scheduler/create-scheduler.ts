@@ -305,6 +305,10 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
       generate: runOptions.generate ?? generate,
       toolbox: runOptions.toolbox ?? toolbox,
       signal: combinedSignal,
+      // `SchedulerRunOptions` omits `runId` (see its doc comment) — derive
+      // a stable id from this dispatch's own task id, same as
+      // `startAndAwaitTask`'s in-memory branch.
+      runId: `${SCHEDULER_RUN_ID_PREFIX}${taskId}`,
     });
 
     // Register in the running map so getState() reflects this task
@@ -680,6 +684,13 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
             generate: runOptions.generate ?? generate,
             toolbox: runOptions.toolbox ?? toolbox,
             signal: combinedSignal,
+            // `SchedulerRunOptions` omits `runId` (see its doc comment) —
+            // stamp the same derived id this dispatch already pinned the
+            // Weft workflow to, so a `RunOptions` with `steering` set is
+            // valid at construction, not only after `run-workflow.ts`
+            // later overrides `StepDeps.runId` from its own `runId` local
+            // regardless of what's here.
+            runId: durableRunId,
           },
           signal: combinedSignal,
         },
@@ -697,6 +708,18 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
         generate: runOptions.generate ?? generate,
         toolbox: runOptions.toolbox ?? toolbox,
         signal: combinedSignal,
+        // `SchedulerRunOptions` omits `runId` (see its doc comment) — the
+        // in-memory path has no durable workflow id to reuse, so derive a
+        // stable per-dispatch id. `task.id` alone is NOT enough: a
+        // `background`/`ambient` in-memory task preempted mid-run is
+        // requeued as the SAME `QueuedTask` (`preemptTask` spreads `task`
+        // into `requeuedTask`, `create-scheduler.ts` above) and restarted
+        // from scratch — not resumed — via a fresh `executeLoop` call, so
+        // `task.id` repeats across attempts. Include `__requeues` (bumped
+        // once per requeue, `undefined`/`0` on the first attempt) so each
+        // restart gets its own identity, mirroring the durable branch's
+        // own per-attempt counter above.
+        runId: `${SCHEDULER_RUN_ID_PREFIX}${task.id}-${task.__requeues ?? 0}`,
       });
     }
 

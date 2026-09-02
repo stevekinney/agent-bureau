@@ -3200,9 +3200,17 @@ describe('durable agentRun workflow', () => {
      * updated and persisted when the handler returns a string.
      */
 
-    /** Build services with an agent that always emits a tool call (never settles). */
+    /**
+     * Build services with an agent that always emits a tool call (never
+     * settles). Excludes `runId`/`steering` from the override bag rather
+     * than accepting `Partial<DurableRunDeps['options']>` — AB-236 makes
+     * those two a discriminated pair on `RunOptions`, and `Partial` (like
+     * `Omit`) flattens a union's members into one merged, looser shape,
+     * which would let this helper accept a `steering` override with no
+     * `runId` again. No caller below needs to override either field.
+     */
     function makeNeverSettlingServices(
-      options?: Partial<DurableRunDeps['options']>,
+      options?: Partial<Omit<DurableRunDeps['options'], 'runId' | 'steering'>>,
     ): DurableRunDeps {
       const toolbox = continuingToolbox();
       return {
@@ -3382,6 +3390,7 @@ describe('durable agentRun workflow', () => {
           conversation: createConversationHistory(),
           stopWhen: noToolCalls(),
           steering: gate,
+          runId: 'run-1',
         },
       };
 
@@ -3433,6 +3442,7 @@ describe('durable agentRun workflow', () => {
           conversation: createConversationHistory(),
           stopWhen: noToolCalls(),
           steering: gate,
+          runId: 'run-1',
         },
       };
 
@@ -3476,6 +3486,7 @@ describe('durable agentRun workflow', () => {
           conversation: createConversationHistory(),
           stopWhen: noToolCalls(),
           steering: gate,
+          runId: 'run-1',
         },
       };
 

@@ -306,9 +306,19 @@ export interface SteeringGate {
 }
 
 /**
- * Options for the agent loop.
+ * Options for the agent loop, minus `runId` and `steering` — see
+ * {@link RunOptions}, which adds those two as a discriminated pair via a
+ * `type` (intersecting this interface with a union), not an `interface`,
+ * following AB-16's `CreateAgentOptions`/`CreateAgentOptionsBase` precedent:
+ * enforcing the pairing requires a union, and a TypeScript `interface`
+ * can't `extends` a type containing one, nor declaration-merge into one. A
+ * consumer that previously wrote `interface MyOptions extends RunOptions`
+ * for the full options bag needs `MyOptions = RunOptions & { ... }`
+ * instead; extending or declaration-merging onto just the fields unrelated
+ * to the `runId`/`steering` pairing still works via this separately
+ * exported `RunOptionsBase` interface.
  */
-export interface RunOptions {
+export interface RunOptionsBase {
   generate: GenerateFunction;
   toolbox: AnyToolbox;
   conversation: Conversation | ConversationHistory;
@@ -398,11 +408,6 @@ export interface RunOptions {
   agentName?: string;
 
   /**
-   * Run id, used to stamp curated `tool.*` bubble events. Optional — only
-   * supplied when the run has a stable identity (session-owned runs).
-   */
-  runId?: string;
-  /**
    * Enables replay-safe durable operation keys for tool calls. This is distinct
    * from `runId`, because in-memory session-owned runs also have stable run ids
    * for event stamping but should not make effectful tools idempotent.
@@ -443,15 +448,89 @@ export interface RunOptions {
    * explicit model.
    */
   costEstimation?: { model: string; pricing?: CostEstimationOptions };
-  /**
-   * The AB-67 runtime steering gate: read at every step's `runStep` entry
-   * boundary to consult desired route/model/provider/effort configuration
-   * and gate a `paused: true` desired state until a matching `resume` (or
-   * the run's `AbortSignal`) releases it. Optional — omit for a run that
-   * never needs to be steered; `runStep` behaves exactly as it does today.
-   */
-  steering?: SteeringGate;
 }
+
+/**
+ * Options for the agent loop.
+ *
+ * `runId` and `steering` are a discriminated pair (AB-236, per AB-67's
+ * ratified contract): a run configured with `steering` always has a stable
+ * run identity, because `runStep`'s AB-221 `steering.applied` dispatch
+ * stamps `SteeringEffectiveState.appliedAtRunId` from `runId` and has no
+ * honest value to fall back to when it's absent — a steering-enabled run
+ * with no `runId` would silently never fire that event (see the "declared,
+ * tested gap" comment on `runId` above `runStep`'s boundary read in
+ * `run-step.ts`). AB-67's decision record names two ways to close it: make
+ * `runId` required whenever `steering` is set, or synthesize one through the
+ * identifier seam AB-214 introduces. AB-214 has not merged as of this
+ * change, so this is the type-level option — a caller who omits `runId` on
+ * a steering-enabled `RunOptions` literal gets a compile error, not a
+ * silently-dropped event. When AB-214 merges, `createActiveRun` may instead
+ * synthesize a `runId`, which would let this constraint relax; that is a
+ * separate, later decision, not made here.
+ *
+ * Migration: a caller constructing a steering-enabled `RunOptions` (or
+ * calling `executeLoop`/`buildStepDeps`/`createActiveRun` with one) must
+ * now also supply `runId`. A run with no `steering` is unaffected — `runId`
+ * stays optional there, exactly as before.
+ *
+ * Both fields are `readonly`: a plain (non-`readonly`) `runId`/`steering`
+ * would let a helper holding a type-checked, valid `RunOptions` reach into
+ * it after the fact — `o.runId = undefined` or `o.steering = gate` — and
+ * reintroduce the exact silently-missing-`runId` shape this type exists to
+ * rule out, since TypeScript checks a property WRITE against the union's
+ * combined property type, not against the cross-property pairing. `readonly`
+ * makes both assignments a compile error through any `RunOptions`-typed
+ * reference, matching every other field on `RunOptionsBase` and this
+ * package's immutability-via-spread convention — an object still spreads
+ * cleanly to swap either field, only in-place mutation is blocked.
+ *
+ * The second arm's `steering` is itself optional (`SteeringGate | undefined`),
+ * not required, once `runId` is present — deliberately, so a caller
+ * forwarding an already-`SteeringGate | undefined`-typed value alongside a
+ * definite `runId` (e.g. a helper that always has a stable run identity but
+ * only conditionally steers) matches this arm without a cast or a runtime
+ * branch first. The invariant this type exists to enforce is one-directional
+ * — `steering` (when it holds an actual gate) requires `runId` — not the
+ * reverse; plenty of callers legitimately supply `runId` with no steering
+ * intention at all (bubble-event stamping, durable/session-owned runs). What
+ * the union still forbids, in both arms, is a REAL `SteeringGate` with no
+ * `runId`: that shape satisfies neither arm (the first requires `steering`
+ * to be exactly `undefined`; the second requires `runId`), so it remains a
+ * compile error.
+ */
+export type RunOptions = RunOptionsBase &
+  (
+    | {
+        /**
+         * Run id, used to stamp curated `tool.*` bubble events. Optional
+         * when `steering` is absent — only supplied when the run has a
+         * stable identity (session-owned runs).
+         */
+        readonly runId?: string;
+        readonly steering?: undefined;
+      }
+    | {
+        /**
+         * Required whenever `steering` holds an actual `SteeringGate` —
+         * see this type's doc comment. Used to stamp curated `tool.*`
+         * bubble events AND `SteeringEffectiveState.appliedAtRunId`.
+         */
+        readonly runId: string;
+        /**
+         * The AB-67 runtime steering gate: read at every step's `runStep`
+         * entry boundary to consult desired route/model/provider/effort
+         * configuration and gate a `paused: true` desired state until a
+         * matching `resume` (or the run's `AbortSignal`) releases it.
+         * Optional here too — this arm exists to let a `runId`-carrying
+         * caller pass a possibly-`undefined` `SteeringGate` through
+         * unbranched (see this type's doc comment); the AC this type
+         * enforces is that an actually-PRESENT gate requires `runId`, not
+         * that `runId` requires a gate.
+         */
+        readonly steering?: SteeringGate;
+      }
+  );
 
 /**
  * Context for streaming generate functions.

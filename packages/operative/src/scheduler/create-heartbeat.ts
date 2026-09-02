@@ -1,7 +1,7 @@
-import type { RunOptions, RunResult } from '../types';
+import type { RunResult } from '../types';
 import type { Scheduler } from './create-scheduler';
 import { sleep } from './sleep';
-import type { SchedulerPriority, SchedulerTask } from './types';
+import type { SchedulerPriority, SchedulerRunOptions, SchedulerTask } from './types';
 
 /**
  * Options for creating a heartbeat instance.
@@ -11,8 +11,16 @@ export interface CreateHeartbeatOptions {
   scheduler: Scheduler;
   /** Interval between heartbeats in milliseconds. Default: 60000 (1 minute). */
   interval?: number;
-  /** Factory that creates the RunOptions for each heartbeat tick. */
-  createHeartbeatRun: () => RunOptions | Promise<RunOptions>;
+  /**
+   * Factory that creates the run options for each heartbeat tick.
+   * `SchedulerRunOptions`, not `RunOptions` (AB-236) — this factory's
+   * return value is forwarded straight into `SchedulerTask.createRun`, and
+   * `SchedulerRunOptions` omits `runId` because the scheduler always
+   * derives and injects one at dispatch (see its doc comment); a
+   * steering-enabled heartbeat should not need to invent a throwaway
+   * `runId` the scheduler discards anyway.
+   */
+  createHeartbeatRun: () => SchedulerRunOptions | Promise<SchedulerRunOptions>;
   /** Priority for heartbeat tasks. Default: 'scheduled'. */
   priority?: SchedulerPriority;
   /** Whether to run immediately on start, or wait for the first interval. Default: false. */

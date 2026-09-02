@@ -28,7 +28,7 @@ import { SteeringAppliedEvent } from './events';
 import type { OperativeHookMap } from './hooks';
 import { buildStepDeps, executeLoop } from './loop';
 import { awaitResumeOrAbort, type EventDispatcher, type RunState, runStep } from './run-step';
-import type { GenerateContext, GenerateResponse, SteeringGate } from './types';
+import type { GenerateContext, GenerateResponse, RunOptions, SteeringGate } from './types';
 
 /** A minimal {@link EventDispatcher} test double that records every dispatched event. */
 function createEventRecorder(): EventDispatcher & { events: Event[] } {
@@ -99,6 +99,65 @@ const nextTool = createTool({
   input: z.object({}),
   execute: async () => 'ok',
 });
+
+/**
+ * AB-236 compile-only proof: `RunOptions` makes `runId` required whenever
+ * `steering` is set (see `types.ts`'s `RunOptions` doc comment). This file
+ * is checked under the package's main `tsconfig.json` (it lives under
+ * `src/`, which the `include` covers), so the `@ts-expect-error` below
+ * fails `check-types` immediately if the constraint ever regresses — the
+ * same pattern `durable/steering-types.check.ts` uses for
+ * `SteeringCommandFailure`. The function body below is never CALLED (only
+ * `void`-referenced, at the bottom of this block, to satisfy
+ * `noUnusedLocals`) — `bun test` still evaluates that module-level
+ * reference when it runs this file, same as any other top-level statement,
+ * but a reference is not a call: nothing inside the function body ever
+ * executes, so `someSteeringGate` never needs a real runtime value and only
+ * `tsc` (via `check-types`, not `bun test`) ever looks at the body's
+ * `RunOptions` literals.
+ */
+function steeringRunOptionsCompileOnlyChecks(
+  someSteeringGate: SteeringGate,
+  maybeSteeringGate: SteeringGate | undefined,
+): void {
+  function acceptRunOptions(_options: RunOptions): void {}
+
+  // A steering-enabled run with no `runId` must fail to type-check.
+  // @ts-expect-error — `RunOptions` requires `runId` whenever `steering` is set.
+  acceptRunOptions({
+    generate: async () => textResponse('done'),
+    toolbox: createTestToolbox([]),
+    conversation: new Conversation(),
+    steering: someSteeringGate,
+  });
+  // The same shape WITH `runId` type-checks with no cast or suppression.
+  acceptRunOptions({
+    generate: async () => textResponse('done'),
+    toolbox: createTestToolbox([]),
+    conversation: new Conversation(),
+    steering: someSteeringGate,
+    runId: 'run-1',
+  });
+  // A run with no `steering` at all still doesn't require `runId`.
+  acceptRunOptions({
+    generate: async () => textResponse('done'),
+    toolbox: createTestToolbox([]),
+    conversation: new Conversation(),
+  });
+  // A `runId`-carrying helper forwarding a `SteeringGate | undefined`-typed
+  // value (not a literal presence/absence the compiler can discriminate)
+  // must also type-check with no cast or runtime branch — the pairing this
+  // type enforces is one-directional (an actual gate requires `runId`),
+  // not "steering must be exactly present or exactly absent."
+  acceptRunOptions({
+    generate: async () => textResponse('done'),
+    toolbox: createTestToolbox([]),
+    conversation: new Conversation(),
+    runId: 'run-1',
+    steering: maybeSteeringGate,
+  });
+}
+void steeringRunOptionsCompileOnlyChecks;
 
 describe('awaitResumeOrAbort (the pause-gate/AbortSignal race runStep consults)', () => {
   it('resolves aborted: true immediately for an already-aborted signal, without awaiting the gate', async () => {
@@ -204,6 +263,7 @@ describe('runStep: AB-67 steering boundary read', () => {
       conversation: new Conversation(),
       stopWhen: noToolCalls(),
       steering: gate,
+      runId: 'run-1',
     });
 
     expect(captured).toEqual({ paused: false, configVersion: 5, model: 'gpt-5', effort: 'high' });
@@ -222,6 +282,7 @@ describe('runStep: AB-67 steering boundary read', () => {
       conversation: new Conversation(),
       stopWhen: noToolCalls(),
       steering: gate,
+      runId: 'run-1',
     });
 
     // Let the loop reach and block on the pause gate before asserting it
@@ -251,6 +312,7 @@ describe('runStep: AB-67 steering boundary read', () => {
       conversation: new Conversation(),
       stopWhen: noToolCalls(),
       steering: gate,
+      runId: 'run-1',
     });
 
     await Promise.resolve();
@@ -305,6 +367,7 @@ describe('runStep: AB-67 steering boundary read', () => {
       conversation: new Conversation(),
       stopWhen: noToolCalls(),
       steering: gate,
+      runId: 'run-1',
     });
 
     // If the boundary read had forwarded the gate's own object reference
@@ -332,6 +395,7 @@ describe('runStep: AB-67 steering boundary read', () => {
       conversation: new Conversation(),
       stopWhen: noToolCalls(),
       steering: gate,
+      runId: 'run-1',
       retry: {
         attempts: 2,
         delay: 0,
@@ -365,6 +429,7 @@ describe('runStep: AB-67 steering boundary read', () => {
       conversation: new Conversation(),
       signal: controller.signal,
       steering: gate,
+      runId: 'run-1',
     });
 
     // Let the loop reach and block on the pause gate, then abort instead of
@@ -389,6 +454,7 @@ describe('runStep: AB-67 steering boundary read', () => {
       conversation: new Conversation(),
       signal: controller.signal,
       steering: gate,
+      runId: 'run-1',
     });
 
     // Let the loop reach and register a waiter on the pause gate.
@@ -423,6 +489,7 @@ describe('runStep: AB-67 steering boundary read', () => {
       conversation: new Conversation(),
       signal: controller.signal,
       steering: gate,
+      runId: 'run-1',
     });
 
     expect(result.finishReason).toBe('aborted');
@@ -451,6 +518,7 @@ describe('runStep: AB-67 steering boundary read', () => {
       conversation: new Conversation(),
       stopWhen: noToolCalls(),
       steering: gate,
+      runId: 'run-1',
     });
 
     expect(observedRoutes).toEqual(['r1', 'r2']);
@@ -489,6 +557,7 @@ describe('runStep: AB-67 steering boundary read', () => {
       conversation: new Conversation(),
       stopWhen: noToolCalls(),
       steering: gate,
+      runId: 'run-1',
     });
 
     expect(observedRoutes).toEqual(['r1', 'r2']);
@@ -525,6 +594,7 @@ describe('runStep: AB-67 steering boundary read', () => {
       stopWhen: noToolCalls(),
       hooks,
       steering: gate,
+      runId: 'run-1',
     });
 
     const expected = { paused: false, configVersion: 3, model: 'real-model' };
@@ -555,6 +625,7 @@ describe('runStep: AB-67 steering boundary read', () => {
       stopWhen: noToolCalls(),
       hooks,
       steering: gate,
+      runId: 'run-1',
     });
 
     expect(capturedSteering).toEqual({ paused: false, configVersion: 1, model: 'real-model' });
@@ -601,6 +672,7 @@ describe('runStep: AB-67 steering boundary read', () => {
       stopWhen: noToolCalls(),
       hooks,
       steering: gate,
+      runId: 'run-1',
     });
 
     const expected = { paused: false, configVersion: 1, model: 'real-model' };
@@ -818,20 +890,37 @@ describe('runStep: AB-221 steering.applied dispatch', () => {
   });
 
   it('never fires when the run has no runId to stamp appliedAtRunId with', async () => {
+    // AB-236 makes a steering-enabled `RunOptions` literal with no `runId`
+    // a compile error (see `types.ts`'s `RunOptions` doc comment) — a real
+    // caller can no longer construct this through `executeLoop`/
+    // `createActiveRun`. `runStep`'s own `deps.runId !== undefined` guard
+    // (see its "declared, tested gap" comment) stays as defense in depth
+    // regardless, since `StepDeps` itself does not carry the same
+    // type-level pairing — this drives `runStep` directly against a
+    // `StepDeps` built from a valid, type-checked `RunOptions` and then
+    // stripped of `runId`, the only way left to reach this shape.
     const recorder = createEventRecorder();
     const gate = createTestSteeringGate({ paused: false, configVersion: 1, model: 'real-model' });
-
-    await executeLoop(
-      {
+    const deps = {
+      ...buildStepDeps({
         generate: async () => textResponse('done'),
         toolbox: createTestToolbox([]),
         conversation: new Conversation(),
         stopWhen: noToolCalls(),
         steering: gate,
-        // no runId
-      },
-      recorder,
-    );
+        runId: 'run-1',
+      }),
+      runId: undefined,
+    };
+    const runState: RunState = {
+      steps: [],
+      totalUsage: { prompt: 0, completion: 0, total: 0 },
+      lastContent: '',
+      schemaAttempts: 0,
+      lastAppliedConfigVersion: 0,
+    };
+
+    await runStep(deps, runState, new Conversation(), 0, recorder);
 
     expect(steeringAppliedEvents(recorder)).toHaveLength(0);
   });
