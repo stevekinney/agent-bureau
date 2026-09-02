@@ -2005,6 +2005,11 @@ const result = await activeRun.result;
 
 **Exported types:** `DurableActiveRunOptions`, `DurableActiveRunContext`, `RecoveredRunHandle`, `StartDurableRunResultOptions`, `CheckpointStore`, `RunEngine`, `RegistryAgnosticEngine`, `CreateRunEngineOptions`, `RunEngineObservability`, `AgentRunWorkflowInput`, `AgentRunWorkflowResult`, `DurableRunDeps`, `RunCheckpoint`, `RunCursor`, `StepRecord`.
 
+> [!NOTE] Session-input admission types (AB-42, type-only)
+> `@lostgradient/operative/durable` also exports `SessionInputDeliveryMode`, `SessionInputPayload`, `SessionInputRecord`, `SessionInputAdmissionRequest`, `SessionInputReceipt`, `SessionInputConflict`, `SessionInputAdmissionOutcome`, `SessionInputState`, `SessionInputPromotion`, and `SessionInputFailure` — the request, receipt, and state-transition shapes AB-42's decision record fixes for session-input admission (`submitSessionInput`, illustratively named). These are types only: no runtime `submitSessionInput` implementation ships yet. See `documentation/operative-type-safe-api.md`'s "Session input admission" section for the full contract.
+
+**Session-input admission types:** `SessionInputDeliveryMode`, `SessionInputPayload`, `SessionInputRecord`, `SessionInputAdmissionRequest`, `SessionInputReceipt`, `SessionInputConflict`, `SessionInputAdmissionOutcome`, `SessionInputState`, `SessionInputPromotion`, `SessionInputFailure`.
+
 ---
 
 ### `@lostgradient/operative/test` — Test Utilities
