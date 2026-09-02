@@ -9,6 +9,27 @@ const AUTH_TOKEN = 'test-token';
 const authHeaders = { authorization: `Bearer ${AUTH_TOKEN}` };
 const sessionWriteHeaders = { ...authHeaders, 'content-type': 'application/json' };
 
+/** Minimal Bureau stub with no durable engine methods — only methods consumed by createGateway itself are provided. */
+function makeStubBureau(overrides: Partial<Record<string, unknown>>): Bureau {
+  return {
+    store: {},
+    kv: undefined,
+    ready: true,
+    dispose: () => undefined,
+    subscribeLiveFrames: () => () => undefined,
+    addEventListener: () => undefined,
+    removeEventListener: () => undefined,
+    setRequestAuthorityValidator: () => undefined,
+    getConfiguration: () => ({
+      provider: undefined,
+      maximumSteps: 10,
+      systemPrompt: undefined,
+      tools: [],
+    }),
+    ...overrides,
+  } as unknown as Bureau;
+}
+
 describe('sessions routes', () => {
   it('returns 503 when no persistence adapter is configured', async () => {
     const gateway = await createTestGateway({ authToken: AUTH_TOKEN });
@@ -223,27 +244,6 @@ describe('sessions routes', () => {
     // interface consumed by createGateway at construction time, with the target
     // method (signalSession / updateSession / querySession) resolving successfully.
 
-    /** Minimal Bureau stub with no durable engine methods — only methods consumed by createGateway itself are provided. */
-    function makeStubBureau(overrides: Partial<Record<string, unknown>>): Bureau {
-      return {
-        store: {},
-        kv: undefined,
-        ready: true,
-        dispose: () => undefined,
-        subscribeLiveFrames: () => () => undefined,
-        addEventListener: () => undefined,
-        removeEventListener: () => undefined,
-        setRequestAuthorityValidator: () => undefined,
-        getConfiguration: () => ({
-          provider: undefined,
-          maximumSteps: 10,
-          systemPrompt: undefined,
-          tools: [],
-        }),
-        ...overrides,
-      } as unknown as Bureau;
-    }
-
     it('POST /api/v1/sessions/:id/signal returns 202 when signal is delivered (not 501)', async () => {
       // Build a stub bureau where signalSession resolves (simulating a configured
       // durable engine that delivered the signal). Before the fix this route would
@@ -377,6 +377,425 @@ describe('sessions routes', () => {
       // undefined serialises as absent key in JSON — the important thing is 200, not 501.
       const body = await response.json();
       expect(body).not.toHaveProperty('error');
+    });
+  });
+
+  describe('POST /api/v1/sessions/:id/input (AB-196)', () => {
+    const minimalValidBody = {
+      deliveryMode: 'steer' as const,
+      payload: 'Hello from the caller',
+    };
+
+    it('returns 202 with the receipt for an "admitted" outcome', async () => {
+      const receipt = {
+        id: 'input-1',
+        sessionId: 'my-session',
+        deliveryMode: 'steer',
+        admissionSequence: 1,
+        revision: 1,
+        state: 'accepted',
+        admittedAt: '2026-09-02T00:00:00.000Z',
+      };
+      const stubBureau = makeStubBureau({
+        submitSessionInput: async () => ({ outcome: 'admitted', receipt }),
+      });
+      const gateway = await createTestGateway(stubBureau, { authToken: AUTH_TOKEN });
+
+      const response = await requestJSON(gateway, '/api/v1/sessions/my-session/input', {
+        method: 'POST',
+        headers: sessionWriteHeaders,
+        body: JSON.stringify(minimalValidBody),
+      });
+
+      expect(response.status).toBe(202);
+      const body = await response.json();
+      expect(body).toEqual({ outcome: 'admitted', receipt });
+    });
+
+    it('returns 202 with the receipt for a "replayed" outcome', async () => {
+      const receipt = {
+        id: 'input-1',
+        sessionId: 'my-session',
+        deliveryMode: 'steer',
+        admissionSequence: 1,
+        revision: 1,
+        state: 'accepted',
+        admittedAt: '2026-09-02T00:00:00.000Z',
+      };
+      const stubBureau = makeStubBureau({
+        submitSessionInput: async () => ({ outcome: 'replayed', receipt }),
+      });
+      const gateway = await createTestGateway(stubBureau, { authToken: AUTH_TOKEN });
+
+      const response = await requestJSON(gateway, '/api/v1/sessions/my-session/input', {
+        method: 'POST',
+        headers: sessionWriteHeaders,
+        body: JSON.stringify({ ...minimalValidBody, id: 'input-1' }),
+      });
+
+      expect(response.status).toBe(202);
+      const body = await response.json();
+      expect(body).toEqual({ outcome: 'replayed', receipt });
+    });
+
+    it('returns 409 with the conflict detail for a "conflict" outcome', async () => {
+      const conflict = {
+        id: 'input-1',
+        reason: 'id-owned-by-other-principal',
+        originalReceipt: {
+          id: 'input-1',
+          sessionId: 'my-session',
+          deliveryMode: 'steer',
+          admissionSequence: 1,
+          revision: 1,
+          state: 'accepted',
+          admittedAt: '2026-09-02T00:00:00.000Z',
+        },
+      };
+      const stubBureau = makeStubBureau({
+        submitSessionInput: async () => ({ outcome: 'conflict', conflict }),
+      });
+      const gateway = await createTestGateway(stubBureau, { authToken: AUTH_TOKEN });
+
+      const response = await requestJSON(gateway, '/api/v1/sessions/my-session/input', {
+        method: 'POST',
+        headers: sessionWriteHeaders,
+        body: JSON.stringify({ ...minimalValidBody, id: 'input-1' }),
+      });
+
+      expect(response.status).toBe(409);
+      const body = await response.json();
+      expect(body.error.code).toBe('CONFLICT');
+      expect(body.error.conflict).toEqual(conflict);
+    });
+
+    it('returns 404 for a "not-found" outcome', async () => {
+      const stubBureau = makeStubBureau({
+        submitSessionInput: async () => ({ outcome: 'not-found' }),
+      });
+      const gateway = await createTestGateway(stubBureau, { authToken: AUTH_TOKEN });
+
+      const response = await requestJSON(gateway, '/api/v1/sessions/my-session/input', {
+        method: 'POST',
+        headers: sessionWriteHeaders,
+        body: JSON.stringify(minimalValidBody),
+      });
+
+      expect(response.status).toBe(404);
+    });
+
+    it('returns 410 for a "session-terminal" outcome', async () => {
+      const stubBureau = makeStubBureau({
+        submitSessionInput: async () => ({
+          outcome: 'session-terminal',
+          sessionId: 'my-session',
+        }),
+      });
+      const gateway = await createTestGateway(stubBureau, { authToken: AUTH_TOKEN });
+
+      const response = await requestJSON(gateway, '/api/v1/sessions/my-session/input', {
+        method: 'POST',
+        headers: sessionWriteHeaders,
+        body: JSON.stringify(minimalValidBody),
+      });
+
+      expect(response.status).toBe(410);
+      const body = await response.json();
+      expect(body.error.code).toBe('SESSION_TERMINAL');
+    });
+
+    it('returns 501 for an "unsupported-capability" outcome', async () => {
+      const stubBureau = makeStubBureau({
+        submitSessionInput: async () => ({
+          outcome: 'unsupported-capability',
+          reason: 'durable-mailbox-unavailable',
+        }),
+      });
+      const gateway = await createTestGateway(stubBureau, { authToken: AUTH_TOKEN });
+
+      const response = await requestJSON(gateway, '/api/v1/sessions/my-session/input', {
+        method: 'POST',
+        headers: sessionWriteHeaders,
+        body: JSON.stringify(minimalValidBody),
+      });
+
+      expect(response.status).toBe(501);
+      const body = await response.json();
+      expect(body.error.code).toBe('UNSUPPORTED_CAPABILITY');
+      expect(body.error.message).toBe('durable-mailbox-unavailable');
+    });
+
+    it('returns 429 for a "backlog-exhausted" outcome', async () => {
+      const stubBureau = makeStubBureau({
+        submitSessionInput: async () => ({
+          outcome: 'backlog-exhausted',
+          scope: 'session',
+          limit: 64,
+        }),
+      });
+      const gateway = await createTestGateway(stubBureau, { authToken: AUTH_TOKEN });
+
+      const response = await requestJSON(gateway, '/api/v1/sessions/my-session/input', {
+        method: 'POST',
+        headers: sessionWriteHeaders,
+        body: JSON.stringify(minimalValidBody),
+      });
+
+      expect(response.status).toBe(429);
+      const body = await response.json();
+      expect(body.error.code).toBe('BACKLOG_EXHAUSTED');
+      expect(body.error.scope).toBe('session');
+      expect(body.error.limit).toBe(64);
+    });
+
+    it('returns 400 for an invalid JSON body, before submitSessionInput is called', async () => {
+      let called = false;
+      const stubBureau = makeStubBureau({
+        submitSessionInput: async () => {
+          called = true;
+          return { outcome: 'not-found' };
+        },
+      });
+      const gateway = await createTestGateway(stubBureau, { authToken: AUTH_TOKEN });
+
+      const response = await requestJSON(gateway, '/api/v1/sessions/my-session/input', {
+        method: 'POST',
+        headers: sessionWriteHeaders,
+        body: '{not-json',
+      });
+
+      expect(response.status).toBe(400);
+      expect(called).toBe(false);
+    });
+
+    it('returns 400 for a schema-invalid body (missing deliveryMode), before submitSessionInput is called', async () => {
+      let called = false;
+      const stubBureau = makeStubBureau({
+        submitSessionInput: async () => {
+          called = true;
+          return { outcome: 'not-found' };
+        },
+      });
+      const gateway = await createTestGateway(stubBureau, { authToken: AUTH_TOKEN });
+
+      const response = await requestJSON(gateway, '/api/v1/sessions/my-session/input', {
+        method: 'POST',
+        headers: sessionWriteHeaders,
+        body: JSON.stringify({ payload: 'Hello' }),
+      });
+
+      expect(response.status).toBe(400);
+      expect(called).toBe(false);
+    });
+
+    it('returns 400 for a non-ISO expiresAt, before submitSessionInput is called', async () => {
+      let called = false;
+      const stubBureau = makeStubBureau({
+        submitSessionInput: async () => {
+          called = true;
+          return { outcome: 'not-found' };
+        },
+      });
+      const gateway = await createTestGateway(stubBureau, { authToken: AUTH_TOKEN });
+
+      const response = await requestJSON(gateway, '/api/v1/sessions/my-session/input', {
+        method: 'POST',
+        headers: sessionWriteHeaders,
+        body: JSON.stringify({ deliveryMode: 'steer', payload: 'hi', expiresAt: 'never' }),
+      });
+
+      expect(response.status).toBe(400);
+      expect(called).toBe(false);
+    });
+
+    it('accepts an ISO-8601 expiresAt with a numeric offset', async () => {
+      let receivedRequest: unknown;
+      const stubBureau = makeStubBureau({
+        submitSessionInput: async (_sessionId: string, request: unknown) => {
+          receivedRequest = request;
+          return { outcome: 'not-found' };
+        },
+      });
+      const gateway = await createTestGateway(stubBureau, { authToken: AUTH_TOKEN });
+
+      const response = await requestJSON(gateway, '/api/v1/sessions/my-session/input', {
+        method: 'POST',
+        headers: sessionWriteHeaders,
+        body: JSON.stringify({
+          deliveryMode: 'steer',
+          payload: 'hi',
+          expiresAt: '2026-09-02T00:00:00+02:00',
+        }),
+      });
+
+      expect(response.status).toBe(404);
+      expect((receivedRequest as { expiresAt: string }).expiresAt).toBe(
+        '2026-09-02T00:00:00+02:00',
+      );
+    });
+
+    it('always resolves principal from the authenticated caller, ignoring a body-supplied principal', async () => {
+      let receivedRequest: unknown;
+      const stubBureau = makeStubBureau({
+        submitSessionInput: async (_sessionId: string, request: unknown) => {
+          receivedRequest = request;
+          return { outcome: 'not-found' };
+        },
+      });
+      const gateway = await createTestGateway(stubBureau, { authToken: AUTH_TOKEN });
+
+      const response = await requestJSON(gateway, '/api/v1/sessions/my-session/input', {
+        method: 'POST',
+        headers: sessionWriteHeaders,
+        body: JSON.stringify({ ...minimalValidBody, principal: 'attacker-supplied-principal' }),
+      });
+
+      expect(response.status).toBe(404);
+      expect(receivedRequest).toMatchObject({
+        deliveryMode: 'steer',
+        payload: minimalValidBody.payload,
+      });
+      // `sessionWriteHeaders` authenticates via the static bearer token, which
+      // `resolvePrincipal` (`middleware/authentication.ts:60`) always resolves
+      // to the literal string `'static-token'` — assert equality, not just
+      // inequality with the spoofed value, so a future regression that swaps
+      // in some other wrong-but-not-attacker-supplied principal still fails.
+      expect((receivedRequest as { principal: string }).principal).toBe('static-token');
+    });
+
+    it('admits a text/image/document payload array (the three UserAdmissibleContent variants)', async () => {
+      let receivedRequest: unknown;
+      const receipt = {
+        id: 'input-1',
+        sessionId: 'my-session',
+        deliveryMode: 'queue',
+        admissionSequence: 1,
+        revision: 1,
+        state: 'queued',
+        admittedAt: '2026-09-02T00:00:00.000Z',
+      };
+      const stubBureau = makeStubBureau({
+        submitSessionInput: async (_sessionId: string, request: unknown) => {
+          receivedRequest = request;
+          return { outcome: 'admitted', receipt };
+        },
+      });
+      const gateway = await createTestGateway(stubBureau, { authToken: AUTH_TOKEN });
+
+      const payload = [
+        { type: 'text', text: 'Look at this' },
+        { type: 'image', url: 'https://example.com/cat.png', mimeType: 'image/png' },
+        {
+          type: 'document',
+          name: 'report.pdf',
+          mimeType: 'application/pdf',
+          source: { kind: 'reference', uri: 'https://example.com/report.pdf' },
+        },
+        {
+          type: 'document',
+          name: 'inline.txt',
+          mimeType: 'text/plain',
+          source: { kind: 'base64', data: 'aGVsbG8=' },
+        },
+      ];
+
+      const response = await requestJSON(gateway, '/api/v1/sessions/my-session/input', {
+        method: 'POST',
+        headers: sessionWriteHeaders,
+        body: JSON.stringify({ deliveryMode: 'queue', payload }),
+      });
+
+      expect(response.status).toBe(202);
+      expect((receivedRequest as { payload: unknown }).payload).toEqual(payload);
+    });
+
+    // AB-42's coordinator amendments (2026-09-02), applied by AB-202: the six
+    // provider-generated/response-only `MultiModalContent` variants are
+    // excluded from `UserAdmissibleContent` at the type level, and
+    // "enforced at runtime by the gateway request schema (AB-196), which
+    // rejects them with 400" (documentation/operative-type-safe-api.md's
+    // "Session input admission" section). Table-driven so every excluded
+    // discriminant is proven rejected, not just one representative.
+    const excludedContentBlocks: Array<{ label: string; block: Record<string, unknown> }> = [
+      {
+        label: 'thinking',
+        block: { type: 'thinking', thinking: 'secret reasoning', signature: 'sig' },
+      },
+      {
+        label: 'redacted_thinking',
+        block: { type: 'redacted_thinking', data: 'opaque' },
+      },
+      {
+        label: 'server_tool_use',
+        block: { type: 'server_tool_use', id: 'tool-1', name: 'web_search', input: {} },
+      },
+      {
+        label: 'web_search_tool_result',
+        block: { type: 'web_search_tool_result', tool_use_id: 'tool-1', content: [] },
+      },
+      // All four `ServerToolResultType` discriminants (packages/conversationalist/src/multi-modal.ts)
+      // are covered individually — the allowlist is enforced purely by `type`
+      // discrimination, so each one needs its own failing case to guard
+      // against a future schema change accidentally admitting one of them.
+      {
+        label: 'code_execution_tool_result',
+        block: { type: 'code_execution_tool_result', tool_use_id: 'tool-1', content: {} },
+      },
+      {
+        label: 'bash_code_execution_tool_result',
+        block: { type: 'bash_code_execution_tool_result', tool_use_id: 'tool-1', content: {} },
+      },
+      {
+        label: 'text_editor_code_execution_tool_result',
+        block: {
+          type: 'text_editor_code_execution_tool_result',
+          tool_use_id: 'tool-1',
+          content: {},
+        },
+      },
+      {
+        label: 'web_fetch_tool_result',
+        block: { type: 'web_fetch_tool_result', tool_use_id: 'tool-1', content: {} },
+      },
+      {
+        label: 'container_upload',
+        block: { type: 'container_upload', file_id: 'file-1' },
+      },
+    ];
+
+    for (const { label, block } of excludedContentBlocks) {
+      it(`rejects a "${label}" content block with 400 (excluded by AB-42/AB-202)`, async () => {
+        const stubBureau = makeStubBureau({
+          submitSessionInput: async () => ({ outcome: 'admitted', receipt: {} }),
+        });
+        const gateway = await createTestGateway(stubBureau, { authToken: AUTH_TOKEN });
+
+        const response = await requestJSON(gateway, '/api/v1/sessions/my-session/input', {
+          method: 'POST',
+          headers: sessionWriteHeaders,
+          body: JSON.stringify({ deliveryMode: 'steer', payload: [block] }),
+        });
+
+        expect(response.status).toBe(400);
+      });
+    }
+
+    it('rejects a text content block carrying citations with 400 (structurally forbidden)', async () => {
+      const stubBureau = makeStubBureau({
+        submitSessionInput: async () => ({ outcome: 'admitted', receipt: {} }),
+      });
+      const gateway = await createTestGateway(stubBureau, { authToken: AUTH_TOKEN });
+
+      const response = await requestJSON(gateway, '/api/v1/sessions/my-session/input', {
+        method: 'POST',
+        headers: sessionWriteHeaders,
+        body: JSON.stringify({
+          deliveryMode: 'steer',
+          payload: [{ type: 'text', text: 'hi', citations: [{ url: 'https://example.com' }] }],
+        }),
+      });
+
+      expect(response.status).toBe(400);
     });
   });
 

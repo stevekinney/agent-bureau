@@ -1,8 +1,95 @@
+import type {
+  SessionInputDeliveryMode,
+  UserAdmissibleContent,
+} from '@lostgradient/operative/durable';
 import { BureauError } from 'bureau';
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
+import { z } from 'zod';
 
-import type { Bureau } from '../types';
+import { resolvePrincipal } from '../middleware/authentication';
+import type { Bureau, SessionInputAdmissionOutcome, SessionInputAdmissionRequest } from '../types';
+
+/**
+ * AB-196 — runtime enforcement of the AB-42/AB-202 payload allowlist:
+ * `TextContent` (citations forbidden — structurally excluded, not merely
+ * dropped, matching `UserAdmissibleContent`'s `citations?: never`),
+ * `ImageContent`, and `DocumentContent`. Every other `MultiModalContent`
+ * variant (`thinking`, `redacted_thinking`, `server_tool_use`,
+ * `web_search_tool_result`, the code-execution/web-fetch result kinds,
+ * `container_upload`) fails to match any branch of this discriminated union
+ * and is rejected with 400 before `submitSessionInput` is ever called. See
+ * `documentation/operative-type-safe-api.md`'s "Session input admission"
+ * section, "User-admissible payload only".
+ */
+const userAdmissibleContentSchema = z.discriminatedUnion('type', [
+  z
+    .object({
+      type: z.literal('text'),
+      text: z.string(),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('image'),
+      url: z.string().url(),
+      mimeType: z.string().optional(),
+      text: z.string().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('document'),
+      name: z.string().min(1),
+      mimeType: z.string().min(1),
+      source: z.discriminatedUnion('kind', [
+        z
+          .object({
+            kind: z.literal('base64'),
+            data: z.string().min(1),
+          })
+          .strict(),
+        z
+          .object({
+            kind: z.literal('reference'),
+            uri: z.string().min(1),
+          })
+          .strict(),
+      ]),
+    })
+    .strict(),
+]) satisfies z.ZodType<UserAdmissibleContent>;
+
+const sessionInputDeliveryModeSchema = z.enum([
+  'steer',
+  'queue',
+]) satisfies z.ZodType<SessionInputDeliveryMode>;
+
+/**
+ * AB-196 — `POST /:id/input`'s body schema: `SessionInputAdmissionRequest`
+ * minus `principal`. Deliberately not `.strict()`: a body-supplied
+ * `principal` (or any other unknown field) is accepted by the schema and
+ * then silently stripped by plain `z.object` parsing, never reaching
+ * `SessionInputAdmissionRequest` — the route always sets `principal` from
+ * `resolvePrincipal(context)` afterward, matching `hooks.ts:152`'s
+ * convention. This is what the acceptance criterion means by "ignored/
+ * overwritten, never trusted": a spoofed `principal` in the body has no
+ * effect on the resolved caller identity, rather than failing the request.
+ */
+const sessionInputAdmissionRequestBodySchema = z.object({
+  id: z.string().min(1).optional(),
+  deliveryMode: sessionInputDeliveryModeSchema,
+  payload: z.union([z.string(), z.array(userAdmissibleContentSchema)]),
+  // `SessionInputRecord.expiresAt` / `SessionInputAdmissionRequest.expiresAt`
+  // are documented `// ISO` — validate that shape at the boundary rather than
+  // accepting any non-empty string, so a malformed deadline (e.g. `'never'`)
+  // is rejected with 400 instead of reaching `submitSessionInput` and either
+  // creating a record whose expiry can't be evaluated or being silently
+  // misinterpreted downstream. `offset: true` accepts both a trailing `Z`
+  // and an explicit numeric UTC offset.
+  expiresAt: z.iso.datetime({ offset: true }).optional(),
+  supersedes: z.string().min(1).optional(),
+}) satisfies z.ZodType<Omit<SessionInputAdmissionRequest, 'principal'>>;
 
 function parseNonNegativeInteger(value: string | undefined, name: string, allowZero: boolean) {
   if (value === undefined) return undefined;
@@ -194,6 +281,97 @@ export function createSessionsRoutes(bureau: Bureau) {
           );
       }
       throw error;
+    }
+  });
+
+  /**
+   * POST /sessions/:id/input — admit a caller's session input (AB-42/AB-194,
+   * gateway wiring per AB-196). Validates the body against
+   * {@link sessionInputAdmissionRequestBodySchema} first — a schema-validation
+   * failure returns 400 before `bureau.submitSessionInput` is ever called.
+   * `principal` always comes from `resolvePrincipal(context)`
+   * (`hooks.ts:152`'s convention); a body-supplied `principal` is never
+   * trusted, matching the schema comment above.
+   *
+   * Maps every `SessionInputAdmissionOutcome` variant to a fixed HTTP
+   * status: `admitted`/`replayed` → 202, `conflict` → 409, `not-found` →
+   * 404, `session-terminal` → 410, `unsupported-capability` → 501 (matching
+   * the existing 501 convention at `sessions.ts:104-105`/`:139-140`/
+   * `:179-180`), `backlog-exhausted` → 429.
+   */
+  app.post('/:id/input', async (context) => {
+    const sessionId = context.req.param('id');
+
+    let rawBody: unknown;
+    try {
+      rawBody = await context.req.json();
+    } catch {
+      throw new HTTPException(400, { message: 'Invalid JSON body' });
+    }
+
+    const parsed = sessionInputAdmissionRequestBodySchema.safeParse(rawBody);
+    if (!parsed.success) {
+      const fieldErrors = parsed.error.flatten().fieldErrors;
+      const message = Object.entries(fieldErrors)
+        .map(([field, errors]) => `${field}: ${errors?.join(', ') ?? 'invalid'}`)
+        .join('; ');
+      throw new HTTPException(400, { message: message || 'Invalid request body' });
+    }
+
+    const request: SessionInputAdmissionRequest = {
+      ...parsed.data,
+      principal: resolvePrincipal(context),
+    };
+
+    const outcome: SessionInputAdmissionOutcome = await bureau.submitSessionInput(
+      sessionId,
+      request,
+    );
+
+    switch (outcome.outcome) {
+      case 'admitted':
+      case 'replayed':
+        return context.json({ outcome: outcome.outcome, receipt: outcome.receipt }, 202);
+      case 'conflict':
+        return context.json(
+          {
+            error: {
+              code: 'CONFLICT',
+              message: `Session input conflict: ${outcome.conflict.reason}`,
+              conflict: outcome.conflict,
+            },
+          },
+          409,
+        );
+      case 'not-found':
+        throw new HTTPException(404, { message: 'Session not found' });
+      case 'session-terminal':
+        return context.json(
+          {
+            error: {
+              code: 'SESSION_TERMINAL',
+              message: `Session "${outcome.sessionId}" is terminal`,
+            },
+          },
+          410,
+        );
+      case 'unsupported-capability':
+        return context.json(
+          { error: { code: 'UNSUPPORTED_CAPABILITY', message: outcome.reason } },
+          501,
+        );
+      case 'backlog-exhausted':
+        return context.json(
+          {
+            error: {
+              code: 'BACKLOG_EXHAUSTED',
+              message: `Backlog limit of ${outcome.limit} exhausted for scope "${outcome.scope}"`,
+              scope: outcome.scope,
+              limit: outcome.limit,
+            },
+          },
+          429,
+        );
     }
   });
 

@@ -1,3 +1,7 @@
+import type {
+  SessionInputAdmissionOutcome,
+  SessionInputAdmissionRequest,
+} from '@lostgradient/operative/durable';
 import type { Store } from '@lostgradient/operative/store';
 import type { EvaluationReportSummary } from 'evaluation';
 import type { Hono } from 'hono';
@@ -33,6 +37,7 @@ export type {
 } from 'bureau';
 export { DEFAULT_MAXIMUM_STEPS } from 'bureau';
 export type { EvaluationReportSummary } from 'evaluation';
+export type { SessionInputAdmissionOutcome, SessionInputAdmissionRequest };
 
 // ── Gateway (HTTP door — door-only config, no brain options) ────────
 
