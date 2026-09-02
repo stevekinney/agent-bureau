@@ -149,11 +149,17 @@ export function matchesAnyGlob(relativePath: string, globs: readonly string[]): 
  * filename straight to `Linter.verify`) to a POSIX path relative to the repository root.
  */
 export function toRepoRelativePosixPath(filename: string, repoRoot: string): string {
-  const normalizedRoot = repoRoot.endsWith('/') ? repoRoot : `${repoRoot}/`;
-  const relative = filename.startsWith(normalizedRoot)
-    ? filename.slice(normalizedRoot.length)
-    : filename;
-  return relative.split('\\').join('/');
+  // Normalize separators BEFORE the prefix comparison, not after: a Windows filename like
+  // `C:\repo\packages\...` compared against a POSIX-converted `C:\repo/` (mixed separators)
+  // never matches the prefix, and the caller's later separator conversion happens too late to
+  // fix it. Converting both operands up front keeps the comparison — and everything after it —
+  // separator-agnostic.
+  const posixFilename = filename.split('\\').join('/');
+  const posixRepoRoot = repoRoot.split('\\').join('/');
+  const normalizedRoot = posixRepoRoot.endsWith('/') ? posixRepoRoot : `${posixRepoRoot}/`;
+  return posixFilename.startsWith(normalizedRoot)
+    ? posixFilename.slice(normalizedRoot.length)
+    : posixFilename;
 }
 
 function exemptionGlobs(manifest: DeterminismManifest): string[] {
@@ -180,8 +186,32 @@ function isTransportMutationScopeFile(
   );
 }
 
-/** Real-runtime call sites this rule flags, matched by AST shape rather than source text. */
+/**
+ * Static property name of a MemberExpression, dot or bracket form: `x.fetch` and `x['fetch']`
+ * both resolve to `'fetch'`; a non-literal computed property (`x[someVariable]`) resolves to
+ * `undefined` since its actual value isn't known statically.
+ */
+function staticMemberPropertyName(
+  member: Rule.Node & { type: 'MemberExpression' },
+): string | undefined {
+  if (!member.computed) {
+    return member.property.type === 'Identifier' ? member.property.name : undefined;
+  }
+  return member.property.type === 'Literal' && typeof member.property.value === 'string'
+    ? member.property.value
+    : undefined;
+}
+
+/**
+ * Real-runtime call sites this rule flags, matched by AST shape rather than source text. Every
+ * candidate identifier is additionally required to resolve to the ambient global (via ESLint's
+ * own `sourceCode.isGlobalReference`, the same check `no-implied-eval` and friends use) — code
+ * that destructures an injected runtime (`const { setTimeout } = runtime; setTimeout(...)`) or
+ * shadows `Date`/`performance`/`crypto`/`Math` with a local binding is exactly the injection
+ * pattern this gate exists to encourage, and must not be flagged for using it.
+ */
 function realRuntimeCallLabel(
+  context: Rule.RuleContext,
   node: (Rule.Node & { type: 'CallExpression' | 'NewExpression' }) | undefined,
 ): string | undefined {
   if (!node) return undefined;
@@ -190,7 +220,8 @@ function realRuntimeCallLabel(
     if (
       node.callee.type === 'Identifier' &&
       node.callee.name === 'Date' &&
-      node.arguments.length === 0
+      node.arguments.length === 0 &&
+      context.sourceCode.isGlobalReference(node.callee)
     ) {
       return 'new Date()';
     }
@@ -200,19 +231,21 @@ function realRuntimeCallLabel(
   const callee = node.callee;
   if (
     callee.type === 'Identifier' &&
-    (callee.name === 'setTimeout' || callee.name === 'setInterval')
+    (callee.name === 'setTimeout' || callee.name === 'setInterval') &&
+    context.sourceCode.isGlobalReference(callee)
   ) {
     return `${callee.name}(`;
   }
 
-  if (
-    callee.type === 'MemberExpression' &&
-    !callee.computed &&
-    callee.property.type === 'Identifier'
-  ) {
+  if (callee.type === 'MemberExpression') {
+    const propertyName = staticMemberPropertyName(callee);
     const object = callee.object;
-    if (object.type === 'Identifier') {
-      const pair = `${object.name}.${callee.property.name}`;
+    if (
+      propertyName &&
+      object.type === 'Identifier' &&
+      context.sourceCode.isGlobalReference(object)
+    ) {
+      const pair = `${object.name}.${propertyName}`;
       if (
         pair === 'Date.now' ||
         pair === 'performance.now' ||
@@ -247,7 +280,7 @@ export function createNoRealRuntimeCallRule(
       function reportIfRealRuntimeCall(
         node: Rule.Node & { type: 'CallExpression' | 'NewExpression' },
       ) {
-        const label = realRuntimeCallLabel(node);
+        const label = realRuntimeCallLabel(context, node);
         if (!label) return;
         context.report({
           node,
@@ -284,24 +317,29 @@ export function createNoGlobalTransportMutationRule(
         AssignmentExpression(node) {
           if (node.operator !== '=') return;
           const left = node.left;
-          if (
-            left.type !== 'MemberExpression' ||
-            left.computed ||
-            left.property.type !== 'Identifier'
-          ) {
+          if (left.type !== 'MemberExpression') return;
+
+          // Dot form (`x.fetch`) and bracket-with-string-literal form (`x['fetch']`) both count;
+          // a non-literal computed property (`x[someVariable]`) can't be resolved statically.
+          const propertyName = staticMemberPropertyName(left);
+          if (!propertyName || !['fetch', 'WebSocket', 'EventSource'].includes(propertyName)) {
             return;
           }
-          if (!['fetch', 'WebSocket', 'EventSource'].includes(left.property.name)) return;
+
+          // `global`/`globalThis` must resolve to the ambient process global, not a local
+          // parameter or variable of the same name (e.g. `function install(global: Env) { ... }`)
+          // — otherwise this rule would reject valid injected-environment code.
           if (
             left.object.type !== 'Identifier' ||
-            (left.object.name !== 'globalThis' && left.object.name !== 'global')
+            (left.object.name !== 'globalThis' && left.object.name !== 'global') ||
+            !context.sourceCode.isGlobalReference(left.object)
           ) {
             return;
           }
 
           context.report({
             node,
-            message: `Direct assignment to ${left.object.name}.${left.property.name} mutates process-global transport state (${relativePath}). ${DETERMINISM_ACTION_SENTENCE}`,
+            message: `Direct assignment to ${left.object.name}.${propertyName} mutates process-global transport state (${relativePath}). ${DETERMINISM_ACTION_SENTENCE}`,
           });
         },
       };
@@ -345,14 +383,19 @@ export function createDeterminismConfig(
   ];
 }
 
+/** Rejects `""`/whitespace-only strings too — an empty `reason` or `owningIssue` is not a real one. */
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
 function isDeterminismManifestExemption(value: unknown): value is DeterminismManifestExemption {
   if (typeof value !== 'object' || value === null) return false;
   const record = value as Record<string, unknown>;
   return (
-    typeof record.path === 'string' &&
-    typeof record.reason === 'string' &&
-    typeof record.owner === 'string' &&
-    typeof record.owningIssue === 'string'
+    isNonEmptyString(record.path) &&
+    isNonEmptyString(record.reason) &&
+    isNonEmptyString(record.owner) &&
+    isNonEmptyString(record.owningIssue)
   );
 }
 
@@ -366,10 +409,10 @@ export function parseDeterminismManifest(value: unknown): DeterminismManifest {
   const { deterministicDirectories, realRuntimeExemptions } = record;
   if (
     !Array.isArray(deterministicDirectories) ||
-    !deterministicDirectories.every((entry): entry is string => typeof entry === 'string')
+    !deterministicDirectories.every(isNonEmptyString)
   ) {
     throw new TypeError(
-      'determinism-manifest.json "deterministicDirectories" must be a string array',
+      'determinism-manifest.json "deterministicDirectories" must be an array of non-empty strings',
     );
   }
   if (
@@ -377,7 +420,7 @@ export function parseDeterminismManifest(value: unknown): DeterminismManifest {
     !realRuntimeExemptions.every(isDeterminismManifestExemption)
   ) {
     throw new TypeError(
-      'determinism-manifest.json "realRuntimeExemptions" must be an array of {path, reason, owner, owningIssue}',
+      'determinism-manifest.json "realRuntimeExemptions" must be an array of {path, reason, owner, owningIssue}, each a non-empty string',
     );
   }
 

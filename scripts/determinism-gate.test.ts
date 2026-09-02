@@ -7,9 +7,15 @@
  */
 import { describe, expect, test } from 'bun:test';
 import { Linter } from 'eslint';
+import globals from 'globals';
 import tseslint from 'typescript-eslint';
 
-import { createDeterminismConfig, type DeterminismManifest } from '../eslint.config.base.ts';
+import {
+  createDeterminismConfig,
+  parseDeterminismManifest,
+  toRepoRelativePosixPath,
+  type DeterminismManifest,
+} from '../eslint.config.base.ts';
 
 const FIXTURE_REPO_ROOT = '/repo';
 
@@ -39,6 +45,10 @@ function lintFixture(source: string, absoluteFilename: string): readonly string[
           parser: tseslint.parser,
           ecmaVersion: 'latest' as const,
           sourceType: 'module' as const,
+          // `setTimeout`/`crypto`/`performance` etc. are host globals, not ECMAScript builtins —
+          // without this, `isGlobalReference` sees them as unresolved-but-unconfigured and the
+          // rules never flag them. Matches the real baseConfig's own globals.
+          globals: { ...globals.node, ...globals.browser },
         },
         linterOptions: { noInlineConfig: true },
       },
@@ -53,6 +63,14 @@ function lintFixture(source: string, absoluteFilename: string): readonly string[
 
 async function readFixture(name: string): Promise<string> {
   return Bun.file(new URL(`./fixtures/determinism/${name}`, import.meta.url)).text();
+}
+
+function lintSourceInDeterministicDirectory(source: string): readonly string[] {
+  return lintFixture(source, `${FIXTURE_REPO_ROOT}/packages/fixture-package/src/test/x.ts`);
+}
+
+function lintSourceUnderPackages(source: string): readonly string[] {
+  return lintFixture(source, `${FIXTURE_REPO_ROOT}/packages/fixture-package/src/ui/x.ts`);
 }
 
 describe('determinism/no-real-runtime-call', () => {
@@ -101,5 +119,93 @@ describe('determinism/no-global-transport-mutation', () => {
       `${FIXTURE_REPO_ROOT}/packages/fixture-package/src/test/exempted/global-transport-assignment-under-exempted-path.ts`,
     );
     expect(ruleIds).toEqual([]);
+  });
+
+  test('flags a computed-property assignment (globalThis["fetch"] = ...) the same as dot notation', () => {
+    const ruleIds = lintSourceUnderPackages("globalThis['fetch'] = fake;\n");
+    expect(ruleIds).toEqual(['determinism/no-global-transport-mutation']);
+  });
+
+  test('does not flag a non-literal computed property (cannot be resolved statically)', () => {
+    const ruleIds = lintSourceUnderPackages('globalThis[propertyName] = fake;\n');
+    expect(ruleIds).toEqual([]);
+  });
+
+  test('does not flag a local parameter shadowing the name "global"', () => {
+    const ruleIds = lintSourceUnderPackages(
+      'function install(global) {\n  global.fetch = fake;\n}\n',
+    );
+    expect(ruleIds).toEqual([]);
+  });
+});
+
+describe('scope-aware detection (regression coverage for injected-runtime false positives)', () => {
+  test('does not flag setTimeout destructured from an injected runtime', () => {
+    const ruleIds = lintSourceInDeterministicDirectory(
+      'function scheduleRetry(callback) {\n  const { setTimeout } = runtime;\n  setTimeout(callback, 1);\n}\n',
+    );
+    expect(ruleIds).toEqual([]);
+  });
+
+  test('does not flag Date.now() when Date is shadowed by a local binding', () => {
+    const ruleIds = lintSourceInDeterministicDirectory(
+      'function stamp(Date) {\n  return Date.now();\n}\n',
+    );
+    expect(ruleIds).toEqual([]);
+  });
+
+  test('still flags the real global setTimeout when nothing shadows it', () => {
+    const ruleIds = lintSourceInDeterministicDirectory(
+      'function scheduleRetry(callback) {\n  setTimeout(callback, 1);\n}\n',
+    );
+    expect(ruleIds).toEqual(['determinism/no-real-runtime-call']);
+  });
+});
+
+describe('parseDeterminismManifest', () => {
+  test('rejects an exemption with an empty reason or owningIssue', () => {
+    expect(() =>
+      parseDeterminismManifest({
+        deterministicDirectories: ['packages/*/src/test/**'],
+        realRuntimeExemptions: [
+          { path: 'packages/x/**', reason: '', owner: 'team', owningIssue: '' },
+        ],
+      }),
+    ).toThrow(/non-empty string/);
+  });
+
+  test('rejects an exemption with a whitespace-only reason', () => {
+    expect(() =>
+      parseDeterminismManifest({
+        deterministicDirectories: ['packages/*/src/test/**'],
+        realRuntimeExemptions: [
+          { path: 'packages/x/**', reason: '   ', owner: 'team', owningIssue: 'AB-1' },
+        ],
+      }),
+    ).toThrow(/non-empty string/);
+  });
+
+  test('accepts a well-formed manifest', () => {
+    const manifest = parseDeterminismManifest({
+      deterministicDirectories: ['packages/*/src/test/**'],
+      realRuntimeExemptions: [
+        { path: 'packages/x/**', reason: 'real reason', owner: 'team', owningIssue: 'AB-1' },
+      ],
+    });
+    expect(manifest.deterministicDirectories).toEqual(['packages/*/src/test/**']);
+  });
+});
+
+describe('toRepoRelativePosixPath', () => {
+  test('normalizes a Windows-style filename and repo root before removing the prefix', () => {
+    expect(
+      toRepoRelativePosixPath('C:\\repo\\packages\\memory\\src\\test\\index.ts', 'C:\\repo'),
+    ).toBe('packages/memory/src/test/index.ts');
+  });
+
+  test('handles a POSIX filename and repo root unchanged', () => {
+    expect(toRepoRelativePosixPath('/repo/packages/memory/src/test/index.ts', '/repo')).toBe(
+      'packages/memory/src/test/index.ts',
+    );
   });
 });

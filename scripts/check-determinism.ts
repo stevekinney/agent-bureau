@@ -22,6 +22,7 @@
 import { resolve } from 'node:path';
 
 import { ESLint } from 'eslint';
+import globals from 'globals';
 import tseslint from 'typescript-eslint';
 
 import { createDeterminismConfig, determinismManifest } from '../eslint.config.base.ts';
@@ -66,11 +67,19 @@ function createDeterminismEslint(repoRoot: string): ESLint {
     overrideConfig: [
       { ignores: ['**/{dist,build,coverage,.bun}/**', '**/node_modules/**'] },
       {
-        files: ['packages/**/*.{ts,tsx}'],
+        files: ['packages/**/*.{js,jsx,cjs,mjs,ts,tsx}'],
         languageOptions: {
           parser: tseslint.parser,
           ecmaVersion: 'latest' as const,
           sourceType: 'module' as const,
+          // `setTimeout`/`crypto`/`performance`/`fetch`/`WebSocket`/`EventSource` are HOST
+          // globals, not ECMAScript builtins — unlike `Date`/`Math`/`globalThis`, ESLint's scope
+          // analysis does NOT recognize them as the ambient global without this. Without it, the
+          // determinism rules' `isGlobalReference` checks (added to stop flagging a destructured
+          // injected runtime — see eslint.config.base.ts) would see every one of these as an
+          // unconfigured, unresolved reference and silently never flag them at all. Matches the
+          // globals baseConfig itself configures, since this run must behave identically.
+          globals: { ...globals.node, ...globals.browser },
         },
         linterOptions: { noInlineConfig: true },
       },
@@ -82,7 +91,7 @@ function createDeterminismEslint(repoRoot: string): ESLint {
 /** End-to-end check for a repository root: lints every `packages/**\/*.{ts,tsx}` file and returns every violation found. */
 export async function runDeterminismGate(repoRoot: string): Promise<DeterminismViolation[]> {
   const eslint = createDeterminismEslint(repoRoot);
-  const results = await eslint.lintFiles(['packages/**/*.{ts,tsx}']);
+  const results = await eslint.lintFiles(['packages/**/*.{js,jsx,cjs,mjs,ts,tsx}']);
   return extractDeterminismViolations(results);
 }
 
