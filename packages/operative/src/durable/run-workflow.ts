@@ -501,18 +501,25 @@ export function createRunWorkflow(
             };
             const stepResult = yield* ctx.memo(`step-${stepIndex}`, async () => {
               const deps = runDepsFrom(ctx.services);
-              // AB-44 — clear the run-scoped `pendingHumanWait` slot BEFORE this
-              // step runs, in this no-`yield*` region where `deps` is live. The
-              // slot is sticky (`requestHumanInput` only ever sets it; nothing
-              // clears it once its signal is delivered), so without this reset a
-              // step that does NOT call `requestHumanInput` would still report the
-              // PRIOR step's park request as its own — every step after a park
-              // would see it as freshly set and park again. Clearing here means
-              // this step's memoized `pendingHumanWait` reflects only what THIS
-              // step's own tool call (if any) set; cross-step accumulation still
-              // happens via the hoisted `pendingHumanWait` local outside the loop
-              // (last-write-wins), which is unaffected by this per-step reset.
+              // AB-44 — clear the run-scoped `pendingHumanWait`/`pendingWakeup`
+              // slots BEFORE this step runs, in this no-`yield*` region where
+              // `deps` is live. Both slots are sticky (`requestHumanInput`/
+              // `scheduleWakeup` only ever SET them; nothing clears either once
+              // its park is consumed), so without this reset a step that does
+              // NOT call the corresponding tool would still report a PRIOR
+              // step's park request as its own. Before AB-44 this never
+              // mattered — nothing ran after a park — but now a delivered
+              // signal continues the run with more steps, so a stale slot from
+              // an earlier step (e.g. a `scheduleWakeup` call two parks ago)
+              // could otherwise resurface as this step's own memoized result
+              // and re-trigger a park the current step never requested.
+              // Clearing here means this step's memoized `pendingHumanWait`/
+              // `pendingWakeup` reflect only what THIS step's own tool call (if
+              // any) set; cross-step accumulation still happens via the
+              // hoisted locals outside the loop (last-write-wins), which are
+              // unaffected by this per-step reset.
               deps.pendingHumanWait = undefined;
+              deps.pendingWakeup = undefined;
               const conversation = Conversation.from(snapshot);
               // Build StepDeps from the run's options (one code path with executeLoop),
               // overriding only the toolbox with the per-run (variance-widened) one
@@ -814,7 +821,24 @@ export function createRunWorkflow(
             pendingHumanWait = undefined;
             lastHumanWaitSignal = signalName;
 
-            const continuationInput = buildSignalContinuationInput(signalName, payload);
+            // `deliveredAt` must be a plain, checkpointed value — reading
+            // `Date.now()`/`new Date().toISOString()` directly in workflow-body
+            // code would be non-deterministic across replay. `ctx.memo` here
+            // commits it once and short-circuits to the same value on replay.
+            // Keyed by `cursor.step`: a re-park needs at least one more
+            // committed step first (this loop's own memo-per-step keys already
+            // rely on the same uniqueness), so each park cycle gets its own key.
+            const deliveredAt = yield* ctx.memo(
+              `signal-delivered-at-${cursor.step}`,
+              // eslint-disable-next-line @typescript-eslint/require-await -- ctx.memo requires an async callback; this one has no await of its own.
+              async () => new Date().toISOString(),
+            );
+
+            const continuationInput = buildSignalContinuationInput(
+              signalName,
+              payload,
+              deliveredAt,
+            );
             const renderedMessage = renderSignalContinuation(continuationInput);
 
             const resumedConversation = Conversation.from(snapshot);

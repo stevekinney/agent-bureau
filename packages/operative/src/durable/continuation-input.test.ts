@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 
 import {
+  buildSignalContinuationInput,
   isDeniedSignalPayload,
   renderSignalContinuation,
   type SignalContinuationInput,
@@ -28,6 +29,7 @@ describe('renderSignalContinuation', () => {
       kind: 'signal',
       signalName: 'human-response',
       payload: { approved: true },
+      deliveredAt: '2026-09-02T10:00:00.000Z',
       denied: false,
     };
     expect(renderSignalContinuation(input)).toBe('[signal:human-response] {"approved":true}');
@@ -38,6 +40,7 @@ describe('renderSignalContinuation', () => {
       kind: 'signal',
       signalName: 'human-response',
       payload: { __abDenied: true, reason: 'budget exceeded' },
+      deliveredAt: '2026-09-02T10:00:00.000Z',
       denied: true,
       denialReason: 'budget exceeded',
     };
@@ -49,6 +52,7 @@ describe('renderSignalContinuation', () => {
       kind: 'signal',
       signalName: 'human-response',
       payload: { __abDenied: true },
+      deliveredAt: '2026-09-02T10:00:00.000Z',
       denied: true,
     };
     expect(renderSignalContinuation(input)).toBe('[signal:human-response] denied');
@@ -61,6 +65,7 @@ describe('renderSignalContinuation', () => {
       kind: 'signal',
       signalName: 'human-response',
       payload: circular,
+      deliveredAt: '2026-09-02T10:00:00.000Z',
       denied: false,
     };
     expect(renderSignalContinuation(input)).toBe(
@@ -73,6 +78,7 @@ describe('renderSignalContinuation', () => {
       kind: 'signal',
       signalName: 'ping',
       payload: undefined,
+      deliveredAt: '2026-09-02T10:00:00.000Z',
       denied: false,
     };
     // JSON.stringify(undefined) is the JS value `undefined`, not a string —
@@ -85,8 +91,42 @@ describe('renderSignalContinuation', () => {
       kind: 'signal',
       signalName: 'ping',
       payload: 10n,
+      deliveredAt: '2026-09-02T10:00:00.000Z',
       denied: false,
     };
     expect(renderSignalContinuation(input)).toBe('[signal:ping] [unserializable payload]');
+  });
+});
+
+describe('buildSignalContinuationInput', () => {
+  it('threads deliveredAt through for an ordinary payload', () => {
+    const input = buildSignalContinuationInput(
+      'human-response',
+      { approved: true },
+      '2026-09-02T10:00:00.000Z',
+    );
+    expect(input).toEqual({
+      kind: 'signal',
+      signalName: 'human-response',
+      payload: { approved: true },
+      deliveredAt: '2026-09-02T10:00:00.000Z',
+      denied: false,
+    });
+  });
+
+  it('threads deliveredAt through for a denied payload', () => {
+    const input = buildSignalContinuationInput(
+      'human-response',
+      { __abDenied: true, reason: 'budget exceeded' },
+      '2026-09-02T10:00:00.000Z',
+    );
+    expect(input).toEqual({
+      kind: 'signal',
+      signalName: 'human-response',
+      payload: { __abDenied: true, reason: 'budget exceeded' },
+      deliveredAt: '2026-09-02T10:00:00.000Z',
+      denied: true,
+      denialReason: 'budget exceeded',
+    });
   });
 });

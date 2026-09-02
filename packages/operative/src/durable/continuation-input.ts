@@ -30,6 +30,17 @@ export interface SignalContinuationInput<TPayload = unknown> {
   /** The payload delivered with the signal, exactly as `ctx.waitForSignal` returned it. */
   readonly payload: TPayload;
   /**
+   * ISO timestamp of delivery. Not read directly from `Date.now()`/
+   * `new Date().toISOString()` in workflow-body code — that would be
+   * non-deterministic across replay — the caller obtains it through a
+   * checkpointed `ctx.memo` (or `ctx.run`) and passes it in. Carried on this
+   * type per AB-41's ratified shape even though the fixed rendered message
+   * does not include it (the rendering is keyed on `signalName`/`payload`/
+   * `denied` only) — it is metadata for a caller inspecting the structured
+   * input, not the transcript text.
+   */
+  readonly deliveredAt: string;
+  /**
    * `true` when `payload` is the AB-46-ratified `requestHumanInput` denial
    * sentinel (`{ __abDenied: true, reason?: string }`) — see
    * {@link isDeniedSignalPayload}. AB-41's decision is explicit that a denial
@@ -72,17 +83,21 @@ export function isDeniedSignalPayload(value: unknown): value is DeniedSignalSent
 /**
  * Build a {@link SignalContinuationInput} from a signal's raw delivered
  * payload. Detects the denial sentinel via {@link isDeniedSignalPayload} so
- * callers do not need to special-case it.
+ * callers do not need to special-case it. `deliveredAt` must already be a
+ * plain ISO string obtained through a checkpointed operation — see the
+ * field's own doc.
  */
 export function buildSignalContinuationInput<TPayload = unknown>(
   signalName: string,
   payload: TPayload,
+  deliveredAt: string,
 ): SignalContinuationInput<TPayload> {
   if (isDeniedSignalPayload(payload)) {
     return {
       kind: 'signal',
       signalName,
       payload,
+      deliveredAt,
       denied: true,
       ...(payload.reason !== undefined ? { denialReason: payload.reason } : {}),
     };
@@ -91,6 +106,7 @@ export function buildSignalContinuationInput<TPayload = unknown>(
     kind: 'signal',
     signalName,
     payload,
+    deliveredAt,
     denied: false,
   };
 }

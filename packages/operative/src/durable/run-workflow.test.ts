@@ -2201,6 +2201,124 @@ describe('durable agentRun workflow', () => {
       }
     });
 
+    it('AB-44 — a stale pendingWakeup from an earlier step does not resurface and re-park the continuation step', async () => {
+      // REGRESSION: `deps.pendingWakeup` is sticky (`scheduleWakeup` only ever
+      // SETS it; nothing clears it once consumed), exactly like
+      // `pendingHumanWait`. Before AB-44 this never mattered — nothing ran
+      // after a park. Now a delivered signal continues the run with more
+      // steps, so without clearing BOTH slots at the top of each step's memo,
+      // a continuation step's memoized result would still carry a PRIOR
+      // step's `pendingWakeup` (from a `scheduleWakeup` call two parks ago) as
+      // if it were its own — re-triggering `ctx.sleep` on a wakeup the agent
+      // never asked for on this step, hanging the run.
+      //
+      // Step 0: scheduleWakeup(999_999_999) — sets pendingWakeup.
+      // Step 1: requestHumanInput — mutual exclusivity clears the LOCAL
+      //   pendingWakeup, but NOT `deps.pendingWakeup` on the shared services
+      //   object; the workflow parks on ctx.waitForSignal.
+      // (signal delivered)
+      // Step 2 (continuation): plain content, no tool calls. Its memo must
+      //   report `pendingWakeup: undefined` (the per-step clear), not step
+      //   0's stale value — otherwise the run would `ctx.sleep(999_999_999)`
+      //   here and this test would hang.
+      const storage = new MemoryStorage();
+      const runId = 'ab44-stale-wakeup-clear';
+      const signalName = 'human-response';
+
+      const depsContainer: { ref: DurableRunDeps | undefined } = { ref: undefined };
+      const wakeupTool = createTool({
+        name: 'scheduleWakeup',
+        description: 'Schedule a wakeup',
+        input: z.object({ duration: z.number() }),
+        execute: async (params) => {
+          if (depsContainer.ref) {
+            depsContainer.ref.pendingWakeup = { duration: params.duration };
+          }
+          return 'scheduled';
+        },
+      });
+      const hitlTool = createTool({
+        name: 'requestHumanInput',
+        description: 'Request human input',
+        input: z.object({ signalName: z.string() }),
+        execute: async (params) => {
+          if (depsContainer.ref) {
+            depsContainer.ref.pendingHumanWait = { signalName: params.signalName };
+          }
+          return 'parked';
+        },
+      });
+      const toolbox = createToolbox([wakeupTool, hitlTool]) as unknown as RegistryToolbox;
+
+      let call = 0;
+      const services: DurableRunDeps = {
+        options: {
+          generate: async () => {
+            const c = call++;
+            if (c === 0) {
+              return {
+                content: '',
+                toolCalls: [{ name: 'scheduleWakeup', arguments: { duration: 999_999_999 } }],
+              };
+            }
+            if (c === 1) {
+              return {
+                content: '',
+                toolCalls: [{ name: 'requestHumanInput', arguments: { signalName } }],
+              };
+            }
+            // Continuation step (call 2): plain content, no tool calls. If the
+            // bug is present, this step's memo would still see step 0's
+            // `pendingWakeup` and the workflow would sleep here instead of
+            // returning.
+            return { content: 'done after two parks', toolCalls: [] };
+          },
+          toolbox,
+          conversation: createConversationHistory(),
+          stopWhen: noToolCalls(),
+          maximumSteps: 5,
+        },
+        toolbox,
+      };
+      depsContainer.ref = services;
+
+      const { engine } = await buildEngine(storage, false);
+      try {
+        const handle = await engine.start(
+          'agentRun',
+          { runId, sessionId: runId, agentName: 'test-agent', prompt: 'start', maximumSteps: 5 },
+          { id: runId, services },
+        );
+
+        let parked = false;
+        for (let i = 0; i < 100; i++) {
+          await yieldToPortableEventLoop();
+          const snap = await handle.snapshot();
+          if (snap?.status === 'running') {
+            parked = true;
+            break;
+          }
+          if (snap?.status === 'completed' || snap?.status === 'failed') break;
+        }
+        expect(parked).toBe(true);
+
+        await engine.signal(runId, signalName, { approved: true });
+
+        // With the bug, this hangs forever on ctx.sleep(999_999_999) — the
+        // test's own timeout is the failure signal for that case.
+        const result = await handle.result();
+        expect(result.finishReason).toBe('stop-condition');
+        expect(result.content).toBe('done after two parks');
+        expect(result.humanWaitSignal).toBe(signalName);
+        // The wakeup from step 0 never governs the final park — it was
+        // superseded by the human-wait request in step 1, and must not
+        // resurface as a fresh request in step 2.
+        expect(result.wakeupNote).toBeUndefined();
+      } finally {
+        engine[Symbol.dispose]();
+      }
+    });
+
     it('only parks on ctx.sleep when scheduleWakeup is the only park request set', async () => {
       // Sanity check: a run that only calls scheduleWakeup (no requestHumanInput)
       // still parks on ctx.sleep — the fix must not break the single-park-type case.
