@@ -349,4 +349,48 @@ describe('createRoutingGenerate — descriptor union (AB-64 AC2, AB-245)', () =>
     expect(readBackendDescriptors(forward)).toEqual(readBackendDescriptors(reversed));
     expect(readBackendDescriptors(forward)[0]?.provider).toBe('anthropic');
   });
+
+  it('resolves a same-triple collision to the same, conservative descriptor regardless of route order', () => {
+    // Two OpenAI routes for the identical model, one constructed with a
+    // proxying baseURL — same (provider, endpoint, model) triple, different
+    // endpointAmbiguous/capability content. The union must pick the same
+    // (ambiguous, conservative) descriptor no matter which route is declared
+    // first — never the one that merely happened to be inserted first.
+    const catalog = createModelCatalog({ now: FIXED_NOW });
+    const official = catalog.descriptors.find((d) => d.provider === 'openai');
+    if (!official) throw new Error('expected at least one openai seed descriptor');
+    const ambiguousCatalog = createModelCatalog({
+      now: FIXED_NOW,
+      openAIBaseURL: 'https://proxy.internal.example/v1',
+    });
+    const ambiguous = ambiguousCatalog.descriptors.find(
+      (d) => d.provider === 'openai' && d.model === official.model,
+    );
+    if (!ambiguous) throw new Error('expected a matching ambiguous openai descriptor');
+    expect(ambiguous.endpointAmbiguous).toBe(true);
+    expect(official.endpointAmbiguous).not.toBe(true);
+
+    const officialFirst = createRoutingGenerate({
+      routes: [
+        routeWithDescriptors('official', 'official-response', [official]),
+        routeWithDescriptors('proxy', 'proxy-response', [ambiguous]),
+      ],
+      strategy: () => ({ route: 'official', reason: 'test' }),
+      fallback: 'official',
+    });
+    const ambiguousFirst = createRoutingGenerate({
+      routes: [
+        routeWithDescriptors('proxy', 'proxy-response', [ambiguous]),
+        routeWithDescriptors('official', 'official-response', [official]),
+      ],
+      strategy: () => ({ route: 'official', reason: 'test' }),
+      fallback: 'official',
+    });
+
+    const officialFirstDescriptors = readBackendDescriptors(officialFirst);
+    const ambiguousFirstDescriptors = readBackendDescriptors(ambiguousFirst);
+    expect(officialFirstDescriptors).toEqual(ambiguousFirstDescriptors);
+    expect(officialFirstDescriptors).toHaveLength(1);
+    expect(officialFirstDescriptors[0]?.endpointAmbiguous).toBe(true);
+  });
 });
