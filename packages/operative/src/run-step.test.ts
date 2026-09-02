@@ -220,6 +220,118 @@ describe('runStep: AB-67 steering boundary read', () => {
     expect(result.finishReason).toBe('stop-condition');
   });
 
+  it('re-checks paused after a resume: a pause re-admitted before the continuation re-reads state is not bypassed', async () => {
+    const gate = createTestSteeringGate({ paused: true, configVersion: 1 });
+    let generateCalls = 0;
+
+    const resultPromise = executeLoop({
+      generate: async () => {
+        generateCalls++;
+        return textResponse('done');
+      },
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      steering: gate,
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(generateCalls).toBe(0);
+
+    // Resume, then immediately re-pause within the same synchronous turn —
+    // simulating a command handler that resolves one pause's waiters and
+    // admits a second pause before runStep's continuation gets a chance to
+    // re-read desired state. A single-shot re-read (rather than looping
+    // while still paused) would miss this and proceed anyway.
+    gate.setDesiredState({ paused: false, configVersion: 2 });
+    gate.setDesiredState({ paused: true, configVersion: 3 });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(generateCalls).toBe(0); // still blocked by the re-admitted pause
+
+    gate.setDesiredState({ paused: false, configVersion: 4 });
+
+    const result = await resultPromise;
+    expect(generateCalls).toBe(1);
+    expect(result.finishReason).toBe('stop-condition');
+  });
+
+  it('AB-67: the boundary read is a snapshot, not a live reference into a mutable gate object', async () => {
+    // `SteeringDesiredState`'s fields are `readonly` in the public type, but
+    // a real gate implementation is free to hold one mutable object behind
+    // that readonly view (e.g. a session cache it updates in place) — a
+    // plain mutable local is structurally assignable to the readonly public
+    // shape (readonly only restricts writes through that view, not
+    // assignability), so no cast is needed to model that here.
+    const state = { paused: false, configVersion: 1, route: 'r1' };
+    const gate: SteeringGate = {
+      getDesiredState: () => state, // SAME object reference every call
+      awaitResume: () => new Promise<void>(() => {}),
+    };
+    let capturedRoute: string | undefined;
+
+    await executeLoop({
+      generate: async (context) => {
+        // Mutate the gate's live object mid-step, simulating a command
+        // admitted concurrently with this step's own generate call.
+        state.route = 'r2';
+        capturedRoute = context.steering?.route;
+        return textResponse('done');
+      },
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      steering: gate,
+    });
+
+    // If the boundary read had forwarded the gate's own object reference
+    // rather than a copy, this would read back 'r2' — the mutation this
+    // step made to the *gate's* state — instead of the value the boundary
+    // actually captured before generate ever ran.
+    expect(capturedRoute).toBe('r1');
+  });
+
+  it('AB-67: a retry mutator that omits steering does not drop it from the retried GenerateContext', async () => {
+    const gate = createTestSteeringGate({ paused: false, configVersion: 1, model: 'real-model' });
+    const observedSteering: Array<GenerateContext['steering']> = [];
+    let attempts = 0;
+
+    const result = await executeLoop({
+      generate: async (context) => {
+        observedSteering.push(context.steering);
+        attempts++;
+        if (attempts === 1) {
+          throw new Error('transient');
+        }
+        return textResponse('done');
+      },
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      steering: gate,
+      retry: {
+        attempts: 2,
+        delay: 0,
+        mutate: () => ({
+          // A mutator written with no knowledge of AB-67 — omits `steering`
+          // entirely, the way most existing retry mutators would.
+          conversation: new Conversation(),
+          step: 0,
+          toolbox: createTestToolbox([]),
+        }),
+      },
+    });
+
+    expect(attempts).toBe(2);
+    const expected = { paused: false, configVersion: 1, model: 'real-model' };
+    expect(observedSteering).toEqual([expected, expected]);
+    expect(result.finishReason).not.toBe('error');
+  });
+
   it('an abort while paused resolves the step as an abort, not a hang', async () => {
     const gate = createTestSteeringGate({ paused: true, configVersion: 1 });
     const controller = new AbortController();
@@ -427,5 +539,53 @@ describe('runStep: AB-67 steering boundary read', () => {
     });
 
     expect(capturedSteering).toEqual({ paused: false, configVersion: 1, model: 'real-model' });
+  });
+
+  it('AB-67: steering is re-applied between beforeGenerate handlers, not only after the last one', async () => {
+    const gate = createTestSteeringGate({ paused: false, configVersion: 1, model: 'real-model' });
+    const hooks = new HookRegistry<OperativeHookMap>();
+    let secondHandlerSawSteering: GenerateContext['steering'];
+    let generateSawSteering: GenerateContext['steering'];
+
+    // Priority 10 runs first and returns a replacement that omits `steering`
+    // entirely — the way a hook written before AB-67 existed naturally
+    // would. Priority 5 runs second: if the boundary value were only
+    // reapplied once at the very end of the waterfall (not between
+    // handlers), this second handler would see it missing.
+    hooks.on(
+      'beforeGenerate',
+      async (context) => ({
+        conversation: context.conversation,
+        step: context.step,
+        toolbox: context.toolbox,
+        maximumTokens: 111,
+      }),
+      { priority: 10 },
+    );
+    hooks.on(
+      'beforeGenerate',
+      async (context) => {
+        secondHandlerSawSteering = context.steering;
+        return { ...context, maximumTokens: 222 };
+      },
+      { priority: 5 },
+    );
+
+    await executeLoop({
+      generate: async (context) => {
+        generateSawSteering = context.steering;
+        expect(context.maximumTokens).toBe(222);
+        return textResponse('done');
+      },
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      hooks,
+      steering: gate,
+    });
+
+    const expected = { paused: false, configVersion: 1, model: 'real-model' };
+    expect(secondHandlerSawSteering).toEqual(expected);
+    expect(generateSawSteering).toEqual(expected);
   });
 });

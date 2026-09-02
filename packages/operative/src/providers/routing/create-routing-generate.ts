@@ -45,10 +45,15 @@ export function createRoutingGenerate(options: RoutingOptions): GenerateFunction
   const routeMap = new Map(routes.map((r) => [r.name, r]));
 
   return async (context: GenerateContext): Promise<GenerateResponse> => {
+    // `!== undefined`, not truthy: a validated route name is an unrestricted
+    // string, so a catalog entry named `''` is a real, distinguishable route
+    // — a truthiness check would silently ignore a steering override for it
+    // and fall through to the strategy instead.
     const steeringRoute = context.steering?.route;
-    const decision: RoutingDecision = steeringRoute
-      ? { route: steeringRoute, reason: 'steering override (AB-67)' }
-      : strategy(context, routes);
+    const decision: RoutingDecision =
+      steeringRoute !== undefined
+        ? { route: steeringRoute, reason: 'steering override (AB-67)' }
+        : strategy(context, routes);
     let selectedRoute = routeMap.get(decision.route);
 
     if (!selectedRoute) {

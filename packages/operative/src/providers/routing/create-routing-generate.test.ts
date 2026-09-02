@@ -195,6 +195,25 @@ describe('createRoutingGenerate', () => {
     expect(events[0]!.reason).toContain('steering');
   });
 
+  it('AB-67: an empty-string steering route override is honored, not treated as absent', async () => {
+    let strategyCalled = false;
+
+    const generate = createRoutingGenerate({
+      routes: [makeRoute('', 'empty-name-route-response'), makeRoute('fast', 'fast-response')],
+      strategy: () => {
+        strategyCalled = true;
+        return { route: 'fast', reason: 'test' };
+      },
+      fallback: 'fast',
+    });
+
+    const context = makeContext({ steering: { paused: false, configVersion: 1, route: '' } });
+    const result = await generate(context);
+
+    expect(result.content).toBe('empty-name-route-response');
+    expect(strategyCalled).toBe(false);
+  });
+
   it('no steering field on the context is a no-op: the strategy decides exactly as it does today', async () => {
     const generate = createRoutingGenerate({
       routes: [makeRoute('fast', 'fast-response'), makeRoute('smart', 'smart-response')],

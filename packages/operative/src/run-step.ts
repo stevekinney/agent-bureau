@@ -278,7 +278,12 @@ async function callGenerateWithRetry(
       if (retry.mutate) {
         const mutatedContext = await retry.mutate(currentContext, error, attempt);
         if (mutatedContext !== undefined) {
-          currentContext = mutatedContext;
+          // AB-67: steering desired-configuration is not mutator-overridable,
+          // the same rule `beforeGenerate` follows — reapply the value this
+          // retry loop started with (`context.steering`, the step's original
+          // boundary read) so a mutator that omits or replaces it can never
+          // make a later attempt within the same step ignore the override.
+          currentContext = { ...mutatedContext, steering: context.steering };
           mutated = true;
           mutationDescription = `Context mutated on attempt ${attempt}`;
         }
@@ -452,17 +457,27 @@ export async function runStep(
   // execution, or on a same-step retry). `deps.steering` is undefined for a
   // run with no steering dependency configured — that is a complete no-op,
   // matching today's non-steerable behavior exactly.
-  let steeringDesiredState = deps.steering?.getDesiredState();
-  if (steeringDesiredState?.paused && deps.steering) {
+  //
+  // Each read is copied (`{ ...state }`), never the gate's own returned
+  // reference: a real gate is free to keep one mutable desired-state object
+  // it updates in place as commands are admitted, and forwarding that live
+  // reference into `GenerateContext.steering` would let a later mutation
+  // become visible to this step's already-captured context — the exact
+  // same-step leak the mid-step-admission acceptance criterion forbids.
+  //
+  // The pause check is a loop, not a single `if`: a `resume` releasing
+  // `awaitResume()` does not guarantee the freshly re-read state is
+  // unpaused — a new `pause` can be admitted in the same turn a command
+  // handler resolves the previous one's waiters. Keep waiting while the
+  // state we just read is still `paused: true`, so the most recently
+  // desired pause always wins.
+  let steeringDesiredState = deps.steering ? { ...deps.steering.getDesiredState() } : undefined;
+  while (steeringDesiredState?.paused && deps.steering) {
     const { aborted } = await awaitResumeOrAbort(deps.steering, signal);
     if (aborted) {
       return { kind: 'abort', reason: explicitAbortReason(signal) };
     }
-    // Re-read after the gate releases: a resume may have arrived bundled
-    // with other steering commands (route/model/provider/effort) admitted
-    // while this step was paused, and the boundary should reflect all of
-    // them, not a stale pre-pause snapshot.
-    steeringDesiredState = deps.steering.getDesiredState();
+    steeringDesiredState = { ...deps.steering.getDesiredState() };
   }
 
   // Backpressure: wait before proceeding if the strategy requires it
@@ -657,7 +672,21 @@ export async function runStep(
         };
 
         if (hooks?.has('beforeGenerate')) {
-          const beforeGenContext = {
+          // Iterate handlers manually (the same reason afterGenerate does,
+          // below) rather than a single `hooks.run()` call: AB-67 requires
+          // re-applying the boundary-read `steering` value after EVERY
+          // handler, not only after the waterfall's final result, so an
+          // earlier handler that omits or replaces it can never leave a
+          // later handler observing missing or forged desired state.
+          // `hooks.run()` has no hook between handlers to do that reapply.
+          //
+          // Trade-off: this does not replicate `HookRegistry.run()`'s
+          // registry-level default `onError` — only a handler's own
+          // per-registration `onError` (`entry.options.onError`), matching
+          // `afterGenerate`'s existing manual-iteration precedent below,
+          // which has the identical constraint for the identical reason.
+          const handlers = hooks.getHandlers('beforeGenerate');
+          let beforeGenContext: GenerateContext = {
             conversation,
             step,
             toolbox: stepToolbox,
@@ -666,15 +695,19 @@ export async function runStep(
             signal: stepSignal,
             steering: steeringDesiredState,
           };
-          const beforeGenResult = await hooks.run('beforeGenerate', beforeGenContext);
-          if (beforeGenResult !== undefined) {
-            // AB-67: steering desired-configuration is not hook-overridable.
-            // A `beforeGenerate` hook may replace every other field of
-            // `GenerateContext`, but the session's boundary-read steering
-            // state is re-applied here so a hook can never silently drop or
-            // override it.
-            generateContext = { ...beforeGenResult, steering: steeringDesiredState };
+          for (const entry of handlers) {
+            const handlerResult = await entry.handler(beforeGenContext);
+            if (handlerResult !== undefined) {
+              // AB-67: steering desired-configuration is not hook-overridable.
+              // A `beforeGenerate` hook may replace every other field of
+              // `GenerateContext`, but the session's boundary-read steering
+              // state is re-applied here so a hook can never silently drop
+              // or override it — for this handler's own return value, not
+              // only the waterfall's last one.
+              beforeGenContext = { ...handlerResult, steering: steeringDesiredState };
+            }
           }
+          generateContext = beforeGenContext;
         }
 
         // onLLMInput: parallel allSettled, read-only, non-blocking
