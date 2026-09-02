@@ -481,6 +481,17 @@ export function createDurableActiveRun(
     emitter.complete();
   }
 
+  // closed()'s AC8-equivalent for a FRESH (non-reattached) run (AB-204): a
+  // pending `handle.result()` waiter rejected with `EngineDisposedError`
+  // (bureau teardown mid-run) is swallowed by `driveDurableRun` into a
+  // quiet, resolved, write-free `RunResult` — see its own doc comment —
+  // rather than firing a terminal lifecycle. Cleanup is genuinely
+  // unconfirmed there, so `resolveDurableOutcome` must classify it
+  // unresolved/unreachable, never `completed`/`not-required`. Same side
+  // channel `reattachDurableActiveRun`'s `reachability` uses, since the
+  // rejection this observes is likewise invisible on the public `result`.
+  const reachability = { unreachable: false };
+
   function drive(): Promise<RunResult> {
     return driveDurableRun(
       context,
@@ -493,6 +504,7 @@ export function createDurableActiveRun(
       emitter,
       durableRun.prompt,
       durableRun.onServices,
+      reachability,
     );
   }
 
@@ -579,6 +591,7 @@ export function createDurableActiveRun(
   }
 
   async function resolveDurableOutcome(): Promise<CleanupAcknowledgement> {
+    if (reachability.unreachable) return { status: 'unresolved', reason: 'unreachable' };
     // `cancelRequested` alone misses a cancellation delivered through
     // `RunOptions.signal` with `abort()` never called — the same gap the
     // not-required disqualifier above closes, but here it matters more: a
@@ -619,7 +632,8 @@ export function createDurableActiveRun(
     // `cancelRequested` alone misses a cancellation that arrived through
     // `RunOptions.signal` rather than a direct `abort()` call —
     // `combinedSignal` covers both, matching create-run.ts's identical fix.
-    disqualifiesFastPath: () => cancelRequested || combinedSignal.aborted,
+    disqualifiesFastPath: () =>
+      cancelRequested || combinedSignal.aborted || reachability.unreachable,
     hasInFlightWork: () => inFlightTools > 0,
     resolveOutcome: resolveDurableOutcome,
   });
@@ -1212,6 +1226,7 @@ async function driveDurableRun(
   emitter: OperativeEventEmitter,
   prompt: string | undefined,
   onServices: ((services: DurableRunDeps) => void) | undefined,
+  reachability: { unreachable: boolean },
 ): Promise<RunResult> {
   const runStartTime = performance.now();
   const { hooks } = options;
@@ -1295,6 +1310,9 @@ async function driveDurableRun(
     // `instanceof`) to survive the module boundary — `isWeftErrorLike` narrows a
     // caught unknown without `instanceof`.
     if (isWeftErrorLike(error) && error.code === 'EngineDisposedError') {
+      // AB-204: closed() classifies this as unresolved/unreachable, never
+      // completed/not-required — see `reachability`'s doc comment above.
+      reachability.unreachable = true;
       return makeInterruptedRunResult(conversation);
     }
     // B6 (abort-into-generate): when abort() calls engine.cancel() in parallel

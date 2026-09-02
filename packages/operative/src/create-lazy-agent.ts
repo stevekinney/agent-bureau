@@ -645,6 +645,7 @@ function createDeferredAgentRun<O, H extends boolean>(
     }),
 
     [Symbol.dispose](): void {
+      cancelRequested = true;
       if (underlying) {
         underlying[Symbol.dispose]();
         return;

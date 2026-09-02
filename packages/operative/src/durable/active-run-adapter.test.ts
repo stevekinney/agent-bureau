@@ -599,6 +599,43 @@ describe('createRun with durable routing', () => {
     expect(result.finishReason).toBe('aborted');
   });
 
+  // Regression: a code-review finding on the AB-204 pull request —
+  // driveDurableRun swallows an EngineDisposedError rejection of a FRESH
+  // (non-reattached) run into a quiet, write-free, resolved RunResult (see
+  // its own doc comment) — closed() cannot see this from the settled
+  // `result` alone and must classify it unresolved/unreachable, matching
+  // reattachDurableActiveRun's identical AC8 handling, never
+  // completed/not-required.
+  it('closed() classifies a fresh run whose engine was disposed as unresolved/unreachable, never completed or not-required', async () => {
+    const disposedError = Object.assign(new Error('engine disposed'), {
+      code: 'EngineDisposedError',
+    });
+    const engine = {
+      start: async () => ({
+        result: () => Promise.reject(disposedError),
+      }),
+    } as unknown as RegistryAgnosticEngine;
+    const context = {
+      engine,
+      checkpointStore: {
+        loadCheckpoint: async () => {
+          throw new Error('unused');
+        },
+      },
+    } as never;
+
+    const activeRun = createDurableActiveRun(context, {
+      runId: 'durable-engine-disposed-closed',
+      sessionId: 'durable-engine-disposed-closed',
+      options: runOptions(async () => ({ content: 'unused', toolCalls: [] })),
+    });
+
+    await activeRun.result;
+    await Promise.resolve();
+
+    expect(await activeRun.closed()).toEqual({ status: 'unresolved', reason: 'unreachable' });
+  });
+
   it('classifies a durable workflow timeout as an execution deadline error', async () => {
     const timeoutError = Object.assign(new Error('timed out'), {
       code: 'WorkflowTimeoutError',

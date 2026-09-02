@@ -534,6 +534,47 @@ describe('createLazyAgent', () => {
     expect(await closedAcknowledgement).toEqual({ status: 'completed' });
   });
 
+  // Regression: a code-review finding on the AB-204 pull request —
+  // [Symbol.dispose]() delegates straight to the underlying handle's own
+  // disposer without setting cancelRequested when underlying already
+  // exists, so a first closed() call after settlement could wrongly take
+  // the not-required fast path and skip delegation, potentially hiding a
+  // real underlying cleanup outcome. Uses a handle whose closed() reports
+  // something distinguishable from both `completed` and `not-required` to
+  // prove delegation genuinely happened.
+  it('marks the wrapper as cancelled when [Symbol.dispose]() is called after resolution, disqualifying the not-required fast path', async () => {
+    const closedFailure = {
+      status: 'failed',
+      error: new Error('underlying cleanup failed'),
+    } as const;
+    let resultSettled!: (result: RunResult<string, false>) => void;
+    const resultPromise = new Promise<RunResult<string, false>>((resolve) => {
+      resultSettled = resolve;
+    });
+    const underlyingHandle = {
+      result: () => resultPromise,
+      unwrap: () => resultPromise.then((r) => r.content),
+      abort() {},
+      children: () => [],
+      abortChild() {},
+      closed: () => Promise.resolve(closedFailure),
+      [Symbol.dispose]() {},
+      [Symbol.asyncIterator]: () => (async function* () {})(),
+    } as unknown as AgentRun<string, false>;
+    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => underlyingHandle };
+    const lazy = createLazyAgent(() => agent);
+
+    const run = lazy.run('hello');
+    await flushMicrotasks();
+
+    run[Symbol.dispose]();
+    resultSettled(successResult('done'));
+    await run.result();
+    await Promise.resolve();
+
+    expect(await run.closed()).toEqual(closedFailure);
+  });
+
   it('closed() resolves not-required when first called after the run already settled with no cancellation (AB-204)', async () => {
     const fake = createFakeAgentRun();
     const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };
