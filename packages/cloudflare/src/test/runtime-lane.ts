@@ -239,8 +239,17 @@ export default {
 `;
 }
 
-/** Bundles the Durable Object glue script (and the real adapter it imports) for workerd. */
-async function buildDurableObjectWorkerScript(packageRoot: string): Promise<string> {
+/**
+ * Bundles the Durable Object glue script (and the real adapter it imports) for workerd.
+ * `identifier` names the temporary entry file the bundler resolves from — reusing the
+ * caller's already-injected `options.identifiers.next()` draw rather than calling
+ * `crypto.randomUUID()` here directly, per the AB-92 rule that deterministic test
+ * directories never read process globals.
+ */
+async function buildDurableObjectWorkerScript(
+  packageRoot: string,
+  identifier: string,
+): Promise<string> {
   // A relative specifier, not an absolute path: `packageRoot/node_modules`
   // is not guaranteed to exist (a workspace-linked package root need not
   // have its own), and an absolute path baked into the glue source is not
@@ -253,7 +262,7 @@ async function buildDurableObjectWorkerScript(packageRoot: string): Promise<stri
   // The entry file needs a real path so Bun.build can resolve the relative
   // import above; it never becomes part of `src/` and is removed immediately
   // after bundling, so it carries no coverage obligation of its own.
-  const glueTempPath = path.join(packageRoot, `.runtime-lane-glue-${crypto.randomUUID()}.ts`);
+  const glueTempPath = path.join(packageRoot, `.runtime-lane-glue-${identifier}.ts`);
   await Bun.write(glueTempPath, glueSource);
   try {
     const build = await Bun.build({
@@ -430,7 +439,7 @@ export async function startCloudflareRuntime(
   let miniflare: InstanceType<MiniflareModule['Miniflare']> | undefined;
   try {
     const namespace = `lane-${identifier}`;
-    const script = await buildDurableObjectWorkerScript(packageRoot);
+    const script = await buildDurableObjectWorkerScript(packageRoot, identifier);
 
     miniflare = new Miniflare({
       modules: [{ type: 'ESModule', path: 'runtime-lane-worker.mjs', contents: script }],

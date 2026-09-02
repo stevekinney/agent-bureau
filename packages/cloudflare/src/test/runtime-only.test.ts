@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 
 import { afterEach, describe, expect, it } from 'bun:test';
 
+import { createProcessUniqueIdentifierPrefix } from '../../test/runtime-lane-process-identifier';
 import { createCloudflareR2TextValueStore } from '../create-cloudflare-r2-text-value-store';
 import {
   cleanUpAfterStartupFailure,
@@ -22,7 +23,7 @@ import {
 // file would otherwise produce identical `runtime-only-N` sequences,
 // letting one process's still-in-use temporary directory read as a leak
 // from a completely different process's completed attempt.
-const processIdentifierPrefix = crypto.randomUUID();
+const processIdentifierPrefix = createProcessUniqueIdentifierPrefix();
 let identifierCounter = 0;
 function nextIdentifier(): string {
   identifierCounter += 1;

@@ -54,6 +54,15 @@ export interface RunCloudflareBackendContractOptions {
   createBindings(): Promise<CloudflareContractBindings>;
   /** This run's capability declarations. */
   readonly capabilities: readonly CloudflareCapability[];
+  /**
+   * Supplies the timestamp {@link memoryRecordInput} stamps a fresh
+   * `MemoryRecord`'s `createdAt`/`updatedAt` with. Injected — per the AB-92
+   * rule that deterministic test directories never read process globals —
+   * rather than read from `Date.now()` here; the composition edge
+   * (`test/cloudflare-backend-contract.test.ts`, per the AB-286 coordinator
+   * ruling) supplies the real clock.
+   */
+  now(): number;
 }
 
 function findCapability(
@@ -83,8 +92,7 @@ function memoryScope(): MemoryRecordScope {
   return { tenantId: 'contract-tenant', namespace: 'contract-namespace' };
 }
 
-function memoryRecordInput(overrides: Partial<MemoryRecord> = {}): MemoryRecord {
-  const now = Date.now();
+function memoryRecordInput(now: number, overrides: Partial<MemoryRecord> = {}): MemoryRecord {
   return {
     id: overrides.id ?? 'contract-record',
     tenantId: 'contract-tenant',
@@ -116,7 +124,7 @@ function memoryRecordInput(overrides: Partial<MemoryRecord> = {}): MemoryRecord 
  * double-only for that reason and are not migrated here.
  */
 export function runCloudflareBackendContract(options: RunCloudflareBackendContractOptions): void {
-  const { label, createBindings, capabilities } = options;
+  const { label, createBindings, capabilities, now } = options;
 
   describe(`Cloudflare backend contract (${label})`, () => {
     describe('Durable Object SQLite storage', () => {
@@ -287,7 +295,7 @@ export function runCloudflareBackendContract(options: RunCloudflareBackendContra
         const memoryRecordStorage = await requireMemoryRecordStorage(createBindings);
         await memoryRecordStorage.init();
 
-        const record = memoryRecordInput();
+        const record = memoryRecordInput(now());
         await memoryRecordStorage.put(record);
 
         const fetched = await memoryRecordStorage.get(record.id, memoryScope());
@@ -305,7 +313,7 @@ export function runCloudflareBackendContract(options: RunCloudflareBackendContra
         const memoryRecordStorage = await requireMemoryRecordStorage(createBindings);
         await memoryRecordStorage.init();
 
-        const record = memoryRecordInput({
+        const record = memoryRecordInput(now(), {
           id: 'serialization-record',
           vector: new Float32Array([0.5, -0.25, 0.75]),
           metadata: { nested: { unicode: '🎈' }, list: [1, 2, 3] },
@@ -323,11 +331,11 @@ export function runCloudflareBackendContract(options: RunCloudflareBackendContra
         const memoryRecordStorage = await requireMemoryRecordStorage(createBindings);
         await memoryRecordStorage.init();
 
-        const record = memoryRecordInput({ id: 'tombstone-record' });
+        const record = memoryRecordInput(now(), { id: 'tombstone-record' });
         // A surviving record in the same direction as `record.vector` keeps
         // `hits` non-empty after the delete below, so the assertion below
         // exercises its `.map()` callback rather than mapping over `[]`.
-        const survivor = memoryRecordInput({ id: 'tombstone-survivor' });
+        const survivor = memoryRecordInput(now(), { id: 'tombstone-survivor' });
         await memoryRecordStorage.put(record);
         await memoryRecordStorage.put(survivor);
         expect(await memoryRecordStorage.get(record.id, memoryScope())).toBeDefined();
