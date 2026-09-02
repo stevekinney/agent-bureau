@@ -20,7 +20,10 @@
  * present only when an `output` schema is supplied; the widened
  * (runtime-computed) dynamic-module path is accepted when well-shaped and
  * rejected at runtime when it is not; and every removed API from AB-15/17/
- * 18/21/22 fails to compile. No network provider, external storage service,
+ * 18/21/22 either fails to compile (types/functions removed from the public
+ * surface) or is rejected at runtime (the legacy `structuredOutput`
+ * persisted-record field, which was never a compile-time-checked input in
+ * the first place). No network provider, external storage service,
  * or credential is used anywhere in local verification — every agent uses a
  * hand-rolled deterministic `GenerateFunction` and an in-memory Armorer
  * toolbox.
@@ -42,6 +45,23 @@ async function run(command: string[], cwd: string): Promise<string> {
   return output;
 }
 
+/**
+ * Like {@link run}, but returns ONLY stdout on success — for a command whose
+ * stdout is meant to be parsed as JSON (`npm pack --json`). An ordinary npm
+ * config warning on stderr (e.g. `npm warn Unknown env config "http-proxy"`)
+ * does not fail the command and must not corrupt the JSON payload the way
+ * concatenating stdout+stderr would. On failure the combined output is still
+ * included in the thrown error for diagnostics.
+ */
+async function runForStdout(command: string[], cwd: string): Promise<string> {
+  const [executable, ...arguments_] = command;
+  const result = await $`${executable} ${arguments_}`.cwd(cwd).nothrow().quiet();
+  if (result.exitCode !== 0) {
+    throw new Error(`${command.join(' ')} failed:\n${result.stdout}${result.stderr}`);
+  }
+  return result.stdout.toString();
+}
+
 /** Runs a command and returns its exit code + combined output without throwing. */
 async function runExpectingFailure(
   command: string[],
@@ -53,11 +73,11 @@ async function runExpectingFailure(
 }
 
 async function packLocal(staging: string): Promise<string> {
-  const output = await run(
+  const stdout = await runForStdout(
     ['npm', 'pack', '--json', '--ignore-scripts', '--pack-destination', staging],
     packageDirectory,
   );
-  const filename = (JSON.parse(output) as Array<{ filename: string }>)[0]?.filename;
+  const filename = (JSON.parse(stdout) as Array<{ filename: string }>)[0]?.filename;
   if (!filename) throw new Error('npm pack produced no tarball');
   return join(staging, filename);
 }
@@ -302,38 +322,59 @@ const TSCONFIG = {
   include: ['src/**/*.ts', 'test/**/*.ts'],
 };
 
-// Each removed-API probe is its own file so `tsc` failing on ANY of them
-// (rather than the whole program) is unambiguous, and each is asserted to
-// fail individually below.
+// Each removed-API probe is its own file, and each probe attacks exactly ONE
+// removed name, so a `tsc` failure on one probe can never mask another
+// probe's own (still-required) failure, and reintroducing any single removed
+// name is independently caught. Every field probe below targets the type it
+// actually lived on pre-AB-18 (`RunOptions`/`createActiveRun` — confirmed
+// against packages/operative/src/types.ts as of the commit immediately
+// before AB-18 landed), not `CreateAgentOptions`/`createAgent`, which never
+// had these fields at all.
 const REMOVED_API_PROBES: Record<string, string> = {
-  'removed-response-schema.ts': `import { createAgent } from '@lostgradient/operative';
+  'removed-response-schema.ts': `import { createActiveRun } from '@lostgradient/operative';
+import { createToolbox } from 'armorer';
+import { Conversation } from 'conversationalist';
 
-// 'responseSchema' was removed by AB-18 — this must be a real, unsuppressed
-// compile error (checked by running tsc against just this file).
-createAgent({
+// 'responseSchema' lived on RunOptions/createActiveRun pre-AB-18, removed
+// with no alias — this must be a real, unsuppressed compile error.
+createActiveRun({
   generate: async () => ({ content: 'x', toolCalls: [] }),
+  toolbox: createToolbox([]),
+  conversation: new Conversation(),
   responseSchema: { type: 'object' },
 });
 `,
-  'removed-structured-output.ts': `import { createAgent } from '@lostgradient/operative';
+  'removed-response-json-schema.ts': `import { createActiveRun } from '@lostgradient/operative';
+import { createToolbox } from 'armorer';
+import { Conversation } from 'conversationalist';
 
-createAgent({
+// 'responseJsonSchema' — AB-18's companion RunOptions field, also removed.
+createActiveRun({
   generate: async () => ({ content: 'x', toolCalls: [] }),
-  structuredOutput: true,
+  toolbox: createToolbox([]),
+  conversation: new Conversation(),
+  responseJsonSchema: { type: 'object' },
 });
 `,
   'removed-bureau-types.ts': `import type { Anything } from '@lostgradient/operative/bureau-types';
 
 export type Probe = Anything;
 `,
-  'removed-registry.ts': `import {
-  AgentRegistry,
-  createAgentRegistry,
-  createBureauRuntime,
-  RegistryAgent,
-} from '@lostgradient/operative';
+  'removed-agent-registry.ts': `import { AgentRegistry } from '@lostgradient/operative';
 
-export { AgentRegistry, createAgentRegistry, createBureauRuntime, RegistryAgent };
+export { AgentRegistry };
+`,
+  'removed-create-agent-registry.ts': `import { createAgentRegistry } from '@lostgradient/operative';
+
+export { createAgentRegistry };
+`,
+  'removed-create-bureau-runtime.ts': `import { createBureauRuntime } from '@lostgradient/operative';
+
+export { createBureauRuntime };
+`,
+  'removed-registry-agent.ts': `import { RegistryAgent } from '@lostgradient/operative';
+
+export { RegistryAgent };
 `,
 };
 
@@ -382,7 +423,12 @@ void typedOutputAccessor;
 void untypedNoOutputAccessor;
 `;
 
-const SMOKE_TEST = `import { AgentContractError, AsyncDefinitionLoadError } from '@lostgradient/operative';
+const SMOKE_TEST = `import {
+  AgentContractError,
+  AsyncDefinitionLoadError,
+  parseRunFrame,
+  UnsupportedRunResultLegacyFieldError,
+} from '@lostgradient/operative';
 import { describe, expect, it } from 'bun:test';
 
 import { barrelAgent } from '../src/barrel';
@@ -458,6 +504,26 @@ describe('widened (runtime-computed) dynamic-module specifiers', () => {
   it('rejects a malformed createLazyGenerate resolution at runtime with AsyncDefinitionLoadError', async () => {
     const generate = widenedMalformedGenerate();
     await expect(generate({} as never)).rejects.toBeInstanceOf(AsyncDefinitionLoadError);
+  });
+});
+
+describe('removed structured-output legacy field (AB-18)', () => {
+  // 'structuredOutput' was never a CreateAgentOptions/createAgent input field
+  // — it is a legacy PERSISTED-RECORD field a durable run's report could
+  // carry pre-AB-18. Removal is enforced at the parseRunFrame() runtime
+  // boundary (packages/operative/src/run-envelope.ts), not by TypeScript, so
+  // this is a runtime probe rather than a compile-failure one like the other
+  // removed APIs.
+  it('rejects a run-finished frame report carrying the legacy structuredOutput field', () => {
+    expect(() =>
+      parseRunFrame({
+        type: 'run-finished',
+        runId: 'probe',
+        timestamp: Date.now(),
+        schemaVersion: 1,
+        report: { structuredOutput: { some: 'legacy value' } },
+      }),
+    ).toThrow(UnsupportedRunResultLegacyFieldError);
   });
 });
 `;

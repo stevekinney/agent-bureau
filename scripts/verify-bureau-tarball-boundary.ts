@@ -219,14 +219,42 @@ describe('bureau tarball boundary — path-installed consumer', () => {
     await run(['bun', 'install'], directory);
     // The lockfile itself is the strongest evidence: it resolves bureau and
     // every one of its private siblings to local file paths, never to a
-    // registry entry — there is no registry entry to resolve them to.
+    // registry entry — there is no registry entry to resolve them to. Each
+    // package's OWN "packages" entry is checked individually (rather than a
+    // whole-file substring search) so a sibling that slipped through to the
+    // registry is caught even when other siblings are correctly local.
     const lockText = await Bun.file(join(directory, 'bun.lock')).text();
-    for (const packageName of [
+    const packagesStart = lockText.indexOf('"packages": {');
+    if (packagesStart === -1) throw new Error('bun.lock has no "packages" block');
+    const packageLines = lockText
+      .slice(packagesStart)
+      .split('\n')
+      .filter((line) => /^\s*"[^"]+":\s*\[/.test(line));
+
+    const expectedLocalPackages = new Set([
       'bureau',
       ...Object.keys(PACKAGE_NAME_BY_DIRECTORY).map((key) => PACKAGE_NAME_BY_DIRECTORY[key]),
-    ]) {
-      if (!lockText.includes(`file:`) || !lockText.includes(packageName)) {
-        throw new Error(`bun.lock does not show ${packageName} resolving through a local path`);
+    ]);
+    const seen = new Set<string>();
+    for (const line of packageLines) {
+      const nameMatch = /^\s*"([^"]+)":/.exec(line);
+      const name = nameMatch?.[1];
+      if (!name || !expectedLocalPackages.has(name)) continue;
+      seen.add(name);
+      // `bun.lock` embeds a `file:`-installed dependency's resolved spec as
+      // `"<name>@<absolute path>.tgz"` — no literal "file:" scheme prefix.
+      // The one thing that conclusively distinguishes it from a registry
+      // resolution (always a bare semver, e.g. `"<name>@1.2.3"`) is that the
+      // path lives inside OUR staging directory.
+      if (!line.includes(staging) || !line.includes('.tgz')) {
+        throw new Error(
+          `${name} did not resolve through this run's local tarball in bun.lock:\n${line}`,
+        );
+      }
+    }
+    for (const name of expectedLocalPackages) {
+      if (!seen.has(name)) {
+        throw new Error(`bun.lock never resolved ${name} at all`);
       }
     }
 

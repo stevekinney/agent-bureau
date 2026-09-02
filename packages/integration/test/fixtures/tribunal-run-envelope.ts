@@ -200,17 +200,26 @@ export function captureRunEnvelope<O, H extends boolean>(
     );
   });
 
+  // Drives the iterator manually (rather than `for await`) so only the
+  // ITERATOR's own failure (it throws on an aborted/errored run — the run's
+  // own `result()` promise, awaited by the caller, is the source of truth
+  // for that outcome) is swallowed. A listener throwing — in particular
+  // `emit()`'s `runFrameSchema.parse`/`schemaVersion` check failing on a
+  // malformed frame — must reject `drained` instead of silently vanishing;
+  // a `for await` wrapped in one try/catch cannot make that distinction.
+  const iterator = agentRun[Symbol.asyncIterator]();
   const drained = (async () => {
-    try {
-      for await (const event of agentRun) {
-        const listener = listeners.get(event.type);
-        listener?.(event);
+    for (;;) {
+      let step: IteratorResult<CombinedOperativeEventMap[CombinedOperativeEventType]>;
+      try {
+        step = await iterator.next();
+      } catch {
+        return;
       }
-    } catch {
-      // The iterator throws on an aborted/errored run — the run's own
-      // `result()` promise (awaited by the caller) is the source of truth
-      // for that outcome. `drained` only guarantees "no more frames will
-      // arrive," so it always settles rather than rejecting.
+      if (step.done) return;
+      const event = step.value;
+      const listener = listeners.get(event.type);
+      listener?.(event);
     }
   })();
 
