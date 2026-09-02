@@ -307,9 +307,18 @@ export interface SteeringGate {
 
 /**
  * Options for the agent loop, minus `runId` and `steering` — see
- * {@link RunOptions}, which adds those two as a discriminated pair.
+ * {@link RunOptions}, which adds those two as a discriminated pair via a
+ * `type` (intersecting this interface with a union), not an `interface`,
+ * following AB-16's `CreateAgentOptions`/`CreateAgentOptionsBase` precedent:
+ * enforcing the pairing requires a union, and a TypeScript `interface`
+ * can't `extends` a type containing one, nor declaration-merge into one. A
+ * consumer that previously wrote `interface MyOptions extends RunOptions`
+ * for the full options bag needs `MyOptions = RunOptions & { ... }`
+ * instead; extending or declaration-merging onto just the fields unrelated
+ * to the `runId`/`steering` pairing still works via this separately
+ * exported `RunOptionsBase` interface.
  */
-interface RunOptionsBase {
+export interface RunOptionsBase {
   generate: GenerateFunction;
   toolbox: AnyToolbox;
   conversation: Conversation | ConversationHistory;
@@ -464,6 +473,17 @@ interface RunOptionsBase {
  * calling `executeLoop`/`buildStepDeps`/`createActiveRun` with one) must
  * now also supply `runId`. A run with no `steering` is unaffected — `runId`
  * stays optional there, exactly as before.
+ *
+ * Both fields are `readonly`: a plain (non-`readonly`) `runId`/`steering`
+ * would let a helper holding a type-checked, valid `RunOptions` reach into
+ * it after the fact — `o.runId = undefined` or `o.steering = gate` — and
+ * reintroduce the exact silently-missing-`runId` shape this type exists to
+ * rule out, since TypeScript checks a property WRITE against the union's
+ * combined property type, not against the cross-property pairing. `readonly`
+ * makes both assignments a compile error through any `RunOptions`-typed
+ * reference, matching every other field on `RunOptionsBase` and this
+ * package's immutability-via-spread convention — an object still spreads
+ * cleanly to swap either field, only in-place mutation is blocked.
  */
 export type RunOptions = RunOptionsBase &
   (
@@ -473,8 +493,8 @@ export type RunOptions = RunOptionsBase &
          * when `steering` is absent — only supplied when the run has a
          * stable identity (session-owned runs).
          */
-        runId?: string;
-        steering?: undefined;
+        readonly runId?: string;
+        readonly steering?: undefined;
       }
     | {
         /**
@@ -482,7 +502,7 @@ export type RunOptions = RunOptionsBase &
          * comment. Used to stamp curated `tool.*` bubble events AND
          * `SteeringEffectiveState.appliedAtRunId`.
          */
-        runId: string;
+        readonly runId: string;
         /**
          * The AB-67 runtime steering gate: read at every step's `runStep`
          * entry boundary to consult desired route/model/provider/effort
@@ -490,7 +510,7 @@ export type RunOptions = RunOptionsBase &
          * matching `resume` (or the run's `AbortSignal`) releases it.
          * Setting this requires `runId` — see this type's doc comment.
          */
-        steering: SteeringGate;
+        readonly steering: SteeringGate;
       }
   );
 

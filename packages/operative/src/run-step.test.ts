@@ -107,9 +107,14 @@ const nextTool = createTool({
  * `src/`, which the `include` covers), so the `@ts-expect-error` below
  * fails `check-types` immediately if the constraint ever regresses — the
  * same pattern `durable/steering-types.check.ts` uses for
- * `SteeringCommandFailure`. Never called — a function body, not top-level
- * statements, so `bun test` never executes it (the `declare const` below
- * has no runtime value) and only `tsc` ever looks at it.
+ * `SteeringCommandFailure`. The function body below is never CALLED (only
+ * `void`-referenced, at the bottom of this block, to satisfy
+ * `noUnusedLocals`) — `bun test` still evaluates that module-level
+ * reference when it runs this file, same as any other top-level statement,
+ * but a reference is not a call: nothing inside the function body ever
+ * executes, so `someSteeringGate` never needs a real runtime value and only
+ * `tsc` (via `check-types`, not `bun test`) ever looks at the body's
+ * `RunOptions` literals.
  */
 function steeringRunOptionsCompileOnlyChecks(someSteeringGate: SteeringGate): void {
   function acceptRunOptions(_options: RunOptions): void {}

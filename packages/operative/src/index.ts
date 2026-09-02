@@ -614,6 +614,7 @@ export type {
   PrepareStepHook,
   RetryOptions,
   RunOptions,
+  RunOptionsBase,
   RunResult,
   RunResultBase,
   SelectToolsHook,
