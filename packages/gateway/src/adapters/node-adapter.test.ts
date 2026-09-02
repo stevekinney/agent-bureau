@@ -118,3 +118,152 @@ describe('defaultLoadServe', () => {
     expect(typeof serve).toBe('function');
   });
 });
+
+describe('createNodeAdapter — forceClose()', () => {
+  it('calls closeAllConnections() when the underlying server implements it (AB-235)', async () => {
+    let closeAllConnectionsCalled = false;
+    const adapter = createNodeAdapter({
+      loadServe: async () => () => ({
+        close: (callback?: (error?: Error) => void) => {
+          callback?.();
+        },
+        closeAllConnections: () => {
+          closeAllConnectionsCalled = true;
+        },
+      }),
+    });
+
+    const handle = await adapter.serve(fakeApp(), { port: 0 });
+    handle.forceClose();
+    expect(closeAllConnectionsCalled).toBe(true);
+  });
+
+  it('is a no-op when the underlying server does not implement closeAllConnections() (AB-235)', async () => {
+    const adapter = createNodeAdapter({
+      loadServe: async () => () => ({
+        close: (callback?: (error?: Error) => void) => {
+          callback?.();
+        },
+        // No closeAllConnections — simulates an older Node runtime or a
+        // fake test server. forceClose() must not throw.
+      }),
+    });
+
+    const handle = await adapter.serve(fakeApp(), { port: 0 });
+    expect(() => handle.forceClose()).not.toThrow();
+  });
+
+  it("forceClose() causes the pending stop() to resolve via close()'s callback (AB-235)", async () => {
+    let releaseClose: (() => void) | undefined;
+    const closeGate = new Promise<void>((resolve) => {
+      releaseClose = resolve;
+    });
+
+    const adapter = createNodeAdapter({
+      loadServe: async () => () => ({
+        close: (callback?: (error?: Error) => void) => {
+          void (async () => {
+            await closeGate;
+            callback?.();
+          })();
+        },
+        closeAllConnections: () => {
+          // Simulates Node destroying open sockets, which causes the
+          // pending close(callback) above to fire.
+          releaseClose?.();
+        },
+      }),
+    });
+
+    const handle = await adapter.serve(fakeApp(), { port: 0 });
+
+    let resolved = false;
+    const stopPromise = handle.stop().then(() => {
+      resolved = true;
+    });
+
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+
+    handle.forceClose();
+    await stopPromise;
+    expect(resolved).toBe(true);
+  });
+
+  it('destroys tracked sockets when closeAllConnections() is unavailable (Node < 18.2, AB-235)', async () => {
+    let connectionListener: ((socket: { destroy(): void; once(): unknown }) => void) | undefined;
+    let socketDestroyed = false;
+
+    const adapter = createNodeAdapter({
+      loadServe: async () => () => ({
+        close: (callback?: (error?: Error) => void) => {
+          callback?.();
+        },
+        // No closeAllConnections — simulates Node 18.0/18.1, which the
+        // repository's `node >=18` engine range still permits.
+        on: (
+          event: 'connection',
+          listener: (socket: { destroy(): void; once(): unknown }) => void,
+        ) => {
+          if (event === 'connection') connectionListener = listener;
+        },
+      }),
+    });
+
+    const handle = await adapter.serve(fakeApp(), { port: 0 });
+
+    // Simulate one inbound TCP connection the adapter tracked via 'connection'.
+    connectionListener?.({
+      destroy: () => {
+        socketDestroyed = true;
+      },
+      once: () => undefined,
+    });
+
+    handle.forceClose();
+    expect(socketDestroyed).toBe(true);
+  });
+
+  it('stops tracking a socket once it closes on its own, so a later forceClose() does not touch it', async () => {
+    let connectionListener:
+      | ((socket: { destroy(): void; once(event: 'close', listener: () => void): unknown }) => void)
+      | undefined;
+    let closeListener: (() => void) | undefined;
+    let destroyCalls = 0;
+
+    const adapter = createNodeAdapter({
+      loadServe: async () => () => ({
+        close: (callback?: (error?: Error) => void) => {
+          callback?.();
+        },
+        on: (
+          event: 'connection',
+          listener: (socket: {
+            destroy(): void;
+            once(event: 'close', listener: () => void): unknown;
+          }) => void,
+        ) => {
+          if (event === 'connection') connectionListener = listener;
+        },
+      }),
+    });
+
+    const handle = await adapter.serve(fakeApp(), { port: 0 });
+
+    connectionListener?.({
+      destroy: () => {
+        destroyCalls++;
+      },
+      once: (event, listener) => {
+        if (event === 'close') closeListener = listener;
+      },
+    });
+
+    // The connection closes on its own (e.g. a normal request finishing)
+    // before shutdown ever calls forceClose().
+    closeListener?.();
+
+    handle.forceClose();
+    expect(destroyCalls).toBe(0);
+  });
+});

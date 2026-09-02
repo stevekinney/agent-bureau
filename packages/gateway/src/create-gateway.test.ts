@@ -6,10 +6,13 @@ import { createBureau } from 'bureau';
 import { sha256HexSync } from 'interoperability';
 
 import { createBunAdapter, handleWsUpgrade } from './adapters/bun-adapter';
+import type { ServerAdapter, ServerHandle } from './adapters/types';
 import {
   buildRequestAuthorityValidator,
   buildWsAuthenticate,
   createGateway,
+  DEFAULT_GATEWAY_DRAIN_TIMEOUT_MS,
+  raceDrainTimeout,
 } from './create-gateway';
 import type { ApiKey, ApiKeyStore } from './keys/types';
 import {
@@ -18,9 +21,51 @@ import {
 } from './middleware/authentication';
 import { DEFAULT_PORT } from './types';
 
-describe('createGateway', () => {
-  type RequestAuthorityValidator = (context: ToolRequestContext) => boolean | Promise<boolean>;
+type RequestAuthorityValidator = (context: ToolRequestContext) => boolean | Promise<boolean>;
 
+/**
+ * Shared across every describe block in this file (not just
+ * `describe('createGateway', ...)`) so the AB-235 shutdown-drain tests
+ * below can build a minimal bureau without duplicating this stub.
+ */
+function createGatewayBureauStub(
+  hostValidator?: RequestAuthorityValidator,
+  kv: Parameters<typeof createGateway>[0]['kv'] = undefined,
+) {
+  let requestAuthorityValidator = hostValidator;
+  const bureau = {
+    store: createStore(),
+    memory: undefined,
+    scheduler: undefined,
+    ready: true,
+    kv,
+    subscribeLiveFrames: () => () => undefined,
+    addEventListener: () => undefined,
+    removeEventListener: () => undefined,
+    setRequestAuthorityValidator(validator: RequestAuthorityValidator | undefined) {
+      requestAuthorityValidator = validator;
+    },
+    getRequestAuthorityValidator() {
+      return requestAuthorityValidator;
+    },
+    getConfiguration() {
+      return {
+        provider: undefined,
+        providers: [],
+        maximumSteps: 3,
+        systemPrompt: undefined,
+        tools: [],
+      };
+    },
+  } as unknown as Parameters<typeof createGateway>[0];
+
+  return {
+    bureau,
+    getRequestAuthorityValidator: () => requestAuthorityValidator,
+  };
+}
+
+describe('createGateway', () => {
   function staticTokenRequestContext(authToken: string, ownerId = 'bureau'): ToolRequestContext {
     return {
       authority: {
@@ -31,43 +76,6 @@ describe('createGateway', () => {
         authorizationRevision: staticTokenAuthorizationRevision(authToken),
       },
       audience: 'operator',
-    };
-  }
-
-  function createGatewayBureauStub(
-    hostValidator?: RequestAuthorityValidator,
-    kv: Parameters<typeof createGateway>[0]['kv'] = undefined,
-  ) {
-    let requestAuthorityValidator = hostValidator;
-    const bureau = {
-      store: createStore(),
-      memory: undefined,
-      scheduler: undefined,
-      ready: true,
-      kv,
-      subscribeLiveFrames: () => () => undefined,
-      addEventListener: () => undefined,
-      removeEventListener: () => undefined,
-      setRequestAuthorityValidator(validator: RequestAuthorityValidator | undefined) {
-        requestAuthorityValidator = validator;
-      },
-      getRequestAuthorityValidator() {
-        return requestAuthorityValidator;
-      },
-      getConfiguration() {
-        return {
-          provider: undefined,
-          providers: [],
-          maximumSteps: 3,
-          systemPrompt: undefined,
-          tools: [],
-        };
-      },
-    } as unknown as Parameters<typeof createGateway>[0];
-
-    return {
-      bureau,
-      getRequestAuthorityValidator: () => requestAuthorityValidator,
     };
   }
 
@@ -712,5 +720,277 @@ describe('buildRequestAuthorityValidator', () => {
     expect(rotatedValidator).toBeDefined();
     expect(await originalValidator!(originalAuthority)).toBe(true);
     expect(await rotatedValidator!(originalAuthority)).toBe(false);
+  });
+});
+
+/**
+ * A controllable fake for the injected `setTimeoutFn`/`clearTimeoutFn`
+ * dependencies, shared by every describe block below that needs to fire a
+ * drain timeout deterministically rather than waiting in real time.
+ */
+function createFakeTimer() {
+  let scheduled: { callback: () => void } | undefined;
+  let cleared = false;
+  const setTimeoutFn = ((callback: () => void) => {
+    scheduled = { callback };
+    return 1 as unknown as ReturnType<typeof setTimeout>;
+  }) as typeof setTimeout;
+  const clearTimeoutFn = (() => {
+    cleared = true;
+  }) as typeof clearTimeout;
+  return {
+    setTimeoutFn,
+    clearTimeoutFn,
+    fire: () => scheduled?.callback(),
+    wasCleared: () => cleared,
+  };
+}
+
+describe('raceDrainTimeout', () => {
+  it('resolves true when the stopping promise settles before the timeout fires', async () => {
+    const timer = createFakeTimer();
+    const result = await raceDrainTimeout(Promise.resolve(), 10_000, {
+      setTimeoutFn: timer.setTimeoutFn,
+      clearTimeoutFn: timer.clearTimeoutFn,
+    });
+    expect(result).toBe(true);
+    expect(timer.wasCleared()).toBe(true);
+  });
+
+  it('resolves true when the stopping promise rejects before the timeout fires', async () => {
+    const timer = createFakeTimer();
+    const rejecting = Promise.reject(new Error('boom'));
+    // Suppress the unhandled-rejection warning without changing what
+    // raceDrainTimeout itself observes — it gets the raw rejecting promise.
+    rejecting.catch(() => undefined);
+
+    const result = await raceDrainTimeout(rejecting, 10_000, {
+      setTimeoutFn: timer.setTimeoutFn,
+      clearTimeoutFn: timer.clearTimeoutFn,
+    });
+    expect(result).toBe(true);
+  });
+
+  it('resolves false when the injected timeout fires before the stopping promise settles', async () => {
+    const timer = createFakeTimer();
+    let releaseStopping: (() => void) | undefined;
+    const stopping = new Promise<void>((resolve) => {
+      releaseStopping = resolve;
+    });
+
+    const resultPromise = raceDrainTimeout(stopping, 10_000, {
+      setTimeoutFn: timer.setTimeoutFn,
+      clearTimeoutFn: timer.clearTimeoutFn,
+    });
+
+    timer.fire();
+    expect(await resultPromise).toBe(false);
+
+    // Clean up the still-pending stopping promise so it doesn't linger.
+    releaseStopping?.();
+  });
+});
+
+describe('createGateway — AB-235 shutdown drain', () => {
+  /**
+   * A fake `ServerAdapter` whose `ServerHandle.stop()` never resolves on
+   * its own — it only settles once `forceClose()` is called — so the
+   * AB-235 drain-timeout race can be exercised deterministically without a
+   * real server. Captures the `wsHandler` the gateway wires up so a test
+   * can open a fake WebSocket through it and simulate a client that never
+   * disconnects on its own — the exact "lingering connection" scenario
+   * AB-235 force-closes.
+   */
+  function createHangingAdapter() {
+    let resolveStop: (() => void) | undefined;
+    const stopPromise = new Promise<void>((resolve) => {
+      resolveStop = resolve;
+    });
+    let forceCloseCalls = 0;
+    let capturedWsHandler: Parameters<ServerAdapter['serve']>[1]['wsHandler'];
+
+    const handle: ServerHandle = {
+      stop: () => stopPromise,
+      forceClose: () => {
+        forceCloseCalls++;
+        resolveStop?.();
+      },
+    };
+    const adapter: ServerAdapter = {
+      mountStaticFiles: () => undefined,
+      serve: (_app, options) => {
+        capturedWsHandler = options.wsHandler;
+        return handle;
+      },
+    };
+    return {
+      adapter,
+      getForceCloseCalls: () => forceCloseCalls,
+      getWsHandler: () => capturedWsHandler,
+    };
+  }
+
+  /** A fake `ServerAdapter` whose `stop()` resolves immediately. */
+  function createCleanAdapter() {
+    let forceCloseCalls = 0;
+    const handle: ServerHandle = {
+      stop: async () => undefined,
+      forceClose: () => {
+        forceCloseCalls++;
+      },
+    };
+    const adapter: ServerAdapter = {
+      mountStaticFiles: () => undefined,
+      serve: () => handle,
+    };
+    return { adapter, getForceCloseCalls: () => forceCloseCalls };
+  }
+
+  it('exposes DEFAULT_GATEWAY_DRAIN_TIMEOUT_MS as 10000', () => {
+    expect(DEFAULT_GATEWAY_DRAIN_TIMEOUT_MS).toBe(10_000);
+  });
+
+  it('accepts an omitted shutdown option and defaults drainTimeoutMs', async () => {
+    const { bureau } = createGatewayBureauStub();
+    const { adapter } = createCleanAdapter();
+    const gateway = await createGateway(bureau, {}, { resolveAdapterFn: async () => adapter });
+    expect(gateway).toBeDefined();
+  });
+
+  it('rejects a non-positive-integer drainTimeoutMs', async () => {
+    const { bureau } = createGatewayBureauStub();
+    const { adapter } = createCleanAdapter();
+
+    let caught: unknown;
+    try {
+      await createGateway(
+        bureau,
+        { shutdown: { drainTimeoutMs: 0 } },
+        { resolveAdapterFn: async () => adapter },
+      );
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+  });
+
+  it('rejects a fractional drainTimeoutMs', async () => {
+    const { bureau } = createGatewayBureauStub();
+    const { adapter } = createCleanAdapter();
+
+    let caught: unknown;
+    try {
+      await createGateway(
+        bureau,
+        { shutdown: { drainTimeoutMs: 1.5 } },
+        { resolveAdapterFn: async () => adapter },
+      );
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+  });
+
+  it('rejects a drainTimeoutMs that overflows the runtime timer range', async () => {
+    const { bureau } = createGatewayBureauStub();
+    const { adapter } = createCleanAdapter();
+
+    // Bun/Node clamp a setTimeout delay above 2_147_483_647ms to 1ms rather
+    // than honoring it — accepting this would silently force-close
+    // connections almost immediately instead of the much longer drain the
+    // caller asked for.
+    let caught: unknown;
+    try {
+      await createGateway(
+        bureau,
+        { shutdown: { drainTimeoutMs: 2_147_483_648 } },
+        { resolveAdapterFn: async () => adapter },
+      );
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+  });
+
+  it('accepts a drainTimeoutMs exactly at the runtime timer maximum', async () => {
+    const { bureau } = createGatewayBureauStub();
+    const { adapter } = createCleanAdapter();
+
+    const gateway = await createGateway(
+      bureau,
+      { shutdown: { drainTimeoutMs: 2_147_483_647 } },
+      { resolveAdapterFn: async () => adapter },
+    );
+    expect(gateway).toBeDefined();
+  });
+
+  it('reports drained: true and forcedConnections: 0 for a clean shutdown', async () => {
+    const { bureau } = createGatewayBureauStub();
+    const { adapter, getForceCloseCalls } = createCleanAdapter();
+    const gateway = await createGateway(
+      bureau,
+      { shutdown: { drainTimeoutMs: 5000 } },
+      { resolveAdapterFn: async () => adapter },
+    );
+
+    const runningGateway = await gateway.start();
+    const report = await runningGateway.stop();
+
+    expect(report).toEqual({ drained: true, forcedConnections: 0 });
+    expect(getForceCloseCalls()).toBe(0);
+  });
+
+  it('closes an open fake WebSocket, times out via an injected timer, and force-closes it', async () => {
+    const { bureau } = createGatewayBureauStub();
+    const { adapter, getForceCloseCalls, getWsHandler } = createHangingAdapter();
+    const timer = createFakeTimer();
+    const gateway = await createGateway(
+      bureau,
+      { shutdown: { drainTimeoutMs: 5000 } },
+      {
+        resolveAdapterFn: async () => adapter,
+        setTimeoutFn: timer.setTimeoutFn,
+        clearTimeoutFn: timer.clearTimeoutFn,
+      },
+    );
+
+    const runningGateway = await gateway.start();
+    const wsHandler = getWsHandler();
+    expect(wsHandler).toBeDefined();
+
+    // Open one fake WebSocket through the wsHandler the gateway wired up —
+    // this registers it as a live-frame subscriber — and never call
+    // handler.close() on it, simulating a client that never disconnects on
+    // its own (the "lingering connection" AB-235 exists to bound).
+    let fakeWsClosed = false;
+    // The handler only ever calls `send`/`close` on this — Bun's real
+    // ServerWebSocket generic signature can't be satisfied by a partial
+    // object, so this goes through `unknown` first (same pattern as
+    // bun-adapter.test.ts's fake server).
+    const fakeWs = {
+      send: () => undefined,
+      close: () => (fakeWsClosed = true),
+    } as unknown as Parameters<NonNullable<typeof wsHandler>['open']>[0];
+    wsHandler!.open(fakeWs);
+
+    const stopPromise = runningGateway.stop();
+
+    // Let the microtask queue drain so raceDrainTimeout has registered its
+    // timer before we fire it — firing too early would race the promise
+    // chain non-deterministically.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    timer.fire();
+    const report = await stopPromise;
+
+    // closeAll() (via LiveFrameBroker) asked the fake WebSocket to close as
+    // part of the drain, in parallel with the adapter's own stop() — but it
+    // never took the handler's close() path, so it was still open when the
+    // drain timeout elapsed and force-close had to run.
+    expect(fakeWsClosed).toBe(true);
+    expect(report.drained).toBe(false);
+    expect(report.forcedConnections).toBe(1);
+    expect(getForceCloseCalls()).toBe(1);
   });
 });

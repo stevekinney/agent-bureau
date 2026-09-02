@@ -7,9 +7,11 @@ import { describe, expect, it } from 'bun:test';
 import {
   parseStartEnvironment,
   resolveStartOptions,
+  shutdownGateway,
   type StartEnvironment,
   startGateway,
 } from './start';
+import type { GatewayShutdownReport } from './types';
 
 const BASE_ENVIRONMENT: Record<string, string | undefined> = {};
 
@@ -217,5 +219,71 @@ describe('startGateway', () => {
     } finally {
       await rm(rootDirectory, { recursive: true, force: true });
     }
+  });
+});
+
+describe('shutdownGateway', () => {
+  function createFakeReportingServer(report: GatewayShutdownReport) {
+    return { stop: async () => report };
+  }
+
+  function createFakeBureau() {
+    let disposeCalled = false;
+    return {
+      bureau: {
+        dispose: async () => {
+          disposeCalled = true;
+        },
+      },
+      wasDisposeCalled: () => disposeCalled,
+    };
+  }
+
+  function createFakeLogger() {
+    const lines: string[] = [];
+    return { log: (message: string) => lines.push(message), lines };
+  }
+
+  it('logs a clean-drain message and disposes the bureau on a clean shutdown', async () => {
+    const server = createFakeReportingServer({ drained: true, forcedConnections: 0 });
+    const { bureau, wasDisposeCalled } = createFakeBureau();
+    const logger = createFakeLogger();
+
+    const report = await shutdownGateway({ bureau }, server, logger);
+
+    expect(report).toEqual({ drained: true, forcedConnections: 0 });
+    expect(wasDisposeCalled()).toBe(true);
+    expect(logger.lines).toContain('[gateway] drained cleanly');
+  });
+
+  it('logs the forced-connection count and still disposes the bureau after a timed-out drain', async () => {
+    const server = createFakeReportingServer({ drained: false, forcedConnections: 2 });
+    const { bureau, wasDisposeCalled } = createFakeBureau();
+    const logger = createFakeLogger();
+
+    const report = await shutdownGateway({ bureau }, server, logger);
+
+    expect(report).toEqual({ drained: false, forcedConnections: 2 });
+    expect(wasDisposeCalled()).toBe(true);
+    expect(logger.lines).toContain(
+      '[gateway] drain timed out — force-closed 2 live-stream connection(s)',
+    );
+  });
+
+  it('still disposes the bureau when server.stop() rejects', async () => {
+    const failure = new Error('stop failed');
+    const server = { stop: async () => Promise.reject(failure) };
+    const { bureau, wasDisposeCalled } = createFakeBureau();
+    const logger = createFakeLogger();
+
+    let caught: unknown;
+    try {
+      await shutdownGateway({ bureau }, server, logger);
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBe(failure);
+    expect(wasDisposeCalled()).toBe(true);
   });
 });

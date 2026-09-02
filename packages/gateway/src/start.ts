@@ -5,7 +5,7 @@ import { createBureau } from 'bureau';
 import { z } from 'zod';
 
 import { createGateway } from './create-gateway';
-import type { BureauOptions, GatewayOptions } from './types';
+import type { BureauOptions, GatewayOptions, GatewayShutdownReport } from './types';
 
 /**
  * Process entrypoint for running the gateway as a standalone service (the
@@ -207,6 +207,44 @@ export async function startGateway(environment: StartEnvironment) {
   return { gateway, server, bureau };
 }
 
+/**
+ * Runs the AB-235 shutdown sequence: awaits `server.stop()`'s bounded
+ * drain-then-force-close report, logs it, then always runs
+ * `gateway.bureau.dispose()` — even if `stop()` throws — so a failed drain
+ * never leaves durable state un-flushed (AB-37: drain rather than abandon).
+ *
+ * Extracted from `main()`'s SIGTERM/SIGINT handler so the shutdown sequence
+ * is directly unit-testable against injected `server`/`gateway.bureau`
+ * fakes and an injected `logger`, without going through real process
+ * signals or `process.exit`.
+ */
+export async function shutdownGateway(
+  gateway: { bureau: { dispose(): Promise<void> } },
+  server: { stop(): Promise<GatewayShutdownReport> },
+  logger: Pick<Console, 'log'> = console,
+): Promise<GatewayShutdownReport> {
+  try {
+    // AB-235: `server.stop()` drains open connections for a bounded
+    // period, then force-closes whatever remains. Log the report so an
+    // operator can see whether shutdown was clean or had to force-close
+    // a lingering connection (e.g. an attached UI client).
+    const report = await server.stop();
+    if (report.drained) {
+      logger.log('[gateway] drained cleanly');
+    } else {
+      logger.log(
+        `[gateway] drain timed out — force-closed ${report.forcedConnections} live-stream connection(s)`,
+      );
+    }
+    return report;
+  } finally {
+    // Always run cleanup, even if the drain itself threw, so a failed
+    // stop() never leaves durable state un-flushed (AB-37: drain rather
+    // than abandon).
+    await gateway.bureau.dispose();
+  }
+}
+
 async function main(): Promise<void> {
   const environment = parseStartEnvironment(Bun.env);
   if (environment.STORAGE_TYPE === 'memory') {
@@ -230,8 +268,7 @@ async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(`[gateway] received ${signal}, shutting down`);
-    await server.stop();
-    await gateway.bureau.dispose();
+    await shutdownGateway(gateway, server);
     process.exit(0);
   };
   process.on('SIGTERM', () => void shutdown('SIGTERM'));

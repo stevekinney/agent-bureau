@@ -22,9 +22,93 @@ import {
 import { createRoutes } from './routes';
 import { createHookIdempotencyRegistry } from './routes/hooks';
 import { createPages } from './server/pages';
-import type { Gateway, GatewayOptions } from './types';
+import type { Gateway, GatewayOptions, GatewayShutdownReport } from './types';
 import { DEFAULT_PORT, SCOPE } from './types';
 import { createWebSocketHandler } from './websocket';
+
+/**
+ * AB-235 default drain timeout: how long `stop()` waits for open
+ * connections to close on their own before force-closing whatever
+ * remains. Ten seconds sits comfortably inside a typical deployment
+ * platform's shutdown grace period (commonly 30 s) while still giving an
+ * in-flight request or a parked SSE/WebSocket client a real chance to
+ * finish cleanly.
+ */
+export const DEFAULT_GATEWAY_DRAIN_TIMEOUT_MS = 10_000;
+
+/**
+ * The largest delay `setTimeout`/`setInterval` accept as a 32-bit signed
+ * integer of milliseconds (both Bun and Node). A delay above this is
+ * silently clamped to 1 ms rather than rejected, which would force-close
+ * connections almost immediately instead of honoring a caller's much
+ * longer requested drain — the opposite of what `drainTimeoutMs` promises.
+ */
+const MAX_SAFE_TIMEOUT_MS = 2_147_483_647;
+
+/**
+ * Validates `shutdown.drainTimeoutMs` as a positive integer within the
+ * runtime timer's representable range, defaulting to
+ * {@link DEFAULT_GATEWAY_DRAIN_TIMEOUT_MS} when omitted. Throws eagerly
+ * (at `createGateway()` call time, not lazily inside `stop()`) so a
+ * misconfigured value fails fast during startup.
+ */
+function validateDrainTimeoutMs(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_GATEWAY_DRAIN_TIMEOUT_MS;
+  if (!Number.isInteger(value) || value <= 0 || value > MAX_SAFE_TIMEOUT_MS) {
+    throw new Error(
+      `shutdown.drainTimeoutMs must be a positive integer no greater than ${MAX_SAFE_TIMEOUT_MS} ` +
+        `(the runtime timer's representable range), received ${JSON.stringify(value)}.`,
+    );
+  }
+  return value;
+}
+
+/**
+ * Dependencies {@link createGateway} injects for the AB-235 shutdown-drain
+ * race, mirroring AB-209's `loadServe`-style injection pattern
+ * (`node-adapter.ts`'s `CreateNodeAdapterDependencies`). Defaults to the
+ * real runtime timers and adapter resolver; tests override them to
+ * exercise the drain timeout and force-close path deterministically,
+ * without waiting in real time or standing up a real Bun/Node server.
+ */
+export interface CreateGatewayDependencies {
+  setTimeoutFn?: typeof setTimeout;
+  clearTimeoutFn?: typeof clearTimeout;
+  resolveAdapterFn?: (runtime: 'bun' | 'node') => Promise<ServerAdapter>;
+}
+
+/**
+ * Races an in-flight server-stop promise against a drain timeout.
+ * Resolves `true` when `stopping` settles (fulfilled or rejected) before
+ * the timeout — a clean drain — and `false` when the timeout elapses
+ * first. Never rejects on its own: a `stopping` rejection is treated as
+ * "settled" here so the race resolves, and the caller's own separate
+ * `await stopping` is what surfaces the actual error.
+ *
+ * Extracted as a standalone, dependency-injected function (rather than
+ * inlined in `stop()`) so the AB-235 drain-timeout behavior is directly
+ * unit-testable without waiting in real time — tests inject
+ * `setTimeoutFn`/`clearTimeoutFn` and fire the timeout callback
+ * themselves.
+ */
+export async function raceDrainTimeout(
+  stopping: Promise<unknown>,
+  drainTimeoutMs: number,
+  dependencies: Pick<CreateGatewayDependencies, 'setTimeoutFn' | 'clearTimeoutFn'> = {},
+): Promise<boolean> {
+  const { setTimeoutFn = setTimeout, clearTimeoutFn = clearTimeout } = dependencies;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<'timed-out'>((resolve) => {
+    timer = setTimeoutFn(() => resolve('timed-out'), drainTimeoutMs);
+  });
+  const settled = stopping.then(
+    () => 'settled' as const,
+    () => 'settled' as const,
+  );
+  const result = await Promise.race([settled, timedOut]);
+  if (timer !== undefined) clearTimeoutFn(timer);
+  return result === 'settled';
+}
 
 type RequestAuthorityValidator = (context: ToolRequestContext) => boolean | Promise<boolean>;
 type BureauRequestAuthorityValidatorAccess = {
@@ -200,10 +284,12 @@ function composeRequestAuthorityValidators(
 export async function createGateway(
   bureau: Bureau,
   options: GatewayOptions = {},
+  dependencies: CreateGatewayDependencies = {},
 ): Promise<Gateway> {
+  const drainTimeoutMs = validateDrainTimeoutMs(options.shutdown?.drainTimeoutMs);
   const port = options.port ?? DEFAULT_PORT;
   const runtime = options.runtime ?? detectRuntime();
-  const adapter = await resolveAdapter(runtime);
+  const adapter = await (dependencies.resolveAdapterFn ?? resolveAdapter)(runtime);
   const liveFrameBroker = new LiveFrameBroker();
   const unsubscribeLiveFrames = bureau.subscribeLiveFrames((frame) => {
     liveFrameBroker.broadcast(frame);
@@ -327,13 +413,18 @@ export async function createGateway(
     });
 
     return {
-      async stop() {
+      async stop(): Promise<GatewayShutdownReport> {
         // Start the server's own drain (stops accepting new connections,
         // then waits for in-flight requests/WebSocket connections to close)
         // before running the rest of teardown, rather than after — cleanup
         // that doesn't depend on the listener being fully drained shouldn't
         // be serialized behind it.
         const stopping = handle.stop();
+        // AB-235 (AB-37: drain rather than abandon): tell every open
+        // WebSocket and SSE stream to close through the existing subscriber
+        // registry, so they start winding down in parallel with the
+        // adapter's own drain instead of only after it times out.
+        liveFrameBroker.closeAll();
         wsHandler.dispose();
         unsubscribeLiveFrames();
         bureau.removeEventListener('run.removed', clearRunBufferOnRemoval);
@@ -351,7 +442,24 @@ export async function createGateway(
             bureau.setRequestAuthorityValidator(replacementValidator);
           }
         }
+
+        const drained = await raceDrainTimeout(stopping, drainTimeoutMs, dependencies);
+        if (!drained) {
+          // AB-235 escalation: the drain timeout elapsed with the adapter's
+          // own stop() still pending — force-close whatever connections are
+          // still open rather than holding the process past its deployment
+          // grace period. `subscriberCount` is read now, before forcing,
+          // so it reports how many connections were still open at the
+          // moment we had to force them rather than however many remain
+          // after.
+          const forcedConnections = liveFrameBroker.subscriberCount;
+          handle.forceClose();
+          await stopping;
+          return { drained: false, forcedConnections };
+        }
+
         await stopping;
+        return { drained: true, forcedConnections: 0 };
       },
     };
   }

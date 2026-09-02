@@ -30,6 +30,7 @@ const RUN_FRAME_BUFFER_LIMIT = 2_000;
 
 type Subscriber = {
   sendFrame: (frame: ServerFrame) => void;
+  closeConnection: () => void;
   runIds: Set<string>;
   includeScheduler: boolean;
 };
@@ -37,6 +38,16 @@ type Subscriber = {
 export type LiveFrameSubscriberOptions = {
   runIds?: Iterable<string>;
   includeScheduler?: boolean;
+  /**
+   * Ends this subscriber's underlying connection — a WebSocket close frame
+   * or the end of an SSE stream, depending on transport. Invoked by
+   * {@link LiveFrameBroker.closeAll} during gateway shutdown (AB-235) so
+   * every open connection is asked to close before the server adapter's
+   * own drain timeout elapses. Defaults to a no-op so callers that never
+   * need coordinated shutdown (most existing subscribers/tests) aren't
+   * required to supply one.
+   */
+  closeConnection?: () => void;
 };
 
 export type EventStreamResponseOptions = LiveFrameSubscriberOptions & {
@@ -127,6 +138,15 @@ function formatEventStreamPayload(frame: ServerFrame, id?: string): string {
 export class LiveFrameBroker {
   private readonly subscribers = new Map<object, Subscriber>();
   /**
+   * Set by {@link closeAll} during gateway shutdown (AB-235). Once true, a
+   * subscriber that registers afterward — e.g. an SSE request that was
+   * already in-flight through async authentication or rate-limiting when
+   * `stop()` called `closeAll()` — is closed immediately by
+   * {@link addSubscriber} instead of being left open for the rest of the
+   * drain timeout.
+   */
+  private closing = false;
+  /**
    * AB-15 replay buffers, one per run, holding the last {@link RUN_FRAME_BUFFER_LIMIT}
    * run-scoped frames emitted for that run (regardless of whether anyone was
    * subscribed when they were emitted — a reconnect from zero must still be
@@ -141,11 +161,19 @@ export class LiveFrameBroker {
     sendFrame: (frame: ServerFrame) => void,
     options: LiveFrameSubscriberOptions = {},
   ): void {
+    const closeConnection = options.closeConnection ?? (() => undefined);
     this.subscribers.set(key, {
       sendFrame,
+      closeConnection,
       runIds: new Set(options.runIds ?? []),
       includeScheduler: options.includeScheduler ?? false,
     });
+    if (this.closing) {
+      // AB-235: shutdown already asked every existing connection to close
+      // before this one registered — don't let it hold the drain window
+      // open for the rest of the timeout.
+      closeConnection();
+    }
   }
 
   /**
@@ -273,6 +301,47 @@ export class LiveFrameBroker {
     return count;
   }
 
+  /**
+   * Total number of connections this broker is currently tracking, across
+   * both WebSocket and SSE transports. Read by gateway shutdown (AB-235)
+   * right before escalating to a force-close, to report how many
+   * connections were still open at that point.
+   */
+  get subscriberCount(): number {
+    return this.subscribers.size;
+  }
+
+  /**
+   * Ends every connection this broker is tracking by invoking each
+   * subscriber's registered {@link LiveFrameSubscriberOptions.closeConnection}
+   * — a WebSocket close frame, or the end of an SSE stream. This is the
+   * "drain rather than abandon" step of gateway shutdown (AB-235, per the
+   * AB-37 decision record): every connection is told to close before the
+   * server adapter's own `stop()` is raced against the drain timeout.
+   *
+   * Does not itself remove subscribers — each connection's own close
+   * handling (SSE's internal `close()`, the WebSocket handler's `close`
+   * event) does that once the underlying transport actually finishes
+   * closing, which may happen after this call returns.
+   *
+   * Also marks the broker as closing (see {@link closing}) and tolerates
+   * an individual `closeConnection` throwing — mirroring {@link broadcast}'s
+   * per-subscriber isolation — so one misbehaving connection can't abort
+   * the drain early and leave the rest of the connections un-asked.
+   */
+  closeAll(): void {
+    this.closing = true;
+    for (const subscriber of this.subscribers.values()) {
+      try {
+        subscriber.closeConnection();
+      } catch {
+        // Isolated per subscriber, same as broadcast() — one connection's
+        // close callback throwing must not stop the rest from being asked
+        // to close too.
+      }
+    }
+  }
+
   createEventStreamResponse(request: Request, options: EventStreamResponseOptions = {}): Response {
     const streamKey = {};
     const encoder = new TextEncoder();
@@ -357,7 +426,16 @@ export class LiveFrameBroker {
           }
         };
 
-        this.addSubscriber(streamKey, sendFrame, options);
+        this.addSubscriber(streamKey, sendFrame, { ...options, closeConnection: close });
+
+        // AB-235: addSubscriber() above closes this stream synchronously
+        // (via closeConnection) when the broker is already shutting down —
+        // e.g. this request was in-flight through async auth/rate-limiting
+        // when stop() called closeAll(). The controller is closed at that
+        // point, so nothing below may enqueue anything further.
+        if (closed) {
+          return;
+        }
 
         // AB-15 replay: for every explicitly-named run (not the `*` wildcard —
         // there is no stable buffered position across an open-ended run set),

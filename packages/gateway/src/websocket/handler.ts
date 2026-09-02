@@ -17,9 +17,17 @@ export interface WebSocketHandler {
 
 export function createWebSocketHandler(options: WebSocketHandlerOptions): WebSocketHandler {
   function open(ws: ServerWebSocket<unknown>): void {
-    options.broker.addSubscriber(ws, (frame) => {
-      ws.send(JSON.stringify(frame));
-    });
+    options.broker.addSubscriber(
+      ws,
+      (frame) => {
+        ws.send(JSON.stringify(frame));
+      },
+      // AB-235: register a close callback so gateway shutdown's
+      // `LiveFrameBroker.closeAll()` can send a WebSocket close frame to
+      // this connection as part of draining before the adapter's own
+      // `stop()` is force-closed.
+      { closeConnection: () => ws.close() },
+    );
   }
 
   function message(ws: ServerWebSocket<unknown>, data: string | Buffer): void {
