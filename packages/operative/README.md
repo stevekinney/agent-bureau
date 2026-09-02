@@ -150,6 +150,8 @@ for await (const event of run) {
 const result = await run.result(); // await — same handle
 ```
 
+`createAgent`'s return value satisfies `RunnableAgent<O, H>` (AB-21) — it carries a `readonly name` (`options.name`, defaulting to `'(agent)'` when omitted) and `run` accepts an optional second `AgentRunContext` argument (`{ signal, agentName, traceContext, withTraceContext }`), so it slots into `createLazyAgent` or a future `AgentDefinitions` map without a cast. `context.signal` drives per-run abort, `context.agentName` overrides the run's stamped agent name, and `context.traceContext` becomes the same `parentContext` field `RunOptions` already uses for nested tracing.
+
 **`CreateAgentOptions`** — key fields:
 
 | Field               | Type                                    | Description                                                                          |
@@ -286,6 +288,38 @@ await monitoring; // rejects with AbortError
 ```
 
 Use a Weft-backed run wakeup or signal when a current run must survive restart, and use a Bureau recurring schedule when future runs must survive restart. Session timing does not switch to those durable capabilities implicitly.
+
+#### `createLazyAgent(loader, options?)`
+
+Type-preserving lazy loading for a whole `RunnableAgent` (AB-21) — instructions, tools, and output schema together, not just the `generate` function (`createLazyGenerate` covers that narrower case: `createAgent({ generate: createLazyGenerate(loader) })`). It defers `import()`ing an agent's module until the first `run()` call, while still returning an `AgentRun` handle synchronously:
+
+```typescript
+import { createLazyAgent } from '@lostgradient/operative';
+
+// A named export: select it inside the loader — there is no selector overload.
+const researcher = createLazyAgent(() =>
+  import('./agents/researcher').then((module) => module.researcher),
+);
+
+const run = researcher.run('Summarize the Q3 report.'); // synchronous — no await here
+const result = await run.result(); // the module loads on first run(), then is cached
+
+// A default export: `createLazyAgent` accepts the raw `import()` result
+// directly and unwraps `.default` itself (AB-15's `AgentModule<O, H>`).
+const plugin = createLazyAgent(() => import('./agents/plugin'));
+```
+
+`createLazyAgent`'s return value is an ordinary `RunnableAgent<O, H>` — the same shape `createAgent` produces — so it slots into an `AgentDefinitions` map without unwrapping. The first successful load is cached and shared across concurrent `run()` calls; a load failure clears only that pending load, so a later `run()` retries.
+
+Each `run()` call owns its own `waiting → started → terminal` state, independent of every other call to the same lazy agent:
+
+- `input` and `context` are both snapshotted synchronously at `run()` call time (matching `createAgent`'s own snapshot semantics), so a caller mutating the object it passed in — after `run()` already returned — never leaks into this run.
+- Events emitted before the underlying agent resolves are buffered and replayed to the returned handle's async iterator once a consumer actually starts iterating; a caller who only ever calls `result()` never subscribes to the underlying event stream at all, so a long or tool-heavy run doesn't grow an unbounded buffer of events nobody reads.
+- `run.abort(reason)` called before resolution completes means the underlying agent's `run()` is never called at all — a fast abort, not a delayed one; an abort that raced synchronously inside `agent.run()` itself disposes the handle it just returned instead of leaving it running unobserved.
+- `run.abort(reason)` called after resolution forwards to the real handle exactly once. `context.signal` is passed straight through to the underlying agent's own `run()`, so once the underlying handle exists, the wrapper stops separately forwarding that same signal — a compliant agent is already responsible for honoring it directly, and forwarding twice would risk duplicating non-idempotent cleanup.
+- `result()`, `unwrap()`, and `output()` delegate to the real handle once it exists.
+
+A loader that throws or rejects surfaces `AsyncDefinitionLoadError` (the same error `createLazyGenerate` uses, kind `'load'`). A loader that resolves to something that isn't a valid `RunnableAgent` — or whose `run()` returns something that isn't a valid `AgentRun` (missing `result`, `abort`, iteration, or `[Symbol.dispose]`) — surfaces `AgentContractError` (kind `'contract'`, code `'INVALID_AGENT_HANDLE'`) instead: the load itself succeeded, so this isn't retried on the next `run()` call. Either failure is delivered both ways — the returned `AgentRun`'s `result()` resolves with `finishReason: 'error'` (or `'aborted'`) and the matching event, and its async iterator yields that one event before completing.
 
 #### `createActiveRun(options)`
 

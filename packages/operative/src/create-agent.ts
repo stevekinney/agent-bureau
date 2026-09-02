@@ -7,6 +7,8 @@ import type { AgentRun } from './agent-run';
 import { createAgentRun } from './agent-run';
 import { noToolCalls } from './conditions/predicates';
 import { createActiveRun } from './create-run';
+import type { AgentRunContext, DefinitionResolvingAgent } from './runnable-agent';
+import { OPERATIVE_RESOLVE_RUN_OPTIONS } from './runnable-agent';
 import { toOutputJsonSchema } from './structured-output/response-schema';
 import type {
   ContextManagementOptions,
@@ -37,6 +39,16 @@ export interface CreateAgentOptionsBase {
    * Receives a `GenerateContext` and returns a `GenerateResponse`.
    */
   generate: GenerateFunction;
+
+  /**
+   * Identifies this agent — stamped on curated `tool.*` bubble events
+   * (`AgentRunContext.agentName`'s standalone-path default) and populates
+   * the returned agent's `RunnableAgent.name`. Optional here (unlike the
+   * final `RunnableAgent` contract, where AB-15 makes it required): a
+   * `createAgent` result already satisfies `RunnableAgent<O, H>`
+   * structurally without one, defaulting to `'(agent)'`.
+   */
+  name?: string;
 
   /**
    * System instructions injected as a system message on step 0.
@@ -229,7 +241,18 @@ function validateCreateAgentOptions(options: CreateAgentOptions): void {
  * The runtime agent returned by `createAgent({...})`. Bureau-less, in-memory
  * only. Calling `.run(input)` starts a new ephemeral run each time.
  */
-export interface StandaloneAgent<O = never, H extends boolean = false> {
+export interface StandaloneAgent<
+  O = never,
+  H extends boolean = false,
+> extends DefinitionResolvingAgent {
+  /**
+   * This agent's identity — `options.name`, defaulting to `'(agent)'` when
+   * omitted. Makes a `createAgent` result structurally satisfy
+   * `RunnableAgent<O, H>` (AB-21), so it can be passed to `createLazyAgent`
+   * or placed in an `AgentDefinitions` map without a cast.
+   */
+  readonly name: string;
+
   /**
    * Start a new in-memory run.
    *
@@ -250,10 +273,18 @@ export interface StandaloneAgent<O = never, H extends boolean = false> {
    *   whatever system context it needs, so resuming it repeatedly never
    *   duplicates system messages.
    *
+   * `context` (AB-21's `AgentRunContext`) is optional, matching
+   * `RunnableAgent.run`: `signal` becomes `RunOptions.signal`, `agentName`
+   * overrides the run's stamped agent name, `traceContext` becomes
+   * `RunOptions.parentContext`, and `withTraceContext` is forwarded as-is.
+   *
    * Returns an `AgentRun` handle — NOT a Promise (non-thenable by design).
    * Access the result via `handle.result()`.
    */
-  run(input: string | { conversation: ConversationHistory }): AgentRun<O, H>;
+  run(
+    input: string | { conversation: ConversationHistory },
+    context?: AgentRunContext,
+  ): AgentRun<O, H>;
 }
 
 // Re-export AgentRun from agent-run.ts so callers who import from create-agent
@@ -369,6 +400,7 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknow
     instructions,
     permissions,
     output,
+    name: configuredName,
     // Default to `noToolCalls()` when the caller doesn't supply a `stopWhen`
     // — see the doc comment on `CreateAgentOptionsBase.stopWhen`. Falls back
     // to `createActiveRun`'s own "no stop conditions at all" behavior only
@@ -376,6 +408,8 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknow
     stopWhen = noToolCalls(),
     ...rest
   } = options;
+
+  const resolvedName = configuredName ?? '(agent)';
 
   // Pre-compute tool entries once (pure transform — no per-run state).
   // The map key is canonical — override each tool's inner `.name` with the
@@ -389,61 +423,93 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknow
       }))
     : [];
 
+  // Shared by `run()` and the AB-21 definition-resolution protocol below —
+  // both need the exact same `RunOptions` bag; only what happens to it
+  // (start an in-memory run vs. hand it to a durable engine) differs.
+  function buildRunOptions(
+    input: string | { conversation: ConversationHistory },
+    context?: AgentRunContext,
+  ): RunOptions {
+    // A caller-supplied `toolbox` is used AS-IS, shared across every run —
+    // that's the point (see the `toolbox` option's doc comment: it's what
+    // makes armorer's cross-request approval flow possible). Otherwise
+    // build a fresh Toolbox for each run: `createActiveRun` attaches
+    // listeners to the toolbox emitter and the toolbox tracks per-instance
+    // state (loop detection, budget counters), so a toolbox this factory
+    // owns must not be shared between concurrent runs.
+    const toolbox =
+      providedToolbox ??
+      createToolbox(
+        toolEntries,
+        permissions ? { policy: createHeadlessPermissionPolicyHooks(permissions) } : undefined,
+      );
+
+    const conversation =
+      typeof input === 'string'
+        ? (() => {
+            // Build a fresh Conversation for each run (ephemeral — no session state).
+            const fresh = new Conversation();
+            if (instructions) {
+              fresh.appendSystemMessage(instructions);
+            }
+            fresh.appendUserMessage(input);
+            return fresh;
+          })()
+        : // Snapshot semantics: CLONE the supplied history before wrapping it
+          // in a fresh Conversation instance. `Conversation`'s constructor
+          // only validates its input — it does not copy it — so without the
+          // clone this run's initial node would alias the caller's own
+          // ConversationHistory object. A stateless host commonly holds a
+          // mutable reference it keeps touching between turns; aliasing
+          // would let either side's mutations leak into the other. The
+          // clone makes this run's state and the caller's object fully
+          // independent from the moment `run()` is called: later mutations
+          // by the caller (or by another run resuming the same object)
+          // never affect this in-flight run, and this run never mutates the
+          // caller's object (`ConversationHistory` is a structuredClone-safe
+          // tree — see `durable/types.ts`).
+          new Conversation(structuredClone(input.conversation));
+
+    return {
+      generate,
+      toolbox,
+      conversation,
+      stopWhen,
+      output,
+      // AB-21: `AgentRunContext` fields translate onto their `RunOptions`
+      // equivalents — `agentName` stamps curated `tool.*` events (falling
+      // back to this agent's own `name`), `signal` drives per-run abort,
+      // `traceContext` is `RunOptions.parentContext` (the field this engine
+      // already uses for the same concept), and `withTraceContext` forwards
+      // unchanged.
+      agentName: context?.agentName ?? resolvedName,
+      ...(context?.signal ? { signal: context.signal } : {}),
+      ...(context?.traceContext !== undefined ? { parentContext: context.traceContext } : {}),
+      ...(context?.withTraceContext ? { withTraceContext: context.withTraceContext } : {}),
+      ...rest,
+    };
+  }
+
   return {
-    run(input: string | { conversation: ConversationHistory }): AgentRun<unknown, boolean> {
-      // A caller-supplied `toolbox` is used AS-IS, shared across every run —
-      // that's the point (see the `toolbox` option's doc comment: it's what
-      // makes armorer's cross-request approval flow possible). Otherwise
-      // build a fresh Toolbox for each run: `createActiveRun` attaches
-      // listeners to the toolbox emitter and the toolbox tracks per-instance
-      // state (loop detection, budget counters), so a toolbox this factory
-      // owns must not be shared between concurrent runs.
-      const toolbox =
-        providedToolbox ??
-        createToolbox(
-          toolEntries,
-          permissions ? { policy: createHeadlessPermissionPolicyHooks(permissions) } : undefined,
-        );
-
-      const conversation =
-        typeof input === 'string'
-          ? (() => {
-              // Build a fresh Conversation for each run (ephemeral — no session state).
-              const fresh = new Conversation();
-              if (instructions) {
-                fresh.appendSystemMessage(instructions);
-              }
-              fresh.appendUserMessage(input);
-              return fresh;
-            })()
-          : // Snapshot semantics: CLONE the supplied history before wrapping it
-            // in a fresh Conversation instance. `Conversation`'s constructor
-            // only validates its input — it does not copy it — so without the
-            // clone this run's initial node would alias the caller's own
-            // ConversationHistory object. A stateless host commonly holds a
-            // mutable reference it keeps touching between turns; aliasing
-            // would let either side's mutations leak into the other. The
-            // clone makes this run's state and the caller's object fully
-            // independent from the moment `run()` is called: later mutations
-            // by the caller (or by another run resuming the same object)
-            // never affect this in-flight run, and this run never mutates the
-            // caller's object (`ConversationHistory` is a structuredClone-safe
-            // tree — see `durable/types.ts`).
-            new Conversation(structuredClone(input.conversation));
-
-      const runOptions: RunOptions = {
-        generate,
-        toolbox,
-        conversation,
-        stopWhen,
-        output,
-        ...rest,
-      };
-
-      const activeRun = createActiveRun(runOptions);
+    name: resolvedName,
+    run(
+      input: string | { conversation: ConversationHistory },
+      context?: AgentRunContext,
+    ): AgentRun<unknown, boolean> {
+      const activeRun = createActiveRun(buildRunOptions(input, context));
       return createAgentRun<unknown, boolean>(activeRun, {
         hasOutput: output !== undefined,
       });
+    },
+    // AB-21's definition-resolution protocol: resolves the same `RunOptions`
+    // bag `run()` builds, without starting an in-memory run, so a durable
+    // engine can drive it through `createActiveRun(options, durable)`
+    // directly. Private/unstable — see `runnable-agent.ts`.
+    [OPERATIVE_RESOLVE_RUN_OPTIONS](
+      input: string | { conversation: ConversationHistory },
+      context?: AgentRunContext,
+    ): Promise<RunOptions> {
+      return Promise.resolve(buildRunOptions(input, context));
     },
   };
 }
