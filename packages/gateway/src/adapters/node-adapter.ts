@@ -9,6 +9,14 @@ import type { ServerAdapter, ServerAdapterOptions, ServerHandle } from './types'
  */
 export type CloseableServer = {
   close(callback?: (error?: Error) => void): unknown;
+  /**
+   * Forcibly destroys every open connection (Node's `http.Server` since
+   * 18.2.0). Optional because a fake test server may not implement it —
+   * `createNodeAdapter`'s `forceClose()` treats a missing implementation
+   * as a no-op rather than throwing, matching the AB-235 force-close path
+   * on a runtime too old to support it.
+   */
+  closeAllConnections?(): void;
 };
 
 /**
@@ -103,6 +111,12 @@ export function createNodeAdapter(dependencies: CreateNodeAdapterDependencies = 
       return {
         stop() {
           return promisifyClose(server);
+        },
+        forceClose() {
+          // AB-235: escalates the already-in-flight `close()` above by
+          // destroying any connections still open, which causes the
+          // pending `close(callback)` to fire immediately.
+          server.closeAllConnections?.();
         },
       };
     },

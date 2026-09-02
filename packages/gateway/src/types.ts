@@ -83,6 +83,36 @@ export interface GatewayOptions {
    * `bureau.getConfiguration()`.
    */
   a2a?: A2AAgentCardOptions;
+  /**
+   * AB-235 — bounds how long `stop()` waits for open connections (in-flight
+   * requests, open WebSockets, live SSE streams) to drain before forcing
+   * them closed, so a deployment's shutdown grace period is never held
+   * open indefinitely by an attached UI client. Omit to use
+   * `DEFAULT_GATEWAY_DRAIN_TIMEOUT_MS`.
+   */
+  shutdown?: GatewayShutdownOptions;
+}
+
+/** AB-235 — {@link GatewayOptions.shutdown}. */
+export interface GatewayShutdownOptions {
+  /**
+   * Milliseconds to wait for open connections to drain during `stop()`
+   * before force-closing whatever remains. Must be a positive integer.
+   * Default: {@link DEFAULT_GATEWAY_DRAIN_TIMEOUT_MS} (10000).
+   */
+  drainTimeoutMs?: number;
+}
+
+/**
+ * AB-235 — the report `Gateway['start']`'s returned `stop()` resolves with.
+ * `drained: true` means every open connection closed on its own before the
+ * drain timeout; `drained: false` means `stop()` had to force-close whatever
+ * was still open, and `forcedConnections` names how many connections were
+ * still open at that point.
+ */
+export interface GatewayShutdownReport {
+  drained: boolean;
+  forcedConnections: number;
 }
 
 /**
@@ -118,7 +148,7 @@ export interface Gateway {
   readonly bureau: import('bureau').Bureau;
   readonly store: Store;
   readonly port: number;
-  start(): Promise<{ stop(): Promise<void> }>;
+  start(): Promise<{ stop(): Promise<GatewayShutdownReport> }>;
 }
 
 // ── API Response Types (door-only) ──────────────────────────────────

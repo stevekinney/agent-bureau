@@ -51,6 +51,16 @@ export type ServerAdapterOptions = {
 export type ServerHandle = {
   /** Stops the server. Resolves only once the underlying server has closed. */
   stop(): Promise<void>;
+  /**
+   * Forces closed any connections still open (in-flight requests, open
+   * WebSockets) rather than waiting for them to drain — the AB-235
+   * escalation path when a prior {@link ServerHandle.stop} call has not
+   * settled before the gateway's drain timeout. Implementations resolve
+   * the same `stop()` promise once the forced close completes; this method
+   * itself does not return a promise because the caller already holds
+   * that `stop()` promise and re-awaits it.
+   */
+  forceClose(): void;
 };
 
 /**

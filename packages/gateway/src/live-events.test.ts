@@ -246,3 +246,68 @@ describe('LiveFrameBroker', () => {
     await reader.cancel();
   });
 });
+
+describe('LiveFrameBroker — AB-235 shutdown drain', () => {
+  it('reports zero subscribers when none are registered', () => {
+    const broker = new LiveFrameBroker();
+    expect(broker.subscriberCount).toBe(0);
+  });
+
+  it('counts every registered subscriber regardless of transport', () => {
+    const broker = new LiveFrameBroker();
+    broker.addSubscriber({}, () => undefined, { runIds: ['run-1'] });
+    broker.addSubscriber({}, () => undefined, { runIds: ['run-2'] });
+    expect(broker.subscriberCount).toBe(2);
+  });
+
+  it('invokes each subscriber registered closeConnection callback', () => {
+    const broker = new LiveFrameBroker();
+    let firstClosed = false;
+    let secondClosed = false;
+
+    broker.addSubscriber({}, () => undefined, {
+      runIds: ['run-1'],
+      closeConnection: () => {
+        firstClosed = true;
+      },
+    });
+    broker.addSubscriber({}, () => undefined, {
+      runIds: ['run-2'],
+      closeConnection: () => {
+        secondClosed = true;
+      },
+    });
+
+    broker.closeAll();
+
+    expect(firstClosed).toBe(true);
+    expect(secondClosed).toBe(true);
+  });
+
+  it('does not throw when a subscriber has no closeConnection callback', () => {
+    const broker = new LiveFrameBroker();
+    broker.addSubscriber({}, () => undefined, { runIds: ['run-1'] });
+    expect(() => broker.closeAll()).not.toThrow();
+  });
+
+  it('closes the underlying SSE stream for a subscriber created via createEventStreamResponse', async () => {
+    const broker = new LiveFrameBroker();
+    const request = new Request('http://example.test/api/v1/events');
+    const response = broker.createEventStreamResponse(request, { heartbeatIntervalMs: 60_000 });
+
+    const reader = response.body?.getReader();
+    expect(reader).toBeDefined();
+    if (!reader) return;
+
+    // Consume the initial ': connected' comment so the subscriber is fully
+    // registered before we ask the broker to close everything.
+    await reader.read();
+    expect(broker.subscriberCount).toBe(1);
+
+    broker.closeAll();
+
+    // closeAll() ends the stream; the next read reports the stream as done.
+    const next = await reader.read();
+    expect(next.done).toBe(true);
+  });
+});

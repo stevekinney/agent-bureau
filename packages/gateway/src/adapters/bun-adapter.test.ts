@@ -17,16 +17,24 @@ function createFakeBunServer() {
     releaseStop = resolve;
   });
   let stopCalled = false;
+  let stoppedWithForce: boolean | undefined;
 
   return {
     server: {
-      stop: () => {
+      stop: (force?: boolean) => {
         stopCalled = true;
+        stoppedWithForce = force;
+        // Bun's real Server.stop(true) resolves the same underlying stop
+        // promise immediately rather than waiting for connections to
+        // drain — simulate that here so tests can observe forceClose()
+        // unblocking the original stop() promise.
+        if (force) releaseStop?.();
         return stopGate;
       },
     },
     releaseStop: () => releaseStop?.(),
     wasStopCalled: () => stopCalled,
+    wasStoppedWithForce: () => stoppedWithForce,
   };
 }
 
@@ -269,5 +277,61 @@ describe('createBunAdapter — stop()', () => {
     fake.releaseStop();
     await stopPromise;
     expect(resolved).toBe(true);
+  });
+});
+
+describe('createBunAdapter — forceClose()', () => {
+  const originalServe = Bun.serve;
+
+  afterEach(() => {
+    Bun.serve = originalServe;
+  });
+
+  it('calls server.stop(true) and resolves the original stop() promise (no wsHandler, AB-235)', async () => {
+    const fake = createFakeBunServer();
+    Bun.serve = (() => fake.server) as unknown as typeof Bun.serve;
+
+    const adapter = createBunAdapter();
+    const handle = await adapter.serve(fakeApp(), { port: 0 });
+
+    let resolved = false;
+    const stopPromise = handle.stop().then(() => {
+      resolved = true;
+    });
+
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+
+    handle.forceClose();
+    await stopPromise;
+    expect(resolved).toBe(true);
+    expect(fake.wasStoppedWithForce()).toBe(true);
+  });
+
+  it('calls server.stop(true) and resolves the original stop() promise (with wsHandler, AB-235)', async () => {
+    const fake = createFakeBunServer();
+    Bun.serve = (() => fake.server) as unknown as typeof Bun.serve;
+
+    const adapter = createBunAdapter();
+    const wsHandler = {
+      dispose: () => {},
+      open: () => {},
+      message: () => {},
+      close: () => {},
+    };
+    const handle = await adapter.serve(fakeApp(), { port: 0, wsHandler });
+
+    let resolved = false;
+    const stopPromise = handle.stop().then(() => {
+      resolved = true;
+    });
+
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+
+    handle.forceClose();
+    await stopPromise;
+    expect(resolved).toBe(true);
+    expect(fake.wasStoppedWithForce()).toBe(true);
   });
 });

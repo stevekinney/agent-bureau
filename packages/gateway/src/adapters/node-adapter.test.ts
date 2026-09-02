@@ -118,3 +118,75 @@ describe('defaultLoadServe', () => {
     expect(typeof serve).toBe('function');
   });
 });
+
+describe('createNodeAdapter — forceClose()', () => {
+  it('calls closeAllConnections() when the underlying server implements it (AB-235)', async () => {
+    let closeAllConnectionsCalled = false;
+    const adapter = createNodeAdapter({
+      loadServe: async () => () => ({
+        close: (callback?: (error?: Error) => void) => {
+          callback?.();
+        },
+        closeAllConnections: () => {
+          closeAllConnectionsCalled = true;
+        },
+      }),
+    });
+
+    const handle = await adapter.serve(fakeApp(), { port: 0 });
+    handle.forceClose();
+    expect(closeAllConnectionsCalled).toBe(true);
+  });
+
+  it('is a no-op when the underlying server does not implement closeAllConnections() (AB-235)', async () => {
+    const adapter = createNodeAdapter({
+      loadServe: async () => () => ({
+        close: (callback?: (error?: Error) => void) => {
+          callback?.();
+        },
+        // No closeAllConnections — simulates an older Node runtime or a
+        // fake test server. forceClose() must not throw.
+      }),
+    });
+
+    const handle = await adapter.serve(fakeApp(), { port: 0 });
+    expect(() => handle.forceClose()).not.toThrow();
+  });
+
+  it("forceClose() causes the pending stop() to resolve via close()'s callback (AB-235)", async () => {
+    let releaseClose: (() => void) | undefined;
+    const closeGate = new Promise<void>((resolve) => {
+      releaseClose = resolve;
+    });
+
+    const adapter = createNodeAdapter({
+      loadServe: async () => () => ({
+        close: (callback?: (error?: Error) => void) => {
+          void (async () => {
+            await closeGate;
+            callback?.();
+          })();
+        },
+        closeAllConnections: () => {
+          // Simulates Node destroying open sockets, which causes the
+          // pending close(callback) above to fire.
+          releaseClose?.();
+        },
+      }),
+    });
+
+    const handle = await adapter.serve(fakeApp(), { port: 0 });
+
+    let resolved = false;
+    const stopPromise = handle.stop().then(() => {
+      resolved = true;
+    });
+
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+
+    handle.forceClose();
+    await stopPromise;
+    expect(resolved).toBe(true);
+  });
+});

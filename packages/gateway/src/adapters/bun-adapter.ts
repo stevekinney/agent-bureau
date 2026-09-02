@@ -132,6 +132,13 @@ export function createBunAdapter(): ServerAdapter {
           stop() {
             return server.stop();
           },
+          forceClose() {
+            // AB-235: escalates the already-in-flight `stop()` above by
+            // force-closing any connections still open. Bun resolves the
+            // original `stop()` promise once this completes — there is
+            // only ever one underlying stop operation per server.
+            void server.stop(true);
+          },
         };
       }
 
@@ -149,6 +156,9 @@ export function createBunAdapter(): ServerAdapter {
       return {
         stop() {
           return server.stop();
+        },
+        forceClose() {
+          void server.stop(true);
         },
       };
     },
