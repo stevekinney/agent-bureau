@@ -257,3 +257,108 @@ describe('providers/instrumentation instrument', () => {
     expect(caught).toBe(original);
   });
 });
+
+// AB-230 attribute-classification table.
+//
+// Every `span.setAttribute`/`span.setAttributes` call site in
+// `packages/operative/src/providers/instrumentation/index.ts`, classified as
+// privileged (tool arguments, tool results, provider request/response
+// content, conversation content) or non-privileged (model/provider identity,
+// timing, counts, event type names). This module never reads the generate
+// context's conversation, the response's `content`, or any tool call — only
+// provider/model identity (developer-configured, not user data) and
+// aggregate token counts.
+type AttributeClassificationRow = {
+  callSite: string;
+  attributeKey: string;
+  sourceValue: string;
+  privileged: boolean;
+  treatment: 'emitted' | 'omitted';
+};
+
+const PROVIDER_ATTRIBUTE_CLASSIFICATION_TABLE: AttributeClassificationRow[] = [
+  {
+    callSite: 'instrument() → tracer.startSpan(..., { attributes })',
+    attributeKey: 'gen_ai.operation.name',
+    sourceValue: "toGenAiOperationName(options.provider) ('chat' | 'generate_content')",
+    privileged: false,
+    treatment: 'emitted',
+  },
+  {
+    callSite: 'instrument() → tracer.startSpan(..., { attributes })',
+    attributeKey: 'gen_ai.provider.name',
+    sourceValue: 'toGenAiProviderName(options.provider) (configured provider identity)',
+    privileged: false,
+    treatment: 'emitted',
+  },
+  {
+    callSite: 'instrument() → tracer.startSpan(..., { attributes })',
+    attributeKey: 'gen_ai.request.model',
+    sourceValue: 'options.model (configured model identity)',
+    privileged: false,
+    treatment: 'emitted',
+  },
+  {
+    callSite: 'instrument() → tracer.startSpan(..., { attributes })',
+    attributeKey: 'gen_ai.request.max_tokens',
+    sourceValue: 'options.maximumTokens (a limit, not content)',
+    privileged: false,
+    treatment: 'emitted',
+  },
+  {
+    callSite: 'instrument() success path → span.setAttributes(...)',
+    attributeKey:
+      'gen_ai.usage.input_tokens / output_tokens / cache_creation.input_tokens / cache_read.input_tokens',
+    sourceValue: 'response.usage.* (token counts)',
+    privileged: false,
+    treatment: 'emitted',
+  },
+  {
+    callSite: 'instrument() error path → span.setAttribute(...)',
+    attributeKey: 'error.type',
+    sourceValue: "error.name ?? '_OTHER' (a category name, not error content)",
+    privileged: false,
+    treatment: 'emitted',
+  },
+];
+
+describe('AB-230 provider attribute-classification table', () => {
+  it('has no privileged rows — provider instrumentation never observes conversation or response content', () => {
+    expect(PROVIDER_ATTRIBUTE_CLASSIFICATION_TABLE.every((row) => !row.privileged)).toBe(true);
+    expect(
+      PROVIDER_ATTRIBUTE_CLASSIFICATION_TABLE.every((row) => row.treatment === 'emitted'),
+    ).toBe(true);
+  });
+});
+
+describe('AB-230 regression: privileged fixture values never reach a provider-generation span attribute', () => {
+  const MARKER = 'PRIVILEGED-MARKER-3f9c1e';
+
+  function containsMarker(value: unknown): boolean {
+    if (typeof value === 'string') return value.includes(MARKER);
+    if (Array.isArray(value)) return value.some(containsMarker);
+    if (value && typeof value === 'object') {
+      return Object.values(value as Record<string, unknown>).some(containsMarker);
+    }
+    return false;
+  }
+
+  it('never attaches a fixture privileged marker carried in the response content or tool calls', async () => {
+    const tracer = createMockTracer();
+    const generate: GenerateFunction = async () => ({
+      content: `the answer involves ${MARKER}`,
+      toolCalls: [{ name: 'lookup', arguments: { query: MARKER } }],
+      usage: { prompt: 10, completion: 5, total: 15 },
+    });
+    const wrapped = instrument(generate, {
+      tracer,
+      provider: 'anthropic',
+      model: 'claude-sonnet-5',
+    });
+
+    await wrapped(makeContext());
+
+    expect(tracer.spans).toHaveLength(1);
+    expect(containsMarker(tracer.spans[0]?.attributes)).toBe(false);
+  });
+});

@@ -40,15 +40,6 @@ export function instrument(
 
   const subscriptions: (() => void)[] = [];
 
-  // Helper to safely stringify values for attributes
-  const safeStringify = (value: unknown): string => {
-    try {
-      return typeof value === 'string' ? value : JSON.stringify(value);
-    } catch {
-      return String(value);
-    }
-  };
-
   subscriptions.push(
     toolbox.addEventListener('call', (event) => {
       const { tool, call } = event;
@@ -56,10 +47,17 @@ export function instrument(
         // gen_ai.* attributes follow the OTel GenAI semantic conventions
         // "Execute tool span" shape. See the mapping table in the package
         // README for the pinned conventions version and any divergence.
+        //
+        // `gen_ai.tool.call.arguments` and `gen_ai.tool.call.result` are
+        // Opt-In under the conventions precisely because they can carry
+        // privileged data (tool arguments, tool results); this package
+        // does not opt in. They are omitted rather than attached with a
+        // placeholder — `armorer.tool.input_digest`/`output_digest` (set
+        // in the `tool.finished` handler below) are the non-privileged
+        // correlation handle for the same call.
         'gen_ai.operation.name': 'execute_tool',
         'gen_ai.tool.name': tool.identity.name,
         'gen_ai.tool.call.id': call.id,
-        'gen_ai.tool.call.arguments': safeStringify(call.arguments),
       };
       if (tool.description) {
         attributes['gen_ai.tool.description'] = tool.description;
@@ -82,28 +80,21 @@ export function instrument(
 
   subscriptions.push(
     toolbox.addEventListener('tool.started', (event) => {
-      const { toolCall, params } = event;
+      const { toolCall } = event;
       const span = activeSpans.get(toolCall.id);
       if (span) {
-        span.addEvent('tool.started', {
-          'gen_ai.tool.call.arguments': safeStringify(params),
-        });
+        // `params` (the tool arguments) are privileged — see the omission
+        // note on the `call` handler above. The event carries only the
+        // timing marker; no attributes.
+        span.addEvent('tool.started');
       }
     }),
   );
 
   subscriptions.push(
     toolbox.addEventListener('tool.finished', (event) => {
-      const {
-        toolCall,
-        status,
-        result,
-        error,
-        durationMs,
-        inputDigest,
-        outputDigest,
-        errorCategory,
-      } = event;
+      const { toolCall, status, error, durationMs, inputDigest, outputDigest, errorCategory } =
+        event;
       const span = activeSpans.get(toolCall.id);
       if (span) {
         // armorer.tool.* attributes are intentionally divergent extensions —
@@ -124,13 +115,24 @@ export function instrument(
 
         switch (status as string) {
           case 'success': {
-            attributes['gen_ai.tool.call.result'] = safeStringify(result);
+            // The tool result is privileged — see the omission note on the
+            // `call` handler above. `armorer.tool.output_digest` (set
+            // above, when configured) is the non-privileged correlation
+            // handle.
             span.setStatus({ code: SpanStatusCode.OK });
             break;
           }
           case 'cancelled': {
+            // The cancellation error is derived from a caller-supplied
+            // abort reason and may itself carry tool-argument content
+            // (e.g. a message formatted from the reason); omit it and
+            // report only the non-privileged category, matching the
+            // error/denied branch below.
             span.setStatus({ code: SpanStatusCode.UNSET, message: 'Cancelled' });
-            attributes['armorer.tool.cancellation_reason'] = safeStringify(error);
+            attributes['error.type'] = errorCategory ?? status;
+            if (error instanceof Error) {
+              span.recordException(error);
+            }
 
             break;
           }
@@ -144,7 +146,12 @@ export function instrument(
             break;
           }
           default: {
-            // error or denied
+            // error or denied. The thrown/returned error value is
+            // privileged-by-derivation — a tool can throw an object
+            // carrying its own arguments or a response body — so only the
+            // non-privileged category is attached; the exception itself is
+            // recorded via the standard OTel `recordException` API (not a
+            // span attribute) when it is a genuine `Error`.
             span.setStatus({
               code: SpanStatusCode.ERROR,
               message: error instanceof Error ? error.message : String(error),
@@ -152,8 +159,6 @@ export function instrument(
             attributes['error.type'] = errorCategory ?? status;
             if (error instanceof Error) {
               span.recordException(error);
-            } else {
-              attributes['armorer.tool.error'] = safeStringify(error);
             }
           }
         }

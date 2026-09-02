@@ -204,7 +204,7 @@ describe('instrument', () => {
     expect(startedSpans[0]?.span.ended).toBe(true);
   });
 
-  it('records started and successful finished tool events', () => {
+  it('records started and successful finished tool events without attaching tool arguments or the tool result', () => {
     const manualToolbox = createManualToolbox();
     const span = createSpan();
     const tracer = {
@@ -214,48 +214,44 @@ describe('instrument', () => {
     } as Tracer;
 
     const stop = instrument(manualToolbox as never, { tracer });
-    const circularArguments: Record<string, unknown> = {};
-    circularArguments['self'] = circularArguments;
+    const toolArguments = { secret: 'do-not-leak' };
     manualToolbox.dispatch('call', {
       tool: { identity: { name: 'lookup' } },
-      call: { id: 'call-1', arguments: circularArguments },
+      call: { id: 'call-1', arguments: toolArguments },
     });
     manualToolbox.dispatch('tool.started', {
       toolCall: { id: 'call-1' },
-      params: circularArguments,
+      params: toolArguments,
     });
     manualToolbox.dispatch('tool.finished', {
       toolCall: { id: 'call-1' },
       status: 'success',
-      result: { ok: true },
+      result: { ok: true, secret: 'do-not-leak-either' },
       durationMs: 12,
       inputDigest: 'input',
       outputDigest: 'output',
     });
     stop();
 
-    expect(span.events).toEqual([
-      {
-        name: 'tool.started',
-        attributes: {
-          'gen_ai.tool.call.arguments': '[object Object]',
-        },
-      },
-    ]);
+    // The `tool.started` marker fires with no attributes — the arguments it
+    // used to carry are privileged (AB-230).
+    expect(span.events).toEqual([{ name: 'tool.started', attributes: undefined }]);
     expect(span.status).toEqual({ code: SpanStatusCode.OK });
     expect(span.attributes).toMatchObject({
       'armorer.tool.duration_ms': 12,
       'armorer.tool.input_digest': 'input',
       'armorer.tool.output_digest': 'output',
-      'gen_ai.tool.call.result': '{"ok":true}',
       'armorer.tool.status': 'success',
     });
+    // Privileged: never attached, on success or otherwise.
+    expect(span.attributes).not.toHaveProperty('gen_ai.tool.call.arguments');
+    expect(span.attributes).not.toHaveProperty('gen_ai.tool.call.result');
     expect(span.ended).toBe(true);
   });
 
   it('records cancelled, paused, and error tool finish statuses', () => {
     const manualToolbox = createManualToolbox();
-    const recordedSpans = [createSpan(), createSpan(), createSpan(), createSpan()];
+    const recordedSpans = [createSpan(), createSpan(), createSpan(), createSpan(), createSpan()];
     const spanQueue = [...recordedSpans];
     const tracer = {
       startSpan() {
@@ -264,7 +260,13 @@ describe('instrument', () => {
     } as Tracer;
     const stop = instrument(manualToolbox as never, { tracer });
 
-    for (const callId of ['cancelled', 'paused', 'error-instance', 'error-value']) {
+    for (const callId of [
+      'cancelled',
+      'cancelled-error-instance',
+      'paused',
+      'error-instance',
+      'error-value',
+    ]) {
       manualToolbox.dispatch('call', {
         tool: { identity: { name: callId } },
         call: { id: callId, arguments: {} },
@@ -273,7 +275,14 @@ describe('instrument', () => {
     manualToolbox.dispatch('tool.finished', {
       toolCall: { id: 'cancelled' },
       status: 'cancelled',
-      error: { reason: 'abort' },
+      error: { reason: 'abort', secret: 'do-not-leak' },
+      durationMs: 1,
+    });
+    const cancelledError = new Error('deadline exceeded');
+    manualToolbox.dispatch('tool.finished', {
+      toolCall: { id: 'cancelled-error-instance' },
+      status: 'cancelled',
+      error: cancelledError,
       durationMs: 1,
     });
     manualToolbox.dispatch('tool.finished', {
@@ -291,29 +300,40 @@ describe('instrument', () => {
     manualToolbox.dispatch('tool.finished', {
       toolCall: { id: 'error-value' },
       status: 'denied',
-      error: { code: 'DENIED' },
+      error: { code: 'DENIED', secret: 'do-not-leak' },
       durationMs: 4,
     });
     stop();
 
     expect(recordedSpans[0]?.status).toEqual({ code: SpanStatusCode.UNSET, message: 'Cancelled' });
-    expect(recordedSpans[0]?.attributes['armorer.tool.cancellation_reason']).toBe(
-      '{"reason":"abort"}',
-    );
-    expect(recordedSpans[1]?.status).toEqual({
+    // Privileged: the cancellation error is derived from a caller-supplied
+    // reason and is never serialized onto an attribute (AB-230).
+    expect(recordedSpans[0]?.attributes).not.toHaveProperty('armorer.tool.cancellation_reason');
+    expect(recordedSpans[0]?.attributes['error.type']).toBe('cancelled');
+    expect(recordedSpans[0]?.exceptions).toEqual([]);
+    // A genuine Error is still recorded via recordException (not a span
+    // attribute) even on the cancelled path.
+    expect(recordedSpans[1]?.status).toEqual({ code: SpanStatusCode.UNSET, message: 'Cancelled' });
+    expect(recordedSpans[1]?.attributes).not.toHaveProperty('armorer.tool.cancellation_reason');
+    expect(recordedSpans[1]?.attributes['error.type']).toBe('cancelled');
+    expect(recordedSpans[1]?.exceptions).toEqual([cancelledError]);
+    expect(recordedSpans[2]?.status).toEqual({
       code: SpanStatusCode.OK,
       message: 'Paused (Action Required)',
     });
-    expect(recordedSpans[1]?.attributes['armorer.tool.status']).toBe('paused');
-    expect(recordedSpans[2]?.status).toEqual({ code: SpanStatusCode.ERROR, message: 'failed' });
-    expect(recordedSpans[2]?.exceptions).toEqual([thrown]);
-    expect(recordedSpans[2]?.attributes['error.type']).toBe('error');
-    expect(recordedSpans[3]?.status).toEqual({
+    expect(recordedSpans[2]?.attributes['armorer.tool.status']).toBe('paused');
+    expect(recordedSpans[3]?.status).toEqual({ code: SpanStatusCode.ERROR, message: 'failed' });
+    expect(recordedSpans[3]?.exceptions).toEqual([thrown]);
+    expect(recordedSpans[3]?.attributes['error.type']).toBe('error');
+    expect(recordedSpans[4]?.status).toEqual({
       code: SpanStatusCode.ERROR,
       message: '[object Object]',
     });
-    expect(recordedSpans[3]?.attributes['armorer.tool.error']).toBe('{"code":"DENIED"}');
-    expect(recordedSpans[3]?.attributes['error.type']).toBe('denied');
+    // Privileged: a non-`Error` error value (denied/error status) is never
+    // serialized onto an attribute (AB-230) — only its non-privileged
+    // category survives.
+    expect(recordedSpans[4]?.attributes).not.toHaveProperty('armorer.tool.error');
+    expect(recordedSpans[4]?.attributes['error.type']).toBe('denied');
   });
 
   it('covers complete and error fallback events', () => {
@@ -416,5 +436,246 @@ describe('instrument', () => {
     // Parent supplied → the exact sentinel is forwarded by identity, proving the
     // undefined above is a genuine "no parent" path and not a shallow default.
     expect(startedSpans[1]?.context).toBe(sentinelParent);
+  });
+});
+
+// AB-230 attribute-classification table.
+//
+// Every `span.setAttribute`/`span.setAttributes`/`span.addEvent(name, attrs)`
+// call site in `packages/armorer/src/instrumentation/index.ts`, classified
+// as privileged (tool arguments, tool results, provider request/response
+// content, conversation content) or non-privileged (model/provider
+// identity, timing, counts, event type names).
+//
+// `packages/armorer/src/core/context.ts` also declares `Tracer`/`Span`
+// types with `startSpan`/`setAttribute`/`addEvent` shapes — verified (grep)
+// to be caller-supplied hook types that armorer's own `src/` never invokes
+// (no `.startSpan(`/`.setAttribute(`/`.addEvent(` call site outside
+// `instrumentation/`), so there is no emission site there to audit.
+//
+// Every privileged row's `treatment` is `omitted` — none is attached with a
+// placeholder — because `gen_ai.tool.call.arguments`/`gen_ai.tool.call.result` are Opt-In under
+// the OTel GenAI semantic conventions specifically to keep this content out
+// of default telemetry, and a placeholder string risks being parsed by a
+// backend as if it were real content.
+type AttributeClassificationRow = {
+  callSite: string;
+  attributeKey: string;
+  sourceValue: string;
+  privileged: boolean;
+  treatment: 'emitted' | 'omitted';
+};
+
+const ARMORER_ATTRIBUTE_CLASSIFICATION_TABLE: AttributeClassificationRow[] = [
+  {
+    callSite: "'call' listener → tracer.startSpan(..., { attributes })",
+    attributeKey: 'gen_ai.operation.name',
+    sourceValue: "literal 'execute_tool'",
+    privileged: false,
+    treatment: 'emitted',
+  },
+  {
+    callSite: "'call' listener → tracer.startSpan(..., { attributes })",
+    attributeKey: 'gen_ai.tool.name',
+    sourceValue: 'tool.identity.name',
+    privileged: false,
+    treatment: 'emitted',
+  },
+  {
+    callSite: "'call' listener → tracer.startSpan(..., { attributes })",
+    attributeKey: 'gen_ai.tool.call.id',
+    sourceValue: 'call.id',
+    privileged: false,
+    treatment: 'emitted',
+  },
+  {
+    callSite: "'call' listener → tracer.startSpan(..., { attributes })",
+    attributeKey: 'gen_ai.tool.description',
+    sourceValue: 'tool.description (when set)',
+    privileged: false,
+    treatment: 'emitted',
+  },
+  {
+    callSite: "'call' listener → tracer.startSpan(..., { attributes })",
+    attributeKey: 'gen_ai.tool.call.arguments',
+    sourceValue: 'call.arguments — tool arguments',
+    privileged: true,
+    treatment: 'omitted',
+  },
+  {
+    callSite: "'tool.started' listener → span.addEvent('tool.started', attrs)",
+    attributeKey: 'gen_ai.tool.call.arguments',
+    sourceValue: 'params — tool arguments',
+    privileged: true,
+    treatment: 'omitted',
+  },
+  {
+    callSite: "'tool.finished' listener → span.setAttributes(attributes)",
+    attributeKey: 'armorer.tool.duration_ms',
+    sourceValue: 'durationMs (timing)',
+    privileged: false,
+    treatment: 'emitted',
+  },
+  {
+    callSite: "'tool.finished' listener → span.setAttributes(attributes)",
+    attributeKey: 'armorer.tool.status',
+    sourceValue: 'status (event type name)',
+    privileged: false,
+    treatment: 'emitted',
+  },
+  {
+    callSite: "'tool.finished' listener → span.setAttributes(attributes)",
+    attributeKey: 'armorer.tool.input_digest',
+    sourceValue: 'inputDigest — a digest, not the argument content',
+    privileged: false,
+    treatment: 'emitted',
+  },
+  {
+    callSite: "'tool.finished' listener → span.setAttributes(attributes)",
+    attributeKey: 'armorer.tool.output_digest',
+    sourceValue: 'outputDigest — a digest, not the result content',
+    privileged: false,
+    treatment: 'emitted',
+  },
+  {
+    callSite: "'tool.finished' listener, success case → span.setAttributes(attributes)",
+    attributeKey: 'gen_ai.tool.call.result',
+    sourceValue: 'result — the tool result',
+    privileged: true,
+    treatment: 'omitted',
+  },
+  {
+    callSite: "'tool.finished' listener, cancelled case → span.setAttributes(attributes)",
+    attributeKey: 'armorer.tool.cancellation_reason',
+    sourceValue: 'error — derived from a caller-supplied abort reason, may carry argument content',
+    privileged: true,
+    treatment: 'omitted',
+  },
+  {
+    callSite:
+      "'tool.finished' listener, cancelled/error/denied cases → span.setAttributes(attributes)",
+    attributeKey: 'error.type',
+    sourceValue: 'errorCategory ?? status (a category name, not error content)',
+    privileged: false,
+    treatment: 'emitted',
+  },
+  {
+    callSite:
+      "'tool.finished' listener, error/denied default case → span.setAttributes(attributes)",
+    attributeKey: 'armorer.tool.error',
+    sourceValue: 'error — a thrown/returned non-Error value, may carry argument or result content',
+    privileged: true,
+    treatment: 'omitted',
+  },
+  {
+    callSite: "'error' fallback listener → span.setAttribute(key, value)",
+    attributeKey: 'error.type',
+    sourceValue: 'result.error.code (a category code, not error content)',
+    privileged: false,
+    treatment: 'emitted',
+  },
+];
+
+describe('AB-230 armorer attribute-classification table', () => {
+  it('omits every privileged row and emits every non-privileged row', () => {
+    const privilegedRows = ARMORER_ATTRIBUTE_CLASSIFICATION_TABLE.filter((row) => row.privileged);
+    const nonPrivilegedRows = ARMORER_ATTRIBUTE_CLASSIFICATION_TABLE.filter(
+      (row) => !row.privileged,
+    );
+    expect(privilegedRows.every((row) => row.treatment === 'omitted')).toBe(true);
+    expect(nonPrivilegedRows.every((row) => row.treatment === 'emitted')).toBe(true);
+  });
+});
+
+describe('AB-230 regression: privileged fixture values never reach a span attribute', () => {
+  const MARKER = 'PRIVILEGED-MARKER-3f9c1e';
+
+  function containsMarker(value: unknown): boolean {
+    if (typeof value === 'string') return value.includes(MARKER);
+    if (Array.isArray(value)) return value.some(containsMarker);
+    if (value && typeof value === 'object') {
+      return Object.values(value as Record<string, unknown>).some(containsMarker);
+    }
+    return false;
+  }
+
+  it('never attaches a fixture privileged marker to any tool-call span attribute or event', () => {
+    const manualToolbox = createManualToolbox();
+    const startedSpans: Array<{ options?: SpanOptions; span: RecordingSpan }> = [];
+    const tracer = {
+      startSpan(_name: string, options?: SpanOptions) {
+        const span = createSpan();
+        startedSpans.push({ options, span });
+        return span;
+      },
+    } as Tracer;
+
+    const stop = instrument(manualToolbox as never, { tracer });
+    const toolArguments = { query: MARKER, nested: { value: MARKER } };
+    const toolResult = { answer: MARKER };
+    const toolError = { message: `tool failed on input: ${MARKER}` };
+
+    manualToolbox.dispatch('call', {
+      tool: { identity: { name: 'lookup' } },
+      call: { id: 'call-1', arguments: toolArguments },
+    });
+    manualToolbox.dispatch('tool.started', {
+      toolCall: { id: 'call-1' },
+      params: toolArguments,
+    });
+    manualToolbox.dispatch('tool.finished', {
+      toolCall: { id: 'call-1' },
+      status: 'success',
+      result: toolResult,
+      durationMs: 5,
+    });
+
+    manualToolbox.dispatch('call', {
+      tool: { identity: { name: 'lookup-denied' } },
+      call: { id: 'call-2', arguments: toolArguments },
+    });
+    manualToolbox.dispatch('tool.finished', {
+      toolCall: { id: 'call-2' },
+      status: 'denied',
+      error: toolError,
+      durationMs: 5,
+    });
+
+    manualToolbox.dispatch('call', {
+      tool: { identity: { name: 'lookup-cancelled' } },
+      call: { id: 'call-3', arguments: toolArguments },
+    });
+    manualToolbox.dispatch('tool.finished', {
+      toolCall: { id: 'call-3' },
+      status: 'cancelled',
+      error: toolError,
+      durationMs: 5,
+    });
+    stop();
+
+    expect(startedSpans).toHaveLength(3);
+    for (const { options, span } of startedSpans) {
+      // Scan every surface a span can expose an attribute through: the
+      // attributes passed to startSpan, the attributes set later via
+      // setAttribute(s), and any addEvent attributes.
+      expect(containsMarker(options?.attributes)).toBe(false);
+      expect(containsMarker(span.attributes)).toBe(false);
+      expect(span.events.every((event) => !containsMarker(event.attributes))).toBe(true);
+    }
+
+    // AC #4: this scenario does not over-redact — every non-privileged
+    // attribute the classification table above claims is still emitted
+    // survives, for every one of the three call outcomes it exercises.
+    const [success, denied, cancelled] = startedSpans;
+    expect(success?.options?.attributes).toMatchObject({
+      'gen_ai.tool.name': 'lookup',
+      'gen_ai.tool.call.id': 'call-1',
+    });
+    expect(success?.span.attributes).toMatchObject({
+      'armorer.tool.duration_ms': 5,
+      'armorer.tool.status': 'success',
+    });
+    expect(denied?.span.attributes['error.type']).toBe('denied');
+    expect(cancelled?.span.attributes['error.type']).toBe('cancelled');
   });
 });
