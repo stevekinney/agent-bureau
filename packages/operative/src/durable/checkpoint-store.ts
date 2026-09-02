@@ -100,13 +100,26 @@ export function createCheckpointStore(store: TextValueStore): CheckpointStore {
       ]);
       return {
         runId,
-        cursor: cursor ?? {
-          step: 0,
-          totalUsage: { prompt: 0, completion: 0, total: 0 },
-          lastContent: '',
-          schemaAttempts: 0,
-          lastAppliedConfigVersion: 0,
-        },
+        // A missing cursor (no run persisted yet) gets the full zeroed default.
+        // A cursor persisted before AB-221 added `lastAppliedConfigVersion` to
+        // `RunCursor` deserializes with every OTHER field present but that one
+        // `undefined` — `parseJson` casts the stored JSON to `RunCursor`
+        // without validating it, so nothing else catches this. Left as-is,
+        // `undefined` would leak into the durable driver's `RunState` and
+        // `run-step.ts`'s `state.configVersion !== runState.lastAppliedConfigVersion`
+        // dedupe check, treating every `configVersion` (including 0, the
+        // un-steered default) as novel and misfiring `steering.applied`.
+        // Normalize here, at the one place a persisted cursor is deserialized,
+        // rather than pushing the same `?? 0` into every reader.
+        cursor: cursor
+          ? { ...cursor, lastAppliedConfigVersion: cursor.lastAppliedConfigVersion ?? 0 }
+          : {
+              step: 0,
+              totalUsage: { prompt: 0, completion: 0, total: 0 },
+              lastContent: '',
+              schemaAttempts: 0,
+              lastAppliedConfigVersion: 0,
+            },
         conversation,
         steps,
       };

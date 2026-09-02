@@ -157,6 +157,17 @@ export function createRunRecorder(activeRun: ActiveRun): RunRecorder {
     'session.saved',
     'session.loaded',
     'context.budget-warning',
+    // Steering (AB-90 child ab90-01 / AB-221): only `steering.applied` is
+    // dispatched by this package today (from `runStep`'s AB-67/AB-198
+    // boundary); the other four are exported for AB-199's admission path to
+    // dispatch through the same ActiveRun surface once it exists. Listed
+    // here now so a consumer test using this recorder can assert on any of
+    // them without another silent gap.
+    'steering.accepted',
+    'steering.applied',
+    'steering.rejected',
+    'steering.superseded',
+    'steering.failed',
   ];
 
   for (const type of eventTypes) {

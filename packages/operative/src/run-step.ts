@@ -505,23 +505,57 @@ export async function runStep(
   // steering-gated run with no `runId` silently does not fire this event,
   // a declared, tested gap rather than a fabricated run id.
   //
-  // NOT solved here: a session whose `configVersion` a PRIOR run already
-  // applied. `RunState.lastAppliedConfigVersion` is per-run, so a new run
-  // starting fresh re-observes and re-fires for a `configVersion` an
-  // earlier run on the same session already applied. Deduping across runs
-  // needs the `SteeringGate` itself to remember what it has applied — that
-  // is AB-199's `SteeringGate` implementation's responsibility, not this
-  // boundary's.
+  // NOT solved here, same root cause for both: `SteeringDesiredState` is an
+  // AGGREGATE — one `configVersion` covering every steerable field at once,
+  // with no per-target or applied-history information (AB-67's ratified
+  // shape) — so this boundary cannot distinguish "this bump changed a field
+  // that applies now" from "this bump changed a field that applies later"
+  // or "from a field this run already consumed."
+  //
+  // - A session whose `configVersion` a PRIOR run already applied.
+  //   `RunState.lastAppliedConfigVersion` is per-run, so a new run starting
+  //   fresh re-observes and re-fires for a `configVersion` an earlier run
+  //   on the same session already applied.
+  // - `agentName` (an `agent-identity` command): AB-67 fixes its effective
+  //   boundary as the FIRST STEP OF THE SESSION'S NEXT RUN, not the current
+  //   run's next boundary read — "agent-identity commands stay `accepted`
+  //   and carry forward to the next run's boundary." This boundary has no
+  //   way to know a `configVersion` bump was identity-only (or identity
+  //   bundled with an in-run field like `route`) versus purely an in-run
+  //   field, so it currently reports EVERY bump as applied to the current
+  //   run, including one that should not take effect until the next run.
+  //   Diffing the previous and current `SteeringDesiredState` snapshots
+  //   in-place to detect "only `agentName` changed" would still be wrong
+  //   for the bundled case — the stamped `SteeringEffectiveState.agentName`
+  //   would claim effect for a run whose already-resolved agent, toolbox,
+  //   generator, and hooks never actually changed.
+  //
+  // Both need the `SteeringGate` itself — read-only from this boundary's
+  // side (`getDesiredState()`/`awaitResume()`) — to carry target- and
+  // history-aware write-side state: which fields are due now versus at the
+  // next run boundary, and what a prior run already consumed. That is
+  // AB-199's `SteeringGate` implementation's responsibility, not this
+  // boundary's; AB-221's own scope excludes reopening AB-67's
+  // `SteeringDesiredState`/`RunOptions` shapes to add it.
   const steeringGate = deps.steering;
   const maybeDispatchSteeringApplied = (state: SteeringDesiredState) => {
     if (
       steeringGate &&
       state.configVersion > 0 &&
       state.configVersion !== runState.lastAppliedConfigVersion &&
-      deps.runId !== undefined
+      deps.runId !== undefined &&
+      // Advancing the dedupe cursor must be conditioned on an emitter
+      // actually being present to dispatch to, exactly like `deps.runId`
+      // above. `emitter?.dispatch(...)` alone would silently "consume" a
+      // `configVersion` with no emitter (a real, if narrow, caller shape —
+      // `executeLoop`'s `emitter` parameter is optional) — the event never
+      // fires anywhere, yet the cursor reports it applied, so nothing ever
+      // gets a chance to observe it, this run or a later one sharing the
+      // same durable cursor.
+      emitter !== undefined
     ) {
       runState.lastAppliedConfigVersion = state.configVersion;
-      emitter?.dispatch(
+      emitter.dispatch(
         new SteeringAppliedEvent(steeringGate.sessionId, {
           ...state,
           appliedAtStep: step,

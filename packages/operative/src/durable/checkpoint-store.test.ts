@@ -141,6 +141,25 @@ describe('createCheckpointStore', () => {
       expect(checkpoint.conversation).toBeNull();
       expect(checkpoint.steps).toEqual([]);
     });
+
+    it('defaults lastAppliedConfigVersion to 0 for a cursor persisted before AB-221 added the field', async () => {
+      // Simulate a pre-AB-221 cursor written by an older process: every field
+      // `RunCursor` had at the time, minus `lastAppliedConfigVersion`. Written
+      // directly through the underlying text-value store so the test does not
+      // depend on `saveCursor`'s current (post-AB-221) `RunCursor` shape.
+      const preAb221Cursor = {
+        step: 2,
+        totalUsage: { prompt: 10, completion: 5, total: 15 },
+        lastContent: 'partial',
+        schemaAttempts: 1,
+      };
+      const underlying = createStore();
+      await underlying.set('durable-run:run-1:cursor', JSON.stringify(preAb221Cursor));
+
+      const store = createCheckpointStore(underlying);
+      const checkpoint = await store.loadCheckpoint('run-1');
+      expect(checkpoint.cursor).toEqual({ ...preAb221Cursor, lastAppliedConfigVersion: 0 });
+    });
   });
 
   describe('clear', () => {

@@ -26,8 +26,8 @@ import { noToolCalls } from './conditions/predicates';
 import type { SteeringDesiredState } from './durable/types';
 import { SteeringAppliedEvent } from './events';
 import type { OperativeHookMap } from './hooks';
-import { executeLoop } from './loop';
-import { awaitResumeOrAbort, type EventDispatcher } from './run-step';
+import { buildStepDeps, executeLoop } from './loop';
+import { awaitResumeOrAbort, type EventDispatcher, type RunState, runStep } from './run-step';
 import type { GenerateContext, GenerateResponse, SteeringGate } from './types';
 
 /** A minimal {@link EventDispatcher} test double that records every dispatched event. */
@@ -669,6 +669,38 @@ describe('runStep: AB-221 steering.applied dispatch', () => {
     );
 
     expect(steeringAppliedEvents(recorder)).toHaveLength(0);
+  });
+
+  it('does not advance lastAppliedConfigVersion when there is no emitter to dispatch to', async () => {
+    // Regression: `runStep` used to advance `runState.lastAppliedConfigVersion`
+    // unconditionally (guarded only by `deps.runId !== undefined`), then
+    // dispatch through `emitter?.dispatch(...)`. With no `emitter` at all,
+    // that silently "consumed" the configVersion in `RunState` — no event
+    // was ever observed, but a later step (or, durably, a resumed run) that
+    // DOES have an emitter would then see `configVersion` already marked
+    // applied and never fire `steering.applied` for it either. Call
+    // `runStep` directly (not through `executeLoop`) so `runState` stays a
+    // handle this test owns and can inspect after the call.
+    const gate = createTestSteeringGate({ paused: false, configVersion: 1, model: 'real-model' });
+    const deps = buildStepDeps({
+      generate: async () => textResponse('done'),
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      steering: gate,
+      runId: 'run-1',
+    });
+    const runState: RunState = {
+      steps: [],
+      totalUsage: { prompt: 0, completion: 0, total: 0 },
+      lastContent: '',
+      schemaAttempts: 0,
+      lastAppliedConfigVersion: 0,
+    };
+
+    await runStep(deps, runState, new Conversation(), 0, undefined);
+
+    expect(runState.lastAppliedConfigVersion).toBe(0);
   });
 
   it('fires once at the boundary for an already-accepted command, with sessionId and the exact SteeringEffectiveState payload', async () => {
