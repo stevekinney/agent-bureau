@@ -268,6 +268,14 @@ export function createOnlineEvalSampler(
 
   async function evaluateRun(runId: string, runResult: RunResult): Promise<void> {
     for (const judge of judges) {
+      // Checked before invoking the judge at all: `judge.evaluate()` is
+      // called synchronously as an argument expression, so `raceAgainstAbort`
+      // below only ever races an ALREADY-RUNNING judge against the abort —
+      // it cannot stop the judge from starting in the first place. An
+      // already-aborted signal must skip the judge outright rather than
+      // start (and leak) an evaluation nobody is going to wait on.
+      if (signal?.aborted) return;
+
       let result: EvalScore;
       try {
         result = await raceAgainstAbort(Promise.resolve(judge.evaluate(runResult)), signal);
@@ -283,6 +291,12 @@ export function createOnlineEvalSampler(
       if (signal?.aborted) return;
 
       await recordScore(runId, judge, result);
+
+      // Rechecked after the audit write: the owner may have aborted while
+      // `recordScore()` was awaiting a slow persistent write, and firing a
+      // NEW webhook off the back of an evaluation the shutdown already
+      // cancelled would enqueue delivery work past the abort boundary.
+      if (signal?.aborted) return;
 
       if (breachesThreshold(judge, result)) {
         fireAlert(runId, judge, result);

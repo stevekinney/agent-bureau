@@ -312,12 +312,19 @@ export function createWebhookNotifier(
         resolve();
       };
       backoffAbortSignal.addEventListener('abort', onAbort, { once: true });
-      void sleep(milliseconds).then(() => {
+      const finish = () => {
         if (settled) return;
         settled = true;
         backoffAbortSignal.removeEventListener('abort', onAbort);
         resolve();
-      });
+      };
+      // Settled on EITHER outcome of the injected `sleep()`: before this
+      // change a rejecting `sleep()` propagated out of `deliver()` into
+      // `Promise.allSettled` in `flush()`/`dispose()`; a `.then(finish)`-only
+      // handler would instead leave this wait (and the abort listener)
+      // hanging forever on a rejection, since neither outcome would ever
+      // call `resolve()`.
+      void sleep(milliseconds).then(finish, finish);
     });
   }
 
@@ -374,12 +381,25 @@ export function createWebhookNotifier(
     };
     await persist(record);
 
-    for (let attempt = 1; attempt <= maxAttempts && !disposed; attempt++) {
+    // Deliberately NOT `&& !disposed` here: the abort check inside the loop
+    // body below must run even when `dispose()` has already flipped
+    // `disposed` before this delivery's first attempt begins (e.g. dispose
+    // races the initial KV lookup/persist above), so an owner-issued
+    // `signal` abort is always recorded as `aborted` rather than silently
+    // dropped as `pending` — see the abort-before-disposed ordering below.
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       if (signal?.aborted) {
         record = { ...record, status: 'aborted', updatedAt: now() };
         await persist(record);
         return;
       }
+
+      // Checked AFTER the abort branch above: a plain `dispose()` with no
+      // `signal` configured must still stop the retry loop promptly (the
+      // pre-existing behavior), it just has no defined terminal status to
+      // persist — the record is left `pending` for a future process to
+      // retry, exactly as before this change.
+      if (disposed) return;
 
       record = { ...record, attempts: attempt, updatedAt: now() };
       try {

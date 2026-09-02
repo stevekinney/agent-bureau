@@ -572,14 +572,27 @@ describe('createOnlineEvalSampler', () => {
     await sampler.dispose();
   });
 
-  it('an already-aborted signal at evaluation start settles evaluateRun promptly without recording a score', async () => {
+  it('a judge that aborts the signal as a side effect of starting settles promptly via the already-aborted race branch', async () => {
     const { bureau, emit } = createStubBureau();
     const { auditTrail, records } = createStubAuditTrail();
     const controller = new AbortController();
-    controller.abort(new Error('shutting down before evaluation started'));
 
+    // The top-of-loop `if (signal?.aborted) return;` check only catches a
+    // signal already aborted BEFORE this judge starts. This judge instead
+    // aborts as a side effect of its own synchronous invocation — the
+    // signal is still unaborted when the loop check runs, but IS aborted by
+    // the time `raceAgainstAbort`'s internal `whenAborted()` observes it a
+    // few synchronous steps later, exercising that already-aborted-at-race
+    // -time branch rather than the abort-mid-wait one.
+    const selfAbortingJudge: OnlineEvalJudge = {
+      name: 'self-aborting-judge',
+      evaluate: () => {
+        controller.abort(new Error('aborted by the judge itself'));
+        return new Promise<EvalScore>(() => {});
+      },
+    };
     const sampler = createOnlineEvalSampler(bureau, auditTrail, undefined, {
-      judges: [passingMatcher()],
+      judges: [selfAbortingJudge],
       sampleRate: 1,
       rng: scriptedRng([0]),
       signal: controller.signal,
@@ -589,6 +602,94 @@ describe('createOnlineEvalSampler', () => {
     await sampler.flush();
 
     expect(records).toHaveLength(0);
+    await sampler.dispose();
+  });
+
+  it('an already-aborted signal at evaluation start settles evaluateRun promptly without invoking the judge or recording a score', async () => {
+    const { bureau, emit } = createStubBureau();
+    const { auditTrail, records } = createStubAuditTrail();
+    const controller = new AbortController();
+    controller.abort(new Error('shutting down before evaluation started'));
+
+    // Tracks whether the judge was actually invoked, not just whether the
+    // eventual race against `signal` rejects — `judge.evaluate(runResult)`
+    // is evaluated as a plain argument expression BEFORE `raceAgainstAbort`
+    // runs, so a race-only guard cannot prevent the judge from starting.
+    let judgeInvoked = false;
+    const trackedJudge: OnlineEvalJudge = {
+      name: 'tracked-judge',
+      evaluate: () => {
+        judgeInvoked = true;
+        return { pass: true, score: 1, message: 'ok' };
+      },
+    };
+
+    const sampler = createOnlineEvalSampler(bureau, auditTrail, undefined, {
+      judges: [trackedJudge],
+      sampleRate: 1,
+      rng: scriptedRng([0]),
+      signal: controller.signal,
+    });
+
+    emit(makeAction({ type: 'run.completed', runId: 'run-1', detail: makeRunResult() }));
+    await sampler.flush();
+
+    expect(judgeInvoked).toBe(false);
+    expect(records).toHaveLength(0);
+    await sampler.dispose();
+  });
+
+  it('aborting the signal while the audit write is in flight suppresses the alert fired after it settles', async () => {
+    const { bureau, emit } = createStubBureau();
+    const controller = new AbortController();
+
+    // Gates `auditTrail.record()` so the signal can be aborted WHILE
+    // `recordScore()` is mid-await, after the judge already reported a
+    // threshold breach but before `fireAlert()` would run.
+    let releaseRecord: (() => void) | undefined;
+    const records: Record<string, unknown>[] = [];
+    const auditTrail: AuditTrail = {
+      record(entry) {
+        records.push(entry);
+        return new Promise<void>((resolve) => {
+          releaseRecord = resolve;
+        });
+      },
+      async query() {
+        return [];
+      },
+      dispose() {},
+    };
+    const { webhookNotifier, notifications } = createStubWebhookNotifier();
+
+    const breachingJudge: OnlineEvalJudge = {
+      name: 'breaching-judge',
+      evaluate: () => ({ pass: false, score: 0, message: 'breach' }),
+    };
+    const sampler = createOnlineEvalSampler(bureau, auditTrail, webhookNotifier, {
+      judges: [breachingJudge],
+      sampleRate: 1,
+      rng: scriptedRng([0]),
+      signal: controller.signal,
+    });
+
+    emit(makeAction({ type: 'run.completed', runId: 'run-1', detail: makeRunResult() }));
+
+    // Give the judge's microtasks a chance to run and reach the gated
+    // audit write.
+    while (records.length === 0) {
+      await Promise.resolve();
+    }
+    expect(records).toHaveLength(1);
+
+    controller.abort(new Error('shutting down mid audit write'));
+    releaseRecord?.();
+    await sampler.flush();
+
+    // The audit write itself already landed (best-effort, in flight before
+    // the abort), but the NEW webhook alert enqueued after it must not fire
+    // once the owner has aborted.
+    expect(notifications).toHaveLength(0);
     await sampler.dispose();
   });
 

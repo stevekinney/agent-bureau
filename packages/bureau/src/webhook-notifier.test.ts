@@ -673,6 +673,59 @@ describe('createWebhookNotifier', () => {
     await notifier.dispose();
   });
 
+  it('aborting the signal and calling dispose() while the initial pending persist is in flight still records aborted, not pending', async () => {
+    const review = makeToolApprovalReview();
+    const { bureau, emit } = createStubBureau([review]);
+    const controller = new AbortController();
+
+    // Gates the delivery's INITIAL `pending`-status `kv.set()` (the one
+    // `deliver()` awaits before the retry loop even starts), so `dispose()`
+    // can race it: `disposed` becomes true before the loop's first
+    // iteration begins, and the abort branch inside the loop body must
+    // still win over the `disposed` short-circuit rather than leaving the
+    // record `pending` forever.
+    const baseKv = textValueStore(new MemoryStorage());
+    let releaseInitialSet: (() => void) | undefined;
+    let initialSetGated = false;
+    const kv: ReturnType<typeof textValueStore> = {
+      ...baseKv,
+      set: async (key, value) => {
+        if (!initialSetGated) {
+          initialSetGated = true;
+          await new Promise<void>((resolve) => {
+            releaseInitialSet = resolve;
+          });
+        }
+        await baseKv.set(key, value);
+      },
+    };
+
+    const fetchImpl = (async () => new Response(null, { status: 200 })) as unknown as typeof fetch;
+
+    const notifier = createWebhookNotifier(bureau, kv, undefined, {
+      targets: [{ url: 'https://example.com/hook' }],
+      fetch: fetchImpl,
+      signal: controller.signal,
+    });
+
+    emit(makeAction({ type: 'step.completed', runId: 'run-1' }));
+
+    // Give `deliver()` a chance to reach the gated initial persist.
+    while (!releaseInitialSet) {
+      await Promise.resolve();
+    }
+
+    controller.abort(new Error('shutting down mid initial persist'));
+    const disposePromise = notifier.dispose();
+    releaseInitialSet();
+    await disposePromise;
+
+    const deliveries = await notifier.listDeliveries();
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0]?.status).toBe('aborted');
+    expect(deliveries[0]?.status).not.toBe('pending');
+  });
+
   it('calling dispose() twice does not throw', async () => {
     const { bureau } = createStubBureau();
     const notifier = createWebhookNotifier(bureau, undefined, undefined, { targets: [] });
