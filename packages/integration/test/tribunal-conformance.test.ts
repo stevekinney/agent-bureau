@@ -147,7 +147,7 @@ describe('AB-99 Tribunal conformance — single provider (Anthropic mock)', () =
         toolPostFrames.every((frame) => frame.type === 'tool-post' && frame.status === 'success'),
       ).toBe(true);
 
-      // Pulled from the last step's GenerateResponse.metadata (AB-91's
+      // Pulled from the last step's GenerateResponse.metadata (AB-64's
       // effective-value reporting), not hardcoded — this is what actually
       // reaches a real RunReport, including the literal `'none'` sentinel
       // the Anthropic/OpenAI adapters set for `effectiveEffort` when no

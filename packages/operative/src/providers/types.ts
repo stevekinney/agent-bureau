@@ -516,6 +516,29 @@ export interface GeminiCacheCreatingClient {
 }
 
 /**
+ * Provider-neutral result of a server-side token count, per AB-64.
+ *
+ * Replaces the two provisional, SDK-shaped response types this package
+ * shipped ahead of AB-64 (Gemini's `{ totalTokens?, cachedContentTokenCount? }`
+ * and Anthropic's `{ input_tokens? }`) with one shape both
+ * `createGeminiTokenCounter` and `createAnthropicTokenCounter` map onto at
+ * their own boundary. `totalTokens` is required here even though both SDKs
+ * declare their own field optional: AB-64 requires it, so each adapter
+ * normalizes the absent case to `0` once, at the mapping boundary, rather
+ * than pushing a `?? 0` onto every caller. `cachedTokens` stays optional and
+ * is never fabricated as `0` — Anthropic's `messages.countTokens` reports no
+ * cache attribution at all, so its adapter always omits the field, and
+ * Gemini's adapter omits it whenever the SDK response omits
+ * `cachedContentTokenCount`.
+ */
+export interface TokenCountResult {
+  readonly totalTokens: number;
+  readonly cachedTokens?: number;
+  readonly provider: ProviderName;
+  readonly model: string;
+}
+
+/**
  * Minimal shape of a `@google/genai` `CountTokensParameters`.
  *
  * `model` and `contents` are required in the SDK and required here; `config`
@@ -536,28 +559,6 @@ export interface GeminiCountTokensRequest {
 }
 
 /**
- * Minimal shape of a `@google/genai` `CountTokensResponse`.
- *
- * Both fields are optional in the SDK — `totalTokens` genuinely can come back
- * absent, not merely zero, so this type never fabricates a `0` for it. That
- * mirrors {@link GeminiUsageMetadata} and {@link TokenUsage}'s own rule:
- * "absent" and "zero" are distinct, and a caller doing budgeting on a token
- * count needs to be able to tell them apart.
- *
- * **Provisional.** This is deliberately the SDK's own field names, unrenamed,
- * rather than a new provider-neutral shape — AB-64 is still in Backlog and
- * will define the real context/output-limit fields this package standardizes
- * on. Introducing a parallel budgeting shape here now would just be more
- * surface for AB-64 to reconcile against later.
- */
-export interface GeminiCountTokensResponse {
-  /** Total token count for `contents` (and `config`, when supplied). */
-  totalTokens?: number;
-  /** Tokens attributable to a referenced context cache. */
-  cachedContentTokenCount?: number;
-}
-
-/**
  * Structural interface for the `models.countTokens` operation of a
  * `@google/genai` client.
  *
@@ -566,10 +567,22 @@ export interface GeminiCountTokensResponse {
  * calls `countTokens` through this interface, matching the minimal-interface
  * rule {@link GeminiCacheCreatingClient} and the batch interfaces follow. A
  * real `GoogleGenAI` satisfies this; see `gemini-client-assignability.test-d.ts`.
+ *
+ * The response shape is declared inline, matching the SDK's own
+ * `CountTokensResponse` field names, rather than naming a package-level type:
+ * this keeps the interface structural so a real `GoogleGenAI` satisfies it
+ * with no cast. `createGeminiTokenCounter` maps this shape to
+ * {@link TokenCountResult} at its own boundary — see that type's doc comment
+ * for why the mapping normalizes `totalTokens` but not `cachedTokens`.
  */
 export interface GeminiTokenCountingClient {
   models: {
-    countTokens(params: GeminiCountTokensRequest): Promise<GeminiCountTokensResponse>;
+    countTokens(params: GeminiCountTokensRequest): Promise<{
+      /** Total token count for `contents` (and `config`, when supplied). */
+      totalTokens?: number;
+      /** Tokens attributable to a referenced context cache. */
+      cachedContentTokenCount?: number;
+    }>;
   };
 }
 
@@ -1012,42 +1025,6 @@ export interface AnthropicCountTokensRequest {
 }
 
 /**
- * Minimal shape of an Anthropic `MessageTokensCount` response.
- *
- * **`input_tokens` is optional here although the SDK declares it required.**
- * That is deliberate, not a transcription slip. The declared type describes
- * what Anthropic's own endpoint returns; it is not a runtime guarantee, and
- * this package is routinely pointed at something else — see
- * {@link AnthropicProviderOptions.baseURL}, which accepts any origin including
- * a credential-injecting proxy. Typing the field as required would let a
- * response that genuinely omits it surface as `undefined` through a `number`,
- * or invite a `?? 0` default at the call site.
- *
- * Narrowing is the caller's job precisely because "absent" and "zero" are
- * different facts, and a caller budgeting against a token count needs to tell
- * them apart. This mirrors {@link GeminiCountTokensResponse} and
- * {@link TokenUsage}, which carry the same rule. A real `MessageTokensCount`
- * still satisfies this interface: a required property is assignable to an
- * optional one of the same type.
- *
- * **Provisional.** Deliberately the SDK's own field name, unrenamed, rather
- * than a new provider-neutral shape — AB-64 is still in Backlog and will define
- * the context/output-limit fields this package standardizes on. Inventing a
- * parallel budgeting shape now would only be more surface for AB-64 to
- * reconcile. Note that this is the same *policy* as
- * {@link GeminiCountTokensResponse}, not the same fields: Anthropic reports
- * `input_tokens`, Gemini reports `totalTokens`, and neither is translated into
- * the other's vocabulary here.
- */
-export interface AnthropicCountTokensResponse {
-  /**
-   * Total tokens across the request's messages, system prompt, and tools.
-   * Absent when the response genuinely omits it; never fabricated as `0`.
-   */
-  input_tokens?: number;
-}
-
-/**
  * Structural interface for the `messages.countTokens` operation of an
  * `@anthropic-ai/sdk` client.
  *
@@ -1057,10 +1034,29 @@ export interface AnthropicCountTokensResponse {
  * {@link AnthropicBatchClient} and the Gemini interfaces follow. A real
  * `Anthropic` satisfies this; see
  * `anthropic-token-counting-assignability.test-d.ts`.
+ *
+ * **`input_tokens` is optional here although the SDK declares it required.**
+ * That is deliberate, not a transcription slip. The declared type describes
+ * what Anthropic's own endpoint returns; it is not a runtime guarantee, and
+ * this package is routinely pointed at something else — see
+ * {@link AnthropicProviderOptions.baseURL}, which accepts any origin including
+ * a credential-injecting proxy. Typing the field as required would let a
+ * response that genuinely omits it surface as `undefined` through a `number`.
+ * A required property is still assignable to an optional one of the same
+ * type, so a real `MessageTokensCount` satisfies this interface with no cast.
+ * The response shape is declared inline rather than naming a package-level
+ * type, matching {@link GeminiTokenCountingClient}: `createAnthropicTokenCounter`
+ * maps it to {@link TokenCountResult} at its own boundary.
  */
 export interface AnthropicTokenCountingClient {
   messages: {
-    countTokens(params: AnthropicCountTokensRequest): Promise<AnthropicCountTokensResponse>;
+    countTokens(params: AnthropicCountTokensRequest): Promise<{
+      /**
+       * Total tokens across the request's messages, system prompt, and tools.
+       * Absent when the response genuinely omits it; never fabricated as `0`.
+       */
+      input_tokens?: number;
+    }>;
   };
 }
 

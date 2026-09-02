@@ -128,7 +128,6 @@ export type {
   AnthropicBatchListQuery,
   AnthropicClient,
   AnthropicCountTokensRequest,
-  AnthropicCountTokensResponse,
   AnthropicMessageBatch,
   AnthropicMessageBatchIndividualResponse,
   AnthropicMessageBatchRequestCounts,
@@ -149,7 +148,6 @@ export type {
   GeminiCacheCreatingClient,
   GeminiCachedContent,
   GeminiCountTokensRequest,
-  GeminiCountTokensResponse,
   GeminiCreateBatchJobRequest,
   GeminiCreateCachedContentRequest,
   GeminiDeleteResourceJob,
@@ -178,5 +176,6 @@ export type {
   ProviderName,
   StreamingGenerateFunction,
   StreamingHandle,
+  TokenCountResult,
   TokenUsage,
 } from './types.ts';
