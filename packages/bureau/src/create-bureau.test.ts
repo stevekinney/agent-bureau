@@ -32,6 +32,7 @@ import {
   SCHEDULER_ORIGIN_TAG,
   startDurableRunResult,
 } from '@lostgradient/operative/durable';
+import { createModelCatalog } from '@lostgradient/operative/providers';
 import { createStore } from '@lostgradient/operative/store';
 import { createMockGenerate as createSequentialGenerate } from '@lostgradient/operative/test';
 import { encode } from '@lostgradient/weft';
@@ -75,6 +76,7 @@ import {
   wireFlowControlSchedulerEvents,
   wireStreamEventTargetFrames,
 } from './create-bureau';
+import { createModelCatalogService } from './model-catalog-refresh';
 import { createMemoryPersistHook, createRuntimeComposition } from './runtime-composition';
 import { waitForCondition, waitForRunState } from './test';
 import { type Bureau, type ConfigurationResponse, type ServerFrame } from './types';
@@ -7253,5 +7255,107 @@ describe('createBureau requestHumanInput availability across durability configur
     expect(error.code).toBe('DurableCapabilityUnavailableError');
     expect(error.category).toBe('unavailable');
     expect(error.retryable).toBe(false);
+  });
+});
+
+describe('Bureau.modelCatalog (AB-246)', () => {
+  it('is present regardless of D, and defaults to a service seeded from the operative static catalog', async () => {
+    const bureau = await createBureau({ agents: {} });
+    try {
+      const before = bureau.modelCatalog.catalog();
+      expect(before.descriptors.length).toBeGreaterThan(0);
+      expect(before.stale).toBe(false);
+
+      const handle = bureau.modelCatalog.refresh({
+        id: 'default-refresh',
+        requestedAt: new Date().toISOString(),
+      });
+      const result = await handle.result();
+
+      expect(result.outcome).toBe('completed');
+      expect(result.newRevision).toBe(before.revision + 1);
+      expect(bureau.modelCatalog.catalog().revision).toBe(before.revision + 1);
+    } finally {
+      bureau.dispose();
+    }
+  });
+
+  it('accepts a caller-supplied ModelCatalogService via BureauOptions.modelCatalog', async () => {
+    const seed = createModelCatalog({ now: () => '2026-09-02T00:00:00.000Z' });
+    const modelCatalog = createModelCatalogService({
+      seed,
+      descriptorSource: () => Promise.resolve([]),
+      now: () => '2026-09-02T00:00:01.000Z',
+      newRefreshId: () => 'injected-refresh',
+    });
+    const bureau = await createBureau({ agents: {}, modelCatalog });
+    try {
+      expect(bureau.modelCatalog).toBe(modelCatalog);
+      expect(bureau.modelCatalog.catalog()).toBe(seed);
+    } finally {
+      bureau.dispose();
+    }
+  });
+
+  it('dispose() awaits an in-flight refresh before its returned promise resolves — it does not abort it', async () => {
+    let resolveSource!: (descriptors: readonly []) => void;
+    const source = new Promise<readonly []>((resolve) => {
+      resolveSource = resolve;
+    });
+    const seed = createModelCatalog({ now: () => '2026-09-02T00:00:00.000Z' });
+    const modelCatalog = createModelCatalogService({
+      seed,
+      descriptorSource: () => source,
+      now: () => '2026-09-02T00:00:01.000Z',
+      newRefreshId: () => 'in-flight-refresh',
+    });
+    const bureau = await createBureau({ agents: {}, modelCatalog });
+
+    const handle = bureau.modelCatalog.refresh({
+      id: 'req-1',
+      requestedAt: '2026-09-02T00:00:00.000Z',
+    });
+
+    let disposeSettled = false;
+    const disposePromise = bureau.dispose().then(() => {
+      disposeSettled = true;
+    });
+
+    // Give dispose() every chance to resolve prematurely before the source
+    // ever settles — it must not.
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(disposeSettled).toBe(false);
+    // abort() was never called: the refresh is still genuinely running.
+    expect(handle.snapshot().state).toBe('pending');
+
+    resolveSource([]);
+    await disposePromise;
+
+    expect(disposeSettled).toBe(true);
+    const result = await handle.result();
+    expect(result.outcome).toBe('completed');
+  });
+
+  it('a second dispose() call after an in-flight refresh already settled resolves immediately', async () => {
+    const seed = createModelCatalog({ now: () => '2026-09-02T00:00:00.000Z' });
+    const modelCatalog = createModelCatalogService({
+      seed,
+      descriptorSource: () => Promise.resolve([]),
+      now: () => '2026-09-02T00:00:01.000Z',
+      newRefreshId: () => 'settled-refresh',
+    });
+    const bureau = await createBureau({ agents: {}, modelCatalog });
+
+    const handle = bureau.modelCatalog.refresh({
+      id: 'req-1',
+      requestedAt: '2026-09-02T00:00:00.000Z',
+    });
+    await handle.result();
+
+    await bureau.dispose();
+    await bureau.dispose();
+    expect(bureau.modelCatalog.inFlightRefresh()).toBeUndefined();
   });
 });
