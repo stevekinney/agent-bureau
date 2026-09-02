@@ -78,6 +78,7 @@ export function createRunState(): RunState {
     totalUsage: { prompt: 0, completion: 0, total: 0 },
     lastContent: '',
     schemaAttempts: 0,
+    lastAppliedConfigVersion: 0,
   };
 }
 

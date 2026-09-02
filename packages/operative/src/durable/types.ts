@@ -38,6 +38,14 @@ export interface RunCursor {
   /** Run-scoped count of structured-output schema retries already consumed. */
   schemaAttempts: number;
   /**
+   * The `configVersion` `SteeringAppliedEvent` last fired for, on this run
+   * (AB-221). Mirrors `RunState.lastAppliedConfigVersion` across a
+   * checkpoint boundary the same way `schemaAttempts` does, so a recovered
+   * run does not re-fire `steering.applied` for a `configVersion` an
+   * earlier, already-committed step already stamped.
+   */
+  lastAppliedConfigVersion: number;
+  /**
    * The workflow version identifier this run was created under (see
    * {@link import('./run-workflow').createRunWorkflow}'s `version` option),
    * stamped once at run creation and carried unchanged across every subsequent

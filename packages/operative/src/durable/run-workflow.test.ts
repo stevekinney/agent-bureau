@@ -3363,6 +3363,7 @@ describe('durable agentRun workflow', () => {
     it('threads DurableRunDeps.options.steering into GenerateContext.steering for the generate call inside ctx.memo', async () => {
       const { engine } = await buildEngine(new MemoryStorage(), false);
       const gate: SteeringGate = {
+        sessionId: 'test-session',
         getDesiredState: () => ({ paused: false, configVersion: 7, model: 'durable-model' }),
         awaitResume: () => new Promise<void>(() => {}), // never needed: this run never pauses
       };
@@ -3399,6 +3400,7 @@ describe('durable agentRun workflow', () => {
       let paused = true;
       let resumeResolvers: Array<() => void> = [];
       const gate: SteeringGate = {
+        sessionId: 'test-session',
         getDesiredState: () => ({ paused, configVersion: paused ? 1 : 2 }),
         awaitResume: () =>
           new Promise<void>((resolve) => {

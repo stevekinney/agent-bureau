@@ -321,6 +321,7 @@ function initialCursor(version: string | undefined): RunCursor {
     totalUsage: { prompt: 0, completion: 0, total: 0 },
     lastContent: '',
     schemaAttempts: 0,
+    lastAppliedConfigVersion: 0,
     ...(version !== undefined ? { workflowVersion: version } : {}),
   };
 }
@@ -518,6 +519,7 @@ export function createRunWorkflow(
               totalUsage: cursor.totalUsage,
               lastContent: cursor.lastContent,
               schemaAttempts: cursor.schemaAttempts,
+              lastAppliedConfigVersion: cursor.lastAppliedConfigVersion,
             };
             const stepResult = yield* ctx.memo(`step-${stepIndex}`, async () => {
               const deps = runDepsFrom(ctx.services);
@@ -557,6 +559,7 @@ export function createRunWorkflow(
               runState.totalUsage = { ...carriedAccumulators.totalUsage };
               runState.lastContent = carriedAccumulators.lastContent;
               runState.schemaAttempts = carriedAccumulators.schemaAttempts;
+              runState.lastAppliedConfigVersion = carriedAccumulators.lastAppliedConfigVersion;
 
               const outcome = await runStep(
                 stepDeps,
@@ -634,6 +637,7 @@ export function createRunWorkflow(
                   totalUsage: runState.totalUsage,
                   lastContent: runState.lastContent,
                   schemaAttempts: runState.schemaAttempts,
+                  lastAppliedConfigVersion: runState.lastAppliedConfigVersion,
                 },
                 pendingWakeup: deps.pendingWakeup,
                 pendingHumanWait: deps.pendingHumanWait,

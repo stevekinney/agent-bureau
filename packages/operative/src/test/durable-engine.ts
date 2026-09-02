@@ -105,6 +105,7 @@ export function createManualCheckpointStore(): CheckpointStore {
         totalUsage: { prompt: 0, completion: 0, total: 0 },
         lastContent: '',
         schemaAttempts: 0,
+        lastAppliedConfigVersion: 0,
       },
       conversation: null,
       steps: [],

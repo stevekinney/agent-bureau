@@ -14,6 +14,7 @@ const cursor = (step: number): RunCursor => ({
   totalUsage: { prompt: 0, completion: 0, total: 0 },
   lastContent: '',
   schemaAttempts: 0,
+  lastAppliedConfigVersion: 0,
 });
 
 describe('createCheckpointStore', () => {

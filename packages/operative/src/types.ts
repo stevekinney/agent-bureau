@@ -278,6 +278,14 @@ export type RunResult<O = unknown, H extends boolean = true> = RunResultBase &
  * dependency proceeds exactly as it does today, with no behavior change.
  */
 export interface SteeringGate {
+  /**
+   * The owning Bureau session's id. `SteeringDesiredState`/`SteeringEffectiveState`
+   * carry no `sessionId` field themselves (AB-67 — desired state is scoped to,
+   * not self-describing, the session that owns it), so `runStep` reads it from
+   * here to stamp the `sessionId` AB-90/AB-221's `steering.applied` event
+   * carries.
+   */
+  readonly sessionId: string;
   /** Synchronous read of the session's current desired steering state. */
   getDesiredState(): SteeringDesiredState;
   /**
