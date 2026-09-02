@@ -1,5 +1,6 @@
 /**
- * Compile-only fixture for AB-42's session-input admission types (AB-193).
+ * Compile-only fixture for AB-42's session-input admission types (AB-193;
+ * AB-202 amendments).
  *
  * This file is included in `check-types` (it lives under `src/`, which
  * `tsconfig.json` includes) and excluded from the test runner (it does not
@@ -20,6 +21,39 @@ import type {
   SessionInputRecord,
   SessionInputState,
 } from './types';
+
+// AB-202 — `SessionInputRecord`/`SessionInputAdmissionRequest` are now bounded
+// generics (`TPayload extends SessionInputPayload`); a type argument that is
+// not assignable to `SessionInputPayload` must fail to compile.
+// @ts-expect-error — `Date` does not extend `SessionInputPayload`.
+export type InvalidSessionInputRecord = SessionInputRecord<Date>;
+
+// AB-202 — `SessionInputPayload` excludes provider-generated block kinds. A
+// payload array containing a `thinking` block must fail to compile.
+const providerGeneratedPayload: ReadonlyArray<{
+  type: 'thinking';
+  thinking: string;
+  signature: string;
+}> = [{ type: 'thinking', thinking: 'internal reasoning', signature: 'sig' }];
+// @ts-expect-error — a `thinking` block is provider-generated, not user-admissible.
+const rejectedPayload: SessionInputPayload = providerGeneratedPayload;
+
+// AB-202 — every non-excluded `MultiModalContent` kind (including
+// `container_upload`, deliberately left admissible: it references a
+// user-initiated container file upload, not a provider-generated block) must
+// still be assignable to `SessionInputPayload`, so the `Exclude<>` above
+// didn't over-exclude down to `never`.
+const admissiblePayload: SessionInputPayload = [
+  { type: 'text', text: 'Summarize this.' },
+  { type: 'image', url: 'https://example.invalid/chart.png' },
+  {
+    type: 'document',
+    name: 'q3.pdf',
+    mimeType: 'application/pdf',
+    source: { kind: 'reference', uri: 'file:///q3.pdf' },
+  },
+  { type: 'container_upload', file_id: 'file-1' },
+];
 
 const deliveryMode: SessionInputDeliveryMode = 'steer';
 const otherDeliveryMode: SessionInputDeliveryMode = 'queue';
@@ -107,6 +141,9 @@ const failure: SessionInputFailure = {
 // Referenced so `noUnusedLocals` cannot flag the fixture values above; there is
 // no runtime assertion here, only the compiler checking every shape compiles.
 export const sessionInputTypeFixture = {
+  providerGeneratedPayload,
+  rejectedPayload,
+  admissiblePayload,
   record,
   request,
   receipt,

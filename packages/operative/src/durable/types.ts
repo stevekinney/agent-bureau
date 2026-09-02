@@ -1,5 +1,13 @@
 import type { AnyToolbox, ToolExecutionResult } from 'armorer';
-import type { ConversationSnapshot, MultiModalContent } from 'conversationalist';
+import type {
+  ConversationSnapshot,
+  MultiModalContent,
+  RedactedThinkingContent,
+  ServerToolResultContent,
+  ServerToolUseContent,
+  ThinkingContent,
+  WebSearchToolResultContent,
+} from 'conversationalist';
 import type { JSONValue, ToolCall } from 'interoperability';
 
 import type { Effort } from '../providers/types';
@@ -177,15 +185,40 @@ export interface DurableRunDeps {
 /** How an admitted {@link SessionInputRecord} is delivered to the session. */
 export type SessionInputDeliveryMode = 'steer' | 'queue';
 
+/** The subset of {@link MultiModalContent} a caller may submit as session input. Excludes every
+ *  provider-generated block kind, resolved from `packages/conversationalist/src/multi-modal.ts`:
+ *  `'thinking'` (`ThinkingContent`), `'redacted_thinking'` (`RedactedThinkingContent`),
+ *  `'server_tool_use'` (`ServerToolUseContent`), `'web_search_tool_result'`
+ *  (`WebSearchToolResultContent`), and the `ServerToolResultType` discriminants
+ *  (`'code_execution_tool_result'`, `'bash_code_execution_tool_result'`,
+ *  `'text_editor_code_execution_tool_result'`, `'web_fetch_tool_result'`). Promotion turns a
+ *  payload into user input, and provider adapters either discard or misattribute these kinds when
+ *  replayed as if the user had sent them. `TextContent`, `ImageContent`, `DocumentContent`, and
+ *  `ContainerUploadContent` remain admissible. AB-42's coordinator amendments (2026-09-02) own
+ *  this exclusion; AB-70 owns any future widening. */
+export type UserAdmissibleContent = Exclude<
+  MultiModalContent,
+  | ThinkingContent
+  | RedactedThinkingContent
+  | ServerToolUseContent
+  | WebSearchToolResultContent
+  | ServerToolResultContent
+>;
+
 /** The message-shaped subset of the document's `AgentInput` this contract accepts: exactly
  *  what one `Message.content` can hold (`string | ReadonlyArray<MultiModalContent>`, matching
- *  `packages/conversationalist/src/types.ts:140`). The `{ conversation }` variant of `AgentInput`
+ *  `packages/conversationalist/src/types.ts:140`), narrowed to {@link UserAdmissibleContent} per
+ *  AB-42's coordinator amendments (2026-09-02). The `{ conversation }` variant of `AgentInput`
  *  is out of scope for session-input admission; a caller with a full conversation to inject uses
- *  Bureau's conversation-replacement surface. AB-70 owns any future widening of the multimodal
+ *  Bureau's conversation-replacement surface. AB-70 owns any future widening of the admissible
  *  content within this message-shaped constraint. */
-export type SessionInputPayload = string | ReadonlyArray<MultiModalContent>;
+export type SessionInputPayload = string | ReadonlyArray<UserAdmissibleContent>;
 
-export interface SessionInputRecord<TPayload = SessionInputPayload> {
+/** Per AB-42's coordinator amendments (2026-09-02): `TPayload` is bounded by
+ *  {@link SessionInputPayload} so an explicit type argument can narrow the payload (e.g. to
+ *  `string`, or to a single {@link UserAdmissibleContent} member) but never widen it past the
+ *  user-admissible union. */
+export interface SessionInputRecord<TPayload extends SessionInputPayload = SessionInputPayload> {
   /** Caller-supplied idempotency identity, or server-generated when the caller omits one. */
   readonly id: string;
   readonly idOrigin: 'caller' | 'generated';
@@ -209,8 +242,12 @@ export interface SessionInputRecord<TPayload = SessionInputPayload> {
  *  here, matching `BureauRunOptions.principal`'s placement; the calling layer (the gateway's
  *  `resolvePrincipal(context)`, `hooks.ts:152`) attaches it from the authenticated request. The
  *  gateway body schema for `POST /sessions/:id/input` is `Omit<SessionInputAdmissionRequest,
- *  'principal'>`; a body-supplied `principal` is never trusted. */
-export interface SessionInputAdmissionRequest<TPayload = SessionInputPayload> {
+ *  'principal'>`; a body-supplied `principal` is never trusted. Per AB-42's coordinator
+ *  amendments (2026-09-02), `TPayload` is bounded by {@link SessionInputPayload}, matching
+ *  {@link SessionInputRecord}. */
+export interface SessionInputAdmissionRequest<
+  TPayload extends SessionInputPayload = SessionInputPayload,
+> {
   readonly id?: string;
   readonly principal: string;
   readonly deliveryMode: SessionInputDeliveryMode;
@@ -234,7 +271,16 @@ export interface SessionInputReceipt {
 
 export interface SessionInputConflict {
   readonly id: string;
-  readonly reason: 'session-mismatch' | 'delivery-mode-mismatch' | 'payload-mismatch';
+  readonly reason:
+    | 'session-mismatch'
+    | 'delivery-mode-mismatch'
+    | 'payload-mismatch'
+    /** Per AB-42's coordinator amendments (2026-09-02): a session-input `id` is unique within
+     *  its `sessionId` regardless of principal. A different `principal` submitting an `id` that
+     *  already exists in the session gets this reason, and the existing record is untouched;
+     *  the idempotency key stays `(principal, 'session-input', id)` for replay detection by the
+     *  same principal. */
+    | 'id-owned-by-other-principal';
   readonly originalReceipt: SessionInputReceipt;
 }
 
