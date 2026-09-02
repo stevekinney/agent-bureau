@@ -710,11 +710,16 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
         signal: combinedSignal,
         // `SchedulerRunOptions` omits `runId` (see its doc comment) — the
         // in-memory path has no durable workflow id to reuse, so derive a
-        // stable per-dispatch id the same way the durable branch above
-        // does, minus the retry counter (an in-memory dispatch is never
-        // resumed/requeued the way a suspended durable one is, so `task.id`
-        // alone is already unique here).
-        runId: `${SCHEDULER_RUN_ID_PREFIX}${task.id}`,
+        // stable per-dispatch id. `task.id` alone is NOT enough: a
+        // `background`/`ambient` in-memory task preempted mid-run is
+        // requeued as the SAME `QueuedTask` (`preemptTask` spreads `task`
+        // into `requeuedTask`, `create-scheduler.ts` above) and restarted
+        // from scratch — not resumed — via a fresh `executeLoop` call, so
+        // `task.id` repeats across attempts. Include `__requeues` (bumped
+        // once per requeue, `undefined`/`0` on the first attempt) so each
+        // restart gets its own identity, mirroring the durable branch's
+        // own per-attempt counter above.
+        runId: `${SCHEDULER_RUN_ID_PREFIX}${task.id}-${task.__requeues ?? 0}`,
       });
     }
 

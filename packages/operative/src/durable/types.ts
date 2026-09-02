@@ -425,23 +425,32 @@ export interface SteeringCommand {
  * for both a single reason and a subset of reasons (see
  * `events.ts`'s `SteeringFailureReason`).
  *
- * Deliberately does NOT declare a `supersededBy?: never` field. This
- * package builds with `exactOptionalPropertyTypes: false` (a repo-wide
- * setting, `tsconfig.base.json`), under which a DECLARED `?: never`
- * property still accepts an EXPLICIT `supersededBy: undefined` — see
- * `SteeringRequestedValue`'s `override?: never`/`policyRef?: never` pair,
- * which carries that exact caveat (`steering-types.check.ts`). Omitting the
- * field from this type ENTIRELY, rather than declaring it as forbidden,
- * sidesteps that gap: TypeScript's excess-property check on an object
- * literal rejects ANY key the type doesn't declare — including an explicit
- * `supersededBy: undefined` — without needing the repo-wide compiler flag
- * this issue is not in scope to change. See
- * `steeringCommandFailureNonSupersededExplicitUndefined` in
- * `steering-types.check.ts` for the pinned proof.
+ * Declares `supersededBy?: never` rather than omitting the field entirely —
+ * the two catch DIFFERENT malformed shapes, and this one guards the more
+ * consequential case. `?: never` rejects a KNOWN, definite `supersededBy:
+ * string` reaching this type through a non-literal value (a builder
+ * function's return, an intermediate variable, anything not a fresh object
+ * literal checked directly against this type) — the shape a real bug looks
+ * like: a successor command's id genuinely attached to the wrong `reason`.
+ * Omitting the field instead only strengthens the LITERAL case (TypeScript
+ * excess-property-checks a fresh object literal against every key the
+ * matched member declares — declared as `never`, an object literal
+ * supplying a real string still gets caught) but weakens the non-literal
+ * one: `Omit`-free structural assignability does not excess-property-check
+ * an intermediate value, so a definite `{ supersededBy: string }`-shaped
+ * value assigned through a variable would slip through undetected if the
+ * field weren't declared at all. The one gap `?: never` cannot close, given
+ * this package's repo-wide `exactOptionalPropertyTypes: false`
+ * (`tsconfig.base.json`): a literal explicit `supersededBy: undefined`
+ * still type-checks — behaviorally identical to omitting the field, so not
+ * a real invariant violation — matching `SteeringRequestedValue`'s
+ * identical `override?: never`/`policyRef?: never` caveat
+ * (`steering-types.check.ts`).
  */
 type SteeringCommandFailureOf<R extends string> = {
   readonly failedAt: string; // ISO
   readonly reason: R;
+  readonly supersededBy?: never;
 };
 
 /**
@@ -453,10 +462,10 @@ type SteeringCommandFailureOf<R extends string> = {
  * when `reason` is `'superseded-by'` and absent otherwise" in prose; this
  * makes that exclusivity a type error instead of a runtime-only invariant).
  * The `'superseded-by'` member requires `supersededBy`; every other member
- * does not declare the field at all (see `SteeringCommandFailureOf`'s doc
- * comment for why that's stronger than declaring it `?: never`), so a
- * literal that supplies it alongside a different reason — or omits it
- * alongside `'superseded-by'` — fails to type-check. See
+ * carries `supersededBy?: never` (see `SteeringCommandFailureOf`'s doc
+ * comment for the tradeoff that shape makes), so a literal or non-literal
+ * value that supplies a real `supersededBy` alongside a different reason,
+ * or omits it alongside `'superseded-by'`, fails to type-check. See
  * `steering-types.check.ts` for both malformed shapes pinned with
  * `@ts-expect-error`.
  *
