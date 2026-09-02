@@ -94,6 +94,16 @@ const narrowedWidenedLazy: RunnableAgent<unknown, boolean> = createLazyAgent(asy
 });
 void narrowedWidenedLazy;
 
+// AB-15's own canonical widened-plugin example (documentation/operative-type-safe-api.md,
+// "Widened runtime modules"): the loader is annotated to the raw `import()`
+// result — a `{ default: RunnableAgent<unknown, boolean> }` module — with no
+// `.then((m) => m.default)` selector, and this must type-check as-is.
+declare const pluginPath: string;
+const widenedPlugin: RunnableAgent<unknown, boolean> = createLazyAgent<unknown, boolean>(
+  () => import(pluginPath) as Promise<{ default: RunnableAgent<unknown, boolean> }>,
+);
+void widenedPlugin;
+
 // -- Loader accepts a promise-like agent too ---------------------------------
 
 const promiseLikeLoader: LazyAgentLoader<never, false> = () => Promise.resolve(untypedAgent);
@@ -106,11 +116,20 @@ void options;
 const optionsWithSelector: CreateLazyAgentOptions = { select: (module: unknown) => module };
 void optionsWithSelector;
 
+// A raw `import(path)` module namespace object — its `default` export is
+// unwrapped automatically (AB-15's `AgentModule<O, H>`); no selector needed.
 const moduleObjectLoader = () => import('./create-lazy-agent-type-fixtures');
-
-// @ts-expect-error — module objects are not accepted; the caller must select the RunnableAgent export.
-const moduleObjectLazy = createLazyAgent(moduleObjectLoader);
+const moduleObjectLazy: RunnableAgent<never, false> = createLazyAgent(moduleObjectLoader);
 void moduleObjectLazy;
+
+// A named (non-default) export is still not unwrapped automatically — the
+// caller selects it themselves, exactly as `createLazyGenerate` requires.
+const namedExportOnlyLoader = () =>
+  import('./create-lazy-agent-type-fixtures').then((module) => ({ notRun: module.namedAgent }));
+
+// @ts-expect-error — an object with no callable run() (and no `default`) is not an AgentModule.
+const namedExportOnlyLazy = createLazyAgent(namedExportOnlyLoader);
+void namedExportOnlyLazy;
 
 // `createLazyAgent`'s return value is an ordinary `RunnableAgent`, with no
 // stateful helper API and no thenable surface.

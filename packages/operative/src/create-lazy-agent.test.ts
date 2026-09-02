@@ -795,4 +795,113 @@ describe('createLazyAgent', () => {
     firstResult.usage.total = 999;
     expect(secondResult.usage.total).toBe(0);
   });
+
+  it('disposes a handle returned by agent.run() when abort raced it synchronously', async () => {
+    const controller = new AbortController();
+    const fake = createFakeAgentRun();
+    const agent: RunnableAgent<string, false> = {
+      name: 'fake',
+      run: () => {
+        // A custom agent that reacts to the shared signal synchronously,
+        // inside its own run() — before this call even returns a handle.
+        controller.abort('synchronous abort inside run()');
+        return fake.handle;
+      },
+    };
+    const lazy = createLazyAgent(() => agent);
+
+    const run = lazy.run('hello', { signal: controller.signal });
+    const result = await run.result();
+
+    expect(result.finishReason).toBe('aborted');
+    expect(fake.disposed).toBe(true);
+  });
+
+  it('does not forward a signal-driven abort to the underlying handle twice once started', async () => {
+    const controller = new AbortController();
+    const fake = createFakeAgentRun();
+    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };
+    const lazy = createLazyAgent(() => agent);
+
+    lazy.run('hello', { signal: controller.signal });
+    await flushMicrotasks();
+    controller.abort('after started');
+
+    expect(fake.abortCalls).toEqual([]);
+    fake.settle(successResult('done'));
+  });
+
+  it('snapshots context at run() call time, so a later mutation of the caller object does not leak in', async () => {
+    let observedAgentName: string | undefined;
+    const fake = createFakeAgentRun();
+    const agent: RunnableAgent<string, false> = {
+      name: 'fake',
+      run: (_input, context) => {
+        observedAgentName = context?.agentName;
+        return fake.handle;
+      },
+    };
+    const lazy = createLazyAgent(() => agent);
+
+    const mutableContext = { agentName: 'original' };
+    lazy.run('hello', mutableContext);
+    mutableContext.agentName = 'mutated-after-run';
+    await flushMicrotasks();
+
+    expect(observedAgentName).toBe('original');
+    fake.settle(successResult('done'));
+  });
+
+  it('accepts a loader resolving to a { default } module namespace object, per AB-15', async () => {
+    const fake = createFakeAgentRun();
+    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };
+    const lazy = createLazyAgent(() => Promise.resolve({ default: agent }));
+
+    const run = lazy.run('hello');
+    fake.settle(successResult('done'));
+    const result = await run.result();
+
+    expect(result.content).toBe('done');
+  });
+
+  it('snapshots resolveRunOptions input before awaiting the loader', async () => {
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => (release = resolve));
+    let observedOptions: RunOptions | undefined;
+    const agent: RunnableAgent<never, false> & {
+      [OPERATIVE_RESOLVE_RUN_OPTIONS]: (input: {
+        conversation: { marker: string };
+      }) => Promise<RunOptions>;
+    } = {
+      name: 'fake',
+      run: () => createFakeAgentRun().handle,
+      [OPERATIVE_RESOLVE_RUN_OPTIONS]: (input) => {
+        observedOptions = input as unknown as RunOptions;
+        return Promise.resolve({} as RunOptions);
+      },
+    };
+    const lazy = createLazyAgent(async () => {
+      await pending;
+      return agent;
+    });
+
+    const resolver = (
+      lazy as RunnableAgent<never, false> & {
+        [OPERATIVE_RESOLVE_RUN_OPTIONS]: (input: {
+          conversation: { marker: string };
+        }) => Promise<RunOptions>;
+      }
+    )[OPERATIVE_RESOLVE_RUN_OPTIONS];
+
+    const mutableHistory = { marker: 'original' };
+    const resolving = resolver({ conversation: mutableHistory });
+    mutableHistory.marker = 'mutated-during-load';
+    release();
+    await resolving;
+
+    expect(
+      (observedOptions as unknown as { conversation: { marker: string } } | undefined)?.conversation
+        .marker,
+    ).toBe('original');
+  });
 });

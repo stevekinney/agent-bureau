@@ -40,8 +40,19 @@ import type {
 import { OPERATIVE_RESOLVE_RUN_OPTIONS } from './runnable-agent';
 import type { FinishReason, RunResult, TokenUsage } from './types';
 
+/**
+ * The two shapes a loader may resolve to (AB-15's `AgentModule<O, H>`): the
+ * agent directly, or a module namespace object exposing it as `default` —
+ * the shape a bare `import(path)` produces. There is no unwrapping for any
+ * OTHER named export; a caller with a named export selects it themselves
+ * inside the loader (`() => import('./agent').then((m) => m.researcher)`),
+ * exactly as `createLazyGenerate` (AB-20) already requires.
+ */
+export type AgentModule<O, H extends boolean> =
+  RunnableAgent<O, H> | { default: RunnableAgent<O, H> };
+
 export type LazyAgentLoader<O, H extends boolean> = () =>
-  RunnableAgent<O, H> | PromiseLike<RunnableAgent<O, H>>;
+  AgentModule<O, H> | PromiseLike<AgentModule<O, H>>;
 
 export interface CreateLazyAgentOptions {
   /** Human-readable label included in lazy loading and contract error messages. */
@@ -206,7 +217,7 @@ function createEventQueue(): EventQueue {
 function createDeferredAgentRun<O, H extends boolean>(
   resolveAgent: () => Promise<RunnableAgent<O, H>>,
   rawInput: AgentInput,
-  context: AgentRunContext | undefined,
+  rawContext: AgentRunContext | undefined,
   label: string,
 ): AgentRun<O, H> {
   // Snapshot a `{ conversation }` input synchronously, at `run()` call time —
@@ -218,6 +229,16 @@ function createDeferredAgentRun<O, H extends boolean>(
     typeof rawInput === 'string'
       ? rawInput
       : { conversation: structuredClone(rawInput.conversation) };
+
+  // Shallow-copy `context` too, for the same reason: `agentName`,
+  // `traceContext`, and `withTraceContext` are otherwise read only once the
+  // underlying agent finally loads, so a caller mutating the object it
+  // passed in — after `run()` already returned — would leak into this run.
+  // `signal` is deliberately copied by reference, not cloned (an
+  // `AbortSignal` has no clone operation and identity is the point: this
+  // wrapper's own listener and the one the underlying agent attaches must
+  // observe the same signal).
+  const context: AgentRunContext | undefined = rawContext ? { ...rawContext } : undefined;
 
   type PerRunState = 'waiting' | 'started' | 'terminal';
   let state: PerRunState = 'waiting';
@@ -434,15 +455,34 @@ function createDeferredAgentRun<O, H extends boolean>(
       return;
     }
 
+    // `agent.run()` can itself settle this wrapper synthetically — a custom
+    // agent that reacts to `context.signal` (or that calls back into an
+    // already-returned reference to this same lazy handle) synchronously
+    // during its own `run()`. `requestAbort` sees `state === 'waiting'` at
+    // that point (this run hasn't reached `'started'` yet) and finalizes.
+    // Recheck here before overwriting that terminal state: the wrapper
+    // already reported an aborted result, so the handle `agent.run()` just
+    // returned must be disposed rather than left running unobserved.
+    if (isTerminal()) {
+      handle[Symbol.dispose]();
+      return;
+    }
+
     // Store the handle and flip to 'started' BEFORE any later `abort()` call
     // can be forwarded — the "resolution wins" half of the required race
-    // behavior. The "abort wins" half is the `state === 'terminal'` check
-    // above, which runs first and returns without ever calling
-    // `agent.run()`. From this point, `requestAbort` sees `state ===
-    // 'started'` and forwards directly to `underlying`, exactly once
-    // (guarded by `abortForwarded`).
+    // behavior. The "abort wins" half is the two `isTerminal()` checks
+    // above, which run first and return without ever storing `handle`. From
+    // this point, `requestAbort` sees `state === 'started'` and forwards
+    // directly to `underlying`, exactly once (guarded by `abortForwarded`).
     underlying = handle;
     state = 'started';
+    // From here on, `context.signal` (already passed to `agent.run()`
+    // above) is the underlying agent's own responsibility to honor — this
+    // wrapper's listener existed only to cover the window before an
+    // underlying run existed at all. Detaching now avoids a second,
+    // wrapper-driven `abort()` call racing a compliant agent's own
+    // signal-triggered one for the same reason.
+    detachSignalListener();
 
     watchResult(handle);
     startPumpingEvents();
@@ -542,8 +582,9 @@ export function createLazyAgent<O = never, H extends boolean = false>(
     if (state.kind === 'loading') return state.pending;
 
     const pending = (async () => {
+      let loaded: AgentModule<O, H>;
       try {
-        return await loader();
+        loaded = await loader();
       } catch (cause) {
         throw new AsyncDefinitionLoadError(
           'LOAD_FAILED',
@@ -551,6 +592,18 @@ export function createLazyAgent<O = never, H extends boolean = false>(
           cause,
         );
       }
+      // Unwrap the `import(path)` module-namespace shape. `isRunnableAgent`
+      // is checked FIRST — a value that's already directly runnable is used
+      // as-is, so an agent that happens to also carry an unrelated
+      // `default` property of its own is never misread as a module.
+      // Anything else (no `run`, no `default`) is returned unchanged and
+      // caught by the `isRunnableAgent` validation every call site already
+      // performs on the resolved value.
+      if (isRunnableAgent(loaded)) return loaded;
+      if (loaded !== null && typeof loaded === 'object' && 'default' in loaded) {
+        return loaded.default;
+      }
+      return loaded;
     })();
 
     state = { kind: 'loading', pending };
@@ -569,7 +622,17 @@ export function createLazyAgent<O = never, H extends boolean = false>(
     return pending;
   }
 
-  const resolveRunOptions: ResolveRunOptions = async (input, context) => {
+  const resolveRunOptions: ResolveRunOptions = async (rawInput, context) => {
+    // Snapshot a `{ conversation }` input synchronously, before the loader
+    // is ever awaited — matching `run()`'s own snapshot-at-invocation
+    // semantics (this protocol promises to resolve the exact `RunOptions`
+    // `run()` would build). Without this, a caller mutating its
+    // `ConversationHistory` while the load is pending would leak into the
+    // resolved options.
+    const input: AgentInput =
+      typeof rawInput === 'string'
+        ? rawInput
+        : { conversation: structuredClone(rawInput.conversation) };
     const agent = await resolve();
     // Validate the same contract `run()` does — a `null`/non-object load
     // result would otherwise throw a raw `TypeError` here instead of the
