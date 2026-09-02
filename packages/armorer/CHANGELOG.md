@@ -1,5 +1,27 @@
 # Changelog
 
+## 2.3.0
+
+### Minor Changes
+
+- 380da79: `ToolExecuteOptions` gains two optional per-call fields: `traceContext?: unknown` and `executionContext?: Record<string, unknown>`. `createToolbox` threads both into the per-call `RuntimeToolContext` (`context.traceContext`/`context.executionContext`), falling back to the toolbox's own base context when a call supplies neither (AB-233).
+
+  `packages/operative/src/run-step.ts`'s toolbox execute call site now passes the run's active trace context through `traceContext`, and this run's own `childRegistry`/`runId` through `executionContext: { childRegistry, parentRunId }`. A `createSubagentTool` reached through the ordinary `createAgent`-driven agent loop now observes the parent run's trace context automatically — no more building a toolbox with a matching `context: { traceContext }` to make `context.traceContext` reach a subagent tool (the operative README's documented limitation is removed).
+
+  This also closes an AB-50 reuse gap: `createSubagentTool` previously captured `parentContext.registry`/`parentContext.parentRunId` once at tool construction, so one tool instance reused across two `agent.run()` calls shared a child registry (either run's `abortChild` could cancel the other's child) and nested dispatch stamped every child with the same frozen `parentRunId`. `createSubagentTool` now reads `childRegistry`/`parentRunId` from `ToolContext.executionContext` at execute time, in preference to `parentContext.registry`/`parentContext.parentRunId`, which remain supported as construction-time defaults for a direct `dispatchChildRun` caller or a tool built outside the ordinary loop.
+
+  `RunOptions` (operative) gains a new optional `childRegistry?: ChildRunRegistry` field, threaded automatically from `AgentRunContext.childRegistry` when a run is started through `createAgent`'s returned agent.
+
+- 6ae0ef0: `instrument()` (`armorer/instrumentation`) no longer calls `span.recordException(...)` for a cancelled tool call, closing a gap AB-230 left open (AB-237, grounded in AB-87's telemetry redaction column).
+
+  A cancellation error is derived from a caller-supplied abort reason and can itself carry tool-argument content — for example an `Error` whose `message` embeds the reason. Passing that `Error` to OpenTelemetry's `recordException` serializes it verbatim onto the exception event's `exception.message`/`exception.stacktrace` attributes, which leaked the reason even though AB-230's changelog claimed "a genuine `Error` on any error/cancelled path is still recorded via `recordException`, unchanged." That claim no longer holds for the cancelled path specifically — the error/denied paths are unaffected and still call `recordException` for a genuine `Error`.
+
+  On a cancellation, only the non-privileged category now reaches the span, on both `error.type` (unchanged) and a new attribute, `armorer.tool.cancellation_category`, added so a cancellation is queryable without colliding with the `error`/`denied` use of `error.type`.
+
+  If a downstream telemetry consumer read `exception.message`/`exception.stacktrace` off a cancelled tool span's exception event, that event no longer fires for cancellations; `armorer.tool.cancellation_category` (or `error.type`) is the replacement signal.
+
+  The same reason also reached `span.status.message` through a second path: a tool created without `telemetry: true` never emits `tool.finished` at all (`create-tool.ts`'s `finishTelemetry` returns early), so its cancellation was previously reported only through the toolbox-level `error` event fallback, which copied `result.error.message` verbatim onto the span status. That fallback now applies the same sanitization — a fixed `status.message` of `Cancelled` plus `error.type`/`armorer.tool.cancellation_category`, regardless of whether the tool opted into `telemetry: true`.
+
 ## 2.2.0
 
 ### Minor Changes
