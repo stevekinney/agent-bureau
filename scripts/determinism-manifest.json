@@ -10,6 +10,24 @@
       "reason": "Svelte hook tests assign globalThis.fetch/WebSocket/EventSource directly to install fakes (5 files: use-chat, use-reviews, use-run-detail, use-runs, use-websocket .svelte.test.ts). AB-273 injects fetch/WebSocket/EventSource/timers through a client environment so these tests stop mutating process globals.",
       "owner": "Agent Bureau team",
       "owningIssue": "AB-273"
+    },
+    {
+      "path": "packages/cloudflare/src/test/runtime-only.test.ts",
+      "reason": "AB-276's real-runtime conformance lane (Miniflare, not a fake double). `crypto.randomUUID()` seeds a per-process identifier prefix so two agent-validation processes running this same file concurrently against the same machine cannot collide on temporary-directory names (see the file's own comment above `processIdentifierPrefix`); this is exactly the real-runtime tier the testability contract (AB-92) says may use real randomness, since it is asserting against a real Cloudflare runtime, not proving determinism.",
+      "owner": "Agent Bureau team",
+      "owningIssue": "AB-276"
+    },
+    {
+      "path": "packages/cloudflare/src/test/runtime-lane.ts",
+      "reason": "AB-276's real-runtime conformance lane. `crypto.randomUUID()` is the default fallback for the injectable `CloudflareRuntimeLaneIdentifierSource` this module defines specifically so callers CAN inject a deterministic identifier source; the module intentionally does not depend on AB-92's not-yet-built RuntimeServices.identifiers to stay unshipped-code-free (see the file's own doc comment on CloudflareRuntimeLaneIdentifierSource).",
+      "owner": "Agent Bureau team",
+      "owningIssue": "AB-276"
+    },
+    {
+      "path": "packages/cloudflare/src/test/behavior-contract.ts",
+      "reason": "AB-276's shared backend behavior contract, run against both the fast Bun doubles and the real Miniflare runtime. `Date.now()` seeds a default createdAt/updatedAt pair in the memoryRecordInput contract-fixture helper; no assertion in this file depends on a specific clock value, only on the two timestamps being consistent with each other.",
+      "owner": "Agent Bureau team",
+      "owningIssue": "AB-276"
     }
   ]
 }
