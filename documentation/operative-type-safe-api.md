@@ -1229,22 +1229,29 @@ export type SteeringTargetKind =
 /** Discriminated by `target`. `pause`/`resume` carry no value: the target
  *  itself is the instruction. Every other target carries exactly one of
  *  `policyRef` (a named, pre-approved policy the selector resolves) or
- *  `override` (an exact value); see the caption below for why this is a
- *  union, not two optional fields a caller could set simultaneously or omit
- *  both. */
+ *  `override` (an exact value), encoded as an exclusive pair — `policyRef?:
+ *  never` on the `override` arm and `override?: never` on the `policyRef`
+ *  arm — rather than two same-discriminant variants, so a literal supplying
+ *  both fields with non-`undefined` values, or neither field, is rejected by
+ *  the type checker at compile time. This package's
+ *  `exactOptionalPropertyTypes: false` means an explicit `override: undefined`
+ *  alongside `policyRef` still type-checks — semantically indistinguishable
+ *  from omitting `override` — so the runtime admission check that exactly
+ *  one is *present* (not merely non-`undefined` in the type) stays
+ *  load-bearing, not just defense in depth. */
 export type SteeringRequestedValue =
   | { readonly target: 'pause' }
   | { readonly target: 'resume' }
-  | { readonly target: 'agent-identity'; readonly policyRef: string }
-  | { readonly target: 'agent-identity'; readonly override: string } // a catalog agent name; must be a key of Bureau<D>'s agents map
-  | { readonly target: 'route'; readonly policyRef: string }
-  | { readonly target: 'route'; readonly override: string } // must name a configured RoutingOptions.routes entry
-  | { readonly target: 'model'; readonly policyRef: string }
-  | { readonly target: 'model'; readonly override: string }
-  | { readonly target: 'provider'; readonly policyRef: string }
-  | { readonly target: 'provider'; readonly override: string }
-  | { readonly target: 'effort'; readonly policyRef: string }
-  | { readonly target: 'effort'; readonly override: Effort }; // packages/operative/src/providers/types.ts:22-25
+  | { readonly target: 'agent-identity'; readonly policyRef: string; readonly override?: never }
+  | { readonly target: 'agent-identity'; readonly override: string; readonly policyRef?: never } // a catalog agent name; must be a key of Bureau<D>'s agents map
+  | { readonly target: 'route'; readonly policyRef: string; readonly override?: never }
+  | { readonly target: 'route'; readonly override: string; readonly policyRef?: never } // must name a configured RoutingOptions.routes entry
+  | { readonly target: 'model'; readonly policyRef: string; readonly override?: never }
+  | { readonly target: 'model'; readonly override: string; readonly policyRef?: never }
+  | { readonly target: 'provider'; readonly policyRef: string; readonly override?: never }
+  | { readonly target: 'provider'; readonly override: string; readonly policyRef?: never }
+  | { readonly target: 'effort'; readonly policyRef: string; readonly override?: never }
+  | { readonly target: 'effort'; readonly override: Effort; readonly policyRef?: never }; // packages/operative/src/providers/types.ts:22-25
 
 export interface SteeringCommand {
   readonly id: string;
@@ -1258,10 +1265,22 @@ export interface SteeringCommand {
   readonly expectedRevision?: number;
   readonly requestedAt: string; // ISO
   readonly deadline?: string; // ISO, same semantics as AB-42's SessionInputRecord.expiresAt
+  /** `pause`/`resume` only. When present, must name a non-terminal run
+   *  owned by `sessionId`, or admission fails with the existing
+   *  `SteeringCommandFailure.reason: 'run-terminal'`. When absent and the
+   *  session has exactly one non-terminal run, the command binds to that
+   *  run and the effective `runId` is recorded on the accepted command;
+   *  when absent and the session has zero or more than one non-terminal
+   *  run, admission fails with `'run-ambiguous'`. Configuration-targeting
+   *  commands (`model`, `provider`, `route`, `effort`, `agent-identity`)
+   *  remain session-scoped desired state and ignore `runId`. */
+  readonly runId?: string;
 }
 ```
 
 `SteeringRequestedValue` is a union, never a bag with both `policyRef` and `override` optional. `policyRef` resolves through AB-66's selector — this record fixes that the resolution step exists and is mandatory, not what the selector's algorithm is. `override` is an exact value that still passes the same capability/authority checks a `policyRef` resolution would produce. Until AB-66 ships, no deployment can honor a `policyRef`- or `override`-carrying `SteeringCommand` for `route`/`model`/`provider`/`effort`: `submitSteeringCommand` (illustrative name) must return `{ outcome: 'unsupported-capability', reason: 'selector-unavailable' }`, mirroring AB-42's `'durable-mailbox-unavailable'` pre-WFT-84 fallback, never a silent direct write. `BureauRunOptions` is unchanged by this contract: no `model`, `provider`, `route`, `effort`, or `agentName` field is added to it — a `SteeringCommand` targeting these four values travels through the new session-scoped admission verb (illustratively `submitSteeringCommand`, alongside AB-42's `submitSessionInput` and AB-39's `signalSession`/`updateSession`/`querySession`), never as a field on the per-call `options` argument to `bureau.run`.
+
+A `pause` or `resume` command targets exactly one run: when `runId` is present it must name a non-terminal run owned by `sessionId`, otherwise admission fails with the existing `'run-terminal'` reason; when `runId` is absent and the session has exactly one non-terminal run, the command binds to that run and the effective `runId` is recorded on the accepted command; when `runId` is absent and the session has zero or more than one non-terminal run, admission fails with `SteeringCommandFailure.reason: 'run-ambiguous'`.
 
 ```ts
 /** Populated on every terminal-failure SteeringCommandState (`rejected`,
@@ -1271,10 +1290,14 @@ export interface SteeringCommandFailure {
   readonly reason:
     | 'session-terminal' // the owning session itself went terminal (closed) before application
     | 'run-terminal' // pause/resume only: the run it targeted ended (aborted or completed) before its gate could apply
+    | 'run-ambiguous' // pause/resume only: no runId given and the session has zero or more than one non-terminal run
     | 'authorization-revoked'
     | 'policy-denied'
     | 'deadline-passed'
     | 'superseded-by'; // pairs with a successor command's id, same target
+  /** The `id` of the successor command, present exactly when `reason` is
+   *  `'superseded-by'` and absent otherwise. */
+  readonly supersededBy?: string;
 }
 ```
 
