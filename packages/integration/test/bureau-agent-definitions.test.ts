@@ -176,31 +176,46 @@ describe('literal-name output inference and widened-name behavior', () => {
     }
   });
 
-  it('dispatches correctly and types as a proper union for a genuinely widened name', async () => {
+  it('dispatches correctly and types as a proper union for a genuinely widened, MIXED-output name', async () => {
     const bureau = await makeBureau();
     try {
-      // A real widened name: a union of two literal keys, not narrowed to
-      // one — the shape a caller reading a name off an HTTP path segment
-      // (validated against bureau.agents.names()) would have.
-      function pick(flag: boolean): 'direct' | 'lazyGenerate' {
-        return flag ? 'direct' : 'lazyGenerate';
+      // A real widened name spanning a schema-backed agent ('direct', H =
+      // true) and a schema-less one ('barrel', H = false) — the exact case
+      // agent-catalog.ts's "TName extends TName ? ... : never" doc comment
+      // calls out: collapsing this to a non-distributed AgentRun<unknown,
+      // boolean> would make `.output()` vanish unconditionally rather than
+      // being present on only the 'direct' branch, and `unwrap()` would
+      // become unsoundly `Promise<string>`-only, silently dropping the
+      // parsed-object case. A widened union of two H = true agents (as an
+      // earlier version of this test used) cannot catch that: it "passes"
+      // even under the broken, collapsed form.
+      function pick(flag: boolean): 'direct' | 'barrel' {
+        return flag ? 'direct' : 'barrel';
       }
       const widenedName = pick(true);
 
       const widenedRun = bureau.run(widenedName, 'hi');
-      // The return type here is the DISTRIBUTED union
-      // AgentRunForName<Agents, 'direct'> | AgentRunForName<Agents, 'lazyGenerate'>
-      // — both branches happen to have H = true here, so this compiles;
-      // the point of this assignment is that it would NOT compile if the
-      // conditional type incorrectly collapsed to a non-distributed
-      // AgentRun<unknown, boolean> for a widened name (see agent-catalog.ts's
-      // "TName extends TName ? ... : never" doc comment).
-      const typed: AgentRunForName<Agents, 'direct' | 'lazyGenerate'> = widenedRun;
+      const typed: AgentRunForName<Agents, 'direct' | 'barrel'> = widenedRun;
+
+      // Type-level distribution proof: HasOutputMethod, a naked conditional
+      // over the union, distributes to `true | false` when the return type
+      // is genuinely the distributed union AgentRun<{greeting}, true> |
+      // AgentRun<never, false> — but collapses to exactly `false` if
+      // AgentRunForName incorrectly resolved H to the non-literal `boolean`
+      // (neither branch of AgentRun<unknown, boolean> exposes .output()).
+      // Assigning \`true\` to it only compiles in the distributed case.
+      type HasOutputMethod<T> = T extends { output(): unknown } ? true : false;
+      const distributionProof: HasOutputMethod<typeof widenedRun> = true;
+      void distributionProof;
+
       const result = await typed.result();
       expect(result.finishReason).toBe('stop-condition');
       // Runtime dispatch: the widened name still resolves to the correct
-      // agent (the 'direct' branch, since pick(true) was called).
-      expect(result.output).toEqual({ greeting: 'hello from direct' });
+      // agent (the 'direct' branch, since pick(true) was called) and its
+      // real, schema-validated output — not the 'barrel' agent's plain text.
+      // ('output' in result) narrows the union member-by-member — 'barrel'
+      // (H = false) has no 'output' property at all.
+      expect('output' in result && result.output).toEqual({ greeting: 'hello from direct' });
     } finally {
       bureau.dispose();
     }

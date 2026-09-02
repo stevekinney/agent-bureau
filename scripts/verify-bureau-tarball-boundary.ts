@@ -237,10 +237,21 @@ describe('bureau tarball boundary — path-installed consumer', () => {
     ]);
     const seen = new Set<string>();
     for (const line of packageLines) {
-      const nameMatch = /^\s*"([^"]+)":/.exec(line);
-      const name = nameMatch?.[1];
-      if (!name || !expectedLocalPackages.has(name)) continue;
-      seen.add(name);
+      const keyMatch = /^\s*"([^"]+)":/.exec(line);
+      const key = keyMatch?.[1];
+      if (!key) continue;
+      // A NESTED resolution of one of our expected packages (a different
+      // version resolved beneath a specific importer, e.g. one Bureau
+      // sibling depending on another) gets an importer-PREFIXED lock key
+      // like "bureau/memory", not the bare "memory" the top-level
+      // resolution uses. Match either form — a nested resolution that
+      // slipped through to the registry while the top-level one stayed
+      // local must still fail this check.
+      const matched = [...expectedLocalPackages].find(
+        (name) => key === name || key.endsWith(`/${name}`),
+      );
+      if (!matched) continue;
+      seen.add(matched);
       // `bun.lock` embeds a `file:`-installed dependency's resolved spec as
       // `"<name>@<absolute path>.tgz"` — no literal "file:" scheme prefix.
       // The one thing that conclusively distinguishes it from a registry
@@ -248,7 +259,7 @@ describe('bureau tarball boundary — path-installed consumer', () => {
       // path lives inside OUR staging directory.
       if (!line.includes(staging) || !line.includes('.tgz')) {
         throw new Error(
-          `${name} did not resolve through this run's local tarball in bun.lock:\n${line}`,
+          `${key} did not resolve through this run's local tarball in bun.lock:\n${line}`,
         );
       }
     }

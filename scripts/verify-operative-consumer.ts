@@ -618,12 +618,23 @@ async function verifyLockfile(
       continue;
     }
 
-    for (const forbidden of ['workspace:', 'link:', 'patch:', 'file:', root]) {
-      if (line.includes(forbidden)) {
-        throw new Error(
-          `${name} resolved through a non-registry mechanism (${forbidden}) in bun.lock:\n${line}`,
-        );
-      }
+    // Positively assert a plain registry semver rather than blacklisting
+    // known non-registry substrings: a local tarball/directory resolution
+    // outside the repository root (`name@/tmp/dependency.tgz`, an absolute
+    // path with no `file:`/`workspace:`/`link:`/`patch:` prefix at all —
+    // see verify-bureau-tarball-boundary.ts's own doc comment on this exact
+    // lockfile shape) would pass a substring blacklist while still being
+    // exactly the non-registry resolution this check exists to reject.
+    const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const specMatch = new RegExp(`"${escapedName}@([^"]+)"`).exec(line);
+    const resolvedSpec = specMatch?.[1];
+    if (
+      !resolvedSpec ||
+      !/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/.test(resolvedSpec)
+    ) {
+      throw new Error(
+        `${name} did not resolve to a plain registry semver in bun.lock (got "${resolvedSpec}"):\n${line}`,
+      );
     }
   }
   if (!sawOperative) throw new Error('bun.lock never resolved @lostgradient/operative at all');
