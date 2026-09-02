@@ -1,14 +1,16 @@
+import { createTool, createToolbox, createToolCall } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import { CompletableEventTarget } from 'lifecycle';
 
 import type { RequestHumanInputContext } from './create-request-human-input-tool';
 import { createRequestHumanInputTool } from './create-request-human-input-tool';
+import { DurableCapabilityUnavailableError } from './durable/durable-capability-unavailable-error';
 import type { CombinedOperativeEventMap } from './events';
 import { HumanWaitParkedEvent } from './events';
 
 describe('createRequestHumanInputTool', () => {
-  function makeContext(runId?: string): RequestHumanInputContext {
-    return { pendingHumanWait: undefined, runId };
+  function makeContext(runId?: string, durable = true): RequestHumanInputContext {
+    return { pendingHumanWait: undefined, runId, durable };
   }
 
   function makeEmitter() {
@@ -237,6 +239,91 @@ describe('createRequestHumanInputTool', () => {
       const tool = createRequestHumanInputTool({ context: makeContext() });
 
       expect(() => tool.input.parse({ prompt: 'oops' })).toThrow();
+    });
+  });
+
+  // AB-41 / AB-43 — an unavailable capability rejects with a stable typed
+  // error rather than returning a success-shaped no-op.
+  describe('when context.durable is false', () => {
+    it('throws DurableCapabilityUnavailableError instead of writing pendingHumanWait', () => {
+      const context = makeContext(undefined, false);
+      const tool = createRequestHumanInputTool({ context });
+
+      expect(() => tool.execute({ signalName: 'human-response' })).toThrow(
+        DurableCapabilityUnavailableError,
+      );
+      expect(context.pendingHumanWait).toBeUndefined();
+    });
+
+    it('throws an error satisfying armorer isToolError (code, category, retryable, message)', () => {
+      const context = makeContext(undefined, false);
+      const tool = createRequestHumanInputTool({ context });
+
+      try {
+        tool.execute({ signalName: 'human-response' });
+        throw new Error('expected execute to throw');
+      } catch (error) {
+        expect(error).toBeInstanceOf(DurableCapabilityUnavailableError);
+        const durableError = error as DurableCapabilityUnavailableError;
+        expect(durableError.code).toBe('DurableCapabilityUnavailableError');
+        expect(durableError.category).toBe('unavailable');
+        expect(durableError.retryable).toBe(false);
+        expect(durableError.message).toContain('requestHumanInput');
+      }
+    });
+
+    it('does not dispatch HumanWaitParkedEvent when rejected as unavailable', () => {
+      const context = makeContext('run-9', false);
+      const emitter = makeEmitter();
+      const tool = createRequestHumanInputTool({ context, emitter });
+
+      const received: HumanWaitParkedEvent[] = [];
+      emitter.addEventListener(HumanWaitParkedEvent.type, (event) => {
+        received.push(event);
+      });
+
+      expect(() => tool.execute({ signalName: 'human-response' })).toThrow(
+        DurableCapabilityUnavailableError,
+      );
+      expect(received).toHaveLength(0);
+    });
+
+    it('does not overwrite an existing pendingHumanWait slot', () => {
+      const context = makeContext(undefined, false);
+      context.pendingHumanWait = { signalName: 'existing' };
+      const tool = createRequestHumanInputTool({ context });
+
+      expect(() => tool.execute({ signalName: 'human-response' })).toThrow(
+        DurableCapabilityUnavailableError,
+      );
+      expect(context.pendingHumanWait).toEqual({ signalName: 'existing' });
+    });
+  });
+
+  // Configuration 1 of AB-43's four named configurations: a standalone
+  // in-memory agent (no Bureau composition) — the tool has no way to be
+  // omitted from the toolbox, so it must reject on invocation. Routes the
+  // thrown error through armorer's real `createToolbox`/`isToolError` catch
+  // to prove the resulting `ToolExecutionResult.error.category` is
+  // `'unavailable'`, exactly as AB-41's decision record specifies.
+  describe('standalone createAgent toolbox (armorer integration)', () => {
+    it('rejects with an unavailable ToolExecutionResult when the standalone toolbox has no durable run', async () => {
+      const context = makeContext(undefined, false);
+      const rawTool = createRequestHumanInputTool({ context });
+      const tool = createTool({
+        ...rawTool,
+        execute: async (input) => await Promise.resolve(rawTool.execute(input)),
+      });
+      const toolbox = createToolbox([tool]);
+
+      const result = await toolbox.execute(
+        createToolCall(tool.name, { signalName: 'human-response' }),
+      );
+
+      expect(result.outcome).toBe('error');
+      expect(result.error?.code).toBe('DurableCapabilityUnavailableError');
+      expect(result.error?.category).toBe('unavailable');
+      expect(result.error?.retryable).toBe(false);
     });
   });
 });
