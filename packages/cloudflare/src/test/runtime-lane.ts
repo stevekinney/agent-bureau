@@ -239,7 +239,21 @@ export default {
 `;
 }
 
-/** Bundles the Durable Object glue script (and the real adapter it imports) for workerd. */
+/**
+ * Bundles the Durable Object glue script (and the real adapter it imports) for workerd.
+ *
+ * The temporary entry file's name must be collision-safe across CONCURRENT PROCESSES,
+ * not just concurrent calls within one process — this box runs concurrent agent
+ * validation, and a caller's `options.identifiers.next()` is not guaranteed to be
+ * process-unique (e.g. `test/cloudflare-backend-contract.test.ts`'s plain per-process
+ * counter), so reusing an injected identifier here would let two processes' builds
+ * write, read, and then race-delete the very same file. `crypto.randomUUID()` is used
+ * directly and is listed in `scripts/determinism-manifest.json`'s `realRuntimeExemptions`
+ * (owningIssue `AB-286`) rather than injected: this module ships as part of `src/` (its
+ * `tsconfig.build.json` `rootDir` is `./src`), so it cannot import a default from outside
+ * `src/test/` the way `runtime-only.test.ts` does (excluded from the build as `*.test.ts`),
+ * and no caller can supply a process-unique value without becoming process-unique itself.
+ */
 async function buildDurableObjectWorkerScript(packageRoot: string): Promise<string> {
   // A relative specifier, not an absolute path: `packageRoot/node_modules`
   // is not guaranteed to exist (a workspace-linked package root need not

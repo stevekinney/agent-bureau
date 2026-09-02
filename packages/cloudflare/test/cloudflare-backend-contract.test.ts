@@ -25,6 +25,7 @@ import { createSqliteDouble } from '../src/test/sqlite-double';
 runCloudflareBackendContract({
   label: 'fast double',
   capabilities: [{ name: 'vectorize', outcome: 'supported' }],
+  now: () => Date.now(),
   createBindings(): Promise<CloudflareContractBindings> {
     return Promise.resolve({
       sqliteStorage: createCloudflareSqliteStorage({ sql: createSqliteDouble() }),
@@ -63,6 +64,7 @@ runCloudflareBackendContract({
       reason: 'vectorize-remote-only',
     },
   ],
+  now: () => Date.now(),
   createBindings(): Promise<CloudflareContractBindings> {
     // A fresh Durable Object namespace and a fresh R2 key prefix per case —
     // not `realLane.sqliteStorage`/`realLane.r2Bucket` directly — so each
