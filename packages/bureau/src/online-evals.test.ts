@@ -491,31 +491,35 @@ describe('createOnlineEvalSampler', () => {
     expect(records).toHaveLength(1);
   });
 
-  it('threads the owner-issued AbortSignal into every evaluateRun() judge invocation', async () => {
+  it('threads the owner-issued AbortSignal into every evaluateRun() judge invocation, unblocking a never-settling judge on abort', async () => {
     const { bureau, emit } = createStubBureau();
     const { auditTrail, records } = createStubAuditTrail();
     const controller = new AbortController();
 
-    let observedSignal: AbortSignal | undefined;
-    const signalObservingJudge: OnlineEvalJudge = {
-      name: 'signal-observing-judge',
-      evaluate: () => {
-        observedSignal = controller.signal;
-        return { pass: true, score: 1, message: 'ok' };
-      },
+    // A judge that never settles on its own: if `options.signal` were not
+    // actually threaded into this judge's race, `flush()` below would hang
+    // forever instead of resolving once the signal aborts.
+    const neverSettlingJudge: OnlineEvalJudge = {
+      name: 'never-settling-judge',
+      evaluate: () => new Promise<EvalScore>(() => {}),
     };
     const sampler = createOnlineEvalSampler(bureau, auditTrail, undefined, {
-      judges: [signalObservingJudge],
+      judges: [neverSettlingJudge],
       sampleRate: 1,
       rng: scriptedRng([0]),
       signal: controller.signal,
     });
 
     emit(makeAction({ type: 'run.completed', runId: 'run-1', detail: makeRunResult() }));
+
+    // Give the sampler a chance to kick off the judge's evaluation before
+    // aborting it.
+    await Promise.resolve();
+    controller.abort(new Error('shutting down'));
+
     await sampler.flush();
 
-    expect(observedSignal).toBe(controller.signal);
-    expect(records).toHaveLength(1);
+    expect(records).toHaveLength(0);
     await sampler.dispose();
   });
 

@@ -288,6 +288,39 @@ export function createWebhookNotifier(
     void promise.finally(() => activeDeliveries.delete(promise));
   }
 
+  // Internal shutdown signal, aborted by `dispose()`. Separate from the
+  // owner-issued `signal` (AB-37/AB-206): `dispose()` must abandon an
+  // in-flight backoff wait even when the caller never configured `signal`,
+  // per this module's docstring. Combined with the owner-issued `signal` (if
+  // any) so a delivery's backoff `sleep()` is abandoned by EITHER: a call to
+  // `dispose()`, or the owner aborting `signal` directly without disposing.
+  const shutdownController = new AbortController();
+  const backoffAbortSignal = signal
+    ? AbortSignal.any([shutdownController.signal, signal])
+    : shutdownController.signal;
+
+  // Races the (possibly injected, non-cancellable) `sleep()` against
+  // `backoffAbortSignal`, resolving as soon as either settles rather than
+  // blocking a `dispose()`/`flush()` caller for the full backoff duration.
+  function abandonableSleep(milliseconds: number): Promise<void> {
+    if (backoffAbortSignal.aborted) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      let settled = false;
+      const onAbort = () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+      backoffAbortSignal.addEventListener('abort', onAbort, { once: true });
+      void sleep(milliseconds).then(() => {
+        if (settled) return;
+        settled = true;
+        backoffAbortSignal.removeEventListener('abort', onAbort);
+        resolve();
+      });
+    });
+  }
+
   async function persist(record: WebhookDeliveryRecord): Promise<void> {
     if (!kv) return;
     try {
@@ -385,7 +418,7 @@ export function createWebhookNotifier(
 
         await persist(record);
         const backoffMilliseconds = backoffBaseMilliseconds * 2 ** (attempt - 1);
-        await sleep(backoffMilliseconds);
+        await abandonableSleep(backoffMilliseconds);
       }
     }
   }
@@ -500,6 +533,7 @@ export function createWebhookNotifier(
     notify: notifyExternal,
     async dispose(): Promise<void> {
       disposed = true;
+      shutdownController.abort();
       bureau.removeEventListener('action', listener);
       await Promise.allSettled([...activeDeliveries]);
     },

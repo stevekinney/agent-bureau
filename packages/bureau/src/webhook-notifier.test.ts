@@ -503,6 +503,52 @@ describe('createWebhookNotifier', () => {
     expect(callCount).toBe(1);
   });
 
+  it('dispose() abandons an in-flight backoff wait instead of hanging until it elapses', async () => {
+    const review = makeToolApprovalReview();
+    const { bureau, emit } = createStubBureau([review]);
+
+    let callCount = 0;
+    const fetchImpl = (async () => {
+      callCount++;
+      return new Response(null, { status: 500 });
+    }) as unknown as typeof fetch;
+
+    // A `sleep()` that never resolves on its own — standing in for a very
+    // long backoff wait. If `dispose()` merely awaited this promise, it
+    // would hang forever; it must instead abandon the wait via the internal
+    // shutdown signal (AB-37/AB-206).
+    const sleep = () => new Promise<void>(() => {});
+
+    const notifier = createWebhookNotifier(bureau, undefined, undefined, {
+      targets: [{ url: 'https://example.com/hook' }],
+      fetch: fetchImpl,
+      sleep,
+      maxAttempts: 5,
+      backoffBaseMilliseconds: 10,
+    });
+
+    emit(makeAction({ type: 'step.completed', runId: 'run-1' }));
+
+    // Give the first attempt's microtasks a chance to run: it fails and
+    // parks in the never-resolving backoff wait. `flush()` would hang here
+    // too (nothing has aborted the wait yet), so poll callCount directly
+    // instead of awaiting it.
+    while (callCount === 0) {
+      await Promise.resolve();
+    }
+    expect(callCount).toBe(1);
+
+    let disposeResolved = false;
+    const disposePromise = notifier.dispose().then(() => {
+      disposeResolved = true;
+    });
+    await disposePromise;
+
+    expect(disposeResolved).toBe(true);
+    // dispose() abandoned the wait before the retry fired.
+    expect(callCount).toBe(1);
+  });
+
   // ── Awaitable dispose() and AbortSignal threading (AB-37/AB-206) ────
 
   it('dispose() returns a promise that resolves only after every in-flight deliver() settles', async () => {
