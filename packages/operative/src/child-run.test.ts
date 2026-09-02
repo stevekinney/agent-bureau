@@ -356,6 +356,57 @@ describe('dispatchChildRun — lifecycle events', () => {
     expect(registry.children()[0]?.status).toBe('failed');
   });
 
+  it('settles the registry and emits ChildWorkflowFailedEvent when result() itself THROWS synchronously, not only when its promise rejects', async () => {
+    // Regression: a misbehaving or third-party AgentRun's `result()` can
+    // throw before ever returning a promise, rather than returning a
+    // promise that rejects. Before this was fixed, `agentRun.result()` was
+    // called directly as the receiver of `.then()` — a synchronous throw
+    // there escaped before `.then()` was ever reached, leaving the
+    // registry entry stuck at 'running' forever with no failed event, and
+    // propagating out of `dispatchChildRun` itself instead of surfacing
+    // through the handle's own `result()`.
+    const emitter = makeEmitter();
+    const received: ChildWorkflowFailedEvent[] = [];
+    emitter.addEventListener(ChildWorkflowFailedEvent.type, (e) => received.push(e));
+    const registry = createChildRunRegistry();
+
+    const agent: RunnableAgent = {
+      name: 'throws-from-result',
+      run: () =>
+        ({
+          result: () => {
+            throw new Error('sync boom');
+          },
+          unwrap: () => Promise.reject(new Error('sync boom')),
+          abort: () => {},
+          [Symbol.dispose]: () => {},
+          [Symbol.asyncIterator]: () => (async function* () {})(),
+        }) as unknown as ReturnType<RunnableAgent['run']>,
+    };
+
+    const handle = dispatchChildRun(agent, 'go', {
+      agentName: 'a',
+      parentRunId: 'p',
+      emitter,
+      registry,
+    });
+
+    let caughtError: unknown;
+    try {
+      await handle.result();
+    } catch (error) {
+      caughtError = error;
+    }
+    expect(caughtError).toBeInstanceOf(Error);
+    expect((caughtError as Error).message).toBe('sync boom');
+
+    expect(received).toHaveLength(1);
+    expect(received[0]?.reason).toBe('sync boom');
+    expect(received[0]?.childRunId).toBe(handle.childRunId);
+    expect(registry.children()[0]?.status).toBe('failed');
+    expect(registry.children()[0]?.result).toBeUndefined();
+  });
+
   it('emits no events when no emitter is supplied', async () => {
     // No emitter passed at all — dispatchChildRun must not throw trying to
     // dispatch onto something that doesn't exist.
@@ -422,6 +473,66 @@ describe('dispatchChildRun — abort semantics', () => {
     expect(first.calls[0]?.context?.signal?.aborted).toBe(true);
     expect(second.calls[0]?.context?.signal?.aborted).toBe(false);
   });
+
+  it('forwards to the live agentRun.abort() too — not only the private controller — so an agent that cancels solely through its own abort() still stops', () => {
+    // A `RunnableAgent` is free to ignore the (optional) `AgentRunContext.signal`
+    // entirely and cancel only through its returned `AgentRun.abort()`.
+    // Before this was fixed, `dispatchChildRun`'s `abort()` touched only its
+    // own private `AbortController`, which such an agent never observes —
+    // the child would keep running and `result()` would never settle.
+    const agentRunAbortCalls: (string | undefined)[] = [];
+    let resolveResult: (() => void) | undefined;
+    const resultPromise = new Promise<void>((resolve) => {
+      resolveResult = resolve;
+    });
+    const agent: RunnableAgent = {
+      name: 'ignores-signal',
+      run: () =>
+        ({
+          // Deliberately never reads `context.signal` — cancellation is
+          // observable ONLY through this `abort()` being called.
+          result: () => resultPromise.then(() => makeResult({ finishReason: 'aborted' })),
+          unwrap: () => resultPromise.then(() => 'unused'),
+          abort: (reason?: string) => {
+            agentRunAbortCalls.push(reason);
+            resolveResult?.();
+          },
+          [Symbol.dispose]: () => {},
+          [Symbol.asyncIterator]: () => (async function* () {})(),
+        }) as unknown as ReturnType<RunnableAgent['run']>,
+    };
+
+    const handle = dispatchChildRun(agent, 'go', { agentName: 'a', parentRunId: 'p' });
+    handle.abort('please stop');
+
+    expect(agentRunAbortCalls).toEqual(['please stop']);
+  });
+
+  it("reports the PARENT signal's reason on ChildWorkflowAbortedEvent when a parent-propagated abort (not a child-targeted one) settles the child", async () => {
+    // Regression: the reason was previously read off the private
+    // `childController.signal` — which a parent-propagated abort never
+    // touches — so a parent abort with a string reason surfaced as
+    // `reason: undefined` on the event instead of the actual reason.
+    const emitter = makeEmitter();
+    const received: ChildWorkflowAbortedEvent[] = [];
+    emitter.addEventListener(ChildWorkflowAbortedEvent.type, (e) => received.push(e));
+
+    const parentController = new AbortController();
+    const { agent, settle } = makeControllableAgent();
+    const handle = dispatchChildRun(agent, 'go', {
+      agentName: 'a',
+      parentRunId: 'p',
+      signal: parentController.signal,
+      emitter,
+    });
+
+    parentController.abort('parent said stop');
+    settle(makeResult({ finishReason: 'aborted' }));
+    await handle.result();
+
+    expect(received).toHaveLength(1);
+    expect(received[0]?.reason).toBe('parent said stop');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -472,6 +583,33 @@ describe('createChildRunRegistry', () => {
   it('starts empty', () => {
     const registry = createChildRunRegistry();
     expect(registry.children()).toEqual([]);
+  });
+
+  it("returns frozen descriptor snapshots — mutating one never corrupts the registry's own control state", () => {
+    // Regression: `children()` previously returned the registry's actual
+    // stored descriptor objects. A caller (JavaScript, or TypeScript code
+    // crossing the `readonly` boundary with a cast) mutating a returned
+    // descriptor's `status` to `'completed'` would make a subsequent
+    // `abortChild(id)` see the fake terminal status and silently no-op
+    // instead of aborting the still-running child.
+    const registry = createChildRunRegistry();
+    const { agent, calls } = makeControllableAgent();
+    const handle = dispatchChildRun(agent, 'go', {
+      agentName: 'a',
+      parentRunId: 'p',
+      registry,
+    });
+
+    const [descriptor] = registry.children();
+    expect(Object.isFrozen(descriptor)).toBe(true);
+    expect(() => {
+      // @ts-expect-error — deliberately violating `readonly` to prove the
+      // registry's OWN state is unaffected even if a caller does this.
+      descriptor.status = 'completed';
+    }).toThrow();
+
+    registry.abortChild(handle.childRunId, 'still works');
+    expect(calls[0]?.context?.signal?.aborted).toBe(true);
   });
 
   it('registers a child as "running" and transitions it to "completed" on settle', async () => {

@@ -94,7 +94,16 @@ export interface ChildRunDescriptor {
   readonly agentName: string;
   readonly durable: boolean;
   readonly status: ChildRunStatus;
-  /** Present once `status` is terminal; absent while still `running`. */
+  /**
+   * Present once `status` is terminal AND the child actually produced a
+   * `RunResult` — absent while still `running`, and also absent for a
+   * `'failed'` descriptor settled before one existed: `agent.run()`
+   * throwing synchronously, or `agentRun.result()` rejecting (or itself
+   * throwing) before resolving one. Those two paths have no `RunResult` to
+   * report — the alternative would be fabricating one — so `'failed'`
+   * genuinely can carry `result === undefined`; only `'completed'` and
+   * `'aborted'` are guaranteed to carry one.
+   */
   readonly result?: RunResult;
 }
 
@@ -165,7 +174,15 @@ export function createChildRunRegistry(): MutableChildRunRegistry {
       existing.descriptor = { ...existing.descriptor, status, ...(result ? { result } : {}) };
     },
     children(): readonly ChildRunDescriptor[] {
-      return [...entries.values()].map((entry) => entry.descriptor);
+      // A frozen clone per call, not the registry's own stored object: every
+      // field is already `readonly` at the type level, but that boundary is
+      // compile-time-only — a JavaScript consumer, or any TypeScript code
+      // that crosses it with a cast, could otherwise mutate a returned
+      // descriptor's `status` in place and corrupt this registry's actual
+      // control state (e.g. forcing it to `'completed'` would make a later
+      // `abortChild(id)` treat a still-running child as already terminal and
+      // silently no-op instead of aborting it).
+      return [...entries.values()].map((entry) => Object.freeze({ ...entry.descriptor }));
     },
     abortChild(childId, reason): void {
       const entry = entries.get(childId);
@@ -250,8 +267,19 @@ export function dispatchChildRun<O = never, H extends boolean = false>(
     ? AbortSignal.any([options.signal, childController.signal])
     : childController.signal;
 
+  // Set once `agent.run()` returns a handle (below). Some `RunnableAgent`
+  // implementations cancel only through their own `AgentRun.abort()` and
+  // never observe the `signal` this dispatch composed and passed to
+  // `agent.run()` — the optional `AgentRunContext.signal` parameter, not a
+  // required one. Without also forwarding to the live handle, a
+  // child-targeted `abort()` on such an agent would abort only this
+  // private controller and leave the child itself running, its `result()`
+  // pending forever.
+  const liveAgentRun: { current?: ReturnType<typeof agent.run> } = {};
+
   const abort = (reason?: string): void => {
     childController.abort(reason);
+    liveAgentRun.current?.abort(reason);
   };
 
   const correlation = {
@@ -301,6 +329,7 @@ export function dispatchChildRun<O = never, H extends boolean = false>(
     );
     throw error;
   }
+  liveAgentRun.current = agentRun;
 
   const settle = (result: RunResult<O, H>): RunResult<O, H> => {
     const asBaseResult = result as unknown as RunResult;
@@ -312,13 +341,15 @@ export function dispatchChildRun<O = never, H extends boolean = false>(
     options.registry?.settle(childRunId, status, asBaseResult);
 
     if (status === 'aborted') {
+      // `signal` (the composed one), not `childController.signal`: a
+      // parent-propagated abort only fires the PARENT half of the
+      // composition, leaving the private controller's own `.reason`
+      // `undefined` even though the child genuinely aborted with a
+      // reason. The composed signal reflects whichever source fired.
       options.emitter?.dispatchEvent(
         new ChildWorkflowAbortedEvent({
           ...correlation,
-          reason:
-            typeof childController.signal.reason === 'string'
-              ? childController.signal.reason
-              : undefined,
+          reason: typeof signal.reason === 'string' ? signal.reason : undefined,
         }),
       );
     } else if (status === 'completed') {
@@ -342,7 +373,26 @@ export function dispatchChildRun<O = never, H extends boolean = false>(
     throw error;
   };
 
-  const settledResult = agentRun.result().then(settle, settleRejection);
+  // `agentRun.result()` is documented to return a `Promise`, but a
+  // misbehaving or third-party `AgentRun` implementation can throw
+  // synchronously from the method itself rather than rejecting the promise
+  // it returns. That throw would otherwise escape before `.then()` is ever
+  // reached, leaving the registry entry stuck at 'running' forever and
+  // emitting no failed lifecycle event — the same gap the `agent.run()`
+  // try/catch above closes for dispatch itself. Routing it through
+  // `settleRejection` gives it the identical failure-settlement path a
+  // rejected `result()` promise already gets.
+  const settledResult = ((): Promise<RunResult<O, H>> => {
+    try {
+      return agentRun.result();
+    } catch (error) {
+      // `settleRejection` below narrows via `error instanceof Error`
+      // regardless, so wrapping a non-`Error` throw here (matching
+      // `create-lazy-agent.ts`'s identical pattern) costs nothing and
+      // satisfies `prefer-promise-reject-errors`.
+      return Promise.reject(error instanceof Error ? error : new Error(String(error)));
+    }
+  })().then(settle, settleRejection);
 
   return {
     childRunId,

@@ -282,6 +282,30 @@ describe('createLazyAgent', () => {
     expect((result.error as AgentContractError).code).toBe('INVALID_AGENT_HANDLE');
   });
 
+  it('rejects a run() handle missing children()/abortChild() (AB-50) as an AgentContractError, not a raw TypeError', async () => {
+    // Regression: without validating these two, a lazy-loaded older or
+    // untyped third-party handle would pass this guard, start and finish
+    // normally, and only fail later — as a raw `TypeError:
+    // underlying.children is not a function` — the first time something
+    // called the wrapper's own children()/abortChild(), instead of the
+    // contract failure this validator exists to surface up front.
+    const preAb50Handle = {
+      result: () => Promise.resolve(successResult('x')),
+      unwrap: () => Promise.resolve('x'),
+      abort: () => {},
+      [Symbol.dispose]: () => {},
+      [Symbol.asyncIterator]: () => (async function* () {})(),
+      // Deliberately omits `children`/`abortChild`.
+    } as unknown as AgentRun<string, false>;
+    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => preAb50Handle };
+    const lazy = createLazyAgent(() => agent, { label: 'pre-ab50-handle' });
+
+    const run = lazy.run('one');
+    const result = await run.result();
+    expect(result.error).toBeInstanceOf(AgentContractError);
+    expect((result.error as AgentContractError).code).toBe('INVALID_AGENT_HANDLE');
+  });
+
   it('wraps a synchronous throw from the underlying run() as an AgentContractError', async () => {
     const agent: RunnableAgent<string, false> = {
       name: 'fake',
@@ -627,6 +651,8 @@ describe('createLazyAgent', () => {
       result: () => new Promise<RunResult<string, false>>(() => {}),
       unwrap: () => new Promise<string>(() => {}),
       abort() {},
+      children: () => [],
+      abortChild() {},
       [Symbol.dispose]() {},
       [Symbol.asyncIterator](): AsyncIterator<RunEvent> {
         return {
@@ -655,6 +681,8 @@ describe('createLazyAgent', () => {
       result: () => new Promise<RunResult<string, false>>(() => {}),
       unwrap: () => new Promise<string>(() => {}),
       abort() {},
+      children: () => [],
+      abortChild() {},
       [Symbol.dispose]() {},
       [Symbol.asyncIterator](): AsyncIterator<RunEvent> {
         return {
@@ -751,6 +779,8 @@ describe('createLazyAgent', () => {
       result: () => Promise.reject(rejection),
       unwrap: () => Promise.reject(rejection),
       abort() {},
+      children: () => [],
+      abortChild() {},
       [Symbol.dispose]() {},
       [Symbol.asyncIterator](): AsyncIterator<RunEvent> {
         return {

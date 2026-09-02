@@ -506,9 +506,21 @@ export function createAgentRun<O = never, H extends boolean = false>(
  * Wrap a recovered active run without offering an output or unwrap accessor.
  * A diagnostic run is intentionally useful for inspection and cancellation
  * only: its originating schema may no longer be available to validate data.
+ *
+ * `options.childRegistry` is forwarded straight through to `createAgentRun`
+ * — a `DiagnosticAgentRun`'s `children()`/`abortChild()` back the same
+ * capability `AgentRun` does (AB-34 applies it to both alike), so a caller
+ * recovering a run whose tools were wired into a registry can still supply
+ * that same registry here and get real discovery, not the empty default.
  */
-export function createDiagnosticAgentRun(activeRun: ActiveRun): DiagnosticAgentRun {
-  const run = createAgentRun<unknown, false>(activeRun) as unknown as DiagnosticAgentRun & {
+export function createDiagnosticAgentRun(
+  activeRun: ActiveRun,
+  options: Pick<CreateAgentRunOptions, 'childRegistry'> = {},
+): DiagnosticAgentRun {
+  const run = createAgentRun<unknown, false>(
+    activeRun,
+    options,
+  ) as unknown as DiagnosticAgentRun & {
     unwrap?: () => Promise<string>;
     output?: () => Promise<unknown>;
   };
