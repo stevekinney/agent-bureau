@@ -356,9 +356,14 @@ createActiveRun({
   responseJsonSchema: { type: 'object' },
 });
 `,
-  'removed-bureau-types.ts': `import type { Anything } from '@lostgradient/operative/bureau-types';
+  'removed-bureau-types.ts': `// The subpath itself is removed, but importing an ARBITRARY (nonexistent)
+// name from it would fail even if the subpath were restored — that's not a
+// real regression signal. Import one of its actual former exports so this
+// probe only "passes" (stays broken) when the real subpath is truly gone,
+// not merely because 'Anything' never existed there.
+import type { AgentRun } from '@lostgradient/operative/bureau-types';
 
-export type Probe = Anything;
+export type Probe = AgentRun;
 `,
   'removed-agent-registry.ts': `import { AgentRegistry } from '@lostgradient/operative';
 
@@ -397,12 +402,16 @@ async function typedOutputAccessor(): Promise<void> {
   // .output() exists and is typed as Promise<GreetingOutput> when an output
   // schema was supplied (H = true).
   const output: GreetingOutput = await run.output();
+  // unwrap() is also typed as Promise<GreetingOutput> — the SAME parsed
+  // value — for a schema-backed (H = true) run, not Promise<string>.
+  const unwrapped: GreetingOutput = await run.unwrap();
   const result = await run.result();
   if (result.output !== undefined) {
     const inferred: GreetingOutput = result.output;
     void inferred;
   }
   void output;
+  void unwrapped;
 }
 
 async function untypedNoOutputAccessor(): Promise<void> {
@@ -415,8 +424,12 @@ async function untypedNoOutputAccessor(): Promise<void> {
   // this handle's type at all.
   // @ts-expect-error — untyped agents have no .output() accessor.
   void run.output;
+  // unwrap() DOES still exist for an untyped (H = false) run, but typed as
+  // Promise<string> (the raw final text) — never the parsed-object type.
+  const unwrapped: string = await run.unwrap();
   const result = await run.result();
   void result;
+  void unwrapped;
 }
 
 void typedOutputAccessor;
@@ -426,6 +439,7 @@ void untypedNoOutputAccessor;
 const SMOKE_TEST = `import {
   AgentContractError,
   AsyncDefinitionLoadError,
+  createAgent,
   parseRunFrame,
   UnsupportedRunResultLegacyFieldError,
 } from '@lostgradient/operative';
@@ -434,9 +448,11 @@ import { describe, expect, it } from 'bun:test';
 import { barrelAgent } from '../src/barrel';
 import { directAgent } from '../src/direct';
 import { literalDynamicImportAgent } from '../src/dynamic-literal';
+import { makeDeterministicGenerate } from '../src/generate';
 import { runInlineAgent } from '../src/inline';
 import { lazyAgent } from '../src/lazy-agent';
 import { agentWithLazyGenerate } from '../src/lazy-generate';
+import { makeToolbox } from '../src/tools';
 import {
   widenedMalformedAgent,
   widenedMalformedGenerate,
@@ -504,6 +520,23 @@ describe('widened (runtime-computed) dynamic-module specifiers', () => {
   it('rejects a malformed createLazyGenerate resolution at runtime with AsyncDefinitionLoadError', async () => {
     const generate = widenedMalformedGenerate();
     await expect(generate({} as never)).rejects.toBeInstanceOf(AsyncDefinitionLoadError);
+  });
+});
+
+describe('unwrap() return-type contract', () => {
+  it('resolves the parsed, schema-validated object for a schema-backed (H = true) run', async () => {
+    const unwrapped = await directAgent().run('Say hello.').unwrap();
+    expect(unwrapped).toEqual({ greeting: 'hello, hello' });
+  });
+
+  it('resolves the raw final text (never a parsed object) for a schema-less (H = false) run', async () => {
+    const untyped = createAgent({
+      generate: makeDeterministicGenerate(),
+      toolbox: makeToolbox(),
+    });
+    const unwrapped = await untyped.run('Say hello.').unwrap();
+    expect(typeof unwrapped).toBe('string');
+    expect(unwrapped).toBe(JSON.stringify({ greeting: 'hello, hello' }));
   });
 });
 
@@ -596,20 +629,34 @@ async function verifyLockfile(
 
   let sawOperative = false;
   for (const line of lines) {
-    const nameMatch = /^\s*"([^"]+)":/.exec(line);
-    const name = nameMatch?.[1];
-    if (!name) throw new Error(`Could not parse package name from bun.lock line: ${line}`);
+    // The lock KEY (`"<key>": [...`) is not always the resolved package's
+    // own name — a transitive dependency Bun could not dedupe gets an
+    // importer-prefixed key like `"ajv-formats/ajv"`, while the tuple's
+    // FIRST string is still the real resolved identity, e.g. `"ajv@8.18.0"`.
+    // Building an exact-name regex from the key (rather than parsing that
+    // first tuple string) misses every such nested entry. Parse the tuple
+    // itself: the first quoted string right after the opening `[`.
+    const tupleMatch = /:\s*\[\s*"([^"]+)"/.exec(line);
+    const resolvedEntry = tupleMatch?.[1];
+    if (!resolvedEntry)
+      throw new Error(`Could not parse a resolved entry from bun.lock line: ${line}`);
+    // Split "<name>@<version-or-path>" into name/version, accounting for a
+    // scoped name's own leading "@" (e.g. "@lostgradient/operative@0.10.0").
+    const entryMatch = /^(@[^/]+\/[^@]+|[^@]+)@(.+)$/.exec(resolvedEntry);
+    if (!entryMatch)
+      throw new Error(`Could not split resolved entry "${resolvedEntry}" in bun.lock`);
+    const [, resolvedName, resolvedVersion] = entryMatch;
 
-    if (name === '@lostgradient/operative') {
+    if (resolvedName === '@lostgradient/operative') {
       sawOperative = true;
       if (mode === 'local') {
-        if (!expected.tarball || !line.includes(expected.tarball)) {
+        if (!expected.tarball || resolvedVersion !== expected.tarball) {
           throw new Error(
             `@lostgradient/operative did not resolve to the local tarball ${expected.tarball}:\n${line}`,
           );
         }
       } else {
-        if (!expected.version || !line.includes(`@lostgradient/operative@${expected.version}"`)) {
+        if (!expected.version || resolvedVersion !== expected.version) {
           throw new Error(
             `@lostgradient/operative did not resolve to registry version ${expected.version}:\n${line}`,
           );
@@ -625,15 +672,9 @@ async function verifyLockfile(
     // see verify-bureau-tarball-boundary.ts's own doc comment on this exact
     // lockfile shape) would pass a substring blacklist while still being
     // exactly the non-registry resolution this check exists to reject.
-    const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const specMatch = new RegExp(`"${escapedName}@([^"]+)"`).exec(line);
-    const resolvedSpec = specMatch?.[1];
-    if (
-      !resolvedSpec ||
-      !/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/.test(resolvedSpec)
-    ) {
+    if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/.test(resolvedVersion ?? '')) {
       throw new Error(
-        `${name} did not resolve to a plain registry semver in bun.lock (got "${resolvedSpec}"):\n${line}`,
+        `${resolvedName} did not resolve to a plain registry semver in bun.lock (got "${resolvedVersion}"):\n${line}`,
       );
     }
   }

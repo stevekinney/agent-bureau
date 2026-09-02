@@ -31,7 +31,7 @@
  *
  * Usage: `bun run scripts/verify-bureau-tarball-boundary.ts`
  */
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -48,30 +48,53 @@ async function run(command: string[], cwd: string): Promise<string> {
 }
 
 /**
+ * A hard-coded sibling list silently goes stale the moment bureau's own
+ * `package.json` gains (or drops) a `workspace:*` dependency — this script
+ * would then neither pack nor override the new one, and the lockfile
+ * scanner (derived from the same list) would not even look for it,
+ * defeating the dependency-confusion check entirely. Derived instead: read
+ * bureau's manifest's own `dependencies`, keep only the `workspace:*`
+ * entries, then map each dependency NAME back to its `packages/<dir>`
+ * directory by reading every sibling package's own `name` field (a
+ * directory name and its package name can differ, e.g. `operative` ->
+ * `@lostgradient/operative`).
+ */
+async function resolveBureauWorkspaceSiblings(): Promise<Record<string, string>> {
+  const bureauManifest = JSON.parse(
+    await Bun.file(join(root, 'packages', 'bureau', 'package.json')).text(),
+  ) as { dependencies?: Record<string, string> };
+  const workspaceDependencyNames = Object.entries(bureauManifest.dependencies ?? {})
+    .filter(([, range]) => range === 'workspace:*')
+    .map(([name]) => name);
+
+  const nameToDirectory = new Map<string, string>();
+  for (const directoryName of await readdir(join(root, 'packages'))) {
+    const manifestPath = join(root, 'packages', directoryName, 'package.json');
+    if (!(await Bun.file(manifestPath).exists())) continue;
+    const manifest = JSON.parse(await Bun.file(manifestPath).text()) as { name?: string };
+    if (manifest.name) nameToDirectory.set(manifest.name, directoryName);
+  }
+
+  const directoryByName: Record<string, string> = {};
+  for (const name of workspaceDependencyNames) {
+    const directoryName = nameToDirectory.get(name);
+    if (!directoryName) {
+      throw new Error(
+        `bureau depends on "${name}" (workspace:*), but no packages/* directory declares that name`,
+      );
+    }
+    directoryByName[name] = directoryName;
+  }
+  return directoryByName;
+}
+
+/**
  * Bureau's own `workspace:*` dependencies (private, unpublished) plus
  * bureau itself — every one of these must be packed and installed by local
  * path, never resolved from the registry. Mirrors `packages/bureau/package.json`'s
- * `dependencies`.
+ * `dependencies` — see {@link resolveBureauWorkspaceSiblings} above, which
+ * derives this set instead of hard-coding it.
  */
-const BUREAU_WORKSPACE_SIBLINGS = [
-  'armorer',
-  'conversationalist',
-  'operative', // directory name; package name is @lostgradient/operative
-  'interoperability',
-  'lifecycle',
-  'memory',
-  'skills',
-] as const;
-
-const PACKAGE_NAME_BY_DIRECTORY: Record<(typeof BUREAU_WORKSPACE_SIBLINGS)[number], string> = {
-  armorer: 'armorer',
-  conversationalist: 'conversationalist',
-  operative: '@lostgradient/operative',
-  interoperability: 'interoperability',
-  lifecycle: 'lifecycle',
-  memory: 'memory',
-  skills: 'skills',
-};
 
 async function packWorkspacePackage(directoryName: string, staging: string): Promise<string> {
   const packageDirectory = join(root, 'packages', directoryName);
@@ -118,12 +141,12 @@ async function main(): Promise<void> {
   await run(['turbo', 'run', 'build', '--filter=bureau'], root);
   await verifyStructuralBoundary();
 
+  const directoryByPackageName = await resolveBureauWorkspaceSiblings();
   const staging = await mkdtemp(join(tmpdir(), 'bureau-tarball-pack-'));
   const directory = await mkdtemp(join(tmpdir(), 'bureau-tarball-consumer-'));
   try {
     const tarballs: Record<string, string> = {};
-    for (const directoryName of BUREAU_WORKSPACE_SIBLINGS) {
-      const packageName = PACKAGE_NAME_BY_DIRECTORY[directoryName];
+    for (const [packageName, directoryName] of Object.entries(directoryByPackageName)) {
       tarballs[packageName] = await packWorkspacePackage(directoryName, staging);
     }
     const bureauTarball = await packWorkspacePackage('bureau', staging);
@@ -231,10 +254,7 @@ describe('bureau tarball boundary — path-installed consumer', () => {
       .split('\n')
       .filter((line) => /^\s*"[^"]+":\s*\[/.test(line));
 
-    const expectedLocalPackages = new Set([
-      'bureau',
-      ...Object.keys(PACKAGE_NAME_BY_DIRECTORY).map((key) => PACKAGE_NAME_BY_DIRECTORY[key]),
-    ]);
+    const expectedLocalPackages = new Set(['bureau', ...Object.keys(directoryByPackageName)]);
     const seen = new Set<string>();
     for (const line of packageLines) {
       const keyMatch = /^\s*"([^"]+)":/.exec(line);
