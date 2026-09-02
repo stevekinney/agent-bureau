@@ -21,6 +21,7 @@
 import { Conversation } from 'conversationalist';
 
 import type { AgentRun, RunEvent, UnwrappedValue } from './agent-run';
+import { CompletedRunIterationError } from './agent-run';
 import type { AgentRunError } from './errors';
 import {
   AbortAgentRunError,
@@ -62,12 +63,13 @@ function isCallable(value: unknown): value is (...args: never[]) => unknown {
   return typeof value === 'function';
 }
 
-/** Validates the shape `AgentRun` promises: `result`, `abort`, iteration, and disposal. */
+/** Validates the shape `AgentRun` promises: `result`, `unwrap`, `abort`, iteration, and disposal. */
 function isValidAgentRunHandle(value: unknown): value is AgentRun<unknown, boolean> {
   if (value === null || typeof value !== 'object') return false;
   const candidate = value as Record<PropertyKey, unknown>;
   return (
     isCallable(candidate['result']) &&
+    isCallable(candidate['unwrap']) &&
     isCallable(candidate['abort']) &&
     isCallable(candidate[Symbol.asyncIterator]) &&
     isCallable(candidate[Symbol.dispose])
@@ -100,6 +102,12 @@ function createEventQueue(): EventQueue {
   let hasPendingError = false;
   let waitResolve: ((result: IteratorResult<RunEvent>) => void) | null = null;
   let waitReject: ((error: unknown) => void) | null = null;
+  // Guards against concurrent or repeated iteration — matches `AgentRun`'s
+  // own contract (`createAgentRun` throws `CompletedRunIterationError` for
+  // the same misuse) rather than silently splitting events between two
+  // consumers or replaying a finished stream.
+  let iterating = false;
+  let consumed = false;
 
   return {
     push(event) {
@@ -137,6 +145,10 @@ function createEventQueue(): EventQueue {
       pendingError = error;
     },
     [Symbol.asyncIterator](): AsyncIterator<RunEvent> {
+      if (iterating || consumed) {
+        throw new CompletedRunIterationError();
+      }
+      iterating = true;
       return {
         next(): Promise<IteratorResult<RunEvent>> {
           if (buffered.length > 0) {
@@ -147,18 +159,33 @@ function createEventQueue(): EventQueue {
             const error = pendingError;
             hasPendingError = false;
             pendingError = undefined;
+            iterating = false;
+            consumed = true;
             return Promise.reject(error instanceof Error ? error : new Error(String(error)));
           }
           if (done) {
+            iterating = false;
+            consumed = true;
             return Promise.resolve({ value: undefined as unknown as RunEvent, done: true });
           }
           return new Promise<IteratorResult<RunEvent>>((resolve, reject) => {
-            waitResolve = resolve;
-            waitReject = reject;
+            waitResolve = (result) => {
+              if (result.done) {
+                iterating = false;
+                consumed = true;
+              }
+              resolve(result);
+            };
+            waitReject = (error) => {
+              iterating = false;
+              consumed = true;
+              reject(error instanceof Error ? error : new Error(String(error)));
+            };
           });
         },
         return(): Promise<IteratorResult<RunEvent>> {
-          done = true;
+          iterating = false;
+          consumed = true;
           return Promise.resolve({ value: undefined as unknown as RunEvent, done: true });
         },
       };
@@ -172,14 +199,33 @@ function createEventQueue(): EventQueue {
 
 function createDeferredAgentRun<O, H extends boolean>(
   resolveAgent: () => Promise<RunnableAgent<O, H>>,
-  input: AgentInput,
+  rawInput: AgentInput,
   context: AgentRunContext | undefined,
   label: string,
 ): AgentRun<O, H> {
+  // Snapshot a `{ conversation }` input synchronously, at `run()` call time —
+  // matching `createAgent`'s snapshot-at-`run()` semantics. Without this, the
+  // caller's `ConversationHistory` object would be read only later (once the
+  // underlying agent loads and its own `run()` clones it), so a mutation made
+  // during the load-wait window would leak into this run.
+  const input: AgentInput =
+    typeof rawInput === 'string'
+      ? rawInput
+      : { conversation: structuredClone(rawInput.conversation) };
+
   type PerRunState = 'waiting' | 'started' | 'terminal';
   let state: PerRunState = 'waiting';
+  // Reads `state` through a function so TypeScript's control-flow narrowing
+  // — which otherwise keeps `state` pinned to its literal initial value
+  // across the `await` inside the resolution IIFE below, since it can't see
+  // the reassignments `requestAbort`/`finalizeSynthetic` perform from
+  // outside that IIFE's own textual body — doesn't produce a false
+  // "no overlap" comparison error against a state this run can genuinely be
+  // in by the time that `await` resumes.
+  function isTerminal(): boolean {
+    return state === 'terminal';
+  }
   let underlying: AgentRun<O, H> | undefined;
-  let skipStart = false;
   let abortReason: string | undefined;
   let abortForwarded = false;
 
@@ -195,6 +241,7 @@ function createDeferredAgentRun<O, H extends boolean>(
     if (resultSettled) return;
     resultSettled = true;
     settleResultPromise(result);
+    detachSignalListener();
   }
 
   function finalizeSynthetic(
@@ -227,7 +274,18 @@ function createDeferredAgentRun<O, H extends boolean>(
     if (state === 'terminal') return;
     abortReason = reason;
     if (state === 'waiting') {
-      skipStart = true;
+      // Settle the abort immediately rather than waiting for `resolveAgent()`
+      // to finish — a hung or slow loader would otherwise make a supposedly
+      // fast cancellation hang too. The shared load itself is NOT cancelled
+      // (module loads aren't cancellable, matching `createLazyGenerate`'s
+      // AB-20 precedent): it continues in the background so the cache still
+      // gets populated, but this run's outer resolution IIFE checks
+      // `state === 'terminal'` before ever calling `agent.run()`.
+      finalizeSynthetic(
+        new AbortAgentRunError('The agent run was aborted while loading a lazy agent', reason),
+        'aborted',
+        true,
+      );
       return;
     }
     // state === 'started'
@@ -237,16 +295,21 @@ function createDeferredAgentRun<O, H extends boolean>(
     }
   }
 
+  let detachSignalListener: () => void = () => {};
   const signal = context?.signal;
   if (signal) {
     if (signal.aborted) {
       requestAbort(typeof signal.reason === 'string' ? signal.reason : undefined);
     } else {
       const onAbort = (): void => {
-        signal.removeEventListener('abort', onAbort);
         requestAbort(typeof signal.reason === 'string' ? signal.reason : undefined);
       };
       signal.addEventListener('abort', onAbort, { once: true });
+      // Detach on settlement so a long-lived signal (a request-scoped or
+      // root controller) doesn't keep this closure — and everything it
+      // closes over (the run's state, `underlying`) — alive after the run
+      // is done.
+      detachSignalListener = () => signal.removeEventListener('abort', onAbort);
     }
   }
 
@@ -262,10 +325,29 @@ function createDeferredAgentRun<O, H extends boolean>(
       }
     })();
 
-    void handle.result().then((result) => {
-      settleResult(result);
-      state = 'terminal';
-    });
+    void handle.result().then(
+      (result) => {
+        state = 'terminal';
+        settleResult(result);
+      },
+      (error: unknown) => {
+        // `AgentRun.result()` is documented to always resolve, even on
+        // abort or error (the terminal `RunResult` carries `.error`) — but
+        // that's a contract only `createAgentRun`-produced handles are
+        // guaranteed to uphold. A third-party `RunnableAgent` whose `result()`
+        // rejects instead would otherwise leave this wrapper's `resultPromise`
+        // pending forever; fold it into the same synthetic-result shape.
+        state = 'terminal';
+        settleResult({
+          conversation: buildFallbackConversation(input),
+          steps: [],
+          content: '',
+          usage: EMPTY_USAGE,
+          finishReason: 'error',
+          error: toAgentRunError(error, { kind: 'contract' }),
+        });
+      },
+    );
   }
 
   void (async () => {
@@ -278,7 +360,10 @@ function createDeferredAgentRun<O, H extends boolean>(
       // loader failure before this catch ever sees it. `toAgentRunError`
       // passes an already-`AgentRunError` value through unchanged, so this
       // is just a type-safe way to hand `finalizeSynthetic` the error
-      // without asserting a specific subclass here.
+      // without asserting a specific subclass here. `finalizeSynthetic` is
+      // itself a no-op once `state` is already `'terminal'` (an abort that
+      // settled while this load was in flight), so no explicit guard is
+      // needed here.
       finalizeSynthetic(
         toAgentRunError(cause, { kind: 'load', code: 'LOAD_FAILED' }),
         'error',
@@ -286,6 +371,11 @@ function createDeferredAgentRun<O, H extends boolean>(
       );
       return;
     }
+
+    // An abort that arrived while `resolveAgent()` was in flight already
+    // settled this run synthetically (see `requestAbort`) — do not start the
+    // underlying agent at all.
+    if (isTerminal()) return;
 
     if (!isRunnableAgent(agent)) {
       finalizeSynthetic(
@@ -295,15 +385,6 @@ function createDeferredAgentRun<O, H extends boolean>(
         ),
         'error',
         false,
-      );
-      return;
-    }
-
-    if (skipStart) {
-      finalizeSynthetic(
-        new AbortAgentRunError('The agent run was aborted while loading a lazy agent', abortReason),
-        'aborted',
-        true,
       );
       return;
     }
@@ -331,10 +412,11 @@ function createDeferredAgentRun<O, H extends boolean>(
 
     // Store the handle and flip to 'started' BEFORE any later `abort()` call
     // can be forwarded — the "resolution wins" half of the required race
-    // behavior. The "abort wins" half is the `skipStart` check above, which
-    // runs first and returns without ever calling `agent.run()`. From this
-    // point, `requestAbort` sees `state === 'started'` and forwards directly
-    // to `underlying`, exactly once (guarded by `abortForwarded`).
+    // behavior. The "abort wins" half is the `state === 'terminal'` check
+    // above, which runs first and returns without ever calling
+    // `agent.run()`. From this point, `requestAbort` sees `state ===
+    // 'started'` and forwards directly to `underlying`, exactly once
+    // (guarded by `abortForwarded`).
     underlying = handle;
     state = 'started';
 

@@ -150,6 +150,8 @@ for await (const event of run) {
 const result = await run.result(); // await — same handle
 ```
 
+`createAgent`'s return value satisfies `RunnableAgent<O, H>` (AB-21) — it carries a `readonly name` (`options.name`, defaulting to `'(agent)'` when omitted) and `run` accepts an optional second `AgentRunContext` argument (`{ signal, agentName, traceContext, withTraceContext }`), so it slots into `createLazyAgent` or a future `AgentDefinitions` map without a cast. `context.signal` drives per-run abort, `context.agentName` overrides the run's stamped agent name, and `context.traceContext` becomes the same `parentContext` field `RunOptions` already uses for nested tracing.
+
 **`CreateAgentOptions`** — key fields:
 
 | Field               | Type                                    | Description                                                                          |

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
 
 import type { AgentRun, RunEvent } from './agent-run';
+import { CompletedRunIterationError } from './agent-run';
 import { createLazyAgent } from './create-lazy-agent';
 import {
   AbortAgentRunError,
@@ -640,5 +641,59 @@ describe('createLazyAgent', () => {
     }
     earlyFake.settle(successResult('first'));
     await earlyRun.result();
+  });
+
+  it('rejects a second concurrent iteration of the same run with CompletedRunIterationError', async () => {
+    const fake = createFakeAgentRun();
+    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };
+    const lazy = createLazyAgent(() => agent);
+
+    const run = lazy.run('hello');
+    // Establish the first iterator (buffers, doesn't need to complete).
+    const iterator = run[Symbol.asyncIterator]();
+    void iterator.next();
+
+    expect(() => run[Symbol.asyncIterator]()).toThrowError(CompletedRunIterationError);
+
+    fake.settle(successResult('done'));
+    await run.result();
+  });
+
+  it('rejects re-iterating an already-completed run with CompletedRunIterationError', async () => {
+    const fake = createFakeAgentRun();
+    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };
+    const lazy = createLazyAgent(() => agent);
+
+    const run = lazy.run('hello');
+    fake.settle(successResult('done'));
+    await drain(run);
+
+    expect(() => run[Symbol.asyncIterator]()).toThrowError(CompletedRunIterationError);
+  });
+
+  it('folds a rejected underlying result() into an error RunResult instead of hanging forever', async () => {
+    const rejection = new Error('result rejected');
+    const queuelessHandle = {
+      result: () => Promise.reject(rejection),
+      unwrap: () => Promise.reject(rejection),
+      abort() {},
+      [Symbol.dispose]() {},
+      [Symbol.asyncIterator](): AsyncIterator<RunEvent> {
+        return {
+          next(): Promise<IteratorResult<RunEvent>> {
+            return Promise.resolve({ value: undefined as unknown as RunEvent, done: true });
+          },
+        };
+      },
+    } as AgentRun<string, false>;
+    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => queuelessHandle };
+    const lazy = createLazyAgent(() => agent);
+
+    const run = lazy.run('hello');
+    const result = await run.result();
+
+    expect(result.finishReason).toBe('error');
+    expect(result.error).toBeInstanceOf(AgentRunError);
+    expect((result.error as AgentRunError).cause).toBe(rejection);
   });
 });

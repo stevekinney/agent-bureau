@@ -7,7 +7,7 @@ import type { AgentRun } from './agent-run';
 import { createAgentRun } from './agent-run';
 import { noToolCalls } from './conditions/predicates';
 import { createActiveRun } from './create-run';
-import type { DefinitionResolvingAgent } from './runnable-agent';
+import type { AgentRunContext, DefinitionResolvingAgent } from './runnable-agent';
 import { OPERATIVE_RESOLVE_RUN_OPTIONS } from './runnable-agent';
 import { toOutputJsonSchema } from './structured-output/response-schema';
 import type {
@@ -39,6 +39,16 @@ export interface CreateAgentOptionsBase {
    * Receives a `GenerateContext` and returns a `GenerateResponse`.
    */
   generate: GenerateFunction;
+
+  /**
+   * Identifies this agent — stamped on curated `tool.*` bubble events
+   * (`AgentRunContext.agentName`'s standalone-path default) and populates
+   * the returned agent's `RunnableAgent.name`. Optional here (unlike the
+   * final `RunnableAgent` contract, where AB-15 makes it required): a
+   * `createAgent` result already satisfies `RunnableAgent<O, H>`
+   * structurally without one, defaulting to `'(agent)'`.
+   */
+  name?: string;
 
   /**
    * System instructions injected as a system message on step 0.
@@ -236,6 +246,14 @@ export interface StandaloneAgent<
   H extends boolean = false,
 > extends DefinitionResolvingAgent {
   /**
+   * This agent's identity — `options.name`, defaulting to `'(agent)'` when
+   * omitted. Makes a `createAgent` result structurally satisfy
+   * `RunnableAgent<O, H>` (AB-21), so it can be passed to `createLazyAgent`
+   * or placed in an `AgentDefinitions` map without a cast.
+   */
+  readonly name: string;
+
+  /**
    * Start a new in-memory run.
    *
    * - `run('some text')` starts a fresh conversation: `instructions` (if
@@ -255,10 +273,18 @@ export interface StandaloneAgent<
    *   whatever system context it needs, so resuming it repeatedly never
    *   duplicates system messages.
    *
+   * `context` (AB-21's `AgentRunContext`) is optional, matching
+   * `RunnableAgent.run`: `signal` becomes `RunOptions.signal`, `agentName`
+   * overrides the run's stamped agent name, `traceContext` becomes
+   * `RunOptions.parentContext`, and `withTraceContext` is forwarded as-is.
+   *
    * Returns an `AgentRun` handle — NOT a Promise (non-thenable by design).
    * Access the result via `handle.result()`.
    */
-  run(input: string | { conversation: ConversationHistory }): AgentRun<O, H>;
+  run(
+    input: string | { conversation: ConversationHistory },
+    context?: AgentRunContext,
+  ): AgentRun<O, H>;
 }
 
 // Re-export AgentRun from agent-run.ts so callers who import from create-agent
@@ -374,6 +400,7 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknow
     instructions,
     permissions,
     output,
+    name: configuredName,
     // Default to `noToolCalls()` when the caller doesn't supply a `stopWhen`
     // — see the doc comment on `CreateAgentOptionsBase.stopWhen`. Falls back
     // to `createActiveRun`'s own "no stop conditions at all" behavior only
@@ -381,6 +408,8 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknow
     stopWhen = noToolCalls(),
     ...rest
   } = options;
+
+  const resolvedName = configuredName ?? '(agent)';
 
   // Pre-compute tool entries once (pure transform — no per-run state).
   // The map key is canonical — override each tool's inner `.name` with the
@@ -397,7 +426,10 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknow
   // Shared by `run()` and the AB-21 definition-resolution protocol below —
   // both need the exact same `RunOptions` bag; only what happens to it
   // (start an in-memory run vs. hand it to a durable engine) differs.
-  function buildRunOptions(input: string | { conversation: ConversationHistory }): RunOptions {
+  function buildRunOptions(
+    input: string | { conversation: ConversationHistory },
+    context?: AgentRunContext,
+  ): RunOptions {
     // A caller-supplied `toolbox` is used AS-IS, shared across every run —
     // that's the point (see the `toolbox` option's doc comment: it's what
     // makes armorer's cross-request approval flow possible). Otherwise
@@ -444,13 +476,27 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknow
       conversation,
       stopWhen,
       output,
+      // AB-21: `AgentRunContext` fields translate onto their `RunOptions`
+      // equivalents — `agentName` stamps curated `tool.*` events (falling
+      // back to this agent's own `name`), `signal` drives per-run abort,
+      // `traceContext` is `RunOptions.parentContext` (the field this engine
+      // already uses for the same concept), and `withTraceContext` forwards
+      // unchanged.
+      agentName: context?.agentName ?? resolvedName,
+      ...(context?.signal ? { signal: context.signal } : {}),
+      ...(context?.traceContext !== undefined ? { parentContext: context.traceContext } : {}),
+      ...(context?.withTraceContext ? { withTraceContext: context.withTraceContext } : {}),
       ...rest,
     };
   }
 
   return {
-    run(input: string | { conversation: ConversationHistory }): AgentRun<unknown, boolean> {
-      const activeRun = createActiveRun(buildRunOptions(input));
+    name: resolvedName,
+    run(
+      input: string | { conversation: ConversationHistory },
+      context?: AgentRunContext,
+    ): AgentRun<unknown, boolean> {
+      const activeRun = createActiveRun(buildRunOptions(input, context));
       return createAgentRun<unknown, boolean>(activeRun, {
         hasOutput: output !== undefined,
       });
@@ -461,8 +507,9 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknow
     // directly. Private/unstable — see `runnable-agent.ts`.
     [OPERATIVE_RESOLVE_RUN_OPTIONS](
       input: string | { conversation: ConversationHistory },
+      context?: AgentRunContext,
     ): Promise<RunOptions> {
-      return Promise.resolve(buildRunOptions(input));
+      return Promise.resolve(buildRunOptions(input, context));
     },
   };
 }
