@@ -38,11 +38,9 @@ const providerGeneratedPayload: ReadonlyArray<{
 // @ts-expect-error — a `thinking` block is provider-generated, not user-admissible.
 const rejectedPayload: SessionInputPayload = providerGeneratedPayload;
 
-// AB-202 — every non-excluded `MultiModalContent` kind (including
-// `container_upload`, deliberately left admissible: it references a
-// user-initiated container file upload, not a provider-generated block) must
-// still be assignable to `SessionInputPayload`, so the `Exclude<>` above
-// didn't over-exclude down to `never`.
+// AB-202 — every remaining admissible `MultiModalContent` kind (text, image,
+// document) must still be assignable to `SessionInputPayload`, so the
+// `Exclude<>` above didn't over-exclude down to `never`.
 const admissiblePayload: SessionInputPayload = [
   { type: 'text', text: 'Summarize this.' },
   { type: 'image', url: 'https://example.invalid/chart.png' },
@@ -52,8 +50,18 @@ const admissiblePayload: SessionInputPayload = [
     mimeType: 'application/pdf',
     source: { kind: 'reference', uri: 'file:///q3.pdf' },
   },
+];
+
+// AB-202 — `container_upload` is response-only in the Anthropic adapter (its
+// request-block serializer throws for it) and silently dropped by the
+// OpenAI/Gemini adapters, so it is excluded from `UserAdmissibleContent`
+// alongside the other provider-generated kinds. A payload containing one must
+// fail to compile.
+const containerUploadPayload: ReadonlyArray<{ type: 'container_upload'; file_id: string }> = [
   { type: 'container_upload', file_id: 'file-1' },
 ];
+// @ts-expect-error — `container_upload` is response-only, not user-admissible.
+const rejectedContainerUploadPayload: SessionInputPayload = containerUploadPayload;
 
 const deliveryMode: SessionInputDeliveryMode = 'steer';
 const otherDeliveryMode: SessionInputDeliveryMode = 'queue';
@@ -144,6 +152,8 @@ export const sessionInputTypeFixture = {
   providerGeneratedPayload,
   rejectedPayload,
   admissiblePayload,
+  containerUploadPayload,
+  rejectedContainerUploadPayload,
   record,
   request,
   receipt,

@@ -974,14 +974,17 @@ asynchronous, and durable exactly when the session's own backing store is.
 ```ts
 export type SessionInputDeliveryMode = 'steer' | 'queue';
 
-/** The subset of `MultiModalContent` a caller may submit as session input. Excludes every
- *  provider-generated block kind, resolved from `packages/conversationalist/src/multi-modal.ts`:
+/** The subset of `MultiModalContent` a caller may submit as session input. Excludes every block
+ *  kind a provider adapter cannot safely round-trip as request content, resolved from
+ *  `packages/conversationalist/src/multi-modal.ts` and the adapters that serialize it:
  *  `'thinking'` (`ThinkingContent`), `'redacted_thinking'` (`RedactedThinkingContent`),
  *  `'server_tool_use'` (`ServerToolUseContent`), `'web_search_tool_result'`
- *  (`WebSearchToolResultContent`), and the `ServerToolResultType` discriminants
+ *  (`WebSearchToolResultContent`), the `ServerToolResultType` discriminants
  *  (`'code_execution_tool_result'`, `'bash_code_execution_tool_result'`,
- *  `'text_editor_code_execution_tool_result'`, `'web_fetch_tool_result'`). `TextContent`,
- *  `ImageContent`, `DocumentContent`, and `ContainerUploadContent` remain admissible. */
+ *  `'text_editor_code_execution_tool_result'`, `'web_fetch_tool_result'`), and
+ *  `'container_upload'` (`ContainerUploadContent`) — response-only in the Anthropic adapter
+ *  (whose stable request-block serializer throws for it) and silently dropped by the OpenAI and
+ *  Gemini adapters. Only `TextContent`, `ImageContent`, and `DocumentContent` remain admissible. */
 export type UserAdmissibleContent = Exclude<
   MultiModalContent,
   | ThinkingContent
@@ -989,6 +992,7 @@ export type UserAdmissibleContent = Exclude<
   | ServerToolUseContent
   | WebSearchToolResultContent
   | ServerToolResultContent
+  | ContainerUploadContent
 >;
 
 /** The message-shaped subset of the document's `AgentInput` this contract accepts: exactly
@@ -1025,7 +1029,7 @@ export interface SessionInputRecord<TPayload extends SessionInputPayload = Sessi
 **Coordinator amendments (2026-09-02).** Three findings raised during AB-193's review (Codex reviewer on pull request #397) were real gaps in the ratified record above; the coordinator resolved them, and AB-202 applies the resulting type changes:
 
 - **Bounded payload generic.** `SessionInputRecord<TPayload extends SessionInputPayload = SessionInputPayload>` and `SessionInputAdmissionRequest<TPayload extends SessionInputPayload = SessionInputPayload>`. An explicit type argument can narrow the payload, never widen it past the admissible union. Future widening remains AB-70's, by widening `SessionInputPayload` itself.
-- **User-admissible payload only.** `SessionInputPayload` excludes provider-generated block kinds (`thinking`, `redacted_thinking`, `server_tool_use`, and server-side tool results — see `UserAdmissibleContent` above). Promotion turns a payload into user input, and those kinds are either discarded or misattributed by provider adapters. The exclusion is type-level in operative and enforced at runtime by the gateway request schema (AB-196), which rejects them with 400; Bureau's `submitSessionInput` treats a payload containing them as malformed and never admits it.
+- **User-admissible payload only.** `SessionInputPayload` excludes every block kind a provider adapter cannot safely round-trip as request content (`thinking`, `redacted_thinking`, `server_tool_use`, server-side tool results, and `container_upload` — see `UserAdmissibleContent` above). Promotion turns a payload into user input, and those kinds are either rejected outright (the Anthropic adapter throws on `container_upload` and the other response-only blocks), discarded (the OpenAI and Gemini adapters silently drop `container_upload`), or misattributed by provider adapters. The exclusion is type-level in operative and enforced at runtime by the gateway request schema (AB-196), which rejects them with 400; Bureau's `submitSessionInput` treats a payload containing them as malformed and never admits it.
 - **Identifier uniqueness within a session.** A session-input `id` is unique within its `sessionId` regardless of principal. The idempotency key stays `(principal, 'session-input', id)` for replay detection by the same principal; a different principal submitting an `id` that already exists in the session receives the `conflict` outcome with `SessionInputConflict.reason: 'id-owned-by-other-principal'` (see below) and the existing record is untouched. This keeps `id` sufficient as the record's child identity in the session's ownership graph (the AB-50 amendment) without a composite identifier.
 
 ### Exact retry of the same identifier and payload returns the original receipt and does not duplicate a run or model-visible message; conflicting reuse returns a typed conflict
@@ -1076,12 +1080,12 @@ export interface SessionInputReceipt {
 
 export interface SessionInputConflict {
   readonly id: string;
+  /** `'id-owned-by-other-principal'`: a different `principal` submitted an `id` that already
+   *  exists in the session; see the "Identifier uniqueness within a session" amendment above. */
   readonly reason:
     | 'session-mismatch'
     | 'delivery-mode-mismatch'
     | 'payload-mismatch'
-    /** A different `principal` submitted an `id` that already exists in the session; see the
-     *  "Identifier uniqueness within a session" amendment above. */
     | 'id-owned-by-other-principal';
   readonly originalReceipt: SessionInputReceipt;
 }

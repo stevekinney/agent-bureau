@@ -1,5 +1,6 @@
 import type { AnyToolbox, ToolExecutionResult } from 'armorer';
 import type {
+  ContainerUploadContent,
   ConversationSnapshot,
   MultiModalContent,
   RedactedThinkingContent,
@@ -186,16 +187,21 @@ export interface DurableRunDeps {
 export type SessionInputDeliveryMode = 'steer' | 'queue';
 
 /** The subset of {@link MultiModalContent} a caller may submit as session input. Excludes every
- *  provider-generated block kind, resolved from `packages/conversationalist/src/multi-modal.ts`:
+ *  block kind a provider adapter cannot safely round-trip as request content, resolved from
+ *  `packages/conversationalist/src/multi-modal.ts` and the adapters that serialize it:
  *  `'thinking'` (`ThinkingContent`), `'redacted_thinking'` (`RedactedThinkingContent`),
  *  `'server_tool_use'` (`ServerToolUseContent`), `'web_search_tool_result'`
- *  (`WebSearchToolResultContent`), and the `ServerToolResultType` discriminants
+ *  (`WebSearchToolResultContent`), the `ServerToolResultType` discriminants
  *  (`'code_execution_tool_result'`, `'bash_code_execution_tool_result'`,
- *  `'text_editor_code_execution_tool_result'`, `'web_fetch_tool_result'`). Promotion turns a
- *  payload into user input, and provider adapters either discard or misattribute these kinds when
- *  replayed as if the user had sent them. `TextContent`, `ImageContent`, `DocumentContent`, and
- *  `ContainerUploadContent` remain admissible. AB-42's coordinator amendments (2026-09-02) own
- *  this exclusion; AB-70 owns any future widening. */
+ *  `'text_editor_code_execution_tool_result'`, `'web_fetch_tool_result'`), and
+ *  `'container_upload'` (`ContainerUploadContent`) — response-only in the Anthropic adapter,
+ *  where the stable SDK's request-block union rejects it (throws a `TypeError`;
+ *  `packages/conversationalist/src/adapters/anthropic/index.ts`'s block-serialization switch),
+ *  and silently dropped by the OpenAI and Gemini adapters, which serialize only text, document,
+ *  and image content. Promotion turns a payload into user input, and these kinds are either
+ *  rejected, discarded, or misattributed by provider adapters when replayed as if the user had
+ *  sent them. Only `TextContent`, `ImageContent`, and `DocumentContent` remain admissible. AB-42's
+ *  coordinator amendments (2026-09-02) own this exclusion; AB-70 owns any future widening. */
 export type UserAdmissibleContent = Exclude<
   MultiModalContent,
   | ThinkingContent
@@ -203,6 +209,7 @@ export type UserAdmissibleContent = Exclude<
   | ServerToolUseContent
   | WebSearchToolResultContent
   | ServerToolResultContent
+  | ContainerUploadContent
 >;
 
 /** The message-shaped subset of the document's `AgentInput` this contract accepts: exactly
@@ -271,15 +278,15 @@ export interface SessionInputReceipt {
 
 export interface SessionInputConflict {
   readonly id: string;
+  /** `'id-owned-by-other-principal'` is per AB-42's coordinator amendments (2026-09-02): a
+   *  session-input `id` is unique within its `sessionId` regardless of principal. A different
+   *  `principal` submitting an `id` that already exists in the session gets this reason, and the
+   *  existing record is untouched; the idempotency key stays `(principal, 'session-input', id)`
+   *  for replay detection by the same principal. */
   readonly reason:
     | 'session-mismatch'
     | 'delivery-mode-mismatch'
     | 'payload-mismatch'
-    /** Per AB-42's coordinator amendments (2026-09-02): a session-input `id` is unique within
-     *  its `sessionId` regardless of principal. A different `principal` submitting an `id` that
-     *  already exists in the session gets this reason, and the existing record is untouched;
-     *  the idempotency key stays `(principal, 'session-input', id)` for replay detection by the
-     *  same principal. */
     | 'id-owned-by-other-principal';
   readonly originalReceipt: SessionInputReceipt;
 }
