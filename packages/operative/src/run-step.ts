@@ -191,7 +191,10 @@ export async function awaitResumeOrAbort(
     onAbort = () => resolve('abort');
     signal.addEventListener('abort', onAbort, { once: true });
   });
-  const resumePromise = gate.awaitResume().then((): 'resume' => 'resume');
+  // Pass `signal` through so a real gate implementation can drop its own
+  // registered waiter as soon as the signal fires, rather than leaving one
+  // registered indefinitely once the abort branch of this race has won.
+  const resumePromise = gate.awaitResume(signal).then((): 'resume' => 'resume');
 
   try {
     const outcome = await Promise.race([resumePromise, abortPromise]);

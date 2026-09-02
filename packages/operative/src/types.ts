@@ -281,11 +281,19 @@ export interface SteeringGate {
   /** Synchronous read of the session's current desired steering state. */
   getDesiredState(): SteeringDesiredState;
   /**
-   * Resolves the next time desired state's `paused` flag next reports
-   * `false` (a matching `resume` command is applied). Raced against the
-   * step's own `AbortSignal` by `runStep` — whichever settles first wins.
+   * Resolves the next time desired state's `paused` flag reports `false`
+   * (a matching `resume` command is applied). Raced against the step's own
+   * `AbortSignal` by `runStep` — whichever settles first wins.
+   *
+   * `runStep` passes its own step `AbortSignal` as `signal` so a real
+   * implementation can drop its own registered waiter (and any resources
+   * tied to it) the moment the signal fires, instead of leaving a waiter
+   * registered indefinitely once the abort branch of the race has already
+   * won. Passing `signal` is a cleanup hint, not a requirement: a gate that
+   * ignores it still behaves correctly — `runStep` proceeds as abort either
+   * way — it just does not get to release resources any earlier.
    */
-  awaitResume(): Promise<void>;
+  awaitResume(signal?: AbortSignal): Promise<void>;
 }
 
 /**

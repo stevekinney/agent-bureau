@@ -40,10 +40,16 @@ function textResponse(content: string): GenerateResponse {
  * `paused: false`, releases every pending `awaitResume()` caller. No real
  * timers are involved — `awaitResume()` returns a promise this function
  * resolves directly.
+ *
+ * Also models the cleanup `SteeringGate.awaitResume`'s optional `signal`
+ * parameter exists for: when the passed signal fires first, this gate drops
+ * its own registered waiter instead of leaving it pending forever —
+ * `pendingWaiterCount()` lets a test assert that drop actually happened.
  */
-function createTestSteeringGate(
-  initial: SteeringDesiredState,
-): SteeringGate & { setDesiredState: (next: SteeringDesiredState) => void } {
+function createTestSteeringGate(initial: SteeringDesiredState): SteeringGate & {
+  setDesiredState: (next: SteeringDesiredState) => void;
+  pendingWaiterCount: () => number;
+} {
   let desired = initial;
   let resumeWaiters: Array<() => void> = [];
 
@@ -57,9 +63,18 @@ function createTestSteeringGate(
         for (const resolve of waiters) resolve();
       }
     },
-    awaitResume: () =>
+    pendingWaiterCount: () => resumeWaiters.length,
+    awaitResume: (signal) =>
       new Promise<void>((resolve) => {
         resumeWaiters.push(resolve);
+        if (!signal) return;
+        signal.addEventListener(
+          'abort',
+          () => {
+            resumeWaiters = resumeWaiters.filter((waiter) => waiter !== resolve);
+          },
+          { once: true },
+        );
       }),
   };
 }
@@ -231,6 +246,33 @@ describe('runStep: AB-67 steering boundary read', () => {
     const result = await resultPromise;
     expect(result.finishReason).toBe('aborted');
     expect(generateCalls).toBe(0);
+  });
+
+  it('passes its own AbortSignal to awaitResume() so a real gate can drop its waiter on abort, not leak it', async () => {
+    const gate = createTestSteeringGate({ paused: true, configVersion: 1 });
+    const controller = new AbortController();
+
+    const resultPromise = executeLoop({
+      generate: async () => textResponse('unreachable'),
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      signal: controller.signal,
+      steering: gate,
+    });
+
+    // Let the loop reach and register a waiter on the pause gate.
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(gate.pendingWaiterCount()).toBe(1);
+
+    controller.abort('stop while paused');
+    await resultPromise;
+
+    // The gate's own waiter is gone — a real implementation given `signal`
+    // has the same opportunity to release whatever it registered, instead
+    // of an abort-while-paused leaking a waiter for the gate's lifetime.
+    expect(gate.pendingWaiterCount()).toBe(0);
   });
 
   it('a pre-aborted signal short-circuits before the pause gate is even consulted', async () => {
