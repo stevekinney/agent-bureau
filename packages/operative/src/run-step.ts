@@ -536,12 +536,16 @@ export async function runStep(
   // accepted) and never fires.
   //
   // `deps.runId` is required to stamp `SteeringEffectiveState.appliedAtRunId`
-  // (a required field — there is no honest way to leave it unset). AB-67
-  // ties steering to Bureau session/run identity throughout, so a real
-  // steering-enabled run always supplies one (the durable driver always
-  // does; only a bare in-memory `executeLoop` caller could omit it) — a
-  // steering-gated run with no `runId` silently does not fire this event,
-  // a declared, tested gap rather than a fabricated run id.
+  // (a required field — there is no honest way to leave it unset). AB-236
+  // closes this at the type level: `RunOptions` makes `runId` required
+  // whenever `steering` is set (see `types.ts`'s `RunOptions` doc comment),
+  // so a real caller can no longer construct a steering-enabled `RunOptions`
+  // with no `runId` — `buildStepDeps`/`executeLoop`/`createActiveRun` always
+  // thread one through. This `deps.runId !== undefined` check stays as
+  // defense in depth against `StepDeps` built by hand (bypassing
+  // `RunOptions` entirely, as `run-step.test.ts`'s
+  // "never fires when the run has no runId" test does) rather than a
+  // reachable gap in any real driver.
   //
   // NOT solved here, same root cause for both: `SteeringDesiredState` is an
   // AGGREGATE — one `configVersion` covering every steerable field at once,

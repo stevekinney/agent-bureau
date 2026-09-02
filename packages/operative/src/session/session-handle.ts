@@ -49,11 +49,21 @@ const FAILURE_FINISH_REASONS: ReadonlySet<FinishReason> = new Set([
 ]);
 
 /**
+ * Plain `Omit<T, K>` maps over `K`, not over `T` — for a union `T` it
+ * collapses every member into one merged, looser shape. That would flatten
+ * away `RunOptions`'s AB-236 `runId`/`steering` discriminated pair (see the
+ * identical note on `scheduler/types.ts`'s `SchedulerRunOptions`). This
+ * distributes `Omit` over each union member first, via the naked type
+ * parameter `T extends unknown ? ... : never` distributes on.
+ */
+type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : never;
+
+/**
  * Options passed to `createSessionHandle` that define the agent's run behavior.
  * These are the portions of `RunOptions` that are constant across every `run()`
  * call within the session (the LLM backend, toolbox, hooks, limits, etc.).
  */
-export type SessionRunOptions = Omit<RunOptions, 'conversation'>;
+export type SessionRunOptions = DistributiveOmit<RunOptions, 'conversation'>;
 
 /**
  * Options for `session.monitor()` — a process-local conditional watch loop that runs

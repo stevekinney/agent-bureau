@@ -417,6 +417,18 @@ export interface SteeringCommand {
   readonly runId?: string;
 }
 
+/** One non-`'superseded-by'` member of {@link SteeringCommandFailure} —
+ *  factored out so each of the six reasons below is its own union member
+ *  (not grouped into one member with a six-literal `reason`), which is what
+ *  lets `Extract<SteeringCommandFailure, { reason: R }>` narrow correctly
+ *  for both a single reason and a subset of reasons (see
+ *  `events.ts`'s `SteeringFailureReason`). */
+type SteeringCommandFailureOf<R extends string> = {
+  readonly failedAt: string; // ISO
+  readonly reason: R;
+  readonly supersededBy?: never;
+};
+
 /**
  * Populated on every terminal-failure `SteeringCommandState` (`rejected`,
  * `superseded`, `failed`), mirroring AB-42's `SessionInputFailure`.
@@ -432,17 +444,12 @@ export interface SteeringCommand {
  * pinned with `@ts-expect-error`.
  */
 export type SteeringCommandFailure =
-  | {
-      readonly failedAt: string; // ISO
-      readonly reason:
-        | 'session-terminal' // the owning session itself went terminal (closed) before application
-        | 'run-terminal' // pause/resume only: the run it targeted ended (aborted or completed) before its gate could apply
-        | 'run-ambiguous' // pause/resume only: no runId given and the session has zero or more than one non-terminal run (AB-67's 2026-09-02 coordinator amendments)
-        | 'authorization-revoked'
-        | 'policy-denied'
-        | 'deadline-passed';
-      readonly supersededBy?: never;
-    }
+  | SteeringCommandFailureOf<'session-terminal'> // the owning session itself went terminal (closed) before application
+  | SteeringCommandFailureOf<'run-terminal'> // pause/resume only: the run it targeted ended (aborted or completed) before its gate could apply
+  | SteeringCommandFailureOf<'run-ambiguous'> // pause/resume only: no runId given and the session has zero or more than one non-terminal run (AB-67's 2026-09-02 coordinator amendments)
+  | SteeringCommandFailureOf<'authorization-revoked'>
+  | SteeringCommandFailureOf<'policy-denied'>
+  | SteeringCommandFailureOf<'deadline-passed'>
   | {
       readonly failedAt: string; // ISO
       readonly reason: 'superseded-by'; // pairs with a successor command's id, same target

@@ -1108,18 +1108,27 @@ export class WorkflowVersionMismatchEvent extends Event {
 
 /**
  * Narrows {@link SteeringCommandFailure} to a subset of `reason` values.
- * `SteeringCommandFailure` is one interface with a seven-member `reason`
- * union, not a discriminated union of per-reason variants — `Extract<
- * SteeringCommandFailure, { reason: R }>` would evaluate `T extends U` on
- * the whole interface at once (broader `reason` vs. narrower `R`), which is
- * always false and collapses to `never`, not the intended narrowing. This
- * overrides just the `reason` field instead, keeping every other field
- * (`failedAt`, the optional `supersededBy`) intact.
+ *
+ * AB-236 makes `SteeringCommandFailure` a genuine discriminated union — one
+ * member per `reason` (not one member grouping several reasons under a
+ * multi-literal `reason` field) — specifically so `Extract<T, { reason: R
+ * }>` narrows correctly here: each member's `reason` is a single literal,
+ * so `member extends { reason: R }` is decided per member rather than
+ * against one wide multi-literal field, and works whether `R` is a single
+ * reason (`SteeringSupersededEvent`, below) or a subset
+ * (`SteeringRejectedEvent`/`SteeringFailedEvent`). Before AB-236 this used
+ * to reconstruct the shape via `Omit<SteeringCommandFailure, 'reason'> &
+ * { reason: R }` instead, precisely because `Extract` did not narrow
+ * correctly against the pre-AB-236 shape — but that reconstruction doesn't
+ * distribute over a union either, so it silently lost the
+ * `'superseded-by'`-only `supersededBy: string` requirement AB-236 added
+ * (see the `DistributiveOmit` note on `scheduler/types.ts`'s
+ * `SchedulerRunOptions` for the same non-distributivity, elsewhere).
  */
-type SteeringFailureReason<R extends SteeringCommandFailure['reason']> = Omit<
+type SteeringFailureReason<R extends SteeringCommandFailure['reason']> = Extract<
   SteeringCommandFailure,
-  'reason'
-> & { readonly reason: R };
+  { reason: R }
+>;
 
 /**
  * `requested` → `accepted`: a `SteeringCommand` was admitted and written
