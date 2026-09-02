@@ -5,7 +5,8 @@
     ".prettierrc.json",
     "bunfig.toml",
     "tsconfig.base.json",
-    "eslint.config.base.ts"
+    "eslint.config.base.ts",
+    "scripts/determinism-manifest.json"
   ],
   "tasks": {
     "build": {

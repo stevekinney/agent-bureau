@@ -5,6 +5,7 @@
   "scripts": {
     "build": "turbo run build",
     "check-changesets": "bun run scripts/check-changesets.ts",
+    "check-determinism": "bun run scripts/check-determinism.ts",
     "check-types": "turbo run check-types",
     "check:stale-dist": "bun run scripts/check-stale-workspace-dist.ts",
     "coverage:check": "turbo run coverage:check --concurrency=1 --filter=armorer --filter=conversationalist --filter=evaluation --filter=interoperability --filter=lifecycle --filter=memory --filter=@lostgradient/operative --filter=skills --filter=bureau --filter=cloudflare",
@@ -19,7 +20,7 @@
     "test:consumer:operative": "bun run scripts/verify-operative-consumer.ts --mode local",
     "verify:bureau:tarball-boundary": "bun run scripts/verify-bureau-tarball-boundary.ts",
     "prepare": "lefthook install",
-    "validate": "bun run check-changesets && turbo run format:check lint check-types test --concurrency=2 && prettier --check \"**/*.{ts,tsx,js,jsx,mjs,cjs,json,md,yml,yaml}\" && bun run test:scripts",
+    "validate": "bun run check-changesets && bun run check-determinism && turbo run format:check lint check-types test --concurrency=2 && prettier --check \"**/*.{ts,tsx,js,jsx,mjs,cjs,json,md,yml,yaml}\" && bun run test:scripts",
     "changeset": "changeset",
     "version": "changeset version",
     "release": "bun run scripts/release.ts",
