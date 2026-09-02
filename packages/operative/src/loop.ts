@@ -57,6 +57,7 @@ export function buildStepDeps(options: RunOptions): StepDeps {
     runId: options.runId,
     durableOperationKeys: options.durableOperationKeys ?? false,
     defaultToolChoice: options.toolChoice,
+    steering: options.steering,
     stopConditions,
     prepareStepHooks: normalizeToArray(options.prepareStep),
     beforeToolExecutionHooks: normalizeToArray(options.beforeToolExecution),

@@ -585,6 +585,7 @@ export type {
   RunResult,
   RunResultBase,
   SelectToolsHook,
+  SteeringGate,
   StepContext,
   StepResult,
   StopCondition,
