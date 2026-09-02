@@ -1,5 +1,5 @@
 import type { AnyToolbox, ToolExecutionResult } from 'armorer';
-import type { ConversationSnapshot } from 'conversationalist';
+import type { ConversationSnapshot, MultiModalContent } from 'conversationalist';
 import type { JSONValue, ToolCall } from 'interoperability';
 
 import type { EventDispatcher } from '../run-step';
@@ -163,4 +163,118 @@ export interface DurableRunDeps {
    * returned data shares the step record's commit boundary.
    */
   getStepMetadata?: () => Record<string, JSONValue> | undefined;
+}
+
+// AB-42 — session-input admission and delivery semantics. Type-only: these
+// types fix the request, receipt, and state-transition shapes for
+// `submitSessionInput` (AB-42's illustrative name; the runtime method itself is
+// `ab-42-bureau-a`/`ab-42-bureau-b`'s scope, not this file's). No runtime
+// behavior is attached here. See AB-42's decision record and
+// `documentation/operative-type-safe-api.md`'s "Session input admission"
+// section for the full contract these types participate in.
+
+/** How an admitted {@link SessionInputRecord} is delivered to the session. */
+export type SessionInputDeliveryMode = 'steer' | 'queue';
+
+/** The message-shaped subset of the document's `AgentInput` this contract accepts: exactly
+ *  what one `Message.content` can hold (`string | ReadonlyArray<MultiModalContent>`, matching
+ *  `packages/conversationalist/src/types.ts:140`). The `{ conversation }` variant of `AgentInput`
+ *  is out of scope for session-input admission; a caller with a full conversation to inject uses
+ *  Bureau's conversation-replacement surface. AB-70 owns any future widening of the multimodal
+ *  content within this message-shaped constraint. */
+export type SessionInputPayload = string | ReadonlyArray<MultiModalContent>;
+
+export interface SessionInputRecord<TPayload = SessionInputPayload> {
+  /** Caller-supplied idempotency identity, or server-generated when the caller omits one. */
+  readonly id: string;
+  readonly idOrigin: 'caller' | 'generated';
+  readonly sessionId: string;
+  /** Authenticated sender. Required, unlike `StartedWorkIdentity.owner`. */
+  readonly principal: string;
+  readonly deliveryMode: SessionInputDeliveryMode;
+  readonly payload: TPayload;
+  /** Content-addressed digest of the canonicalized payload; part of the idempotency binding. */
+  readonly payloadDigest: string;
+  readonly admittedAt: string; // ISO
+  /** The record's own eligibility deadline. Absent means no deadline. Distinct from
+   *  post-terminal retention, which the document's line 569 rule governs separately. */
+  readonly expiresAt?: string; // ISO
+  /** Present only when admitted as an explicit successor to a still-pending input. Never inferred. */
+  readonly supersedes?: string;
+}
+
+/** Caller-facing admission request. `SessionInputRecord` is the persisted, server-computed shape
+ *  (`idOrigin`, `payloadDigest`, `admittedAt` are assigned by admission). `principal` is included
+ *  here, matching `BureauRunOptions.principal`'s placement; the calling layer (the gateway's
+ *  `resolvePrincipal(context)`, `hooks.ts:152`) attaches it from the authenticated request. The
+ *  gateway body schema for `POST /sessions/:id/input` is `Omit<SessionInputAdmissionRequest,
+ *  'principal'>`; a body-supplied `principal` is never trusted. */
+export interface SessionInputAdmissionRequest<TPayload = SessionInputPayload> {
+  readonly id?: string;
+  readonly principal: string;
+  readonly deliveryMode: SessionInputDeliveryMode;
+  readonly payload: TPayload;
+  readonly expiresAt?: string; // ISO
+  readonly supersedes?: string;
+}
+
+// Illustrative: submitSessionInput(sessionId: string, request: SessionInputAdmissionRequest): Promise<SessionInputAdmissionOutcome>
+
+export interface SessionInputReceipt {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly deliveryMode: SessionInputDeliveryMode;
+  /** Server-assigned per-session FIFO position, distinct from `revision`. */
+  readonly admissionSequence: number;
+  readonly revision: number;
+  readonly state: SessionInputState;
+  readonly admittedAt: string;
+}
+
+export interface SessionInputConflict {
+  readonly id: string;
+  readonly reason: 'session-mismatch' | 'delivery-mode-mismatch' | 'payload-mismatch';
+  readonly originalReceipt: SessionInputReceipt;
+}
+
+export type SessionInputAdmissionOutcome =
+  | { readonly outcome: 'admitted'; readonly receipt: SessionInputReceipt }
+  | { readonly outcome: 'replayed'; readonly receipt: SessionInputReceipt }
+  | { readonly outcome: 'conflict'; readonly conflict: SessionInputConflict }
+  | { readonly outcome: 'not-found' }
+  | { readonly outcome: 'session-terminal'; readonly sessionId: string }
+  | { readonly outcome: 'unsupported-capability'; readonly reason: string }
+  | {
+      readonly outcome: 'backlog-exhausted';
+      readonly scope: 'session' | 'principal';
+      readonly limit: number;
+    };
+
+export type SessionInputState =
+  | 'accepted' // admitted, `steer` mode, waiting for the next safe boundary
+  | 'queued' // admitted, `queue` mode, waiting for FIFO turn
+  | 'promoted' // terminal-success: model-visible message and record committed together
+  | 'rejected' // terminal-failure: authorization revoked, or session went terminal, after admission
+  | 'expired' // terminal-failure: the input's own eligibility deadline passed before promotion
+  | 'superseded' // terminal-failure: explicitly replaced by a named successor before promotion
+  | 'canceled' // terminal-failure: caller or session-owner canceled before promotion
+  | 'failed'; // terminal-failure: promotion was attempted and the session could not consume it
+
+export interface SessionInputPromotion {
+  readonly promotedAt: string; // ISO
+  readonly conversationMessageId: string; // the message this input became
+  /** Ordinal of the provider-turn boundary this input was consumed at. AB-67 owns the boundary's definition. */
+  readonly providerTurn: number;
+}
+
+/** Populated on every terminal-failure `SessionInputState`. */
+export interface SessionInputFailure {
+  readonly failedAt: string; // ISO
+  readonly reason:
+    | 'session-terminal'
+    | 'authorization-revoked'
+    | 'deadline-passed'
+    | 'superseded-by' // pairs with `SessionInputRecord.supersedes` on the successor
+    | 'caller-canceled'
+    | 'promotion-failed';
 }

@@ -44,6 +44,22 @@ export {
   isScheduledAgentRunInput,
 } from './schedule-agent';
 export { createStorageActivities } from './storage-activities';
-export type { DurableRunDeps, PendingWakeup, RunCheckpoint, RunCursor, StepRecord } from './types';
+export type {
+  DurableRunDeps,
+  PendingWakeup,
+  RunCheckpoint,
+  RunCursor,
+  SessionInputAdmissionOutcome,
+  SessionInputAdmissionRequest,
+  SessionInputConflict,
+  SessionInputDeliveryMode,
+  SessionInputFailure,
+  SessionInputPayload,
+  SessionInputPromotion,
+  SessionInputReceipt,
+  SessionInputRecord,
+  SessionInputState,
+  StepRecord,
+} from './types';
 // AB-10 — workflow versioning for in-flight durable runs
 export { WorkflowVersionMismatchEvent } from '../events';
