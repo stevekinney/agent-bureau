@@ -1,5 +1,32 @@
 # Changelog
 
+## 2.2.0
+
+### Minor Changes
+
+- 5739368: `instrument()` (`armorer/instrumentation`) no longer attaches privileged tool-argument or tool-result content to OpenTelemetry span attributes (AB-230, auditing the gap AB-87 declared: "a privileged tool argument must not become a span attribute, and nothing today verifies that").
+
+  Four attributes are removed rather than redacted with a placeholder — `gen_ai.tool.call.arguments`/`gen_ai.tool.call.result` are Opt-In under the OTel GenAI semantic conventions specifically because they can carry sensitive data, so this package no longer opts in:
+
+  - `gen_ai.tool.call.arguments` — previously attached on the `execute_tool` span (from `call.arguments`) and as an attribute on the span's `tool.started` event (from `params`). Both sites now omit it; the `tool.started` event still fires as a timing marker, with no attributes.
+  - `gen_ai.tool.call.result` — previously attached on a successful `tool.finished` close (from `result`).
+  - `armorer.tool.cancellation_reason` — previously attached on a cancelled `tool.finished` close, serializing the cancellation error (which is derived from a caller-supplied abort reason and can itself carry argument content).
+  - `armorer.tool.error` — previously attached on an error/denied `tool.finished` close for a thrown/returned value that was not an `Error` instance (which can itself carry argument or result content).
+
+  If a downstream telemetry consumer depended on any of these, `armorer.tool.input_digest`/`armorer.tool.output_digest` remain as the non-privileged correlation handle, and `error.type` (the error category, unchanged) remains for the error paths. A genuine `Error` on any error/cancelled path is still recorded via the standard OpenTelemetry `recordException` API, unchanged.
+
+  No attribute name changed or was renamed — only content removed — so no dashboard query keyed on an attribute _name_ breaks; a query that projected the _value_ of one of the four attributes above will now see it absent.
+
+- 0e00f2b: Add `RuntimeToolContext.progress()` (AB-217, ratifying AB-88's AC11) — a typed wrapper over the existing `progress` event so tool authors no longer hand-construct an `Event` and call `dispatch` themselves.
+
+  `progress<TDetail = unknown>(update: { percent?; message?; checkpoint?: TDetail }): void` dispatches the same `ToolProgressEvent`/`DefaultToolEvents['progress']` event a hand-constructed `dispatch(new ToolProgressEvent(...))` call produces today, so every existing `progress` listener continues to fire unchanged. The event's `checkpoint` now carries whatever value the tool author passes through verbatim — never re-serialized or reconstructed from `percent`/`message` — so a downstream consumer (an activity-backed execution's heartbeat forwarder, or a liveness-ingestion point) can read it directly.
+
+  Calling `progress()` outside of an active tool call (after it has completed or been aborted) is a no-op rather than a thrown error, matching the tolerant-context pattern of `RuntimeToolContext`'s other methods. `progress()` never resets or extends a tool's existing `timeout`.
+
+- bbfe517: A `loop-blocked` toolbox rejection now dispatches a companion `error` event carrying the same rejected `ToolExecutionResult`, mirroring the existing `budget-exceeded`-then-`error` pattern (AB-231, ratifying AB-87's armorer-surface decision). Previously `loop-blocked` returned its `blocked` result directly with no companion `error` event, so operative's generic toolbox-event forwarding never observed a blocked call — the run layer saw no signal at all. `loop-warning`'s non-blocking, advisory-only semantics are unchanged.
+
+  Also adds `TOOLBOX_BUDGET_EXCEEDED_MARKER` and `isToolboxBudgetExceededToolError` (with the `ToolboxBudgetExceededToolError` type), a provenance marker the toolbox's own `checkBudget` path stamps onto the `ToolError` it throws in `failFast` mode. `ToolError.code` alone is public, user-controlled data — a tool's own `execute()` can throw an error whose `code` also normalizes to `'BUDGET_EXCEEDED'` without being a toolbox-accounting rejection — so a consumer that needs to distinguish a genuine toolbox-level budget rejection (such as operative's `BudgetExceededError` reclassification, see the companion `@lostgradient/operative` changeset) checks for this marker instead of trusting `code` alone. The marker is symbol-keyed and therefore invisible to `JSON.stringify`, `Object.keys`, and structured-clone serialization, and is registered via `Symbol.for` (not a bare `Symbol()`) so it resolves to the identical runtime value across separate module instances of armorer — a mixed ESM/CJS host or a dependency graph resolving more than one armorer copy still classifies correctly.
+
 ## 2.1.0
 
 ### Minor Changes
