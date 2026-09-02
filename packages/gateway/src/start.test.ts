@@ -265,7 +265,9 @@ describe('shutdownGateway', () => {
 
     expect(report).toEqual({ drained: false, forcedConnections: 2 });
     expect(wasDisposeCalled()).toBe(true);
-    expect(logger.lines).toContain('[gateway] drain timed out — force-closed 2 connection(s)');
+    expect(logger.lines).toContain(
+      '[gateway] drain timed out — force-closed 2 live-stream connection(s)',
+    );
   });
 
   it('still disposes the bureau when server.stop() rejects', async () => {

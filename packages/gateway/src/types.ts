@@ -106,9 +106,18 @@ export interface GatewayShutdownOptions {
 /**
  * AB-235 — the report `Gateway['start']`'s returned `stop()` resolves with.
  * `drained: true` means every open connection closed on its own before the
- * drain timeout; `drained: false` means `stop()` had to force-close whatever
- * was still open, and `forcedConnections` names how many connections were
- * still open at that point.
+ * drain timeout; `drained: false` means `stop()` had to force-close
+ * whatever the server adapter still had open.
+ *
+ * `forcedConnections` counts the live-frame connections (open WebSockets
+ * and SSE streams, tracked via `live-events.ts`'s subscriber registry) that
+ * were still open at the moment force-close ran — the "attached UI client"
+ * scenario this issue exists to bound. It is not a count of every raw TCP
+ * connection the adapter force-closed: an ordinary in-flight HTTP request
+ * force-closed at the same moment is not counted here, since it is not
+ * tracked by the broker and (unlike a parked WebSocket/SSE stream) cannot
+ * hold shutdown open indefinitely on its own — it is bounded by the
+ * request's own handling, well inside `drainTimeoutMs` in practice.
  */
 export interface GatewayShutdownReport {
   drained: boolean;

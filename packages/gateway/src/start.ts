@@ -233,7 +233,7 @@ export async function shutdownGateway(
       logger.log('[gateway] drained cleanly');
     } else {
       logger.log(
-        `[gateway] drain timed out — force-closed ${report.forcedConnections} connection(s)`,
+        `[gateway] drain timed out — force-closed ${report.forcedConnections} live-stream connection(s)`,
       );
     }
     return report;

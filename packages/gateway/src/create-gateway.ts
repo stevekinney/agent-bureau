@@ -37,16 +37,27 @@ import { createWebSocketHandler } from './websocket';
 export const DEFAULT_GATEWAY_DRAIN_TIMEOUT_MS = 10_000;
 
 /**
- * Validates `shutdown.drainTimeoutMs` as a positive integer, defaulting to
+ * The largest delay `setTimeout`/`setInterval` accept as a 32-bit signed
+ * integer of milliseconds (both Bun and Node). A delay above this is
+ * silently clamped to 1 ms rather than rejected, which would force-close
+ * connections almost immediately instead of honoring a caller's much
+ * longer requested drain — the opposite of what `drainTimeoutMs` promises.
+ */
+const MAX_SAFE_TIMEOUT_MS = 2_147_483_647;
+
+/**
+ * Validates `shutdown.drainTimeoutMs` as a positive integer within the
+ * runtime timer's representable range, defaulting to
  * {@link DEFAULT_GATEWAY_DRAIN_TIMEOUT_MS} when omitted. Throws eagerly
  * (at `createGateway()` call time, not lazily inside `stop()`) so a
  * misconfigured value fails fast during startup.
  */
 function validateDrainTimeoutMs(value: number | undefined): number {
   if (value === undefined) return DEFAULT_GATEWAY_DRAIN_TIMEOUT_MS;
-  if (!Number.isInteger(value) || value <= 0) {
+  if (!Number.isInteger(value) || value <= 0 || value > MAX_SAFE_TIMEOUT_MS) {
     throw new Error(
-      `shutdown.drainTimeoutMs must be a positive integer, received ${JSON.stringify(value)}.`,
+      `shutdown.drainTimeoutMs must be a positive integer no greater than ${MAX_SAFE_TIMEOUT_MS} ` +
+        `(the runtime timer's representable range), received ${JSON.stringify(value)}.`,
     );
   }
   return value;

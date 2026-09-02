@@ -2,6 +2,12 @@ import type { Hono } from 'hono';
 
 import type { ServerAdapter, ServerAdapterOptions, ServerHandle } from './types';
 
+/** A raw TCP socket, as passed to a `'connection'` event listener. */
+export type DestroyableSocket = {
+  destroy(): void;
+  once(event: 'close', listener: () => void): unknown;
+};
+
 /**
  * The subset of Node's `http.Server` (what `@hono/node-server`'s `serve()`
  * returns) that `stop()` needs: a `close()` that accepts an optional
@@ -11,12 +17,22 @@ export type CloseableServer = {
   close(callback?: (error?: Error) => void): unknown;
   /**
    * Forcibly destroys every open connection (Node's `http.Server` since
-   * 18.2.0). Optional because a fake test server may not implement it —
-   * `createNodeAdapter`'s `forceClose()` treats a missing implementation
-   * as a no-op rather than throwing, matching the AB-235 force-close path
-   * on a runtime too old to support it.
+   * 18.2.0). Optional because a fake test server may not implement it, and
+   * because it does not exist at all on Node 18.0–18.1 (the repository's
+   * `node >=18` engine range permits both) — `createNodeAdapter`'s
+   * `forceClose()` falls back to destroying sockets it has tracked itself
+   * via `on('connection', ...)` when this is absent, rather than silently
+   * becoming a no-op and leaving `stop()` to hang past the drain timeout.
    */
   closeAllConnections?(): void;
+  /**
+   * Node's `http.Server` (any `net.Server`) emits `'connection'` with the
+   * raw socket for every new inbound TCP connection. Optional so a minimal
+   * fake test server can omit it — when both this and
+   * `closeAllConnections` are absent, `forceClose()` has no way to close
+   * open connections and is a documented no-op.
+   */
+  on?(event: 'connection', listener: (socket: DestroyableSocket) => void): unknown;
 };
 
 /**
@@ -108,6 +124,15 @@ export function createNodeAdapter(dependencies: CreateNodeAdapterDependencies = 
       const serve = await loadServe();
       const server = serve({ fetch: app.fetch, port, hostname });
 
+      // AB-235: track open sockets ourselves so forceClose() can still
+      // bound shutdown on a Node runtime older than 18.2 (no
+      // closeAllConnections) instead of silently becoming a no-op there.
+      const sockets = new Set<DestroyableSocket>();
+      server.on?.('connection', (socket) => {
+        sockets.add(socket);
+        socket.once('close', () => sockets.delete(socket));
+      });
+
       return {
         stop() {
           return promisifyClose(server);
@@ -115,8 +140,16 @@ export function createNodeAdapter(dependencies: CreateNodeAdapterDependencies = 
         forceClose() {
           // AB-235: escalates the already-in-flight `close()` above by
           // destroying any connections still open, which causes the
-          // pending `close(callback)` to fire immediately.
-          server.closeAllConnections?.();
+          // pending `close(callback)` to fire immediately. Prefer the
+          // built-in closeAllConnections() when available; fall back to
+          // destroying the sockets tracked above otherwise.
+          if (server.closeAllConnections) {
+            server.closeAllConnections();
+            return;
+          }
+          for (const socket of sockets) {
+            socket.destroy();
+          }
         },
       };
     },

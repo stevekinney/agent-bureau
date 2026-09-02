@@ -137,6 +137,7 @@ interface GatewayOptions {
   enableCsp?: boolean; // default: true
   idleTimeout?: number; // seconds; Bun default: 10
   evaluationReportsDirectory?: string; // backs the read-only /evaluations trend page
+  shutdown?: { drainTimeoutMs?: number }; // AB-235; default: DEFAULT_GATEWAY_DRAIN_TIMEOUT_MS (10000)
 }
 
 interface Gateway {
@@ -144,9 +145,22 @@ interface Gateway {
   readonly bureau: Bureau;
   readonly store: Store;
   readonly port: number;
-  start(): Promise<{ stop(): Promise<void> }>;
+  start(): Promise<{ stop(): Promise<GatewayShutdownReport> }>;
 }
 ```
+
+#### Shutdown draining (AB-235)
+
+`stop()` stops accepting new connections, asks every open WebSocket and SSE stream to close, then waits up to `shutdown.drainTimeoutMs` (default 10 s) for them to actually close before force-closing whatever remains — so a deployment's shutdown grace period is never held open indefinitely by an attached UI client. It resolves with:
+
+```typescript
+interface GatewayShutdownReport {
+  drained: boolean; // true when every connection closed on its own before the timeout
+  forcedConnections: number; // open WebSocket/SSE connections force-closed at timeout, if any
+}
+```
+
+`start.ts`'s SIGTERM/SIGINT handler logs this report and always runs `bureau.dispose()` afterward, even when the drain itself throws.
 
 ### `/evaluations` — evaluation report trend page
 

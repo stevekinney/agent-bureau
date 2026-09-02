@@ -891,6 +891,39 @@ describe('createGateway — AB-235 shutdown drain', () => {
     expect(caught).toBeInstanceOf(Error);
   });
 
+  it('rejects a drainTimeoutMs that overflows the runtime timer range', async () => {
+    const { bureau } = createGatewayBureauStub();
+    const { adapter } = createCleanAdapter();
+
+    // Bun/Node clamp a setTimeout delay above 2_147_483_647ms to 1ms rather
+    // than honoring it — accepting this would silently force-close
+    // connections almost immediately instead of the much longer drain the
+    // caller asked for.
+    let caught: unknown;
+    try {
+      await createGateway(
+        bureau,
+        { shutdown: { drainTimeoutMs: 2_147_483_648 } },
+        { resolveAdapterFn: async () => adapter },
+      );
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+  });
+
+  it('accepts a drainTimeoutMs exactly at the runtime timer maximum', async () => {
+    const { bureau } = createGatewayBureauStub();
+    const { adapter } = createCleanAdapter();
+
+    const gateway = await createGateway(
+      bureau,
+      { shutdown: { drainTimeoutMs: 2_147_483_647 } },
+      { resolveAdapterFn: async () => adapter },
+    );
+    expect(gateway).toBeDefined();
+  });
+
   it('reports drained: true and forcedConnections: 0 for a clean shutdown', async () => {
     const { bureau } = createGatewayBureauStub();
     const { adapter, getForceCloseCalls } = createCleanAdapter();

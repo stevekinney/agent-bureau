@@ -290,6 +290,42 @@ describe('LiveFrameBroker — AB-235 shutdown drain', () => {
     expect(() => broker.closeAll()).not.toThrow();
   });
 
+  it('closes every remaining subscriber even when an earlier one throws on close', () => {
+    const broker = new LiveFrameBroker();
+    let secondClosed = false;
+
+    broker.addSubscriber({}, () => undefined, {
+      runIds: ['run-1'],
+      closeConnection: () => {
+        throw new Error('transport already gone');
+      },
+    });
+    broker.addSubscriber({}, () => undefined, {
+      runIds: ['run-2'],
+      closeConnection: () => {
+        secondClosed = true;
+      },
+    });
+
+    expect(() => broker.closeAll()).not.toThrow();
+    expect(secondClosed).toBe(true);
+  });
+
+  it('immediately closes a subscriber that registers after closeAll() has run', () => {
+    const broker = new LiveFrameBroker();
+    broker.closeAll();
+
+    let closedImmediately = false;
+    broker.addSubscriber({}, () => undefined, {
+      runIds: ['run-1'],
+      closeConnection: () => {
+        closedImmediately = true;
+      },
+    });
+
+    expect(closedImmediately).toBe(true);
+  });
+
   it('closes the underlying SSE stream for a subscriber created via createEventStreamResponse', async () => {
     const broker = new LiveFrameBroker();
     const request = new Request('http://example.test/api/v1/events');
@@ -309,5 +345,26 @@ describe('LiveFrameBroker — AB-235 shutdown drain', () => {
     // closeAll() ends the stream; the next read reports the stream as done.
     const next = await reader.read();
     expect(next.done).toBe(true);
+  });
+
+  it('immediately ends an SSE stream created after closeAll() (a late in-flight request)', async () => {
+    const broker = new LiveFrameBroker();
+    broker.closeAll();
+
+    // Simulates an /api/v1/events request that was already in-flight
+    // through async auth/rate-limiting when stop() called closeAll() —
+    // it only registers its subscriber now, after shutdown began.
+    const request = new Request('http://example.test/api/v1/events');
+    const response = broker.createEventStreamResponse(request, { heartbeatIntervalMs: 60_000 });
+
+    const reader = response.body?.getReader();
+    expect(reader).toBeDefined();
+    if (!reader) return;
+
+    // Even the initial ': connected' comment must not hold the stream
+    // open past shutdown — it is closed immediately rather than waiting
+    // out the rest of the drain timeout.
+    const first = await reader.read();
+    expect(first.done).toBe(true);
   });
 });
