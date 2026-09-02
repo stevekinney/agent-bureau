@@ -41,6 +41,7 @@
  */
 import type { TextValueStore } from '@lostgradient/weft/storage';
 
+import type { AgentDefinitions } from './agent-catalog';
 import type { AuditTrail } from './audit-trail';
 import type { ActionEvent } from './events';
 import { resolveDiagnosticSink } from './serialization';
@@ -225,8 +226,8 @@ function targetsFor(targets: WebhookTarget[], trigger: WebhookTriggerType): Webh
  * @param onDiagnostic - Host sink for operational diagnostics (persistence
  *   failures). Omit to log to the console, matching prior behavior.
  */
-export function createWebhookNotifier(
-  bureau: Bureau,
+export function createWebhookNotifier<D extends AgentDefinitions = AgentDefinitions>(
+  bureau: Bureau<D>,
   kv: TextValueStore | undefined,
   auditTrail: AuditTrail | undefined,
   options: WebhookNotifierOptions | undefined,

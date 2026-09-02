@@ -607,23 +607,33 @@ describe('createBureau', () => {
   });
 
   it('is not ready when no generate function is configured', async () => {
-    const bureau = await createBureau();
+    const bureau = await createBureau({
+      agents: {},
+    });
     expect(bureau.ready).toBe(false);
   });
 
   it('is ready when a generate function is configured', async () => {
-    const bureau = await createBureau({ generate: createMockGenerate() });
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+    });
     expect(bureau.ready).toBe(true);
   });
 
   it('uses a provided store when one is supplied', async () => {
     const store = createStore();
-    const bureau = await createBureau({ store });
+    const bureau = await createBureau({
+      agents: {},
+      store,
+    });
     expect(bureau.store).toBe(store);
   });
 
   it('exposes the event facade through the public bureau surface', async () => {
-    const bureau = await createBureau();
+    const bureau = await createBureau({
+      agents: {},
+    });
     const listener = () => {};
 
     bureau.addEventListener('bureau.disposed', listener);
@@ -644,7 +654,9 @@ describe('createBureau', () => {
   });
 
   it('throws NOT_CONFIGURED when createRun is called without a generate function', async () => {
-    const bureau = await createBureau();
+    const bureau = await createBureau({
+      agents: {},
+    });
 
     const error = await bureau.createRun({ message: 'Hello' }).then(
       () => undefined,
@@ -657,7 +669,10 @@ describe('createBureau', () => {
   });
 
   it('throws BAD_REQUEST when createRun is called with an empty message', async () => {
-    const bureau = await createBureau({ generate: createMockGenerate() });
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+    });
 
     const error = await bureau.createRun({ message: '' }).then(
       () => undefined,
@@ -670,7 +685,10 @@ describe('createBureau', () => {
   });
 
   it('throws BAD_REQUEST when createRun is called with a blank session identifier', async () => {
-    const bureau = await createBureau({ generate: createMockGenerate() });
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+    });
 
     const error = await bureau.createRun({ message: 'Hello', sessionId: '   ' }).then(
       () => undefined,
@@ -684,6 +702,7 @@ describe('createBureau', () => {
 
   it('creates runs with a session identifier and registers them in the store', async () => {
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
     });
@@ -708,11 +727,12 @@ describe('createBureau', () => {
     // event fires, then completes on step 1. The toolbox must be a real createToolbox
     // (not empty) so toolbox addEventListener is wired and the event bubbles.
     const bureau = await createBureau({
+      agents: {},
       generate: async ({ step }) =>
         step === 0
           ? { content: 'calling', toolCalls: [{ name: 'next', arguments: {} }] }
           : { content: 'done', toolCalls: [] },
-      toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+      toolbox: createToolbox([createNextTool()]),
       stopWhen: stopWhen.noToolCalls(),
     });
 
@@ -750,11 +770,12 @@ describe('createBureau', () => {
     const capturedStamps: Array<{ agentName: string; runId: string }> = [];
 
     const bureau = await createBureau({
+      agents: {},
       generate: async ({ step }) =>
         step === 0
           ? { content: 'calling', toolCalls: [{ name: 'next', arguments: {} }] }
           : { content: 'done', toolCalls: [] },
-      toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+      toolbox: createToolbox([createNextTool()]),
       stopWhen: stopWhen.noToolCalls(),
     });
 
@@ -782,6 +803,7 @@ describe('createBureau', () => {
     // APIs/persistence never reflected the dispatched agent. Now the session is
     // stamped with (or promoted to) the named agent.
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
       persistence: textValueStore(new MemoryStorage()),
@@ -797,6 +819,7 @@ describe('createBureau', () => {
 
   it('stamps the session with the default bureau agent when no agentName is dispatched', async () => {
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
       persistence: textValueStore(new MemoryStorage()),
@@ -811,6 +834,7 @@ describe('createBureau', () => {
 
   it('persists and resumes sessions through the session store', async () => {
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
       persistence: textValueStore(new MemoryStorage()),
@@ -834,6 +858,7 @@ describe('createBureau', () => {
 
   it('preserves both turns from concurrent createRun writers on one session', async () => {
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
       persistence: textValueStore(new MemoryStorage()),
@@ -876,6 +901,7 @@ describe('createBureau', () => {
     });
 
     const bureau = await createBureau({
+      agents: {},
       generate: async (context) => {
         if (
           context.conversation
@@ -911,6 +937,7 @@ describe('createBureau', () => {
 
   it('aligns a new session history identifier with the requested session identifier', async () => {
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
       persistence: textValueStore(new MemoryStorage()),
@@ -930,6 +957,7 @@ describe('createBureau', () => {
 
   it('persists completed session metadata for fast runs', async () => {
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
       persistence: textValueStore(new MemoryStorage()),
@@ -949,6 +977,7 @@ describe('createBureau', () => {
   // not restore it and recovered generate calls silently received undefined.
   it('persists maximumTokens as lastMaximumTokens in session metadata when a run is created with a token cap', async () => {
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
       persistence: textValueStore(new MemoryStorage()),
@@ -965,6 +994,7 @@ describe('createBureau', () => {
     // The field is always written — null when absent — so a reused session never
     // inherits a previous run's cap (PRRT_kwDORvupsc6MZ1Mb).
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
       persistence: textValueStore(new MemoryStorage()),
@@ -984,6 +1014,7 @@ describe('createBureau', () => {
     // and buildRunDepsFromSession reads it back during recovery (mirroring the
     // lastMaximumTokens recovery fix).
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
       persistence: textValueStore(new MemoryStorage()),
@@ -1000,6 +1031,7 @@ describe('createBureau', () => {
     // The field is always written — null when absent — so a reused session never
     // inherits a previous run's step cap (PRRT_kwDORvupsc6MZ1Mb).
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
       persistence: textValueStore(new MemoryStorage()),
@@ -1021,6 +1053,7 @@ describe('createBureau', () => {
   it('clears stale cap metadata when a follow-up run omits maximumTokens (regression PRRT_kwDORvupsc6MZ1Mb)', async () => {
     const persistence = textValueStore(new MemoryStorage());
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
       persistence,
@@ -1048,6 +1081,7 @@ describe('createBureau', () => {
   it('clears stale step cap metadata when a follow-up run omits maximumSteps (regression PRRT_kwDORvupsc6MZ1Mb)', async () => {
     const persistence = textValueStore(new MemoryStorage());
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
       persistence,
@@ -1098,6 +1132,7 @@ describe('createBureau', () => {
     };
 
     const bureau = await createBureau({
+      agents: {},
       generate: failOnSecondRun,
       toolbox: createEmptyToolbox(),
       persistence,
@@ -1151,6 +1186,7 @@ describe('createBureau', () => {
     });
 
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
       persistence: flakyStore,
@@ -1195,6 +1231,7 @@ describe('createBureau', () => {
       // raced: that event fires INSIDE step 0's memo, before any checkpoint yield.)
       let bureauAReachedStep1 = false;
       const bureauA = await createBureau({
+        agents: {},
         generate: async ({ step }) => {
           if (step === 0) {
             return { content: 'A step 0', toolCalls: [{ name: 'next', arguments: {} }] };
@@ -1203,7 +1240,7 @@ describe('createBureau', () => {
           // Hang forever — the "process" dies here.
           return new Promise<never>(() => {});
         },
-        toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+        toolbox: createToolbox([createNextTool()]),
         storage: { type: 'sqlite', path: databasePath },
         durableExecution: true,
         stopWhen: stopWhen.noToolCalls(),
@@ -1227,11 +1264,12 @@ describe('createBureau', () => {
       // reconstructs deps from config + the persisted session and resumes. ===
       const bSteps: number[] = [];
       const bureauB = await createBureau({
+        agents: {},
         generate: async ({ step }) => {
           bSteps.push(step);
           return { content: `B recovered step ${step}`, toolCalls: [] };
         },
-        toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+        toolbox: createToolbox([createNextTool()]),
         storage: { type: 'sqlite', path: databasePath },
         durableExecution: true,
         stopWhen: stopWhen.noToolCalls(),
@@ -1321,6 +1359,7 @@ describe('createBureau', () => {
       let bureauAReachedStep1 = false;
       const runSeqsFromA: number[] = [];
       const bureauA = await createBureau({
+        agents: {},
         generate: async ({ step }) => {
           if (step === 0) {
             return { content: 'A step 0', toolCalls: [{ name: 'next', arguments: {} }] };
@@ -1328,7 +1367,7 @@ describe('createBureau', () => {
           bureauAReachedStep1 = true;
           return new Promise<never>(() => {});
         },
-        toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+        toolbox: createToolbox([createNextTool()]),
         storage: { type: 'sqlite', path: databasePath },
         durableExecution: true,
         stopWhen: stopWhen.noToolCalls(),
@@ -1355,11 +1394,12 @@ describe('createBureau', () => {
       const bSteps: number[] = [];
       const runSeqsFromB: number[] = [];
       const bureauB = await createBureau({
+        agents: {},
         generate: async ({ step }) => {
           bSteps.push(step);
           return { content: `B recovered step ${step}`, toolCalls: [] };
         },
-        toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+        toolbox: createToolbox([createNextTool()]),
         storage: { type: 'sqlite', path: databasePath },
         durableExecution: true,
         stopWhen: stopWhen.noToolCalls(),
@@ -1406,6 +1446,7 @@ describe('createBureau', () => {
     try {
       let bureauAReachedStep1 = false;
       const bureauA = await createBureau({
+        agents: {},
         generate: async ({ step }) => {
           if (step === 0) {
             return { content: 'A step 0', toolCalls: [{ name: 'next', arguments: {} }] };
@@ -1413,7 +1454,7 @@ describe('createBureau', () => {
           bureauAReachedStep1 = true;
           return new Promise<never>(() => {});
         },
-        toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+        toolbox: createToolbox([createNextTool()]),
         storage: { type: 'sqlite', path: databasePath },
         durableExecution: true,
         stopWhen: stopWhen.noToolCalls(),
@@ -1428,11 +1469,12 @@ describe('createBureau', () => {
       const warnSpy = spyOn(console, 'warn');
       const bSteps: number[] = [];
       const bureauB = await createBureau({
+        agents: {},
         generate: async ({ step }) => {
           bSteps.push(step);
           return { content: `B recovered step ${step}`, toolCalls: [] };
         },
-        toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+        toolbox: createToolbox([createNextTool()]),
         storage: { type: 'sqlite', path: databasePath },
         durableExecution: true,
         stopWhen: stopWhen.noToolCalls(),
@@ -1512,6 +1554,7 @@ describe('createBureau', () => {
 
     try {
       const bureau = await createBureau({
+        agents: {},
         generate: createMockGenerate(),
         toolbox: createEmptyToolbox(),
         storage: { type: 'memory' },
@@ -1579,6 +1622,7 @@ describe('createBureau', () => {
       }
 
       const bureau = await createBureau({
+        agents: {},
         generate: async () => ({ content: 'legacy scheduled recovery completed', toolCalls: [] }),
         toolbox: createEmptyToolbox(),
         storage: { type: 'sqlite', path: databasePath },
@@ -1669,6 +1713,7 @@ describe('createBureau', () => {
       }
 
       const bureau = await createBureau({
+        agents: {},
         generate: async () => ({ content: 'object marker recovery completed', toolCalls: [] }),
         toolbox: createEmptyToolbox(),
         storage: { type: 'sqlite', path: databasePath },
@@ -1719,6 +1764,7 @@ describe('createBureau', () => {
       // leaving a non-terminal durable workflow for recoverAll to pick up.
       let bureauAReachedStep1 = false;
       const bureauA = await createBureau({
+        agents: {},
         generate: async ({ step }) => {
           if (step === 0) {
             return { content: 'A step 0', toolCalls: [{ name: 'next', arguments: {} }] };
@@ -1726,7 +1772,7 @@ describe('createBureau', () => {
           bureauAReachedStep1 = true;
           return new Promise<never>(() => {});
         },
-        toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+        toolbox: createToolbox([createNextTool()]),
         storage: { type: 'sqlite', path: databasePath },
         durableExecution: true,
         stopWhen: stopWhen.noToolCalls(),
@@ -1767,8 +1813,9 @@ describe('createBureau', () => {
         // Bureau B: a wholly separate bureau over the same SQLite file. On boot it
         // recovers the run, which resumes at step 1 and settles.
         bureauB = await createBureau({
+          agents: {},
           generate: async ({ step }) => ({ content: `B recovered step ${step}`, toolCalls: [] }),
-          toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+          toolbox: createToolbox([createNextTool()]),
           storage: { type: 'sqlite', path: databasePath },
           durableExecution: true,
           stopWhen: stopWhen.noToolCalls(),
@@ -1822,6 +1869,7 @@ describe('createBureau', () => {
       // Bureau A: step 0 commits a tool call, then step 1's generate hangs (crash).
       let reachedStep1 = false;
       const bureauA = await createBureau({
+        agents: {},
         generate: async ({ step }) => {
           if (step === 0) {
             return { content: 'A step 0', toolCalls: [{ name: 'next', arguments: {} }] };
@@ -1829,7 +1877,7 @@ describe('createBureau', () => {
           reachedStep1 = true;
           return new Promise<never>(() => {});
         },
-        toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+        toolbox: createToolbox([createNextTool()]),
         storage: { type: 'sqlite', path: databasePath },
         durableExecution: true,
         stopWhen: stopWhen.noToolCalls(),
@@ -1842,13 +1890,14 @@ describe('createBureau', () => {
       // settling — so a toolbox action fires on the RECOVERED run's surface.
       const actions: string[] = [];
       const bureauB = await createBureau({
+        agents: {},
         generate: async ({ step }) => {
           if (step === 1) {
             return { content: 'B resume step 1', toolCalls: [{ name: 'next', arguments: {} }] };
           }
           return { content: `B step ${step}`, toolCalls: [] };
         },
-        toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+        toolbox: createToolbox([createNextTool()]),
         storage: { type: 'sqlite', path: databasePath },
         durableExecution: true,
         stopWhen: stopWhen.noToolCalls(),
@@ -1895,6 +1944,7 @@ describe('createBureau', () => {
       // Bureau A: step 0 commits a tool call, then step 1's generate hangs (crash).
       let bureauAReachedStep1 = false;
       const bureauA = await createBureau({
+        agents: {},
         generate: async ({ step }) => {
           if (step === 0) {
             return { content: 'A step 0', toolCalls: [{ name: 'next', arguments: {} }] };
@@ -1902,7 +1952,7 @@ describe('createBureau', () => {
           bureauAReachedStep1 = true;
           return new Promise<never>(() => {});
         },
-        toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+        toolbox: createToolbox([createNextTool()]),
         storage: { type: 'sqlite', path: databasePath },
         durableExecution: true,
         stopWhen: stopWhen.noToolCalls(),
@@ -1916,13 +1966,14 @@ describe('createBureau', () => {
       // settling — so step/tool-pre/tool-post frames should surface on the
       // recovered run's run-envelope stream, not just the terminal one.
       const bureauB = await createBureau({
+        agents: {},
         generate: async ({ step }) => {
           if (step === 1) {
             return { content: 'B resume step 1', toolCalls: [{ name: 'next', arguments: {} }] };
           }
           return { content: `B step ${step}`, toolCalls: [] };
         },
-        toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+        toolbox: createToolbox([createNextTool()]),
         storage: { type: 'sqlite', path: databasePath },
         durableExecution: true,
         stopWhen: stopWhen.noToolCalls(),
@@ -1970,6 +2021,7 @@ describe('createBureau', () => {
       // Bureau A: step 0 commits a tool call, then step 1's generate hangs (crash).
       let bureauAReachedStep1 = false;
       const bureauA = await createBureau({
+        agents: {},
         generate: async ({ step }) => {
           if (step === 0) {
             return { content: 'A step 0', toolCalls: [{ name: 'next', arguments: {} }] };
@@ -1977,7 +2029,7 @@ describe('createBureau', () => {
           bureauAReachedStep1 = true;
           return new Promise<never>(() => {});
         },
-        toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+        toolbox: createToolbox([createNextTool()]),
         storage: { type: 'sqlite', path: databasePath },
         durableExecution: true,
         stopWhen: stopWhen.noToolCalls(),
@@ -1995,13 +2047,14 @@ describe('createBureau', () => {
       // during resume carries {agentName:'recovery-agent', runId}.
       const capturedStamps: Array<{ agentName: string; runId: string }> = [];
       const bureauB = await createBureau({
+        agents: {},
         generate: async ({ step }) => {
           if (step === 1) {
             return { content: 'B resume', toolCalls: [{ name: 'next', arguments: {} }] };
           }
           return { content: `B step ${step}`, toolCalls: [] };
         },
-        toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+        toolbox: createToolbox([createNextTool()]),
         storage: { type: 'sqlite', path: databasePath },
         durableExecution: true,
         stopWhen: stopWhen.noToolCalls(),
@@ -2047,6 +2100,7 @@ describe('createBureau', () => {
     try {
       let bureauAReachedStep1 = false;
       const bureauA = await createBureau({
+        agents: {},
         generate: async ({ step, signal }) => {
           if (step === 0) {
             return { content: 'A step 0', toolCalls: [{ name: 'next', arguments: {} }] };
@@ -2060,7 +2114,7 @@ describe('createBureau', () => {
             );
           });
         },
-        toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+        toolbox: createToolbox([createNextTool()]),
         storage: { type: 'sqlite', path: databasePath },
         durableExecution: true,
         stopWhen: stopWhen.noToolCalls(),
@@ -2071,6 +2125,7 @@ describe('createBureau', () => {
       bureauA.dispose();
 
       const bureauB = await createBureau({
+        agents: {},
         generate: async ({ signal }) =>
           new Promise<GenerateResponse>((resolve) => {
             signal?.addEventListener(
@@ -2079,7 +2134,7 @@ describe('createBureau', () => {
               { once: true },
             );
           }),
-        toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+        toolbox: createToolbox([createNextTool()]),
         storage: { type: 'sqlite', path: databasePath },
         durableExecution: true,
         stopWhen: stopWhen.noToolCalls(),
@@ -2122,6 +2177,7 @@ describe('createBureau', () => {
     try {
       let bureauAReachedStep1 = false;
       const bureauA = await createBureau({
+        agents: {},
         generate: async ({ step }) => {
           if (step === 0) {
             return { content: 'A step 0', toolCalls: [{ name: 'next', arguments: {} }] };
@@ -2129,7 +2185,7 @@ describe('createBureau', () => {
           bureauAReachedStep1 = true;
           return new Promise<never>(() => {}); // hang — the "process" dies here
         },
-        toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+        toolbox: createToolbox([createNextTool()]),
         storage: { type: 'sqlite', path: databasePath },
         durableExecution: true,
         stopWhen: stopWhen.noToolCalls(),
@@ -2143,6 +2199,7 @@ describe('createBureau', () => {
       // === Bureau B: same file, durable forced on, but NO generate and NO
       // provider — so reconstructing the run's deps throws on this process. ===
       const bureauB = await createBureau({
+        agents: {},
         storage: { type: 'sqlite', path: databasePath },
         durableExecution: true,
         stopWhen: stopWhen.noToolCalls(),
@@ -2188,6 +2245,7 @@ describe('createBureau', () => {
     // `durableExecution: true` is what actually builds the in-memory durable
     // engine, so this test genuinely exercises the durable path.
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
       storage: { type: 'memory' },
@@ -2227,13 +2285,14 @@ describe('createBureau', () => {
     );
     try {
       const bureau = await createBureau({
+        agents: {},
         // Step 0 commits a tool call (so toolbox events must fire on the durable
         // path); step 1 has no tool call, so `noToolCalls()` stops the run.
         generate: async ({ step }) =>
           step === 0
             ? { content: 'calling tool', toolCalls: [{ name: 'next', arguments: {} }] }
             : { content: 'done', toolCalls: [] },
-        toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+        toolbox: createToolbox([createNextTool()]),
         storage: { type: 'sqlite', path: databasePath },
         // NOTE: no `durableExecution` — relying on the default-on flip.
         stopWhen: stopWhen.noToolCalls(),
@@ -2298,6 +2357,7 @@ describe('createBureau', () => {
 
     try {
       const bureau = await createBureau({
+        agents: {},
         generate: createMockGenerate(),
         toolbox: createEmptyToolbox(),
         persistence: flakyStore,
@@ -2343,6 +2403,7 @@ describe('createBureau', () => {
     });
 
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
       persistence: failingStore,
@@ -2364,6 +2425,7 @@ describe('createBureau', () => {
     };
 
     const bureau = await createBureau({
+      agents: {},
       generate,
       toolbox: createEmptyToolbox(),
       persistence: textValueStore(new MemoryStorage()),
@@ -2396,6 +2458,7 @@ describe('createBureau', () => {
     const generate: GenerateFunction = async () => ({ content: 'ok', toolCalls: [] });
 
     const bureau = await createBureau({
+      agents: {},
       generate,
       toolbox: createEmptyToolbox(),
       persistence: textValueStore(new MemoryStorage()),
@@ -2444,6 +2507,7 @@ describe('createBureau', () => {
     };
 
     const bureau = await createBureau({
+      agents: {},
       generate,
       toolbox: createEmptyToolbox(),
       persistence: trackingStore,
@@ -2461,7 +2525,10 @@ describe('createBureau', () => {
       toolCalls: [{ name: 'missing_tool', arguments: {} }],
     });
 
-    const bureau = await createBureau({ generate });
+    const bureau = await createBureau({
+      agents: {},
+      generate,
+    });
 
     const run = await bureau.createRun({ message: 'Need a tool' });
     await waitForRunCompletion(bureau, run.id);
@@ -2473,6 +2540,7 @@ describe('createBureau', () => {
 
   it('lists runs and filters them by status', async () => {
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
     });
@@ -2489,6 +2557,7 @@ describe('createBureau', () => {
 
   it('retains session identifiers for completed run summaries and details', async () => {
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
     });
@@ -2505,6 +2574,7 @@ describe('createBureau', () => {
 
   it('returns a run detail payload with events and step details', async () => {
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate('Detailed response'),
       toolbox: createEmptyToolbox(),
     });
@@ -2522,7 +2592,11 @@ describe('createBureau', () => {
 
   it('aborts a running run', async () => {
     const generate: GenerateFunction = () => new Promise(() => {});
-    const bureau = await createBureau({ generate, toolbox: createEmptyToolbox() });
+    const bureau = await createBureau({
+      agents: {},
+      generate,
+      toolbox: createEmptyToolbox(),
+    });
 
     const run = await bureau.createRun({ message: 'Hello' });
 
@@ -2537,6 +2611,7 @@ describe('createBureau', () => {
     // recovered run that aborts settles through this same listener.
     const generate: GenerateFunction = () => new Promise(() => {});
     const bureau = await createBureau({
+      agents: {},
       generate,
       toolbox: createEmptyToolbox(),
       persistence: textValueStore(new MemoryStorage()),
@@ -2572,6 +2647,7 @@ describe('createBureau', () => {
     // back to just the seed message and the checkpointed steps are lost.
     let reachedStep1 = false;
     const bureau = await createBureau({
+      agents: {},
       generate: async ({ step }) => {
         if (step === 0) {
           // Step 0 commits a tool call so the workflow checkpoints it before
@@ -2585,7 +2661,7 @@ describe('createBureau', () => {
         reachedStep1 = true;
         return new Promise<never>(() => {});
       },
-      toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+      toolbox: createToolbox([createNextTool()]),
       storage: { type: 'memory' },
       durableExecution: true,
       stopWhen: stopWhen.noToolCalls(),
@@ -2623,7 +2699,11 @@ describe('createBureau', () => {
 
   it('throws CONFLICT when deleting a running run', async () => {
     const generate: GenerateFunction = () => new Promise(() => {});
-    const bureau = await createBureau({ generate, toolbox: createEmptyToolbox() });
+    const bureau = await createBureau({
+      agents: {},
+      generate,
+      toolbox: createEmptyToolbox(),
+    });
 
     const run = await bureau.createRun({ message: 'Hello' });
     expect(bureau.getRun(run.id)?.status).toBe('running');
@@ -2665,6 +2745,7 @@ describe('createBureau', () => {
       },
     };
     const bureau = await createBureau({
+      agents: {},
       generate: createSequentialGenerate([
         {
           content: '',
@@ -2695,7 +2776,7 @@ describe('createBureau', () => {
             }),
           },
         },
-      ) as unknown as Toolbox,
+      ),
       stopWhen: stopWhen.toolOutcome('action_required'),
       persistence,
       sessionPersistenceSleep: async () => {},
@@ -2725,6 +2806,7 @@ describe('createBureau', () => {
       },
     };
     const bureau = await createBureau({
+      agents: {},
       generate: createSequentialGenerate([
         {
           content: '',
@@ -2757,7 +2839,7 @@ describe('createBureau', () => {
             }),
           },
         },
-      ) as unknown as Toolbox,
+      ),
       stopWhen: stopWhen.toolOutcome('action_required'),
       persistence: textValueStore(new MemoryStorage()),
     });
@@ -2771,7 +2853,9 @@ describe('createBureau', () => {
   });
 
   it('throws NOT_CONFIGURED for session APIs when persistence is not configured', async () => {
-    const bureau = await createBureau();
+    const bureau = await createBureau({
+      agents: {},
+    });
 
     const error = await bureau.listSessions().then(
       () => undefined,
@@ -2785,6 +2869,7 @@ describe('createBureau', () => {
 
   it('lists, loads, and deletes sessions from the canonical session store', async () => {
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
       persistence: textValueStore(new MemoryStorage()),
@@ -2809,6 +2894,7 @@ describe('createBureau', () => {
 
   it('returns configuration data with provider and tool summaries', async () => {
     const bureau = await createBureau({
+      agents: {},
       provider: {
         provider: 'anthropic',
         model: 'claude-sonnet-4-20250514',
@@ -2841,11 +2927,12 @@ describe('createBureau', () => {
     // This test drives a REAL run — not just getConfiguration() — past the
     // boundary so any future re-divergence between the two entry points fails here.
     const bureau = await createBureau({
+      agents: {},
       generate: async () => ({
         content: 'calling',
         toolCalls: [{ name: 'next', arguments: {} }],
       }),
-      toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+      toolbox: createToolbox([createNextTool()]),
       persistence: textValueStore(new MemoryStorage()),
       // No maximumSteps and no stopWhen — the run stops solely on the bureau's
       // default step cap, exercising the exact seam that diverged.
@@ -2868,6 +2955,7 @@ describe('createBureau', () => {
 
   it('configures a scheduler for routed multi-provider runtimes', async () => {
     const bureau = await createBureau({
+      agents: {},
       providers: [
         {
           name: 'fast',
@@ -2893,6 +2981,7 @@ describe('createBureau', () => {
 
   it('does not configure a scheduler unless it is explicitly enabled', async () => {
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
     });
@@ -2908,6 +2997,7 @@ describe('createBureau', () => {
     });
 
     const bureau = await createBureau({
+      agents: {},
       generate: createSequentialGenerate([
         {
           content: '',
@@ -2941,6 +3031,7 @@ describe('createBureau', () => {
 
   it('throws BAD_REQUEST when submitSchedulerTask receives invalid scheduler-specific fields', async () => {
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       scheduler: { enabled: true, idleDelay: 1 },
       toolbox: createEmptyToolbox(),
@@ -2970,6 +3061,7 @@ describe('createBureau', () => {
 
   it('returns tool summaries', async () => {
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
     });
@@ -2979,6 +3071,7 @@ describe('createBureau', () => {
 
   it('returns run reports for unknown, active, and completed runs', async () => {
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
     });
@@ -3006,6 +3099,7 @@ describe('createBureau', () => {
     // `running` and the ActiveRun launched but never registered — `getRun`
     // would return `undefined` forever for a run that is actually executing.
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
     });
@@ -3043,6 +3137,7 @@ describe('createBureau', () => {
         [];
 
       const bureau = await createBureau({
+        agents: {},
         generate: createMockGenerate(),
         toolbox: createEmptyToolbox(),
         onDiagnostic: (diagnostic) => received.push(diagnostic),
@@ -3069,6 +3164,7 @@ describe('createBureau', () => {
       const errorSpy = spyOn(console, 'error').mockImplementation(() => {});
 
       const bureau = await createBureau({
+        agents: {},
         generate: createMockGenerate(),
         toolbox: createEmptyToolbox(),
       });
@@ -3090,6 +3186,7 @@ describe('createBureau', () => {
       const errorSpy = spyOn(console, 'error').mockImplementation(() => {});
 
       const bureau = await createBureau({
+        agents: {},
         generate: createMockGenerate(),
         toolbox: createEmptyToolbox(),
         onDiagnostic: () => {
@@ -3120,6 +3217,7 @@ describe('createBureau', () => {
     >[] = [];
 
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
       scheduler: { enabled: true, idleDelay: 1 },
@@ -3180,6 +3278,7 @@ describe('createBureau', () => {
 
   it('emits action events from live runs', async () => {
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
     });
@@ -3196,7 +3295,9 @@ describe('createBureau', () => {
   });
 
   it('disposes cleanly more than once', async () => {
-    const bureau = await createBureau();
+    const bureau = await createBureau({
+      agents: {},
+    });
     await bureau.dispose();
     await bureau.dispose();
   });
@@ -3205,6 +3306,7 @@ describe('createBureau', () => {
     const toolbox = createEmptyToolbox();
     const diagnostics: string[] = [];
     const bureau = await createBureau({
+      agents: {},
       toolbox,
       onDiagnostic: (event) => diagnostics.push(event.message),
     });
@@ -3228,6 +3330,7 @@ describe('createBureau', () => {
     );
     try {
       const bureau = await createBureau({
+        agents: {},
         generate: createMockGenerate(),
         toolbox: createEmptyToolbox(),
         storage: { type: 'sqlite', path: databasePath },
@@ -3257,6 +3360,7 @@ describe('createBureau', () => {
     );
     try {
       const bureau = await createBureau({
+        agents: {},
         generate: createMockGenerate(),
         toolbox: createEmptyToolbox(),
         storage: { type: 'sqlite', path: databasePath },
@@ -3283,6 +3387,7 @@ describe('createBureau', () => {
 
   it('createSchedule registers a native schedule and returns its summary on a durable bureau (#109)', async () => {
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
       storage: { type: 'memory' },
@@ -3317,6 +3422,7 @@ describe('createBureau', () => {
 
   it('exposes optional service getters and the completable event surface', async () => {
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
     });
@@ -3341,6 +3447,7 @@ describe('createBureau', () => {
     // not cron — toScheduleSpec wraps it as { every } so weft parses it as an
     // interval. ISO-8601 (`PT6H`) is NOT weft duration grammar and stays cron.
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
       storage: { type: 'memory' },
@@ -3369,6 +3476,7 @@ describe('createBureau', () => {
 
   it('createSchedule rejects a blank recurring sessionId and overlap:allow with a session (codex)', async () => {
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
       storage: { type: 'memory' },
@@ -3418,6 +3526,7 @@ describe('createBureau', () => {
     // every fire throws "No generate function configured" at runtime. Reject up
     // front rather than hand back a healthy-looking summary for a broken schedule.
     const bureau = await createBureau({
+      agents: {},
       storage: { type: 'memory' },
       durableExecution: true,
     });
@@ -3442,6 +3551,7 @@ describe('createBureau', () => {
     // circuits to undefined before any registration, matching the other
     // durable-only accessors.
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
     });
@@ -3464,6 +3574,7 @@ describe('createBureau durable inspection surface', () => {
     // A memory-backed bureau with no durableExecution flag has no engine, so the
     // durable read accessors report "no durable surface" via undefined.
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
     });
@@ -3489,6 +3600,7 @@ describe('createBureau durable inspection surface', () => {
 
     try {
       const bureau = await createBureau({
+        agents: {},
         generate: createMockGenerate(),
         toolbox: createEmptyToolbox(),
         storage: { type: 'memory' },
@@ -3510,6 +3622,7 @@ describe('createBureau durable inspection surface', () => {
     // durableExecution:true on a memory backend builds an engine, so the
     // accessors pass through to engine.get / engine.list.
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
       storage: { type: 'memory' },
@@ -3539,6 +3652,7 @@ describe('createBureau schedule management sentinel (regression PRRT_kwDORvupsc6
 
   it('pauseSchedule / resumeSchedule / cancelSchedule return undefined when no durable engine is composed', async () => {
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
       // No storage / durableExecution — no engine
@@ -3575,6 +3689,7 @@ describe('createBureau schedule management sentinel (regression PRRT_kwDORvupsc6
 
     try {
       const bureau = await createBureau({
+        agents: {},
         generate: createMockGenerate(),
         toolbox: createEmptyToolbox(),
         storage: { type: 'memory' },
@@ -3689,6 +3804,7 @@ describe('createBureau scheduler-origin crash semantics (#25)', () => {
       // runs the suspended-scheduler sweep at boot. The dangling suspended run must
       // be cancelled. ===
       const bureau = await createBureau({
+        agents: {},
         generate: createMockGenerate(),
         toolbox: createEmptyToolbox(),
         storage: { type: 'sqlite', path: databasePath },
@@ -3749,6 +3865,7 @@ describe('createBureau effectful hook idempotency (#27)', () => {
 
     const sessionId = 'memory-idempotency-session';
     const bureau = await createBureau({
+      agents: {},
       generate: async () => ({ content: 'the stable remembered fact', toolCalls: [] }),
       toolbox: createEmptyToolbox(),
       memory,
@@ -4049,6 +4166,7 @@ describe('createBureau session signal/update/query without durable engine', () =
 
   it('signalSession throws NOT_CONFIGURED when no durable engine is composed', async () => {
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
     });
@@ -4065,6 +4183,7 @@ describe('createBureau session signal/update/query without durable engine', () =
 
   it('updateSession throws NOT_CONFIGURED when no durable engine is composed', async () => {
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
     });
@@ -4081,6 +4200,7 @@ describe('createBureau session signal/update/query without durable engine', () =
 
   it('querySession throws NOT_CONFIGURED when no durable engine is composed', async () => {
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
     });
@@ -4112,6 +4232,7 @@ describe('createBureau session signal/update/query with terminal sessions', () =
     // durable engine AND a built-in session store (created from the same Memory
     // storage backend) — the combination required to hit requireSessionRunId.
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
       storage: { type: 'memory' },
@@ -4141,6 +4262,7 @@ describe('createBureau session signal/update/query with terminal sessions', () =
 
   it('updateSession throws NOT_FOUND when lastRunStatus is completed (not running)', async () => {
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
       storage: { type: 'memory' },
@@ -4162,6 +4284,7 @@ describe('createBureau session signal/update/query with terminal sessions', () =
 
   it('querySession throws NOT_FOUND when lastRunStatus is completed (not running)', async () => {
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
       storage: { type: 'memory' },
@@ -4184,6 +4307,7 @@ describe('createBureau session signal/update/query with terminal sessions', () =
   it('signalSession throws NOT_FOUND when lastRunStatus is aborted (not running)', async () => {
     const generate: GenerateFunction = () => new Promise(() => {});
     const bureau = await createBureau({
+      agents: {},
       generate,
       toolbox: createEmptyToolbox(),
       storage: { type: 'memory' },
@@ -4213,6 +4337,7 @@ describe('createBureau session signal/update/query with terminal sessions', () =
 describe('createBureau session signal authority revalidation', () => {
   it('fails closed for transport-issued authority without a validator on live runs', async () => {
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
       storage: { type: 'memory' },
@@ -4247,6 +4372,7 @@ describe('createBureau session signal authority revalidation', () => {
   it('rejects stale transport authority before flow-control admission or session persistence', async () => {
     let flowControlCalls = 0;
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
       storage: { type: 'memory' },
@@ -4295,6 +4421,7 @@ describe('createBureau session signal authority revalidation', () => {
   it('revalidates captured authority before delivering a direct session signal', async () => {
     let authorityCurrent = true;
     const bureau = await createBureau({
+      agents: {},
       generate: () => new Promise<never>(() => {}),
       toolbox: createEmptyToolbox(),
       storage: { type: 'memory' },
@@ -4529,6 +4656,7 @@ describe('createBureau review queue (AB-20)', () => {
     );
 
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
       storage,
@@ -4606,6 +4734,7 @@ describe('createBureau review queue (AB-20)', () => {
     );
 
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
       storage,
@@ -4675,6 +4804,7 @@ describe('createBureau review queue (AB-20)', () => {
     );
 
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
       storage,
@@ -4694,6 +4824,7 @@ describe('createBureau review queue (AB-20)', () => {
     const storage = await resolveStorage({ type: 'memory' });
     const charges: number[] = [];
     const bureauA = await createBureau({
+      agents: {},
       generate: createSequentialGenerate([
         {
           content: '',
@@ -4711,6 +4842,7 @@ describe('createBureau review queue (AB-20)', () => {
     await bureauA.dispose();
 
     const bureauB = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createNeedsApprovalToolbox('restart-approval-secret', charges),
       storage,
@@ -4736,6 +4868,7 @@ describe('createBureau review queue (AB-20)', () => {
     const charges: number[] = [];
     const persistence = textValueStore(new MemoryStorage());
     const bureau = await createBureau({
+      agents: {},
       generate: createSequentialGenerate([
         {
           content: '',
@@ -4780,6 +4913,7 @@ describe('createBureau review queue (AB-20)', () => {
 
   it('listPendingReviews surfaces a run parked on a human-wait signal', async () => {
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
     });
@@ -4814,6 +4948,7 @@ describe('createBureau review queue (AB-20)', () => {
     // exclude it. See `listPendingReviews omits a human-wait run whose park
     // has resolved and the run completed` below for that side of the check.
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
     });
@@ -4847,6 +4982,7 @@ describe('createBureau review queue (AB-20)', () => {
 
   it('listPendingReviews omits a human-wait run whose park has resolved and the run completed', async () => {
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
     });
@@ -4870,6 +5006,7 @@ describe('createBureau review queue (AB-20)', () => {
     const charges: number[] = [];
     let validatorCalls = 0;
     const bureau = await createBureau({
+      agents: {},
       generate: createSequentialGenerate([
         {
           content: '',
@@ -4914,6 +5051,7 @@ describe('createBureau review queue (AB-20)', () => {
     const charges: number[] = [];
     let authorityCurrent = true;
     const bureau = await createBureau({
+      agents: {},
       generate: createSequentialGenerate([
         {
           content: '',
@@ -4957,7 +5095,10 @@ describe('createBureau review queue (AB-20)', () => {
   it('exposes the construction-time request authority validator for transport composition', async () => {
     const constructionValidator = () => true;
     const replacementValidator = () => false;
-    const bureau = await createBureau({ requestAuthorityValidator: constructionValidator });
+    const bureau = await createBureau({
+      agents: {},
+      requestAuthorityValidator: constructionValidator,
+    });
 
     try {
       expect(bureau.getRequestAuthorityValidator()).toBe(constructionValidator);
@@ -5011,6 +5152,7 @@ describe('createBureau review queue (AB-20)', () => {
 
     try {
       const bureau = await createBureau({
+        agents: {},
         generate: createMockGenerate(),
         toolbox: createEmptyToolbox(),
         storage,
@@ -5092,6 +5234,7 @@ describe('createBureau review queue (AB-20)', () => {
     const recoverAllSpy = spyOn(enginePrototype, 'recoverAll').mockResolvedValue([]);
     try {
       const bureau = await createBureau({
+        agents: {},
         generate: createMockGenerate(),
         toolbox: createEmptyToolbox(),
         storage,
@@ -5132,6 +5275,7 @@ describe('createBureau review queue (AB-20)', () => {
     };
     const diagnostics: string[] = [];
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
       storage,
@@ -5169,6 +5313,7 @@ describe('createBureau review queue (AB-20)', () => {
 
     try {
       const bureau = await createBureau({
+        agents: {},
         generate: createMockGenerate(),
         toolbox: createEmptyToolbox(),
         storage: { type: 'memory' },
@@ -5200,6 +5345,7 @@ describe('createBureau review queue (AB-20)', () => {
     try {
       let bureauAReachedStep1 = false;
       const bureauA = await createBureau({
+        agents: {},
         generate: async ({ step }) => {
           if (step === 0) {
             return {
@@ -5233,6 +5379,7 @@ describe('createBureau review queue (AB-20)', () => {
 
       const diagnostics: string[] = [];
       const bureauB = await createBureau({
+        agents: {},
         generate: async () => ({
           content: 'Recovered after stale approval pruning',
           toolCalls: [],
@@ -5264,7 +5411,7 @@ describe('createBureau review queue (AB-20)', () => {
               },
             },
           },
-        ) as unknown as Toolbox,
+        ),
         storage: { type: 'sqlite', path: databasePath },
         durableExecution: true,
         stopWhen: stopWhen.noToolCalls(),
@@ -5312,6 +5459,7 @@ describe('createBureau review queue (AB-20)', () => {
     const diagnostics: string[] = [];
     const charges: number[] = [];
     const bureau = await createBureau({
+      agents: {},
       generate: createSequentialGenerate([
         {
           content: '',
@@ -5354,6 +5502,7 @@ describe('createBureau review queue (AB-20)', () => {
     await bureau.dispose();
 
     const restartedBureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createNeedsApprovalToolbox('cleanup-secret', charges),
       persistence,
@@ -5395,6 +5544,7 @@ describe('createBureau review queue (AB-20)', () => {
     });
     const diagnostics: string[] = [];
     const bureau = await createBureau({
+      agents: {},
       generate: createSequentialGenerate([
         {
           content: '',
@@ -5432,6 +5582,7 @@ describe('createBureau review queue (AB-20)', () => {
     // approval decision pending.
     const charges: number[] = [];
     const bureau = await createBureau({
+      agents: {},
       generate: createSequentialGenerate([
         {
           content: '',
@@ -5477,6 +5628,7 @@ describe('createBureau review queue (AB-20)', () => {
   it('keeps a review pending when approval resume fails before execution admission', async () => {
     const charges: number[] = [];
     const bureau = await createBureau({
+      agents: {},
       generate: createSequentialGenerate([
         {
           content: '',
@@ -5544,6 +5696,7 @@ describe('createBureau review queue (AB-20)', () => {
     });
     const charges: number[] = [];
     const bureau = await createBureau({
+      agents: {},
       generate: createSequentialGenerate([
         {
           content: '',
@@ -5621,6 +5774,7 @@ describe('createBureau review queue (AB-20)', () => {
     });
     const charges: number[] = [];
     const bureau = await createBureau({
+      agents: {},
       generate: createSequentialGenerate([
         {
           content: '',
@@ -5698,6 +5852,7 @@ describe('createBureau review queue (AB-20)', () => {
 
   it('resolveReview approve on a human-wait review signals the parked session', async () => {
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
       storage: { type: 'memory' },
@@ -5741,6 +5896,7 @@ describe('createBureau review queue (AB-20)', () => {
   it('resolveReview deny records the decision without resuming, attributed to the principal', async () => {
     const charges: number[] = [];
     const bureau = await createBureau({
+      agents: {},
       generate: createSequentialGenerate([
         {
           content: '',
@@ -5801,6 +5957,7 @@ describe('createBureau review queue (AB-20)', () => {
 
   it('resolveReview throws NOT_FOUND for an unknown or already-resolved review id', async () => {
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
     });
@@ -5827,6 +5984,7 @@ describe('createBureau review queue (AB-20)', () => {
     // the internal set was actually pruned rather than merely believed to
     // be pruned.
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
     });
@@ -5895,6 +6053,7 @@ describe('createBureau flow control (AB-13)', () => {
   it('enforces a concurrency cap, rejecting admission until a slot frees', async () => {
     const { generate } = createBlockingGenerate();
     const bureau = await createBureau({
+      agents: {},
       generate,
       toolbox: createEmptyToolbox(),
       flowControl: { concurrency: { limit: 2 } },
@@ -5926,6 +6085,7 @@ describe('createBureau flow control (AB-13)', () => {
   it('isolates the concurrency cap per agent by default', async () => {
     const { generate } = createBlockingGenerate();
     const bureau = await createBureau({
+      agents: {},
       generate,
       toolbox: createEmptyToolbox(),
       flowControl: { concurrency: { limit: 1 } },
@@ -5953,6 +6113,7 @@ describe('createBureau flow control (AB-13)', () => {
 
   it('isolates rate limits per an arbitrary key function', async () => {
     const bureau = await createBureau({
+      agents: {},
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
       flowControl: {
@@ -5984,6 +6145,7 @@ describe('createBureau flow control (AB-13)', () => {
   it('dedupes a concurrent identical trigger via singleton, and admits again once it settles', async () => {
     const { generate } = createBlockingGenerate();
     const bureau = await createBureau({
+      agents: {},
       generate,
       toolbox: createEmptyToolbox(),
       flowControl: { singleton: { key: (trigger) => trigger.sessionId ?? 'none' } },
@@ -6025,6 +6187,7 @@ describe('createBureau flow control (AB-13)', () => {
     // is only ever preempted (aborted) or cancelled at the end of the test.
     const { generate } = createBlockingGenerate();
     const bureau = await createBureau({
+      agents: {},
       generate,
       toolbox: createEmptyToolbox(),
       scheduler: { enabled: true, idleDelay: 1 },
@@ -6160,6 +6323,7 @@ describe('createBureau human input wiring — real durable park (F3)', () => {
     };
 
     const bureau = await createBureau({
+      agents: {},
       generate,
       toolbox: createEmptyToolbox(),
       storage: { type: 'memory' },
@@ -6245,6 +6409,7 @@ describe('createBureau human input wiring — real durable park (F3)', () => {
     ]);
 
     const bureau = await createBureau({
+      agents: {},
       generate,
       toolbox: createEmptyToolbox(),
       storage: { type: 'memory' },
@@ -6298,6 +6463,7 @@ describe('createBureau human input wiring — real durable park (F3)', () => {
   it('revalidates captured request authority before approving a human wait', async () => {
     let authorityCurrent = true;
     const bureau = await createBureau({
+      agents: {},
       generate: createSequentialGenerate([
         {
           content: '',
@@ -6378,6 +6544,7 @@ describe('createBureau requestHumanInput availability across durability configur
     };
 
     const bureau = await createBureau({
+      agents: {},
       generate,
       toolbox: createEmptyToolbox(),
       humanInput: true,
@@ -6410,6 +6577,7 @@ describe('createBureau requestHumanInput availability across durability configur
     };
 
     const bureau = await createBureau({
+      agents: {},
       generate: wrappedGenerate,
       toolbox: createEmptyToolbox(),
       storage: { type: 'memory' },
@@ -6459,6 +6627,7 @@ describe('createBureau requestHumanInput availability across durability configur
       };
 
       const bureau = await createBureau({
+        agents: {},
         generate: wrappedGenerate,
         toolbox: createEmptyToolbox(),
         storage: { type: 'sqlite', path: databasePath },

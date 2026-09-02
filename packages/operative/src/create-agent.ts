@@ -233,8 +233,8 @@ function validateCreateAgentOptions(options: CreateAgentOptions): void {
 // ---------------------------------------------------------------------------
 // StandaloneAgent — the runtime agent returned by createAgent()
 //
-// NOT an `AgentBuilder<TBureauTools, TAgentTools>` — that's the TYPE-LEVEL
-// declaration in bureau-types.ts. The runtime object just needs `.run()`.
+// NOT a `RunnableAgent` from the deleted synchronous builder chain (AB-22).
+// The runtime object just needs `.run()`.
 // ---------------------------------------------------------------------------
 
 /**

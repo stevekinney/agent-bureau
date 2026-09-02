@@ -1,17 +1,25 @@
 import {
   type ActiveRun,
+  type AgentInput,
+  type AgentRun,
+  type AgentRunContext,
   type AgentSession,
   type CombinedOperativeEventMap,
   createActiveRun,
+  createAgentRun,
   createAgentSession,
+  createDeferredAgentRun,
   createFlowController,
   createRequestHumanInputTool,
   createRunFinishedFrame,
   createRunStartedFrame,
+  type DefinitionResolvingAgent,
   type FlowController,
   HumanWaitParkedEvent,
   type JSONValue,
+  OPERATIVE_RESOLVE_RUN_OPTIONS,
   type RequestHumanInputContext,
+  type RunnableAgent,
   type RunReport,
   SchedulerTaskCompletedEvent,
   SchedulerTaskFailedEvent,
@@ -64,6 +72,7 @@ import {
 } from 'conversationalist';
 import { CompletableEventTarget, type TypedEventTarget } from 'lifecycle';
 
+import { type AgentDefinitions, createAgentCatalog } from './agent-catalog';
 import { type AuditTrail, createAuditTrail } from './audit-trail';
 import {
   ActionEvent,
@@ -97,6 +106,7 @@ import {
 import type {
   Bureau,
   BureauOptions,
+  BureauRunOptions,
   ConfigurationResponse,
   CreateRunRequest,
   DiagnosticSink,
@@ -506,6 +516,48 @@ function validateCreateRunRequest(request: CreateRunRequest): void {
   }
 }
 
+/**
+ * AB-15/AB-22: `bureau.run`'s synchronous-throw surface — unknown agent name,
+ * malformed `input`, or malformed `options` — validated BEFORE any async
+ * work (durable-engine dispatch, definition resolution) begins. Everything
+ * else (session, provider, tool, policy, abort) settles through the
+ * returned `AgentRun` handle instead of throwing here.
+ */
+function validateAgentRunInput(input: unknown): asserts input is AgentInput {
+  if (typeof input === 'string') return;
+  if (
+    input !== null &&
+    typeof input === 'object' &&
+    'conversation' in input &&
+    input.conversation !== null &&
+    typeof input.conversation === 'object'
+  ) {
+    return;
+  }
+  toBadRequest('"input" must be a string or an object with a "conversation" property');
+}
+
+function validateBureauRunOptions(
+  options: BureauRunOptions | undefined,
+): asserts options is BureauRunOptions | undefined {
+  if (options === undefined) return;
+  if (options === null || typeof options !== 'object') {
+    toBadRequest('"options" must be an object');
+  }
+  if (options.sessionId !== undefined && typeof options.sessionId !== 'string') {
+    toBadRequest('"options.sessionId" must be a string');
+  }
+  if (options.signal !== undefined && !(options.signal instanceof AbortSignal)) {
+    toBadRequest('"options.signal" must be an AbortSignal');
+  }
+  if (options.withTraceContext !== undefined && typeof options.withTraceContext !== 'function') {
+    toBadRequest('"options.withTraceContext" must be a function');
+  }
+  if (options.principal !== undefined && typeof options.principal !== 'string') {
+    toBadRequest('"options.principal" must be a string');
+  }
+}
+
 function validateSubmitSchedulerTaskRequest(request: SubmitSchedulerTaskRequest): void {
   validateMessageRequest(request);
 
@@ -754,12 +806,19 @@ export async function monitorRecoveredScheduledFire(
   }
 }
 
-export async function createBureau(options: BureauOptions = {}): Promise<Bureau> {
+export async function createBureau<const D extends AgentDefinitions = AgentDefinitions>(
+  options: BureauOptions<D>,
+): Promise<Bureau<D>> {
   const diagnose = resolveDiagnosticSink(options.onDiagnostic);
   const ownsStore = !options.store;
   const store: Store = options.store ?? createStore();
   const emitter = new CompletableEventTarget<BureauEventMap>();
   const runtime = await createRuntimeComposition(options);
+  // AB-15/AB-22: the typed agent catalog — a plain literal map, fixed for
+  // the bureau's lifetime, dispatched by name through `bureau.run`.
+  // Independent of `runtime` (bureau-level generate/toolbox/provider
+  // composition, still used by `createRun`).
+  const agentCatalog = createAgentCatalog(options.agents);
   // AB-13 — declarative flow control (concurrency/rate-limit/singleton). One
   // controller instance shared across BOTH `createRun` (API-triggered) and
   // `submitSchedulerTask` (scheduler-originated), so a per-agent concurrency
@@ -1740,6 +1799,74 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       const disposeListener = listeners.pop();
       disposeListener?.();
     }
+  }
+
+  /**
+   * AB-15/AB-22: `bureau.run(name, input, options?)` — synchronous dispatch
+   * to a named catalog agent. Independent of `createRunFromRequest` below:
+   * this drives the catalog agent's OWN generate/tools/durability, not
+   * `runtime`'s bureau-level composition.
+   *
+   * Synchronous throws are limited to unknown `name`, a disposed bureau, and
+   * malformed `input`/`options` (validated up front, before any async work).
+   * When this bureau has a durable engine composed AND the named agent
+   * exposes the definition-resolution capability (AB-21's
+   * `OPERATIVE_RESOLVE_RUN_OPTIONS`), the run is driven through that engine
+   * so it survives a crash; otherwise the agent's own in-memory `run()` is
+   * used directly. Either way this function itself returns synchronously —
+   * the async work (resolving run options, or awaiting the durable engine's
+   * setup) is deferred behind `createDeferredAgentRun`.
+   */
+  function runAgent(
+    name: string,
+    input: AgentInput,
+    runOptions?: BureauRunOptions,
+  ): AgentRun<unknown, boolean> {
+    if (disposePromise) {
+      throw new BureauError('Cannot run an agent: bureau is disposed', 'CONFLICT');
+    }
+    const agent = agentCatalog.find(name);
+    if (!agent) {
+      throw new BureauError(`Unknown agent "${name}"`, 'NOT_FOUND');
+    }
+    validateAgentRunInput(input);
+    validateBureauRunOptions(runOptions);
+
+    const context: AgentRunContext = { agentName: name };
+    if (runOptions?.signal) context.signal = runOptions.signal;
+    if (runOptions?.traceContext !== undefined) context.traceContext = runOptions.traceContext;
+    if (runOptions?.withTraceContext) context.withTraceContext = runOptions.withTraceContext;
+
+    const definitionResolvingAgent = agent as RunnableAgent<unknown, boolean> &
+      DefinitionResolvingAgent;
+    const resolver = definitionResolvingAgent[OPERATIVE_RESOLVE_RUN_OPTIONS];
+
+    if (runtime.durable && typeof resolver === 'function') {
+      const durable = runtime.durable;
+      const runId = `agent-run-${crypto.randomUUID()}`;
+      // `createDeferredAgentRun` resolves a `RunnableAgent` then calls its
+      // `run()` — built for `createLazyAgent`'s "resolve a module" case, but
+      // agnostic to WHY resolution is async. Wrapping the durable-engine
+      // handle (already fully built by the time this resolver settles) in a
+      // one-shot synthetic agent reuses its buffering/abort-forwarding
+      // machinery instead of reimplementing it.
+      const resolveDurableAgent = async (): Promise<RunnableAgent<unknown, boolean>> => {
+        const resolvedOptions = await resolver(input, context);
+        const activeRun = createActiveRun(resolvedOptions, {
+          engine: durable.engine,
+          checkpointStore: durable.checkpointStore,
+          runId,
+          sessionId: runOptions?.sessionId ?? runId,
+        });
+        const agentRun = createAgentRun<unknown, boolean>(activeRun, {
+          hasOutput: resolvedOptions.output !== undefined,
+        });
+        return { name, run: () => agentRun };
+      };
+      return createDeferredAgentRun(resolveDurableAgent, input, context, name);
+    }
+
+    return agent.run(input, context);
   }
 
   async function createRunFromRequest(request: CreateRunRequest): Promise<RunSummary> {
@@ -3727,12 +3854,21 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   let webhookNotifierInstance: WebhookNotifier | undefined;
   let onlineEvalSamplerInstance: OnlineEvalSampler | undefined;
 
-  const bureau: Bureau = {
+  const bureau: Bureau<D> = {
     store,
     memory: runtime.memory,
     scheduler: runtime.scheduler,
     sessionStore: runtime.sessionStore,
     kv: runtime.kv,
+    agents: agentCatalog,
+    // `runAgent`'s runtime signature is deliberately widened (`string`,
+    // `AgentRun<unknown, boolean>`) — it looks the agent up by a plain
+    // runtime string via `agentCatalog.find`, the same widening
+    // `BureauAgentCatalog.find` itself documents. The precise per-`TName`
+    // return type on `Bureau<D>['run']` is a caller-side compile-time
+    // narrowing this cast restores; at runtime the returned `AgentRun` IS
+    // exactly the named entry's own handle, unaffected by the cast.
+    run: runAgent as Bureau<D>['run'],
     get auditTrail(): AuditTrail | undefined {
       return auditTrailInstance;
     },
@@ -3817,7 +3953,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       return emitter.signal;
     },
     dispose,
-  } satisfies Bureau;
+  } satisfies Bureau<D>;
 
   // Wire the durable audit trail (Layer B) now that we have a bureau to
   // subscribe to. Only created when a KV store is available; ephemeral

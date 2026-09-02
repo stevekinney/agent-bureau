@@ -63,8 +63,15 @@ export async function createGatewayAuthorityTestApiKey(
  *
  * This type exists ONLY in the test helper — production callers of
  * `createGateway` must construct the bureau themselves.
+ *
+ * `agents` is optional here (unlike `BureauOptions` itself, where AB-22
+ * requires it) — most gateway tests exercise `createRun`/session-based
+ * dispatch and have no use for the typed catalog; `createTestGateway`
+ * defaults it to `{}` when omitted.
  */
-export type TestGatewayOptions = BureauOptions & GatewayOptions;
+export type TestGatewayOptions = Omit<BureauOptions, 'agents'> &
+  Partial<Pick<BureauOptions, 'agents'>> &
+  GatewayOptions;
 
 /** Type guard: is this a pre-built Bureau (vs. a plain options object)? */
 function isBureau(value: Bureau | TestGatewayOptions): value is Bureau {
@@ -94,7 +101,7 @@ export async function createTestGateway(
   doorOptions?: GatewayOptions,
 ): Promise<Gateway> {
   if (!bureauOrOptions) {
-    const bureau = await createBureau();
+    const bureau = await createBureau({ agents: {} });
     return createGateway(bureau);
   }
 
@@ -121,7 +128,7 @@ export async function createTestGateway(
     ...bureauOptions
   } = bureauOrOptions;
 
-  const bureau = await createBureau(bureauOptions);
+  const bureau = await createBureau({ agents: {}, ...bureauOptions });
   return createGateway(bureau, {
     port,
     hostname,

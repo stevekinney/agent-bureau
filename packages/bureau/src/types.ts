@@ -1,4 +1,6 @@
 import type {
+  AgentInput,
+  AgentRun,
   AgentSession,
   CacheOptions,
   EnhancedStreamingOptions,
@@ -49,6 +51,13 @@ import type {
 } from 'lifecycle';
 import type { CreateMemoryOptions, Memory } from 'memory';
 
+import type {
+  AgentDefinitions,
+  AgentHasOutput,
+  AgentNames,
+  AgentOutput,
+  BureauAgentCatalog,
+} from './agent-catalog';
 import type { AuditTrail } from './audit-trail';
 import type { BureauEventMap } from './events';
 import type { OnlineEvalSampler, OnlineEvalSamplerOptions } from './online-evals';
@@ -241,7 +250,18 @@ export interface PersistenceOptions {
 
 // ── Bureau (headless, no HTTP) ──────────────────────────────────────
 
-export interface BureauOptions {
+export interface BureauOptions<D extends AgentDefinitions = AgentDefinitions> {
+  /**
+   * The typed agent catalog (AB-15, AB-22) — a plain literal map of agent
+   * name to `RunnableAgent`, exposed read-only as {@link Bureau.agents} and
+   * dispatched by name through {@link Bureau.run}. Required — pass `{}` for a
+   * bureau that only uses the session/durability-backed `createRun` surface
+   * and doesn't dispatch through the catalog at all. There is no
+   * register/unregister lifecycle: the map is fixed for the bureau's
+   * lifetime, independent of and additive to `createRun`/`generate`/
+   * `provider` below (a bureau may use either, both, or neither surface).
+   */
+  agents: D;
   generate?: GenerateFunction;
   provider?: ProviderConfiguration;
   providers?: ProviderRouteConfiguration[];
@@ -542,11 +562,61 @@ export interface ResolveReviewResult {
   result?: unknown;
 }
 
-export interface Bureau {
+/**
+ * Per-call options accepted by {@link Bureau.run} — session/tracing/
+ * attribution concerns that are properties of the CALL, not the agent (AB-15).
+ * There is deliberately no `systemPrompt`, `maximumSteps`, or `maximumTokens`
+ * override here: anything that shapes how the agent runs is fixed on the
+ * catalog agent's own definition (`createAgent({ instructions, ... })`).
+ */
+export interface BureauRunOptions {
+  sessionId?: string;
+  signal?: AbortSignal;
+  traceContext?: unknown;
+  withTraceContext?: <T>(parentContext: unknown, fn: () => Promise<T>) => Promise<T>;
+  principal?: string;
+}
+
+export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
   readonly store: Store;
   readonly memory: Memory | undefined;
   readonly scheduler: Scheduler | undefined;
   readonly ready: boolean;
+
+  /**
+   * The typed agent catalog (AB-15, AB-22) — the immutable, read-only view
+   * over `BureauOptions.agents`. `bureau.agents.has(name)` narrows a literal
+   * string to a known agent name where TypeScript permits it.
+   */
+  readonly agents: BureauAgentCatalog<D>;
+
+  /**
+   * Dispatch to a named catalog agent (AB-15, AB-22) — synchronous, like
+   * `RunnableAgent.run`: it returns the `AgentRun` handle immediately, never
+   * `Promise<AgentRun>`, regardless of whether the named agent is a
+   * `createLazyAgent` entry still resolving. Synchronous throws are limited
+   * to an unknown `name`, a disposed bureau, and malformed `input`/`options`;
+   * every other failure (session, provider, tool, policy, or abort) settles
+   * through the returned handle.
+   *
+   * Independent of `createRun` below: `run` dispatches to a catalog
+   * `RunnableAgent` (agent-owned generate/tools/durability by construction);
+   * `createRun` keeps driving bureau-level `generate`/`provider` through the
+   * session/durable-execution machinery. A bureau may use either, both, or
+   * neither.
+   *
+   * When this bureau has a durable engine composed (a persistent `storage`
+   * backend, or `durableExecution: true`) and the named agent supports the
+   * definition-resolution capability (every `createAgent`/`createLazyAgent`
+   * result does), the run is driven through that SAME durable engine so it
+   * survives a crash and resumes — exactly like a `createRun` run. Otherwise
+   * the agent's own in-memory `run()` is used directly.
+   */
+  run<TName extends AgentNames<D>>(
+    name: TName,
+    input: AgentInput,
+    options?: BureauRunOptions,
+  ): AgentRun<AgentOutput<D, TName>, AgentHasOutput<D, TName>>;
 
   createRun(request: CreateRunRequest): Promise<RunSummary>;
   submitSchedulerTask(request: SubmitSchedulerTaskRequest): Promise<SubmitSchedulerTaskResponse>;

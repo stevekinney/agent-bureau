@@ -148,6 +148,7 @@ export class AgentDurableObject {
     environment: Environment,
   ) {
     this.bureau = createBureau({
+      agents: {},
       provider: {
         provider: 'anthropic',
         apiKey: environment.ANTHROPIC_API_KEY,

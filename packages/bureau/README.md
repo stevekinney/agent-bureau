@@ -15,7 +15,8 @@
   - [The `Bureau` Object](#the-bureau-object)
   - [`streamEventToFrame`](#streameventtoframe)
   - [The Audit Trail](#the-audit-trail)
-- [`bureau/builder` — the Typed Fleet Builder](#bureaubuilder--the-typed-fleet-builder)
+- [`AgentDefinitions` and the Agent Catalog](#agentdefinitions-and-the-agent-catalog)
+  - [`createSupervisor` and `createAgentDiscoveryTool`](#createsupervisor-and-createagentdiscoverytool)
 - [`bureau/test`](#bureautest)
 - [Development](#development)
 
@@ -33,7 +34,7 @@ Everything else in the workspace is a library: `operative` runs one agent loop, 
 - Exposes durable primitives when a durable engine is composed: `signalSession`, `updateSession`, `querySession`, and full CRUD over durable schedules (`createSchedule`, `getSchedule`, `listSchedules`, `pauseSchedule`, `resumeSchedule`, `cancelSchedule`).
 - Emits a typed event surface (`BureauEventMap`) and live WebSocket/SSE-ready frames (`ServerFrame`) via `subscribeLiveFrames` and `streamEventToFrame`.
 - Records a durable, append-only audit trail of tool, run, and step lifecycle events when persistence is configured.
-- Provides a separate typed builder API (`bureau/builder`) for statically registering named agents and running them without the session/durability machinery.
+- Exposes a typed `AgentDefinitions` catalog (`bureau.agents`) and a synchronous `bureau.run(name, input, options?)` for dispatching to a statically named agent, alongside the session/durability-backed `createRun`.
 
 ## How It Works
 
@@ -53,6 +54,7 @@ On boot, if durable execution is configured, `bureau` sweeps suspended scheduler
 import { createBureau } from 'bureau';
 
 const bureau = await createBureau({
+  agents: {},
   provider: { provider: 'anthropic', model: 'claude-sonnet-4.5' },
   storage: { type: 'sqlite', path: 'agent-bureau.sqlite' },
 });
@@ -82,17 +84,20 @@ Without `storage`, runs are ephemeral: nothing is persisted, and a crash loses i
 ### `createBureau(options)`
 
 ```typescript
-function createBureau(options?: BureauOptions): Promise<Bureau>;
+function createBureau<const D extends AgentDefinitions = AgentDefinitions>(
+  options: BureauOptions<D>,
+): Promise<Bureau<D>>;
 ```
 
-Composes and returns a `Bureau`. Safe to call with no options — the result has no generate function configured (`bureau.ready === false`) and `createRun` throws `BureauError('NOT_CONFIGURED')` until one is provided via `generate`, `provider`, or `providers` + `routing`.
+Composes and returns a `Bureau`. `agents` is the only required field — pass `{}` for a bureau that only uses the session/durability-backed `createRun` surface below and doesn't dispatch through the typed catalog at all. Without a `generate`/`provider`/`providers` + `routing`, the result has no generate function configured (`bureau.ready === false`) and `createRun` throws `BureauError('NOT_CONFIGURED')` until one is provided.
 
 ### `BureauOptions`
 
-All fields are optional.
+Every field except `agents` is optional.
 
 | Field                                                                  | Type                                                                                                  | Purpose                                                                                                                                                                                |
 | ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `agents`                                                               | `AgentDefinitions` (`D`)                                                                              | **Required.** The typed agent catalog, exposed as `bureau.agents` and dispatched by name through `bureau.run`. Pass `{}` for a bureau that doesn't use it.                             |
 | `generate`                                                             | `GenerateFunction`                                                                                    | Escape hatch: supply your own generate function directly, bypassing provider resolution entirely.                                                                                      |
 | `provider`                                                             | `ProviderConfiguration`                                                                               | Resolve a single provider (`'anthropic' \| 'openai' \| 'gemini'`) to a generate function.                                                                                              |
 | `providers` / `routing`                                                | `ProviderRouteConfiguration[]` / `RoutingConfiguration`                                               | Resolve multiple named providers with fallover or step-based routing between them.                                                                                                     |
@@ -129,6 +134,7 @@ import pino from 'pino';
 const logger = pino();
 
 const bureau = await createBureau({
+  agents: {},
   onDiagnostic: ({ level, scope, message, cause }) => logger[level]({ scope, cause }, message),
 });
 ```
@@ -137,24 +143,26 @@ const bureau = await createBureau({
 
 The most commonly used members:
 
-| Member                                                                                                                                          | Returns                                                                                                  | Purpose                                                                             |
-| ----------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| `createRun(request)`                                                                                                                            | `Promise<RunSummary>`                                                                                    | Create and start a run against a session.                                           |
-| `submitSchedulerTask(request)`                                                                                                                  | `Promise<SubmitSchedulerTaskResponse>`                                                                   | Queue a task on the in-process scheduler.                                           |
-| `listRuns(status?)`                                                                                                                             | `RunSummary[]`                                                                                           | List tracked runs, optionally filtered by status.                                   |
-| `getRun(id)` / `abortRun(id)` / `deleteRun(id)`                                                                                                 | `RunDetail \| undefined` / `RunSummary` / `void`                                                         | Read, abort, or remove a tracked run.                                               |
-| `getDurableRun(runId)` / `listDurableRuns(...)`                                                                                                 | `Promise<WorkflowState \| null \| undefined>` / `Promise<PaginatedResult<WorkflowSummary> \| undefined>` | Read the durable engine's own view of a run. `undefined` without a durable engine.  |
-| `listSessions()` / `getSession(id)` / `deleteSession(id)`                                                                                       | `Promise<SessionSummary[]>` / `Promise<AgentSession \| undefined>` / `Promise<void>`                     | Session CRUD through the configured `SessionStore`.                                 |
-| `signalSession(id, name, payload?)`                                                                                                             | `Promise<void>`                                                                                          | Fire-and-forget signal to a session's in-flight durable run.                        |
-| `updateSession(id, name, payload?)`                                                                                                             | `Promise<unknown>`                                                                                       | Validated request/response update to a session's in-flight run.                     |
-| `querySession(id, name, input?)`                                                                                                                | `Promise<unknown>`                                                                                       | Read live state from a session's in-flight run without mutating it.                 |
-| `createSchedule(definition)` / `getSchedule(id)` / `listSchedules(filter?)` / `pauseSchedule(id)` / `resumeSchedule(id)` / `cancelSchedule(id)` | various                                                                                                  | Durable recurring schedule CRUD, backed by the Weft engine.                         |
-| `getConfiguration()` / `getTools()`                                                                                                             | `ConfigurationResponse` / `ToolSummary[]`                                                                | Introspect the resolved provider/tool configuration.                                |
-| `subscribeLiveFrames(listener)`                                                                                                                 | `() => void`                                                                                             | Subscribe to every `ServerFrame` the bureau emits; returns an unsubscribe function. |
-| `addEventListener` / `on` / `once` / `subscribe` / `toObservable` / `events`                                                                    | —                                                                                                        | The full `lifecycle`-style event surface over `BureauEventMap`.                     |
-| `ready`                                                                                                                                         | `boolean`                                                                                                | Whether a generate function is configured.                                          |
-| `sessionStore` / `kv` / `auditTrail`                                                                                                            | `SessionStore \| undefined` / `ConditionalTextValueStore \| undefined` / `AuditTrail \| undefined`       | The underlying persistence handles, when configured.                                |
-| `dispose()`                                                                                                                                     | `void`                                                                                                   | Tear down subscriptions and close owned storage handles.                            |
+| Member                                                                                                                                          | Returns                                                                                                  | Purpose                                                                                                                      |
+| ----------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `agents`                                                                                                                                        | `BureauAgentCatalog<D>`                                                                                  | The typed, read-only agent catalog. See [`AgentDefinitions` and the Agent Catalog](#agentdefinitions-and-the-agent-catalog). |
+| `run(name, input, options?)`                                                                                                                    | `AgentRun<...>`                                                                                          | Synchronous dispatch to a named catalog agent.                                                                               |
+| `createRun(request)`                                                                                                                            | `Promise<RunSummary>`                                                                                    | Create and start a run against a session.                                                                                    |
+| `submitSchedulerTask(request)`                                                                                                                  | `Promise<SubmitSchedulerTaskResponse>`                                                                   | Queue a task on the in-process scheduler.                                                                                    |
+| `listRuns(status?)`                                                                                                                             | `RunSummary[]`                                                                                           | List tracked runs, optionally filtered by status.                                                                            |
+| `getRun(id)` / `abortRun(id)` / `deleteRun(id)`                                                                                                 | `RunDetail \| undefined` / `RunSummary` / `void`                                                         | Read, abort, or remove a tracked run.                                                                                        |
+| `getDurableRun(runId)` / `listDurableRuns(...)`                                                                                                 | `Promise<WorkflowState \| null \| undefined>` / `Promise<PaginatedResult<WorkflowSummary> \| undefined>` | Read the durable engine's own view of a run. `undefined` without a durable engine.                                           |
+| `listSessions()` / `getSession(id)` / `deleteSession(id)`                                                                                       | `Promise<SessionSummary[]>` / `Promise<AgentSession \| undefined>` / `Promise<void>`                     | Session CRUD through the configured `SessionStore`.                                                                          |
+| `signalSession(id, name, payload?)`                                                                                                             | `Promise<void>`                                                                                          | Fire-and-forget signal to a session's in-flight durable run.                                                                 |
+| `updateSession(id, name, payload?)`                                                                                                             | `Promise<unknown>`                                                                                       | Validated request/response update to a session's in-flight run.                                                              |
+| `querySession(id, name, input?)`                                                                                                                | `Promise<unknown>`                                                                                       | Read live state from a session's in-flight run without mutating it.                                                          |
+| `createSchedule(definition)` / `getSchedule(id)` / `listSchedules(filter?)` / `pauseSchedule(id)` / `resumeSchedule(id)` / `cancelSchedule(id)` | various                                                                                                  | Durable recurring schedule CRUD, backed by the Weft engine.                                                                  |
+| `getConfiguration()` / `getTools()`                                                                                                             | `ConfigurationResponse` / `ToolSummary[]`                                                                | Introspect the resolved provider/tool configuration.                                                                         |
+| `subscribeLiveFrames(listener)`                                                                                                                 | `() => void`                                                                                             | Subscribe to every `ServerFrame` the bureau emits; returns an unsubscribe function.                                          |
+| `addEventListener` / `on` / `once` / `subscribe` / `toObservable` / `events`                                                                    | —                                                                                                        | The full `lifecycle`-style event surface over `BureauEventMap`.                                                              |
+| `ready`                                                                                                                                         | `boolean`                                                                                                | Whether a generate function is configured.                                                                                   |
+| `sessionStore` / `kv` / `auditTrail`                                                                                                            | `SessionStore \| undefined` / `ConditionalTextValueStore \| undefined` / `AuditTrail \| undefined`       | The underlying persistence handles, when configured.                                                                         |
+| `dispose()`                                                                                                                                     | `void`                                                                                                   | Tear down subscriptions and close owned storage handles.                                                                     |
 
 `bureau.dispose()` is safe to call more than once; it no-ops after the first call.
 
@@ -180,39 +188,53 @@ trail.dispose();
 
 This is a second, durable layer alongside the in-memory `@lostgradient/operative/store` ring buffer (which is bounded by `maxActions` and lost on restart): the operative store is the live/glass-box view, the audit trail is the durable/queryable one. `trail.query(options)` filters by `since`, `runId`, and `type`, returning up to `limit` records (default 500) oldest-first. Without a `kv` store, the trail still subscribes (so `dispose()` is always safe) but writes nothing.
 
-## `bureau/builder` — the Typed Fleet Builder
+## `AgentDefinitions` and the Agent Catalog
 
-`bureau/builder` exports a second `createBureau()` — a synchronous, typed registry/table API for statically declaring a small set of named agents and running them without session persistence, durable execution, or a `Store`. It's a lighter-weight alternative to the main `createBureau()` for callers who just want to route a request to one of a few known agents.
+`AgentDefinitions` (AB-15, AB-22) is a plain literal object — the `agents` map passed to `createBureau({ agents })` — of agent name to `RunnableAgent` (an `@lostgradient/operative` `createAgent()` or `createLazyAgent()` result). There is no register/unregister lifecycle: the map is fixed for the bureau's lifetime. `bureau.agents` exposes an immutable, read-only `BureauAgentCatalog` view over it (`get`/`find`/`has`/`names`/`entries`/`query`), and `bureau.run(name, input, options?)` dispatches to a named entry synchronously — like `RunnableAgent.run`, it returns the `AgentRun` handle immediately, never `Promise<AgentRun>`.
 
 ```typescript
-import { createBureau } from 'bureau/builder';
+import { createAgent } from '@lostgradient/operative';
+import { createBureau } from 'bureau';
 
-const bureau = createBureau({
+const bureau = await createBureau({
   agents: {
-    researcher: { instructions: 'You are a research assistant.' },
-    writer: {},
+    researcher: createAgent({ generate, instructions: 'You are a research assistant.' }),
+    writer: createAgent({ generate }),
   },
 });
 
-// Tier 2 — chained accretion; the return MUST be captured to widen the type.
-const bureau2 = bureau.agent({ name: 'editor', instructions: 'You edit prose for clarity.' });
+bureau.agents.has('researcher'); // narrows to a known agent name where TypeScript permits it
+bureau.agents.names(); // ['researcher', 'writer'] — definition order
 
-const run = bureau2.run('researcher', 'Summarize the Q3 report.');
+const run = bureau.run('researcher', 'Summarize the Q3 report.');
 for await (const event of run) {
   // ...
 }
 const result = await run.result();
 ```
 
-Three tiers of agent registration compose the same underlying state:
+`run`'s synchronous throws are limited to an unknown `name`, a disposed bureau, and malformed `input`/`options`; everything else (session, provider, tool, policy, or abort failures) settles through the returned `AgentRun` handle. `BureauRunOptions` (`sessionId?`, `signal?`, `traceContext?`, `withTraceContext?`, `principal?`) carries only call-scoped concerns — there is no per-call `systemPrompt`/`maximumSteps`/`maximumTokens` override; anything that shapes how an agent runs is fixed on its own definition (`createAgent({ instructions, maximumSteps, ... })`).
 
-1. **Construction-time seed** — pass an `agents` map to `createBureau({ agents })`.
-2. **Chained accretion** — `bureau.agent({ name, ... })` returns a wider-typed builder; reassign the result to keep the new agent's static name available to `.run()`.
-3. **Per-call widening** — `bureau.run<AgentTable>('dynamic-name', input)` for agent names resolved at runtime rather than statically declared.
+`run` is independent of, and additive to, `createRun` below: `run` dispatches to a catalog `RunnableAgent` (agent-owned generate/tools/durability by construction), while `createRun` keeps driving bureau-level `generate`/`provider` through the session/durable-execution machinery documented above. A bureau may use either, both, or neither — pass `agents: {}` for a bureau that only uses `createRun`. When a durable engine is composed (a persistent `storage` backend, or `durableExecution: true`) and the named agent supports AB-21's definition-resolution capability (every `createAgent`/`createLazyAgent` result does), `run` drives the dispatch through that same durable engine so it survives a crash and resumes; otherwise the agent's own in-memory `run()` is used directly.
 
-`.tools()` registers bureau-level tools (merged into every agent's toolbox, agent tools winning on name collision); `.generate()` sets a bureau-level default `GenerateFunction` (an agent's own `generate` overrides it); `.skills()` attaches a skill catalog provider with the same `<available_skills>` injection behavior as the main `createBureau()`. Each `.agent()` call accepts its own `instructions`, `tools`, `generate`, and `skillPolicy`.
+### `createSupervisor` and `createAgentDiscoveryTool`
 
-This builder is a distinct export (`bureau/builder`, not `bureau`'s top-level `createBureau`) — the two are not interchangeable. Use the main `createBureau()` when you need sessions, durability, or a single generate/provider configuration shared across the whole bureau; use `bureau/builder`'s `createBureau()` when you need a small, statically-typed table of named agents with independent generate functions and no persistence.
+Both moved here from `operative` (AB-22), rebuilt against `BureauAgentCatalog<D>` in place of the deleted `AgentRegistry`.
+
+```typescript
+import { createAgentDiscoveryTool, createFanOutRouting, createSupervisor } from 'bureau';
+
+const supervisor = createSupervisor({
+  agents: bureau.agents,
+  routing: createFanOutRouting(), // or a custom `RoutingStrategy<D>`
+});
+
+const { results, synthesis } = await supervisor.delegate('Draft a Q3 summary.');
+
+const discoveryTool = createAgentDiscoveryTool(bureau.agents);
+```
+
+`createSupervisor` delegates a task to one or more catalog agents chosen by a pluggable `RoutingStrategy<D>` (`(task, descriptors) => name | name[] | Promise<...>`; built-ins `createRoundRobinRouting`/`createFanOutRouting` only load the agents they actually select) and synthesizes their results — `delegate` (one task), `delegateAll` (many, sequential or parallel), and `pipeline` (chain each stage's output into the next stage's input). `createAgentDiscoveryTool` exposes a tool an orchestrating agent can call to search catalog agent names (case-insensitive substring match) — metadata only, since `RunnableAgent` carries no description/capabilities/tags to search beyond its name.
 
 ## `bureau/test`
 

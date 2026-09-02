@@ -48,6 +48,7 @@ describe('dist bundling (built output, not source)', () => {
       const distModule = (await import(distEntrypoint)) as { createBureau: typeof CreateBureau };
 
       const bureau = await distModule.createBureau({
+        agents: {},
         storage: { type: 'sqlite', path: databasePath },
       });
 

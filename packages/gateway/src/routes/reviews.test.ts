@@ -92,6 +92,7 @@ describe('reviews routes', () => {
   it('GET /api/v1/reviews lists both a tool-approval and a human-wait pending item', async () => {
     const charges: number[] = [];
     const bureau = await createBureau({
+      agents: {},
       generate: async (context) =>
         context.step === 0
           ? {
@@ -139,6 +140,7 @@ describe('reviews routes', () => {
   it('POST /api/v1/reviews/:id/approve resumes a tool-approval, attributed to the caller', async () => {
     const charges: number[] = [];
     const bureau = await createBureau({
+      agents: {},
       generate: async (context) =>
         context.step === 0
           ? {
@@ -195,6 +197,7 @@ describe('reviews routes', () => {
   it('POST /api/v1/reviews/:id/deny records the decision without executing the tool', async () => {
     const charges: number[] = [];
     const bureau = await createBureau({
+      agents: {},
       generate: async (context) =>
         context.step === 0
           ? {

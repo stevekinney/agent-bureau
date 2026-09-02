@@ -46,9 +46,32 @@ export type AgentDefinitions = Record<
 /** The literal agent names of `D`, widened to `string` for runtime use. */
 export type AgentNames<D extends AgentDefinitions> = keyof D & string;
 
-/** `D[TName]`'s validated output type — `never` when that agent has none. */
+/**
+ * `D[TName]`'s validated output type — `never` when that agent has none.
+ *
+ * Matches `RunnableAgent<never, false>` and `RunnableAgent<infer O, true>`
+ * as two SEPARATE branches, deliberately not one `RunnableAgent<infer O,
+ * boolean>` check — the same conditional-expansion problem `AgentDefinitions`'
+ * own doc comment describes for the value bound above recurs here for a
+ * different reason. `RunnableAgent.run()` returns `AgentRun<O, H>`, and
+ * `AgentRun`'s `unwrap()`/`result()` members embed `H`-conditional types
+ * (`UnwrappedValue<O, H>`, `RunResult<O, H>`). Checking a real schema'd
+ * `StandaloneAgent<O, true>` against a target with `H` fixed to the
+ * non-literal `boolean` collapses those conditionals structurally (`[boolean]
+ * extends [true]` is false, since `boolean` is not assignable to the literal
+ * `true`) before `O` is ever inferred from them — so `infer O` silently binds
+ * to whatever unrelated type is left in that collapsed position (observed:
+ * `string`, `unwrap()`'s false-branch type) instead of the real output type.
+ * Matching `true` and `false` as separate literal branches keeps `H` fixed to
+ * a literal on each side, so the `H`-conditional members never collapse and
+ * `O` infers correctly.
+ */
 export type AgentOutput<D extends AgentDefinitions, TName extends keyof D> =
-  D[TName] extends RunnableAgent<infer O, boolean> ? O : never;
+  D[TName] extends RunnableAgent<never, false>
+    ? never
+    : D[TName] extends RunnableAgent<infer O, true>
+      ? O
+      : never;
 
 /** Whether `D[TName]` was built with an `output` schema. */
 export type AgentHasOutput<D extends AgentDefinitions, TName extends keyof D> =
@@ -77,7 +100,13 @@ export interface BureauAgentCatalog<D extends AgentDefinitions> {
    * `RunnableAgent<unknown, boolean>`.
    */
   find(name: string): RunnableAgent<unknown, boolean> | undefined;
-  has(name: string): boolean;
+  /**
+   * Narrows a runtime `string` to a known literal key of `D` where
+   * TypeScript permits it (a type predicate) — `if (catalog.has(name))`
+   * lets `catalog.get(name)` (literal-key-only) compile on the narrowed
+   * `name` inside that branch, without a cast.
+   */
+  has(name: string): name is keyof D & string;
   /** Definition order — the order `Object.keys(agents)` produced. */
   names(): Array<keyof D & string>;
   entries(): Array<AgentCatalogEntry<D>>;
@@ -128,7 +157,7 @@ export function createAgentCatalog<D extends AgentDefinitions>(agents: D): Burea
     find(name) {
       return byName.get(name)?.agent;
     },
-    has(name) {
+    has(name): name is keyof D & string {
       return byName.has(name);
     },
     names() {

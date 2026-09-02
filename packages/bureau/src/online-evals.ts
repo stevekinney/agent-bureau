@@ -21,6 +21,7 @@
 import type { RunResult } from '@lostgradient/operative';
 import { Conversation } from 'conversationalist';
 
+import type { AgentDefinitions } from './agent-catalog';
 import type { AuditTrail } from './audit-trail';
 import type { ActionEvent } from './events';
 import type { Bureau } from './types';
@@ -188,8 +189,8 @@ async function raceAgainstAbort<T>(
  *   `options` is `undefined`, `options.judges` is empty, or `sampleRate` is
  *   `0`.
  */
-export function createOnlineEvalSampler(
-  bureau: Bureau,
+export function createOnlineEvalSampler<D extends AgentDefinitions = AgentDefinitions>(
+  bureau: Bureau<D>,
   auditTrail: AuditTrail | undefined,
   webhookNotifier: WebhookNotifier | undefined,
   options: OnlineEvalSamplerOptions | undefined,

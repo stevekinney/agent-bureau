@@ -242,7 +242,11 @@ export function createSupervisor<D extends AgentDefinitions>(
     for (const name of names) {
       const nameAsString: string = name;
       if (!catalog.has(nameAsString)) {
-        throw new Error(`Routing strategy selected unknown agent "${nameAsString}"`);
+        // `catalog.has`'s type predicate narrows the negative branch to
+        // `Exclude<string, AgentNames<D>>`, which TypeScript collapses to
+        // `never` for a generic `D` — `String(...)` re-widens it to `string`
+        // so the template literal reports the actual runtime value.
+        throw new Error(`Routing strategy selected unknown agent "${String(nameAsString)}"`);
       }
     }
     return [...names];
