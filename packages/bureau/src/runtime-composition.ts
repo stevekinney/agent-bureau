@@ -1351,6 +1351,9 @@ export async function createRuntimeComposition(
       // it spreads straight through; createRunEngine guards each one internally, so
       // passing `undefined` members is harmless.
       ...options.durableGuardrails,
+      // durableOwnership (AB-178) is the same Pick pattern — createRunEngine
+      // defaults `ownership` to 'none' when this is omitted entirely.
+      ...options.durableOwnership,
       // history from PersistenceOptions takes precedence over durableGuardrails.history
       ...(persistenceHistory !== undefined ? { history: persistenceHistory } : {}),
       runWorkflowVersion: options.workflowVersion,

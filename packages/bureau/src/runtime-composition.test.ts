@@ -1179,6 +1179,35 @@ describe('createRuntimeComposition durable execution', () => {
     }
   });
 
+  it('threads durableOwnership (AB-178) into the durable engine', async () => {
+    // The composition forwards BureauOptions.durableOwnership into
+    // createRunEngine — every other test in this file omits it, so
+    // createRunEngine's own default of `ownership: 'none'` applies there.
+    // This test proves the opt-in path reaches the engine: passing
+    // 'workflow-lease' with a short claim TTL builds successfully. Fencing
+    // behavior itself (two-engine contention, crash-and-adopt) is already
+    // covered at the operative layer (`create-run-engine.test.ts`); this
+    // test only proves the wiring, not the mechanism.
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+      storage: { type: 'memory' },
+      durableExecution: true,
+      durableOwnership: {
+        ownership: 'workflow-lease',
+        // Weft requires workflowClaimTtl >= WORKFLOW_CLAIM_TTL_SAFETY_MULTIPLIER
+        // (3) * workflowClaimRenewInterval.
+        workflowClaimTtlMs: 60,
+        workflowClaimRenewIntervalMs: 20,
+      },
+    });
+    try {
+      expect(runtime.durable).toBeDefined();
+    } finally {
+      runtime.durable?.engine[Symbol.dispose]?.();
+    }
+  });
+
   it('builds a durable engine BY DEFAULT for a persistent (sqlite) backend with no flag', async () => {
     // The default-on contract: a persistent storage backend and NO explicit
     // `durableExecution` flag resolves to durable-on, because that is the only
