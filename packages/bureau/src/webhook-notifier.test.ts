@@ -106,7 +106,7 @@ function createStubAuditTrail(): { auditTrail: AuditTrail; records: unknown[] } 
     async query() {
       return [];
     },
-    dispose() {},
+    async dispose() {},
   };
   return { auditTrail, records };
 }

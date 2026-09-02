@@ -473,6 +473,64 @@ describe('bureau.run', () => {
     await bureau.dispose();
   });
 
+  it("shutdown({ policy: 'drain' }) lets a still-running bureau.run() catalog dispatch reach its own natural terminal result instead of aborting it (AB-207)", async () => {
+    // The 'abort' policy's catalog-run handling (`for (const catalogRun of
+    // [...catalogRuns]) catalogRun.abort(...)`) is covered by the hostile-
+    // agent test above. 'drain' takes the OTHER branch instead —
+    // `runTerminals.push(Promise.allSettled([catalogRun.result()]))` — which
+    // this test is the only coverage for: a gated (not hostile) catalog
+    // agent whose `result()` only settles once the test releases it.
+    let releaseAgent!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseAgent = resolve;
+    });
+    let aborted = false;
+    const gatedAgent: RunnableAgent<unknown, boolean> = {
+      name: 'gated',
+      run: () =>
+        ({
+          result: async () => {
+            await gate;
+            return { content: 'done', toolCalls: [] };
+          },
+          unwrap: () => {
+            throw new Error('not used by this test');
+          },
+          abort: () => {
+            aborted = true;
+          },
+          [Symbol.dispose]: () => {},
+          [Symbol.asyncIterator]: () => {
+            throw new Error('not used by this test');
+          },
+        }) as unknown as AgentRun<unknown, boolean>,
+    };
+    const bureau = await createBureau({ agents: { gated: gatedAgent } });
+
+    const run = bureau.run('gated', 'hi');
+
+    let shutdownSettled = false;
+    const shutdownPromise = bureau.shutdown({ policy: 'drain' }).then((report) => {
+      shutdownSettled = true;
+      return report;
+    });
+
+    // Still gated — 'drain' must not have aborted the catalog run, and
+    // shutdown() has not resolved while it is still in flight.
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(aborted).toBe(false);
+    expect(shutdownSettled).toBe(false);
+
+    releaseAgent();
+    await run.result();
+
+    await shutdownPromise;
+    expect(shutdownSettled).toBe(true);
+    expect(aborted).toBe(false);
+  });
+
   it('snapshots agents before the first await — a caller mutating the same object after calling createBureau() does not leak into bureau.agents', async () => {
     // Review round 2 (Codex): createRuntimeComposition(options) used to be
     // awaited BEFORE the catalog was built from options.agents, leaving a

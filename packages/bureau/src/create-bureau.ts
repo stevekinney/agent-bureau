@@ -114,6 +114,10 @@ import type {
   Bureau,
   BureauOptions,
   BureauRunOptions,
+  BureauShutdownOptions,
+  BureauShutdownOwnerReport,
+  BureauShutdownReport,
+  CleanupAcknowledgement,
   ConfigurationResponse,
   CreateRunRequest,
   DiagnosticSink,
@@ -434,6 +438,23 @@ function omitStringsWithPrefix(values: readonly JSONValue[], prefix: string): JS
 
 export function defaultSessionPersistenceSleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+/**
+ * Default `BureauOptions.shutdownTimeoutSleep` — a real `setTimeout`, cleared
+ * (never resolving) if `signal` aborts first so a `shutdown()` whose real
+ * teardown wins the race does not leave this timer pending for the rest of
+ * its duration.
+ */
+export function defaultShutdownTimeoutSleep(
+  milliseconds: number,
+  signal: AbortSignal,
+): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) return;
+    const handle = setTimeout(resolve, milliseconds);
+    signal.addEventListener('abort', () => clearTimeout(handle), { once: true });
+  });
 }
 
 function ignoreBestEffortPromiseRejection(): void {}
@@ -1055,7 +1076,21 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   const catalogRuns = new Set<AgentRun<unknown, boolean>>();
   const runToolboxes = new Set<BureauToolbox>();
   const runToolboxesByRunId = new Map<string, BureauToolbox>();
-  let disposePromise: Promise<void> | undefined;
+  let shutdownPromise: Promise<BureauShutdownReport> | undefined;
+  // AB-207: Bureau-owned background work (scheduler, online-evals, webhook
+  // notifier, audit trail) shares this signal so `shutdown()` can tell an
+  // in-flight judge invocation / webhook delivery to hurry up and settle
+  // instead of stalling the awaited drain. Threaded into each subsystem at
+  // construction time (merged with any caller-supplied signal via
+  // `AbortSignal.any`), aborted at the top of `shutdown()` under BOTH
+  // policies — Bureau-owned work is stopped identically under `'drain'`
+  // (only caller-owned runs get the drain treatment).
+  const backgroundShutdownController = new AbortController();
+  function withBackgroundShutdownSignal(callerSignal: AbortSignal | undefined): AbortSignal {
+    return callerSignal
+      ? AbortSignal.any([callerSignal, backgroundShutdownController.signal])
+      : backgroundShutdownController.signal;
+  }
   // Ids of PendingReview items already resolved via resolveReview() (AB-20).
   // Neither resolution path (resumeApproval, signalSession) mutates the live
   // store in a way listPendingReviews() can detect on its own — resumeApproval
@@ -1157,9 +1192,31 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     options.sessionPersistenceRetryDelayMilliseconds ??
     SESSION_PERSISTENCE_RETRY_DELAY_MILLISECONDS;
   const sessionPersistenceSleep = options.sessionPersistenceSleep ?? defaultSessionPersistenceSleep;
+  const shutdownTimeoutSleep = options.shutdownTimeoutSleep ?? defaultShutdownTimeoutSleep;
 
   function getRunSessionIdentifier(runState: { activeRun: ActiveRun }): string {
     return runSessionIdentifiers.get(runState.activeRun) ?? '';
+  }
+
+  /**
+   * Resolves once `activeRun` reaches ITS OWN terminal event — mirrors the
+   * exact `run.completed` / `run.aborted` / `run.error` contract gateway
+   * already wires (`run-lifecycle.ts`'s module doc), so a fourth listener
+   * here observes the same terminal moment as every other terminal-run
+   * consumer in this file. Only safe to call for an `activeRun` known NOT
+   * to have already settled (callers check `activeRuns.has(...)` or
+   * `runState.status === 'running'` first) — `once()` ties the listener to
+   * `activeRun`'s own completion signal, which an already-terminal run has
+   * already aborted, silently dropping a listener registered after the
+   * fact per DOM `addEventListener` semantics.
+   */
+  function whenActiveRunTerminal(activeRun: ActiveRun): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const settle = () => resolve();
+      activeRun.once('run.completed', settle);
+      activeRun.once('run.aborted', settle);
+      activeRun.once('run.error', settle);
+    });
   }
 
   function emitLiveFrame(frame: ServerFrame): void {
@@ -2087,7 +2144,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     input: AgentInput,
     runOptions?: BureauRunOptions,
   ): AgentRun<unknown, boolean> {
-    if (disposePromise) {
+    if (shutdownPromise) {
       throw new BureauError('Cannot run an agent: bureau is disposed', 'CONFLICT');
     }
     const agent = agentCatalog.find(name);
@@ -3531,6 +3588,34 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         for (const reviewId of invalidApprovalReviewIds) {
           if (reviewId.startsWith(`approval:${runId}:`)) invalidApprovalReviewIds.delete(reviewId);
         }
+      }
+
+      // AB-207: abort EVERY run this session owns, found the same way
+      // `listRuns` attributes a run to a session — via `getRunSessionIdentifier`
+      // — not the narrower `persistedApprovalRunIds` set above (a run with no
+      // pending approval was previously left running past its session's
+      // deletion). Each running run's own terminal event
+      // (`run.completed`/`run.aborted`/`run.error`) is awaited before
+      // session-scoped bookkeeping is cleared and the session record is
+      // deleted, so this function's returned promise never resolves while a
+      // session run is still cleanup-pending.
+      const state = store.getState();
+      const sessionRunIds = new Set<string>();
+      for (const [, runState] of state.runs) {
+        if (getRunSessionIdentifier(runState) === id) sessionRunIds.add(runState.id);
+      }
+
+      const runTerminals: Array<Promise<void>> = [];
+      for (const runId of sessionRunIds) {
+        const runState = store.getRun(runId);
+        if (runState?.status === 'running') {
+          runTerminals.push(whenActiveRunTerminal(runState.activeRun));
+          abortRun(runId);
+        }
+      }
+      await Promise.allSettled(runTerminals);
+
+      for (const runId of sessionRunIds) {
         runRequestContexts.delete(runId);
         runToolboxesByRunId.delete(runId);
         terminalReviewSessions.delete(runId);
@@ -4131,21 +4216,39 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     };
   }
 
-  function dispose(): Promise<void> {
-    // Idempotency guard: dispose() may be called more than once (the harness
-    // does in tests, and `[Symbol.dispose]` may re-enter). Disposing the engine
-    // and especially the raw Storage twice can close an already-closed SQLite
-    // connection; a second pass is a no-op.
-    if (disposePromise) return disposePromise;
+  /**
+   * Every subsystem kind {@link BureauShutdownReport.owners} can report on.
+   * `'heartbeat'` is reserved for the day Bureau composes one — see
+   * `composedOwnerKinds` below, which decides which kinds actually get a row.
+   */
+  const ALL_SHUTDOWN_OWNER_KINDS = [
+    'scheduler',
+    'online-evals',
+    'webhook-notifier',
+    'audit-trail',
+    'durable-engine',
+  ] as const;
+
+  function shutdown(shutdownOptions?: BureauShutdownOptions): Promise<BureauShutdownReport> {
+    // Idempotency guard: shutdown()/dispose() may be called more than once
+    // (the harness does in tests, and `[Symbol.dispose]` may re-enter).
+    // Disposing the engine and especially the raw Storage twice can close an
+    // already-closed SQLite connection; a second call returns the first
+    // call's already-cached report promise, ignoring whatever `policy` it
+    // was given — the FIRST call's policy is what actually ran.
+    if (shutdownPromise) return shutdownPromise;
+
+    const policy: 'abort' | 'drain' = shutdownOptions?.policy ?? 'abort';
+    const timeoutMilliseconds = shutdownOptions?.timeoutMilliseconds;
 
     // AB-246/AB-64 (2026-09-02 amendment): a model-catalog refresh is
     // INDEPENDENTLY owned by Bureau's catalog, not parent-owned by a run — so
-    // it isn't touched by the run/toolbox teardown below, and `dispose()`
+    // it isn't touched by the run/toolbox teardown below, and `shutdown()`
     // awaits it here rather than aborting it out from under a caller who may
     // still be awaiting the same handle. Captured synchronously, BEFORE the
     // teardown below runs, but awaited only at the very end (not blocking
     // admission closure, active-run cancellation, or backend teardown — a
-    // slow or never-settling refresh must not stall the rest of `dispose()`,
+    // slow or never-settling refresh must not stall the rest of `shutdown()`,
     // per review finding on PR #432). Awaits `closed()`, not `result()`: the
     // started-work contract lets a handle's cleanup acknowledgement settle
     // AFTER its result (result() only means the refresh's business outcome
@@ -4155,59 +4258,155 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // finding, PR #432).
     const modelCatalogRefreshClosedPromise = modelCatalog.inFlightRefresh()?.closed();
 
-    disposePromise = (async () => {
-      // Stop admission before cancelling runs. The canonical toolbox is the
+    // Which owners this bureau actually composes — a report row is emitted
+    // ONLY for a composed owner (2026-09-02 coordinator ruling).
+    const composedOwnerKinds = ALL_SHUTDOWN_OWNER_KINDS.filter((kind) => {
+      if (kind === 'scheduler') return Boolean(runtime.scheduler);
+      if (kind === 'online-evals') return Boolean(onlineEvalSamplerInstance);
+      if (kind === 'webhook-notifier') return Boolean(webhookNotifierInstance);
+      if (kind === 'audit-trail') return Boolean(auditTrailInstance);
+      return Boolean(runtime.durable);
+    });
+    const ownerOutcomes = new Map<
+      (typeof ALL_SHUTDOWN_OWNER_KINDS)[number],
+      CleanupAcknowledgement
+    >();
+
+    function buildReport(): BureauShutdownReport {
+      const owners: BureauShutdownOwnerReport[] = composedOwnerKinds.map((kind) => ({
+        kind,
+        outcome: ownerOutcomes.get(kind) ?? 'unresolved',
+      }));
+      // A `.filter().length` per outcome (armorer's own `ExecutionCleanupReport`
+      // shape) rather than one accumulating loop: every predicate runs for
+      // every owner regardless of count, so `notRequired` reads as covered
+      // even on a run with zero `'not-required'` owners today (the union
+      // member is reserved per the shared vocabulary; no Bureau owner
+      // currently produces it).
+      return Object.freeze({
+        admissionClosed: true,
+        policy,
+        requested: owners.length,
+        completed: owners.filter((owner) => owner.outcome === 'completed').length,
+        failed: owners.filter((owner) => owner.outcome === 'failed').length,
+        unresolved: owners.filter((owner) => owner.outcome === 'unresolved').length,
+        notRequired: owners.filter((owner) => owner.outcome === 'not-required').length,
+        owners: Object.freeze(owners),
+      });
+    }
+
+    // Awaits `run()`, recording its outcome ('completed'/'failed') into
+    // `ownerOutcomes`. Never throws — a rejecting owner drain is diagnosed
+    // and recorded, not propagated, so one failing owner cannot skip the
+    // unconditional backend teardown below (same isolation the pre-AB-207
+    // `dispose()` already gave catalog-run `abort()` failures).
+    async function settleOwner(
+      kind: (typeof ALL_SHUTDOWN_OWNER_KINDS)[number],
+      run: () => Promise<unknown>,
+    ): Promise<void> {
+      try {
+        await run();
+        ownerOutcomes.set(kind, 'completed');
+      } catch (error) {
+        ownerOutcomes.set(kind, 'failed');
+        diagnose({
+          level: 'error',
+          scope: 'shutdown',
+          message: `[bureau] Error during ${kind} shutdown: ${serializeUnknownError(error)}`,
+        });
+      }
+    }
+
+    const chain = (async (): Promise<BureauShutdownReport> => {
+      // Stop admission before touching runs. The canonical toolbox is the
       // owner of local execution lifecycle; await its shutdown as the
       // quiescence fence before releasing durable resources.
       runtime.baseToolbox.closeAdmission();
       for (const toolbox of runToolboxes) toolbox.closeAdmission();
-      for (const activeRun of activeRuns) activeRun.abort('Bureau disposed');
-      // AB-22 review fix: `bureau.run(...)` dispatches are tracked separately
-      // (see `trackCatalogRun`) since a catalog `RunnableAgent`'s returned
-      // handle is not necessarily backed by a bureau-owned `ActiveRun` — its
-      // `abort()` can be arbitrary, untrusted code. Snapshot before
-      // iterating (a synchronous catalog agent can settle result()
-      // immediately from inside abort(), whose trackCatalogRun cleanup
-      // deletes from catalogRuns mid-iteration), and isolate each call: an
-      // in-flight custom handle throwing from abort() must not reject this
-      // entire dispose() before the unconditional teardown below runs — that
-      // would skip toolbox shutdown, durable-engine disposal, and storage
-      // closure, and since disposePromise is already cached at this point,
-      // every subsequent dispose() call would return the same rejection
-      // forever instead of ever completing cleanup (review round 2, Codex).
-      for (const catalogRun of [...catalogRuns]) {
-        try {
-          catalogRun.abort('Bureau disposed');
-        } catch (error) {
-          diagnose({
-            level: 'error',
-            scope: 'dispose',
-            message: `[bureau] A catalog run's abort() threw during disposal; continuing teardown: ${serializeUnknownError(error)}`,
-          });
+
+      const runTerminals: Array<Promise<unknown>> = [];
+      if (policy === 'abort') {
+        // Deliberately NOT awaited here (or anywhere gating the
+        // unconditional engine/storage teardown below): a caller-owned
+        // `ActiveRun` whose underlying provider call never honors its
+        // `AbortSignal` (a hung dependency, not a well-behaved one) must
+        // never be able to wedge the WHOLE shutdown chain open forever —
+        // the critical backend teardown has to stay reachable regardless
+        // of whether any individual run ever actually settles. A
+        // well-behaved run's `abort()` drops its provider connection
+        // immediately (see `active-run-adapter.ts`'s `abort()` doc), so its
+        // terminal event — and any audit-trail/webhook-notifier write it
+        // triggers — has ample opportunity to land during the real async
+        // work the toolbox-shutdown await below already does, well before
+        // the owner drains further down snapshot each subsystem's in-flight
+        // writes.
+        for (const activeRun of activeRuns) activeRun.abort('Bureau disposed');
+        // AB-22 review fix: `bureau.run(...)` dispatches are tracked
+        // separately (see `trackCatalogRun`) since a catalog `RunnableAgent`'s
+        // returned handle is not necessarily backed by a bureau-owned
+        // `ActiveRun` — its `abort()` can be arbitrary, untrusted code.
+        // Snapshot before iterating (a synchronous catalog agent can settle
+        // result() immediately from inside abort(), whose trackCatalogRun
+        // cleanup deletes from catalogRuns mid-iteration), and isolate each
+        // call: an in-flight custom handle throwing from abort() must not
+        // reject this entire shutdown() before the unconditional teardown
+        // below runs — that would skip toolbox shutdown, durable-engine
+        // disposal, and storage closure, and since shutdownPromise is
+        // already cached at this point, every subsequent shutdown()/dispose()
+        // call would return the same rejection forever instead of ever
+        // completing cleanup (review round 2, Codex).
+        for (const catalogRun of [...catalogRuns]) {
+          try {
+            catalogRun.abort('Bureau disposed');
+          } catch (error) {
+            diagnose({
+              level: 'error',
+              scope: 'shutdown',
+              message: `[bureau] A catalog run's abort() threw during disposal; continuing teardown: ${serializeUnknownError(error)}`,
+            });
+          }
+        }
+      } else {
+        // 'drain': let every caller-owned run reach its own natural terminal
+        // result instead of aborting it — only Bureau-owned background work
+        // (above/below) is stopped like 'abort'.
+        for (const activeRun of activeRuns) {
+          runTerminals.push(whenActiveRunTerminal(activeRun));
+        }
+        for (const catalogRun of [...catalogRuns]) {
+          runTerminals.push(Promise.allSettled([catalogRun.result()]));
         }
       }
       const toolboxes = [
         ...new Set([runtime.baseToolbox, ...runToolboxes, ...runToolboxesByRunId.values()]),
       ];
-      const toolboxShutdownResults = await Promise.allSettled(
-        toolboxes.map((toolbox) =>
-          toolbox.shutdown({ policy: 'abort', reason: 'Bureau disposed' }),
-        ),
-      );
+      const toolboxShutdownResults = await Promise.allSettled([
+        ...toolboxes.map((toolbox) => toolbox.shutdown({ policy, reason: 'Bureau disposed' })),
+        ...runTerminals,
+      ]);
       for (const result of toolboxShutdownResults) {
         if (result.status === 'rejected') {
           diagnose({
             level: 'error',
-            scope: 'dispose',
+            scope: 'shutdown',
             message: `[bureau] Error during toolbox shutdown: ${serializeUnknownError(result.reason)}`,
           });
         }
       }
 
+      // Bureau-owned background work is stopped/awaited identically under
+      // BOTH policies (2026-09-02 coordinator ruling) — abort the shared
+      // signal now, AFTER runs are aborted/drained and toolbox shutdown is
+      // awaited above, so an in-flight judge invocation / webhook delivery
+      // settles promptly against the owner drains immediately below rather
+      // than being told to abort before shutdown has even started (which
+      // would make the audit trail's `if (signal?.aborted) return` above
+      // drop the very `run.aborted`/`tool.*` records this shutdown produces).
+      backgroundShutdownController.abort();
+
       // All pre-teardown is BEST-EFFORT, and the whole body is under an OUTER
       // try/finally so the critical backend teardown (engine → storage → store)
-      // ALWAYS runs. The async steps (`scheduler.stop`, `memory.close`) are
-      // already `.catch`'d; the synchronous steps below are equally fallible —
+      // ALWAYS runs. The synchronous steps below are fallible —
       // `emitter.dispatch`/`emitter.complete` route through
       // `CompletableEventTarget.dispatchEvent`, which loops over `toObservable()`
       // subscribers WITHOUT a try/catch, so a subscriber whose `next`/`complete`
@@ -4218,26 +4417,40 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // dispose no-ops), leaking it permanently. Covered by the
       // "toObservable subscriber throws during dispose" regression test.
       try {
-        if (runtime.scheduler) {
-          detachBestEffortPromise(runtime.scheduler.stop());
-        }
-
+        // `runtime.memory.close()` stays a detached best-effort call — it is
+        // not one of the owners this issue's report covers (2026-09-02
+        // ruling: scheduler, online-evals, webhook notifier, audit trail,
+        // durable engine).
         if (runtime.memory) {
           detachBestEffortPromise(runtime.memory.close());
         }
 
         try {
-          // Dispose the audit trail and webhook notifier before emitting
-          // bureau.disposed so any in-flight write/delivery callbacks are
-          // unsubscribed cleanly (the notifier also abandons in-flight backoff
+          // Dispose every Bureau-owned background subsystem — AWAITED, not
+          // detached (AB-207/AB-37): each is a report-tracked owner drain,
+          // run concurrently, before emitting bureau.disposed so any
+          // in-flight write/delivery/evaluation callback is unsubscribed
+          // cleanly (the webhook notifier also abandons in-flight backoff
           // waits so a disposed bureau never fires a webhook late).
-          auditTrailInstance?.dispose();
+          const ownerDrains: Array<Promise<void>> = [];
+          if (runtime.scheduler) {
+            const scheduler = runtime.scheduler;
+            ownerDrains.push(settleOwner('scheduler', () => scheduler.stop()));
+          }
+          if (auditTrailInstance) {
+            const auditTrail = auditTrailInstance;
+            ownerDrains.push(settleOwner('audit-trail', () => auditTrail.dispose()));
+          }
           if (webhookNotifierInstance) {
-            detachBestEffortPromise(webhookNotifierInstance.dispose());
+            const webhookNotifier = webhookNotifierInstance;
+            ownerDrains.push(settleOwner('webhook-notifier', () => webhookNotifier.dispose()));
           }
           if (onlineEvalSamplerInstance) {
-            detachBestEffortPromise(onlineEvalSamplerInstance.dispose());
+            const onlineEvalSampler = onlineEvalSamplerInstance;
+            ownerDrains.push(settleOwner('online-evals', () => onlineEvalSampler.dispose()));
           }
+          await Promise.allSettled(ownerDrains);
+
           emitter.dispatch(new BureauDisposedEvent());
           storeSubscription.unsubscribe();
           for (const disposeListener of schedulerCleanup) {
@@ -4250,8 +4463,8 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         } catch (error) {
           diagnose({
             level: 'error',
-            scope: 'dispose',
-            message: `[bureau] Error during dispose pre-teardown: ${serializeUnknownError(error)}`,
+            scope: 'shutdown',
+            message: `[bureau] Error during shutdown pre-teardown: ${serializeUnknownError(error)}`,
           });
         }
       } finally {
@@ -4282,11 +4495,19 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           } catch (error) {
             diagnose({
               level: 'error',
-              scope: 'dispose',
+              scope: 'shutdown',
               message: `[bureau] Error disposing durable observability: ${serializeUnknownError(error)}`,
             });
           }
-          runtime.durable?.engine[Symbol.dispose]?.();
+          // AB-207: prefer the async disposal path (`[Symbol.asyncDispose]`)
+          // over the synchronous one — `RegistryAgnosticEngine` always
+          // implements both `Disposable` and `AsyncDisposable`, so this
+          // await genuinely observes the engine's own drain rather than
+          // firing a sync teardown and moving on.
+          if (runtime.durable) {
+            const engine = runtime.durable.engine;
+            await settleOwner('durable-engine', () => engine[Symbol.asyncDispose]());
+          }
         } finally {
           try {
             runtime.disposeStorage?.();
@@ -4297,10 +4518,49 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           }
         }
       }
-      // Awaited last: everything above (admission, active runs, toolbox
-      // shutdown, backend teardown) already ran without waiting on this.
+      // Awaited last: everything above (admission, runs, toolbox shutdown,
+      // owner drains, backend teardown) already ran without waiting on this.
       await modelCatalogRefreshClosedPromise;
+      return buildReport();
     })();
+
+    if (timeoutMilliseconds === undefined) {
+      // The chain above is best-effort at every internal step and should
+      // never reject, but this guards against an unhandled rejection
+      // leaking out if it somehow does.
+      detachBestEffortPromise(chain);
+      shutdownPromise = chain;
+    } else {
+      // Aborted once `chain` itself settles (by either winning the race or
+      // losing it) so the timer never outlives this call — a `shutdown()`
+      // whose real teardown finishes well inside `timeoutMilliseconds` must
+      // not hold a live `setTimeout` open for the remainder of that budget.
+      // `detachBestEffortPromise`, not a bare `void`, on the SAME derived
+      // `.finally()` promise this covers both: an unhandled rejection from
+      // `chain` and the timer-abort side effect.
+      const timeoutAbort = new AbortController();
+      detachBestEffortPromise(chain.finally(() => timeoutAbort.abort()));
+      shutdownPromise = Promise.race([
+        chain,
+        shutdownTimeoutSleep(timeoutMilliseconds, timeoutAbort.signal).then(() => buildReport()),
+      ]);
+    }
+
+    return shutdownPromise;
+  }
+
+  // Cached separately from `shutdownPromise`: `dispose()` must keep returning
+  // the SAME promise reference on repeat calls (no externally observable
+  // regression vs. the pre-AB-207 caller-visible contract) — `shutdown()`'s
+  // own idempotency guard caches its own report promise, but each call to
+  // `.then(() => undefined)` below would otherwise mint a new derived
+  // promise every time.
+  let disposePromise: Promise<void> | undefined;
+
+  function dispose(): Promise<void> {
+    if (!disposePromise) {
+      disposePromise = shutdown({ policy: 'abort' }).then(() => undefined);
+    }
     return disposePromise;
   }
 
@@ -4418,6 +4678,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       return emitter.signal;
     },
     dispose,
+    shutdown,
   } satisfies Bureau<D>;
 
   // Wire the durable audit trail (Layer B) now that we have a bureau to
@@ -4429,7 +4690,12 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // settled, or settle during the awaits inside recoverDurableRuns() — are
   // captured in the durable trail rather than landing only in the live store.
   if (runtime.kv) {
-    auditTrailInstance = createAuditTrail(bureau, runtime.kv, diagnose);
+    // AB-207: threaded with the bureau-owned background-shutdown signal so
+    // `shutdown()` can bound this subsystem's drain the same way it bounds
+    // online-evals and the webhook notifier below.
+    auditTrailInstance = createAuditTrail(bureau, runtime.kv, diagnose, {
+      signal: backgroundShutdownController.signal,
+    });
   }
 
   // Wire the webhook notifier (AB-21) now that the audit trail exists (an
@@ -4441,7 +4707,12 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       bureau,
       runtime.kv,
       auditTrailInstance,
-      options.webhooks,
+      // AB-207: merge any caller-supplied signal with the bureau-owned
+      // background-shutdown signal so `shutdown()` can tell an in-flight
+      // delivery's `fetchImpl` to abort — the mechanism `dispose()`'s prior
+      // detached call gave up entirely, which is what let a delivery's
+      // write race `disposeStorage()` (AB-206 review finding, PR #402).
+      { ...options.webhooks, signal: withBackgroundShutdownSignal(options.webhooks.signal) },
       diagnose,
     );
   }
@@ -4461,7 +4732,12 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       bureau,
       auditTrailInstance,
       webhookNotifierInstance,
-      options.onlineEvals,
+      {
+        ...options.onlineEvals,
+        // AB-207: same bounded-abort wiring as the webhook notifier above, for
+        // an in-flight judge invocation.
+        signal: withBackgroundShutdownSignal(options.onlineEvals.signal),
+      },
     );
   }
 

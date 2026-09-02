@@ -374,6 +374,19 @@ export interface BureauOptions<D extends AgentDefinitions = AgentDefinitions> {
   stopWhen?: StopCondition | StopCondition[];
   sessionPersistenceRetryDelayMilliseconds?: number;
   sessionPersistenceSleep?: (milliseconds: number) => Promise<void>;
+  /**
+   * Injectable sleep used ONLY to bound `shutdown({ timeoutMilliseconds })`'s
+   * wait (AB-207). Defaults to a real `setTimeout`-backed sleep, cleared via
+   * `signal` once the real teardown chain wins the race first — otherwise a
+   * `shutdown({ timeoutMilliseconds })` call on a bureau whose teardown
+   * finishes quickly would still hold a live timer open for the full
+   * duration. Tests supply a manually-controlled promise here instead of a
+   * fake system clock — the same pattern `sessionPersistenceSleep` already
+   * establishes — so the timeout-elapsed acceptance criterion never depends
+   * on a real wall-clock wait; a test implementation should also honor
+   * `signal` so it does not itself leak a pending timer/interval.
+   */
+  shutdownTimeoutSleep?: (milliseconds: number, signal: AbortSignal) => Promise<void>;
   maximumSteps?: number;
   systemPrompt?: string;
   /**
@@ -612,6 +625,71 @@ export interface ResolveReviewResult {
   decision: 'approve' | 'deny';
   /** The tool's `ToolExecutionResult` when a `tool-approval` was approved. */
   result?: unknown;
+}
+
+/**
+ * Armorer's cleanup-outcome vocabulary
+ * (`packages/armorer/src/execution-lifecycle.ts`'s `ExecutionCleanupOutcome`
+ * `status`), reused verbatim per AB-34's vocabulary constraint — the same
+ * reuse `CatalogRefreshCleanupAcknowledgement` makes in
+ * `model-catalog-refresh.ts`.
+ *
+ * - `'completed'` — the owner's drain settled normally.
+ * - `'failed'` — the owner's drain settled by rejecting; the failure is
+ *   diagnosed and teardown continues past it.
+ * - `'unresolved'` — a `shutdown({ timeoutMilliseconds })` wait elapsed
+ *   before this owner's drain settled. The drain itself is not abandoned —
+ *   only `shutdown()`'s wait for it is.
+ * - `'not-required'` — this owner had nothing to release.
+ */
+export type CleanupAcknowledgement = 'not-required' | 'completed' | 'failed' | 'unresolved';
+
+/**
+ * Options for {@link Bureau.shutdown}. `policy` defaults to `'abort'` when
+ * omitted (including when `options` itself is omitted) — matching
+ * `dispose()`'s existing behavior.
+ */
+export interface BureauShutdownOptions {
+  readonly policy?: 'abort' | 'drain';
+  /**
+   * Bounds `shutdown()`'s WAIT only — see {@link Bureau.shutdown}. Omit to
+   * wait indefinitely.
+   */
+  readonly timeoutMilliseconds?: number;
+}
+
+/** One row of {@link BureauShutdownReport.owners} — one Bureau-composed subsystem's drain outcome. */
+export interface BureauShutdownOwnerReport {
+  /**
+   * Which Bureau-composed subsystem this row reports on. A row is emitted
+   * only for a subsystem this bureau actually composes — `'heartbeat'` is
+   * reserved for the day Bureau composes one; no row carries it today.
+   */
+  readonly kind:
+    | 'scheduler'
+    | 'online-evals'
+    | 'webhook-notifier'
+    | 'audit-trail'
+    | 'durable-engine'
+    | 'heartbeat';
+  readonly id?: string;
+  readonly outcome: CleanupAcknowledgement;
+}
+
+/**
+ * Returned by {@link Bureau.shutdown}, modeled on armorer's
+ * `ExecutionCleanupReport` shape (`packages/armorer/src/execution-lifecycle.ts`)
+ * rather than a new report vocabulary.
+ */
+export interface BureauShutdownReport {
+  readonly admissionClosed: true;
+  readonly policy: 'abort' | 'drain';
+  readonly requested: number;
+  readonly completed: number;
+  readonly failed: number;
+  readonly unresolved: number;
+  readonly notRequired: number;
+  readonly owners: readonly BureauShutdownOwnerReport[];
 }
 
 /**
@@ -953,6 +1031,32 @@ export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
   readonly signal: AbortSignal;
 
   dispose(): Promise<void>;
+
+  /**
+   * Awaited drain of everything Bureau owns (AB-207/AB-37). `dispose()` is a
+   * thin wrapper — `shutdown({ policy: 'abort' })` awaited to completion —
+   * kept for the existing `Promise<void>` external shape; prefer `shutdown()`
+   * directly when the report is useful.
+   *
+   * `'abort'` (the default when `policy` is omitted) aborts every active run
+   * immediately, then awaits every drain. `'drain'` closes admission
+   * identically but lets every already-active caller-owned agent run
+   * (`bureau.run`/session-owned) reach its own natural terminal result while
+   * Bureau-owned background work (scheduler, online-evals, webhook notifier,
+   * audit trail) is stopped/awaited exactly as under `'abort'`.
+   *
+   * `timeoutMilliseconds` bounds the WAIT only: on elapse, `shutdown()`
+   * resolves (never rejects) with every already-settled owner's real outcome
+   * and every still-outstanding owner reported `'unresolved'` — the
+   * underlying teardown keeps running to completion in the background, it is
+   * never abandoned. Omitting it waits indefinitely, matching today's
+   * `dispose()`.
+   *
+   * Calling `shutdown()` (or `dispose()`) more than once is idempotent: every
+   * call after the first returns the same cached report promise, regardless
+   * of the policy passed to the later call.
+   */
+  shutdown(options?: BureauShutdownOptions): Promise<BureauShutdownReport>;
 
   readonly sessionStore: SessionStore | undefined;
   readonly kv: ConditionalTextValueStore | undefined;

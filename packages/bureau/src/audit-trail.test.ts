@@ -644,4 +644,165 @@ describe('createAuditTrail', () => {
       trail.dispose();
     });
   });
+
+  // AB-207: `dispose()` becomes an awaited drain of every write already in
+  // flight, and accepts an owner-issued `signal` that refuses to START a
+  // new write once aborted (a write already in flight still runs to
+  // completion and `dispose()` still awaits it — see `AuditTrailOptions`).
+  describe('AB-207 — awaited dispose and the owner-issued signal', () => {
+    /**
+     * A `TextValueStore`-shaped stub whose `set` resolves only once the
+     * returned `release` function is called — a controllable, deterministic
+     * stand-in for a slow write, never a real timer.
+     */
+    function createControllableKv(): {
+      kv: ReturnType<typeof textValueStore>;
+      release: () => void;
+      setCallCount: () => number;
+    } {
+      const base = textValueStore(new MemoryStorage());
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let setCallCount = 0;
+      const kv: ReturnType<typeof textValueStore> = {
+        ...base,
+        async set(key: string, value: string) {
+          setCallCount += 1;
+          await gate;
+          await base.set(key, value);
+        },
+      };
+      return { kv, release, setCallCount: () => setCallCount };
+    }
+
+    it('dispose() resolves only after a write already in flight settles', async () => {
+      const { kv, release } = createControllableKv();
+      const { bureau, emit } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+
+      emit(
+        new ActionEvent({
+          type: 'tool.started',
+          timestamp: 6000,
+          sequence: 1,
+          runId: 'run-inflight-write',
+          detail: null,
+        }),
+      );
+
+      let disposed = false;
+      const disposal = trail.dispose().then(() => {
+        disposed = true;
+      });
+
+      // The write is deliberately still gated — dispose() must not have
+      // resolved yet.
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(disposed).toBe(false);
+
+      release();
+      await disposal;
+      expect(disposed).toBe(true);
+
+      const records = await trail.query({ runId: 'run-inflight-write' });
+      expect(records).toHaveLength(1);
+    });
+
+    it('dispose() resolves promptly when there is nothing in flight', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+      await trail.dispose();
+    });
+
+    it("record()'s write is tracked so dispose() awaits it even when the caller never awaits record()", async () => {
+      const { kv, release } = createControllableKv();
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+
+      // Deliberately not awaited — the caller fires-and-forgets.
+      void trail.record({
+        runId: 'run-unawaited-record',
+        type: 'review.tool-approval.approved',
+        detail: null,
+      });
+
+      let disposed = false;
+      const disposal = trail.dispose().then(() => {
+        disposed = true;
+      });
+
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(disposed).toBe(false);
+
+      release();
+      await disposal;
+      expect(disposed).toBe(true);
+    });
+
+    it('refuses to start a new write, from the listener, once the owner-issued signal aborts', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau, emit } = createStubBureau();
+      const controller = new AbortController();
+      const trail = createAuditTrail(bureau, kv, undefined, { signal: controller.signal });
+
+      controller.abort();
+      emit(
+        new ActionEvent({
+          type: 'tool.started',
+          timestamp: 7000,
+          sequence: 1,
+          runId: 'run-after-abort',
+          detail: null,
+        }),
+      );
+
+      await trail.dispose();
+      const records = await trail.query({ runId: 'run-after-abort' });
+      expect(records).toHaveLength(0);
+    });
+
+    it('refuses to start a new write from record() once the owner-issued signal aborts', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau } = createStubBureau();
+      const controller = new AbortController();
+      const trail = createAuditTrail(bureau, kv, undefined, { signal: controller.signal });
+
+      controller.abort();
+      await trail.record({
+        runId: 'run-record-after-abort',
+        type: 'review.tool-approval.approved',
+        detail: null,
+      });
+
+      const records = await trail.query({ runId: 'run-record-after-abort' });
+      expect(records).toHaveLength(0);
+      await trail.dispose();
+    });
+
+    it('still starts a write when the owner-issued signal has not aborted', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau, emit } = createStubBureau();
+      const controller = new AbortController();
+      const trail = createAuditTrail(bureau, kv, undefined, { signal: controller.signal });
+
+      emit(
+        new ActionEvent({
+          type: 'tool.started',
+          timestamp: 8000,
+          sequence: 1,
+          runId: 'run-before-abort',
+          detail: null,
+        }),
+      );
+      await trail.dispose();
+
+      const records = await trail.query({ runId: 'run-before-abort' });
+      expect(records).toHaveLength(1);
+    });
+  });
 });
