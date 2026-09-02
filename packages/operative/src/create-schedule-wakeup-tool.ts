@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import { renderDurationLabel } from './durable/continuation-input';
 import { DurableCapabilityUnavailableError } from './durable/durable-capability-unavailable-error';
 import type { PendingWakeup } from './durable/types';
 
@@ -23,8 +24,10 @@ export interface ScheduleWakeupInput {
    */
   in: number | string;
   /**
-   * Optional note the agent attaches to the wakeup. Carried in the workflow
-   * result and surfaced to the next run so it knows why it resumed.
+   * Optional note the agent attaches to the wakeup. Rendered into the SAME
+   * run's continuation message once the wakeup fires (AB-45 — a fired
+   * wakeup continues the same run with one more generation step, never a
+   * new run), and carried on the final `AgentRunWorkflowResult.wakeupNote`.
    *
    * @example 'Wake me up to check if the deploy succeeded.'
    */
@@ -85,7 +88,12 @@ export interface CreateScheduleWakeupToolOptions {
  * for a specified duration and resume later. Under the hood it sets a
  * `pendingWakeup` flag on the run's `DurableRunDeps`; the `agentRun` workflow
  * checks this flag after the main step loop exits and performs
- * `yield* ctx.sleep(duration)` to actually park the Weft workflow.
+ * `yield* ctx.sleep(duration)` to actually park the Weft workflow. Per AB-41's
+ * ratified decision record, once the timer fires the workflow CONTINUES the
+ * same run with one more agent generation step, seeded by a deterministic
+ * `[wakeup] Resumed after sleeping ...` conversation message carrying the
+ * requested duration and this tool's `note` (AB-45) — it never merely delays
+ * terminal completion.
  *
  * This is an **opt-in built-in tool** — the bureau or agent explicitly adds it
  * to the toolbox (no ambient grant). It only works in a durable run; calling it
@@ -175,7 +183,7 @@ export function createScheduleWakeupTool(options: CreateScheduleWakeupToolOption
         ...(input.note !== undefined ? { note: input.note } : {}),
       };
 
-      const durationLabel = typeof input.in === 'number' ? `${input.in}ms` : input.in;
+      const durationLabel = renderDurationLabel(input.in);
 
       const message = input.note
         ? `Wakeup scheduled in ${durationLabel}. Note: ${input.note}`

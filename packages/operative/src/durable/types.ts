@@ -82,8 +82,10 @@ export interface RunCheckpoint {
 /**
  * A pending self-wakeup registered by the `scheduleWakeup` tool during a run.
  * When present after the main step loop exits, the `agentRun` workflow will
- * `yield* ctx.sleep(duration)` before completing — parking the durable run
- * until the timer fires.
+ * `yield* ctx.sleep(duration)` — parking the durable run until the timer
+ * fires. Per AB-41's ratified decision record, once the timer fires the
+ * workflow CONTINUES the same run with one more agent generation step
+ * (AB-45); it never merely delays terminal completion.
  *
  * The `note` is appended to the conversation on wakeup so the agent knows why
  * it resumed (e.g. "Wake me up to check the deploy").
