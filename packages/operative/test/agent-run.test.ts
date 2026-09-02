@@ -16,6 +16,7 @@ import {
   createAgentRun,
   createDiagnosticAgentRun,
 } from '../src/agent-run';
+import { createChildRunRegistry } from '../src/child-run';
 import { noToolCalls } from '../src/conditions/predicates';
 import { type ActiveRun, createActiveRun as createRun } from '../src/create-run';
 import { AbortAgentRunError, MaximumStepsExceededError } from '../src/errors';
@@ -316,6 +317,36 @@ describe('createDiagnosticAgentRun()', () => {
     expect('unwrap' in run).toBe(false);
     expect('output' in run).toBe(false);
     await expect(run.result()).resolves.toMatchObject({ content: 'diagnostic result' });
+  });
+
+  it('forwards a supplied childRegistry option to children()/abortChild(), same as createAgentRun', async () => {
+    // AB-34 applies the Required capabilities table's children()/abortChild()
+    // requirement to a DiagnosticAgentRun exactly as it does to AgentRun —
+    // this proves createDiagnosticAgentRun actually has a way to receive
+    // the registry that backs both, not only the always-empty default.
+    const activeRun = createResolvedActiveRun({
+      content: 'diagnostic result',
+      conversation: {} as never,
+      finishReason: 'stop-condition',
+      steps: [],
+      usage: { prompt: 0, completion: 0, total: 0 },
+    });
+    const registry = createChildRunRegistry();
+    const abortCalls: (string | undefined)[] = [];
+    registry.register({
+      id: 'child-1',
+      parentId: 'p',
+      agentName: 'researcher',
+      durable: false,
+      abort: (reason) => abortCalls.push(reason),
+    });
+
+    const run = createDiagnosticAgentRun(activeRun, { childRegistry: registry });
+
+    expect(run.children()).toHaveLength(1);
+    expect(run.children()[0]?.agentName).toBe('researcher');
+    run.abortChild('child-1', 'stop it');
+    expect(abortCalls).toEqual(['stop it']);
   });
 });
 

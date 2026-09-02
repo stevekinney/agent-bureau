@@ -928,13 +928,18 @@ const orchestrator = createAgent({
 });
 ```
 
-`createSubagentTool` threads the parent tool call's `signal` and
-`traceContext` — plus this tool's own `agentName` and `withTraceContext`
-option — into `agent.run(input, { agentName, signal, traceContext,
-withTraceContext })`, so a real `createAgent` child aborts when the parent's
-tool call does. `signal` always propagates. `traceContext` is read off the
-executing `ToolContext`, which is populated only when the caller built its
-toolbox with a matching `context: { traceContext }` — the ordinary
+`createSubagentTool` is built on `dispatchChildRun` (AB-50), the lower-level
+child dispatch primitive — see [Child dispatch and discovery
+(AB-50)](#child-dispatch-and-discovery-ab-50) below. It threads the parent
+tool call's `signal` and `traceContext` — plus this tool's own `agentName`
+and `withTraceContext` option — through to `agent.run(input, { agentName,
+signal, traceContext, withTraceContext })`, so a real `createAgent` child
+aborts when the parent's tool call does. `signal` always propagates, composed
+with a private per-child `AbortController` so a child-targeted abort (through
+`AgentRun.abortChild()`, or the `ChildRunHandle.abort()` a direct
+`dispatchChildRun` caller retains) never reaches a sibling. `traceContext` is
+read off the executing `ToolContext`, which is populated only when the caller
+built its toolbox with a matching `context: { traceContext }` — the ordinary
 `createAgent`-driven agent loop does not populate a tool's `traceContext`
 from the run's own `parentContext` (that field wraps `generate`/tool
 _execution_ in `withTraceContext`; it isn't copied onto `ToolContext`). Pass
@@ -999,6 +1004,94 @@ const researcherTool = createSubagentTool({
   },
 });
 ```
+
+##### Child dispatch and discovery (AB-50)
+
+`createSubagentTool` is the model-facing entry point; `dispatchChildRun` is
+the lower-level primitive underneath it, exported for code that dispatches a
+subagent directly rather than through a tool. It returns a `ChildRunHandle`
+that carries `childRunId`, `parentRunId`, and `agentName` alongside `AgentRun`'s
+own iterate/await/abort/dispose surface, so two concurrently retained handles
+stay independently addressable — aborting or iterating one never touches the
+other:
+
+```typescript
+import { dispatchChildRun } from '@lostgradient/operative';
+
+// `AgentRun` carries no id of its own (a recorded gap owned by AB-88), so a
+// caller who wants one supplies it — here, generated up front so it can
+// also correlate every event these two dispatches emit.
+const parentRunId = crypto.randomUUID();
+
+const alpha = dispatchChildRun(researcherAgent, 'Research topic A', {
+  agentName: 'researcher-alpha',
+  parentRunId,
+});
+const beta = dispatchChildRun(researcherAgent, 'Research topic B', {
+  agentName: 'researcher-beta',
+  parentRunId,
+});
+
+const [resultAlpha, resultBeta] = await Promise.all([alpha.result(), beta.result()]);
+// alpha.abort('no longer needed') stops only alpha — beta keeps running.
+```
+
+`dispatchChildRun` dispatches through `RunnableAgent.run()` — the in-process
+route — and emits the four `multiagent.child-workflow.*` lifecycle events
+(`started`/`completed`/`failed`/`aborted`) on `emitter` when one is supplied,
+each correlated by `parentRunId` and `childRunId`.
+
+**Child discovery.** `AgentRun.children()` / `.abortChild(id, reason?)` (the
+signatures the started-work control contract in
+`documentation/operative-type-safe-api.md` assigns to AB-50) are backed by an
+opt-in `ChildRunRegistry`. Discovery does not happen automatically — a tool
+is constructed once, independent of any particular run, so nothing can inject
+a run-scoped registry into an already-built tool by itself. Wire the same
+registry into both places to make a run's children discoverable even when the
+tool's own return value never surfaces them to the caller:
+
+```typescript
+import { createChildRunRegistry, createSubagentTool } from '@lostgradient/operative';
+
+const registry = createChildRunRegistry();
+// Tools are built once, independent of any particular run — so the parent
+// run's id has to exist before the tool does, not be read off a `run`
+// value that doesn't exist yet.
+const parentRunId = crypto.randomUUID();
+
+const researcherTool = createSubagentTool({
+  name: 'research',
+  description: 'Delegates a research task to a specialist agent.',
+  agentName: 'researcher',
+  agent: researcherAgent,
+  input: z.object({ query: z.string() }),
+  toAgentInput: (input) => input.query,
+  parentContext: {
+    emitter, // the parent run's own event emitter
+    parentAgentName: 'orchestrator',
+    parentRunId,
+    durable: false,
+    registry, // <- makes this tool's children discoverable
+  },
+});
+
+const run = orchestratorAgent.run('...', { childRegistry: registry }); // <- same registry
+// ... after the orchestrator has dispatched some subagent calls ...
+run.children(); // [{ id, parentId, agentName: 'researcher', durable: false, status: 'running' | ... }]
+run.abortChild(run.children()[0]?.id, 'no longer needed'); // scoped: this child only
+```
+
+`ChildRunDescriptor.parentId` carries the edge back to whatever id
+`parentRunId` was, so nesting `createSubagentTool` inside a child's own
+toolbox — with every level threading through the SAME `registry` — makes
+the whole ownership tree reconstructable from one `registry.children()`
+call at the root, reassembled by `parentId`, even though the registry
+itself stores a flat list.
+
+Omit `registry` on either side and `children()` reads back an empty array and
+`abortChild()` is a no-op — never a throw. `abortChild()` is idempotent on an
+unknown or already-terminal child id, matching `abort()`'s own rule, and
+never propagates to a sibling.
 
 **Supervisor:**
 

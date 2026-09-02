@@ -15,9 +15,12 @@
  * architecture.md for the 3-reviewer consensus on this decision.
  */
 
+import type { ChildRunDescriptor, ChildRunRegistry } from './child-run';
 import type { ActiveRun } from './create-run';
 import type { CombinedOperativeEventMap, CombinedOperativeEventType } from './events';
 import type { RunResult, RunResultBase } from './types';
+
+export type { ChildRunDescriptor, ChildRunRegistry } from './child-run';
 
 // ---------------------------------------------------------------------------
 // RunEvent — the event type yielded by AgentRun's async iterator
@@ -90,6 +93,25 @@ export type AgentRun<O = never, H extends boolean = false> = AsyncIterable<RunEv
     abort(reason?: string): void;
 
     /**
+     * Child discovery (AB-50 / AB-34's Required capabilities table). A
+     * snapshot of every child this run has dispatched through
+     * `createSubagentTool` (or `dispatchChildRun` directly) with a matching
+     * `childRegistry` — see `createAgentRun`'s `childRegistry` option and
+     * `child-run.ts`'s module docs for how the two are wired together.
+     * Empty when no registry was supplied; never throws.
+     */
+    children(): readonly ChildRunDescriptor[];
+
+    /**
+     * Scoped child cancellation (AB-50 / AB-34's Required capabilities
+     * table). Aborts only the named child — never a sibling — and is
+     * idempotent: an unknown id, or one already terminal, is a no-op, not
+     * an error. Distinct from `abort()`, which AB-15 fixed and this does
+     * not change.
+     */
+    abortChild(childId: string, reason?: string): void;
+
+    /**
      * Dispose the run handle and release internal resources. Equivalent to
      * `abort()` when the run is still in flight.
      */
@@ -100,6 +122,10 @@ export type AgentRun<O = never, H extends boolean = false> = AsyncIterable<RunEv
 export interface DiagnosticAgentRun extends AsyncIterable<RunEvent> {
   result(): Promise<RunResult<unknown, false>>;
   abort(reason?: string): void;
+  /** See `AgentRun.children()` — AB-34 applies the same capability here. */
+  children(): readonly ChildRunDescriptor[];
+  /** See `AgentRun.abortChild()` — AB-34 applies the same capability here. */
+  abortChild(childId: string, reason?: string): void;
   [Symbol.dispose](): void;
 }
 
@@ -200,6 +226,15 @@ export interface CreateAgentRunOptions {
   onCompletedIteration?: 'error' | 'empty';
   /** Whether this handle has a configured schema-backed output accessor. */
   hasOutput?: boolean;
+  /**
+   * Backs `children()`/`abortChild()` (AB-50). Opt-in: omit it and both
+   * methods are safe no-ops (`children()` returns `[]`, `abortChild()` does
+   * nothing). Supply the SAME registry to every `createSubagentTool` this
+   * run dispatches through (via its `parentContext.registry`) to make this
+   * run's children discoverable — see `child-run.ts`'s module docs for why
+   * this can't be wired automatically.
+   */
+  childRegistry?: ChildRunRegistry;
 }
 
 /**
@@ -242,6 +277,7 @@ export function createAgentRun<O = never, H extends boolean = false>(
 ): AgentRun<O, H> {
   const { onCompletedIteration = 'error' } = options;
   const hasOutput = options.hasOutput ?? false;
+  const childRegistry = options.childRegistry;
 
   // Cache the result promise so result() is idempotent across all calls
   // (before, during, and after iteration).
@@ -323,6 +359,14 @@ export function createAgentRun<O = never, H extends boolean = false>(
 
     abort(reason?: string): void {
       activeRun.abort(reason);
+    },
+
+    children(): readonly ChildRunDescriptor[] {
+      return childRegistry?.children() ?? [];
+    },
+
+    abortChild(childId: string, reason?: string): void {
+      childRegistry?.abortChild(childId, reason);
     },
 
     [Symbol.dispose](): void {
@@ -462,9 +506,21 @@ export function createAgentRun<O = never, H extends boolean = false>(
  * Wrap a recovered active run without offering an output or unwrap accessor.
  * A diagnostic run is intentionally useful for inspection and cancellation
  * only: its originating schema may no longer be available to validate data.
+ *
+ * `options.childRegistry` is forwarded straight through to `createAgentRun`
+ * — a `DiagnosticAgentRun`'s `children()`/`abortChild()` back the same
+ * capability `AgentRun` does (AB-34 applies it to both alike), so a caller
+ * recovering a run whose tools were wired into a registry can still supply
+ * that same registry here and get real discovery, not the empty default.
  */
-export function createDiagnosticAgentRun(activeRun: ActiveRun): DiagnosticAgentRun {
-  const run = createAgentRun<unknown, false>(activeRun) as unknown as DiagnosticAgentRun & {
+export function createDiagnosticAgentRun(
+  activeRun: ActiveRun,
+  options: Pick<CreateAgentRunOptions, 'childRegistry'> = {},
+): DiagnosticAgentRun {
+  const run = createAgentRun<unknown, false>(
+    activeRun,
+    options,
+  ) as unknown as DiagnosticAgentRun & {
     unwrap?: () => Promise<string>;
     output?: () => Promise<unknown>;
   };

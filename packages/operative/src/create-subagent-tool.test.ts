@@ -483,7 +483,17 @@ describe('createSubagentTool', () => {
         { signal: controller.signal, traceContext: { traceId: 't-1' } },
       );
 
-      expect(calls[0]?.context?.signal).toBe(controller.signal);
+      // AB-50: `dispatchChildRun` composes the parent tool call's signal
+      // with a private per-child `AbortController` (so a child-targeted
+      // `abort()` never reaches a sibling) — so `agent.run()` no longer
+      // receives `controller.signal` by identity. It still observes the
+      // same abort, which is the actual contract: aborting the parent's
+      // signal must stop the child.
+      const childSignal = calls[0]?.context?.signal;
+      expect(childSignal).not.toBe(controller.signal);
+      expect(childSignal?.aborted).toBe(false);
+      controller.abort('parent cancelled');
+      expect(childSignal?.aborted).toBe(true);
       expect(calls[0]?.context?.traceContext).toEqual({ traceId: 't-1' });
       expect(calls[0]?.context?.withTraceContext).toBe(withTraceContext);
     });

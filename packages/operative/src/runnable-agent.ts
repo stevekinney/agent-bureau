@@ -11,6 +11,7 @@
 import type { ConversationHistory } from 'conversationalist';
 
 import type { AgentRun, RunEvent } from './agent-run';
+import type { ChildRunRegistry } from './child-run';
 import type { RunOptions } from './types';
 
 export type { RunEvent };
@@ -35,6 +36,14 @@ export interface AgentRunContext {
   traceContext?: unknown;
   withTraceContext?: <T>(parentContext: unknown, fn: () => Promise<T>) => Promise<T>;
   agentName?: string;
+  /**
+   * AB-50 — backs the returned `AgentRun`'s `children()`/`abortChild()`.
+   * Opt-in: supply the same registry to every `createSubagentTool` this run
+   * may dispatch through (its `parentContext.registry`) to make this run's
+   * children discoverable. See `child-run.ts`'s module docs for why this
+   * can't be wired automatically from `run()` alone.
+   */
+  childRegistry?: ChildRunRegistry;
 }
 
 /**

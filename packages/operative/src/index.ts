@@ -40,6 +40,16 @@ export {
   withCache,
   withCacheMetrics,
 } from './cache/index';
+export type {
+  ChildEventEmitter,
+  ChildRunDescriptor,
+  ChildRunHandle,
+  ChildRunRegistry,
+  ChildRunStatus,
+  DispatchChildRunOptions,
+  MutableChildRunRegistry,
+} from './child-run';
+export { createChildRunRegistry, dispatchChildRun } from './child-run';
 export type { RepeatingToolCallsOptions, TokenBudgetOptions } from './conditions/index';
 export { stopWhen } from './conditions/index';
 export type {
@@ -276,6 +286,13 @@ export {
   SteeringFailedEvent,
   SteeringRejectedEvent,
   SteeringSupersededEvent,
+} from './events';
+// AB-50 — child dispatch lifecycle correlation (terminal events)
+export type { ChildWorkflowCorrelation } from './events';
+export {
+  ChildWorkflowAbortedEvent,
+  ChildWorkflowCompletedEvent,
+  ChildWorkflowFailedEvent,
 } from './events';
 // D6 — scheduling events
 export type {

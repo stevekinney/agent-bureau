@@ -25,10 +25,12 @@ function createFakeAgentRun(): {
   push: (event: RunEvent) => void;
   settle: (result: RunResult<string, false>) => void;
   abortCalls: (string | undefined)[];
+  abortChildCalls: { childId: string; reason: string | undefined }[];
   disposed: boolean;
   returnCalls: number;
 } {
   const abortCalls: (string | undefined)[] = [];
+  const abortChildCalls: { childId: string; reason: string | undefined }[] = [];
   let disposed = false;
   let returnCalls = 0;
   const buffered: RunEvent[] = [];
@@ -53,6 +55,12 @@ function createFakeAgentRun(): {
     },
     abort(reason?: string): void {
       abortCalls.push(reason);
+    },
+    children(): readonly never[] {
+      return [];
+    },
+    abortChild(childId: string, reason?: string): void {
+      abortChildCalls.push({ childId, reason });
     },
     [Symbol.dispose](): void {
       disposed = true;
@@ -85,6 +93,7 @@ function createFakeAgentRun(): {
 
   return {
     handle,
+    abortChildCalls,
     push(event) {
       if (waitResolve) {
         const resolve = waitResolve;
@@ -273,6 +282,30 @@ describe('createLazyAgent', () => {
     expect((result.error as AgentContractError).code).toBe('INVALID_AGENT_HANDLE');
   });
 
+  it('rejects a run() handle missing children()/abortChild() (AB-50) as an AgentContractError, not a raw TypeError', async () => {
+    // Regression: without validating these two, a lazy-loaded older or
+    // untyped third-party handle would pass this guard, start and finish
+    // normally, and only fail later — as a raw `TypeError:
+    // underlying.children is not a function` — the first time something
+    // called the wrapper's own children()/abortChild(), instead of the
+    // contract failure this validator exists to surface up front.
+    const preAb50Handle = {
+      result: () => Promise.resolve(successResult('x')),
+      unwrap: () => Promise.resolve('x'),
+      abort: () => {},
+      [Symbol.dispose]: () => {},
+      [Symbol.asyncIterator]: () => (async function* () {})(),
+      // Deliberately omits `children`/`abortChild`.
+    } as unknown as AgentRun<string, false>;
+    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => preAb50Handle };
+    const lazy = createLazyAgent(() => agent, { label: 'pre-ab50-handle' });
+
+    const run = lazy.run('one');
+    const result = await run.result();
+    expect(result.error).toBeInstanceOf(AgentContractError);
+    expect((result.error as AgentContractError).code).toBe('INVALID_AGENT_HANDLE');
+  });
+
   it('wraps a synchronous throw from the underlying run() as an AgentContractError', async () => {
     const agent: RunnableAgent<string, false> = {
       name: 'fake',
@@ -390,6 +423,27 @@ describe('createLazyAgent', () => {
     await run.result();
 
     expect(fake.abortCalls).toEqual(['first']);
+  });
+
+  it('children()/abortChild() read empty/no-op before resolution and delegate to the underlying handle once resolved', async () => {
+    const fake = createFakeAgentRun();
+    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };
+    const lazy = createLazyAgent(() => agent);
+
+    const run = lazy.run('hello');
+
+    // Before the internal resolution microtask has run, there is no
+    // underlying handle yet — both read as the safe, opt-in default.
+    expect(run.children()).toEqual([]);
+    expect(() => run.abortChild('child-1', 'too soon')).not.toThrow();
+
+    await flushMicrotasks();
+
+    run.abortChild('child-1', 'now resolved');
+    fake.settle(successResult('done'));
+    await run.result();
+
+    expect(fake.abortChildCalls).toEqual([{ childId: 'child-1', reason: 'now resolved' }]);
   });
 
   it('honors an already-aborted context.signal without calling the loader', async () => {
@@ -597,6 +651,8 @@ describe('createLazyAgent', () => {
       result: () => new Promise<RunResult<string, false>>(() => {}),
       unwrap: () => new Promise<string>(() => {}),
       abort() {},
+      children: () => [],
+      abortChild() {},
       [Symbol.dispose]() {},
       [Symbol.asyncIterator](): AsyncIterator<RunEvent> {
         return {
@@ -625,6 +681,8 @@ describe('createLazyAgent', () => {
       result: () => new Promise<RunResult<string, false>>(() => {}),
       unwrap: () => new Promise<string>(() => {}),
       abort() {},
+      children: () => [],
+      abortChild() {},
       [Symbol.dispose]() {},
       [Symbol.asyncIterator](): AsyncIterator<RunEvent> {
         return {
@@ -721,6 +779,8 @@ describe('createLazyAgent', () => {
       result: () => Promise.reject(rejection),
       unwrap: () => Promise.reject(rejection),
       abort() {},
+      children: () => [],
+      abortChild() {},
       [Symbol.dispose]() {},
       [Symbol.asyncIterator](): AsyncIterator<RunEvent> {
         return {
