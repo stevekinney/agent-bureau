@@ -1289,14 +1289,18 @@ describe('createDurableActiveRun.closed()', () => {
   // `completed` the moment it sees `!cancelRequested`. Uses the manual
   // engine (not the real one) so the workflow genuinely does not settle on
   // its own before the signal fires — proving cancellation, not a race.
-  it('fires its own post-cancel confirmation when only RunOptions.signal fired, never calling abort() or engine.cancel', async () => {
-    // A signal-only cancellation never fires engine.cancel from abort()
-    // itself (only abort() does that) — this proves resolveDurableOutcome's
-    // fallback still confirms durable cancellation rather than trusting
-    // `!cancelRequested` alone. The workflow settling here (resolveResult)
-    // stands in for the in-process signal drop settling it some other way
-    // (e.g. a B6-style race) — engine.cancel was never called by anyone.
-    const { engine, resolveResult } = createManualDurableEngine();
+  // Regression: a code-review finding on the AB-204 pull request — a
+  // workflow parked in `ctx.sleep`/`ctx.waitForSignal` cannot advance on
+  // the in-process signal alone; only `engine.cancel()` can unblock it.
+  // Deferring that call to `resolveDurableOutcome`'s fallback (which only
+  // runs after `result` has settled) would deadlock closed() AND `result`
+  // forever for a signal-only cancellation. `engine.cancel` must fire the
+  // moment the signal fires — proven here by asserting it fires
+  // SYNCHRONOUSLY-ISH with controller.abort(), well before `closed()` is
+  // ever called, and before the manual engine's own `result` has any other
+  // way to settle.
+  it('fires engine.cancel the moment RunOptions.signal aborts, never calling abort() directly, unblocking a workflow that cannot otherwise advance', async () => {
+    const { engine } = createManualDurableEngine();
     const cancelledIds: string[] = [];
     const realCancel = engine.cancel.bind(engine);
     engine.cancel = async (id: string) => {
@@ -1324,14 +1328,47 @@ describe('createDurableActiveRun.closed()', () => {
 
     await Promise.resolve();
     controller.abort();
-    expect(cancelledIds).toEqual([]);
+    // engine.cancel is async (its own body awaits nothing before the
+    // push), so a single microtask tick is enough to observe it fired —
+    // no closed() call, and no other trigger, was involved.
+    await Promise.resolve();
+    expect(cancelledIds).toEqual([runId]);
 
+    // The manual engine's `cancel` rejects the workflow result as its own
+    // side effect (the B6 race simulation) — that is what actually lets
+    // `result` (and therefore closed()) settle here, not anything closed()
+    // itself drove.
     const closedAcknowledgement = activeRun.closed();
-    resolveResult();
     await activeRun.result;
 
     expect(await closedAcknowledgement).toEqual({ status: 'completed' });
     expect(cancelledIds).toEqual([runId]);
+  });
+
+  it('routes an already-aborted RunOptions.signal into abort() too, even when the signal was aborted before this ActiveRun was even created', async () => {
+    const context = await buildContext();
+    try {
+      const controller = new AbortController();
+      controller.abort('already gone before creation');
+
+      const activeRun = createDurableActiveRun(context, {
+        runId: 'ac-durable-pre-aborted-signal',
+        sessionId: 'ac-durable-pre-aborted-signal',
+        options: {
+          ...runOptions(async () => ({ content: 'unused', toolCalls: [] })),
+          signal: controller.signal,
+        },
+        prompt: 'Hello',
+      });
+
+      await activeRun.result;
+      await Promise.resolve();
+
+      const acknowledgement = await activeRun.closed();
+      expect(acknowledgement).not.toEqual({ status: 'not-required' });
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
   });
 
   // Regression: a code-review finding on the AB-204 pull request — see the

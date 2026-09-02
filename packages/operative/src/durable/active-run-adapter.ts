@@ -558,6 +558,26 @@ export function createDurableActiveRun(
     }
   }
 
+  // A cancellation delivered through `RunOptions.signal` alone (never
+  // calling this ActiveRun's own `abort()`) must still route through
+  // `abort()` — and do so THE MOMENT the signal fires, not merely be
+  // observed later by `resolveDurableOutcome`'s fallback. That fallback
+  // only runs after `result` has settled, but a workflow parked in
+  // `ctx.sleep`/`ctx.waitForSignal` cannot advance on the in-process signal
+  // alone — only `engine.cancel()` can unblock it. Deferring to the
+  // fallback would deadlock closed() (and `result`) forever. Firing here,
+  // synchronously the same tick the signal fires, is what actually
+  // terminates the parked workflow.
+  if (combinedSignal.aborted) {
+    abort(typeof combinedSignal.reason === 'string' ? combinedSignal.reason : undefined);
+  } else {
+    combinedSignal.addEventListener(
+      'abort',
+      () => abort(typeof combinedSignal.reason === 'string' ? combinedSignal.reason : undefined),
+      { once: true },
+    );
+  }
+
   async function resolveDurableOutcome(): Promise<CleanupAcknowledgement> {
     // `cancelRequested` alone misses a cancellation delivered through
     // `RunOptions.signal` with `abort()` never called — the same gap the

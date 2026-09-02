@@ -315,18 +315,48 @@ describe('createLazyAgent', () => {
     // otherwise pass this guard and only fail later, as a raw
     // `TypeError: underlying.closed is not a function`, the first time
     // this wrapper's own closed() delegates to it.
+    let disposed = false;
     const preAb204Handle = {
       result: () => Promise.resolve(successResult('x')),
       unwrap: () => Promise.resolve('x'),
       abort: () => {},
       children: () => [],
       abortChild: () => {},
-      [Symbol.dispose]: () => {},
+      [Symbol.dispose]: () => {
+        disposed = true;
+      },
       [Symbol.asyncIterator]: () => (async function* () {})(),
       // Deliberately omits `closed`.
     } as unknown as AgentRun<string, false>;
     const agent: RunnableAgent<string, false> = { name: 'fake', run: () => preAb204Handle };
     const lazy = createLazyAgent(() => agent, { label: 'pre-ab204-handle' });
+
+    const run = lazy.run('one');
+    const result = await run.result();
+    expect(result.error).toBeInstanceOf(AgentContractError);
+    expect((result.error as AgentContractError).code).toBe('INVALID_AGENT_HANDLE');
+    // Regression: a code-review finding on the AB-204 pull request —
+    // agent.run() already started this handle's underlying work before the
+    // validator rejected it; the rejection path must still dispose it
+    // rather than leaking provider/tool work unobserved.
+    expect(disposed).toBe(true);
+  });
+
+  it('swallows a throwing [Symbol.dispose] on a rejected invalid handle without masking the AgentContractError', async () => {
+    const preAb204Handle = {
+      result: () => Promise.resolve(successResult('x')),
+      unwrap: () => Promise.resolve('x'),
+      abort: () => {},
+      children: () => [],
+      abortChild: () => {},
+      [Symbol.dispose]: () => {
+        throw new Error('disposer itself is broken');
+      },
+      [Symbol.asyncIterator]: () => (async function* () {})(),
+      // Deliberately omits `closed`.
+    } as unknown as AgentRun<string, false>;
+    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => preAb204Handle };
+    const lazy = createLazyAgent(() => agent, { label: 'pre-ab204-handle-throwing-dispose' });
 
     const run = lazy.run('one');
     const result = await run.result();

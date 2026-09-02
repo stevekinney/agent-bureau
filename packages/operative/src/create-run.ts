@@ -293,6 +293,23 @@ export function createActiveRun(options: RunOptions, durable?: DurableRunRouting
     abortController.abort(reason);
   }
 
+  // A cancellation delivered through `RunOptions.signal` alone (never
+  // calling this ActiveRun's own `abort()`) must still route through
+  // `abort()` — not just be observed later by `disqualifiesFastPath`'s
+  // `combinedSignal.aborted` read. `evaluateNotRequired()` and
+  // `resolveOutcome` are on `closed()`'s async path, so relying on either
+  // to set `cancelRequested` would be an ordering hazard; this makes the
+  // signal itself the trigger, synchronously, the same tick it fires.
+  if (combinedSignal.aborted) {
+    abort(typeof combinedSignal.reason === 'string' ? combinedSignal.reason : undefined);
+  } else {
+    combinedSignal.addEventListener(
+      'abort',
+      () => abort(typeof combinedSignal.reason === 'string' ? combinedSignal.reason : undefined),
+      { once: true },
+    );
+  }
+
   function complete(): void {
     for (const cleanup of cleanups) cleanup();
     emitter.complete();

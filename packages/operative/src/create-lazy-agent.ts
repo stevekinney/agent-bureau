@@ -518,6 +518,22 @@ function createDeferredAgentRun<O, H extends boolean>(
     }
 
     if (!isValidAgentRunHandle(handle)) {
+      // `agent.run()` has already started this handle's underlying work —
+      // provider/tool calls can continue unobserved if nothing disposes it.
+      // Best-effort: an otherwise-valid handle missing only `closed()` (or
+      // any other single required member) still very likely has a callable
+      // `[Symbol.dispose]`; guard rather than assume, since a handle this
+      // malformed could be missing that too.
+      const disposable = handle as unknown as Record<PropertyKey, unknown>;
+      if (isCallable(disposable[Symbol.dispose])) {
+        try {
+          (disposable[Symbol.dispose] as () => void).call(handle);
+        } catch {
+          // Swallow: the handle is already being reported as contractually
+          // invalid: a throwing disposer doesn't change that outcome, and
+          // must not mask it.
+        }
+      }
       finalizeSynthetic(
         new AgentContractError(`Lazy agent "${label}" returned an invalid run handle`, handle),
         'error',

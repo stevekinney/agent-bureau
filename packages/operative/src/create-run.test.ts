@@ -135,6 +135,30 @@ describe('ActiveRun.closed()', () => {
     expect(await activeRun.closed()).not.toEqual({ status: 'not-required' });
   });
 
+  // Regression: a code-review finding on the AB-204 pull request — a
+  // signal-only cancellation must route through abort() the moment it
+  // fires (not merely be observed later), including when the signal was
+  // already aborted before this ActiveRun was even created.
+  it('routes an already-aborted RunOptions.signal into abort() too, even when the signal was aborted before this ActiveRun was even created', async () => {
+    const controller = new AbortController();
+    controller.abort('already gone before creation');
+    const generate = createMockGenerate([textResponse('should not run')]);
+    const toolbox = createTestToolbox([]);
+    const activeRun = createActiveRun({
+      generate,
+      toolbox,
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      signal: controller.signal,
+    });
+
+    const result = await activeRun.result;
+    expect(result.finishReason).toBe('aborted');
+    await Promise.resolve();
+
+    expect(await activeRun.closed()).not.toEqual({ status: 'not-required' });
+  });
+
   it('calling closed() twice after settlement returns the identical object by reference', async () => {
     const generate = createMockGenerate([textResponse('done')]);
     const toolbox = createTestToolbox([]);
