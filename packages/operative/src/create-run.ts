@@ -22,6 +22,7 @@ import {
 } from './events';
 import { executeLoop } from './loop';
 import { toOutputJsonSchema } from './structured-output/response-schema';
+import { createToolboxEventForwarder } from './toolbox-event-forwarding';
 import type { CleanupAcknowledgement, ClosedOptions, RunOptions, RunResult } from './types';
 
 /**
@@ -195,8 +196,11 @@ export function createActiveRun(options: RunOptions, durable?: DurableRunRouting
     pendingHookPromises.push(promise);
   };
 
-  const toolboxForward = forwardEvents(options.toolbox, emitter, 'toolbox');
-  cleanups.push(() => toolboxForward.stop());
+  // AB-239: the base subscription covers the whole run; `toolboxForwarder.onStepToolbox`
+  // (wired below via `executeLoop`) additionally covers any step whose `selectTools`
+  // hook swaps in a different toolbox for that step.
+  const toolboxForwarder = createToolboxEventForwarder(options.toolbox, emitter);
+  cleanups.push(() => toolboxForwarder.stop());
 
   const conversationForward = forwardEvents(conversation, emitter, 'conversation');
   cleanups.push(() => conversationForward.stop());
@@ -365,7 +369,11 @@ export function createActiveRun(options: RunOptions, durable?: DurableRunRouting
   }
 
   const result = Promise.resolve()
-    .then(() => executeLoop(loopOptions, emitter, hookTracker, trackToolCallIds))
+    .then(() =>
+      executeLoop(loopOptions, emitter, hookTracker, trackToolCallIds, (toolbox) =>
+        toolboxForwarder.onStepToolbox(toolbox),
+      ),
+    )
     .finally(complete);
 
   let cancelRequested = false;

@@ -141,6 +141,21 @@ export interface StepDeps {
    * run's calls on the same toolbox.
    */
   readonly trackToolCallIds?: (ids: readonly string[]) => void;
+  /**
+   * AB-239 — invoked by `runStep` itself ONCE, at step start, with that
+   * step's resolved toolbox (`deps.toolbox`, or a `selectTools`
+   * replacement), immediately after resolution. The driver (`loop.ts`'s
+   * `executeLoop` / `run-workflow.ts`) invokes the SAME callback a second
+   * time, at step end (after `runStep` returns) with `deps.toolbox` — so
+   * across one step this fires twice: swapped-or-base at start, base at end.
+   * Lets the driver (`create-run.ts` / `active-run-adapter.ts`) keep
+   * `toolbox.*` event forwarding attached to whichever toolbox instance this
+   * step actually executes tools against, for exactly that step's duration.
+   * `undefined` for a driver that builds no run emitter (e.g.
+   * `startDurableRunResult`'s headless scheduler runs) — see
+   * `ToolboxEventForwarder`.
+   */
+  readonly onStepToolbox?: (toolbox: AnyToolbox) => void;
 }
 
 /**
@@ -796,6 +811,7 @@ export async function runStep(
       stepToolbox = registryToolbox;
     }
   }
+  deps.onStepToolbox?.(stepToolbox);
 
   // Resolve per-step tool choice: hook override → RunOptions default → undefined
   let stepToolChoice: ToolChoice | undefined = deps.defaultToolChoice;
