@@ -1,8 +1,11 @@
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
+import type { AnyToolbox } from 'armorer';
 import {
   createTool,
   createToolbox,
+  ToolboxBudgetExceededEvent,
+  ToolboxCallEvent,
   ToolboxExecuteStartEvent,
   ToolboxPolicyDeniedEvent,
   ToolboxProgressEvent,
@@ -47,6 +50,7 @@ import { createCheckpointStore } from './checkpoint-store';
 import type { RegistryAgnosticEngine } from './create-run-engine';
 import { createRunEngine } from './create-run-engine';
 import { AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION, createRunWorkflow } from './run-workflow';
+import type { DurableRunDeps } from './types';
 
 const run = (...args: Parameters<typeof createActiveRun>) => createActiveRun(...args).result;
 const createRun = createActiveRun;
@@ -1169,6 +1173,209 @@ describe('createRun with durable routing', () => {
     }
   });
 
+  it('forwards a budget-exceeded event from a selectTools-swapped step toolbox on the durable path (AB-239)', async () => {
+    const context = await buildContext();
+    try {
+      const echoTool = createTool({
+        name: 'echo',
+        description: 'Echo the input',
+        input: z.object({ message: z.string() }),
+        execute: async ({ message }: { message: string }) => message,
+      });
+
+      const baseToolbox = createToolbox([echoTool]) as unknown as RunOptions['toolbox'];
+      const swappedToolbox = createToolbox([echoTool], {
+        budget: { maxCalls: 1 },
+      }) as unknown as RunOptions['toolbox'];
+
+      const generate = createMockGenerate([
+        { content: '', toolCalls: [{ name: 'echo', arguments: { message: 'step-zero' } }] },
+        { content: '', toolCalls: [{ name: 'echo', arguments: { message: 'step-one' } }] },
+        { content: 'done', toolCalls: [] },
+      ]);
+
+      const activeRun = createRun(
+        {
+          generate,
+          toolbox: baseToolbox,
+          conversation: createConversationHistory(),
+          stopWhen: stopWhen.noToolCalls(),
+          runId: 'durable-swap-budget-run',
+          // Every step resolves to the swapped toolbox; the base toolbox is
+          // never used for tool execution.
+          selectTools: () => swappedToolbox,
+        },
+        { ...context, runId: 'durable-swap-budget-run', prompt: 'Start' },
+      );
+
+      const forwardedEvents: string[] = [];
+      activeRun.toObservable().subscribe({
+        next(event) {
+          if (event.type.startsWith('toolbox.')) forwardedEvents.push(event.type);
+        },
+      });
+
+      await activeRun.result;
+
+      expect(forwardedEvents).toContain('toolbox.budget-exceeded');
+      expect(forwardedEvents).toContain('toolbox.error');
+      expect(forwardedEvents.filter((type) => type === 'toolbox.call')).toHaveLength(2);
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('forwards a loop-blocked companion error from a selectTools-swapped step toolbox on the durable path (AB-239)', async () => {
+    const context = await buildContext();
+    try {
+      const echoTool = createTool({
+        name: 'echo',
+        description: 'Echo the input',
+        input: z.object({ message: z.string() }),
+        execute: async ({ message }: { message: string }) => message,
+      });
+
+      const baseToolbox = createToolbox([echoTool]) as unknown as RunOptions['toolbox'];
+      const swappedToolbox = createToolbox([echoTool], {
+        loopDetection: { warningThreshold: 2, blockThreshold: 4, maxWindowSize: 30 },
+      }) as unknown as RunOptions['toolbox'];
+
+      const responses = Array.from({ length: 5 }, () => ({
+        content: '',
+        toolCalls: [{ name: 'echo', arguments: { message: 'repeat' } }],
+      }));
+      responses.push({ content: 'done', toolCalls: [] });
+      const generate = createMockGenerate(responses);
+
+      const activeRun = createRun(
+        {
+          generate,
+          toolbox: baseToolbox,
+          conversation: createConversationHistory(),
+          stopWhen: stopWhen.noToolCalls(),
+          runId: 'durable-swap-loop-run',
+          selectTools: () => swappedToolbox,
+        },
+        { ...context, runId: 'durable-swap-loop-run', prompt: 'Start' },
+      );
+
+      const forwardedErrorEvents: Array<{ originalEvent: unknown }> = [];
+      activeRun.addEventListener('toolbox.error', (event) => {
+        forwardedErrorEvents.push(event);
+      });
+
+      await activeRun.result;
+
+      const loopBlockedError = forwardedErrorEvents.find((e) => {
+        const original = e.originalEvent as {
+          result?: { error?: { code?: string; category?: string } };
+        };
+        return (
+          original.result?.error?.code === 'LOOP_BLOCKED' &&
+          original.result?.error?.category === 'conflict'
+        );
+      });
+      expect(loopBlockedError).toBeDefined();
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('does not duplicate toolbox events on the durable path when selectTools returns the original toolbox instance', async () => {
+    const context = await buildContext();
+    try {
+      const echoTool = createTool({
+        name: 'echo',
+        description: 'Echo the input',
+        input: z.object({ message: z.string() }),
+        execute: async ({ message }: { message: string }) => message,
+      });
+
+      const toolbox = createToolbox([echoTool]) as unknown as RunOptions['toolbox'];
+
+      const generate = createMockGenerate([
+        { content: '', toolCalls: [{ name: 'echo', arguments: { message: 'hi' } }] },
+        { content: 'done', toolCalls: [] },
+      ]);
+
+      const activeRun = createRun(
+        {
+          generate,
+          toolbox,
+          conversation: createConversationHistory(),
+          stopWhen: stopWhen.noToolCalls(),
+          runId: 'durable-no-swap-run',
+          selectTools: () => toolbox,
+        },
+        { ...context, runId: 'durable-no-swap-run', prompt: 'Start' },
+      );
+
+      const callEvents: unknown[] = [];
+      activeRun.addEventListener('toolbox.call', (e) => callEvents.push(e));
+
+      await activeRun.result;
+
+      expect(callEvents).toHaveLength(1);
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('calls onStepToolbox at each step start with the resolved toolbox and at step end with the base toolbox on the durable path (AB-239)', async () => {
+    const context = await buildContext();
+    try {
+      const echoTool = createTool({
+        name: 'echo',
+        description: 'Echo the input',
+        input: z.object({ message: z.string() }),
+        execute: async ({ message }: { message: string }) => message,
+      });
+
+      const baseToolbox = createToolbox([echoTool]) as unknown as RunOptions['toolbox'];
+      const swappedToolbox = createToolbox([echoTool]) as unknown as RunOptions['toolbox'];
+
+      const generate = createMockGenerate([
+        { content: '', toolCalls: [{ name: 'echo', arguments: { message: 'step-zero' } }] },
+        { content: '', toolCalls: [{ name: 'echo', arguments: { message: 'step-one' } }] },
+        { content: 'done', toolCalls: [] },
+      ]);
+
+      const calls: Array<'base' | 'swapped'> = [];
+
+      const activeRun = createRun(
+        {
+          generate,
+          toolbox: baseToolbox,
+          conversation: createConversationHistory(),
+          stopWhen: stopWhen.noToolCalls(),
+          runId: 'durable-onstep-ordering-run',
+          selectTools: () => swappedToolbox,
+        },
+        {
+          ...context,
+          runId: 'durable-onstep-ordering-run',
+          prompt: 'Start',
+          onServices: (services) => {
+            const inner = services.onStepToolbox;
+            services.onStepToolbox = (toolbox) => {
+              calls.push(toolbox === swappedToolbox ? 'swapped' : 'base');
+              inner?.(toolbox);
+            };
+          },
+        },
+      );
+
+      await activeRun.result;
+
+      // Three steps (two tool-calling, one final stop): `selectTools` resolves
+      // on every step, so each brackets the swapped toolbox between a start
+      // call and an end call reverting to the base toolbox.
+      expect(calls).toEqual(['swapped', 'base', 'swapped', 'base', 'swapped', 'base']);
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
   // Regression: PRRT_kwDORvupsc6MZ-vs — when engine.cancel() wins the B6 abort
   // race (handle.result() rejects with "Workflow cancelled"), the abort result was
   // built from an empty run state and the original seed conversation, losing any
@@ -1799,6 +2006,84 @@ describe('createRecoveredRunEventSurface', () => {
     );
     expect(forwardedTypes).toHaveLength(eventCountAfterCleanup + 1);
     expect(progress).toHaveLength(1);
+  });
+
+  it('forwards events from a selectTools-swapped step toolbox and stops without duplicating base events (AB-239)', () => {
+    const tool = createTool({
+      name: 'recovered-swap-tool',
+      description: 'A recovered-run swapped-toolbox event source',
+      input: z.object({ value: z.string() }),
+      async execute({ value }) {
+        return { value };
+      },
+    });
+    const baseToolbox = createToolbox([tool]);
+    const swappedToolbox = createToolbox([tool]);
+    const options = {
+      ...runOptions(async () => ({ content: 'unused', toolCalls: [] })),
+      toolbox: baseToolbox as unknown as RunOptions['toolbox'],
+    };
+    // A resolver-installed `onStepToolbox` already on `services` before this
+    // surface is built must be chained, not clobbered.
+    const priorCalls: AnyToolbox[] = [];
+    const services: DurableRunDeps = {
+      options,
+      toolbox: baseToolbox,
+      onStepToolbox: (toolbox) => priorCalls.push(toolbox),
+    };
+    const surface = createRecoveredRunEventSurface(
+      services,
+      'recovered-swap-run',
+      'recovered-agent',
+    );
+
+    const forwardedTypes: string[] = [];
+    surface.emitter.toObservable().subscribe((event) => forwardedTypes.push(event.type));
+
+    // `run-workflow.ts` calls `deps.onStepToolbox` (== `services.onStepToolbox`)
+    // once per step with that step's resolved toolbox.
+    expect(services.onStepToolbox).toBeDefined();
+    services.onStepToolbox?.(swappedToolbox);
+    expect(priorCalls).toEqual([swappedToolbox]);
+
+    const call = { id: 'swap-call-id', name: tool.name, arguments: { value: 'hi' } };
+    swappedToolbox.dispatchEvent(
+      new ToolboxBudgetExceededEvent({ tool, call, reason: 'Budget exceeded: max calls 1' }),
+    );
+    expect(forwardedTypes).toContain('toolbox.budget-exceeded');
+
+    // The base toolbox's own subscription is untouched by the swap — it
+    // still forwards, and does not duplicate the swapped toolbox's events.
+    const beforeBaseCount = forwardedTypes.length;
+    baseToolbox.dispatchEvent(new ToolboxCallEvent({ tool, call }));
+    expect(forwardedTypes).toHaveLength(beforeBaseCount + 1);
+    expect(forwardedTypes.filter((type) => type === 'toolbox.call')).toHaveLength(1);
+
+    // Reverting to the base toolbox for the next step stops the swap
+    // subscription — the swapped toolbox's later events are no longer forwarded.
+    services.onStepToolbox?.(baseToolbox);
+    const beforeRevertCount = forwardedTypes.length;
+    swappedToolbox.dispatchEvent(
+      new ToolboxBudgetExceededEvent({ tool, call, reason: 'ignored after revert' }),
+    );
+    expect(forwardedTypes).toHaveLength(beforeRevertCount);
+
+    // `stopToolboxForward` (used by both the fresh-start and recovered
+    // drivers' cleanup) also silences the base subscription.
+    surface.stopToolboxForward();
+    const beforeStopCount = forwardedTypes.length;
+    baseToolbox.dispatchEvent(new ToolboxCallEvent({ tool, call }));
+    expect(forwardedTypes).toHaveLength(beforeStopCount);
+
+    // `stop()` is final: a late `onStepToolbox` call (e.g. a driver bug, or a
+    // step resolving after cleanup) must not re-open a swap subscription —
+    // the chained resolver callback still fires either way.
+    services.onStepToolbox?.(swappedToolbox);
+    expect(priorCalls).toEqual([swappedToolbox, baseToolbox, swappedToolbox]);
+    swappedToolbox.dispatchEvent(
+      new ToolboxBudgetExceededEvent({ tool, call, reason: 'ignored after stop' }),
+    );
+    expect(forwardedTypes).toHaveLength(beforeStopCount);
   });
 });
 

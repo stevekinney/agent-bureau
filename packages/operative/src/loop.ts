@@ -1,3 +1,4 @@
+import type { AnyToolbox } from 'armorer';
 import { Conversation, isConversation } from 'conversationalist';
 
 import { MaximumStepsExceededError } from './errors';
@@ -104,6 +105,10 @@ export async function executeLoop(
   // AB-204: forwarded to `buildStepDeps`'s output — see
   // `StepDeps.trackToolCallIds` and `create-run.ts`'s `ownedToolCallIds`.
   trackToolCallIds?: (ids: readonly string[]) => void,
+  // AB-239: notifies the driver's toolbox-event forwarder of each step's
+  // resolved toolbox (base or `selectTools`-swapped). Not part of RunOptions —
+  // it is a driver-internal wire, not user-facing configuration.
+  onStepToolbox?: (toolbox: AnyToolbox) => void,
 ): Promise<RunResult> {
   const { maximumSteps = DEFAULT_MAXIMUM_STEPS, hooks, onMaximumSteps, costEstimation } = options;
 
@@ -111,7 +116,7 @@ export async function executeLoop(
     ? options.conversation
     : new Conversation(options.conversation);
 
-  const deps = { ...buildStepDeps(options), hookTracker, trackToolCallIds };
+  const deps = { ...buildStepDeps(options), hookTracker, trackToolCallIds, onStepToolbox };
   const runState = createRunState();
 
   const runStartTime = performance.now();
@@ -133,6 +138,12 @@ export async function executeLoop(
 
   for (let step = 0; step < maximumSteps; step++) {
     const outcome = await runStep(deps, runState, conversation, step, emitter);
+    // AB-239: revert the forwarder to the base toolbox now that the step
+    // (which called `onStepToolbox` with its own resolved toolbox) has ended —
+    // see `ToolboxEventForwarder`'s JSDoc for why this must happen at the
+    // step's actual end, not merely before the next step resolves its own
+    // toolbox (a durable step can park for arbitrarily long in between).
+    onStepToolbox?.(deps.toolbox);
 
     if (outcome.kind === 'abort') {
       return makeAbortResult(

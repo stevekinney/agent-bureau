@@ -1,7 +1,7 @@
 import { HISTORY_CIRCUIT_BREAKER_REASON, isWeftErrorLike } from '@lostgradient/weft';
-import type { ToolboxEventMap } from 'armorer';
+import type { AnyToolbox, ToolboxEventMap } from 'armorer';
 import { Conversation, isConversation } from 'conversationalist';
-import { CompletableEventTarget, forwardEvents } from 'lifecycle';
+import { CompletableEventTarget } from 'lifecycle';
 
 import { createClosedAcknowledgement } from '../closed-acknowledgement';
 import type { ActiveRun } from '../create-run';
@@ -32,6 +32,7 @@ import {
   startRunLifecycle,
 } from '../run-lifecycle';
 import type { RunState } from '../run-step';
+import { createToolboxEventForwarder } from '../toolbox-event-forwarding';
 import type { CleanupAcknowledgement, FinishReason, RunOptions, RunResult } from '../types';
 import type { CheckpointStore } from './checkpoint-store';
 import type { RegistryAgnosticEngine } from './create-run-engine';
@@ -361,8 +362,12 @@ export function createDurableActiveRun(
   // closed()'s not-required fast path (coordinator ruling, AB-204) — see the
   // identical counter in `create-run.ts`.
   let inFlightTools = 0;
-  const toolboxForward = forwardEvents(options.toolbox, emitter, 'toolbox');
-  cleanups.push(() => toolboxForward.stop());
+  // AB-239: the base subscription covers the whole run; `toolboxForwarder.onStepToolbox`
+  // (threaded through `driveDurableRun` into `services.onStepToolbox`, then into
+  // per-step `StepDeps` by `run-workflow.ts`) additionally covers any step whose
+  // `selectTools` hook swaps in a different toolbox for that step.
+  const toolboxForwarder = createToolboxEventForwarder(options.toolbox, emitter);
+  cleanups.push(() => toolboxForwarder.stop());
 
   // C3 — curated tool.* bubble events stamped with {agentName, runId, step}.
   // Mirrors the same block in createActiveRun (the in-memory path) so the
@@ -505,6 +510,7 @@ export function createDurableActiveRun(
       durableRun.prompt,
       durableRun.onServices,
       reachability,
+      (toolbox) => toolboxForwarder.onStepToolbox(toolbox),
     );
   }
 
@@ -693,8 +699,20 @@ export function createRecoveredRunEventSurface(
   };
   services.emitter = emitter;
   const cleanups: Array<(() => void) | undefined> = [];
-  const toolboxForward = forwardEvents(services.toolbox, emitter, 'toolbox');
-  cleanups.push(() => toolboxForward.stop());
+  // AB-239: same base-plus-per-step forwarding as the fresh-start path
+  // (`createDurableActiveRun` → `driveDurableRun`), wired directly onto the
+  // recovered `services` object rather than threaded through a `drive()` call —
+  // the recovered generator reads `services.onStepToolbox` via `ctx.services`
+  // on its very next step. Chains any `onStepToolbox` the resolver already
+  // installed on `services` rather than clobbering it, so this forwarder can
+  // never silently drop another caller's per-step toolbox instrumentation.
+  const priorOnStepToolbox = services.onStepToolbox;
+  const toolboxForwarder = createToolboxEventForwarder(services.toolbox, emitter);
+  services.onStepToolbox = (toolbox) => {
+    priorOnStepToolbox?.(toolbox);
+    toolboxForwarder.onStepToolbox(toolbox);
+  };
+  cleanups.push(() => toolboxForwarder.stop());
 
   let currentStep = 0;
   const stepListener = (event: StepStartedEvent) => {
@@ -1227,6 +1245,7 @@ async function driveDurableRun(
   prompt: string | undefined,
   onServices: ((services: DurableRunDeps) => void) | undefined,
   reachability: { unreachable: boolean },
+  onStepToolbox: ((toolbox: AnyToolbox) => void) | undefined,
 ): Promise<RunResult> {
   const runStartTime = performance.now();
   const { hooks } = options;
@@ -1269,6 +1288,7 @@ async function driveDurableRun(
     options: { ...options, signal },
     toolbox: options.toolbox,
     emitter,
+    onStepToolbox,
   };
   // Give the caller a live reference to the EXACT object Weft will hand back as
   // `ctx.services` — see `DurableActiveRunOptions.onServices`. Must fire before

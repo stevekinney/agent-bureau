@@ -517,3 +517,52 @@ describe('loop helper coverage', () => {
     });
   });
 });
+
+describe('executeLoop onStepToolbox (AB-239)', () => {
+  it('calls onStepToolbox at each step start with the resolved toolbox and at step end with the base toolbox', async () => {
+    const echoTool = createTool({
+      name: 'echo_value',
+      description: 'Echo a provided value.',
+      input: z.object({ value: z.string() }),
+      execute: async ({ value }) => ({ echoed: value }),
+    });
+
+    const baseToolbox = createTestToolbox([echoTool]);
+    const swappedToolbox = createTestToolbox([echoTool]);
+    const calls: Array<'base' | 'swapped'> = [];
+    const onStepToolbox = (toolbox: typeof baseToolbox) => {
+      calls.push(toolbox === swappedToolbox ? 'swapped' : 'base');
+    };
+
+    let generateCalls = 0;
+    await executeLoop(
+      {
+        generate: async () => {
+          generateCalls++;
+          if (generateCalls <= 2) {
+            return {
+              content: '',
+              toolCalls: [
+                { id: `call-${generateCalls}`, name: 'echo_value', arguments: { value: 'hi' } },
+              ],
+            };
+          }
+          return textResponse('done');
+        },
+        toolbox: baseToolbox,
+        conversation: new Conversation(),
+        stopWhen: noToolCalls(),
+        // Every step resolves to the swapped toolbox.
+        selectTools: () => swappedToolbox,
+      },
+      undefined,
+      onStepToolbox,
+    );
+
+    // Three steps (two tool-calling, one final stop): `selectTools` resolves
+    // on every step, so each brackets the swapped toolbox between a start
+    // call and an end call reverting to the base toolbox — never the reverse
+    // order, and never a step-end call missing.
+    expect(calls).toEqual(['swapped', 'base', 'swapped', 'base', 'swapped', 'base']);
+  });
+});

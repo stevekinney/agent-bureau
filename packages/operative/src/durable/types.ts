@@ -152,6 +152,18 @@ export interface DurableRunDeps {
    */
   emitter?: EventDispatcher;
   /**
+   * AB-239 — invoked twice per step (via `StepDeps.onStepToolbox`, which
+   * `runStep` calls at step start and `run-workflow.ts` calls again at step
+   * end): with that step's resolved toolbox at start, with the base
+   * `toolbox` at end. Lets the driver's `ToolboxEventForwarder` keep
+   * `toolbox.*` event forwarding attached to a `selectTools`-swapped step
+   * toolbox for exactly that step's duration — including across a park
+   * (`ctx.waitForSignal`/`ctx.sleep`) between this step ending and the next
+   * one starting. `undefined` for a headless durable run with no `emitter`
+   * (nothing to forward to) — see `createToolboxEventForwarder`.
+   */
+  onStepToolbox?: (toolbox: AnyToolbox) => void;
+  /**
    * A pending self-wakeup registered during this run by the `scheduleWakeup`
    * tool. When present after the main step loop exits, the workflow performs
    * `yield* ctx.sleep(duration)` to park until the timer fires.
