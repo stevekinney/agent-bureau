@@ -875,10 +875,18 @@ export function createSessionHandle(
           // the session's own configured `runOptions.signal` rather than a
           // direct `abort()`/`[Symbol.dispose]()` call — matching the
           // identical fix in create-run.ts / active-run-adapter.ts.
+          // `activeInnerRun !== null` disqualifies unconditionally too: once
+          // a real inner run exists, its own closed() already correctly
+          // implements not-required semantics — this wrapper's OWN fast
+          // path applies only to the "reservation itself failed, no inner
+          // run ever created" case, never bypassing a real inner run's
+          // acknowledgement (which can be unresolved/unreachable even with
+          // no cancellation requested — a disposed durable engine mid-run).
           disqualifiesFastPath: () =>
             cancelRequested ||
             abortController.signal.aborted ||
-            (runOptions.signal?.aborted ?? false),
+            (runOptions.signal?.aborted ?? false) ||
+            activeInnerRun !== null,
           hasInFlightWork: () => false,
           resolveOutcome: () =>
             activeInnerRun ? activeInnerRun.closed() : Promise.resolve({ status: 'completed' }),
