@@ -83,6 +83,14 @@ export interface WebhookNotifierOptions {
   maxAttempts?: number;
   /** Base backoff delay in milliseconds; doubles on every retry. Default `1000`. */
   backoffBaseMilliseconds?: number;
+  /**
+   * Owner-issued signal threaded into every `deliver()` call's `fetchImpl`
+   * invocation (AB-37/AB-206). Aborting it stops further retry attempts for
+   * every in-flight delivery and records each one's persisted status as
+   * `aborted` rather than leaving it `pending` forever. `dispose()` still
+   * awaits that settlement via `flush()`.
+   */
+  signal?: AbortSignal;
 }
 
 /** The persisted record for a single webhook delivery. */
@@ -92,7 +100,7 @@ export interface WebhookDeliveryRecord {
   triggerType: WebhookTriggerType;
   targetUrl: string;
   runId: string;
-  status: 'pending' | 'delivered' | 'exhausted';
+  status: 'pending' | 'delivered' | 'exhausted' | 'aborted';
   attempts: number;
   lastError?: string;
   createdAt: number;
@@ -131,8 +139,13 @@ export interface WebhookNotifier {
     trigger: WebhookTriggerType;
     detail?: Record<string, unknown>;
   }): void;
-  /** Stop listening to bureau events and abandon any in-flight backoff waits. */
-  dispose(): void;
+  /**
+   * Stop listening to bureau events, abandon any in-flight backoff waits, and
+   * await every in-flight `deliver()` call tracked in `activeDeliveries`
+   * before resolving (AB-37/AB-206). Safe to call more than once — the
+   * second call resolves promptly.
+   */
+  dispose(): Promise<void>;
 }
 
 // ── Key encoding ────────────────────────────────────────────────────
@@ -233,13 +246,14 @@ export function createWebhookNotifier(
       notify() {
         // No targets configured — nothing to deliver.
       },
-      dispose() {
+      async dispose() {
         // Nothing was ever subscribed.
       },
     };
   }
 
   const fetchImpl = options?.fetch ?? fetch;
+  const signal = options?.signal;
   const sleep = options?.sleep ?? defaultSleep;
   const now = options?.now ?? Date.now;
   const maxAttempts = options?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
@@ -328,12 +342,19 @@ export function createWebhookNotifier(
     await persist(record);
 
     for (let attempt = 1; attempt <= maxAttempts && !disposed; attempt++) {
+      if (signal?.aborted) {
+        record = { ...record, status: 'aborted', updatedAt: now() };
+        await persist(record);
+        return;
+      }
+
       record = { ...record, attempts: attempt, updatedAt: now() };
       try {
         const response = await fetchImpl(target.url, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify(payload),
+          signal,
         });
         if (!response.ok) {
           throw new Error(`Webhook target responded with status ${response.status}`);
@@ -342,6 +363,16 @@ export function createWebhookNotifier(
         await persist(record);
         return;
       } catch (error) {
+        if (signal?.aborted) {
+          // The signal aborted mid-attempt (`fetchImpl` observed it, per
+          // AB-37/AB-206) — record a defined terminal status rather than
+          // treating the abort as a retryable delivery error.
+          const lastError = error instanceof Error ? error.message : String(error);
+          record = { ...record, status: 'aborted', lastError, updatedAt: now() };
+          await persist(record);
+          return;
+        }
+
         const lastError = error instanceof Error ? error.message : String(error);
         record = { ...record, lastError, updatedAt: now() };
 
@@ -467,9 +498,10 @@ export function createWebhookNotifier(
       await Promise.allSettled([...activeDeliveries]);
     },
     notify: notifyExternal,
-    dispose(): void {
+    async dispose(): Promise<void> {
       disposed = true;
       bureau.removeEventListener('action', listener);
+      await Promise.allSettled([...activeDeliveries]);
     },
   };
 }

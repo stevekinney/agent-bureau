@@ -66,6 +66,13 @@ export interface OnlineEvalSamplerOptions {
   sampleRate: number;
   /** Injectable RNG returning a value in `[0, 1)`. Defaults to `Math.random`. */
   rng?: () => number;
+  /**
+   * Owner-issued signal threaded into every `evaluateRun()` judge invocation
+   * (AB-37/AB-206). Aborting it causes the affected `evaluateRun()` call to
+   * settle promptly instead of running its remaining judges to completion.
+   * `dispose()` still awaits that settlement via `flush()`.
+   */
+  signal?: AbortSignal;
 }
 
 /** The online eval sampler object returned by {@link createOnlineEvalSampler}. */
@@ -80,8 +87,13 @@ export interface OnlineEvalSampler {
    * racing an async judge.
    */
   flush(): Promise<void>;
-  /** Stop listening to bureau events. */
-  dispose(): void;
+  /**
+   * Stop listening to bureau events and await every in-flight `evaluateRun()`
+   * judge invocation tracked in `activeEvaluations` before resolving
+   * (AB-37/AB-206). Safe to call more than once — the second call resolves
+   * promptly.
+   */
+  dispose(): Promise<void>;
 }
 
 // ── Guards ──────────────────────────────────────────────────────────
@@ -113,6 +125,50 @@ const EVAL_ALERT_TRIGGER = 'eval.threshold-breached';
 function breachesThreshold(judge: OnlineEvalJudge, result: EvalScore): boolean {
   if (judge.alertThreshold !== undefined) return result.score < judge.alertThreshold;
   return !result.pass;
+}
+
+// ── Abort-aware settlement ──────────────────────────────────────────
+
+/**
+ * Rejects with `signal`'s abort reason as soon as it aborts, so awaiting
+ * `judge.evaluate()` never blocks `evaluateRun()` past the owner's shutdown
+ * request even though {@link OnlineEvalJudge.evaluate} itself has no way to
+ * observe the signal. `signal` is the owner's disposal signal and outlives
+ * any single evaluation, so the listener is removed via `unregister()` once
+ * the race is decided rather than relying on `{ once: true }` alone —
+ * otherwise a judge that WINS the race (settles before an abort) would leave
+ * its listener attached to `signal` forever, one per sampled run.
+ */
+function whenAborted(signal: AbortSignal): { promise: Promise<never>; unregister: () => void } {
+  const reason = () => (signal.reason instanceof Error ? signal.reason : new Error('Aborted'));
+  let onAbort: (() => void) | undefined;
+  const promise = new Promise<never>((_resolve, reject) => {
+    if (signal.aborted) {
+      reject(reason());
+      return;
+    }
+    onAbort = () => reject(reason());
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+  return {
+    promise,
+    unregister: () => {
+      if (onAbort) signal.removeEventListener('abort', onAbort);
+    },
+  };
+}
+
+async function raceAgainstAbort<T>(
+  promise: Promise<T>,
+  signal: AbortSignal | undefined,
+): Promise<T> {
+  if (!signal) return promise;
+  const { promise: abortPromise, unregister } = whenAborted(signal);
+  try {
+    return await Promise.race([promise, abortPromise]);
+  } finally {
+    unregister();
+  }
 }
 
 // ── Sampler factory ─────────────────────────────────────────────────
@@ -151,7 +207,7 @@ export function createOnlineEvalSampler(
       async flush() {
         // Nothing was ever kicked off.
       },
-      dispose() {
+      async dispose() {
         // Nothing was ever subscribed.
       },
     };
@@ -159,6 +215,7 @@ export function createOnlineEvalSampler(
 
   const sampleRate = options.sampleRate;
   const rng = options.rng ?? Math.random;
+  const signal = options.signal;
 
   let observed = 0;
   let sampled = 0;
@@ -213,11 +270,17 @@ export function createOnlineEvalSampler(
     for (const judge of judges) {
       let result: EvalScore;
       try {
-        result = await judge.evaluate(runResult);
+        result = await raceAgainstAbort(Promise.resolve(judge.evaluate(runResult)), signal);
       } catch (error) {
+        // An aborted signal ends this evaluation promptly rather than
+        // recording the interrupted judge as a score-0 failure — the abort
+        // is a shutdown request, not a judge outcome.
+        if (signal?.aborted) return;
         const message = error instanceof Error ? error.message : String(error);
         result = { pass: false, score: 0, message: `Judge threw: ${message}` };
       }
+
+      if (signal?.aborted) return;
 
       await recordScore(runId, judge, result);
 
@@ -254,9 +317,10 @@ export function createOnlineEvalSampler(
     async flush(): Promise<void> {
       await Promise.allSettled([...activeEvaluations]);
     },
-    dispose(): void {
+    async dispose(): Promise<void> {
       disposed = true;
       bureau.removeEventListener('action', listener);
+      await Promise.allSettled([...activeEvaluations]);
     },
   };
 }
