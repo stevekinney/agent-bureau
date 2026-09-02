@@ -1141,23 +1141,25 @@ Stream lifecycle events are emitted for both modes: `stream-start`, `stream-chun
 
 ### Dispatching Progress Events
 
-To report progress from inside a tool, use the `dispatch` function provided in the `ToolContext` (second argument to `execute`). Emit a `progress` event with an optional `percent` number (0–100) and an optional `message`:
+To report progress from inside a tool, call `progress` on the `ToolContext` (second argument to `execute`) — a typed wrapper over `dispatch` that constructs and dispatches the same `progress` event, so you no longer hand-construct the event yourself. Pass an optional `percent` number (0–100), an optional `message`, and an optional `checkpoint` of any shape, forwarded verbatim for a downstream consumer (such as an activity-backed execution's heartbeat forwarder) to read without reconstructing it from `percent`/`message`:
 
 ```typescript
 const longTask = createTool({
   name: 'long-task',
   description: 'Does work in phases',
   input: z.object({ input: z.string() }),
-  async execute({ input }, { dispatch }) {
-    dispatch({ type: 'progress', detail: { percent: 10, message: 'Queued' } });
+  async execute({ input }, { progress }) {
+    progress({ percent: 10, message: 'Queued' });
     // ... do work
-    dispatch({ type: 'progress', detail: { percent: 50, message: 'Halfway' } });
+    progress({ percent: 50, message: 'Halfway', checkpoint: { phase: 'processing' } });
     // ... do more work
-    dispatch({ type: 'progress', detail: { percent: 100, message: 'Done' } });
+    progress({ percent: 100, message: 'Done' });
     return input.toUpperCase();
   },
 });
 ```
+
+`progress` is a no-op once the tool call has completed or been aborted, and it never resets or extends an explicit `timeout`. You can still dispatch the event by hand — `dispatch({ type: 'progress', detail: { percent: 50, message: 'Processing...' } })` — the two are equivalent.
 
 Then subscribe to `progress` on the tool:
 
