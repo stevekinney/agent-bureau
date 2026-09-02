@@ -22,6 +22,7 @@ import type {
   SessionInputAdmissionOutcome,
   SessionInputAdmissionRequest,
 } from '@lostgradient/operative/durable';
+import type { LivenessSnapshot } from '@lostgradient/operative/liveness';
 import type { Store } from '@lostgradient/operative/store';
 import type {
   HistoryPolicy,
@@ -703,6 +704,26 @@ export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
   getRun(id: string): RunDetail | undefined;
 
   /**
+   * Subscribes to live liveness updates for a run (AB-88/AB-214),
+   * delegating to the underlying `ActiveRun`'s `subscribeSnapshot`. Delivers
+   * the current snapshot synchronously before returning, then a new
+   * snapshot on every revision change; already-terminal work delivers the
+   * terminal snapshot once. A caller with only `getRun(id)` sees the
+   * liveness observed at that call; a caller wanting live updates uses this
+   * instead of polling `getRun`.
+   *
+   * Throws when `id` names no known run — matching `abortRun`'s unknown-id
+   * behavior rather than `getRun`'s `undefined`-returning one, because there
+   * is no snapshot value to hand back synchronously to `observer` for an id
+   * this bureau has never registered.
+   */
+  subscribeRunSnapshot(
+    runId: string,
+    observer: (snapshot: LivenessSnapshot) => void,
+    options?: { signal?: AbortSignal },
+  ): Subscription;
+
+  /**
    * Synchronously returns the versioned, JSON-serializable {@link RunReport}
    * (AB-96) for a run — a plain in-memory read, no I/O, no promise.
    *
@@ -1100,6 +1121,13 @@ export interface RunDetail extends RunSummary {
   events: RunEventRecord[];
   stepDetails: RunStepDetail[];
   latestSnapshot: ConversationSnapshot | undefined;
+  /**
+   * The run's current liveness snapshot (AB-88/AB-214), plain-data and
+   * JSON-safe. `getRun(id)` carries the value observed at call time; a
+   * caller wanting live updates calls `bureau.subscribeRunSnapshot(id, ...)`
+   * instead of polling `getRun`.
+   */
+  liveness: LivenessSnapshot;
 }
 
 export interface CreateRunRequest {

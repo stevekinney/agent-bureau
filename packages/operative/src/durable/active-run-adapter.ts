@@ -23,6 +23,8 @@ import {
   ToolSettledBubbleEvent,
   ToolStartedBubbleEvent,
 } from '../events';
+import type { StallWatchdogClock } from '../liveness';
+import { createActiveRunLiveness } from '../liveness';
 import { createRunState } from '../loop';
 import { UnsupportedRunResultVersionError } from '../run-envelope';
 import {
@@ -139,6 +141,12 @@ export interface DurableActiveRunOptions {
    * tool's context at it (see bureau's `createRunFromRequest` for the pattern).
    */
   onServices?: (services: DurableRunDeps) => void;
+  /**
+   * Test-only clock seam for this run's `LivenessObservable` watchdogs
+   * (AB-214/obs-01). Composition-root only — production callers omit this
+   * and get the real `Date.now()`/`setTimeout` clock.
+   */
+  livenessClock?: StallWatchdogClock;
 }
 
 /**
@@ -348,6 +356,12 @@ export function createDurableActiveRun(
     ? options.conversation
     : new Conversation(options.conversation);
 
+  const liveness = createActiveRunLiveness({
+    id: runId,
+    durability: 'durable',
+    clock: durableRun.livenessClock,
+  });
+
   // Forward toolbox events with the `toolbox` prefix, as createRun does. The
   // toolbox is the SAME instance `runStep` executes in-process under inline mode,
   // so its events fire live on the durable path.
@@ -452,6 +466,12 @@ export function createDurableActiveRun(
           },
         ),
       );
+      liveness.recordToolProgressPulse({
+        toolCallId: e.call.id,
+        toolName: e.call.name,
+        percent: e.percent,
+        message: e.message,
+      });
     };
 
     const onPolicyDenied = (e: ToolboxEventMap['policy-denied']) => {
@@ -484,6 +504,7 @@ export function createDurableActiveRun(
   function complete(): void {
     for (const cleanup of cleanups) cleanup();
     emitter.complete();
+    liveness.dispose();
   }
 
   // closed()'s AC8-equivalent for a FRESH (non-reattached) run (AB-204): a
@@ -514,6 +535,23 @@ export function createDurableActiveRun(
     );
   }
 
+  {
+    const onGenerateStarted = () => liveness.recordProviderPulse({ phase: 'started' });
+    const onGenerateCompleted = () => liveness.recordProviderPulse({ phase: 'completed' });
+    const onGenerateError = () => liveness.recordProviderPulse({ phase: 'error' });
+    const onGenerateRetry = () => liveness.recordProviderPulse({ phase: 'retry' });
+    emitter.addEventListener('generate.started', onGenerateStarted);
+    emitter.addEventListener('generate.completed', onGenerateCompleted);
+    emitter.addEventListener('generate.error', onGenerateError);
+    emitter.addEventListener('generate.retry', onGenerateRetry);
+    cleanups.push(() => {
+      emitter.removeEventListener('generate.started', onGenerateStarted);
+      emitter.removeEventListener('generate.completed', onGenerateCompleted);
+      emitter.removeEventListener('generate.error', onGenerateError);
+      emitter.removeEventListener('generate.retry', onGenerateRetry);
+    });
+  }
+
   // Track whether the deferred-microtask drive() call has started. This flag
   // lets abort() know whether the Weft workflow has been handed to the engine,
   // so it can fire engine.cancel() in parallel with the AbortController signal.
@@ -528,6 +566,17 @@ export function createDurableActiveRun(
       driveStarted = true;
       return drive();
     })
+    .then(
+      (runResult) => {
+        liveness.setResult(runResult);
+        liveness.setStatus('terminal');
+        return runResult;
+      },
+      (error: unknown) => {
+        liveness.setStatus('terminal');
+        throw error;
+      },
+    )
     .finally(complete);
 
   // closed()'s AC7 (AB-204): a durable `completed` acknowledgement is
@@ -542,6 +591,7 @@ export function createDurableActiveRun(
 
   function abort(reason?: string): void {
     cancelRequested = true;
+    liveness.setStatus('aborting');
     // CRITICAL (B6 — "the link that stops the bill"): fire the AbortController
     // IMMEDIATELY so the in-flight generate() call (inside ctx.memo in the
     // durable workflow) drops its provider connection NOW. This does NOT wait
@@ -656,6 +706,8 @@ export function createDurableActiveRun(
     events: emitter.events.bind(emitter) as ActiveRun['events'],
     toObservable: emitter.toObservable.bind(emitter),
     complete,
+    snapshot: () => liveness.snapshot(),
+    subscribeSnapshot: (observer, options) => liveness.subscribeSnapshot(observer, options),
     [Symbol.dispose](): void {
       abort();
       complete();
@@ -855,14 +907,48 @@ export function reattachDurableActiveRun(
      */
     stopToolboxForward?: () => void;
     abort?: (reason?: string) => void;
+    /** Test-only clock seam for this run's watchdogs (AB-214/obs-01). */
+    livenessClock?: StallWatchdogClock;
   },
 ): ActiveRun {
   const { runId, handle } = reattach;
   const emitter = reattach.emitter ?? new CompletableEventTarget<CombinedOperativeEventMap>();
 
+  const liveness = createActiveRunLiveness({
+    id: runId,
+    durability: 'durable',
+    clock: reattach.livenessClock,
+  });
+
+  const onGenerateStarted = () => liveness.recordProviderPulse({ phase: 'started' });
+  const onGenerateCompleted = () => liveness.recordProviderPulse({ phase: 'completed' });
+  const onGenerateError = () => liveness.recordProviderPulse({ phase: 'error' });
+  const onGenerateRetry = () => liveness.recordProviderPulse({ phase: 'retry' });
+  const onToolProgressBubble = (event: ToolProgressBubbleEvent) => {
+    liveness.recordToolProgressPulse({
+      toolCallId: event.toolCallId,
+      toolName: event.toolName,
+      percent: event.percent,
+      message: event.message,
+    });
+  };
+  emitter.addEventListener('generate.started', onGenerateStarted);
+  emitter.addEventListener('generate.completed', onGenerateCompleted);
+  emitter.addEventListener('generate.error', onGenerateError);
+  emitter.addEventListener('generate.retry', onGenerateRetry);
+  emitter.addEventListener(ToolProgressBubbleEvent.type, onToolProgressBubble);
+
   // The awaited recovery hook already forwards toolbox actions into `emitter`.
-  // Reattach owns the teardown so the subscription stops on completion.
-  const toolboxForwardCleanup = reattach.stopToolboxForward;
+  // Reattach owns the teardown so the subscription stops on completion, plus
+  // this function's own liveness listeners registered just above.
+  function toolboxForwardCleanup(): void {
+    reattach.stopToolboxForward?.();
+    emitter.removeEventListener('generate.started', onGenerateStarted);
+    emitter.removeEventListener('generate.completed', onGenerateCompleted);
+    emitter.removeEventListener('generate.error', onGenerateError);
+    emitter.removeEventListener('generate.retry', onGenerateRetry);
+    emitter.removeEventListener(ToolProgressBubbleEvent.type, onToolProgressBubble);
+  }
 
   // Resolves `true` only when an adapter-initiated `engine.cancel` SUCCEEDS for
   // this run — i.e. THIS abort terminalized the run. `undefined` means no abort
@@ -884,6 +970,7 @@ export function reattachDurableActiveRun(
   function complete(): void {
     toolboxForwardCleanup?.();
     emitter.complete();
+    liveness.dispose();
   }
 
   function abortOutcome(): Promise<boolean> | undefined {
@@ -913,6 +1000,7 @@ export function reattachDurableActiveRun(
   // resolver/teardown failure that merely raced an abort() call. Idempotent via
   // `abortCancelled ??=`, so a later dispose() that also aborts is a no-op.
   function abort(): void {
+    liveness.setStatus('aborting');
     reattach.abort?.('Aborted durable run');
     abortCancelled ??= context.engine.cancel(runId).then(cancelSucceeded, cancelFailed);
   }
@@ -922,7 +1010,20 @@ export function reattachDurableActiveRun(
   // `runSessionIdentifiers.set` in its synchronous turn BEFORE any terminal event
   // microtask fires, so `getRun(runId)` resolves and no subscriber misses the
   // terminal event — even when `handle.result()` already settled before reattach.
-  const result = Promise.resolve().then(drive).finally(complete);
+  const result = Promise.resolve()
+    .then(drive)
+    .then(
+      (runResult) => {
+        liveness.setResult(runResult);
+        liveness.setStatus('terminal');
+        return runResult;
+      },
+      (error: unknown) => {
+        liveness.setStatus('terminal');
+        throw error;
+      },
+    )
+    .finally(complete);
 
   async function resolveReattachOutcome(): Promise<CleanupAcknowledgement> {
     if (reachability.unreachable) return { status: 'unresolved', reason: 'unreachable' };
@@ -971,6 +1072,8 @@ export function reattachDurableActiveRun(
     events: emitter.events.bind(emitter) as ActiveRun['events'],
     toObservable: emitter.toObservable.bind(emitter),
     complete,
+    snapshot: () => liveness.snapshot(),
+    subscribeSnapshot: (observer, options) => liveness.subscribeSnapshot(observer, options),
     [Symbol.dispose](): void {
       // Cancel the durable run at the engine BEFORE completing the local emitter,
       // mirroring the live createActiveRun dispose. A reattached/recovered run

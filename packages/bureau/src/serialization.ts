@@ -328,6 +328,14 @@ export function serializeRunDetail(
 ): RunDetail {
   return {
     ...serializeRunState(runState, sessionId, attribution),
+    // AB-88/AB-214: plain-data liveness snapshot, run through the same
+    // JSON-safety pass as the rest of this DTO — `evidence[].detail` and
+    // `result` are `unknown` and not guaranteed JSON-safe on their own.
+    // `toJsonSafe` necessarily returns `unknown` (it walks arbitrary nested
+    // data); the cast back to `LivenessSnapshot`'s known shape is safe
+    // because the pass only replaces unsafe leaf values (functions,
+    // circular references) and otherwise preserves the input's own shape.
+    liveness: toJsonSafe(runState.activeRun.snapshot()) as RunDetail['liveness'],
     events: runState.actions.map((action) => ({
       sequence: action.sequence,
       runId: action.runId,

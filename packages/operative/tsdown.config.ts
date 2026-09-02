@@ -12,6 +12,7 @@ const entry = {
   'durable/index': './src/durable/index.ts',
   'guardrails/index': './src/guardrails/index.ts',
   'instrumentation/index': './src/instrumentation/index.ts',
+  'liveness/index': './src/liveness/index.ts',
   'retry/index': './src/retry/index.ts',
   'streaming/index': './src/streaming/index.ts',
   'store/index': './src/store/index.ts',

@@ -48,6 +48,7 @@ import {
   type SessionInputAdmissionOutcome,
   type SessionInputAdmissionRequest,
 } from '@lostgradient/operative/durable';
+import type { LivenessSnapshot, Subscription } from '@lostgradient/operative/liveness';
 import { createModelCatalog } from '@lostgradient/operative/providers';
 import {
   createStore,
@@ -3526,6 +3527,19 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     return serializeRunDetail(runState, getRunSessionIdentifier(runState), runAttribution.get(id));
   }
 
+  function subscribeRunSnapshot(
+    runId: string,
+    observer: (snapshot: LivenessSnapshot) => void,
+    options?: { signal?: AbortSignal },
+  ): Subscription {
+    const runState = store.getRun(runId);
+    if (!runState) {
+      throw new BureauError('Run not found', 'NOT_FOUND');
+    }
+
+    return runState.activeRun.subscribeSnapshot(observer, options);
+  }
+
   function getRunReport(id: string): RunReport | undefined {
     const cached = runReports.get(id);
     if (cached) return cached;
@@ -4612,6 +4626,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     submitSchedulerTask,
     listRuns,
     getRun,
+    subscribeRunSnapshot,
     getRunReport,
     abortRun,
     deleteRun,

@@ -68,6 +68,13 @@
       "default": "./dist/instrumentation/index.js",
       "types": "./dist/instrumentation/index.d.ts"
     },
+    "./liveness": {
+      "bun": "./dist/liveness/index.js",
+      "import": "./dist/liveness/index.js",
+      "require": "./dist/liveness/index.cjs",
+      "default": "./dist/liveness/index.js",
+      "types": "./dist/liveness/index.d.ts"
+    },
     "./retry": {
       "bun": "./dist/retry/index.js",
       "import": "./dist/retry/index.js",

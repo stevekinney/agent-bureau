@@ -938,3 +938,30 @@ describe('AgentRun non-thenable contract', () => {
     expect(typeof resolved.abort).toBe('function');
   });
 });
+
+// ---------------------------------------------------------------------------
+// AB-88/AB-214 — snapshot()/subscribeSnapshot() delegate to the wrapped ActiveRun
+// ---------------------------------------------------------------------------
+
+describe('AgentRun.snapshot()/subscribeSnapshot()', () => {
+  it('snapshot() delegates to the wrapped ActiveRun', async () => {
+    const run = makeRun();
+
+    const snapshot = run.snapshot();
+    expect(snapshot.kind).toBe('agent-run');
+    expect(snapshot.id.length).toBeGreaterThan(0);
+
+    await run.result();
+  });
+
+  it('subscribeSnapshot() delegates to the wrapped ActiveRun, delivering the current snapshot synchronously', async () => {
+    const run = makeRun();
+
+    const received: number[] = [];
+    const subscription = run.subscribeSnapshot((snapshot) => received.push(snapshot.revision));
+    expect(received.length).toBeGreaterThan(0);
+    subscription.unsubscribe();
+
+    await run.result();
+  });
+});

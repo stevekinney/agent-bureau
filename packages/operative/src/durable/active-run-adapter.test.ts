@@ -27,6 +27,10 @@ import {
 } from '../errors';
 import {
   type CombinedOperativeEventMap,
+  GenerateCompletedEvent,
+  GenerateErrorEvent,
+  GenerateRetryEvent,
+  GenerateStartedEvent,
   RunCompletedEvent,
   StepStartedEvent,
   ToolErrorBubbleEvent,
@@ -569,6 +573,38 @@ describe('createRun with durable routing', () => {
 
       expect(result.finishReason).toBe('error');
       expect((result.error as Error).message).toBe('start hook failed');
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('AB-88/AB-214: records a provider-io pulse for generate.started/completed/error/retry on the fresh durable path', async () => {
+    const context = await buildContext();
+    try {
+      const emitter = new CompletableEventTarget<CombinedOperativeEventMap>();
+      const activeRun = createDurableActiveRun(context, {
+        runId: 'durable-liveness-provider-pulses',
+        sessionId: 'durable-liveness-provider-pulses',
+        options: runOptions(async () => ({ content: 'done', toolCalls: [] })),
+        emitter,
+      });
+
+      emitter.dispatchEvent(new GenerateStartedEvent(0));
+      emitter.dispatchEvent(new GenerateCompletedEvent(0, { content: 'done' } as never, 1));
+      emitter.dispatchEvent(new GenerateErrorEvent(0, new Error('boom'), 1));
+      emitter.dispatchEvent(new GenerateRetryEvent(0, 1, new Error('boom')));
+
+      const evidence = activeRun.snapshot().evidence;
+      expect(evidence.filter((entry) => entry.source === 'provider-io')).toHaveLength(4);
+
+      const received: number[] = [];
+      const subscription = activeRun.subscribeSnapshot((snapshot) =>
+        received.push(snapshot.revision),
+      );
+      expect(received.length).toBeGreaterThan(0);
+      subscription.unsubscribe();
+
+      await activeRun.result;
     } finally {
       context.engine[Symbol.dispose]();
     }
@@ -2618,6 +2654,68 @@ describe('reattachDurableActiveRun', () => {
 
     // engine.cancel ran exactly once despite both abort() and dispose().
     expect(cancelled).toEqual(['reattach-abort-then-dispose']);
+  });
+
+  it('AB-88/AB-214: reports a liveness snapshot fed by generate.*/tool.progress pulses on the supplied emitter', async () => {
+    const context = await buildContext();
+    try {
+      const emitter = new CompletableEventTarget<CombinedOperativeEventMap>();
+      let resolveResult!: (value: unknown) => void;
+      const handle = {
+        id: 'reattach-liveness',
+        result: () => new Promise<unknown>((resolve) => (resolveResult = resolve)),
+      };
+      const recoveredRun = reattachDurableActiveRun(
+        { engine: context.engine, checkpointStore: context.checkpointStore },
+        { runId: 'reattach-liveness', handle, emitter },
+      );
+
+      expect(recoveredRun.snapshot().id).toBe('reattach-liveness');
+      expect(recoveredRun.snapshot().durability).toBe('durable');
+      expect(recoveredRun.snapshot().evidence).toHaveLength(0);
+
+      emitter.dispatchEvent(new GenerateStartedEvent(0));
+      emitter.dispatchEvent(new GenerateCompletedEvent(0, { content: '' } as never, 1));
+      emitter.dispatchEvent(new GenerateErrorEvent(0, new Error('boom'), 1));
+      emitter.dispatchEvent(new GenerateRetryEvent(0, 1, new Error('boom')));
+      emitter.dispatchEvent(
+        new ToolProgressBubbleEvent(
+          { agentName: 'a', runId: 'reattach-liveness', step: 0 },
+          { toolName: 'search', toolCallId: 'call-1', percent: 50 },
+        ),
+      );
+
+      const evidence = recoveredRun.snapshot().evidence;
+      expect(evidence.filter((entry) => entry.source === 'provider-io')).toHaveLength(4);
+      expect(evidence.filter((entry) => entry.source === 'tool-progress')).toHaveLength(1);
+
+      const received: string[] = [];
+      const subscription = recoveredRun.subscribeSnapshot((snapshot) =>
+        received.push(snapshot.status),
+      );
+      expect(received).toEqual(['running']);
+      subscription.unsubscribe();
+
+      // The adapter starts driving (and calls handle.result(), wiring
+      // resolveResult) on a deferred microtask — yield once first.
+      await Promise.resolve();
+
+      // Await the normal `drive()` (schema-version-checked) completion path
+      // instead of aborting, so this doesn't exercise `engine.cancel` on a
+      // workflow id the real engine never started.
+      resolveResult({
+        schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
+        runId: 'reattach-liveness',
+        steps: 0,
+        content: 'done',
+        finishReason: 'stop-condition',
+      });
+      await recoveredRun.result;
+
+      expect(recoveredRun.snapshot().status).toBe('terminal');
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
   });
 });
 

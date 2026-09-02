@@ -1,6 +1,12 @@
-import { AbortAgentRunError, type ActiveRun } from '@lostgradient/operative';
+import {
+  AbortAgentRunError,
+  type ActiveRun,
+  type CombinedOperativeEventMap,
+} from '@lostgradient/operative';
+import { LIVENESS_POLICY_VERSION } from '@lostgradient/operative/liveness';
 import type { RunState } from '@lostgradient/operative/store';
 import { afterEach, describe, expect, it, spyOn } from 'bun:test';
+import { CompletableEventTarget } from 'lifecycle';
 
 import {
   resolveDiagnosticSink,
@@ -388,6 +394,52 @@ describe('serializeActionDetail', () => {
   });
 });
 
+function buildStubLivenessSnapshot() {
+  return {
+    id: 'run-5',
+    kind: 'agent-run' as const,
+    startedAt: new Date(0).toISOString(),
+    revision: 0,
+    status: 'running' as const,
+    lastTransitionAt: new Date(0).toISOString(),
+    projection: 'redacted' as const,
+    ownership: 'independent' as const,
+    detached: false,
+    durability: 'process-local' as const,
+    cancellable: true,
+    attempt: 0,
+    reachability: 'unknown' as const,
+    progress: 'unknown' as const,
+    assessment: 'healthy' as const,
+    observedAt: 0,
+    missedPulseCount: 0,
+    policyVersion: LIVENESS_POLICY_VERSION,
+    evidence: [],
+  };
+}
+
+function stubActiveRunWithSnapshot(): ActiveRun {
+  const emitter = new CompletableEventTarget<CombinedOperativeEventMap>();
+  return {
+    result: new Promise<never>(() => {}),
+    abort: () => {},
+    addEventListener: emitter.addEventListener.bind(emitter),
+    removeEventListener: emitter.removeEventListener.bind(emitter),
+    on: emitter.on.bind(emitter),
+    once: emitter.once.bind(emitter),
+    subscribe: emitter.subscribe.bind(emitter),
+    events: emitter.events.bind(emitter) as ActiveRun['events'],
+    toObservable: emitter.toObservable.bind(emitter),
+    complete: emitter.complete.bind(emitter),
+    snapshot: buildStubLivenessSnapshot,
+    subscribeSnapshot: (observer) => {
+      observer(buildStubLivenessSnapshot());
+      return { unsubscribe: () => {}, closed: false };
+    },
+    [Symbol.dispose]: () => {},
+  };
+}
+
 describe('serializeRunDetail', () => {
   it('keeps non-plain tool result values JSON-safe without dropping their contents', () => {
     const runState: RunState = {
@@ -426,7 +478,7 @@ describe('serializeRunDetail', () => {
       error: undefined,
       snapshots: [],
       actions: [],
-      activeRun: {} as ActiveRun,
+      activeRun: stubActiveRunWithSnapshot(),
     };
 
     const detail = serializeRunDetail(runState, 'session-1');

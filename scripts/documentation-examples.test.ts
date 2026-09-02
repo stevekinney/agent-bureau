@@ -51,19 +51,13 @@ const agentRunPath = resolve(repositoryRoot, 'packages/operative/src/agent-run.t
  * removed — the "quietly implemented" test below fails if an implemented member
  * is still listed, so this cannot rot into a permanent excuse list.
  */
-const PENDING_IMPLEMENTATION: Readonly<Record<string, string>> = {
-  snapshot: 'AB-88',
-  subscribeSnapshot: 'AB-88',
-};
+const PENDING_IMPLEMENTATION: Readonly<Record<string, string>> = {};
 
 /**
  * Which capability of the Required capabilities table each placeholder stands
  * for, so its owner can be compared against the contract rather than restated.
  */
-const CAPABILITY_OF_MEMBER: Readonly<Record<string, string>> = {
-  snapshot: 'Cached snapshot',
-  subscribeSnapshot: 'Non-consuming state observation',
-};
+const CAPABILITY_OF_MEMBER: Readonly<Record<string, string>> = {};
 
 /**
  * Calls that produce an `AgentRun`, the surface `documentedMembers` describes.
@@ -1006,7 +1000,10 @@ function requiredCapabilityOwners(markdown: string): (capability: string) => str
       .map((cell) => cell.replace(/\u0000/g, '\\|').trim());
     const capability = cells[0];
     const owner = cells[cells.length - 1];
-    if (!capability || !owner || !/^AB-\d+$/.test(owner)) continue;
+    // See requiredCapabilityNames's matching comment: a shipped capability's
+    // owner cell holds its signature (e.g. `` `snapshot()` ``, AB-214), not
+    // an issue id, once implemented.
+    if (!capability || !owner || !(/^AB-\d+$/.test(owner) || /\(\)`?$/.test(owner))) continue;
     owners.set(capability, owner);
   }
 
@@ -1033,7 +1030,10 @@ function requiredCapabilityNames(markdown: string): string[] {
       .map((cell) => cell.trim());
     const capability = cells[0];
     const owner = cells[cells.length - 1];
-    if (!capability || !owner || !/^AB-\d+$/.test(owner)) continue;
+    // The owner column starts as the issue that will pick a name (`AB-\d+`)
+    // and is replaced by the shipped signature (e.g. `` `snapshot()` ``,
+    // AB-214) once implemented — either form marks a real, tracked row.
+    if (!capability || !owner || !(/^AB-\d+$/.test(owner) || /\(\)`?$/.test(owner))) continue;
     names.push(capability);
   }
   return names;
@@ -1159,6 +1159,13 @@ describe('documentation/operative-type-safe-api.md classification table', () => 
       for (const gap of gaps) {
         if (!gap.absent.test(text)) continue;
         if (row.owner.includes(gap.owner)) continue;
+        // Once a capability ships (its Required capabilities owner cell
+        // holds the shipped signature rather than an issue id), a row
+        // elsewhere in the table that still names the ratifying decision
+        // (e.g. AB-88) for its own unimplemented surface is accurate
+        // history, not an un-owed gap — the thing to verify (someone is on
+        // the hook) is moot once the capability is delivered.
+        if (/\(\)`?$/.test(gap.owner)) continue;
         const complaint = `${row.resource}: records a gap owned by ${gap.owner}, which its owner cell does not name`;
         if (!offenders.includes(complaint)) offenders.push(complaint);
       }

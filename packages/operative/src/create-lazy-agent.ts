@@ -33,6 +33,8 @@ import {
 } from './errors';
 import { RunAbortedEvent, RunCompletedEvent, RunErrorEvent } from './events';
 import type { AgentGenerationProfile } from './generation-profile';
+import type { AgentRunLivenessSnapshot } from './liveness';
+import { LIVENESS_POLICY_VERSION } from './liveness';
 import { deepFreeze } from './providers/backend-descriptor-attachment';
 import type {
   AgentInput,
@@ -713,6 +715,45 @@ export function createDeferredAgentRun<O, H extends boolean>(
           ? underlying.closed()
           : Promise.resolve(invalidHandleDisposalOutcome ?? { status: 'completed' }),
     }),
+
+    // AB-88/AB-214 — before `underlying` resolves there is no real
+    // `ActiveRun` to delegate a snapshot to yet, so this wrapper reports a
+    // synthetic 'created' snapshot (mirroring `children()`'s empty-default
+    // pattern above). Once resolved, both delegate straight through.
+    snapshot(): AgentRunLivenessSnapshot {
+      if (underlying) return underlying.snapshot();
+      const now = new Date().toISOString();
+      return {
+        id: label,
+        kind: 'agent-run',
+        startedAt: now,
+        revision: 0,
+        status: 'created',
+        lastTransitionAt: now,
+        projection: 'redacted',
+        ownership: 'independent',
+        detached: false,
+        durability: 'process-local',
+        cancellable: true,
+        attempt: 0,
+        reachability: 'unknown',
+        progress: 'unknown',
+        assessment: 'healthy',
+        observedAt: Date.now(),
+        missedPulseCount: 0,
+        policyVersion: LIVENESS_POLICY_VERSION,
+        evidence: [],
+      };
+    },
+
+    subscribeSnapshot(
+      observer: (snapshot: AgentRunLivenessSnapshot) => void,
+      options?: { signal?: AbortSignal },
+    ) {
+      if (underlying) return underlying.subscribeSnapshot(observer, options);
+      observer(publicHandle.snapshot());
+      return { unsubscribe(): void {}, closed: true };
+    },
 
     [Symbol.dispose](): void {
       cancelRequested = true;
