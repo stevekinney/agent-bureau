@@ -3,12 +3,12 @@ import { basename, resolve } from 'node:path';
 
 import parseChangesetFile from '@changesets/parse';
 
-type ChangesetRelease = {
+export type ChangesetRelease = {
   name: string;
   type: string;
 };
 
-type PendingChangeset = {
+export type PendingChangeset = {
   id: string;
   releases: readonly ChangesetRelease[];
 };
@@ -73,7 +73,7 @@ export function findChangesetTargetErrors(
   return errors;
 }
 
-async function readPendingChangesets(repositoryRoot: string): Promise<PendingChangeset[]> {
+export async function readPendingChangesets(repositoryRoot: string): Promise<PendingChangeset[]> {
   const changesetDirectory = resolve(repositoryRoot, '.changeset');
   const entries = await readdir(changesetDirectory, { withFileTypes: true });
   const changesetPaths = entries
