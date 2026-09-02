@@ -95,6 +95,12 @@ export function createRunState(): RunState {
 export async function executeLoop(
   options: RunOptions,
   emitter?: EventDispatcher,
+  // AB-204: forwarded to `buildStepDeps`'s output and to every
+  // `make*Result` call below so `createActiveRun`'s `closed()` can await
+  // every run-owned hook (`onRunComplete`/`onRunAbort`/`onRunError` here,
+  // `onLLMInput`/`onLLMOutput` inside `runStep`) before acknowledging
+  // cleanup — see `create-run.ts`'s `pendingHookPromises`.
+  hookTracker?: (promise: Promise<unknown>) => void,
 ): Promise<RunResult> {
   const { maximumSteps = DEFAULT_MAXIMUM_STEPS, hooks, onMaximumSteps, costEstimation } = options;
 
@@ -102,7 +108,7 @@ export async function executeLoop(
     ? options.conversation
     : new Conversation(options.conversation);
 
-  const deps = buildStepDeps(options);
+  const deps = { ...buildStepDeps(options), hookTracker };
   const runState = createRunState();
 
   const runStartTime = performance.now();
@@ -110,7 +116,16 @@ export async function executeLoop(
   // RunStartedEvent + onRunStart (error aborts the run). Shared with the adapter.
   const startError = await startRunLifecycle(options, conversation, emitter);
   if (startError !== undefined) {
-    return makeErrorResult(runState, conversation, hooks, emitter, startError, costEstimation);
+    return makeErrorResult(
+      runState,
+      conversation,
+      hooks,
+      emitter,
+      startError,
+      costEstimation,
+      undefined,
+      hookTracker,
+    );
   }
 
   for (let step = 0; step < maximumSteps; step++) {
@@ -125,6 +140,8 @@ export async function executeLoop(
         step,
         outcome.reason,
         costEstimation,
+        undefined,
+        hookTracker,
       );
     }
     if (outcome.kind === 'error') {
@@ -136,6 +153,7 @@ export async function executeLoop(
         outcome.error,
         costEstimation,
         outcome.errorKind,
+        hookTracker,
       );
     }
     if (outcome.kind === 'continue') {
@@ -152,6 +170,8 @@ export async function executeLoop(
         outcome.schemaValidation,
         outcome.output,
         costEstimation,
+        undefined,
+        hookTracker,
       );
     }
     // outcome.kind === 'next' — proceed to the next step
@@ -178,6 +198,7 @@ export async function executeLoop(
         error,
         costEstimation,
         'policy',
+        hookTracker,
       );
     }
   }
@@ -193,5 +214,6 @@ export async function executeLoop(
     undefined,
     costEstimation,
     new MaximumStepsExceededError(maximumSteps),
+    hookTracker,
   );
 }

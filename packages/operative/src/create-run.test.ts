@@ -1,11 +1,13 @@
-import { createTool, ToolboxSettledEvent } from 'armorer';
+import { createTool, ToolboxExecuteStartEvent, ToolboxSettledEvent } from 'armorer';
 import { createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
+import { HookRegistry } from 'lifecycle';
 import { z } from 'zod';
 
 import { noToolCalls } from './conditions/predicates';
 import { createActiveRun } from './create-run';
+import type { OperativeHookMap } from './hooks';
 import { createMockGenerate } from './test/index';
 import type { GenerateResponse } from './types';
 
@@ -308,5 +310,109 @@ describe('ActiveRun.closed()', () => {
     const result = await activeRun.result;
     expect(result.finishReason).toBe('stop-condition');
     expect(await closedAcknowledgement).toEqual({ status: 'completed' });
+  });
+
+  // Regression: a code-review finding on the AB-204 pull request
+  // (PRRT_kwDORvupsc6elvRf) — a `failFast` parallel tool batch can settle
+  // `result` while a sibling tool call is still executing. Simulated here
+  // directly via the toolbox's own events (matching the "settled without a
+  // preceding execute-start" test above) rather than a real failFast batch,
+  // since the observable contract is the same either way: `resolveOutcome`
+  // must not report `completed` while `inFlightTools` is still nonzero.
+  it('does not resolve completed while a tool call is still in flight when result settles, and resolves once it drains', async () => {
+    const generate = createMockGenerate([textResponse('done')]);
+    const toolbox = createTestToolbox([weatherTool]);
+    const activeRun = createActiveRun({
+      generate,
+      toolbox,
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+    });
+
+    const inFlightCall = {
+      id: 'sibling-call-id',
+      name: weatherTool.name,
+      arguments: { location: 'nowhere' },
+    };
+    toolbox.dispatchEvent(
+      new ToolboxExecuteStartEvent({
+        tool: weatherTool,
+        call: inFlightCall,
+        params: inFlightCall.arguments,
+      }),
+    );
+
+    const closedAcknowledgement = activeRun.closed();
+    const result = await activeRun.result;
+    expect(result.finishReason).toBe('stop-condition');
+
+    let settledFlag = false;
+    void closedAcknowledgement.then(() => {
+      settledFlag = true;
+    });
+    // `awaitToolDrain()` genuinely never settles until the sibling tool's
+    // `settled` event arrives (its promise is only ever resolved from
+    // `onSettled`, never on a timer) — so this isn't a fixed-tick race
+    // against the fix: without the fix `resolveOutcome` reaches `completed`
+    // in a handful of microtask hops regardless, while with the fix it
+    // stays pending no matter how many turns the queue is flushed. Flush
+    // generously to make that contrast unambiguous either way.
+    for (let tick = 0; tick < 25; tick++) {
+      await Promise.resolve();
+    }
+    expect(settledFlag).toBe(false);
+
+    toolbox.dispatchEvent(
+      new ToolboxSettledEvent({ tool: weatherTool, call: inFlightCall, result: { ok: true } }),
+    );
+
+    expect(await closedAcknowledgement).toEqual({ status: 'completed' });
+    expect(settledFlag).toBe(true);
+  });
+
+  // Regression: a code-review finding on the AB-204 pull request
+  // (PRRT_kwDORvupsc6ekmeT) — `onRunComplete`/`onRunAbort`/`onRunError`/
+  // `onLLMInput`/`onLLMOutput` all fire fire-and-forget via
+  // `runHookSilently`, so `result` can settle while one is still running.
+  it('does not resolve completed while an onRunComplete hook is still running, and resolves once it settles', async () => {
+    let releaseHook: (() => void) | undefined;
+    const hookGate = new Promise<void>((resolve) => {
+      releaseHook = resolve;
+    });
+    const hooks = new HookRegistry<OperativeHookMap>();
+    hooks.on('onRunComplete', async () => {
+      await hookGate;
+    });
+
+    const generate = createMockGenerate([textResponse('done')]);
+    const toolbox = createTestToolbox([]);
+    const activeRun = createActiveRun({
+      generate,
+      toolbox,
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      hooks,
+    });
+
+    const closedAcknowledgement = activeRun.closed();
+    const result = await activeRun.result;
+    expect(result.finishReason).toBe('stop-condition');
+
+    let settledFlag = false;
+    void closedAcknowledgement.then(() => {
+      settledFlag = true;
+    });
+    // Same reasoning as the tool-drain regression above: `hookGate` is only
+    // ever resolved by `releaseHook()`, so `resolveOutcome` genuinely
+    // cannot reach `completed` while it's pending, at any tick count.
+    for (let tick = 0; tick < 25; tick++) {
+      await Promise.resolve();
+    }
+    expect(settledFlag).toBe(false);
+
+    releaseHook?.();
+
+    expect(await closedAcknowledgement).toEqual({ status: 'completed' });
+    expect(settledFlag).toBe(true);
   });
 });

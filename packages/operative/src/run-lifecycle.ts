@@ -98,6 +98,7 @@ export function makeAbortResult(
   reason?: string,
   costEstimation?: RunOptions['costEstimation'],
   terminalError?: AgentRunError,
+  hookTracker?: (promise: Promise<unknown>) => void,
 ): RunResult {
   const costEstimate = computeCostEstimate(runState.totalUsage, costEstimation);
   const explicitReason = typeof reason === 'string' ? reason : undefined;
@@ -112,12 +113,16 @@ export function makeAbortResult(
       explicitReason,
     ),
   );
-  runHookSilently(hooks, 'onRunAbort', {
+  // `runHookSilently` must run unconditionally — `hookTracker?.(runHookSilently(...))`
+  // would short-circuit optional-call semantics and never evaluate the
+  // argument (never fire the hook) when `hookTracker` is undefined.
+  const onRunAbortHookPromise = runHookSilently(hooks, 'onRunAbort', {
     reason: explicitReason,
     error,
     partialSteps: [...runState.steps],
     conversation,
   });
+  hookTracker?.(onRunAbortHookPromise);
   return {
     conversation,
     steps: runState.steps,
@@ -149,13 +154,15 @@ export function makeErrorResult(
   error: unknown,
   costEstimation?: RunOptions['costEstimation'],
   errorKind?: AgentRunErrorKind,
+  hookTracker?: (promise: Promise<unknown>) => void,
 ): RunResult {
   const runError = toAgentRunError(error, { kind: errorKind });
-  runHookSilently(hooks, 'onRunError', {
+  const onRunErrorHookPromise = runHookSilently(hooks, 'onRunError', {
     error: runError,
     partialSteps: [...runState.steps],
     conversation,
   });
+  hookTracker?.(onRunErrorHookPromise);
 
   const finishReason: FinishReason =
     runError instanceof ElicitationDeniedError
@@ -208,6 +215,7 @@ export function makeCompletedResult(
   output?: unknown,
   costEstimation?: RunOptions['costEstimation'],
   terminalError?: AgentRunError,
+  hookTracker?: (promise: Promise<unknown>) => void,
 ): RunResult {
   const costEstimate = computeCostEstimate(runState.totalUsage, costEstimation);
   const maximumStepsError =
@@ -227,16 +235,18 @@ export function makeCompletedResult(
   };
   emitter?.dispatch(new RunCompletedEvent(result));
   if (maximumStepsError) {
-    runHookSilently(hooks, 'onRunError', {
+    const maxStepsErrorHookPromise = runHookSilently(hooks, 'onRunError', {
       error: maximumStepsError,
       partialSteps: [...runState.steps],
       conversation,
     });
+    hookTracker?.(maxStepsErrorHookPromise);
   } else {
-    runHookSilently(hooks, 'onRunComplete', {
+    const onRunCompleteHookPromise = runHookSilently(hooks, 'onRunComplete', {
       result,
       totalDuration: performance.now() - runStartTime,
     });
+    hookTracker?.(onRunCompleteHookPromise);
   }
   return result;
 }

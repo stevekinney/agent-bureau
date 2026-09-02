@@ -121,6 +121,16 @@ export interface StepDeps {
   readonly validateToolResultHooks: ValidateToolResultHook[];
   /** Maximum number of retries the onError hook can request per step. */
   readonly maxErrorRetries: number;
+  /**
+   * AB-204: when supplied, every run-owned hook's fire-and-forget promise
+   * (`onLLMInput`/`onLLMOutput` here; `onRunComplete`/`onRunAbort`/
+   * `onRunError` in `run-lifecycle.ts`) is handed to this callback so
+   * `closed()` can await genuine hook completion instead of acknowledging
+   * cleanup while a hook is still running. `undefined` for a caller that
+   * doesn't need the acknowledgement (e.g. a bare `executeLoop` caller that
+   * never calls `closed()`) — hooks still run exactly the same either way.
+   */
+  readonly hookTracker?: (promise: Promise<unknown>) => void;
 }
 
 /**
@@ -231,8 +241,14 @@ export function normalizeToArray<T>(value: T | T[] | undefined): T[] {
 /**
  * Runs a hook via the registry in a fire-and-forget fashion.
  * All handlers execute via Promise.allSettled so individual failures
- * never block the caller. The returned promise is intentionally not
- * awaited — callers should use `void runHookSilently(...)`.
+ * never block the caller. Most callers don't await the returned promise —
+ * `void runHookSilently(...)` is the common shape — but AB-204's `closed()`
+ * needs to know when a run-owned hook (`onRunComplete`/`onRunAbort`/
+ * `onRunError`/`onLLMInput`/`onLLMOutput`) actually finishes, since none of
+ * these are otherwise on the run's critical path. Callers that care pass the
+ * returned promise to a `hookTracker` (see `StepDeps.hookTracker` and
+ * `make*Result`'s `hookTracker` parameter in `run-lifecycle.ts`) so
+ * `closed()` can await it before acknowledging cleanup.
  */
 export function runHookSilently<K extends string>(
   hooks:
@@ -243,14 +259,14 @@ export function runHookSilently<K extends string>(
     | undefined,
   hookName: K,
   ...args: unknown[]
-): void {
-  if (!hooks?.has(hookName)) return;
+): Promise<void> {
+  if (!hooks?.has(hookName)) return Promise.resolve();
   const handlers = hooks.getHandlers(hookName);
-  void Promise.allSettled(
+  return Promise.allSettled(
     handlers.map((entry) =>
       Promise.resolve((entry.handler as (...a: unknown[]) => unknown)(...args)),
     ),
-  );
+  ).then(() => undefined);
 }
 
 /**
@@ -492,7 +508,7 @@ export async function runStep(
   step: number,
   emitter: EventDispatcher | undefined,
 ): Promise<StepOutcome> {
-  const { signal, backpressure, hooks } = deps;
+  const { signal, backpressure, hooks, hookTracker } = deps;
 
   if (signal?.aborted) {
     return { kind: 'abort', reason: explicitAbortReason(signal) };
@@ -866,12 +882,19 @@ export async function runStep(
           generateContext = beforeGenContext;
         }
 
-        // onLLMInput: parallel allSettled, read-only, non-blocking
-        runHookSilently(hooks, 'onLLMInput', {
+        // onLLMInput: parallel allSettled, read-only, non-blocking. AB-204:
+        // handed to hookTracker so closed() can await it — it can still be
+        // running when this run's result settles. `runHookSilently` must
+        // run unconditionally here — `hookTracker?.(runHookSilently(...))`
+        // would short-circuit optional-call semantics and never evaluate
+        // the argument (never fire the hook at all) when hookTracker is
+        // undefined.
+        const onLLMInputHookPromise = runHookSilently(hooks, 'onLLMInput', {
           conversation: generateContext.conversation,
           step: generateContext.step,
           messageCount: generateContext.conversation.getMessages().length,
         });
+        hookTracker?.(onLLMInputHookPromise);
 
         emitter?.dispatch(new GenerateStartedEvent(step));
         const generateStart = performance.now();
@@ -893,14 +916,17 @@ export async function runStep(
         // onLLMOutput: parallel allSettled, read-only, non-blocking
         // Use generateContext (which may have been modified by beforeGenerate)
         // for consistency with onLLMInput — both hooks should report the same
-        // conversation and step values for a given LLM call.
-        runHookSilently(hooks, 'onLLMOutput', {
+        // conversation and step values for a given LLM call. AB-204: handed
+        // to hookTracker for the same reason as onLLMInput above (and same
+        // "call unconditionally, track separately" reasoning).
+        const onLLMOutputHookPromise = runHookSilently(hooks, 'onLLMOutput', {
           conversation: generateContext.conversation,
           step: generateContext.step,
           response: Object.freeze({ ...response }),
           duration: durationMilliseconds,
           usage: response.usage,
         });
+        hookTracker?.(onLLMOutputHookPromise);
 
         // afterGenerate: waterfall that can modify the response.
         // This runs outside the generate try/catch so that hook errors are not

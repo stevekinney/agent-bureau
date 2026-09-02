@@ -157,6 +157,28 @@ export function createActiveRun(options: RunOptions, durable?: DurableRunRouting
   // AB-88 ships a `cancellable` snapshot field, in-flight tool executions are
   // this run's own signal that cleanup is not trivially unnecessary.
   let inFlightTools = 0;
+  // AB-204 (PRRT_kwDORvupsc6elvRf): `inFlightTools` alone only gated
+  // `closed()`'s not-required fast path — it did not stop `resolveOutcome`
+  // from reporting `completed` while a sibling tool in a `failFast` batch
+  // was still executing after the run's `result` had already settled.
+  // `toolDrainWaiters` lets `resolveOutcome` actually wait for the counter
+  // to return to zero before acknowledging cleanup.
+  let toolDrainWaiters: Array<() => void> = [];
+  function awaitToolDrain(): Promise<void> {
+    if (inFlightTools === 0) return Promise.resolve();
+    return new Promise((resolve) => toolDrainWaiters.push(resolve));
+  }
+  // AB-204 (PRRT_kwDORvupsc6ekmeT / PRRT_kwDORvupsc6elvRf): every run-owned
+  // hook (`onRunComplete`/`onRunAbort`/`onRunError`/`onLLMInput`/
+  // `onLLMOutput`) fires via `runHookSilently`'s fire-and-forget
+  // `Promise.allSettled`, so `result` can settle while one is still running.
+  // `hookTracker` collects each hook's promise (threaded through
+  // `executeLoop` → `StepDeps`/`run-lifecycle.ts`) so `resolveOutcome` can
+  // await genuine hook completion before acknowledging cleanup.
+  const pendingHookPromises: Promise<unknown>[] = [];
+  const hookTracker = (promise: Promise<unknown>): void => {
+    pendingHookPromises.push(promise);
+  };
 
   const toolboxForward = forwardEvents(options.toolbox, emitter, 'toolbox');
   cleanups.push(() => toolboxForward.stop());
@@ -211,6 +233,11 @@ export function createActiveRun(options: RunOptions, durable?: DurableRunRouting
       // aborted signal path), which would otherwise drive this negative and
       // corrupt hasInFlightWork()'s later reads.
       inFlightTools = Math.max(0, inFlightTools - 1);
+      if (inFlightTools === 0 && toolDrainWaiters.length > 0) {
+        const waiters = toolDrainWaiters;
+        toolDrainWaiters = [];
+        for (const resolve of waiters) resolve();
+      }
       const hasError = e.error !== undefined;
       const status: 'success' | 'error' = hasError ? 'error' : 'success';
       emitter.dispatchEvent(
@@ -276,14 +303,30 @@ export function createActiveRun(options: RunOptions, durable?: DurableRunRouting
         addListener('progress', onToolProgress, { signal: abortController.signal }),
         addListener('policy-denied', onPolicyDenied, { signal: abortController.signal }),
       ];
-      cleanups.push(() => {
+      const removeToolboxListeners = (): void => {
         for (const cleanup of toolboxCleanups) cleanup?.();
+      };
+      cleanups.push(() => {
+        // AB-204 (PRRT_kwDORvupsc6elvRf): a `failFast` parallel tool batch
+        // can settle `result` (via `makeErrorResult`) while sibling tool
+        // calls are still executing. Tearing this listener down right here,
+        // unconditionally, would mean `onSettled` never sees those siblings'
+        // `settled` events, so `inFlightTools` would never reach zero and
+        // `awaitToolDrain()` (used by `resolveOutcome` below) would hang
+        // forever. Defer the teardown until the counter actually drains;
+        // the common case (no in-flight tools left) tears down immediately,
+        // same as before.
+        if (inFlightTools === 0) {
+          removeToolboxListeners();
+        } else {
+          void awaitToolDrain().then(removeToolboxListeners);
+        }
       });
     }
   }
 
   const result = Promise.resolve()
-    .then(() => executeLoop(loopOptions, emitter))
+    .then(() => executeLoop(loopOptions, emitter, hookTracker))
     .finally(complete);
 
   let cancelRequested = false;
@@ -327,7 +370,14 @@ export function createActiveRun(options: RunOptions, durable?: DurableRunRouting
     // direct `abort()` call — `combinedSignal` covers both.
     disqualifiesFastPath: () => cancelRequested || combinedSignal.aborted,
     hasInFlightWork: () => inFlightTools > 0,
-    resolveOutcome: () => Promise.resolve({ status: 'completed' }),
+    // AB-204: `result` settling is not, by itself, proof that cleanup is
+    // done — a `failFast` tool batch can leave siblings executing
+    // (PRRT_kwDORvupsc6elvRf) and a run-owned hook can still be running
+    // (PRRT_kwDORvupsc6ekmeT). Await both before reporting `completed`.
+    resolveOutcome: async () => {
+      await Promise.all([awaitToolDrain(), Promise.allSettled(pendingHookPromises)]);
+      return { status: 'completed' };
+    },
   });
 
   return {
