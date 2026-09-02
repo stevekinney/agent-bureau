@@ -90,14 +90,25 @@ async function runForStdout(command: string[], cwd: string): Promise<string> {
   return result.stdout.toString();
 }
 
-/** Runs a command and returns its exit code + combined output without throwing. */
+/**
+ * Runs a command and returns its exit code, stdout, and combined output
+ * without throwing. `output` (stdout+stderr) is for error diagnostics only —
+ * a caller that parses a successful command's stdout as JSON must use
+ * `stdout` alone, since an ordinary npm warning on stderr would otherwise
+ * corrupt the payload the way concatenating stdout+stderr does for
+ * {@link runForStdout}'s callers.
+ */
 async function runExpectingFailure(
   command: string[],
   cwd: string,
-): Promise<{ exitCode: number; output: string }> {
+): Promise<{ exitCode: number; stdout: string; output: string }> {
   const [executable, ...arguments_] = command;
   const result = await $`${executable} ${arguments_}`.cwd(cwd).nothrow().quiet();
-  return { exitCode: result.exitCode, output: `${result.stdout}${result.stderr}` };
+  return {
+    exitCode: result.exitCode,
+    stdout: result.stdout.toString(),
+    output: `${result.stdout}${result.stderr}`,
+  };
 }
 
 /** Packs the package at `directory` with `npm pack --ignore-scripts` and returns the tarball's absolute path. */
@@ -183,7 +194,7 @@ async function getRegistryVersions(name: string): Promise<string[]> {
     if (/E404/.test(result.output)) return [];
     throw new Error(`npm view ${name} versions failed:\n${result.output}`);
   }
-  const parsed = JSON.parse(result.output) as string | string[];
+  const parsed = JSON.parse(result.stdout) as string | string[];
   return Array.isArray(parsed) ? parsed : [parsed];
 }
 
