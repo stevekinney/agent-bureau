@@ -145,6 +145,13 @@ async function bureauRunOutputInference() {
   const unionName = 'schema' as 'plain' | 'schema';
   const unionRun = bureau.run(unionName, 'hi');
   const unionUnwrapped = unionRun.unwrap();
-  expectType<Promise<string> | Promise<{ a: string }>>(unionUnwrapped);
+  // expectType is an assignability check, not equality: the non-distributive
+  // regression's `unwrap(): Promise<string>` is itself assignable to
+  // `Promise<string> | Promise<{ a: string }>`, so an expectType assertion
+  // here would pass identically whether or not the regression is present.
+  // expectEquals (defined above, exact-type-equality) is required to make
+  // this a real tripwire.
+  expectEquals<typeof unionUnwrapped, Promise<string> | Promise<{ a: string }>>();
+  void unionUnwrapped;
 }
 void bureauRunOutputInference;
