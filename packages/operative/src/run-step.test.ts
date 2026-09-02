@@ -116,7 +116,10 @@ const nextTool = createTool({
  * `tsc` (via `check-types`, not `bun test`) ever looks at the body's
  * `RunOptions` literals.
  */
-function steeringRunOptionsCompileOnlyChecks(someSteeringGate: SteeringGate): void {
+function steeringRunOptionsCompileOnlyChecks(
+  someSteeringGate: SteeringGate,
+  maybeSteeringGate: SteeringGate | undefined,
+): void {
   function acceptRunOptions(_options: RunOptions): void {}
 
   // A steering-enabled run with no `runId` must fail to type-check.
@@ -140,6 +143,18 @@ function steeringRunOptionsCompileOnlyChecks(someSteeringGate: SteeringGate): vo
     generate: async () => textResponse('done'),
     toolbox: createTestToolbox([]),
     conversation: new Conversation(),
+  });
+  // A `runId`-carrying helper forwarding a `SteeringGate | undefined`-typed
+  // value (not a literal presence/absence the compiler can discriminate)
+  // must also type-check with no cast or runtime branch — the pairing this
+  // type enforces is one-directional (an actual gate requires `runId`),
+  // not "steering must be exactly present or exactly absent."
+  acceptRunOptions({
+    generate: async () => textResponse('done'),
+    toolbox: createTestToolbox([]),
+    conversation: new Conversation(),
+    runId: 'run-1',
+    steering: maybeSteeringGate,
   });
 }
 void steeringRunOptionsCompileOnlyChecks;

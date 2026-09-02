@@ -484,6 +484,20 @@ export interface RunOptionsBase {
  * reference, matching every other field on `RunOptionsBase` and this
  * package's immutability-via-spread convention — an object still spreads
  * cleanly to swap either field, only in-place mutation is blocked.
+ *
+ * The second arm's `steering` is itself optional (`SteeringGate | undefined`),
+ * not required, once `runId` is present — deliberately, so a caller
+ * forwarding an already-`SteeringGate | undefined`-typed value alongside a
+ * definite `runId` (e.g. a helper that always has a stable run identity but
+ * only conditionally steers) matches this arm without a cast or a runtime
+ * branch first. The invariant this type exists to enforce is one-directional
+ * — `steering` (when it holds an actual gate) requires `runId` — not the
+ * reverse; plenty of callers legitimately supply `runId` with no steering
+ * intention at all (bubble-event stamping, durable/session-owned runs). What
+ * the union still forbids, in both arms, is a REAL `SteeringGate` with no
+ * `runId`: that shape satisfies neither arm (the first requires `steering`
+ * to be exactly `undefined`; the second requires `runId`), so it remains a
+ * compile error.
  */
 export type RunOptions = RunOptionsBase &
   (
@@ -498,9 +512,9 @@ export type RunOptions = RunOptionsBase &
       }
     | {
         /**
-         * Required whenever `steering` is set — see this type's doc
-         * comment. Used to stamp curated `tool.*` bubble events AND
-         * `SteeringEffectiveState.appliedAtRunId`.
+         * Required whenever `steering` holds an actual `SteeringGate` —
+         * see this type's doc comment. Used to stamp curated `tool.*`
+         * bubble events AND `SteeringEffectiveState.appliedAtRunId`.
          */
         readonly runId: string;
         /**
@@ -508,9 +522,13 @@ export type RunOptions = RunOptionsBase &
          * entry boundary to consult desired route/model/provider/effort
          * configuration and gate a `paused: true` desired state until a
          * matching `resume` (or the run's `AbortSignal`) releases it.
-         * Setting this requires `runId` — see this type's doc comment.
+         * Optional here too — this arm exists to let a `runId`-carrying
+         * caller pass a possibly-`undefined` `SteeringGate` through
+         * unbranched (see this type's doc comment); the AC this type
+         * enforces is that an actually-PRESENT gate requires `runId`, not
+         * that `runId` requires a gate.
          */
-        readonly steering: SteeringGate;
+        readonly steering?: SteeringGate;
       }
   );
 

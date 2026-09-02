@@ -31,7 +31,21 @@ export function isHigherPriority(a: SchedulerPriority, b: SchedulerPriority): bo
  */
 type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : never;
 
-export type SchedulerRunOptions = DistributiveOmit<RunOptions, 'generate' | 'toolbox'> &
+/**
+ * Omits `runId` as well as `generate`/`toolbox`: a scheduled run's `runId`
+ * is always DERIVED by `create-scheduler.ts` at dispatch time — the
+ * durable path already generates `${SCHEDULER_RUN_ID_PREFIX}${task.id}-N`
+ * (a stable id a later preemption can suspend/resume by), and the
+ * in-memory path derives `${SCHEDULER_RUN_ID_PREFIX}${task.id}` the same
+ * way — and injects it into the options this factory's return value feeds
+ * into `createActiveRun`/`executeLoop`, overwriting anything supplied here.
+ * A caller can never meaningfully set it themselves. Without this
+ * omission, `RunOptions`'s AB-236 `runId`/`steering` pairing would force a
+ * caller configuring a steering-enabled scheduled task to invent a
+ * throwaway `runId` that gets silently discarded — the same reasoning
+ * `session-handle.ts`'s `SessionRunOptions` documents.
+ */
+export type SchedulerRunOptions = DistributiveOmit<RunOptions, 'generate' | 'toolbox' | 'runId'> &
   Partial<Pick<RunOptions, 'generate' | 'toolbox'>>;
 
 /**
