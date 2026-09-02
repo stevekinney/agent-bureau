@@ -289,6 +289,21 @@ describe('createModelCatalog: catalog invariants', () => {
     }
   });
 
+  it("is deeply frozen one level into a descriptor's own nested values", () => {
+    const catalog = createModelCatalog({ now: fixedNow });
+    for (const row of catalog.descriptors) {
+      expect(Object.isFrozen(row.aliases)).toBe(true);
+      expect(Object.isFrozen(row.mimeFamilies)).toBe(true);
+      expect(Object.isFrozen(row.mediaLimits)).toBe(true);
+      expect(Object.isFrozen(row.parameterCompatibility)).toBe(true);
+      expect(Object.isFrozen(row.effort)).toBe(true);
+      expect(Object.isFrozen(row.effort.portable)).toBe(true);
+      expect(Object.isFrozen(row.effort.degradesTo)).toBe(true);
+      expect(Object.isFrozen(row.modalities)).toBe(true);
+      if (row.pricing) expect(Object.isFrozen(row.pricing)).toBe(true);
+    }
+  });
+
   it('starts at revision 1', () => {
     expect(createModelCatalog({ now: fixedNow }).revision).toBe(1);
   });
@@ -309,13 +324,12 @@ describe('createModelCatalog: catalog invariants', () => {
     }
   });
 
-  it('defaults now to the wall clock when not injected', () => {
-    const before = Date.now();
+  it('defaults now to a real ISO timestamp when not injected, without this test reading the wall clock', () => {
     const catalog = createModelCatalog();
-    const after = Date.now();
-    const generatedAtMillis = new Date(catalog.generatedAt).getTime();
-    expect(generatedAtMillis).toBeGreaterThanOrEqual(before);
-    expect(generatedAtMillis).toBeLessThanOrEqual(after);
+    expect(Number.isNaN(Date.parse(catalog.generatedAt))).toBe(false);
+    for (const row of catalog.descriptors) {
+      expect(row.freshness).toBe(catalog.generatedAt);
+    }
   });
 });
 

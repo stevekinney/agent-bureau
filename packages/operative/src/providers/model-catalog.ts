@@ -457,6 +457,26 @@ export function requireModalities(provider: ProviderName, model: string): Modali
 
 // ── Row construction ────────────────────────────────────────────────────────
 
+/**
+ * Recursively freezes an object graph. The catalog and its top-level
+ * `descriptors` array are frozen where they are constructed, but a
+ * descriptor row's own nested values — `aliases`, `effort.portable`,
+ * `pricing`, `mimeFamilies`, `mediaLimits` — are plain arrays/objects built
+ * fresh per row and would otherwise stay mutable underneath a frozen
+ * top-level object. Always recurses (never short-circuits on an
+ * already-frozen parent), because freezing a parent does not freeze its
+ * children — `ANTHROPIC_MODALITIES` is `Object.freeze`d but its per-modality
+ * entry objects are not, until this runs.
+ */
+function deepFreeze<T>(value: T): T {
+  if (value === null || typeof value !== 'object') return value;
+  const record = value as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    deepFreeze(record[key]);
+  }
+  return Object.freeze(value);
+}
+
 function pricingFor(model: string): BackendDescriptor['pricing'] {
   const pricing = getModelPricing(model);
   if (!pricing) return undefined;
@@ -607,13 +627,13 @@ export function createModelCatalog(options?: CreateModelCatalogOptions): ModelCa
   const endpointAmbiguous = Boolean(options?.openAIBaseURL || readOpenAIBaseUrlOverride());
 
   const anthropicDescriptors = Object.keys(ANTHROPIC_LIMITS).map((model) =>
-    Object.freeze(buildAnthropicRow(model, freshness)),
+    deepFreeze(buildAnthropicRow(model, freshness)),
   );
   const openAIDescriptors = Object.keys(OPENAI_LIMITS).map((model) =>
-    Object.freeze(buildOpenAIRow(model, freshness, endpointAmbiguous)),
+    deepFreeze(buildOpenAIRow(model, freshness, endpointAmbiguous)),
   );
   const geminiDescriptors = Object.keys(GEMINI_LIMITS).map((model) =>
-    Object.freeze(buildGeminiRow(model, freshness)),
+    deepFreeze(buildGeminiRow(model, freshness)),
   );
 
   const descriptors = Object.freeze([

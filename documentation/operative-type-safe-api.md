@@ -1458,17 +1458,19 @@ These seven exported types carry no runtime behavior on their own. The `runStep`
 
 ## Model capability and selection
 
-Decision record for AB-64, implemented by AB-243 (`packages/operative/src/providers/model-catalog.ts`). Seven generation-state terms get one meaning apiece, never used as a synonym for another:
+Decision record for AB-64, implemented by AB-243 (`packages/operative/src/providers/model-catalog.ts`). Seven generation-state terms get one meaning apiece, never used as a synonym for another, transcribed verbatim from AB-64's decision record:
 
-| Term       | Meaning                                                                                                | Decided at                                 |
-| ---------- | ------------------------------------------------------------------------------------------------------ | ------------------------------------------ |
-| known      | What the provider's SDK/API can do, independent of this deployment                                     | `BackendDescriptor` static fields          |
-| available  | Known, and reachable now: credentials configured, health not `unhealthy`                               | `BackendDescriptor.availability`/`.health` |
-| allowed    | Available, and permitted by every policy layer                                                         | Precedence composition (AB-66)             |
-| compatible | Allowed, and able to serve this request's modality, tools, schema, effort                              | `SelectionCandidate.eligible` (AB-66)      |
-| requested  | What the caller asked for: a `policyRef` or an exact override; reuses AB-67's `SteeringRequestedValue` | `SelectionRequest.requestedValue` (AB-66)  |
-| selected   | What the plan chose after filtering and ranking                                                        | `SelectionPlan.selected` (AB-66)           |
-| effective  | What the provider actually used                                                                        | `EffectiveGenerationResult` (AB-66)        |
+| Term       | Meaning                                                                                                       | Decided at                                 |
+| ---------- | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| known      | What the provider's SDK/API can do, independent of this deployment                                            | `BackendDescriptor` static fields          |
+| available  | Known, and reachable now: credentials configured, health not `unhealthy`                                      | `BackendDescriptor.availability`/`.health` |
+| allowed    | Available, and permitted by every policy layer                                                                | Precedence composition                     |
+| compatible | Allowed, and able to serve this request's modality, tools, schema, effort                                     | `SelectionCandidate.eligible`              |
+| requested  | What the caller asked for: a `policyRef` or an exact override; reuses AB-67's `SteeringRequestedValue`        | `SelectionRequest.requestedValue`          |
+| selected   | What the plan chose after filtering and ranking                                                               | `SelectionPlan.selected`                   |
+| effective  | What the provider actually used (`GenerateResponse.metadata.effectiveEffort` plus the model/provider sibling) | `EffectiveGenerationResult`                |
+
+The `allowed`/`compatible`/`requested`/`selected`/`effective` rows name types AB-66 has not shipped yet (`SelectionCandidate`, `SelectionRequest`, `SelectionPlan`, `EffectiveGenerationResult`); AB-243 ships only the `known`/`available` rows' `BackendDescriptor`/`ModelCatalog` types below.
 
 A versioned `BackendDescriptor` and the `ModelCatalog` it lives in, transcribed verbatim from AB-64's decision record with the 2026-09-02 coordinator amendment applied (`modalities: ModalityMatrix` replaces the three parallel `inputModalities`/`outputModalities`/`acceptedSourceForms` fields, citing AB-70's `Modality`, `MimeFamily`, `ContentSource`, and `ModalityMatrix` vocabulary by name):
 
