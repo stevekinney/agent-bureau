@@ -404,6 +404,8 @@ import {
 - Composition exports: `createInstructionComposer`, `createInstructionTemplate`, `createConditionalInstructionComposer`, `whenStep`, `whenToolsAvailable`, `whenAnyToolAvailable`, `whenMetadata`, `whenMetadataPresent`.
 - Event classes: `ConversationChangeEvent`, `ConversationPushEvent`, `MessagesAppendedEvent`, `StreamStartedEvent`, `StreamFinalizedEvent`, and others.
 
+**AB-70 portable content and modality vocabulary (type-only):** `Modality`, `MimeFamily`, `MediaLimitScope`, `MediaLimits`, `ContentSource`, and `ModalityMatrix`, defined in `src/multi-modal.ts` and re-exported from the root. These are additive names for other packages (notably `@lostgradient/operative`'s `BackendDescriptor`) to cite, and do not replace `MultiModalContent`, `ImageContent`, `DocumentContent`, or `DocumentSource`, which stay as they are.
+
 ---
 
 ### `conversationalist/conversation`

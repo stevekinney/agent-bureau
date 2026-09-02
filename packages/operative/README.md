@@ -1322,6 +1322,21 @@ const monitor = createCostBudgetMonitor({
 });
 ```
 
+#### Model Catalog (AB-64)
+
+`createModelCatalog` (`@lostgradient/operative/providers`) builds a static, synchronous, side-effect-free `ModelCatalog` — one `BackendDescriptor` row per `(provider, endpoint, model)` this package ships a generate function for. Each descriptor names its `modalities` (an AB-70 `ModalityMatrix`, re-exported from `conversationalist`), context/output limits, effort support and degradation, parameter compatibility, pricing (derived from `defaultPricingTable`, never fabricated), and availability/health. `voyage` and `ollama` are embedding-only and get no row.
+
+```typescript
+import { createModelCatalog } from '@lostgradient/operative/providers';
+
+const catalog = createModelCatalog();
+// catalog.revision, catalog.descriptors, catalog.projection ('privileged')
+
+const anthropicRows = catalog.descriptors.filter((d) => d.provider === 'anthropic');
+```
+
+`getProviderCapabilities` is now implemented as a projection over `createModelCatalog`'s descriptors — its public signature and every previously published answer are unchanged.
+
 #### Structured Output
 
 `output` (AB-18) is the single validated output contract: one Zod schema that

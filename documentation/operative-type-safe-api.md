@@ -654,6 +654,8 @@ That section already exists below — see [Session input admission](#session-inp
 
 **AB-67 is the second.** It fixes the request and state-transition shapes for `SteeringCommand` (agent-identity, route, model, provider, effort, pause, and resume changes) while every other start operation still lacks a key. Whichever issue implements this contract must add a `## Steering commands` section (placed after Session input admission) carrying the type sketches from AB-67's decision record verbatim, including the classification-table row and the further-widened Session-row scope for AB-50.
 
+**AB-64 is the third.** It fixes the versioned `BackendDescriptor`/`ModelCatalog` surface and the seven generation-state terms (known, available, allowed, compatible, requested, selected, effective), while the five-layer policy precedence, the deterministic selector, and the `SelectionPlan` it produces remain a later issue's scope (AB-66). Whichever issue implements the descriptor and catalog must add a `## Model capability and selection` section (placed after Steering commands) carrying the descriptor/catalog/projection type sketches from AB-64's decision record verbatim.
+
 **One shipped path already accepts one and satisfies these semantics within its documented process-local boundary.** The mounted gateway route `POST /hooks/*` scopes an `Idempotency-Key` to the authenticated principal and hook operation, reserves before starting a Bureau run, replays the original successful or known-failure receipt for an identical canonical request, and returns a typed `IDEMPOTENCY_CONFLICT` for a mismatched reuse (`packages/gateway/src/routes/hooks.ts`). Its receipts remain for the lifetime of the route instance, matching the process-local run-locator lifetime; AB-109 owns durable cross-instance receipts.
 
 ### The unowned-background-work rule
@@ -1453,6 +1455,106 @@ export type SteeringCommandState =
 `requested` is not a state a `SteeringCommand` record is ever observed in: admission is synchronous validate-then-accept-or-reject, so nothing is persisted mid-request. **Supersession rationale.** AB-42 explicitly rejects automatic coalescing for conversational message content, because collapsing two messages can silently drop what a caller said. A `SteeringCommand` targeting `model`/`route`/etc. carries no content to drop; it is a desired value, and two commands for the same target are two different opinions about what that one value should be. Keeping both pending and racing them at the boundary has no coherent semantics, so this record decides last-request-per-target-wins, with the earlier one explicitly marked `superseded` (never silently dropped; it remains inspectable) rather than queued behind the new one or merged into it.
 
 These seven exported types carry no runtime behavior on their own. The `runStep` boundary read, pause/resume gate, and `GenerateContext` threading ship (AB-198), as do the five `OperativeEventMap` events dispatched at these transitions (AB-90/AB-221): `steering.accepted`, `steering.applied`, `steering.rejected`, `steering.superseded`, `steering.failed`. `steering.applied` is dispatched by `runStep` itself, at the boundary above; the other four are exported for `submitSteeringCommand` (Bureau's admission surface, AB-199) to dispatch — `submitSteeringCommand` itself does not ship yet. No `steering.requested` event exists: the `requested` state is never persisted or dispatched standalone.
+
+## Model capability and selection
+
+Decision record for AB-64, implemented by AB-243 (`packages/operative/src/providers/model-catalog.ts`). Seven generation-state terms get one meaning apiece, never used as a synonym for another, transcribed verbatim from AB-64's decision record:
+
+| Term       | Meaning                                                                                                       | Decided at                                 |
+| ---------- | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| known      | What the provider's SDK/API can do, independent of this deployment                                            | `BackendDescriptor` static fields          |
+| available  | Known, and reachable now: credentials configured, health not `unhealthy`                                      | `BackendDescriptor.availability`/`.health` |
+| allowed    | Available, and permitted by every policy layer                                                                | Precedence composition                     |
+| compatible | Allowed, and able to serve this request's modality, tools, schema, effort                                     | `SelectionCandidate.eligible`              |
+| requested  | What the caller asked for: a `policyRef` or an exact override; reuses AB-67's `SteeringRequestedValue`        | `SelectionRequest.requestedValue`          |
+| selected   | What the plan chose after filtering and ranking                                                               | `SelectionPlan.selected`                   |
+| effective  | What the provider actually used (`GenerateResponse.metadata.effectiveEffort` plus the model/provider sibling) | `EffectiveGenerationResult`                |
+
+The `allowed`/`compatible`/`requested`/`selected`/`effective` rows name types AB-66 has not shipped yet (`SelectionCandidate`, `SelectionRequest`, `SelectionPlan`, `EffectiveGenerationResult`); AB-243 ships only the `known`/`available` rows' `BackendDescriptor`/`ModelCatalog` types below.
+
+A versioned `BackendDescriptor` and the `ModelCatalog` it lives in, transcribed verbatim from AB-64's decision record with the 2026-09-02 coordinator amendment applied (`modalities: ModalityMatrix` replaces the three parallel `inputModalities`/`outputModalities`/`acceptedSourceForms` fields, citing AB-70's `Modality`, `MimeFamily`, `ContentSource`, and `ModalityMatrix` vocabulary by name):
+
+```ts
+import type {
+  ContentSource,
+  MediaLimits,
+  MimeFamily,
+  Modality,
+  ModalityMatrix,
+} from 'conversationalist'; // AB-70 vocabulary
+import type { BaseProviderOptions, Effort, ProviderName } from './types.ts';
+
+export type BackendLifecycleState = 'preview' | 'stable' | 'deprecated' | 'retired';
+export interface ModelAlias {
+  readonly alias: string;
+  readonly resolvesTo: string;
+}
+
+export interface EffortSupport {
+  readonly portable: readonly Effort[];
+  readonly nativeMapping:
+    'output_config.effort' | 'reasoning_effort' | 'thinkingConfig.thinkingBudget' | 'unsupported';
+  /** Generated from effort.ts's ANTHROPIC_EFFORT_SUPPORT / OPENAI_REASONING_MODELS / GEMINI_THINKING_MODELS tables, not a second table. */
+  readonly degradesTo: Readonly<Partial<Record<Effort, Effort | undefined>>>;
+}
+
+export interface GeneratedAssetBehavior {
+  readonly modality: Modality;
+  readonly synchronous: boolean;
+  readonly maxConcurrentGenerations?: number;
+}
+
+export interface BackendDescriptor {
+  readonly descriptorVersion: number;
+  readonly provider: ProviderName;
+  readonly endpoint: string;
+  readonly model: string; // provider-native, post-alias
+  readonly aliases: readonly ModelAlias[];
+  readonly lifecycle: BackendLifecycleState;
+  /** AB-70's ModalityMatrix: Record<Modality, { input: boolean; output: boolean; sourceForms: readonly ContentSource['kind'][] }> */
+  readonly modalities: ModalityMatrix;
+  readonly mimeFamilies: readonly MimeFamily[];
+  readonly mediaLimits: readonly MediaLimits[];
+  readonly generatedAssetBehavior?: readonly GeneratedAssetBehavior[];
+  readonly contextWindowTokens: number;
+  readonly maxOutputTokens: number;
+  readonly streaming: boolean;
+  readonly tools: boolean;
+  readonly parallelTools: boolean;
+  readonly structuredOutput: boolean;
+  readonly parameterCompatibility: readonly (keyof BaseProviderOptions)[];
+  readonly caching: boolean; // subsumes ProviderCapabilities.requestControlledContextCaching
+  readonly batchInference: boolean;
+  readonly explicitThinkingRequest: boolean;
+  readonly serverSideTokenCounting: boolean;
+  readonly effort: EffortSupport;
+  /** true for an ambiguous OpenAI endpoint (custom baseURL); capability flags conservatively false, availability 'unknown'. */
+  readonly endpointAmbiguous?: boolean;
+  readonly pricing?: {
+    readonly inputPerMillionTokens: number;
+    readonly outputPerMillionTokens: number;
+    readonly currency: string;
+  };
+  readonly availability: 'available' | 'unavailable' | 'unknown';
+  readonly health: 'healthy' | 'degraded' | 'unhealthy' | 'unknown';
+  readonly source: 'static' | 'provider-reported' | 'operator-override';
+  readonly freshness: string; // ISO timestamp
+}
+
+export interface ModelCatalog {
+  readonly revision: number;
+  readonly descriptors: readonly BackendDescriptor[];
+  readonly generatedAt: string;
+  readonly stale: boolean;
+  readonly projection: CatalogProjection; // AB-34's contract: a caller reads which projection it received, never infers it
+}
+
+export type CatalogProjection = 'general' | 'privileged'; // the vault brief's own vocabulary for this catalog
+```
+
+`voyage` and `ollama` are embedding-only and get no descriptor row. `getProviderCapabilities` (`packages/operative/src/providers/capabilities.ts`) is now a projection over `createModelCatalog`'s descriptor rows, with an identical public signature and bit-for-bit identical answers to its pre-AB-64 behavior — the ambiguous-`baseURL` rule is sourced from `descriptor.endpointAmbiguous`. `createModelCatalog` is synchronous, side-effect-free, performs no network input or output, and returns a deeply frozen catalog at `revision: 1`; `now` is the only clock it reads, defaulting to the wall clock and injectable in tests.
+
+The five-layer policy precedence, the deterministic selector, `SelectionPlan`, and the `'general'`-redacting catalog projection remain AB-66's scope (AB-247/AB-248 in the Model Capability project); this section covers only the descriptor and catalog AB-243 ships.
 
 ## Compile-ready examples
 
