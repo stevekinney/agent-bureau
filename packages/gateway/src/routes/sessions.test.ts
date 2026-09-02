@@ -588,6 +588,52 @@ describe('sessions routes', () => {
       expect(called).toBe(false);
     });
 
+    it('returns 400 for a non-ISO expiresAt, before submitSessionInput is called', async () => {
+      let called = false;
+      const stubBureau = makeStubBureau({
+        submitSessionInput: async () => {
+          called = true;
+          return { outcome: 'not-found' };
+        },
+      });
+      const gateway = await createTestGateway(stubBureau, { authToken: AUTH_TOKEN });
+
+      const response = await requestJSON(gateway, '/api/v1/sessions/my-session/input', {
+        method: 'POST',
+        headers: sessionWriteHeaders,
+        body: JSON.stringify({ deliveryMode: 'steer', payload: 'hi', expiresAt: 'never' }),
+      });
+
+      expect(response.status).toBe(400);
+      expect(called).toBe(false);
+    });
+
+    it('accepts an ISO-8601 expiresAt with a numeric offset', async () => {
+      let receivedRequest: unknown;
+      const stubBureau = makeStubBureau({
+        submitSessionInput: async (_sessionId: string, request: unknown) => {
+          receivedRequest = request;
+          return { outcome: 'not-found' };
+        },
+      });
+      const gateway = await createTestGateway(stubBureau, { authToken: AUTH_TOKEN });
+
+      const response = await requestJSON(gateway, '/api/v1/sessions/my-session/input', {
+        method: 'POST',
+        headers: sessionWriteHeaders,
+        body: JSON.stringify({
+          deliveryMode: 'steer',
+          payload: 'hi',
+          expiresAt: '2026-09-02T00:00:00+02:00',
+        }),
+      });
+
+      expect(response.status).toBe(404);
+      expect((receivedRequest as { expiresAt: string }).expiresAt).toBe(
+        '2026-09-02T00:00:00+02:00',
+      );
+    });
+
     it('always resolves principal from the authenticated caller, ignoring a body-supplied principal', async () => {
       let receivedRequest: unknown;
       const stubBureau = makeStubBureau({
@@ -687,9 +733,29 @@ describe('sessions routes', () => {
         label: 'web_search_tool_result',
         block: { type: 'web_search_tool_result', tool_use_id: 'tool-1', content: [] },
       },
+      // All four `ServerToolResultType` discriminants (packages/conversationalist/src/multi-modal.ts)
+      // are covered individually — the allowlist is enforced purely by `type`
+      // discrimination, so each one needs its own failing case to guard
+      // against a future schema change accidentally admitting one of them.
       {
         label: 'code_execution_tool_result',
         block: { type: 'code_execution_tool_result', tool_use_id: 'tool-1', content: {} },
+      },
+      {
+        label: 'bash_code_execution_tool_result',
+        block: { type: 'bash_code_execution_tool_result', tool_use_id: 'tool-1', content: {} },
+      },
+      {
+        label: 'text_editor_code_execution_tool_result',
+        block: {
+          type: 'text_editor_code_execution_tool_result',
+          tool_use_id: 'tool-1',
+          content: {},
+        },
+      },
+      {
+        label: 'web_fetch_tool_result',
+        block: { type: 'web_fetch_tool_result', tool_use_id: 'tool-1', content: {} },
       },
       {
         label: 'container_upload',

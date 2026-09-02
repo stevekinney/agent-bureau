@@ -80,7 +80,14 @@ const sessionInputAdmissionRequestBodySchema = z.object({
   id: z.string().min(1).optional(),
   deliveryMode: sessionInputDeliveryModeSchema,
   payload: z.union([z.string(), z.array(userAdmissibleContentSchema)]),
-  expiresAt: z.string().min(1).optional(),
+  // `SessionInputRecord.expiresAt` / `SessionInputAdmissionRequest.expiresAt`
+  // are documented `// ISO` — validate that shape at the boundary rather than
+  // accepting any non-empty string, so a malformed deadline (e.g. `'never'`)
+  // is rejected with 400 instead of reaching `submitSessionInput` and either
+  // creating a record whose expiry can't be evaluated or being silently
+  // misinterpreted downstream. `offset: true` accepts both a trailing `Z`
+  // and an explicit numeric UTC offset.
+  expiresAt: z.iso.datetime({ offset: true }).optional(),
   supersedes: z.string().min(1).optional(),
 }) satisfies z.ZodType<Omit<SessionInputAdmissionRequest, 'principal'>>;
 
