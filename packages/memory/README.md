@@ -1143,7 +1143,7 @@ import { createMockEmbedder, createInMemoryMemoryRecordStorage } from 'memory/te
 
 **`createMockEmbedder(dimension?)`:** Returns a deterministic, hash-based `Embedder`. No network calls. `dimension` defaults to 128.
 
-**`createInMemoryMemoryRecordStorage()`:** Full in-memory backend with the identical observable contract as the Weft local backend—including `putOnce`, `searchByVector` with cosine ranking, and `deleteNamespace`.
+**`createInMemoryMemoryRecordStorage(options?)`:** Full in-memory backend with the identical observable contract as the Weft local backend—including `putOnce`, `searchByVector` with cosine ranking, and `deleteNamespace`. `options.now` injects the clock used to stamp `updatedAt` on `update()` (defaults to the real `Date.now`); a deterministic test supplies a fixed or stepped clock instead of reaching a real wall clock.
 
 ```typescript
 import { createMemory } from 'memory';

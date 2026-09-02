@@ -126,7 +126,7 @@ bun run integration
 bun run validate
 ```
 
-`bun run coverage:check` is the strict package-level coverage gate for the scoped public packages. `bun run validate` runs formatting, linting, type-checking, and tests through Turbo.
+`bun run coverage:check` is the strict package-level coverage gate for the scoped public packages. `bun run validate` runs formatting, linting, type-checking, and tests through Turbo, and additionally runs `bun run check-determinism` — the determinism gate that rejects a direct `setTimeout`, `setInterval`, `Date.now`, `new Date()` with no argument, `performance.now`, `crypto.randomUUID`, or `Math.random` call inside the deterministic test directories named in [`scripts/determinism-manifest.json`](scripts/determinism-manifest.json), and a `(globalThis|global).(fetch|WebSocket|EventSource) = ...` assignment anywhere under `packages/`, unless the path is listed in that manifest's `realRuntimeExemptions` with a reason and an owning issue.
 
 ## Roadmap
 

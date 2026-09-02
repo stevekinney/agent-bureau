@@ -1,0 +1,15 @@
+{
+  "deterministicDirectories": [
+    "packages/*/src/test/**",
+    "packages/bureau/src/test/**",
+    "packages/integration/test/lifecycle-contract/**"
+  ],
+  "realRuntimeExemptions": [
+    {
+      "path": "packages/gateway/src/ui/**",
+      "reason": "Svelte hook tests assign globalThis.fetch/WebSocket/EventSource directly to install fakes (5 files: use-chat, use-reviews, use-run-detail, use-runs, use-websocket .svelte.test.ts). AB-273 injects fetch/WebSocket/EventSource/timers through a client environment so these tests stop mutating process globals.",
+      "owner": "Agent Bureau team",
+      "owningIssue": "AB-273"
+    }
+  ]
+}

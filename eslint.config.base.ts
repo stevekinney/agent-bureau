@@ -1,6 +1,6 @@
 import { fixupPluginRules } from '@eslint/compat';
 import js from '@eslint/js';
-import type { Linter } from 'eslint';
+import type { Linter, Rule } from 'eslint';
 import eslintConfigPrettier from 'eslint-config-prettier';
 import eslintComments from 'eslint-plugin-eslint-comments';
 import importPlugin from 'eslint-plugin-import';
@@ -11,6 +11,8 @@ import unicorn from 'eslint-plugin-unicorn';
 import unusedImports from 'eslint-plugin-unused-imports';
 import globals from 'globals';
 import tseslint from 'typescript-eslint';
+
+import rawDeterminismManifest from './scripts/determinism-manifest.json' with { type: 'json' };
 
 const commonFiles = '**/*.{js,jsx,cjs,mjs,ts,tsx}';
 
@@ -77,6 +79,312 @@ const regexpRules: Linter.RulesRecord = {
   'regexp/no-empty-capturing-group': 'error',
   'regexp/no-lazy-ends': 'error',
 };
+
+/**
+ * Determinism gate (AB-278): rejects direct use of real clocks, timers, and identifier/random
+ * sources inside `scripts/determinism-manifest.json`'s `deterministicDirectories`, and rejects
+ * process-global transport mutation (`(globalThis|global).(fetch|WebSocket|EventSource) = ...`)
+ * anywhere under `packages/`. Both rules are manifest-driven: a path listed under the manifest's
+ * `realRuntimeExemptions` is skipped instead of flagged.
+ *
+ * The rule implementations live here so `eslint.config.base.ts` — spread into every package's
+ * `eslint.config.js` — enforces them through the ordinary `turbo run lint` path. The *inline
+ * eslint-disable-comment bypass* guarantee (a `// eslint-disable-next-line` above an offending
+ * call must not suppress the report) is NOT provided by this per-package integration: ESLint's
+ * `linterOptions.noInlineConfig` is scoped per matched file, not per rule, and the
+ * transport-mutation rule is deliberately repo-wide, so making it non-bypassable here would mean
+ * disabling ALL inline disable comments across the entire `packages/` tree — collateral damage to
+ * every other rule's legitimate disables. `scripts/check-determinism.ts` re-runs these same two
+ * rules through `Linter.verify` in an isolated config where NO other rule is registered, so
+ * `noInlineConfig: true` there affects only these two rules — this is where the non-bypass
+ * guarantee actually lives, and it is wired into `bun run validate` directly (see
+ * `scripts/check-determinism.ts` for the rationale in full).
+ */
+
+export interface DeterminismManifestExemption {
+  readonly path: string;
+  readonly reason: string;
+  readonly owner: string;
+  readonly owningIssue: string;
+}
+
+export interface DeterminismManifest {
+  readonly deterministicDirectories: readonly string[];
+  readonly realRuntimeExemptions: readonly DeterminismManifestExemption[];
+}
+
+const DETERMINISM_ACTION_SENTENCE =
+  'Drive an injected RuntimeServices instead, or add this path to scripts/determinism-manifest.json with a reason and an owning issue.';
+
+/** The transport-mutation rule's scope: every file under `packages/`, exemptions aside. */
+const TRANSPORT_MUTATION_SCOPE_GLOB = 'packages/**';
+
+const GLOBSTAR_PLACEHOLDER = '\u0000';
+
+/** Converts a `*`/`**`-only glob into an anchored RegExp matched against a POSIX-relative path. */
+function globToRegExp(glob: string): RegExp {
+  const segments = glob.split('/').map((segment) => {
+    if (segment === '**') return GLOBSTAR_PLACEHOLDER;
+    const escaped = segment.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+    return escaped.replace(/\*/g, '[^/]*');
+  });
+
+  const pattern = segments
+    .join('/')
+    .replace(new RegExp(`/${GLOBSTAR_PLACEHOLDER}/`, 'g'), '/(?:.*/)?')
+    .replace(new RegExp(`^${GLOBSTAR_PLACEHOLDER}/`), '(?:.*/)?')
+    .replace(new RegExp(`/${GLOBSTAR_PLACEHOLDER}$`), '(?:/.*)?')
+    .replace(new RegExp(`^${GLOBSTAR_PLACEHOLDER}$`), '.*');
+
+  return new RegExp(`^${pattern}$`);
+}
+
+export function matchesAnyGlob(relativePath: string, globs: readonly string[]): boolean {
+  return globs.some((glob) => globToRegExp(glob).test(relativePath));
+}
+
+/**
+ * Resolves an ESLint rule's `context.filename` (absolute when linting real files under a
+ * package's own `eslint .` invocation, or already repo-relative when a test passes a synthetic
+ * filename straight to `Linter.verify`) to a POSIX path relative to the repository root.
+ */
+export function toRepoRelativePosixPath(filename: string, repoRoot: string): string {
+  const normalizedRoot = repoRoot.endsWith('/') ? repoRoot : `${repoRoot}/`;
+  const relative = filename.startsWith(normalizedRoot)
+    ? filename.slice(normalizedRoot.length)
+    : filename;
+  return relative.split('\\').join('/');
+}
+
+function exemptionGlobs(manifest: DeterminismManifest): string[] {
+  return manifest.realRuntimeExemptions.map((exemption) => exemption.path);
+}
+
+function isDeterministicDirectoryFile(
+  relativePath: string,
+  manifest: DeterminismManifest,
+): boolean {
+  return (
+    matchesAnyGlob(relativePath, manifest.deterministicDirectories) &&
+    !matchesAnyGlob(relativePath, exemptionGlobs(manifest))
+  );
+}
+
+function isTransportMutationScopeFile(
+  relativePath: string,
+  manifest: DeterminismManifest,
+): boolean {
+  return (
+    matchesAnyGlob(relativePath, [TRANSPORT_MUTATION_SCOPE_GLOB]) &&
+    !matchesAnyGlob(relativePath, exemptionGlobs(manifest))
+  );
+}
+
+/** Real-runtime call sites this rule flags, matched by AST shape rather than source text. */
+function realRuntimeCallLabel(
+  node: (Rule.Node & { type: 'CallExpression' | 'NewExpression' }) | undefined,
+): string | undefined {
+  if (!node) return undefined;
+
+  if (node.type === 'NewExpression') {
+    if (
+      node.callee.type === 'Identifier' &&
+      node.callee.name === 'Date' &&
+      node.arguments.length === 0
+    ) {
+      return 'new Date()';
+    }
+    return undefined;
+  }
+
+  const callee = node.callee;
+  if (
+    callee.type === 'Identifier' &&
+    (callee.name === 'setTimeout' || callee.name === 'setInterval')
+  ) {
+    return `${callee.name}(`;
+  }
+
+  if (
+    callee.type === 'MemberExpression' &&
+    !callee.computed &&
+    callee.property.type === 'Identifier'
+  ) {
+    const object = callee.object;
+    if (object.type === 'Identifier') {
+      const pair = `${object.name}.${callee.property.name}`;
+      if (
+        pair === 'Date.now' ||
+        pair === 'performance.now' ||
+        pair === 'crypto.randomUUID' ||
+        pair === 'Math.random'
+      ) {
+        return `${pair}(`;
+      }
+    }
+  }
+
+  return undefined;
+}
+
+export function createNoRealRuntimeCallRule(
+  manifest: DeterminismManifest,
+  repoRoot: string,
+): Rule.RuleModule {
+  return {
+    meta: {
+      type: 'problem',
+      docs: {
+        description:
+          'disallow direct setTimeout/setInterval/Date.now/new Date()/performance.now/crypto.randomUUID/Math.random inside a deterministic test directory not listed in scripts/determinism-manifest.json',
+      },
+      schema: [],
+    },
+    create(context) {
+      const relativePath = toRepoRelativePosixPath(context.filename, repoRoot);
+      if (!isDeterministicDirectoryFile(relativePath, manifest)) return {};
+
+      function reportIfRealRuntimeCall(
+        node: Rule.Node & { type: 'CallExpression' | 'NewExpression' },
+      ) {
+        const label = realRuntimeCallLabel(node);
+        if (!label) return;
+        context.report({
+          node,
+          message: `${label} is a real, non-deterministic runtime call inside a deterministic test directory (${relativePath}). ${DETERMINISM_ACTION_SENTENCE}`,
+        });
+      }
+
+      return {
+        CallExpression: reportIfRealRuntimeCall,
+        NewExpression: reportIfRealRuntimeCall,
+      };
+    },
+  };
+}
+
+export function createNoGlobalTransportMutationRule(
+  manifest: DeterminismManifest,
+  repoRoot: string,
+): Rule.RuleModule {
+  return {
+    meta: {
+      type: 'problem',
+      docs: {
+        description:
+          'disallow (globalThis|global).(fetch|WebSocket|EventSource) = ... assignment anywhere under packages/ not listed in scripts/determinism-manifest.json',
+      },
+      schema: [],
+    },
+    create(context) {
+      const relativePath = toRepoRelativePosixPath(context.filename, repoRoot);
+      if (!isTransportMutationScopeFile(relativePath, manifest)) return {};
+
+      return {
+        AssignmentExpression(node) {
+          if (node.operator !== '=') return;
+          const left = node.left;
+          if (
+            left.type !== 'MemberExpression' ||
+            left.computed ||
+            left.property.type !== 'Identifier'
+          ) {
+            return;
+          }
+          if (!['fetch', 'WebSocket', 'EventSource'].includes(left.property.name)) return;
+          if (
+            left.object.type !== 'Identifier' ||
+            (left.object.name !== 'globalThis' && left.object.name !== 'global')
+          ) {
+            return;
+          }
+
+          context.report({
+            node,
+            message: `Direct assignment to ${left.object.name}.${left.property.name} mutates process-global transport state (${relativePath}). ${DETERMINISM_ACTION_SENTENCE}`,
+          });
+        },
+      };
+    },
+  };
+}
+
+/**
+ * Flat-config entries wiring both determinism rules for `manifest`/`repoRoot`, plus a
+ * `noInlineConfig` block scoped to the manifest's test-directory shapes. That scoping is narrow
+ * enough to be safe repo-wide (verified empty via `git grep eslint-disable` across
+ * `packages/*\/src/test/**` and `packages/integration/test/lifecycle-contract/**` as of this
+ * writing) and gives the real-runtime-call rule genuine non-bypass through the ordinary
+ * `turbo run lint` path; the transport-mutation rule's non-bypass guarantee comes from
+ * `scripts/check-determinism.ts` instead, per the comment above.
+ */
+export function createDeterminismConfig(
+  manifest: DeterminismManifest,
+  repoRoot: string,
+): Linter.Config[] {
+  return [
+    {
+      files: [commonFiles],
+      plugins: {
+        determinism: {
+          rules: {
+            'no-real-runtime-call': createNoRealRuntimeCallRule(manifest, repoRoot),
+            'no-global-transport-mutation': createNoGlobalTransportMutationRule(manifest, repoRoot),
+          },
+        },
+      },
+      rules: {
+        'determinism/no-real-runtime-call': 'error',
+        'determinism/no-global-transport-mutation': 'error',
+      },
+    },
+    {
+      files: ['src/test/**', 'test/lifecycle-contract/**'],
+      linterOptions: { noInlineConfig: true },
+    },
+  ];
+}
+
+function isDeterminismManifestExemption(value: unknown): value is DeterminismManifestExemption {
+  if (typeof value !== 'object' || value === null) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.path === 'string' &&
+    typeof record.reason === 'string' &&
+    typeof record.owner === 'string' &&
+    typeof record.owningIssue === 'string'
+  );
+}
+
+/** Runtime shape guard for `scripts/determinism-manifest.json` — no `as` cast past this point. */
+export function parseDeterminismManifest(value: unknown): DeterminismManifest {
+  if (typeof value !== 'object' || value === null) {
+    throw new TypeError('determinism-manifest.json must be a JSON object');
+  }
+  const record = value as Record<string, unknown>;
+
+  const { deterministicDirectories, realRuntimeExemptions } = record;
+  if (
+    !Array.isArray(deterministicDirectories) ||
+    !deterministicDirectories.every((entry): entry is string => typeof entry === 'string')
+  ) {
+    throw new TypeError(
+      'determinism-manifest.json "deterministicDirectories" must be a string array',
+    );
+  }
+  if (
+    !Array.isArray(realRuntimeExemptions) ||
+    !realRuntimeExemptions.every(isDeterminismManifestExemption)
+  ) {
+    throw new TypeError(
+      'determinism-manifest.json "realRuntimeExemptions" must be an array of {path, reason, owner, owningIssue}',
+    );
+  }
+
+  return { deterministicDirectories, realRuntimeExemptions };
+}
+
+export const determinismManifest = parseDeterminismManifest(rawDeterminismManifest);
 
 /**
  * Shared ESLint flat config array. Each package imports this and spreads it,
@@ -164,6 +472,13 @@ export const baseConfig = [
       ],
     },
   })),
+
+  // `import.meta.dirname`, not the Bun-only `import.meta.dir`: `eslint .` runs under whatever
+  // interpreter its `#!/usr/bin/env node` shebang resolves to. Direct `bun <path-to-eslint>`
+  // stays on Bun, but `bun run lint` (what `turbo run lint`/CI actually invokes) forwards to
+  // real Node, where `import.meta.dir` is undefined. `dirname` is the one spelling both runtimes
+  // support.
+  ...createDeterminismConfig(determinismManifest, import.meta.dirname),
 ];
 
 export const testOverrides = [
