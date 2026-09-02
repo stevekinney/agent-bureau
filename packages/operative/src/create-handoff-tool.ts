@@ -15,7 +15,16 @@ import type { RunnableAgent } from './runnable-agent';
  */
 export interface HandoffTarget {
   readonly agentName: string;
-  readonly agent: RunnableAgent<never, boolean>;
+  // A two-member union, not one instantiation of `RunnableAgent<O, H>` —
+  // matches bureau's `AgentDefinitions` bound (see its identical comment for
+  // why: a real `StandaloneAgent` forces `AgentRun<O, H>.unwrap()`'s
+  // conditional return type to fully expand during the structural check, and
+  // no single concrete `(O, H)` pair accepts both a no-schema and a
+  // schema'd agent). `createHandoffTool` never calls `agent.run()` itself
+  // (handoff is marker-based — see below), so nothing here actually reads a
+  // value at this widened type.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- required for the has-output union member; see the identical note on bureau's AgentDefinitions.
+  readonly agent: RunnableAgent<never, false> | RunnableAgent<any, true>;
 }
 
 /**
