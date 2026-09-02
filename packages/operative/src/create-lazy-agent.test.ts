@@ -336,6 +336,29 @@ describe('createLazyAgent', () => {
     expect((events.at(-1) as RunCompletedEvent).result).toBe(result);
   });
 
+  it('rejects a resolved value with run() and name but no boolean hasOutput as an AgentContractError (AB-234 review round 2 — Codex P1)', async () => {
+    // An untyped or pre-AB-234 module resolving to an object with `run`/
+    // `name` but no `hasOutput` at all must be rejected as a contract
+    // failure — not silently accepted with the lazy wrapper's `hasOutput`
+    // getter then reading `undefined` off it (which `isSuccessfulRunResult`
+    // treats as falsy, reopening the exact gap AB-234 closes).
+    const preAb234Agent = { name: 'pre-ab-234', run: () => ({}) } as unknown as RunnableAgent<
+      never,
+      false
+    >;
+    const lazy = createLazyAgent(() => preAb234Agent, { label: 'pre-ab-234-agent' });
+
+    const run = lazy.run('one');
+    const result = await run.result();
+
+    expect(result.finishReason).toBe('error');
+    expect(result.error).toBeInstanceOf(AgentContractError);
+    expect((result.error as AgentContractError).code).toBe('INVALID_AGENT_HANDLE');
+    // The provisional (pre-load) witness, since the loaded agent's own
+    // hasOutput is not a valid boolean and is never trusted.
+    expect(lazy.hasOutput).toBe(false);
+  });
+
   it('rejects an invalid run() handle (missing abort) as an AgentContractError', async () => {
     const badHandle = { result: () => Promise.resolve(successResult('x')) } as unknown as AgentRun<
       string,

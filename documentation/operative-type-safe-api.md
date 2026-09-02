@@ -328,16 +328,26 @@ export type AgentModule<O, H extends boolean> =
 
 export function createLazyAgent<O, H extends boolean>(
   loader: () => Promise<AgentModule<O, H>>,
-  options: { label?: string; hasOutput?: boolean } = {},
+  options: { label?: string; hasOutput?: H } = {},
 ): RunnableAgent<O, H> {
+  let state: { kind: 'unloaded' } | { kind: 'loaded'; agent: RunnableAgent<O, H> } = {
+    kind: 'unloaded',
+  };
   let resolved: Promise<RunnableAgent<O, H>> | undefined;
 
   const resolve = (): Promise<RunnableAgent<O, H>> =>
-    (resolved ??= loader().then((module) => ('run' in module ? module : module.default)));
+    (resolved ??= loader()
+      .then((module) => ('run' in module ? module : module.default))
+      .then((agent) => {
+        state = { kind: 'loaded', agent };
+        return agent;
+      }));
 
   return {
     name: options.label ?? '(lazy)',
-    hasOutput: options.hasOutput ?? false,
+    get hasOutput() {
+      return state.kind === 'loaded' ? state.agent.hasOutput : (options.hasOutput ?? false);
+    },
     run(input, context) {
       return createDeferredAgentRun(resolve().then((agent) => agent.run(input, context)));
     },
@@ -347,10 +357,17 @@ export function createLazyAgent<O, H extends boolean>(
 
 `createLazyAgent` returns a `RunnableAgent` synchronously, before the loader
 has ever run — so its `hasOutput` witness (AB-234) can't be discovered from
-the module in time. `options.hasOutput` lets the caller declare the same
-truthful value the underlying, eventually-loaded agent's own `hasOutput` will
-report, matching whatever `H` this call is instantiated with. It defaults to
-`false`, matching `H`'s own default.
+the module in time until it resolves. `hasOutput` is therefore a live
+getter, not a value frozen at construction: before the loader resolves it
+falls back to `options.hasOutput` (a provisional value, typed as `H` itself
+so it cannot disagree with this call's own type argument — default `false`,
+matching `H`'s own default); once resolved, it switches to reading the
+_loaded_ agent's own `hasOutput` directly — the real, load-derived truth —
+regardless of what (or whether) `options.hasOutput` said. This closes a
+review-round gap in an earlier draft of this contract: publishing a value
+frozen at construction time would otherwise leave a permanently wrong
+witness whenever the caller's declared `options.hasOutput` didn't match the
+underlying agent's actual one (or was omitted for an inferred `H = true`).
 
 `createLazyAgent`'s return type is `RunnableAgent<O, H>` — the same shape as
 an eager `createAgent` result. This is the load-bearing property: a lazy agent

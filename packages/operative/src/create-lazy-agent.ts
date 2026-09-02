@@ -145,7 +145,22 @@ function isRunnableAgent(value: unknown): value is RunnableAgent<unknown, boolea
   // `default` unwrapping, later invoking the unrelated `run` with
   // `AgentInput`. A module namespace object has no `name` binding, so this
   // check rejects it and falls through to the `default` unwrapping branch.
-  return isCallable(candidate['run']) && typeof candidate['name'] === 'string';
+  //
+  // `hasOutput` (AB-234 review round 2, Codex P1) must also be validated as
+  // an actual `boolean`, not merely present-or-absent: an untyped or
+  // pre-AB-234 module resolving to an object with `run`/`name` but no
+  // `hasOutput` would otherwise pass this guard, and the lazy wrapper's own
+  // `hasOutput` getter would then read `undefined` off it — which
+  // `isSuccessfulRunResult` treats as falsy, silently reopening the exact
+  // soundness gap this issue closes. Failing the contract check here
+  // instead routes it through the existing `AgentContractError` path (see
+  // both call sites below) rather than publishing a missing property as a
+  // witness.
+  return (
+    isCallable(candidate['run']) &&
+    typeof candidate['name'] === 'string' &&
+    typeof candidate['hasOutput'] === 'boolean'
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -887,7 +902,17 @@ export function createLazyAgent<O = never, H extends boolean = false>(
      * completed, so this always observes the loaded value in practice.
      */
     get hasOutput(): boolean {
-      return state.kind === 'loaded' ? state.agent.hasOutput : (options.hasOutput ?? false);
+      // `state.agent` is whatever the loader resolved to — `resolve()`
+      // caches it before `isRunnableAgent` gets a chance to reject it (that
+      // rejection happens per-call-site, as an `AgentContractError` on the
+      // run itself, not by unsetting `state`). Guard with `typeof` here too
+      // (belt-and-suspenders alongside the `isRunnableAgent` contract
+      // check both call sites already perform) so a malformed loaded value
+      // can never make this getter return anything but a real `boolean`.
+      if (state.kind === 'loaded' && typeof state.agent.hasOutput === 'boolean') {
+        return state.agent.hasOutput;
+      }
+      return options.hasOutput ?? false;
     },
     run(input: AgentInput, context?: AgentRunContext): AgentRun<O, H> {
       return createDeferredAgentRun(resolve, input, context, label);
