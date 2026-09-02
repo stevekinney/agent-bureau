@@ -1,6 +1,5 @@
 import type {
   AgentInput,
-  AgentRun,
   AgentSession,
   CacheOptions,
   EnhancedStreamingOptions,
@@ -53,9 +52,8 @@ import type { CreateMemoryOptions, Memory } from 'memory';
 
 import type {
   AgentDefinitions,
-  AgentHasOutput,
   AgentNames,
-  AgentOutput,
+  AgentRunForName,
   BureauAgentCatalog,
 } from './agent-catalog';
 import type { AuditTrail } from './audit-trail';
@@ -634,7 +632,7 @@ export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
     name: TName,
     input: AgentInput,
     options?: BureauRunOptions,
-  ): AgentRun<AgentOutput<D, TName>, AgentHasOutput<D, TName>>;
+  ): AgentRunForName<D, TName>;
 
   createRun(request: CreateRunRequest): Promise<RunSummary>;
   submitSchedulerTask(request: SubmitSchedulerTaskRequest): Promise<SubmitSchedulerTaskResponse>;

@@ -10,6 +10,7 @@
  */
 import {
   AgentContractError,
+  type AgentRun,
   createAgent,
   createLazyAgent,
   type RunnableAgent,
@@ -70,6 +71,20 @@ describe('bureau.run', () => {
     }
   });
 
+  it('throws BureauError BAD_REQUEST when options is an array (typeof [] === "object" does not make it a valid options bag)', async () => {
+    const bureau = await createBureau({
+      agents: { echo: createAgent({ generate: mockGenerate() }) },
+    });
+    try {
+      expect(() =>
+        // @ts-expect-error — deliberately an array, not a BureauRunOptions object
+        bureau.run('echo', 'hi', []),
+      ).toThrow(BureauError);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
   it('throws BureauError BAD_REQUEST when options.signal is not an AbortSignal', async () => {
     const bureau = await createBureau({
       agents: { echo: createAgent({ generate: mockGenerate() }) },
@@ -123,6 +138,28 @@ describe('bureau.run', () => {
       expect(typeof (run as unknown as { then?: unknown }).then).toBe('undefined');
       const result = await run.result();
       expect(result.content).toBe('hello from echo');
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('settles a direct-dispatch agent whose run() throws synchronously through the returned handle, not as a synchronous throw from bureau.run() itself', async () => {
+    // AB-22's synchronous-throw allowlist is unknown name / disposed /
+    // malformed input-options only — a hand-written catalog RunnableAgent
+    // is a valid entry, and its run() throwing during per-run setup must
+    // not escape bureau.run() as a bare exception (review round 2, Codex).
+    const throwingAgent: RunnableAgent<unknown, boolean> = {
+      name: 'throws',
+      run: () => {
+        throw new Error('setup exploded');
+      },
+    };
+    const bureau = await createBureau({ agents: { throws: throwingAgent } });
+    try {
+      const run = bureau.run('throws', 'hi'); // must not throw here
+      const result = await run.result();
+      expect(result.finishReason).not.toBe('stop-condition');
+      expect(result.error).toBeInstanceOf(Error);
     } finally {
       await bureau.dispose();
     }
@@ -256,6 +293,38 @@ describe('bureau.run', () => {
     }
   });
 
+  it('falls back to direct execution for a LAZY-wrapped agent whose resolved module does not support definition resolution (review round 2, Codex)', async () => {
+    // `createLazyAgent` always exposes the definition-resolution symbol as a
+    // proxy — `typeof resolver === 'function'` is true for every lazy
+    // wrapper regardless of whether the module it eventually loads actually
+    // supports it. Without the AgentContractError-triggered fallback, this
+    // exact scenario (a durable bureau + a lazy-wrapped non-resolving
+    // agent) would route into the durable branch and fail there, even
+    // though the non-lazy version of the same agent (the test above)
+    // correctly falls back to direct dispatch.
+    const lazyNonResolvingAgent = createLazyAgent(() =>
+      Promise.resolve<RunnableAgent<never, false>>({
+        name: 'plain',
+        run: (input, context) =>
+          createAgent({ generate: mockGenerate('lazy plain hello') }).run(input, context),
+      }),
+    );
+    const bureau = await createBureau({
+      agents: { plain: lazyNonResolvingAgent },
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+    try {
+      const before = await bureau.listDurableRuns();
+      const result = await bureau.run('plain', 'hi').result();
+      expect(result.content).toBe('lazy plain hello');
+      const after = await bureau.listDurableRuns();
+      expect(after?.total ?? 0).toBe(before?.total ?? 0);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
   it('settles a lazy-load failure through the returned handle instead of throwing synchronously', async () => {
     const failingLazyAgent = createLazyAgent(() => Promise.reject(new Error('load failed')));
     const bureau = await createBureau({ agents: { lazy: failingLazyAgent } });
@@ -350,6 +419,65 @@ describe('bureau.run', () => {
     try {
       expect(bureau.agents.names()).toEqual([]);
       expect(bureau.agents.has('anything')).toBe(false);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('completes dispose() teardown (toolbox/storage) even when an in-flight catalog run throws from abort()', async () => {
+    // Review round 2 (Codex): dispose() must isolate a failing catalog
+    // run's abort() so the unconditional teardown after it (toolbox
+    // shutdown, durable-engine disposal, storage closure) still runs — a
+    // rejection here would otherwise be cached forever as disposePromise,
+    // permanently blocking cleanup on every subsequent dispose() call too.
+    const hostileAgent: RunnableAgent<unknown, boolean> = {
+      name: 'hostile',
+      run: () =>
+        ({
+          result: () => new Promise<never>(() => {}), // never settles
+          unwrap: () => {
+            throw new Error('not used by this test');
+          },
+          abort: () => {
+            throw new Error('a hostile agent throwing from abort()');
+          },
+          [Symbol.dispose]: () => {},
+          [Symbol.asyncIterator]: () => {
+            throw new Error('not used by this test');
+          },
+        }) as unknown as AgentRun<unknown, boolean>,
+    };
+    const bureau = await createBureau({ agents: { hostile: hostileAgent } });
+    bureau.run('hostile', 'hi'); // dispatched, never settles, still tracked
+
+    // Must resolve, not hang or reject, despite the hostile abort() above.
+    await bureau.dispose();
+
+    // A second call returns the same cached, already-resolved promise
+    // rather than re-running (and re-throwing) teardown.
+    await bureau.dispose();
+  });
+
+  it('snapshots agents before the first await — a caller mutating the same object after calling createBureau() does not leak into bureau.agents', async () => {
+    // Review round 2 (Codex): createRuntimeComposition(options) used to be
+    // awaited BEFORE the catalog was built from options.agents, leaving a
+    // real mutation window. createBureau() is an async function: it runs
+    // synchronously up to its first `await`, so if the snapshot happens
+    // before that point (the fix), a caller's mutation on the very next
+    // line — necessarily AFTER createBureau() has already returned control
+    // — can never affect it, regardless of how many microtask hops
+    // composition itself takes.
+    const agents: Record<string, RunnableAgent<unknown, boolean>> = {
+      echo: createAgent({ generate: mockGenerate() }),
+    };
+    const bureauPromise = createBureau({ agents });
+    agents['mutated'] = createAgent({ generate: mockGenerate() });
+    delete agents['echo'];
+
+    const bureau = await bureauPromise;
+    try {
+      expect(bureau.agents.names()).toEqual(['echo']);
+      expect(bureau.agents.has('mutated')).toBe(false);
     } finally {
       await bureau.dispose();
     }

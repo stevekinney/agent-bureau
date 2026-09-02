@@ -8,7 +8,7 @@
  * `query`, and nothing that mutates.
  */
 
-import type { RunnableAgent } from '@lostgradient/operative';
+import type { AgentRun, RunnableAgent } from '@lostgradient/operative';
 
 /**
  * A plain literal map of agent name to `RunnableAgent`. There is no
@@ -76,6 +76,34 @@ export type AgentOutput<D extends AgentDefinitions, TName extends keyof D> =
 /** Whether `D[TName]` was built with an `output` schema. */
 export type AgentHasOutput<D extends AgentDefinitions, TName extends keyof D> =
   D[TName] extends RunnableAgent<unknown, infer H> ? H : false;
+
+/**
+ * `bureau.run`'s return type, name-keyed and DISTRIBUTIVE over `TName`
+ * (review round 2, Codex) — required whenever a caller's static `name` type
+ * is a union spanning both a schema-backed and a schema-less agent (e.g. a
+ * name read from a variable typed `'schema' | 'plain'`, or a generic helper
+ * forwarding a caller-supplied literal union). `AgentOutput`/`AgentHasOutput`
+ * key off `D[TName]` — an indexed access, not a naked type-parameter
+ * reference — so neither one distributes over a union `TName` on its own;
+ * wrapping them in `AgentRun<AgentOutput<D, TName>, AgentHasOutput<D,
+ * TName>>` directly (as `Bureau.run`'s signature used to) computes `O`/`H`
+ * against the COLLAPSED union `D[TName1] | D[TName2]` once, which can
+ * resolve `AgentHasOutput` to the non-literal `boolean` and make `AgentRun`
+ * select its `H = false` conditional branch regardless of which name was
+ * actually passed — `unwrap()` then types as `Promise<string>` even for a
+ * call that resolves to the schema'd agent at runtime, an unsound
+ * `Promise<string>` promise where a real caller gets back a parsed object.
+ * The `TName extends TName ? ... : never` idiom is TypeScript's standard way
+ * to force distribution over an otherwise inert type-parameter position:
+ * inside that true branch, `TName` is narrowed to ONE union member at a
+ * time as the conditional expands, so `AgentOutput`/`AgentHasOutput`
+ * evaluate correctly per member and the results union together as
+ * `AgentRun<O1, H1> | AgentRun<O2, H2> | ...` — never collapsed.
+ */
+export type AgentRunForName<
+  D extends AgentDefinitions,
+  TName extends keyof D & string,
+> = TName extends TName ? AgentRun<AgentOutput<D, TName>, AgentHasOutput<D, TName>> : never;
 
 export interface AgentCatalogEntry<
   D extends AgentDefinitions,

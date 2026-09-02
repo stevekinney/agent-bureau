@@ -1,5 +1,6 @@
 import {
   type ActiveRun,
+  AgentContractError,
   type AgentInput,
   type AgentRun,
   type AgentRunContext,
@@ -20,6 +21,7 @@ import {
   OPERATIVE_RESOLVE_RUN_OPTIONS,
   type RequestHumanInputContext,
   type RunnableAgent,
+  type RunOptions,
   type RunReport,
   SchedulerTaskCompletedEvent,
   SchedulerTaskFailedEvent,
@@ -543,7 +545,11 @@ function validateBureauRunOptions(
   options: BureauRunOptions | undefined,
 ): asserts options is BureauRunOptions | undefined {
   if (options === undefined) return;
-  if (options === null || typeof options !== 'object') {
+  // `typeof [] === 'object'` — without excluding arrays explicitly, a
+  // JavaScript caller passing `[]` (or any array) as `options` passed this
+  // guard as an empty options bag instead of the synchronous rejection the
+  // contract advertises for malformed options (review round 2, Codex).
+  if (options === null || typeof options !== 'object' || Array.isArray(options)) {
     toBadRequest('"options" must be an object');
   }
   if (options.sessionId !== undefined && typeof options.sessionId !== 'string') {
@@ -823,12 +829,23 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   const ownsStore = !options.store;
   const store: Store = options.store ?? createStore();
   const emitter = new CompletableEventTarget<BureauEventMap>();
+  // Snapshot `agents` synchronously, before the first `await` below — the
+  // "fixed at createBureau() call time" catalog contract otherwise has a
+  // real mutation window: a caller that mutates the SAME `agents` object it
+  // passed in (adds/removes/reassigns a key) between calling createBureau()
+  // and it resolving would leak that change into `bureau.agents`, since
+  // `createRuntimeComposition(options)` is awaited before the catalog used
+  // to be built from `options.agents` (review round 2, Codex). A shallow
+  // copy preserves key insertion order (the definition-order guarantee)
+  // while defeating exactly that window; it does not deep-freeze individual
+  // agent values, which is unchanged/out of scope.
+  const agentsSnapshot: D = { ...options.agents };
   const runtime = await createRuntimeComposition(options);
   // AB-15/AB-22: the typed agent catalog — a plain literal map, fixed for
   // the bureau's lifetime, dispatched by name through `bureau.run`.
   // Independent of `runtime` (bureau-level generate/toolbox/provider
   // composition, still used by `createRun`).
-  const agentCatalog = createAgentCatalog(options.agents);
+  const agentCatalog = createAgentCatalog(agentsSnapshot);
   // AB-13 — declarative flow control (concurrency/rate-limit/singleton). One
   // controller instance shared across BOTH `createRun` (API-triggered) and
   // `submitSchedulerTask` (scheduler-originated), so a per-agent concurrency
@@ -1912,6 +1929,15 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // `await resolver(...)` settles would otherwise leave the already-started
       // durable workflow running, unobserved, forever.
       let dispatchedActiveRun: ActiveRun | undefined;
+      // Review round 2 (Codex): the previous fix only forwarded abort() to
+      // `dispatchedActiveRun` when it ALREADY existed at the moment abort()
+      // ran — it did nothing when abort() was called (or the handle
+      // disposed) while `resolver(input, context)` was still pending, since
+      // `dispatchedActiveRun` is undefined for that entire window and
+      // nothing re-checks after it's finally assigned. Remember the request
+      // instead, and act on it the instant the ActiveRun exists, whichever
+      // order the two events happen in.
+      let cancellationRequested: { reason: string | undefined; dispose: boolean } | undefined;
       // `createDeferredAgentRun` resolves a `RunnableAgent` then calls its
       // `run()` — built for `createLazyAgent`'s "resolve a module" case, but
       // agnostic to WHY resolution is async. Wrapping the durable-engine
@@ -1919,7 +1945,40 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // one-shot synthetic agent reuses its buffering/abort-forwarding
       // machinery instead of reimplementing it.
       const resolveDurableAgent = async (): Promise<RunnableAgent<unknown, boolean>> => {
-        const resolvedOptions = await resolver(input, context);
+        let resolvedOptions: RunOptions;
+        try {
+          // Invoked through `definitionResolvingAgent`, not as a bare
+          // extracted `resolver(...)` call — a resolver implemented as a
+          // method reading instance state via `this` (a custom
+          // `DefinitionResolvingAgent`, not necessarily `createAgent`'s own
+          // arrow-function implementation) would otherwise lose its receiver
+          // under strict-mode ESM. Matches `createLazyAgent`'s own resolver
+          // forwarding for the same reason.
+          resolvedOptions = await definitionResolvingAgent[OPERATIVE_RESOLVE_RUN_OPTIONS]!(
+            input,
+            context,
+          );
+        } catch (error) {
+          // Review round 2 (Codex): `typeof resolver === 'function'` above
+          // is true for EVERY `createLazyAgent`-wrapped agent unconditionally
+          // — the wrapper always exposes this symbol as a proxy that only
+          // discovers, once actually invoked, whether the module it loads
+          // supports durable resolution at all. A lazy-wrapped agent whose
+          // real underlying agent does NOT support it would otherwise always
+          // be routed into this durable branch and fail here, even though
+          // the exact same agent registered eagerly correctly falls back to
+          // direct dispatch (see the "falls back to direct execution" test
+          // above). `AgentContractError` is the established convention this
+          // codebase already throws for "this capability is not supported"
+          // (both here and inside `createLazyAgent`'s own resolver) — catch
+          // exactly that class and fall back to the ORIGINAL catalog agent's
+          // own `run()`, matching what direct registration would have done.
+          // Anything else is a genuine resolver failure and must propagate.
+          if (error instanceof AgentContractError) {
+            return agent;
+          }
+          throw error;
+        }
         const activeRun = createActiveRun(resolvedOptions, {
           engine: durable.engine,
           checkpointStore: durable.checkpointStore,
@@ -1927,6 +1986,13 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           sessionId: runOptions?.sessionId ?? runId,
         });
         dispatchedActiveRun = activeRun;
+        if (cancellationRequested) {
+          if (cancellationRequested.dispose) {
+            activeRun[Symbol.dispose]();
+          } else {
+            activeRun.abort(cancellationRequested.reason);
+          }
+        }
         const agentRun = createAgentRun<unknown, boolean>(activeRun, {
           hasOutput: resolvedOptions.output !== undefined,
         });
@@ -1937,20 +2003,43 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         ...deferredRun,
         abort(reason?: string): void {
           deferredRun.abort(reason);
-          // No-op if `activeRun.abort()` already ran via the normal
-          // `underlying.abort()` forwarding path — `AbortController.abort()`
-          // (what `ActiveRun.abort()` calls under the hood) is idempotent.
-          dispatchedActiveRun?.abort(reason);
+          if (dispatchedActiveRun) {
+            // No-op if `activeRun.abort()` already ran via the normal
+            // `underlying.abort()` forwarding path — `AbortController.abort()`
+            // (what `ActiveRun.abort()` calls under the hood) is idempotent.
+            dispatchedActiveRun.abort(reason);
+          } else if (!cancellationRequested) {
+            cancellationRequested = { reason, dispose: false };
+          }
         },
         [Symbol.dispose](): void {
           deferredRun[Symbol.dispose]();
-          dispatchedActiveRun?.abort();
+          if (dispatchedActiveRun) {
+            dispatchedActiveRun[Symbol.dispose]();
+          } else if (!cancellationRequested) {
+            cancellationRequested = { reason: undefined, dispose: true };
+          }
         },
       };
       return trackCatalogRun(guardedRun);
     }
 
-    return trackCatalogRun(agent.run(input, context));
+    // Review round 2 (Codex): a hand-written catalog RunnableAgent is a
+    // valid entry, and one whose run() throws synchronously during per-run
+    // setup must still settle through the returned handle, not escape as a
+    // synchronous throw from bureau.run() itself — AB-22's synchronous-throw
+    // allowlist is unknown name / disposed / malformed input-options only.
+    // `createDeferredAgentRun` already contains exactly this "resolveAgent's
+    // run() throws synchronously" handling (built for createLazyAgent's own
+    // resolved-module case, agnostic to why); reusing it here for an
+    // already-resolved agent avoids duplicating that state machine. The one
+    // externally observable cost is that `agent.run()` itself is invoked one
+    // microtask later than before — compatible with the contract, which
+    // promises a synchronous RETURN of the handle, not synchronous START of
+    // the agent's own work.
+    return trackCatalogRun(
+      createDeferredAgentRun(() => Promise.resolve(agent), input, context, name),
+    );
   }
 
   async function createRunFromRequest(request: CreateRunRequest): Promise<RunSummary> {
@@ -3817,11 +3906,28 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       for (const activeRun of activeRuns) activeRun.abort('Bureau disposed');
       // AB-22 review fix: `bureau.run(...)` dispatches are tracked separately
       // (see `trackCatalogRun`) since a catalog `RunnableAgent`'s returned
-      // handle is not necessarily backed by a bureau-owned `ActiveRun`.
-      // Snapshot before iterating: a synchronous catalog agent can settle
-      // result() immediately from inside abort(), whose trackCatalogRun
-      // cleanup deletes from catalogRuns mid-iteration.
-      for (const catalogRun of [...catalogRuns]) catalogRun.abort('Bureau disposed');
+      // handle is not necessarily backed by a bureau-owned `ActiveRun` — its
+      // `abort()` can be arbitrary, untrusted code. Snapshot before
+      // iterating (a synchronous catalog agent can settle result()
+      // immediately from inside abort(), whose trackCatalogRun cleanup
+      // deletes from catalogRuns mid-iteration), and isolate each call: an
+      // in-flight custom handle throwing from abort() must not reject this
+      // entire dispose() before the unconditional teardown below runs — that
+      // would skip toolbox shutdown, durable-engine disposal, and storage
+      // closure, and since disposePromise is already cached at this point,
+      // every subsequent dispose() call would return the same rejection
+      // forever instead of ever completing cleanup (review round 2, Codex).
+      for (const catalogRun of [...catalogRuns]) {
+        try {
+          catalogRun.abort('Bureau disposed');
+        } catch (error) {
+          diagnose({
+            level: 'error',
+            scope: 'dispose',
+            message: `[bureau] A catalog run's abort() threw during disposal; continuing teardown: ${serializeUnknownError(error)}`,
+          });
+        }
+      }
       const toolboxes = [
         ...new Set([runtime.baseToolbox, ...runToolboxes, ...runToolboxesByRunId.values()]),
       ];
