@@ -623,11 +623,14 @@ describe('createLazyAgent', () => {
     const lazy = createLazyAgent(() => agent);
 
     const run = lazy.run('hello');
-    // Let the underlying failure land in the queue BEFORE anyone starts
-    // iterating — this exercises the "buffer the error, no active waiter"
-    // path (`hasPendingError`) rather than the direct-reject path.
+    // Start iteration (which starts the deferred event pump) but don't call
+    // `next()` yet — let the underlying failure land in the queue BEFORE
+    // anyone is parked waiting for it, exercising the "buffer the error, no
+    // active waiter" path (`hasPendingError`) rather than the direct-reject
+    // path a synchronous `for await` would hit instead.
+    const iterator = run[Symbol.asyncIterator]();
     await flushMicrotasks();
-    await expectRejects(drain(run), { message: 'iteration failed' });
+    await expectRejects(iterator.next(), { message: 'iteration failed' });
 
     // A second, fresh iteration of a different run exercises early-exit
     // (`return()`), which the first run's already-failed queue cannot.
@@ -695,5 +698,101 @@ describe('createLazyAgent', () => {
     expect(result.finishReason).toBe('error');
     expect(result.error).toBeInstanceOf(AgentRunError);
     expect((result.error as AgentRunError).cause).toBe(rejection);
+  });
+
+  it('never subscribes to the underlying event stream for a result()-only consumer', async () => {
+    let iteratorRequests = 0;
+    const fake = createFakeAgentRun();
+    const trackedHandle = {
+      ...fake.handle,
+      [Symbol.asyncIterator](): AsyncIterator<RunEvent> {
+        iteratorRequests += 1;
+        return fake.handle[Symbol.asyncIterator]();
+      },
+    } as AgentRun<string, false>;
+    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => trackedHandle };
+    const lazy = createLazyAgent(() => agent);
+
+    const run = lazy.run('hello');
+    await flushMicrotasks();
+    fake.settle(successResult('done'));
+    const result = await run.result();
+
+    expect(result.content).toBe('done');
+    expect(iteratorRequests).toBe(0);
+  });
+
+  it('starts draining the underlying event stream once the consumer iterates, even if that happens after resolution', async () => {
+    const fake = createFakeAgentRun();
+    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };
+    const lazy = createLazyAgent(() => agent);
+
+    const run = lazy.run('hello');
+    await flushMicrotasks();
+    fake.push(new RunCompletedEvent(successResult('done')));
+    fake.settle(successResult('done'));
+
+    const events = await drain(run);
+    expect(events).toHaveLength(1);
+  });
+
+  it('resolveRunOptions surfaces AgentContractError, not a raw TypeError, for an invalid loaded value', async () => {
+    const lazy = createLazyAgent(() => ({}) as unknown as RunnableAgent<never, false>, {
+      label: 'bad-export',
+    });
+
+    const resolver = (
+      lazy as RunnableAgent<never, false> & {
+        [OPERATIVE_RESOLVE_RUN_OPTIONS]: (input: string) => Promise<RunOptions>;
+      }
+    )[OPERATIVE_RESOLVE_RUN_OPTIONS];
+
+    await expectRejects(resolver('hello'), {
+      name: 'AgentContractError',
+      code: 'INVALID_AGENT_HANDLE',
+    });
+  });
+
+  it('invokes a method-style definition resolver with the resolved agent as its receiver', async () => {
+    let capturedThis: unknown;
+    const resolvedOptions = { marker: 'resolved' } as unknown as RunOptions;
+    const agent = {
+      name: 'stateful',
+      run: () => createFakeAgentRun().handle,
+      [OPERATIVE_RESOLVE_RUN_OPTIONS](this: unknown) {
+        // eslint-disable-next-line @typescript-eslint/no-this-alias -- deliberately capturing the receiver to assert on it
+        capturedThis = this;
+        return Promise.resolve(resolvedOptions);
+      },
+    } satisfies RunnableAgent<never, false> & {
+      [OPERATIVE_RESOLVE_RUN_OPTIONS]: (input: string) => Promise<RunOptions>;
+    };
+    const lazy = createLazyAgent(() => agent);
+
+    const resolver = (
+      lazy as RunnableAgent<never, false> & {
+        [OPERATIVE_RESOLVE_RUN_OPTIONS]: (input: string) => Promise<RunOptions>;
+      }
+    )[OPERATIVE_RESOLVE_RUN_OPTIONS];
+    const options = await resolver('hello');
+
+    expect(options).toBe(resolvedOptions);
+    expect(capturedThis).toBe(agent);
+  });
+
+  it('gives each synthetic RunResult its own usage object, never a shared mutable singleton', async () => {
+    const first = createLazyAgent(() => {
+      throw new Error('boom-1');
+    });
+    const second = createLazyAgent(() => {
+      throw new Error('boom-2');
+    });
+
+    const firstResult = await first.run('one').result();
+    const secondResult = await second.run('two').result();
+
+    expect(firstResult.usage).not.toBe(secondResult.usage);
+    firstResult.usage.total = 999;
+    expect(secondResult.usage.total).toBe(0);
   });
 });

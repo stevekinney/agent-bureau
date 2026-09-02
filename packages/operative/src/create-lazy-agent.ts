@@ -48,7 +48,13 @@ export interface CreateLazyAgentOptions {
   label?: string;
 }
 
-const EMPTY_USAGE: TokenUsage = { prompt: 0, completion: 0, total: 0 };
+// A fresh object per call — never a shared module-level singleton. `RunResult.usage`
+// is a plain, externally-visible object; sharing one mutable instance across every
+// synthetic (load-failure, contract-failure, or pre-start-abort) result would let a
+// mutation on one run's `result.usage` bleed into every other run's.
+function zeroUsage(): TokenUsage {
+  return { prompt: 0, completion: 0, total: 0 };
+}
 
 function buildFallbackConversation(input: AgentInput): Conversation {
   if (typeof input === 'string') {
@@ -256,12 +262,12 @@ function createDeferredAgentRun<O, H extends boolean>(
       conversation,
       steps: [],
       content: '',
-      usage: EMPTY_USAGE,
+      usage: zeroUsage(),
       finishReason,
       error,
     } as RunResult<O, H>;
     if (isAbort) {
-      queue.push(new RunAbortedEvent(0, conversation, error, EMPTY_USAGE, undefined, abortReason));
+      queue.push(new RunAbortedEvent(0, conversation, error, zeroUsage(), undefined, abortReason));
     } else {
       queue.push(new RunErrorEvent(0, error, 'contract'));
     }
@@ -313,7 +319,23 @@ function createDeferredAgentRun<O, H extends boolean>(
     }
   }
 
-  function pump(handle: AgentRun<O, H>): void {
+  // Draining `handle`'s own event stream is deliberately NOT started the
+  // moment `handle` exists — only once this wrapper's OWN consumer actually
+  // asks for events (`consumerRequestedIteration`, set by
+  // `publicHandle[Symbol.asyncIterator]`). A caller who only ever calls
+  // `result()` (the other documented consumption pattern) never subscribes,
+  // so a long, tool-heavy, or streaming run doesn't grow an unbounded buffer
+  // of events nobody will read — matching `createAgentRun`'s own handle,
+  // which likewise only subscribes to its observable on first iteration.
+  let consumerRequestedIteration = false;
+  let eventsPumpStarted = false;
+
+  function startPumpingEvents(): void {
+    if (eventsPumpStarted) return;
+    if (!underlying) return;
+    if (!consumerRequestedIteration) return;
+    eventsPumpStarted = true;
+    const handle = underlying;
     void (async () => {
       try {
         for await (const event of handle) {
@@ -324,7 +346,9 @@ function createDeferredAgentRun<O, H extends boolean>(
         queue.fail(error);
       }
     })();
+  }
 
+  function watchResult(handle: AgentRun<O, H>): void {
     void handle.result().then(
       (result) => {
         state = 'terminal';
@@ -342,7 +366,7 @@ function createDeferredAgentRun<O, H extends boolean>(
           conversation: buildFallbackConversation(input),
           steps: [],
           content: '',
-          usage: EMPTY_USAGE,
+          usage: zeroUsage(),
           finishReason: 'error',
           error: toAgentRunError(error, { kind: 'contract' }),
         });
@@ -420,7 +444,8 @@ function createDeferredAgentRun<O, H extends boolean>(
     underlying = handle;
     state = 'started';
 
-    pump(handle);
+    watchResult(handle);
+    startPumpingEvents();
   })();
 
   const publicHandle = {
@@ -468,6 +493,10 @@ function createDeferredAgentRun<O, H extends boolean>(
     },
 
     [Symbol.asyncIterator](): AsyncIterator<RunEvent> {
+      consumerRequestedIteration = true;
+      // No-ops until `underlying` exists — the "waiting" window's events
+      // still arrive via `finalizeSynthetic`/queue.push directly.
+      startPumpingEvents();
       return queue[Symbol.asyncIterator]();
     },
     // `output()` is defined unconditionally at runtime — whether the
@@ -542,17 +571,30 @@ export function createLazyAgent<O = never, H extends boolean = false>(
 
   const resolveRunOptions: ResolveRunOptions = async (input, context) => {
     const agent = await resolve();
+    // Validate the same contract `run()` does — a `null`/non-object load
+    // result would otherwise throw a raw `TypeError` here instead of the
+    // promised `AgentContractError`, and an object exposing the resolver
+    // symbol but no callable `run()` isn't a `RunnableAgent` at all.
+    if (!isRunnableAgent(agent)) {
+      throw new AgentContractError(
+        `Lazy agent "${label}" resolved to a value without a callable run() method`,
+        agent,
+      );
+    }
     // `RunnableAgent` doesn't itself declare the definition-resolution
     // symbol — it's an optional, private capability (`runnable-agent.ts`).
     // The cast only widens what we look for; `typeof resolver !== 'function'`
     // below is the actual runtime guard.
-    const resolver = (agent as RunnableAgent<O, H> & DefinitionResolvingAgent)[
-      OPERATIVE_RESOLVE_RUN_OPTIONS
-    ];
+    const definitionResolvingAgent = agent as RunnableAgent<O, H> & DefinitionResolvingAgent;
+    const resolver = definitionResolvingAgent[OPERATIVE_RESOLVE_RUN_OPTIONS];
     if (typeof resolver !== 'function') {
       throw new AgentContractError(`Lazy agent "${label}" does not support definition resolution`);
     }
-    return resolver(input, context);
+    // Invoke through the object, not as a bare extracted function, so a
+    // resolver implemented as a method that reads instance state via `this`
+    // (a custom `DefinitionResolvingAgent`, not necessarily `createAgent`'s
+    // own arrow-function implementation) still gets `agent` as its receiver.
+    return definitionResolvingAgent[OPERATIVE_RESOLVE_RUN_OPTIONS]!(input, context);
   };
 
   const agent = {
