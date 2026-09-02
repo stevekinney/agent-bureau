@@ -12,6 +12,7 @@ import type {
   OpenAIChatCompletion,
   OpenAIChatCompletionChunk,
   OpenAIClient,
+  OpenAIRequestOptions,
   OpenAIStreamingClient,
 } from '../types.ts';
 
@@ -67,6 +68,8 @@ export function createMockAnthropicClient(
 
 export interface MockOpenAIClient extends OpenAIClient {
   _calls: Array<Record<string, unknown>>;
+  /** The request options (second `create` argument) recorded per call. */
+  _requestOptions: Array<OpenAIRequestOptions | undefined>;
   _responses: OpenAIChatCompletion[];
   _errors: Error[];
 }
@@ -79,17 +82,23 @@ export function createMockOpenAIClient(
   errors: Error[] = [],
 ): MockOpenAIClient {
   const calls: Array<Record<string, unknown>> = [];
+  const requestOptions: Array<OpenAIRequestOptions | undefined> = [];
   let responseIndex = 0;
   let errorIndex = 0;
 
   return {
     _calls: calls,
+    _requestOptions: requestOptions,
     _responses: responses,
     _errors: errors,
     chat: {
       completions: {
-        async create(params: Record<string, unknown>): Promise<OpenAIChatCompletion> {
+        async create(
+          params: Record<string, unknown>,
+          options?: OpenAIRequestOptions,
+        ): Promise<OpenAIChatCompletion> {
           calls.push(params);
+          requestOptions.push(options);
           const error = errors[errorIndex];
           if (error && errorIndex < errors.length) {
             errorIndex++;
@@ -232,6 +241,8 @@ export function createMockAnthropicStreamingClient(
 
 export interface MockOpenAIStreamingClient extends OpenAIStreamingClient {
   _calls: Array<Record<string, unknown>>;
+  /** The request options (second `create` argument) recorded per call. */
+  _requestOptions: Array<OpenAIRequestOptions | undefined>;
   _chunkSequences: OpenAIChatCompletionChunk[][];
   _errors: Error[];
 }
@@ -248,18 +259,24 @@ export function createMockOpenAIStreamingClient(
   options?: { errorAfterEvents?: number },
 ): MockOpenAIStreamingClient {
   const calls: Array<Record<string, unknown>> = [];
+  const requestOptions: Array<OpenAIRequestOptions | undefined> = [];
   let sequenceIndex = 0;
   let errorIndex = 0;
   const errorAfterEvents = options?.errorAfterEvents;
 
   return {
     _calls: calls,
+    _requestOptions: requestOptions,
     _chunkSequences: chunkSequences,
     _errors: errors,
     chat: {
       completions: {
-        create(params: Record<string, unknown>): AsyncIterable<OpenAIChatCompletionChunk> {
+        create(
+          params: Record<string, unknown>,
+          createOptions?: OpenAIRequestOptions,
+        ): AsyncIterable<OpenAIChatCompletionChunk> {
           calls.push(params);
+          requestOptions.push(createOptions);
           const error = errors[errorIndex];
           if (error && errorIndex < errors.length && errorAfterEvents === undefined) {
             errorIndex++;

@@ -323,12 +323,30 @@ export interface AnthropicProviderOptions extends BaseProviderOptions {
 }
 
 /**
+ * The subset of the `openai` SDK's per-request `RequestOptions` that operative
+ * passes as `chat.completions.create`'s second argument.
+ *
+ * `signal` lives here and never in the body params: like the Anthropic SDK
+ * (see {@link AnthropicRequestOptions}, AB-189), the OpenAI SDK only honors
+ * an abort signal handed to it as request options — a signal inside the
+ * body is JSON-serialized away and ignored, so `run.abort()` used to leave
+ * the upstream stream open until the model finished on its own (AB-238).
+ */
+export interface OpenAIRequestOptions {
+  /** Aborts the in-flight HTTP request, closing a streaming response early. */
+  signal?: AbortSignal;
+}
+
+/**
  * Structural interface for the OpenAI SDK client surface the provider uses.
  */
 export interface OpenAIClient {
   chat: {
     completions: {
-      create(params: Record<string, unknown>): Promise<OpenAIChatCompletion>;
+      create(
+        params: Record<string, unknown>,
+        options?: OpenAIRequestOptions,
+      ): Promise<OpenAIChatCompletion>;
     };
   };
 }
@@ -795,7 +813,10 @@ export interface AnthropicStreamingClient {
 export interface OpenAIStreamingClient {
   chat: {
     completions: {
-      create(params: Record<string, unknown>): AsyncIterable<OpenAIChatCompletionChunk>;
+      create(
+        params: Record<string, unknown>,
+        options?: OpenAIRequestOptions,
+      ): AsyncIterable<OpenAIChatCompletionChunk>;
     };
   };
 }

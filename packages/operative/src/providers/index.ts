@@ -173,6 +173,7 @@ export type {
   OpenAIChatCompletionChunk,
   OpenAIClient,
   OpenAIProviderOptions,
+  OpenAIRequestOptions,
   OpenAIStreamingClient,
   ProviderName,
   StreamingGenerateFunction,

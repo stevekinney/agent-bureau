@@ -109,10 +109,12 @@ export function createOpenAIProvider(options: OpenAIProviderOptions): GenerateFu
     if (common.temperature !== undefined) params['temperature'] = common.temperature;
     if (common.topP !== undefined) params['top_p'] = common.topP;
     if (common.stopSequences) params['stop'] = common.stopSequences;
-    if (context.signal) params['signal'] = context.signal;
+    // The signal goes in the SDK's request options, never the body — a body
+    // `signal` is serialized away and the request outlives `run.abort()`.
+    const requestOptions = context.signal ? { signal: context.signal } : undefined;
 
     try {
-      const response = await client.chat.completions.create(params);
+      const response = await client.chat.completions.create(params, requestOptions);
 
       const choice = response.choices[0];
       const content = choice?.message.content ?? '';
@@ -201,11 +203,14 @@ export function createOpenAIProviderStream(
     if (common.temperature !== undefined) params['temperature'] = common.temperature;
     if (common.topP !== undefined) params['top_p'] = common.topP;
     if (common.stopSequences) params['stop'] = common.stopSequences;
-    if (context.signal) params['signal'] = context.signal;
+    // See createOpenAIProvider: request options, not the body. This is what
+    // lets an abort actually close the streaming connection instead of
+    // parking the `for await` below until the model finishes on its own.
+    const requestOptions = context.signal ? { signal: context.signal } : undefined;
 
     try {
       // Await handles both sync (mock) and async (real SDK APIPromise) returns
-      const stream = await Promise.resolve(client.chat.completions.create(params));
+      const stream = await Promise.resolve(client.chat.completions.create(params, requestOptions));
 
       let accumulatedText = '';
       let usage: GenerateResponse['usage'] | undefined;
