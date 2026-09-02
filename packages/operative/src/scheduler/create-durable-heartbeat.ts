@@ -1,6 +1,6 @@
 import { parseDuration, type ScheduleSpec, type ScheduleSummary } from '@lostgradient/weft';
 
-import type { AnyRunEngine } from '../durable/create-run-engine';
+import type { RegistryAgnosticEngine } from '../durable/create-run-engine';
 import type {
   DurableHeartbeatTickInput,
   DurableHeartbeatTickServices,
@@ -112,7 +112,7 @@ function assertDurableHeartbeatSchedule(
  * Creates or reuses a durable Weft schedule that fires one scheduler task per tick.
  */
 export async function createDurableHeartbeat(
-  engine: AnyRunEngine,
+  engine: RegistryAgnosticEngine,
   options: CreateDurableHeartbeatOptions,
 ): Promise<DurableHeartbeat> {
   const { scheduleId } = options;

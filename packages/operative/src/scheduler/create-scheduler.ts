@@ -1,6 +1,6 @@
 import type { ActiveRun } from '../create-run';
 import { createActiveRun } from '../create-run';
-import type { AnyRunEngine, CheckpointStore } from '../durable';
+import type { CheckpointStore, RegistryAgnosticEngine } from '../durable';
 import {
   resumeDurableRunResult,
   SCHEDULER_ORIGIN_TAG,
@@ -70,7 +70,7 @@ export interface CreateSchedulerOptions {
 
 /** The durable-engine wiring a scheduler needs to suspend/resume preempted tasks. */
 export interface SchedulerDurableContext {
-  engine: AnyRunEngine;
+  engine: RegistryAgnosticEngine;
   checkpointStore: CheckpointStore;
 }
 

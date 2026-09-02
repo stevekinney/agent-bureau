@@ -1945,6 +1945,12 @@ const result = await activeRun.result;
 > [!NOTE] Reattaching after a restart
 > `reattachDurableActiveRun` wraps a handle already returned by `engine.recoverAll()` — it does not take a `sessionId`/`options` bag. `createRunEngine`'s default `recover: true` runs recovery during construction and does not surface the handles, so observing a recovered run as a live `ActiveRun` requires `recover: false` plus calling `engine.recoverAll()` yourself and reattaching each returned handle. See `reattachDurableActiveRun`'s own JSDoc and `bureau`'s `create-bureau.ts` (`reattachRecoveredRun`) for the full recovery-driven flow.
 
+> [!NOTE] Multi-process safety (AB-178)
+> `createRunEngine`'s `ownership` option defaults to `'none'` — one engine per durable store, enforced by infrastructure convention (one replica, a `Recreate` deploy) rather than the engine itself. Pass `ownership: 'workflow-lease'` to let more than one engine safely share a store: Weft claims each workflow for exactly one engine before its generator runs, so a second engine racing to resume the same workflow fails closed instead of double-executing it. This requires a storage backend with the `conditionalBatch` capability (`MemoryStorage` and `SQLiteStorage` both qualify). **Known limitation:** a weft 0.23.1 defect makes `'workflow-lease'` incompatible with the scheduler's `suspendAndDetach`/`resumeDurableRunResult` preemption path — `engine.suspend()` releases a workflow's claim as a side effect of a code path meant for terminal transitions, so a same-engine `engine.resume()` right after throws `WorkflowClaimUnavailableError` instead of re-acquiring. Do not enable `'workflow-lease'` on an engine a preempting scheduler attaches to until this is fixed upstream; see `CreateRunEngineOptions.ownership`'s JSDoc for the full repro.
+
+> [!WARNING] weft 0.23 persisted-data schema bump (breaking for existing stores)
+> `@lostgradient/weft` 0.23 advances its persisted-data schema from version 1 to version 2 with **no in-place migration**: a store written by weft 0.22.x or earlier is rejected with `PersistedDataIncompatibleError` when opened under 0.23+. There is no online upgrade path — plan a cutover (new store, or offline migration) before deploying this version against an existing durable store.
+
 **Exported functions:**
 
 | Function                                   | Description                                                                  |
@@ -1961,7 +1967,7 @@ const result = await activeRun.result;
 | `SCHEDULER_ORIGIN_TAG`                     | Tag identifying scheduler-originated durable runs.                           |
 | `SCHEDULER_RUN_ID_PREFIX`                  | Prefix for scheduler-managed run IDs.                                        |
 
-**Exported types:** `DurableActiveRunOptions`, `DurableActiveRunContext`, `RecoveredRunHandle`, `StartDurableRunResultOptions`, `CheckpointStore`, `RunEngine`, `AnyRunEngine`, `CreateRunEngineOptions`, `RunEngineObservability`, `AgentRunWorkflowInput`, `AgentRunWorkflowResult`, `DurableRunDeps`, `RunCheckpoint`, `RunCursor`, `StepRecord`.
+**Exported types:** `DurableActiveRunOptions`, `DurableActiveRunContext`, `RecoveredRunHandle`, `StartDurableRunResultOptions`, `CheckpointStore`, `RunEngine`, `RegistryAgnosticEngine`, `CreateRunEngineOptions`, `RunEngineObservability`, `AgentRunWorkflowInput`, `AgentRunWorkflowResult`, `DurableRunDeps`, `RunCheckpoint`, `RunCursor`, `StepRecord`.
 
 ---
 

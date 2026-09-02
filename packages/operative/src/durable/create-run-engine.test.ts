@@ -1,7 +1,9 @@
 import {
   activity,
+  Engine,
   Scheduler,
   workflow,
+  WorkflowClaimUnavailableError,
   type WorkflowLogRecord,
   type WorkflowStatus,
 } from '@lostgradient/weft';
@@ -11,7 +13,7 @@ import { afterEach, describe, expect, it, spyOn } from 'bun:test';
 
 import { WorkflowVersionMismatchEvent } from '../events';
 import { createCheckpointStore } from './checkpoint-store';
-import { type AnyRunEngine, createRunEngine } from './create-run-engine';
+import { createRunEngine, type RegistryAgnosticEngine } from './create-run-engine';
 
 // A run is "parked" — not finished — when its status is neither completed nor a
 // failure terminal. Asserting non-terminal (rather than a specific intermediate
@@ -162,7 +164,7 @@ async function pollUntil(predicate: () => boolean | Promise<boolean>): Promise<v
  * `result()` is never awaited, so engine disposal has no pending promise to reject.
  */
 async function assertRunStaysParkedWhenPollerUnarmed(
-  engine: AnyRunEngine,
+  engine: RegistryAgnosticEngine,
   reachedSleepMarkers: readonly WorkflowLogRecord[],
 ) {
   const handle = await engine.start('agentRun', { value: 21 });
@@ -835,6 +837,197 @@ describe('createRunEngine', () => {
     try {
       const handle = await engine.start('agentRun', { value: 9 });
       expect(await handle.result()).toEqual({ doubled: 18 });
+    } finally {
+      engine[Symbol.dispose]();
+    }
+  });
+});
+
+/**
+ * A workflow that commits one step (folding in its claim under
+ * `ownership: 'workflow-lease'`) and then durably parks on
+ * `ctx.waitForSignal('proceed')` until signaled. Used by the AB-178 ownership
+ * tests below to hold a workflow open across two engines without relying on
+ * `engine.suspend()`/`engine.resume()` on the SAME engine — see
+ * 'known weft defect' below for why that specific combination is avoided.
+ */
+function makeParkingWorkflow() {
+  return workflow({ name: 'agentRun' }).execute(async function* (ctx, input: { value: number }) {
+    yield* ctx.run(async () => 'started');
+    yield* ctx.waitForSignal('proceed');
+    return { doubled: input.value * 2 };
+  });
+}
+
+/** True once `handle`'s workflow has left `pending` and is parked `running`. */
+async function isParkedRunning(handle: { snapshot: () => Promise<{ status: string } | null> }) {
+  const snapshot = await handle.snapshot();
+  return snapshot !== null && snapshot.status === 'running';
+}
+
+describe('createRunEngine ownership (AB-178)', () => {
+  it('defaults ownership to "none" (unchanged single-writer-by-convention posture)', async () => {
+    // No explicit `ownership` passed — spy on the underlying `Engine.create`
+    // call to prove `createRunEngine` still passes `'none'` by default,
+    // rather than silently changing to `'workflow-lease'`. Asserting the
+    // literal option passed to weft is deterministic; racing two live
+    // engines against the same workflow under the (intentionally
+    // unfenced) default posture is exactly the uncoordinated scenario AB-39
+    // describes as "outside the contract entirely" and is not something a
+    // test should assert a specific outcome for.
+    const engineCreateSpy = spyOn(Engine, 'create');
+    try {
+      const { engine } = await createRunEngine({
+        storage: new MemoryStorage(),
+        runWorkflow: makeProbeWorkflow(),
+        recover: false,
+      });
+      try {
+        expect(engineCreateSpy).toHaveBeenCalledTimes(1);
+        expect(engineCreateSpy.mock.calls[0]?.[0]).toMatchObject({ ownership: 'none' });
+      } finally {
+        engine[Symbol.dispose]();
+      }
+    } finally {
+      engineCreateSpy.mockRestore();
+    }
+  });
+
+  it('fences a second engine out of a workflow the first engine still holds (two-engine fence)', async () => {
+    const storage = new MemoryStorage();
+    const a = await createRunEngine({
+      storage,
+      runWorkflow: makeParkingWorkflow(),
+      recover: false,
+      ownership: 'workflow-lease',
+    });
+
+    const handle = await a.engine.start('agentRun', { value: 21 });
+    // Poll until engine A's step-0 commit has folded in its claim AND the
+    // workflow is parked on the signal wait (not yet completed).
+    await pollUntil(() => isParkedRunning(handle));
+
+    const b = await createRunEngine({
+      storage,
+      runWorkflow: makeParkingWorkflow(),
+      recover: false,
+      ownership: 'workflow-lease',
+    });
+
+    try {
+      // B has never touched this workflow (no cached epoch), so it takes the
+      // fresh-acquire path — which loses the race to A's live, unexpired
+      // claim and fails closed instead of adopting a workflow A still owns.
+      // (`expect(...).rejects` types as a synchronous `Matchers`, not a
+      // Promise, per bun-types — an explicit try/catch is the correctly
+      // typed way to assert a rejection here, rather than an `await` the
+      // type checker cannot verify actually waits for anything.)
+      try {
+        await b.engine.resume(handle.id);
+        throw new Error('expected b.engine.resume to reject');
+      } catch (error) {
+        expect(error).toBeInstanceOf(WorkflowClaimUnavailableError);
+      }
+
+      // A is unaffected by B's rejected attempt: signaling and completing
+      // through A still works.
+      await a.engine.signal(handle.id, 'proceed');
+      expect(await handle.result()).toEqual({ doubled: 42 });
+    } finally {
+      a.engine[Symbol.dispose]();
+      b.engine[Symbol.dispose]();
+    }
+  });
+
+  it("lets a surviving engine adopt a workflow after the crashed holder's claim lapses (crash-and-adopt)", async () => {
+    const storage = new MemoryStorage();
+    // A short claim TTL/renewal so the test does not wait out Weft's real 30s
+    // default; `backgroundTasks: 'manual'` on both engines means the TTL only
+    // lapses on the wall clock — nothing here silently arms a background
+    // renewal loop that could mask the crash.
+    const claimTtlMs = 30;
+    const a = await createRunEngine({
+      storage,
+      runWorkflow: makeParkingWorkflow(),
+      recover: false,
+      ownership: 'workflow-lease',
+      workflowClaimTtlMs: claimTtlMs,
+      workflowClaimRenewIntervalMs: 10,
+      backgroundTasks: 'manual',
+    });
+
+    const handle = await a.engine.start('agentRun', { value: 5 });
+    await pollUntil(() => isParkedRunning(handle));
+
+    // Simulate a crash: A is never disposed and never renews its claim again
+    // (backgroundTasks: 'manual' means nothing renews it automatically). The
+    // claim's expiry is a genuine wall-clock quantity inside weft (its
+    // `getNow` is not injectable through the public `Engine.create` surface),
+    // so waiting it out needs a real timer — bounded to a small multiple of
+    // the (already tiny) configured TTL, covering both the TTL itself and
+    // weft's own takeover-eligibility grace window on top of it
+    // (`WORKFLOW_CLAIM_TAKEOVER_GRACE_MULTIPLIER`), not a tuned guess.
+    await new Promise((resolve) => setTimeout(resolve, claimTtlMs * 10));
+
+    const b = await createRunEngine({
+      storage,
+      runWorkflow: makeParkingWorkflow(),
+      recover: false,
+      ownership: 'workflow-lease',
+      workflowClaimTtlMs: claimTtlMs,
+      workflowClaimRenewIntervalMs: 10,
+      backgroundTasks: 'manual',
+    });
+
+    try {
+      // Driving B's maintenance once runs its claim-renewal task, which scans
+      // for reclaimable (expired-claim) workflows and takes them over — the
+      // same mechanism a real host's periodic maintenance call would trigger.
+      await b.engine.runMaintenance(Date.now());
+
+      const bHandle = await b.engine.resume(handle.id);
+      expect(bHandle).toBeDefined();
+      await b.engine.signal(handle.id, 'proceed');
+      expect(await bHandle.result()).toEqual({ doubled: 10 });
+    } finally {
+      a.engine[Symbol.dispose]();
+      b.engine[Symbol.dispose]();
+    }
+  });
+
+  /**
+   * Tripwire for a weft 0.23.1 defect (see `CreateRunEngineOptions.ownership`'s
+   * JSDoc for the full write-up): `engine.suspend()` releases a workflow's
+   * `workflow-lease` claim as a side effect of reusing the terminal-commit
+   * code path, even though suspend is documented as non-terminal and later
+   * resumable. A same-engine `engine.resume()` right after then throws
+   * `WorkflowClaimUnavailableError` instead of silently re-acquiring.
+   *
+   * This test PINS that current (broken) behavior rather than asserting the
+   * desired one, specifically so it starts FAILING the moment weft ships a
+   * fix — the signal to flip `ownership`'s default and remove the JSDoc
+   * warning against combining it with the scheduler's suspend/resume
+   * preemption path.
+   */
+  it('[tripwire] suspend-then-resume on the SAME engine currently throws under workflow-lease (weft 0.23.1 defect)', async () => {
+    const { engine } = await createRunEngine({
+      storage: new MemoryStorage(),
+      runWorkflow: makeSleepingWorkflow(DURABLE_SLEEP_MILLISECONDS),
+      recover: false,
+      ownership: 'workflow-lease',
+    });
+
+    try {
+      const handle = await engine.start('agentRun', { value: 3 });
+      await pollUntil(() => isParkedRunning(handle));
+
+      await engine.suspend(handle.id);
+      try {
+        await engine.resume(handle.id);
+        throw new Error('expected engine.resume to reject');
+      } catch (error) {
+        expect(error).toBeInstanceOf(WorkflowClaimUnavailableError);
+      }
     } finally {
       engine[Symbol.dispose]();
     }

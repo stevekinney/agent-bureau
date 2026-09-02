@@ -1,5 +1,5 @@
 import type { CheckpointStore } from '../durable/checkpoint-store';
-import type { AnyRunEngine } from '../durable/create-run-engine';
+import type { RegistryAgnosticEngine } from '../durable/create-run-engine';
 import {
   AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
   type AgentRunWorkflowResult,
@@ -11,7 +11,7 @@ import {
  * abort-and-rerun that happens to satisfy the higher-level assertions).
  */
 export interface EngineSpy {
-  engine: AnyRunEngine;
+  engine: RegistryAgnosticEngine;
   suspends: string[];
   resumes: string[];
   cancels: string[];
@@ -22,7 +22,7 @@ export interface EngineSpy {
  * `cancel`. The engine is mutated in place so any object already holding a
  * reference (e.g. a scheduler) sees the wrapped methods.
  */
-export function spyEngine(engine: AnyRunEngine): EngineSpy {
+export function spyEngine(engine: RegistryAgnosticEngine): EngineSpy {
   const spy: EngineSpy = { engine, suspends: [], resumes: [], cancels: [] };
   const realSuspend = engine.suspend.bind(engine);
   const realResume = engine.resume.bind(engine);
@@ -55,7 +55,7 @@ export function spyEngine(engine: AnyRunEngine): EngineSpy {
  * backing store would add noise.
  */
 export function createManualDurableEngine(): {
-  engine: AnyRunEngine;
+  engine: RegistryAgnosticEngine;
   resolveResult: () => void;
   rejectResult: (error: unknown) => void;
 } {
@@ -74,7 +74,7 @@ export function createManualDurableEngine(): {
     cancel: async () => {
       rejectResult?.(new Error('Workflow cancelled'));
     },
-  } as unknown as AnyRunEngine;
+  } as unknown as RegistryAgnosticEngine;
 
   return {
     engine,

@@ -29,7 +29,7 @@
     },
     "packages/armorer": {
       "name": "armorer",
-      "version": "2.0.0",
+      "version": "2.1.0",
       "devDependencies": {
         "@anthropic-ai/claude-agent-sdk": "^0.3.231",
         "@eslint/compat": "^2.1.0",
@@ -82,7 +82,7 @@
       "version": "0.0.8",
       "dependencies": {
         "@lostgradient/operative": "workspace:*",
-        "@lostgradient/weft": "^0.20.0",
+        "@lostgradient/weft": "^0.23.1",
         "armorer": "workspace:*",
         "conversationalist": "workspace:*",
         "interoperability": "workspace:*",
@@ -118,7 +118,7 @@
       "name": "cloudflare",
       "version": "0.1.0",
       "dependencies": {
-        "@lostgradient/weft": "^0.20.0",
+        "@lostgradient/weft": "^0.23.1",
         "interoperability": "workspace:*",
         "memory": "workspace:*",
         "zod": "^4.4.3",
@@ -133,7 +133,7 @@
     },
     "packages/conversationalist": {
       "name": "conversationalist",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "dependencies": {
         "gray-matter": "^4.0.3",
       },
@@ -209,7 +209,7 @@
         "@lostgradient/cinder": "^0.24.2",
         "@lostgradient/markdown": "^0.2.0",
         "@lostgradient/operative": "workspace:*",
-        "@lostgradient/weft": "^0.20.0",
+        "@lostgradient/weft": "^0.23.1",
         "armorer": "workspace:*",
         "bureau": "workspace:*",
         "conversationalist": "workspace:*",
@@ -287,7 +287,7 @@
       "name": "memory",
       "version": "0.0.1",
       "dependencies": {
-        "@lostgradient/weft": "^0.20.0",
+        "@lostgradient/weft": "^0.23.1",
         "armorer": "workspace:*",
         "interoperability": "workspace:*",
         "zod": "^4.4.3",
@@ -298,11 +298,11 @@
     },
     "packages/operative": {
       "name": "@lostgradient/operative",
-      "version": "0.3.0",
+      "version": "0.8.0",
       "dependencies": {
-        "@lostgradient/weft": "^0.20.0",
-        "armorer": "^2.0.0",
-        "conversationalist": "^1.0.0",
+        "@lostgradient/weft": "^0.23.1",
+        "armorer": "^2.1.0",
+        "conversationalist": "^1.1.0",
       },
       "devDependencies": {
         "@anthropic-ai/sdk": "^0.122.0",
@@ -349,7 +349,7 @@
       "name": "skills",
       "version": "0.0.1",
       "dependencies": {
-        "@lostgradient/weft": "^0.20.0",
+        "@lostgradient/weft": "^0.23.1",
         "armorer": "workspace:*",
         "gray-matter": "^4.0.3",
         "interoperability": "workspace:*",
@@ -485,7 +485,7 @@
 
     "@lostgradient/operative": ["@lostgradient/operative@workspace:packages/operative"],
 
-    "@lostgradient/weft": ["@lostgradient/weft@0.20.0", "", { "dependencies": { "@msgpack/msgpack": "^3.1.3", "zod": "^4.3.6" }, "optionalDependencies": { "@valibot/to-json-schema": "^1.7.0" }, "peerDependencies": { "@libsql/client": "^0.17.2", "@lostgradient/weft-console": "^0.1.0", "@neondatabase/serverless": "^1.1.0", "@opentelemetry/api": "^1.0.0", "better-sqlite3": "^12.8.0", "lmdb": "^3.5.2", "pg": "^8.11.0" }, "optionalPeers": ["@libsql/client", "@lostgradient/weft-console", "@neondatabase/serverless", "@opentelemetry/api", "better-sqlite3", "lmdb", "pg"], "bin": { "weft": "dist/cli-main.js", "weft-mcp": "dist/mcp/cli.js" } }, "sha512-eiUnJOZOhYZISPRgxg5WGDSc1N8lX7z07py+cf7hkNrGimQUDw3X9EvIZJnbMKIdZlLh4HJTFWzwXw0AAM+WpQ=="],
+    "@lostgradient/weft": ["@lostgradient/weft@0.23.1", "", { "dependencies": { "@msgpack/msgpack": "^3.1.3", "zod": "^4.3.6" }, "optionalDependencies": { "@valibot/to-json-schema": "^1.7.0" }, "peerDependencies": { "@libsql/client": "^0.17.2", "@lostgradient/weft-ui": "^0.1.0", "@neondatabase/serverless": "^1.1.0", "@opentelemetry/api": "^1.0.0", "better-sqlite3": "^12.8.0", "lmdb": "^3.5.2", "pg": "^8.11.0" }, "optionalPeers": ["@libsql/client", "@lostgradient/weft-ui", "@neondatabase/serverless", "@opentelemetry/api", "better-sqlite3", "lmdb", "pg"], "bin": { "weft": "dist/cli-main.js", "weft-mcp": "dist/mcp/cli.js" } }, "sha512-DDdAc30CEzk+RzFw79n5olewnvO62oQDKVxUk9qzhkDiCM1V+sa/ieaknLIiDMAusyB5Xe2zLYt/dzrlKd+6uQ=="],
 
     "@manypkg/find-root": ["@manypkg/find-root@3.1.0", "", { "dependencies": { "@manypkg/tools": "^2.1.0" } }, "sha512-BcSqCyKhBVZ5YkSzOiheMCV41kqAFptW6xGqYSTjkVTl9XQpr+pqHhwgGCOHQtjDCv7Is6EFyA14Sm5GVbVABA=="],
 

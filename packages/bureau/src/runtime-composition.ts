@@ -30,9 +30,9 @@ import {
   createAnthropicProviderStream,
 } from '@lostgradient/operative/anthropic';
 import type {
-  AnyRunEngine,
   CheckpointStore,
   DurableRunDeps,
+  RegistryAgnosticEngine,
   RunEngineObservability,
   ScheduledAgentRunInput,
   StepRecord,
@@ -1137,7 +1137,7 @@ function createUnavailableToolbox(): BureauToolbox {
  * engine's terminal lifecycle events still reach the span-closing listeners.
  */
 export interface DurableComposition {
-  engine: AnyRunEngine;
+  engine: RegistryAgnosticEngine;
   checkpointStore: CheckpointStore;
   observability?: RunEngineObservability;
 }

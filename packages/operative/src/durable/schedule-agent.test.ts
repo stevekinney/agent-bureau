@@ -7,7 +7,6 @@ import type {
 import { ScheduleHandle } from '@lostgradient/weft';
 import { describe, expect, it } from 'bun:test';
 
-import type { AnyRunEngine } from './create-run-engine';
 import type { ScheduledAgentRunInput, SchedulingEngine } from './schedule-agent';
 import {
   createAgentSchedule,
@@ -154,7 +153,7 @@ describe('createAgentSchedule', () => {
     const engine = makeSchedulingEngine();
 
     const handle = await createAgentSchedule({
-      engine: engine as unknown as AnyRunEngine,
+      engine: engine,
       agentName: 'researcher',
       spec: { cron: '0 9 * * *' },
       input: 'Summarize overnight activity',
@@ -177,7 +176,7 @@ describe('createAgentSchedule', () => {
     const engine = makeSchedulingEngine({ scheduleId: 'daily-digest-sched' });
 
     await createAgentSchedule({
-      engine: engine as unknown as AnyRunEngine,
+      engine: engine,
       agentName: 'researcher',
       spec: { every: '6h' },
       input: 'hello',
@@ -203,7 +202,7 @@ describe('createAgentSchedule', () => {
     const engine = makeSchedulingEngine();
 
     await createAgentSchedule({
-      engine: engine as unknown as AnyRunEngine,
+      engine: engine,
       agentName: 'researcher',
       spec: { every: '6h' },
       input: 'hello',
@@ -219,7 +218,7 @@ describe('createAgentSchedule', () => {
     const engine = makeSchedulingEngine();
 
     await createAgentSchedule({
-      engine: engine as unknown as AnyRunEngine,
+      engine: engine,
       workflowType: 'myRun',
       agentName: 'researcher',
       spec: { every: '1h' },
@@ -232,7 +231,7 @@ describe('createAgentSchedule', () => {
   it('trims a padded session id before registering', async () => {
     const engine = makeSchedulingEngine();
     await createAgentSchedule({
-      engine: engine as unknown as AnyRunEngine,
+      engine: engine,
       agentName: 'a',
       spec: { every: '1h' },
       input: 'x',
@@ -246,7 +245,7 @@ describe('createAgentSchedule', () => {
     let caught: unknown;
     try {
       await createAgentSchedule({
-        engine: engine as unknown as AnyRunEngine,
+        engine: engine,
         agentName: 'a',
         spec: { every: '1h' },
         input: 'x',
@@ -264,7 +263,7 @@ describe('createAgentSchedule', () => {
     let caught: unknown;
     try {
       await createAgentSchedule({
-        engine: engine as unknown as AnyRunEngine,
+        engine: engine,
         agentName: 'a',
         spec: { every: '1h' },
         input: 'x',
@@ -282,7 +281,7 @@ describe('createAgentSchedule', () => {
     let caught: unknown;
     try {
       await createAgentSchedule({
-        engine: engine as unknown as AnyRunEngine,
+        engine: engine,
         agentName: 'a',
         spec: { every: '1h' },
         input: 'x',
@@ -299,7 +298,7 @@ describe('createAgentSchedule', () => {
   it("allows overlap 'allow' when there is no session (stateless fires)", async () => {
     const engine = makeSchedulingEngine();
     const handle = await createAgentSchedule({
-      engine: engine as unknown as AnyRunEngine,
+      engine: engine,
       agentName: 'a',
       spec: { every: '1h' },
       input: 'x',
@@ -315,7 +314,7 @@ describe('createAgentSchedule', () => {
 
     try {
       const handle = await createAgentSchedule({
-        engine: engine as unknown as AnyRunEngine,
+        engine: engine,
         agentName: 'a',
         spec: { every: '1h' },
         input: 'x',
@@ -343,7 +342,7 @@ describe('createAgentSchedule', () => {
 
     try {
       const handle = await createAgentSchedule({
-        engine: engine as unknown as AnyRunEngine,
+        engine: engine,
         agentName: 'a',
         spec: { every: '1h' },
         input: 'x',
@@ -366,7 +365,7 @@ describe('createAgentSchedule', () => {
 
     try {
       const handle = await createAgentSchedule({
-        engine: engine as unknown as AnyRunEngine,
+        engine: engine,
         agentName: 'a',
         spec: { every: '1h' },
         input: 'x',
@@ -384,7 +383,7 @@ describe('createAgentSchedule', () => {
     const engine = makeSchedulingEngine({ handleRecorder: recorder });
 
     const handle = await createAgentSchedule({
-      engine: engine as unknown as AnyRunEngine,
+      engine: engine,
       agentName: 'researcher',
       spec: { every: '1h' },
       input: 'hello',
@@ -410,7 +409,7 @@ describe('createAgentSchedule', () => {
     const engine = makeSchedulingEngine({ summaries: [existingSummary] });
 
     const handle = await createAgentSchedule({
-      engine: engine as unknown as AnyRunEngine,
+      engine: engine,
       agentName: 'researcher',
       spec: { every: '1h' },
       input: 'hello',
@@ -441,7 +440,7 @@ describe('createAgentSchedule', () => {
     };
 
     const handle = await createAgentSchedule({
-      engine: engine as unknown as AnyRunEngine,
+      engine: engine,
       agentName: 'researcher',
       spec: { every: '1h' },
       input: 'hello',
@@ -468,7 +467,7 @@ describe('createAgentSchedule', () => {
     };
 
     const handle = await createAgentSchedule({
-      engine: engine as unknown as AnyRunEngine,
+      engine: engine,
       agentName: 'researcher',
       spec: { every: '1h' },
       input: 'hello',
@@ -508,7 +507,7 @@ describe('createAgentSchedule', () => {
     };
 
     const handle = await createAgentSchedule({
-      engine: engine as unknown as AnyRunEngine,
+      engine: engine,
       agentName: 'researcher',
       spec: { cron: '0 9 * * *' },
       input: 'hello',
@@ -528,7 +527,7 @@ describe('createAgentSchedule', () => {
     let caught: unknown;
     try {
       await createAgentSchedule({
-        engine: engine as unknown as AnyRunEngine,
+        engine: engine,
         agentName: 'researcher',
         spec: { every: '1h' },
         input: 'hello',
@@ -559,7 +558,7 @@ describe('createAgentSchedule', () => {
 
     try {
       await createAgentSchedule({
-        engine: engine as unknown as AnyRunEngine,
+        engine: engine,
         agentName: 'researcher',
         spec: { cron: '0 9 * * *' },
         input: 'hello',
@@ -581,7 +580,7 @@ describe('createAgentSchedule', () => {
 
     try {
       await createAgentSchedule({
-        engine: engine as unknown as AnyRunEngine,
+        engine: engine,
         agentName: 'researcher',
         spec: { every: '1h' },
         input: 'hello',
@@ -603,7 +602,7 @@ describe('createAgentSchedule', () => {
     let caught: unknown;
     try {
       await createAgentSchedule({
-        engine: engine as unknown as AnyRunEngine,
+        engine: engine,
         agentName: 'researcher',
         spec: { every: '1h' },
         input: 'hello',
@@ -629,7 +628,7 @@ describe('createAgentSchedule', () => {
     let caught: unknown;
     try {
       await createAgentSchedule({
-        engine: engine as unknown as AnyRunEngine,
+        engine: engine,
         agentName: 'researcher',
         spec: { every: '1h' },
         input: 'hello',
@@ -657,7 +656,7 @@ describe('createAgentSchedule', () => {
     let caught: unknown;
     try {
       await createAgentSchedule({
-        engine: engine as unknown as AnyRunEngine,
+        engine: engine,
         agentName: 'researcher',
         spec: { every: '1h' },
         input: 'hello',
@@ -690,7 +689,7 @@ describe('createAgentSchedule', () => {
     let caught: unknown;
     try {
       await createAgentSchedule({
-        engine: engine as unknown as AnyRunEngine,
+        engine: engine,
         agentName: 'researcher',
         spec: { every: '1h' },
         input: 'hello',

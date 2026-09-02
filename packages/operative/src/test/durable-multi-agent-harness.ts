@@ -248,9 +248,11 @@ export async function createDurableMultiAgentHarness(
     // .workflowType. We build a WorkflowHandle from the engine directly.
     const started = event as WorkflowStartedEvent;
     // WorkflowHandle is publicly constructible; the engine is its backing
-    // target. Engine<any,any> does not directly satisfy WorkflowHandleEngine
-    // (which carries a symbol-keyed method), so widen via `as any`.
-    const handle = new WorkflowHandle(started.workflowId, engine as any);
+    // target. `RegistryAgnosticEngine` retains every `Engine` member except
+    // the two chained-builder registration methods, so it satisfies
+    // `WorkflowHandleEngine` (including the symbol-keyed result method)
+    // without a cast.
+    const handle = new WorkflowHandle(started.workflowId, engine);
     childRunHandles.push({
       runId: started.workflowId,
       workflowType: started.workflowType,
@@ -286,8 +288,8 @@ export async function createDurableMultiAgentHarness(
     // fires asynchronously (deferred via the inline launch queue's setTimeout(0)),
     // so it may not be populated yet. Construct a handle directly for reliability.
     const tracked = childRunHandles.find((h) => h.runId === runId);
-    // See the WorkflowStartedEvent listener above for cast rationale.
-    const handle = tracked?.handle ?? new WorkflowHandle(runId, engine as any);
+    // See the WorkflowStartedEvent listener above for why no cast is needed.
+    const handle = tracked?.handle ?? new WorkflowHandle(runId, engine);
 
     // Poll until the workflow leaves 'pending' status, which means the inline
     // launch queue has flushed and the generator has executed at least its

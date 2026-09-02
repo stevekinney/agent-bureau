@@ -33,7 +33,7 @@ import {
 import type { RunState } from '../run-step';
 import type { FinishReason, RunOptions, RunResult } from '../types';
 import type { CheckpointStore } from './checkpoint-store';
-import type { AnyRunEngine } from './create-run-engine';
+import type { RegistryAgnosticEngine } from './create-run-engine';
 import {
   AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
   type AgentRunWorkflowResult,
@@ -66,7 +66,7 @@ export const SCHEDULER_RUN_ID_PREFIX = 'scheduler-run-' as const;
 
 /** Dependencies the adapter needs from bureau composition. */
 export interface DurableActiveRunContext {
-  engine: AnyRunEngine;
+  engine: RegistryAgnosticEngine;
   checkpointStore: CheckpointStore;
 }
 
@@ -534,7 +534,7 @@ export function createDurableActiveRun(
  * The minimal recovered-handle surface {@link reattachDurableActiveRun} needs: a
  * pinned id (== runId) and the settling `result()`. `engine.recoverAll()` returns
  * full `WorkflowHandle`s; this narrow shape avoids depending on Weft's invariant
- * `WorkflowHandle` generics (matching the `AnyRunEngine` widening convention).
+ * `WorkflowHandle` generics (matching the `RegistryAgnosticEngine` widening convention).
  */
 export interface RecoveredRunHandle {
   readonly id: string;

@@ -11,7 +11,7 @@ import type { ActiveRun } from '../create-run';
 import { createActiveRun } from '../create-run';
 import { reattachDurableActiveRun } from '../durable/active-run-adapter';
 import type { CheckpointStore } from '../durable/checkpoint-store';
-import type { AnyRunEngine } from '../durable/create-run-engine';
+import type { RegistryAgnosticEngine } from '../durable/create-run-engine';
 import {
   type AgentRunWorkflowResult,
   normalizeAgentRunWorkflowResult,
@@ -247,7 +247,7 @@ export interface SessionHandleContext {
    * Required alongside `checkpointStore` for the durable `recover()` re-attach
    * path (D2).
    */
-  engine?: AnyRunEngine;
+  engine?: RegistryAgnosticEngine;
   /**
    * The checkpoint store for reading durable run transcripts. Required for the
    * durable `recover()` re-attach path (D2) when `engine` is present. If absent
@@ -467,7 +467,7 @@ async function loadTerminalConversationHistory(
  * the RunRef alone rather than guessing at a status).
  */
 async function readTerminalRunOutcome(
-  engine: AnyRunEngine,
+  engine: RegistryAgnosticEngine,
   checkpointStore: CheckpointStore,
   runId: string,
 ): Promise<{ status: RunRef['status']; conversation?: ConversationHistory } | null> {
@@ -509,7 +509,7 @@ async function readTerminalRunOutcome(
  */
 async function reconcileTerminalRunRef(
   store: SessionStore,
-  engine: AnyRunEngine,
+  engine: RegistryAgnosticEngine,
   checkpointStore: CheckpointStore,
   sessionId: string,
   runningRef: RunRef,
@@ -649,7 +649,7 @@ export function createSessionHandle(
   /**
    * Require a durable engine or throw `NoDurableEngineError`.
    */
-  function requireEngine(verb: string): AnyRunEngine {
+  function requireEngine(verb: string): RegistryAgnosticEngine {
     if (!engine) throw new NoDurableEngineError(verb);
     return engine;
   }

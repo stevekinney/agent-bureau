@@ -8,8 +8,6 @@ import type {
 } from '@lostgradient/weft';
 import { parseDuration, ScheduleHandle } from '@lostgradient/weft';
 
-import type { AnyRunEngine } from './create-run-engine';
-
 type ScheduleIdCrypto = {
   randomUUID?: () => string;
   getRandomValues?: <T extends Uint8Array>(array: T) => T;
@@ -94,9 +92,13 @@ export function isScheduledAgentRunInput(value: unknown): value is ScheduledAgen
 export interface CreateAgentScheduleOptions {
   /**
    * The Weft engine to register the schedule on. Must be the same engine the
-   * bureau built over its `.persistence()` store.
+   * bureau built over its `.persistence()` store. Typed as {@link SchedulingEngine}
+   * — the narrow scheduling-only surface — rather than the full
+   * `RegistryAgnosticEngine`, since this function only ever calls `schedule` and
+   * `getSchedule`; widening the parameter to the full engine type would force a
+   * cast back down at every call site instead of accepting what's actually used.
    */
-  engine: AnyRunEngine;
+  engine: SchedulingEngine;
   /**
    * The name of the registered `agentRun` workflow type (always `'agentRun'` in
    * the current architecture, but injectable for testing).
@@ -165,7 +167,7 @@ export interface AgentScheduleHandle {
  * Engine-level scheduling surface used by {@link AgentScheduler}.
  *
  * Extracted so tests can provide a partial stub without implementing the full
- * `AnyRunEngine` interface.
+ * `RegistryAgnosticEngine` interface.
  */
 export interface SchedulingEngine {
   schedule(
@@ -453,7 +455,7 @@ export function createAgentScheduler(options: {
       scheduleOptions: AgentScheduleOptions,
     ): Promise<AgentScheduleHandle> {
       return createAgentSchedule({
-        engine: engine as AnyRunEngine,
+        engine,
         workflowType,
         agentName,
         ...scheduleOptions,
