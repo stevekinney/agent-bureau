@@ -476,4 +476,44 @@ describe('createRoutingGenerate — descriptor union (AB-64 AC2, AB-245)', () =>
 
     expect(readBackendDescriptors(generate)).toEqual([anthropic]);
   });
+
+  it('prevents a custom strategy from mutating the routes it receives, keeping dispatch and the descriptor union in sync (review)', async () => {
+    const anthropic = descriptorsFor('anthropic')[0];
+    const openai = descriptorsFor('openai')[0];
+    if (!anthropic || !openai)
+      throw new Error('expected seed descriptors for anthropic and openai');
+
+    const replacementGenerate = routeWithDescriptors('fast', 'replaced-response', [
+      openai,
+    ]).generate;
+    let sawFrozenRoute = false;
+
+    const generate = createRoutingGenerate({
+      routes: [routeWithDescriptors('fast', 'original-response', [anthropic])],
+      strategy: (_context, routes) => {
+        // A strategy receives the SAME snapshotted route objects
+        // createRoutingGenerate's own dispatch reads through — frozen, so
+        // this assignment is a no-op (or throws, depending on strict
+        // mode), never a real mutation that could diverge dispatch from
+        // the already-computed descriptor union.
+        sawFrozenRoute = Object.isFrozen(routes[0]);
+        try {
+          (routes[0] as { generate: typeof replacementGenerate }).generate = replacementGenerate;
+        } catch {
+          // Ignored — sloppy mode would silently no-op the same assignment.
+        }
+        return { route: 'fast', reason: 'test' };
+      },
+      fallback: 'fast',
+    });
+
+    const result = await generate(makeContext());
+
+    expect(sawFrozenRoute).toBe(true);
+    // Dispatch actually ran the ORIGINAL generate — proof the attempted
+    // mutation never took effect, not just that the descriptor union
+    // reports the original descriptor.
+    expect(result.content).toBe('original-response');
+    expect(readBackendDescriptors(generate)).toEqual([anthropic]);
+  });
 });

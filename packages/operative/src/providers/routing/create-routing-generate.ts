@@ -119,15 +119,19 @@ function unionDescriptors(
  */
 export function createRoutingGenerate(options: RoutingOptions): GenerateFunction {
   const { strategy, onRoute, fallback } = options;
-  // Snapshot each route object at construction time — copying `name`/
-  // `generate`/`costPerMillionTokens` onto a fresh object — rather than
-  // reusing `options.routes`'s own objects. Without this, a caller mutating
-  // a route in place after construction (e.g. reassigning
-  // `options.routes[0].generate`) would make dispatch (which reads through
-  // `routeMap`, which references those same objects) silently diverge from
-  // the descriptor union already computed below from the ORIGINAL
-  // `generate`, advertising a backend the agent no longer actually invokes.
-  const routes = options.routes.map((route) => ({ ...route }));
+  // Snapshot AND freeze each route object at construction time — copying
+  // `name`/`generate`/`costPerMillionTokens` onto a fresh, frozen object —
+  // rather than reusing `options.routes`'s own (mutable-field) objects.
+  // Copying alone stops a caller mutating a route in place after
+  // construction; freezing additionally stops a custom `RoutingStrategy`
+  // (which receives this same `routes` array on every call, per its own
+  // signature) reaching in and reassigning `routes[0].generate` from
+  // WITHIN a routing decision. Either way, without the freeze, dispatch
+  // (which reads through `routeMap`, referencing these same objects) would
+  // silently diverge from the descriptor union already computed below from
+  // the ORIGINAL `generate`, advertising a backend the agent no longer
+  // actually invokes.
+  const routes = options.routes.map((route) => Object.freeze({ ...route }));
   const routeMap = new Map(routes.map((r) => [r.name, r]));
 
   const generate: GenerateFunction = async (
