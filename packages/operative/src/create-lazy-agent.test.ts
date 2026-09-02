@@ -630,7 +630,17 @@ describe('createLazyAgent', () => {
     expect(await run.closed()).toEqual(closedFailure);
   });
 
-  it('closed() resolves not-required when first called after the run already settled with no cancellation (AB-204)', async () => {
+  it('closed() delegates to the underlying run once it exists, even with no cancellation (AB-204)', async () => {
+    // Regression: a code-review finding on the AB-204 pull request
+    // (PRRT_kwDORvupsc6esJjg) — once `underlying` exists, its own
+    // acknowledgement must always be consulted, even with no cancellation
+    // at all. An underlying run can fulfill `result()` with a nontrivial
+    // cleanup outcome entirely on its own (e.g. a durable Bureau path
+    // hitting an engine disposal it classifies `unresolved`/`unreachable`
+    // with no cancellation involved); taking the `not-required` fast path
+    // here instead would silently hide that. Same class of bug the session
+    // wrapper's `activeInnerRun` check already fixed
+    // (PRRT_kwDORvupsc6enump).
     const fake = createFakeAgentRun();
     const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };
     const lazy = createLazyAgent(() => agent);
@@ -641,7 +651,10 @@ describe('createLazyAgent', () => {
     await run.result();
     await Promise.resolve();
 
-    expect(await run.closed()).toEqual({ status: 'not-required' });
+    // `createFakeAgentRun`'s `closed()` resolves `completed` once its
+    // result settles — this proves `underlying.closed()` was actually
+    // consulted, not a `not-required` fast path that never called it.
+    expect(await run.closed()).toEqual({ status: 'completed' });
   });
 
   // Regression: a code-review finding on the AB-204 pull request — once

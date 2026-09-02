@@ -680,8 +680,22 @@ export function createDeferredAgentRun<O, H extends boolean>(
       // (ownership transfers directly to the underlying agent's run() once
       // it exists — see `detachSignalListener` above) — reading the signal
       // directly here still catches that case.
+      //
+      // AB-204 review (PRRT_kwDORvupsc6esJjg): `underlying !== undefined`
+      // must ALSO disqualify the fast path, even with no cancellation at
+      // all — an underlying run can fulfill `result()` with a nontrivial
+      // cleanup outcome on its own (e.g. a durable Bureau path hitting an
+      // engine disposal it classifies `unresolved`/`unreachable` with no
+      // cancellation involved). Without this, `evaluateNotRequired()` would
+      // return `not-required` without ever consulting `underlying.closed()`
+      // below, hiding that outcome — the same class of bug the session
+      // wrapper's `activeInnerRun` check (PRRT_kwDORvupsc6enump) already
+      // fixed for `SessionHandle`.
       disqualifiesFastPath: () =>
-        cancelRequested || (signal?.aborted ?? false) || invalidHandleDisposalOutcome !== undefined,
+        cancelRequested ||
+        (signal?.aborted ?? false) ||
+        invalidHandleDisposalOutcome !== undefined ||
+        underlying !== undefined,
       hasInFlightWork: () => false,
       resolveOutcome: () =>
         underlying
