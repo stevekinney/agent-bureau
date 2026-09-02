@@ -425,23 +425,23 @@ export interface SteeringCommand {
  * for both a single reason and a subset of reasons (see
  * `events.ts`'s `SteeringFailureReason`).
  *
- * `supersededBy?: never` forbids the property when it is OMITTED, but this
+ * Deliberately does NOT declare a `supersededBy?: never` field. This
  * package builds with `exactOptionalPropertyTypes: false` (a repo-wide
- * setting, `tsconfig.base.json`), under which `?: never` still accepts an
- * EXPLICIT `supersededBy: undefined` — indistinguishable at the type level
- * from omitting it, but observable at runtime via `'supersededBy' in
- * failure`. This is the same caveat `SteeringRequestedValue`'s
- * `override?: never`/`policyRef?: never` pair already documents (see
- * `steering-types.check.ts`) — not a gap specific to this type, and not
- * fixable short of a repo-wide `exactOptionalPropertyTypes: true` flip,
- * which is out of this issue's scope. A runtime consumer that cares about
- * the distinction should check `'supersededBy' in failure`, not merely
- * `failure.supersededBy !== undefined`.
+ * setting, `tsconfig.base.json`), under which a DECLARED `?: never`
+ * property still accepts an EXPLICIT `supersededBy: undefined` — see
+ * `SteeringRequestedValue`'s `override?: never`/`policyRef?: never` pair,
+ * which carries that exact caveat (`steering-types.check.ts`). Omitting the
+ * field from this type ENTIRELY, rather than declaring it as forbidden,
+ * sidesteps that gap: TypeScript's excess-property check on an object
+ * literal rejects ANY key the type doesn't declare — including an explicit
+ * `supersededBy: undefined` — without needing the repo-wide compiler flag
+ * this issue is not in scope to change. See
+ * `steeringCommandFailureNonSupersededExplicitUndefined` in
+ * `steering-types.check.ts` for the pinned proof.
  */
 type SteeringCommandFailureOf<R extends string> = {
   readonly failedAt: string; // ISO
   readonly reason: R;
-  readonly supersededBy?: never;
 };
 
 /**
@@ -453,10 +453,18 @@ type SteeringCommandFailureOf<R extends string> = {
  * when `reason` is `'superseded-by'` and absent otherwise" in prose; this
  * makes that exclusivity a type error instead of a runtime-only invariant).
  * The `'superseded-by'` member requires `supersededBy`; every other member
- * carries `supersededBy?: never`, so a literal that supplies it alongside a
- * different reason — or omits it alongside `'superseded-by'` — fails to
- * type-check. See `steering-types.check.ts` for both malformed shapes
- * pinned with `@ts-expect-error`.
+ * does not declare the field at all (see `SteeringCommandFailureOf`'s doc
+ * comment for why that's stronger than declaring it `?: never`), so a
+ * literal that supplies it alongside a different reason — or omits it
+ * alongside `'superseded-by'` — fails to type-check. See
+ * `steering-types.check.ts` for both malformed shapes pinned with
+ * `@ts-expect-error`.
+ *
+ * A consumer that previously wrote `interface LoggedFailure extends
+ * SteeringCommandFailure { traceId: string }` needs an intersection
+ * instead — `type LoggedFailure = SteeringCommandFailure & { traceId:
+ * string }` — since a TypeScript `interface` cannot `extends` a type
+ * containing a union, matching `RunOptions`'s identical migration note.
  */
 export type SteeringCommandFailure =
   | SteeringCommandFailureOf<'session-terminal'> // the owning session itself went terminal (closed) before application

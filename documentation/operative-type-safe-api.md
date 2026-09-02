@@ -1315,21 +1315,26 @@ A `pause` or `resume` command targets exactly one run: when `runId` is present i
  *  SteeringCommandFailure, { reason: R }>` narrow correctly for a single
  *  reason or a subset of reasons — grouping them under one wide `reason`
  *  field, as an earlier draft of this section did, makes that `Extract`
- *  evaluate to `never` instead. */
+ *  evaluate to `never` instead. Deliberately does NOT declare a
+ *  `supersededBy?: never` field: this package builds with
+ *  `exactOptionalPropertyTypes: false`, under which a DECLARED `?: never`
+ *  property still accepts an explicit `supersededBy: undefined`. Omitting
+ *  the field entirely instead makes an object literal supplying it — even
+ *  as `undefined` — an excess-property error, independent of that
+ *  compiler setting. */
 type SteeringCommandFailureOf<R extends string> = {
   readonly failedAt: string; // ISO
   readonly reason: R;
-  readonly supersededBy?: never;
 };
 
 /** Populated on every terminal-failure SteeringCommandState (`rejected`,
  *  `superseded`, `failed`), mirroring AB-42's SessionInputFailure.
  *
  *  A discriminated union on `reason` (AB-236): the `'superseded-by'` member
- *  requires `supersededBy`; every other member forbids it
- *  (`supersededBy?: never`). A literal supplying `supersededBy` alongside a
- *  different reason, or omitting it alongside `'superseded-by'`, is a
- *  compile error, not just a documented invariant. */
+ *  requires `supersededBy`; every other member does not declare the field
+ *  at all. A literal supplying `supersededBy` alongside a different
+ *  reason, or omitting it alongside `'superseded-by'`, is a compile error,
+ *  not just a documented invariant. */
 export type SteeringCommandFailure =
   | SteeringCommandFailureOf<'session-terminal'> // the owning session itself went terminal (closed) before application
   | SteeringCommandFailureOf<'run-terminal'> // pause/resume only: the run it targeted ended (aborted or completed) before its gate could apply

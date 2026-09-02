@@ -105,32 +105,31 @@ export const steeringCommandFailureSuperseded: SteeringCommandFailure = {
 
 // AB-236 tightens `SteeringCommandFailure` to a discriminated union on
 // `reason`: the `'superseded-by'` member requires `supersededBy`, and every
-// other member forbids it (`supersededBy?: never`). Both malformed
-// combinations must fail to type-check.
+// other member OMITS the field entirely (not `supersededBy?: never` — see
+// `SteeringCommandFailureOf`'s doc comment in `types.ts` for why that's
+// stronger under this package's `exactOptionalPropertyTypes: false`). All
+// three malformed combinations below must fail to type-check.
 // @ts-expect-error — `reason: 'superseded-by'` requires `supersededBy`.
 export const steeringCommandFailureSupersededMissingId: SteeringCommandFailure = {
   failedAt: new Date(0).toISOString(),
   reason: 'superseded-by',
 };
-// @ts-expect-error — a non-`'superseded-by'` reason must not carry `supersededBy`.
 export const steeringCommandFailureNonSupersededWithId: SteeringCommandFailure = {
   failedAt: new Date(0).toISOString(),
   reason: 'policy-denied',
+  // @ts-expect-error — a non-`'superseded-by'` reason must not carry `supersededBy`.
   supersededBy: 'successor-command-id',
 };
-// This package's `exactOptionalPropertyTypes: false` means `supersededBy?:
-// never` forbids OMITTED-vs-required exclusivity but not an EXPLICIT
-// `supersededBy: undefined` — that still type-checks, indistinguishable at
-// the type level from omitting it (see `SteeringCommandFailureOf`'s doc
-// comment in `types.ts`, and `SteeringRequestedValue`'s identical
-// `override`/`policyRef` caveat below). Pinned here, not as a
-// `@ts-expect-error`, precisely because it is NOT an error under this
-// package's compiler settings — a future flip to
-// `exactOptionalPropertyTypes: true` would make this fail, at which point
-// this const should gain the directive.
+// The same rejection holds for an EXPLICIT `supersededBy: undefined`, not
+// just a definite value — the case that would have slipped through if this
+// type declared `supersededBy?: never` instead of omitting the field.
+// Excess-property checking on this object literal rejects any key the
+// matched union member doesn't declare, `undefined`-valued or not,
+// independent of `exactOptionalPropertyTypes`.
 export const steeringCommandFailureNonSupersededExplicitUndefined: SteeringCommandFailure = {
   failedAt: new Date(0).toISOString(),
   reason: 'policy-denied',
+  // @ts-expect-error — a non-`'superseded-by'` reason must not carry `supersededBy`, even as `undefined`.
   supersededBy: undefined,
 };
 
