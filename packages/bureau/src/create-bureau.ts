@@ -269,6 +269,10 @@ export function hasRecoverableTransportAuthority(metadata: Record<string, JSONVa
  * per-run lookup that is GENUINELY ABSENT (no map, no `lastRunId`, or the key
  * missing from the map) falls back to the legacy field.
  */
+function isPlainAuthorityRecord(value: JSONValue | undefined): value is Record<string, JSONValue> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 function lookupSessionAuthority(
   metadata: Record<string, JSONValue>,
 ):
@@ -276,22 +280,26 @@ function lookupSessionAuthority(
   | { readonly recorded: true; readonly principalId: string | undefined } {
   const lastRunId = metadata['lastRunId'];
   const authorities = metadata['lastRequestAuthorities'];
+  // A PRESENT-but-malformed `lastRequestAuthorities` value (not absent — a
+  // string or array where a map belongs) is itself evidence something was
+  // recorded and corrupted. It must fail closed regardless of `lastRunId` or
+  // a legacy fallback, never be read as "nothing recorded" (open) — the same
+  // fail-closed principle as a malformed per-run/legacy entry below.
+  if (authorities !== undefined && !isPlainAuthorityRecord(authorities)) {
+    return { recorded: true, principalId: undefined };
+  }
   const perRunEntry =
-    typeof lastRunId === 'string' &&
-    lastRunId &&
-    authorities &&
-    typeof authorities === 'object' &&
-    !Array.isArray(authorities)
-      ? (authorities as Record<string, JSONValue>)[lastRunId]
+    typeof lastRunId === 'string' && lastRunId && authorities !== undefined
+      ? authorities[lastRunId]
       : undefined;
   const candidate = perRunEntry !== undefined ? perRunEntry : metadata['lastRequestAuthority'];
   if (candidate === undefined) {
     return { recorded: false };
   }
-  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+  if (!isPlainAuthorityRecord(candidate)) {
     return { recorded: true, principalId: undefined };
   }
-  const principalId = (candidate as Record<string, JSONValue>)['principalId'];
+  const principalId = candidate['principalId'];
   return { recorded: true, principalId: typeof principalId === 'string' ? principalId : undefined };
 }
 

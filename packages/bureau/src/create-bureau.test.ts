@@ -4453,6 +4453,32 @@ describe('recordedSessionAuthorityPrincipalId / isSessionAuthorityAuthorized (AB
     expect(isSessionAuthorityAuthorized(metadata, 'anyone-else')).toBe(false);
     expect(recordedSessionAuthorityPrincipalId(metadata)).toBeUndefined();
   });
+
+  it('fails closed (denies every principal) when lastRequestAuthorities itself is a malformed container, even with no legacy fallback at all', () => {
+    // Regression (Codex review, second pass): a PRESENT-but-malformed
+    // lastRequestAuthorities value (an array or string, not a map) is itself
+    // evidence something was recorded and corrupted — it must fail closed
+    // regardless of lastRunId or a legacy field, never be read as "nothing
+    // recorded" (which would authorize any principal).
+    expect(
+      isSessionAuthorityAuthorized(
+        { lastRunId: 'run-1', lastRequestAuthorities: ['not-a-map'] },
+        'anyone',
+      ),
+    ).toBe(false);
+    expect(
+      isSessionAuthorityAuthorized(
+        { lastRunId: 'run-1', lastRequestAuthorities: 'not-a-map' },
+        'anyone',
+      ),
+    ).toBe(false);
+    expect(
+      recordedSessionAuthorityPrincipalId({
+        lastRunId: 'run-1',
+        lastRequestAuthorities: ['not-a-map'],
+      }),
+    ).toBeUndefined();
+  });
 });
 
 describe('isSessionRunTerminal (AB-194)', () => {
