@@ -980,7 +980,6 @@ describe('createLazyAgent', () => {
       children: () => [],
       abortChild() {},
       closed: () => Promise.resolve({ status: 'completed' }),
-||||||| parent of f4b3d798 (Add the liveness watchdog module and run snapshot() / subscribeSnapshot() (AB-214))
       snapshot: () => stubLivenessSnapshot('throwing-handle-gated'),
       subscribeSnapshot: (observer: (snapshot: AgentRunLivenessSnapshot) => void) => {
         observer(stubLivenessSnapshot('throwing-handle-gated'));
@@ -1017,7 +1016,6 @@ describe('createLazyAgent', () => {
       children: () => [],
       abortChild() {},
       closed: () => Promise.resolve({ status: 'completed' }),
-||||||| parent of f4b3d798 (Add the liveness watchdog module and run snapshot() / subscribeSnapshot() (AB-214))
       snapshot: () => stubLivenessSnapshot('throwing-handle'),
       subscribeSnapshot: (observer: (snapshot: AgentRunLivenessSnapshot) => void) => {
         observer(stubLivenessSnapshot('throwing-handle'));
@@ -1122,7 +1120,6 @@ describe('createLazyAgent', () => {
       children: () => [],
       abortChild() {},
       closed: () => Promise.resolve({ status: 'completed' }),
-||||||| parent of f4b3d798 (Add the liveness watchdog module and run snapshot() / subscribeSnapshot() (AB-214))
       snapshot: () => stubLivenessSnapshot('queueless-handle'),
       subscribeSnapshot: (observer: (snapshot: AgentRunLivenessSnapshot) => void) => {
         observer(stubLivenessSnapshot('queueless-handle'));
