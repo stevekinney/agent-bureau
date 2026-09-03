@@ -2,17 +2,20 @@ import type { ToolRequestContext } from 'armorer';
 import type { Bureau } from 'bureau';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
+import type { RuntimeServices } from 'lifecycle';
+import { createDefaultRuntimeServices } from 'lifecycle';
 
 import type { ServerAdapter } from './adapters/types';
 import { bootstrapApiKey, createApiKeyStore } from './keys';
 import type { ApiKeyStore } from './keys/types';
+import type { LiveFrameBrokerClock } from './live-events';
 import { LiveFrameBroker } from './live-events';
 import {
   createAuthentication,
   createRateLimiter,
+  createRequestIdentifier,
   createSecurityHeaders,
   errorHandler,
-  requestIdentifier,
 } from './middleware';
 import {
   gatewayAuthorizationRevisionForApiKey,
@@ -66,15 +69,18 @@ function validateDrainTimeoutMs(value: number | undefined): number {
 /**
  * Dependencies {@link createGateway} injects for the AB-235 shutdown-drain
  * race, mirroring AB-209's `loadServe`-style injection pattern
- * (`node-adapter.ts`'s `CreateNodeAdapterDependencies`). Defaults to the
- * real runtime timers and adapter resolver; tests override them to
- * exercise the drain timeout and force-close path deterministically,
- * without waiting in real time or standing up a real Bun/Node server.
+ * (`node-adapter.ts`'s `CreateNodeAdapterDependencies`). `setTimeoutFn`/
+ * `clearTimeoutFn` default to the resolved `RuntimeServices.timers` (AB-303)
+ * — the real globals when `options.runtime` is omitted — and the adapter
+ * resolver defaults to the real dynamic-import resolver; tests override
+ * either to exercise the drain timeout and force-close path
+ * deterministically, without waiting in real time or standing up a real
+ * Bun/Node server.
  */
 export interface CreateGatewayDependencies {
-  setTimeoutFn?: typeof setTimeout;
-  clearTimeoutFn?: typeof clearTimeout;
-  resolveAdapterFn?: (runtime: 'bun' | 'node') => Promise<ServerAdapter>;
+  setTimeoutFn?: (callback: () => void, ms: number) => unknown;
+  clearTimeoutFn?: (handle: unknown) => void;
+  resolveAdapterFn?: (serverRuntime: 'bun' | 'node') => Promise<ServerAdapter>;
 }
 
 /**
@@ -89,15 +95,20 @@ export interface CreateGatewayDependencies {
  * inlined in `stop()`) so the AB-235 drain-timeout behavior is directly
  * unit-testable without waiting in real time — tests inject
  * `setTimeoutFn`/`clearTimeoutFn` and fire the timeout callback
- * themselves.
+ * themselves. `createGateway` always supplies both (from its resolved
+ * `RuntimeServices.timers`), so the `setTimeout`/`clearTimeout` global
+ * defaults below exist only for direct unit tests of this function.
  */
 export async function raceDrainTimeout(
   stopping: Promise<unknown>,
   drainTimeoutMs: number,
   dependencies: Pick<CreateGatewayDependencies, 'setTimeoutFn' | 'clearTimeoutFn'> = {},
 ): Promise<boolean> {
-  const { setTimeoutFn = setTimeout, clearTimeoutFn = clearTimeout } = dependencies;
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  const {
+    setTimeoutFn = (callback: () => void, ms: number) => setTimeout(callback, ms),
+    clearTimeoutFn = (handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+  } = dependencies;
+  let timer: unknown;
   const timedOut = new Promise<'timed-out'>((resolve) => {
     timer = setTimeoutFn(() => resolve('timed-out'), drainTimeoutMs);
   });
@@ -126,12 +137,15 @@ const gatewayValidatorState = new WeakMap<
 >();
 const STATIC_TOKEN_REVISION_SECRET_KEY = 'gateway:private:static-token-revision-secret';
 
-async function resolveStaticTokenRevisionSecret(store: Bureau['kv']): Promise<string | undefined> {
+async function resolveStaticTokenRevisionSecret(
+  store: Bureau['kv'],
+  identifiers: RuntimeServices['identifiers'],
+): Promise<string | undefined> {
   if (!store) return undefined;
   const persisted = await store.get(STATIC_TOKEN_REVISION_SECRET_KEY);
   if (persisted) return persisted;
 
-  const candidate = crypto.randomUUID();
+  const candidate = identifiers.next('gateway-static-token-revision-secret');
   const created = await store.conditionalBatch(
     [{ key: STATIC_TOKEN_REVISION_SECRET_KEY, expectedValue: null }],
     [{ type: 'set', key: STATIC_TOKEN_REVISION_SECRET_KEY, value: candidate }],
@@ -147,17 +161,17 @@ async function resolveStaticTokenRevisionSecret(store: Bureau['kv']): Promise<st
  * Detects the current server runtime. Returns `'bun'` when running
  * inside the Bun runtime, `'node'` otherwise.
  */
-function detectRuntime(): 'bun' | 'node' {
+function detectServerRuntime(): 'bun' | 'node' {
   return typeof Bun !== 'undefined' ? 'bun' : 'node';
 }
 
 /**
- * Resolves a ServerAdapter for the given runtime string.
+ * Resolves a ServerAdapter for the given server-runtime string.
  * Uses dynamic imports so that the unused adapter is never
  * pulled into the bundle.
  */
-async function resolveAdapter(runtime: 'bun' | 'node'): Promise<ServerAdapter> {
-  if (runtime === 'bun') {
+async function resolveAdapter(serverRuntime: 'bun' | 'node'): Promise<ServerAdapter> {
+  if (serverRuntime === 'bun') {
     const { createBunAdapter } = await import('./adapters/bun-adapter');
     return createBunAdapter();
   }
@@ -220,6 +234,7 @@ export function buildRequestAuthorityValidator(
   authToken: string | undefined,
   store: ApiKeyStore | undefined,
   staticTokenRevisionSecret?: string,
+  now: () => number = Date.now,
 ): ((context: ToolRequestContext) => Promise<boolean>) | undefined {
   if (!authToken && !store) return undefined;
 
@@ -240,7 +255,7 @@ export function buildRequestAuthorityValidator(
     const keys = await store.list();
     const key = keys.find((candidate) => candidate.id === keyId);
     if (!key?.active) return false;
-    if (key.expiresAt !== undefined && Date.parse(key.expiresAt) <= Date.now()) return false;
+    if (key.expiresAt !== undefined && Date.parse(key.expiresAt) <= now()) return false;
     if (authority.authorizationRevision !== gatewayAuthorizationRevisionForApiKey(key.id)) {
       return false;
     }
@@ -274,9 +289,10 @@ function composeRequestAuthorityValidators(
  * Creates a new Gateway (HTTP door) over an already-constructed Bureau (brain).
  *
  * The bureau is the first argument — it owns all agent/run/session logic.
- * The options object is door-only: port, hostname, authToken, runtime.
- * Gateway depends only on `bureau` and exposes the bureau's surface over
- * HTTP transport (run/session verbs → routes; AgentRun stream → WebSocket).
+ * The options object is door-only: port, hostname, authToken, serverRuntime,
+ * runtime (AB-303's `RuntimeServices` seam). Gateway depends only on
+ * `bureau` and exposes the bureau's surface over HTTP transport
+ * (run/session verbs → routes; AgentRun stream → WebSocket).
  *
  * This function is async because it resolves the server adapter (dynamic import)
  * and bootstraps the API key store against the bureau's KV backend.
@@ -288,9 +304,22 @@ export async function createGateway(
 ): Promise<Gateway> {
   const drainTimeoutMs = validateDrainTimeoutMs(options.shutdown?.drainTimeoutMs);
   const port = options.port ?? DEFAULT_PORT;
-  const runtime = options.runtime ?? detectRuntime();
-  const adapter = await (dependencies.resolveAdapterFn ?? resolveAdapter)(runtime);
-  const liveFrameBroker = new LiveFrameBroker();
+  const serverRuntime = options.serverRuntime ?? detectServerRuntime();
+  // AB-303: resolved exactly once, here, and forwarded as the same single
+  // instance to everything below that reads current time, a monotonic
+  // timer, or mints an identifier — never re-read from `options.runtime`
+  // and never a process global directly beyond this point.
+  const runtimeServices: RuntimeServices = options.runtime ?? createDefaultRuntimeServices();
+  const adapter = await (dependencies.resolveAdapterFn ?? resolveAdapter)(serverRuntime);
+  const liveFrameBrokerClock: LiveFrameBrokerClock = {
+    now: runtimeServices.monotonic.now,
+    nowISO: runtimeServices.clock.nowISO,
+    setTimeout: runtimeServices.timers.setTimeout,
+    clearTimeout: runtimeServices.timers.clearTimeout,
+    setInterval: runtimeServices.timers.setInterval,
+    clearInterval: runtimeServices.timers.clearInterval,
+  };
+  const liveFrameBroker = new LiveFrameBroker({ clock: liveFrameBrokerClock });
   const unsubscribeLiveFrames = bureau.subscribeLiveFrames((frame) => {
     liveFrameBroker.broadcast(frame);
   });
@@ -309,10 +338,13 @@ export async function createGateway(
   let apiKeyStore: ApiKeyStore | undefined;
 
   if (bureau.kv) {
-    apiKeyStore = createApiKeyStore(bureau.kv);
+    apiKeyStore = createApiKeyStore(bureau.kv, runtimeServices.clock);
     await bootstrapApiKey(apiKeyStore);
   }
-  const staticTokenRevisionSecret = await resolveStaticTokenRevisionSecret(bureau.kv);
+  const staticTokenRevisionSecret = await resolveStaticTokenRevisionSecret(
+    bureau.kv,
+    runtimeServices.identifiers,
+  );
   const authorityValidatorAccess = bureau as Bureau & BureauRequestAuthorityValidatorAccess;
   const existingValidator = authorityValidatorAccess.getRequestAuthorityValidator?.();
   const previousGatewayValidator = gatewayValidatorState.get(bureau);
@@ -329,6 +361,7 @@ export async function createGateway(
     options.authToken,
     apiKeyStore,
     staticTokenRevisionSecret,
+    runtimeServices.clock.now,
   );
   if (gatewayRequestAuthorityValidator) {
     retainedState.gatewayValidators.add(gatewayRequestAuthorityValidator);
@@ -349,12 +382,13 @@ export async function createGateway(
 
   // Global middleware
   app.use('*', cors());
-  app.use('*', requestIdentifier);
+  app.use('*', createRequestIdentifier(runtimeServices.identifiers));
   app.use('*', createAuthentication(options.authToken, apiKeyStore, staticTokenRevisionSecret));
   app.use(
     '*',
     createRateLimiter({
       store: bureau.kv,
+      now: runtimeServices.clock.now,
       hasHookIdempotencyReceipt: (principal, idempotencyKey) =>
         hookIdempotencyRegistry.has(principal, idempotencyKey),
     }),
@@ -444,7 +478,10 @@ export async function createGateway(
           }
         }
 
-        const drained = await raceDrainTimeout(stopping, drainTimeoutMs, dependencies);
+        const drained = await raceDrainTimeout(stopping, drainTimeoutMs, {
+          setTimeoutFn: dependencies.setTimeoutFn ?? runtimeServices.timers.setTimeout,
+          clearTimeoutFn: dependencies.clearTimeoutFn ?? runtimeServices.timers.clearTimeout,
+        });
         if (!drained) {
           // AB-235 escalation: the drain timeout elapsed with the adapter's
           // own stop() still pending — force-close whatever connections are

@@ -33,8 +33,8 @@ function summarize(path: string, report: EvaluationReport): EvaluationReportSumm
  * since a reports directory may accumulate unrelated files over time.
  *
  * Uses `node:fs/promises` rather than `Bun.Glob`/`Bun.file` — the gateway
- * this feeds also runs under a Node adapter (`GatewayOptions.runtime`), and
- * a Bun-only global would throw a ReferenceError on that path.
+ * this feeds also runs under a Node adapter (`GatewayOptions.serverRuntime`,
+ * AB-303), and a Bun-only global would throw a ReferenceError on that path.
  */
 export async function listEvaluationReports(directory: string): Promise<EvaluationReportSummary[]> {
   const directoryStats = await stat(directory).catch(() => undefined);

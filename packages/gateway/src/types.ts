@@ -5,6 +5,7 @@ import type {
 import type { Store } from '@lostgradient/operative/store';
 import type { EvaluationReportSummary } from 'evaluation';
 import type { Hono } from 'hono';
+import type { RuntimeServices } from 'lifecycle';
 
 export type {
   AuditEventType,
@@ -50,8 +51,36 @@ export interface GatewayOptions {
   port?: number;
   hostname?: string;
   authToken?: string;
-  /** Server runtime. Default: auto-detected (`'bun'` when `typeof Bun !== 'undefined'`, `'node'` otherwise). */
-  runtime?: 'bun' | 'node';
+  /**
+   * Server runtime. Default: auto-detected (`'bun'` when `typeof Bun !==
+   * 'undefined'`, `'node'` otherwise).
+   *
+   * Named `serverRuntime` (AB-303) — not `runtime`, which is
+   * {@link GatewayOptions.runtime} below, the {@link RuntimeServices}
+   * injection seam. The two are unrelated: this selects which HTTP/WS
+   * server adapter to build; `runtime` below is the clock/timer/identifier
+   * seam that adapter and every other server-side construction reads from.
+   */
+  serverRuntime?: 'bun' | 'node';
+  /**
+   * AB-303 — the injectable {@link RuntimeServices} seam (AB-92 AC4):
+   * clock, monotonic time, timers, identifiers, random, and deferred-work
+   * tracking. Resolved exactly once inside `createGateway` and forwarded,
+   * as the same single instance, to the composed Bureau (when
+   * `createGateway` itself constructs one — today it never does; the
+   * bureau is always the caller-supplied first argument), the live-events
+   * connection watchdogs (AB-219), and every server-side timer and
+   * identifier read `createGateway` owns directly (the shutdown drain
+   * race, the static-token revision secret, the request-identifier
+   * middleware, the rate limiter's clock, and the API key store's
+   * timestamps). Omit to get `createDefaultRuntimeServices`'s real-globals
+   * implementation — unconfigured production behavior is unchanged. A
+   * test composes its own deterministic instance from
+   * `@lostgradient/operative/test`'s `createManualRuntimeServices` (or,
+   * for the loopback conformance harness, reuses the Bureau's own
+   * `harness.runtime` so both sides of the wire share one clock).
+   */
+  runtime?: RuntimeServices;
   /**
    * Explicit list of allowed origins for WebSocket upgrade requests. When non-empty,
    * upgrade requests whose `Origin` header is absent or not in the list are rejected

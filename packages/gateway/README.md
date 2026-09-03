@@ -51,7 +51,7 @@ await server.stop();
 bureau.dispose();
 ```
 
-`createGateway()` auto-detects the runtime (`'bun'` when `typeof Bun !== 'undefined'`, `'node'` otherwise). The default port is `5555`. Pass `authToken` to require a bearer token on every request. See `src/start.ts` for the reference process entrypoint that reads this configuration from the environment (used by `bun run start` and the Dockerfile — documented in `documentation/deployment.md`).
+`createGateway()` auto-detects the server runtime (`'bun'` when `typeof Bun !== 'undefined'`, `'node'` otherwise) unless `serverRuntime` is set. The default port is `5555`. Pass `authToken` to require a bearer token on every request. See `src/start.ts` for the reference process entrypoint that reads this configuration from the environment (used by `bun run start` and the Dockerfile — documented in `documentation/deployment.md`).
 
 ### Running the bureau without HTTP
 
@@ -128,21 +128,26 @@ const server = await gateway.start();
 
 ### `createGateway(bureau, options?): Promise<Gateway>`
 
-Wraps an already-constructed `Bureau` (see `createBureau()` in the `bureau` package) in an HTTP door: creates the Hono application, wires all middleware and routes, and returns a `Gateway` handle. The server is **not** started until you call `gateway.start()`. `GatewayOptions` is transport-only — it does not carry any brain/runtime configuration, which lives entirely on the `Bureau` passed as the first argument.
+Wraps an already-constructed `Bureau` (see `createBureau()` in the `bureau` package) in an HTTP door: creates the Hono application, wires all middleware and routes, and returns a `Gateway` handle. The server is **not** started until you call `gateway.start()`. `GatewayOptions` is transport-only — it does not carry any brain/agent configuration, which lives entirely on the `Bureau` passed as the first argument. The one exception is `runtime` (below): a clock/timer/identifier seam, not a brain option, resolved once and shared with everything `createGateway` itself constructs.
 
 ```typescript
 interface GatewayOptions {
   port?: number; // default: 5555
   hostname?: string;
   authToken?: string; // bearer token required on every request when set
-  runtime?: 'bun' | 'node'; // default: auto-detected
+  serverRuntime?: 'bun' | 'node'; // default: auto-detected
+  runtime?: RuntimeServices; // default: createDefaultRuntimeServices() (real globals)
   allowedOrigins?: string[]; // WebSocket upgrade origin allowlist
   enableCsp?: boolean; // default: true
   idleTimeout?: number; // seconds; Bun default: 10
   evaluationReportsDirectory?: string; // backs the read-only /evaluations trend page
   shutdown?: { drainTimeoutMs?: number }; // AB-235; default: DEFAULT_GATEWAY_DRAIN_TIMEOUT_MS (10000)
 }
+```
 
+`serverRuntime` selects which HTTP/WebSocket server adapter to build (`'bun'` or `'node'`) — unrelated to `runtime`, despite the similar name. `runtime` (AB-303) is the injectable `RuntimeServices` contract (`lifecycle`'s clock, monotonic time, timers, identifiers, random, and deferred-work tracking): resolved exactly once inside `createGateway` and forwarded as that same instance to the composed Bureau (when `createGateway` itself constructs one — today it never does), the live-events connection watchdogs (AB-219), the AB-235 shutdown-drain race, the `x-request-id` middleware, the rate limiter's clock, the static-token revision secret, and the API key store's timestamps. A test composes its own deterministic instance via `@lostgradient/operative/test`'s `createManualRuntimeServices` — or, for the loopback conformance harness, reuses the Bureau's own `harness.runtime` so both sides of the wire share one clock:
+
+```typescript
 interface Gateway {
   readonly app: Hono;
   readonly bureau: Bureau;
