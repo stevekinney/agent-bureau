@@ -298,7 +298,12 @@ const RESPONSE_VALIDATED_EVENT_TYPE = 'response.validated';
  */
 const RESPONSE_VALIDATED_REDACTION_MARKER: Readonly<Record<string, unknown>> = Object.freeze({
   content: '[redacted]',
-  toolCalls: [],
+  // This marker is a shared singleton reused across every projected frame
+  // for every non-privileged subscriber — `Object.freeze` is shallow, so
+  // the nested array must be frozen too, or an accidental downstream
+  // mutation of `toolCalls` (e.g. `.push()`) would leak across every
+  // subscriber and frame that reused this same object (copilot review).
+  toolCalls: Object.freeze([]),
 });
 
 /** The shape `response.validated`'s frame `detail` carries — see `ResponseValidatedEvent`. */

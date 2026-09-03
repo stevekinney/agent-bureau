@@ -32,9 +32,14 @@ export function createScopeGuard(requiredScopes: string[]) {
       return;
     }
 
-    // `isPrivilegedGatewayConnection` already ruled out `undefined` and `''`
-    // above; the fallback here is unreachable, not a behavior change.
-    const keyScopes = (scopesHeader ?? '').split(',').map((s) => s.trim());
+    // `isPrivilegedGatewayConnection(scopesHeader)` returning `false` above
+    // guarantees `scopesHeader` is neither `undefined` nor `''` — i.e. a
+    // real, non-empty scopes string — so this is a type-level-only
+    // assertion, not a behavior change (copilot review: prefer this over
+    // a `?? ''` fallback, which would silently paper over a future
+    // desync between this check and `isPrivilegedGatewayConnection`
+    // instead of surfacing it as a type error).
+    const keyScopes = (scopesHeader as string).split(',').map((s) => s.trim());
     const missing = requiredScopes.filter((scope) => !keyScopes.includes(scope));
 
     if (missing.length > 0) {
