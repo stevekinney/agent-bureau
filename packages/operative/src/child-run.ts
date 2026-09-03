@@ -58,7 +58,7 @@ import {
 } from './events';
 import type { LivenessAssessment, LivenessObservable, LivenessSnapshot } from './liveness';
 import type { DelegatedAuthority } from './providers/policy.ts';
-import type { Effort } from './providers/types.ts';
+import type { Effort, ProviderName } from './providers/types.ts';
 import type { AgentInput, RunnableAgent } from './runnable-agent';
 import type { CleanupAcknowledgement, RunResult } from './types';
 
@@ -270,6 +270,34 @@ export function isMutableChildRunRegistry(value: unknown): value is MutableChild
 }
 
 /**
+ * The complete, closed value sets for {@link DelegatedAuthority}'s two
+ * literal-typed narrowing fields — kept local to this guard (not imported
+ * from `providers/types.ts`, which declares no such runtime array for
+ * either union) so {@link isDelegatedAuthority} can reject a value outside
+ * either union rather than merely checking its JS type.
+ */
+const VALID_EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+const VALID_PROVIDER_NAMES: readonly ProviderName[] = [
+  'anthropic',
+  'openai',
+  'gemini',
+  'voyage',
+  'ollama',
+];
+
+/** Type predicate over `unknown`, not a narrowed-but-unverified static type
+ *  — see {@link isDelegatedAuthority}'s own doc comment for why checking
+ *  against the closed value set (not just `typeof`) matters here. */
+function isEffort(value: unknown): value is Effort {
+  return typeof value === 'string' && (VALID_EFFORTS as readonly string[]).includes(value);
+}
+
+/** Type predicate over `unknown` — see {@link isEffort}. */
+function isProviderName(value: unknown): value is ProviderName {
+  return typeof value === 'string' && (VALID_PROVIDER_NAMES as readonly string[]).includes(value);
+}
+
+/**
  * Structural guard for {@link DelegatedAuthority}. Exists so a
  * per-execution value read off an opaque bag (e.g.
  * `ToolContext.executionContext['delegatedAuthority']`, AB-300) can be
@@ -278,20 +306,42 @@ export function isMutableChildRunRegistry(value: unknown): value is MutableChild
  * `childRegistry`. `policyVersion` is `DelegatedAuthority`'s only required
  * field; the three narrowing fields are each optional, so this only checks
  * their type when present rather than requiring all three.
+ *
+ * Every check is against the CLOSED value set each field actually declares,
+ * not merely `typeof`: an out-of-union `maximumEffort` string (e.g.
+ * `'supermax'`) would otherwise pass a bare `typeof === 'string'` check and
+ * reach `attenuateDelegatedAuthority`'s `narrowerEffort`, whose
+ * `EFFORT_ORDER.indexOf` returns `-1` for an unknown tier — silently
+ * WIDENING the effective authority (an unknown tier compares as "lower"
+ * than every real one) rather than narrowing it, exactly the failure mode
+ * this guard exists to prevent forwarding as an apparently-valid grant.
+ * The same reasoning applies to a non-`ProviderName`/non-`string` element
+ * inside `grantedProviders`/`grantedModels`.
  */
 export function isDelegatedAuthority(value: unknown): value is DelegatedAuthority {
   if (typeof value !== 'object' || value === null) return false;
-  const candidate = value as Partial<DelegatedAuthority>;
-  if (typeof candidate.policyVersion !== 'string') return false;
-  if (candidate.grantedProviders !== undefined && !Array.isArray(candidate.grantedProviders)) {
+  const candidate = value as Record<string, unknown>;
+  if (typeof candidate['policyVersion'] !== 'string') return false;
+
+  const grantedProviders = candidate['grantedProviders'];
+  if (
+    grantedProviders !== undefined &&
+    (!Array.isArray(grantedProviders) || !grantedProviders.every(isProviderName))
+  ) {
     return false;
   }
-  if (candidate.grantedModels !== undefined && !Array.isArray(candidate.grantedModels)) {
+
+  const grantedModels = candidate['grantedModels'];
+  if (
+    grantedModels !== undefined &&
+    (!Array.isArray(grantedModels) || !grantedModels.every((model) => typeof model === 'string'))
+  ) {
     return false;
   }
-  if (candidate.maximumEffort !== undefined && typeof candidate.maximumEffort !== 'string') {
-    return false;
-  }
+
+  const maximumEffort = candidate['maximumEffort'];
+  if (maximumEffort !== undefined && !isEffort(maximumEffort)) return false;
+
   return true;
 }
 
