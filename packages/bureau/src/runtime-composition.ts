@@ -1461,17 +1461,24 @@ export async function createRuntimeComposition(
         typeof result === 'object' && result !== null && 'finishReason' in result
           ? result.finishReason
           : undefined;
-      scheduleFireEvents.dispatchEvent(
-        isRunFailureFinishReason(finishReason)
-          ? new ScheduleFailedEvent(scheduleId, event.workflowId)
-          : new ScheduleCompletedEvent(scheduleId, event.workflowId),
-      );
+      // Two branches, each dispatching its own concrete event type, rather
+      // than one `dispatch(cond ? new A() : new B())` call: TypedEventTarget's
+      // `dispatch<K>` infers `K` from its argument's `type` literal, and a
+      // ternary's union argument defeats that inference (the argument's
+      // static `type` widens to `string`) — using the typed `dispatch` wrapper
+      // (not the untyped inherited `dispatchEvent`) needs single-type call
+      // sites.
+      if (isRunFailureFinishReason(finishReason)) {
+        scheduleFireEvents.dispatch(new ScheduleFailedEvent(scheduleId, event.workflowId));
+      } else {
+        scheduleFireEvents.dispatch(new ScheduleCompletedEvent(scheduleId, event.workflowId));
+      }
     });
     durable.engine.addEventListener(WorkflowFailedEvent.type, (event) => {
       const scheduleId = scheduledFireScheduleIds.get(event.workflowId);
       if (scheduleId === undefined) return;
       scheduledFireScheduleIds.delete(event.workflowId);
-      scheduleFireEvents.dispatchEvent(new ScheduleFailedEvent(scheduleId, event.workflowId));
+      scheduleFireEvents.dispatch(new ScheduleFailedEvent(scheduleId, event.workflowId));
     });
     // Not a fire-terminal dispatch (cancellation is out of this issue's scope),
     // but the correlation entry must still be dropped on a cancelled fire, or
