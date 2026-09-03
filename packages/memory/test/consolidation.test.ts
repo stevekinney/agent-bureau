@@ -92,6 +92,9 @@ function createStubMemory(
       ];
       return entry;
     },
+    async rememberOnce(content: string, metadata: Partial<MemoryMetadata> & { dedupeKey: string }) {
+      return this.remember(content, metadata);
+    },
     async recall(query: string, options) {
       const limit = options?.limit ?? entries.length;
       const threshold = options?.threshold ?? 0;

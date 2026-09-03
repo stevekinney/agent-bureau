@@ -27,12 +27,8 @@ import {
 } from '../src/conversation/index';
 import { ConversationalistError } from '../src/errors';
 import { messageSchema } from '../src/schemas';
-import type { AssistantMessage, Conversation, JSONValue, Message } from '../src/types';
-
-const getOrderedMessages = (conversation: Conversation): Message[] =>
-  conversation.ids
-    .map((id) => conversation.messages[id])
-    .filter((message): message is Message => Boolean(message));
+import type { AssistantMessage, ConversationHistory, JSONValue } from '../src/types';
+import { getOrderedMessages } from '../src/utilities/message-store';
 
 describe('conversation (functional)', () => {
   test('create, append, statistics and encode', () => {
@@ -240,7 +236,7 @@ describe('conversation (functional)', () => {
 
   test('redact throws when the message id is missing', () => {
     const base = createConversation();
-    const broken: Conversation = {
+    const broken: ConversationHistory = {
       ...base,
       ids: ['missing'],
       messages: {},
@@ -1115,7 +1111,7 @@ describe('prependMessages', () => {
     let c = createConversation();
     c = appendUserMessage(c, 'u');
     // Simulate a malformed conversation: an id listed with no backing message.
-    const malformed: Conversation = { ...c, ids: [...c.ids, 'dangling-id'] };
+    const malformed: ConversationHistory = { ...c, ids: [...c.ids, 'dangling-id'] };
 
     let caught: unknown;
     try {
@@ -1134,7 +1130,7 @@ describe('prependMessages', () => {
     // Simulate a conversation whose existing positions are already sparse
     // (e.g. from an external source) — 52 and 53 rather than 0 and 1.
     const [firstId, secondId] = c.ids;
-    const sparse: Conversation = {
+    const sparse: ConversationHistory = {
       ...c,
       messages: {
         ...c.messages,

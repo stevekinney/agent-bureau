@@ -5,6 +5,7 @@ import { Conversation } from 'conversationalist';
 import { createAdaptiveBackoff, createSlidingWindow, createTokenBucket } from '../src/backpressure';
 import { noToolCalls } from '../src/conditions/predicates';
 import { createActiveRun } from '../src/create-run';
+import type { BackpressureAppliedEvent, BackpressureReleasedEvent } from '../src/events';
 import { createRunRecorder } from '../src/test/index';
 import type { GenerateResponse } from '../src/types';
 const run = (options: Parameters<typeof createActiveRun>[0]) => createActiveRun(options).result;
@@ -291,9 +292,9 @@ describe('backpressure loop integration', () => {
     const releasedEvents = recorder.events.filter((e) => e.type === 'backpressure.released');
     expect(appliedEvents).toHaveLength(1);
     expect(releasedEvents).toHaveLength(1);
-    expect((appliedEvents[0].detail as { step: number; delay: number }).step).toBe(0);
-    expect((appliedEvents[0].detail as { step: number; delay: number }).delay).toBe(1);
-    expect((releasedEvents[0].detail as { step: number }).step).toBe(0);
+    expect((appliedEvents[0].detail as BackpressureAppliedEvent).step).toBe(0);
+    expect((appliedEvents[0].detail as BackpressureAppliedEvent).delay).toBe(1);
+    expect((releasedEvents[0].detail as BackpressureReleasedEvent).step).toBe(0);
   });
 
   it('does not emit backpressure events when delay is 0', async () => {

@@ -10,7 +10,7 @@ import { createActiveRun } from '../src/create-run';
 import type { SteeringDesiredState } from '../src/durable/types';
 import type { OperativeHookMap } from '../src/hooks';
 import { buildStepDeps, executeLoop } from '../src/loop';
-import type { GenerateResponse, SteeringGate } from '../src/types';
+import type { AnyToolbox, GenerateResponse, SteeringGate } from '../src/types';
 const run = (options: Parameters<typeof createActiveRun>[0]) => createActiveRun(options).result;
 
 function textResponse(content: string): GenerateResponse {
@@ -181,6 +181,8 @@ describe('loop helper coverage', () => {
         },
         onSuccess: () => {},
         onError: () => {},
+        currentDelay: 0,
+        isActive: false,
       },
     });
 
@@ -201,6 +203,8 @@ describe('loop helper coverage', () => {
         beforeStep: () => ({ delay: 20 }),
         onSuccess: () => {},
         onError: () => {},
+        currentDelay: 0,
+        isActive: false,
       },
     });
 
@@ -463,6 +467,7 @@ describe('loop helper coverage', () => {
     function makeGate(initial: SteeringDesiredState): SteeringGate {
       let desired = initial;
       return {
+        sessionId: 'test-session',
         getDesiredState: () => desired,
         awaitResume: () =>
           new Promise<void>((resolve) => {
@@ -478,6 +483,7 @@ describe('loop helper coverage', () => {
         generate: async () => textResponse('unused'),
         toolbox: createTestToolbox([]),
         conversation: new Conversation(),
+        runId: 'test-run',
         steering: gate,
       });
 
@@ -506,6 +512,7 @@ describe('loop helper coverage', () => {
         toolbox: createTestToolbox([]),
         conversation: new Conversation(),
         stopWhen: noToolCalls(),
+        runId: 'test-run',
         steering: gate,
       });
 
@@ -532,7 +539,12 @@ describe('loop helper coverage', () => {
           steering: gate,
           runId: 'run-with-prior-applied-floor',
         },
-        { dispatch: (event) => dispatched.push(event) && true },
+        {
+          dispatch: (event) => {
+            dispatched.push(event);
+            return true;
+          },
+        },
       );
 
       expect(result.finishReason).toBe('stop-condition');
@@ -555,7 +567,12 @@ describe('loop helper coverage', () => {
           steering: gate,
           runId: 'run-with-new-configVersion',
         },
-        { dispatch: (event) => dispatched.push(event) && true },
+        {
+          dispatch: (event) => {
+            dispatched.push(event);
+            return true;
+          },
+        },
       );
 
       expect(result.finishReason).toBe('stop-condition');
@@ -575,7 +592,12 @@ describe('loop helper coverage', () => {
           steering: gate,
           runId: 'run-with-no-applied-floor-accessor',
         },
-        { dispatch: (event) => dispatched.push(event) && true },
+        {
+          dispatch: (event) => {
+            dispatched.push(event);
+            return true;
+          },
+        },
       );
 
       expect(result.finishReason).toBe('stop-condition');
@@ -596,7 +618,7 @@ describe('executeLoop onStepToolbox (AB-239)', () => {
     const baseToolbox = createTestToolbox([echoTool]);
     const swappedToolbox = createTestToolbox([echoTool]);
     const calls: Array<'base' | 'swapped'> = [];
-    const onStepToolbox = (toolbox: typeof baseToolbox) => {
+    const onStepToolbox = (toolbox: AnyToolbox) => {
       calls.push(toolbox === swappedToolbox ? 'swapped' : 'base');
     };
 

@@ -261,7 +261,7 @@ describe('withTimeout', () => {
     const timer = createManualTimer();
     const hook = withTimeout(
       200,
-      async () => {
+      async (_context: { step: number }) => {
         throw new Error('hook failed');
       },
       'error',
@@ -275,7 +275,7 @@ describe('withTimeout', () => {
   it('wraps non-Error rejections as Error instances', async () => {
     const hook = withTimeout(
       200,
-      async () => {
+      async (_context: { step: number }) => {
         throw 'plain failure';
       },
       'error',
@@ -319,10 +319,10 @@ describe('composeHooks', () => {
   });
 
   it('skips void returns in waterfall and passes original to next', async () => {
-    const h1 = async (_context: { value: number }) => {
+    const h1 = async (_context: { value: number }): Promise<{ value: number } | undefined> => {
       return undefined;
     };
-    const h2 = async (context: { value: number }) => {
+    const h2 = async (context: { value: number }): Promise<{ value: number } | undefined> => {
       return { value: context.value * 3 };
     };
 

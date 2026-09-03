@@ -1,4 +1,4 @@
-import { createTestToolbox } from 'armorer/test';
+import { createMockTool, createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
 
@@ -6,12 +6,7 @@ import { createToolRemovalMutator } from '../../src/retry/tool-removal-mutator';
 import type { GenerateContext } from '../../src/types';
 
 function makeContext(toolNames: string[]): GenerateContext {
-  const entries = toolNames.map((name) => ({
-    name,
-    description: `A tool named ${name}`,
-    parameters: {},
-    execute: async () => `result from ${name}`,
-  }));
+  const entries = toolNames.map((name) => createMockTool({ name }));
 
   return {
     conversation: new Conversation(),

@@ -7,6 +7,7 @@ import { z } from 'zod';
 
 import { noToolCalls } from '../src/conditions/predicates';
 import { createActiveRun } from '../src/create-run';
+import type { AgentRunError } from '../src/errors';
 import { AbortAgentRunError, MaximumStepsExceededError } from '../src/errors';
 import type { OperativeHookMap } from '../src/hooks';
 import type {
@@ -590,7 +591,7 @@ describe('onRunAbort hook', () => {
     expect(result.finishReason).toBe('aborted');
     expect(contexts).toHaveLength(1);
     expect(contexts[0].reason).toBe('test abort');
-    expect(contexts[0].error).toBe(result.error);
+    expect(contexts[0].error).toBe(result.error as AgentRunError);
     expect(contexts[0].error).toBeInstanceOf(AbortAgentRunError);
     expect(contexts[0].error.kind).toBe('abort');
     expect(contexts[0].error.code).toBe('ABORTED');
@@ -606,7 +607,7 @@ describe('onRunAbort hook', () => {
     });
 
     const activeRun = createActiveRun({
-      generate: createMockGenerate(),
+      generate: createMockGenerate([]),
       toolbox: createTestToolbox([tool]),
       conversation: new Conversation(),
       hooks,
@@ -623,7 +624,7 @@ describe('onRunAbort hook', () => {
     expect(result.error).toBeInstanceOf(AbortAgentRunError);
     expect(contexts).toHaveLength(1);
     expect(contexts[0].reason).toBeUndefined();
-    expect(contexts[0].error).toBe(result.error);
+    expect(contexts[0].error).toBe(result.error as AgentRunError);
     expect(eventReason).toBeUndefined();
   });
 });

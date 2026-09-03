@@ -4,6 +4,7 @@ import {
   copyContent,
   copyMultiModalContent,
   type DocumentContent,
+  type MultiModalContent,
   renderDocumentReferenceText,
 } from '../src/multi-modal';
 
@@ -18,10 +19,12 @@ describe('copyMultiModalContent', () => {
     });
 
     it('copies text content without text property', () => {
-      const input = { type: 'text' as const };
+      // Deliberately malformed: exercises defensive handling of a `text` block
+      // missing its required `text` field (e.g. from an untrusted provider).
+      const input = { type: 'text' as const } as MultiModalContent;
       const result = copyMultiModalContent(input);
 
-      expect(result).toEqual({ type: 'text' });
+      expect(result).toEqual({ type: 'text' } as MultiModalContent);
     });
   });
 
@@ -58,10 +61,12 @@ describe('copyMultiModalContent', () => {
     });
 
     it('copies image content without optional properties', () => {
-      const input = { type: 'image' as const };
+      // Deliberately malformed: exercises defensive handling of an `image` block
+      // missing its required `url` field (e.g. from an untrusted provider).
+      const input = { type: 'image' as const } as MultiModalContent;
       const result = copyMultiModalContent(input);
 
-      expect(result).toEqual({ type: 'image' });
+      expect(result).toEqual({ type: 'image' } as MultiModalContent);
     });
   });
 

@@ -1,13 +1,19 @@
 import { beforeEach, describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
+import type { ToolRequestContext } from '../../src';
 import { createProcessLocalApprovalStateStore } from '../../src/approval-binding';
 import { createTool } from '../../src/create-tool';
 import { createToolbox, type Toolbox } from '../../src/create-toolbox';
 import { claimCacheStarted } from '../../src/idempotency/cache-operations';
 import { createToolResultCache } from '../../src/idempotency/create-tool-result-cache';
 import { fullInputKey } from '../../src/idempotency/key-generators';
-import type { CachedToolResult, ToolResultCache } from '../../src/idempotency/types';
+import type {
+  CachedToolResult,
+  StartedToolExecution,
+  ToolResultCache,
+  ToolResultCacheEntry,
+} from '../../src/idempotency/types';
 import { withToolboxIdempotency as createIdempotentToolbox } from '../../src/idempotency/with-toolbox-idempotency';
 import type { SignedPendingToolApproval, ToolCallInput } from '../../src/types';
 
@@ -39,7 +45,7 @@ const withToolboxIdempotency = (
       return (input: unknown, options?: Record<string, unknown>) =>
         target.execute(input as ToolCallInput, {
           ...options,
-          requestContext: options?.['requestContext'] ?? requestContext,
+          requestContext: (options?.['requestContext'] ?? requestContext) as ToolRequestContext,
         });
     },
   });
@@ -695,7 +701,7 @@ describe('withToolboxIdempotency', () => {
           nonce: 'legacy-receipt',
           authorization: 'signed',
         },
-      },
+      } as any,
     );
 
     expect(normalReceiptResult.idempotency).toEqual({
@@ -758,7 +764,7 @@ describe('withToolboxIdempotency', () => {
           nonce: 'legacy-resolution-receipt',
           authorization: 'legacy-signed',
         },
-      },
+      } as any,
     );
 
     expect(result.outcome).toBe('success');
@@ -814,7 +820,7 @@ describe('withToolboxIdempotency', () => {
           nonce: 'leased-legacy-resolution-receipt',
           authorization: 'legacy-signed',
         },
-      },
+      } as any,
     );
 
     expect(result.idempotency).toEqual({
@@ -862,7 +868,7 @@ describe('withToolboxIdempotency', () => {
           nonce: 'legacy-migration-race-receipt',
           authorization: 'legacy-signed',
         },
-      },
+      } as any,
     );
 
     expect(result.idempotency).toEqual({
@@ -914,7 +920,7 @@ describe('withToolboxIdempotency', () => {
           nonce: 'stale-legacy-receipt',
           authorization: 'signed',
         },
-      },
+      } as any,
     );
     const fencedResult = await idempotentToolbox.execute(
       { id: 'call-2', name: 'add', arguments: { a: 1, b: 2 } },
@@ -934,7 +940,7 @@ describe('withToolboxIdempotency', () => {
           nonce: 'fenced-legacy-receipt',
           authorization: 'signed',
         },
-      },
+      } as any,
     );
 
     expect(staleResult.idempotency).toEqual({
@@ -988,9 +994,9 @@ describe('withToolboxIdempotency', () => {
         idempotencyKey: 'retry-after-review',
         resolutionReceipt: {
           version: 1,
-          key: pause.idempotency.key,
+          key: pause.idempotency!.key,
           attemptId: receiptAttemptId,
-          inputDigest: pause.idempotency.inputDigest!,
+          inputDigest: pause.idempotency!.inputDigest!,
           tenantId: 'tenant-a',
           toolRevision: 'default:add',
           decision: 'retry',
@@ -1300,12 +1306,7 @@ describe('withToolboxIdempotency', () => {
 
     expect(firstResume.result).toEqual({ charged: 100 });
     expect(firstResume.idempotency).toEqual({
-      key: expectedCacheKey(
-        'tenant-a',
-        'default:charge@1.0.0',
-        'charge:charge-once',
-        requestContext,
-      ),
+      key: expectedCacheKey('tenant-a', 'default:charge@1.0.0', 'charge:charge-once'),
       outcome: 'fresh',
     });
     await expect(
@@ -1528,8 +1529,10 @@ describe('withToolboxIdempotency', () => {
       { idempotencyKey: 'policy-denied' },
     );
 
-    expect(first.outcome).toBe('denied');
-    expect(second.outcome).toBe('denied');
+    // `outcome: 'denied'` is a real runtime value (see `create-tool.ts`) not
+    // covered by `interoperability`'s `SharedToolResult['outcome']` union.
+    expect(first.outcome as string).toBe('denied');
+    expect(second.outcome as string).toBe('denied');
     expect(first.idempotency).toBeUndefined();
     expect(second.idempotency).toBeUndefined();
     expect(
@@ -1586,7 +1589,7 @@ describe('withToolboxIdempotency', () => {
       async execute() {
         throw 'provider timeout after side effect';
       },
-    } as Toolbox;
+    } as unknown as Toolbox;
     const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
     await expect(
@@ -1966,9 +1969,9 @@ describe('withToolboxIdempotency', () => {
     });
     const renewingCache: ToolResultCache = {
       ...cache,
-      async renewStarted(key, attemptId, leaseExpiresAt) {
+      async renewStarted(key, attemptId, leaseExpiresAt, observedAt) {
         renewals += 1;
-        return cache.renewStarted(key, attemptId, leaseExpiresAt);
+        return cache.renewStarted(key, attemptId, leaseExpiresAt, observedAt);
       },
     };
     const result = await withToolboxIdempotency(createToolbox([slowTool]), {
@@ -2578,7 +2581,9 @@ describe('withToolboxIdempotency', () => {
       return result;
     };
 
-    let releaseRead!: () => void;
+    let releaseRead!: (
+      value?: ToolResultCacheEntry | PromiseLike<ToolResultCacheEntry | undefined>,
+    ) => void;
     await interrupt({
       getState: () => new Promise((resolve) => (releaseRead = resolve)),
     });
@@ -2602,7 +2607,9 @@ describe('withToolboxIdempotency', () => {
 
     const deadlineCallbacks: Array<() => void> = [];
     let clock = 0;
-    let releaseDeadlineRead!: () => void;
+    let releaseDeadlineRead!: (
+      value?: ToolResultCacheEntry | PromiseLike<ToolResultCacheEntry | undefined>,
+    ) => void;
     const deadlineRead = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
       cache: {
         ...cache,
@@ -2683,7 +2690,7 @@ describe('withToolboxIdempotency', () => {
       nonce: `deferred-${attemptId}`,
       authorization: 'signed',
     });
-    const started = (attemptId: string): CachedToolResult => ({
+    const started = (attemptId: string): StartedToolExecution => ({
       status: 'started',
       toolName: 'add',
       startedAt: 0,
@@ -2695,7 +2702,9 @@ describe('withToolboxIdempotency', () => {
     });
 
     let clearCount = 0;
-    let releaseRead!: () => void;
+    let releaseRead!: (
+      value?: ToolResultCacheEntry | PromiseLike<ToolResultCacheEntry | undefined>,
+    ) => void;
     const deadlineController = new AbortController();
     const deadlineRead = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
       cache: {
@@ -2720,7 +2729,7 @@ describe('withToolboxIdempotency', () => {
     releaseRead();
 
     const interruptDeferred = async (
-      entry: CachedToolResult,
+      entry: ToolResultCacheEntry,
       operation: (controller: AbortController) => Partial<ToolResultCache>,
       options: Record<string, unknown> = {},
       waitUntil: () => boolean = () => true,
@@ -2739,7 +2748,7 @@ describe('withToolboxIdempotency', () => {
       }).execute(call, {
         requestContext,
         signal: controller.signal,
-        resolutionReceipt: receipt(entry.attemptId!),
+        resolutionReceipt: receipt((entry as StartedToolExecution).attemptId!),
       });
       if (operationStarted) {
         await operationStarted;
@@ -2759,7 +2768,7 @@ describe('withToolboxIdempotency', () => {
       startedAt: 0,
       ttl: 60_000,
       leaseExpiresAt: 0,
-    } as CachedToolResult;
+    } as unknown as ToolResultCacheEntry;
     let legacyVerificationStarted = false;
     const legacyController = new AbortController();
     const legacyPending = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
@@ -2789,7 +2798,7 @@ describe('withToolboxIdempotency', () => {
         nonce: 'legacy-deferred',
         authorization: 'signed',
       },
-    });
+    } as any);
     for (let index = 0; index < 5 && !legacyVerificationStarted; index++) {
       await Promise.resolve();
     }
@@ -2842,7 +2851,7 @@ describe('withToolboxIdempotency', () => {
         nonce: 'legacy-replace-deferred',
         authorization: 'signed',
       },
-    });
+    } as any);
     await legacyReplacementStartedPromise;
     expect(legacyReplacementStarted).toBe(true);
     legacyReplaceController.abort('legacy replacement');
@@ -2932,10 +2941,10 @@ describe('withToolboxIdempotency', () => {
     await Promise.resolve();
     expect(lateClaimDeletes).toBe(1);
 
-    let resolveLostClaim!: (result: { outcome: 'existing'; entry: CachedToolResult }) => void;
+    let resolveLostClaim!: (result: { outcome: 'existing'; entry: ToolResultCacheEntry }) => void;
     const lostClaim = new Promise<{
       outcome: 'existing';
-      entry: CachedToolResult;
+      entry: ToolResultCacheEntry;
     }>((resolve) => {
       resolveLostClaim = resolve;
     });
@@ -3084,7 +3093,9 @@ describe('withToolboxIdempotency', () => {
       }),
     ).rejects.toThrow('synchronous verification failure');
 
-    let release!: () => void;
+    let release!: (
+      value?: ToolResultCacheEntry | PromiseLike<ToolResultCacheEntry | undefined>,
+    ) => void;
     const controller = new AbortController();
     const pending = withToolboxIdempotency(createToolbox([createToolWithKey()]), {
       cache: { ...cache, getState: () => new Promise((resolve) => (release = resolve)) },
@@ -3164,7 +3175,7 @@ describe('withToolboxIdempotency', () => {
       name: 'controlled',
       description: 'records execution order',
       input: z.object({ value: z.number() }),
-      idempotencyKey: ({ value }: { value: number }) => String(value),
+      idempotencyKey: (input) => String((input as { value: number }).value),
       async execute({ value }) {
         active += 1;
         maximumActive = Math.max(maximumActive, active);

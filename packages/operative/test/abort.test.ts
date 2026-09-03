@@ -96,7 +96,7 @@ describe('abort signal handling', () => {
     (toolbox as any).execute = async (...args: any[]) => {
       executeCallCount++;
       receivedOptions = args[1];
-      return originalExecute(...args);
+      return (originalExecute as (...callArgs: any[]) => Promise<unknown>)(...args);
     };
 
     const conversation = new Conversation();

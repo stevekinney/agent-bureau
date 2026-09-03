@@ -11,8 +11,14 @@ import {
 } from '../src/core/registry/embeddings';
 import { createTool } from '../src/create-tool';
 import { createToolbox } from '../src/create-toolbox';
+import type { ToolMetadata } from '../src/is-tool';
 
-const makeTool = (name: string, overrides: Partial<Parameters<typeof createTool>[0]> = {}) =>
+const makeTool = (
+  name: string,
+  overrides: Partial<
+    Omit<Parameters<typeof createTool>[0], 'metadata' | 'input' | 'execute' | 'name'>
+  > & { metadata?: ToolMetadata } = {},
+) =>
   createTool({
     name,
     description: `${name} tool`,

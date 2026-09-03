@@ -11,6 +11,12 @@ class ToolCallEvent extends Event {
     super(ToolCallEvent.type);
     this.toolName = toolName;
   }
+
+  // Narrows the inherited `Event.type: string` to the literal so `dispatch`'s
+  // `M[K] & { type: K }` constraint can match this event to its map key.
+  override get type(): typeof ToolCallEvent.type {
+    return ToolCallEvent.type;
+  }
 }
 
 class ToolCompleteEvent extends Event {
@@ -21,17 +27,24 @@ class ToolCompleteEvent extends Event {
     super(ToolCompleteEvent.type);
     this.result = result;
   }
+
+  override get type(): typeof ToolCompleteEvent.type {
+    return ToolCompleteEvent.type;
+  }
 }
 
-interface SourceEventMap {
+// `type` aliases, not `interface`s: only object type literals get TypeScript's
+// implicit index signature, letting these satisfy `EventMap`'s
+// `Record<string, Event>` constraint without a redundant explicit index signature.
+type SourceEventMap = {
   [ToolCallEvent.type]: ToolCallEvent;
   [ToolCompleteEvent.type]: ToolCompleteEvent;
-}
+};
 
-interface TargetEventMap {
+type TargetEventMap = {
   'toolbox.call': ForwardedEvent<ToolCallEvent>;
   'toolbox.complete': ForwardedEvent<ToolCompleteEvent>;
-}
+};
 
 describe('ForwardedEvent', () => {
   it('has the correct type string', () => {

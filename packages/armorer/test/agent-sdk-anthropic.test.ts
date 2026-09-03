@@ -5,24 +5,23 @@ import { describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
 import { createTool } from '../src/create-tool';
-import { createToolbox } from '../src/create-toolbox';
 import { createMCP } from '../src/integrations/mcp';
+import { createMutableToolbox } from './helpers/mutable-toolbox';
 
 type McpSdkServerConfigurationWithInstance = ReturnType<typeof createSdkMcpServer>;
 
 describe('Anthropic Agent SDK MCP integration', () => {
   it('lists and executes tools through an in-process MCP server instance', async () => {
-    const toolbox = createToolbox();
-    createTool(
-      {
+    const toolbox = createMutableToolbox();
+    toolbox.register(
+      createTool({
         name: 'sum',
         description: 'adds two numbers',
         input: z.object({ a: z.number(), b: z.number() }),
         async execute({ a, b }) {
           return a + b;
         },
-      },
-      toolbox,
+      }),
     );
 
     const mcp = await createMCP(toolbox, {

@@ -10,12 +10,12 @@ import {
   toMarkdown,
 } from '../../src/markdown';
 import type { MultiModalContent } from '../../src/multi-modal';
-import type { AssistantMessage, Conversation, Message, MessageRole } from '../../src/types';
+import type { AssistantMessage, ConversationHistory, Message, MessageRole } from '../../src/types';
 import { isAssistantMessage } from '../../src/utilities';
 
 type ConversationMessage = Message | AssistantMessage;
 
-type ConversationOverrides = Partial<Omit<Conversation, 'messages' | 'ids'>> & {
+type ConversationOverrides = Partial<Omit<ConversationHistory, 'messages' | 'ids'>> & {
   messages?: ConversationMessage[];
   ids?: string[];
 };
@@ -26,7 +26,7 @@ const toMessageRecord = (messages: ConversationMessage[]): Record<string, Messag
     return acc;
   }, {});
 
-const getOrderedMessages = (conversation: Conversation): Message[] =>
+const getOrderedMessages = (conversation: ConversationHistory): Message[] =>
   conversation.ids
     .map((id) => conversation.messages[id])
     .filter((message): message is Message => Boolean(message));
@@ -35,7 +35,7 @@ describe('toMarkdown', () => {
   const createConversation = (
     messages: ConversationMessage[],
     overrides: ConversationOverrides = {},
-  ): Conversation => {
+  ): ConversationHistory => {
     const { messages: overrideMessages, ids, ...rest } = overrides;
     const baseMessages = overrideMessages ?? messages;
     const baseIds = ids ?? baseMessages.map((message) => message.id);
@@ -1337,7 +1337,7 @@ describe('toMarkdown/fromMarkdown round-trip', () => {
   const createConversation = (
     messages: ConversationMessage[],
     overrides: ConversationOverrides = {},
-  ): Conversation => {
+  ): ConversationHistory => {
     const { messages: overrideMessages, ids, ...rest } = overrides;
     const baseMessages = overrideMessages ?? messages;
     const baseIds = ids ?? baseMessages.map((message) => message.id);
@@ -1676,7 +1676,7 @@ describe('toMarkdown/fromMarkdown round-trip', () => {
       },
     ];
 
-    const original: Conversation = {
+    const original: ConversationHistory = {
       schemaVersion: 1,
       id: 'conv-complex-123',
       title: 'Complex Test Conversation',

@@ -34,8 +34,8 @@ function createSpan(recording = true): RecordingSpan {
       span.events.push({ name, attributes });
       return span;
     },
-    addLink: () => undefined,
-    addLinks: () => undefined,
+    addLink: () => span,
+    addLinks: () => span,
     end: () => {
       span.ended = true;
     },
@@ -111,7 +111,7 @@ describe('instrument', () => {
         startedSpans.push({ name, options, context, span });
         return span;
       },
-    } as Tracer;
+    } as unknown as Tracer;
     const toolbox = createToolbox([
       createTool({
         name: 'lookup',
@@ -171,7 +171,7 @@ describe('instrument', () => {
         startedSpans.push({ name, options, context, span });
         return span;
       },
-    } as Tracer;
+    } as unknown as Tracer;
     const toolbox = createToolbox([
       createTool({
         name: 'fail',
@@ -211,7 +211,7 @@ describe('instrument', () => {
       startSpan() {
         return span;
       },
-    } as Tracer;
+    } as unknown as Tracer;
 
     const stop = instrument(manualToolbox as never, { tracer });
     const toolArguments = { secret: 'do-not-leak' };
@@ -257,7 +257,7 @@ describe('instrument', () => {
       startSpan() {
         return spanQueue.shift()!;
       },
-    } as Tracer;
+    } as unknown as Tracer;
     const stop = instrument(manualToolbox as never, { tracer });
 
     for (const callId of [
@@ -351,7 +351,7 @@ describe('instrument', () => {
       startSpan() {
         return spans.shift()!;
       },
-    } as Tracer;
+    } as unknown as Tracer;
     const stop = instrument(manualToolbox as never, { tracer });
 
     for (const callId of ['success', 'error', 'not-recording']) {
@@ -398,7 +398,7 @@ describe('instrument', () => {
       startSpan() {
         return span;
       },
-    } as Tracer;
+    } as unknown as Tracer;
     const stop = instrument(manualToolbox as never, { tracer });
 
     manualToolbox.dispatch('call', {
@@ -436,7 +436,7 @@ describe('instrument', () => {
     // these prove the `undefined` is a real "no parent" decision, not a coincidence.
     // Single cast (matching the existing supplied-parent test above): we only
     // need a distinct reference to assert forwarding by identity via `toBe`.
-    const sentinelParent = { __sentinel: 'parent' } as Context;
+    const sentinelParent = { __sentinel: 'parent' } as unknown as Context;
     const startedSpans: Array<{
       name: string;
       options?: SpanOptions;
@@ -448,7 +448,7 @@ describe('instrument', () => {
         startedSpans.push({ name, options, context });
         return span;
       },
-    } as Tracer;
+    } as unknown as Tracer;
     const toolbox = createToolbox([
       createTool({
         name: 'noop',
@@ -682,7 +682,7 @@ describe('AB-230 regression: privileged fixture values never reach a span attrib
         startedSpans.push({ options, span });
         return span;
       },
-    } as Tracer;
+    } as unknown as Tracer;
 
     const stop = instrument(manualToolbox as never, { tracer });
     const toolArguments = { query: MARKER, nested: { value: MARKER } };

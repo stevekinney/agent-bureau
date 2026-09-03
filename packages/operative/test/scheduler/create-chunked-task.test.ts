@@ -172,11 +172,11 @@ describe('createChunkedTask', () => {
     const scheduler = {
       async submit(task) {
         submitCount++;
-        const run = task.createRun();
+        const run = await task.createRun();
         await run.generate({ signal: new AbortController().signal } as never);
         return submitCount === 1 ? null : ({ finishReason: 'stop-condition' } as never);
       },
-    } as Scheduler;
+    } as unknown as Scheduler;
 
     const submitChunked = createChunkedTask<{ count: number }>({
       name: 'preempted',
@@ -200,11 +200,11 @@ describe('createChunkedTask', () => {
     const failures: Array<{ error: unknown; state: { count: number } }> = [];
     const scheduler = {
       async submit(task) {
-        const run = task.createRun();
+        const run = await task.createRun();
         await run.generate({ signal: new AbortController().signal } as never);
         return null;
       },
-    } as Scheduler;
+    } as unknown as Scheduler;
 
     const submitChunked = createChunkedTask<{ count: number }>({
       name: 'too-many-preemptions',
@@ -228,11 +228,11 @@ describe('createChunkedTask', () => {
     const failures: Array<{ error: unknown; state: { count: number } }> = [];
     const scheduler = {
       async submit(task) {
-        const run = task.createRun();
+        const run = await task.createRun();
         await run.generate({ signal: new AbortController().signal } as never);
         return { finishReason: 'stop-condition' } as never;
       },
-    } as Scheduler;
+    } as unknown as Scheduler;
 
     const submitChunked = createChunkedTask<{ count: number }>({
       name: 'string-error',
@@ -253,7 +253,7 @@ describe('createChunkedTask', () => {
   it('provides a safe stub toolbox surface during chunk execution', async () => {
     const scheduler = {
       async submit(task) {
-        const run = task.createRun();
+        const run = await task.createRun();
         expect(run.toolbox.tools()).toEqual([]);
         await expect(run.toolbox.execute([])).resolves.toEqual([]);
         const subscription = run.toolbox.toObservable().subscribe();
@@ -261,7 +261,7 @@ describe('createChunkedTask', () => {
         await run.generate({ signal: new AbortController().signal } as never);
         return { finishReason: 'stop-condition' } as never;
       },
-    } as Scheduler;
+    } as unknown as Scheduler;
 
     const submitChunked = createChunkedTask<{ count: number }>({
       name: 'safe-toolbox-surface',
@@ -281,7 +281,7 @@ describe('createChunkedTask', () => {
       async submit() {
         return { finishReason: 'stop-condition' } as never;
       },
-    } as Scheduler;
+    } as unknown as Scheduler;
 
     const submitChunked = createChunkedTask<{ count: number }>({
       name: 'missing-result',

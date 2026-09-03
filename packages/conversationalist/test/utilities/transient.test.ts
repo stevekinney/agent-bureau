@@ -1,18 +1,18 @@
 import { describe, expect, test } from 'bun:test';
 
-import type { Conversation, Message } from '../../src/types';
+import type { ConversationHistory, Message } from '../../src/types';
 import {
   isTransientKey,
   stripTransientFromRecord,
   stripTransientMetadata,
 } from '../../src/utilities/transient';
 
-type ConversationOverrides = Partial<Omit<Conversation, 'messages' | 'ids'>> & {
+type ConversationOverrides = Partial<Omit<ConversationHistory, 'messages' | 'ids'>> & {
   messages?: Message[];
   ids?: string[];
 };
 
-const getOrderedMessages = (conversation: Conversation): Message[] =>
+const getOrderedMessages = (conversation: ConversationHistory): Message[] =>
   conversation.ids
     .map((id) => conversation.messages[id])
     .filter((message): message is Message => Boolean(message));
@@ -73,7 +73,7 @@ describe('transient utilities', () => {
   });
 
   describe('stripTransientMetadata', () => {
-    const createConversation = (overrides: ConversationOverrides = {}): Conversation => {
+    const createConversation = (overrides: ConversationOverrides = {}): ConversationHistory => {
       const { messages = [], ids, ...rest } = overrides;
       const baseIds = ids ?? messages.map((message) => message.id);
 

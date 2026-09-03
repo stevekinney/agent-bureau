@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
-import { createTool, createToolCall } from '../src/create-tool';
+import { createTool } from '../src/create-tool';
 
 describe('ToolError model', () => {
   it('maps validation errors to structured ToolError', async () => {
@@ -14,7 +14,7 @@ describe('ToolError model', () => {
       },
     });
 
-    const result = await tool.execute(createToolCall('validate-me', { value: 123 } as any));
+    const result = await tool.executeWith({ params: { value: 123 } as any });
 
     expect(result.error?.category).toBe('validation');
     expect(result.error?.retryable).toBe(false);

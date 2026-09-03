@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 
 import { Conversation } from '../src/history';
 import { appendUserMessage, createConversationHistory, defineMessagePlugin } from '../src/index';
+import type { MessagePluginIdentity } from '../src/types';
 
 describe('Conversation lifecycle and observation', () => {
   it('exposes a cached framework-neutral snapshot and stable subscriptions', () => {
@@ -257,7 +258,7 @@ describe('Conversation lifecycle and observation', () => {
     const conversation = new Conversation(createConversationHistory({ id: 'plugins' }), {
       plugins: [failing],
     });
-    const events: Array<{ type: string; plugin?: { id: string; revision: number } }> = [];
+    const events: Array<{ type: string; plugin?: MessagePluginIdentity }> = [];
     conversation.addEventListener('plugin.activated', (event) => events.push(event));
     conversation.addEventListener('plugin.failed', (event) => events.push(event));
 

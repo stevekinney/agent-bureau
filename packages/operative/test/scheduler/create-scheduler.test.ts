@@ -101,8 +101,8 @@ describe('createScheduler', () => {
       maximumSteps: 1,
     }));
 
-    expect(result.content).toBe('hello');
-    expect(result.finishReason).toBe('maximum-steps');
+    expect(result!.content).toBe('hello');
+    expect(result!.finishReason).toBe('maximum-steps');
 
     await scheduler.stop();
   });
@@ -155,7 +155,7 @@ describe('createScheduler', () => {
     resolveGenerate(textResponse('bg-step-done'));
 
     const immRunResult = await immResult;
-    expect(immRunResult.content).toBe('immediate-done');
+    expect(immRunResult!.content).toBe('immediate-done');
 
     const bgRunResult = await bgResult;
     expect(bgRunResult).toBeNull();
@@ -977,7 +977,7 @@ describe('createScheduler', () => {
       resolveGenerate(textResponse('bg-step-done'));
 
       const immRunResult = await immResult;
-      expect(immRunResult.content).toBe('immediate-done');
+      expect(immRunResult!.content).toBe('immediate-done');
       expect(await bgResult).toBeNull();
 
       // stop() is called while the onPreempted callback's promise is still

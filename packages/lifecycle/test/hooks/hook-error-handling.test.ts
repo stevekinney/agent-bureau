@@ -4,7 +4,7 @@ import { HookRegistry } from '../../src/hooks/hook-registry';
 import type { HookErrorHandler } from '../../src/hooks/types';
 
 type TestHooks = {
-  process: (value: string) => string;
+  process: (value: string) => string | Promise<string>;
 };
 
 describe('HookRegistry error handling', () => {

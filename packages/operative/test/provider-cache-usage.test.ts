@@ -31,7 +31,7 @@ function makeContext(): GenerateContext {
 }
 
 function makeStreamingHandle(): StreamingHandle {
-  return { update: () => {} };
+  return { update: () => {}, messageId: 'test-message-id' };
 }
 
 describe('Anthropic provider cache token accounting', () => {

@@ -482,7 +482,7 @@ describe('MCP OAuth state and callback edges', () => {
   it('round-trips provider state and invalidates every credential scope', async () => {
     const storage = createInMemoryMcpOAuthTokenStorage();
     const addClientAuthentication = () => {};
-    const validateResourceURL = () => {};
+    const validateResourceURL = async () => undefined;
     const provider = createMcpOAuthProvider({
       redirectUrl,
       clientMetadata,

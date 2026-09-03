@@ -1,3 +1,4 @@
+import type { TextCitationParam } from '@anthropic-ai/sdk/resources';
 import { describe, expect, it } from 'bun:test';
 
 import {
@@ -136,7 +137,7 @@ describe('Anthropic SDK adapter', () => {
   });
 
   it('converts every supported citation location', () => {
-    const citations = [
+    const citations: TextCitationParam[] = [
       {
         type: 'char_location',
         cited_text: 'Characters',
@@ -318,9 +319,12 @@ describe('Anthropic SDK adapter', () => {
     }
 
     const sdk = toAnthropicMessagesForSdk(conversation);
-    const cacheBreakpoints = sdk.messages.map((message) =>
-      Array.isArray(message.content) ? message.content[0]?.cache_control : undefined,
-    );
+    const cacheBreakpoints = sdk.messages.map((message) => {
+      const firstBlock = Array.isArray(message.content) ? message.content[0] : undefined;
+      // Not every `ContentBlockParam` member (e.g. `ThinkingBlockParam`) carries
+      // `cache_control`; every block built from these plain-text messages does.
+      return firstBlock && 'cache_control' in firstBlock ? firstBlock.cache_control : undefined;
+    });
 
     expect(cacheBreakpoints).toEqual([
       undefined,

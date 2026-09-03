@@ -10,6 +10,12 @@ class TestEvent extends Event {
     super(TestEvent.type);
     this.value = value;
   }
+
+  // Narrows the inherited `Event.type: string` to the literal so `dispatch`'s
+  // `M[K] & { type: K }` constraint can match this event to its map key.
+  override get type(): typeof TestEvent.type {
+    return TestEvent.type;
+  }
 }
 
 class OtherEvent extends Event {
@@ -20,12 +26,19 @@ class OtherEvent extends Event {
     super(OtherEvent.type);
     this.message = message;
   }
+
+  override get type(): typeof OtherEvent.type {
+    return OtherEvent.type;
+  }
 }
 
-interface TestEventMap {
+// A `type` alias, not an `interface`: only object type literals get TypeScript's
+// implicit index signature, letting this satisfy `EventMap`'s `Record<string, Event>`
+// constraint without a redundant explicit index signature.
+type TestEventMap = {
   [TestEvent.type]: TestEvent;
   [OtherEvent.type]: OtherEvent;
-}
+};
 
 describe('CompletableEventTarget', () => {
   describe('completion', () => {

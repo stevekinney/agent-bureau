@@ -232,11 +232,14 @@ describe('scratchpad tools', () => {
 });
 
 describe('createTypedScratchpad', () => {
-  interface TestSchema {
+  // A `type` alias, not an `interface`: only object type literals get TypeScript's
+  // implicit index signature, letting this satisfy the `Record<string, unknown>`
+  // constraint without a redundant explicit index signature.
+  type TestSchema = {
     name: string;
     count: number;
     active: boolean;
-  }
+  };
 
   it('get/set with correct types at runtime', () => {
     const pad = createTypedScratchpad<TestSchema>();

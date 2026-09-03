@@ -81,7 +81,7 @@ describe('createAnthropicProvider / createAnthropicProviderStream — backend de
   });
 
   it('attaches the same descriptor on the streaming variant', () => {
-    const client = createMockAnthropicStreamingClient(anthropicStreamTextEvents);
+    const client = createMockAnthropicStreamingClient([anthropicStreamTextEvents]);
     const generate = createAnthropicProviderStream({ model: 'claude-sonnet-5', client });
     const expected = seedDescriptor('anthropic', 'claude-sonnet-5');
 
@@ -118,7 +118,7 @@ describe('createOpenAIProvider / createOpenAIProviderStream — backend descript
   });
 
   it('attaches the same descriptor on the streaming variant', () => {
-    const client = createMockOpenAIStreamingClient(openAIStreamTextChunks);
+    const client = createMockOpenAIStreamingClient([openAIStreamTextChunks]);
     const generate = createOpenAIProviderStream({ model: 'gpt-4o', client });
     const expected = seedDescriptor('openai', 'gpt-4o');
 
@@ -162,7 +162,7 @@ describe('createGeminiProvider / createGeminiProviderStream — backend descript
     // factory calls the distinct `generateContentStream` operation.
     // Attaching the `generateContent` row would misreport the endpoint this
     // function actually invokes, so it attaches nothing instead.
-    const client = createMockGeminiStreamingModel(geminiStreamTextChunks);
+    const client = createMockGeminiStreamingModel([geminiStreamTextChunks]);
     const generate = createGeminiProviderStream({ model: 'gemini-2.5-flash', client });
 
     expect(readBackendDescriptors(generate)).toEqual([]);

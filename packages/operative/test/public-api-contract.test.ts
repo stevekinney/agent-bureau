@@ -84,8 +84,14 @@ function baseRunOptions(generate: RunOptions['generate']): RunOptions {
  * An optional `resolveWorkflowServices` is passed at engine-build time,
  * which is what Weft calls on a fresh process before resuming a workflow.
  */
+// `@lostgradient/weft/storage`'s published `.d.ts` re-exports `MemoryStorage`
+// through a `declare const exportedMemoryStorage: typeof MemoryStorage` alias,
+// which carries the value binding but not the class's type — `MemoryStorage`
+// is therefore usable as a constructor but not as a type annotation here.
+// `InstanceType<typeof MemoryStorage>` recovers the instance type without
+// patching the package. Filed upstream: WFT (weft storage barrel).
 async function buildEngine(
-  storage: MemoryStorage,
+  storage: InstanceType<typeof MemoryStorage>,
   resolveWorkflowServices?: Parameters<typeof createRunEngine>[0]['resolveWorkflowServices'],
 ) {
   const checkpointStore = createCheckpointStore(
@@ -312,7 +318,7 @@ describe('abort propagation — aborting a run finalizes as aborted and stops ge
     expect(result.finishReason).toBe('aborted');
     expect(result.error).toBeInstanceOf(AbortAgentRunError);
     expect((result.error as AbortAgentRunError).code).toBe('ABORTED');
-    expect(abortError).toBe(result.error);
+    expect(abortError).toBe(result.error as AbortAgentRunError);
     // Either run.aborted or run.completed with aborted is acceptable
     expect(events.length).toBeGreaterThan(0);
   });

@@ -1,9 +1,11 @@
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
+import { createTool } from 'armorer';
 import { createTestToolbox } from 'armorer/test';
 import { afterEach, describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
 import { HookRegistry } from 'lifecycle';
+import { z } from 'zod';
 
 import { createCheckpointStore } from '../../src/durable/checkpoint-store';
 import { createRunEngine } from '../../src/durable/index';
@@ -22,12 +24,12 @@ import type { GenerateFunction } from '../../src/types';
 
 function createNextToolbox() {
   return createTestToolbox([
-    {
+    createTool({
       name: 'next',
       description: 'advance',
-      parameters: { type: 'object', properties: {} },
-      execute: () => ({ outcome: 'success' as const, content: 'ok', result: 'ok' }),
-    },
+      input: z.object({}),
+      execute: async () => 'ok',
+    }),
   ]);
 }
 
@@ -589,7 +591,7 @@ describe('durable scheduler preemption (suspend/resume)', () => {
 
     let onRunCompleteCalls = 0;
     const hooks = new HookRegistry<OperativeHookMap>();
-    hooks.on('onRunComplete', () => {
+    hooks.on('onRunComplete', async () => {
       onRunCompleteCalls++;
     });
 

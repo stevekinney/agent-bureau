@@ -5,6 +5,7 @@ import { HookRegistry } from 'lifecycle';
 
 import { noToolCalls } from '../src/conditions/predicates';
 import { createActiveRun } from '../src/create-run';
+import type { ContextCompactedEvent } from '../src/events';
 import type { OperativeHookMap } from '../src/hooks';
 import { createMockGenerate, createRunRecorder } from '../src/test/index';
 import type { GenerateResponse } from '../src/types';
@@ -120,10 +121,7 @@ describe('context window management', () => {
 
     const compactEvents = recorder.events.filter((e) => e.type === 'context.compacted');
     expect(compactEvents).toHaveLength(1);
-    const detail = compactEvents[0].detail as {
-      tokensBefore: number;
-      tokensAfter: number;
-    };
+    const detail = compactEvents[0].detail as ContextCompactedEvent;
     expect(detail.tokensBefore).toBe(100);
     expect(detail.tokensAfter).toBe(5);
   });

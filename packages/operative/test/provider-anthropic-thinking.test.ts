@@ -51,7 +51,7 @@ function makeContext(): GenerateContext {
 }
 
 function makeStreamingHandle(): StreamingHandle {
-  return { update: () => {} };
+  return { update: () => {}, messageId: 'test-message-id' };
 }
 
 describe('Anthropic explicit extended-thinking request', () => {

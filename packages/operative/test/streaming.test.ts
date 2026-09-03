@@ -73,7 +73,9 @@ describe('withStreaming', () => {
 
     const generate = withStreaming(streamingGenerate);
 
-    await expect(generate({ conversation, step: 0 })).rejects.toThrow('LLM connection lost');
+    await expect(generate({ conversation, step: 0, toolbox: {} as any })).rejects.toThrow(
+      'LLM connection lost',
+    );
 
     // The streaming message should not be left hanging
     const streamingMessage = conversation.getStreamingMessage();

@@ -262,7 +262,7 @@ describe('execution authority and projections', () => {
           return { allow: true, capabilities: ['read', 'admin'] };
         },
       },
-      execute(_input, context) {
+      async execute(_input, context) {
         observedContext = context.requestContext;
         return 'ok';
       },

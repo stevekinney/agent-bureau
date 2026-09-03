@@ -1602,7 +1602,11 @@ describe('C5 — Server-tool content blocks (Anthropic adapter)', () => {
     const roundTripped = toAnthropicMessages(conversation);
 
     const assistant = roundTripped.messages.find((m) => m.role === 'assistant');
-    const blocks = assistant?.content as Array<{ type: string; [k: string]: unknown }>;
+    // `AnthropicContentBlock`'s discriminated members have no index signature, so a
+    // direct cast to this loose introspection shape is rejected as a probable
+    // mistake; bridging through `unknown` is the deliberate, documented escape for
+    // reading arbitrary block properties generically across many block types.
+    const blocks = assistant?.content as unknown as Array<{ type: string; [k: string]: unknown }>;
     expect(blocks.map((b) => b.type)).toEqual([
       'server_tool_use',
       'bash_code_execution_tool_result',
@@ -1630,7 +1634,11 @@ describe('C5 — Server-tool content blocks (Anthropic adapter)', () => {
     const roundTripped = toAnthropicMessages(conversation);
 
     const assistant = roundTripped.messages.find((m) => m.role === 'assistant');
-    const blocks = assistant?.content as Array<{ type: string; [k: string]: unknown }>;
+    // `AnthropicContentBlock`'s discriminated members have no index signature, so a
+    // direct cast to this loose introspection shape is rejected as a probable
+    // mistake; bridging through `unknown` is the deliberate, documented escape for
+    // reading arbitrary block properties generically across many block types.
+    const blocks = assistant?.content as unknown as Array<{ type: string; [k: string]: unknown }>;
     const upload = blocks.find((b) => b.type === 'container_upload');
     expect(upload).toBeDefined();
     expect(upload?.file_id).toBe('file_abc123');
@@ -1663,7 +1671,11 @@ describe('C5 — Server-tool content blocks (Anthropic adapter)', () => {
     const roundTripped = toAnthropicMessages(conversation);
 
     const assistant = roundTripped.messages.find((m) => m.role === 'assistant');
-    const blocks = assistant?.content as Array<{ type: string; [k: string]: unknown }>;
+    // `AnthropicContentBlock`'s discriminated members have no index signature, so a
+    // direct cast to this loose introspection shape is rejected as a probable
+    // mistake; bridging through `unknown` is the deliberate, documented escape for
+    // reading arbitrary block properties generically across many block types.
+    const blocks = assistant?.content as unknown as Array<{ type: string; [k: string]: unknown }>;
     const fetchBlock = blocks.find((b) => b.type === 'web_fetch_tool_result');
     expect(fetchBlock).toBeDefined();
     expect(fetchBlock?.content).toEqual({ url: 'https://x.com', text: 'fetched body' });

@@ -136,7 +136,7 @@ function makeContext(conversation: Conversation): GenerateContext {
 }
 
 function makeStreamingHandle(): StreamingHandle {
-  return { update: () => {} };
+  return { update: () => {}, messageId: 'test-message-id' };
 }
 
 /** Runs `generate` twice over a growing conversation — the "loop" shape. */

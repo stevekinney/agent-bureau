@@ -535,7 +535,7 @@ describe('HookRegistry integration', () => {
       const hooks = new HookRegistry<OperativeHookMap>();
 
       hooks.on('validateToolResult', async (result) => {
-        return { ...result, output: '[redacted]' };
+        return { ...result, content: '[redacted]' };
       });
 
       const generate = createMockGenerate([
@@ -551,7 +551,7 @@ describe('HookRegistry integration', () => {
         hooks,
       });
 
-      expect(runResult.steps[0].results[0].output).toBe('[redacted]');
+      expect(runResult.steps[0].results[0].content).toBe('[redacted]');
     });
   });
 

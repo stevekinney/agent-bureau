@@ -869,7 +869,7 @@ describe('AgentRun.abort()', () => {
     expect((result.error as AbortAgentRunError).code).toBe('ABORTED');
     expect((result.error as AbortAgentRunError).message).toBe('user cancelled');
     expect(eventError).toBeInstanceOf(AbortAgentRunError);
-    expect(eventError).toBe(result.error);
+    expect(eventError).toBe(result.error as AbortAgentRunError);
   });
 });
 

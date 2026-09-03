@@ -2,13 +2,14 @@ import type { Content } from '@google/genai';
 import { describe, expectTypeOf, it } from 'bun:test';
 import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions';
 
+import type { AnthropicConversation } from '../src/adapters/anthropic';
 import { toAnthropicMessages } from '../src/adapters/anthropic';
 import { toGeminiMessages } from '../src/adapters/gemini';
 import { toOpenAIMessages, toOpenAIMessagesGrouped } from '../src/adapters/openai';
-import type { Conversation } from '../src/types';
+import type { ConversationHistory } from '../src/types';
 
 describe('Adapter Type Compatibility', () => {
-  const conv: Conversation = {
+  const conv: ConversationHistory = {
     schemaVersion: 1,
     id: 'test',
     status: 'active',
@@ -39,7 +40,7 @@ describe('Adapter Type Compatibility', () => {
       };
 
       expectTypeOf(messages).toMatchTypeOf<AnthropicMessageParamLike[]>();
-      expectTypeOf(system).toEqualTypeOf<string | undefined>();
+      expectTypeOf(system).toExtend<AnthropicConversation['system']>();
     });
   });
 

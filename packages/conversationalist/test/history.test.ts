@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 
+import type { TruncateOptions } from '../src/context';
 import { estimateConversationTokens, truncateToTokenLimit } from '../src/context';
 import { ConversationChangeEvent } from '../src/events';
 import { Conversation as ConversationHistory } from '../src/history';
@@ -12,7 +13,11 @@ import {
   conversationFromMarkdown as conversationHistoryFromMarkdown,
   conversationToMarkdown as conversationHistoryToMarkdown,
 } from '../src/markdown';
-import type { ConversationHistory as ConversationState, Message } from '../src/types';
+import type {
+  ConversationHistory as ConversationState,
+  Message,
+  TokenEstimator,
+} from '../src/types';
 
 const getOrderedMessages = (conversation: ConversationState): Message[] =>
   conversation.ids
@@ -190,7 +195,13 @@ describe('Conversation', () => {
       estimateTokens: customEstimator,
     });
 
-    const boundTruncate = history.bind(truncateToTokenLimit);
+    // Explicit type arguments select the sync overload of `truncateToTokenLimit`:
+    // `bind`'s generic inference from an overloaded function value only considers
+    // the last overload signature, which would otherwise require the async options.
+    const boundTruncate = history.bind<
+      [number, (TruncateOptions | TokenEstimator)?],
+      ConversationState
+    >(truncateToTokenLimit);
 
     history.push(appendUserMessage(history.current, 'Hello'));
     history.push(appendUserMessage(history.current, 'World'));
@@ -211,7 +222,9 @@ describe('Conversation', () => {
       estimateTokens: customEstimator,
     });
 
-    const boundEstimate = history.bind(estimateConversationTokens);
+    // Explicit type arguments select the sync overload; see the comment above
+    // `boundTruncate` for why inference alone picks the wrong overload here.
+    const boundEstimate = history.bind<[TokenEstimator?], number>(estimateConversationTokens);
 
     history.push(appendUserMessage(history.current, 'Hello'));
     history.push(appendUserMessage(history.current, 'World'));
@@ -559,6 +572,11 @@ describe('Conversation', () => {
           action: 'push',
           conversation: history.current,
           previousConversation: history.current,
+          revision: 0,
+          sequence: 0,
+          correlationId: 'test-correlation-id',
+          durability: 'ephemeral',
+          outcome: 'accepted',
         }),
       );
 
@@ -580,6 +598,11 @@ describe('Conversation', () => {
           action: 'push',
           conversation: history.current,
           previousConversation: history.current,
+          revision: 0,
+          sequence: 0,
+          correlationId: 'test-correlation-id',
+          durability: 'ephemeral',
+          outcome: 'accepted',
         }),
       );
 
@@ -600,6 +623,11 @@ describe('Conversation', () => {
           action: 'push',
           conversation: history.current,
           previousConversation: history.current,
+          revision: 0,
+          sequence: 0,
+          correlationId: 'test-correlation-id',
+          durability: 'ephemeral',
+          outcome: 'accepted',
         }),
       );
       expect(calls).toBe(1);
@@ -610,6 +638,11 @@ describe('Conversation', () => {
           action: 'push',
           conversation: history.current,
           previousConversation: history.current,
+          revision: 0,
+          sequence: 0,
+          correlationId: 'test-correlation-id',
+          durability: 'ephemeral',
+          outcome: 'accepted',
         }),
       );
       expect(calls).toBe(1);
@@ -646,6 +679,11 @@ describe('Conversation', () => {
           action: 'push',
           conversation: history.current,
           previousConversation: history.current,
+          revision: 0,
+          sequence: 0,
+          correlationId: 'test-correlation-id',
+          durability: 'ephemeral',
+          outcome: 'accepted',
         }),
       );
 

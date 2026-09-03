@@ -5,6 +5,13 @@ import { sha256HexSync, timingSafeEqualHex } from 'interoperability';
 import { parseSkillMarkdown, SkillParseError } from '../parse-skill-markdown';
 import type { SkillProvider } from '../types';
 
+/**
+ * The subset of the `fetch` call signature this module actually uses. `typeof fetch`
+ * additionally requires Bun-specific statics (`preconnect`, `preload`) that a test
+ * double has no reason to implement.
+ */
+export type FetchFunction = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+
 export interface FetchFromRegistryOptions {
   /** Base URL of the skill registry. */
   baseUrl: string;
@@ -13,7 +20,7 @@ export interface FetchFromRegistryOptions {
   /** Skill provider to save fetched skills to. */
   provider: SkillProvider;
   /** Custom fetch function (for testing). Defaults to global fetch. */
-  fetchFunction?: typeof fetch;
+  fetchFunction?: FetchFunction;
   /** Bearer token sent as `Authorization: Bearer <authToken>` on every registry request. */
   authToken?: string;
   /**

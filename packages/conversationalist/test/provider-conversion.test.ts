@@ -264,7 +264,12 @@ describe('provider reverse conversion', () => {
   });
 
   it('reconstructs OpenAI null, multimodal, and fallback payload variants', () => {
-    const payload: OpenAIMessage[] = [
+    // Untyped here on purpose: this payload deliberately includes shapes a real
+    // OpenAI API response can send but `OpenAIMessage`'s per-role content typing
+    // forbids (a `system` message with `content: null`, an `assistant` message
+    // mixing text and image parts) — the point of this test is that
+    // `fromOpenAIMessages` handles them defensively.
+    const payload = [
       {
         role: 'system',
         content: null,
@@ -369,7 +374,7 @@ describe('provider reverse conversion', () => {
       },
     ];
 
-    const conversation = fromOpenAIMessages(payload);
+    const conversation = fromOpenAIMessages(payload as OpenAIMessage[]);
     const messages = getOrderedMessages(conversation);
     const toolCalls = messages.filter((message) => message.role === 'tool-call');
     const toolResults = messages.filter((message) => message.role === 'tool-result');

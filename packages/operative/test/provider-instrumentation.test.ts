@@ -24,6 +24,7 @@ function createMockSpan(
   options?: SpanOptions,
 ): Span & {
   name: string;
+  kind: SpanKind | undefined;
   attributes: Record<string, unknown>;
   status: { code: number; message?: string };
   ended: boolean;

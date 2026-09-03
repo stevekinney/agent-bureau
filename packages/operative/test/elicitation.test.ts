@@ -6,6 +6,7 @@ import { z } from 'zod';
 
 import { noToolCalls } from '../src/conditions/predicates';
 import { createActiveRun } from '../src/create-run';
+import type { ElicitationRequestedEvent, ElicitationResolvedEvent } from '../src/events';
 import { createRunRecorder } from '../src/test/index';
 import type { ElicitationRequest, GenerateResponse } from '../src/types';
 const run = (options: Parameters<typeof createActiveRun>[0]) => createActiveRun(options).result;
@@ -127,14 +128,14 @@ describe('elicitation', () => {
 
     const requestedEvents = recorder.events.filter((e) => e.type === 'elicitation.requested');
     expect(requestedEvents).toHaveLength(1);
-    expect((requestedEvents[0].detail as { step: number; message: string }).message).toBe(
+    expect((requestedEvents[0].detail as ElicitationRequestedEvent).message).toBe(
       'Do you confirm?',
     );
-    expect((requestedEvents[0].detail as { step: number; message: string }).step).toBe(0);
+    expect((requestedEvents[0].detail as ElicitationRequestedEvent).step).toBe(0);
 
     const resolvedEvents = recorder.events.filter((e) => e.type === 'elicitation.resolved');
     expect(resolvedEvents).toHaveLength(1);
-    expect((resolvedEvents[0].detail as { step: number; accepted: boolean }).accepted).toBe(true);
+    expect((resolvedEvents[0].detail as ElicitationResolvedEvent).accepted).toBe(true);
   });
 
   it('emits elicitation.resolved with accepted false when declined', async () => {
@@ -160,7 +161,7 @@ describe('elicitation', () => {
 
     const resolvedEvents = recorder.events.filter((e) => e.type === 'elicitation.resolved');
     expect(resolvedEvents).toHaveLength(1);
-    expect((resolvedEvents[0].detail as { step: number; accepted: boolean }).accepted).toBe(false);
+    expect((resolvedEvents[0].detail as ElicitationResolvedEvent).accepted).toBe(false);
   });
 
   it('elicit is undefined when no onElicitation callback is configured', async () => {

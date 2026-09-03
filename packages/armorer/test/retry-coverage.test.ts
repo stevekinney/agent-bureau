@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import { createManualRuntimeServices } from 'lifecycle';
 import { z } from 'zod';
 
+import type { AnyTool } from '../src/compose-types';
 import { internalRetryTestUtilities, retry } from '../src/utilities/retry';
 
 /**
@@ -19,13 +20,17 @@ async function waitUntil(predicate: () => boolean, description: string): Promise
 }
 
 describe('retry coverage edges', () => {
-  const makeRawTool = (execute: (input: unknown) => Promise<unknown>) => {
+  // Deliberately a bare callable-function "legacy tool" shape (`.schema`
+  // instead of `.input`, no `identity`/`id`/`display`) — proves `retry()`
+  // tolerates it at runtime even though it doesn't satisfy the strict
+  // `AnyTool` type.
+  const makeRawTool = (execute: (input: unknown) => Promise<unknown>): AnyTool => {
     const rawTool = async (input: unknown) => execute(input);
     rawTool.description = 'raw tool';
     rawTool.schema = z.object({ value: z.number() });
     rawTool.tags = ['raw'];
     rawTool.metadata = { tier: 'test' };
-    return rawTool;
+    return rawTool as unknown as AnyTool;
   };
 
   it('throws immediately when shouldRetry returns false', async () => {

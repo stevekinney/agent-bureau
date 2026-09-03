@@ -4,7 +4,7 @@
  * Spec: context.maximumTokens takes precedence over the construction-time
  * maximumTokens option when building the provider request params.
  */
-import { createTool, createToolbox, type Toolbox } from 'armorer';
+import { type AnyToolbox, createTool, createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
 import { z } from 'zod';
@@ -23,7 +23,7 @@ import {
   createMockOpenAIClient,
 } from '../src/providers/test/mock-clients.ts';
 
-function makeContext(maximumTokens?: number, toolbox: Toolbox = createToolbox([])) {
+function makeContext(maximumTokens?: number, toolbox: AnyToolbox = createToolbox([])) {
   return {
     conversation: new Conversation(),
     step: 0,

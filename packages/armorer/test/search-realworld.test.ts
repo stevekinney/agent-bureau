@@ -2,8 +2,9 @@ import { describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
 import { searchTools } from '../src/core/registry';
+import { createTool } from '../src/create-tool';
 import { createToolbox } from '../src/create-toolbox';
-import type { ToolConfiguration } from '../src/is-tool';
+import type { Tool } from '../src/is-tool';
 
 const makeRegistry = (embed?: (texts: string[]) => number[][]) =>
   createToolbox(realWorldTools(), embed ? { embed } : undefined);
@@ -98,9 +99,9 @@ describe('search real-world scenarios', () => {
   });
 });
 
-function realWorldTools(): ToolConfiguration[] {
+function realWorldTools(): Tool[] {
   return [
-    {
+    createTool({
       name: 'issue-refund',
       description: 'issue refund for an order with item-level adjustments',
       tags: ['billing', 'refund', 'orders'],
@@ -111,8 +112,8 @@ function realWorldTools(): ToolConfiguration[] {
         reason: z.string().optional(),
       }),
       execute: async () => null,
-    },
-    {
+    }),
+    createTool({
       name: 'capture-payment',
       description: 'capture an authorized card payment for an order',
       tags: ['billing', 'payments'],
@@ -122,8 +123,8 @@ function realWorldTools(): ToolConfiguration[] {
         amount: z.number(),
       }),
       execute: async () => null,
-    },
-    {
+    }),
+    createTool({
       name: 'track-shipment',
       description: 'track shipment status and carrier updates',
       tags: ['shipping', 'tracking', 'orders'],
@@ -133,8 +134,8 @@ function realWorldTools(): ToolConfiguration[] {
         carrier: z.string().optional(),
       }),
       execute: async () => null,
-    },
-    {
+    }),
+    createTool({
       name: 'schedule-delivery',
       description: 'schedule a delivery window for an order',
       tags: ['shipping', 'delivery'],
@@ -144,8 +145,8 @@ function realWorldTools(): ToolConfiguration[] {
         date: z.string(),
       }),
       execute: async () => null,
-    },
-    {
+    }),
+    createTool({
       name: 'update-inventory',
       description: 'update inventory counts for a SKU',
       tags: ['inventory', 'catalog'],
@@ -155,8 +156,8 @@ function realWorldTools(): ToolConfiguration[] {
         quantity: z.number(),
       }),
       execute: async () => null,
-    },
-    {
+    }),
+    createTool({
       name: 'summarize-support-tickets',
       description: 'summarize open support tickets by category',
       tags: ['support', 'analysis'],
@@ -166,8 +167,8 @@ function realWorldTools(): ToolConfiguration[] {
         limit: z.number().optional(),
       }),
       execute: async () => null,
-    },
-    {
+    }),
+    createTool({
       name: 'translate-message',
       description: 'translate a customer message to the requested locale',
       tags: ['localization', 'text'],
@@ -177,8 +178,8 @@ function realWorldTools(): ToolConfiguration[] {
         locale: z.string(),
       }),
       execute: async () => null,
-    },
-    {
+    }),
+    createTool({
       name: 'flag-fraud',
       description: 'flag suspicious orders for manual review',
       tags: ['risk', 'fraud', 'orders'],
@@ -188,8 +189,8 @@ function realWorldTools(): ToolConfiguration[] {
         score: z.number(),
       }),
       execute: async () => null,
-    },
-    {
+    }),
+    createTool({
       name: 'get-order-status',
       description: 'fetch the current order status and last update',
       tags: ['orders', 'status'],
@@ -198,8 +199,8 @@ function realWorldTools(): ToolConfiguration[] {
         orderId: z.string(),
       }),
       execute: async () => null,
-    },
-    {
+    }),
+    createTool({
       name: 'create-customer-profile',
       description: 'create a customer profile with marketing preferences',
       tags: ['customers', 'crm'],
@@ -209,8 +210,8 @@ function realWorldTools(): ToolConfiguration[] {
         name: z.string(),
       }),
       execute: async () => null,
-    },
-    {
+    }),
+    createTool({
       name: 'list-invoices',
       description: 'list invoices for a billing account',
       tags: ['billing', 'invoices'],
@@ -219,8 +220,8 @@ function realWorldTools(): ToolConfiguration[] {
         accountId: z.string(),
       }),
       execute: async () => null,
-    },
-    {
+    }),
+    createTool({
       name: 'log-audit-event',
       description: 'write audit log entries for compliance',
       tags: ['audit', 'logs'],
@@ -230,6 +231,6 @@ function realWorldTools(): ToolConfiguration[] {
         actorId: z.string(),
       }),
       execute: async () => null,
-    },
+    }),
   ];
 }

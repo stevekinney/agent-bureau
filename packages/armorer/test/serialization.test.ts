@@ -10,6 +10,7 @@ import {
   serializeToolDefinition,
   stableStringifyJson,
 } from '../src/core';
+import type { ToolMetadata } from '../src/is-tool';
 
 describe('serialization', () => {
   const schema = z.object({
@@ -22,7 +23,7 @@ describe('serialization', () => {
       name: 'bad-meta',
       description: 'bad metadata',
       input: schema,
-      metadata: { when: new Date() } as unknown as Record<string, unknown>,
+      metadata: { when: new Date() } as unknown as ToolMetadata,
     });
 
     expect(() => serializeToolDefinition(tool)).toThrow(
@@ -35,7 +36,7 @@ describe('serialization', () => {
       name: 'bad-undefined',
       description: 'bad undefined',
       input: schema,
-      metadata: { nested: { value: undefined } } as unknown as Record<string, unknown>,
+      metadata: { nested: { value: undefined } } as unknown as ToolMetadata,
     });
 
     expect(() => serializeToolDefinition(tool)).toThrow(

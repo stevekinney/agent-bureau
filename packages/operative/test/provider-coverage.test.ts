@@ -63,8 +63,10 @@ import {
   createMockOpenAIStreamingClient,
 } from '../src/providers/test/mock-clients.ts';
 import type {
+  AnthropicMessageCreateRequest,
   AnthropicStreamEvent,
   AnthropicStreamingClient,
+  GeminiGenerateContentRequest,
   OpenAIStreamingClient,
 } from '../src/providers/types.ts';
 import type { GenerateContext, StreamingHandle } from '../src/types.ts';
@@ -95,7 +97,10 @@ function makeContext(
 
 function makeStreamingHandle(updates: string[] = []): StreamingHandle {
   return {
-    update: (text) => updates.push(text),
+    update: (text) => {
+      updates.push(text);
+    },
+    messageId: 'test-message-id',
   };
 }
 
@@ -191,15 +196,15 @@ describe('provider helper coverage', () => {
   });
 
   it('mock clients fail loudly when queued responses are exhausted', async () => {
-    await expect(createMockAnthropicClient([]).messages.create({})).rejects.toThrow(
-      'MockAnthropicClient: no response at index 0',
-    );
+    await expect(
+      createMockAnthropicClient([]).messages.create({} as AnthropicMessageCreateRequest),
+    ).rejects.toThrow('MockAnthropicClient: no response at index 0');
     await expect(createMockOpenAIClient([]).chat.completions.create({})).rejects.toThrow(
       'MockOpenAIClient: no response at index 0',
     );
-    await expect(createMockGeminiModel([]).models.generateContent({})).rejects.toThrow(
-      'MockGeminiModel: no response at index 0',
-    );
+    await expect(
+      createMockGeminiModel([]).models.generateContent({} as GeminiGenerateContentRequest),
+    ).rejects.toThrow('MockGeminiModel: no response at index 0');
   });
 
   it('streaming mock clients can fail after yielding part of a stream', async () => {
@@ -207,7 +212,7 @@ describe('provider helper coverage', () => {
       [anthropicStreamTextEvents],
       [new Error('anthropic stream failed')],
       { errorAfterEvents: 1 },
-    ).messages.create({});
+    ).messages.create({} as AnthropicMessageCreateRequest);
     const openAIStream = createMockOpenAIStreamingClient(
       [openAIStreamTextChunks],
       [new Error('openai stream failed')],
@@ -217,7 +222,7 @@ describe('provider helper coverage', () => {
       [geminiStreamTextChunks],
       [new Error('gemini stream failed')],
       { errorAfterEvents: 1 },
-    ).models.generateContentStream({});
+    ).models.generateContentStream({} as GeminiGenerateContentRequest);
 
     await expect(
       (async () => {
@@ -247,7 +252,7 @@ describe('provider helper coverage', () => {
       [[]],
       [new Error('anthropic late failure')],
       { errorAfterEvents: 1 },
-    ).messages.create({});
+    ).messages.create({} as AnthropicMessageCreateRequest);
     const openAIStream = createMockOpenAIStreamingClient([[]], [new Error('openai late failure')], {
       errorAfterEvents: 1,
     }).chat.completions.create({});
@@ -255,7 +260,7 @@ describe('provider helper coverage', () => {
       [[]],
       [new Error('gemini late failure')],
       { errorAfterEvents: 1 },
-    ).models.generateContentStream({});
+    ).models.generateContentStream({} as GeminiGenerateContentRequest);
 
     await expect(
       (async () => {
@@ -453,7 +458,7 @@ describe('OpenAI provider coverage', () => {
                 {
                   index: 0,
                   id: 'call_bad_01',
-                  type: 'function',
+                  type: 'function' as const,
                   function: { name: 'roll_dice', arguments: '{"sides": 2' },
                 },
               ],

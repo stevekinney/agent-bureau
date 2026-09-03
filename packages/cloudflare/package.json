@@ -22,7 +22,7 @@
   "types": "./dist/index.d.ts",
   "scripts": {
     "build": "bun run scripts/build.ts",
-    "check-types": "tsc --noEmit",
+    "check-types": "tsc --noEmit && tsc -p tsconfig.test.json",
     "clean": "rm -rf dist coverage tsconfig.tsbuildinfo",
     "ci": "bun run validate && bun run build",
     "coverage:check": "bun run ../../scripts/check-coverage.ts",

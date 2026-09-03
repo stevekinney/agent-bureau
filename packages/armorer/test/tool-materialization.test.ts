@@ -63,6 +63,8 @@ describe('tool materialization helpers', () => {
         callId: 'call-1',
         outcome: 'action_required',
         content: undefined,
+        // `toolCallId` is not part of `ToolResultInput` — this deliberately
+        // passes a runtime-only field to prove it gets stripped.
         toolCallId: 'call-1',
         toolName: 'lookup',
         result: 'ignored',
@@ -71,7 +73,7 @@ describe('tool materialization helpers', () => {
           message: 'Need approval',
           schema: Symbol('approval'),
         },
-      }),
+      } as Parameters<typeof materializeToolResult>[0]),
     ).toEqual({
       callId: 'call-1',
       outcome: 'action_required',
