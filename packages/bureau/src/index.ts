@@ -14,12 +14,14 @@ export { AUDIT_EVENT_TYPES, createAuditTrail } from './audit-trail';
 export { createAgentDiscoveryTool } from './create-agent-discovery-tool';
 export type {
   BureauErrorNotConfiguredSubject,
+  ClassifyRecoveredRunArgs,
   RecoveredRunSessionMetadata,
   SessionLoadOutcome,
 } from './create-bureau';
 export {
   BureauError,
   classifyRecoveredRun,
+  classifyRecoveredRunDetailed,
   createBureau,
   ScheduleLocatorUnavailableError,
 } from './create-bureau';
@@ -46,8 +48,16 @@ export {
   TaskFailedEvent,
   TaskRoutedEvent,
 } from './create-supervisor';
-export type { BureauEventMap } from './events';
-export { ActionEvent, BureauDisposedEvent, RunRegisteredEvent, RunRemovedEvent } from './events';
+export type { BureauEventMap, RecoveredRunVerdict, RecoveryRejectionReason } from './events';
+export {
+  ActionEvent,
+  BureauDisposedEvent,
+  RecoveryAttemptedEvent,
+  RecoveryLeaseReleasedEvent,
+  RecoveryRejectedEvent,
+  RunRegisteredEvent,
+  RunRemovedEvent,
+} from './events';
 export type {
   LivenessSnapshotEnvelope,
   TaskDiagnosticsFilter,
@@ -57,6 +67,7 @@ export type {
 } from './liveness-projection';
 export {
   buildTaskDiagnosticsInput,
+  leaseEvidenceFromLostHealth,
   projectEngineLeaseSnapshot,
   projectStreamLivenessSnapshot,
   projectTaskLivenessSnapshot,

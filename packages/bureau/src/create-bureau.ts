@@ -96,9 +96,15 @@ import {
   ActionEvent,
   BureauDisposedEvent,
   type BureauEventMap,
+  type RecoveredRunVerdict,
+  RecoveryAttemptedEvent,
+  RecoveryLeaseReleasedEvent,
+  RecoveryRejectedEvent,
+  type RecoveryRejectionReason,
   RunRegisteredEvent,
   RunRemovedEvent,
 } from './events';
+import { leaseEvidenceFromLostHealth } from './liveness-projection';
 import { createModelCatalogService } from './model-catalog-refresh';
 import { createModelPolicyPlanner } from './model-policy';
 import { createOnlineEvalSampler, type OnlineEvalSampler } from './online-evals';
@@ -980,7 +986,7 @@ export type SessionLoadOutcome = { ok: true; session: RecoveredRunSessionMetadat
  * session is still `'running'` (its monitor has not written yet), and it must
  * still be reattached so its completion is persisted.
  */
-export function classifyRecoveredRun(args: {
+export interface ClassifyRecoveredRunArgs {
   handleId: string;
   /** Whether the launch metadata identifies a native scheduled fire. */
   scheduledFire: boolean;
@@ -1001,28 +1007,55 @@ export function classifyRecoveredRun(args: {
    * the drift.
    */
   versionMismatch?: boolean;
-}): 'reattach' | 'reattach-version-mismatch' | 'monitor' | 'cancel' | 'skip' {
+}
+
+/**
+ * `classifyRecoveredRun`'s verdict, plus — only when the verdict is
+ * `'cancel'` — the structured reason (AB-90/ab90-09's `recovery.rejected`
+ * payload). Both derived from the SAME branch pass over `args` as the plain
+ * verdict below, so the verdict `emitter.dispatch`es as `recovery.attempted`
+ * and the reason it dispatches as `recovery.rejected` can never drift apart.
+ */
+export function classifyRecoveredRunDetailed(args: ClassifyRecoveredRunArgs): {
+  verdict: RecoveredRunVerdict;
+  rejection?: RecoveryRejectionReason;
+} {
   // A failed metadata read means we cannot even identify the run — but it WAS
   // resumed by recoverAll, so cancel it rather than leave it unowned.
-  if (args.metadataReadFailed) return 'cancel';
+  if (args.metadataReadFailed) {
+    return { verdict: 'cancel', rejection: 'metadata-read-failed' };
+  }
   if (args.ownedSessionId === undefined) {
     // A scheduled fire has no interactive session ownership to confirm. Weft has
     // already resumed it via the scheduled-fire resolver branch, so monitor its
     // result without registering it as an ActiveRun or cancelling it as foreign.
-    if (args.scheduledFire) return 'monitor';
+    if (args.scheduledFire) return { verdict: 'monitor' };
     // Not a bureau-owned agentRun (foreign run id / non-agentRun input) — cancel.
-    return 'cancel';
+    return { verdict: 'cancel', rejection: 'foreign-input' };
   }
   // Owned input but no session store to confirm against / reattach into — skip.
-  if (!args.hasSessionStore) return 'skip';
+  if (!args.hasSessionStore) return { verdict: 'skip' };
   // Transient session-load failure — ownership UNKNOWN, never cancel; skip.
-  if (!args.sessionLoad.ok) return 'skip';
+  if (!args.sessionLoad.ok) return { verdict: 'skip' };
   const session = args.sessionLoad.session;
   // Session absent / owns a different run / not in-flight — positively unowned.
-  if (!session || session.lastRunId !== args.handleId || session.lastRunStatus !== 'running') {
-    return 'cancel';
+  if (!session) return { verdict: 'cancel', rejection: 'session-absent' };
+  if (session.lastRunId !== args.handleId) {
+    return { verdict: 'cancel', rejection: 'session-run-mismatch' };
   }
-  return args.versionMismatch ? 'reattach-version-mismatch' : 'reattach';
+  if (session.lastRunStatus !== 'running') {
+    return { verdict: 'cancel', rejection: 'session-not-running' };
+  }
+  return { verdict: args.versionMismatch ? 'reattach-version-mismatch' : 'reattach' };
+}
+
+/**
+ * Plain-verdict view of {@link classifyRecoveredRunDetailed}, unchanged for
+ * every existing caller and test — this wrapper exists only so the
+ * rejection-reason derivation above has exactly one place to live.
+ */
+export function classifyRecoveredRun(args: ClassifyRecoveredRunArgs): RecoveredRunVerdict {
+  return classifyRecoveredRunDetailed(args).verdict;
 }
 
 export function isRecoverableScheduledFireInput(input: unknown): input is ScheduledAgentRunInput {
@@ -3413,6 +3446,43 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   }
 
   /**
+   * Dispatches `recovery.attempted` for every `classifyRecoveredRun` call
+   * (AB-90/ab90-09), making the classification externally observable, then
+   * `recovery.rejected` — synchronously, right after, so the two are always
+   * correctly ordered for the same `runId` — only when the verdict is the
+   * positive rejection (`'cancel'`). Shared by both `classifyRecoveredRun`
+   * call sites below; not shared with any other AB-90 child's emission
+   * points (per the merge-order convention, each child's call sites stay
+   * independent).
+   */
+  function dispatchRecoveryClassification(
+    runId: string,
+    classification: { verdict: RecoveredRunVerdict; rejection?: RecoveryRejectionReason },
+  ): void {
+    emitter.dispatch(new RecoveryAttemptedEvent(runId, classification.verdict));
+    if (classification.rejection !== undefined) {
+      emitter.dispatch(new RecoveryRejectedEvent(runId, classification.rejection));
+    }
+  }
+
+  /**
+   * Dispatches `recovery.lease-released` when Weft's own `Engine.getLeaseHealth()`
+   * — read fresh, never cached — reports a released (contested, with holder
+   * record) engine-level lease this run's recovery pass overlapped with.
+   * Projects Weft's evidence via `leaseEvidenceFromLostHealth`; never
+   * dispatched for a disabled/no-lease engine, a currently-held lease, or the
+   * sparsest contested shape, since none of those is a lease actually
+   * released, and never asserts a Bureau-owned lease of its own (AB-39).
+   */
+  function dispatchRecoveryLeaseReleasedIfAny(runId: string): void {
+    if (!runtime.durable) return;
+    const lease = leaseEvidenceFromLostHealth(runtime.durable.engine.getLeaseHealth());
+    if (lease !== undefined) {
+      emitter.dispatch(new RecoveryLeaseReleasedEvent(runId, lease));
+    }
+  }
+
+  /**
    * Reattach an owned interactive run inside Weft's awaited recovery hook. At
    * this point the resolver has rebuilt `services`, but the recovered workflow
    * has not advanced, so the ActiveRun surface and all event forwarding exist
@@ -3441,7 +3511,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       return;
     }
 
-    const verdict = classifyRecoveredRun({
+    const classification = classifyRecoveredRunDetailed({
       handleId: info.workflowId,
       scheduledFire: false,
       ownedSessionId: info.input.sessionId,
@@ -3450,6 +3520,9 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       sessionLoad,
       versionMismatch: runtime.workflowVersionMismatches.has(info.workflowId),
     });
+    const { verdict } = classification;
+    dispatchRecoveryClassification(info.workflowId, classification);
+    dispatchRecoveryLeaseReleasedIfAny(info.workflowId);
     if (verdict !== 'reattach' && verdict !== 'reattach-version-mismatch') return;
 
     if (verdict === 'reattach-version-mismatch') {
@@ -3623,7 +3696,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         }
       }
 
-      const verdict = classifyRecoveredRun({
+      const classification = classifyRecoveredRunDetailed({
         handleId: handle.id,
         scheduledFire,
         ownedSessionId,
@@ -3632,6 +3705,9 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         sessionLoad,
         versionMismatch: runtime.workflowVersionMismatches.has(handle.id),
       });
+      const { verdict } = classification;
+      dispatchRecoveryClassification(handle.id, classification);
+      dispatchRecoveryLeaseReleasedIfAny(handle.id);
 
       if (verdict === 'reattach' || verdict === 'reattach-version-mismatch') {
         if (verdict === 'reattach-version-mismatch') {
