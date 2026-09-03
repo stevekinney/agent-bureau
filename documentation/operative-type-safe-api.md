@@ -1528,7 +1528,7 @@ Decision record for AB-64, implemented by AB-243 (`packages/operative/src/provid
 | selected   | What the plan chose after filtering and ranking                                                               | `SelectionPlan.selected`                   |
 | effective  | What the provider actually used (`GenerateResponse.metadata.effectiveEffort` plus the model/provider sibling) | `EffectiveGenerationResult`                |
 
-The `allowed`/`compatible`/`requested`/`selected`/`effective` rows name types AB-66 has not shipped yet (`SelectionCandidate`, `SelectionRequest`, `SelectionPlan`, `EffectiveGenerationResult`); AB-243 ships only the `known`/`available` rows' `BackendDescriptor`/`ModelCatalog` types below.
+The `allowed` row is decided by the precedence composition below (AB-248); the `compatible`/`requested`/`selected`/`effective` rows name types [The deterministic backend selector and `SelectionPlan`](#the-deterministic-backend-selector-and-selectionplan) ships — `SelectionCandidate`, `SelectionRequest`, `SelectionPlan`, `EffectiveGenerationResult` (AB-249). AB-243 ships the `known`/`available` rows' `BackendDescriptor`/`ModelCatalog` types below.
 
 A versioned `BackendDescriptor` and the `ModelCatalog` it lives in, transcribed verbatim from AB-64's decision record with the 2026-09-02 coordinator amendment applied (`modalities: ModalityMatrix` replaces the three parallel `inputModalities`/`outputModalities`/`acceptedSourceForms` fields, citing AB-70's `Modality`, `MimeFamily`, `ContentSource`, and `ModalityMatrix` vocabulary by name):
 
@@ -1612,7 +1612,7 @@ export type CatalogProjection = 'general' | 'privileged'; // the vault brief's o
 
 `voyage` and `ollama` are embedding-only and get no descriptor row. `getProviderCapabilities` (`packages/operative/src/providers/capabilities.ts`) is now a projection over `createModelCatalog`'s descriptor rows, with an identical public signature and bit-for-bit identical answers to its pre-AB-64 behavior — the ambiguous-`baseURL` rule is sourced from `descriptor.endpointAmbiguous`. `createModelCatalog` is synchronous, side-effect-free, performs no network input or output, and returns a deeply frozen catalog at `revision: 1`; `now` is the only clock it reads, defaulting to the wall clock and injectable in tests.
 
-The deterministic selector and `SelectionPlan` remain AB-66's scope (AB-249 in the Model Capability project); the five-layer policy precedence itself is covered below (AB-248). The `'general'`/`'privileged'` catalog projection ships here (AB-247/mod-02e, `packages/operative/src/providers/model-catalog-projection.ts`): `projectDescriptor(descriptor, projection)` and `projectCatalog(catalog, projection)` are synchronous, pure functions that read neither the environment nor the clock and return deeply frozen values. `'privileged'` returns a structural copy — nothing dropped. `'general'` redacts exactly what AB-64's `## Catalog discipline (AC8)` names: `pricing` omitted entirely; `endpoint` reduced to its bare operation name with any host or origin detail stripped; `endpointAmbiguous` omitted, because it discloses that a custom base URL or proxy is configured; and any account-level quota field omitted (`BackendDescriptor` has none today). `availability`, `health`, `source`, and `freshness` are retained, so a caller can still tell an unavailable backend from an available one. `GENERAL_PROJECTION_REDACTED_KEYS`, exported from the same module, is what `model-catalog-projection.test.ts`'s exhaustive key-enumeration test checks every `BackendDescriptor` key against — present in the `'general'` projection, or named here — so a field added to the descriptor later without a redaction decision fails that test instead of silently being exposed.
+The deterministic selector and `SelectionPlan` ship in [The deterministic backend selector and `SelectionPlan`](#the-deterministic-backend-selector-and-selectionplan) below (AB-249); the five-layer policy precedence itself is covered next (AB-248). The `'general'`/`'privileged'` catalog projection ships here (AB-247/mod-02e, `packages/operative/src/providers/model-catalog-projection.ts`): `projectDescriptor(descriptor, projection)` and `projectCatalog(catalog, projection)` are synchronous, pure functions that read neither the environment nor the clock and return deeply frozen values. `'privileged'` returns a structural copy — nothing dropped. `'general'` redacts exactly what AB-64's `## Catalog discipline (AC8)` names: `pricing` omitted entirely; `endpoint` reduced to its bare operation name with any host or origin detail stripped; `endpointAmbiguous` omitted, because it discloses that a custom base URL or proxy is configured; and any account-level quota field omitted (`BackendDescriptor` has none today). `availability`, `health`, `source`, and `freshness` are retained, so a caller can still tell an unavailable backend from an available one. `GENERAL_PROJECTION_REDACTED_KEYS`, exported from the same module, is what `model-catalog-projection.test.ts`'s exhaustive key-enumeration test checks every `BackendDescriptor` key against — present in the `'general'` projection, or named here — so a field added to the descriptor later without a redaction decision fails that test instead of silently being exposed.
 
 ### The five-layer model policy precedence composition
 
@@ -1696,7 +1696,132 @@ Layers apply top to bottom in exactly this order — deployment, Bureau, Agent, 
 
 `exactOverride` must name both `provider` and `model` to identify exactly one descriptor — a partially specified override (only `route`, or only `effort`) cannot resolve to a single candidate and yields an empty result, as does one naming no matching descriptor; at most one candidate is ever returned even if `descriptors` contains more than one row for the same `(provider, model)` pair. A fully specified override is checked only against the four layers above the user's (deployment, Bureau, Agent, delegated) before being honored: a rejected override yields a single-candidate result carrying the denying layer's own exclusion code, never `denied-by-user`, matching AB-64's verification walk (an override denied at the Bureau layer reports `denied-by-bureau`). Without `exactOverride`, `composePolicy` returns one frozen `PolicyCandidate` per input descriptor, in input order — never dropping a candidate silently. `composePolicy` reads no clock and performs no input or output: the same input object graph always produces a structurally equal result.
 
-Ranking, tie-breaking, the deterministic selector, and the `SelectionPlan` itself remain AB-66's scope (AB-249); this composition only produces the eligible/excluded candidate set that selector consumes.
+Ranking, tie-breaking, the deterministic selector, and the `SelectionPlan` itself are the next section's scope (AB-249); this composition only produces the eligible/excluded candidate set that selector consumes.
+
+### The deterministic backend selector and `SelectionPlan`
+
+Implemented by AB-249 (`packages/operative/src/providers/selection.ts`), consuming `composePolicy` above. `select(request, options)` is a pure, synchronous function: no input or output, no clock read except the injected `options.now`, deterministic for a recorded catalog revision, policy revision, availability-snapshot revision, task classification, and requested value. Every eligible candidate's `descriptorSnapshot` is a deep, independent structural copy — never a live reference into the catalog — so a `SelectionPlan` replays its own decision unchanged after the source catalog has moved on, been mutated, or been discarded:
+
+```ts
+/** Opaque caller/Agent-supplied tag. AB-64 fixes no taxonomy — determinism is
+ *  a property of the SelectionRequest signature, not of what the tag's
+ *  string value is. Quality-evidence-based classification is out of scope
+ *  (ABP-11 ruling); SelectionCandidate.rankingInputs is the named extension
+ *  point for a future signal, not this type. */
+export type TaskClassification = string & { readonly __brand?: 'TaskClassification' };
+
+export interface SelectionRequest {
+  readonly agentName: string;
+  readonly taskClassification?: TaskClassification;
+  /** AB-67's shipped union, narrowed to the four targets a selector can act
+   *  on. Absent means "use the Agent's own default." */
+  readonly requestedValue?: Extract<
+    SteeringRequestedValue,
+    { target: 'model' | 'provider' | 'route' | 'effort' }
+  >;
+  readonly catalogRevision: number;
+  readonly policyRevision: number;
+  readonly availabilitySnapshotRevision: number;
+}
+
+export interface SelectionCandidate {
+  readonly provider: ProviderName;
+  readonly model: string;
+  readonly route?: string;
+  /** Inlined by value, deeply frozen, structurally independent of the
+   *  source catalog — the replay guarantee AB-64 requires. */
+  readonly descriptorSnapshot: BackendDescriptor;
+  readonly eligible: boolean;
+  readonly exclusionCode?: SelectionExclusionCode;
+  readonly exclusionReason?: string;
+  readonly rankingInputs?: Readonly<Record<string, number>>;
+}
+
+export type SelectionOutcomeKind =
+  | 'selected'
+  | 'no-candidate'
+  | 'stale-catalog'
+  | 'capability-changed'
+  | 'policy-changed'
+  | 'exact-override-rejected'
+  | 'provider-effective-divergence';
+
+export interface SelectionOutcomeFailure {
+  readonly kind: Exclude<SelectionOutcomeKind, 'selected'>;
+  readonly reason: string;
+  readonly exclusionCode?: SelectionExclusionCode;
+  readonly rejectedOverride?: SteeringRequestedValue;
+}
+
+// `failure` is present if and only if `outcome !== 'selected'`, enforced
+// structurally by this two-arm union rather than a runtime assertion.
+export type SelectionPlan =
+  | (SelectionPlanCommon & { readonly outcome: 'selected'; readonly failure?: never })
+  | (SelectionPlanCommon & {
+      readonly outcome: Exclude<SelectionOutcomeKind, 'selected'>;
+      readonly failure: SelectionOutcomeFailure;
+    });
+
+interface SelectionPlanCommon {
+  readonly planId: string;
+  readonly request: SelectionRequest;
+  readonly candidates: readonly SelectionCandidate[];
+  readonly selected?: {
+    readonly provider: ProviderName;
+    readonly model: string;
+    readonly route?: string;
+    readonly effort?: Effort;
+  };
+  readonly fallbackPlan: readonly {
+    readonly provider: ProviderName;
+    readonly model: string;
+    readonly route?: string;
+  }[];
+  readonly catalogRevision: number;
+  readonly policyRevision: number;
+  readonly selectorRevision: number;
+  readonly configurationRevision?: number;
+  readonly createdAt: string;
+}
+
+export interface EffectiveGenerationResult {
+  readonly planId: string;
+  readonly provider: ProviderName;
+  readonly model: string;
+  readonly effort?: Effort;
+  readonly divergedFromPlan: boolean;
+}
+
+export interface SelectOptions {
+  readonly catalog: ModelCatalog;
+  readonly deployment?: DeploymentInvariants;
+  readonly bureau?: BureauInvariants;
+  readonly agent?: AgentPreferences;
+  readonly delegated?: DelegatedAuthority;
+  readonly user?: UserModelConfiguration;
+  readonly now?: () => string; // defaults to the wall clock
+  readonly newPlanId?: () => string; // defaults to crypto.randomUUID
+  readonly selectorRevision?: number; // defaults to 1
+  readonly configurationRevision?: number;
+  readonly revalidate?: RevalidationInput;
+}
+
+declare function select(request: SelectionRequest, options: SelectOptions): SelectionPlan;
+declare function recordEffectiveGeneration(
+  plan: SelectionPlan,
+  effective: EffectiveGenerationResult,
+): SelectionPlan;
+```
+
+`SelectionRequest` is exactly AB-64's recorded signature — the catalog and the five policy layers travel on `SelectOptions` instead, never on the request itself, so `SelectionRequest`'s field list stays exactly what determinism is checked against. `select` calls `composePolicy` internally for hard-constraint filtering (deployment, Bureau, Agent, delegated, user), then applies effort compatibility within the already-eligible set, then ranks by `costPreference`/`latencyPreference`/`preferredProviders`/`preferredModels` — soft preferences never resurrect a candidate a hard constraint excluded. Ties, including "no preference set at all," break by `(provider, model)` lexicographic order using plain `<` comparison, independent of locale and of input array order.
+
+`rankingInputs` is always populated for every eligible candidate with three named signals: `cost` (0..1, higher is cheaper, normalized across the eligible set; `0.5` for an unpriced descriptor), `latency` (a fixed `0` for every candidate today — `BackendDescriptor` carries no latency field yet, so `latencyPreference` has a documented, inert home rather than silently doing nothing), and `preferenceMatch` (`0`, `0.5`, or `1`, one half for each of `preferredProviders`/`preferredModels` naming the candidate).
+
+A `requestedValue` targeting `'model'`/`'provider'`/`'route'` with `.override` set contributes that field to the same `exactOverride` object `composePolicy` already understands, merged with any standing `options.user.exactOverride` — `composePolicy`'s override path already never applies the user layer to a matched candidate, so this reuse gets AB-64's "checked only against the four layers above the user's" rule for free. An override naming only one of `provider`/`model` cannot resolve to a single candidate on its own (AB-64's own rule); merge it with a standing `options.user.exactOverride` supplying the other field to identify exactly one descriptor. A rejected override yields a single-candidate plan with `eligible: false`, the denying layer's `exclusionCode`, and `outcome: 'exact-override-rejected'` carrying `rejectedOverride`. `target: 'route'` always yields `'no-candidate'`, since no descriptor carries a `route` field yet.
+
+Effort resolution reads, in priority order: `requestedValue` when its target is `'effort'` with `.override` set, else `options.user?.exactOverride?.effort`, else `options.user?.defaultEffort` — deliberately excluded from the `exactOverride` object handed to `composePolicy`, since `composePolicy` routes on the mere _presence_ of that key regardless of which fields it carries, and a pure effort preference must never trigger the provider/model override path. When a requested tier is defined, every otherwise-eligible candidate is checked against its own `descriptor.effort.degradesTo` table: the same tier is compatible; a different, defined tier is compatible only under `effortFallbackMode: 'degrade'` and the selected effort is recorded as the degraded tier, never silently; an `undefined` entry excludes the candidate with `'incompatible-effort'` regardless of mode.
+
+`'stale-catalog'` marks every candidate without excluding any, per `catalog.stale`. `'capability-changed'`/`'policy-changed'` compare a prior selection against the current one when the caller supplies `options.revalidate` (a prior selected candidate plus the catalog/policy revisions that plan was made against) — Bureau's boundary revalidation (AB-250) decides _when_ to revalidate; this module only defines what the comparison means. `recordEffectiveGeneration(plan, effective)` folds a completed generation's actual effective backend into a `'selected'` plan: `plan.selected` is never rewritten — when `effective.divergedFromPlan` is `true`, a new terminal plan is returned with `outcome: 'provider-effective-divergence'` and the original `selected` retained unchanged; when `false`, `plan` is returned unchanged, by reference.
 
 ### The Agent generation profile
 
