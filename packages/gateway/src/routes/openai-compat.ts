@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { resolvePrincipal, resolveTrustedRequestContext } from '../middleware/authentication';
 import { isRunFailure } from '../run-outcome';
 import type { Bureau, CreateRunRequest } from '../types';
+import { classifyRunAttachment, propagateDisconnectToAttachedRun } from './runs';
 
 /**
  * An individual message in the OpenAI chat messages array.
@@ -465,8 +466,20 @@ export function createOpenAICompatRoutes(bureau: Bureau) {
     // is never empty with a live provider. The loop resolves for all terminal
     // states (completed, error, aborted); the try/catch guards against
     // unexpected rejections only.
+    //
+    // AB-212 — this IS AB-37's "synchronous HTTP call awaiting a run" row: the
+    // handler blocks here until the run settles, so a client that disconnects
+    // during the wait must abort the run rather than let it run to completion
+    // for an audience that has left (mirroring the `stream: true` branch's
+    // existing `cancel()` → `abort()` wiring above). Only wired when the run
+    // is attached (process-local) — a durable run must survive this request.
     const runState = bureau.store.getRun(summary.id);
     if (runState) {
+      const durability = bureau.getRun(summary.id)?.liveness.durability ?? 'process-local';
+      const attachment = classifyRunAttachment({ signalForwarded: true, durability });
+      if (attachment === 'attached') {
+        propagateDisconnectToAttachedRun(bureau, summary.id, context.req.raw.signal);
+      }
       try {
         await runState.activeRun.result;
       } catch {

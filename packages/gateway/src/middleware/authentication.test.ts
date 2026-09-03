@@ -303,4 +303,76 @@ describe('authentication with api key store', () => {
     const response = await app.request('/protected');
     expect(response.status).toBe(401);
   });
+
+  // AB-212 regression: `commitHeaders()` rebuilds `context.req.raw` on every
+  // request (even the no-auth pass-through) to strip client-spoofable
+  // headers. Before this fix, the replacement `Request` carried no `signal`,
+  // so a downstream route's `context.req.raw.signal` was a fresh,
+  // never-aborting signal — completely disconnected from the caller's real
+  // one. This silently broke every request-disconnect propagation path
+  // (AB-212's attached-run abort included) regardless of which route or
+  // auth branch handled the request.
+  describe('forwards the original request signal through the header rewrite (AB-212)', () => {
+    function createSignalCapturingApp(authToken: string | undefined, apiKeyStore?: ApiKeyStore) {
+      const app = new Hono();
+      app.use('*', requestIdentifier);
+      app.use('*', createAuthentication(authToken, apiKeyStore));
+      let capturedSignal: AbortSignal | undefined;
+      app.get('/capture', (c) => {
+        capturedSignal = c.req.raw.signal;
+        return c.json({ ok: true });
+      });
+      app.onError(errorHandler);
+      return { app, getCapturedSignal: () => capturedSignal };
+    }
+
+    it('propagates a later abort on the no-auth pass-through branch', async () => {
+      const { app, getCapturedSignal } = createSignalCapturingApp(undefined, undefined);
+      const controller = new AbortController();
+
+      const response = await app.request('/capture', { signal: controller.signal });
+      expect(response.status).toBe(200);
+
+      const capturedSignal = getCapturedSignal();
+      expect(capturedSignal).toBeDefined();
+      expect(capturedSignal!.aborted).toBe(false);
+
+      let fired = false;
+      capturedSignal!.addEventListener('abort', () => {
+        fired = true;
+      });
+      controller.abort();
+
+      expect(fired).toBe(true);
+      expect(capturedSignal!.aborted).toBe(true);
+    });
+
+    it('propagates a later abort on the authenticated branch', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const apiKeyStore = createApiKeyStore(kv);
+      const { plaintext } = await apiKeyStore.create({
+        name: 'signal-test',
+        scopes: ['runs:read'],
+      });
+      const { app, getCapturedSignal } = createSignalCapturingApp(undefined, apiKeyStore);
+      const controller = new AbortController();
+
+      const response = await app.request('/capture', {
+        headers: { authorization: `Bearer ${plaintext}` },
+        signal: controller.signal,
+      });
+      expect(response.status).toBe(200);
+
+      const capturedSignal = getCapturedSignal();
+      expect(capturedSignal).toBeDefined();
+
+      let fired = false;
+      capturedSignal!.addEventListener('abort', () => {
+        fired = true;
+      });
+      controller.abort();
+
+      expect(fired).toBe(true);
+    });
+  });
 });

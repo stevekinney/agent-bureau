@@ -607,6 +607,78 @@ describe('OpenAI-compat route (POST /v1/chat/completions)', () => {
     });
   });
 
+  // AB-212 — this non-streaming path is AB-37's "synchronous HTTP call
+  // awaiting a run" row: the handler blocks on `activeRun.result` before
+  // responding, so a client disconnect during that wait must propagate to
+  // the run exactly like the `stream: true` branch's `cancel()` above.
+  describe('non-streaming: client disconnect aborts the run (AB-212)', () => {
+    it('aborts the run, awaits closed(), and records a run.disconnect-aborted audit entry', async () => {
+      // Resolves the instant `generate` is first invoked — which can only
+      // happen AFTER `createRun` has registered the run in the store (per
+      // `create-bureau.ts`'s own comment: `createRun` returns "synchronously
+      // right after the run starts", before its execute loop ever calls
+      // `generate`). Awaiting this promise directly, rather than polling the
+      // store on a bounded attempt count, makes "the run is running before
+      // we disconnect" a genuine causal guarantee instead of a timing race —
+      // it resolves exactly as fast as the real event loop allows, with no
+      // load-sensitive attempt budget to size.
+      let generateInvoked: () => void;
+      const generateInvokedPromise = new Promise<void>((resolve) => {
+        generateInvoked = resolve;
+      });
+      const generate: GenerateFunction = (context) => {
+        generateInvoked();
+        return new Promise((_resolve, reject) => {
+          context.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+        });
+      };
+
+      const gateway = await createTestGateway({
+        generate,
+        storage: { type: 'memory' },
+      });
+      const { plaintext } = await createGatewayAuthorityTestApiKey(gateway);
+
+      const controller = new AbortController();
+      const responsePromise = requestJSON(gateway, '/v1/chat/completions', {
+        method: 'POST',
+        headers: { authorization: `Bearer ${plaintext}` },
+        signal: controller.signal,
+        body: JSON.stringify({
+          model: 'bureau',
+          messages: [{ role: 'user', content: 'Disconnect test' }],
+        }),
+      });
+
+      await generateInvokedPromise;
+      const runId = [...gateway.bureau.store.getState().runs.values()].find(
+        (run) => run.status === 'running',
+      )?.id;
+      expect(runId).toBeDefined();
+
+      controller.abort();
+
+      const response = await responsePromise;
+      // The client disconnected before the run settled — the non-streaming
+      // handler's own response is moot (nobody is listening), but it still
+      // resolves rather than hanging.
+      expect(response.status).toBe(500);
+
+      expect(gateway.bureau.getRun(runId!)?.status).toBe('aborted');
+
+      const auditRecords = await gateway.bureau.auditTrail?.query({ runId });
+      const disconnectEntry = auditRecords?.find(
+        (record) => record.type === 'run.disconnect-aborted',
+      );
+      expect(disconnectEntry).toBeDefined();
+      expect(disconnectEntry?.detail).toMatchObject({
+        acknowledgement: { status: 'completed' },
+      });
+
+      gateway.bureau.dispose();
+    });
+  });
+
   describe('SSE streaming: run already settled before listeners attach (regression: PRRT_kwDORvupsc6MddwF)', () => {
     // For very fast `stream: true` requests, createRun() can schedule and
     // complete the run BEFORE the ReadableStream.start() callback attaches the
