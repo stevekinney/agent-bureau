@@ -36,6 +36,12 @@ export type {
 export type { PromptInjectionFixtureCase } from './prompt-injection-fixtures';
 export { PROMPT_INJECTION_FIXTURES } from './prompt-injection-fixtures';
 export type {
+  ReactiveSourceConformanceOptions,
+  ReactiveSourceConformanceTestRunner,
+  ReactiveSourceSubject,
+} from './reactive-source-suite';
+export { runReactiveSourceConformanceSuite } from './reactive-source-suite';
+export type {
   ClosableRun,
   DetachedResource,
   LeakedResource,
