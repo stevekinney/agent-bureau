@@ -1,10 +1,13 @@
 import type {
+  AgentInput,
+  AgentRunContext,
   AgentSession,
   GenerateFunction,
   GuardrailsOptions,
   JSONValue,
   OnStepHook,
   PrepareStepHook,
+  RunOptions,
   Scheduler,
   SessionStore,
   SessionSummary,
@@ -61,6 +64,7 @@ import {
 import {
   decode,
   deserializeCheckpoint,
+  encode,
   WorkflowCancelledEvent,
   WorkflowCompletedEvent,
   WorkflowFailedEvent,
@@ -476,6 +480,87 @@ export function decodeScheduleRunMarker(decoded: unknown): string | undefined {
   }
   return undefined;
 }
+
+/**
+ * AB-240: the recovery record `bureau.run()`'s durable catalog dispatch
+ * persists BEFORE starting the durable engine, keyed by the run's workflow
+ * id — a marker entirely separate from (and never correlated with)
+ * `sessionStore`'s `lastRunId`/`lastRunStatus`, because a catalog run never
+ * owns a bureau session. `definitionRevision` is `AgentGenerationProfile.revision`
+ * (operative's existing per-agent stable-revision field, read via
+ * `readGenerationProfile`) at dispatch time — the closest existing "has this
+ * catalog agent's definition changed" signal, reused rather than inventing a
+ * new one. `input` is the ORIGINAL `AgentInput` `bureau.run(name, input)` was
+ * called with: `AgentRunWorkflowInput.prompt` is NOT a substitute (it is a
+ * seed-only field the durable workflow itself ignores on resume — see its own
+ * doc comment), and `OPERATIVE_RESOLVE_RUN_OPTIONS` must be re-invoked with the
+ * real input to rebuild `RunOptions` fresh each boot, the same way
+ * `buildRunDepsFromSession` rebuilds session-owned deps from config rather
+ * than a stored blob.
+ */
+export interface CatalogRunRecoveryRecord {
+  readonly schemaVersion: 1;
+  readonly agentName: string;
+  readonly definitionRevision: number;
+  readonly input: AgentInput;
+}
+
+// Exported for tests only — lets `runtime-composition.test.ts` construct the
+// exact storage key to exercise `loadCatalogRunRecoveryRecord`'s read-error
+// branch by writing malformed raw bytes directly through the durable engine's
+// own `Storage` (`runtime.durable.engine.storage`), the only way to inject a
+// genuine decode failure rather than a merely-absent or malformed-but-decodable
+// record.
+export const CATALOG_RUN_RECOVERY_KEY_PREFIX = 'bureau-catalog-run:';
+
+function catalogRunRecoveryKey(runId: string): string {
+  return `${CATALOG_RUN_RECOVERY_KEY_PREFIX}${runId}`;
+}
+
+function isCatalogAgentInput(value: unknown): value is AgentInput {
+  if (typeof value === 'string') return true;
+  return isRecord(value) && isRecord(value['conversation']);
+}
+
+function isCatalogRunRecoveryRecord(value: unknown): value is CatalogRunRecoveryRecord {
+  if (!isRecord(value)) return false;
+  if (value['schemaVersion'] !== 1) return false;
+  const agentName = value['agentName'];
+  if (typeof agentName !== 'string' || agentName.length === 0) return false;
+  if (typeof value['definitionRevision'] !== 'number') return false;
+  return isCatalogAgentInput(value['input']);
+}
+
+/**
+ * The outcome of re-resolving a catalog agent's `RunOptions` during boot
+ * recovery — `resolveRunServices`'s catalog branch consults
+ * `catalogAgentRunOptionsResolver` (wired by `createBureau` from its own
+ * agent catalog, which `createRuntimeComposition` deliberately does not know
+ * about — see this file's own `RuntimeCompositionOptions` doc comment) rather
+ * than reaching into the catalog directly.
+ */
+export type CatalogAgentRunOptionsResolution =
+  | { status: 'resolved'; options: RunOptions; definitionRevision: number }
+  | { status: 'missing-agent' }
+  /**
+   * The named agent exists in the catalog but does not (or no longer)
+   * expose AB-21's `OPERATIVE_RESOLVE_RUN_OPTIONS` — distinct from
+   * `'missing-agent'` (review finding: conflating the two produced the
+   * misleading "is no longer in the catalog" reason for an agent that
+   * genuinely IS still there, just not durable-resolution-capable). This is
+   * reachable at recovery even though live dispatch only reaches the
+   * durable branch for a resolver-exposing agent: the catalog can be
+   * reconfigured between restarts to swap the same name to a different
+   * `RunnableAgent` that lacks the capability.
+   */
+  | { status: 'not-durable-capable' }
+  | { status: 'resolver-failed'; error: unknown };
+
+export type CatalogAgentRunOptionsResolver = (
+  agentName: string,
+  input: AgentInput,
+  context: AgentRunContext,
+) => Promise<CatalogAgentRunOptionsResolution>;
 
 type RecoveredScheduleMarker =
   | { status: 'found'; scheduleId: string }
@@ -1240,6 +1325,29 @@ export interface RuntimeComposition {
   setRequestAuthorityValidator(
     validator: ((context: ToolRequestContext) => boolean | Promise<boolean>) | undefined,
   ): void;
+  /**
+   * AB-240: wired by `createBureau` once its agent catalog exists, so boot
+   * recovery can resolve a catalog-dispatched run's deps through the
+   * catalog agent's OWN `OPERATIVE_RESOLVE_RUN_OPTIONS` rather than the
+   * Bureau's default runtime composition.
+   */
+  setCatalogAgentRunOptionsResolver(resolver: CatalogAgentRunOptionsResolver | undefined): void;
+  /**
+   * Persist the catalog-run recovery record `resolveRunServices` consults
+   * on the next boot. Called from `bureau.run()`'s durable dispatch branch
+   * before the durable engine starts. A no-op when this composition has no
+   * durable storage.
+   */
+  persistCatalogRunRecoveryRecord(
+    runId: string,
+    record: Omit<CatalogRunRecoveryRecord, 'schemaVersion'>,
+  ): Promise<void>;
+  /**
+   * Whether `runId` has a persisted catalog-run recovery record — used by
+   * `createBureau`'s boot-recovery classification to route a catalog run to
+   * a headless monitor instead of the session-ownership classification.
+   */
+  isCatalogRecoveredRun(runId: string): Promise<boolean>;
   ready: boolean;
   provider: RedactedProviderConfiguration | undefined;
   providers: RedactedProviderRouteConfiguration[];
@@ -1290,6 +1398,11 @@ export async function createRuntimeComposition(
   // mode has no background poller, but shares the same gate for consistency.
   let compositionReady = false;
   let requestAuthorityValidator = options.requestAuthorityValidator;
+  // AB-240: wired by `createBureau` once its agent catalog exists (this
+  // function's own contract deliberately excludes `agents` — see
+  // `RuntimeCompositionOptions`'s doc comment) — `undefined` until then, and
+  // for any direct `createRuntimeComposition` caller that never wires one.
+  let catalogAgentRunOptionsResolver: CatalogAgentRunOptionsResolver | undefined;
 
   // AB-10: run ids the durable engine flags as version-mismatched during boot
   // recovery — see RuntimeComposition.workflowVersionMismatches.
@@ -1973,6 +2086,131 @@ export async function createRuntimeComposition(
     };
   }
 
+  /**
+   * AB-240: persist the catalog-run recovery record. Called from
+   * `create-bureau.ts`'s `runAgent` durable branch BEFORE `createActiveRun`
+   * starts the durable engine, so a crash immediately after start still has,
+   * on the next boot, enough to reattach against the catalog agent's own
+   * run options — see `resolveRunServices`'s catalog branch below. A no-op
+   * when this composition has no durable storage (nothing to reattach
+   * across a restart without one, matching the schedule-marker precedent
+   * above); the caller only reaches this inside an `if (runtime.durable)`
+   * guard, so `durableStorage` is defined whenever it actually matters.
+   */
+  async function persistCatalogRunRecoveryRecord(
+    runId: string,
+    record: Omit<CatalogRunRecoveryRecord, 'schemaVersion'>,
+  ): Promise<void> {
+    if (!durableStorage) return;
+    const fullRecord: CatalogRunRecoveryRecord = { schemaVersion: 1, ...record };
+    await durableStorage.put(catalogRunRecoveryKey(runId), encode(fullRecord));
+  }
+
+  type CatalogRunRecoveryLoad =
+    | { status: 'found'; record: CatalogRunRecoveryRecord }
+    | { status: 'missing' }
+    | { status: 'read-error'; error: unknown };
+
+  async function loadCatalogRunRecoveryRecord(runId: string): Promise<CatalogRunRecoveryLoad> {
+    if (!durableStorage) return { status: 'missing' };
+    try {
+      const value = await durableStorage.get(catalogRunRecoveryKey(runId));
+      if (!value) return { status: 'missing' };
+      const decoded = decode(value);
+      return isCatalogRunRecoveryRecord(decoded)
+        ? { status: 'found', record: decoded }
+        : { status: 'missing' };
+    } catch (error) {
+      return { status: 'read-error', error };
+    }
+  }
+
+  /**
+   * AB-240: whether `runId` has a persisted catalog-run recovery record —
+   * `create-bureau.ts`'s boot-recovery classification uses this to route a
+   * catalog-dispatched run to a headless monitor (mirroring a native
+   * scheduled fire) instead of the session-ownership classification, which
+   * would otherwise treat it as an orphaned run and cancel it (a catalog run
+   * deliberately owns no bureau session).
+   *
+   * True for `'read-error'` as well as `'found'` (review finding): a corrupt
+   * record still marks this workflow id as catalog territory. `'missing'`
+   * is the only status that means "genuinely not a catalog run" — treating
+   * `'read-error'` as `false` would let a merely-corrupt (not absent) record
+   * fall through to the session-ownership classification below, which would
+   * then cancel the run as an unowned orphan instead of leaving it to the
+   * `{ status: 'unavailable', reason: '... unreadable' }` outcome
+   * `resolveRunServices`'s catalog branch already produced for it.
+   */
+  async function isCatalogRecoveredRun(runId: string): Promise<boolean> {
+    const load = await loadCatalogRunRecoveryRecord(runId);
+    return load.status !== 'missing';
+  }
+
+  /**
+   * AB-240: `resolveRunServices`'s catalog branch — resolves a recovered
+   * catalog-dispatched run's deps through the CATALOG AGENT's own
+   * `OPERATIVE_RESOLVE_RUN_OPTIONS` (via `catalogAgentRunOptionsResolver`,
+   * wired by `createBureau`), never through `buildRunDepsFromSession` /
+   * the Bureau's own runtime composition — reattaching a catalog run
+   * against the Bureau's default provider/tools instead of the agent's own
+   * is this feature's rollback trigger.
+   */
+  async function resolveCatalogAgentRunServices(
+    runId: string,
+    record: CatalogRunRecoveryRecord,
+  ): Promise<WorkflowServicesResolution> {
+    if (!catalogAgentRunOptionsResolver) {
+      return {
+        status: 'unavailable',
+        reason: `run ${runId}: no catalog agent recovery resolver is configured`,
+      };
+    }
+    const resolution = await catalogAgentRunOptionsResolver(record.agentName, record.input, {
+      agentName: record.agentName,
+    });
+    if (resolution.status === 'missing-agent') {
+      return {
+        status: 'unavailable',
+        reason: `run ${runId}: catalog agent "${record.agentName}" is no longer in the catalog`,
+      };
+    }
+    if (resolution.status === 'not-durable-capable') {
+      return {
+        status: 'unavailable',
+        reason:
+          `run ${runId}: catalog agent "${record.agentName}" no longer supports durable ` +
+          `definition resolution (OPERATIVE_RESOLVE_RUN_OPTIONS)`,
+      };
+    }
+    if (resolution.status === 'resolver-failed') {
+      return {
+        status: 'unavailable',
+        reason:
+          `run ${runId}: catalog agent "${record.agentName}" could not resolve run options ` +
+          `during recovery: ${serializeUnknownError(resolution.error)}`,
+      };
+    }
+    if (resolution.definitionRevision !== record.definitionRevision) {
+      // Pin-and-warn, mirroring AB-10's workflow-version-mismatch precedent
+      // (`workflowVersionMismatches` / 'reattach-version-mismatch'): reattach
+      // with the catalog's CURRENT definition (the closest available match)
+      // rather than fail, but surface the drift for operators.
+      diagnose({
+        level: 'warn',
+        scope: 'recovery',
+        message:
+          `[bureau] Catalog agent "${record.agentName}" definition revision changed since ` +
+          `run ${runId} was checkpointed (was ${record.definitionRevision}, now ` +
+          `${resolution.definitionRevision}); reattaching with the current definition.`,
+      });
+    }
+    return {
+      status: 'available',
+      services: { options: resolution.options, toolbox: resolution.options.toolbox },
+    };
+  }
+
   async function loadScheduleIdForRecoveredRun(
     workflowId: string,
   ): Promise<RecoveredScheduleMarker> {
@@ -2273,6 +2511,23 @@ export async function createRuntimeComposition(
     if (!sessionStore) {
       return { status: 'unavailable', reason: 'no session store configured' };
     }
+    // AB-240: `bureau.run()`'s durable catalog dispatch persists its OWN
+    // recovery record (agent name + a stable definition revision + the
+    // original input), keyed by workflowId, entirely independent of
+    // `sessionStore`'s lastRunId/lastRunStatus correlation — a catalog run
+    // deliberately never owns a bureau session. Check for it FIRST: when
+    // present it is authoritative and bypasses every guard below (scheduler
+    // origin, session ownership), none of which apply to a catalog run.
+    const catalogRecovery = await loadCatalogRunRecoveryRecord(info.workflowId);
+    if (catalogRecovery.status === 'read-error') {
+      return {
+        status: 'unavailable',
+        reason: `run ${info.workflowId}: catalog recovery record unreadable`,
+      };
+    }
+    if (catalogRecovery.status === 'found') {
+      return resolveCatalogAgentRunServices(info.workflowId, catalogRecovery.record);
+    }
     // NATIVE SCHEDULED FIRE (#109/#126): Weft sets `info.schedule` for a live
     // schedule tick, and (Weft 0.10+) also derives it from durable schedule
     // metadata when re-providing services on recovery — so `info.schedule` alone
@@ -2481,6 +2736,11 @@ export async function createRuntimeComposition(
     setRequestAuthorityValidator(validator) {
       requestAuthorityValidator = validator;
     },
+    setCatalogAgentRunOptionsResolver(resolver) {
+      catalogAgentRunOptionsResolver = resolver;
+    },
+    persistCatalogRunRecoveryRecord,
+    isCatalogRecoveredRun,
     ready:
       options.generate !== undefined ||
       options.provider !== undefined ||
