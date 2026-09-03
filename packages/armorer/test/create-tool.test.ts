@@ -10,7 +10,7 @@ import type {
   ToolRequestContext,
 } from '../src';
 import { createTool, createToolCall, isTool, lazy, withContext } from '../src';
-import { serializeToolDefinition } from '../src/core/serialization';
+import { type SerializedToolDefinition, serializeToolDefinition } from '../src/core/serialization';
 import type { AnyToolDefinition } from '../src/core/tool-definition';
 import { ToolProgressEvent } from '../src/events';
 import {
@@ -20,6 +20,7 @@ import {
   policyAuthorizationOnlySymbol,
 } from '../src/internal/approval-resume';
 import { createConcurrencyLimiter } from '../src/utilities/concurrency';
+import { createMutableToolbox } from './helpers/mutable-toolbox';
 
 async function drainMicrotasks(): Promise<void> {
   for (let index = 0; index < 5; index++) {
@@ -145,6 +146,34 @@ function expectTerminalAuditContext(context: EffectiveToolExecutionContext | und
 }
 
 describe('createTool', () => {
+  it('auto-registers onto a legacy mutable toolbox passed as the second argument', () => {
+    // The legacy `createTool(config, toolbox)` form auto-registers the tool
+    // when `toolbox` exposes the mutable `register()` convenience that
+    // `createToolboxBase` attaches under `isTestRuntime()` (see
+    // `hasLegacyRegister` in `src/create-tool.ts`). Kept as a dedicated
+    // regression test since AB-295 converted every other call site in this
+    // suite to the typed `toolbox.register(createTool(config))` form.
+    const toolbox = createMutableToolbox();
+    // The two-argument form is deliberately untyped on `createTool`'s public
+    // overloads (only its implementation signature accepts `legacyToolbox:
+    // unknown`), so this mirrors that with a cast rather than fighting it.
+    const legacyCreateTool = createTool as (
+      configuration: Parameters<typeof createTool>[0],
+      legacyToolbox: unknown,
+    ) => Tool;
+    const tool = legacyCreateTool(
+      {
+        name: 'legacy-auto-register',
+        description: 'registers via the legacy two-argument form',
+        input: z.object({}),
+        execute: async () => 'ok',
+      },
+      toolbox,
+    );
+
+    expect(toolbox.getTool('legacy-auto-register')?.name).toBe(tool.name);
+  });
+
   it('creates a callable tool function with metadata and execute()', async () => {
     const calls: unknown[] = [];
     type Events = { called: { a: string; b?: number } } & {
@@ -185,6 +214,18 @@ describe('createTool', () => {
     expect(tool.toString()).toContain('example');
     expect(tool[Symbol.toPrimitive]('string')).toBe('example');
     expect(`${tool}`).toBe('example');
+    // `toJSON` is attached to the runtime proxy (see `bag.toJSON` in
+    // `src/create-tool.ts`) but deliberately absent from the public `Tool`
+    // type — callers serialize a tool via its `configuration`, not this
+    // property — so it's accessed the same way the legacy `register`
+    // convenience above is: through a cast rather than a public type.
+    const toolWithToJSON = tool as unknown as { toJSON: () => SerializedToolDefinition };
+    expect(toolWithToJSON.toJSON()).toEqual(
+      serializeToolDefinition({
+        ...tool.configuration,
+        input: tool.configuration.input ?? tool.input,
+      } as AnyToolDefinition),
+    );
 
     // execute() validates then calls underlying fn
     const execResult = await tool.execute(createToolCall('example', { a: 'hi' }));
