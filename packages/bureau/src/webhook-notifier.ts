@@ -38,7 +38,32 @@
  * Restart-resumption of in-flight `pending` deliveries is out of scope for
  * v1 — see the module doc on `listDeliveries` for the exact guarantee this
  * gives instead (durable de-duplication, not durable resumption).
+ *
+ * Each in-flight delivery also gets a per-delivery `LivenessSnapshot`
+ * (AB-220), watched via `createStallWatchdog` against a `webhook-delivery`
+ * `StallPolicy` row (AB-214) whose `absoluteDeadlineMs` is computed per
+ * delivery from that delivery's own `maxAttempts`/`backoffBaseMilliseconds`
+ * — the worst-case total elapsed backoff before it gives up. This is a
+ * detection backstop for a single hung `fetchImpl` call: the delivery loop
+ * has no per-request `AbortSignal`/fetch timeout of its own, so a hung
+ * request can otherwise exceed the computed deadline without the delivery
+ * code itself noticing.
  */
+import {
+  createStallWatchdog,
+  LIVENESS_POLICY_VERSION,
+  type LivenessAssessment,
+  type LivenessLifecycleStatus,
+  type LivenessObservable,
+  type LivenessProgressState,
+  type LivenessReachability,
+  type LivenessSnapshot,
+  type StallPolicy,
+  type StallWatchdog,
+  type StallWatchdogClock,
+  type Subscription,
+  WEBHOOK_DELIVERY_POLICY,
+} from '@lostgradient/operative/liveness';
 import type { TextValueStore } from '@lostgradient/weft/storage';
 
 import type { AgentDefinitions } from './agent-catalog';
@@ -62,6 +87,139 @@ export interface WebhookTarget {
    * three ({@link WebhookTriggerType}).
    */
   events?: WebhookTriggerType[];
+}
+
+/** A single webhook delivery's liveness snapshot (AB-220). */
+export type WebhookDeliveryLivenessSnapshot = LivenessSnapshot & { kind: 'webhook-delivery' };
+
+/**
+ * The `absoluteDeadlineMs` for a webhook delivery (AB-220): the worst-case
+ * total elapsed backoff across every retry attempt before the delivery
+ * gives up — `backoffBaseMilliseconds * (2 ** (maxAttempts - 1) - 1)`,
+ * matching this module's own `deliver()` backoff schedule
+ * (`backoffBaseMilliseconds * 2 ** (attempt - 1)`, summed across the
+ * `maxAttempts - 1` retries after the first attempt). Exported for direct
+ * unit testing against `DEFAULT_MAX_ATTEMPTS`/`DEFAULT_BACKOFF_BASE_MILLISECONDS`
+ * and a caller override.
+ */
+export function computeWebhookDeliveryDeadlineMs(
+  maxAttempts: number,
+  backoffBaseMilliseconds: number,
+): number {
+  return backoffBaseMilliseconds * (2 ** (maxAttempts - 1) - 1);
+}
+
+function webhookDeliveryPolicy(maxAttempts: number, backoffBaseMilliseconds: number): StallPolicy {
+  return {
+    ...WEBHOOK_DELIVERY_POLICY,
+    absoluteDeadlineMs: computeWebhookDeliveryDeadlineMs(maxAttempts, backoffBaseMilliseconds),
+  };
+}
+
+/**
+ * The default production clock backing each delivery's
+ * `createStallWatchdog` — `performance.now()`, a monotonic source, matching
+ * `active-run-liveness.ts`'s own default clock. Distinct from this module's
+ * own `now` option, which is `Date.now`-based and only ever timestamps
+ * persisted `WebhookDeliveryRecord`s. Exported for direct unit testing of
+ * `setTimeout`/`clearTimeout` (AB-220): the `webhook-delivery` policy row
+ * has `missedPulseThreshold: 0`, so `createStallWatchdog` never actually
+ * calls either through the public API — see
+ * `packages/operative/src/liveness/watchdog.ts`'s `scheduleNextCheck`,
+ * which no-ops when a policy isn't cadence-gated.
+ */
+export const realWatchdogClock: StallWatchdogClock = {
+  now: () => performance.now(),
+  setTimeout: (callback, ms) => setTimeout(callback, ms),
+  clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+};
+
+/** The fixed id for the notifier's own instance-level aggregate snapshot. */
+const AGGREGATE_DELIVERY_ID = 'webhook-notifier';
+
+/**
+ * AB-216's child-liveness severity ordering
+ * (`packages/operative/src/liveness/active-run-liveness.ts`), duplicated at
+ * module-local scope rather than imported: this issue's delivery boundary
+ * restricts its edit to `online-evals.ts`/`webhook-notifier.ts` and their
+ * tests, and the source ordering is not part of `@lostgradient/operative`'s
+ * public `liveness` subpath export.
+ */
+const ASSESSMENT_SEVERITY: readonly Exclude<LivenessAssessment, 'terminal'>[] = [
+  'unreachable',
+  'alive-but-stalled',
+  'aborting',
+  'cleaning-up',
+  'legitimately-waiting',
+  'healthy',
+];
+
+/**
+ * Folds a set of non-terminal assessments down to the single most severe
+ * one, defaulting to `'healthy'` when empty. Exported for direct unit
+ * testing (AB-220): before a delivery's computed deadline passes it always
+ * reports `'healthy'` (no cadence), so the "found something worse" branch
+ * is otherwise unreachable through the public API without a real hung
+ * request outliving the deadline.
+ */
+export function worstAssessment(assessments: readonly LivenessAssessment[]): LivenessAssessment {
+  let worst: LivenessAssessment = 'healthy';
+  let worstRank = ASSESSMENT_SEVERITY.indexOf('healthy');
+  for (const assessment of assessments) {
+    if (assessment === 'terminal') continue;
+    const rank = ASSESSMENT_SEVERITY.indexOf(assessment);
+    if (rank === -1 || rank >= worstRank) continue;
+    worstRank = rank;
+    worst = assessment;
+  }
+  return worst;
+}
+
+const REACHABILITY_RANK: readonly LivenessReachability[] = ['reachable', 'late', 'unreachable'];
+
+/** Exported for direct unit testing (AB-220); see {@link worstAssessment}. */
+export function worstReachability(values: readonly LivenessReachability[]): LivenessReachability {
+  let worst: LivenessReachability = 'unknown';
+  let worstRank = -1;
+  for (const value of values) {
+    const rank = REACHABILITY_RANK.indexOf(value);
+    if (rank > worstRank) {
+      worstRank = rank;
+      worst = value;
+    }
+  }
+  return worst;
+}
+
+const PROGRESS_RANK: readonly LivenessProgressState[] = ['progressing', 'idle', 'stalled'];
+
+/** Exported for direct unit testing (AB-220); see {@link worstAssessment}. */
+export function worstProgress(values: readonly LivenessProgressState[]): LivenessProgressState {
+  let worst: LivenessProgressState = 'unknown';
+  let worstRank = -1;
+  for (const value of values) {
+    const rank = PROGRESS_RANK.indexOf(value);
+    if (rank > worstRank) {
+      worstRank = rank;
+      worst = value;
+    }
+  }
+  return worst;
+}
+
+/** Mirrors `active-run-liveness.ts`'s `deriveAssessment` for this module's own status dimension. */
+function deriveDeliveryAssessment(
+  status: LivenessLifecycleStatus,
+  reachability: LivenessReachability,
+  progress: LivenessProgressState,
+): LivenessAssessment {
+  if (status === 'terminal') return 'terminal';
+  if (status === 'aborting') return 'aborting';
+  if (status === 'cleaning-up') return 'cleaning-up';
+  if (reachability === 'unreachable') return 'unreachable';
+  if (status === 'waiting') return 'legitimately-waiting';
+  if (progress === 'stalled') return 'alive-but-stalled';
+  return 'healthy';
 }
 
 /** Options for {@link createWebhookNotifier}. */
@@ -92,6 +250,12 @@ export interface WebhookNotifierOptions {
    * awaits that settlement via `flush()`.
    */
   signal?: AbortSignal;
+  /**
+   * Injectable timer-agnostic clock backing each delivery's
+   * `createStallWatchdog` (AB-220). Defaults to a `performance.now()`-based
+   * clock. Tests inject a manual clock so no real sleeps are needed.
+   */
+  clock?: StallWatchdogClock;
 }
 
 /** The persisted record for a single webhook delivery. */
@@ -108,7 +272,7 @@ export interface WebhookDeliveryRecord {
   updatedAt: number;
 }
 
-export interface WebhookNotifier {
+export interface WebhookNotifier extends LivenessObservable<WebhookDeliveryLivenessSnapshot> {
   /**
    * List every persisted delivery record (for diagnostics/tests). Best-effort:
    * returns `[]` when no KV store is configured (ephemeral bureau).
@@ -147,6 +311,14 @@ export interface WebhookNotifier {
    * second call resolves promptly.
    */
   dispose(): Promise<void>;
+  /**
+   * Per-delivery `LivenessSnapshot`s for every delivery currently in flight
+   * (AB-220), most-recently-started last. `snapshot()` (from
+   * {@link LivenessObservable}) reports the instance-level aggregate — the
+   * worst assessment across these — for a caller holding only the notifier
+   * handle.
+   */
+  activeDeliverySnapshots(): WebhookDeliveryLivenessSnapshot[];
 }
 
 // ── Key encoding ────────────────────────────────────────────────────
@@ -237,6 +409,27 @@ export function createWebhookNotifier<D extends AgentDefinitions = AgentDefiniti
   const targets = options?.targets ?? [];
 
   if (targets.length === 0) {
+    const noOpSnapshot: WebhookDeliveryLivenessSnapshot = Object.freeze({
+      id: AGGREGATE_DELIVERY_ID,
+      kind: 'webhook-delivery',
+      startedAt: new Date().toISOString(),
+      revision: 0,
+      status: 'terminal',
+      lastTransitionAt: new Date().toISOString(),
+      projection: 'redacted',
+      ownership: 'independent',
+      detached: false,
+      durability: 'process-local',
+      cancellable: false,
+      attempt: 0,
+      reachability: 'not-applicable',
+      progress: 'not-applicable',
+      assessment: 'terminal',
+      observedAt: 0,
+      missedPulseCount: 0,
+      policyVersion: LIVENESS_POLICY_VERSION,
+      evidence: [],
+    });
     return {
       listDeliveries() {
         return Promise.resolve([]);
@@ -250,6 +443,16 @@ export function createWebhookNotifier<D extends AgentDefinitions = AgentDefiniti
       async dispose() {
         // Nothing was ever subscribed.
       },
+      activeDeliverySnapshots() {
+        return [];
+      },
+      snapshot() {
+        return noOpSnapshot;
+      },
+      subscribeSnapshot(observer) {
+        observer(noOpSnapshot);
+        return { unsubscribe() {}, closed: true };
+      },
     };
   }
 
@@ -261,6 +464,8 @@ export function createWebhookNotifier<D extends AgentDefinitions = AgentDefiniti
   const backoffBaseMilliseconds =
     options?.backoffBaseMilliseconds ?? DEFAULT_BACKOFF_BASE_MILLISECONDS;
   const reviewQueueBaseUrl = options?.reviewQueueBaseUrl;
+  const clock = options?.clock ?? realWatchdogClock;
+  const deliveryPolicy = webhookDeliveryPolicy(maxAttempts, backoffBaseMilliseconds);
 
   // Subject ids already notified this process, so a delivery is kicked off
   // at most once per (subject, target) pair even across multiple qualifying
@@ -287,6 +492,135 @@ export function createWebhookNotifier<D extends AgentDefinitions = AgentDefiniti
   function trackDelivery(promise: Promise<void>): void {
     activeDeliveries.add(promise);
     void promise.finally(() => activeDeliveries.delete(promise));
+  }
+
+  // ── AB-220: per-delivery liveness ───────────────────────────────────
+
+  interface TrackedDelivery {
+    readonly id: string;
+    readonly runId: string;
+    readonly watchdog: StallWatchdog;
+    readonly startedAt: string;
+    readonly deadlineAt: number;
+  }
+
+  const trackedDeliveries = new Map<string, TrackedDelivery>();
+
+  function computeDeliverySnapshot(tracked: TrackedDelivery): WebhookDeliveryLivenessSnapshot {
+    const assessed = tracked.watchdog.assess();
+    const status: LivenessLifecycleStatus = 'running';
+    return Object.freeze({
+      id: tracked.id,
+      kind: 'webhook-delivery',
+      parentId: tracked.runId,
+      startedAt: tracked.startedAt,
+      revision: 0,
+      status,
+      lastTransitionAt: tracked.startedAt,
+      projection: 'redacted',
+      ownership: 'independent',
+      detached: false,
+      durability: 'process-local',
+      cancellable: false,
+      attempt: 0,
+      reachability: assessed.reachability,
+      progress: assessed.progress,
+      assessment: deriveDeliveryAssessment(status, assessed.reachability, assessed.progress),
+      observedAt: clock.now(),
+      missedPulseCount: assessed.missedPulseCount,
+      deadline: tracked.deadlineAt,
+      policyVersion: LIVENESS_POLICY_VERSION,
+      evidence: assessed.evidence,
+    });
+  }
+
+  const aggregateStartedAt = new Date().toISOString();
+  let aggregateRevision = 0;
+  let cachedAggregate: WebhookDeliveryLivenessSnapshot | undefined;
+  let cachedAggregateRevision = -1;
+
+  interface AggregateSubscriberRecord {
+    readonly observer: (snapshot: WebhookDeliveryLivenessSnapshot) => void;
+    closed: boolean;
+    detachAbortListener: () => void;
+  }
+
+  const aggregateSubscribers = new Set<AggregateSubscriberRecord>();
+
+  function computeAggregateSnapshot(): WebhookDeliveryLivenessSnapshot {
+    const items = [...trackedDeliveries.values()].map(computeDeliverySnapshot);
+    const status: LivenessLifecycleStatus = 'running';
+    const reachability = worstReachability(items.map((item) => item.reachability));
+    const progress = worstProgress(items.map((item) => item.progress));
+    return Object.freeze({
+      id: AGGREGATE_DELIVERY_ID,
+      kind: 'webhook-delivery',
+      startedAt: aggregateStartedAt,
+      revision: aggregateRevision,
+      status,
+      lastTransitionAt: aggregateStartedAt,
+      projection: 'redacted',
+      ownership: 'independent',
+      detached: false,
+      durability: 'process-local',
+      cancellable: false,
+      attempt: 0,
+      reachability,
+      progress,
+      assessment: worstAssessment(items.map((item) => item.assessment)),
+      observedAt: clock.now(),
+      missedPulseCount: items.reduce((max, item) => Math.max(max, item.missedPulseCount), 0),
+      policyVersion: LIVENESS_POLICY_VERSION,
+      evidence: [],
+    });
+  }
+
+  function readAggregateSnapshot(): WebhookDeliveryLivenessSnapshot {
+    if (cachedAggregate && cachedAggregateRevision === aggregateRevision) {
+      return cachedAggregate;
+    }
+    cachedAggregate = computeAggregateSnapshot();
+    cachedAggregateRevision = aggregateRevision;
+    return cachedAggregate;
+  }
+
+  function notifyAggregate(): void {
+    const current = readAggregateSnapshot();
+    for (const record of [...aggregateSubscribers]) {
+      if (record.closed) continue;
+      try {
+        record.observer(current);
+      } catch {
+        // A throwing subscriber must not escape into the caller driving this
+        // revision, matching `active-run-liveness.ts`'s own isolation.
+      }
+    }
+  }
+
+  function advanceAggregate(): void {
+    aggregateRevision += 1;
+    notifyAggregate();
+  }
+
+  function beginTrackedDelivery(id: string, runId: string): TrackedDelivery {
+    const watchdog = createStallWatchdog(deliveryPolicy, clock);
+    const deadlineAt = clock.now() + (deliveryPolicy.absoluteDeadlineMs ?? 0);
+    const tracked: TrackedDelivery = {
+      id,
+      runId,
+      watchdog,
+      startedAt: new Date().toISOString(),
+      deadlineAt,
+    };
+    trackedDeliveries.set(id, tracked);
+    advanceAggregate();
+    return tracked;
+  }
+
+  function endTrackedDelivery(tracked: TrackedDelivery): void {
+    tracked.watchdog.dispose();
+    trackedDeliveries.delete(tracked.id);
+    advanceAggregate();
   }
 
   // Internal shutdown signal, aborted by `dispose()`. Separate from the
@@ -382,65 +716,70 @@ export function createWebhookNotifier<D extends AgentDefinitions = AgentDefiniti
     };
     await persist(record);
 
-    // Deliberately NOT `&& !disposed` here: the abort check inside the loop
-    // body below must run even when `dispose()` has already flipped
-    // `disposed` before this delivery's first attempt begins (e.g. dispose
-    // races the initial KV lookup/persist above), so an owner-issued
-    // `signal` abort is always recorded as `aborted` rather than silently
-    // dropped as `pending` — see the abort-before-disposed ordering below.
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      if (signal?.aborted) {
-        record = { ...record, status: 'aborted', updatedAt: now() };
-        await persist(record);
-        return;
-      }
-
-      // Checked AFTER the abort branch above: a plain `dispose()` with no
-      // `signal` configured must still stop the retry loop promptly (the
-      // pre-existing behavior), it just has no defined terminal status to
-      // persist — the record is left `pending` for a future process to
-      // retry, exactly as before this change.
-      if (disposed) return;
-
-      record = { ...record, attempts: attempt, updatedAt: now() };
-      try {
-        const response = await fetchImpl(target.url, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(payload),
-          signal,
-        });
-        if (!response.ok) {
-          throw new Error(`Webhook target responded with status ${response.status}`);
-        }
-        record = { ...record, status: 'delivered', updatedAt: now() };
-        await persist(record);
-        return;
-      } catch (error) {
+    const tracked = beginTrackedDelivery(id, payload.runId);
+    try {
+      // Deliberately NOT `&& !disposed` here: the abort check inside the loop
+      // body below must run even when `dispose()` has already flipped
+      // `disposed` before this delivery's first attempt begins (e.g. dispose
+      // races the initial KV lookup/persist above), so an owner-issued
+      // `signal` abort is always recorded as `aborted` rather than silently
+      // dropped as `pending` — see the abort-before-disposed ordering below.
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         if (signal?.aborted) {
-          // The signal aborted mid-attempt (`fetchImpl` observed it, per
-          // AB-37/AB-206) — record a defined terminal status rather than
-          // treating the abort as a retryable delivery error.
+          record = { ...record, status: 'aborted', updatedAt: now() };
+          await persist(record);
+          return;
+        }
+
+        // Checked AFTER the abort branch above: a plain `dispose()` with no
+        // `signal` configured must still stop the retry loop promptly (the
+        // pre-existing behavior), it just has no defined terminal status to
+        // persist — the record is left `pending` for a future process to
+        // retry, exactly as before this change.
+        if (disposed) return;
+
+        record = { ...record, attempts: attempt, updatedAt: now() };
+        try {
+          const response = await fetchImpl(target.url, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(payload),
+            signal,
+          });
+          if (!response.ok) {
+            throw new Error(`Webhook target responded with status ${response.status}`);
+          }
+          record = { ...record, status: 'delivered', updatedAt: now() };
+          await persist(record);
+          return;
+        } catch (error) {
+          if (signal?.aborted) {
+            // The signal aborted mid-attempt (`fetchImpl` observed it, per
+            // AB-37/AB-206) — record a defined terminal status rather than
+            // treating the abort as a retryable delivery error.
+            const lastError = error instanceof Error ? error.message : String(error);
+            record = { ...record, status: 'aborted', lastError, updatedAt: now() };
+            await persist(record);
+            return;
+          }
+
           const lastError = error instanceof Error ? error.message : String(error);
-          record = { ...record, status: 'aborted', lastError, updatedAt: now() };
+          record = { ...record, lastError, updatedAt: now() };
+
+          if (attempt >= maxAttempts) {
+            record = { ...record, status: 'exhausted', updatedAt: now() };
+            await persist(record);
+            await markExhausted(record);
+            return;
+          }
+
           await persist(record);
-          return;
+          const backoffMilliseconds = backoffBaseMilliseconds * 2 ** (attempt - 1);
+          await abandonableSleep(backoffMilliseconds);
         }
-
-        const lastError = error instanceof Error ? error.message : String(error);
-        record = { ...record, lastError, updatedAt: now() };
-
-        if (attempt >= maxAttempts) {
-          record = { ...record, status: 'exhausted', updatedAt: now() };
-          await persist(record);
-          await markExhausted(record);
-          return;
-        }
-
-        await persist(record);
-        const backoffMilliseconds = backoffBaseMilliseconds * 2 ** (attempt - 1);
-        await abandonableSleep(backoffMilliseconds);
       }
+    } finally {
+      endTrackedDelivery(tracked);
     }
   }
 
@@ -557,6 +896,61 @@ export function createWebhookNotifier<D extends AgentDefinitions = AgentDefiniti
       shutdownController.abort();
       bureau.removeEventListener('action', listener);
       await Promise.allSettled([...activeDeliveries]);
+    },
+    activeDeliverySnapshots(): WebhookDeliveryLivenessSnapshot[] {
+      return [...trackedDeliveries.values()].map(computeDeliverySnapshot);
+    },
+    snapshot(): WebhookDeliveryLivenessSnapshot {
+      return readAggregateSnapshot();
+    },
+    subscribeSnapshot(
+      observer: (snapshot: WebhookDeliveryLivenessSnapshot) => void,
+      subscribeOptions?: { signal?: AbortSignal },
+    ): Subscription {
+      const subscriptionSignal = subscribeOptions?.signal;
+      const record: AggregateSubscriberRecord = {
+        observer,
+        closed: false,
+        detachAbortListener: () => subscriptionSignal?.removeEventListener('abort', unsubscribe),
+      };
+
+      function unsubscribe(): void {
+        if (record.closed) return;
+        record.closed = true;
+        record.detachAbortListener();
+        aggregateSubscribers.delete(record);
+      }
+
+      if (subscriptionSignal?.aborted) {
+        record.closed = true;
+        try {
+          observer(readAggregateSnapshot());
+        } catch {
+          // Same isolation as `notifyAggregate()` above.
+        }
+        return {
+          unsubscribe,
+          get closed() {
+            return record.closed;
+          },
+        };
+      }
+
+      aggregateSubscribers.add(record);
+      subscriptionSignal?.addEventListener('abort', unsubscribe, { once: true });
+
+      try {
+        observer(readAggregateSnapshot());
+      } catch {
+        // Same isolation as `notifyAggregate()` above.
+      }
+
+      return {
+        unsubscribe,
+        get closed() {
+          return record.closed;
+        },
+      };
     },
   };
 }

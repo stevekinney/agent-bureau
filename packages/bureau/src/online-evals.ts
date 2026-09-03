@@ -17,8 +17,32 @@
  * Sampling is driven by an injectable RNG (`Math.random` by default) so
  * `sampleRate` is deterministic and testable — a fake RNG that returns a
  * fixed sequence exercises "sampled" and "not sampled" runs exactly.
+ *
+ * Each in-flight evaluation also gets a per-evaluation `LivenessSnapshot`
+ * (AB-220), watched via `createStallWatchdog` against the
+ * `background-evaluation` `StallPolicy` row (AB-214). That row has no
+ * cadence or absolute deadline today (AB-88's own "absent today"
+ * characterization — `evaluateRun` has no per-evaluation `timeout` field to
+ * project a deadline from), so this seam gives every evaluation a stable
+ * identity and a structurally-correct snapshot now, ready for real stall
+ * detection once a per-evaluation deadline exists, without reopening this
+ * module later to add it.
  */
 import type { RunResult } from '@lostgradient/operative';
+import {
+  BACKGROUND_EVALUATION_POLICY,
+  createStallWatchdog,
+  LIVENESS_POLICY_VERSION,
+  type LivenessAssessment,
+  type LivenessLifecycleStatus,
+  type LivenessObservable,
+  type LivenessProgressState,
+  type LivenessReachability,
+  type LivenessSnapshot,
+  type StallWatchdog,
+  type StallWatchdogClock,
+  type Subscription,
+} from '@lostgradient/operative/liveness';
 import { Conversation } from 'conversationalist';
 
 import type { AgentDefinitions } from './agent-catalog';
@@ -37,6 +61,142 @@ export interface EvalScore {
   score: number;
   /** Human-readable description of the score. */
   message: string;
+}
+
+/** A single background evaluation's liveness snapshot (AB-220). */
+export type EvaluationLivenessSnapshot = LivenessSnapshot & { kind: 'background-evaluation' };
+
+/**
+ * Local injectable per-evaluation identifier seam (AB-220), mirroring
+ * obs-01's `RunIdentifierSeam` pattern
+ * (`packages/operative/src/liveness/identifiers.ts`) — a constructor-time
+ * injected id-generator, never a bare `crypto.randomUUID()` reached from
+ * inside evaluation-dispatch logic. AB-88's own text names
+ * `RuntimeServices.identifiers` (AB-92/AB-93) as the eventual home for this
+ * kind of seam; that seam does not exist in this repository yet, so this
+ * module builds the same narrower local seam obs-01 uses rather than
+ * blocking on AB-92/AB-93.
+ */
+export interface EvaluationIdentifierSeam {
+  next(): string;
+}
+
+/**
+ * The default seam: a monotonic in-process counter, composition-root only.
+ * Tests inject their own {@link EvaluationIdentifierSeam} instead of relying
+ * on this default's output.
+ */
+function createDefaultEvaluationIdentifierSeam(): EvaluationIdentifierSeam {
+  let counter = 0;
+  return {
+    next(): string {
+      counter += 1;
+      return `eval-${counter}-${crypto.randomUUID()}`;
+    },
+  };
+}
+
+/**
+ * The default production clock backing each evaluation's
+ * `createStallWatchdog` — `performance.now()`, a monotonic source, matching
+ * `active-run-liveness.ts`'s own default clock. Exported for direct unit
+ * testing of `setTimeout`/`clearTimeout` (AB-220): the `background-evaluation`
+ * policy row has no cadence today, so `createStallWatchdog` never actually
+ * calls either through the public API — see `packages/operative/src/liveness/watchdog.ts`'s
+ * `scheduleNextCheck`, which no-ops when a policy isn't cadence-gated.
+ */
+export const realClock: StallWatchdogClock = {
+  now: () => performance.now(),
+  setTimeout: (callback, ms) => setTimeout(callback, ms),
+  clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+};
+
+/** The fixed id for the sampler's own instance-level aggregate snapshot. */
+const AGGREGATE_EVALUATION_ID = 'online-eval-sampler';
+
+/**
+ * AB-216's child-liveness severity ordering
+ * (`packages/operative/src/liveness/active-run-liveness.ts`), duplicated at
+ * module-local scope rather than imported: this issue's delivery boundary
+ * restricts its edit to `online-evals.ts`/`webhook-notifier.ts` and their
+ * tests, and the source ordering is not part of `@lostgradient/operative`'s
+ * public `liveness` subpath export.
+ */
+const ASSESSMENT_SEVERITY: readonly Exclude<LivenessAssessment, 'terminal'>[] = [
+  'unreachable',
+  'alive-but-stalled',
+  'aborting',
+  'cleaning-up',
+  'legitimately-waiting',
+  'healthy',
+];
+
+/**
+ * Folds a set of non-terminal assessments down to the single most severe
+ * one, defaulting to `'healthy'` when empty. Exported for direct unit
+ * testing (AB-220): the `background-evaluation` policy row has no cadence
+ * or deadline today, so every real evaluation this module produces reports
+ * `'healthy'` — the "found something worse" branch is otherwise unreachable
+ * through the public API.
+ */
+export function worstAssessment(assessments: readonly LivenessAssessment[]): LivenessAssessment {
+  let worst: LivenessAssessment = 'healthy';
+  let worstRank = ASSESSMENT_SEVERITY.indexOf('healthy');
+  for (const assessment of assessments) {
+    if (assessment === 'terminal') continue;
+    const rank = ASSESSMENT_SEVERITY.indexOf(assessment);
+    if (rank === -1 || rank >= worstRank) continue;
+    worstRank = rank;
+    worst = assessment;
+  }
+  return worst;
+}
+
+const REACHABILITY_RANK: readonly LivenessReachability[] = ['reachable', 'late', 'unreachable'];
+
+/** Exported for direct unit testing (AB-220); see {@link worstAssessment}. */
+export function worstReachability(values: readonly LivenessReachability[]): LivenessReachability {
+  let worst: LivenessReachability = 'unknown';
+  let worstRank = -1;
+  for (const value of values) {
+    const rank = REACHABILITY_RANK.indexOf(value);
+    if (rank > worstRank) {
+      worstRank = rank;
+      worst = value;
+    }
+  }
+  return worst;
+}
+
+const PROGRESS_RANK: readonly LivenessProgressState[] = ['progressing', 'idle', 'stalled'];
+
+/** Exported for direct unit testing (AB-220); see {@link worstAssessment}. */
+export function worstProgress(values: readonly LivenessProgressState[]): LivenessProgressState {
+  let worst: LivenessProgressState = 'unknown';
+  let worstRank = -1;
+  for (const value of values) {
+    const rank = PROGRESS_RANK.indexOf(value);
+    if (rank > worstRank) {
+      worstRank = rank;
+      worst = value;
+    }
+  }
+  return worst;
+}
+
+/** Mirrors `active-run-liveness.ts`'s `deriveAssessment` for this module's own status dimension. */
+function deriveEvaluationAssessment(
+  status: LivenessLifecycleStatus,
+  reachability: LivenessReachability,
+  progress: LivenessProgressState,
+): LivenessAssessment {
+  if (status === 'terminal') return 'terminal';
+  if (status === 'aborting') return 'aborting';
+  if (status === 'cleaning-up') return 'cleaning-up';
+  if (reachability === 'unreachable') return 'unreachable';
+  if (status === 'waiting') return 'legitimately-waiting';
+  if (progress === 'stalled') return 'alive-but-stalled';
+  return 'healthy';
 }
 
 /**
@@ -74,10 +234,22 @@ export interface OnlineEvalSamplerOptions {
    * `dispose()` still awaits that settlement via `flush()`.
    */
   signal?: AbortSignal;
+  /**
+   * Injectable timer-agnostic clock backing each evaluation's
+   * `createStallWatchdog` (AB-220). Defaults to a `performance.now()`-based
+   * clock. Tests inject a manual clock so no real sleeps are needed.
+   */
+  clock?: StallWatchdogClock;
+  /**
+   * Injectable per-evaluation identifier seam (AB-220). Defaults to a
+   * monotonic in-process counter. Tests inject their own seam to assert
+   * stable, distinguishable ids across concurrently-admitted evaluations.
+   */
+  evaluationIds?: EvaluationIdentifierSeam;
 }
 
 /** The online eval sampler object returned by {@link createOnlineEvalSampler}. */
-export interface OnlineEvalSampler {
+export interface OnlineEvalSampler extends LivenessObservable<EvaluationLivenessSnapshot> {
   /** Number of completed runs the sampler has observed (sampled or not). */
   observedCount(): number;
   /** Number of runs actually sampled (passed the `sampleRate` roll). */
@@ -95,6 +267,14 @@ export interface OnlineEvalSampler {
    * promptly.
    */
   dispose(): Promise<void>;
+  /**
+   * Per-evaluation `LivenessSnapshot`s for every evaluation currently in
+   * flight (AB-220), most-recently-started last. `snapshot()` (from
+   * {@link LivenessObservable}) reports the instance-level aggregate — the
+   * worst assessment across these — for a caller holding only the sampler
+   * handle.
+   */
+  activeEvaluationSnapshots(): EvaluationLivenessSnapshot[];
 }
 
 // ── Guards ──────────────────────────────────────────────────────────
@@ -198,6 +378,27 @@ export function createOnlineEvalSampler<D extends AgentDefinitions = AgentDefini
   const judges = options?.judges ?? [];
 
   if (judges.length === 0 || !options || options.sampleRate <= 0) {
+    const noOpSnapshot: EvaluationLivenessSnapshot = Object.freeze({
+      id: AGGREGATE_EVALUATION_ID,
+      kind: 'background-evaluation',
+      startedAt: new Date().toISOString(),
+      revision: 0,
+      status: 'terminal',
+      lastTransitionAt: new Date().toISOString(),
+      projection: 'redacted',
+      ownership: 'independent',
+      detached: false,
+      durability: 'process-local',
+      cancellable: false,
+      attempt: 0,
+      reachability: 'not-applicable',
+      progress: 'not-applicable',
+      assessment: 'terminal',
+      observedAt: 0,
+      missedPulseCount: 0,
+      policyVersion: LIVENESS_POLICY_VERSION,
+      evidence: [],
+    });
     return {
       observedCount() {
         return 0;
@@ -211,12 +412,24 @@ export function createOnlineEvalSampler<D extends AgentDefinitions = AgentDefini
       async dispose() {
         // Nothing was ever subscribed.
       },
+      activeEvaluationSnapshots() {
+        return [];
+      },
+      snapshot() {
+        return noOpSnapshot;
+      },
+      subscribeSnapshot(observer) {
+        observer(noOpSnapshot);
+        return { unsubscribe() {}, closed: true };
+      },
     };
   }
 
   const sampleRate = options.sampleRate;
   const rng = options.rng ?? Math.random;
   const signal = options.signal;
+  const clock = options.clock ?? realClock;
+  const evaluationIds = options.evaluationIds ?? createDefaultEvaluationIdentifierSeam();
 
   let observed = 0;
   let sampled = 0;
@@ -234,6 +447,130 @@ export function createOnlineEvalSampler<D extends AgentDefinitions = AgentDefini
   function trackEvaluation(promise: Promise<void>): void {
     activeEvaluations.add(promise);
     void promise.finally(() => activeEvaluations.delete(promise));
+  }
+
+  // ── AB-220: per-evaluation liveness ─────────────────────────────────
+
+  interface TrackedEvaluation {
+    readonly id: string;
+    readonly watchdog: StallWatchdog;
+    readonly startedAt: string;
+  }
+
+  const trackedEvaluations = new Map<string, TrackedEvaluation>();
+
+  function computeEvaluationSnapshot(tracked: TrackedEvaluation): EvaluationLivenessSnapshot {
+    const assessed = tracked.watchdog.assess();
+    const status: LivenessLifecycleStatus = 'running';
+    return Object.freeze({
+      id: tracked.id,
+      kind: 'background-evaluation',
+      startedAt: tracked.startedAt,
+      revision: 0,
+      status,
+      lastTransitionAt: tracked.startedAt,
+      projection: 'redacted',
+      ownership: 'independent',
+      detached: false,
+      durability: 'process-local',
+      cancellable: false,
+      attempt: 0,
+      reachability: assessed.reachability,
+      progress: assessed.progress,
+      assessment: deriveEvaluationAssessment(status, assessed.reachability, assessed.progress),
+      observedAt: clock.now(),
+      missedPulseCount: assessed.missedPulseCount,
+      policyVersion: LIVENESS_POLICY_VERSION,
+      evidence: assessed.evidence,
+    });
+  }
+
+  const aggregateStartedAt = new Date().toISOString();
+  let aggregateRevision = 0;
+  let cachedAggregate: EvaluationLivenessSnapshot | undefined;
+  let cachedAggregateRevision = -1;
+
+  interface AggregateSubscriberRecord {
+    readonly observer: (snapshot: EvaluationLivenessSnapshot) => void;
+    closed: boolean;
+    detachAbortListener: () => void;
+  }
+
+  const aggregateSubscribers = new Set<AggregateSubscriberRecord>();
+
+  function computeAggregateSnapshot(): EvaluationLivenessSnapshot {
+    const items = [...trackedEvaluations.values()].map(computeEvaluationSnapshot);
+    const status: LivenessLifecycleStatus = 'running';
+    const reachability = worstReachability(items.map((item) => item.reachability));
+    const progress = worstProgress(items.map((item) => item.progress));
+    return Object.freeze({
+      id: AGGREGATE_EVALUATION_ID,
+      kind: 'background-evaluation',
+      startedAt: aggregateStartedAt,
+      revision: aggregateRevision,
+      status,
+      lastTransitionAt: aggregateStartedAt,
+      projection: 'redacted',
+      ownership: 'independent',
+      detached: false,
+      durability: 'process-local',
+      cancellable: false,
+      attempt: 0,
+      reachability,
+      progress,
+      assessment: worstAssessment(items.map((item) => item.assessment)),
+      observedAt: clock.now(),
+      missedPulseCount: items.reduce((max, item) => Math.max(max, item.missedPulseCount), 0),
+      policyVersion: LIVENESS_POLICY_VERSION,
+      evidence: [],
+    });
+  }
+
+  function readAggregateSnapshot(): EvaluationLivenessSnapshot {
+    if (cachedAggregate && cachedAggregateRevision === aggregateRevision) {
+      return cachedAggregate;
+    }
+    cachedAggregate = computeAggregateSnapshot();
+    cachedAggregateRevision = aggregateRevision;
+    return cachedAggregate;
+  }
+
+  function notifyAggregate(): void {
+    const current = readAggregateSnapshot();
+    for (const record of [...aggregateSubscribers]) {
+      if (record.closed) continue;
+      try {
+        record.observer(current);
+      } catch {
+        // A throwing subscriber must not escape into the caller driving this
+        // revision, matching `active-run-liveness.ts`'s own isolation.
+      }
+    }
+  }
+
+  function advanceAggregate(): void {
+    aggregateRevision += 1;
+    notifyAggregate();
+  }
+
+  function beginTrackedEvaluation(): TrackedEvaluation {
+    const id = evaluationIds.next();
+    const watchdog = createStallWatchdog(BACKGROUND_EVALUATION_POLICY, clock);
+    const tracked: TrackedEvaluation = { id, watchdog, startedAt: new Date().toISOString() };
+    trackedEvaluations.set(id, tracked);
+    advanceAggregate();
+    return tracked;
+  }
+
+  function endTrackedEvaluation(tracked: TrackedEvaluation): void {
+    tracked.watchdog.dispose();
+    trackedEvaluations.delete(tracked.id);
+    advanceAggregate();
+  }
+
+  function runTrackedEvaluation(runId: string, runResult: RunResult): Promise<void> {
+    const tracked = beginTrackedEvaluation();
+    return evaluateRun(runId, runResult).finally(() => endTrackedEvaluation(tracked));
   }
 
   async function recordScore(
@@ -317,7 +654,7 @@ export function createOnlineEvalSampler<D extends AgentDefinitions = AgentDefini
     if (!isRunResultDetail(action.detail)) return;
 
     sampled++;
-    trackEvaluation(evaluateRun(action.runId, action.detail));
+    trackEvaluation(runTrackedEvaluation(action.runId, action.detail));
   };
 
   bureau.addEventListener('action', listener);
@@ -336,6 +673,61 @@ export function createOnlineEvalSampler<D extends AgentDefinitions = AgentDefini
       disposed = true;
       bureau.removeEventListener('action', listener);
       await Promise.allSettled([...activeEvaluations]);
+    },
+    activeEvaluationSnapshots(): EvaluationLivenessSnapshot[] {
+      return [...trackedEvaluations.values()].map(computeEvaluationSnapshot);
+    },
+    snapshot(): EvaluationLivenessSnapshot {
+      return readAggregateSnapshot();
+    },
+    subscribeSnapshot(
+      observer: (snapshot: EvaluationLivenessSnapshot) => void,
+      subscribeOptions?: { signal?: AbortSignal },
+    ): Subscription {
+      const subscriptionSignal = subscribeOptions?.signal;
+      const record: AggregateSubscriberRecord = {
+        observer,
+        closed: false,
+        detachAbortListener: () => subscriptionSignal?.removeEventListener('abort', unsubscribe),
+      };
+
+      function unsubscribe(): void {
+        if (record.closed) return;
+        record.closed = true;
+        record.detachAbortListener();
+        aggregateSubscribers.delete(record);
+      }
+
+      if (subscriptionSignal?.aborted) {
+        record.closed = true;
+        try {
+          observer(readAggregateSnapshot());
+        } catch {
+          // Same isolation as `notifyAggregate()` above.
+        }
+        return {
+          unsubscribe,
+          get closed() {
+            return record.closed;
+          },
+        };
+      }
+
+      aggregateSubscribers.add(record);
+      subscriptionSignal?.addEventListener('abort', unsubscribe, { once: true });
+
+      try {
+        observer(readAggregateSnapshot());
+      } catch {
+        // Same isolation as `notifyAggregate()` above.
+      }
+
+      return {
+        unsubscribe,
+        get closed() {
+          return record.closed;
+        },
+      };
     },
   };
 }

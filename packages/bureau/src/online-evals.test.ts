@@ -7,15 +7,25 @@
  * exercised deterministically: no test depends on `Math.random`.
  */
 import type { RunResult } from '@lostgradient/operative';
+import { LIVENESS_POLICY_VERSION, type StallWatchdogClock } from '@lostgradient/operative/liveness';
 import type { Action } from '@lostgradient/operative/store';
-import { describe, expect, it } from 'bun:test';
+import { describe, expect, it, spyOn } from 'bun:test';
 import { Conversation } from 'conversationalist';
 
 import type { AuditTrail } from './audit-trail';
 import { ActionEvent } from './events';
-import { createOnlineEvalSampler, type EvalScore, type OnlineEvalJudge } from './online-evals';
+import {
+  createOnlineEvalSampler,
+  type EvalScore,
+  type EvaluationIdentifierSeam,
+  type OnlineEvalJudge,
+  realClock,
+  worstAssessment,
+  worstProgress,
+  worstReachability,
+} from './online-evals';
 import type { Bureau } from './types';
-import type { WebhookNotifier } from './webhook-notifier';
+import type { WebhookDeliveryLivenessSnapshot, WebhookNotifier } from './webhook-notifier';
 
 // ── Minimal Bureau stub ──────────────────────────────────────────────
 
@@ -89,6 +99,27 @@ function createStubWebhookNotifier(): {
   notifications: RecordedNotification[];
 } {
   const notifications: RecordedNotification[] = [];
+  const noOpSnapshot: WebhookDeliveryLivenessSnapshot = {
+    id: 'stub-webhook-notifier',
+    kind: 'webhook-delivery',
+    startedAt: new Date().toISOString(),
+    revision: 0,
+    status: 'terminal',
+    lastTransitionAt: new Date().toISOString(),
+    projection: 'redacted',
+    ownership: 'independent',
+    detached: false,
+    durability: 'process-local',
+    cancellable: false,
+    attempt: 0,
+    reachability: 'not-applicable',
+    progress: 'not-applicable',
+    assessment: 'terminal',
+    observedAt: 0,
+    missedPulseCount: 0,
+    policyVersion: LIVENESS_POLICY_VERSION,
+    evidence: [],
+  };
   const webhookNotifier: WebhookNotifier = {
     async listDeliveries() {
       return [];
@@ -98,6 +129,16 @@ function createStubWebhookNotifier(): {
       notifications.push(input);
     },
     async dispose() {},
+    activeDeliverySnapshots() {
+      return [];
+    },
+    snapshot() {
+      return noOpSnapshot;
+    },
+    subscribeSnapshot(observer) {
+      observer(noOpSnapshot);
+      return { unsubscribe() {}, closed: true };
+    },
   };
   return { webhookNotifier, notifications };
 }
@@ -109,6 +150,53 @@ function scriptedRng(values: number[]): () => number {
     const value = values[Math.min(index, values.length - 1)]!;
     index++;
     return value;
+  };
+}
+
+/** A timer-agnostic manual clock (AB-220) — no real timers, `setTimeout`/`clearTimeout` unused by a no-cadence policy. */
+function manualClock(start = 0): StallWatchdogClock & { advance: (milliseconds: number) => void } {
+  let time = start;
+  return {
+    now: () => time,
+    setTimeout: () => 0,
+    clearTimeout: () => {},
+    advance(milliseconds: number) {
+      time += milliseconds;
+    },
+  };
+}
+
+/** A scripted `EvaluationIdentifierSeam` that replays a fixed sequence of ids. */
+function scriptedEvaluationIds(ids: string[]): EvaluationIdentifierSeam {
+  let index = 0;
+  return {
+    next(): string {
+      const id = ids[index];
+      if (id === undefined) throw new Error('scriptedEvaluationIds: ran out of scripted ids');
+      index++;
+      return id;
+    },
+  };
+}
+
+/** A judge whose `evaluate()` never resolves until `resolveAll()` is called. */
+function blockingJudge(name = 'blocking-judge'): {
+  judge: OnlineEvalJudge;
+  resolveAll: () => void;
+} {
+  const resolvers: (() => void)[] = [];
+  const judge: OnlineEvalJudge = {
+    name,
+    evaluate: () =>
+      new Promise<EvalScore>((resolve) => {
+        resolvers.push(() => resolve({ pass: true, score: 1, message: 'unblocked' }));
+      }),
+  };
+  return {
+    judge,
+    resolveAll: () => {
+      for (const resolve of resolvers) resolve();
+    },
   };
 }
 
@@ -706,5 +794,233 @@ describe('createOnlineEvalSampler', () => {
     expect(firstDispose).toBeUndefined();
     const secondDispose = await sampler.dispose();
     expect(secondDispose).toBeUndefined();
+  });
+
+  // ── AB-220: per-evaluation liveness ─────────────────────────────────
+
+  describe('per-evaluation liveness (AB-220)', () => {
+    it('mints a stable, distinguishable id for each concurrently-admitted evaluation', async () => {
+      const { bureau, emit } = createStubBureau();
+      const { auditTrail } = createStubAuditTrail();
+      const { judge: judgeA, resolveAll: resolveA } = blockingJudge('judge-a');
+      const sampler = createOnlineEvalSampler(bureau, auditTrail, undefined, {
+        judges: [judgeA],
+        sampleRate: 1,
+        rng: scriptedRng([0]),
+        clock: manualClock(),
+        evaluationIds: scriptedEvaluationIds(['eval-a', 'eval-b']),
+      });
+
+      emit(makeAction({ type: 'run.completed', runId: 'run-1', detail: makeRunResult() }));
+      emit(makeAction({ type: 'run.completed', runId: 'run-2', detail: makeRunResult() }));
+
+      const snapshots = sampler.activeEvaluationSnapshots();
+      expect(snapshots).toHaveLength(2);
+      expect(snapshots.map((snapshot) => snapshot.id)).toEqual(['eval-a', 'eval-b']);
+      expect(new Set(snapshots.map((snapshot) => snapshot.id)).size).toBe(2);
+
+      resolveA();
+      await sampler.flush();
+      await sampler.dispose();
+    });
+
+    it('every per-evaluation snapshot has kind "background-evaluation" and the current policy version', async () => {
+      const { bureau, emit } = createStubBureau();
+      const { auditTrail } = createStubAuditTrail();
+      const { judge, resolveAll } = blockingJudge();
+      const sampler = createOnlineEvalSampler(bureau, auditTrail, undefined, {
+        judges: [judge],
+        sampleRate: 1,
+        rng: scriptedRng([0]),
+        clock: manualClock(),
+      });
+
+      emit(makeAction({ type: 'run.completed', runId: 'run-1', detail: makeRunResult() }));
+
+      const [snapshot] = sampler.activeEvaluationSnapshots();
+      expect(snapshot?.kind).toBe('background-evaluation');
+      expect(snapshot?.policyVersion).toBe(LIVENESS_POLICY_VERSION);
+      expect(snapshot?.status).toBe('running');
+      expect(snapshot?.assessment).toBe('healthy');
+
+      resolveAll();
+      await sampler.flush();
+      await sampler.dispose();
+    });
+
+    it('removes an evaluation from activeEvaluationSnapshots() once it settles', async () => {
+      const { bureau, emit } = createStubBureau();
+      const { auditTrail } = createStubAuditTrail();
+      const sampler = createOnlineEvalSampler(bureau, auditTrail, undefined, {
+        judges: [passingMatcher()],
+        sampleRate: 1,
+        rng: scriptedRng([0]),
+        clock: manualClock(),
+      });
+
+      emit(makeAction({ type: 'run.completed', runId: 'run-1', detail: makeRunResult() }));
+      await sampler.flush();
+
+      expect(sampler.activeEvaluationSnapshots()).toHaveLength(0);
+      await sampler.dispose();
+    });
+
+    it('snapshot() reports the instance-level aggregate as healthy with no active evaluations', async () => {
+      const { bureau } = createStubBureau();
+      const { auditTrail } = createStubAuditTrail();
+      const sampler = createOnlineEvalSampler(bureau, auditTrail, undefined, {
+        judges: [passingMatcher()],
+        sampleRate: 1,
+        rng: scriptedRng([0]),
+        clock: manualClock(),
+      });
+
+      expect(sampler.snapshot().assessment).toBe('healthy');
+      expect(sampler.snapshot().kind).toBe('background-evaluation');
+      await sampler.dispose();
+    });
+
+    it('subscribeSnapshot() delivers the current aggregate immediately, then again as evaluations start and finish', async () => {
+      const { bureau, emit } = createStubBureau();
+      const { auditTrail } = createStubAuditTrail();
+      const sampler = createOnlineEvalSampler(bureau, auditTrail, undefined, {
+        judges: [passingMatcher()],
+        sampleRate: 1,
+        rng: scriptedRng([0]),
+        clock: manualClock(),
+      });
+
+      const revisions: number[] = [];
+      const subscription = sampler.subscribeSnapshot((snapshot) => {
+        revisions.push(snapshot.revision);
+      });
+      expect(revisions).toEqual([0]);
+
+      emit(makeAction({ type: 'run.completed', runId: 'run-1', detail: makeRunResult() }));
+      await sampler.flush();
+
+      // One notification when the evaluation started tracking, one when it
+      // finished — both delivered through the same subscription.
+      expect(revisions.length).toBeGreaterThanOrEqual(3);
+      expect(revisions).toEqual([...revisions].sort((a, b) => a - b));
+
+      subscription.unsubscribe();
+      await sampler.dispose();
+    });
+
+    it('subscribeSnapshot() stops delivering after unsubscribe()', async () => {
+      const { bureau, emit } = createStubBureau();
+      const { auditTrail } = createStubAuditTrail();
+      const sampler = createOnlineEvalSampler(bureau, auditTrail, undefined, {
+        judges: [passingMatcher()],
+        sampleRate: 1,
+        rng: scriptedRng([0]),
+        clock: manualClock(),
+      });
+
+      let calls = 0;
+      const subscription = sampler.subscribeSnapshot(() => {
+        calls++;
+      });
+      expect(calls).toBe(1);
+      subscription.unsubscribe();
+      expect(subscription.closed).toBe(true);
+
+      emit(makeAction({ type: 'run.completed', runId: 'run-1', detail: makeRunResult() }));
+      await sampler.flush();
+
+      expect(calls).toBe(1);
+      await sampler.dispose();
+    });
+
+    it('subscribeSnapshot() with an already-aborted signal delivers once, synchronously closed', async () => {
+      const { bureau } = createStubBureau();
+      const { auditTrail } = createStubAuditTrail();
+      const sampler = createOnlineEvalSampler(bureau, auditTrail, undefined, {
+        judges: [passingMatcher()],
+        sampleRate: 1,
+        rng: scriptedRng([0]),
+        clock: manualClock(),
+      });
+
+      const controller = new AbortController();
+      controller.abort();
+
+      let calls = 0;
+      const subscription = sampler.subscribeSnapshot(() => calls++, {
+        signal: controller.signal,
+      });
+
+      expect(calls).toBe(1);
+      expect(subscription.closed).toBe(true);
+      await sampler.dispose();
+    });
+
+    it('the no-op sampler (no judges) reports a terminal aggregate snapshot and no active evaluations', async () => {
+      const { bureau } = createStubBureau();
+      const sampler = createOnlineEvalSampler(bureau, undefined, undefined, {
+        judges: [],
+        sampleRate: 1,
+      });
+
+      expect(sampler.activeEvaluationSnapshots()).toEqual([]);
+      expect(sampler.snapshot().status).toBe('terminal');
+      expect(sampler.snapshot().assessment).toBe('terminal');
+
+      let observed: unknown;
+      const subscription = sampler.subscribeSnapshot((snapshot) => {
+        observed = snapshot;
+      });
+      expect(observed).toBe(sampler.snapshot());
+      expect(subscription.closed).toBe(true);
+      subscription.unsubscribe();
+
+      await sampler.dispose();
+    });
+  });
+
+  describe('the default production clock (AB-220)', () => {
+    it('now() reads performance.now()', () => {
+      expect(typeof realClock.now()).toBe('number');
+    });
+
+    it('setTimeout()/clearTimeout() delegate to the global timer functions', () => {
+      const timeoutSpy = spyOn(globalThis, 'setTimeout');
+      const clearSpy = spyOn(globalThis, 'clearTimeout');
+      try {
+        const callback = () => {};
+        const handle = realClock.setTimeout(callback, 5);
+        expect(timeoutSpy).toHaveBeenCalledWith(callback, 5);
+        realClock.clearTimeout(handle);
+        expect(clearSpy).toHaveBeenCalledWith(handle);
+      } finally {
+        timeoutSpy.mockRestore();
+        clearSpy.mockRestore();
+      }
+    });
+  });
+
+  describe('worstAssessment/worstReachability/worstProgress (AB-220)', () => {
+    it('worstAssessment returns "healthy" for an empty or all-healthy set', () => {
+      expect(worstAssessment([])).toBe('healthy');
+      expect(worstAssessment(['healthy', 'healthy'])).toBe('healthy');
+    });
+
+    it('worstAssessment picks the most severe non-terminal assessment, skipping terminal entries', () => {
+      expect(worstAssessment(['healthy', 'alive-but-stalled', 'legitimately-waiting'])).toBe(
+        'alive-but-stalled',
+      );
+      expect(worstAssessment(['terminal', 'unreachable', 'healthy'])).toBe('unreachable');
+    });
+
+    it('worstReachability returns "unknown" for an empty set, and folds to the most severe value present', () => {
+      expect(worstReachability([])).toBe('unknown');
+      expect(worstReachability(['reachable', 'unreachable', 'late'])).toBe('unreachable');
+    });
+
+    it('worstProgress returns "unknown" for an empty set, and folds to the most severe value present', () => {
+      expect(worstProgress([])).toBe('unknown');
+      expect(worstProgress(['progressing', 'stalled', 'idle'])).toBe('stalled');
+    });
   });
 });

@@ -6,6 +6,7 @@
  * engine. `fetch`, `sleep`, and `now` are all injected so retry/backoff
  * behavior never touches a real timer or the network.
  */
+import type { StallWatchdogClock } from '@lostgradient/operative/liveness';
 import type { Action } from '@lostgradient/operative/store';
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { afterEach, describe, expect, it, spyOn } from 'bun:test';
@@ -13,7 +14,15 @@ import { afterEach, describe, expect, it, spyOn } from 'bun:test';
 import type { AuditTrail } from './audit-trail';
 import { ActionEvent } from './events';
 import type { Bureau, PendingReview } from './types';
-import { createWebhookNotifier, type WebhookDeliveryRecord } from './webhook-notifier';
+import {
+  computeWebhookDeliveryDeadlineMs,
+  createWebhookNotifier,
+  realWatchdogClock,
+  type WebhookDeliveryRecord,
+  worstAssessment,
+  worstProgress,
+  worstReachability,
+} from './webhook-notifier';
 
 // ── Minimal Bureau stub ──────────────────────────────────────────────
 
@@ -124,6 +133,41 @@ function okFetch(): { fetch: typeof fetch; calls: RecordedFetchCall[] } {
     return new Response(null, { status: 200 });
   }) as unknown as typeof fetch;
   return { fetch: fetchImpl, calls };
+}
+
+/** A timer-agnostic manual clock (AB-220) — no real timers, `setTimeout`/`clearTimeout` unused by a no-cadence policy. */
+function manualClock(start = 0): StallWatchdogClock & { advance: (ms: number) => void } {
+  let time = start;
+  return {
+    now: () => time,
+    setTimeout: () => 0,
+    clearTimeout: () => {},
+    advance(ms: number) {
+      time += ms;
+    },
+  };
+}
+
+/**
+ * A `fetchImpl` whose returned promise never resolves on its own — standing
+ * in for a single hung request (AB-220). Resolves `started` once the call
+ * has been made, so a test can synchronize before advancing a manual clock.
+ * Rejects if `init.signal` aborts, so `notifier.dispose()` can still clean
+ * it up.
+ */
+function hangingFetch(): { fetch: typeof fetch; started: Promise<void> } {
+  let resolveStarted: () => void;
+  const started = new Promise<void>((resolve) => {
+    resolveStarted = resolve;
+  });
+  const fetchImpl = ((_url: string, init?: RequestInit) => {
+    resolveStarted();
+    return new Promise<Response>((_resolve, reject) => {
+      const signal = init?.signal;
+      signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+    });
+  }) as unknown as typeof fetch;
+  return { fetch: fetchImpl, started };
 }
 
 /** Immediate sleep stub that records the requested backoff durations. */
@@ -836,5 +880,278 @@ describe('createWebhookNotifier', () => {
     });
     await notifier.flush();
     await notifier.dispose();
+  });
+
+  // ── AB-220: per-delivery liveness ───────────────────────────────────
+
+  describe('computeWebhookDeliveryDeadlineMs (AB-220)', () => {
+    it('computes the default 15000ms deadline from DEFAULT_MAX_ATTEMPTS/DEFAULT_BACKOFF_BASE_MILLISECONDS', () => {
+      // backoffBaseMilliseconds * (2 ** (maxAttempts - 1) - 1) = 1000 * (2**4 - 1) = 15000.
+      expect(computeWebhookDeliveryDeadlineMs(5, 1000)).toBe(15000);
+    });
+
+    it('computes the deadline for a caller-configured maxAttempts/backoffBaseMilliseconds override', () => {
+      // 2000 * (2**2 - 1) = 6000.
+      expect(computeWebhookDeliveryDeadlineMs(3, 2000)).toBe(6000);
+    });
+
+    it('computes 0 for a single-attempt delivery (no retries to sum)', () => {
+      expect(computeWebhookDeliveryDeadlineMs(1, 1000)).toBe(0);
+    });
+  });
+
+  describe('per-delivery liveness (AB-220)', () => {
+    it('a tracked delivery reports kind "webhook-delivery", the current policy version, and the computed deadline', async () => {
+      const { bureau, emit } = createStubBureau();
+      const { fetch: fetchImpl, started } = hangingFetch();
+      const clock = manualClock();
+      const controller = new AbortController();
+      const notifier = createWebhookNotifier(bureau, undefined, undefined, {
+        targets: [{ url: 'https://example.com/hook' }],
+        fetch: fetchImpl,
+        clock,
+        signal: controller.signal,
+      });
+
+      emit(
+        makeAction({
+          type: 'elicitation.requested',
+          runId: 'run-1',
+          sequence: 1,
+          detail: { message: 'confirm?' },
+        }),
+      );
+      await started;
+
+      const [snapshot] = notifier.activeDeliverySnapshots();
+      expect(snapshot?.kind).toBe('webhook-delivery');
+      expect(snapshot?.status).toBe('running');
+      expect(snapshot?.deadline).toBe(computeWebhookDeliveryDeadlineMs(5, 1000));
+
+      controller.abort(new Error('test teardown'));
+      await notifier.dispose();
+    });
+
+    it('a delivery whose fetchImpl hangs past the computed deadline classifies unreachable', async () => {
+      const { bureau, emit } = createStubBureau();
+      const { fetch: fetchImpl, started } = hangingFetch();
+      const clock = manualClock();
+      const controller = new AbortController();
+      const notifier = createWebhookNotifier(bureau, undefined, undefined, {
+        targets: [{ url: 'https://example.com/hook' }],
+        fetch: fetchImpl,
+        clock,
+        signal: controller.signal,
+      });
+
+      emit(
+        makeAction({
+          type: 'elicitation.requested',
+          runId: 'run-1',
+          sequence: 1,
+          detail: { message: 'confirm?' },
+        }),
+      );
+      await started;
+
+      // Before the deadline: no activity pulse was ever recorded (this
+      // policy row has no cadence), so reachability/progress read 'unknown'
+      // and the derived assessment is 'healthy'.
+      expect(notifier.activeDeliverySnapshots()[0]?.assessment).toBe('healthy');
+
+      clock.advance(computeWebhookDeliveryDeadlineMs(5, 1000) + 1);
+
+      const [snapshot] = notifier.activeDeliverySnapshots();
+      expect(snapshot?.reachability).toBe('unreachable');
+      expect(snapshot?.progress).toBe('stalled');
+      expect(snapshot?.assessment).toBe('unreachable');
+
+      controller.abort(new Error('test teardown'));
+      await notifier.dispose();
+    });
+
+    it('removes a delivery from activeDeliverySnapshots() once it reaches a terminal outcome', async () => {
+      const { bureau, emit } = createStubBureau();
+      const { fetch: fetchImpl } = okFetch();
+      const notifier = createWebhookNotifier(bureau, undefined, undefined, {
+        targets: [{ url: 'https://example.com/hook' }],
+        fetch: fetchImpl,
+        clock: manualClock(),
+      });
+
+      emit(
+        makeAction({
+          type: 'elicitation.requested',
+          runId: 'run-1',
+          sequence: 1,
+          detail: { message: 'confirm?' },
+        }),
+      );
+      await notifier.flush();
+
+      expect(notifier.activeDeliverySnapshots()).toHaveLength(0);
+      await notifier.dispose();
+    });
+
+    it('snapshot() reports the instance-level aggregate as healthy with no active deliveries', async () => {
+      const { bureau } = createStubBureau();
+      const notifier = createWebhookNotifier(bureau, undefined, undefined, {
+        targets: [{ url: 'https://example.com/hook' }],
+        clock: manualClock(),
+      });
+
+      expect(notifier.snapshot().assessment).toBe('healthy');
+      expect(notifier.snapshot().kind).toBe('webhook-delivery');
+      await notifier.dispose();
+    });
+
+    it('subscribeSnapshot() delivers the current aggregate immediately, then again as a delivery starts and finishes', async () => {
+      const { bureau, emit } = createStubBureau();
+      const { fetch: fetchImpl } = okFetch();
+      const notifier = createWebhookNotifier(bureau, undefined, undefined, {
+        targets: [{ url: 'https://example.com/hook' }],
+        fetch: fetchImpl,
+        clock: manualClock(),
+      });
+
+      const revisions: number[] = [];
+      const subscription = notifier.subscribeSnapshot((snapshot) => {
+        revisions.push(snapshot.revision);
+      });
+      expect(revisions).toEqual([0]);
+
+      emit(
+        makeAction({
+          type: 'elicitation.requested',
+          runId: 'run-1',
+          sequence: 1,
+          detail: { message: 'confirm?' },
+        }),
+      );
+      await notifier.flush();
+
+      expect(revisions.length).toBeGreaterThanOrEqual(3);
+      expect(revisions).toEqual([...revisions].sort((a, b) => a - b));
+
+      subscription.unsubscribe();
+      await notifier.dispose();
+    });
+
+    it('subscribeSnapshot() stops delivering after unsubscribe()', async () => {
+      const { bureau, emit } = createStubBureau();
+      const { fetch: fetchImpl } = okFetch();
+      const notifier = createWebhookNotifier(bureau, undefined, undefined, {
+        targets: [{ url: 'https://example.com/hook' }],
+        fetch: fetchImpl,
+        clock: manualClock(),
+      });
+
+      let calls = 0;
+      const subscription = notifier.subscribeSnapshot(() => {
+        calls++;
+      });
+      expect(calls).toBe(1);
+      subscription.unsubscribe();
+      expect(subscription.closed).toBe(true);
+
+      emit(
+        makeAction({
+          type: 'elicitation.requested',
+          runId: 'run-1',
+          sequence: 1,
+          detail: { message: 'confirm?' },
+        }),
+      );
+      await notifier.flush();
+
+      expect(calls).toBe(1);
+      await notifier.dispose();
+    });
+
+    it('subscribeSnapshot() with an already-aborted signal delivers once, synchronously closed', async () => {
+      const { bureau } = createStubBureau();
+      const { fetch: fetchImpl } = okFetch();
+      const notifier = createWebhookNotifier(bureau, undefined, undefined, {
+        targets: [{ url: 'https://example.com/hook' }],
+        fetch: fetchImpl,
+        clock: manualClock(),
+      });
+
+      const controller = new AbortController();
+      controller.abort();
+
+      let calls = 0;
+      const subscription = notifier.subscribeSnapshot(() => calls++, {
+        signal: controller.signal,
+      });
+
+      expect(calls).toBe(1);
+      expect(subscription.closed).toBe(true);
+      await notifier.dispose();
+    });
+
+    it('the no-op notifier (no targets) reports a terminal aggregate snapshot and no active deliveries', async () => {
+      const { bureau } = createStubBureau();
+      const notifier = createWebhookNotifier(bureau, undefined, undefined, { targets: [] });
+
+      expect(notifier.activeDeliverySnapshots()).toEqual([]);
+      expect(notifier.snapshot().status).toBe('terminal');
+      expect(notifier.snapshot().assessment).toBe('terminal');
+
+      let observed: unknown;
+      const subscription = notifier.subscribeSnapshot((snapshot) => {
+        observed = snapshot;
+      });
+      expect(observed).toBe(notifier.snapshot());
+      expect(subscription.closed).toBe(true);
+      subscription.unsubscribe();
+
+      await notifier.dispose();
+    });
+  });
+
+  describe('the default production clock (AB-220)', () => {
+    it('now() reads performance.now()', () => {
+      expect(typeof realWatchdogClock.now()).toBe('number');
+    });
+
+    it('setTimeout()/clearTimeout() delegate to the global timer functions', () => {
+      const timeoutSpy = spyOn(globalThis, 'setTimeout');
+      const clearSpy = spyOn(globalThis, 'clearTimeout');
+      try {
+        const callback = () => {};
+        const handle = realWatchdogClock.setTimeout(callback, 5);
+        expect(timeoutSpy).toHaveBeenCalledWith(callback, 5);
+        realWatchdogClock.clearTimeout(handle);
+        expect(clearSpy).toHaveBeenCalledWith(handle);
+      } finally {
+        timeoutSpy.mockRestore();
+        clearSpy.mockRestore();
+      }
+    });
+  });
+
+  describe('worstAssessment/worstReachability/worstProgress (AB-220)', () => {
+    it('worstAssessment returns "healthy" for an empty or all-healthy set', () => {
+      expect(worstAssessment([])).toBe('healthy');
+      expect(worstAssessment(['healthy', 'healthy'])).toBe('healthy');
+    });
+
+    it('worstAssessment picks the most severe non-terminal assessment, skipping terminal entries', () => {
+      expect(worstAssessment(['healthy', 'alive-but-stalled', 'legitimately-waiting'])).toBe(
+        'alive-but-stalled',
+      );
+      expect(worstAssessment(['terminal', 'unreachable', 'healthy'])).toBe('unreachable');
+    });
+
+    it('worstReachability returns "unknown" for an empty set, and folds to the most severe value present', () => {
+      expect(worstReachability([])).toBe('unknown');
+      expect(worstReachability(['reachable', 'unreachable', 'late'])).toBe('unreachable');
+    });
+
+    it('worstProgress returns "unknown" for an empty set, and folds to the most severe value present', () => {
+      expect(worstProgress([])).toBe('unknown');
+      expect(worstProgress(['progressing', 'stalled', 'idle'])).toBe('stalled');
+    });
   });
 });
