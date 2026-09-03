@@ -4,23 +4,18 @@ import type { RunEvent } from '../agent-run';
 import type { CombinedOperativeEventType } from '../events';
 import { COMBINED_OPERATIVE_EVENT_TYPES } from '../events';
 import type { CleanupAcknowledgement } from '../types';
+import type { FiredFault } from './fault-plan';
 
 // ---------------------------------------------------------------------------
-// AB-92 AC8 shapes (event-recorder subset). `FiredFault`'s companion
-// `FaultBoundary`/`FaultPlan` vocabulary is AB-95's (Backlog, out of scope
-// here — see AB-255's "Out of scope" section): this slice only needs a
-// shape for `CausalTraceEntry.faultEvidence` to compile against, so
-// `FiredFault` is declared minimally, field-for-field with AB-92's sketch,
-// ready for AB-95 to import instead of redefine once it lands.
+// AB-92 AC8 shapes (event-recorder subset). `FiredFault` now has its
+// canonical definition in `./fault-plan` (AB-257, this slice's own file,
+// which also fixes the `FaultBoundary`/`FaultPlan` vocabulary `FiredFault`
+// depends on) and is re-exported here for compatibility — `event-recorder.ts`
+// no longer redeclares it. AB-95's fault engine is what will populate
+// `faultEvidence`; no fault engine exists yet.
 // ---------------------------------------------------------------------------
 
-/** See AB-92's Decision (2026-09-01), AC8. Never populated by this slice — no fault engine exists yet. */
-export interface FiredFault {
-  readonly plan: string;
-  readonly boundary: string;
-  readonly occurrence: number;
-  readonly firedAt: string;
-}
+export type { FiredFault };
 
 /**
  * A normalized, portable causal-trace entry (AB-92 AC8's `CausalTraceEntry`,

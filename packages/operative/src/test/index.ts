@@ -23,13 +23,16 @@ export type {
   DurableMultiAgentHarness,
 } from './durable-multi-agent-harness';
 export { createDurableMultiAgentHarness } from './durable-multi-agent-harness';
-export type {
-  CausalTraceEntry,
-  EventRecorder,
-  EventRecorderOwnerIdentity,
-  FiredFault,
-} from './event-recorder';
+export type { CausalTraceEntry, EventRecorder, EventRecorderOwnerIdentity } from './event-recorder';
 export { createEventRecorder } from './event-recorder';
+export type {
+  FaultBoundary,
+  FaultOccurrence,
+  FaultOperation,
+  FaultPlan,
+  FaultPlanEntry,
+  FiredFault,
+} from './fault-plan';
 export type { PromptInjectionFixtureCase } from './prompt-injection-fixtures';
 export { PROMPT_INJECTION_FIXTURES } from './prompt-injection-fixtures';
 export type {
@@ -43,6 +46,24 @@ export type {
   ResourceScope,
 } from './resource-scope';
 export { createResourceScope, QuiescenceError } from './resource-scope';
+export type {
+  ScriptedGenerate,
+  ScriptedGenerateCall,
+  ScriptedGenerateExpectation,
+  ScriptedGenerateStep,
+} from './scripted-generate';
+export { createScriptedGenerate } from './scripted-generate';
+export type {
+  ScriptedHook,
+  ScriptedHookCall,
+  ScriptedHookPhase,
+  ScriptedHookStep,
+  ScriptedSettlement,
+  ScriptedTool,
+  ScriptedToolCall,
+  ScriptedToolStep,
+} from './scripted-tool';
+export { createScriptedHook, createScriptedTool } from './scripted-tool';
 export { createStepwiseBlockingGenerate } from './stepwise-generate';
 export { createTestStore } from './store';
 export { type RunLookup, waitForCondition, waitForRunState } from './wait';
