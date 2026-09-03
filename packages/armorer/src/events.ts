@@ -4,6 +4,7 @@ import type {
 } from '@opentelemetry/api';
 
 import type { ToolErrorCategory } from './core/errors';
+import type { ExecutionSnapshot } from './execution-lifecycle';
 import type { ToolCall, ToolExecutionResult } from './types';
 
 // Forward reference types to avoid circular imports.
@@ -126,12 +127,27 @@ export class ToolSettledEvent extends Event {
   readonly error?: unknown;
   readonly toolCall: ToolCall;
   readonly configuration: ToolConfiguration;
-  constructor(detail: { result?: unknown; error?: unknown } & ToolEventDetailContext) {
+  /**
+   * Settles only when this call's own tool callback has genuinely returned
+   * or thrown — distinct from this event itself, which fires as soon as the
+   * cancellation race against the execution signal settles. A callback that
+   * ignores its abort signal keeps running after this event fires; await
+   * this promise to observe its real completion (AB-289).
+   */
+  readonly callbackCompletion?: Promise<ExecutionSnapshot>;
+  constructor(
+    detail: {
+      result?: unknown;
+      error?: unknown;
+      callbackCompletion?: Promise<ExecutionSnapshot>;
+    } & ToolEventDetailContext,
+  ) {
     super(ToolSettledEvent.type);
     this.result = detail.result;
     this.error = detail.error;
     this.toolCall = detail.toolCall;
     this.configuration = detail.configuration;
+    this.callbackCompletion = detail.callbackCompletion;
   }
 }
 
@@ -532,12 +548,28 @@ export class ToolboxSettledEvent extends Event {
   readonly call: ToolCall;
   readonly result?: unknown;
   readonly error?: unknown;
-  constructor(detail: { tool: Tool; call: ToolCall; result?: unknown; error?: unknown }) {
+  /**
+   * Settles only when this call's own tool callback has genuinely returned
+   * or thrown — distinct from this event itself, which fires as soon as the
+   * cancellation race against the execution signal settles. A callback that
+   * ignores its abort signal keeps running after this event fires; a
+   * consumer that must not treat the call as done (e.g. reporting `closed()`
+   * `completed`) awaits this promise instead (AB-289).
+   */
+  readonly callbackCompletion?: Promise<ExecutionSnapshot>;
+  constructor(detail: {
+    tool: Tool;
+    call: ToolCall;
+    result?: unknown;
+    error?: unknown;
+    callbackCompletion?: Promise<ExecutionSnapshot>;
+  }) {
     super(ToolboxSettledEvent.type);
     this.tool = detail.tool;
     this.call = detail.call;
     this.result = detail.result;
     this.error = detail.error;
+    this.callbackCompletion = detail.callbackCompletion;
   }
 }
 

@@ -8,7 +8,7 @@ import type { JsonObject } from './core/serialization/json';
 import type { ToolAvailabilityHook, ToolDefinition } from './core/tool-definition';
 import type { ToolEventMap } from './events';
 import type { EffectiveToolExecutionContext, ToolRequestContext } from './execution-context';
-import type { ExecutionHandle, ExecutionLifecycle } from './execution-lifecycle';
+import type { ExecutionHandle, ExecutionLifecycle, ExecutionSnapshot } from './execution-lifecycle';
 import { policyPauseDecisionsSymbol, policyPauseTierSymbol } from './internal/approval-resume';
 import type { PolicyPauseTier, ToolCall, ToolExecutionResult } from './types';
 
@@ -226,6 +226,12 @@ export type DefaultToolEvents = {
   settled: {
     result?: unknown;
     error?: unknown;
+    /**
+     * Settles only once the callback's own returned promise has settled (or
+     * thrown), distinct from this event's own cancellation-race settlement
+     * (AB-289). See {@link ExecutionHandle.whenSettled}.
+     */
+    callbackCompletion?: Promise<ExecutionSnapshot>;
   } & ToolEventDetailContext;
   'policy-denied': { params: unknown; reason?: string } & ToolEventDetailContext;
   'policy-action-required': { params: unknown; reason?: string } & ToolEventDetailContext;

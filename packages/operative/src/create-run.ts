@@ -374,16 +374,45 @@ export function createActiveRun(
       // or spuriously satisfy this run's drain wait for work it never
       // started.
       if (ownedToolCallIds.has(e.call.id)) {
-        // Clamped: armorer can emit 'settled' with no preceding 'execute-start'
-        // for a tool call cancelled before execution begins (an already-
-        // aborted signal path), which would otherwise drive this negative and
-        // corrupt hasInFlightWork()'s later reads.
-        inFlightTools = Math.max(0, inFlightTools - 1);
+        // The tool-call watchdog (AB-214) tracks whether the RUN is still
+        // waiting on this call, not whether the callback has physically
+        // returned — once the cancellation race settles, the run itself has
+        // moved on (the call produced a result, even a cancelled one) and
+        // stops waiting, so ending the watchdog here is correct: keeping it
+        // alive until an abort-ignoring callback's own promise eventually
+        // returns (which may be never, for a genuinely leaked background
+        // task) would report the whole run stalled/unreachable for work the
+        // run no longer waits on.
         liveness.endToolCall();
-        if (inFlightTools === 0 && toolDrainWaiters.length > 0) {
-          const waiters = toolDrainWaiters;
-          toolDrainWaiters = [];
-          for (const resolve of waiters) resolve();
+        // AB-289: armorer's `settled` event fires as soon as the
+        // cancellation race against the execution signal settles — not
+        // once the tool callback's own returned promise has genuinely
+        // settled. A callback that ignores its abort signal keeps running
+        // after this event fires, and `e.callbackCompletion` is the promise
+        // that observes its real completion (see armorer's
+        // `ExecutionHandle.whenSettled`). Defer the drain decrement until
+        // that promise resolves so `awaitToolDrain()` — and therefore
+        // `resolveOutcome` below — never reports this call done while it is
+        // still actually running. A `settled` event with no
+        // `callbackCompletion` (e.g. a hand-constructed test event) drains
+        // synchronously, right here, matching the pre-AB-289 behavior
+        // exactly rather than deferring by a spurious microtask.
+        const release = () => {
+          // Clamped: armorer can emit 'settled' with no preceding
+          // 'execute-start' for a tool call cancelled before execution
+          // begins (an already-aborted signal path), which would otherwise
+          // drive this negative and corrupt hasInFlightWork()'s later reads.
+          inFlightTools = Math.max(0, inFlightTools - 1);
+          if (inFlightTools === 0 && toolDrainWaiters.length > 0) {
+            const waiters = toolDrainWaiters;
+            toolDrainWaiters = [];
+            for (const resolve of waiters) resolve();
+          }
+        };
+        if (e.callbackCompletion) {
+          void e.callbackCompletion.then(release, release);
+        } else {
+          release();
         }
       }
       const hasError = e.error !== undefined;

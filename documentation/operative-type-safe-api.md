@@ -704,7 +704,7 @@ for the `run`/`createRun` swap above:
 - **Configuration and tool operations** — `getConfiguration`, `getTools`.
 - **Live-frame operations** — `subscribeLiveFrames`.
 - **Event operations** — `addEventListener`, `removeEventListener`, `on`, `once`, `subscribe`, `toObservable`, `events`.
-- **Completion, cancellation, and disposal operations**: `complete`, `completed`, `signal`, `dispose`, `shutdown` (AB-37), `cancelDurableRun` (AB-37), plus the read-only `store`, `memory`, `scheduler`, `ready`, `sessionStore`, `kv`, `auditTrail`, `webhookNotifier`, and `onlineEvalSampler` properties. `closed()` (AB-37) is delivered on `ActiveRun`, `AgentRun`, and `DiagnosticAgentRun` by AB-204.
+- **Completion, cancellation, and disposal operations**: `complete`, `completed`, `signal`, `dispose`, `shutdown` (AB-37), `cancelDurableRun` (AB-37), plus the read-only `store`, `memory`, `scheduler`, `ready`, `sessionStore`, `kv`, `auditTrail`, `webhookNotifier`, and `onlineEvalSampler` properties. `closed()` (AB-37) is delivered on `ActiveRun`, `AgentRun`, and `DiagnosticAgentRun` by AB-204. **AB-289** closes a gap in that delivery: an in-memory `ActiveRun.closed()` withholds `{ status: 'completed' }` until every run-owned tool call's own callback has genuinely returned or thrown — not merely until armorer's cancellation-race `settled` event fires, which a callback that ignores its abort signal can outlive.
 
 None of these depend on `D` — a `Bureau<D>`'s administrative surface is
 identical regardless of which agents were registered, which is why `Bureau`

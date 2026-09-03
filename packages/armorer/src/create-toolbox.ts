@@ -104,6 +104,7 @@ import type {
   ExecutionHandle,
   ExecutionLifecycle,
   ExecutionSelector,
+  ExecutionSnapshot,
 } from './execution-lifecycle';
 import { createExecutionLifecycle } from './execution-lifecycle';
 import {
@@ -337,7 +338,18 @@ export interface ToolboxEvents {
   };
   'execute-success': { tool: Tool; call: ToolCall; result: unknown };
   'execute-error': { tool: Tool; call: ToolCall; error: unknown };
-  settled: { tool: Tool; call: ToolCall; result?: unknown; error?: unknown };
+  settled: {
+    tool: Tool;
+    call: ToolCall;
+    result?: unknown;
+    error?: unknown;
+    /**
+     * Settles only once this call's own tool callback has genuinely
+     * returned or thrown, distinct from this event's own cancellation-race
+     * settlement — see {@link ExecutionHandle.whenSettled} (AB-289).
+     */
+    callbackCompletion?: Promise<ExecutionSnapshot>;
+  };
   'policy-denied': {
     tool: Tool;
     call: ToolCall;

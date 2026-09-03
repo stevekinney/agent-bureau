@@ -1245,6 +1245,16 @@ cannot be determined from the wrapper, so a wrapped `'completed'` outcome is
 downgraded to `unresolved`/`unknown-effect`; every other outcome passes
 through unchanged.
 
+**`completed` waits for real tool-callback completion, not just the
+cancellation race (AB-289).** In-memory `ActiveRun.closed()` withholds
+`{ status: 'completed' }` until every run-owned tool call's own callback has
+genuinely returned or thrown — armorer's toolbox `settled` event fires as
+soon as the cancellation race against the execution signal settles, and a
+callback that ignores its abort signal keeps running after that. A caller
+with its own bounded wait (`closed({ signal })`) still observes
+`{ status: 'unresolved', reason: 'timed-out' }` if that signal fires before
+the callback returns.
+
 **Parent `closed()` awaits child cleanup (AB-211).** When a run was started
 with `childRegistry` (the same `ChildRunRegistry` backing `children()` /
 `abortChild()`), its `closed()` does not resolve `completed` while any
