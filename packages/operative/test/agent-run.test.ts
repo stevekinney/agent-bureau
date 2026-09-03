@@ -1085,6 +1085,7 @@ function makeClockedAgent(
 ): RunnableAgent {
   return {
     name: 'clocked-child',
+    hasOutput: false,
     run: (input, context) => {
       const conversation = new Conversation();
       conversation.appendUserMessage(typeof input === 'string' ? input : 'go');
@@ -1158,6 +1159,7 @@ describe('AgentRun worstChildAssessment rollup (AB-216)', () => {
     const parent = makeLongLivedParent(registry);
     const child: RunnableAgent = {
       name: 'child',
+      hasOutput: false,
       run: (_input, context) => {
         const generate = createMockGenerate([textResponse('child done')]);
         const toolbox = createTestToolbox([]);

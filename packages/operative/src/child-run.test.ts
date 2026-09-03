@@ -880,6 +880,7 @@ describe('ChildRunRegistry.attachLiveness()/subscribeLiveness() (AB-216)', () =>
     const registry = createChildRunRegistry();
     const throwingAgent: RunnableAgent = {
       name: 'throws',
+      hasOutput: false,
       run: () => {
         throw new Error('boom');
       },
