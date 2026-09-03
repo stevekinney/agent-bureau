@@ -1381,9 +1381,12 @@ import {
   withBackendDescriptors,
 } from '@lostgradient/operative/providers';
 
-// createAnthropicProvider/createOpenAIProvider/createGeminiProvider (and their
-// streaming siblings) attach the single seed descriptor matching their
-// resolved model automatically — nothing to do here.
+// createAnthropicProvider/createOpenAIProvider/createGeminiProvider (and the
+// Anthropic/OpenAI streaming siblings) attach the single seed descriptor
+// matching their resolved model automatically — nothing to do here.
+// createGeminiProviderStream is the one exception: the seed catalog's Gemini
+// row describes `generateContent`, not the distinct `generateContentStream`
+// operation this factory calls, so it deliberately attaches nothing.
 const generate = createAnthropicProvider({ model: 'claude-sonnet-5', apiKey: '...' });
 const agent = createAgent({ generate });
 agent.generationProfile.mode; // 'fixed'

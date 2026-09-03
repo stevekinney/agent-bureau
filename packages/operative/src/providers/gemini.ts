@@ -724,6 +724,15 @@ async function importGeminiClient(options: {
  * The single `BackendDescriptor` (AB-64 AC2) matching `model` on the
  * `'generateContent'` endpoint, from the static seed catalog — zero or one
  * entries, never fabricated.
+ *
+ * This row describes `models.generateContent` specifically. It is only
+ * accurate for {@link createGeminiProvider}, which calls that method — not
+ * for {@link createGeminiProviderStream}, which calls the distinct
+ * `models.generateContentStream` (`:streamGenerateContent`) operation. The
+ * seed catalog (mod-02a, out of this issue's scope) has no stream-specific
+ * row, so `createGeminiProviderStream` deliberately attaches nothing rather
+ * than misreport an endpoint it never invokes; see
+ * `providers/gemini.ts`'s streaming factory below.
  */
 function geminiDescriptorsFor(model: string) {
   return createModelCatalog().descriptors.filter(
@@ -968,7 +977,14 @@ export function createGeminiProviderStream(
     });
   };
 
-  return withBackendDescriptors(generate, geminiDescriptorsFor(resolvedModel));
+  // The seed catalog's Gemini row describes `models.generateContent`
+  // (`geminiDescriptorsFor`'s own doc comment), not the distinct
+  // `models.generateContentStream` operation this factory actually calls.
+  // Attaching that row here would misreport an endpoint this function never
+  // invokes, so this stream factory is left opaque (no descriptor attached)
+  // until the seed catalog (mod-02a, out of this issue's scope) gains a
+  // stream-specific row. See the review thread on PR #433.
+  return generate;
 }
 
 /**
