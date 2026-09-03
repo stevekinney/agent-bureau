@@ -61,6 +61,7 @@ import * as auditTrailModule from './audit-trail';
 import {
   BureauError,
   classifyRecoveredRun,
+  classifyRecoveredRunDetailed,
   createBureau,
   createHumanWaitContext,
   createWakeupContext,
@@ -4967,6 +4968,107 @@ describe('classifyRecoveredRun', () => {
   });
 });
 
+describe('classifyRecoveredRunDetailed', () => {
+  const base = {
+    handleId: 'run-1',
+    scheduledFire: false,
+    ownedSessionId: 'session-1' as string | undefined,
+    metadataReadFailed: false,
+    hasSessionStore: true,
+    sessionLoad: { ok: true as const, session: { lastRunId: 'run-1', lastRunStatus: 'running' } },
+  };
+
+  it('carries no rejection reason for a reattach verdict', () => {
+    expect(classifyRecoveredRunDetailed(base)).toEqual({ verdict: 'reattach' });
+  });
+
+  it('carries no rejection reason for a monitor verdict', () => {
+    expect(
+      classifyRecoveredRunDetailed({
+        ...base,
+        scheduledFire: true,
+        ownedSessionId: undefined,
+        sessionLoad: { ok: true, session: null },
+      }),
+    ).toEqual({ verdict: 'monitor' });
+  });
+
+  it('carries no rejection reason for a skip verdict (session load failed transiently)', () => {
+    expect(classifyRecoveredRunDetailed({ ...base, sessionLoad: { ok: false } })).toEqual({
+      verdict: 'skip',
+    });
+  });
+
+  it('carries no rejection reason for a skip verdict (no session store)', () => {
+    expect(classifyRecoveredRunDetailed({ ...base, hasSessionStore: false })).toEqual({
+      verdict: 'skip',
+    });
+  });
+
+  it("reports 'metadata-read-failed' when the launch metadata read threw", () => {
+    expect(classifyRecoveredRunDetailed({ ...base, metadataReadFailed: true })).toEqual({
+      verdict: 'cancel',
+      rejection: 'metadata-read-failed',
+    });
+  });
+
+  it("reports 'foreign-input' for a non-bureau-owned, non-scheduled-fire handle", () => {
+    expect(classifyRecoveredRunDetailed({ ...base, ownedSessionId: undefined })).toEqual({
+      verdict: 'cancel',
+      rejection: 'foreign-input',
+    });
+  });
+
+  it("reports 'session-absent' when the owning session no longer exists", () => {
+    expect(
+      classifyRecoveredRunDetailed({ ...base, sessionLoad: { ok: true, session: null } }),
+    ).toEqual({ verdict: 'cancel', rejection: 'session-absent' });
+  });
+
+  it("reports 'session-run-mismatch' when the session now owns a different run", () => {
+    expect(
+      classifyRecoveredRunDetailed({
+        ...base,
+        sessionLoad: { ok: true, session: { lastRunId: 'other-run', lastRunStatus: 'running' } },
+      }),
+    ).toEqual({ verdict: 'cancel', rejection: 'session-run-mismatch' });
+  });
+
+  it("reports 'session-not-running' when the session is already terminal", () => {
+    expect(
+      classifyRecoveredRunDetailed({
+        ...base,
+        sessionLoad: { ok: true, session: { lastRunId: 'run-1', lastRunStatus: 'error' } },
+      }),
+    ).toEqual({ verdict: 'cancel', rejection: 'session-not-running' });
+  });
+
+  it('reports reattach-version-mismatch with no rejection reason', () => {
+    expect(classifyRecoveredRunDetailed({ ...base, versionMismatch: true })).toEqual({
+      verdict: 'reattach-version-mismatch',
+    });
+  });
+
+  it("classifyRecoveredRun's plain verdict always matches classifyRecoveredRunDetailed's verdict", () => {
+    for (const args of [
+      base,
+      {
+        ...base,
+        scheduledFire: true,
+        ownedSessionId: undefined,
+        sessionLoad: { ok: true as const, session: null },
+      },
+      { ...base, metadataReadFailed: true },
+      { ...base, ownedSessionId: undefined },
+      { ...base, sessionLoad: { ok: false as const } },
+      { ...base, hasSessionStore: false },
+      { ...base, versionMismatch: true },
+    ]) {
+      expect(classifyRecoveredRun(args)).toBe(classifyRecoveredRunDetailed(args).verdict);
+    }
+  });
+});
+
 describe('isRecoverableScheduledFireInput', () => {
   it('requires the scheduled input shape and a non-empty persisted schedule marker', () => {
     expect(
@@ -7389,6 +7491,213 @@ describe('createBureau review queue (AB-20)', () => {
       expect(bureau.getRequestAuthorityValidator()).toBe(replacementValidator);
     } finally {
       await bureau.dispose();
+    }
+  });
+
+  it('dispatches recovery.attempted, then recovery.rejected, then recovery.lease-released for a cancelled, lease-released recovered handle (AB-90/ab90-09)', async () => {
+    // Deferred-authority boot: recovery does NOT run inside createBureau(), so
+    // listeners attached to the RETURNED bureau are guaranteed to be in place
+    // before `setRequestAuthorityValidator` triggers the classification pass —
+    // the only way to observe a boot-recovery dispatch, since it otherwise runs
+    // synchronously before createBureau() resolves (see the sibling deferred
+    // recovery tests above/below this one).
+    const storage = new MemoryStorage();
+    const sessionStore = createSessionStore(textValueStore(storage));
+    await sessionStore.save(
+      createAgentSession({
+        id: 'deferred-lease-release',
+        agentName: 'bureau',
+        conversationHistory: createConversationHistory({ id: 'deferred-lease-release' }),
+        metadata: {
+          lastRunId: 'run-deferred-lease-release',
+          lastRunStatus: 'running',
+          lastRequestAuthorities: {
+            'run-deferred-lease-release': {
+              principalId: 'api-key:deferred-lease',
+              tenantId: 'bureau',
+              ownerId: 'bureau',
+              capabilities: ['tools:execute'],
+              authorizationRevision: 'gateway:api-key:deferred-lease',
+            },
+          },
+        },
+      }),
+    );
+    const probe = await createRuntimeComposition({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+    const enginePrototype = Object.getPrototypeOf(probe.durable!.engine) as {
+      recoverAll: () => Promise<unknown[]>;
+      cancel: (runId: string) => Promise<void>;
+      getLeaseHealth: () => unknown;
+    };
+    probe.durable!.engine[Symbol.dispose]?.();
+    probe.disposeStorage?.();
+
+    const targetRunId = 'cancelled-lease-release-run';
+    const recoverAllSpy = spyOn(enginePrototype, 'recoverAll').mockResolvedValue([
+      {
+        id: targetRunId,
+        // undefined launch metadata: not a bureau-owned agentRun → 'cancel'
+        // verdict with rejection reason 'foreign-input'.
+        getLaunchMetadata: async () => undefined,
+      },
+    ]);
+    const cancelSpy = spyOn(enginePrototype, 'cancel').mockResolvedValue(undefined);
+    const contestedHealth = {
+      mode: 'lease' as const,
+      status: 'contested' as const,
+      holdsLease: false as const,
+      holderId: 'engine-b',
+      heldSince: 100,
+      expiresAt: 5000,
+      lastRenewedAt: 4000,
+      fencingEpoch: 9,
+      lossReason: 'deposed' as const,
+    };
+    const getLeaseHealthSpy = spyOn(enginePrototype, 'getLeaseHealth').mockReturnValue(
+      contestedHealth,
+    );
+
+    type RecoveryEvent =
+      | { kind: 'attempted'; runId: string; verdict: string }
+      | { kind: 'rejected'; runId: string; reason: string }
+      | { kind: 'lease-released'; runId: string; lease: unknown };
+    const observed: RecoveryEvent[] = [];
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+        storage,
+        durableExecution: true,
+      });
+
+      try {
+        // Recovery has not run yet (deferred on gateway authority) — attach
+        // listeners now, guaranteed ahead of the dispatch.
+        expect(recoverAllSpy).not.toHaveBeenCalled();
+        bureau.addEventListener('recovery.attempted', (event) => {
+          observed.push({ kind: 'attempted', runId: event.runId, verdict: event.verdict });
+        });
+        bureau.addEventListener('recovery.rejected', (event) => {
+          observed.push({ kind: 'rejected', runId: event.runId, reason: event.reason });
+        });
+        bureau.addEventListener('recovery.lease-released', (event) => {
+          observed.push({ kind: 'lease-released', runId: event.runId, lease: event.lease });
+        });
+
+        bureau.setRequestAuthorityValidator(() => true);
+        await bureau.waitForRecovery?.();
+
+        expect(recoverAllSpy).toHaveBeenCalledTimes(1);
+        expect(cancelSpy).toHaveBeenCalledWith(targetRunId);
+        // Correctly ordered: attempted always precedes rejected, for the SAME
+        // runId (the acceptance criterion's sequence requirement).
+        expect(observed).toEqual([
+          { kind: 'attempted', runId: targetRunId, verdict: 'cancel' },
+          { kind: 'rejected', runId: targetRunId, reason: 'foreign-input' },
+          {
+            kind: 'lease-released',
+            runId: targetRunId,
+            lease: { holderId: 'engine-b', expiresAt: 5000, source: 'weft-workflow-lease' },
+          },
+        ]);
+      } finally {
+        await bureau.dispose();
+      }
+    } finally {
+      recoverAllSpy.mockRestore();
+      cancelSpy.mockRestore();
+      getLeaseHealthSpy.mockRestore();
+    }
+  });
+
+  it('does not dispatch recovery.lease-released when Weft reports no released lease (disabled engine)', async () => {
+    const storage = new MemoryStorage();
+    const sessionStore = createSessionStore(textValueStore(storage));
+    await sessionStore.save(
+      createAgentSession({
+        id: 'deferred-no-lease-release',
+        agentName: 'bureau',
+        conversationHistory: createConversationHistory({ id: 'deferred-no-lease-release' }),
+        metadata: {
+          lastRunId: 'run-deferred-no-lease-release',
+          lastRunStatus: 'running',
+          lastRequestAuthorities: {
+            'run-deferred-no-lease-release': {
+              principalId: 'api-key:deferred-no-lease',
+              tenantId: 'bureau',
+              ownerId: 'bureau',
+              capabilities: ['tools:execute'],
+              authorizationRevision: 'gateway:api-key:deferred-no-lease',
+            },
+          },
+        },
+      }),
+    );
+    const probe = await createRuntimeComposition({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+    const enginePrototype = Object.getPrototypeOf(probe.durable!.engine) as {
+      recoverAll: () => Promise<unknown[]>;
+      cancel: (runId: string) => Promise<void>;
+      getLeaseHealth: () => unknown;
+    };
+    probe.durable!.engine[Symbol.dispose]?.();
+    probe.disposeStorage?.();
+
+    const targetRunId = 'no-lease-release-run';
+    const recoverAllSpy = spyOn(enginePrototype, 'recoverAll').mockResolvedValue([
+      { id: targetRunId, getLaunchMetadata: async () => undefined },
+    ]);
+    const cancelSpy = spyOn(enginePrototype, 'cancel').mockResolvedValue(undefined);
+    const getLeaseHealthSpy = spyOn(enginePrototype, 'getLeaseHealth').mockReturnValue({
+      mode: 'none',
+      status: 'disabled',
+      holdsLease: false,
+    });
+
+    let leaseReleasedCount = 0;
+    let attemptedCount = 0;
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+        storage,
+        durableExecution: true,
+      });
+
+      try {
+        bureau.addEventListener('recovery.attempted', () => {
+          attemptedCount += 1;
+        });
+        bureau.addEventListener('recovery.lease-released', () => {
+          leaseReleasedCount += 1;
+        });
+
+        bureau.setRequestAuthorityValidator(() => true);
+        await bureau.waitForRecovery?.();
+
+        expect(cancelSpy).toHaveBeenCalledWith(targetRunId);
+        expect(attemptedCount).toBe(1);
+        expect(leaseReleasedCount).toBe(0);
+      } finally {
+        await bureau.dispose();
+      }
+    } finally {
+      recoverAllSpy.mockRestore();
+      cancelSpy.mockRestore();
+      getLeaseHealthSpy.mockRestore();
     }
   });
 

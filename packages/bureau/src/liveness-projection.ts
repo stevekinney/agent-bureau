@@ -176,6 +176,31 @@ function baseFields(envelope: LivenessSnapshotEnvelope, status: LivenessLifecycl
  * names), which gates workflow execution ownership — distinct from a
  * per-activity lease and from the connected-worker registry.
  */
+/**
+ * Derives `LivenessLeaseEvidence` for a released engine-level lease from
+ * `Engine.getLeaseHealth()` — the released-lease half of
+ * {@link projectEngineLeaseSnapshot}'s contested branch, extracted so
+ * `create-bureau.ts`'s `recovery.lease-released` event (AB-90/ab90-09) can
+ * reuse the exact same "confirmed loss without inventing successor details"
+ * rule rather than re-deriving it. Returns `undefined` for anything that is
+ * NOT a released lease: a disabled/no-lease engine, a currently-held
+ * (`'healthy'`) lease (this answers "was one just released", not "is one
+ * held"), and the sparsest contested shape (`{ mode: 'lease', status:
+ * 'contested', holdsLease: false, lossReason: 'deposed' }`), which carries no
+ * holder record to relay.
+ */
+export function leaseEvidenceFromLostHealth(
+  health: EngineLeaseHealth,
+): LivenessLeaseEvidence | undefined {
+  if (health.mode !== 'lease' || health.status !== 'contested') return undefined;
+  if (!('holderId' in health)) return undefined;
+  return {
+    holderId: health.holderId,
+    expiresAt: health.expiresAt,
+    source: 'weft-workflow-lease',
+  };
+}
+
 export function projectEngineLeaseSnapshot(
   source: Pick<WeftLivenessSource, 'getLeaseHealth'>,
   envelope: LivenessSnapshotEnvelope,
@@ -217,13 +242,7 @@ export function projectEngineLeaseSnapshot(
     // holdsLease: false, lossReason: 'deposed' }`) carries no holder record
     // at all — no `holderId`/`expiresAt` to report either, so `lease` stays
     // `undefined` rather than fabricating placeholder identifiers.
-    if ('holderId' in health) {
-      lease = {
-        holderId: health.holderId,
-        expiresAt: health.expiresAt,
-        source: 'weft-workflow-lease',
-      };
-    }
+    lease = leaseEvidenceFromLostHealth(health);
     evidence.push({
       source: 'lease-renewal',
       at: 'lastRenewedAt' in health ? health.lastRenewedAt : envelope.observedAt,
