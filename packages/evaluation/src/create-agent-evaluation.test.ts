@@ -54,6 +54,7 @@ function makeRunnableAgent(
   };
   return {
     name,
+    hasOutput: false,
     run: () =>
       ({
         result,
@@ -627,6 +628,7 @@ describe('createAgentEvaluation', () => {
     let disposeCalls = 0;
     const hangingAgent: RunnableAgent<unknown, boolean> = {
       name: 'hanging-agent',
+      hasOutput: false,
       run: (): AgentRun<unknown, boolean> => ({
         result: () => new Promise<never>(() => {}), // never resolves, ignores signal
         unwrap: () => {
@@ -682,6 +684,7 @@ describe('createAgentEvaluation', () => {
     let disposeCalls = 0;
     const uncooperativeAgent: RunnableAgent<unknown, boolean> = {
       name: 'uncooperative-agent',
+      hasOutput: false,
       run: (): AgentRun<unknown, boolean> => ({
         result: () => new Promise<never>(() => {}), // never resolves, ignores signal
         unwrap: () => {

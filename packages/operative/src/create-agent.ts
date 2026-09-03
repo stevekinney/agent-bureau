@@ -307,6 +307,14 @@ export interface StandaloneAgent<
   readonly name: string;
 
   /**
+   * A runtime witness for `H` (AB-234) — `output !== undefined` in the
+   * options this agent was created with. See `RunnableAgent.hasOutput`'s
+   * doc comment (`runnable-agent.ts`) for why this exists alongside the
+   * compile-time-only `H` parameter.
+   */
+  readonly hasOutput: boolean;
+
+  /**
    * This agent's immutable generation-capability snapshot (AB-64, AB-245),
    * computed once at `createAgent()` call time from `options.generate`'s
    * attached `BackendDescriptor`(s): `'fixed'` for exactly one, `'routed'`
@@ -343,11 +351,14 @@ export interface StandaloneAgent<
    *
    * Returns an `AgentRun` handle — NOT a Promise (non-thenable by design).
    * Access the result via `handle.result()`.
+   *
+   * Declared as a property-typed function, not method shorthand — see
+   * `RunnableAgent.run`'s doc comment (`runnable-agent.ts`) for why.
    */
-  run(
+  run: (
     input: string | { conversation: ConversationHistory },
     context?: AgentRunContext,
-  ): AgentRun<O, H>;
+  ) => AgentRun<O, H>;
 }
 
 // Re-export AgentRun from agent-run.ts so callers who import from create-agent
@@ -592,6 +603,7 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknow
 
   return {
     name: resolvedName,
+    hasOutput: output !== undefined,
     generationProfile,
     run(
       input: string | { conversation: ConversationHistory },

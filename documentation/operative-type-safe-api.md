@@ -48,7 +48,8 @@ a caller never needs to pass it there.
 ```ts
 export interface RunnableAgent<O = never, H extends boolean = false> {
   readonly name: string;
-  run(input: AgentInput, context?: AgentRunContext): AgentRun<O, H>;
+  readonly hasOutput: boolean;
+  run: (input: AgentInput, context?: AgentRunContext) => AgentRun<O, H>;
 }
 ```
 
@@ -57,6 +58,23 @@ export interface RunnableAgent<O = never, H extends boolean = false> {
 `output` schema was supplied at all — it exists so `AgentRun<O, H>` can add or
 withhold the `.output()` method without ever exposing a `.output()` that
 resolves to `never`.
+
+`hasOutput` (AB-234) is `H`'s runtime witness: `createAgent` and
+`createLazyAgent` populate it truthfully (`output !== undefined`, or the
+`hasOutput` option supplied to a lazy agent — see
+[Lazy loading](#lazy-loading)), and code that needs to trust `H` at runtime —
+`isSuccessfulRunResult`, and `createSubagentTool`'s success narrowing built on
+it — consults this instead of the compile-time-only `H` parameter. Without
+it, a hand-written `RunnableAgent<O, true>` that never actually attaches
+`schemaValidation` is structurally indistinguishable, at runtime, from a
+genuinely schema-less (`H = false`) agent.
+
+`run` is declared as a property-typed function, not method shorthand, so
+TypeScript checks its parameter contravariantly: an implementation whose
+`run` only accepts a narrower input type than `AgentInput` (for example,
+`(input: string) => AgentRun<O, H>`, rejecting the `{ conversation }`
+resumption form) is correctly rejected. Method shorthand's bivariant
+parameter checking would let that compile unsoundly.
 
 `run()` is synchronous. It always returns an `AgentRun` immediately — never a
 `Promise<AgentRun>` — regardless of whether the agent, its toolbox, or its
@@ -325,20 +343,46 @@ export type AgentModule<O, H extends boolean> =
 
 export function createLazyAgent<O, H extends boolean>(
   loader: () => Promise<AgentModule<O, H>>,
+  options: { label?: string; hasOutput?: H } = {},
 ): RunnableAgent<O, H> {
+  let state: { kind: 'unloaded' } | { kind: 'loaded'; agent: RunnableAgent<O, H> } = {
+    kind: 'unloaded',
+  };
   let resolved: Promise<RunnableAgent<O, H>> | undefined;
 
   const resolve = (): Promise<RunnableAgent<O, H>> =>
-    (resolved ??= loader().then((module) => ('run' in module ? module : module.default)));
+    (resolved ??= loader()
+      .then((module) => ('run' in module ? module : module.default))
+      .then((agent) => {
+        state = { kind: 'loaded', agent };
+        return agent;
+      }));
 
   return {
-    name: '(lazy)',
+    name: options.label ?? '(lazy)',
+    get hasOutput() {
+      return state.kind === 'loaded' ? state.agent.hasOutput : (options.hasOutput ?? false);
+    },
     run(input, context) {
       return createDeferredAgentRun(resolve().then((agent) => agent.run(input, context)));
     },
   };
 }
 ```
+
+`createLazyAgent` returns a `RunnableAgent` synchronously, before the loader
+has ever run — so its `hasOutput` witness (AB-234) can't be discovered from
+the module in time until it resolves. `hasOutput` is therefore a live
+getter, not a value frozen at construction: before the loader resolves it
+falls back to `options.hasOutput` (a provisional value, typed as `H` itself
+so it cannot disagree with this call's own type argument — default `false`,
+matching `H`'s own default); once resolved, it switches to reading the
+_loaded_ agent's own `hasOutput` directly — the real, load-derived truth —
+regardless of what (or whether) `options.hasOutput` said. This closes a
+review-round gap in an earlier draft of this contract: publishing a value
+frozen at construction time would otherwise leave a permanently wrong
+witness whenever the caller's declared `options.hasOutput` didn't match the
+underlying agent's actual one (or was omitted for an inferred `H = true`).
 
 `createLazyAgent`'s return type is `RunnableAgent<O, H>` — the same shape as
 an eager `createAgent` result. This is the load-bearing property: a lazy agent

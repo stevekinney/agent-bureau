@@ -19,6 +19,7 @@ function makeAgent(name: string): HandoffTarget {
     agentName: name,
     agent: {
       name,
+      hasOutput: false,
       run: () => {
         throw new Error('not invoked — handoff is marker-based, not agent.run()');
       },

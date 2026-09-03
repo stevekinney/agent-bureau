@@ -60,10 +60,35 @@ export interface AgentRunContext {
  * `run()` is synchronous — it always returns an `AgentRun` immediately,
  * never a `Promise<AgentRun>`, regardless of whether the agent itself was
  * produced lazily (see `createLazyAgent`).
+ *
+ * `run` is declared with a property-typed function signature (`run: (input,
+ * context?) => AgentRun<O, H>`) rather than method shorthand (`run(input,
+ * context?): AgentRun<O, H>`). TypeScript checks a method-shorthand member's
+ * parameters bivariantly — an object whose `run` only accepts a narrower
+ * input type (e.g. `(input: string) => AgentRun<O, H>`, rejecting the
+ * `{ conversation }` resumption form) would still structurally satisfy the
+ * interface, unsoundly. The property-typed form is checked contravariantly,
+ * so that narrower `run` is correctly rejected (see `runnable-agent.test-d.ts`'s
+ * `@ts-expect-error` type test).
  */
 export interface RunnableAgent<O = never, H extends boolean = false> {
   readonly name: string;
-  run(input: AgentInput, context?: AgentRunContext): AgentRun<O, H>;
+  /**
+   * A runtime witness for `H` (AB-234). `AgentRun.unwrap()`/`.output()`
+   * already close over a real `hasOutput` boolean independent of anything
+   * structural on the eventual `RunResult` (`CreateAgentRunOptions.hasOutput`
+   * in `agent-run.ts`) — this mirrors that same witness onto the agent
+   * itself, so code that only has the `RunnableAgent` (not the `AgentRun` it
+   * produces) — `createSubagentTool`'s success narrowing, most notably — can
+   * consult a truthful runtime signal for `H` instead of trusting the
+   * compile-time-only phantom parameter. Without this, a hand-written
+   * `RunnableAgent<O, true>` that never actually validates or attaches
+   * `schemaValidation` is structurally indistinguishable, at runtime, from a
+   * genuinely schema-less (`H = false`) agent — see `isSuccessfulRunResult`'s
+   * doc comment in `agent-run.ts` for the narrowing this closes.
+   */
+  readonly hasOutput: boolean;
+  run: (input: AgentInput, context?: AgentRunContext) => AgentRun<O, H>;
   /**
    * The immutable generation-capability snapshot behind this agent (AB-64,
    * AB-245). Optional — a third-party `RunnableAgent` implementation that

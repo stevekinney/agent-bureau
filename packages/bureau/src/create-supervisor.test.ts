@@ -1,4 +1,4 @@
-import type { AgentRun, RunResult } from '@lostgradient/operative';
+import type { AgentInput, AgentRun, RunResult } from '@lostgradient/operative';
 import { createAgent } from '@lostgradient/operative';
 import { createMockGenerate } from '@lostgradient/operative/test';
 import { describe, expect, it } from 'bun:test';
@@ -44,7 +44,14 @@ function makeAgent(
   return {
     fixture: {
       name,
-      run: (input: string) => {
+      hasOutput: false,
+      // Narrowed to `string` — every test here only ever calls `run()` with
+      // a plain string, never `{ conversation }`; a real `RunnableAgent`
+      // must accept the full `AgentInput` union (`AgentInput` accepted,
+      // asserted to `string` since this fixture doesn't support resuming a
+      // conversation).
+      run: (rawInput: AgentInput) => {
+        const input = rawInput as string;
         receivedInputs.push(input);
         return {
           result: () => respond(input),
@@ -120,6 +127,7 @@ describe('createSupervisor', () => {
         writer: writer.fixture,
         lazy: {
           name: '(lazy)',
+          hasOutput: false,
           run: () => {
             lazyLoaded = true;
             throw new Error('the lazy agent must never be invoked when unselected');

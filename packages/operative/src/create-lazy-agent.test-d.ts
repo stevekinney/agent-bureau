@@ -31,6 +31,7 @@ function buildRun<O, H extends boolean>(hasOutput: H): AgentRun<O, H> {
 
 const untypedAgent: RunnableAgent<never, false> = {
   name: 'untyped',
+  hasOutput: false,
   run: () => buildRun(false),
 };
 
@@ -39,6 +40,7 @@ type TypedOutput = z.output<typeof _outputSchema>;
 
 const typedAgent: RunnableAgent<TypedOutput, true> = {
   name: 'typed',
+  hasOutput: true,
   run: () => buildRun(true),
 };
 
@@ -115,6 +117,22 @@ void options;
 // @ts-expect-error — a selector overload is not part of the public contract.
 const optionsWithSelector: CreateLazyAgentOptions = { select: (module: unknown) => module };
 void optionsWithSelector;
+
+// AB-234 review round 2 (Copilot): `options.hasOutput` is typed as `H`
+// itself, not a bare `boolean` — a value that disagrees with the call's own
+// `H` type argument is a compile-time error, not a silently-accepted
+// mismatch.
+const agreeingHasOutputLazy: RunnableAgent<TypedOutput, true> = createLazyAgent<TypedOutput, true>(
+  () => typedAgent,
+  { hasOutput: true },
+);
+void agreeingHasOutputLazy;
+
+const disagreeingHasOutputLazy = createLazyAgent<TypedOutput, true>(() => typedAgent, {
+  // @ts-expect-error — `hasOutput: false` disagrees with this call's own `H = true` argument.
+  hasOutput: false,
+});
+void disagreeingHasOutputLazy;
 
 // A raw `import(path)` module namespace object — its `default` export is
 // unwrapped automatically (AB-15's `AgentModule<O, H>`); no selector needed.

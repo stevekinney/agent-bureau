@@ -61,9 +61,31 @@ export type AgentModule<O, H extends boolean> =
 export type LazyAgentLoader<O, H extends boolean> = () =>
   AgentModule<O, H> | PromiseLike<AgentModule<O, H>>;
 
-export interface CreateLazyAgentOptions {
+export interface CreateLazyAgentOptions<H extends boolean = false> {
   /** Human-readable label included in lazy loading and contract error messages. */
   label?: string;
+  /**
+   * A provisional runtime witness for this lazy agent's `H` (AB-234), used
+   * ONLY before the loader has ever resolved. `createLazyAgent` returns a
+   * `RunnableAgent` synchronously — before loading starts — so there is no
+   * real witness to report yet; the returned agent's `hasOutput` getter
+   * falls back to this value until then. Once the underlying agent has
+   * loaded, `hasOutput` switches to reading THAT agent's own `hasOutput`
+   * directly — the real, load-derived truth — so an inaccurate or omitted
+   * `options.hasOutput` cannot leave a permanently wrong witness once
+   * loading completes (see the getter's own doc comment below). Defaults to
+   * `false`, matching `H`'s default.
+   *
+   * Typed as `H` itself, not a bare `boolean` (review round 2, Copilot):
+   * `createLazyAgent<Output, true>(loader, { hasOutput: false })` — a value
+   * that disagrees with the call's own `H` argument — is a compile-time
+   * error, not a silently-accepted mismatch, tightening this from "may be
+   * wrong at the type level, corrected at runtime once loaded" to "cannot
+   * be wrong at the type level in the first place." See
+   * `RunnableAgent.hasOutput`'s doc comment (`runnable-agent.ts`) for why
+   * this witness exists at all.
+   */
+  hasOutput?: H;
 
   /**
    * The generation-capability snapshot exposed on the returned agent (AB-64,
@@ -144,7 +166,22 @@ function isRunnableAgent(value: unknown): value is RunnableAgent<unknown, boolea
   // `default` unwrapping, later invoking the unrelated `run` with
   // `AgentInput`. A module namespace object has no `name` binding, so this
   // check rejects it and falls through to the `default` unwrapping branch.
-  return isCallable(candidate['run']) && typeof candidate['name'] === 'string';
+  //
+  // `hasOutput` (AB-234 review round 2, Codex P1) must also be validated as
+  // an actual `boolean`, not merely present-or-absent: an untyped or
+  // pre-AB-234 module resolving to an object with `run`/`name` but no
+  // `hasOutput` would otherwise pass this guard, and the lazy wrapper's own
+  // `hasOutput` getter would then read `undefined` off it — which
+  // `isSuccessfulRunResult` treats as falsy, silently reopening the exact
+  // soundness gap this issue closes. Failing the contract check here
+  // instead routes it through the existing `AgentContractError` path (see
+  // both call sites below) rather than publishing a missing property as a
+  // witness.
+  return (
+    isCallable(candidate['run']) &&
+    typeof candidate['name'] === 'string' &&
+    typeof candidate['hasOutput'] === 'boolean'
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -949,7 +986,7 @@ function freezeGenerationProfile(profile: AgentGenerationProfile): AgentGenerati
  */
 export function createLazyAgent<O = never, H extends boolean = false>(
   loader: LazyAgentLoader<O, H>,
-  options: CreateLazyAgentOptions = {},
+  options: CreateLazyAgentOptions<H> = {},
 ): RunnableAgent<O, H> {
   const label = options.label ?? 'anonymous';
   let state: LazyAgentState<O, H> = { kind: 'unloaded' };
@@ -1049,6 +1086,41 @@ export function createLazyAgent<O = never, H extends boolean = false>(
     ...(options.generationProfile
       ? { generationProfile: freezeGenerationProfile(options.generationProfile) }
       : {}),
+    /**
+     * A live witness, not a value frozen at construction time (AB-234
+     * review, Codex: `options.hasOutput` alone left exactly the gap this
+     * issue closes — a caller who supplies `H = true` without also passing
+     * `{ hasOutput: true }` would otherwise get a permanently-`false`
+     * witness even after the underlying, genuinely schema-backed agent has
+     * loaded). Once `resolve()` has settled to a `'loaded'` agent, this
+     * defers to THAT agent's own `hasOutput` — the real, load-derived
+     * truth — falling back to the caller-declared `options.hasOutput`
+     * (default `false`) only for the window before the loader has ever
+     * resolved. Every consumer that matters (`createSubagentTool`'s
+     * post-`result()` narrowing, most notably) reads `hasOutput` only after
+     * awaiting the run's result, by which point loading has necessarily
+     * completed, so this always observes the loaded value in practice.
+     */
+    get hasOutput(): boolean {
+      // `state.agent` is whatever the loader resolved to — `resolve()`
+      // caches it before `isRunnableAgent` gets a chance to reject it (that
+      // rejection happens per-call-site, as an `AgentContractError` on the
+      // run itself, not by unsetting `state`). So `state.agent` can be
+      // `null`, a primitive, or any other malformed value here, not just a
+      // well-formed-but-untyped object (AB-234 review round 2, Codex P2:
+      // a bare `typeof state.agent.hasOutput` on a `null`-resolved loader
+      // throws a raw `TypeError` from THIS getter, masking the promised
+      // `AgentContractError`/`SubagentRunError` the run itself would
+      // otherwise surface). Route through the same `isRunnableAgent` guard
+      // both call sites already use — it null/object-checks `state.agent`
+      // before ever touching `.hasOutput` — instead of dereferencing it
+      // directly, so a malformed loaded value can never make this getter
+      // throw or return anything but a real `boolean`.
+      if (state.kind === 'loaded' && isRunnableAgent(state.agent)) {
+        return state.agent.hasOutput;
+      }
+      return options.hasOutput ?? false;
+    },
     run(input: AgentInput, context?: AgentRunContext): AgentRun<O, H> {
       return createDeferredAgentRun(resolve, input, context, label);
     },

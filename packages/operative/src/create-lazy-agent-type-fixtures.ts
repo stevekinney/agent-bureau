@@ -25,11 +25,13 @@ function buildRun(): AgentRun<never, false> {
 
 export const namedAgent: RunnableAgent<never, false> = {
   name: 'named-fixture',
+  hasOutput: false,
   run: () => buildRun(),
 };
 
 const defaultAgent: RunnableAgent<never, false> = {
   name: 'default-fixture',
+  hasOutput: false,
   run: () => buildRun(),
 };
 

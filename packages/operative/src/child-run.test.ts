@@ -66,6 +66,7 @@ function makeControllableAgent<O = never, H extends boolean = false>(): {
 
   const agent: RunnableAgent<O, H> = {
     name: 'controllable',
+    hasOutput: false,
     run(input, context) {
       calls.push({ input, context });
       context?.signal?.addEventListener('abort', () => {
@@ -107,6 +108,7 @@ function makeRejectingAgent(error: Error): RunnableAgent {
   };
   return {
     name: 'rejecting',
+    hasOutput: false,
     run: () =>
       ({
         result: reject,
@@ -372,6 +374,7 @@ describe('dispatchChildRun — lifecycle events', () => {
 
     const agent: RunnableAgent = {
       name: 'throws-from-result',
+      hasOutput: false,
       run: () =>
         ({
           result: () => {
@@ -487,6 +490,7 @@ describe('dispatchChildRun — abort semantics', () => {
     });
     const agent: RunnableAgent = {
       name: 'ignores-signal',
+      hasOutput: false,
       run: () =>
         ({
           // Deliberately never reads `context.signal` — cancellation is
@@ -646,6 +650,7 @@ describe('createChildRunRegistry', () => {
     emitter.addEventListener(ChildWorkflowFailedEvent.type, (e) => received.push(e));
     const throwingAgent: RunnableAgent = {
       name: 'throws-synchronously',
+      hasOutput: false,
       run: () => {
         throw new Error('run() itself threw');
       },

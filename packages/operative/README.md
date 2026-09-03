@@ -151,7 +151,7 @@ for await (const event of run) {
 const result = await run.result(); // await — same handle
 ```
 
-`createAgent`'s return value satisfies `RunnableAgent<O, H>` (AB-21) — it carries a `readonly name` (`options.name`, defaulting to `'(agent)'` when omitted) and `run` accepts an optional second `AgentRunContext` argument (`{ signal, agentName, traceContext, withTraceContext }`), so it slots into `createLazyAgent` or a future `AgentDefinitions` map without a cast. `context.signal` drives per-run abort, `context.agentName` overrides the run's stamped agent name, and `context.traceContext` becomes the same `parentContext` field `RunOptions` already uses for nested tracing.
+`createAgent`'s return value satisfies `RunnableAgent<O, H>` (AB-21) — it carries a `readonly name` (`options.name`, defaulting to `'(agent)'` when omitted), a `readonly hasOutput: boolean` (AB-234 — `output !== undefined`, the runtime witness for `H`), and `run` accepts an optional second `AgentRunContext` argument (`{ signal, agentName, traceContext, withTraceContext }`), so it slots into `createLazyAgent` or a future `AgentDefinitions` map without a cast. `context.signal` drives per-run abort, `context.agentName` overrides the run's stamped agent name, and `context.traceContext` becomes the same `parentContext` field `RunOptions` already uses for nested tracing.
 
 **`CreateAgentOptions`** — key fields:
 
@@ -328,6 +328,8 @@ const plugin = createLazyAgent(() => import('./agents/plugin'));
 ```
 
 `createLazyAgent`'s return value is an ordinary `RunnableAgent<O, H>` — the same shape `createAgent` produces — so it slots into an `AgentDefinitions` map without unwrapping. The first successful load is cached and shared across concurrent `run()` calls; a load failure clears only that pending load, so a later `run()` retries.
+
+Because this return value is synchronous — built before the loader has ever run — `hasOutput` is a live getter, not a value frozen at construction (AB-234). Before the loader resolves it falls back to `options.hasOutput` (typed as `H` itself, so it cannot disagree with the call's own type argument — pass `{ hasOutput: true }` for a schema-backed agent; defaults to `false`, matching `H`'s own default); once resolved, it switches to reading the _loaded_ agent's own `hasOutput` directly, regardless of what (or whether) `options.hasOutput` said — so an omitted or inaccurate provisional value can never leave a permanently wrong witness once loading completes.
 
 Each `run()` call owns its own `waiting → started → terminal` state, independent of every other call to the same lazy agent:
 

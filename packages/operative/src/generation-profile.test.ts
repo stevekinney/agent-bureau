@@ -25,6 +25,7 @@ function seedDescriptor(provider: 'anthropic' | 'openai' | 'gemini'): BackendDes
 function agentWithProfile(generationProfile: RunnableAgent['generationProfile']): RunnableAgent {
   return {
     name: 'test-agent',
+    hasOutput: false,
     run: () => {
       throw new Error('not exercised by these tests');
     },
