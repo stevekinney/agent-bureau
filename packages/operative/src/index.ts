@@ -49,7 +49,7 @@ export type {
   DispatchChildRunOptions,
   MutableChildRunRegistry,
 } from './child-run';
-export { createChildRunRegistry, dispatchChildRun } from './child-run';
+export { attenuateDelegatedAuthority, createChildRunRegistry, dispatchChildRun } from './child-run';
 export type { RepeatingToolCallsOptions, TokenBudgetOptions } from './conditions/index';
 export { stopWhen } from './conditions/index';
 export type {
@@ -164,6 +164,7 @@ export {
   NonJsonOutputError,
   OutputSchemaConversionError,
   OutputValidationError,
+  SelectionRevalidationError,
   serializeAgentRunError,
   SubagentRunError,
 } from './errors';
@@ -224,6 +225,12 @@ export type {
   RunnableAgent,
 } from './runnable-agent';
 export { OPERATIVE_RESOLVE_RUN_OPTIONS } from './runnable-agent';
+export type {
+  CreateSelectionGateOptions,
+  SelectionGate,
+  SelectionGateSource,
+} from './selection-gate';
+export { createSelectionGate } from './selection-gate';
 // C3 — curated tool.* bubble events
 export type { ToolEventStamp } from './events';
 export {

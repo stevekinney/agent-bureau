@@ -2,6 +2,7 @@ import { isToolboxBudgetExceededToolError } from 'armorer';
 import { ZodError, type ZodIssue } from 'zod';
 
 import { isToolCallParseError } from './providers/errors.ts';
+import type { SelectionPlan } from './providers/selection.ts';
 import type { RunResult } from './types';
 
 export type AgentRunErrorKind =
@@ -19,6 +20,7 @@ export type AgentRunErrorCode =
   | 'MAXIMUM_STEPS'
   | 'NON_JSON_OUTPUT'
   | 'OUTPUT_SCHEMA_CONVERSION_FAILED'
+  | 'SELECTION_REVALIDATION_FAILED'
   | 'SUBAGENT_RUN_FAILED'
   | 'TRIPWIRE'
   | 'UNKNOWN';
@@ -325,6 +327,37 @@ export class GuardrailTripwireError extends AgentRunError implements GuardrailTr
     this.phase = info.phase;
     this.confidence = info.confidence;
     if (info.detail !== undefined) this.detail = info.detail;
+  }
+}
+
+/**
+ * Thrown by `runStep`'s AB-67-boundary selection revalidation (AB-250) when
+ * `RunOptions.selection`'s `SelectionGate.revalidate()` returns a plan whose
+ * `outcome` is not `'selected'` — a candidate that was eligible when the
+ * plan was made no longer is, by the time the run reaches its next safe
+ * generation boundary. The step fails outright rather than silently
+ * continuing on the superseded plan's model, per AB-64's decision record:
+ * "a replacement plan that cannot reach `selected` fails the step with a
+ * typed error rather than falling back to the superseded plan's model."
+ *
+ * `plan` is the failed replacement plan (`plan.outcome !== 'selected'`,
+ * `plan.failure` present); `supersededPlan` is the previously `'selected'`
+ * plan it replaces, when one existed — the plan `plan` "links to", per
+ * AB-250's acceptance criteria. `supersededPlan.selected` is never rewritten;
+ * this error carries both, unchanged, for a caller to inspect.
+ */
+export class SelectionRevalidationError extends AgentRunError {
+  readonly plan: SelectionPlan;
+  readonly supersededPlan: SelectionPlan | undefined;
+
+  constructor(plan: SelectionPlan, supersededPlan?: SelectionPlan) {
+    super(plan.failure?.reason ?? `selection revalidation failed with outcome '${plan.outcome}'`, {
+      kind: 'policy',
+      code: 'SELECTION_REVALIDATION_FAILED',
+    });
+    this.name = 'SelectionRevalidationError';
+    this.plan = plan;
+    this.supersededPlan = supersededPlan;
   }
 }
 

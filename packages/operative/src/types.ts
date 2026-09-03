@@ -10,6 +10,7 @@ import type { CostEstimate, CostEstimationOptions } from './cost-estimation';
 import type { SteeringDesiredState } from './durable/types';
 import type { OperativeHookMap } from './hooks';
 import type { RetryMutator } from './retry/types';
+import type { SelectionGate } from './selection-gate';
 import type { LiveStreamEvent } from './streaming/types';
 import type { ResponseFormat, ToolChoice } from './structured-output/types';
 
@@ -536,6 +537,19 @@ export interface RunOptionsBase {
    * explicit model.
    */
   costEstimation?: { model: string; pricing?: CostEstimationOptions };
+  /**
+   * The AB-64/AB-250 selection-revalidation gate, read at the same `runStep`
+   * boundary as `steering` (after the pause-wait loop, before backpressure):
+   * `gate.revalidate()` re-checks a previously planned backend selection
+   * against the CURRENT catalog/policy/availability snapshot. A plan that
+   * no longer reaches `outcome: 'selected'` fails the step with a
+   * {@link SelectionRevalidationError} rather than silently continuing on
+   * the superseded plan's model. `undefined` — the default — is a complete
+   * no-op: the boundary read is skipped entirely and behavior is unchanged,
+   * matching today's non-selecting behavior exactly. Unlike `steering`,
+   * `selection` carries no `runId` coupling — see {@link SelectionGate}.
+   */
+  selection?: SelectionGate;
 }
 
 /**

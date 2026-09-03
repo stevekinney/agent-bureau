@@ -392,6 +392,7 @@ Like `createAgent`, a plain `ConversationHistory` passed here is SNAPSHOTTED on 
 | `signal`              | `AbortSignal`                                          | External cancellation signal.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `runId`               | `string`                                               | Stable run identity, used to stamp curated `tool.*` bubble events. Optional for a run with no `steering` (only supplied when the run has one, e.g. session-owned runs) — **required whenever `steering` is set** (AB-236): `RunOptions` is a discriminated pair on `runId`/`steering`, not two independently-optional fields, so a steering-enabled `RunOptions` literal with no `runId` is a compile error, not a silently-dropped `steering.applied` event.                                                                                                                                                                                                                                                                                                                                            |
 | `steering`            | `SteeringGate`                                         | AB-67 runtime steering: `{ sessionId, getDesiredState(), awaitResume(), getAppliedFloor?() }`, consulted at the entry of every step. `paused: true` blocks the step until `awaitResume()` resolves or `signal` fires. `sessionId` (AB-221) stamps `steering.applied`'s `sessionId` field. `getAppliedFloor?()` (AB-199) — optional, the highest `configVersion` the gate has already observed applied by ANY run on the session — seeds a brand-new run's cross-run dedupe cursor (`executeLoop`/the durable driver call it once, at run start only) so a `configVersion` a prior run already applied is not re-fired as `steering.applied`; a gate that omits it seeds every fresh run at 0, unchanged from before AB-199. Optional — omit for unsteered runs; setting it requires `runId` (see above). |
+| `selection`           | `SelectionGate`                                        | AB-64/AB-250 selection-revalidation gate: `{ getPlan(), revalidate() }`, both synchronous and pure, consulted at the same boundary as `steering` (after the pause-wait loop, before backpressure). A revalidated plan that no longer reaches `outcome: 'selected'` fails the step with `SelectionRevalidationError`. No `runId` coupling. Optional — omit for a run with no selection dependency.                                                                                                                                                                                                                                                                                                                                                                                                        |
 
 **`RunResult`:**
 
@@ -1508,7 +1509,32 @@ plan.candidates[0]?.descriptorSnapshot; // inlined by value — safe to replay a
 
 Every eligible candidate's `descriptorSnapshot` is a deep, independent structural copy of the deciding `BackendDescriptor` — never a live reference — so a `SelectionPlan` replays its own eligibility reasoning unchanged after the source catalog has moved on, been mutated, or been discarded. `rankingInputs` names three signals per eligible candidate (`cost`, `latency`, `preferenceMatch`) rather than summarizing into one score. All seven `SelectionOutcomeKind` values are reachable; `failure` is present if and only if `outcome !== 'selected'`, enforced structurally by the exported type. `recordEffectiveGeneration(plan, effective)` folds a completed generation's actual backend into a `'selected'` plan without ever rewriting `selected`: a divergence produces a new terminal `'provider-effective-divergence'` plan alongside the original selection; a non-divergence returns `plan` unchanged, by reference.
 
-Bureau wiring, `BureauOptions.modelPolicy`, and `runStep` boundary revalidation remain AB-250's scope; cross-mode replay fixtures are AB-251's.
+Bureau wiring (`BureauOptions.modelPolicy`, `Bureau.planSelection`) and `runStep` boundary revalidation ship next (AB-250, below); cross-mode replay fixtures are AB-251's.
+
+#### Selection Gate and Boundary Revalidation (AB-64, AB-250)
+
+`RunOptions` gains an optional `selection?: SelectionGate`, mirroring the shipped `steering?: SteeringGate` field (unlike `steering`, it carries no `runId` coupling). `run-step.ts` reads it at the same shared boundary the steering gate is already read — after the pause-wait loop, before backpressure — and calls `gate.revalidate()`, which is synchronous and pure, exactly like `select` itself:
+
+```typescript
+import { createSelectionGate } from '@lostgradient/operative';
+import { select } from '@lostgradient/operative/providers';
+
+const gate = createSelectionGate({
+  initialPlan: select(request, options),
+  request: () => currentRequest(), // read fresh on every revalidate() call
+  options: () => currentOptions(), // read fresh on every revalidate() call
+});
+
+// ...later, at the runStep boundary:
+const revalidated = gate.revalidate();
+revalidated.outcome; // 'selected' when nothing changed; a typed replacement otherwise
+```
+
+A revalidated plan that no longer reaches `outcome: 'selected'` fails the step with the new `SelectionRevalidationError` (`kind: 'policy'`, `code: 'SELECTION_REVALIDATION_FAILED'`), carrying both the failed replacement plan (`.plan`) and the superseded plan it replaces (`.supersededPlan`) — never silently falling back to the superseded plan's model. Omitting `RunOptions.selection` leaves `runStep` behaving exactly as it does today.
+
+`DelegatedAuthority` threads through `dispatchChildRun`'s `DispatchChildRunOptions.delegatedAuthority`, forwarded to `agent.run()` as the new `AgentRunContext.delegatedAuthority` — never through `BureauRunOptions`. `attenuateDelegatedAuthority(parent, child)` (`@lostgradient/operative`) composes a parent's grant with the authority a dispatch site wants to hand one specific child: `grantedProviders`/`grantedModels` intersect (never widen), `maximumEffort` takes the lower tier, and the result's `policyVersion` is the attenuating (child) grant's own version.
+
+Bureau's `planSelection`/`createSelectionGateFor` surface (`packages/bureau/src/model-policy.ts`) is documented in `packages/bureau/README.md`.
 
 #### Structured Output
 

@@ -23,6 +23,7 @@ import type {
   SessionInputAdmissionRequest,
 } from '@lostgradient/operative/durable';
 import type { LivenessSnapshot } from '@lostgradient/operative/liveness';
+import type { SelectionPlan } from '@lostgradient/operative/providers';
 import type { Store } from '@lostgradient/operative/store';
 import type {
   HistoryPolicy,
@@ -64,6 +65,7 @@ import type {
 import type { AuditTrail } from './audit-trail';
 import type { BureauEventMap } from './events';
 import type { ModelCatalogService } from './model-catalog-refresh';
+import type { BureauModelPolicyOptions, PlanSelectionRequest } from './model-policy';
 import type { OnlineEvalSampler, OnlineEvalSamplerOptions } from './online-evals';
 import type { SteeringCommandAdmissionOutcome, SteeringCommandRequest } from './steering';
 import type { WebhookNotifier, WebhookNotifierOptions } from './webhook-notifier';
@@ -267,6 +269,16 @@ export interface BureauOptions<D extends AgentDefinitions = AgentDefinitions> {
    * `provider` below (a bureau may use either, both, or neither surface).
    */
   agents: D;
+  /**
+   * AB-64/AB-250 — deployment/Bureau model-policy invariants and the
+   * per-principal user configuration `Bureau.planSelection`/a run's
+   * `SelectionGate` compose against, held in memory for the bureau's
+   * lifetime. Named policy profiles are keys of `users` and of each
+   * configuration's own `fallbackOrder`; there is no storage schema and no
+   * migration. `BureauRunOptions` gains no field for any of this — see
+   * AB-64's decision record, `## AB-15 and AB-22 boundaries (AC9)`.
+   */
+  modelPolicy?: BureauModelPolicyOptions;
   generate?: GenerateFunction;
   provider?: ProviderConfiguration;
   providers?: ProviderRouteConfiguration[];
@@ -757,6 +769,18 @@ export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
    * before reporting.
    */
   readonly modelCatalog: ModelCatalogService;
+
+  /**
+   * AB-64/AB-250 — builds a full `SelectionPlan` for `request` against this
+   * bureau's CURRENT model catalog and `BureauOptions.modelPolicy`
+   * configuration. Synchronous and side-effect-free: it starts no run,
+   * refreshes no catalog, and dispatches no event — a caller can ask what
+   * an Agent would use without any of the consequences of actually running
+   * it. `request.principal` selects the per-principal `UserModelConfiguration`
+   * from `modelPolicy.users`, the same value `BureauRunOptions.principal`
+   * carries for an actual run; absent composes with no user layer.
+   */
+  planSelection(request: PlanSelectionRequest): SelectionPlan;
 
   /**
    * The typed agent catalog (AB-15, AB-22) — the immutable, read-only view
