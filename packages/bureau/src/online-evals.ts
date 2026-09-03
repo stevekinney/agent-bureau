@@ -14,9 +14,10 @@
  * `createWebhookNotifier` uses for approval-pending and human-wait alerts, so
  * an eval alert survives a transient delivery failure exactly like those do.
  *
- * Sampling is driven by an injectable RNG (`Math.random` by default) so
- * `sampleRate` is deterministic and testable — a fake RNG that returns a
- * fixed sequence exercises "sampled" and "not sampled" runs exactly.
+ * Sampling is driven by an injectable RNG (the composed `RuntimeServices`
+ * random source by default) so `sampleRate` is deterministic and testable —
+ * a fake RNG that returns a fixed sequence exercises "sampled" and
+ * "not sampled" runs exactly.
  *
  * Each in-flight evaluation also gets a per-evaluation `LivenessSnapshot`
  * (AB-220), watched via `createStallWatchdog` against the
@@ -44,6 +45,7 @@ import {
   type Subscription,
 } from '@lostgradient/operative/liveness';
 import { Conversation } from 'conversationalist';
+import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
 
 import type { AgentDefinitions } from './agent-catalog';
 import type { AuditTrail } from './audit-trail';
@@ -70,46 +72,58 @@ export type EvaluationLivenessSnapshot = LivenessSnapshot & { kind: 'background-
  * Local injectable per-evaluation identifier seam (AB-220), mirroring
  * obs-01's `RunIdentifierSeam` pattern
  * (`packages/operative/src/liveness/identifiers.ts`) — a constructor-time
- * injected id-generator, never a bare `crypto.randomUUID()` reached from
- * inside evaluation-dispatch logic. AB-88's own text names
+ * injected id-generator, never a bare real-random-UUID call reached from
+ * inside evaluation-dispatch logic. AB-88's own text named
  * `RuntimeServices.identifiers` (AB-92/AB-93) as the eventual home for this
- * kind of seam; that seam does not exist in this repository yet, so this
- * module builds the same narrower local seam obs-01 uses rather than
- * blocking on AB-92/AB-93.
+ * kind of seam; AB-260 is that landing — the default below is now backed by
+ * the composed `RuntimeServices.identifiers` rather than a bespoke counter.
  */
 export interface EvaluationIdentifierSeam {
   next(): string;
 }
 
 /**
- * The default seam: a monotonic in-process counter, composition-root only.
- * Tests inject their own {@link EvaluationIdentifierSeam} instead of relying
- * on this default's output.
+ * Factory for the default seam: the composed
+ * {@link RuntimeServices.identifiers} (AB-260), namespaced under the
+ * `'background-evaluation'` kind. Tests inject their own
+ * {@link EvaluationIdentifierSeam} instead of relying on this default's
+ * output.
  */
-function createDefaultEvaluationIdentifierSeam(): EvaluationIdentifierSeam {
-  let counter = 0;
+function createDefaultEvaluationIdentifierSeam(
+  identifiers: RuntimeServices['identifiers'],
+): EvaluationIdentifierSeam {
   return {
     next(): string {
-      counter += 1;
-      return `eval-${counter}-${crypto.randomUUID()}`;
+      return identifiers.next('background-evaluation');
     },
   };
 }
 
 /**
- * The default production clock backing each evaluation's
- * `createStallWatchdog` — `performance.now()`, a monotonic source, matching
- * `active-run-liveness.ts`'s own default clock. Exported for direct unit
- * testing of `setTimeout`/`clearTimeout` (AB-220): the `background-evaluation`
- * policy row has no cadence today, so `createStallWatchdog` never actually
- * calls either through the public API — see `packages/operative/src/liveness/watchdog.ts`'s
- * `scheduleNextCheck`, which no-ops when a policy isn't cadence-gated.
+ * Factory for the default production clock backing each evaluation's
+ * `createStallWatchdog` — driven by the composed
+ * {@link RuntimeServices.monotonic}/{@link RuntimeServices.timers} (AB-260),
+ * defaulting to the real-globals runtime when called with no argument (the
+ * baseline behavior, unchanged from before `RuntimeServices` composition).
+ * Exported for direct unit testing of `setTimeout`/`clearTimeout` (AB-220):
+ * the `background-evaluation` policy row has no cadence today, so
+ * `createStallWatchdog` never actually calls either through the public API
+ * — see `packages/operative/src/liveness/watchdog.ts`'s `scheduleNextCheck`,
+ * which no-ops when a policy isn't cadence-gated. The timer-scheduling and
+ * timer-clearing members are destructured once so the returned clock reads
+ * `scheduleTimeout(...)`/`cancelTimeout(...)` rather than a literal `timers`
+ * method call — see `create-bureau.ts`'s equivalent pattern for why.
  */
-export const realClock: StallWatchdogClock = {
-  now: () => performance.now(),
-  setTimeout: (callback, ms) => setTimeout(callback, ms),
-  clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
-};
+export function createDefaultClock(
+  runtime: RuntimeServices = createDefaultRuntimeServices(),
+): StallWatchdogClock {
+  const { setTimeout: scheduleTimeout, clearTimeout: cancelTimeout } = runtime.timers;
+  return {
+    now: () => runtime.monotonic.now(),
+    setTimeout: (callback, ms) => scheduleTimeout(callback, ms),
+    clearTimeout: (handle) => cancelTimeout(handle),
+  };
+}
 
 /** The fixed id for the sampler's own instance-level aggregate snapshot. */
 const AGGREGATE_EVALUATION_ID = 'online-eval-sampler';
@@ -225,7 +239,7 @@ export interface OnlineEvalSamplerOptions {
   judges: OnlineEvalJudge[];
   /** Fraction of completed runs to sample, in `[0, 1]`. */
   sampleRate: number;
-  /** Injectable RNG returning a value in `[0, 1)`. Defaults to `Math.random`. */
+  /** Injectable RNG returning a value in `[0, 1)`. Defaults to the composed RuntimeServices random. */
   rng?: () => number;
   /**
    * Owner-issued signal threaded into every `evaluateRun()` judge invocation
@@ -236,13 +250,15 @@ export interface OnlineEvalSamplerOptions {
   signal?: AbortSignal;
   /**
    * Injectable timer-agnostic clock backing each evaluation's
-   * `createStallWatchdog` (AB-220). Defaults to a `performance.now()`-based
-   * clock. Tests inject a manual clock so no real sleeps are needed.
+   * `createStallWatchdog` (AB-220). Defaults to the composed
+   * `RuntimeServices` monotonic clock and timers (AB-260). Tests inject a
+   * manual clock so no real sleeps are needed.
    */
   clock?: StallWatchdogClock;
   /**
-   * Injectable per-evaluation identifier seam (AB-220). Defaults to a
-   * monotonic in-process counter. Tests inject their own seam to assert
+   * Injectable per-evaluation identifier seam (AB-220). Defaults to the
+   * composed `RuntimeServices.identifiers` (AB-260), namespaced under
+   * `'background-evaluation'`. Tests inject their own seam to assert
    * stable, distinguishable ids across concurrently-admitted evaluations.
    */
   evaluationIds?: EvaluationIdentifierSeam;
@@ -374,6 +390,12 @@ export function createOnlineEvalSampler<D extends AgentDefinitions = AgentDefini
   auditTrail: AuditTrail | undefined,
   webhookNotifier: WebhookNotifier | undefined,
   options: OnlineEvalSamplerOptions | undefined,
+  // AB-260: the bureau's single composed `RuntimeServices` instance. Defaults
+  // to the real-globals runtime so every pre-existing direct caller of this
+  // exported factory (including this package's own test suite) is
+  // unaffected by construction. `options.rng` (this module's own
+  // pre-existing injectable seam) still takes precedence when supplied.
+  runtime: RuntimeServices = createDefaultRuntimeServices(),
 ): OnlineEvalSampler {
   const judges = options?.judges ?? [];
 
@@ -426,10 +448,11 @@ export function createOnlineEvalSampler<D extends AgentDefinitions = AgentDefini
   }
 
   const sampleRate = options.sampleRate;
-  const rng = options.rng ?? Math.random;
+  const rng = options.rng ?? runtime.random.next;
   const signal = options.signal;
-  const clock = options.clock ?? realClock;
-  const evaluationIds = options.evaluationIds ?? createDefaultEvaluationIdentifierSeam();
+  const clock = options.clock ?? createDefaultClock(runtime);
+  const evaluationIds =
+    options.evaluationIds ?? createDefaultEvaluationIdentifierSeam(runtime.identifiers);
 
   let observed = 0;
   let sampled = 0;
@@ -447,6 +470,12 @@ export function createOnlineEvalSampler<D extends AgentDefinitions = AgentDefini
   function trackEvaluation(promise: Promise<void>): void {
     activeEvaluations.add(promise);
     void promise.finally(() => activeEvaluations.delete(promise));
+    // AB-260: layered on top of `activeEvaluations` (never replacing it) —
+    // every judge evaluation also registers with the bureau's composed
+    // `RuntimeServices.deferred`, so `deferred.drain()` reports it under the
+    // stable `'background-evaluation'` label alongside every other
+    // subsystem's fire-and-forget work.
+    runtime.deferred.track(promise, 'background-evaluation');
   }
 
   // ── AB-220: per-evaluation liveness ─────────────────────────────────

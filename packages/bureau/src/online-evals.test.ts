@@ -15,11 +15,11 @@ import { Conversation } from 'conversationalist';
 import type { AuditTrail } from './audit-trail';
 import { ActionEvent } from './events';
 import {
+  createDefaultClock,
   createOnlineEvalSampler,
   type EvalScore,
   type EvaluationIdentifierSeam,
   type OnlineEvalJudge,
-  realClock,
   worstAssessment,
   worstProgress,
   worstReachability,
@@ -979,12 +979,14 @@ describe('createOnlineEvalSampler', () => {
     });
   });
 
-  describe('the default production clock (AB-220)', () => {
-    it('now() reads performance.now()', () => {
+  describe('the default production clock (AB-220/AB-260)', () => {
+    it('now() reads the composed RuntimeServices monotonic clock', () => {
+      const realClock = createDefaultClock();
       expect(typeof realClock.now()).toBe('number');
     });
 
     it('setTimeout()/clearTimeout() delegate to the global timer functions', () => {
+      const realClock = createDefaultClock();
       const timeoutSpy = spyOn(globalThis, 'setTimeout');
       const clearSpy = spyOn(globalThis, 'clearTimeout');
       try {

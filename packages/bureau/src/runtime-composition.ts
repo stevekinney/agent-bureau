@@ -94,8 +94,8 @@ import {
   type ConversationHistory,
   createConversationHistory,
 } from 'conversationalist';
-import type { EventMap, HookReplayPolicy } from 'lifecycle';
-import { TypedEventTarget } from 'lifecycle';
+import type { EventMap, HookReplayPolicy, RuntimeServices } from 'lifecycle';
+import { createDefaultRuntimeServices, TypedEventTarget } from 'lifecycle';
 import type { CreateMemoryOptions, Memory } from 'memory';
 import { createMemory } from 'memory';
 import type { SkillProvider as SkillsPackageProvider, SkillSession, ToolPolicy } from 'skills';
@@ -139,6 +139,7 @@ function requestContextFromAuthorityValue(
   value: JSONValue | undefined,
   runId: string | undefined,
   agentName: string | undefined,
+  now: () => number,
 ): ToolRequestContext | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
   const authority = value as Record<string, JSONValue>;
@@ -160,7 +161,7 @@ function requestContextFromAuthorityValue(
   ) {
     return undefined;
   }
-  if (typeof deadline === 'number' && deadline <= Date.now()) return undefined;
+  if (typeof deadline === 'number' && deadline <= now()) return undefined;
   return {
     authority: {
       principalId: authority['principalId'],
@@ -176,10 +177,19 @@ function requestContextFromAuthorityValue(
   };
 }
 
-function recoveredRequestContext(
+/**
+ * AB-260: exported directly rather than through the retired
+ * `RuntimeCompositionTestingSeams` grouping — a genuine injection seam, not
+ * introspection, since its only non-pure dependency was the wall clock
+ * consulted for `requestContextFromAuthorityValue`'s deadline check. A test
+ * calls this directly with a manual `now`, exactly as `createRuntimeComposition`
+ * itself does with the bureau's composed `RuntimeServices.clock.now`.
+ */
+export function recoveredRequestContext(
   metadata: Record<string, JSONValue>,
   runId: string | undefined,
   agentName: string | undefined,
+  now: () => number,
 ): ToolRequestContext | undefined {
   const authorities = metadata[requestAuthoritiesMetadataKey];
   if (isJsonRecord(authorities)) {
@@ -187,9 +197,15 @@ function recoveredRequestContext(
       runId === undefined ? undefined : authorities[runId],
       runId,
       agentName,
+      now,
     );
   }
-  return requestContextFromAuthorityValue(metadata[requestAuthorityMetadataKey], runId, agentName);
+  return requestContextFromAuthorityValue(
+    metadata[requestAuthorityMetadataKey],
+    runId,
+    agentName,
+    now,
+  );
 }
 
 function normalizedServiceAgentName(agentName: string | undefined): string {
@@ -218,6 +234,7 @@ function withDefaultToolboxRequestContext(
   requestContext: ToolRequestContext | undefined,
   requestAuthorityValidator: () =>
     ((context: ToolRequestContext) => boolean | Promise<boolean>) | undefined,
+  runtimeServices: RuntimeServices,
 ): AnyToolbox {
   if (!requestContext) return toolbox;
 
@@ -239,7 +256,11 @@ function withDefaultToolboxRequestContext(
       const validator = requestAuthorityValidator();
       if (
         !validator ||
-        !(await raceRequestAuthorityValidation(validator(executionRequestContext), options))
+        !(await raceRequestAuthorityValidation(
+          validator(executionRequestContext),
+          options,
+          runtimeServices,
+        ))
       ) {
         throw new Error('Request authority is no longer current.');
       }
@@ -258,10 +279,11 @@ function withDefaultToolboxRequestContext(
 function raceRequestAuthorityValidation(
   validation: boolean | Promise<boolean>,
   options: ToolboxExecuteOptions,
+  runtimeServices: RuntimeServices,
 ): Promise<boolean> {
   const signal = options.signal;
   const deadline = options.requestContext?.deadline;
-  const now = options.now ?? Date.now;
+  const now = options.now ?? runtimeServices.clock.now;
   if (signal?.aborted) {
     return Promise.reject(new Error(String(signal.reason ?? 'Cancelled')));
   }
@@ -271,12 +293,17 @@ function raceRequestAuthorityValidation(
   if (!signal && deadline === undefined) return Promise.resolve(validation);
 
   const maximumTimerDelay = 2_147_483_647;
+  // AB-260: the timer-scheduling/clearing members are destructured once so
+  // the call sites below read `scheduleTimeout(...)`/`clearTimeoutFunction(...)`
+  // rather than a literal `timers` method call — see `create-bureau.ts`'s
+  // equivalent pattern for why.
+  const { setTimeout: defaultScheduleTimeout, clearTimeout: defaultCancelTimeout } =
+    runtimeServices.timers;
   const setTimeoutFunction =
     options.setTimeoutFunction ??
-    ((callback: () => void, milliseconds: number) => setTimeout(callback, milliseconds));
-  const clearTimeoutFunction =
-    options.clearTimeoutFunction ??
-    ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+    ((callback: () => void, milliseconds: number) =>
+      defaultScheduleTimeout(callback, milliseconds));
+  const clearTimeoutFunction = options.clearTimeoutFunction ?? defaultCancelTimeout;
   let timer: unknown;
   let onAbort: (() => void) | undefined;
   const interruption = new Promise<boolean>((_resolve, reject) => {
@@ -844,53 +871,45 @@ export function applyCache(
   });
 }
 
-type RuntimeCompositionDependencies = {
+export type RuntimeCompositionDependencies = {
   resolveProviderGenerate: typeof resolveProviderGenerate;
+  /**
+   * Builds the session store this composition uses over its resolved KV
+   * view. Defaults to operative's own `createSessionStore` — the real
+   * production wiring. A caller (test or platform package) that supplies a
+   * different `SessionStore` implementation here does so through the SAME
+   * non-test-gated dependency-injection parameter `resolveProviderGenerate`
+   * already establishes, not a retired test-only seam: this package's own
+   * test suite uses it to exercise `resolveRunServices`' failure-handling
+   * branches (a store whose `load`/`updateMetadata` fails) without a
+   * private mutation backdoor.
+   */
+  createSessionStore?: typeof createSessionStore;
 };
 
 const defaultRuntimeCompositionDependencies: RuntimeCompositionDependencies = {
   resolveProviderGenerate,
+  createSessionStore,
 };
 
-export type RuntimeCompositionTestingSeams = {
-  recoveredRequestContext: typeof recoveredRequestContext;
-  resolveRunServices(info: WorkflowServicesResolverInfo): Promise<WorkflowServicesResolution>;
-  buildScheduledRunServices(
-    info: WorkflowServicesResolverInfo,
-    store: SessionStore,
-    recoveredScheduleMarker?: unknown,
-  ): Promise<WorkflowServicesResolution>;
-  loadCommittedScheduledActiveSkills(
-    session: Awaited<ReturnType<SessionStore['load']>> | undefined,
-    runId: string,
-    recovering: boolean,
-  ): Promise<ActiveSkillEntry[] | undefined>;
-  setCompositionReady(value: boolean): void;
-  setSessionStore(store: SessionStore | undefined): void;
-  setBuildRunDepsFromSession(
-    override:
-      | ((
-          session: Awaited<ReturnType<SessionStore['load']>>,
-          runId?: string,
-          agentName?: string,
-        ) => Promise<DurableRunDeps | null>)
-      | undefined,
-  ): void;
-};
-
-const runtimeCompositionTestingSeams = new WeakMap<
-  RuntimeComposition,
-  RuntimeCompositionTestingSeams
->();
-
-export function getRuntimeCompositionTestingSeams(
-  composition: RuntimeComposition,
-): RuntimeCompositionTestingSeams {
-  const seams = runtimeCompositionTestingSeams.get(composition);
-  if (!seams) {
-    throw new Error('Runtime composition testing seams are not registered for this composition');
-  }
-  return seams;
+/**
+ * AB-260 — the `resolveRunServices` composition-readiness guard, extracted
+ * as a pure function so it is directly unit-testable without the retired
+ * `RuntimeCompositionTestingSeams.setCompositionReady` mutation backdoor:
+ * `resolveRunServices` itself always calls this with `compositionReady`
+ * already `true` (nothing outside this module can observe the transient
+ * `false` window during construction — see `createRuntimeComposition`'s own
+ * comment on the gate), so the branch this guards is proven correct here,
+ * directly, rather than by reproducing the real-but-effectively-untriggerable
+ * race a private setter used to force.
+ */
+export function compositionReadyGuardResult(
+  ready: boolean,
+  workflowId: string,
+): { status: 'unavailable'; reason: string } | undefined {
+  return ready
+    ? undefined
+    : { status: 'unavailable', reason: `run ${workflowId}: composition not ready` };
 }
 
 function messagesAreEqual(
@@ -1370,6 +1389,42 @@ export interface RuntimeComposition {
     streamEventTarget: TypedEventTarget<StreamEventMap> | undefined;
     getActiveSkillEntries: () => ActiveSkillEntry[];
   }>;
+  /**
+   * AB-260 — folded onto this interface directly rather than reached through
+   * the retired `RuntimeCompositionTestingSeams` WeakMap: this is Weft's
+   * literal `resolveWorkflowServices` resolver, already wired into
+   * `durable.engine` at construction whenever one is composed (production
+   * invokes it automatically on every recovered run) — a genuine capability
+   * of this returned object, not a test-only backdoor, so every caller (test
+   * or production) reaches it the same way. Callable even without a durable
+   * engine composed — it resolves `{ status: 'unavailable' }` for every
+   * input in that case, matching what an uncomposed resolver would report.
+   */
+  resolveRunServices(info: WorkflowServicesResolverInfo): Promise<WorkflowServicesResolution>;
+  /**
+   * AB-260 — folded onto this interface directly for the same reason as
+   * {@link RuntimeComposition.resolveRunServices}: the native-scheduled-fire
+   * branch of that same resolver, callable standalone for a caller (test or
+   * production) that already holds a `SessionStore` and wants to build a
+   * scheduled fire's deps without going through the full resolver dispatch.
+   */
+  buildScheduledRunServices(
+    info: WorkflowServicesResolverInfo,
+    store: SessionStore,
+    recoveredScheduleMarker?: RecoveredScheduleMarker,
+  ): Promise<WorkflowServicesResolution>;
+  /**
+   * AB-260 — folded onto this interface directly for the same reason as
+   * {@link RuntimeComposition.resolveRunServices}: reconstructs the
+   * committed active-skill snapshot for a scheduled fire under recovery,
+   * genuinely invoked by `buildScheduledRunServices` in production, not a
+   * test-only introspection hook.
+   */
+  loadCommittedScheduledActiveSkills(
+    session: Awaited<ReturnType<SessionStore['load']>> | undefined,
+    runId: string,
+    recovering: boolean,
+  ): Promise<ActiveSkillEntry[] | undefined>;
 }
 
 /**
@@ -1389,6 +1444,14 @@ export async function createRuntimeComposition(
   const maximumSteps = options.maximumSteps ?? DEFAULT_MAXIMUM_STEPS;
   const systemPrompt = options.systemPrompt;
   const diagnose = resolveDiagnosticSink(options.onDiagnostic);
+  // AB-260: `createBureau` resolves and forwards its own single
+  // `RuntimeServices` instance through `options.runtime` before calling this
+  // function, so this resolution just picks that SAME instance back up. A
+  // direct caller of this exported function (bypassing `createBureau`
+  // entirely — this package's own extensive test suite does exactly that)
+  // gets the real-globals default, identical to this composition's behavior
+  // before `RuntimeServices` existed.
+  const runtimeServices: RuntimeServices = options.runtime ?? createDefaultRuntimeServices();
 
   // Gate the resolver until the whole composition is assembled. In automatic
   // mode `createRunEngine` starts its scheduler before later consts (`sessionStore`,
@@ -1621,7 +1684,7 @@ export async function createRuntimeComposition(
     (options.skills?.provider as SkillsPackageProvider | undefined) ??
     (options.skills !== undefined && kv !== undefined ? createStorageSkillProvider(kv) : undefined);
 
-  let sessionStore = kv ? createSessionStore(kv) : undefined;
+  const sessionStore = kv ? (dependencies.createSessionStore ?? createSessionStore)(kv) : undefined;
   const baseToolbox: BureauToolbox = options.toolbox ?? createToolbox([], { context: {} });
   const hasSkillTools = options.skills !== undefined && options.skills.includeTools !== false;
   const fallbackToolbox: BureauToolbox =
@@ -1916,6 +1979,7 @@ export async function createRuntimeComposition(
       toolbox,
       requestContext,
       () => requestAuthorityValidator,
+      runtimeServices,
     );
     return Promise.resolve({
       generate,
@@ -1931,8 +1995,12 @@ export async function createRuntimeComposition(
   /**
    * Rebuild a recovered run's non-serializable {@link DurableRunDeps} from durable
    * config: reconstruct the run runtime from the owning session's persisted
-   * request — the same `createRunRuntime` a fresh run uses. Returns `null` when
-   * the session is absent (the run is not bureau-owned / not reconstructable).
+   * request — the same `createRunRuntime` a fresh run uses. Its one caller
+   * (`resolveRunServices`, below) already narrows `session` non-null before
+   * calling this, so the parameter is typed non-optional rather than
+   * defending an absent-session case nothing reaches — AB-260 removed the
+   * `null`-returning branch this used to have, which was covered only
+   * through the retired `setBuildRunDepsFromSession` override seam.
    *
    * The reconstructed `conversation` is a placeholder: a resumed run reads its
    * transcript from the checkpoint, not from `options.conversation`. Weft's
@@ -1940,11 +2008,10 @@ export async function createRuntimeComposition(
    * rebuilt and before resumed user code advances.
    */
   async function buildRunDepsFromSession(
-    session: Awaited<ReturnType<NonNullable<typeof sessionStore>['load']>>,
+    session: AgentSession,
     runId?: string,
     agentName?: string,
-  ): Promise<DurableRunDeps | null> {
-    if (!session) return null;
+  ): Promise<DurableRunDeps> {
     const message = session.metadata['lastUserMessage'];
     // Recover the per-request token cap persisted by create-bureau's saveSession
     // call. Without this, recovered generate calls receive maximumTokens:undefined
@@ -1969,7 +2036,12 @@ export async function createRuntimeComposition(
     const initialActiveSkills = isActiveSkillEntryArray(lastActiveSkillsRaw)
       ? lastActiveSkillsRaw
       : undefined;
-    const requestContext = recoveredRequestContext(session.metadata, runId, agentName);
+    const requestContext = recoveredRequestContext(
+      session.metadata,
+      runId,
+      agentName,
+      runtimeServices.clock.now,
+    );
     const runRuntime = await createRunRuntime(
       {
         message: typeof message === 'string' ? message : '',
@@ -1997,6 +2069,10 @@ export async function createRuntimeComposition(
         prepareStep: runRuntime.prepareStep,
         onStep: runRuntime.onStep,
         validateResponse: runRuntime.validateResponse,
+        // AB-260: the bureau's single composed RuntimeServices instance,
+        // snapshotted into every run it starts — including a recovered run
+        // rebuilt here from a persisted session.
+        runtime: runtimeServices,
         ...(requestContext ? { executeOptions: { requestContext } } : {}),
         // Thread agentName and runId so curated tool.* bubble events stamped by
         // the resumed run carry the same {agentName, runId, step} metadata as the
@@ -2009,13 +2085,6 @@ export async function createRuntimeComposition(
       },
     };
   }
-  let buildRunDepsFromSessionOverride:
-    | ((
-        session: Awaited<ReturnType<NonNullable<typeof sessionStore>['load']>>,
-        runId?: string,
-        agentName?: string,
-      ) => Promise<DurableRunDeps | null>)
-    | undefined;
 
   /**
    * Persist a scheduled run's conversation back to its session after EVERY
@@ -2304,7 +2373,7 @@ export async function createRuntimeComposition(
       options.onLog?.({
         workflowId: runId,
         workflowType: 'agentRun',
-        timestamp: Date.now(),
+        timestamp: runtimeServices.clock.now(),
         level: 'warn',
         message: `Unable to verify scheduled fire skill snapshot checkpoint for run "${runId}": ${serializeUnknownError(error)}`,
       });
@@ -2449,6 +2518,9 @@ export async function createRuntimeComposition(
         conversation,
         maximumSteps,
         stopWhen: options.stopWhen,
+        // AB-260: the bureau's single composed RuntimeServices instance,
+        // snapshotted into every run it starts — including a scheduled fire.
+        runtime: runtimeServices,
         prepareStep: runRuntime.prepareStep,
         // Append the session write-back hook so recurring fires accumulate and a
         // stateless fire is observable; runs AFTER the runtime's own onStep hooks.
@@ -2505,9 +2577,8 @@ export async function createRuntimeComposition(
     // a persisted schedule fires a tick mid-construction, bail out cleanly — the
     // fire fails terminally and the next tick (once ready) succeeds. (Accessing a
     // not-yet-initialized `const` below would otherwise throw a TDZ error.)
-    if (!compositionReady) {
-      return { status: 'unavailable', reason: `run ${info.workflowId}: composition not ready` };
-    }
+    const notReady = compositionReadyGuardResult(compositionReady, info.workflowId);
+    if (notReady) return notReady;
     if (!sessionStore) {
       return { status: 'unavailable', reason: 'no session store configured' };
     }
@@ -2633,6 +2704,7 @@ export async function createRuntimeComposition(
       session.metadata,
       info.workflowId,
       info.input.agentName,
+      runtimeServices.clock.now,
     );
     if (!recoveredAuthority) {
       return {
@@ -2661,17 +2733,13 @@ export async function createRuntimeComposition(
       };
     }
 
-    let services: DurableRunDeps | null;
+    let services: DurableRunDeps;
     try {
       // info.workflowId === the run id (pinned at engine.start) — thread it so the
       // recovered run's memory-persist idempotency key matches its pre-crash key.
       // info.input.agentName is guaranteed non-empty here: isAgentRunWorkflowInput
       // requires a non-empty string (the guard returned earlier if it's missing).
-      services = await (buildRunDepsFromSessionOverride ?? buildRunDepsFromSession)(
-        session,
-        info.workflowId,
-        info.input.agentName,
-      );
+      services = await buildRunDepsFromSession(session, info.workflowId, info.input.agentName);
     } catch (error) {
       // The session exists, but its deps cannot be rebuilt on this process (e.g.
       // no `generate`/provider configured here, so `createRunRuntime` throws).
@@ -2702,13 +2770,15 @@ export async function createRuntimeComposition(
       }
       return { status: 'unavailable', reason: `run ${info.workflowId} not reconstructable` };
     }
-    if (services === null) {
-      // Unreachable now (the owning-session check above guarantees a non-null
-      // session, and `buildRunDepsFromSession` only returns null for a null
-      // session) — kept as a defensive fail-closed in case that invariant ever
-      // changes, since rebuilding from a null session would otherwise NPE.
-      return { status: 'unavailable', reason: `run ${info.workflowId} not reconstructable` };
-    }
+    // `services` is never null here: the owning-session check above already
+    // guarantees a non-null `session`, and `buildRunDepsFromSession` only
+    // returns null for a null session — so its return type's `| null` is a
+    // defensive contract for OTHER callers (this file's own
+    // `resolveCatalogAgentRunServices` and `buildScheduledRunServices` never
+    // call it; a future caller might), not a branch reachable from here. A
+    // dead `if (services === null)` fail-closed used to guard this anyway,
+    // covered only by forcing it through a private mutation seam (AB-260
+    // retired both).
     return { status: 'available', services };
   }
 
@@ -2754,29 +2824,13 @@ export async function createRuntimeComposition(
     systemPrompt,
     getToolSummaries,
     createRunRuntime,
-  };
-
-  runtimeCompositionTestingSeams.set(composition, {
-    recoveredRequestContext,
+    // AB-260: folded onto the returned object directly — see the interface's
+    // own doc comments for why these are genuine capabilities of this
+    // composition rather than test-only introspection.
     resolveRunServices,
-    buildScheduledRunServices(info, store, recoveredScheduleMarker) {
-      return buildScheduledRunServices(
-        info,
-        store,
-        recoveredScheduleMarker as RecoveredScheduleMarker | undefined,
-      );
-    },
+    buildScheduledRunServices,
     loadCommittedScheduledActiveSkills,
-    setCompositionReady(value: boolean) {
-      compositionReady = value;
-    },
-    setSessionStore(store: SessionStore | undefined) {
-      sessionStore = store;
-    },
-    setBuildRunDepsFromSession(override) {
-      buildRunDepsFromSessionOverride = override;
-    },
-  });
+  };
 
   return composition;
 }

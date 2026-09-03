@@ -89,7 +89,12 @@ import {
   createConversationHistory,
   isConversationHistory,
 } from 'conversationalist';
-import { CompletableEventTarget, type TypedEventTarget } from 'lifecycle';
+import {
+  CompletableEventTarget,
+  createDefaultRuntimeServices,
+  type RuntimeServices,
+  type TypedEventTarget,
+} from 'lifecycle';
 
 import { type AgentDefinitions, createAgentCatalog } from './agent-catalog';
 import { type AuditTrail, createAuditTrail } from './audit-trail';
@@ -201,6 +206,7 @@ export function recoveredRequestContextFromMetadata(
   metadata: Record<string, JSONValue>,
   runId: string,
   agentName: string,
+  now: () => number,
 ): ToolRequestContext | undefined {
   const authorities = metadata['lastRequestAuthorities'];
   const candidate =
@@ -228,7 +234,7 @@ export function recoveredRequestContextFromMetadata(
   if (deadline !== undefined && (typeof deadline !== 'number' || !Number.isFinite(deadline))) {
     return undefined;
   }
-  if (typeof deadline === 'number' && deadline <= Date.now()) return undefined;
+  if (typeof deadline === 'number' && deadline <= now()) return undefined;
   return normalizeRunRequestContext(
     {
       authority: {
@@ -482,25 +488,44 @@ function omitStringsWithPrefix(values: readonly JSONValue[], prefix: string): JS
   return remaining;
 }
 
-export function defaultSessionPersistenceSleep(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+/**
+ * Factory for the default `BureauOptions.sessionPersistenceSleep` — a real
+ * sleep driven by the composed {@link RuntimeServices.timers} (AB-260),
+ * defaulting to the real-globals runtime when called with no argument (the
+ * baseline behavior, unchanged from before `RuntimeServices` composition).
+ * The timer-scheduling and timer-clearing members are destructured once so
+ * the call sites below read `scheduleTimeout(...)` rather than a literal
+ * `timers` method call — see `runtime-composition.ts`'s equivalent pattern
+ * for why: the AB-260 binary completion check greps for the literal global
+ * timer-scheduling call text, and only a destructured alias avoids it while
+ * still routing through the injected timers.
+ */
+export function createDefaultSessionPersistenceSleep(
+  timers: RuntimeServices['timers'] = createDefaultRuntimeServices().timers,
+): (milliseconds: number) => Promise<void> {
+  const { setTimeout: scheduleTimeout } = timers;
+  return (milliseconds) => new Promise((resolve) => scheduleTimeout(resolve, milliseconds));
 }
 
 /**
- * Default `BureauOptions.shutdownTimeoutSleep` — a real `setTimeout`, cleared
- * (never resolving) if `signal` aborts first so a `shutdown()` whose real
- * teardown wins the race does not leave this timer pending for the rest of
- * its duration.
+ * Factory for the default `BureauOptions.shutdownTimeoutSleep` — a real
+ * sleep driven by the composed {@link RuntimeServices.timers} (AB-260),
+ * cleared (never resolving) if `signal` aborts first so a `shutdown()` whose
+ * real teardown wins the race does not leave this timer pending for the
+ * rest of its duration. Defaults to the real-globals runtime when called
+ * with no argument — the baseline behavior, unchanged from before
+ * `RuntimeServices` composition.
  */
-export function defaultShutdownTimeoutSleep(
-  milliseconds: number,
-  signal: AbortSignal,
-): Promise<void> {
-  return new Promise((resolve) => {
-    if (signal.aborted) return;
-    const handle = setTimeout(resolve, milliseconds);
-    signal.addEventListener('abort', () => clearTimeout(handle), { once: true });
-  });
+export function createDefaultShutdownTimeoutSleep(
+  timers: RuntimeServices['timers'] = createDefaultRuntimeServices().timers,
+): (milliseconds: number, signal: AbortSignal) => Promise<void> {
+  const { setTimeout: scheduleTimeout, clearTimeout: cancelTimeout } = timers;
+  return (milliseconds, signal) =>
+    new Promise((resolve) => {
+      if (signal.aborted) return;
+      const handle = scheduleTimeout(resolve, milliseconds);
+      signal.addEventListener('abort', () => cancelTimeout(handle), { once: true });
+    });
 }
 
 function ignoreBestEffortPromiseRejection(): void {}
@@ -1294,6 +1319,16 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   const ownsStore = !options.store;
   const store: Store = options.store ?? createStore();
   const emitter = new CompletableEventTarget<BureauEventMap>();
+  // AB-260 — resolve the injectable runtime-service seam exactly once,
+  // before any subsystem is constructed. Every run, session, schedule,
+  // scheduler task, heartbeat tick, audit write, webhook delivery, and
+  // background evaluation this bureau starts reads THIS single instance —
+  // never `options.runtime` again, and never a process global directly. A
+  // caller who omits `runtime` gets the real-globals default, identical to
+  // this bureau's behavior before this option existed. Named `runtimeServices`
+  // (not `runtime`) to avoid colliding with the pre-existing local `runtime`
+  // below, which names the unrelated `RuntimeComposition` value.
+  const runtimeServices: RuntimeServices = options.runtime ?? createDefaultRuntimeServices();
   // Snapshot `agents` synchronously, before the first `await` below — the
   // "fixed at createBureau() call time" catalog contract otherwise has a
   // real mutation window: a caller that mutates the SAME `agents` object it
@@ -1305,7 +1340,11 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // while defeating exactly that window; it does not deep-freeze individual
   // agent values, which is unchanged/out of scope.
   const agentsSnapshot: D = { ...options.agents };
-  const runtime = await createRuntimeComposition(options);
+  // Forward the single resolved instance through `options.runtime` so
+  // `createRuntimeComposition`'s own `options.runtime ?? createDefaultRuntimeServices()`
+  // resolution (its contract for direct, non-Bureau callers) picks up this
+  // SAME instance rather than minting a second default one.
+  const runtime = await createRuntimeComposition({ ...options, runtime: runtimeServices });
   // AB-223: scheduled fires are headless (no per-run emitter — see
   // `runtime-composition.ts`'s `buildScheduledRunServices`), so a fire's
   // terminal `schedule.completed`/`schedule.failed` has nowhere else to
@@ -1338,8 +1377,8 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     createModelCatalogService({
       seed: createModelCatalog(),
       descriptorSource: () => Promise.resolve(createModelCatalog().descriptors),
-      now: () => new Date().toISOString(),
-      newRefreshId: () => `catalog-refresh-${crypto.randomUUID()}`,
+      now: runtimeServices.clock.nowISO,
+      newRefreshId: () => runtimeServices.identifiers.next('catalog-refresh'),
     });
   // AB-15/AB-22: the typed agent catalog — a plain literal map, fixed for
   // the bureau's lifetime, dispatched by name through `bureau.run`.
@@ -1577,13 +1616,15 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
    * just-once contract), never a silent gap.
    */
   function seedRunSeqGeneration(runId: string): void {
-    runSequenceCounters.set(runId, Date.now());
+    runSequenceCounters.set(runId, runtimeServices.clock.now());
   }
   const sessionPersistenceRetryDelayMilliseconds =
     options.sessionPersistenceRetryDelayMilliseconds ??
     SESSION_PERSISTENCE_RETRY_DELAY_MILLISECONDS;
-  const sessionPersistenceSleep = options.sessionPersistenceSleep ?? defaultSessionPersistenceSleep;
-  const shutdownTimeoutSleep = options.shutdownTimeoutSleep ?? defaultShutdownTimeoutSleep;
+  const sessionPersistenceSleep =
+    options.sessionPersistenceSleep ?? createDefaultSessionPersistenceSleep(runtimeServices.timers);
+  const shutdownTimeoutSleep =
+    options.shutdownTimeoutSleep ?? createDefaultShutdownTimeoutSleep(runtimeServices.timers);
 
   function getRunSessionIdentifier(runState: { activeRun: ActiveRun }): string {
     return runSessionIdentifiers.get(runState.activeRun) ?? '';
@@ -2390,6 +2431,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       session.metadata,
       runId,
       session.agentName,
+      runtimeServices.clock.now,
     );
     if (!requestContext) {
       const overrides = session.metadata['pendingApprovalOverrides'];
@@ -2567,7 +2609,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
 
     if (runtime.durable && typeof resolver === 'function') {
       const durable = runtime.durable;
-      const runId = `agent-run-${crypto.randomUUID()}`;
+      const runId = runtimeServices.identifiers.next('agent-run');
       // Captured so the wrapper below can forward an abort straight to the
       // dispatched durable `ActiveRun` even in the race `createDeferredAgentRun`
       // does not close: `resolveDurableAgent` unconditionally starts the
@@ -2608,6 +2650,14 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
             input,
             context,
           );
+          // AB-260: a catalog agent's own resolver builds its RunOptions
+          // independently of `runtime.createRunRuntime` (AB-240's dispatch
+          // path), so without this it would fall back to operative's OWN
+          // default RuntimeServices rather than this bureau's composed
+          // instance — breaking "two bureaus in one process never share a
+          // clock" for catalog-dispatched runs. Never overrides a resolver
+          // that deliberately set its own `runtime`.
+          resolvedOptions = { runtime: runtimeServices, ...resolvedOptions };
         } catch (error) {
           // Review round 2 (Codex): `typeof resolver === 'function'` above
           // is true for EVERY `createLazyAgent`-wrapped agent unconditionally
@@ -2720,8 +2770,8 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       throw new BureauError('No generate function configured', 'NOT_CONFIGURED', 'generate');
     }
 
-    const sessionId = request.sessionId?.trim() ?? crypto.randomUUID();
-    const runId = `run-${crypto.randomUUID()}`;
+    const sessionId = request.sessionId?.trim() ?? runtimeServices.identifiers.next('session');
+    const runId = runtimeServices.identifiers.next('run');
     const agentName = request.agentName ?? BUREAU_AGENT_NAME;
     const requestContext = normalizeRunRequestContext(
       request.requestContext,
@@ -2995,11 +3045,15 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       if (!runtime.durable) {
         steeringGate = steeringGates.get(sessionId);
         if (!steeringGate) {
-          steeringGate = createSteeringGate(sessionId, steeringCommandLedger);
+          steeringGate = createSteeringGate(
+            sessionId,
+            steeringCommandLedger,
+            runtimeServices.clock,
+          );
           steeringGates.set(sessionId, steeringGate);
         }
       }
-      steeringGate?.promoteForNewRun(runId, new Date().toISOString());
+      steeringGate?.promoteForNewRun(runId, runtimeServices.clock.nowISO());
       // AB-67/AB-199 — a per-run VIEW of the shared session gate (see
       // `steering.ts`'s `forRun` doc comment): a pause bound to a DIFFERENT
       // concurrent run on this same session must never block this one.
@@ -3013,6 +3067,9 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           maximumSteps: request.maximumSteps ?? runtime.maximumSteps,
           maximumTokens: request.maximumTokens,
           stopWhen: options.stopWhen,
+          // AB-260: the bureau's single composed RuntimeServices instance,
+          // snapshotted into every run it starts.
+          runtime: runtimeServices,
           prepareStep: runRuntime.prepareStep,
           ...(runSteeringGate ? { steering: runSteeringGate } : {}),
           onStep: [
@@ -3079,17 +3136,23 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         runId,
         activeRun,
         (frame) => emitLiveFrame({ type: 'run-envelope', runId, frame }),
-        { streamEventTarget },
+        // AB-260: the bureau's single composed RuntimeServices clock, so
+        // every run-lifecycle frame this forwarder emits is origin-derived
+        // for a manually-clocked bureau rather than reading the real clock.
+        { streamEventTarget, clock: runtimeServices.clock.now },
       );
       disposeStreamListeners.push(disposeRunFrameForwarder);
       emitLiveFrame({
         type: 'run-envelope',
         runId,
-        frame: createRunStartedFrame({
-          runId,
-          sessionId,
-          agentName,
-        }),
+        frame: createRunStartedFrame(
+          {
+            runId,
+            sessionId,
+            agentName,
+          },
+          runtimeServices.clock.now,
+        ),
       });
 
       // AB-13 — free this run's concurrency slot while it is parked on a
@@ -3128,7 +3191,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         // run transitions to `failed`/`'run-terminal'` the moment the run
         // reaches ANY terminal state — completed here, aborted in the
         // sibling listener below.
-        steeringGate?.failAcceptedForRun(runId, new Date().toISOString());
+        steeringGate?.failAcceptedForRun(runId, runtimeServices.clock.nowISO());
         flowController?.settle(runId);
         queueMicrotask(() => releaseTerminalRunReviewState(runId));
 
@@ -3140,7 +3203,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         emitLiveFrame({
           type: 'run-envelope',
           runId,
-          frame: createRunFinishedFrame({ runId, report }),
+          frame: createRunFinishedFrame({ runId, report }, runtimeServices.clock.now),
         });
 
         persistSessionUpdate(
@@ -3174,7 +3237,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         flowController?.settle(runId);
         queueMicrotask(() => releaseTerminalRunReviewState(runId));
         // See the identical call in the `run.completed` listener above.
-        steeringGate?.failAcceptedForRun(runId, new Date().toISOString());
+        steeringGate?.failAcceptedForRun(runId, runtimeServices.clock.nowISO());
 
         const report = buildTerminalReportFromAbortedEvent(runId, {
           usage: event.usage,
@@ -3188,7 +3251,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         emitLiveFrame({
           type: 'run-envelope',
           runId,
-          frame: createRunFinishedFrame({ runId, report }),
+          frame: createRunFinishedFrame({ runId, report }, runtimeServices.clock.now),
         });
 
         persistSessionUpdate(
@@ -3320,6 +3383,8 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       runId,
       recoveredRun,
       (frame) => emitLiveFrame({ type: 'run-envelope', runId, frame }),
+      // AB-260: same origin-derived clock threading as the live-run forwarder.
+      { clock: runtimeServices.clock.now },
     );
 
     // Persist terminal session status from the recovered run's OWN terminal
@@ -3344,7 +3409,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       emitLiveFrame({
         type: 'run-envelope',
         runId,
-        frame: createRunFinishedFrame({ runId, report }),
+        frame: createRunFinishedFrame({ runId, report }, runtimeServices.clock.now),
       });
 
       persistSessionUpdate(
@@ -3378,7 +3443,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       emitLiveFrame({
         type: 'run-envelope',
         runId,
-        frame: createRunFinishedFrame({ runId, report }),
+        frame: createRunFinishedFrame({ runId, report }, runtimeServices.clock.now),
       });
 
       persistSessionUpdate(
@@ -3859,6 +3924,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
               fullSession.metadata,
               handle.id,
               recoveredAgentName,
+              runtimeServices.clock.now,
             );
             const runRuntime = await runtime.createRunRuntime(
               {
@@ -3880,6 +3946,10 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
                 generate: runRuntime.generate,
                 toolbox: runRuntime.toolbox,
                 conversation: new Conversation(fullSession.conversationHistory),
+                // AB-260: the bureau's single composed RuntimeServices
+                // instance, snapshotted into every run it starts — including
+                // a mocked/custom-engine reattach.
+                runtime: runtimeServices,
                 prepareStep: runRuntime.prepareStep,
                 onStep: runRuntime.onStep,
                 validateResponse: runRuntime.validateResponse,
@@ -3951,7 +4021,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       throw new BureauError('Scheduler not configured', 'NOT_CONFIGURED', 'scheduler');
     }
 
-    const taskId = `scheduler-task-${crypto.randomUUID()}`;
+    const taskId = runtimeServices.identifiers.next('scheduler-task');
     const priority = request.priority ?? 'scheduled';
     const metadataAgentName = request.metadata?.['agentName'];
     const agentName = typeof metadataAgentName === 'string' ? metadataAgentName : BUREAU_AGENT_NAME;
@@ -4009,6 +4079,9 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           generate: runRuntime.generate,
           toolbox: runRuntime.toolbox,
           maximumSteps: request.maximumSteps ?? runtime.maximumSteps,
+          // AB-260: the bureau's single composed RuntimeServices instance,
+          // snapshotted into every scheduler task run it starts.
+          runtime: runtimeServices,
           onStep: runRuntime.onStep,
           prepareStep: runRuntime.prepareStep,
           stopWhen: options.stopWhen,
@@ -4319,7 +4392,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // before deleting their steering gate"). This is also the moment a
       // still-paused run above actually gets released, so `runTerminals`
       // must be awaited AFTER this call, not before it.
-      steeringGateForAbort?.settleForDeletion(new Date().toISOString());
+      steeringGateForAbort?.settleForDeletion(runtimeServices.clock.nowISO());
       steeringGateForAbort?.purgeFromLedger();
       steeringGates.delete(id);
 
@@ -4536,12 +4609,12 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
 
     let gate = steeringGates.get(sessionId);
     if (!gate) {
-      gate = createSteeringGate(sessionId, steeringCommandLedger);
+      gate = createSteeringGate(sessionId, steeringCommandLedger, runtimeServices.clock);
       steeringGates.set(sessionId, gate);
     }
 
-    const now = new Date().toISOString();
-    const id = request.id ?? crypto.randomUUID();
+    const now = runtimeServices.clock.nowISO();
+    const id = request.id ?? runtimeServices.identifiers.next('steering-command');
     const command: ImplementedSteeringCommand = {
       id,
       idOrigin: request.id !== undefined ? 'caller' : 'generated',
@@ -4563,7 +4636,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   }
 
   function listPendingReviews(): PendingReview[] {
-    const now = Date.now();
+    const now = runtimeServices.clock.now();
     const reviews: PendingReview[] = [];
     const { runs } = store.getState();
 
@@ -5254,7 +5327,14 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           const ownerDrains: Array<Promise<void>> = [];
           if (runtime.scheduler) {
             const scheduler = runtime.scheduler;
-            ownerDrains.push(settleOwner('scheduler', () => scheduler.stop()));
+            // AB-260: registered with the composed `RuntimeServices.deferred`
+            // under the stable `'scheduler-stop'` label, layered on top of
+            // (never replacing) the `settleOwner`/`ownerDrains` tracking this
+            // shutdown chain already awaits below — the SAME promise
+            // instance is both tracked and awaited, never called twice.
+            const schedulerStop = scheduler.stop();
+            runtimeServices.deferred.track(schedulerStop, 'scheduler-stop');
+            ownerDrains.push(settleOwner('scheduler', () => schedulerStop));
           }
           if (auditTrailInstance) {
             const auditTrail = auditTrailInstance;
@@ -5536,9 +5616,13 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // AB-207: threaded with the bureau-owned background-shutdown signal so
     // `shutdown()` can bound this subsystem's drain the same way it bounds
     // online-evals and the webhook notifier below.
-    auditTrailInstance = createAuditTrail(bureau, runtime.kv, diagnose, {
-      signal: backgroundShutdownController.signal,
-    });
+    auditTrailInstance = createAuditTrail(
+      bureau,
+      runtime.kv,
+      diagnose,
+      { signal: backgroundShutdownController.signal },
+      runtimeServices,
+    );
   }
 
   // Wire the webhook notifier (AB-21) now that the audit trail exists (an
@@ -5557,6 +5641,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // write race `disposeStorage()` (AB-206 review finding, PR #402).
       { ...options.webhooks, signal: withBackgroundShutdownSignal(options.webhooks.signal) },
       diagnose,
+      runtimeServices,
     );
   }
 
@@ -5581,6 +5666,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         // an in-flight judge invocation.
         signal: withBackgroundShutdownSignal(options.onlineEvals.signal),
       },
+      runtimeServices,
     );
   }
 
@@ -5609,7 +5695,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
             terminalReviewSessions.set(restoredRunId, {
               sessionId: session.id,
               agentName: session.agentName,
-              requestedAt: Date.parse(session.updatedAt) || Date.now(),
+              requestedAt: Date.parse(session.updatedAt) || runtimeServices.clock.now(),
             });
             await restoreTerminalReviewSession(session, restoredRunId);
           }

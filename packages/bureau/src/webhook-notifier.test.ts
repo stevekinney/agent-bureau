@@ -16,8 +16,8 @@ import { ActionEvent } from './events';
 import type { Bureau, PendingReview } from './types';
 import {
   computeWebhookDeliveryDeadlineMs,
+  createDefaultWatchdogClock,
   createWebhookNotifier,
-  realWatchdogClock,
   type WebhookDeliveryRecord,
   worstAssessment,
   worstProgress,
@@ -1110,12 +1110,14 @@ describe('createWebhookNotifier', () => {
     });
   });
 
-  describe('the default production clock (AB-220)', () => {
-    it('now() reads performance.now()', () => {
+  describe('the default production clock (AB-220/AB-260)', () => {
+    it('now() reads the composed RuntimeServices monotonic clock', () => {
+      const realWatchdogClock = createDefaultWatchdogClock();
       expect(typeof realWatchdogClock.now()).toBe('number');
     });
 
     it('setTimeout()/clearTimeout() delegate to the global timer functions', () => {
+      const realWatchdogClock = createDefaultWatchdogClock();
       const timeoutSpy = spyOn(globalThis, 'setTimeout');
       const clearSpy = spyOn(globalThis, 'clearTimeout');
       try {

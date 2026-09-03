@@ -51,7 +51,7 @@ import {
 import { createMockTool, createTestToolbox } from 'armorer/test';
 import { afterEach, describe, expect, it, mock, spyOn } from 'bun:test';
 import { Conversation, createConversationHistory, getMessages } from 'conversationalist';
-import { CompletableEventTarget, TypedEventTarget } from 'lifecycle';
+import { CompletableEventTarget, createManualRuntimeServices, TypedEventTarget } from 'lifecycle';
 import { createMemory, type Memory } from 'memory';
 import { createInMemoryMemoryRecordStorage, createMockEmbedder } from 'memory/test';
 import { z } from 'zod';
@@ -63,9 +63,9 @@ import {
   classifyRecoveredRun,
   classifyRecoveredRunDetailed,
   createBureau,
+  createDefaultSessionPersistenceSleep,
   createHumanWaitContext,
   createWakeupContext,
-  defaultSessionPersistenceSleep,
   detachBestEffortPromise,
   emptyRecoveredStepMetadata,
   hasRecoverableTransportAuthority,
@@ -238,7 +238,7 @@ describe('create-bureau helper coverage', () => {
     }) as unknown as typeof setTimeout;
 
     try {
-      await defaultSessionPersistenceSleep(42);
+      await createDefaultSessionPersistenceSleep()(42);
     } finally {
       globalThis.setTimeout = originalSetTimeout;
     }
@@ -447,6 +447,7 @@ describe('create-bureau helper coverage', () => {
 
 describe('createBureau', () => {
   it('rebuilds only valid persisted request authority for recovered runs', () => {
+    const now = () => Date.now();
     expect(
       recoveredRequestContextFromMetadata(
         {
@@ -464,6 +465,7 @@ describe('createBureau', () => {
         },
         'run-authorized',
         'billing-agent',
+        now,
       ),
     ).toEqual({
       authority: {
@@ -483,6 +485,7 @@ describe('createBureau', () => {
         { lastRequestAuthorities: { 'other-run': {} } },
         'run-missing',
         'billing-agent',
+        now,
       ),
     ).toBeUndefined();
 
@@ -499,6 +502,7 @@ describe('createBureau', () => {
         },
         'legacy-run',
         'billing-agent',
+        now,
       ),
     ).toEqual({
       authority: {
@@ -527,6 +531,7 @@ describe('createBureau', () => {
         },
         'run-malformed',
         'billing-agent',
+        now,
       ),
     ).toBeUndefined();
 
@@ -547,6 +552,7 @@ describe('createBureau', () => {
         },
         'run-deadline',
         'billing-agent',
+        now,
       )?.deadline,
     ).toBe(futureDeadline);
     expect(
@@ -565,6 +571,7 @@ describe('createBureau', () => {
         },
         'run-expired',
         'billing-agent',
+        now,
       ),
     ).toBeUndefined();
   });
@@ -10056,7 +10063,7 @@ describe('Bureau.shutdown() (AB-207)', () => {
     });
 
     // No `shutdownTimeoutSleep` option — this exercises
-    // `defaultShutdownTimeoutSleep`'s real `setTimeout`, generously bounded
+    // `createDefaultShutdownTimeoutSleep()`'s real timer, generously bounded
     // so the real (fast) teardown always wins the race and the abort
     // listener fires, clearing the timer before it would otherwise elapse.
     const report = await bureau.shutdown({ timeoutMilliseconds: 60_000 });
@@ -10190,5 +10197,165 @@ describe('deleteSession aborts every run it owns (AB-207)', () => {
     expect(bureau.getRun(firstRun.id)?.status).toBe('aborted');
     expect(bureau.getRun(secondRun.id)?.status).toBe('aborted');
     await bureau.dispose();
+  });
+});
+
+describe('AB-260: BureauOptions.runtime composition', () => {
+  it('produces a run envelope whose timestamps are derived from a manual clock pinned to a fixed origin', async () => {
+    const origin = '2024-03-01T00:00:00.000Z';
+    const runtime = createManualRuntimeServices({ origin });
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      runtime,
+    });
+
+    try {
+      const envelopeTimestamps: number[] = [];
+      const unsubscribe = bureau.subscribeLiveFrames((frame) => {
+        if (frame.type === 'run-envelope') {
+          envelopeTimestamps.push(frame.frame.timestamp);
+        }
+      });
+
+      const summary = await bureau.createRun({ message: 'Hello, origin-derived clock' });
+      await waitForRunCompletion(bureau, summary.id);
+      unsubscribe();
+
+      expect(envelopeTimestamps.length).toBeGreaterThan(0);
+      // The manual clock never advances in this test, so every run-envelope
+      // frame's timestamp is the SAME origin-derived value.
+      for (const timestamp of envelopeTimestamps) {
+        expect(timestamp).toBe(Date.parse(origin));
+      }
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('gives two Bureaus with independent manual runtimes no shared clock, identifier sequence, or deferred ledger', async () => {
+    const runtimeA = createManualRuntimeServices({ origin: '2024-01-01T00:00:00.000Z' });
+    const runtimeB = createManualRuntimeServices({ origin: '2025-06-15T00:00:00.000Z' });
+
+    const bureauA = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      runtime: runtimeA,
+      scheduler: { enabled: true },
+    });
+    const bureauB = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      runtime: runtimeB,
+      scheduler: { enabled: true },
+    });
+
+    try {
+      // Distinct clocks.
+      expect(runtimeA.clock.now()).not.toBe(runtimeB.clock.now());
+
+      // Distinct identifier sequences: each Bureau mints its runId through
+      // its own composed `RuntimeServices.identifiers` — two runs started
+      // one on each Bureau both produce the SAME first-of-kind counter
+      // value (`run-1-...`) rather than a shared, monotonically-advancing
+      // sequence.
+      const runA = await bureauA.createRun({ message: 'On bureau A' });
+      const runB = await bureauB.createRun({ message: 'On bureau B' });
+      // Each Bureau's `identifiers.next('run')` counter starts at 1
+      // independently — a shared sequence would produce `run-1` then `run-2`.
+      expect(runA.id).toBe('run-1');
+      expect(runB.id).toBe('run-1');
+      await waitForRunCompletion(bureauA, runA.id);
+      await waitForRunCompletion(bureauB, runB.id);
+
+      // Advancing one runtime's timers never fires the other's.
+      let firedOnA = 0;
+      let firedOnB = 0;
+      runtimeA.timers.setTimeout(() => {
+        firedOnA += 1;
+      }, 1000);
+      runtimeB.timers.setTimeout(() => {
+        firedOnB += 1;
+      }, 1000);
+      await runtimeA.advance(1000);
+      expect(firedOnA).toBe(1);
+      expect(firedOnB).toBe(0);
+      await runtimeB.advance(1000);
+      expect(firedOnB).toBe(1);
+
+      // Draining one runtime's deferred ledger reports only its own labels —
+      // disposing Bureau A settles its own `scheduler-stop`/`audit-write`
+      // tracking on `runtimeA`, never on `runtimeB`.
+      await bureauA.dispose();
+      const drainA = await runtimeA.deferred.drain();
+      const drainB = await runtimeB.deferred.drain();
+      expect(drainA.settled.length).toBeGreaterThan(0);
+      expect(drainB.settled).toEqual([]);
+    } finally {
+      await bureauA.dispose();
+      await bureauB.dispose();
+    }
+  });
+
+  it('registers scheduler-stop, audit-write, webhook-delivery, and background-evaluation with the composed deferred ledger', async () => {
+    const runtime = createManualRuntimeServices();
+    let deliveredCount = 0;
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      runtime,
+      persistence: { type: 'memory' },
+      scheduler: { enabled: true },
+      webhooks: {
+        targets: [{ url: 'https://example.test/webhook' }],
+        fetch: (async () => {
+          deliveredCount += 1;
+          return new Response(null, { status: 200 });
+        }) as unknown as typeof fetch,
+      },
+      onlineEvals: {
+        judges: [
+          {
+            name: 'always-breaches',
+            async evaluate() {
+              return { pass: false, score: 0, message: 'always fails' };
+            },
+          },
+        ],
+        sampleRate: 1,
+        rng: () => 0,
+      },
+    });
+
+    try {
+      const summary = await bureau.createRun({ message: 'Trigger every deferred label' });
+      await waitForRunCompletion(bureau, summary.id);
+      await waitForCondition(
+        () => deliveredCount > 0,
+        'webhook delivery for the eval threshold breach was never attempted',
+      );
+      await bureau.webhookNotifier?.flush();
+      await bureau.onlineEvalSampler?.flush();
+
+      await bureau.dispose();
+
+      const report = await runtime.deferred.drain();
+      const labels = new Set(report.settled.map((entry) => entry.label));
+      expect(labels.has('scheduler-stop')).toBe(true);
+      expect(labels.has('audit-write')).toBe(true);
+      expect(labels.has('webhook-delivery')).toBe(true);
+      expect(labels.has('background-evaluation')).toBe(true);
+      // No heartbeat subsystem exists on Bureau yet (see
+      // `BureauShutdownOwnerReport.kind`'s own doc comment — `'heartbeat'`
+      // is reserved for the day one is composed), so `'heartbeat-stop'` has
+      // no call site to register and is deliberately absent here.
+      expect(labels.has('heartbeat-stop')).toBe(false);
+    } finally {
+      await bureau.dispose();
+    }
   });
 });

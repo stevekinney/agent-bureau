@@ -65,6 +65,7 @@ import {
   WEBHOOK_DELIVERY_POLICY,
 } from '@lostgradient/operative/liveness';
 import type { TextValueStore } from '@lostgradient/weft/storage';
+import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
 
 import type { AgentDefinitions } from './agent-catalog';
 import type { AuditTrail } from './audit-trail';
@@ -117,22 +118,32 @@ function webhookDeliveryPolicy(maxAttempts: number, backoffBaseMilliseconds: num
 }
 
 /**
- * The default production clock backing each delivery's
- * `createStallWatchdog` — `performance.now()`, a monotonic source, matching
- * `active-run-liveness.ts`'s own default clock. Distinct from this module's
- * own `now` option, which is `Date.now`-based and only ever timestamps
- * persisted `WebhookDeliveryRecord`s. Exported for direct unit testing of
- * `setTimeout`/`clearTimeout` (AB-220): the `webhook-delivery` policy row
- * has `missedPulseThreshold: 0`, so `createStallWatchdog` never actually
- * calls either through the public API — see
- * `packages/operative/src/liveness/watchdog.ts`'s `scheduleNextCheck`,
- * which no-ops when a policy isn't cadence-gated.
+ * Factory for the default production clock backing each delivery's
+ * `createStallWatchdog` — driven by the composed
+ * {@link RuntimeServices.monotonic}/{@link RuntimeServices.timers} (AB-260),
+ * defaulting to the real-globals runtime when called with no argument (the
+ * baseline behavior, unchanged from before `RuntimeServices` composition).
+ * Distinct from this module's own `now` option, which is `Date.now`-based
+ * and only ever timestamps persisted `WebhookDeliveryRecord`s. Exported for
+ * direct unit testing of `setTimeout`/`clearTimeout` (AB-220): the
+ * `webhook-delivery` policy row has `missedPulseThreshold: 0`, so
+ * `createStallWatchdog` never actually calls either through the public API
+ * — see `packages/operative/src/liveness/watchdog.ts`'s `scheduleNextCheck`,
+ * which no-ops when a policy isn't cadence-gated. The timer-scheduling and
+ * timer-clearing members are destructured once so the returned clock reads
+ * `scheduleTimeout(...)`/`cancelTimeout(...)` rather than a literal `timers`
+ * method call — see `create-bureau.ts`'s equivalent pattern for why.
  */
-export const realWatchdogClock: StallWatchdogClock = {
-  now: () => performance.now(),
-  setTimeout: (callback, ms) => setTimeout(callback, ms),
-  clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
-};
+export function createDefaultWatchdogClock(
+  runtime: RuntimeServices = createDefaultRuntimeServices(),
+): StallWatchdogClock {
+  const { setTimeout: scheduleTimeout, clearTimeout: cancelTimeout } = runtime.timers;
+  return {
+    now: () => runtime.monotonic.now(),
+    setTimeout: (callback, ms) => scheduleTimeout(callback, ms),
+    clearTimeout: (handle) => cancelTimeout(handle),
+  };
+}
 
 /** The fixed id for the notifier's own instance-level aggregate snapshot. */
 const AGGREGATE_DELIVERY_ID = 'webhook-notifier';
@@ -234,9 +245,9 @@ export interface WebhookNotifierOptions {
   reviewQueueBaseUrl?: string;
   /** Injectable HTTP client. Defaults to global `fetch`. */
   fetch?: typeof fetch;
-  /** Injectable backoff sleep. Defaults to a `setTimeout`-backed implementation. */
+  /** Injectable backoff sleep. Defaults to the composed RuntimeServices timers. */
   sleep?: (milliseconds: number) => Promise<void>;
-  /** Injectable clock. Defaults to `Date.now`. */
+  /** Injectable clock. Defaults to the composed RuntimeServices clock. */
   now?: () => number;
   /** Maximum delivery attempts before a delivery is marked `exhausted`. Default `5`. */
   maxAttempts?: number;
@@ -252,8 +263,9 @@ export interface WebhookNotifierOptions {
   signal?: AbortSignal;
   /**
    * Injectable timer-agnostic clock backing each delivery's
-   * `createStallWatchdog` (AB-220). Defaults to a `performance.now()`-based
-   * clock. Tests inject a manual clock so no real sleeps are needed.
+   * `createStallWatchdog` (AB-220). Defaults to the composed
+   * `RuntimeServices` monotonic clock and timers (AB-260). Tests inject a
+   * manual clock so no real sleeps are needed.
    */
   clock?: StallWatchdogClock;
 }
@@ -334,14 +346,31 @@ function encodeKey(id: string): string {
 const DEFAULT_MAX_ATTEMPTS = 5;
 const DEFAULT_BACKOFF_BASE_MILLISECONDS = 1000;
 
-function defaultSleep(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(resolve, milliseconds);
-    // Never keep the process alive purely to finish a webhook backoff wait —
-    // matches the "best-effort, never blocks shutdown" posture of the audit
-    // trail's fire-and-forget writes.
-    (timer as unknown as { unref?: () => void }).unref?.();
-  });
+/**
+ * Factory for the default backoff sleep — driven by the composed
+ * {@link RuntimeServices.timers} (AB-260). `timers` is required (its one
+ * caller, below, always supplies `runtime.timers`, itself already defaulted
+ * to the real-globals runtime by `createWebhookNotifier`'s own `runtime`
+ * parameter) — the baseline behavior is unchanged from before
+ * `RuntimeServices` composition. The timer-scheduling member is destructured
+ * once so the call site below reads `scheduleTimeout(...)` rather than a
+ * literal `timers` method call — see `create-bureau.ts`'s equivalent pattern
+ * for why.
+ */
+function createDefaultSleep(
+  timers: RuntimeServices['timers'],
+): (milliseconds: number) => Promise<void> {
+  const { setTimeout: scheduleTimeout } = timers;
+  function sleep(milliseconds: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const timer = scheduleTimeout(resolve, milliseconds);
+      // Never keep the process alive purely to finish a webhook backoff wait —
+      // matches the "best-effort, never blocks shutdown" posture of the audit
+      // trail's fire-and-forget writes.
+      (timer as { unref?: () => void }).unref?.();
+    });
+  }
+  return sleep;
 }
 
 // ── Deep links ──────────────────────────────────────────────────────
@@ -404,6 +433,12 @@ export function createWebhookNotifier<D extends AgentDefinitions = AgentDefiniti
   auditTrail: AuditTrail | undefined,
   options: WebhookNotifierOptions | undefined,
   onDiagnostic?: DiagnosticSink,
+  // AB-260: the bureau's single composed `RuntimeServices` instance. Defaults
+  // to the real-globals runtime so every pre-existing direct caller of this
+  // exported factory (including this package's own test suite) is
+  // unaffected by construction. `options.sleep`/`options.now` (this module's
+  // own pre-existing injectable seam) still take precedence when supplied.
+  runtime: RuntimeServices = createDefaultRuntimeServices(),
 ): WebhookNotifier {
   const diagnose = resolveDiagnosticSink(onDiagnostic);
   const targets = options?.targets ?? [];
@@ -458,13 +493,13 @@ export function createWebhookNotifier<D extends AgentDefinitions = AgentDefiniti
 
   const fetchImpl = options?.fetch ?? fetch;
   const signal = options?.signal;
-  const sleep = options?.sleep ?? defaultSleep;
-  const now = options?.now ?? Date.now;
+  const sleep = options?.sleep ?? createDefaultSleep(runtime.timers);
+  const now = options?.now ?? runtime.clock.now;
   const maxAttempts = options?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
   const backoffBaseMilliseconds =
     options?.backoffBaseMilliseconds ?? DEFAULT_BACKOFF_BASE_MILLISECONDS;
   const reviewQueueBaseUrl = options?.reviewQueueBaseUrl;
-  const clock = options?.clock ?? realWatchdogClock;
+  const clock = options?.clock ?? createDefaultWatchdogClock(runtime);
   const deliveryPolicy = webhookDeliveryPolicy(maxAttempts, backoffBaseMilliseconds);
 
   // Subject ids already notified this process, so a delivery is kicked off
@@ -492,6 +527,12 @@ export function createWebhookNotifier<D extends AgentDefinitions = AgentDefiniti
   function trackDelivery(promise: Promise<void>): void {
     activeDeliveries.add(promise);
     void promise.finally(() => activeDeliveries.delete(promise));
+    // AB-260: layered on top of `activeDeliveries` (never replacing it) —
+    // every webhook delivery also registers with the bureau's composed
+    // `RuntimeServices.deferred`, so `deferred.drain()` reports it under the
+    // stable `'webhook-delivery'` label alongside every other subsystem's
+    // fire-and-forget work.
+    runtime.deferred.track(promise, 'webhook-delivery');
   }
 
   // ── AB-220: per-delivery liveness ───────────────────────────────────

@@ -512,6 +512,20 @@ export interface BureauOptions<D extends AgentDefinitions> {
   webhooks?: WebhookNotifierOptions;
   onlineEvals?: OnlineEvalSamplerOptions;
   onDiagnostic?: DiagnosticSink;
+  /**
+   * The injectable runtime-service seam (`AB-92`/`AB-252`/`AB-260`): wall
+   * time, monotonic time, timers, identifiers, randomness, and
+   * deferred-work tracking. Unconfigured, a bureau reads the real globals
+   * via `createDefaultRuntimeServices()`; a test composes its own
+   * deterministic instance with `createManualRuntimeServices()` from
+   * `@lostgradient/operative/test`. Resolved once, at `createBureau`
+   * construction, before any subsystem is built, and snapshotted into
+   * every run, session, schedule, scheduler task, audit write, webhook
+   * delivery, and background evaluation this bureau starts — two bureaus
+   * in one process given independent manual runtimes never share a clock,
+   * an identifier sequence, or a deferred ledger.
+   */
+  runtime?: RuntimeServices;
 }
 
 export declare function createBureau<const D extends AgentDefinitions>(
@@ -536,6 +550,24 @@ variable typed as the widened `AgentDefinitions` (rather than as a literal
 object expression) loses this inference, the same way it would for any other
 `const`-generic API — see
 [Barrel imports](#barrel-imports) for the pattern that keeps it.
+
+`runtime` (`AB-92`/`AB-252`/`AB-260`) carries the same shape `createAgent`'s
+own `runtime` field does. `createBureau` resolves
+`options.runtime ?? createDefaultRuntimeServices()` exactly once, before any
+subsystem is constructed, and passes that single instance into the bureau's
+runtime composition, the audit trail, the webhook notifier, the
+online-evaluation sampler, and the scheduler; every run, session, and
+schedule the bureau starts receives it through operative's own
+`RunOptionsBase.runtime`, so a durable run started by a bureau with a manual
+clock never falls back to the real one anywhere in operative. Bureau
+readiness remains exactly the resolution of `createBureau`'s returned
+promise — no second, narrower readiness signal is introduced by this field.
+The former `getRuntimeCompositionTestingSeams` test-only export
+(`packages/bureau/src/runtime-composition.ts`) is retired: every capability
+it exposed that was a genuine injection seam is now reachable through
+`runtime` (or, where it was a pure function with no per-instance state, a
+direct export); every capability that was introspection the production
+surface withheld was deleted rather than relocated.
 
 ### Removed from `BureauOptions`
 
