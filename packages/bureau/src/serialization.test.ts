@@ -431,6 +431,7 @@ function stubActiveRunWithSnapshot(): ActiveRun {
     events: emitter.events.bind(emitter) as ActiveRun['events'],
     toObservable: emitter.toObservable.bind(emitter),
     complete: emitter.complete.bind(emitter),
+    closed: () => new Promise(() => {}),
     snapshot: buildStubLivenessSnapshot,
     subscribeSnapshot: (observer) => {
       observer(buildStubLivenessSnapshot());

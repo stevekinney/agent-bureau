@@ -1,4 +1,4 @@
-import { createTool, ToolboxSettledEvent } from 'armorer';
+import { createTool, ToolboxProgressEvent, ToolboxSettledEvent } from 'armorer';
 import { createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
@@ -540,5 +540,68 @@ describe('ActiveRun.closed()', () => {
 
     expect(await closedAcknowledgement).toEqual({ status: 'completed' });
     expect(settledFlag).toBe(true);
+  });
+});
+
+// AB-214: the in-memory `createActiveRun` liveness wiring records a
+// tool-progress pulse only for a tool call THIS run itself dispatched (the
+// same `ownedToolCallIds` guard `onExecuteStart`/`onSettled` already use —
+// see the comment on the `progress` listener in create-run.ts).
+describe('AB-214: tool-progress pulses feed the liveness snapshot', () => {
+  it('records a tool-progress evidence entry when an owned tool call reports progress', async () => {
+    // The evidence has to be observed WHILE the call is in flight: `endToolCall`
+    // tears the tool watchdog down (and with it, its evidence) the moment the
+    // in-flight count returns to zero, so a snapshot taken after the tool
+    // settles would never see the pulse.
+    let releaseTool: (() => void) | undefined;
+    const toolGate = new Promise<void>((resolve) => {
+      releaseTool = resolve;
+    });
+    const reportingTool = createTool({
+      name: 'reporting_tool',
+      description: 'Reports progress mid-execution',
+      input: z.object({}),
+      execute: async () => {
+        await toolGate;
+        return { done: true };
+      },
+    });
+    const toolbox = createTestToolbox([reportingTool]);
+
+    const activeRun = createActiveRun({
+      generate: createMockGenerate([
+        toolCallResponse([{ id: 'call-1', name: 'reporting_tool', arguments: {} }]),
+        textResponse('done'),
+      ]),
+      toolbox,
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+    });
+
+    // Let the call reach the toolbox before the progress event arrives, so
+    // `ownedToolCallIds` already has 'call-1' when `onToolProgress` fires.
+    // Deterministic microtask draining (no real timer) — matches the
+    // `closed()` regression tests above in this same file.
+    for (let tick = 0; tick < 50; tick++) {
+      await Promise.resolve();
+    }
+    toolbox.dispatchEvent(
+      new ToolboxProgressEvent({
+        tool: reportingTool,
+        call: { id: 'call-1', name: 'reporting_tool', arguments: {} },
+        percent: 50,
+        message: 'halfway',
+      }),
+    );
+
+    const inFlightEvidence = activeRun.snapshot().evidence;
+    const toolProgressEntries = inFlightEvidence.filter(
+      (entry) => entry.source === 'tool-progress',
+    );
+    expect(toolProgressEntries).toHaveLength(1);
+
+    releaseTool?.();
+    const result = await activeRun.result;
+    expect(result.finishReason).toBe('stop-condition');
   });
 });
