@@ -46,7 +46,11 @@ interface ScheduleCall {
  * class over a stub engine that records lifecycle calls, so handle-delegation can
  * be asserted (`pause`/`resume`/`cancel` route to the engine by id).
  */
-function makeFakeHandle(id: string, recorder?: Record<string, string[]>): ScheduleHandle {
+function makeFakeHandle(
+  id: string,
+  recorder?: Record<string, string[]>,
+  cancelSchedule?: (scheduleId: string) => Promise<void>,
+): ScheduleHandle {
   const stubEngine = {
     pauseSchedule: async (scheduleId: string) => {
       recorder?.['pause']?.push(scheduleId);
@@ -56,6 +60,7 @@ function makeFakeHandle(id: string, recorder?: Record<string, string[]>): Schedu
     },
     cancelSchedule: async (scheduleId: string) => {
       recorder?.['cancel']?.push(scheduleId);
+      await cancelSchedule?.(scheduleId);
     },
     updateSchedule: async () => {},
     getSchedule: async () => mockSummary,
@@ -67,6 +72,14 @@ function makeSchedulingEngine(options?: {
   scheduleId?: string;
   summaries?: ScheduleSummary[];
   handleRecorder?: Record<string, string[]>;
+  /**
+   * Overrides the CANCELLATION behavior of the `ScheduleHandle` `schedule()`
+   * returns (its own internal stub engine, distinct from this
+   * `SchedulingEngine` mock's own `cancelSchedule` below) — used by the
+   * `closed()` "cancel() rejects" regression tests, which need the FRESH
+   * `createAgentSchedule` path's `handle.cancel()` to reject.
+   */
+  handleCancelSchedule?: (scheduleId: string) => Promise<void>;
 }): SchedulingEngine & { calls: ScheduleCall[] } {
   const scheduleId = options?.scheduleId ?? 'test-sched-1';
   const summaries = options?.summaries ?? [mockSummary];
@@ -81,7 +94,11 @@ function makeSchedulingEngine(options?: {
       opts?: ScheduleOptions,
     ): Promise<ScheduleHandle> {
       calls.push({ type, input, spec, options: opts });
-      return makeFakeHandle(opts?.id ?? scheduleId, options?.handleRecorder);
+      return makeFakeHandle(
+        opts?.id ?? scheduleId,
+        options?.handleRecorder,
+        options?.handleCancelSchedule,
+      );
     },
     async getSchedule(): Promise<ScheduleSummary | null> {
       return summaries[0] ?? null;
@@ -98,6 +115,27 @@ function makeSchedulingEngine(options?: {
     async resumeSchedule(): Promise<void> {},
     async cancelSchedule(): Promise<void> {},
   };
+}
+
+/**
+ * Flushes several microtask turns and reports whether `promise` is still
+ * unsettled — used by the `AgentScheduleHandle.closed()` tests below to
+ * assert a NEGATIVE (it does NOT resolve), which a plain `await` can't do.
+ */
+async function stillPending(promise: Promise<unknown>): Promise<boolean> {
+  let settled = false;
+  void promise.then(
+    () => {
+      settled = true;
+    },
+    () => {
+      settled = true;
+    },
+  );
+  for (let i = 0; i < 5; i += 1) {
+    await Promise.resolve();
+  }
+  return !settled;
 }
 
 // ---------------------------------------------------------------------------
@@ -911,5 +949,200 @@ describe('createAgentScheduler', () => {
     await scheduler.listSchedules({ status: 'active' });
 
     expect(capturedFilter?.status).toBe('active');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AgentScheduleHandle.closed() — AB-210
+// ---------------------------------------------------------------------------
+
+describe('AgentScheduleHandle.closed()', () => {
+  it('stays pending on an active schedule that has not been cancelled', async () => {
+    const engine = makeSchedulingEngine();
+    const handle = await createAgentSchedule({
+      engine,
+      agentName: 'researcher',
+      spec: { every: '1h' },
+      input: 'poll',
+    });
+
+    expect(await stillPending(handle.closed())).toBe(true);
+  });
+
+  it('coordinator ruling (2026-09-02): stays pending after a fire completes without cancel()', async () => {
+    const engine = makeSchedulingEngine();
+    const handle = await createAgentSchedule({
+      engine,
+      agentName: 'researcher',
+      spec: { every: '1h' },
+      input: 'poll',
+    });
+
+    // Simulate a fire completing — nothing about any individual fire's own
+    // lifecycle ever settles the schedule DEFINITION's own closed(); only
+    // this handle's own cancel() does.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(await stillPending(handle.closed())).toBe(true);
+  });
+
+  it('resolves { status: "completed" } once this handle\'s own cancel() settles', async () => {
+    const engine = makeSchedulingEngine();
+    const handle = await createAgentSchedule({
+      engine,
+      agentName: 'researcher',
+      spec: { every: '1h' },
+      input: 'poll',
+    });
+
+    await handle.cancel();
+
+    expect(await handle.closed()).toEqual({ status: 'completed' });
+  });
+
+  it('resolves { status: "failed", error } rather than hanging forever when cancel() itself rejects', async () => {
+    const cancelError = new Error('engine.cancelSchedule exploded');
+    const engine = makeSchedulingEngine({
+      handleCancelSchedule: async () => {
+        throw cancelError;
+      },
+    });
+    const handle = await createAgentSchedule({
+      engine,
+      agentName: 'researcher',
+      spec: { every: '1h' },
+      input: 'poll',
+    });
+
+    let caught: unknown;
+    try {
+      await handle.cancel();
+    } catch (error) {
+      caught = error;
+    }
+    // cancel() itself still propagates the rejection to its own caller...
+    expect(caught).toBe(cancelError);
+    // ...and closed() classifies the same failed attempt instead of hanging.
+    expect(await handle.closed()).toEqual({ status: 'failed', error: cancelError });
+  });
+
+  it('scheduleHandleFromEngine (idempotent-reuse path): resolves { status: "failed", error } when cancel() rejects', async () => {
+    const cancelError = new Error('engine.cancelSchedule exploded');
+    const existingSummary: ScheduleSummary = {
+      ...mockSummary,
+      id: 'schedule-closed-cancel-fails',
+      intervalMs: 3_600_000,
+    };
+    const engine = makeSchedulingEngine({ summaries: [existingSummary] });
+    engine.cancelSchedule = async () => {
+      throw cancelError;
+    };
+    const handle = await createAgentSchedule({
+      engine,
+      agentName: 'researcher',
+      spec: { every: '1h' },
+      input: 'poll',
+      id: 'schedule-closed-cancel-fails',
+      idempotent: true,
+    });
+
+    let caught: unknown;
+    try {
+      await handle.cancel();
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBe(cancelError);
+    expect(await handle.closed()).toEqual({ status: 'failed', error: cancelError });
+  });
+
+  it('AC3 — "already canceled": resolves promptly and returns the identical cached object on a repeat call', async () => {
+    const engine = makeSchedulingEngine();
+    const handle = await createAgentSchedule({
+      engine,
+      agentName: 'researcher',
+      spec: { every: '1h' },
+      input: 'poll',
+    });
+    await handle.cancel();
+    await handle.closed();
+
+    // A second call after settlement returns the SAME cached object —
+    // createClosedAcknowledgement's shared idempotency guarantee (AB-37/
+    // AB-204), reused here rather than reinvented for schedules.
+    const first = await handle.closed();
+    const second = await handle.closed();
+    expect(first).toBe(second);
+  });
+
+  it('AC4: does not wait on a separately-tracked in-flight fire — closed() resolves right after cancel() even while a fire dispatched earlier is still running', async () => {
+    let fireSettled = false;
+    const fireStillRunning = new Promise<void>(() => {
+      // Deliberately never resolves during this test — models a fire
+      // dispatched before cancel() that is still in flight. This handle's
+      // closed() must never await it; it is reachable only through the
+      // fire's own AgentRun.closed() (AB-204), not through this handle.
+    });
+    void fireStillRunning.then(() => {
+      fireSettled = true;
+    });
+
+    const engine = makeSchedulingEngine();
+    const handle = await createAgentSchedule({
+      engine,
+      agentName: 'researcher',
+      spec: { every: '1h' },
+      input: 'poll',
+    });
+
+    await handle.cancel();
+    const acknowledgement = await handle.closed();
+
+    expect(acknowledgement).toEqual({ status: 'completed' });
+    expect(fireSettled).toBe(false);
+  });
+
+  it('bounds a caller-supplied signal without disturbing the shared cache', async () => {
+    const engine = makeSchedulingEngine();
+    const handle = await createAgentSchedule({
+      engine,
+      agentName: 'researcher',
+      spec: { every: '1h' },
+      input: 'poll',
+    });
+
+    const controller = new AbortController();
+    const closedPromise = handle.closed({ signal: controller.signal });
+    controller.abort();
+
+    expect(await closedPromise).toEqual({ status: 'unresolved', reason: 'timed-out' });
+
+    // The schedule is still uncancelled — a later signal-free call still
+    // waits on the real settlement rather than caching the timed-out result.
+    await handle.cancel();
+    expect(await handle.closed()).toEqual({ status: 'completed' });
+  });
+
+  it('the idempotent-reuse handle (scheduleHandleFromEngine) also delivers closed()', async () => {
+    const existingSummary: ScheduleSummary = {
+      ...mockSummary,
+      id: 'schedule-closed-reuse',
+      intervalMs: 3_600_000,
+    };
+    const engine = makeSchedulingEngine({ summaries: [existingSummary] });
+
+    const handle = await createAgentSchedule({
+      engine,
+      agentName: 'researcher',
+      spec: { every: '1h' },
+      input: 'poll',
+      id: 'schedule-closed-reuse',
+      idempotent: true,
+    });
+
+    expect(await stillPending(handle.closed())).toBe(true);
+    await handle.cancel();
+    expect(await handle.closed()).toEqual({ status: 'completed' });
   });
 });

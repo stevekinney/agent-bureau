@@ -10,8 +10,11 @@ import { parseDuration, ScheduleHandle } from '@lostgradient/weft';
 import type { RuntimeServices } from 'lifecycle';
 import { createDefaultRuntimeServices } from 'lifecycle';
 
+import type { ClosedFunction } from '../closed-acknowledgement';
+import { createClosedAcknowledgement } from '../closed-acknowledgement';
 import { ScheduleCancelledEvent, SchedulePausedEvent, ScheduleResumedEvent } from '../events';
 import type { EventDispatcher } from '../run-step';
+import type { CleanupAcknowledgement, ClosedOptions } from '../types';
 
 /**
  * The overlap policies Agent Bureau exposes on its three schedule-creation
@@ -177,6 +180,28 @@ export interface AgentScheduleHandle {
   cancel(): Promise<void>;
   /** Read the current {@link ScheduleSummary} for this schedule. */
   describe(): Promise<ScheduleSummary>;
+
+  /**
+   * Cleanup acknowledgement for the schedule DEFINITION itself (AB-37/AB-210)
+   * — mirrors `cancel()`'s own terminal-state semantics rather than tracking
+   * any individual fire. Resolves once no future fire can start: promptly
+   * after this handle's own `cancel()` settles, and NEVER spontaneously for
+   * a schedule that has not been cancelled — an active schedule's `closed()`
+   * stays pending even after a fire completes, until THIS handle's own
+   * `cancel()` is called and settles. (A Bureau shutdown that cancels the
+   * schedule through some other route does not resolve this promise; that
+   * wiring, if any, is Bureau's to add.)
+   *
+   * Never waits on any separately-tracked in-flight fire: a fire dispatched
+   * before `cancel()` and still running is an ordinary run, reachable and
+   * awaitable through its own `closed()` (AB-204), not through this handle.
+   *
+   * A `cancel()` call that itself rejects (the underlying engine call
+   * throws) resolves this as `{ status: 'failed', error }` rather than
+   * hanging forever — the failed cancellation attempt is a genuine, observed
+   * problem, not silently swallowed into "stays pending".
+   */
+  closed(options?: ClosedOptions): Promise<CleanupAcknowledgement>;
 }
 
 /**
@@ -281,11 +306,40 @@ export class InvalidScheduleError extends Error {
   }
 }
 
+/**
+ * Builds `AgentScheduleHandle.closed()`, shared by both handle-construction
+ * sites below (`scheduleHandleFromEngine` and `createAgentSchedule`'s own
+ * return). AB-210: resolves once THIS handle's own `cancel()` call
+ * completes — a schedule's `closed()` has no independent success path of
+ * its own (unlike a run, which settles whether or not anyone requests
+ * cancellation), so the shared helper's `not-required` fast path never
+ * applies here and `disqualifiesFastPath` is unconditionally `true`. Reuses
+ * `createClosedAcknowledgement` (AB-37/AB-204's shared vocabulary) purely
+ * for its memoization and per-call `signal` handling — the acceptance
+ * criterion that `closed()` never resolves spontaneously for a schedule
+ * that has not been cancelled falls out of `cancelled` never settling on
+ * its own.
+ */
+function createScheduleClosed(cancelled: Promise<void>): ClosedFunction {
+  return createClosedAcknowledgement({
+    result: cancelled,
+    disqualifiesFastPath: () => true,
+    hasInFlightWork: () => false,
+    resolveOutcome: () => Promise.resolve({ status: 'completed' }),
+  });
+}
+
 function scheduleHandleFromEngine(
   engine: SchedulingEngine,
   scheduleId: string,
   emitter?: EventDispatcher,
 ): AgentScheduleHandle {
+  let resolveCancelled!: () => void;
+  let rejectCancelled!: (error: unknown) => void;
+  const cancelled = new Promise<void>((resolve, reject) => {
+    resolveCancelled = resolve;
+    rejectCancelled = reject;
+  });
   return {
     id: scheduleId,
     async pause() {
@@ -297,8 +351,18 @@ function scheduleHandleFromEngine(
       emitter?.dispatch(new ScheduleResumedEvent(scheduleId));
     },
     async cancel() {
-      await engine.cancelSchedule(scheduleId);
+      try {
+        await engine.cancelSchedule(scheduleId);
+      } catch (error) {
+        // A failed cancellation attempt is a genuine, observed problem for
+        // `closed()` too — reject `cancelled` so `createClosedAcknowledgement`
+        // classifies it `{ status: 'failed', error }` instead of hanging
+        // forever (a rejected `cancel()` here still propagates unchanged).
+        rejectCancelled(error);
+        throw error;
+      }
       emitter?.dispatch(new ScheduleCancelledEvent(scheduleId));
+      resolveCancelled();
     },
     async describe(): Promise<ScheduleSummary> {
       const schedule = await engine.getSchedule(scheduleId);
@@ -307,6 +371,7 @@ function scheduleHandleFromEngine(
       }
       return schedule;
     },
+    closed: createScheduleClosed(cancelled),
   };
 }
 
@@ -471,6 +536,13 @@ export async function createAgentSchedule(
     throw error;
   }
 
+  let resolveCancelled!: () => void;
+  let rejectCancelled!: (error: unknown) => void;
+  const cancelled = new Promise<void>((resolve, reject) => {
+    resolveCancelled = resolve;
+    rejectCancelled = reject;
+  });
+
   return {
     id: handle.id,
     async pause() {
@@ -482,10 +554,20 @@ export async function createAgentSchedule(
       emitter?.dispatch(new ScheduleResumedEvent(handle.id));
     },
     async cancel() {
-      await handle.cancel();
+      try {
+        await handle.cancel();
+      } catch (error) {
+        // Same reasoning as `scheduleHandleFromEngine`'s `cancel()`: a
+        // failed cancellation attempt rejects `cancelled` so `closed()`
+        // classifies it `{ status: 'failed', error }` rather than hanging.
+        rejectCancelled(error);
+        throw error;
+      }
       emitter?.dispatch(new ScheduleCancelledEvent(handle.id));
+      resolveCancelled();
     },
     describe: () => handle.describe(),
+    closed: createScheduleClosed(cancelled),
   };
 }
 

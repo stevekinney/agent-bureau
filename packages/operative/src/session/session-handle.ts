@@ -53,7 +53,13 @@ import type {
   Subscription,
 } from '../liveness';
 import { createStallWatchdog, LIVENESS_POLICY_VERSION, sessionMonitorPolicy } from '../liveness';
-import type { FinishReason, RunOptions, RunResult } from '../types';
+import type {
+  CleanupAcknowledgement,
+  ClosedOptions,
+  FinishReason,
+  RunOptions,
+  RunResult,
+} from '../types';
 import type { SessionStore } from './types';
 
 /**
@@ -310,6 +316,22 @@ export interface SessionHandle {
    * verb transitions without waiting for an active run.
    */
   readonly emitter: TypedEventTarget<OperativeEventMap>;
+
+  /**
+   * Handle-scoped cleanup acknowledgement (AB-37/AB-204/AB-210). Resolves
+   * `{ status: 'not-required' }` immediately when no run is currently live
+   * on this handle. Otherwise delegates to the live `currentRun`'s own
+   * `AgentRun.closed()` (AB-204, itself delegating to `ActiveRun.closed()`)
+   * and returns the IDENTICAL `CleanupAcknowledgement` object.
+   *
+   * This is deliberately NOT the full-run-history acknowledgement across
+   * every run this session has ever owned: `packages/operative` has no
+   * dependency on `packages/bureau`, so this method cannot see
+   * `getRunSessionIdentifier` or the Bureau `store`. That session-level
+   * acknowledgement is Bureau's responsibility, folded into its
+   * `deleteSession` fix.
+   */
+  closed(options?: ClosedOptions): Promise<CleanupAcknowledgement>;
 }
 
 /**
@@ -968,6 +990,17 @@ export function createSessionHandle(
     id: sessionId,
 
     emitter,
+
+    closed(options?: ClosedOptions): Promise<CleanupAcknowledgement> {
+      // Scoped to what this handle itself tracks (AB-210): `not-required`
+      // when nothing is live, otherwise delegate to the live run's own
+      // `closed()` — its identical returned object satisfies the "delegate
+      // and return the same object" acceptance criterion for free.
+      if (currentRun === null) {
+        return Promise.resolve({ status: 'not-required' });
+      }
+      return currentRun.closed(options);
+    },
 
     run(input: string): AgentRun {
       // A shared emitter that bridges the outer ActiveRun surface (returned
