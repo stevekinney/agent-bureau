@@ -36,6 +36,28 @@ import {
 import { createMockGenerate, createRunRecorder } from '../src/test/index';
 import type { GenerateResponse, SteeringGate } from '../src/types';
 
+/**
+ * The curated operative run-loop sequence (`run.*`/`step.*`/`generate.*`/
+ * `tools.*`/`usage.accumulated`) the three ordering tests below assert on.
+ * `createRunRecorder` now reads `COMBINED_OPERATIVE_EVENT_TYPES` (AB-255),
+ * so it also captures the `toolbox.*`/`conversation.*` forwarded firehose
+ * and the `tool.*` bubble events — real, previously-missed captures (see
+ * `event-forwarding.test.ts` and the `steering.applied`/child-lifecycle
+ * regression test below), just not what these three tests are about.
+ */
+const CURATED_RUN_LOOP_TYPES = new Set<string>([
+  'run.started',
+  'step.started',
+  'generate.started',
+  'generate.completed',
+  'usage.accumulated',
+  'tools.executing',
+  'tools.executed',
+  'step.generated',
+  'step.completed',
+  'run.completed',
+]);
+
 const weatherTool = createTool({
   name: 'get_weather',
   description: 'Get weather for a location',
@@ -81,7 +103,14 @@ describe('events', () => {
     expect(result.finishReason).toBe('stop-condition');
     expect(result.steps).toHaveLength(2);
 
-    const types = recorder.events.map((event) => event.type);
+    // `createRunRecorder` now reads `COMBINED_OPERATIVE_EVENT_TYPES` (AB-255),
+    // so it also captures the `toolbox.*`/`conversation.*` events forwarded
+    // during tool execution. This test is about the curated operative
+    // sequence's ordering, not the forwarded firehose (see
+    // `event-forwarding.test.ts` for that), so those are filtered out here.
+    const types = recorder.events
+      .map((event) => event.type)
+      .filter((type) => CURATED_RUN_LOOP_TYPES.has(type));
 
     expect(types[0]).toBe('run.started');
 
@@ -128,7 +157,11 @@ describe('events', () => {
     const recorder = createRunRecorder(activeRun);
     await activeRun.result;
 
-    const types = recorder.events.map((event) => event.type);
+    // See the comment on the previous test — forwarded events are filtered
+    // out here too, since this test asserts the curated sequence's order.
+    const types = recorder.events
+      .map((event) => event.type)
+      .filter((type) => CURATED_RUN_LOOP_TYPES.has(type));
 
     const expectedSequence: OperativeEventType[] = [
       'run.started',
@@ -180,7 +213,11 @@ describe('events', () => {
     const recorder = createRunRecorder(activeRun);
     await activeRun.result;
 
-    const types = recorder.events.map((event) => event.type);
+    // See the comment on the first test in this file — forwarded events are
+    // filtered out here too, since this test asserts the curated sequence.
+    const types = recorder.events
+      .map((event) => event.type)
+      .filter((type) => CURATED_RUN_LOOP_TYPES.has(type));
 
     expect(types).not.toContain('tools.executing');
     expect(types).not.toContain('tools.executed');
@@ -459,6 +496,38 @@ describe('events', () => {
 
       const applied = recorder.events.filter((event) => event.type === 'steering.applied');
       expect(applied).toHaveLength(1);
+    });
+
+    it('createRunRecorder now captures an event family the deleted 32-entry array omitted (AB-255)', async () => {
+      // `steering.applied` above was already on the old array (all five
+      // steering members were). The genuinely omitted families are the
+      // curated `tool.*` bubbles (`ToolStartedBubbleEvent` etc.) — never on
+      // the deleted list — proven here by asserting `tool.started` was
+      // captured during ordinary tool execution, with no edit to
+      // `createRunRecorder` beyond reading `COMBINED_OPERATIVE_EVENT_TYPES`.
+      const activeRun = createActiveRun({
+        generate: createMockGenerate([
+          { content: '', toolCalls: [{ name: 'get_weather', arguments: { location: 'Denver' } }] },
+          { content: 'Done.', toolCalls: [] },
+        ]),
+        toolbox: createToolbox([
+          createTool({
+            name: 'get_weather',
+            description: 'Get weather for a location',
+            input: z.object({ location: z.string() }),
+            execute: async ({ location }) => ({ temperature: 72, location }),
+          }),
+        ]),
+        conversation: new Conversation(),
+        stopWhen: noToolCalls(),
+      });
+
+      const recorder = createRunRecorder(activeRun);
+      await activeRun.result;
+
+      const types = recorder.events.map((event) => event.type);
+      expect(types).toContain('tool.started');
+      expect(types).toContain('tool.settled');
     });
 
     it('exercises every steering event type as a valid OperativeEventType', () => {

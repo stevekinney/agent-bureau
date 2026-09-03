@@ -1,5 +1,5 @@
 import type { ToolboxEvents, ToolExecutionResult } from 'armorer';
-import type { Conversation, ConversationEvents } from 'conversationalist';
+import type { Conversation, ConversationActionType } from 'conversationalist';
 import type { ToolCall } from 'interoperability';
 import type { EventMap, ForwardedEvent, ObservableLike, Observer, Subscription } from 'lifecycle';
 
@@ -1454,9 +1454,23 @@ export class SteeringFailedEvent extends Event {
 
 // ---------------------------------------------------------------------------
 // Event map: maps event type string to the Event subclass instance
+//
+// `OperativeEventClassMap` deliberately does NOT `extends EventMap`
+// (`Record<string, Event>`, an index-signature type). A TypeScript object
+// type that extends an index signature has its `keyof` collapse to `string`
+// wherever any of its members were introduced by that signature (verified
+// empirically against this TypeScript version: `interface X extends
+// Record<string, Event> { a: Event }` gives `keyof X` = `string`, not `'a'`)
+// — which would make `OPERATIVE_EVENT_TYPES`'s exhaustiveness check below
+// vacuous (a `string`-typed `Exclude` can never surface a missing member).
+// `OperativeEventMap` (below) re-adds `EventMap` for the callers that need
+// it (`TypedEventTarget<OperativeEventMap>`, session-handle's emitter,
+// `create-subagent-tool.ts`/`create-handoff-tool.ts`'s `emitter` param);
+// every event-type addition still happens in exactly one place —
+// `OperativeEventClassMap` — same discipline as before this split.
 // ---------------------------------------------------------------------------
 
-export interface OperativeEventMap extends EventMap {
+export interface OperativeEventClassMap {
   [RunStartedEvent.type]: RunStartedEvent;
   [StepStartedEvent.type]: StepStartedEvent;
   [StepGeneratedEvent.type]: StepGeneratedEvent;
@@ -1537,21 +1551,230 @@ export interface OperativeEventMap extends EventMap {
   [ChildWorkflowProgressEvent.type]: ChildWorkflowProgressEvent;
 }
 
-export type OperativeEventType = Extract<keyof OperativeEventMap, string>;
+/** The runtime-usable event map. See the block comment above the class map for why this exists separately. */
+export interface OperativeEventMap extends OperativeEventClassMap, EventMap {}
+
+export type OperativeEventType = Extract<keyof OperativeEventClassMap, string>;
+
+/**
+ * Every `OperativeEventType`, derived mechanically from each event class's
+ * own `static readonly type` — never retyped by hand — so an entry can
+ * never drift from `OperativeEventClassMap`'s actual property keys.
+ */
+export const OPERATIVE_EVENT_TYPES = [
+  RunStartedEvent.type,
+  StepStartedEvent.type,
+  StepGeneratedEvent.type,
+  ToolsExecutingEvent.type,
+  ToolsExecutedEvent.type,
+  StepCompletedEvent.type,
+  RunCompletedEvent.type,
+  RunErrorEvent.type,
+  RunAbortedEvent.type,
+  RunTripwireEvent.type,
+  StepAbortedEvent.type,
+  GenerateStartedEvent.type,
+  GenerateCompletedEvent.type,
+  GenerateErrorEvent.type,
+  GenerateRetryEvent.type,
+  ResponseValidatedEvent.type,
+  ToolResultValidatedEvent.type,
+  ContextCompactedEvent.type,
+  ResponseSchemaFailedEvent.type,
+  ElicitationRequestedEvent.type,
+  ElicitationResolvedEvent.type,
+  BackpressureAppliedEvent.type,
+  BackpressureReleasedEvent.type,
+  UsageAccumulatedEvent.type,
+  BudgetThresholdEvent.type,
+  BudgetExceededEvent.type,
+  SessionSavedEvent.type,
+  SessionLoadedEvent.type,
+  SessionCreatedEvent.type,
+  SessionDeletedEvent.type,
+  ContextBudgetWarningEvent.type,
+  ToolStartedBubbleEvent.type,
+  ToolProgressBubbleEvent.type,
+  ToolSettledBubbleEvent.type,
+  ToolErrorBubbleEvent.type,
+  ToolPolicyDeniedBubbleEvent.type,
+  SessionRecoverEvent.type,
+  SessionCancelEvent.type,
+  SessionForkEvent.type,
+  SessionSleepEvent.type,
+  SessionSignalEvent.type,
+  SessionUpdateEvent.type,
+  SessionQueryEvent.type,
+  AgentScheduledEvent.type,
+  WakeupScheduledEvent.type,
+  SchedulePausedEvent.type,
+  ScheduleResumedEvent.type,
+  ScheduleCancelledEvent.type,
+  ScheduleFailedEvent.type,
+  ScheduleCompletedEvent.type,
+  SessionMonitorTickEvent.type,
+  SessionMonitorDoneEvent.type,
+  ChildWorkflowStartedEvent.type,
+  ChildWorkflowCompletedEvent.type,
+  ChildWorkflowFailedEvent.type,
+  ChildWorkflowAbortedEvent.type,
+  HandoffOccurredEvent.type,
+  HumanWaitParkedEvent.type,
+  SteeringAcceptedEvent.type,
+  SteeringAppliedEvent.type,
+  SteeringRejectedEvent.type,
+  SteeringSupersededEvent.type,
+  SteeringFailedEvent.type,
+  ChildWorkflowReattachedEvent.type,
+  ChildWorkflowProgressEvent.type,
+] as const satisfies readonly OperativeEventType[];
+
+/**
+ * Compile-time-only exhaustiveness guard: fails `check-types` when a member
+ * is added to `OperativeEventClassMap` (i.e. `OperativeEventType` grows)
+ * without a matching entry in `OPERATIVE_EVENT_TYPES` above. `never` here
+ * means the array is exhaustive; anything else is the list of missing
+ * members, surfaced directly in the compiler error.
+ */
+type MissingOperativeEventTypes = Exclude<
+  OperativeEventType,
+  (typeof OPERATIVE_EVENT_TYPES)[number]
+>;
+const _assertOperativeEventTypesExhaustive: MissingOperativeEventTypes extends never
+  ? true
+  : [
+      'OPERATIVE_EVENT_TYPES is missing a member added to OperativeEventClassMap:',
+      MissingOperativeEventTypes,
+    ] = true;
+void _assertOperativeEventTypesExhaustive;
+
+type ToolboxEventKey = Extract<keyof ToolboxEvents, string>;
 
 type PrefixedToolboxEvents = {
-  [K in keyof ToolboxEvents as `toolbox.${K & string}`]: ForwardedEvent;
+  [K in ToolboxEventKey as `toolbox.${K}`]: ForwardedEvent;
 };
 
+/**
+ * Prefixed conversation events, keyed over `ConversationActionType` (a
+ * finite literal union conversationalist exports) rather than `keyof
+ * ConversationEvents`. `ConversationEventMap` carries its own `[key:
+ * string]: Event` index signature, which collapses `keyof` to `string` for
+ * the same structural reason documented above `OperativeEventClassMap` —
+ * mapping over that would produce an unbounded `` `conversation.${string}`
+ * `` key, making conversation-side exhaustiveness unprovable. Every action
+ * `ConversationActionType` lists is one `ConversationEventMap` already
+ * declares as an explicit property, so this stays a faithful (and, unlike
+ * `keyof ConversationEvents`, actually finite) key set.
+ */
 type PrefixedConversationEvents = {
-  [K in keyof ConversationEvents as `conversation.${K & string}`]: ForwardedEvent;
+  [K in ConversationActionType as `conversation.${K}`]: ForwardedEvent;
 };
 
 export interface ForwardedEvents extends PrefixedToolboxEvents, PrefixedConversationEvents {}
 
-export interface CombinedOperativeEventMap extends OperativeEventMap, ForwardedEvents {}
+/**
+ * Exported (unlike the private `OperativeEventClassMap` it mirrors) because
+ * `EventRecorder.attach`'s default `TEventMap` needs a genuinely narrow-keyed
+ * type to structurally match `ActiveRun.addEventListener`'s `K extends
+ * CombinedOperativeEventType` bound — `CombinedOperativeEventMap` itself
+ * cannot serve that role, since its own `keyof` is deliberately widened by
+ * `extends EventMap` for `TypedEventTarget` compatibility (see the block
+ * comment above `OperativeEventClassMap`).
+ */
+export interface CombinedOperativeEventClassMap extends OperativeEventClassMap, ForwardedEvents {}
 
-export type CombinedOperativeEventType = Extract<keyof CombinedOperativeEventMap, string>;
+export interface CombinedOperativeEventMap extends CombinedOperativeEventClassMap, EventMap {}
+
+export type CombinedOperativeEventType = Extract<keyof CombinedOperativeEventClassMap, string>;
+
+const TOOLBOX_EVENT_KEYS = [
+  'call',
+  'complete',
+  'error',
+  'not-found',
+  'query',
+  'search',
+  'status:update',
+  'execute-start',
+  'validate-success',
+  'validate-error',
+  'execute-success',
+  'execute-error',
+  'settled',
+  'policy-denied',
+  'tool.started',
+  'tool.finished',
+  'budget-exceeded',
+  'progress',
+  'stream-start',
+  'stream-chunk',
+  'stream-end',
+  'stream-error',
+  'output-chunk',
+  'log',
+  'cancelled',
+  'name-resolved',
+  'loop-warning',
+  'loop-blocked',
+] as const satisfies readonly ToolboxEventKey[];
+
+const CONVERSATION_ACTION_TYPES = [
+  'push',
+  'undo',
+  'redo',
+  'switch',
+  'messages.appended',
+  'messages.updated',
+  'messages.removed',
+  'tool-calls.appended',
+  'tool-results.appended',
+  'stream.started',
+  'stream.updated',
+  'stream.finalized',
+  'stream.cancelled',
+  'compaction.started',
+  'compaction.completed',
+  'compaction.failed',
+  'compaction.cancelled',
+  'compaction.stale-discarded',
+  'mutation.rejected',
+  'snapshot.restored',
+  'snapshot.migrated',
+  'branch.pruned',
+  'controller.closed',
+  'controller.disposed',
+  'plugin.activated',
+  'plugin.failed',
+  'session.forked',
+  'session.tagged',
+  'session.renamed',
+] as const satisfies readonly ConversationActionType[];
+
+/**
+ * Every `CombinedOperativeEventType`: `OPERATIVE_EVENT_TYPES` plus every
+ * `toolbox.*`/`conversation.*` forwarded key, each hand-listed exactly once
+ * (`TOOLBOX_EVENT_KEYS`/`CONVERSATION_ACTION_TYPES` above) because neither
+ * `armorer` nor `conversationalist` exports a runtime key array for its
+ * event map — see the coordinator note on `check-package-shape` tolerating
+ * this as a type-only-adjacent value import.
+ */
+export const COMBINED_OPERATIVE_EVENT_TYPES = [
+  ...OPERATIVE_EVENT_TYPES,
+  ...TOOLBOX_EVENT_KEYS.map((key) => `toolbox.${key}` as const),
+  ...CONVERSATION_ACTION_TYPES.map((key) => `conversation.${key}` as const),
+] as const satisfies readonly CombinedOperativeEventType[];
+
+type MissingCombinedOperativeEventTypes = Exclude<
+  CombinedOperativeEventType,
+  (typeof COMBINED_OPERATIVE_EVENT_TYPES)[number]
+>;
+const _assertCombinedOperativeEventTypesExhaustive: MissingCombinedOperativeEventTypes extends never
+  ? true
+  : [
+      'COMBINED_OPERATIVE_EVENT_TYPES is missing a member added to CombinedOperativeEventClassMap:',
+      MissingCombinedOperativeEventTypes,
+    ] = true;
+void _assertCombinedOperativeEventTypesExhaustive;
 
 /**
  * The full public event-target surface accepted by durable routing. Listing
