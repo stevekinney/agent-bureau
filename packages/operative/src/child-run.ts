@@ -287,7 +287,7 @@ export interface DispatchChildRunOptions {
  * Portable effort tiers, low to high — mirrors `providers/model-catalog.ts`'s
  * internal (unexported) `EFFORT_ORDER` array; kept local here rather than
  * imported so this module (a dispatch primitive, not a selection module)
- * doesn't reach into the catalog module for one four-element constant.
+ * doesn't reach into the catalog module for one five-element constant.
  */
 const EFFORT_ORDER: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
 

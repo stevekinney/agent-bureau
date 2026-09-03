@@ -153,6 +153,21 @@ describe('createSelectionGate: revalidate() no-op fast path', () => {
     const second = gate.revalidate();
     expect(second).toBe(first);
   });
+
+  it('applies even when the recorded plan never reached outcome: selected (Copilot review PRRT_kwDORvupsc6e7CDo)', () => {
+    // An empty catalog can select nothing, so the first revalidate() records
+    // a 'no-candidate' plan with selected: undefined. A second call with
+    // catalogRevision/policyRevision/availabilitySnapshotRevision all still
+    // unchanged must still hit the no-op fast path and return that SAME
+    // failed plan by reference — not silently re-run select() every time.
+    const { gate } = makeGate(catalogOf([]));
+    const first = gate.revalidate();
+    expect(first.outcome).toBe('no-candidate');
+    expect(first.selected).toBeUndefined();
+
+    const second = gate.revalidate();
+    expect(second).toBe(first);
+  });
 });
 
 describe('createSelectionGate: catalog revision changed', () => {

@@ -126,26 +126,42 @@ export function createSelectionGate(options: CreateSelectionGateOptions): Select
     const request = options.request();
     const selectOptions = options.options();
 
-    if (current === undefined || current.selected === undefined) {
+    if (current === undefined) {
       const plan = select(request, selectOptions);
       current = plan;
       return plan;
     }
 
+    // The no-op fast path applies to ANY recorded plan — including one that
+    // never reached `outcome: 'selected'` — because `catalogRevision`/
+    // `policyRevision`/`request.availabilitySnapshotRevision` are common
+    // fields present on every `SelectionPlan` regardless of outcome
+    // (Copilot review PRRT_kwDORvupsc6e7CDo). A prior non-'selected' plan
+    // recomputed under otherwise-identical revisions would only reproduce
+    // the same failure, so skipping straight to the same recorded plan by
+    // reference matches the documented "nothing changed" contract exactly.
     const unchanged =
       current.catalogRevision === request.catalogRevision &&
       current.policyRevision === request.policyRevision &&
       current.request.availabilitySnapshotRevision === request.availabilitySnapshotRevision;
     if (unchanged) return current;
 
-    const plan = select(request, {
-      ...selectOptions,
-      revalidate: {
-        priorSelected: current.selected,
-        priorCatalogRevision: current.catalogRevision,
-        priorPolicyRevision: current.policyRevision,
-      },
-    });
+    // `select`'s `revalidate` option requires a real `priorSelected`
+    // candidate to compare the new catalog/policy against — a prior plan
+    // that never selected one (e.g. `'no-candidate'`) has nothing to supply
+    // there, so it falls through to a plain fresh `select()` instead, same
+    // as the never-revalidated (`current === undefined`) case above.
+    const plan =
+      current.selected === undefined
+        ? select(request, selectOptions)
+        : select(request, {
+            ...selectOptions,
+            revalidate: {
+              priorSelected: current.selected,
+              priorCatalogRevision: current.catalogRevision,
+              priorPolicyRevision: current.policyRevision,
+            },
+          });
     current = plan;
     return plan;
   }
