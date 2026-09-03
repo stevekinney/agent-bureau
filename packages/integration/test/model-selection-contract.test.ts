@@ -73,7 +73,11 @@ import {
   select,
   withBackendDescriptors,
 } from '@lostgradient/operative/providers';
-import { createManualCheckpointStore, createMockGenerate } from '@lostgradient/operative/test';
+import {
+  createDurableMultiAgentHarness,
+  createManualCheckpointStore,
+  createMockGenerate,
+} from '@lostgradient/operative/test';
 import { createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import { createBureau, createModelCatalogService } from 'bureau';
@@ -239,7 +243,15 @@ async function dispatchChildAndCapturePlan(
   const result = await handle.result();
   expect(result.finishReason).toBe('stop-condition');
 
-  const forwardedGrant = capturedContext()?.delegatedAuthority;
+  // Prove the forwarding itself, not just the resulting plan — a plan that
+  // happens to match by coincidence (e.g. an unattenuated grant that never
+  // excludes anything) would silently pass even if dispatchChildRun stopped
+  // forwarding delegatedAuthority entirely.
+  const context = capturedContext();
+  expect(context).toBeDefined();
+  expect(context?.delegatedAuthority).toEqual(grant);
+
+  const forwardedGrant = context?.delegatedAuthority;
   return select(request, {
     catalog,
     ...(forwardedGrant === undefined ? {} : { delegated: forwardedGrant }),
@@ -269,13 +281,6 @@ function spiedManualCheckpointStore(): { store: CheckpointStore; checkpointCount
 }
 
 async function computeMode4Plan(): Promise<{ plan: SelectionPlan; checkpointCount: number }> {
-  // Lazily loaded via ToolSearch-free dynamic import so this file's static
-  // imports don't need a direct `@lostgradient/operative/test` re-export for
-  // `createDurableMultiAgentHarness` beyond what's already imported above —
-  // kept as a plain top-level import for readability instead; see the
-  // module import list.
-  const { createDurableMultiAgentHarness } = await import('@lostgradient/operative/test');
-
   const { store, checkpointCount } = spiedManualCheckpointStore();
   const runWorkflow = createRunWorkflow(store);
   const harness = await createDurableMultiAgentHarness({ runWorkflow });
