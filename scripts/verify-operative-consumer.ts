@@ -1266,6 +1266,21 @@ async function verifyProbesFailCompilation(
         `Probe ${relativePath} unexpectedly compiled — the surface it targets still exists:\n${result.output}`,
       );
     }
+    // A nonzero exit is necessary but not sufficient: TS5xxx is a
+    // CONFIGURATION diagnostic (TS5112 among them — see the comment on the
+    // command above), not a compile failure of the probe's own removed or
+    // nonexistent import. A probe whose only reported diagnostic is TS5xxx
+    // "passes" this check for the wrong reason — vacuously, exactly the
+    // failure mode this whole function exists to catch — so require at
+    // least one genuine TSxxxx diagnostic outside the TS5xxx configuration
+    // range.
+    if (!/\bTS(?!5\d{3}\b)\d{4}\b/.test(result.output)) {
+      throw new Error(
+        `Probe ${relativePath} failed to compile, but only with a TS5xxx configuration ` +
+          `diagnostic — not a genuine failure of the probe's own removed/nonexistent import:\n${result.output}`,
+      );
+    }
+    console.log(`  ${relativePath}: ${result.output.trim().split('\n')[0]}`);
   }
 }
 
