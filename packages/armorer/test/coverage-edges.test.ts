@@ -88,16 +88,11 @@ describe('coverage edges', () => {
 
     expect(await resolvePolicyDecision(undefined, {} as any)).toBeUndefined();
     expect(await resolvePolicyDecision(async () => undefined, {} as any)).toBeUndefined();
-    // `resolvePolicyDecision` accepts a bare boolean at runtime (see
-    // `typeof decision === 'boolean'` in `src/create-toolbox.ts`), but the
-    // `beforeExecute` hook's declared type only allows `ToolPolicyDecision |
-    // void`, so this proves the runtime tolerance with a cast.
-    expect(
-      await resolvePolicyDecision(
-        (async () => false) as unknown as Parameters<typeof resolvePolicyDecision>[0],
-        {} as any,
-      ),
-    ).toEqual({ allow: false });
+    // AB-308: `beforeExecute`'s declared type now includes the bare
+    // `boolean` return `resolvePolicyDecision` already tolerated at
+    // runtime (see `typeof decision === 'boolean'` in
+    // `src/create-toolbox.ts`), so this needs no cast.
+    expect(await resolvePolicyDecision(async () => false, {} as any)).toEqual({ allow: false });
 
     expect(
       isMutatingToolContext({

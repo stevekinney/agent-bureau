@@ -121,6 +121,7 @@ import type {
   Tool,
   ToolCallWithArguments,
   ToolConfiguration,
+  ToolConfigurationInput,
   ToolContext,
   ToolDigestOptions,
   ToolEventsMap,
@@ -433,7 +434,7 @@ type ResumeApprovalValidationResult =
     }
   | { outcome: 'interrupted'; result: ToolExecutionResult };
 
-export type ToolboxEntry = ToolConfiguration | Tool;
+export type ToolboxEntry = ToolConfigurationInput | Tool;
 export type ToolboxEntries = readonly ToolboxEntry[];
 
 const maximumTimerDelay = 2_147_483_647;
@@ -2610,7 +2611,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     >(options);
   }
 
-  function normalizeConfiguration(configuration: ToolConfiguration): ToolConfiguration {
+  function normalizeConfiguration(configuration: ToolConfigurationInput): ToolConfiguration {
     if (!configuration || typeof configuration !== 'object') {
       throw new TypeError('createToolbox entries must be ToolConfiguration objects');
     }
@@ -2686,14 +2687,14 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     return result;
   }
 
-  function normalizeRegistration(entry: ToolConfiguration | Tool): ToolConfiguration {
+  function normalizeRegistration(entry: ToolboxEntry): ToolConfigurationInput {
     if (isTool(entry)) {
       return entry.configuration;
     }
     return entry;
   }
 
-  function resolveMissingExecute(configuration: ToolConfiguration): ToolConfiguration {
+  function resolveMissingExecute<T extends ToolConfigurationInput>(configuration: T): T {
     if (!configuration || typeof configuration !== 'object') {
       return configuration;
     }
@@ -2704,7 +2705,12 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     if (!options.getTool) {
       return configuration;
     }
-    const execute = options.getTool(configuration);
+    // `getTool` resolves execute for a lazily-deserialized configuration,
+    // which always carries the full `id`/`identity`/`display` shape (see
+    // `SerializedToolDefinition`) rather than the friendly shorthand — the
+    // shorthand always supplies `execute` directly, so this branch is
+    // unreachable for it.
+    const execute = options.getTool(configuration as Omit<ToolConfiguration, 'execute'>);
     return { ...configuration, execute };
   }
 

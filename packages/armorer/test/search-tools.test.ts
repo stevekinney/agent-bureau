@@ -2,11 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
 import { createTool } from '../src';
-import {
-  createSearchTool,
-  type CreateSearchToolOptions,
-  type SearchToolsResult,
-} from '../src/tools';
+import { createSearchTool, type CreateSearchToolOptions } from '../src/tools';
 import { createMutableToolbox } from './helpers/mutable-toolbox';
 
 describe('createSearchTool', () => {
@@ -187,7 +183,9 @@ describe('createSearchTool', () => {
     toolbox.register(makeTool('alpha'), makeTool('beta'));
     const searchTool = createSearchTool(toolbox);
 
-    const results = (await searchTool({ query: 'alpha' })) as SearchToolsResult[];
+    // AB-308: `createSearchTool()` now returns the concrete tool type, so
+    // its call result is `SearchToolsResult[]` without a cast.
+    const results = await searchTool({ query: 'alpha' });
 
     expect(Array.isArray(results)).toBe(true);
     expect(results[0]?.name).toBe('alpha');

@@ -9,10 +9,12 @@ describe('loop detection', () => {
     });
     it('handles null and undefined', () => {
       expect(stableStringify(null)).toBe('null');
-      // `stableStringify`'s declared return type is `string`, but it
-      // delegates to `JSON.stringify`, which returns `undefined` at runtime
-      // for `undefined` input.
-      expect(stableStringify(undefined) as unknown).toBe(undefined);
+      // AB-308: `stableStringify(undefined)` used to return the runtime
+      // value `undefined` (via `JSON.stringify`) despite its declared
+      // `string` return type — a runtime defect, not a type gap. It now
+      // returns `'null'`, matching the text `JSON.stringify` produces for
+      // `undefined` nested inside an array, with no cast needed.
+      expect(stableStringify(undefined)).toBe('null');
     });
     it('handles primitives', () => {
       expect(stableStringify(42)).toBe('42');

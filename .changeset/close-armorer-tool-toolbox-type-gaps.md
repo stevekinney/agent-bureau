@@ -1,0 +1,14 @@
+---
+'armorer': minor
+---
+
+Closes the six armorer public `Tool`/`ToolConfiguration` type-vs-runtime gaps `packages/armorer/test` worked around with documented casts after AB-295 widened the `check-types` gate (AB-308).
+
+- `Tool` now declares `toJSON(): SerializedToolDefinition`, matching the property every `createTool()`-built tool already carries at runtime. `SerializedToolDefinition` is re-exported from the package root (previously only from the `armorer/core` subpath) so a downstream package's own inferred `Tool`-returning export can name it.
+- `createSearchTool()` now returns the concrete inferred tool type (`Tool<..., SearchToolsResult[], ...>`) instead of the erased `Tool` alias, so a caller gets `SearchToolsResult[]` back from a search tool call without a cast.
+- `ToolPolicyHooks['beforeExecute']` (and the toolbox-level registry policy hook) now declares `ToolPolicyDecision | boolean | void`, matching the bare-boolean shorthand `resolvePolicyDecision` already accepted at runtime in both `create-tool.ts` and `create-toolbox.ts`.
+- `preprocess()` and `postprocess()` now propagate the wrapped tool's metadata type parameter through `ComposedTool`'s new (defaulted) third type parameter, instead of hardcoding it to `undefined`. `ComposedTool`'s default is unchanged for every existing two-argument usage.
+- A new exported `ToolConfigurationInput` type (`ToolConfiguration | ToolConfigurationShorthand`, the latter making `id`/`identity`/`display` optional) describes what `createToolbox()`, `.extend()`, and toolbox registration actually accept — `registerConfiguration` already derived those three fields from the flat `name`/`description` `ToolDefinition` requires. `ToolboxEntry` now accepts this input type; `ToolConfiguration` itself is unchanged and stays required everywhere a tool is already registered (`storedConfigurations`, `Toolbox.toJSON()`, `tool.configuration`), so this is additive, not a narrowing.
+- `stableStringify()` (`src/core/loop-detection.ts`) is a runtime-defect fix, not a type widening: it used to return the runtime value `undefined` (via `JSON.stringify`) for `undefined` input despite its declared `string` return type. It now returns `'null'` for `undefined` — the same text `JSON.stringify` already produces for `undefined` nested inside an array — so every caller, including the tool-call-argument hash function on the loop-detection path, gets a real string.
+
+No narrowing: every change above widens an existing public type or fixes a runtime defect to match its declared type. Two production-code call sites (`preprocess`/`postprocess`'s internal `tool.metadata` read) needed a documented cast to work around TypeScript not proving a generic-parameter equality across a conditional type; every test-side cast the six gaps existed to justify is removed.

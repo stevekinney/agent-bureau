@@ -127,7 +127,7 @@ export interface SearchToolsInput {
 export function createSearchTool(
   toolbox: SearchableToolbox,
   options: CreateSearchToolOptions = {},
-): Tool {
+) {
   const {
     limit: defaultLimit = 10,
     explain = false,

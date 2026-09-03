@@ -215,7 +215,7 @@ export function retry<TTool extends AnyTool>(
     ToolMetadata | undefined,
     ToolContext<DefaultToolEvents>,
     InferToolOutput<TTool>
-  >(toolOptions) as ComposedTool<InferToolInput<TTool>, InferToolOutput<TTool>>;
+  >(toolOptions);
 }
 
 function resolveRetryDelay(

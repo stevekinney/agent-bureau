@@ -1,28 +1,28 @@
 import { describe, expect, it, mock } from 'bun:test';
 import { z } from 'zod';
 
-import { createToolbox, type ToolConfiguration } from '../src';
+import { createToolbox, type ToolConfiguration, type ToolConfigurationInput } from '../src';
 import { defineTool } from '../src/core';
 import { createRegistry } from '../src/core/registry/registry';
 import { createTool } from '../src/create-tool';
 import { createDeprecationWarningMiddleware } from '../src/middleware/index';
 
-// `createToolbox()` normalizes a friendly config shorthand like this one
-// (deriving `identity`/`id`/`display` at registration time — see
-// `registerConfiguration` in `src/create-toolbox.ts`), so the strict
-// `ToolConfiguration` type doesn't describe what a caller actually needs to
-// supply here. This mirrors that runtime leniency with one documented cast
-// instead of fighting the type at each call site.
-const makeConfiguration = (overrides?: Partial<ToolConfiguration>): ToolConfiguration =>
-  ({
-    name: 'test-tool',
-    description: 'a test tool',
-    input: z.object({}),
-    async execute() {
-      return 'result';
-    },
-    ...overrides,
-  }) as unknown as ToolConfiguration;
+// AB-308: `createToolbox()` accepts the friendly configuration shorthand
+// (`ToolConfigurationInput`) directly — `identity`/`id`/`display` are
+// derived at registration time (`registerConfiguration` in
+// `src/create-toolbox.ts`) — so this needs no cast to the strict
+// `ToolConfiguration` type.
+const makeConfiguration = (
+  overrides?: Partial<ToolConfigurationInput>,
+): ToolConfigurationInput => ({
+  name: 'test-tool',
+  description: 'a test tool',
+  input: z.object({}),
+  async execute() {
+    return 'result';
+  },
+  ...overrides,
+});
 
 describe('version resolution', () => {
   it('resolves to the latest semver version by default', () => {

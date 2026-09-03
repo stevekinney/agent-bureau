@@ -325,9 +325,17 @@ export class LoopDetector {
  * Recursively sorts object keys so that key order does not affect the result.
  * Similar to JSON.stringify but omits undefined values (same behavior as JSON.stringify).
  * Does NOT preserve function values, BigInt, circular refs, or symbols.
+ *
+ * Always returns a string: unlike `JSON.stringify`, which returns the
+ * runtime value `undefined` (not a string) for `undefined` input, this
+ * stringifies a top-level `undefined` to `'null'` — the same text
+ * `JSON.stringify` produces for `undefined` nested inside an array — so
+ * every caller (loop-detection's hash function included) can rely on the
+ * declared `string` return type.
  */
 export function stableStringify(value: unknown): string {
-  if (value === null || value === undefined) return JSON.stringify(value);
+  if (value === undefined) return 'null';
+  if (value === null) return JSON.stringify(value);
   if (typeof value !== 'object') return JSON.stringify(value);
   if (Array.isArray(value)) return '[' + value.map(stableStringify).join(',') + ']';
   const sorted = Object.keys(value).sort();
