@@ -424,14 +424,14 @@ function rankingScore(
   latencyPreference: UserModelConfiguration['latencyPreference'],
 ): number {
   return (
-    preferenceWeight(costPreference) * rankingInputs['cost']! +
-    preferenceWeight(latencyPreference) * rankingInputs['latency']! +
-    rankingInputs['preferenceMatch']!
+    preferenceWeight(costPreference) * (rankingInputs['cost'] ?? 0) +
+    preferenceWeight(latencyPreference) * (rankingInputs['latency'] ?? 0) +
+    (rankingInputs['preferenceMatch'] ?? 0)
   );
 }
 
 function candidateKey(provider: ProviderName, model: string): string {
-  return `${provider} ${model}`;
+  return `${provider}::${model}`;
 }
 
 /**
@@ -536,7 +536,17 @@ function buildFallbackPlan(
   fallbackOrder: readonly string[] | undefined,
 ): SelectionPlan['fallbackPlan'] {
   if (fallbackOrder === undefined || fallbackOrder.length === 0) return Object.freeze([]);
-  const byModel = new Map(eligible.map((candidate) => [candidate.model, candidate] as const));
+  // When multiple eligible descriptors share the same `model` across
+  // different providers, pick a deterministic representative — the
+  // lexicographically smallest provider — so the chosen candidate never
+  // depends on the incoming descriptor order.
+  const byModel = new Map<string, SelectionCandidate>();
+  for (const candidate of eligible) {
+    const existing = byModel.get(candidate.model);
+    if (existing === undefined || candidate.provider < existing.provider) {
+      byModel.set(candidate.model, candidate);
+    }
+  }
   const plan: {
     readonly provider: ProviderName;
     readonly model: string;
@@ -694,7 +704,8 @@ export function select(request: SelectionRequest, options: SelectOptions): Selec
   const enrichedByKey = new Map(
     finalEligible.map((candidate) => {
       const inputs = rankingInputsByKey.get(candidateKey(candidate.provider, candidate.model));
-      const enriched = inputs === undefined ? candidate : { ...candidate, rankingInputs: inputs };
+      const enriched =
+        inputs === undefined ? candidate : Object.freeze({ ...candidate, rankingInputs: inputs });
       return [candidateKey(candidate.provider, candidate.model), enriched] as const;
     }),
   );

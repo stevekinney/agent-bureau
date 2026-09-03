@@ -486,6 +486,32 @@ describe('select: fallbackPlan', () => {
       { provider: 'openai', model: openai.model },
     ]);
   });
+
+  it('picks the lexicographically smallest provider as the deterministic representative when multiple eligible descriptors share a model name, regardless of catalog order', () => {
+    const sharedAnthropic: BackendDescriptor = {
+      ...anthropic,
+      provider: 'anthropic',
+      model: 'shared-model',
+      pricing: undefined,
+    };
+    const sharedOpenAI: BackendDescriptor = {
+      ...openai,
+      provider: 'openai',
+      model: 'shared-model',
+      pricing: undefined,
+    };
+    const options = baseOptions(catalogOf([sharedOpenAI, sharedAnthropic]), {
+      user: { fallbackOrder: ['shared-model'] },
+    });
+    const plan = select(baseRequest(), options);
+    expect(plan.fallbackPlan).toEqual([{ provider: 'anthropic', model: 'shared-model' }]);
+
+    const reversedOptions = baseOptions(catalogOf([sharedAnthropic, sharedOpenAI]), {
+      user: { fallbackOrder: ['shared-model'] },
+    });
+    const reversedPlan = select(baseRequest(), reversedOptions);
+    expect(reversedPlan.fallbackPlan).toEqual([{ provider: 'anthropic', model: 'shared-model' }]);
+  });
 });
 
 describe('select: stale-catalog', () => {
