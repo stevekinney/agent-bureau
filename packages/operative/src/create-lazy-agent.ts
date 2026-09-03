@@ -32,6 +32,8 @@ import {
   toAgentRunError,
 } from './errors';
 import { RunAbortedEvent, RunCompletedEvent, RunErrorEvent } from './events';
+import type { AgentGenerationProfile } from './generation-profile';
+import { deepFreeze } from './providers/backend-descriptor-attachment';
 import type {
   AgentInput,
   AgentRunContext,
@@ -59,6 +61,15 @@ export type LazyAgentLoader<O, H extends boolean> = () =>
 export interface CreateLazyAgentOptions {
   /** Human-readable label included in lazy loading and contract error messages. */
   label?: string;
+
+  /**
+   * The generation-capability snapshot exposed on the returned agent (AB-64,
+   * AB-245), alongside `name: options.label ?? '(lazy)'`. Never derived
+   * from the underlying agent — a profile read must never trigger a module
+   * load. Omitted means the lazy agent reports `mode: 'opaque'`
+   * (`readGenerationProfile`'s default fallback).
+   */
+  generationProfile?: AgentGenerationProfile;
 }
 
 // A fresh object per call — never a shared module-level singleton. `RunResult.usage`
@@ -741,6 +752,55 @@ type LazyAgentState<O, H extends boolean> =
   | { kind: 'loaded'; agent: RunnableAgent<O, H> };
 
 /**
+ * Deep-freezes a caller-supplied `AgentGenerationProfile` before it is
+ * exposed on the returned agent, and forces `selector: 'unavailable'` and
+ * `projection: 'privileged'` regardless of what the caller's profile claims.
+ * `generationProfile` is documented as an immutable snapshot; unlike
+ * `createAgent` (which builds the object itself from scratch),
+ * `createLazyAgent` receives it ready-made from the caller, so freezing the
+ * nested collections here — in place, their references shared with (never
+ * copied from) the caller's own objects — is what actually closes the
+ * mutation vector for a caller who built the profile by hand rather than
+ * through `createAgent`. Each attached descriptor's own object graph is
+ * deep-frozen too, via `backend-descriptor-attachment.ts`'s `deepFreeze`
+ * (shared rather than duplicated) — freezing only the containing
+ * `descriptors` array would leave a hand-built descriptor's own fields
+ * (`model`, `aliases`, …) mutable.
+ *
+ * The top-level object IS a fresh shallow copy (never the caller's own
+ * object): AB-64's verification walk fixes `selector: 'unavailable'`
+ * permanently for a standalone or lazy agent, which has no Bureau, no
+ * policy, and no catalog to select through, and fixes `projection:
+ * 'privileged'` for any profile read directly off an agent (the caller
+ * already holds the `GenerateFunction` and therefore its descriptors) — so
+ * a caller-supplied `'available'` selector or `'general'` projection must
+ * never survive unchanged. Reusing the caller's object in place would make
+ * forcing these two fields impossible without also being able to mutate a
+ * field the `Object.freeze` below has already locked.
+ */
+function freezeGenerationProfile(profile: AgentGenerationProfile): AgentGenerationProfile {
+  if (profile.preferences) {
+    if (profile.preferences.requiredCapabilities) {
+      Object.freeze(profile.preferences.requiredCapabilities);
+    }
+    if (profile.preferences.preferredProviders) {
+      Object.freeze(profile.preferences.preferredProviders);
+    }
+    if (profile.preferences.preferredModels) {
+      Object.freeze(profile.preferences.preferredModels);
+    }
+    Object.freeze(profile.preferences);
+  }
+  if (profile.allowedCandidates) {
+    for (const candidate of profile.allowedCandidates) Object.freeze(candidate);
+    Object.freeze(profile.allowedCandidates);
+  }
+  for (const descriptor of profile.descriptors) deepFreeze(descriptor);
+  Object.freeze(profile.descriptors);
+  return Object.freeze({ ...profile, projection: 'privileged', selector: 'unavailable' });
+}
+
+/**
  * Lazily loads and memoizes a `RunnableAgent`, sharing its first load across
  * concurrent calls and returning `RunnableAgent<O, H>` itself — the same
  * shape as an eagerly-constructed agent, so it slots into an
@@ -849,6 +909,9 @@ export function createLazyAgent<O = never, H extends boolean = false>(
 
   const agent = {
     name: options.label ?? '(lazy)',
+    ...(options.generationProfile
+      ? { generationProfile: freezeGenerationProfile(options.generationProfile) }
+      : {}),
     run(input: AgentInput, context?: AgentRunContext): AgentRun<O, H> {
       return createDeferredAgentRun(resolve, input, context, label);
     },

@@ -12,6 +12,7 @@ import type { ConversationHistory } from 'conversationalist';
 
 import type { AgentRun, RunEvent } from './agent-run';
 import type { ChildRunRegistry } from './child-run';
+import type { AgentGenerationProfile } from './generation-profile';
 import type { RunOptions } from './types';
 
 export type { RunEvent };
@@ -63,6 +64,17 @@ export interface AgentRunContext {
 export interface RunnableAgent<O = never, H extends boolean = false> {
   readonly name: string;
   run(input: AgentInput, context?: AgentRunContext): AgentRun<O, H>;
+  /**
+   * The immutable generation-capability snapshot behind this agent (AB-64,
+   * AB-245). Optional — a third-party `RunnableAgent` implementation that
+   * predates this field still type-checks unchanged. Read it with
+   * `readGenerationProfile(agent)` (`generation-profile.ts`), which falls
+   * back to a frozen `mode: 'opaque'` profile when this is absent — never
+   * read this field directly and treat `undefined` as "no capability
+   * information", since that duplicates the fallback `readGenerationProfile`
+   * already centralizes.
+   */
+  readonly generationProfile?: AgentGenerationProfile;
 }
 
 // ---------------------------------------------------------------------------

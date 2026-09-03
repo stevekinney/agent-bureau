@@ -11,6 +11,10 @@ import {
   AsyncDefinitionLoadError,
 } from './errors';
 import { RunCompletedEvent } from './events';
+import type { AgentGenerationProfile } from './generation-profile';
+import { readGenerationProfile } from './generation-profile';
+import type { BackendDescriptor } from './providers/model-catalog';
+import type { ProviderName } from './providers/types';
 import type { RunnableAgent } from './runnable-agent';
 import { OPERATIVE_RESOLVE_RUN_OPTIONS } from './runnable-agent';
 import type { CleanupAcknowledgement, RunOptions, RunResult } from './types';
@@ -1329,5 +1333,226 @@ describe('createLazyAgent', () => {
     await resolving;
 
     expect(observedAgentName).toBe('original');
+  });
+});
+
+describe('createLazyAgent — generationProfile (AB-64 AC2, AB-245)', () => {
+  it('exposes no generationProfile when options.generationProfile is omitted', () => {
+    const lazy = createLazyAgent(() => {
+      throw new Error('the loader must not run for a capability read');
+    });
+
+    expect(readGenerationProfile(lazy).mode).toBe('opaque');
+  });
+
+  it('exposes the supplied generationProfile without invoking the loader', () => {
+    const profile: AgentGenerationProfile = Object.freeze({
+      mode: 'fixed',
+      revision: 1,
+      projection: 'privileged',
+      descriptors: [],
+      freshness: '2026-09-02T12:00:00.000Z',
+      selector: 'unavailable',
+    });
+    const lazy = createLazyAgent(
+      () => {
+        throw new Error('the loader must not run for a capability read');
+      },
+      { generationProfile: profile },
+    );
+
+    expect(readGenerationProfile(lazy)).toEqual(profile);
+    // Reads the identical object by reference across two consecutive calls
+    // — the profile is computed and frozen once, not rebuilt per read.
+    expect(readGenerationProfile(lazy)).toBe(readGenerationProfile(lazy));
+  });
+
+  it('reports its name alongside the generationProfile without either forcing a load', () => {
+    const profile: AgentGenerationProfile = Object.freeze({
+      mode: 'opaque',
+      revision: 1,
+      projection: 'privileged',
+      descriptors: [],
+      freshness: '2026-09-02T12:00:00.000Z',
+      selector: 'unavailable',
+    });
+    let loaderCalls = 0;
+    const lazy = createLazyAgent(
+      () => {
+        loaderCalls += 1;
+        throw new Error('unreachable');
+      },
+      { label: 'catalog-agent', generationProfile: profile },
+    );
+
+    expect(lazy.name).toBe('catalog-agent');
+    expect(readGenerationProfile(lazy)).toEqual(profile);
+    expect(loaderCalls).toBe(0);
+  });
+
+  it('freezes a caller-supplied (not pre-frozen) generationProfile on receipt, closing the mutation vector (review)', () => {
+    const preferences: {
+      requiredCapabilities: (keyof BackendDescriptor)[];
+      preferredProviders: ProviderName[];
+      preferredModels: string[];
+    } = {
+      requiredCapabilities: ['streaming'],
+      preferredProviders: ['anthropic'],
+      preferredModels: ['claude-opus-4-6'],
+    };
+    const allowedCandidates: { provider: ProviderName; model: string }[] = [
+      { provider: 'anthropic', model: 'claude-opus-4-6' },
+    ];
+    // Deliberately NOT Object.freeze()'d — a caller who built this by hand,
+    // not through createAgent, might hand createLazyAgent a fully mutable
+    // object.
+    const mutableProfile: AgentGenerationProfile = {
+      mode: 'selectable',
+      revision: 1,
+      projection: 'privileged',
+      descriptors: [],
+      preferences,
+      allowedCandidates,
+      freshness: '2026-09-02T12:00:00.000Z',
+      selector: 'unavailable',
+    };
+
+    const lazy = createLazyAgent(
+      () => {
+        throw new Error('the loader must not run for a capability read');
+      },
+      { generationProfile: mutableProfile },
+    );
+
+    const exposed = readGenerationProfile(lazy);
+    expect(Object.isFrozen(exposed)).toBe(true);
+    expect(Object.isFrozen(exposed.preferences)).toBe(true);
+    expect(Object.isFrozen(exposed.preferences?.requiredCapabilities)).toBe(true);
+    expect(Object.isFrozen(exposed.preferences?.preferredProviders)).toBe(true);
+    expect(Object.isFrozen(exposed.preferences?.preferredModels)).toBe(true);
+    expect(Object.isFrozen(exposed.allowedCandidates)).toBe(true);
+
+    // Mutating the ORIGINAL objects the caller still holds a reference to
+    // must not silently change what a later read reports — freezing in
+    // place is exactly what prevents that.
+    expect(() => preferences.requiredCapabilities.push('tools')).toThrow();
+    expect(() => preferences.preferredProviders.push('openai')).toThrow();
+    expect(() => preferences.preferredModels.push('claude-sonnet-5')).toThrow();
+    expect(() => allowedCandidates.push({ provider: 'openai', model: 'gpt-4o' })).toThrow();
+    expect(exposed.preferences?.requiredCapabilities).toEqual(['streaming']);
+    expect(exposed.preferences?.preferredProviders).toEqual(['anthropic']);
+    expect(exposed.preferences?.preferredModels).toEqual(['claude-opus-4-6']);
+    expect(exposed.allowedCandidates).toEqual([
+      { provider: 'anthropic', model: 'claude-opus-4-6' },
+    ]);
+  });
+
+  it('forces selector: unavailable even when the caller-supplied profile claims available (review)', () => {
+    // AB-64's verification walk: a createLazyAgent agent has no Bureau, no
+    // policy, and no catalog, so it can never select — this must not
+    // survive a caller's mistaken (or malicious) claim otherwise.
+    const claimedAvailable: AgentGenerationProfile = {
+      mode: 'selectable',
+      revision: 1,
+      projection: 'privileged',
+      descriptors: [],
+      freshness: '2026-09-02T12:00:00.000Z',
+      selector: 'available',
+    };
+
+    const lazy = createLazyAgent(
+      () => {
+        throw new Error('the loader must not run for a capability read');
+      },
+      { generationProfile: claimedAvailable },
+    );
+
+    expect(readGenerationProfile(lazy).selector).toBe('unavailable');
+  });
+
+  it('forces projection: privileged even when the caller-supplied profile claims general (review)', () => {
+    // AB-64's contract: a profile read directly off an agent is always
+    // 'privileged' — the caller already holds the GenerateFunction and
+    // therefore its descriptors. mod-02e's Bureau catalog read is the only
+    // surface that ever stamps 'general'.
+    const claimedGeneral: AgentGenerationProfile = {
+      mode: 'opaque',
+      revision: 1,
+      projection: 'general',
+      descriptors: [],
+      freshness: '2026-09-02T12:00:00.000Z',
+      selector: 'unavailable',
+    };
+
+    const lazy = createLazyAgent(
+      () => {
+        throw new Error('the loader must not run for a capability read');
+      },
+      { generationProfile: claimedGeneral },
+    );
+
+    expect(readGenerationProfile(lazy).projection).toBe('privileged');
+  });
+
+  it('deep-freezes a hand-built descriptor carried in the supplied profile, not just the containing array (review)', () => {
+    const mutableAliases = [{ alias: 'custom-alias', resolvesTo: 'custom-model' }];
+    const customDescriptor: BackendDescriptor = {
+      descriptorVersion: 1,
+      provider: 'anthropic',
+      endpoint: 'messages',
+      model: 'custom-model',
+      aliases: mutableAliases,
+      lifecycle: 'stable',
+      modalities: {
+        text: { input: true, output: true, sourceForms: ['inline'] },
+        image: { input: false, output: false, sourceForms: [] },
+        document: { input: false, output: false, sourceForms: [] },
+        audio: { input: false, output: false, sourceForms: [] },
+        video: { input: false, output: false, sourceForms: [] },
+        file: { input: false, output: false, sourceForms: [] },
+      },
+      mimeFamilies: [],
+      mediaLimits: [],
+      contextWindowTokens: 1000,
+      maxOutputTokens: 100,
+      streaming: true,
+      tools: true,
+      parallelTools: true,
+      structuredOutput: true,
+      parameterCompatibility: [],
+      caching: false,
+      batchInference: false,
+      explicitThinkingRequest: false,
+      serverSideTokenCounting: false,
+      effort: { portable: [], nativeMapping: 'unsupported', degradesTo: {} },
+      availability: 'available',
+      health: 'unknown',
+      source: 'static',
+      freshness: '2026-01-01T00:00:00.000Z',
+    };
+    const profile: AgentGenerationProfile = {
+      mode: 'fixed',
+      revision: 1,
+      projection: 'privileged',
+      descriptors: [customDescriptor],
+      freshness: '2026-09-02T12:00:00.000Z',
+      selector: 'unavailable',
+    };
+
+    const lazy = createLazyAgent(
+      () => {
+        throw new Error('the loader must not run for a capability read');
+      },
+      { generationProfile: profile },
+    );
+
+    const [attached] = readGenerationProfile(lazy).descriptors;
+    if (!attached) throw new Error('expected exactly one attached descriptor');
+    expect(Object.isFrozen(attached)).toBe(true);
+    expect(Object.isFrozen(attached.aliases)).toBe(true);
+    expect(() => mutableAliases.push({ alias: 'injected', resolvesTo: 'custom-model' })).toThrow();
+    expect(readGenerationProfile(lazy).descriptors[0]?.aliases).toEqual([
+      { alias: 'custom-alias', resolvesTo: 'custom-model' },
+    ]);
   });
 });

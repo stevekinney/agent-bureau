@@ -1580,6 +1580,43 @@ export type CatalogProjection = 'general' | 'privileged'; // the vault brief's o
 
 The five-layer policy precedence, the deterministic selector, `SelectionPlan`, and the `'general'`-redacting catalog projection remain AB-66's scope (AB-247/AB-248 in the Model Capability project); this section covers only the descriptor and catalog AB-243 ships.
 
+### The Agent generation profile
+
+Implemented by AB-245 (`packages/operative/src/generation-profile.ts`, `packages/operative/src/providers/backend-descriptor-attachment.ts`). Every `RunnableAgent` optionally carries a `generationProfile: AgentGenerationProfile` — an immutable, cached snapshot naming which `BackendDescriptor`(s) sit behind its `GenerateFunction` and in which of four modes:
+
+```ts
+export type GenerationMode = 'fixed' | 'routed' | 'selectable' | 'opaque';
+
+export interface AgentPreferences {
+  readonly requiredCapabilities?: readonly (keyof BackendDescriptor)[];
+  readonly preferredProviders?: readonly ProviderName[];
+  readonly preferredModels?: readonly string[];
+  readonly minimumContextWindowTokens?: number;
+}
+
+export interface AgentGenerationProfile {
+  readonly mode: GenerationMode;
+  readonly revision: number;
+  readonly projection: CatalogProjection;
+  readonly descriptors: readonly BackendDescriptor[];
+  readonly preferences?: AgentPreferences;
+  readonly allowedCandidates?: readonly {
+    readonly provider: ProviderName;
+    readonly model: string;
+  }[];
+  readonly freshness: string;
+  readonly selector: 'available' | 'unavailable';
+}
+
+declare function readGenerationProfile(agent: RunnableAgent): AgentGenerationProfile;
+```
+
+`AgentPreferences` is defined here — not in AB-66's `policy.ts` — because it is AB-64's Agent-requirements-and-preferences precedence layer; `policy.ts` imports it from here rather than redefining it. `projection` reads `'privileged'` for every profile built this way, because the caller already holds the `GenerateFunction` and therefore its descriptors directly; AB-247's Bureau catalog read is the only surface that stamps `'general'`.
+
+**How the mode is derived.** `withBackendDescriptors(generate, descriptors)`/`readBackendDescriptors(generate)` (`backend-descriptor-attachment.ts`) attach and read a `GenerateFunction`/`StreamingGenerateFunction`'s descriptors through a `Symbol.for('@lostgradient/operative/backend-descriptors')` registry, mirroring `runnable-agent.ts`'s `OPERATIVE_RESOLVE_RUN_OPTIONS` pattern. `createAnthropicProvider`/`createAnthropicProviderStream`, `createOpenAIProvider`/`createOpenAIProviderStream`, and `createGeminiProvider` each attach the single seed descriptor matching their resolved, post-alias model at construction time — nothing for a model absent from the seed. `createGeminiProviderStream` is the one exception: the seed catalog's Gemini row describes the `generateContent` endpoint, not the distinct `generateContentStream` operation this factory calls, so it deliberately attaches nothing until the seed catalog gains a stream-specific row. `createRoutingGenerate` attaches the union of every configured route's descriptors, deduplicated by `(provider, endpoint, model)` and ordered by that triple lexicographically, so the result is deterministic regardless of route declaration order. `createAgent` reads `options.generate`'s attached descriptors and reports `'fixed'` for exactly one, `'routed'` for more than one, `'opaque'` for none — a custom `GenerateFunction` this package cannot introspect never gets an invented descriptor. Supplying the new `CreateAgentOptionsBase.allowedCandidates` field promotes the mode to `'selectable'` regardless of descriptor count; `generationPreferences` populates `preferences` verbatim. `selector` always reads `'unavailable'` on a `createAgent`/`createLazyAgent` agent — it has no Bureau, no policy configuration, and no catalog, so it can never select (AB-64's verification walk fixes this as `{ outcome: 'unsupported-capability', reason: 'selector-unavailable' }`); `'available'` is reported only through Bureau's future catalog read (AB-66).
+
+`createLazyGenerate` gains `CreateLazyGenerateOptions.descriptors?: readonly BackendDescriptor[]`, attached to the returned wrapper at construction time — reading them never invokes the loader. `createLazyAgent` gains `CreateLazyAgentOptions.generationProfile?: AgentGenerationProfile`, exposed on the returned agent alongside its existing `name`; omitted, the lazy agent reports `mode: 'opaque'` through `readGenerationProfile`'s fallback, again without ever loading the underlying agent. A capability read is a synchronous, cached, side-effect-free property access in every case: repeated reads before a represented change return the identical object by reference, and the returned profile is frozen.
+
 ## Compile-ready examples
 
 ### Direct definitions

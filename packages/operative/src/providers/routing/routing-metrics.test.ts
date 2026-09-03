@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'bun:test';
 
+import {
+  readBackendDescriptors,
+  withBackendDescriptors,
+} from '../backend-descriptor-attachment.ts';
+import { createModelCatalog } from '../model-catalog.ts';
 import { withRoutingMetrics } from './routing-metrics.ts';
 import { makeContext } from './strategies/test-helpers.ts';
 import type { ModelRoute } from './types.ts';
@@ -188,5 +193,40 @@ describe('withRoutingMetrics', () => {
     // Latency should still be recorded
     const latencies = metrics.routeLatencies.get('failing');
     expect(latencies).toHaveLength(1);
+  });
+});
+
+describe('withRoutingMetrics — backend descriptor propagation (AB-64, AB-245)', () => {
+  it('propagates the union of the underlying routes’ attached descriptors onto the metrics-tracking wrapper', () => {
+    const descriptor = createModelCatalog().descriptors.find((d) => d.provider === 'anthropic');
+    if (!descriptor) throw new Error('expected at least one anthropic seed descriptor');
+
+    const { generate } = withRoutingMetrics({
+      routes: [
+        {
+          name: 'fast',
+          generate: withBackendDescriptors(
+            async () => ({ content: 'fast-response', toolCalls: [] }),
+            [descriptor],
+          ),
+        },
+      ],
+      strategy: () => ({ route: 'fast', reason: 'test' }),
+      fallback: 'fast',
+    });
+
+    expect(readBackendDescriptors(generate)).toEqual([descriptor]);
+  });
+
+  it('reports no descriptors when no underlying route carries any', () => {
+    const { generate } = withRoutingMetrics({
+      routes: [
+        { name: 'fast', generate: async () => ({ content: 'fast-response', toolCalls: [] }) },
+      ],
+      strategy: () => ({ route: 'fast', reason: 'test' }),
+      fallback: 'fast',
+    });
+
+    expect(readBackendDescriptors(generate)).toEqual([]);
   });
 });

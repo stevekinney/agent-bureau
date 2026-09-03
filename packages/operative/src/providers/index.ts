@@ -17,6 +17,7 @@ export {
   createAnthropicProviderStream,
   createAnthropicTokenCounter,
 } from './anthropic.ts';
+export { readBackendDescriptors, withBackendDescriptors } from './backend-descriptor-attachment.ts';
 export type {
   AnthropicBatchClientOptions,
   AnthropicBatchOperations,

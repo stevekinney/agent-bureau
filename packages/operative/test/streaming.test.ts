@@ -6,6 +6,11 @@ import { z } from 'zod';
 
 import { noToolCalls } from '../src/conditions/predicates';
 import { createActiveRun } from '../src/create-run';
+import {
+  readBackendDescriptors,
+  withBackendDescriptors,
+} from '../src/providers/backend-descriptor-attachment';
+import { createModelCatalog } from '../src/providers/model-catalog';
 import { withStreaming } from '../src/streaming';
 import type { GenerateResponse, StreamingGenerateFunction } from '../src/types';
 const run = (options: Parameters<typeof createActiveRun>[0]) => createActiveRun(options).result;
@@ -105,5 +110,32 @@ describe('withStreaming', () => {
     expect(result.finishReason).toBe('stop-condition');
     expect(result.steps).toHaveLength(2);
     expect(result.content).toBe('The weather is nice.');
+  });
+
+  it('propagates the wrapped function’s attached BackendDescriptor(s) (AB-64, AB-245)', () => {
+    const descriptor = createModelCatalog().descriptors.find((d) => d.provider === 'anthropic');
+    if (!descriptor) throw new Error('expected at least one anthropic seed descriptor');
+    const streamingGenerate: StreamingGenerateFunction = withBackendDescriptors(
+      async ({ streaming }) => {
+        streaming.update('hi');
+        return textResponse('hi');
+      },
+      [descriptor],
+    );
+
+    const generate = withStreaming(streamingGenerate);
+
+    expect(readBackendDescriptors(generate)).toEqual([descriptor]);
+  });
+
+  it('reports no descriptors when the wrapped function carries none', () => {
+    const streamingGenerate: StreamingGenerateFunction = async ({ streaming }) => {
+      streaming.update('hi');
+      return textResponse('hi');
+    };
+
+    const generate = withStreaming(streamingGenerate);
+
+    expect(readBackendDescriptors(generate)).toEqual([]);
   });
 });

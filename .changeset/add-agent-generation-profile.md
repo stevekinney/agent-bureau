@@ -1,0 +1,13 @@
+---
+'@lostgradient/operative': minor
+---
+
+Adds the Agent generation profile — an immutable per-Agent capability snapshot (AB-64, implemented by AB-245).
+
+`packages/operative/src/providers/backend-descriptor-attachment.ts` is new and exports `withBackendDescriptors(generate, descriptors)`/`readBackendDescriptors(generate)`, a construction-time attachment registry (mirroring `runnable-agent.ts`'s `OPERATIVE_RESOLVE_RUN_OPTIONS` pattern with a `Symbol.for('@lostgradient/operative/backend-descriptors')` key) that lets a `GenerateFunction`/`StreamingGenerateFunction` carry the `BackendDescriptor`(s) behind it. `createAnthropicProvider`, `createAnthropicProviderStream`, `createOpenAIProvider`, `createOpenAIProviderStream`, `createGeminiProvider`, and `createGeminiProviderStream` now attach the single seed descriptor matching their resolved, post-alias model at construction time — nothing for a model with no seed row. `createRoutingGenerate` attaches the union of every configured route's descriptors, deduplicated by `(provider, endpoint, model)` and ordered by that triple lexicographically.
+
+`packages/operative/src/generation-profile.ts` is new and exports `GenerationMode` (`'fixed' | 'routed' | 'selectable' | 'opaque'`), `AgentPreferences`, `AgentGenerationProfile`, and `readGenerationProfile(agent)`. `RunnableAgent` gains one optional readonly member, `generationProfile?: AgentGenerationProfile` — every existing implementation still type-checks unchanged. `readGenerationProfile` returns the agent's own profile when present, otherwise a frozen `mode: 'opaque'` fallback; a capability read never loads a lazy module, contacts a provider, or starts background work.
+
+`createAgent` populates `generationProfile` from the attached descriptors on `options.generate` (`'fixed'` for exactly one, `'routed'` for more than one, `'opaque'` for none), and gains two new `CreateAgentOptionsBase` fields: `generationPreferences?: AgentPreferences` and `allowedCandidates?: readonly { provider; model }[]` (supplying the latter promotes the mode to `'selectable'`; `selector` always reads `'unavailable'` off a standalone agent, since it has no Bureau, policy, or catalog to select through). `createLazyGenerate` gains `CreateLazyGenerateOptions.descriptors?: readonly BackendDescriptor[]`, attached to the returned wrapper at construction time without ever invoking the loader. `createLazyAgent` gains `CreateLazyAgentOptions.generationProfile?: AgentGenerationProfile`, exposed on the returned agent alongside its existing `name`.
+
+All additions are optional and additive; nothing existing is renamed, reshaped, or removed.

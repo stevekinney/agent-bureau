@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'bun:test';
 
+import {
+  readBackendDescriptors,
+  withBackendDescriptors,
+} from '../backend-descriptor-attachment.ts';
+import type { BackendDescriptor } from '../model-catalog.ts';
+import { createModelCatalog } from '../model-catalog.ts';
 import type { GenerateContext, GenerateFunction, GenerateResponse } from '../types.ts';
 import { createRoutingGenerate } from './create-routing-generate.ts';
 import { makeContext } from './strategies/test-helpers.ts';
@@ -248,5 +254,266 @@ describe('createRoutingGenerate', () => {
       expect(error).toBeInstanceOf(Error);
       expect((error as Error).message).toBe('LLM API failed');
     }
+  });
+});
+
+describe('createRoutingGenerate — descriptor union (AB-64 AC2, AB-245)', () => {
+  const FIXED_NOW = () => '2026-09-02T12:00:00.000Z';
+
+  function descriptorsFor(
+    provider: 'anthropic' | 'openai' | 'gemini',
+  ): readonly BackendDescriptor[] {
+    return createModelCatalog({ now: FIXED_NOW }).descriptors.filter(
+      (descriptor) => descriptor.provider === provider,
+    );
+  }
+
+  function routeWithDescriptors(
+    name: string,
+    content: string,
+    descriptors: readonly BackendDescriptor[],
+  ): ModelRoute {
+    return { name, generate: withBackendDescriptors(makeGenerate(content), descriptors) };
+  }
+
+  it('attaches no descriptors when no route carries any', () => {
+    const generate = createRoutingGenerate({
+      routes: [makeRoute('fast', 'fast-response')],
+      strategy: () => ({ route: 'fast', reason: 'test' }),
+      fallback: 'fast',
+    });
+
+    expect(readBackendDescriptors(generate)).toEqual([]);
+  });
+
+  it('attaches the union of every route’s descriptors', () => {
+    const anthropic = descriptorsFor('anthropic')[0];
+    const openai = descriptorsFor('openai')[0];
+    if (!anthropic || !openai)
+      throw new Error('expected seed descriptors for anthropic and openai');
+
+    const generate = createRoutingGenerate({
+      routes: [
+        routeWithDescriptors('fast', 'fast-response', [openai]),
+        routeWithDescriptors('smart', 'smart-response', [anthropic]),
+      ],
+      strategy: () => ({ route: 'smart', reason: 'test' }),
+      fallback: 'fast',
+    });
+
+    const attached = readBackendDescriptors(generate);
+    expect(attached).toHaveLength(2);
+    expect(attached).toContainEqual(anthropic);
+    expect(attached).toContainEqual(openai);
+  });
+
+  it('deduplicates by (provider, endpoint, model) across routes sharing the same descriptor', () => {
+    const anthropic = descriptorsFor('anthropic')[0];
+    if (!anthropic) throw new Error('expected at least one anthropic seed descriptor');
+
+    const generate = createRoutingGenerate({
+      routes: [
+        routeWithDescriptors('a', 'a-response', [anthropic]),
+        routeWithDescriptors('b', 'b-response', [anthropic]),
+      ],
+      strategy: () => ({ route: 'a', reason: 'test' }),
+      fallback: 'a',
+    });
+
+    expect(readBackendDescriptors(generate)).toEqual([anthropic]);
+  });
+
+  it('orders the union deterministically by (provider, endpoint, model) regardless of route declaration order', () => {
+    const anthropic = descriptorsFor('anthropic')[0];
+    const gemini = descriptorsFor('gemini')[0];
+    if (!anthropic || !gemini)
+      throw new Error('expected seed descriptors for anthropic and gemini');
+
+    const forward = createRoutingGenerate({
+      routes: [
+        routeWithDescriptors('a', 'a-response', [gemini]),
+        routeWithDescriptors('b', 'b-response', [anthropic]),
+      ],
+      strategy: () => ({ route: 'a', reason: 'test' }),
+      fallback: 'a',
+    });
+    const reversed = createRoutingGenerate({
+      routes: [
+        routeWithDescriptors('b', 'b-response', [anthropic]),
+        routeWithDescriptors('a', 'a-response', [gemini]),
+      ],
+      strategy: () => ({ route: 'a', reason: 'test' }),
+      fallback: 'a',
+    });
+
+    expect(readBackendDescriptors(forward)).toEqual(readBackendDescriptors(reversed));
+    expect(readBackendDescriptors(forward)[0]?.provider).toBe('anthropic');
+  });
+
+  it('resolves a same-triple collision to the same, conservative descriptor regardless of route order', () => {
+    // Two OpenAI routes for the identical model, one constructed with a
+    // proxying baseURL — same (provider, endpoint, model) triple, different
+    // endpointAmbiguous/capability content. The union must pick the same
+    // (ambiguous, conservative) descriptor no matter which route is declared
+    // first — never the one that merely happened to be inserted first.
+    const catalog = createModelCatalog({ now: FIXED_NOW });
+    const official = catalog.descriptors.find((d) => d.provider === 'openai');
+    if (!official) throw new Error('expected at least one openai seed descriptor');
+    const ambiguousCatalog = createModelCatalog({
+      now: FIXED_NOW,
+      openAIBaseURL: 'https://proxy.internal.example/v1',
+    });
+    const ambiguous = ambiguousCatalog.descriptors.find(
+      (d) => d.provider === 'openai' && d.model === official.model,
+    );
+    if (!ambiguous) throw new Error('expected a matching ambiguous openai descriptor');
+    expect(ambiguous.endpointAmbiguous).toBe(true);
+    expect(official.endpointAmbiguous).not.toBe(true);
+
+    const officialFirst = createRoutingGenerate({
+      routes: [
+        routeWithDescriptors('official', 'official-response', [official]),
+        routeWithDescriptors('proxy', 'proxy-response', [ambiguous]),
+      ],
+      strategy: () => ({ route: 'official', reason: 'test' }),
+      fallback: 'official',
+    });
+    const ambiguousFirst = createRoutingGenerate({
+      routes: [
+        routeWithDescriptors('proxy', 'proxy-response', [ambiguous]),
+        routeWithDescriptors('official', 'official-response', [official]),
+      ],
+      strategy: () => ({ route: 'official', reason: 'test' }),
+      fallback: 'official',
+    });
+
+    const officialFirstDescriptors = readBackendDescriptors(officialFirst);
+    const ambiguousFirstDescriptors = readBackendDescriptors(ambiguousFirst);
+    expect(officialFirstDescriptors).toEqual(ambiguousFirstDescriptors);
+    expect(officialFirstDescriptors).toHaveLength(1);
+    expect(officialFirstDescriptors[0]?.endpointAmbiguous).toBe(true);
+  });
+
+  it('breaks a freshness-only tie deterministically, independent of route order (review)', () => {
+    // Two descriptors for the identical triple, identical in every field
+    // EXCEPT freshness — the case content-comparison alone (with freshness
+    // excluded) cannot distinguish, so it must not silently fall back to
+    // "whichever route was declared first".
+    const earlier = createModelCatalog({ now: () => '2026-01-01T00:00:00.000Z' }).descriptors.find(
+      (d) => d.provider === 'anthropic',
+    );
+    if (!earlier) throw new Error('expected at least one anthropic seed descriptor');
+    const later = createModelCatalog({ now: () => '2026-06-01T00:00:00.000Z' }).descriptors.find(
+      (d) => d.provider === 'anthropic' && d.model === earlier.model,
+    );
+    if (!later) throw new Error('expected a matching later-freshness anthropic descriptor');
+    expect(later.freshness).not.toBe(earlier.freshness);
+
+    const earlierFirst = createRoutingGenerate({
+      routes: [
+        routeWithDescriptors('a', 'a-response', [earlier]),
+        routeWithDescriptors('b', 'b-response', [later]),
+      ],
+      strategy: () => ({ route: 'a', reason: 'test' }),
+      fallback: 'a',
+    });
+    const laterFirst = createRoutingGenerate({
+      routes: [
+        routeWithDescriptors('b', 'b-response', [later]),
+        routeWithDescriptors('a', 'a-response', [earlier]),
+      ],
+      strategy: () => ({ route: 'a', reason: 'test' }),
+      fallback: 'a',
+    });
+
+    const earlierFirstDescriptors = readBackendDescriptors(earlierFirst);
+    const laterFirstDescriptors = readBackendDescriptors(laterFirst);
+    expect(earlierFirstDescriptors).toEqual(laterFirstDescriptors);
+    expect(earlierFirstDescriptors).toHaveLength(1);
+    expect(earlierFirstDescriptors[0]?.freshness).toBe(earlier.freshness);
+  });
+
+  it('excludes a shadowed duplicate-name route’s descriptors from the union (review)', () => {
+    // routeMap keeps only the LAST route for a repeated name — dispatch can
+    // never reach the shadowed one, so its descriptor must not appear
+    // either.
+    const anthropic = descriptorsFor('anthropic')[0];
+    const openai = descriptorsFor('openai')[0];
+    if (!anthropic || !openai)
+      throw new Error('expected seed descriptors for anthropic and openai');
+
+    const generate = createRoutingGenerate({
+      routes: [
+        routeWithDescriptors('fast', 'shadowed-response', [anthropic]),
+        routeWithDescriptors('fast', 'winning-response', [openai]),
+      ],
+      strategy: () => ({ route: 'fast', reason: 'test' }),
+      fallback: 'fast',
+    });
+
+    expect(readBackendDescriptors(generate)).toEqual([openai]);
+  });
+
+  it('is unaffected by a caller mutating a route object after construction (review)', () => {
+    const anthropic = descriptorsFor('anthropic')[0];
+    const openai = descriptorsFor('openai')[0];
+    if (!anthropic || !openai)
+      throw new Error('expected seed descriptors for anthropic and openai');
+
+    const route = routeWithDescriptors('fast', 'original-response', [anthropic]);
+    const routes = [route];
+
+    const generate = createRoutingGenerate({
+      routes,
+      strategy: () => ({ route: 'fast', reason: 'test' }),
+      fallback: 'fast',
+    });
+
+    // Mutate the caller's own route object in place — a fresh generate
+    // function that would advertise different descriptors — after
+    // construction.
+    route.generate = routeWithDescriptors('fast', 'replaced-response', [openai]).generate;
+
+    expect(readBackendDescriptors(generate)).toEqual([anthropic]);
+  });
+
+  it('prevents a custom strategy from mutating the routes it receives, keeping dispatch and the descriptor union in sync (review)', async () => {
+    const anthropic = descriptorsFor('anthropic')[0];
+    const openai = descriptorsFor('openai')[0];
+    if (!anthropic || !openai)
+      throw new Error('expected seed descriptors for anthropic and openai');
+
+    const replacementGenerate = routeWithDescriptors('fast', 'replaced-response', [
+      openai,
+    ]).generate;
+    let sawFrozenRoute = false;
+
+    const generate = createRoutingGenerate({
+      routes: [routeWithDescriptors('fast', 'original-response', [anthropic])],
+      strategy: (_context, routes) => {
+        // A strategy receives the SAME snapshotted route objects
+        // createRoutingGenerate's own dispatch reads through — frozen, so
+        // this assignment is a no-op (or throws, depending on strict
+        // mode), never a real mutation that could diverge dispatch from
+        // the already-computed descriptor union.
+        sawFrozenRoute = Object.isFrozen(routes[0]);
+        try {
+          (routes[0] as { generate: typeof replacementGenerate }).generate = replacementGenerate;
+        } catch {
+          // Ignored — sloppy mode would silently no-op the same assignment.
+        }
+        return { route: 'fast', reason: 'test' };
+      },
+      fallback: 'fast',
+    });
+
+    const result = await generate(makeContext());
+
+    expect(sawFrozenRoute).toBe(true);
+    // Dispatch actually ran the ORIGINAL generate — proof the attempted
+    // mutation never took effect, not just that the descriptor union
+    // reports the original descriptor.
+    expect(result.content).toBe('original-response');
+    expect(readBackendDescriptors(generate)).toEqual([anthropic]);
   });
 });

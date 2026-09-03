@@ -211,6 +211,12 @@ export {
 } from './events';
 export { ContextBudgetWarningEvent } from './events';
 export type {
+  AgentGenerationProfile,
+  AgentPreferences,
+  GenerationMode,
+} from './generation-profile';
+export { readGenerationProfile } from './generation-profile';
+export type {
   AgentInput,
   AgentRunContext,
   DefinitionResolvingAgent,

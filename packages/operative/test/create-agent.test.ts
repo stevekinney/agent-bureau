@@ -21,6 +21,9 @@ import { z } from 'zod';
 import { noToolCalls, pendingApproval } from '../src/conditions/predicates';
 import { createAgent } from '../src/create-agent';
 import { MaximumStepsExceededError, OutputSchemaConversionError } from '../src/errors';
+import { readGenerationProfile } from '../src/generation-profile';
+import { withBackendDescriptors } from '../src/providers/backend-descriptor-attachment';
+import { createModelCatalog } from '../src/providers/model-catalog';
 import { OPERATIVE_RESOLVE_RUN_OPTIONS } from '../src/runnable-agent';
 import type { ConversationHistory, GenerateFunction, GenerateResponse } from '../src/types';
 
@@ -1024,5 +1027,150 @@ describe('createAgent — default stopWhen', () => {
     expect(runOptions.generate).toBe(generate);
     expect(runOptions.conversation.hasSystemMessage()).toBe(true);
     expect(runCalls).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// generationProfile (AB-64 AC2/AC9, AB-245)
+// ---------------------------------------------------------------------------
+
+const FIXED_NOW = () => '2026-09-02T12:00:00.000Z';
+
+function seedDescriptor(provider: 'anthropic' | 'openai' | 'gemini') {
+  const descriptor = createModelCatalog({ now: FIXED_NOW }).descriptors.find(
+    (row) => row.provider === provider,
+  );
+  if (!descriptor)
+    throw new Error(`expected at least one ${provider} descriptor in the seed catalog`);
+  return descriptor;
+}
+
+describe('createAgent — generationProfile', () => {
+  it('reports mode: opaque for a plain custom GenerateFunction with no attached descriptor', () => {
+    const generate: GenerateFunction = async () => textResponse('hi');
+    const agent = createAgent({ generate });
+
+    expect(agent.generationProfile.mode).toBe('opaque');
+    expect(agent.generationProfile.descriptors).toEqual([]);
+    expect(agent.generationProfile.selector).toBe('unavailable');
+  });
+
+  it('reports mode: fixed for a GenerateFunction carrying exactly one attached descriptor', () => {
+    const descriptor = seedDescriptor('anthropic');
+    const generate = withBackendDescriptors<GenerateFunction>(
+      async () => textResponse('hi'),
+      [descriptor],
+    );
+    const agent = createAgent({ generate });
+
+    expect(agent.generationProfile.mode).toBe('fixed');
+    expect(agent.generationProfile.descriptors).toEqual([descriptor]);
+  });
+
+  it('reports mode: routed for a GenerateFunction carrying more than one attached descriptor', () => {
+    const generate = withBackendDescriptors<GenerateFunction>(
+      async () => textResponse('hi'),
+      [seedDescriptor('anthropic'), seedDescriptor('openai')],
+    );
+    const agent = createAgent({ generate });
+
+    expect(agent.generationProfile.mode).toBe('routed');
+    expect(agent.generationProfile.descriptors).toHaveLength(2);
+  });
+
+  it('promotes mode to selectable when allowedCandidates is supplied, regardless of descriptor count', () => {
+    const generate: GenerateFunction = async () => textResponse('hi');
+    const agent = createAgent({
+      generate,
+      allowedCandidates: [{ provider: 'anthropic', model: 'claude-opus-4-6' }],
+    });
+
+    expect(agent.generationProfile.mode).toBe('selectable');
+    expect(agent.generationProfile.allowedCandidates).toEqual([
+      { provider: 'anthropic', model: 'claude-opus-4-6' },
+    ]);
+    // AB-64's verification walk: a standalone agent can never select.
+    expect(agent.generationProfile.selector).toBe('unavailable');
+  });
+
+  it('populates preferences from generationPreferences verbatim', () => {
+    const generate: GenerateFunction = async () => textResponse('hi');
+    const agent = createAgent({
+      generate,
+      generationPreferences: {
+        preferredProviders: ['anthropic'],
+        minimumContextWindowTokens: 100_000,
+      },
+    });
+
+    expect(agent.generationProfile.preferences).toEqual({
+      preferredProviders: ['anthropic'],
+      minimumContextWindowTokens: 100_000,
+    });
+  });
+
+  it('never leaks generationPreferences/allowedCandidates onto the RunOptions bag createActiveRun receives', async () => {
+    const generate: GenerateFunction = async () => textResponse('hi');
+    const agent = createAgent({
+      generate,
+      generationPreferences: { preferredProviders: ['anthropic'] },
+      allowedCandidates: [{ provider: 'anthropic', model: 'claude-opus-4-6' }],
+    });
+
+    const resolver = (
+      agent as typeof agent & {
+        [OPERATIVE_RESOLVE_RUN_OPTIONS]: (input: string) => Promise<Record<string, unknown>>;
+      }
+    )[OPERATIVE_RESOLVE_RUN_OPTIONS];
+    const runOptions = await resolver('hello');
+
+    expect(runOptions).not.toHaveProperty('generationPreferences');
+    expect(runOptions).not.toHaveProperty('allowedCandidates');
+  });
+
+  it('returns a frozen profile, readable through readGenerationProfile with reference identity across reads', () => {
+    const generate: GenerateFunction = async () => textResponse('hi');
+    const agent = createAgent({ generate });
+
+    expect(Object.isFrozen(agent.generationProfile)).toBe(true);
+    expect(readGenerationProfile(agent)).toBe(readGenerationProfile(agent));
+    expect(readGenerationProfile(agent)).toBe(agent.generationProfile);
+  });
+
+  it('carries a privileged projection', () => {
+    const generate: GenerateFunction = async () => textResponse('hi');
+    const agent = createAgent({ generate });
+
+    expect(agent.generationProfile.projection).toBe('privileged');
+  });
+
+  it('is not retroactively mutated by later changes to the caller’s generationPreferences object or its arrays (review)', () => {
+    const generate: GenerateFunction = async () => textResponse('hi');
+    const preferences = { preferredProviders: ['anthropic' as const], preferredModels: ['a'] };
+    const agent = createAgent({ generate, generationPreferences: preferences });
+
+    preferences.preferredProviders.push('openai');
+    preferences.preferredModels.push('b');
+    // @ts-expect-error — intentionally reassigning a caller-side field to prove it doesn't alias.
+    preferences.minimumContextWindowTokens = 999;
+
+    expect(agent.generationProfile.preferences?.preferredProviders).toEqual(['anthropic']);
+    expect(agent.generationProfile.preferences?.preferredModels).toEqual(['a']);
+    expect(agent.generationProfile.preferences?.minimumContextWindowTokens).toBeUndefined();
+    expect(Object.isFrozen(agent.generationProfile.preferences)).toBe(true);
+    expect(Object.isFrozen(agent.generationProfile.preferences?.preferredProviders)).toBe(true);
+  });
+
+  it('is not retroactively mutated by later changes to the caller’s allowedCandidates array (review)', () => {
+    const generate: GenerateFunction = async () => textResponse('hi');
+    const candidates = [{ provider: 'anthropic' as const, model: 'claude-opus-4-6' }];
+    const agent = createAgent({ generate, allowedCandidates: candidates });
+
+    candidates.push({ provider: 'openai', model: 'gpt-4o' });
+
+    expect(agent.generationProfile.allowedCandidates).toEqual([
+      { provider: 'anthropic', model: 'claude-opus-4-6' },
+    ]);
+    expect(Object.isFrozen(agent.generationProfile.allowedCandidates)).toBe(true);
   });
 });
