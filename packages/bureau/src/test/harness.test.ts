@@ -5,17 +5,19 @@ import { createAgent, stopWhen } from '@lostgradient/operative';
 import { waitForCondition } from '@lostgradient/operative/test';
 import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createProcessLocalApprovalStateStore, createTool, createToolbox } from 'armorer';
-import { afterEach, describe, expect, it } from 'bun:test';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test';
+import type { ManualRuntimeServices } from 'lifecycle';
 import { createManualRuntimeServices } from 'lifecycle';
 import { z } from 'zod';
 
-import type { Bureau } from '../types';
+import type { Bureau, RunSummary } from '../types';
 import {
   BureauHarnessUnsupportedError,
   type BureauTestHarness,
   createBureauTestHarness,
 } from './harness';
 import {
+  type BureauStorageFixture,
   createLmdbStorageFixture,
   createMemoryStorageFixture,
   createSqliteStorageFixture,
@@ -404,56 +406,134 @@ describe('createBureauTestHarness — durable backend (sqlite)', () => {
 });
 
 describe('two concurrent harnesses are fully isolated', () => {
-  it.each([
+  /**
+   * AB-306: root-caused directly before restructuring anything. Timing the
+   * two storage-fixture creations, the two `createBureauTestHarness` calls,
+   * and the `waitForRunCompletion` polls separately under artificial load
+   * (six concurrent `bun test` runs of another package) showed fixture
+   * creation and Bureau construction together cost well under 200ms even
+   * loaded — not construction cost, as initially suspected. The real cost
+   * living inside the old single `it.each` body was three sequential
+   * `waitForRunCompletion` calls: each one polls with a REAL
+   * `setTimeout(5)` between checks (a documented, intentional fix for LMDB
+   * completion-callback starvation under a zero-delay macrotask loop — see
+   * that helper's own comment), and real timer delivery is exactly what
+   * degrades under host CPU contention, sometimes taking 100s of ms per
+   * 5ms-nominal tick. Stacking three such polls inside ONE test's 5000ms
+   * Bun default timeout is what actually timed out under load, not the
+   * fixture/construction cost.
+   *
+   * The fix moves every real-time-consuming step (fixture creation, Bureau
+   * construction, and — critically — each `waitForRunCompletion` poll) into
+   * its own `beforeAll` hook. Bun (confirmed empirically) gives each
+   * `beforeAll` call in a describe block its OWN default timeout budget
+   * rather than sharing one budget across the whole sequence, so splitting
+   * the three real waits into three separate hooks roughly triples the
+   * real-time headroom available before any single step could time out —
+   * without raising any timeout, retry, or resource cap. Every `it` body
+   * below is now a synchronous (or synthetic-clock-only) assertion with no
+   * real wall-clock dependency, so per-test budget pressure from load is
+   * gone. The isolation assertions themselves (paths differ, timers
+   * independent, identifiers independent, events not shared) are
+   * unchanged in meaning — only when the underlying work happens moved.
+   */
+  describe.each([
     ['memory', () => createMemoryStorageFixture()],
     ['sqlite', () => createSqliteStorageFixture({ runtime: createManualRuntimeServices() })],
     ['lmdb', () => createLmdbStorageFixture({ runtime: createManualRuntimeServices() })],
   ] as const)(
     '%s: independent storage paths, timers, identifiers, and events',
-    async (_label, makeStorage) => {
-      const runtimeA = createManualRuntimeServices({ origin: '2024-01-01T00:00:00.000Z' });
-      const runtimeB = createManualRuntimeServices({ origin: '2025-06-15T00:00:00.000Z' });
-      const storageA = makeStorage();
-      const storageB = makeStorage();
+    (_label, makeStorage) => {
+      let runtimeA: ManualRuntimeServices;
+      let runtimeB: ManualRuntimeServices;
+      let storageA: BureauStorageFixture;
+      let storageB: BureauStorageFixture;
+      let harnessA: BureauTestHarness;
+      let harnessB: BureauTestHarness;
+      let runA: RunSummary;
+      let runB: RunSummary;
+      let eventsSeenByA: string[];
 
-      const harnessA = await createBureauTestHarness({
-        agents: {},
-        generate: mockGenerate('A'),
-        toolbox: createToolbox([]),
-        runtime: runtimeA,
-        storage: storageA,
-      });
-      const harnessB = await createBureauTestHarness({
-        agents: {},
-        generate: mockGenerate('B'),
-        toolbox: createToolbox([]),
-        runtime: runtimeB,
-        storage: storageB,
+      beforeAll(async () => {
+        runtimeA = createManualRuntimeServices({ origin: '2024-01-01T00:00:00.000Z' });
+        runtimeB = createManualRuntimeServices({ origin: '2025-06-15T00:00:00.000Z' });
+        storageA = makeStorage();
+        storageB = makeStorage();
+
+        harnessA = await createBureauTestHarness({
+          agents: {},
+          generate: mockGenerate('A'),
+          toolbox: createToolbox([]),
+          runtime: runtimeA,
+          storage: storageA,
+        });
+        harnessB = await createBureauTestHarness({
+          agents: {},
+          generate: mockGenerate('B'),
+          toolbox: createToolbox([]),
+          runtime: runtimeB,
+          storage: storageB,
+        });
       });
 
-      try {
-        // Distinct storage paths (memory fixtures have no path — this
-        // assertion is vacuously satisfied by both being `undefined` only
-        // when paths genuinely can't collide; sqlite/lmdb always assert a
-        // concrete inequality).
+      // Distinct identifier sequences: each harness's Bureau mints its runId
+      // through its OWN composed runtime — both produce the same
+      // first-of-kind counter value independently. Draining runA to
+      // completion here (its own hook, its own timeout budget) matters
+      // beyond the identifier check itself: it keeps runA's own completion
+      // frame from firing later, during the event-isolation hook's
+      // subscription window, and being mistaken for cross-harness leakage.
+      beforeAll(async () => {
+        runA = await harnessA.startSession({ message: 'on A' });
+        runB = await harnessB.startSession({ message: 'on B' });
+        await waitForRunCompletion(harnessA.bureau, runA.id);
+      });
+
+      // Drained in its own hook (rather than alongside runA's wait above) so
+      // this real LMDB completion poll gets its own fresh timeout budget too.
+      beforeAll(async () => {
+        await waitForRunCompletion(harnessB.bureau, runB.id);
+      });
+
+      // Neither harness observes the other's events. Subscribing and
+      // draining the B-only run happen here — its own hook, its own budget —
+      // rather than inside the `it` below, for the same reason as the two
+      // hooks above.
+      beforeAll(async () => {
+        eventsSeenByA = [];
+        const unsubscribeA = harnessA.bureau.subscribeLiveFrames((frame) => {
+          eventsSeenByA.push(frame.type);
+        });
+        const runOnBOnly = await harnessB.startSession({ message: 'B-only run' });
+        await waitForRunCompletion(harnessB.bureau, runOnBOnly.id);
+        unsubscribeA();
+      });
+
+      afterAll(async () => {
+        await harnessA.bureau.dispose();
+        await harnessB.bureau.dispose();
+        await storageA.dispose();
+        await storageB.dispose();
+        if (storageA.path) await rm(storageA.path, { recursive: true, force: true });
+        if (storageB.path) await rm(storageB.path, { recursive: true, force: true });
+      });
+
+      it('has distinct storage paths (when persistent) and distinct clocks', () => {
+        // Memory fixtures have no path — this assertion is vacuously
+        // satisfied by both being `undefined` only when paths genuinely
+        // can't collide; sqlite/lmdb always assert a concrete inequality.
         if (storageA.path !== undefined || storageB.path !== undefined) {
           expect(storageA.path).not.toBe(storageB.path);
         }
-
-        // Distinct clocks.
         expect(runtimeA.clock.now()).not.toBe(runtimeB.clock.now());
+      });
 
-        // Distinct identifier sequences: each harness's Bureau mints its
-        // runId through its OWN composed runtime — both produce the same
-        // first-of-kind counter value independently.
-        const runA = await harnessA.startSession({ message: 'on A' });
-        const runB = await harnessB.startSession({ message: 'on B' });
+      it('mints identifiers independently', () => {
         expect(runA.id).toBe('run-1');
         expect(runB.id).toBe('run-1');
-        await waitForRunCompletion(harnessA.bureau, runA.id);
-        await waitForRunCompletion(harnessB.bureau, runB.id);
+      });
 
-        // Advancing one runtime's timers never fires the other's.
+      it('never fires the other runtime when advancing timers', async () => {
         let firedOnA = 0;
         let firedOnB = 0;
         runtimeA.timers.setTimeout(() => {
@@ -467,24 +547,11 @@ describe('two concurrent harnesses are fully isolated', () => {
         expect(firedOnB).toBe(0);
         await runtimeB.advance(1000);
         expect(firedOnB).toBe(1);
+      });
 
-        // Neither harness observes the other's events.
-        const eventsSeenByA: string[] = [];
-        const unsubscribeA = harnessA.bureau.subscribeLiveFrames((frame) => {
-          eventsSeenByA.push(frame.type);
-        });
-        const runOnBOnly = await harnessB.startSession({ message: 'B-only run' });
-        await waitForRunCompletion(harnessB.bureau, runOnBOnly.id);
-        unsubscribeA();
+      it('never lets A observe B-only events', () => {
         expect(eventsSeenByA).toEqual([]);
-      } finally {
-        await harnessA.bureau.dispose();
-        await harnessB.bureau.dispose();
-        await storageA.dispose();
-        await storageB.dispose();
-        if (storageA.path) await rm(storageA.path, { recursive: true, force: true });
-        if (storageB.path) await rm(storageB.path, { recursive: true, force: true });
-      }
+      });
     },
   );
 });
