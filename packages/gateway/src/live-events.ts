@@ -154,6 +154,7 @@ function buildConnectionSnapshot(
   startedAt: string,
   watchdog: StallWatchdog,
   clock: StallWatchdogClock,
+  revision: number,
 ): GatewayConnectionSnapshot {
   const raw = watchdog.assess();
   const { reachability, progress } = clampGatewayConnectionAssessment(
@@ -167,7 +168,7 @@ function buildConnectionSnapshot(
     id,
     kind: 'gateway-connection',
     startedAt,
-    revision: 0,
+    revision,
     status: 'running',
     lastTransitionAt: startedAt,
     projection: 'redacted',
@@ -193,6 +194,14 @@ type Subscriber = {
   runIds: Set<string>;
   includeScheduler: boolean;
   watchdog: StallWatchdog;
+  /**
+   * Records `evidenceSource: 'transport-keepalive'` pulse evidence AND
+   * advances this connection's `LivenessSnapshot.revision` — the watchdog's
+   * own `onAssessmentChange` only fires from its timer-driven missed-pulse
+   * check (`watchdog.ts`), never from a `recordPulse` call itself, so a
+   * revision advance from a fresh pulse has to happen here.
+   */
+  recordKeepalive(): void;
   snapshot(): GatewayConnectionSnapshot;
 };
 
@@ -341,7 +350,18 @@ export class LiveFrameBroker {
   ): void {
     const closeConnection = options.closeConnection ?? (() => undefined);
     const heartbeatIntervalMs = options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
-    const watchdog = createStallWatchdog(gatewayConnectionPolicy(heartbeatIntervalMs), this.clock);
+    // `LivenessSnapshot.revision` (AB-219 review): advances whenever this
+    // connection's watchdog assessment changes — either the timer-driven
+    // missed-pulse check (`onAssessmentChange`, below) or a fresh pulse
+    // recorded directly (`recordKeepalive`, which `onAssessmentChange`
+    // alone does not cover — see its own doc comment).
+    let revision = 0;
+    const bumpRevision = () => {
+      revision += 1;
+    };
+    const watchdog = createStallWatchdog(gatewayConnectionPolicy(heartbeatIntervalMs), this.clock, {
+      onAssessmentChange: bumpRevision,
+    });
     const connectionId = `gateway-connection-${(this.nextConnectionId += 1)}`;
     const startedAt = new Date().toISOString();
     const clock = this.clock;
@@ -351,7 +371,11 @@ export class LiveFrameBroker {
       runIds: new Set(options.runIds ?? []),
       includeScheduler: options.includeScheduler ?? false,
       watchdog,
-      snapshot: () => buildConnectionSnapshot(connectionId, startedAt, watchdog, clock),
+      recordKeepalive: () => {
+        watchdog.recordPulse('transport-keepalive', 0);
+        bumpRevision();
+      },
+      snapshot: () => buildConnectionSnapshot(connectionId, startedAt, watchdog, clock, revision),
     });
     if (this.closing) {
       // AB-235: shutdown already asked every existing connection to close
@@ -370,12 +394,12 @@ export class LiveFrameBroker {
    * fired. A no-op if `key` is not (or is no longer) a tracked subscriber.
    */
   recordTransportKeepalive(key: object): void {
-    this.subscribers.get(key)?.watchdog.recordPulse('transport-keepalive', 0);
+    this.subscribers.get(key)?.recordKeepalive();
   }
 
   /**
-   * The live-events subscribers map (`:128`), surfaced under a stable name
-   * for watchdog/health consumers (AB-219) — not a duplicate registry
+   * This broker's own `subscribers` map, surfaced under a stable name for
+   * watchdog/health consumers (AB-219) — not a duplicate registry
    * maintained in parallel.
    */
   getConnectionRegistry(): ReadonlyMap<object, { snapshot(): LivenessSnapshot }> {

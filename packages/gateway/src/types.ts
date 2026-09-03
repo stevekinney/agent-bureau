@@ -209,8 +209,9 @@ export interface HealthResponse {
 
 /**
  * `GET /api/v1/health/ready`'s body shape (AB-219). Replaces the single
- * aggregate `{ status }` boolean with named subsystem evidence: `bureau`
- * mirrors today's `bureau.ready` check exactly (no regression — `503` when
+ * aggregate `{ status: 'ok' | 'unavailable' }` ({@link HealthResponse})
+ * with named subsystem evidence: `bureau` mirrors today's `bureau.ready`
+ * check exactly (no regression — `503` when
  * `bureau` is `'unavailable'`, matching the prior behavior), and
  * `connections` aggregates the Gateway connection watchdog's per-connection
  * `LivenessSnapshot.reachability` assessments (`live-events.ts`'s

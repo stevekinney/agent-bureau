@@ -501,6 +501,37 @@ describe('gateway-connection watchdog (AB-219)', () => {
     expect(broker.getConnectionRegistry().get(keyA)?.snapshot().id).toBe(idA);
   });
 
+  it('advances revision on a fresh keepalive pulse', () => {
+    const clock = createManualLiveFrameBrokerClock();
+    const broker = new LiveFrameBroker({ clock });
+    const key = {};
+    broker.addSubscriber(key, () => {}, { heartbeatIntervalMs: 8_000 });
+
+    const initialRevision = broker.getConnectionRegistry().get(key)?.snapshot().revision;
+    expect(initialRevision).toBe(0);
+
+    broker.recordTransportKeepalive(key);
+    const afterPulse = broker.getConnectionRegistry().get(key)?.snapshot().revision;
+    expect(afterPulse).toBeGreaterThan(initialRevision ?? -1);
+  });
+
+  it('advances revision on a timer-driven missed-pulse check (onAssessmentChange), with no pulse recorded', () => {
+    const clock = createManualLiveFrameBrokerClock();
+    const broker = new LiveFrameBroker({ clock });
+    const key = {};
+    broker.addSubscriber(key, () => {}, { heartbeatIntervalMs: 8_000 });
+
+    const initialRevision = broker.getConnectionRegistry().get(key)?.snapshot().revision;
+    expect(initialRevision).toBe(0);
+
+    // checkIntervalMs = 8000 + 4000 + 800 = 12800 — no pulse was ever
+    // recorded, so this check genuinely changes missedPulseCount (0 -> 1),
+    // which is what drives createStallWatchdog's onAssessmentChange.
+    clock.advance(12_800);
+    const afterMiss = broker.getConnectionRegistry().get(key)?.snapshot().revision;
+    expect(afterMiss).toBeGreaterThan(initialRevision ?? -1);
+  });
+
   it('records a WebSocket pong as transport-keepalive evidence via recordTransportKeepalive', () => {
     const clock = createManualLiveFrameBrokerClock();
     const broker = new LiveFrameBroker({ clock });
