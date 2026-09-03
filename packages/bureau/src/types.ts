@@ -19,6 +19,9 @@ import type {
 } from '@lostgradient/operative';
 import type {
   CreateRunEngineOptions,
+  DurableEventGap,
+  DurableEventOwner,
+  DurableEventPage,
   SessionInputAdmissionOutcome,
   SessionInputAdmissionRequest,
 } from '@lostgradient/operative/durable';
@@ -64,6 +67,7 @@ import type {
   BureauAgentCatalog,
 } from './agent-catalog';
 import type { AuditTrail } from './audit-trail';
+import type { DurableEventHistoryPageOptions } from './durable-event-history';
 import type { BureauEventMap } from './events';
 import type { ModelCatalogService } from './model-catalog-refresh';
 import type { BureauModelPolicyOptions, PlanSelectionRequest } from './model-policy';
@@ -717,6 +721,7 @@ export interface BureauShutdownOwnerReport {
     | 'online-evals'
     | 'webhook-notifier'
     | 'audit-trail'
+    | 'event-history'
     | 'durable-engine'
     | 'heartbeat';
   readonly id?: string;
@@ -1223,6 +1228,36 @@ export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
    * evaluations deterministically.
    */
   readonly onlineEvalSampler: OnlineEvalSampler | undefined;
+
+  /**
+   * Pages `owner`'s durable event history (AB-91's `ab91-01` slice,
+   * AB-310) — a bounded, sequence-ordered page of events after the
+   * exclusive `since` cursor, a {@link DurableEventGap} when `since`
+   * predates the store's retention floor, or
+   * `{ outcome: 'unsupported-capability', reason: 'no-persistent-storage'
+   * }` for an ephemeral bureau (no persistent storage backend
+   * configured) — matching the `unsupported-capability` locator outcome
+   * AB-91's own source spec and AB-42's precedent both use for a missing
+   * durable backend.
+   *
+   * This is a READ surface only: nothing on `Bureau` writes to the store
+   * automatically today (see `durable-event-history.ts`'s own doc comment
+   * on `createDurableEventHistory` for why, and the followUp filed
+   * against AB-310's pull request).
+   */
+  eventHistory(
+    owner: DurableEventOwner,
+    options?: DurableEventHistoryPageOptions,
+  ): Promise<DurableEventPage | DurableEventGap | EventHistoryUnsupportedOutcome>;
+}
+
+/**
+ * Returned by {@link Bureau.eventHistory} when the bureau has no
+ * persistent storage backend configured.
+ */
+export interface EventHistoryUnsupportedOutcome {
+  readonly outcome: 'unsupported-capability';
+  readonly reason: 'no-persistent-storage';
 }
 
 // ── API Request / Response Types ─────────────────────────────────────

@@ -33,6 +33,13 @@ export type {
 export { createRunEngine } from './create-run-engine';
 export { DurableCapabilityUnavailableError } from './durable-capability-unavailable-error';
 export type {
+  DurableEventEnvelope,
+  DurableEventGap,
+  DurableEventOwner,
+  DurableEventOwnerKind,
+  DurableEventPage,
+} from './event-history-types';
+export type {
   AgentRunWorkflowInput,
   AgentRunWorkflowResult,
   CreateRunWorkflowOptions,
