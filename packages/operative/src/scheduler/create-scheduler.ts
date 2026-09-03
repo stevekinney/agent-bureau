@@ -25,7 +25,6 @@ import {
   TaskQueuedEvent,
 } from './events';
 import { createPriorityQueue } from './priority-queue';
-import { sleep } from './sleep';
 import type {
   SchedulerPriority,
   SchedulerRunOptions,
@@ -267,12 +266,20 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
   }
 
   async function waitForWake(timeoutMs: number): Promise<void> {
-    await Promise.race([
-      new Promise<void>((resolve) => {
-        wakeResolver = resolve;
-      }),
-      sleep(timeoutMs, runtime.timers),
-    ]);
+    // Wired directly through `runtime.timers` (not `sleep()`) so the timeout
+    // can be CLEARED when `wakeLoop()` wins the race — otherwise, under
+    // frequent wake-ups, every early wake leaves its timer outstanding until
+    // it eventually fires on its own: unnecessary real-timer churn, and for
+    // a manual runtime, an ever-growing `pendingTimers()` list that skews
+    // any test/tooling inspecting it.
+    let resolveWait: () => void;
+    const waitPromise = new Promise<void>((resolve) => {
+      wakeResolver = resolve;
+      resolveWait = resolve;
+    });
+    const timeoutHandle = runtime.timers.setTimeout(() => resolveWait(), timeoutMs);
+    await waitPromise;
+    runtime.timers.clearTimeout(timeoutHandle);
     wakeResolver = undefined;
   }
 

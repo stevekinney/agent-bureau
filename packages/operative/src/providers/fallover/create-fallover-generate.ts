@@ -152,15 +152,30 @@ function sleep(ms: number, signal: AbortSignal | undefined, timers: RuntimeTimer
       return;
     }
 
-    const timer = timers.setTimeout(resolve, ms);
+    // Guards against a resolve/abort race (the timer firing and the signal
+    // aborting in the same tick) settling the promise twice.
+    let settled = false;
 
-    signal?.addEventListener(
-      'abort',
-      () => {
-        timers.clearTimeout(timer);
-        reject(new DOMException('The operation was aborted', 'AbortError'));
-      },
-      { once: true },
-    );
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      timers.clearTimeout(timer);
+      reject(new DOMException('The operation was aborted', 'AbortError'));
+    };
+
+    const timer = timers.setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      // A normal (non-aborted) resolution must remove its own `abort`
+      // listener — `{ once: true }` only detaches the listener once IT
+      // fires, not once the promise settles some other way. Without this, a
+      // long-lived `signal` reused across many retry sleeps (the exact
+      // caller pattern here) accumulates one listener per completed sleep
+      // for as long as the signal lives.
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+
+    signal?.addEventListener('abort', onAbort, { once: true });
   });
 }
