@@ -46,12 +46,28 @@ function mockGenerate(content = 'Done.'): GenerateFunction {
  */
 async function waitForRunCompletion(bureau: Bureau, runId: string): Promise<void> {
   const maximumAttempts = 400;
+  let status: string | undefined;
+  let reachedTerminalStatus = false;
   for (let attempt = 0; attempt < maximumAttempts; attempt++) {
-    if (bureau.getRun(runId)?.status !== 'running') break;
-    if (attempt === maximumAttempts - 1) {
-      throw new Error(`Run ${runId} did not reach a terminal status`);
+    status = bureau.getRun(runId)?.status;
+    // `undefined` (the run id is not yet, or never, known to this bureau) is
+    // NOT a terminal status — keep polling for it exactly like `'running'`,
+    // rather than treating "not found yet" as "already done" (a false
+    // positive `undefined !== 'running'` would produce).
+    if (status !== undefined && status !== 'running') {
+      reachedTerminalStatus = true;
+      break;
     }
-    await new Promise((resolve) => setTimeout(resolve, 5));
+    if (attempt < maximumAttempts - 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  }
+  if (!reachedTerminalStatus) {
+    throw new Error(
+      status === undefined
+        ? `Run ${runId} was never observed by bureau.getRun`
+        : `Run ${runId} did not reach a terminal status`,
+    );
   }
   for (let i = 0; i < 10; i++) {
     await yieldToPortableEventLoop();
@@ -112,6 +128,37 @@ describe('createBureauTestHarness', () => {
     expect(harness.runtime).toBe(runtime);
     expect(harness.storage).toBe(storage);
     expect(harness.runtime.clock.now()).toBe(Date.parse('2030-01-01T00:00:00.000Z'));
+  });
+
+  it('disposes the storage fixture (and any constructed Bureau) when construction fails, rather than leaking it', async () => {
+    const storage = createMemoryStorageFixture();
+    let disposeCalls = 0;
+    const originalDispose = storage.dispose.bind(storage);
+    storage.dispose = async () => {
+      disposeCalls += 1;
+      await originalDispose();
+    };
+
+    // `sessionInput.sessionBacklogLimit: 0` is rejected synchronously by
+    // createBureau's own construction-time validation (BAD_REQUEST) — the
+    // same invalid-input fixture create-bureau.test.ts's own
+    // "rejects a non-positive-integer sessionBacklogLimit" case uses.
+    // Awaited via an explicit catch (rather than `expect(...).rejects`) so
+    // the disposeCalls assertion below is guaranteed to run only after this
+    // rejection — and this test's own cleanup — have actually settled.
+    const error: unknown = await createBureauTestHarness({
+      agents: {},
+      generate: mockGenerate(),
+      toolbox: createToolbox([]),
+      storage,
+      sessionInput: { sessionBacklogLimit: 0 },
+    }).then(
+      () => undefined,
+      (rejection: unknown) => rejection,
+    );
+
+    expect(error).toBeInstanceOf(Error);
+    expect(disposeCalls).toBe(1);
   });
 
   it('defaults runtime to a freshly constructed ManualRuntimeServices when omitted', async () => {
@@ -271,6 +318,16 @@ describe('createBureauTestHarness', () => {
 
       expect(outcome.decision).toBe('deny');
       expect(harness.bureau.listPendingReviews()).toHaveLength(0);
+    });
+  });
+
+  describe('waitForRunCompletion (this file’s own test helper)', () => {
+    it('keeps polling — never treats "not found yet" as done — and fails with a distinct message when a run id is never observed', async () => {
+      const harness = await harnessWithMemoryStorage();
+
+      expect(waitForRunCompletion(harness.bureau, 'no-such-run')).rejects.toThrow(
+        /never observed/i,
+      );
     });
   });
 

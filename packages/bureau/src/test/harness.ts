@@ -196,9 +196,34 @@ function throwUnsupported(capability: BureauHarnessCapability): never {
 }
 
 /**
+ * Best-effort cleanup for {@link createBureauTestHarness}'s failure path:
+ * disposes `disposable` (a no-op when `undefined` — `bureau` is only ever
+ * assigned once `createBureau` has actually succeeded) and swallows a
+ * disposal failure rather than replacing the ORIGINAL construction error
+ * the caller is about to rethrow.
+ */
+async function disposeQuietly(disposable: { dispose(): Promise<void> } | undefined): Promise<void> {
+  try {
+    await disposable?.dispose();
+  } catch {
+    // Best-effort: the caller rethrows the original construction failure,
+    // not whatever went wrong while cleaning up after it.
+  }
+}
+
+/**
  * Constructs a real `Bureau` over deterministic runtime services and an
  * owned storage fixture, resolving only after `bureau.ready` is `true` and
  * boot recovery has completed.
+ *
+ * On failure — `createBureau` itself rejects, or `bureau.ready` never
+ * settles true — this cleans up whatever it already constructed before
+ * rethrowing: the storage fixture is disposed (releasing an
+ * allocated-but-never-returned sqlite/lmdb path so it can't accumulate
+ * under repeated failing test runs) and, if `createBureau` DID produce a
+ * `Bureau` before the readiness wait failed, that bureau is disposed too.
+ * A caller never receives a partially-constructed harness to clean up
+ * itself.
  */
 export async function createBureauTestHarness<D extends AgentDefinitions = AgentDefinitions>(
   options: BureauTestHarnessOptions<D>,
@@ -206,29 +231,39 @@ export async function createBureauTestHarness<D extends AgentDefinitions = Agent
   const { runtime: providedRuntime, storage, ...rest } = options;
   const runtime = providedRuntime ?? createManualRuntimeServices();
 
-  const bureau = await createBureau<D>({
-    ...(rest as BureauOptions<D>),
-    runtime,
-    storage: storage.configuration,
-  });
+  let bureau: Bureau<D> | undefined;
+  try {
+    bureau = await createBureau<D>({
+      ...(rest as BureauOptions<D>),
+      runtime,
+      storage: storage.configuration,
+    });
 
-  await waitForBureauReady(bureau as unknown as Bureau<AgentDefinitions>);
+    await waitForBureauReady(bureau as unknown as Bureau<AgentDefinitions>);
+  } catch (error) {
+    await disposeQuietly(bureau);
+    await disposeQuietly(storage);
+    throw error;
+  }
+  // `bureau` is definitely assigned here — the try block above either
+  // assigns it before any throw, or the catch block rethrows first.
+  const readyBureau = bureau;
 
   const harness: BureauTestHarness<D> = {
-    bureau,
+    bureau: readyBureau,
     runtime,
     storage,
 
     startRun(name, input, runOptions) {
-      return bureau.run(name, input, runOptions);
+      return readyBureau.run(name, input, runOptions);
     },
 
     startSession(request) {
-      return bureau.createRun(request);
+      return readyBureau.createRun(request);
     },
 
     startChild(parentRunId, agentName, input, dispatchOptions) {
-      const agent = bureau.agents.find(agentName);
+      const agent = readyBureau.agents.find(agentName);
       if (!agent) {
         throw new Error(`Bureau test harness: unknown agent "${agentName}" for startChild`);
       }
@@ -240,23 +275,23 @@ export async function createBureauTestHarness<D extends AgentDefinitions = Agent
     },
 
     submitSchedulerTask(request) {
-      return bureau.submitSchedulerTask(request);
+      return readyBureau.submitSchedulerTask(request);
     },
 
     createRecurringSchedule(definition) {
-      return bureau.createSchedule(definition);
+      return readyBureau.createSchedule(definition);
     },
 
     resolveReview(input) {
-      return bureau.resolveReview(input);
+      return readyBureau.resolveReview(input);
     },
 
     deliverSignal(sessionId, name, payload) {
-      return bureau.signalSession(sessionId, name, payload);
+      return readyBureau.signalSession(sessionId, name, payload);
     },
 
     reattachDurable(runId) {
-      return bureau.getDurableRun(runId);
+      return readyBureau.getDurableRun(runId);
     },
 
     supports() {
