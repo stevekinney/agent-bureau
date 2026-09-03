@@ -32,6 +32,17 @@ export type {
 export { createEventRecorder } from './event-recorder';
 export type { PromptInjectionFixtureCase } from './prompt-injection-fixtures';
 export { PROMPT_INJECTION_FIXTURES } from './prompt-injection-fixtures';
+export type {
+  ClosableRun,
+  DetachedResource,
+  LeakedResource,
+  LeakedResourceDiscoveredVia,
+  LeakedResourceKind,
+  QuiescenceReport,
+  RegisterableResource,
+  ResourceScope,
+} from './resource-scope';
+export { createResourceScope, QuiescenceError } from './resource-scope';
 export { createStepwiseBlockingGenerate } from './stepwise-generate';
 export { createTestStore } from './store';
 export { type RunLookup, waitForCondition, waitForRunState } from './wait';
