@@ -1,6 +1,6 @@
 import { describe, expect, it, mock } from 'bun:test';
 
-import type { RunDetailResponse } from '../../routes/runs';
+import { EMPTY_LIVENESS_SNAPSHOT, type RunDetailResponse } from '../../routes/runs';
 import type { GatewayClientEnvironment } from '../client-environment';
 import { createRunDetailStore } from './use-run-detail.svelte.ts';
 
@@ -20,6 +20,7 @@ function makeRunDetail(overrides: Partial<RunDetailResponse> = {}): RunDetailRes
     events: [],
     stepDetails: [],
     latestSnapshot: undefined,
+    liveness: EMPTY_LIVENESS_SNAPSHOT,
     timeline: [],
     ...overrides,
   };

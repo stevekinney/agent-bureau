@@ -3,7 +3,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import type { GenerateFunction, SessionStore, StreamEventMap } from '@lostgradient/operative';
-import { createAgentSession, GuardrailTripwireError, stopWhen } from '@lostgradient/operative';
+import {
+  createAgentSession,
+  GuardrailTripwireError,
+  ScheduleCompletedEvent,
+  ScheduleFailedEvent,
+  stopWhen,
+} from '@lostgradient/operative';
 import {
   createDurableActiveRun,
   type DurableRunDeps,
@@ -11,7 +17,14 @@ import {
   startDurableRunResult,
   type StepRecord,
 } from '@lostgradient/operative/durable';
-import { createCheckpoint, encode, serializeCheckpoint } from '@lostgradient/weft';
+import {
+  createCheckpoint,
+  encode,
+  serializeCheckpoint,
+  WorkflowCancelledEvent,
+  WorkflowCompletedEvent,
+  WorkflowFailedEvent,
+} from '@lostgradient/weft';
 import { KEYS, MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createTool, createToolbox, type ToolRequestContext } from 'armorer';
@@ -1409,6 +1422,239 @@ describe('createRuntimeComposition durable execution', () => {
     } finally {
       runtime.durable?.engine[Symbol.dispose]?.();
     }
+  });
+
+  describe('AB-223: schedule-fire terminal events', () => {
+    it('dispatches ScheduleCompletedEvent when a correlated fire finishes with a non-failure finishReason', async () => {
+      const runtime = await createRuntimeComposition({
+        generate: async () => ({ content: 'ok', toolCalls: [] }),
+        storage: { type: 'memory' },
+        durableExecution: true,
+      });
+
+      try {
+        // Populate the scheduleId correlation the same way a real fire does —
+        // through buildScheduledRunServices — without needing a real weft
+        // schedule timer tick.
+        const resolution = await getRuntimeCompositionTestingSeams(
+          runtime,
+        ).buildScheduledRunServices(
+          {
+            workflowId: 'fire-completed-1',
+            workflowType: 'agentRun',
+            input: {
+              agentName: 'researcher',
+              input: 'nightly digest',
+              scheduleId: 'nightly-digest',
+            },
+            schedule: { id: 'nightly-digest' },
+          },
+          runtime.sessionStore!,
+        );
+        expect(resolution.status).toBe('available');
+
+        const completed: ScheduleCompletedEvent[] = [];
+        const failed: ScheduleFailedEvent[] = [];
+        runtime.scheduleFireEvents.addEventListener(ScheduleCompletedEvent.type, (event) => {
+          completed.push(event);
+        });
+        runtime.scheduleFireEvents.addEventListener(ScheduleFailedEvent.type, (event) => {
+          failed.push(event);
+        });
+
+        runtime.durable!.engine.dispatchEvent(
+          new WorkflowCompletedEvent('fire-completed-1', { finishReason: 'stop-condition' }, 10),
+        );
+
+        expect(completed).toHaveLength(1);
+        expect(completed[0]!.scheduleId).toBe('nightly-digest');
+        expect(completed[0]!.runId).toBe('fire-completed-1');
+        expect(failed).toHaveLength(0);
+
+        // Correlation entry is deleted on dispatch — a second terminal event
+        // for the same workflowId (should never happen, but proves the
+        // cleanup) is silently ignored rather than double-dispatching.
+        runtime.durable!.engine.dispatchEvent(
+          new WorkflowCompletedEvent('fire-completed-1', { finishReason: 'stop-condition' }, 10),
+        );
+        expect(completed).toHaveLength(1);
+      } finally {
+        runtime.durable?.engine[Symbol.dispose]?.();
+      }
+    });
+
+    it('dispatches ScheduleFailedEvent when a correlated fire completes with a failure finishReason', async () => {
+      const runtime = await createRuntimeComposition({
+        generate: async () => ({ content: 'ok', toolCalls: [] }),
+        storage: { type: 'memory' },
+        durableExecution: true,
+      });
+
+      try {
+        const resolution = await getRuntimeCompositionTestingSeams(
+          runtime,
+        ).buildScheduledRunServices(
+          {
+            workflowId: 'fire-failed-1',
+            workflowType: 'agentRun',
+            input: {
+              agentName: 'researcher',
+              input: 'nightly digest',
+              scheduleId: 'nightly-digest',
+            },
+            schedule: { id: 'nightly-digest' },
+          },
+          runtime.sessionStore!,
+        );
+        expect(resolution.status).toBe('available');
+
+        const completed: ScheduleCompletedEvent[] = [];
+        const failed: ScheduleFailedEvent[] = [];
+        runtime.scheduleFireEvents.addEventListener(ScheduleCompletedEvent.type, (event) => {
+          completed.push(event);
+        });
+        runtime.scheduleFireEvents.addEventListener(ScheduleFailedEvent.type, (event) => {
+          failed.push(event);
+        });
+
+        // A "completed" (non-throwing) workflow whose RunResult.finishReason
+        // is itself a failure classification (isRunFailureFinishReason) is
+        // still schedule.failed, not schedule.completed.
+        runtime.durable!.engine.dispatchEvent(
+          new WorkflowCompletedEvent('fire-failed-1', { finishReason: 'error' }, 10),
+        );
+
+        expect(failed).toHaveLength(1);
+        expect(failed[0]!.scheduleId).toBe('nightly-digest');
+        expect(failed[0]!.runId).toBe('fire-failed-1');
+        expect(completed).toHaveLength(0);
+      } finally {
+        runtime.durable?.engine[Symbol.dispose]?.();
+      }
+    });
+
+    it('dispatches ScheduleFailedEvent when a correlated fire terminates with an unhandled workflow error', async () => {
+      const runtime = await createRuntimeComposition({
+        generate: async () => ({ content: 'ok', toolCalls: [] }),
+        storage: { type: 'memory' },
+        durableExecution: true,
+      });
+
+      try {
+        const resolution = await getRuntimeCompositionTestingSeams(
+          runtime,
+        ).buildScheduledRunServices(
+          {
+            workflowId: 'fire-thrown-1',
+            workflowType: 'agentRun',
+            input: {
+              agentName: 'researcher',
+              input: 'nightly digest',
+              scheduleId: 'nightly-digest',
+            },
+            schedule: { id: 'nightly-digest' },
+          },
+          runtime.sessionStore!,
+        );
+        expect(resolution.status).toBe('available');
+
+        const failed: ScheduleFailedEvent[] = [];
+        runtime.scheduleFireEvents.addEventListener(ScheduleFailedEvent.type, (event) => {
+          failed.push(event);
+        });
+
+        runtime.durable!.engine.dispatchEvent(
+          new WorkflowFailedEvent('fire-thrown-1', new Error('boom')),
+        );
+
+        expect(failed).toHaveLength(1);
+        expect(failed[0]!.scheduleId).toBe('nightly-digest');
+        expect(failed[0]!.runId).toBe('fire-thrown-1');
+      } finally {
+        runtime.durable?.engine[Symbol.dispose]?.();
+      }
+    });
+
+    it('ignores a terminal event for a workflow with no correlated scheduleId (an ordinary, non-scheduled run)', async () => {
+      const runtime = await createRuntimeComposition({
+        generate: async () => ({ content: 'ok', toolCalls: [] }),
+        storage: { type: 'memory' },
+        durableExecution: true,
+      });
+
+      try {
+        const completed: ScheduleCompletedEvent[] = [];
+        const failed: ScheduleFailedEvent[] = [];
+        runtime.scheduleFireEvents.addEventListener(ScheduleCompletedEvent.type, (event) => {
+          completed.push(event);
+        });
+        runtime.scheduleFireEvents.addEventListener(ScheduleFailedEvent.type, (event) => {
+          failed.push(event);
+        });
+
+        runtime.durable!.engine.dispatchEvent(
+          new WorkflowCompletedEvent('ordinary-run', { finishReason: 'stop-condition' }, 10),
+        );
+        runtime.durable!.engine.dispatchEvent(
+          new WorkflowFailedEvent('ordinary-run', new Error('x')),
+        );
+
+        expect(completed).toHaveLength(0);
+        expect(failed).toHaveLength(0);
+      } finally {
+        runtime.durable?.engine[Symbol.dispose]?.();
+      }
+    });
+
+    it('drops the scheduleId correlation entry when the fire is cancelled, without dispatching a schedule event', async () => {
+      const runtime = await createRuntimeComposition({
+        generate: async () => ({ content: 'ok', toolCalls: [] }),
+        storage: { type: 'memory' },
+        durableExecution: true,
+      });
+
+      try {
+        const resolution = await getRuntimeCompositionTestingSeams(
+          runtime,
+        ).buildScheduledRunServices(
+          {
+            workflowId: 'fire-cancelled-1',
+            workflowType: 'agentRun',
+            input: {
+              agentName: 'researcher',
+              input: 'nightly digest',
+              scheduleId: 'nightly-digest',
+            },
+            schedule: { id: 'nightly-digest' },
+          },
+          runtime.sessionStore!,
+        );
+        expect(resolution.status).toBe('available');
+
+        const completed: ScheduleCompletedEvent[] = [];
+        const failed: ScheduleFailedEvent[] = [];
+        runtime.scheduleFireEvents.addEventListener(ScheduleCompletedEvent.type, (event) => {
+          completed.push(event);
+        });
+        runtime.scheduleFireEvents.addEventListener(ScheduleFailedEvent.type, (event) => {
+          failed.push(event);
+        });
+
+        runtime.durable!.engine.dispatchEvent(new WorkflowCancelledEvent('fire-cancelled-1'));
+        // Cancellation clears the correlation entry without dispatching a
+        // schedule.* event (out of this issue's scope) — proven by a
+        // subsequent terminal event for the same workflowId now being
+        // ignored, exactly like an uncorrelated ordinary run.
+        runtime.durable!.engine.dispatchEvent(
+          new WorkflowCompletedEvent('fire-cancelled-1', { finishReason: 'stop-condition' }, 10),
+        );
+
+        expect(completed).toHaveLength(0);
+        expect(failed).toHaveLength(0);
+      } finally {
+        runtime.durable?.engine[Symbol.dispose]?.();
+      }
+    });
   });
 
   it('binds service request authority when creating a scheduler task runtime', async () => {

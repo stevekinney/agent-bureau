@@ -84,7 +84,22 @@ export type {
   ModelCatalog,
 } from './model-catalog.ts';
 export { createModelCatalog } from './model-catalog.ts';
+export {
+  GENERAL_PROJECTION_REDACTED_KEYS,
+  projectCatalog,
+  projectDescriptor,
+} from './model-catalog-projection.ts';
 export { createOpenAIProvider, createOpenAIProviderStream } from './openai.ts';
+export type {
+  BureauInvariants,
+  ComposePolicyInput,
+  DelegatedAuthority,
+  DeploymentInvariants,
+  PolicyCandidate,
+  SelectionExclusionCode,
+  UserModelConfiguration,
+} from './policy.ts';
+export { composePolicy } from './policy.ts';
 export type {
   ComplexitySignals,
   ComplexityStrategyOptions,

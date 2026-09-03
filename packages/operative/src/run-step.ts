@@ -625,7 +625,19 @@ export async function runStep(
     if (
       steeringGate &&
       state.configVersion > 0 &&
-      state.configVersion !== runState.lastAppliedConfigVersion &&
+      // Strictly greater, not merely unequal (review finding, PR #430 —
+      // Codex P2, "Do not seed a run above its visible steering version"):
+      // `RunState.lastAppliedConfigVersion` is seeded from the gate's
+      // SESSION-WIDE `getAppliedFloor()` (`executeLoop`/`run-workflow.ts`'s
+      // `initialCursor`), which can already exceed a brand-new run's own
+      // VISIBLE `configVersion` when a differently-scoped command (a pause
+      // bound to a different, earlier run) advanced the floor past this
+      // run's own identity-only baseline. An unequal-only comparison would
+      // then re-fire `steering.applied` for that lower, already-applied
+      // version the moment this run's boundary observes it — the cursor
+      // must only ever advance, never treat a state genuinely BELOW its
+      // current seed as new.
+      state.configVersion > runState.lastAppliedConfigVersion &&
       deps.runId !== undefined &&
       // Advancing the dedupe cursor must be conditioned on an emitter
       // actually being present to dispatch to, exactly like `deps.runId`

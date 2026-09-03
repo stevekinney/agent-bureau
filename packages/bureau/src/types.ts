@@ -22,6 +22,7 @@ import type {
   SessionInputAdmissionOutcome,
   SessionInputAdmissionRequest,
 } from '@lostgradient/operative/durable';
+import type { LivenessSnapshot } from '@lostgradient/operative/liveness';
 import type { Store } from '@lostgradient/operative/store';
 import type {
   HistoryPolicy,
@@ -64,6 +65,7 @@ import type { AuditTrail } from './audit-trail';
 import type { BureauEventMap } from './events';
 import type { ModelCatalogService } from './model-catalog-refresh';
 import type { OnlineEvalSampler, OnlineEvalSamplerOptions } from './online-evals';
+import type { SteeringCommandAdmissionOutcome, SteeringCommandRequest } from './steering';
 import type { WebhookNotifier, WebhookNotifierOptions } from './webhook-notifier';
 
 // ── Provider Configuration ───────────────────────────────────────────
@@ -371,6 +373,23 @@ export interface BureauOptions<D extends AgentDefinitions = AgentDefinitions> {
    * is opt-in, never an ambient grant.
    */
   humanInput?: boolean;
+  /**
+   * AB-201 — opt into operative's `scheduleWakeup` self-scheduling tool for
+   * durable runs (`createRun` only; has no effect without a durable engine
+   * composed), mirroring {@link BureauOptions.humanInput}'s wiring exactly.
+   * When `true`, bureau adds a `scheduleWakeup` tool to each durable run's
+   * toolbox, bound to that run's real `ctx.services` object so a call
+   * genuinely parks the workflow via `ctx.sleep` (AB-41's decision record)
+   * rather than merely returning a success-shaped no-op. Omit (the default,
+   * or `false`) to leave the toolbox as configured — this tool is opt-in,
+   * never an ambient grant, and is simply absent from the toolbox rather than
+   * wired to throw when disabled (mirroring `requestHumanInput`'s own
+   * omission behavior). A standalone `scheduleWakeup` tool built outside
+   * Bureau's composition with `durable: false` throws
+   * `DurableCapabilityUnavailableError` instead (AB-41 / AB-43), unchanged by
+   * this option.
+   */
+  wakeup?: boolean;
   stopWhen?: StopCondition | StopCondition[];
   sessionPersistenceRetryDelayMilliseconds?: number;
   sessionPersistenceSleep?: (milliseconds: number) => Promise<void>;
@@ -780,6 +799,26 @@ export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
   getRun(id: string): RunDetail | undefined;
 
   /**
+   * Subscribes to live liveness updates for a run (AB-88/AB-214),
+   * delegating to the underlying `ActiveRun`'s `subscribeSnapshot`. Delivers
+   * the current snapshot synchronously before returning, then a new
+   * snapshot on every revision change; already-terminal work delivers the
+   * terminal snapshot once. A caller with only `getRun(id)` sees the
+   * liveness observed at that call; a caller wanting live updates uses this
+   * instead of polling `getRun`.
+   *
+   * Throws when `id` names no known run — matching `abortRun`'s unknown-id
+   * behavior rather than `getRun`'s `undefined`-returning one, because there
+   * is no snapshot value to hand back synchronously to `observer` for an id
+   * this bureau has never registered.
+   */
+  subscribeRunSnapshot(
+    runId: string,
+    observer: (snapshot: LivenessSnapshot) => void,
+    options?: { signal?: AbortSignal },
+  ): Subscription;
+
+  /**
    * Synchronously returns the versioned, JSON-serializable {@link RunReport}
    * (AB-96) for a run — a plain in-memory read, no I/O, no promise.
    *
@@ -886,6 +925,44 @@ export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
     sessionId: string,
     request: SessionInputAdmissionRequest,
   ): Promise<SessionInputAdmissionOutcome>;
+
+  /**
+   * AB-67/AB-199 — admit a `pause` or `resume` steering command as a sixth
+   * session verb, scoped to an in-memory (process-local) session. Reads
+   * authority and terminal status through the same mechanism
+   * `submitSessionInput` uses ({@link isSessionAuthorityAuthorized},
+   * {@link isSessionRunTerminal}): an unauthorized caller or unknown
+   * `sessionId` returns `{ outcome: 'not-found' }`; an authorized caller
+   * naming an already-terminal session returns `{ outcome: 'session-terminal',
+   * sessionId }`.
+   *
+   * Every target other than `pause`/`resume` returns `{ outcome:
+   * 'unsupported-capability', reason: 'selector-unavailable' }` — `ab-67-
+   * bureau-b` owns admitting them (`policyRef` resolution through AB-66's
+   * selector, `override`-against-catalog validation). A `pause`/`resume`
+   * request against a session with `runtime.durable` configured likewise
+   * returns `unsupported-capability`, with `reason:
+   * 'durable-steering-unavailable'`: this method never holds process-local
+   * pause/resume state a restart would lose.
+   *
+   * A `pause` against an authorized, non-terminal, in-memory session is
+   * accepted, increments the session's `configVersion` by exactly one, and
+   * is idempotent against a second `pause` while the first is still
+   * `accepted`/`applied` (no second increment). A `resume` against a session
+   * that is not currently paused is accepted as a no-op, matching the
+   * idempotent-abort precedent at
+   * `documentation/operative-type-safe-api.md:765`. An `accepted`
+   * pause/resume transitions to `failed` with `SteeringCommandFailure.reason
+   * = 'run-terminal'` if the targeted run aborts or completes before its
+   * `runStep` boundary is reached. An exact retry of the same
+   * `(principal, id)` with an identical `requestedValue` replays the
+   * original command's current state; a same-`id`, different-`requestedValue`
+   * reuse returns a typed conflict.
+   */
+  submitSteeringCommand(
+    sessionId: string,
+    request: SteeringCommandRequest,
+  ): Promise<SteeringCommandAdmissionOutcome>;
 
   /**
    * Synchronous, constant capability discovery for the three session verbs
@@ -1165,6 +1242,13 @@ export interface RunDetail extends RunSummary {
   events: RunEventRecord[];
   stepDetails: RunStepDetail[];
   latestSnapshot: ConversationSnapshot | undefined;
+  /**
+   * The run's current liveness snapshot (AB-88/AB-214), plain-data and
+   * JSON-safe. `getRun(id)` carries the value observed at call time; a
+   * caller wanting live updates calls `bureau.subscribeRunSnapshot(id, ...)`
+   * instead of polling `getRun`.
+   */
+  liveness: LivenessSnapshot;
 }
 
 export interface CreateRunRequest {

@@ -1,4 +1,5 @@
 import { createAgent } from '@lostgradient/operative';
+import { createModelCatalog, withBackendDescriptors } from '@lostgradient/operative/providers';
 import { createMockGenerate } from '@lostgradient/operative/test';
 import { describe, expect, it } from 'bun:test';
 
@@ -129,5 +130,135 @@ describe('createAgentCatalog', () => {
     expect(catalog.has('writer')).toBe(true);
     expect(catalog.has('renamed')).toBe(false);
     expect(catalog.get('writer')).toBe(writer);
+  });
+});
+
+describe('createAgentCatalog: generationProfile (AB-64/AB-247/mod-02e)', () => {
+  const FIXED_NOW = '2026-09-02T12:00:00.000Z';
+  const seedDescriptors = createModelCatalog({ now: () => FIXED_NOW }).descriptors;
+  function requireDescriptor(provider: (typeof seedDescriptors)[number]['provider']) {
+    const descriptor = seedDescriptors.find((d) => d.provider === provider);
+    if (!descriptor) throw new Error(`expected at least one seed descriptor for ${provider}`);
+    return descriptor;
+  }
+
+  const anthropicDescriptor = requireDescriptor('anthropic');
+  const openAIDescriptor = requireDescriptor('openai');
+  const geminiDescriptor = requireDescriptor('gemini');
+
+  function fixedAgent(name: string) {
+    return createAgent({
+      generate: withBackendDescriptors(createMockGenerate([]), [anthropicDescriptor]),
+      name,
+    });
+  }
+
+  function routedAgent(name: string) {
+    return createAgent({
+      generate: withBackendDescriptors(createMockGenerate([]), [
+        anthropicDescriptor,
+        openAIDescriptor,
+      ]),
+      name,
+    });
+  }
+
+  function selectableAgent(name: string) {
+    return createAgent({
+      generate: createMockGenerate([]),
+      name,
+      allowedCandidates: [{ provider: geminiDescriptor.provider, model: geminiDescriptor.model }],
+    });
+  }
+
+  function opaqueAgent(name: string) {
+    return createAgent({ generate: createMockGenerate([]), name });
+  }
+
+  it('exposes the general projection of each mode, stamping projection: general and dropping pricing', () => {
+    const catalog = createAgentCatalog({
+      fixed: fixedAgent('fixed'),
+      routed: routedAgent('routed'),
+      selectable: selectableAgent('selectable'),
+      opaque: opaqueAgent('opaque'),
+    });
+
+    const fixed = catalog.generationProfile('fixed');
+    const routed = catalog.generationProfile('routed');
+    const selectable = catalog.generationProfile('selectable');
+    const opaque = catalog.generationProfile('opaque');
+
+    expect(fixed?.mode).toBe('fixed');
+    expect(routed?.mode).toBe('routed');
+    expect(selectable?.mode).toBe('selectable');
+    expect(opaque?.mode).toBe('opaque');
+
+    for (const profile of [fixed, routed, selectable, opaque]) {
+      expect(profile).toBeDefined();
+      expect(profile?.projection).toBe('general');
+      for (const descriptor of profile?.descriptors ?? []) {
+        expect(Object.prototype.hasOwnProperty.call(descriptor, 'pricing')).toBe(false);
+      }
+    }
+
+    // Descriptor counts survive the catalog read unchanged.
+    expect(fixed?.descriptors.length).toBe(1);
+    expect(routed?.descriptors.length).toBe(2);
+    expect(opaque?.descriptors.length).toBe(0);
+  });
+
+  it('reports selector: unavailable for every mode when selectorAvailable is omitted (default false)', () => {
+    const catalog = createAgentCatalog({
+      fixed: fixedAgent('fixed'),
+      routed: routedAgent('routed'),
+      selectable: selectableAgent('selectable'),
+      opaque: opaqueAgent('opaque'),
+    });
+
+    expect(catalog.generationProfile('fixed')?.selector).toBe('unavailable');
+    expect(catalog.generationProfile('routed')?.selector).toBe('unavailable');
+    expect(catalog.generationProfile('selectable')?.selector).toBe('unavailable');
+    expect(catalog.generationProfile('opaque')?.selector).toBe('unavailable');
+  });
+
+  it('selectorAvailable: true flips only the selectable agent’s selector to available', () => {
+    const catalog = createAgentCatalog(
+      {
+        fixed: fixedAgent('fixed'),
+        routed: routedAgent('routed'),
+        selectable: selectableAgent('selectable'),
+        opaque: opaqueAgent('opaque'),
+      },
+      { selectorAvailable: true },
+    );
+
+    expect(catalog.generationProfile('fixed')?.selector).toBe('unavailable');
+    expect(catalog.generationProfile('routed')?.selector).toBe('unavailable');
+    expect(catalog.generationProfile('selectable')?.selector).toBe('available');
+    expect(catalog.generationProfile('opaque')?.selector).toBe('unavailable');
+  });
+
+  it('returns undefined for a name the catalog does not hold', () => {
+    const catalog = createAgentCatalog({ fixed: fixedAgent('fixed') });
+
+    expect(catalog.generationProfile('ghost')).toBeUndefined();
+  });
+
+  it('caches the profile: repeated reads for the same name return the identical object by reference', () => {
+    const catalog = createAgentCatalog({ fixed: fixedAgent('fixed') });
+
+    const first = catalog.generationProfile('fixed');
+    const second = catalog.generationProfile('fixed');
+
+    expect(first).toBe(second);
+  });
+
+  it('returns a frozen profile', () => {
+    const catalog = createAgentCatalog({ fixed: fixedAgent('fixed') });
+
+    const profile = catalog.generationProfile('fixed');
+    expect(profile).toBeDefined();
+    expect(Object.isFrozen(profile)).toBe(true);
+    expect(Object.isFrozen(profile?.descriptors)).toBe(true);
   });
 });

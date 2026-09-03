@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'bun:test';
 import { Conversation, createConversationHistory } from 'conversationalist';
 
-import { assembleRunTimeline, type RunDetailResponse } from '../routes/runs';
+import {
+  assembleRunTimeline,
+  EMPTY_LIVENESS_SNAPSHOT,
+  type RunDetailResponse,
+} from '../routes/runs';
 import type { UsageResponse } from '../routes/usage';
 import type { PendingReview } from '../types';
 import { createBrowserClientEnvironment } from '../ui/client-environment';
@@ -257,6 +261,7 @@ describe('renderPage with a populated run-detail page', () => {
     latestSnapshot: new Conversation(createConversationHistory({ id: 'conversation-1' }), {
       now: () => '2026-01-01T00:00:00.000Z',
     }).snapshot(),
+    liveness: EMPTY_LIVENESS_SNAPSHOT,
     events: populatedRunEvents,
     timeline: assembleRunTimeline(populatedRunEvents),
   };

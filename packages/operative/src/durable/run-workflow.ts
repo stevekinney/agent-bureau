@@ -315,13 +315,20 @@ function tripwireDetailFrom(error: unknown): AgentRunWorkflowResult['tripwire'] 
  * versioning). `version` is `undefined` when the engine was built without
  * {@link CreateRunWorkflowOptions.version}.
  */
-function initialCursor(version: string | undefined): RunCursor {
+/**
+ * `initialAppliedConfigVersion` seeds `lastAppliedConfigVersion` from the
+ * run's `SteeringGate.getAppliedFloor()` (AB-199 cross-run dedupe), mirroring
+ * `loop.ts`'s `createRunState()` seed. Defaults to 0 — a run with no
+ * steering dependency, or replay reconstructing this same value again, is
+ * unaffected.
+ */
+function initialCursor(version: string | undefined, initialAppliedConfigVersion = 0): RunCursor {
   return {
     step: 0,
     totalUsage: { prompt: 0, completion: 0, total: 0 },
     lastContent: '',
     schemaAttempts: 0,
-    lastAppliedConfigVersion: 0,
+    lastAppliedConfigVersion: initialAppliedConfigVersion,
     ...(version !== undefined ? { workflowVersion: version } : {}),
   };
 }
@@ -429,7 +436,10 @@ export function createRunWorkflow(
         // instance. The checkpoint-store writes below exist only so the ActiveRun
         // adapter can reconstruct the RunResult post-completion; they are not the
         // workflow's own resume mechanism.
-        let cursor: RunCursor = initialCursor(workflowVersion);
+        let cursor: RunCursor = initialCursor(
+          workflowVersion,
+          runDepsFrom(ctx.services).options.steering?.getAppliedFloor?.() ?? 0,
+        );
 
         // Seed the conversation on the first run from the run's options + prompt,
         // then persist it so the adapter and any external reader see the transcript.
