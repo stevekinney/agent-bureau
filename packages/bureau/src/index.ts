@@ -49,6 +49,20 @@ export {
 export type { BureauEventMap } from './events';
 export { ActionEvent, BureauDisposedEvent, RunRegisteredEvent, RunRemovedEvent } from './events';
 export type {
+  LivenessSnapshotEnvelope,
+  TaskDiagnosticsFilter,
+  TaskDiagnosticsResult,
+  WeftLivenessSource,
+  WorkerDiagnosticsResult,
+} from './liveness-projection';
+export {
+  buildTaskDiagnosticsInput,
+  projectEngineLeaseSnapshot,
+  projectStreamLivenessSnapshot,
+  projectTaskLivenessSnapshot,
+  projectWorkerLivenessSnapshot,
+} from './liveness-projection';
+export type {
   CatalogDescriptorSource,
   CatalogRefreshCleanupAcknowledgement,
   CatalogRefreshHandle,
@@ -63,6 +77,13 @@ export type {
   SubscribeSnapshotOptions,
 } from './model-catalog-refresh';
 export { createModelCatalogService } from './model-catalog-refresh';
+export type {
+  BureauModelPolicyOptions,
+  CreateModelPolicyPlannerOptions,
+  ModelPolicyPlanner,
+  PlanSelectionRequest,
+} from './model-policy';
+export { createModelPolicyPlanner } from './model-policy';
 export type {
   EvalScore,
   OnlineEvalJudge,

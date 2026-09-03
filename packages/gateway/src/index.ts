@@ -8,5 +8,6 @@ export type {
   GatewayShutdownOptions,
   GatewayShutdownReport,
   HealthResponse,
+  ReadyResponse,
 } from './types';
 export { DEFAULT_PORT } from './types';

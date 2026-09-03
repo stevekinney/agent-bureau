@@ -53,6 +53,13 @@ export {
   isScheduledAgentRunInput,
 } from './schedule-agent';
 export { createStorageActivities } from './storage-activities';
+export type { ToolCallLivenessWatchdog, ToolCallProgressUpdate } from './tool-activity-liveness';
+export {
+  createToolCallLivenessWatchdog,
+  recordToolCallProgress,
+  selectToolCallClockSource,
+  selectToolCallStallPolicy,
+} from './tool-activity-liveness';
 export type {
   DurableRunDeps,
   PendingWakeup,

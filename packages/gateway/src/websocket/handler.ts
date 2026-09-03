@@ -59,6 +59,10 @@ export function createWebSocketHandler(options: WebSocketHandlerOptions): WebSoc
         break;
       }
       case 'ping': {
+        // AB-219: the existing pong response itself is unchanged; this only
+        // feeds the application-level connection watchdog the fact that
+        // the transport-level keepalive fired.
+        options.broker.recordTransportKeepalive(ws);
         const response: ServerFrame = { type: 'pong' };
         ws.send(JSON.stringify(response));
         break;

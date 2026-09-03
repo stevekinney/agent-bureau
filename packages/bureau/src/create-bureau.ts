@@ -101,6 +101,7 @@ import {
   RunRemovedEvent,
 } from './events';
 import { createModelCatalogService } from './model-catalog-refresh';
+import { createModelPolicyPlanner } from './model-policy';
 import { createOnlineEvalSampler, type OnlineEvalSampler } from './online-evals';
 import {
   buildPartialRunReport,
@@ -1291,14 +1292,31 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   runtime.scheduleFireEvents.addEventListener(ScheduleFailedEvent.type, (event) => {
     emitter.dispatch(new ScheduleFailedEvent(event.scheduleId, event.runId));
   });
+  // AB-246 — the model-catalog refresh service. Independent of `runtime`.
+  // When the caller doesn't supply one, the default `descriptorSource`
+  // re-derives `@lostgradient/operative/providers`'s static seed — this is
+  // the seam a future live provider probe attaches to (out of scope here).
+  //
+  // Constructed BEFORE `agentCatalog` below: `selectorAvailable: true`
+  // (AB-250/mod-03c) needs no catalog dependency itself, but ordering the
+  // catalog first keeps every model-policy-related construction together.
+  const modelCatalog =
+    options.modelCatalog ??
+    createModelCatalogService({
+      seed: createModelCatalog(),
+      descriptorSource: () => Promise.resolve(createModelCatalog().descriptors),
+      now: () => new Date().toISOString(),
+      newRefreshId: () => `catalog-refresh-${crypto.randomUUID()}`,
+    });
   // AB-15/AB-22: the typed agent catalog — a plain literal map, fixed for
   // the bureau's lifetime, dispatched by name through `bureau.run`.
   // Independent of `runtime` (bureau-level generate/toolbox/provider
   // composition, still used by `createRun`).
-  // `selectorAvailable: false` — no selector is wired yet (AB-66); mod-03c
-  // flips this to `true` when `planSelection` lands, so the transition has
-  // one named mechanism in one named file (AB-247/mod-02e).
-  const agentCatalog = createAgentCatalog(agentsSnapshot, { selectorAvailable: false });
+  // `selectorAvailable: true` (AB-250/mod-03c) — `planSelection` below is
+  // now wired, so a `selectable` agent's catalog-read profile reports
+  // `selector: 'available'` (AB-247/mod-02e's one named mechanism for this
+  // transition).
+  const agentCatalog = createAgentCatalog(agentsSnapshot, { selectorAvailable: true });
   // AB-240: wire boot recovery's catalog branch NOW that the catalog exists —
   // `runtime` (built above, before this catalog) deliberately knows nothing
   // about it (see `RuntimeCompositionOptions`'s doc comment), so this is the
@@ -1337,18 +1355,14 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       return { status: 'resolver-failed', error };
     }
   });
-  // AB-246 — the model-catalog refresh service. Independent of `runtime`.
-  // When the caller doesn't supply one, the default `descriptorSource`
-  // re-derives `@lostgradient/operative/providers`'s static seed — this is
-  // the seam a future live provider probe attaches to (out of scope here).
-  const modelCatalog =
-    options.modelCatalog ??
-    createModelCatalogService({
-      seed: createModelCatalog(),
-      descriptorSource: () => Promise.resolve(createModelCatalog().descriptors),
-      now: () => new Date().toISOString(),
-      newRefreshId: () => `catalog-refresh-${crypto.randomUUID()}`,
-    });
+  // AB-64/AB-250 — Bureau's selection-planning surface: `bureau.planSelection`
+  // and the `SelectionGate` factory `RunOptions.selection` is built from.
+  // Side-effect-free — see `model-policy.ts`'s module doc comment.
+  const modelPolicyPlanner = createModelPolicyPlanner({
+    agents: agentsSnapshot,
+    modelCatalog,
+    ...(options.modelPolicy === undefined ? {} : { modelPolicy: options.modelPolicy }),
+  });
   // AB-13 — declarative flow control (concurrency/rate-limit/singleton). One
   // controller instance shared across BOTH `createRun` (API-triggered) and
   // `submitSchedulerTask` (scheduler-originated), so a per-agent concurrency
@@ -5323,6 +5337,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     kv: runtime.kv,
     agents: agentCatalog,
     modelCatalog,
+    planSelection: (request) => modelPolicyPlanner.planSelection(request),
     // `runAgent`'s runtime signature is deliberately widened (`string`,
     // `AgentRun<unknown, boolean>`) — it looks the agent up by a plain
     // runtime string via `agentCatalog.find`, the same widening

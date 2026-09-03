@@ -4308,6 +4308,79 @@ describe('createBureau', () => {
   });
 });
 
+describe('createBureau: AB-64/AB-250 selection planning wiring', () => {
+  it('flips selectorAvailable to true so a selectable Agent’s catalog-read profile reports selector: available', async () => {
+    const seed = createModelCatalog();
+    const geminiDescriptor = seed.descriptors.find(
+      (descriptor) => descriptor.provider === 'gemini',
+    );
+    if (!geminiDescriptor) throw new Error('expected at least one seed gemini descriptor');
+
+    const selectable = createAgent({
+      generate: createSequentialGenerate([]),
+      name: 'selectable',
+      allowedCandidates: [{ provider: geminiDescriptor.provider, model: geminiDescriptor.model }],
+    });
+
+    const bureau = await createBureau({ agents: { selectable } });
+    try {
+      expect(bureau.agents.generationProfile('selectable')?.selector).toBe('available');
+    } finally {
+      bureau.dispose();
+    }
+  });
+
+  it('a profile read directly off a standalone createAgent agent still reports unavailable, unaffected by Bureau wiring', async () => {
+    const seed = createModelCatalog();
+    const geminiDescriptor = seed.descriptors.find(
+      (descriptor) => descriptor.provider === 'gemini',
+    );
+    if (!geminiDescriptor) throw new Error('expected at least one seed gemini descriptor');
+
+    const selectable = createAgent({
+      generate: createSequentialGenerate([]),
+      name: 'selectable',
+      allowedCandidates: [{ provider: geminiDescriptor.provider, model: geminiDescriptor.model }],
+    });
+
+    // Bureau's own wiring flips the CATALOG-READ profile — the standalone
+    // agent's own `readGenerationProfile` answer is unaffected, permanently
+    // (AB-64's decision record: a standalone `createAgent` agent has no
+    // Bureau, no policy, and no catalog, so it can never select).
+    const bureau = await createBureau({ agents: { selectable } });
+    try {
+      expect(selectable.generationProfile?.selector).toBe('unavailable');
+      expect(bureau.agents.generationProfile('selectable')?.selector).toBe('available');
+    } finally {
+      bureau.dispose();
+    }
+  });
+
+  it('bureau.planSelection builds a full SelectionPlan without starting a run or refreshing the catalog', async () => {
+    const seed = createModelCatalog();
+    const anthropicDescriptor = seed.descriptors.find(
+      (descriptor) => descriptor.provider === 'anthropic',
+    );
+    if (!anthropicDescriptor) throw new Error('expected at least one seed anthropic descriptor');
+
+    const fixed = createAgent({
+      generate: createSequentialGenerate([]),
+      name: 'fixed',
+    });
+
+    const bureau = await createBureau({ agents: { fixed } });
+    try {
+      const revisionBefore = bureau.modelCatalog.catalog().revision;
+      const plan = bureau.planSelection({ agentName: 'fixed' });
+
+      expect(plan).not.toBeInstanceOf(Promise);
+      expect(bureau.modelCatalog.catalog().revision).toBe(revisionBefore);
+    } finally {
+      bureau.dispose();
+    }
+  });
+});
+
 describe('createBureau durable inspection surface', () => {
   it('getDurableRun and listDurableRuns return undefined when no durable engine is composed', async () => {
     // A memory-backed bureau with no durableExecution flag has no engine, so the
