@@ -1,6 +1,8 @@
 import type { ConditionalTextValueStore } from '@lostgradient/weft/storage/text-value-store';
 import type { ConversationHistory } from 'conversationalist';
 import type { JSONValue } from 'interoperability';
+import type { RuntimeServices } from 'lifecycle';
+import { createDefaultRuntimeServices } from 'lifecycle';
 
 import { createSessionStore } from './session/create-session-store';
 
@@ -58,7 +60,10 @@ export interface AgentSession {
 
 /**
  * Creates a new agent session object. If no id is provided, generates one
- * via crypto.randomUUID(). Timestamps default to the current time.
+ * via the AB-92/AB-252/AB-253 composed `RuntimeServices.identifiers` seam
+ * (`options.runtime`, defaulting to `createDefaultRuntimeServices()` — the
+ * real globals — when omitted). Timestamps default to the runtime's current
+ * wall-clock time.
  */
 export function createAgentSession(options: {
   agentName: string;
@@ -66,10 +71,12 @@ export function createAgentSession(options: {
   metadata?: Record<string, JSONValue>;
   id?: string;
   runs?: RunRef[];
+  runtime?: RuntimeServices;
 }): AgentSession {
-  const now = new Date().toISOString();
+  const runtime = options.runtime ?? createDefaultRuntimeServices();
+  const now = runtime.clock.nowISO();
   return {
-    id: options.id ?? crypto.randomUUID(),
+    id: options.id ?? runtime.identifiers.next('session'),
     agentName: options.agentName,
     conversationHistory: options.conversationHistory,
     revision: 0,

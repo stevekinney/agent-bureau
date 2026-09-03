@@ -1,6 +1,7 @@
 import { createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
+import { createManualRuntimeServices } from 'lifecycle';
 
 import { createHeartbeat } from '../../src/scheduler/create-heartbeat';
 import type { Scheduler } from '../../src/scheduler/create-scheduler';
@@ -133,6 +134,41 @@ describe('createHeartbeat', () => {
 
     expect(tickCount).toBe(2);
     expect(heartbeat.tickCount).toBe(tickCount);
+  });
+
+  it('AB-92/AB-253: without an explicit sleepFunction, uses the injected runtime.timers seam — driven entirely by a manual runtime, never a real timer', async () => {
+    const scheduler = createTestScheduler();
+    const runtime = createManualRuntimeServices();
+
+    let tickCount = 0;
+    const heartbeat = createHeartbeat({
+      scheduler,
+      interval: 10,
+      runtime,
+      createHeartbeatRun: () => ({
+        generate: createMockGenerate([textResponse('tick')]),
+        toolbox: createTestToolbox([]),
+        conversation: new Conversation(),
+        maximumSteps: 1,
+      }),
+      onTick: () => {
+        tickCount++;
+      },
+    });
+
+    heartbeat.start();
+    await flushAsyncWork();
+    expect(tickCount).toBe(0);
+
+    await runtime.advance(10);
+    await flushAsyncWork();
+    expect(tickCount).toBe(1);
+
+    await runtime.advance(10);
+    await flushAsyncWork();
+    expect(tickCount).toBe(2);
+
+    heartbeat.stop();
   });
 
   it('runImmediately triggers a tick before the first sleep', async () => {

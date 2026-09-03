@@ -13,7 +13,7 @@ import {
 } from 'armorer';
 import { afterEach, describe, expect, it } from 'bun:test';
 import { Conversation, createConversationHistory } from 'conversationalist';
-import { CompletableEventTarget, HookRegistry } from 'lifecycle';
+import { CompletableEventTarget, createManualRuntimeServices, HookRegistry } from 'lifecycle';
 import { z } from 'zod';
 
 import { stopWhen } from '../conditions/index';
@@ -1085,6 +1085,103 @@ describe('createRun with durable routing', () => {
       expect(settled[0]?.step).toBe(0);
     } finally {
       context.engine[Symbol.dispose]();
+    }
+  });
+
+  // AB-253's own completion criterion: two durable `createActiveRun` calls in
+  // one process, each given its own `ManualRuntimeServices` pinned to a
+  // different origin and identifier seed, driven to completion, carry
+  // disjoint run identifiers and origin-derived (not process-clock-derived)
+  // tool-event timestamps. Before this slice, `driveDurableRun`'s own
+  // `runStartTime`/tool-started timestamp read the real `performance.now()`/
+  // `Date.now()` globals directly (and the durable branch in `create-run.ts`
+  // resolved `options.runtime` too late to reach it at all), so this
+  // assertion could not have been made: both runs would have observed the
+  // SAME real clock regardless of what `runtime` either caller supplied.
+  it('two durable runs with two manual runtimes (different origins/seeds) carry disjoint ids and origin-derived timestamps', async () => {
+    const contextA = await buildContext();
+    const contextB = await buildContext();
+    try {
+      const runtimeA = createManualRuntimeServices({
+        origin: '2021-01-01T00:00:00.000Z',
+        identifierSeed: 'run-a',
+      });
+      const runtimeB = createManualRuntimeServices({
+        origin: '2032-07-04T00:00:00.000Z',
+        identifierSeed: 'run-b',
+      });
+      // Advance each runtime a DIFFERENT amount before its run starts, so a
+      // shared-origin coincidence could not produce equal timestamps by
+      // accident.
+      await runtimeA.advance(1_000);
+      await runtimeB.advance(9_000);
+
+      const echoTool = createTool({
+        name: 'echo',
+        description: 'Echo the input',
+        input: z.object({ message: z.string() }),
+        execute: async ({ message }: { message: string }) => message,
+      });
+      const toolbox = () => createToolbox([echoTool]) as unknown as RunOptions['toolbox'];
+      const generateFor = (label: string) =>
+        createMockGenerate([
+          { content: '', toolCalls: [{ name: 'echo', arguments: { message: label } }] },
+          { content: 'done', toolCalls: [] },
+        ]);
+
+      const runA = createRun(
+        {
+          generate: generateFor('a'),
+          toolbox: toolbox(),
+          conversation: createConversationHistory(),
+          stopWhen: stopWhen.noToolCalls(),
+          agentName: 'durable-agent-a',
+          runId: 'durable-run-a',
+          runtime: runtimeA,
+        },
+        { ...contextA, runId: 'durable-run-a', prompt: 'Start A' },
+      );
+      const runB = createRun(
+        {
+          generate: generateFor('b'),
+          toolbox: toolbox(),
+          conversation: createConversationHistory(),
+          stopWhen: stopWhen.noToolCalls(),
+          agentName: 'durable-agent-b',
+          runId: 'durable-run-b',
+          runtime: runtimeB,
+        },
+        { ...contextB, runId: 'durable-run-b', prompt: 'Start B' },
+      );
+
+      const startedA: ToolStartedBubbleEvent[] = [];
+      const startedB: ToolStartedBubbleEvent[] = [];
+      runA.addEventListener('tool.started', (e) => startedA.push(e));
+      runB.addEventListener('tool.started', (e) => startedB.push(e));
+
+      const [resultA, resultB] = await Promise.all([runA.result, runB.result]);
+
+      expect(resultA.finishReason).toBe('stop-condition');
+      expect(resultB.finishReason).toBe('stop-condition');
+
+      // Disjoint identifiers: each run's own explicit runId, carried through
+      // the durable routing untouched.
+      expect(runA.snapshot().id).toBe('durable-run-a');
+      expect(runB.snapshot().id).toBe('durable-run-b');
+      expect(runA.snapshot().id).not.toBe(runB.snapshot().id);
+
+      // Origin-derived (not real-clock-derived) timestamps: each event's
+      // `startedAt` matches ITS OWN runtime's pinned origin plus its own
+      // advance, and the two values are provably disjoint because the
+      // origins/advances differ.
+      expect(startedA).toHaveLength(1);
+      expect(startedB).toHaveLength(1);
+      expect(startedA[0]?.startedAt).toBe(Date.parse('2021-01-01T00:00:01.000Z'));
+      expect(startedB[0]?.startedAt).toBe(Date.parse('2032-07-04T00:00:09.000Z'));
+      expect(startedA[0]?.startedAt).not.toBe(startedB[0]?.startedAt);
+    } finally {
+      contextA.engine[Symbol.dispose]();
+      contextB.engine[Symbol.dispose]();
     }
   });
 

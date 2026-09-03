@@ -1,3 +1,6 @@
+import type { RuntimeServices } from 'lifecycle';
+import { createDefaultRuntimeServices } from 'lifecycle';
+
 import type { RunResult } from '../types';
 import type { Scheduler } from './create-scheduler';
 import { sleep } from './sleep';
@@ -29,12 +32,21 @@ export interface CreateHeartbeatOptions {
   signal?: AbortSignal;
   /** Maximum consecutive heartbeat failures before stopping. Default: 5. */
   maxConsecutiveFailures?: number;
-  /** Injectable sleep primitive used by the heartbeat loop. Defaults to the scheduler sleep utility. */
+  /** Injectable sleep primitive used by the heartbeat loop. Defaults to the scheduler sleep utility, driven by `runtime.timers`. */
   sleepFunction?: (milliseconds: number) => Promise<void>;
   /** Callback when a heartbeat tick completes (including preempted ticks with null result). */
   onTick?: (result: RunResult | null) => void | Promise<void>;
   /** Callback when the heartbeat stops due to max failures. */
   onFailure?: (error: unknown) => void;
+  /**
+   * The AB-92/AB-252/AB-253 injectable runtime-service seam. Resolved
+   * exactly once at construction — omitted, this heartbeat reads the real
+   * globals via `createDefaultRuntimeServices()`; a test composes its own
+   * deterministic instance with `createManualRuntimeServices()` so
+   * `sleepFunction`'s default and heartbeat task ids are fully
+   * time-controlled. An explicitly supplied `sleepFunction` still wins.
+   */
+  runtime?: RuntimeServices;
 }
 
 /**
@@ -70,7 +82,6 @@ export interface Heartbeat {
  * semantics for the run it happens to be attached to.
  */
 export function createHeartbeat(options: CreateHeartbeatOptions): Heartbeat {
-  let heartbeatIdCounter = 0;
   const {
     scheduler,
     interval = 60_000,
@@ -79,10 +90,12 @@ export function createHeartbeat(options: CreateHeartbeatOptions): Heartbeat {
     runImmediately = false,
     signal,
     maxConsecutiveFailures = 5,
-    sleepFunction = sleep,
     onTick,
     onFailure,
+    runtime = createDefaultRuntimeServices(),
   } = options;
+  const sleepFunction =
+    options.sleepFunction ?? ((milliseconds) => sleep(milliseconds, runtime.timers));
 
   let running = false;
   let tickCounter = 0;
@@ -129,7 +142,7 @@ export function createHeartbeat(options: CreateHeartbeatOptions): Heartbeat {
 
   async function performTick(): Promise<RunResult | null> {
     tickCounter++;
-    const taskId = `heartbeat-${++heartbeatIdCounter}-${Date.now().toString(36)}`;
+    const taskId = runtime.identifiers.next('heartbeat');
 
     const task: SchedulerTask = {
       id: taskId,

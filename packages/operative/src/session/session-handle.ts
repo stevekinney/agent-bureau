@@ -1,7 +1,13 @@
 import type { WorkflowState } from '@lostgradient/weft';
 import type { ConversationHistory } from 'conversationalist';
 import { Conversation, createConversationHistory } from 'conversationalist';
-import { CompletableEventTarget, ForwardedEvent, TypedEventTarget } from 'lifecycle';
+import type { RuntimeServices } from 'lifecycle';
+import {
+  CompletableEventTarget,
+  createDefaultRuntimeServices,
+  ForwardedEvent,
+  TypedEventTarget,
+} from 'lifecycle';
 
 import type { AgentRun } from '../agent-run';
 import { createAgentRun } from '../agent-run';
@@ -341,10 +347,25 @@ export interface SessionHandleContext {
    * dispatches the corresponding typed event. Created internally if omitted.
    */
   emitter?: TypedEventTarget<OperativeEventMap>;
-  /** Process-local timer injection used by deterministic tests. */
+  /**
+   * Process-local timer injection used by deterministic tests. Still wins
+   * over `runtime.timers` when supplied explicitly — this generalizes the
+   * seam onto `RuntimeServices.timers` rather than replacing it (AB-253).
+   */
   setTimeoutFunction?: (callback: () => void, milliseconds: number) => unknown;
   /** Matching cleanup function for `setTimeoutFunction`. */
   clearTimeoutFunction?: (timer: unknown) => void;
+  /**
+   * The AB-92/AB-252/AB-253 injectable runtime-service seam: wall time,
+   * monotonic time, timers, identifiers, randomness, and deferred-work
+   * tracking. Resolved exactly once at construction — omitted, this handle
+   * reads the real globals via `createDefaultRuntimeServices()`; a test
+   * composes its own deterministic instance with
+   * `createManualRuntimeServices()` from `@lostgradient/operative/test` so
+   * `sleep()`/`monitor()`'s inter-tick delay and every id/timestamp this
+   * handle mints are fully time-controlled.
+   */
+  runtime?: RuntimeServices;
 }
 
 /**
@@ -684,12 +705,16 @@ export function createSessionHandle(
 ): SessionHandle {
   const { store, engine, checkpointStore, agentName, runOptions } = context;
   const emitter = context.emitter ?? new TypedEventTarget<OperativeEventMap>();
-  const setTimeoutFunction =
-    context.setTimeoutFunction ??
-    ((callback: () => void, milliseconds: number) => setTimeout(callback, milliseconds));
-  const clearTimeoutFunction =
-    context.clearTimeoutFunction ??
-    ((timer: unknown) => clearTimeout(timer as ReturnType<typeof setTimeout>));
+  // AB-92/AB-252/AB-253: resolved exactly once, here, at construction.
+  // `setTimeoutFunction`/`clearTimeoutFunction` keep their exported names and
+  // documented process-local meaning — an explicit caller-supplied pair still
+  // wins — but their defaults now resolve from `runtime.timers` rather than
+  // from `globalThis.setTimeout`/`clearTimeout` directly, generalizing the
+  // seam onto the composed `RuntimeServices` instead of leaving it as a
+  // second, competing injection point.
+  const runtime = context.runtime ?? createDefaultRuntimeServices();
+  const setTimeoutFunction = context.setTimeoutFunction ?? runtime.timers.setTimeout;
+  const clearTimeoutFunction = context.clearTimeoutFunction ?? runtime.timers.clearTimeout;
 
   /**
    * The currently-in-flight `AgentRun`, if any. Set at `run()` start, cleared
@@ -704,20 +729,22 @@ export function createSessionHandle(
   // `livenessClock` threads the SAME `setTimeoutFunction`/`clearTimeoutFunction`
   // pair already used by `sleep()`/`monitor()`'s inter-tick delay into
   // `createStallWatchdog`'s `clock` parameter — no second timer seam is
-  // added. `now()` stays the real monotonic clock (matching AB-214's own
-  // `realClock`): a test drives `missedPulseCount` by manually invoking the
-  // captured `setTimeoutFunction` callback, which increments by at least one
-  // full missed interval regardless of how little real time has elapsed
-  // (`watchdog.ts`'s `Math.max(1, …)` floor), so faking `now()` separately
-  // is unnecessary to prove the injected clock drives the watchdog.
+  // added. `now()` reads the composed `runtime.monotonic` clock (AB-253),
+  // generalizing AB-214's own `realClock` onto the injectable seam: a test
+  // drives `missedPulseCount` by manually invoking the captured
+  // `setTimeoutFunction` callback, which increments by at least one full
+  // missed interval regardless of how little (manual-runtime) time has
+  // elapsed (`watchdog.ts`'s `Math.max(1, …)` floor), so a fixed/manual
+  // `now()` does not itself prevent the injected clock from driving the
+  // watchdog.
   // ---------------------------------------------------------------------
   const livenessClock: StallWatchdogClock = {
-    now: () => performance.now(),
+    now: () => runtime.monotonic.now(),
     setTimeout: setTimeoutFunction,
     clearTimeout: clearTimeoutFunction,
   };
 
-  const livenessStartedAt = new Date().toISOString();
+  const livenessStartedAt = runtime.clock.nowISO();
   let livenessRevision = 0;
   let livenessStatus: LivenessLifecycleStatus = 'created';
   let livenessLastTransitionAt = livenessStartedAt;
@@ -851,7 +878,7 @@ export function createSessionHandle(
   function setLivenessState(next: LivenessLifecycleStatus, wait?: DeclaredWait): void {
     if (livenessStatus !== next) {
       livenessStatus = next;
-      livenessLastTransitionAt = new Date().toISOString();
+      livenessLastTransitionAt = runtime.clock.nowISO();
     }
     // Frozen so a caller mutating a returned snapshot's `declaredWait`
     // cannot corrupt this handle's own internal liveness state (the
@@ -905,6 +932,7 @@ export function createSessionHandle(
           agentName,
           conversationHistory: createConversationHistory(),
           id: sessionId,
+          runtime,
         }),
     )) as AgentSession;
   }
@@ -994,6 +1022,7 @@ export function createSessionHandle(
               agentName,
               conversationHistory: createConversationHistory(),
               id: sessionId,
+              runtime,
             });
           const sequence = session.runs.length;
           const runId = deriveRunId(sessionId, sequence);
@@ -1004,7 +1033,7 @@ export function createSessionHandle(
             runId,
             sequence,
             status: 'running',
-            startedAt: new Date().toISOString(),
+            startedAt: runtime.clock.nowISO(),
             agentName,
           };
 
@@ -1042,6 +1071,12 @@ export function createSessionHandle(
           signal: runOptions.signal
             ? AbortSignal.any([runOptions.signal, abortController.signal])
             : abortController.signal,
+          // AB-253: an explicit `runOptions.runtime` still wins; otherwise every
+          // run() this session dispatches shares the SAME composed runtime the
+          // handle itself was constructed with, so a session driven by a manual
+          // runtime stays deterministic end-to-end rather than each run minting
+          // its own default (real-globals) instance.
+          runtime: runOptions.runtime ?? runtime,
         };
 
         // Route through the durable engine when both engine and checkpointStore
@@ -1210,7 +1245,7 @@ export function createSessionHandle(
         // completes gets a legal (if uninformative) value.
         snapshot(): AgentRunLivenessSnapshot {
           if (activeInnerRun) return activeInnerRun.snapshot();
-          const now = new Date().toISOString();
+          const now = runtime.clock.nowISO();
           return {
             id: currentRunId ?? sessionId,
             kind: 'agent-run',
@@ -1227,7 +1262,7 @@ export function createSessionHandle(
             reachability: 'unknown',
             progress: 'unknown',
             assessment: 'healthy',
-            observedAt: Date.now(),
+            observedAt: runtime.clock.now(),
             missedPulseCount: 0,
             policyVersion: LIVENESS_POLICY_VERSION,
             evidence: [],
@@ -1480,12 +1515,13 @@ export function createSessionHandle(
       const forkedHistory: ConversationHistory = historyOrEmpty(session.conversationHistory);
 
       // Create the forked session with a new id and empty runs[].
-      const newSessionId = crypto.randomUUID();
+      const newSessionId = runtime.identifiers.next('session');
       const forkedSession = createAgentSession({
         agentName: session.agentName,
         conversationHistory: forkedHistory,
         id: newSessionId,
         runs: [],
+        runtime,
       });
       await store.save(forkedSession);
 
@@ -1615,7 +1651,7 @@ export function createSessionHandle(
       // Reject non-finite / negative NUMERIC maxDuration — the string guard above
       // only covers strings. A numeric `maxDuration` of NaN or Infinity is
       // accepted as-is and lands in `maxMs`; the deadline check
-      // `Date.now() - startedAt >= maxMs` is then ALWAYS false (every comparison
+      // `runtime.monotonic.now() - startedAt >= maxMs` is then ALWAYS false (every comparison
       // with NaN is false; nothing is >= Infinity), so the loop runs with no
       // effective time cap until the predicate passes or a tick throws. Unlike
       // `every`, a numeric `maxDuration` of 0 is VALID — it means "already
@@ -1632,7 +1668,7 @@ export function createSessionHandle(
         );
       }
 
-      const startedAt = Date.now();
+      const startedAt = runtime.monotonic.now();
       let tick = 0;
 
       // Liveness (AB-215): the `session.monitor` `StallPolicy` row (obs-01's
@@ -1648,7 +1684,7 @@ export function createSessionHandle(
       try {
         while (true) {
           // Deadline guard — check before starting a new tick.
-          if (maxMs !== undefined && Date.now() - startedAt >= maxMs) {
+          if (maxMs !== undefined && runtime.monotonic.now() - startedAt >= maxMs) {
             emitter.dispatchEvent(new SessionMonitorDoneEvent(sessionId, false, tick));
             return false;
           }
@@ -1720,7 +1756,7 @@ export function createSessionHandle(
 
           // Sleep between ticks — respects the maxDuration deadline (don't sleep
           // past the deadline; wake up early if needed).
-          const elapsed = Date.now() - startedAt;
+          const elapsed = runtime.monotonic.now() - startedAt;
           if (maxMs !== undefined && elapsed >= maxMs) {
             emitter.dispatchEvent(new SessionMonitorDoneEvent(sessionId, false, tick));
             return false;

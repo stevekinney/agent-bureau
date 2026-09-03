@@ -1,6 +1,8 @@
 import type { ConditionalTextValueStore } from '@lostgradient/weft/storage/text-value-store';
 import type { ConversationHistory } from 'conversationalist';
 import type { JSONValue } from 'interoperability';
+import type { RuntimeServices } from 'lifecycle';
+import { createDefaultRuntimeServices } from 'lifecycle';
 
 import type { AgentSession } from '../agent-session';
 import type {
@@ -291,10 +293,26 @@ function idForDataKey(key: string): string | undefined {
  * index uses the reserved `agent-session:summary-index` key so both can coexist with
  * other data in the same store.
  */
-export function createSessionStore(store: ConditionalTextValueStore): SessionStore {
+export interface CreateSessionStoreOptions {
+  /**
+   * The AB-92/AB-252/AB-253 injectable runtime-service seam. Resolved
+   * exactly once at construction — omitted, this store reads the real
+   * globals via `createDefaultRuntimeServices()`; a test composes its own
+   * deterministic instance with `createManualRuntimeServices()` so
+   * `updatedAt` refreshes and cleanup's age cutoff are fully
+   * time-controlled.
+   */
+  runtime?: RuntimeServices;
+}
+
+export function createSessionStore(
+  store: ConditionalTextValueStore,
+  options: CreateSessionStoreOptions = {},
+): SessionStore {
   if (typeof store.conditionalBatch !== 'function') {
     throw new TypeError('createSessionStore requires a ConditionalTextValueStore.');
   }
+  const runtime = options.runtime ?? createDefaultRuntimeServices();
 
   let mutationTail = Promise.resolve();
   function runMutation<T>(operation: () => Promise<T>): Promise<T> {
@@ -391,7 +409,7 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
     const next: AgentSession = {
       ...session,
       revision: currentRevision + 1,
-      updatedAt: refreshUpdatedAt ? new Date().toISOString() : session.updatedAt,
+      updatedAt: refreshUpdatedAt ? runtime.clock.nowISO() : session.updatedAt,
     };
     const committed = await store.conditionalBatch(
       [
@@ -707,7 +725,7 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
 
     async cleanup(options: SessionCleanupOptions): Promise<number> {
       return runMutation(async () => {
-        const cutoff = Date.now() - options.olderThan;
+        const cutoff = runtime.clock.now() - options.olderThan;
         await readBody('summary-index');
         for (let attempt = 0; attempt < MAXIMUM_INDEX_CONTENTION_ATTEMPTS; attempt += 1) {
           const keys = await listDataKeys(store);

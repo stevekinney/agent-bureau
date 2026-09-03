@@ -46,7 +46,8 @@
  * Deliberately not `bureau.*`-namespaced — see the function's own docstring.
  */
 
-import type { Subscription } from 'lifecycle';
+import type { RuntimeServices, Subscription } from 'lifecycle';
+import { createDefaultRuntimeServices } from 'lifecycle';
 
 import type { RunEvent } from './agent-run';
 import {
@@ -458,6 +459,15 @@ export interface DispatchChildRunOptions {
    * gate already enforces.
    */
   delegatedAuthority?: DelegatedAuthority;
+  /**
+   * The AB-92/AB-252/AB-253 injectable runtime-service seam. Resolved
+   * exactly once at dispatch — omitted, this dispatch mints `childRunId`
+   * (when not overridden) via the real globals through
+   * `createDefaultRuntimeServices()`; a test composes its own deterministic
+   * instance with `createManualRuntimeServices()` for a fully
+   * time-controlled, deterministic child id.
+   */
+  runtime?: RuntimeServices;
 }
 
 /**
@@ -537,7 +547,8 @@ export function dispatchChildRun<O = never, H extends boolean = false>(
   input: AgentInput,
   options: DispatchChildRunOptions,
 ): ChildRunHandle<O, H> {
-  const childRunId = options.childRunId ?? crypto.randomUUID();
+  const runtime = options.runtime ?? createDefaultRuntimeServices();
+  const childRunId = options.childRunId ?? runtime.identifiers.next('child');
   const parentAgentName = options.parentAgentName ?? '';
   const durable = options.durable ?? false;
 

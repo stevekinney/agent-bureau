@@ -7,6 +7,8 @@ import type {
   ScheduleSummary,
 } from '@lostgradient/weft';
 import { parseDuration, ScheduleHandle } from '@lostgradient/weft';
+import type { RuntimeServices } from 'lifecycle';
+import { createDefaultRuntimeServices } from 'lifecycle';
 
 import { ScheduleCancelledEvent, SchedulePausedEvent, ScheduleResumedEvent } from '../events';
 import type { EventDispatcher } from '../run-step';
@@ -25,31 +27,6 @@ const SUPPORTED_OVERLAP_POLICIES: ReadonlySet<string> = new Set<AgentScheduleOve
   'skip',
   'allow',
 ]);
-
-type ScheduleIdCrypto = {
-  randomUUID?: () => string;
-  getRandomValues?: <T extends Uint8Array>(array: T) => T;
-};
-
-function createScheduleId(): string {
-  const crypto = (globalThis as { crypto?: ScheduleIdCrypto }).crypto;
-  const randomUUID = crypto?.randomUUID;
-  if (randomUUID) return randomUUID.call(crypto);
-
-  const bytes = new Uint8Array(16);
-  if (crypto?.getRandomValues) {
-    crypto.getRandomValues(bytes);
-  } else {
-    for (let index = 0; index < bytes.length; index += 1) {
-      bytes[index] = Math.floor(Math.random() * 256);
-    }
-  }
-
-  bytes[6] = (bytes[6]! & 0x0f) | 0x40;
-  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
-  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0'));
-  return `${hex.slice(0, 4).join('')}-${hex.slice(4, 6).join('')}-${hex.slice(6, 8).join('')}-${hex.slice(8, 10).join('')}-${hex.slice(10).join('')}`;
-}
 
 /**
  * The input injected into the `agentRun` workflow when started by a durable
@@ -158,7 +135,7 @@ export interface CreateAgentScheduleOptions {
   overlap?: AgentScheduleOverlapPolicy;
   /**
    * Optional stable id for this schedule (used by `getSchedule`/`pauseSchedule`
-   * etc.). Defaults to a uuid assigned by Weft.
+   * etc.). Defaults to an id minted through `options.runtime` (AB-92/AB-253).
    */
   id?: string;
   /**
@@ -175,6 +152,14 @@ export interface CreateAgentScheduleOptions {
    * manufactures one.
    */
   emitter?: EventDispatcher;
+  /**
+   * The AB-92/AB-252/AB-253 injectable runtime-service seam. Resolved
+   * exactly once — omitted, a schedule id (when `id` is not supplied) is
+   * minted via the real globals through `createDefaultRuntimeServices()`;
+   * a test composes its own deterministic instance with
+   * `createManualRuntimeServices()` for a fully deterministic id.
+   */
+  runtime?: RuntimeServices;
 }
 
 /**
@@ -418,6 +403,7 @@ export async function createAgentSchedule(
   const { engine, agentName, spec, input, description, session, overlap, id, idempotent, emitter } =
     options;
   const workflowType = options.workflowType ?? 'agentRun';
+  const runtime = options.runtime ?? createDefaultRuntimeServices();
 
   assertSupportedOverlapPolicy(overlap);
   if (session !== undefined && session.trim().length === 0) {
@@ -431,7 +417,7 @@ export async function createAgentSchedule(
       "overlap 'allow' is incompatible with a recurring session (fires must serialize)",
     );
   }
-  const scheduleId = id?.trim() ?? createScheduleId();
+  const scheduleId = id?.trim() ?? runtime.identifiers.next('schedule');
 
   // Trim the session id so a padded value ('  digest  ') persists under the same
   // key the caller means, matching `createRunFromRequest`'s `sessionId.trim()`
