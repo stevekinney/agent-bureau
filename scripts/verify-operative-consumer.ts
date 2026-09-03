@@ -1291,7 +1291,11 @@ async function verifyProbesFailCompilation(
  */
 async function verifyKitProbeTypeChecksStandalone(directory: string): Promise<void> {
   const relativePath = join('src', 'kit-probe.ts');
-  const result = await runExpectingFailure(
+  // This check expects SUCCESS, unlike `verifyProbesFailCompilation`'s
+  // `runExpectingFailure` calls — `run` throws on a nonzero exit, which is
+  // exactly the outcome to reject here, so no manual `if (exitCode !== 0)`
+  // is needed.
+  await run(
     [
       'bunx',
       'tsc',
@@ -1310,9 +1314,6 @@ async function verifyKitProbeTypeChecksStandalone(directory: string): Promise<vo
     ],
     directory,
   );
-  if (result.exitCode !== 0) {
-    throw new Error(`Kit probe ${relativePath} failed to type-check on its own:\n${result.output}`);
-  }
 }
 
 /**
