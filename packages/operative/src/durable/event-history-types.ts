@@ -26,12 +26,12 @@ export interface DurableEventOwner {
 
 /**
  * One committed, owner-scoped durable event. A structurally redacted
- * subset/superset of Weft's `FleetEventEnvelope`
- * (`packages/weft/src/server/workflow-event-feed.ts:194-201`): `owner`
- * replaces the raw `workflowId` string (encoded as `${owner.kind}:${owner.id}`
- * for storage — packages/bureau/src/durable-event-history.ts's owner-
- * scoping convention), and `schemaVersion` is new — Weft's own envelope
- * carries no schema version at all.
+ * subset/superset of Weft's `FleetEventEnvelope` (exported from
+ * `@lostgradient/weft/server/handler`): `owner` replaces the raw
+ * `workflowId` string (encoded as `${owner.kind}:${owner.id}` for storage
+ * — packages/bureau/src/durable-event-history.ts's owner-scoping
+ * convention), and `schemaVersion` is new — Weft's own envelope carries no
+ * schema version at all.
  */
 export interface DurableEventEnvelope {
   readonly kind: string;
@@ -62,8 +62,8 @@ export interface DurableEventPage {
  * cursor is older than the store's own retention floor — durably
  * distinguishable from an ordinary empty page (`{ events: [], hasMore:
  * false }`, which means "caller is caught up," not "history was lost").
- * Mirrors Weft's own `FleetEventGapEnvelope` payload shape
- * (`workflow-event-feed.ts:251-257`).
+ * Mirrors Weft's own `FleetEventGapEnvelope` payload shape (also exported
+ * from `@lostgradient/weft/server/handler`).
  */
 export interface DurableEventGap {
   readonly outcome: 'gap';
