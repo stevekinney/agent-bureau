@@ -315,6 +315,47 @@ describe('ActiveRun.closed()', () => {
     expect(await closedAcknowledgement).toEqual({ status: 'completed' });
   });
 
+  // AB-289: a hand-constructed (or otherwise legacy) `settled` event that
+  // carries no `callbackCompletion` field drains `inFlightTools`
+  // synchronously, right in the listener, exactly as it did before this
+  // issue — it must not be deferred by a spurious microtask.
+  it('drains inFlightTools synchronously for an owned settled event with no callbackCompletion', async () => {
+    const generate = createMockGenerate([
+      toolCallResponse([weatherToolCall('Denver')]),
+      textResponse('done'),
+    ]);
+    const toolbox = createTestToolbox([weatherTool]);
+    const activeRun = createActiveRun({
+      generate,
+      toolbox,
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+    });
+
+    let spoofed = false;
+    activeRun.addEventListener('tool.started', (event) => {
+      if (spoofed) return;
+      spoofed = true;
+      // Simulate a hand-constructed/legacy `settled` event for the SAME
+      // call id armorer just started, carrying no `callbackCompletion`.
+      // `onSettled` must recognize the id as owned (it was tracked by the
+      // real `execute-start`) and drain synchronously via the fallback
+      // `else release()` branch, not `Promise.resolve().then(...)`.
+      toolbox.dispatchEvent(
+        new ToolboxSettledEvent({
+          tool: weatherTool,
+          call: { id: event.toolCallId, name: weatherTool.name, arguments: {} },
+          result: { temperature: 0, location: 'spoofed' },
+        }),
+      );
+    });
+
+    const closedAcknowledgement = activeRun.closed();
+    const result = await activeRun.result;
+    expect(result.finishReason).toBe('stop-condition');
+    expect(await closedAcknowledgement).toEqual({ status: 'completed' });
+  });
+
   // Regression: a code-review finding on the AB-204 pull request
   // (PRRT_kwDORvupsc6elvRf) — a `failFast` parallel tool batch can settle
   // `result` (via `makeErrorResult`, as soon as one call in the batch

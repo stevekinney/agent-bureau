@@ -374,6 +374,15 @@ export function createActiveRun(
       // or spuriously satisfy this run's drain wait for work it never
       // started.
       if (ownedToolCallIds.has(e.call.id)) {
+        // The tool-call watchdog (AB-214) tracks whether the RUN is still
+        // waiting on this call, not whether the callback has physically
+        // returned — once the cancellation race settles, the run itself has
+        // moved on (the call produced a result, even a cancelled one) and
+        // stops waiting, so ending the watchdog here is correct: keeping it
+        // alive until an abort-ignoring callback's own promise eventually
+        // returns (which may be never, for a genuinely leaked background
+        // task) would report the whole run stalled/unreachable for work the
+        // run no longer waits on.
         liveness.endToolCall();
         // AB-289: armorer's `settled` event fires as soon as the
         // cancellation race against the execution signal settles — not
@@ -386,7 +395,8 @@ export function createActiveRun(
         // `resolveOutcome` below — never reports this call done while it is
         // still actually running. A `settled` event with no
         // `callbackCompletion` (e.g. a hand-constructed test event) drains
-        // immediately, matching the pre-AB-289 behavior.
+        // synchronously, right here, matching the pre-AB-289 behavior
+        // exactly rather than deferring by a spurious microtask.
         const release = () => {
           // Clamped: armorer can emit 'settled' with no preceding
           // 'execute-start' for a tool call cancelled before execution
@@ -399,7 +409,11 @@ export function createActiveRun(
             for (const resolve of waiters) resolve();
           }
         };
-        void (e.callbackCompletion ?? Promise.resolve()).then(release, release);
+        if (e.callbackCompletion) {
+          void e.callbackCompletion.then(release, release);
+        } else {
+          release();
+        }
       }
       const hasError = e.error !== undefined;
       const status: 'success' | 'error' = hasError ? 'error' : 'success';
