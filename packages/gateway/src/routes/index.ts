@@ -39,7 +39,7 @@ export function createRoutes({
 }: CreateRoutesOptions) {
   const app = new Hono();
 
-  app.route('/api/v1/health', createHealthRoutes(bureau));
+  app.route('/api/v1/health', createHealthRoutes(bureau, broker));
 
   // ── Audit glass-box: Layer A + Layer B (G5) ─────────────────────────
 

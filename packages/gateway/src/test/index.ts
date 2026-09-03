@@ -5,6 +5,7 @@ import { createBureau } from 'bureau';
 import { createGateway } from '../create-gateway';
 import { createApiKeyStore } from '../keys/create-api-key-store';
 import type { ApiKey, CreateApiKeyOptions } from '../keys/types';
+import type { LiveFrameBrokerClock } from '../live-events';
 import {
   gatewayAuthorizationRevisionForApiKey,
   gatewayCapabilitiesForScopes,
@@ -14,6 +15,81 @@ import type { Gateway, GatewayOptions } from '../types';
 export { waitForCondition, waitForRunState };
 
 export const gatewayAuthorityTestScopes = ['runs:write', 'hooks:write'] as const;
+
+/**
+ * A fully manual {@link LiveFrameBrokerClock} — no real timers, no real
+ * sleeps (AB-219's testing plan). Drives both `LiveFrameBroker`'s SSE
+ * heartbeat `setInterval` and every connection's `createStallWatchdog`
+ * `setTimeout`, sharing the same monotonic `now()` so cadence math and the
+ * heartbeat that feeds it stay consistent under `advance()`.
+ */
+export function createManualLiveFrameBrokerClock(): LiveFrameBrokerClock & {
+  advance(ms: number): void;
+  pendingTimerCount(): number;
+} {
+  let time = 0;
+  let nextHandle = 1;
+  const timeouts = new Map<number, { at: number; callback: () => void }>();
+  const intervals = new Map<number, { everyMs: number; nextAt: number; callback: () => void }>();
+
+  return {
+    now: () => time,
+    setTimeout(callback, ms) {
+      const handle = nextHandle++;
+      timeouts.set(handle, { at: time + ms, callback });
+      return handle;
+    },
+    clearTimeout(handle) {
+      timeouts.delete(handle as number);
+    },
+    setInterval(callback, ms) {
+      const handle = nextHandle++;
+      intervals.set(handle, { everyMs: ms, nextAt: time + ms, callback });
+      return handle;
+    },
+    clearInterval(handle) {
+      intervals.delete(handle as number);
+    },
+    advance(ms: number) {
+      const deadline = time + ms;
+      // Fire every timeout/interval tick due by `deadline`, in due-time
+      // order — a fired callback may itself schedule a new timeout (the
+      // watchdog's own re-arm loop) or the next interval tick, so re-scan
+      // until nothing more is due.
+      for (;;) {
+        let next: { kind: 'timeout' | 'interval'; handle: number; at: number } | undefined;
+        for (const [handle, timeout] of timeouts.entries()) {
+          if (timeout.at <= deadline && (!next || timeout.at < next.at)) {
+            next = { kind: 'timeout', handle, at: timeout.at };
+          }
+        }
+        for (const [handle, interval] of intervals.entries()) {
+          if (interval.nextAt <= deadline && (!next || interval.nextAt < next.at)) {
+            next = { kind: 'interval', handle, at: interval.nextAt };
+          }
+        }
+
+        if (!next) break;
+
+        time = next.at;
+        if (next.kind === 'timeout') {
+          const timeout = timeouts.get(next.handle);
+          timeouts.delete(next.handle);
+          timeout?.callback();
+        } else {
+          const interval = intervals.get(next.handle);
+          if (interval) {
+            interval.nextAt += interval.everyMs;
+            interval.callback();
+          }
+        }
+      }
+
+      time = deadline;
+    },
+    pendingTimerCount: () => timeouts.size + intervals.size,
+  };
+}
 
 export function attackerRequestContextFixture() {
   return {

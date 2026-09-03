@@ -10,6 +10,7 @@
     "check-svelte": "svelte-check --tsconfig ./tsconfig.json",
     "check-types": "tsc --noEmit && bun run check-svelte",
     "clean": "rm -rf dist coverage tsconfig.tsbuildinfo",
+    "coverage:check": "bun run ../../scripts/check-coverage.ts",
     "dev": "bun --watch run src/start.ts",
     "format": "prettier --write \"**/*.{ts,tsx,js,jsx,mjs,cjs,json,md,yml,yaml,css}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,mjs,cjs,json,md,yml,yaml,css}\"",

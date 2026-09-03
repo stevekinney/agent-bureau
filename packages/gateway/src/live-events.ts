@@ -1,3 +1,19 @@
+import type {
+  LivenessAssessment,
+  LivenessEvidenceEntry,
+  LivenessProgressState,
+  LivenessReachability,
+  LivenessSnapshot,
+  StallPolicy,
+  StallWatchdog,
+  StallWatchdogClock,
+} from '@lostgradient/operative/liveness';
+import {
+  createStallWatchdog,
+  GATEWAY_CONNECTION_POLICY,
+  LIVENESS_POLICY_VERSION,
+} from '@lostgradient/operative/liveness';
+
 import type { ServerFrame } from './types';
 
 export const ALL_RUNS_SUBSCRIPTION = '*';
@@ -28,11 +44,156 @@ const DEFAULT_HEARTBEAT_INTERVAL_MS = 8_000;
  */
 const RUN_FRAME_BUFFER_LIMIT = 2_000;
 
+/**
+ * A `gateway-connection` liveness snapshot, per AB-219's acceptance
+ * criteria (AB-88's AC4 shape, narrowed to `kind: 'gateway-connection'`).
+ */
+export type GatewayConnectionSnapshot = LivenessSnapshot & { kind: 'gateway-connection' };
+
+/**
+ * The timer seam {@link LiveFrameBroker} uses for its heartbeat interval and
+ * per-connection watchdog. Extends obs-01's {@link StallWatchdogClock} with
+ * `setInterval`/`clearInterval` — the existing SSE heartbeat mechanism —
+ * so a test can inject one fake clock that drives both, per AB-219's
+ * testing plan (no real timers, no real sleeps). Defaults to the real
+ * globals so no existing caller (`new LiveFrameBroker()`) is affected.
+ */
+export interface LiveFrameBrokerClock extends StallWatchdogClock {
+  setInterval(callback: () => void, ms: number): unknown;
+  clearInterval(handle: unknown): void;
+}
+
+const realClock: LiveFrameBrokerClock = {
+  now: () => performance.now(),
+  setTimeout: (callback, ms) => setTimeout(callback, ms),
+  clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+  setInterval: (callback, ms) => setInterval(callback, ms),
+  clearInterval: (handle) => clearInterval(handle as ReturnType<typeof setInterval>),
+};
+
+export type LiveFrameBrokerOptions = {
+  clock?: LiveFrameBrokerClock;
+};
+
+/**
+ * Builds this connection's own `StallPolicy` row, derived from obs-01's
+ * `GATEWAY_CONNECTION_POLICY` (AB-214's `policies.ts`) but with `cadenceMs`
+ * overridden to the connection's own resolved `heartbeatIntervalMs` — never
+ * the fixed `8000` the base row declares — per AB-219's acceptance
+ * criteria. `graceMs` and `jitterMs` are recomputed against the real
+ * cadence for the same reason (a fixed `graceMs: 4000`/`jitterMs: 800`,
+ * sized for the 8 s default, would misclassify a connection opened with a
+ * deliberately longer or shorter interval). `jitterMs` uses AB-214's own
+ * formula — 10 percent of `cadenceMs`, floored at 50 ms. No new
+ * `StallPolicy` row is added to `policies.ts`; this is a per-connection
+ * override of the existing row, computed locally.
+ */
+function gatewayConnectionPolicy(cadenceMs: number): StallPolicy {
+  return {
+    ...GATEWAY_CONNECTION_POLICY,
+    cadenceMs,
+    graceMs: cadenceMs / 2,
+    jitterMs: Math.max(50, Math.round(cadenceMs * 0.1)),
+  };
+}
+
+/**
+ * Whether any evidence entry recorded for this connection came from a
+ * source other than `'transport-keepalive'`.
+ */
+function hasNonKeepaliveEvidence(evidence: readonly LivenessEvidenceEntry[]): boolean {
+  return evidence.some((entry) => entry.source !== 'transport-keepalive');
+}
+
+/**
+ * AB-219's AC2: the existing SSE `: heartbeat` comment write and WebSocket
+ * pong are recorded as `evidenceSource: 'transport-keepalive'`, but that
+ * source alone never resolves `reachability`/`progress` off `'unknown'` —
+ * only `'host-reachability'` or another application-level signal may (none
+ * exists yet for gateway connections; a future obs-* slice adds one).
+ * `createStallWatchdog`'s generic cadence-gated `assess()` computes
+ * `reachability`/`progress` from `missedPulseCount` alone, regardless of
+ * which evidence source produced the pulses, so this clamp is applied here
+ * rather than in the shared watchdog: a steady stream of transport-keepalive
+ * pulses alone reads as `'unknown'`, not a self-referential `'reachable'`.
+ * A missed-pulse decay (`'late'`/`'unreachable'`) still passes through
+ * unclamped — that direction is genuine silence, not a false-positive
+ * liveness claim.
+ */
+function clampGatewayConnectionAssessment(
+  reachability: LivenessReachability,
+  progress: LivenessProgressState,
+  evidence: readonly LivenessEvidenceEntry[],
+): { reachability: LivenessReachability; progress: LivenessProgressState } {
+  if (hasNonKeepaliveEvidence(evidence)) {
+    return { reachability, progress };
+  }
+
+  return {
+    reachability: reachability === 'reachable' ? 'unknown' : reachability,
+    progress: progress === 'progressing' ? 'unknown' : progress,
+  };
+}
+
+function deriveGatewayConnectionAssessment(
+  reachability: LivenessReachability,
+  progress: LivenessProgressState,
+): LivenessAssessment {
+  if (reachability === 'unreachable') return 'unreachable';
+  if (progress === 'stalled') return 'alive-but-stalled';
+  return 'healthy';
+}
+
+function lastEvidenceAt(evidence: readonly LivenessEvidenceEntry[]): number | undefined {
+  const last = evidence.at(-1);
+  return last?.at;
+}
+
+function buildConnectionSnapshot(
+  id: string,
+  startedAt: string,
+  watchdog: StallWatchdog,
+  clock: StallWatchdogClock,
+): GatewayConnectionSnapshot {
+  const raw = watchdog.assess();
+  const { reachability, progress } = clampGatewayConnectionAssessment(
+    raw.reachability,
+    raw.progress,
+    raw.evidence,
+  );
+  const lastHeartbeatAt = lastEvidenceAt(raw.evidence);
+
+  return Object.freeze({
+    id,
+    kind: 'gateway-connection',
+    startedAt,
+    revision: 0,
+    status: 'running',
+    lastTransitionAt: startedAt,
+    projection: 'redacted',
+    ownership: 'independent',
+    detached: false,
+    durability: 'process-local',
+    cancellable: false,
+    attempt: 0,
+    reachability,
+    progress,
+    assessment: deriveGatewayConnectionAssessment(reachability, progress),
+    observedAt: clock.now(),
+    ...(lastHeartbeatAt !== undefined ? { lastHeartbeatAt } : {}),
+    missedPulseCount: raw.missedPulseCount,
+    policyVersion: LIVENESS_POLICY_VERSION,
+    evidence: raw.evidence,
+  });
+}
+
 type Subscriber = {
   sendFrame: (frame: ServerFrame) => void;
   closeConnection: () => void;
   runIds: Set<string>;
   includeScheduler: boolean;
+  watchdog: StallWatchdog;
+  snapshot(): GatewayConnectionSnapshot;
 };
 
 export type LiveFrameSubscriberOptions = {
@@ -48,10 +209,19 @@ export type LiveFrameSubscriberOptions = {
    * required to supply one.
    */
   closeConnection?: () => void;
+  /**
+   * This connection's own heartbeat cadence, in milliseconds. Drives both
+   * the SSE heartbeat interval (when applicable) and this connection's
+   * `gateway-connection` `StallPolicy` cadence (AB-219). Defaults to
+   * {@link DEFAULT_HEARTBEAT_INTERVAL_MS} — the same default the SSE
+   * transport already uses — so a WebSocket connection (which has no
+   * server-initiated heartbeat option today) is still classified against a
+   * concrete cadence rather than an undefined one.
+   */
+  heartbeatIntervalMs?: number;
 };
 
 export type EventStreamResponseOptions = LiveFrameSubscriberOptions & {
-  heartbeatIntervalMs?: number;
   initialFrames?: readonly ServerFrame[];
 };
 
@@ -155,6 +325,14 @@ export class LiveFrameBroker {
    * {@link subscribe} on reconnect.
    */
   private readonly runFrameBuffers = new Map<string, ServerFrame[]>();
+  /** The clock seam driving both the SSE heartbeat interval and every connection's watchdog (AB-219). */
+  private readonly clock: LiveFrameBrokerClock;
+  /** Monotonic per-broker counter used to mint each connection's `LivenessSnapshot.id`. */
+  private nextConnectionId = 0;
+
+  constructor(options: LiveFrameBrokerOptions = {}) {
+    this.clock = options.clock ?? realClock;
+  }
 
   addSubscriber(
     key: object,
@@ -162,11 +340,18 @@ export class LiveFrameBroker {
     options: LiveFrameSubscriberOptions = {},
   ): void {
     const closeConnection = options.closeConnection ?? (() => undefined);
+    const heartbeatIntervalMs = options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
+    const watchdog = createStallWatchdog(gatewayConnectionPolicy(heartbeatIntervalMs), this.clock);
+    const connectionId = `gateway-connection-${(this.nextConnectionId += 1)}`;
+    const startedAt = new Date().toISOString();
+    const clock = this.clock;
     this.subscribers.set(key, {
       sendFrame,
       closeConnection,
       runIds: new Set(options.runIds ?? []),
       includeScheduler: options.includeScheduler ?? false,
+      watchdog,
+      snapshot: () => buildConnectionSnapshot(connectionId, startedAt, watchdog, clock),
     });
     if (this.closing) {
       // AB-235: shutdown already asked every existing connection to close
@@ -174,6 +359,27 @@ export class LiveFrameBroker {
       // open for the rest of the timeout.
       closeConnection();
     }
+  }
+
+  /**
+   * Records `evidenceSource: 'transport-keepalive'` pulse evidence for
+   * `key`'s connection watchdog (AB-219, AB-88's AC2/AC5). Used by the
+   * existing SSE `: heartbeat` comment write and WebSocket pong response —
+   * neither of which changes behavior on the wire; this only feeds the
+   * application-level watchdog the fact that the transport-level keepalive
+   * fired. A no-op if `key` is not (or is no longer) a tracked subscriber.
+   */
+  recordTransportKeepalive(key: object): void {
+    this.subscribers.get(key)?.watchdog.recordPulse('transport-keepalive', 0);
+  }
+
+  /**
+   * The live-events subscribers map (`:128`), surfaced under a stable name
+   * for watchdog/health consumers (AB-219) — not a duplicate registry
+   * maintained in parallel.
+   */
+  getConnectionRegistry(): ReadonlyMap<object, { snapshot(): LivenessSnapshot }> {
+    return this.subscribers;
   }
 
   /**
@@ -205,6 +411,7 @@ export class LiveFrameBroker {
   }
 
   removeSubscriber(key: object): void {
+    this.subscribers.get(key)?.watchdog.dispose();
     this.subscribers.delete(key);
   }
 
@@ -346,7 +553,7 @@ export class LiveFrameBroker {
     const streamKey = {};
     const encoder = new TextEncoder();
     const heartbeatIntervalMs = options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
-    let heartbeat: ReturnType<typeof setInterval> | undefined;
+    let heartbeat: unknown;
     let closed = false;
     let controllerForClose: ReadableStreamDefaultController<Uint8Array> | undefined;
 
@@ -375,8 +582,8 @@ export class LiveFrameBroker {
       }
 
       closed = true;
-      if (heartbeat) {
-        clearInterval(heartbeat);
+      if (heartbeat !== undefined) {
+        this.clock.clearInterval(heartbeat);
         heartbeat = undefined;
       }
       this.removeSubscriber(streamKey);
@@ -460,13 +667,14 @@ export class LiveFrameBroker {
 
         controller.enqueue(encoder.encode(': connected\n\n'));
 
-        heartbeat = setInterval(() => {
+        heartbeat = this.clock.setInterval(() => {
           if (closed) {
             return;
           }
 
           try {
             controller.enqueue(encoder.encode(': heartbeat\n\n'));
+            this.recordTransportKeepalive(streamKey);
           } catch {
             close();
           }
