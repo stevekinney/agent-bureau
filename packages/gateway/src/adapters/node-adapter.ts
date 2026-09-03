@@ -33,7 +33,53 @@ export type CloseableServer = {
    * open connections and is a documented no-op.
    */
   on?(event: 'connection', listener: (socket: DestroyableSocket) => void): unknown;
+  /**
+   * Registers a one-time listener for Node's `net.Server` `'listening'`
+   * event (AB-272), which fires once the server has actually bound and
+   * `address()` first becomes non-`null`. Optional so a minimal fake test
+   * server can omit it — {@link createNodeAdapter}'s `serve()` then skips
+   * waiting and reads `address()` immediately, matching pre-AB-272
+   * behavior.
+   */
+  once?(event: 'listening', listener: () => void): unknown;
+  /**
+   * Node's `net.Server#address()` (AB-272): the actual bound address once
+   * listening, or `null` before that. Used to discover the
+   * operating-system-assigned port when {@link ServerAdapterOptions.port}
+   * was `0`. Optional so a minimal fake test server can omit it —
+   * `serve()` then falls back to the originally requested port.
+   */
+  address?(): { port: number } | string | null;
 };
+
+/**
+ * Waits for `server` to actually bind (AB-272), so a caller requesting an
+ * ephemeral port (`0`) can read the real one back from `address()`
+ * immediately afterward. Resolves immediately when the server has no
+ * `once`/`address` (a minimal fake test server) or is already listening —
+ * never waits on a server that cannot report readiness.
+ */
+export function waitForListening(server: CloseableServer): Promise<void> {
+  if (!server.once) return Promise.resolve();
+  if (server.address?.()) return Promise.resolve();
+  return new Promise((resolve) => {
+    server.once?.('listening', () => resolve());
+  });
+}
+
+/**
+ * Resolves the port `server` actually bound to (AB-272). Falls back to
+ * `requestedPort` when the server exposes no `address()` (a minimal fake
+ * test server) or `address()` returns a pipe/named-socket string rather
+ * than a TCP address.
+ */
+export function resolveBoundPort(server: CloseableServer, requestedPort: number): number {
+  const address = server.address?.();
+  if (address && typeof address === 'object' && typeof address.port === 'number') {
+    return address.port;
+  }
+  return requestedPort;
+}
 
 /**
  * Promisifies a Node-style `close(callback)` server shutdown. Extracted so
@@ -123,6 +169,11 @@ export function createNodeAdapter(dependencies: CreateNodeAdapterDependencies = 
 
       const serve = await loadServe();
       const server = serve({ fetch: app.fetch, port, hostname });
+      // AB-272: wait for the real bind before reporting the port, so a
+      // caller that requested an ephemeral port (0) can read the real one
+      // back immediately rather than racing the underlying listen().
+      await waitForListening(server);
+      const boundPort = resolveBoundPort(server, port);
 
       // AB-235: track open sockets ourselves so forceClose() can still
       // bound shutdown on a Node runtime older than 18.2 (no
@@ -134,6 +185,7 @@ export function createNodeAdapter(dependencies: CreateNodeAdapterDependencies = 
       });
 
       return {
+        port: boundPort,
         stop() {
           return promisifyClose(server);
         },

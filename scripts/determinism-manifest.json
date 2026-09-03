@@ -2,9 +2,16 @@
   "deterministicDirectories": [
     "packages/*/src/test/**",
     "packages/bureau/src/test/**",
+    "packages/gateway/src/conformance/**",
     "packages/integration/test/lifecycle-contract/**"
   ],
   "realRuntimeExemptions": [
+    {
+      "path": "packages/gateway/src/conformance/**",
+      "reason": "AB-98's real-runtime conformance tier (AB-92's test-tier matrix): a real Bun HTTP/SSE/WebSocket loopback server bound to an operating-system-assigned ephemeral port, real fetch/WebSocket clients, and one deterministic bounded-drain read after a duplicate-subscription assertion (AbortSignal/ping-pong fenced, not a fixed sleep) — this tier exists specifically to exercise real sockets, which the deterministic tiers below it cannot.",
+      "owner": "Agent Bureau team",
+      "owningIssue": "AB-272"
+    },
     {
       "path": "packages/gateway/src/ui/**",
       "reason": "Svelte hook tests assign globalThis.fetch/WebSocket/EventSource directly to install fakes (5 files: use-chat, use-reviews, use-run-detail, use-runs, use-websocket .svelte.test.ts). AB-273 injects fetch/WebSocket/EventSource/timers through a client environment so these tests stop mutating process globals.",

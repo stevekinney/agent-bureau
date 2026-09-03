@@ -129,6 +129,7 @@ export function createBunAdapter(): ServerAdapter {
         });
 
         return {
+          port: server.port ?? port,
           stop() {
             return server.stop();
           },
@@ -154,6 +155,7 @@ export function createBunAdapter(): ServerAdapter {
       });
 
       return {
+        port: server.port ?? port,
         stop() {
           return server.stop();
         },

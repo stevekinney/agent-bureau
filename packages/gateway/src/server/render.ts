@@ -39,14 +39,28 @@ const isBuiltOutput = basename(currentDirectory) === 'dist';
 /** Manifest keys the built server must be able to resolve to hashed assets. */
 const REQUIRED_MANIFEST_KEYS = ['entry.js', 'styles.css'] as const;
 
-async function loadManifest(): Promise<AssetManifest> {
+/**
+ * Clears the module-level {@link cachedManifest} (AB-92/AB-272). The
+ * manifest is a build artifact, not a lifecycle counter, so its reset lives
+ * on the gateway test surface rather than on `RuntimeServices` — a caller
+ * running two builds in one process (for example two loopback gateways
+ * constructed against different `manifestDirectory` values in one test
+ * file) calls this between them so the second `renderPage` call actually
+ * re-reads its own manifest instead of continuing to serve whatever the
+ * first one cached.
+ */
+export function resetAssetManifestCache(): void {
+  cachedManifest = undefined;
+}
+
+async function loadManifest(manifestDirectory: string): Promise<AssetManifest> {
   if (cachedManifest) return cachedManifest;
   let manifest: AssetManifest;
   try {
     // Bun bundles the whole server graph flat into `dist/index.js`, so at
     // runtime `import.meta.url` resolves to `dist/`, and the manifest sits
     // alongside it at `dist/manifest.json`.
-    const manifestPath = resolve(currentDirectory, 'manifest.json');
+    const manifestPath = resolve(manifestDirectory, 'manifest.json');
     const raw = await readFile(manifestPath, 'utf-8');
     manifest = JSON.parse(raw) as AssetManifest;
   } catch (error) {
@@ -132,6 +146,17 @@ interface RenderPageOptions<Props extends Record<string, unknown>> {
    * are themselves the hydration payload in the common case.
    */
   data?: unknown;
+  /**
+   * Directory to resolve `manifest.json` from (AB-272). Defaults to this
+   * module's own compiled/source location — the real deployment shape,
+   * where the built server's manifest sits alongside `dist/index.js`.
+   * Overridable so more than one build's manifest can be exercised in one
+   * process (a real production shape too: an operator running two gateway
+   * instances against two different `dist/` builds), paired with
+   * {@link resetAssetManifestCache} between reads that must see a
+   * different build.
+   */
+  manifestDirectory?: string;
 }
 
 /**
@@ -152,8 +177,9 @@ export async function renderPage<Props extends Record<string, unknown>>({
   component,
   props,
   data,
+  manifestDirectory = currentDirectory,
 }: RenderPageOptions<Props>): Promise<string> {
-  const manifest = await loadManifest();
+  const manifest = await loadManifest(manifestDirectory);
   // In built mode loadManifest() has already thrown if the manifest is absent,
   // so these keys are present; the `??` only covers from-source dev/test where
   // the unhashed `/public/*` URLs are the real assets.

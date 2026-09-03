@@ -13,6 +13,18 @@ import {
 import type { Gateway, GatewayOptions } from '../types';
 
 export { waitForCondition, waitForRunState };
+export type {
+  LoopbackGateway,
+  LoopbackGatewayOptions,
+  LoopbackServerRuntime,
+  LoopbackWebSocketClient,
+  ServerEventStreamReader,
+} from './loopback';
+export { LoopbackTransportUnsupportedError, startLoopbackGateway } from './loopback';
+// AB-92/AB-272: `cachedManifest` (render.ts:10) is a build artifact, not a
+// lifecycle counter, so its reset lives on the gateway test surface rather
+// than on `RuntimeServices`.
+export { resetAssetManifestCache } from '../server/render';
 
 export const gatewayAuthorityTestScopes = ['runs:write', 'hooks:write'] as const;
 
