@@ -60,7 +60,7 @@ import type { LivenessAssessment, LivenessObservable, LivenessSnapshot } from '.
 import type { DelegatedAuthority } from './providers/policy.ts';
 import type { Effort } from './providers/types.ts';
 import type { AgentInput, RunnableAgent } from './runnable-agent';
-import type { RunResult } from './types';
+import type { CleanupAcknowledgement, RunResult } from './types';
 
 // ---------------------------------------------------------------------------
 // ChildRunHandle — the primitive's own return value
@@ -168,6 +168,24 @@ export interface ChildRunRegistry {
    * without polling.
    */
   subscribeLiveness(observer: () => void): Subscription;
+  /**
+   * Resolves once every child registered so far has its own `closed()`
+   * (AB-37/AB-204's cleanup acknowledgement, reached through whichever
+   * child accessor attached it — see `attachClosed`) genuinely settled.
+   * Never rejects: each child's own `closed()` contract already never
+   * rejects, and a child with no `closed` attached (a synchronous
+   * `agent.run()` throw settled it before any handle existed to attach —
+   * see `attachClosed`'s doc comment) is treated as having nothing left to
+   * await, the same declared-gap treatment `ChildRunDescriptor.assessment`
+   * gets for that identical case.
+   *
+   * A child registered by another caller WHILE this call is pending is
+   * folded in too — this re-reads the registry until the set of attached
+   * `closed` functions stops growing, so `AgentRun.closed()` (AB-211)
+   * never reports `completed` while a child dispatched mid-await is still
+   * outstanding.
+   */
+  awaitChildrenClosed(): Promise<void>;
 }
 
 interface RegisteredChild {
@@ -175,6 +193,8 @@ interface RegisteredChild {
   abort: (reason?: string) => void;
   /** Set by `attachLiveness`; released once the child settles or is re-attached. */
   livenessSubscription?: Subscription;
+  /** Set by `attachClosed` (AB-211); see that method's doc comment. */
+  closed?: () => Promise<CleanupAcknowledgement>;
 }
 
 /** Internal registration surface `dispatchChildRun` uses; not part of the public read contract. */
@@ -200,6 +220,25 @@ interface ChildRunRegistrar {
    * recomputed or overridden here.
    */
   attachLiveness(id: string, observable: LivenessObservable<LivenessSnapshot>): void;
+  /**
+   * Wires a child's own `closed()` (AB-37/AB-204's cleanup acknowledgement)
+   * into this registry so `awaitChildrenClosed` (AB-211's parent-`closed()`
+   * integration point) can gate on the child's genuine settlement rather
+   * than its liveness alone — a child whose `result()` has resolved can
+   * still have a `closed()` pending (an in-flight tool-drain wait or
+   * run-owned hook, AB-204's own AC7/AC8). A no-op for an unknown `id`,
+   * mirroring `attachLiveness`. `dispatchChildRun` calls this once, right
+   * after `agent.run()` returns successfully, guarded by a runtime check
+   * that the returned handle actually implements `closed()` — a
+   * third-party or test-double `RunnableAgent` is not required to (see
+   * `hasLivenessObservable`'s identical rationale for the same defensive
+   * posture). Never called eagerly on the child's behalf otherwise: calling
+   * a child's `closed()` before the caller does would itself count as
+   * "the caller called it", which is exactly what
+   * `createClosedAcknowledgement`'s own fast-path memoization assumes never
+   * happens on its behalf.
+   */
+  attachClosed(id: string, closed: () => Promise<CleanupAcknowledgement>): void;
 }
 
 /** A `ChildRunRegistry` a `dispatchChildRun` caller can also register children into. */
@@ -222,9 +261,11 @@ export function isMutableChildRunRegistry(value: unknown): value is MutableChild
     typeof (value as Partial<MutableChildRunRegistry>).register === 'function' &&
     typeof (value as Partial<MutableChildRunRegistry>).settle === 'function' &&
     typeof (value as Partial<MutableChildRunRegistry>).attachLiveness === 'function' &&
+    typeof (value as Partial<MutableChildRunRegistry>).attachClosed === 'function' &&
     typeof (value as Partial<MutableChildRunRegistry>).children === 'function' &&
     typeof (value as Partial<MutableChildRunRegistry>).abortChild === 'function' &&
-    typeof (value as Partial<MutableChildRunRegistry>).subscribeLiveness === 'function'
+    typeof (value as Partial<MutableChildRunRegistry>).subscribeLiveness === 'function' &&
+    typeof (value as Partial<MutableChildRunRegistry>).awaitChildrenClosed === 'function'
   );
 }
 
@@ -250,6 +291,25 @@ export function hasLivenessObservable(
     value !== null &&
     typeof (value as Partial<LivenessObservable<LivenessSnapshot>>).snapshot === 'function' &&
     typeof (value as Partial<LivenessObservable<LivenessSnapshot>>).subscribeSnapshot === 'function'
+  );
+}
+
+/**
+ * Structural guard mirroring {@link hasLivenessObservable}, for the child's
+ * own `closed()` (AB-37/AB-204's cleanup acknowledgement) that AB-211's
+ * `awaitChildrenClosed` gates a parent's `closed()` on. Checked with
+ * `typeof` rather than assumed from `RunnableAgent<O, H>.run()`'s declared
+ * return type for the identical reason `hasLivenessObservable` is: a
+ * third-party or test-double `RunnableAgent` can return an object that
+ * satisfies `AgentRun` only structurally-on-paper.
+ */
+export function hasClosedAcknowledgement(
+  value: unknown,
+): value is { closed: () => Promise<CleanupAcknowledgement> } {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as { closed?: unknown }).closed === 'function'
   );
 }
 
@@ -317,6 +377,28 @@ export function createChildRunRegistry(): MutableChildRunRegistry {
         current.descriptor = { ...current.descriptor, assessment: snapshot.assessment };
         notifyLivenessChange();
       });
+    },
+    attachClosed(id, closed): void {
+      const existing = entries.get(id);
+      if (!existing) return;
+      existing.closed = closed;
+    },
+    async awaitChildrenClosed(): Promise<void> {
+      // Fixed point over the entries map: a child dispatched from inside
+      // another child's own tool call (or any other caller of this same
+      // registry) while this call is already awaiting must still be
+      // folded in — see the interface doc comment on `awaitChildrenClosed`.
+      let awaited = -1;
+      for (;;) {
+        const pending = [...entries.values()]
+          .map((entry) => entry.closed)
+          .filter(
+            (closed): closed is () => Promise<CleanupAcknowledgement> => closed !== undefined,
+          );
+        if (pending.length === awaited) return;
+        awaited = pending.length;
+        await Promise.all(pending.map((closed) => closed()));
+      }
     },
     subscribeLiveness(observer): Subscription {
       livenessListeners.add(observer);
@@ -641,6 +723,16 @@ export function dispatchChildRun<O = never, H extends boolean = false>(
   // acceptance criterion) — this registry has no watchdog of its own.
   if (options.registry && hasLivenessObservable(agentRun)) {
     options.registry.attachLiveness(childRunId, agentRun);
+  }
+
+  // AB-211 — wire this child's own `closed()` into the registry so a
+  // parent's `closed()` (`create-run.ts`) can await genuine child cleanup
+  // settlement, not just the child's terminal result. Guarded by
+  // `hasClosedAcknowledgement` for the same reason `hasLivenessObservable`
+  // is guarded above. Never invoked here — only wired for
+  // `awaitChildrenClosed` to call later.
+  if (options.registry && hasClosedAcknowledgement(agentRun)) {
+    options.registry.attachClosed(childRunId, () => agentRun.closed());
   }
 
   const settle = (result: RunResult<O, H>): RunResult<O, H> => {

@@ -5,12 +5,14 @@ import { Conversation } from 'conversationalist';
 import { createDefaultRuntimeServices, createManualRuntimeServices, HookRegistry } from 'lifecycle';
 import { z } from 'zod';
 
+import type { MutableChildRunRegistry } from './child-run';
+import { createChildRunRegistry } from './child-run';
 import { noToolCalls } from './conditions/predicates';
 import { createActiveRun } from './create-run';
 import { ToolStartedBubbleEvent } from './events';
 import type { OperativeHookMap } from './hooks';
 import { createMockGenerate } from './test/index';
-import type { GenerateResponse } from './types';
+import type { CleanupAcknowledgement, GenerateResponse } from './types';
 
 /**
  * AB-204: `ActiveRun.closed()` — the cleanup acknowledgement. Colocated with
@@ -541,6 +543,205 @@ describe('ActiveRun.closed()', () => {
 
     expect(await closedAcknowledgement).toEqual({ status: 'completed' });
     expect(settledFlag).toBe(true);
+  });
+});
+
+/**
+ * AB-211: `ActiveRun.closed()` awaits every registered child's own
+ * `closed()` (AB-50's `ChildRunRegistry`, wired via `attachClosed` in
+ * `child-run.ts`) before reporting `completed` — not merely the child's
+ * terminal `result()`. Fake children are constructed directly against the
+ * registry (`register`/`attachClosed`/`settle`), never through
+ * `dispatchChildRun`, so each child's settlement is fully test-controlled
+ * via manually resolved promises — no real sleeps, matching this issue's
+ * testing plan.
+ */
+describe('ActiveRun.closed() awaits registered children (AB-211)', () => {
+  function deferredAcknowledgement(): {
+    promise: Promise<CleanupAcknowledgement>;
+    resolve: (value: CleanupAcknowledgement) => void;
+  } {
+    let resolveAcknowledgement!: (value: CleanupAcknowledgement) => void;
+    const promise = new Promise<CleanupAcknowledgement>((resolve) => {
+      resolveAcknowledgement = resolve;
+    });
+    return { promise, resolve: resolveAcknowledgement };
+  }
+
+  async function flushTicks(count = 25): Promise<void> {
+    for (let tick = 0; tick < count; tick++) {
+      await Promise.resolve();
+    }
+  }
+
+  function registerFakeChild(
+    registry: MutableChildRunRegistry,
+    id: string,
+    abort: (reason?: string) => void = () => undefined,
+  ): { resolve: (value: CleanupAcknowledgement) => void } {
+    registry.register({ id, parentId: 'parent', agentName: 'child', durable: false, abort });
+    const child = deferredAcknowledgement();
+    registry.attachClosed(id, () => child.promise);
+    return { resolve: child.resolve };
+  }
+
+  it('does not resolve completed while two live children are both still cleanup-pending', async () => {
+    const registry = createChildRunRegistry();
+    const child1 = registerFakeChild(registry, 'child-1');
+    const child2 = registerFakeChild(registry, 'child-2');
+
+    const generate = createMockGenerate([textResponse('done')]);
+    const toolbox = createTestToolbox([]);
+    const activeRun = createActiveRun({
+      generate,
+      toolbox,
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      childRegistry: registry,
+    });
+
+    await activeRun.result;
+    const closedAcknowledgement = activeRun.closed();
+
+    let settledFlag = false;
+    void closedAcknowledgement.then(() => {
+      settledFlag = true;
+    });
+
+    await flushTicks();
+    expect(settledFlag).toBe(false);
+
+    child1.resolve({ status: 'completed' });
+    await flushTicks();
+    expect(settledFlag).toBe(false);
+
+    child2.resolve({ status: 'completed' });
+    expect(await closedAcknowledgement).toEqual({ status: 'completed' });
+    expect(settledFlag).toBe(true);
+  });
+
+  it('resolves only once a still-running child also settles, after a sibling aborts and settles quickly', async () => {
+    const registry = createChildRunRegistry();
+    const quickChild = registerFakeChild(registry, 'quick-child');
+    const slowChild = registerFakeChild(registry, 'slow-child');
+
+    const generate = createMockGenerate([textResponse('done')]);
+    const toolbox = createTestToolbox([]);
+    const activeRun = createActiveRun({
+      generate,
+      toolbox,
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      childRegistry: registry,
+    });
+
+    await activeRun.result;
+    const closedAcknowledgement = activeRun.closed();
+
+    // The quick child aborts and settles immediately.
+    quickChild.resolve({ status: 'completed' });
+
+    let settledFlag = false;
+    void closedAcknowledgement.then(() => {
+      settledFlag = true;
+    });
+    await flushTicks();
+    expect(settledFlag).toBe(false);
+
+    slowChild.resolve({ status: 'completed' });
+    expect(await closedAcknowledgement).toEqual({ status: 'completed' });
+  });
+
+  it('resolves not-required immediately for a zero-children run, identically to before this issue, even when a childRegistry is supplied but empty', async () => {
+    const registry = createChildRunRegistry();
+
+    const generate = createMockGenerate([textResponse('done')]);
+    const toolbox = createTestToolbox([]);
+    const activeRun = createActiveRun({
+      generate,
+      toolbox,
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      childRegistry: registry,
+    });
+
+    await activeRun.result;
+    await Promise.resolve();
+
+    expect(await activeRun.closed()).toEqual({ status: 'not-required' });
+  });
+
+  it('still waits on a child whose own result() already settled but whose closed() is still pending', async () => {
+    const registry = createChildRunRegistry();
+    const child = registerFakeChild(registry, 'child-1');
+    registry.settle('child-1', 'completed');
+    expect(registry.children()[0]?.status).toBe('completed');
+
+    const generate = createMockGenerate([textResponse('done')]);
+    const toolbox = createTestToolbox([]);
+    const activeRun = createActiveRun({
+      generate,
+      toolbox,
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      childRegistry: registry,
+    });
+
+    await activeRun.result;
+    const closedAcknowledgement = activeRun.closed();
+
+    let settledFlag = false;
+    void closedAcknowledgement.then(() => {
+      settledFlag = true;
+    });
+    await flushTicks();
+    expect(settledFlag).toBe(false);
+
+    child.resolve({ status: 'completed' });
+    expect(await closedAcknowledgement).toEqual({ status: 'completed' });
+  });
+
+  it('aborting one child via abortChild does not affect an untouched sibling settling on its own', async () => {
+    const registry = createChildRunRegistry();
+    let child1Aborted = false;
+    let child2Aborted = false;
+    const child1 = registerFakeChild(registry, 'child-1', () => {
+      child1Aborted = true;
+    });
+    const child2 = registerFakeChild(registry, 'child-2', () => {
+      child2Aborted = true;
+    });
+
+    const generate = createMockGenerate([textResponse('done')]);
+    const toolbox = createTestToolbox([]);
+    const activeRun = createActiveRun({
+      generate,
+      toolbox,
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      childRegistry: registry,
+    });
+
+    await activeRun.result;
+    const closedAcknowledgement = activeRun.closed();
+
+    registry.abortChild('child-1', 'no longer needed');
+    expect(child1Aborted).toBe(true);
+    expect(child2Aborted).toBe(false);
+
+    child1.resolve({ status: 'completed' });
+    await flushTicks();
+
+    let settledFlag = false;
+    void closedAcknowledgement.then(() => {
+      settledFlag = true;
+    });
+    await flushTicks();
+    expect(settledFlag).toBe(false);
+    expect(child2Aborted).toBe(false);
+
+    child2.resolve({ status: 'completed' });
+    expect(await closedAcknowledgement).toEqual({ status: 'completed' });
   });
 });
 

@@ -580,19 +580,41 @@ export function createActiveRun(
   // cleanup is `completed` whenever `result` settles at all; a genuine
   // rejection (e.g. a cleanup listener itself throwing inside `complete()`,
   // which `.finally()` surfaces as the settlement) is the only `failed` case.
+  // AB-211: a parent does not resolve `closed()`'s `completed` while any
+  // addressable child (AB-50's `ChildRunRegistry`, opt-in via
+  // `options.childRegistry`) is still cleanup-pending — gated on each
+  // child's own `closed()` via `awaitChildrenClosed` (`child-run.ts`), not
+  // merely its terminal `result()`, matching AB-204's own "settlement, not
+  // just result" standard. A run started without `options.childRegistry`
+  // (or one with zero registered children) is untouched: `children().length`
+  // is `0`, so the fast path below behaves identically to before this
+  // issue, with zero added latency.
+  const childRegistry = options.childRegistry;
+
   const closed = createClosedAcknowledgement({
     result,
     // `cancelRequested` alone misses a cancellation that arrived through
     // `RunOptions.signal` (e.g. `AgentRunContext.signal`) rather than a
     // direct `abort()` call — `combinedSignal` covers both.
     disqualifiesFastPath: () => cancelRequested || combinedSignal.aborted,
-    hasInFlightWork: () => inFlightTools > 0,
+    // A registered child disqualifies the `not-required` fast path even
+    // once its own `result()` has resolved — its `closed()` can still be
+    // pending (a slow tool-drain wait or run-owned hook, AB-204's own
+    // AC7/AC8), and the fast path has no way to check that without
+    // awaiting, which is exactly what `resolveOutcome` below is for.
+    hasInFlightWork: () => inFlightTools > 0 || (childRegistry?.children().length ?? 0) > 0,
     // AB-204: `result` settling is not, by itself, proof that cleanup is
     // done — a `failFast` tool batch can leave siblings executing
     // (PRRT_kwDORvupsc6elvRf) and a run-owned hook can still be running
-    // (PRRT_kwDORvupsc6ekmeT). Await both before reporting `completed`.
+    // (PRRT_kwDORvupsc6ekmeT). AB-211 adds a third: every registered
+    // child's own `closed()` must settle too. Await all three before
+    // reporting `completed`.
     resolveOutcome: async () => {
-      await Promise.all([awaitToolDrain(), Promise.allSettled(pendingHookPromises)]);
+      await Promise.all([
+        awaitToolDrain(),
+        Promise.allSettled(pendingHookPromises),
+        childRegistry?.awaitChildrenClosed() ?? Promise.resolve(),
+      ]);
       return { status: 'completed' };
     },
   });
