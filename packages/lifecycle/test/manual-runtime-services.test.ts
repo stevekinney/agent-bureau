@@ -3,6 +3,28 @@ import { describe, expect, it } from 'bun:test';
 import { createManualRuntimeServices } from '../src/manual-runtime-services';
 
 describe('createManualRuntimeServices', () => {
+  describe('recorded seeds (AB-263)', () => {
+    it('exposes clockOrigin, identifierSeed, and randomSeed matching the supplied options', () => {
+      const runtime = createManualRuntimeServices({
+        origin: '2024-01-01T00:00:00.000Z',
+        identifierSeed: 'custom-identifier-seed',
+        randomSeed: 'custom-random-seed',
+      });
+
+      expect(runtime.clockOrigin).toBe('2024-01-01T00:00:00.000Z');
+      expect(runtime.identifierSeed).toBe('custom-identifier-seed');
+      expect(runtime.randomSeed).toBe('custom-random-seed');
+    });
+
+    it('exposes the default clockOrigin, identifierSeed, and randomSeed when none are supplied', () => {
+      const runtime = createManualRuntimeServices();
+
+      expect(runtime.clockOrigin).toBe('2020-01-01T00:00:00.000Z');
+      expect(runtime.identifierSeed).toBe('manual-runtime-services');
+      expect(runtime.randomSeed).toBe('manual-runtime-services');
+    });
+  });
+
   describe('clock and monotonic', () => {
     it('starts at the supplied origin and never touches the real clock', () => {
       const runtime = createManualRuntimeServices({ origin: '2024-01-01T00:00:00.000Z' });

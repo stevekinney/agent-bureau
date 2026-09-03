@@ -199,6 +199,8 @@ await trail.dispose();
 
 This is a second, durable layer alongside the in-memory `@lostgradient/operative/store` ring buffer (which is bounded by `maxActions` and lost on restart): the operative store is the live/glass-box view, the audit trail is the durable/queryable one. `trail.query(options)` filters by `since`, `runId`, and `type`, returning up to `limit` records (default 500) oldest-first. Without a `kv` store, the trail still subscribes (so `dispose()` is always safe) but writes nothing.
 
+`encodeAuditEntryKey(timestampMs, sequence, runId)` (also exported from `bureau`) reconstructs the exact `audit:v1:...` key a queried `AuditRecord` was written under from its own public fields — used by `bureau/test`'s `selectAuditWriteFaultTarget` (AB-263) rather than a second, drifting reimplementation of the key encoding.
+
 `trail.dispose()` returns `Promise<void>` (AB-207) — it resolves only after every write already in flight has settled, and accepts an owner-issued `AbortSignal` (threaded in by `bureau.shutdown()`) that tells the trail to stop _starting new writes_ once aborted; a write already in flight when the signal fires cannot be cancelled (there is no cancellation hook for the underlying `kv.set`), so `dispose()` still fully awaits it rather than racing the KV store's own close. `bureau.shutdown()`/`bureau.dispose()` await this the same way they await the webhook notifier and online-eval sampler's own async `dispose()`.
 
 ## `AgentDefinitions` and the Agent Catalog
@@ -296,7 +298,42 @@ The harness exposes `bureau`, `runtime`, and `storage` directly, plus thin lifec
 
 Two harnesses constructed independently in one process — each with its own `runtime`/`storage` — share no state: their clocks, timers, identifier sequences, storage paths, and events are fully isolated.
 
-Out of scope for this harness: the quiescence report and a `close()` that delegates to `Bureau.shutdown()` (AB-262), the reproduction-artifact assembler and Bureau-scoped fault selectors (AB-263), and packed-consumer tarball verification (AB-264).
+Out of scope for this harness: the quiescence report and a `close()` that delegates to `Bureau.shutdown()` (AB-262), and packed-consumer tarball verification (AB-264).
+
+### `assembleReproductionArtifact(harness, recorder, options)` (AB-263)
+
+```typescript
+import { createEventRecorder } from '@lostgradient/operative/test';
+import { assembleReproductionArtifact, createBureauTestHarness } from 'bureau/test';
+
+const recorder = createEventRecorder(harness.runtime);
+const run = harness.startRun('worker', 'hello');
+recorder.attachIterable(run, { kind: 'run', id: 'worker-run' });
+
+const terminalResult = await run.result();
+const cleanupReport = await run.closed();
+await harness.runtime.deferred.drain();
+
+const artifact = await assembleReproductionArtifact(harness, recorder, {
+  terminalResult,
+  cleanupReport,
+});
+```
+
+Assembles the normalized `ReproductionArtifact` AB-92's decision record fixes (AC8) from one harness run: `sourceRevision` (`git rev-parse HEAD`, read once), `packageVersions` (every workspace package's `name`/`version`, read from its `package.json`), `effectiveModel` (`harness.bureau.getConfiguration().provider` — requires `BureauOptions.provider` to be set alongside a scripted `generate`; throws rather than inventing a provider/model when it is not), `clockOrigin`/`identifierSeed`/`randomSeed` (`harness.runtime`'s own recorded seeds — present even for an unpinned, default-constructed runtime), `scriptedOutcomes`/`firedFaults` (always empty until AB-95's fault engine exists), `causalTrace` (`recorder.normalize()` and nothing else), `terminalResult`, and `cleanupReport`. `terminalResult` is redacted through `summarizeToolInput` before embedding — a privileged key (`password`, `secret`, `token`, `apiKey`, `authorization`, `credential`, `privateKey`) never appears in the serialized artifact. The returned object's keys are always written in AB-92's fixed field order, so `JSON.stringify` is byte-identical across two runs of the same scripted case with the same seeds.
+
+### Bureau-scoped fault-plan vocabulary and selectors (AB-263)
+
+```typescript
+import {
+  selectAuditWriteFaultTarget,
+  selectSchedulerTaskFaultTarget,
+  selectWebhookDeliveryFaultTarget,
+  type BureauFaultPlan,
+} from 'bureau/test';
+```
+
+`BureauFaultOperation` widens `@lostgradient/operative/test`'s `FaultOperation` with three Bureau-owned boundaries operative cannot see: `'webhook-delivery'`, `'audit-write'`, and `'scheduler-task'`. `BureauFaultPlanEntry`/`BureauFaultPlan` mirror operative's `FaultPlanEntry`/`FaultPlan` with that widened operation; every other fault type (`FaultBoundary`, `FaultOccurrence`, `FiredFault`, ...) is re-exported from operative verbatim — there is exactly one `FaultBoundary` union in the repository. No engine executes a `BureauFaultPlan` yet (AB-95); what ships here is the type vocabulary plus three selector functions that resolve a Bureau-scoped target to exactly one concrete resource, throwing `BureauFaultSelectorResolutionError` otherwise: `selectWebhookDeliveryFaultTarget(deliveries, deliveryId)` (by `WebhookDeliveryRecord.id`, from `WebhookNotifier.listDeliveries()`), `selectAuditWriteFaultTarget(records, auditEntryKey)` (by the audit entry key `encodeAuditEntryKey` — also exported from this package's root — produces from a queried `AuditRecord`'s `timestampMs`/`sequence`/`runId`), and `selectSchedulerTaskFaultTarget(tasks, taskId)` (by `SubmitSchedulerTaskResponse.taskId`).
 
 ### Storage fixtures
 

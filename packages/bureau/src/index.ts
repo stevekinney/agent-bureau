@@ -10,7 +10,11 @@ export type {
 } from './agent-catalog';
 export { createAgentCatalog } from './agent-catalog';
 export type { AuditEventType, AuditQueryOptions, AuditRecord, AuditTrail } from './audit-trail';
-export { AUDIT_EVENT_TYPES, createAuditTrail } from './audit-trail';
+export {
+  AUDIT_EVENT_TYPES,
+  createAuditTrail,
+  encodeKey as encodeAuditEntryKey,
+} from './audit-trail';
 export { createAgentDiscoveryTool } from './create-agent-discovery-tool';
 export type {
   BureauErrorNotConfiguredSubject,
