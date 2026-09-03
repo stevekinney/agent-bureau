@@ -765,7 +765,14 @@ export function createSessionHandle(
 
   function computeLivenessSnapshot(): SessionLivenessSnapshot {
     const watchdogAssessment = sessionWatchdog?.assess();
-    const evidence = watchdogAssessment?.evidence ?? [];
+    // A fresh, frozen copy — `watchdog.assess()` already returns a spread
+    // copy, not its own internal array, but freezing here (not just the
+    // outer snapshot) keeps a caller's mutation from corrupting a CACHED
+    // snapshot object read again at the same revision (the "Cached
+    // snapshot" capability's identity-stability contract).
+    const evidence = Object.freeze(
+      watchdogAssessment?.evidence ? [...watchdogAssessment.evidence] : [],
+    );
     // AC3: `session.monitor.tick`'s `'host-reachability'` pulse is this
     // session's only evidence source, so it — and only it — governs
     // `lastHeartbeatAt`/`lastActivityAt`/`lastProgressAt` here. Unlike
@@ -846,7 +853,11 @@ export function createSessionHandle(
       livenessStatus = next;
       livenessLastTransitionAt = new Date().toISOString();
     }
-    declaredWait = wait;
+    // Frozen so a caller mutating a returned snapshot's `declaredWait`
+    // cannot corrupt this handle's own internal liveness state (the
+    // snapshot's `Object.freeze` is shallow and does not reach here on its
+    // own) — every snapshot embeds this SAME reference until the wait ends.
+    declaredWait = wait ? Object.freeze({ ...wait }) : undefined;
     advanceLiveness();
   }
 
