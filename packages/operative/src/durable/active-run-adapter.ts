@@ -404,20 +404,18 @@ export function createDurableActiveRun(
   const hookTracker = (promise: Promise<unknown>): void => {
     pendingHookPromises.push(promise);
   };
-  // AB-239: the base subscription covers the whole run; `toolboxForwarder.onStepToolbox`
-  // (threaded through `driveDurableRun` into `services.onStepToolbox`, then into
-  // per-step `StepDeps` by `run-workflow.ts`) additionally covers any step whose
-  // `selectTools` hook swaps in a different toolbox for that step.
-  const toolboxForwarder = createToolboxEventForwarder(options.toolbox, emitter);
-  cleanups.push(() => toolboxForwarder.stop());
-
   // C3 — curated tool.* bubble events stamped with {agentName, runId, step}.
   // Mirrors the same block in createActiveRun (the in-memory path) so the
   // audit trail and operative store receive identical tool.* events regardless
   // of whether the run is in-memory or durable. Without this, durable tool
   // calls were absent from both the curated run stream and /api/v1/audit for
   // persistent bureaus (PRRT_kwDORvupsc6MV8Xa).
-  {
+  //
+  // AB-294: these listeners move onto the same per-step subscription
+  // `toolboxForwarder` uses for the low-level `toolbox.*` forward (AB-239) —
+  // see `attachToolboxCuratedListeners` below, passed to
+  // `createToolboxEventForwarder` as its `attachCurated` argument.
+  const toolboxForwarder = (() => {
     let currentStep = 0;
 
     const stepListener = (e: StepStartedEvent) => {
@@ -425,14 +423,6 @@ export function createDurableActiveRun(
     };
     emitter.addEventListener(StepStartedEvent.type, stepListener);
     cleanups.push(() => emitter.removeEventListener(StepStartedEvent.type, stepListener));
-
-    const toolbox = options.toolbox as unknown as {
-      addEventListener?: <K extends keyof ToolboxEventMap>(
-        type: K,
-        listener: (e: ToolboxEventMap[K]) => void,
-        options?: AddEventListenerOptions,
-      ) => () => void;
-    };
 
     const onExecuteStart = (e: ToolboxEventMap['execute-start']) => {
       inFlightTools += 1;
@@ -548,19 +538,43 @@ export function createDurableActiveRun(
       );
     };
 
-    if (toolbox.addEventListener) {
-      const addListener = toolbox.addEventListener.bind(toolbox);
+    // Attach the curated listeners onto one toolbox instance (the base
+    // toolbox, or a `selectTools`-swapped step toolbox — AB-294) and return a
+    // function that detaches them again. Guards against mock/custom toolboxes
+    // that omit `addEventListener`. Not bound to `abortController.signal` —
+    // `toolboxForwarder.stop()` (via the `cleanups` entry below, which runs
+    // on every termination path once `result` settles via `.finally(complete)`)
+    // is the single removal path, so the same subscription lifecycle applies
+    // whether the toolbox is the base instance or a swapped step toolbox.
+    const attachToolboxCuratedListeners = (toolboxInstance: AnyToolbox): (() => void) => {
+      const toolboxWithListener = toolboxInstance as unknown as {
+        addEventListener?: <K extends keyof ToolboxEventMap>(
+          type: K,
+          listener: (e: ToolboxEventMap[K]) => void,
+          options?: AddEventListenerOptions,
+        ) => () => void;
+      };
+      if (!toolboxWithListener.addEventListener) return () => {};
+      const addListener = toolboxWithListener.addEventListener.bind(toolboxWithListener);
       const toolboxCleanups = [
-        addListener('execute-start', onExecuteStart, { signal: abortController.signal }),
-        addListener('settled', onSettled, { signal: abortController.signal }),
-        addListener('progress', onToolProgress, { signal: abortController.signal }),
-        addListener('policy-denied', onPolicyDenied, { signal: abortController.signal }),
+        addListener('execute-start', onExecuteStart),
+        addListener('settled', onSettled),
+        addListener('progress', onToolProgress),
+        addListener('policy-denied', onPolicyDenied),
       ];
-      cleanups.push(() => {
+      return () => {
         for (const cleanup of toolboxCleanups) cleanup?.();
-      });
-    }
-  }
+      };
+    };
+
+    // AB-239: the base subscription covers the whole run; `toolboxForwarder.onStepToolbox`
+    // (threaded through `driveDurableRun` into `services.onStepToolbox`, then into
+    // per-step `StepDeps` by `run-workflow.ts`) additionally covers any step whose
+    // `selectTools` hook swaps in a different toolbox for that step — including,
+    // since AB-294, the curated listeners defined above.
+    return createToolboxEventForwarder(options.toolbox, emitter, attachToolboxCuratedListeners);
+  })();
+  cleanups.push(() => toolboxForwarder.stop());
 
   function complete(): void {
     for (const cleanup of cleanups) cleanup();
@@ -892,20 +906,6 @@ export function createRecoveredRunEventSurface(
   };
   services.emitter = emitter;
   const cleanups: Array<(() => void) | undefined> = [];
-  // AB-239: same base-plus-per-step forwarding as the fresh-start path
-  // (`createDurableActiveRun` → `driveDurableRun`), wired directly onto the
-  // recovered `services` object rather than threaded through a `drive()` call —
-  // the recovered generator reads `services.onStepToolbox` via `ctx.services`
-  // on its very next step. Chains any `onStepToolbox` the resolver already
-  // installed on `services` rather than clobbering it, so this forwarder can
-  // never silently drop another caller's per-step toolbox instrumentation.
-  const priorOnStepToolbox = services.onStepToolbox;
-  const toolboxForwarder = createToolboxEventForwarder(services.toolbox, emitter);
-  services.onStepToolbox = (toolbox) => {
-    priorOnStepToolbox?.(toolbox);
-    toolboxForwarder.onStepToolbox(toolbox);
-  };
-  cleanups.push(() => toolboxForwarder.stop());
 
   let currentStep = 0;
   const stepListener = (event: StepStartedEvent) => {
@@ -914,17 +914,21 @@ export function createRecoveredRunEventSurface(
   emitter.addEventListener(StepStartedEvent.type, stepListener);
   cleanups.push(() => emitter.removeEventListener(StepStartedEvent.type, stepListener));
 
-  const toolbox = services.toolbox as unknown as {
-    addEventListener?: <K extends keyof ToolboxEventMap>(
-      type: K,
-      listener: (event: ToolboxEventMap[K]) => void,
-      options?: AddEventListenerOptions,
-    ) => () => void;
-  };
-
-  if (toolbox.addEventListener) {
-    const addListener = toolbox.addEventListener.bind(toolbox);
-    cleanups.push(
+  // AB-294: the curated tool.* bubble listeners move onto the same per-step
+  // subscription `toolboxForwarder` uses for the low-level `toolbox.*`
+  // forward (AB-239) — `attachToolboxCuratedListeners` below is passed to
+  // `createToolboxEventForwarder` as its `attachCurated` argument.
+  const attachToolboxCuratedListeners = (toolboxInstance: AnyToolbox): (() => void) => {
+    const toolboxWithListener = toolboxInstance as unknown as {
+      addEventListener?: <K extends keyof ToolboxEventMap>(
+        type: K,
+        listener: (event: ToolboxEventMap[K]) => void,
+        options?: AddEventListenerOptions,
+      ) => () => void;
+    };
+    if (!toolboxWithListener.addEventListener) return () => {};
+    const addListener = toolboxWithListener.addEventListener.bind(toolboxWithListener);
+    const toolboxCleanups = [
       addListener('execute-start', (event) => {
         emitter.dispatchEvent(
           new ToolStartedBubbleEvent(
@@ -990,8 +994,32 @@ export function createRecoveredRunEventSurface(
           ),
         );
       }),
-    );
-  }
+    ];
+    return () => {
+      for (const cleanup of toolboxCleanups) cleanup?.();
+    };
+  };
+
+  // AB-239: same base-plus-per-step forwarding as the fresh-start path
+  // (`createDurableActiveRun` → `driveDurableRun`), wired directly onto the
+  // recovered `services` object rather than threaded through a `drive()` call —
+  // the recovered generator reads `services.onStepToolbox` via `ctx.services`
+  // on its very next step. Chains any `onStepToolbox` the resolver already
+  // installed on `services` rather than clobbering it, so this forwarder can
+  // never silently drop another caller's per-step toolbox instrumentation.
+  // Since AB-294, `attachToolboxCuratedListeners` above rides the same
+  // base-plus-swap bracket as the low-level `toolbox.*` forward.
+  const priorOnStepToolbox = services.onStepToolbox;
+  const toolboxForwarder = createToolboxEventForwarder(
+    services.toolbox,
+    emitter,
+    attachToolboxCuratedListeners,
+  );
+  services.onStepToolbox = (toolbox) => {
+    priorOnStepToolbox?.(toolbox);
+    toolboxForwarder.onStepToolbox(toolbox);
+  };
+  cleanups.push(() => toolboxForwarder.stop());
 
   return {
     emitter,
