@@ -9,10 +9,16 @@ import {
   createTestGateway,
   expectedPersistedApiKeyAuthority,
   requestJSON,
+  waitForCondition,
   waitForRunState,
 } from '../test';
 import type { PendingReview, PendingToolApprovalReview, RunEventRecord } from '../types';
-import { assembleRunTimeline, findParkedReview } from './runs';
+import {
+  assembleRunTimeline,
+  classifyRunAttachment,
+  findParkedReview,
+  propagateDisconnectToAttachedRun,
+} from './runs';
 
 function createMockGenerate(): GenerateFunction {
   return async () => ({ content: 'Done.', toolCalls: [] });
@@ -421,6 +427,155 @@ describe('assembleRunTimeline', () => {
       detail: { versionMismatch: true, storedVersion: 'v1', registeredVersion: 'v2' },
       timestamp: 12345,
     });
+  });
+});
+
+// AB-212 — the request-disconnect classification rule (AC1: a named
+// function, unit-tested for each branch).
+describe('classifyRunAttachment', () => {
+  it('is "attached" when the signal was forwarded and the run is process-local', () => {
+    expect(classifyRunAttachment({ signalForwarded: true, durability: 'process-local' })).toBe(
+      'attached',
+    );
+  });
+
+  it('is "detached" when the signal was forwarded but the run is durable — durable work survives the request', () => {
+    expect(classifyRunAttachment({ signalForwarded: true, durability: 'durable' })).toBe(
+      'detached',
+    );
+  });
+
+  it('is "detached" when the run is process-local but no signal was forwarded', () => {
+    expect(classifyRunAttachment({ signalForwarded: false, durability: 'process-local' })).toBe(
+      'detached',
+    );
+  });
+
+  it('is "detached" when neither condition holds', () => {
+    expect(classifyRunAttachment({ signalForwarded: false, durability: 'durable' })).toBe(
+      'detached',
+    );
+  });
+});
+
+// AB-212 — the already-aborted branch: a client that vanished WHILE
+// `bureau.createRun` was still doing its own async setup (session load,
+// durable dispatch) leaves the request's signal already aborted by the time
+// the route registers the disconnect handler — `propagateDisconnectToAttachedRun`
+// must fire immediately in that case rather than only on a future 'abort'
+// event that will never come.
+describe('propagateDisconnectToAttachedRun: already-aborted signal (AB-212)', () => {
+  it('fires the disconnect handler immediately when the signal is already aborted at registration time', async () => {
+    const generate: GenerateFunction = (context) =>
+      new Promise((_resolve, reject) => {
+        context.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+      });
+
+    const gateway = await createTestGateway({ generate, toolbox: createEmptyToolbox() });
+    const summary = await gateway.bureau.createRun({ message: 'Hello' });
+    expect(gateway.bureau.getRun(summary.id)?.status).toBe('running');
+
+    const alreadyAbortedController = new AbortController();
+    alreadyAbortedController.abort();
+
+    propagateDisconnectToAttachedRun(gateway.bureau, summary.id, alreadyAbortedController.signal);
+
+    await waitForRunState(gateway.bureau, summary.id, (run) => run.status === 'aborted');
+
+    gateway.bureau.dispose();
+  });
+});
+
+// AB-212 AC2 — an attached run's disconnect aborts the run, awaits its
+// closed() cleanup, and records a `run.disconnect-aborted` audit entry.
+describe('POST /api/v1/runs: attached-run disconnect propagation (AB-212)', () => {
+  it('aborts the run and records a run.disconnect-aborted audit entry when the request disconnects after the run starts', async () => {
+    // Gate generate on the run's own abort signal — exactly like the
+    // existing openai-compat SSE-disconnect regression test — so the run
+    // stays "running" until the disconnect handler aborts it.
+    const generate: GenerateFunction = (context) =>
+      new Promise((_resolve, reject) => {
+        context.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+      });
+
+    const gateway = await createTestGateway({
+      generate,
+      storage: { type: 'memory' },
+      toolbox: createEmptyToolbox(),
+    });
+    const { plaintext } = await createGatewayAuthorityTestApiKey(gateway);
+
+    const controller = new AbortController();
+    const response = await requestJSON(gateway, '/api/v1/runs', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${plaintext}` },
+      body: JSON.stringify({ message: 'Hello' }),
+      signal: controller.signal,
+    });
+    expect(response.status).toBe(201);
+    const { id } = (await response.json()) as { id: string };
+
+    expect(gateway.bureau.getRun(id)?.status).toBe('running');
+    expect(gateway.bureau.getRun(id)?.liveness.durability).toBe('process-local');
+
+    // Simulate the client disconnecting AFTER the response was already
+    // delivered — the disconnect handler was registered on this same
+    // signal before the handler returned, and stays live for as long as
+    // the signal itself does.
+    controller.abort();
+
+    await waitForRunState(gateway.bureau, id, (run) => run.status === 'aborted');
+
+    const auditRecords = await gateway.bureau.auditTrail?.query({ runId: id });
+    const disconnectEntry = auditRecords?.find(
+      (record) => record.type === 'run.disconnect-aborted',
+    );
+    expect(disconnectEntry).toBeDefined();
+    expect(disconnectEntry?.runId).toBe(id);
+    expect(disconnectEntry?.detail).toMatchObject({
+      acknowledgement: { status: 'completed' },
+    });
+
+    gateway.bureau.dispose();
+  });
+
+  it('does not abort a durably-routed run when the request disconnects — durable work is preserved (AB-212 AC1)', async () => {
+    const generate: GenerateFunction = (context) =>
+      new Promise((_resolve, reject) => {
+        context.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+      });
+
+    const gateway = await createTestGateway({
+      generate,
+      storage: { type: 'memory' },
+      durableExecution: true,
+      toolbox: createEmptyToolbox(),
+    });
+    const { plaintext } = await createGatewayAuthorityTestApiKey(gateway);
+
+    const controller = new AbortController();
+    const response = await requestJSON(gateway, '/api/v1/runs', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${plaintext}` },
+      body: JSON.stringify({ message: 'Hello' }),
+      signal: controller.signal,
+    });
+    expect(response.status).toBe(201);
+    const { id } = (await response.json()) as { id: string };
+
+    expect(gateway.bureau.getRun(id)?.liveness.durability).toBe('durable');
+
+    controller.abort();
+
+    // A durable run must be left running: give the (absent) disconnect
+    // handler a bounded number of turns to (not) act, then assert the run
+    // is still running and no disconnect audit entry was written.
+    await waitForCondition(() => Promise.resolve(true), 'unreachable', 5);
+    expect(gateway.bureau.getRun(id)?.status).toBe('running');
+    const auditRecords = await gateway.bureau.auditTrail?.query({ runId: id });
+    expect(auditRecords?.some((record) => record.type === 'run.disconnect-aborted')).toBe(false);
+
+    gateway.bureau.dispose();
   });
 });
 

@@ -131,6 +131,12 @@ export function createAuthentication(
         body: raw.body,
         // @ts-expect-error — duplex is needed for streaming bodies in some runtimes
         duplex: raw.body ? 'half' : undefined,
+        // AB-212: without forwarding the original request's `signal`, this
+        // replacement Request gets a fresh, never-aborting one — silently
+        // severing every downstream route's access to the client's real
+        // disconnect signal (the attached-run disconnect propagation this
+        // signal exists for depends on it surviving this rewrite).
+        signal: raw.signal,
       });
       Object.defineProperty(context.req, 'raw', { value: request, writable: true });
     }
