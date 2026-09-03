@@ -374,17 +374,32 @@ export function createActiveRun(
       // or spuriously satisfy this run's drain wait for work it never
       // started.
       if (ownedToolCallIds.has(e.call.id)) {
-        // Clamped: armorer can emit 'settled' with no preceding 'execute-start'
-        // for a tool call cancelled before execution begins (an already-
-        // aborted signal path), which would otherwise drive this negative and
-        // corrupt hasInFlightWork()'s later reads.
-        inFlightTools = Math.max(0, inFlightTools - 1);
         liveness.endToolCall();
-        if (inFlightTools === 0 && toolDrainWaiters.length > 0) {
-          const waiters = toolDrainWaiters;
-          toolDrainWaiters = [];
-          for (const resolve of waiters) resolve();
-        }
+        // AB-289: armorer's `settled` event fires as soon as the
+        // cancellation race against the execution signal settles — not
+        // once the tool callback's own returned promise has genuinely
+        // settled. A callback that ignores its abort signal keeps running
+        // after this event fires, and `e.callbackCompletion` is the promise
+        // that observes its real completion (see armorer's
+        // `ExecutionHandle.whenSettled`). Defer the drain decrement until
+        // that promise resolves so `awaitToolDrain()` — and therefore
+        // `resolveOutcome` below — never reports this call done while it is
+        // still actually running. A `settled` event with no
+        // `callbackCompletion` (e.g. a hand-constructed test event) drains
+        // immediately, matching the pre-AB-289 behavior.
+        const release = () => {
+          // Clamped: armorer can emit 'settled' with no preceding
+          // 'execute-start' for a tool call cancelled before execution
+          // begins (an already-aborted signal path), which would otherwise
+          // drive this negative and corrupt hasInFlightWork()'s later reads.
+          inFlightTools = Math.max(0, inFlightTools - 1);
+          if (inFlightTools === 0 && toolDrainWaiters.length > 0) {
+            const waiters = toolDrainWaiters;
+            toolDrainWaiters = [];
+            for (const resolve of waiters) resolve();
+          }
+        };
+        void (e.callbackCompletion ?? Promise.resolve()).then(release, release);
       }
       const hasError = e.error !== undefined;
       const status: 'success' | 'error' = hasError ? 'error' : 'success';

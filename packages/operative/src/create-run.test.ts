@@ -446,29 +446,42 @@ describe('ActiveRun.closed()', () => {
   // uncooperative tool already in flight (one that doesn't observe its own
   // cancellation) could ever emit its `settled` event. `inFlightTools`
   // would then never reach zero and `awaitToolDrain()` would hang forever.
-  it('does not hang closed() forever after abort() while a tool call is in flight (armorer settles the cancelled call asynchronously)', async () => {
-    // Armorer settles an in-flight call promptly once its execution signal
-    // aborts — it does not wait for the tool's own promise — but that
-    // `settled` event still arrives on a LATER microtask than the
-    // synchronous `abortController.abort()` call. Binding this run's own
-    // `execute-start`/`settled` listeners to `abortController.signal` (the
-    // pre-fix shape) tore them down on the exact same, earlier tick,
+  // AB-289: armorer's `settled` toolbox event fires as soon as the
+  // cancellation race against the execution signal settles — not once the
+  // tool callback's own returned promise has genuinely settled. Before this
+  // issue, `resolveOutcome` treated that early event as proof the callback
+  // was done, so `closed()` could report `completed` while `stubborn_tool`'s
+  // callback was still running and still touching run-owned resources. The
+  // fix: `onSettled` defers `inFlightTools`'s decrement until the event's
+  // `callbackCompletion` promise (armorer's `ExecutionHandle.whenSettled()`)
+  // resolves, so `closed()` genuinely stays pending until the callback
+  // returns — and, with a `signal`-bounded call, reports `unresolved` if the
+  // caller's own deadline elapses first.
+  it('does not report closed() completed until an abort-ignoring tool callback genuinely returns, and reports unresolved for a bounded caller whose deadline elapses first (AB-289)', async () => {
+    // Armorer settles the cancellation race for an in-flight call promptly
+    // once its execution signal aborts — it does not wait for the tool's
+    // own promise — but that `settled` event still arrives on a LATER
+    // microtask than the synchronous `abortController.abort()` call.
+    // Binding this run's own `execute-start`/`settled` listeners to
+    // `abortController.signal` (a shape this issue predates and does not
+    // reintroduce) would tear them down on the exact same, earlier tick,
     // missing that later `settled` event entirely and hanging
-    // `awaitToolDrain()`/`closed()` forever — verified by temporarily
-    // reintroducing the signal binding, which makes this same test time out.
+    // `awaitToolDrain()`/`closed()` forever.
     let notifyToolStarted: (() => void) | undefined;
     const toolStarted = new Promise<void>((resolve) => {
       notifyToolStarted = resolve;
     });
-    const neverSettlesOnItsOwn = new Promise<never>(() => {});
+    let releaseStubbornTool: ((value: { done: true }) => void) | undefined;
+    const stubbornToolGate = new Promise<{ done: true }>((resolve) => {
+      releaseStubbornTool = resolve;
+    });
     const stubbornTool = createTool({
       name: 'stubborn_tool',
-      description: 'Ignores cancellation; only armorer settles this call',
+      description: 'Ignores cancellation; keeps running until the test releases it',
       input: z.object({}),
       execute: async () => {
         notifyToolStarted?.();
-        await neverSettlesOnItsOwn;
-        return { done: true };
+        return stubbornToolGate;
       },
     });
     const generate = createMockGenerate([
@@ -493,10 +506,39 @@ describe('ActiveRun.closed()', () => {
     const result = await activeRun.result;
     expect(result.finishReason).toBe('aborted');
 
-    // Armorer's own asynchronous cancellation-settlement of the in-flight
-    // call is what drains `inFlightTools` here (the tool's own promise
-    // never resolves) — `closed()` must observe it rather than hang.
+    let settledFlag = false;
+    void closedAcknowledgement.then(() => {
+      settledFlag = true;
+    });
+    // `stubbornToolGate` is only ever resolved by `releaseStubbornTool()`,
+    // so `resolveOutcome` genuinely cannot reach `completed` while it's
+    // pending, at any tick count — this is the assertion that is red on the
+    // pre-AB-289 baseline (armorer's cancellation-race `settled` event
+    // alone used to be enough for `resolveOutcome` to call this drained).
+    for (let tick = 0; tick < 25; tick++) {
+      await Promise.resolve();
+    }
+    expect(settledFlag).toBe(false);
+
+    // A caller with its own bounded wait must not hang either — it observes
+    // `unresolved`/`timed-out` once its deadline elapses, driven by a
+    // manual clock rather than a real sleep, while the callback keeps
+    // running underneath and the concurrent signal-free call above stays
+    // pending.
+    const manualClock = createManualRuntimeServices();
+    const deadlineController = new AbortController();
+    manualClock.timers.setTimeout(() => deadlineController.abort(), 1_000);
+    const boundedCall = activeRun.closed({ signal: deadlineController.signal });
+    await manualClock.advance(1_000);
+    expect(await boundedCall).toEqual({ status: 'unresolved', reason: 'timed-out' });
+    expect(settledFlag).toBe(false);
+
+    releaseStubbornTool?.({ done: true });
+
+    // Once the callback genuinely returns, the real, signal-free `closed()`
+    // call observes the true settlement.
     expect(await closedAcknowledgement).toEqual({ status: 'completed' });
+    expect(settledFlag).toBe(true);
   });
 
   // Regression: a code-review finding on the AB-204 pull request

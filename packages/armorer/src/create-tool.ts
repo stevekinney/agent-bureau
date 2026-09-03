@@ -909,7 +909,11 @@ export function createTool<
         retryable: false,
       });
       emit('execute-error', { ...baseDetail, error: errorObj });
-      emit('settled', { ...baseDetail, error: errorObj });
+      emit('settled', {
+        ...baseDetail,
+        error: errorObj,
+        callbackCompletion: options.executionHandle?.whenSettled(),
+      });
       const cancelledDetails: {
         error?: unknown;
         errorCategory?: ToolErrorCategory;
@@ -1092,7 +1096,11 @@ export function createTool<
           retryable: false,
         });
         emit('execute-error', { ...parsedDetail, error: errorObj });
-        emit('settled', { ...parsedDetail, error: errorObj });
+        emit('settled', {
+          ...parsedDetail,
+          error: errorObj,
+          callbackCompletion: options.executionHandle?.whenSettled(),
+        });
         await runPolicyAfter(
           {
             ...policyContext,
@@ -1143,7 +1151,11 @@ export function createTool<
           return handleCancellation(options.signal.reason);
         }
         emit('execute-success', { ...parsedDetail, result: undefined });
-        emit('settled', { ...parsedDetail, result: undefined });
+        emit('settled', {
+          ...parsedDetail,
+          result: undefined,
+          callbackCompletion: options.executionHandle?.whenSettled(),
+        });
         try {
           await runPolicyAfter(
             {
@@ -1396,6 +1408,7 @@ export function createTool<
                   emit('settled', {
                     ...parsedDetail,
                     result: finalized.collected,
+                    callbackCompletion: options.executionHandle?.whenSettled(),
                   });
                   const policyAfter: ToolPolicyAfterContext = {
                     ...policyContext,
@@ -1427,6 +1440,7 @@ export function createTool<
                   emit('settled', {
                     ...parsedDetail,
                     error: streamError,
+                    callbackCompletion: options.executionHandle?.whenSettled(),
                   });
                   const streamErrorCategory = classifyErrorCategory(streamError);
                   await runPolicyAfter(
@@ -1491,7 +1505,11 @@ export function createTool<
         outputDigest = computeDigest(value, digestOptions.algorithm);
       }
       emit('execute-success', { ...parsedDetail, result: value });
-      emit('settled', { ...parsedDetail, result: value });
+      emit('settled', {
+        ...parsedDetail,
+        result: value,
+        callbackCompletion: options.executionHandle?.whenSettled(),
+      });
       const policyAfter: ToolPolicyAfterContext = {
         ...policyContext,
         outcome: 'success',
@@ -1584,7 +1602,11 @@ export function createTool<
       } else {
         emit('execute-error', { ...baseDetail, error: reportedError });
       }
-      emit('settled', { ...baseDetail, error: reportedError });
+      emit('settled', {
+        ...baseDetail,
+        error: reportedError,
+        callbackCompletion: options.executionHandle?.whenSettled(),
+      });
       const callId = toolCall.id;
       const errorCategory = classifyErrorCategory(reportedError);
       const errorPolicyContext = buildPolicyContext(toolCall, toolCall.arguments, inputDigest);

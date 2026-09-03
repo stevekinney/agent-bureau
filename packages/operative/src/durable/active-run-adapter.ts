@@ -454,11 +454,26 @@ export function createDurableActiveRun(
     };
 
     const onSettled = (e: ToolboxEventMap['settled']) => {
-      // Clamped: same reasoning as the identical counter in create-run.ts —
-      // armorer can emit 'settled' with no preceding 'execute-start' for a
-      // tool call cancelled before execution begins.
-      inFlightTools = Math.max(0, inFlightTools - 1);
       liveness.endToolCall();
+      // AB-289: armorer's `settled` event fires as soon as the
+      // cancellation race against the execution signal settles, not once
+      // the tool callback's own returned promise has genuinely settled —
+      // see the identical deferral and reasoning in `create-run.ts`'s
+      // `onSettled`. Deferring this decrement matters here for
+      // `hasInFlightWork()`'s `not-required` fast-path gate below: without
+      // it, that gate could read zero in-flight work while a local
+      // abort-ignoring callback is still actually running, even though the
+      // durable cancellation record this run's own `completed`
+      // classification depends on (`resolveDurableOutcome`) is unaffected
+      // by local tool tracking.
+      const release = () => {
+        // Clamped: same reasoning as the identical counter in
+        // create-run.ts — armorer can emit 'settled' with no preceding
+        // 'execute-start' for a tool call cancelled before execution
+        // begins.
+        inFlightTools = Math.max(0, inFlightTools - 1);
+      };
+      void (e.callbackCompletion ?? Promise.resolve()).then(release, release);
       const hasError = e.error !== undefined;
       const status: 'success' | 'error' = hasError ? 'error' : 'success';
       emitter.dispatchEvent(

@@ -7222,3 +7222,90 @@ describe('per-call traceContext and executionContext (AB-233)', () => {
     expect(observedTraceContext).toBe(callTimeTraceContext);
   });
 });
+
+// AB-289: the toolbox's `settled` event fires as soon as the cancellation
+// race against the execution signal settles — not once the tool callback's
+// own returned promise has settled. A callback that ignores its abort
+// signal keeps running after `settled` fires, so the event carries a
+// `callbackCompletion` promise that stays pending until that callback
+// genuinely returns (or throws), distinct from the event's own firing.
+describe('toolbox settled event carries real callback completion (AB-289)', () => {
+  it('keeps callbackCompletion pending while an abort-ignoring callback keeps running, and resolves it once the callback returns', async () => {
+    let releaseTool: ((value: string) => void) | undefined;
+    const toolGate = new Promise<string>((resolve) => {
+      releaseTool = resolve;
+    });
+    let notifyStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      notifyStarted = resolve;
+    });
+    const stubbornTool = createTool({
+      name: 'stubborn',
+      description: 'ignores its abort signal and keeps running',
+      input: z.object({}),
+      async execute() {
+        notifyStarted?.();
+        return toolGate;
+      },
+    });
+    const toolbox = createToolbox([stubbornTool]);
+
+    let settledEvent: { callbackCompletion?: Promise<unknown> } | undefined;
+    toolbox.addEventListener('settled', (event) => {
+      settledEvent = event;
+    });
+
+    const controller = new AbortController();
+    const pending = toolbox.execute(
+      { id: 'stubborn-call', name: 'stubborn', arguments: {} },
+      { signal: controller.signal },
+    );
+    // Wait for the tool's own callback to actually start (not just a fixed
+    // tick count) before aborting, so the abort races a real in-flight
+    // callback rather than winning during argument validation.
+    await started;
+    controller.abort('caller stopped');
+    const result = await pending;
+
+    expect(result.errorCategory).toBe('cancelled');
+    // Red on the baseline: `callbackCompletion` does not exist yet, so this
+    // is `undefined`, not a `Promise` — every assertion below it is moot
+    // until the field is added.
+    expect(settledEvent?.callbackCompletion).toBeInstanceOf(Promise);
+
+    let callbackSettled = false;
+    void settledEvent!.callbackCompletion!.then(() => {
+      callbackSettled = true;
+    });
+    for (let tick = 0; tick < 10; tick++) {
+      await Promise.resolve();
+    }
+    expect(callbackSettled).toBe(false);
+
+    releaseTool?.('done');
+    await settledEvent!.callbackCompletion;
+    expect(callbackSettled).toBe(true);
+  });
+
+  it('resolves callbackCompletion promptly for a normal, non-aborted call', async () => {
+    const quickTool = createTool({
+      name: 'quick',
+      description: 'resolves immediately',
+      input: z.object({}),
+      async execute() {
+        return 'ok';
+      },
+    });
+    const toolbox = createToolbox([quickTool]);
+
+    let settledEvent: { callbackCompletion?: Promise<{ state: string }> } | undefined;
+    toolbox.addEventListener('settled', (event) => {
+      settledEvent = event;
+    });
+
+    await toolbox.execute({ id: 'quick-call', name: 'quick', arguments: {} });
+
+    expect(settledEvent?.callbackCompletion).toBeInstanceOf(Promise);
+    await expect(settledEvent!.callbackCompletion).resolves.toMatchObject({ state: 'terminal' });
+  });
+});

@@ -84,6 +84,19 @@ export interface ExecutionHandle {
   settle(result?: unknown): void;
   cleanup(outcome?: ExecutionCleanupOutcome): void;
   unknownEffect(result?: unknown): void;
+  /**
+   * Resolves once this execution reaches a terminal state (`terminal` or
+   * `unknown-effect`) — genuinely, not merely once a cancellation race
+   * against this execution's `signal` has settled. For a `createTool`
+   * execution, a callback that ignores `signal.abort()` and keeps running
+   * leaves this promise pending: `settle()`/`cleanup()`/`unknownEffect()`
+   * are only called once that callback's own returned promise has itself
+   * settled (or thrown) — see the `void runner.then(...)` completion path in
+   * `create-tool.ts`. Consumers that must not treat an aborted call as done
+   * (armorer's own toolbox `settled` event carries this promise as
+   * `callbackCompletion`, AB-289) await this instead of relying on the
+   * event's own firing.
+   */
   whenSettled(): Promise<ExecutionSnapshot>;
 }
 
