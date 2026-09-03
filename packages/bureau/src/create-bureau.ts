@@ -2772,6 +2772,21 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       const closedSettlement: ReturnType<ActiveRun['closed']> = dispatchSettledPromise.then(
         () => cancellationForward ?? deferredRun.closed(),
       );
+      // AB-291 (AC4 review finding): `closedSettlement`'s own genuine
+      // acknowledgement, captured once it settles — read by `closed()`
+      // below BEFORE `options.signal.aborted`, so a caller passing an
+      // already-aborted signal AFTER the shared settlement has genuinely
+      // resolved still gets the identical cached acknowledgement, per
+      // `createClosedAcknowledgement`'s own post-settlement idempotency
+      // guarantee ("a repeated call after the underlying cleanup has
+      // genuinely settled returns the identical cached acknowledgement
+      // object by reference"), rather than manufacturing a fresh
+      // `unresolved`/`timed-out` result for a signal that arrived too late
+      // to mean anything.
+      let cachedAcknowledgement: Awaited<ReturnType<ActiveRun['closed']>> | undefined;
+      void closedSettlement.then((acknowledgement) => {
+        cachedAcknowledgement = acknowledgement;
+      });
       const guardedRun: AgentRun<unknown, boolean> = {
         ...deferredRun,
         abort(reason?: string): void {
@@ -2804,6 +2819,12 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         closed(options?: ClosedOptions): ReturnType<ActiveRun['closed']> {
           const signal = options?.signal;
           if (!signal) return closedSettlement;
+          // Post-settlement idempotency guarantee: once the shared
+          // acknowledgement has genuinely settled, every call — regardless
+          // of a per-call signal's state — returns that identical cached
+          // object, never a fresh `unresolved`/`timed-out` manufactured
+          // from a signal that arrived after the fact.
+          if (cachedAcknowledgement) return Promise.resolve(cachedAcknowledgement);
           if (signal.aborted) {
             return Promise.resolve({ status: 'unresolved', reason: 'timed-out' });
           }

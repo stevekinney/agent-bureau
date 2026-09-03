@@ -2255,6 +2255,59 @@ describe('createDurableActiveRun.closed()', () => {
     await Promise.resolve();
     expect(resultSettled).toBe(false);
   });
+
+  // Review finding on this pull request: `cancelRejectionGate` must trip
+  // ONLY for the genuinely-parked (suspended) case above — not for every
+  // `engine.cancel()` rejection. A cancel can also legitimately reject
+  // against a workflow that's already terminal, or mid-step and about to
+  // settle cleanly on its own (the B6 abort-into-generate race the "still
+  // settles when engine.cancel rejects during durable abort cleanup" test
+  // above exercises for `result`). Misclassifying THOSE as `failed` would
+  // be a regression on a clean cleanup. Overrides `engine.get` to report
+  // `'running'` (not `'suspended'`) at the moment of the rejection, proving
+  // the gate stays untripped and `closed()` instead falls through to the
+  // ordinary post-cancel re-read once the workflow settles on its own.
+  it('does not classify closed() failed for a benign engine.cancel rejection against a workflow that is not parked', async () => {
+    const { engine, resolveResult } = createManualDurableEngine();
+    engine.cancel = async () => {
+      throw new Error('cancel rejected but the workflow was never actually parked');
+    };
+    engine.get = (async () => ({ status: 'running' })) as unknown as RegistryAgnosticEngine['get'];
+
+    const runId = 'ac3-durable-cancel-rejects-not-parked';
+    const activeRun = createDurableActiveRun(
+      { engine, checkpointStore: createManualCheckpointStore() },
+      {
+        runId,
+        sessionId: runId,
+        options: runOptions(async () => ({ content: 'unused', toolCalls: [] })),
+        prompt: 'Hello',
+      },
+    );
+
+    await Promise.resolve();
+    activeRun.abort('abort races a workflow about to settle on its own');
+    const closedAcknowledgement = activeRun.closed();
+
+    // Let the rejected engine.cancel()'s own `engine.get` check resolve —
+    // it observes 'running', so `cancelRejectionGate` is never tripped —
+    // before the workflow settles on its own.
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // The workflow settles normally, as if the cancel simply lost the race.
+    resolveResult();
+
+    // `resolveDurableOutcome`'s OWN post-cancel re-read also observes the
+    // still-'running' (nonterminal) status, so this resolves
+    // unresolved/persistence-failed — never `failed` — proving the benign
+    // rejection above was correctly ignored, not misclassified.
+    expect(await closedAcknowledgement).toEqual({
+      status: 'unresolved',
+      reason: 'persistence-failed',
+    });
+  });
 });
 
 describe('createRecoveredRunEventSurface', () => {

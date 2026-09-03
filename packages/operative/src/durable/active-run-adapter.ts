@@ -675,17 +675,36 @@ export function createDurableActiveRun(
       // must not overwrite an already-in-flight (or already-settled) first
       // cancellation with a fresh, possibly slower or non-settling, one —
       // closed() would otherwise wait on the wrong promise.
-      cancelSettled ??= context.engine.cancel(runId).catch((error: unknown) => {
-        // Swallowed for THIS promise: a failing cancel (run already
-        // terminal) is not an error for `cancelSettled`'s own callers below
-        // — the AbortController signal is the load-bearing stop, and the
-        // post-cancel re-read still disambiguates a genuine no-op from a
-        // real problem. But also surface the rejection onto
-        // `cancelRejectionGate` (AC3) so `closed()` doesn't hang forever if
-        // this was instead a genuinely parked workflow that `engine.cancel`
-        // failed to unblock — `result` would never settle on its own in
-        // that case.
-        rejectCancelGate?.(error);
+      cancelSettled ??= context.engine.cancel(runId).catch(async (error: unknown) => {
+        // Swallowed for THIS promise unconditionally: a failing cancel (run
+        // already terminal, or racing the in-flight step's own
+        // AbortController-driven completion — see "still settles when
+        // engine.cancel rejects during durable abort cleanup" below) is not
+        // an error for `cancelSettled`'s own callers — the AbortController
+        // signal is the load-bearing stop, and the post-cancel re-read
+        // still disambiguates a genuine no-op from a real problem.
+        //
+        // AC3 is specifically about a workflow PARKED in `ctx.sleep`/
+        // `ctx.waitForSignal` that a rejecting `engine.cancel()` fails to
+        // unblock — not every cancel rejection. A cancel can also
+        // legitimately reject against a workflow that's already terminal,
+        // or mid-step and about to settle cleanly via its own
+        // AbortController-driven abort path; tripping `cancelRejectionGate`
+        // for THOSE would misclassify a clean cleanup as `failed` (review
+        // finding on this pull request). Only trip it when the durable
+        // engine's own record confirms the workflow is genuinely
+        // `suspended` at the moment of the failure — the one state a
+        // rejecting cancel truly cannot unblock on its own.
+        try {
+          const state = await context.engine.get(runId);
+          if (state?.status === 'suspended') {
+            rejectCancelGate?.(error);
+          }
+        } catch {
+          // The engine read itself failed — nothing more can be determined
+          // here; `result` settles (or doesn't) on its own, same as every
+          // other case this catch already swallows.
+        }
       });
     }
   }

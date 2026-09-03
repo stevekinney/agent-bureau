@@ -1852,6 +1852,17 @@ describe('createBureau', () => {
       expect(await handle.closed({ signal: nonAborting.signal })).toEqual({
         status: 'completed',
       });
+
+      // Review finding: an ALREADY-aborted signal, passed AFTER the shared
+      // settlement genuinely resolved, still returns the identical cached
+      // acknowledgement — the post-settlement idempotency guarantee — not
+      // a fresh unresolved/timed-out manufactured from a signal that
+      // arrived too late to mean anything.
+      const postSettlementAborted = new AbortController();
+      postSettlementAborted.abort();
+      expect(await handle.closed({ signal: postSettlementAborted.signal })).toEqual({
+        status: 'completed',
+      });
     } finally {
       await bureau.dispose();
     }
