@@ -5,7 +5,16 @@ import type { ActiveRun } from '../create-run';
 import type { FinishReason, StepResult, TokenUsage } from '../types';
 import type { StoreEventMap } from './events';
 
-export type RunStatus = 'running' | 'completed' | 'error' | 'aborted';
+/**
+ * `'aborting'` (AB-205/AB-37) is a transitional status: `Bureau.abortRun`
+ * reports it the moment an abort is requested but before the underlying
+ * `ActiveRun.abort()` call's teardown has settled. `Store`'s own `RunState`
+ * (`store.ts`) never writes this value itself — it only ever transitions
+ * `'running'` directly to a terminal status when the run's own terminal
+ * event fires — so `'aborting'` is surfaced only by a caller (Bureau) layering
+ * its own in-flight-abort tracking on top of a still-`'running'` `RunState`.
+ */
+export type RunStatus = 'running' | 'aborting' | 'completed' | 'error' | 'aborted';
 
 export interface Action {
   readonly sequence: number;

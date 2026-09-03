@@ -597,19 +597,24 @@ for the `run`/`createRun` swap above:
 - **Configuration and tool operations** — `getConfiguration`, `getTools`.
 - **Live-frame operations** — `subscribeLiveFrames`.
 - **Event operations** — `addEventListener`, `removeEventListener`, `on`, `once`, `subscribe`, `toObservable`, `events`.
-- **Completion and disposal operations** — `complete`, `completed`, `signal`, `dispose`, plus the read-only `store`, `memory`, `scheduler`, `ready`, `sessionStore`, `kv`, `auditTrail`, `webhookNotifier`, and `onlineEvalSampler` properties. `closed()` (AB-37) is delivered on `ActiveRun`, `AgentRun`, and `DiagnosticAgentRun` by AB-204.
+- **Completion, cancellation, and disposal operations**: `complete`, `completed`, `signal`, `dispose`, `shutdown` (AB-37), `cancelDurableRun` (AB-37), plus the read-only `store`, `memory`, `scheduler`, `ready`, `sessionStore`, `kv`, `auditTrail`, `webhookNotifier`, and `onlineEvalSampler` properties. `closed()` (AB-37) is delivered on `ActiveRun`, `AgentRun`, and `DiagnosticAgentRun` by AB-204.
 
 None of these depend on `D` — a `Bureau<D>`'s administrative surface is
 identical regardless of which agents were registered, which is why `Bureau`
 above is written as `Bureau<D extends AgentDefinitions = AgentDefinitions>`
 rather than requiring every consumer of, say, `getRun` to know `D`.
 
-`abortRun`'s _shape_ is unchanged by AB-34, but its _behavior_ is a declared
-non-conforming exception to the idempotent-abort rule added in
-[Started-work control contract](#started-work-control-contract). It throws
-`CONFLICT` against a run that is not currently running instead of returning an
-already-terminal outcome. AB-37 owns the remediation; until it lands, the
-exception is recorded rather than silently reclassified as conforming.
+`abortRun`'s shape is unchanged by AB-34 and by AB-37: it remains a
+synchronous, process-local operation. AB-37 resolves its behavioral
+non-conformance: it no longer throws `CONFLICT` against a run that is not
+currently running, and returns an idempotent, already-terminal-aware outcome
+instead, a `RunSummary` whose `status` reflects the run's actual current
+state, including the new transitional `aborting` value written when the
+abort is requested and cleared to `aborted` by the run's own terminal event
+once teardown settles. AB-37 also adds
+`Bureau.cancelDurableRun(runId): Promise<CancelDurableRunOutcome>` as a
+separate asynchronous locator for a durable run `abortRun` cannot reach
+because it has no process-local `ActiveRun`.
 
 ### Session update/query capability
 
@@ -971,7 +976,7 @@ thrown error, so a caller awaiting cleanup always gets an answer rather than
 wrapping the call to discover whether cleanup itself failed. AB-37 owns its
 signature.
 
-**Bureau's `abortRun` is a known non-conformance, not a new rule.** `packages/bureau/src/create-bureau.ts:2916` throws `BureauError('Run is already {status}', 'CONFLICT')` when `abortRun(id)` is called against a run that is not currently `'running'`. That is not idempotent—a second `abortRun` call, or a call arriving after the run finished on its own, fails instead of returning an already-terminal outcome. This amendment does not fix it (no runtime code changes here); it records the gap, names `packages/bureau/src/create-bureau.ts:2916-2929` as its exact location, and assigns remediation ownership to AB-37, which owns cancellation and asynchronous shutdown and already covers the durable fencing and cleanup-acknowledgement semantics this fix depends on. Filing it separately now would likely be rewritten once AB-37 settles those semantics. Until that remediation lands, `abortRun` is a **declared exception** to the idempotent-abort rule—the same escape hatch the vault brief's Definition of Done anticipates ("the decision document records intentional exceptions and their owners")—not a silent contradiction.
+**Bureau's `abortRun` non-conformance is resolved by AB-37.** `packages/bureau/src/create-bureau.ts:2916` previously threw `BureauError('Run is already {status}', 'CONFLICT')` when `abortRun(id)` was called against a run that was not currently `'running'`. AB-37's decision record fixes this: `abortRun` is idempotent and no longer fabricates a terminal `status: 'aborted'` before teardown starts, using the transitional `aborting` status instead. `abortRun` remains synchronous and process-local; a durable run with no live `ActiveRun` is reached through `Bureau.cancelDurableRun(runId)`. The implementation is tracked under AB-38.
 
 Armorer's existing `ExecutionHandle.abort(source?, reason?): boolean` (`packages/armorer/src/execution-lifecycle.ts:80`) already conforms: it returns whether _this_ call changed anything, so a repeated call returns `false` rather than throwing. Its `whenSettled(): Promise<ExecutionSnapshot>` (line 83's neighbor) is the closest existing prior art for the cleanup acknowledgement this contract requires, and its `ExecutionCleanupOutcome` (`'not-required' | 'completed' | 'failed' | 'unresolved'`, line 26) is the outcome set [Required capabilities](#required-capabilities) adopts. The naming and vocabulary constraints recorded there — borrow armorer's terms where the concepts match exactly, and do not call state observation `subscribe` — bind whoever declares the signatures.
 

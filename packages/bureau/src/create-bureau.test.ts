@@ -76,6 +76,7 @@ import {
   omitKeysWithPrefix,
   recordedSessionAuthorityPrincipalId,
   recoveredRequestContextFromMetadata,
+  resolveCancelDurableRun,
   ScheduleLocatorUnavailableError,
   wireFlowControlSchedulerEvents,
   wireStreamEventTargetFrames,
@@ -2823,7 +2824,11 @@ describe('createBureau', () => {
     expect(detail?.stepDetails.length).toBeGreaterThan(0);
   });
 
-  it('aborts a running run', async () => {
+  it('aborts a running run, reporting the transitional aborting status (AB-205)', async () => {
+    // `abortRun` no longer fabricates a terminal `'aborted'` status before
+    // teardown has actually started (AB-37) — it reports the transitional
+    // `'aborting'` status instead, cleared to the real terminal status only
+    // once the run's own terminal event settles.
     const generate: GenerateFunction = () => new Promise(() => {});
     const bureau = await createBureau({
       agents: {},
@@ -2834,7 +2839,288 @@ describe('createBureau', () => {
     const run = await bureau.createRun({ message: 'Hello' });
 
     const aborted = bureau.abortRun(run.id);
-    expect(aborted.status).toBe('aborted');
+    expect(aborted.status).toBe('aborting');
+
+    // `getRun`/`listRuns` deliberately keep reporting the run's real,
+    // unmodified status (still `'running'` — the run has not actually
+    // stopped yet) rather than `abortRun`'s own transitional value, so the
+    // widely used "`status !== 'running'` means settled" idiom (e.g.
+    // `waitForRunState`) is never falsely satisfied before teardown starts.
+    expect(bureau.getRun(run.id)?.status).toBe('running');
+    expect(bureau.listRuns().find((entry) => entry.id === run.id)?.status).toBe('running');
+
+    await pollUntil(() => bureau.getRun(run.id)?.status === 'aborted');
+    expect(bureau.getRun(run.id)?.status).toBe('aborted');
+
+    bureau.dispose();
+  });
+
+  it('abortRun is idempotent: a second call on the same still-running run does not throw and reports aborting or later (AB-205)', async () => {
+    const generate: GenerateFunction = () => new Promise(() => {});
+    const bureau = await createBureau({
+      agents: {},
+      generate,
+      toolbox: createEmptyToolbox(),
+    });
+
+    const run = await bureau.createRun({ message: 'Hello' });
+
+    const first = bureau.abortRun(run.id);
+    const second = bureau.abortRun(run.id);
+
+    expect(first.status).toBe('aborting');
+    expect(second.status).toBe('aborting');
+
+    await pollUntil(() => bureau.getRun(run.id)?.status === 'aborted');
+
+    bureau.dispose();
+  });
+
+  it('abortRun is idempotent against a terminal run: returns the current summary instead of throwing CONFLICT (AB-205)', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    const run = await bureau.createRun({ message: 'Hello' });
+    await pollUntil(() => bureau.getRun(run.id)?.status !== 'running');
+
+    expect(bureau.getRun(run.id)?.status).toBe('completed');
+
+    // A repeat call after the run finished on its own no longer throws
+    // `CONFLICT` — it returns the run's current (real, terminal) summary.
+    const repeat = bureau.abortRun(run.id);
+    expect(repeat.status).toBe('completed');
+
+    bureau.dispose();
+  });
+
+  it('abortRun is idempotent for a run that was already aborted: a second call after teardown returns the aborted summary (AB-205)', async () => {
+    const generate: GenerateFunction = () => new Promise(() => {});
+    const bureau = await createBureau({
+      agents: {},
+      generate,
+      toolbox: createEmptyToolbox(),
+    });
+
+    const run = await bureau.createRun({ message: 'Hello' });
+    bureau.abortRun(run.id);
+    await pollUntil(() => bureau.getRun(run.id)?.status === 'aborted');
+
+    const repeat = bureau.abortRun(run.id);
+    expect(repeat.status).toBe('aborted');
+
+    bureau.dispose();
+  });
+
+  describe('cancelDurableRun (AB-205)', () => {
+    it('resolves unsupported-capability when no durable engine is composed', async () => {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+      });
+
+      const outcome = await bureau.cancelDurableRun('anything');
+      expect(outcome).toEqual({ status: 'unsupported-capability' });
+
+      bureau.dispose();
+    });
+
+    it('resolves not-found against an unknown runId', async () => {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'memory' },
+        durableExecution: true,
+      });
+
+      const outcome = await bureau.cancelDurableRun('does-not-exist');
+      expect(outcome).toEqual({ status: 'not-found' });
+
+      bureau.dispose();
+    });
+
+    it('resolves already-terminal against an already-completed durable workflow', async () => {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'memory' },
+        durableExecution: true,
+      });
+
+      const run = await bureau.createRun({ message: 'Hello' });
+      await pollUntil(async () => {
+        const state = await bureau.getDurableRun(run.id);
+        return state?.status === 'completed';
+      });
+
+      const outcome = await bureau.cancelDurableRun(run.id);
+      expect(outcome).toEqual({ status: 'already-terminal' });
+
+      bureau.dispose();
+    });
+
+    it('resolves requested against a running durable workflow only after the post-cancel re-read observes cancelled', async () => {
+      const generate: GenerateFunction = () => new Promise(() => {});
+      const bureau = await createBureau({
+        agents: {},
+        generate,
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'memory' },
+        durableExecution: true,
+      });
+
+      const run = await bureau.createRun({ message: 'Hello' });
+      await pollUntil(async () => {
+        const state = await bureau.getDurableRun(run.id);
+        return state?.status === 'running';
+      });
+
+      const outcome = await bureau.cancelDurableRun(run.id);
+      expect(outcome).toEqual({ status: 'requested' });
+
+      const state = await bureau.getDurableRun(run.id);
+      expect(state?.status).toBe('cancelled');
+
+      bureau.dispose();
+    });
+
+    describe('resolveCancelDurableRun (dependency-injected resolution algorithm)', () => {
+      it('resolves already-terminal WITHOUT calling cancel when the workflow is already outside the forcibly-terminable statuses', async () => {
+        let cancelCalls = 0;
+        const outcome = await resolveCancelDurableRun('run-1', {
+          getDurableRun: async () =>
+            ({ id: 'run-1', type: 'agentRun', status: 'completed', input: undefined }) as never,
+          cancel: async () => {
+            cancelCalls += 1;
+          },
+        });
+
+        expect(outcome).toEqual({ status: 'already-terminal' });
+        expect(cancelCalls).toBe(0);
+      });
+
+      it('resolves already-terminal, never requested, when a race lets the workflow complete normally during the cancel call (regression fixture)', async () => {
+        // `cancel` resolves without proof it actually committed the
+        // cancellation — it can just as easily resolve because the workflow
+        // raced to `'completed'` on its own first. The post-cancel re-read
+        // is what tells the two apart; this fixture forces that exact race
+        // by having `getDurableRun` report `'running'` on the FIRST call
+        // (the pre-cancel read) and `'completed'` on the SECOND (the
+        // post-cancel re-read) — the workflow-completed-during-cancel case.
+        let getDurableRunCalls = 0;
+        const outcome = await resolveCancelDurableRun('run-2', {
+          getDurableRun: async () => {
+            getDurableRunCalls += 1;
+            return getDurableRunCalls === 1
+              ? ({ id: 'run-2', type: 'agentRun', status: 'running', input: undefined } as never)
+              : ({ id: 'run-2', type: 'agentRun', status: 'completed', input: undefined } as never);
+          },
+          // `cancel` resolves normally (it lost the race — the engine's own
+          // `allowedStatuses` guard silently no-ops against an already-
+          // terminal workflow), which is exactly why a re-read is required.
+          cancel: async () => {},
+        });
+
+        expect(outcome).toEqual({ status: 'already-terminal' });
+        expect(getDurableRunCalls).toBe(2);
+      });
+
+      it('resolves requested only when the post-cancel re-read observes cancelled', async () => {
+        let getDurableRunCalls = 0;
+        const outcome = await resolveCancelDurableRun('run-3', {
+          getDurableRun: async () => {
+            getDurableRunCalls += 1;
+            return getDurableRunCalls === 1
+              ? ({ id: 'run-3', type: 'agentRun', status: 'pending', input: undefined } as never)
+              : ({ id: 'run-3', type: 'agentRun', status: 'cancelled', input: undefined } as never);
+          },
+          cancel: async () => {},
+        });
+
+        expect(outcome).toEqual({ status: 'requested' });
+      });
+
+      it('resolves failed with the error attached when cancel rejects', async () => {
+        const cancelError = new Error('engine unavailable');
+        const outcome = await resolveCancelDurableRun('run-4', {
+          getDurableRun: async () =>
+            ({ id: 'run-4', type: 'agentRun', status: 'suspended', input: undefined }) as never,
+          cancel: async () => {
+            throw cancelError;
+          },
+        });
+
+        expect(outcome).toEqual({ status: 'failed', error: cancelError });
+      });
+
+      it('never rejects: an unexpected getDurableRun rejection resolves failed instead', async () => {
+        const readError = new Error('storage unavailable');
+        const outcome = await resolveCancelDurableRun('run-5', {
+          getDurableRun: async () => {
+            throw readError;
+          },
+          cancel: async () => {},
+        });
+
+        expect(outcome).toEqual({ status: 'failed', error: readError });
+      });
+
+      it('resolves failed, not already-terminal, when the post-cancel re-read still reports a forcibly-terminable status (code-review regression fixture)', async () => {
+        // `cancel` resolving without rejecting is not proof the cancellation
+        // committed. If the post-cancel re-read still reports a status
+        // WITHIN the forcibly-terminable set (the cancellation genuinely
+        // never landed — neither committed nor lost to a race with normal
+        // completion), reporting `'already-terminal'` would be a false
+        // positive and `'requested'` would be an unproven claim; only
+        // `'failed'` is honest.
+        let getDurableRunCalls = 0;
+        const outcome = await resolveCancelDurableRun('run-6', {
+          getDurableRun: async () => {
+            getDurableRunCalls += 1;
+            return { id: 'run-6', type: 'agentRun', status: 'running', input: undefined } as never;
+          },
+          cancel: async () => {},
+        });
+
+        expect(outcome.status).toBe('failed');
+        expect(getDurableRunCalls).toBe(2);
+      });
+
+      it('resolves not-found when the post-cancel re-read observes the run was purged', async () => {
+        let getDurableRunCalls = 0;
+        const outcome = await resolveCancelDurableRun('run-7', {
+          getDurableRun: async () => {
+            getDurableRunCalls += 1;
+            return getDurableRunCalls === 1
+              ? ({ id: 'run-7', type: 'agentRun', status: 'suspended', input: undefined } as never)
+              : null;
+          },
+          cancel: async () => {},
+        });
+
+        expect(outcome).toEqual({ status: 'not-found' });
+      });
+
+      it('resolves unsupported-capability when the post-cancel re-read observes no durable engine composed', async () => {
+        let getDurableRunCalls = 0;
+        const outcome = await resolveCancelDurableRun('run-8', {
+          getDurableRun: async () => {
+            getDurableRunCalls += 1;
+            return getDurableRunCalls === 1
+              ? ({ id: 'run-8', type: 'agentRun', status: 'pending', input: undefined } as never)
+              : undefined;
+          },
+          cancel: async () => {},
+        });
+
+        expect(outcome).toEqual({ status: 'unsupported-capability' });
+      });
+    });
   });
 
   it('persists both lastRunStatus and lastFinishReason when a run is aborted', async () => {

@@ -72,6 +72,7 @@ import {
   type ListOptions,
   type RecoveredWorkflowInfo,
   type ScheduleSpec,
+  type WorkflowState,
 } from '@lostgradient/weft';
 import { KEYS } from '@lostgradient/weft/storage';
 import {
@@ -138,6 +139,7 @@ import type {
   BureauShutdownOptions,
   BureauShutdownOwnerReport,
   BureauShutdownReport,
+  CancelDurableRunOutcome,
   CleanupAcknowledgement,
   ConfigurationResponse,
   CreateRunRequest,
@@ -498,6 +500,111 @@ function ignoreBestEffortPromiseRejection(): void {}
 
 export function detachBestEffortPromise(promise: Promise<unknown>): void {
   void promise.catch(ignoreBestEffortPromiseRejection);
+}
+
+/**
+ * `WorkflowStatus` values (Weft `core/types/identity.ts`) a workflow can
+ * still be forcibly terminated from. Mirrors Weft's own internal
+ * `FORCIBLY_TERMINABLE_STATUSES` (`core/engine/termination/cleanup.ts`),
+ * which is not exported on the public `@lostgradient/weft` barrel, and
+ * operative's parallel (also module-private) `TERMINAL_WORKFLOW_STATUSES`
+ * set in `durable/active-run-adapter.ts`. Kept local rather than exported
+ * from either package, since neither exposes the underlying constant for
+ * `bureau` to import.
+ */
+const DURABLE_FORCIBLY_TERMINABLE_STATUSES = new Set<string>(['pending', 'running', 'suspended']);
+
+/**
+ * Dependencies {@link resolveCancelDurableRun} needs, factored out for
+ * direct dependency injection in tests (AB-205) — in particular the
+ * "resolves `already-terminal`, never `requested`" race fixture, which needs
+ * to observe/control exactly when `cancel` resolves relative to a workflow
+ * completing normally, something a real Weft engine cannot be made to do
+ * deterministically.
+ */
+export interface CancelDurableRunDependencies {
+  getDurableRun: (runId: string) => Promise<WorkflowState | null | undefined>;
+  cancel: (runId: string) => Promise<void>;
+}
+
+/**
+ * The pure resolution algorithm behind {@link Bureau.cancelDurableRun}
+ * (AB-37, AB-205), independent of any real `runtime.durable.engine` — see
+ * {@link CancelDurableRunDependencies}. Never rejects.
+ *
+ * Resolution order: `getDurableRun` resolving `undefined` (no durable engine
+ * composed) resolves `'unsupported-capability'`; resolving `null` (unknown to
+ * the engine) resolves `'not-found'`; a resolved `WorkflowState.status`
+ * already outside {@link DURABLE_FORCIBLY_TERMINABLE_STATUSES} resolves
+ * `'already-terminal'` WITHOUT calling `cancel`. Otherwise `cancel(runId)` is
+ * called — a rejection resolves `'failed'` with the error attached; a
+ * resolution triggers a REQUIRED post-cancel re-read via `getDurableRun`,
+ * because `cancel` resolving is not proof a cancellation record committed (it
+ * can win OR lose a race against the workflow completing on its own): a
+ * re-read observing `status === 'cancelled'` resolves `'requested'`; a
+ * re-read observing any OTHER status outside
+ * {@link DURABLE_FORCIBLY_TERMINABLE_STATUSES} (the race where normal
+ * completion won instead) resolves `'already-terminal'`; a re-read
+ * observing `null` (the run was purged between the two reads) resolves
+ * `'not-found'`; a re-read observing `undefined` (the durable engine
+ * vanished between the two reads — not expected in practice, since nothing
+ * decomposes a bureau's durable engine mid-call, but never assumed) resolves
+ * `'unsupported-capability'`; a re-read still reporting a status WITHIN
+ * {@link DURABLE_FORCIBLY_TERMINABLE_STATUSES} means `cancel` resolved
+ * without the cancellation actually committing — genuinely unproven, not a
+ * success — and resolves `'failed'` rather than being misreported as
+ * `'already-terminal'` (a code-review finding on this pull request).
+ */
+export async function resolveCancelDurableRun(
+  runId: string,
+  dependencies: CancelDurableRunDependencies,
+): Promise<CancelDurableRunOutcome> {
+  try {
+    const state = await dependencies.getDurableRun(runId);
+    if (state === undefined) {
+      return { status: 'unsupported-capability' };
+    }
+    if (state === null) {
+      return { status: 'not-found' };
+    }
+    if (!DURABLE_FORCIBLY_TERMINABLE_STATUSES.has(state.status)) {
+      return { status: 'already-terminal' };
+    }
+
+    try {
+      await dependencies.cancel(runId);
+    } catch (error) {
+      return { status: 'failed', error };
+    }
+
+    const rereadState = await dependencies.getDurableRun(runId);
+    if (rereadState === undefined) {
+      return { status: 'unsupported-capability' };
+    }
+    if (rereadState === null) {
+      return { status: 'not-found' };
+    }
+    if (rereadState.status === 'cancelled') {
+      return { status: 'requested' };
+    }
+    if (!DURABLE_FORCIBLY_TERMINABLE_STATUSES.has(rereadState.status)) {
+      return { status: 'already-terminal' };
+    }
+    // `cancel` resolved without rejecting, but the post-cancel re-read still
+    // reports a forcibly-terminable status — the cancellation record did not
+    // actually commit. Reporting `'already-terminal'` here would be a false
+    // positive; reporting `'requested'` would be an unproven claim. Neither
+    // is honest, so this resolves `'failed'`.
+    return {
+      status: 'failed',
+      error: new Error(
+        `cancelDurableRun("${runId}"): engine.cancel resolved but the post-cancel re-read still ` +
+          `reports status "${rereadState.status}" — the cancellation did not commit.`,
+      ),
+    };
+  } catch (error) {
+    return { status: 'failed', error };
+  }
 }
 
 type FlowControlScheduler = Pick<EventTarget, 'addEventListener' | 'removeEventListener'>;
@@ -1305,6 +1412,18 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // AB-96 — terminal RunReports, cached at the moment each run's lifecycle
   // event fires so `getRunReport` never needs to re-derive them.
   const runReports = new Map<string, RunReport>();
+  // AB-205/AB-37 — ids `abortRun` has already requested cancellation for
+  // (`ActiveRun.abort()` called) but whose teardown has not yet genuinely
+  // settled. Guards `abortRun` itself against re-calling `abort()` (and
+  // re-chaining a `closed()` continuation) on a same-run repeat call while
+  // it is still `'running'`; NOT surfaced through `getRun`/`listRuns` — see
+  // the doc comment on `abortRun` below for why those two deliberately keep
+  // reporting the real, unmodified `'running'` status for a run in this
+  // window rather than the transitional `'aborting'` value `abortRun`'s own
+  // return reports. An entry is removed once `ActiveRun.closed()` genuinely
+  // settles (AB-204); `Store` itself never writes `'aborting'` (see
+  // `RunStatus`'s doc comment in `operative/src/store/types.ts`).
+  const abortingRunIds = new Set<string>();
   // AB-15: per-run monotonic sequence counter for run-scoped live frames
   // (`event` and `stream:*`). Stamped once here — the single point where
   // frames reach `emitLiveFrame` — so `streamEventToFrame` and the store
@@ -3757,6 +3876,26 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     return buildPartialRunReport(id, runState, 'Run report requested before a terminal result');
   }
 
+  /**
+   * AB-37/AB-205: idempotent. A repeat call, or one arriving after the run
+   * finished on its own, returns the run's current summary instead of
+   * throwing `CONFLICT`. Called against a still-`'running'` run it requests
+   * cancellation and returns synchronously with the transitional
+   * `status: 'aborting'` — never a fabricated terminal `'aborted'` before
+   * teardown has actually started.
+   *
+   * `'aborting'` is reported ONLY in `abortRun`'s own return value here, not
+   * through `getRun`/`listRuns` (which keep reporting the run's real,
+   * unmodified `store` status — still `'running'` at this point): a run in
+   * this window has NOT actually stopped running yet — `store`'s `RunState`,
+   * the flow-control admission slot, and every other "is this run still
+   * live" consumer all still treat it as `'running'` until its own terminal
+   * event fires. Surfacing `'aborting'` through those general-purpose status
+   * reads would make `status !== 'running'` — the idiom this codebase (and
+   * `operative/test/wait.ts`'s `waitForRunState`) uses throughout to mean
+   * "this run has settled" — falsely true before settlement has actually
+   * happened.
+   */
   function abortRun(id: string): RunSummary {
     const runState = store.getRun(id);
     if (!runState) {
@@ -3764,13 +3903,27 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     }
 
     if (runState.status !== 'running') {
-      throw new BureauError(`Run is already ${runState.status}`, 'CONFLICT');
+      abortingRunIds.delete(id);
+      return serializeRunState(runState, getRunSessionIdentifier(runState), runAttribution.get(id));
     }
 
-    runState.activeRun.abort('Aborted via API');
+    if (!abortingRunIds.has(id)) {
+      abortingRunIds.add(id);
+      runState.activeRun.abort('Aborted via API');
+      // Evict the transitional marker once cleanup genuinely settles — never
+      // on `abort()` returning, which is synchronous and proves nothing
+      // about teardown. `closed()` never rejects (AB-204), so this is a
+      // plain best-effort continuation, not a value anything awaits.
+      detachBestEffortPromise(
+        runState.activeRun.closed().then(() => {
+          abortingRunIds.delete(id);
+        }),
+      );
+    }
+
     return {
       ...serializeRunState(runState, getRunSessionIdentifier(runState), runAttribution.get(id)),
-      status: 'aborted',
+      status: 'aborting',
     };
   }
 
@@ -3843,6 +3996,19 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   async function getDurableRun(runId: string) {
     if (!runtime.durable) return undefined;
     return runtime.durable.engine.get(runId);
+  }
+
+  /**
+   * Cancel a durable run with no live `ActiveRun` (AB-37, AB-205) — see the
+   * {@link Bureau.cancelDurableRun} doc comment. Delegates the resolution
+   * algorithm to {@link resolveCancelDurableRun}; this wrapper supplies the
+   * real `getDurableRun`/`engine.cancel` dependencies.
+   */
+  async function cancelDurableRun(runId: string): Promise<CancelDurableRunOutcome> {
+    return resolveCancelDurableRun(runId, {
+      getDurableRun,
+      cancel: (id) => runtime.durable!.engine.cancel(id),
+    });
   }
 
   /**
@@ -5082,6 +5248,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     abortRun,
     deleteRun,
     getDurableRun,
+    cancelDurableRun,
     listDurableRuns,
     runDurableMaintenance,
     listSessions,
