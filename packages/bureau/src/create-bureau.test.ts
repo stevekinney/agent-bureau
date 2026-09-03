@@ -9901,6 +9901,101 @@ describe('Bureau.shutdown() (AB-207)', () => {
     expect(report.completed).toBe(2);
   });
 
+  it('does NOT compose an event-history owner over durableExecution-forced memory storage — "persistent" means the backend, not just runtime.durable', async () => {
+    // Same construction as the previous test (memory storage, durable
+    // execution forced on) — proves `eventHistory`'s persistence gate
+    // checks the storage backend's own `capabilities().persistence`, not
+    // merely whether `runtime.durable` exists (AB-310).
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    const outcome = await bureau.eventHistory({ kind: 'run', id: 'run-1' });
+    expect(outcome).toEqual({ outcome: 'unsupported-capability', reason: 'no-persistent-storage' });
+
+    const report = await bureau.shutdown();
+    expect(report.owners.map((owner) => owner.kind).sort()).toEqual([
+      'audit-trail',
+      'durable-engine',
+    ]);
+  });
+
+  it('returns unsupported-capability from eventHistory for a fully ephemeral bureau (no storage at all)', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    const outcome = await bureau.eventHistory({ kind: 'session', id: 'session-1' });
+    expect(outcome).toEqual({ outcome: 'unsupported-capability', reason: 'no-persistent-storage' });
+
+    await bureau.dispose();
+  });
+
+  it('composes and disposes a real event-history store, reporting an event-history owner, for a genuinely persistent SQLite bureau', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-event-history-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        runtime,
+      });
+
+      // Composed and functioning (not unsupported-capability) — an
+      // ordinary empty page, since nothing has recorded to it yet: this
+      // slice ships `eventHistory()` as a read surface with no automatic
+      // producer wiring (see `durable-event-history.ts`'s own doc comment
+      // on `createDurableEventHistory`).
+      const outcome = await bureau.eventHistory({ kind: 'run', id: 'run-1' });
+      expect(outcome).toEqual({ events: [], hasMore: false });
+
+      const before = await runtime.deferred.drain();
+      expect(before.outstanding).toEqual([]);
+
+      const report = await bureau.shutdown();
+      expect(report.owners.map((owner) => owner.kind).sort()).toEqual([
+        'audit-trail',
+        'durable-engine',
+        'event-history',
+      ]);
+      const eventHistoryOwner = report.owners.find((owner) => owner.kind === 'event-history');
+      expect(eventHistoryOwner?.outcome).toBe('completed');
+
+      // AB-91's acceptance criterion 9 (ResourceScope/QuiescenceReport,
+      // AB-256): this store creates no timer and no listener of its own —
+      // `createDurableEventHistory` never calls `FleetEventFeed.subscribe()`
+      // (the only place Weft's own feed schedules a live-poll timer or
+      // registers a listener; see that module's own top-of-file doc
+      // comment) — so there is nothing for a `ResourceScope` registration
+      // to usefully track here beyond what `RuntimeServices.deferred`
+      // already covers above (zero outstanding, both before and after
+      // shutdown). The restart tests in `durable-event-history.test.ts`
+      // are the concrete proof that `dispose()` genuinely releases the
+      // backend: reopening the SAME SQLite/LMDB file immediately after
+      // `dispose()` succeeds, which would deadlock (LMDB) or contend
+      // (SQLite) if a listener/timer/handle were left live.
+      const after = await runtime.deferred.drain();
+      expect(after.outstanding).toEqual([]);
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
   it('reports a webhook-notifier owner, awaited to completion, for a bureau configured with a webhook target', async () => {
     const bureau = await createBureau({
       agents: {},

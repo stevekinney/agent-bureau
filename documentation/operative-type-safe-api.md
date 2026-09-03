@@ -705,6 +705,7 @@ for the `run`/`createRun` swap above:
 - **Live-frame operations** — `subscribeLiveFrames`.
 - **Event operations** — `addEventListener`, `removeEventListener`, `on`, `once`, `subscribe`, `toObservable`, `events`.
 - **Completion, cancellation, and disposal operations**: `complete`, `completed`, `signal`, `dispose`, `shutdown` (AB-37), `cancelDurableRun` (AB-37), plus the read-only `store`, `memory`, `scheduler`, `ready`, `sessionStore`, `kv`, `auditTrail`, `webhookNotifier`, and `onlineEvalSampler` properties. `closed()` (AB-37) is delivered on `ActiveRun`, `AgentRun`, and `DiagnosticAgentRun` by AB-204. **AB-289** closes a gap in that delivery: an in-memory `ActiveRun.closed()` withholds `{ status: 'completed' }` until every run-owned tool call's own callback has genuinely returned or thrown — not merely until armorer's cancellation-race `settled` event fires, which a callback that ignores its abort signal can outlive.
+- **Durable event history (AB-91)** — `eventHistory(owner, options?)`. See its own subsection below.
 
 None of these depend on `D` — a `Bureau<D>`'s administrative surface is
 identical regardless of which agents were registered, which is why `Bureau`
@@ -722,6 +723,58 @@ once teardown settles. AB-37 also adds
 `Bureau.cancelDurableRun(runId): Promise<CancelDurableRunOutcome>` as a
 separate asynchronous locator for a durable run `abortRun` cannot reach
 because it has no process-local `ActiveRun`.
+
+### Durable event history (AB-91's `ab91-01` slice, AB-310)
+
+```ts
+export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
+  eventHistory(
+    owner: DurableEventOwner,
+    options?: { since?: string; limit?: number },
+  ): Promise<DurableEventPage | DurableEventGap | EventHistoryUnsupportedOutcome>;
+}
+```
+
+A THIRD durable layer, alongside the operative store (Layer A, live) and the
+KV-based audit trail (Layer B, `AUDIT_EVENT_TYPES`-only, no cursor, no
+retention floor, no schema version — the gap this closes). Built over
+Weft 0.23.1's `FleetEventFeed` (`@lostgradient/weft/server/handler`),
+sharing `runtime.durable.engine.storage` — no second durable log —
+`packages/bureau/src/durable-event-history.ts` exports
+`createDurableEventHistory(storage, runtime): DurableEventHistory`, with
+`record(owner, kind, payload)` and `page(owner, options?)`. `Bureau`
+composes ONE instance whenever a genuinely persistent storage backend is
+configured (`capabilities().persistence !== 'ephemeral'` — not merely
+"`runtime.durable` exists," since `durableExecution: true` can be forced
+over `{ type: 'memory' }` storage) and exposes it as the read-only
+`bureau.eventHistory(owner, options?)`; an ephemeral bureau resolves
+`{ outcome: 'unsupported-capability', reason: 'no-persistent-storage' }`,
+the same locator vocabulary `cancelDurableRun`/`submitSessionInput`/
+`submitSteeringCommand` already use for a missing durable backend.
+
+Every returned `DurableEventEnvelope` carries `owner` (`{ kind: 'run' |
+'session'; id: string }`, encoded into Weft's `workflowId` as
+`${owner.kind}:${owner.id}` — no prior `FleetEventFeed` writer existed in
+`packages/bureau` to conflict with), `sequence`/`cursor` (Weft's own
+fleet-global sequence, never re-derived), `emittedAtMs`, `payload`, and a
+new `schemaVersion` field Weft's own envelope does not carry.
+`page()` returns events in strictly increasing sequence order for one
+owner with an EXCLUSIVE `since` cursor and a bounded `limit`
+(`hasMore`/`nextCursor` for continuation), or a typed `DurableEventGap`
+(`{ outcome: 'gap'; requestedCursor; firstRetainedSequence }`) —
+distinguishable from an ordinary empty page — when `since` predates the
+store's own `snapshotRetentionFloor()`. Restart durability (reopening the
+same SQLite/LMDB storage across two independently constructed store
+instances) is proven in `durable-event-history.test.ts`.
+
+`bureau.eventHistory()` is a READ surface only in this slice: nothing on
+`Bureau` writes to the store automatically. Wiring bureau's own action
+stream (`tool.*`, `run.*`, `step.completed`, and the rest of AB-87's
+already-dispatched `run.*`/`session.*`/`schedule.*` durable set) into
+`record()` the way `createAuditTrail` sinks them into the KV-based trail —
+and the race-free replay-then-tail live subscription (AB-91's `ab91-02`)
+and the Gateway paging/SSE/WebSocket projection (`ab91-03`) — remain
+separate, not-yet-built slices.
 
 ### Session update/query capability
 

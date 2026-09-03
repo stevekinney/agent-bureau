@@ -48,6 +48,9 @@ import {
 import {
   createAgentScheduler,
   createRecoveredRunEventSurface,
+  type DurableEventGap,
+  type DurableEventOwner,
+  type DurableEventPage,
   type DurableRunDeps,
   InvalidScheduleError,
   isAgentRunWorkflowInput,
@@ -99,6 +102,11 @@ import {
 
 import { type AgentDefinitions, createAgentCatalog } from './agent-catalog';
 import { type AuditTrail, createAuditTrail } from './audit-trail';
+import {
+  createDurableEventHistory,
+  type DurableEventHistory,
+  type DurableEventHistoryPageOptions,
+} from './durable-event-history';
 import {
   ActionEvent,
   BureauDisposedEvent,
@@ -158,6 +166,7 @@ import type {
   CreateRunRequest,
   DiagnosticSink,
   DurableScheduleDefinition,
+  EventHistoryUnsupportedOutcome,
   PendingReview,
   ResolveReviewInput,
   ResolveReviewResult,
@@ -5227,6 +5236,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     'online-evals',
     'webhook-notifier',
     'audit-trail',
+    'event-history',
     'durable-engine',
   ] as const;
 
@@ -5266,6 +5276,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       if (kind === 'online-evals') return Boolean(onlineEvalSamplerInstance);
       if (kind === 'webhook-notifier') return Boolean(webhookNotifierInstance);
       if (kind === 'audit-trail') return Boolean(auditTrailInstance);
+      if (kind === 'event-history') return Boolean(eventHistoryInstance);
       return Boolean(runtime.durable);
     });
     const ownerOutcomes = new Map<
@@ -5449,6 +5460,10 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
             const auditTrail = auditTrailInstance;
             ownerDrains.push(settleOwner('audit-trail', () => auditTrail.dispose()));
           }
+          if (eventHistoryInstance) {
+            const eventHistory = eventHistoryInstance;
+            ownerDrains.push(settleOwner('event-history', () => eventHistory.dispose()));
+          }
           if (webhookNotifierInstance) {
             const webhookNotifier = webhookNotifierInstance;
             ownerDrains.push(settleOwner('webhook-notifier', () => webhookNotifier.dispose()));
@@ -5600,6 +5615,29 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   let webhookNotifierInstance: WebhookNotifier | undefined;
   let onlineEvalSamplerInstance: OnlineEvalSampler | undefined;
 
+  // The durable event history store (AB-91's `ab91-01` slice, AB-310) —
+  // built eagerly (unlike `auditTrailInstance`/`webhookNotifierInstance`
+  // below, which need `bureau` itself to subscribe to action events) since
+  // it needs only `runtime.durable.engine.storage` and `runtimeServices`,
+  // both already available here. "A persistent storage backend is
+  // configured" (this issue's own acceptance criterion) means more than
+  // "`runtime.durable` exists" — a caller can force `durableExecution:
+  // true` over `{ type: 'memory' }` storage (several existing shutdown
+  // tests do exactly this) and get a real durable engine over genuinely
+  // EPHEMERAL storage, which would make restart-durability a lie the
+  // moment this store's FleetEventFeed were built over it. Gating on the
+  // backend's own declared `capabilities().persistence` (never `'ephemeral'`)
+  // is the same test Weft's `assertDurableStorageForRecovery` and
+  // `runtime-composition.ts`'s own `effectiveStorageIsPersistent` check
+  // use.
+  const persistentDurableStorage =
+    runtime.durable && runtime.durable.engine.storage.capabilities().persistence !== 'ephemeral'
+      ? runtime.durable.engine.storage
+      : undefined;
+  const eventHistoryInstance: DurableEventHistory | undefined = persistentDurableStorage
+    ? createDurableEventHistory(persistentDurableStorage, runtimeServices)
+    : undefined;
+
   const bureau: Bureau<D> = {
     store,
     memory: runtime.memory,
@@ -5619,6 +5657,18 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     run: runAgent as Bureau<D>['run'],
     get auditTrail(): AuditTrail | undefined {
       return auditTrailInstance;
+    },
+    eventHistory(
+      owner: DurableEventOwner,
+      eventHistoryOptions?: DurableEventHistoryPageOptions,
+    ): Promise<DurableEventPage | DurableEventGap | EventHistoryUnsupportedOutcome> {
+      if (!eventHistoryInstance) {
+        return Promise.resolve({
+          outcome: 'unsupported-capability',
+          reason: 'no-persistent-storage',
+        });
+      }
+      return eventHistoryInstance.page(owner, eventHistoryOptions);
     },
     get webhookNotifier(): WebhookNotifier | undefined {
       return webhookNotifierInstance;
