@@ -1,4 +1,5 @@
 import { sha256HexSync } from 'interoperability';
+import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
 
 import type { JsonValue } from '../core/serialization/json';
 import { stableStringifyJson } from '../core/serialization/json';
@@ -51,14 +52,20 @@ async function cleanLateClaim(
   }
 }
 
-function scheduleBoundedTimeout(callback: () => void, delay: number): () => void {
+function scheduleBoundedTimeout(
+  callback: () => void,
+  delay: number,
+  runtime: RuntimeServices,
+): () => void {
+  const scheduleTimeout = runtime.timers.setTimeout;
+  const cancelTimeout = runtime.timers.clearTimeout;
   let remaining = Math.max(0, delay);
   let cancelled = false;
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  let timer: unknown;
   const schedule = () => {
     if (cancelled) return;
     const chunk = Math.min(remaining, maximumTimerDelay);
-    timer = setTimeout(() => {
+    timer = scheduleTimeout(() => {
       if (cancelled) return;
       remaining -= chunk;
       if (remaining <= 0) callback();
@@ -68,7 +75,7 @@ function scheduleBoundedTimeout(callback: () => void, delay: number): () => void
   schedule();
   return () => {
     cancelled = true;
-    if (timer !== undefined) clearTimeout(timer);
+    if (timer !== undefined) cancelTimeout(timer);
   };
 }
 
@@ -96,6 +103,15 @@ export type WithToolboxIdempotencyOptions = {
   ) => boolean | Promise<boolean>;
   now?: () => number;
   createAttemptId?: () => string;
+  /**
+   * The injectable runtime-service seam (AB-92's `RuntimeServices`, AB-254):
+   * wall time, timers, and identifiers backing this wrap's default `now`,
+   * lease-renewal timer, and attempt-identifier generation. Resolved once,
+   * at wrap time. A test composes its own from `armorer/test`'s
+   * `createManualRuntimeServices()` instead of touching a real timer or a
+   * real clock.
+   */
+  runtime?: RuntimeServices;
 };
 
 type ToolboxExecuteOptionsWithIdempotencyKey = {
@@ -174,6 +190,7 @@ export function withToolboxIdempotency(
   toolbox: AnyToolbox,
   options: WithToolboxIdempotencyOptions,
 ): AnyToolbox {
+  const runtime: RuntimeServices = options.runtime ?? createDefaultRuntimeServices();
   const {
     cache,
     defaultTTL = DEFAULT_TTL,
@@ -185,8 +202,8 @@ export function withToolboxIdempotency(
     maximumExecutionDurationMs = Math.max(defaultTTL, DEFAULT_TTL),
     verifyResolutionReceipt,
     verifyLegacyResolutionReceipt,
-    now = Date.now,
-    createAttemptId = () => crypto.randomUUID(),
+    now = runtime.clock.now,
+    createAttemptId = () => runtime.identifiers.next('attempt'),
   } = options;
 
   if (!tenantId) throw new Error('Idempotency requires a non-empty tenantId.');
@@ -327,12 +344,8 @@ export function withToolboxIdempotency(
     }
 
     return new Promise((resolve, reject) => {
-      const setTimeoutFunction =
-        controls?.setTimeoutFunction ??
-        ((callback, milliseconds) => setTimeout(callback, milliseconds));
-      const clearTimeoutFunction =
-        controls?.clearTimeoutFunction ??
-        ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+      const setTimeoutFunction = controls?.setTimeoutFunction ?? runtime.timers.setTimeout;
+      const clearTimeoutFunction = controls?.clearTimeoutFunction ?? runtime.timers.clearTimeout;
       let deadlineTimer: unknown;
       let deadlineTimerScheduled = false;
       let settled = false;
@@ -870,12 +883,14 @@ export function withToolboxIdempotency(
             .finally(scheduleRenewal);
         },
         Math.max(1, Math.floor(leaseDurationMs / 2)),
+        runtime,
       );
     };
     scheduleRenewal();
     const cancelDeadlineTimer = scheduleBoundedTimeout(
       stopRenewal,
       Math.max(0, execution.absoluteDeadline! - execution.startedAt),
+      runtime,
     );
     try {
       result = await originalExecute(call, executeOptions);

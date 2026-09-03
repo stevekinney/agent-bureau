@@ -324,6 +324,24 @@ bag the identical way, and `createActiveRun` resolves
 `options.runtime ?? createDefaultRuntimeServices()` exactly once, at
 construction, snapshotting the resolved instance into the run.
 
+**Armorer's `createToolbox` (`AB-92`/`AB-254`).** `ToolboxOptions` gains the
+identical optional `runtime?: RuntimeServices` field. `createToolbox` resolves
+`options.runtime ?? createDefaultRuntimeServices()` exactly once, at
+construction, and snapshots the resolved instance into the toolbox's own
+`ExecutionLifecycle` and into every tool it builds — so a tool constructed by
+the toolbox reads wall time, timers, and identifiers through the same
+instance the toolbox itself uses, rather than through an independent
+per-tool default. This closes AB-92's `nextExecutionId` finding:
+`packages/armorer/src/execution-lifecycle.ts`'s module-level counter is gone,
+and `ExecutionLifecycle`'s own execution and call identifiers are minted
+through `RuntimeServices.identifiers` instead, so two `ExecutionLifecycle`
+instances in one process — including two toolboxes running concurrently in
+one test file — no longer share a counter. `armorer/test` re-exports
+`ManualRuntimeServices`/`createManualRuntimeServices` from `lifecycle`,
+matching the treatment `@lostgradient/operative/test` already receives. The
+`BureauOptions` amendment remains tst-03a's and the gateway construction
+amendment remains tst-07a's; neither lands here.
+
 ## Lazy loading
 
 Two separate factories cover the two things that can be loaded lazily: the

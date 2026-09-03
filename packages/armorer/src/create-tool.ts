@@ -1,6 +1,10 @@
 import type { StandardSchemaV1 } from 'interoperability';
 import { createIncrementalHash, isStandardSchema, sha256HexSync } from 'interoperability';
-import { CompletableEventTarget } from 'lifecycle';
+import {
+  CompletableEventTarget,
+  createDefaultRuntimeServices,
+  type RuntimeServices,
+} from 'lifecycle';
 import { z } from 'zod';
 
 import { isToolError, type ToolError, type ToolErrorCategory } from './core/errors';
@@ -116,6 +120,12 @@ type InternalToolExecuteOptions = ToolExecuteOptions & {
 // Map from event type strings to their Event subclass constructors.
 // Used by the `emit(type, detail)` helper to construct the correct Event.
 
+// `createToolCall` is a standalone public utility (not composed from any
+// toolbox or tool's own `RuntimeServices`), so its identifier generation
+// draws from one process-local default instance rather than reaching the
+// real random-UUID global directly (AB-92 AC4, AB-254).
+const defaultCallIdRuntime = createDefaultRuntimeServices();
+
 const toolEventClassMap: Record<string, new (detail: any) => Event> = {
   [ToolStatusUpdateEvent.type]: ToolStatusUpdateEvent,
   [ToolExecuteStartEvent.type]: ToolExecuteStartEvent,
@@ -198,6 +208,17 @@ export interface CreateToolOptions<
    * can be wrapped with `withIdempotency()` to deduplicate executions.
    */
   idempotencyKey?: (input: unknown) => string;
+  /**
+   * The injectable runtime-service seam (AB-92's `RuntimeServices`, AB-254):
+   * wall time, timers, and identifiers for this tool's own `ExecutionLifecycle`
+   * and call-identifier generation. `createToolbox` passes its own composed
+   * instance here for every tool it builds, so a tool constructed directly
+   * (not via a toolbox) resolves `options.runtime ?? createDefaultRuntimeServices()`
+   * on its own. A test composes its own from `armorer/test`'s
+   * `createManualRuntimeServices()` instead of touching a real timer or a
+   * real clock.
+   */
+  runtime?: RuntimeServices;
 }
 
 export type SyncToolMetadataInput<M extends ToolMetadata | undefined> = M | (() => M);
@@ -510,7 +531,9 @@ export function createTool<
     telemetry,
     diagnostics,
     idempotencyKey,
+    runtime: runtimeOption,
   } = options as CreateToolOptions<TInput, TOutput, E, Tags, M, TContext, TReturn>;
+  const runtime: RuntimeServices = runtimeOption ?? createDefaultRuntimeServices();
 
   // A non-Zod Standard Schema validator (Valibot, ArkType, ...) has no general
   // JSON Schema export, so the tool cannot be serialized for a provider
@@ -541,7 +564,7 @@ export function createTool<
   // would incorrectly reject that pipe as "not a Zod object schema".
 
   const emitter = new CompletableEventTarget<ToolEventMap>();
-  const executionLifecycle = createExecutionLifecycle();
+  const executionLifecycle = createExecutionLifecycle(undefined, runtime);
 
   // Convenience wrapper to dispatch a pre-constructed Event.
   const dispatch = (event: Event) => emitter.dispatchEvent(event);
@@ -753,7 +776,7 @@ export function createTool<
       ? { ...options, requestContext: freezeToolRequestContext(options.requestContext) }
       : options;
     const resolvedTimeout = executionOptions?.timeout ?? timeout;
-    const nowFunction = executionOptions?.now ?? Date.now;
+    const nowFunction = executionOptions?.now ?? runtime.clock.now;
     const requestDeadline = executionOptions?.requestContext?.deadline;
     // Request deadlines are absolute and govern the whole lifecycle,
     // including queueing. Execution timeouts are relative and begin only
@@ -779,7 +802,7 @@ export function createTool<
     const execution = runWithConcurrency(
       () => (
         executionHandle.activate(),
-        executeInner(normalizeToolCall(toolCall), {
+        executeInner(normalizeToolCall(toolCall, runtime), {
           ...executeOptions,
           signal: executionHandle.signal,
         })
@@ -830,7 +853,7 @@ export function createTool<
     options: InternalToolExecuteOptions = {},
   ): Promise<ToolExecutionResult> => {
     const baseDetail = { toolCall, configuration };
-    const nowFunction = options.now ?? Date.now;
+    const nowFunction = options.now ?? runtime.clock.now;
     const startedAt = telemetryEnabled ? nowFunction() : 0;
     const inputDigest = digestOptions.input
       ? computeDigest(toolCall.arguments, digestOptions.algorithm)
@@ -1785,7 +1808,7 @@ export function createTool<
       ...options,
       ...(resolvedTimeout !== undefined ? { timeout: resolvedTimeout } : {}),
     };
-    const nowFunction = options.now ?? Date.now;
+    const nowFunction = options.now ?? runtime.clock.now;
     const requestDeadline = options.requestContext?.deadline;
     // Request deadlines are absolute and govern the whole lifecycle,
     // including queueing. Execution timeouts are relative and begin only
@@ -1855,12 +1878,8 @@ export function createTool<
     options: ToolExecuteOptions,
   ): Promise<TP> {
     return new Promise<TP>((resolve, reject) => {
-      const setTimeoutFunction =
-        options.setTimeoutFunction ??
-        ((callback, milliseconds) => setTimeout(callback, milliseconds));
-      const clearTimeoutFunction =
-        options.clearTimeoutFunction ??
-        ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+      const setTimeoutFunction = options.setTimeoutFunction ?? runtime.timers.setTimeout;
+      const clearTimeoutFunction = options.clearTimeoutFunction ?? runtime.timers.clearTimeout;
       const id = setTimeoutFunction(() => {
         if ('executionHandle' in options) {
           (options as InternalToolExecuteOptions).executionHandle?.abort(
@@ -2088,7 +2107,7 @@ export function createToolCall<Args extends JsonValue>(
   id?: string,
 ): ToolCall & { arguments: Args } {
   return {
-    id: id ?? crypto.randomUUID(),
+    id: id ?? defaultCallIdRuntime.identifiers.next('call'),
     name: toolName,
     arguments: args,
   };
@@ -2096,9 +2115,12 @@ export function createToolCall<Args extends JsonValue>(
 
 const TOOL_CALL_KEYS = new Set(['id', 'name', 'arguments']);
 
-function normalizeToolCall<T extends ToolCallWithArguments>(toolCall: T): T {
+function normalizeToolCall<T extends ToolCallWithArguments>(
+  toolCall: T,
+  runtime: RuntimeServices,
+): T {
   if (toolCall.id) return toolCall;
-  return { ...toolCall, id: crypto.randomUUID() };
+  return { ...toolCall, id: runtime.identifiers.next('call') };
 }
 
 function looksLikeToolCall(value: unknown, toolName: string): value is ToolCallWithArguments {

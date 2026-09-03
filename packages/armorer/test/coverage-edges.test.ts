@@ -138,11 +138,10 @@ describe('coverage edges', () => {
       'Tool input must be a Zod object schema or an object of Zod schemas',
     );
 
-    const originalNow = Date.now;
-    Date.now = () => 1_000;
-    expect(checkBudget({ maxDurationMs: 100 }, 900, 0)).toBe('Budget exceeded: max duration 100ms');
-    expect(checkBudget({ maxDurationMs: 100 }, 999, 0)).toBeUndefined();
-    Date.now = originalNow;
+    expect(checkBudget({ maxDurationMs: 100 }, 900, 0, 1_000)).toBe(
+      'Budget exceeded: max duration 100ms',
+    );
+    expect(checkBudget({ maxDurationMs: 100 }, 999, 0, 1_000)).toBeUndefined();
 
     const functionResolver = createLazyExecuteResolver(async (params: unknown) => params, 'direct');
     expect(await functionResolver()).toBeInstanceOf(Function);

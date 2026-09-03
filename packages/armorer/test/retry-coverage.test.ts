@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test';
+import { createManualRuntimeServices } from 'lifecycle';
 import { z } from 'zod';
 
 import { internalRetryTestUtilities, retry } from '../src/utilities/retry';
@@ -137,5 +138,52 @@ describe('retry coverage edges', () => {
 
   it('supports the retry wait helper without a cancellation signal', async () => {
     await expect(internalRetryTestUtilities.wait(0)).resolves.toBeUndefined();
+  });
+
+  describe('AB-92/AB-254: RuntimeServices composition', () => {
+    it('drives exponential backoff entirely through ManualRuntimeServices.advance, with no real timer', async () => {
+      const runtime = createManualRuntimeServices();
+      let attempts = 0;
+      const failing = makeRawTool(async () => {
+        attempts += 1;
+        if (attempts < 3) throw new Error(`attempt ${attempts} failed`);
+        return 'ok';
+      });
+
+      const wrapped = retry(failing, {
+        attempts: 3,
+        delayMs: 100,
+        backoff: 'exponential',
+        runtime,
+      });
+
+      const resultPromise = wrapped({ value: 1 });
+
+      // First failure schedules a 100ms delay before attempt 2.
+      while (runtime.pendingTimers().length === 0) {
+        await Promise.resolve();
+      }
+      expect(attempts).toBe(1);
+      await runtime.advance(100);
+      while (attempts < 2) {
+        await Promise.resolve();
+      }
+
+      // Second failure schedules the exponential-backoff 200ms delay before
+      // attempt 3.
+      while (runtime.pendingTimers().length === 0) {
+        await Promise.resolve();
+      }
+      await runtime.advance(200);
+
+      await expect(resultPromise).resolves.toBe('ok');
+      expect(attempts).toBe(3);
+    });
+
+    it('resolves its own default RuntimeServices when none is supplied, unaffected in production behavior', async () => {
+      const flaky = makeRawTool(async () => 'ok');
+      const wrapped = retry(flaky, { attempts: 1 });
+      await expect(wrapped({ value: 1 })).resolves.toBe('ok');
+    });
   });
 });

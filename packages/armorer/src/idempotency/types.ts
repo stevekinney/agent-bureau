@@ -1,3 +1,5 @@
+import type { RuntimeServices } from 'lifecycle';
+
 /**
  * A cached tool execution result stored in the result cache.
  */
@@ -142,4 +144,13 @@ export type IdempotencyOptions = {
   leaseDurationMs?: number;
   maximumExecutionDurationMs?: number;
   now?: () => number;
+  /**
+   * The injectable runtime-service seam (AB-92's `RuntimeServices`, AB-254):
+   * wall time, timers, and identifiers backing this wrap's default `now`,
+   * lease-renewal timer, and attempt-identifier generation. Resolved once,
+   * at wrap time. A test composes its own from `armorer/test`'s
+   * `createManualRuntimeServices()` and drives lease-renewal timing
+   * entirely through `advance()`, with no real timer.
+   */
+  runtime?: RuntimeServices;
 };

@@ -47,6 +47,7 @@ import type {
 } from '@modelcontextprotocol/sdk/shared/auth.js';
 import type { FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { CallToolResult, Implementation } from '@modelcontextprotocol/sdk/types.js';
+import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
 
 import type { Tool } from '../../is-tool';
 import { fromMcpTools } from './index';
@@ -121,6 +122,14 @@ export type McpOAuthProviderOptions = {
   clientMetadataUrl?: string;
   addClientAuthentication?: AddClientAuthentication;
   validateResourceURL?: OAuthClientProvider['validateResourceURL'];
+  /**
+   * The injectable runtime-service seam (AB-92's `RuntimeServices`, AB-254)
+   * backing this provider's OAuth `state` value generation. Resolved once,
+   * at construction. A test composes its own from `armorer/test`'s
+   * `createManualRuntimeServices()` instead of touching a real random-UUID
+   * global.
+   */
+  runtime?: RuntimeServices;
 };
 
 /**
@@ -131,6 +140,7 @@ export type McpOAuthProviderOptions = {
  * {@link McpOAuthTokenStorage} hook.
  */
 export function createMcpOAuthProvider(options: McpOAuthProviderOptions): OAuthClientProvider {
+  const runtime: RuntimeServices = options.runtime ?? createDefaultRuntimeServices();
   const {
     redirectUrl,
     clientMetadata,
@@ -151,7 +161,7 @@ export function createMcpOAuthProvider(options: McpOAuthProviderOptions): OAuthC
     async state() {
       const stored = await tokenStorage.load();
       if (stored.state !== undefined) return stored.state;
-      const generated = crypto.randomUUID();
+      const generated = runtime.identifiers.next('oauth-state');
       await tokenStorage.save({ state: generated });
       return generated;
     },

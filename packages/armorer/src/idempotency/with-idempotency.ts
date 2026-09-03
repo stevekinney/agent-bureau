@@ -1,4 +1,5 @@
 import { sha256HexSync } from 'interoperability';
+import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
 
 import { assertJsonValue, stableStringifyJson } from '../core/serialization/json';
 import {
@@ -29,26 +30,29 @@ const maximumTimerDelay = 2_147_483_647;
 function scheduleBoundedTimeout(
   callback: () => void,
   delay: number,
+  runtime: RuntimeServices,
   setTimeoutFunction?: ToolExecuteOptions['setTimeoutFunction'],
   clearTimeoutFunction?: ToolExecuteOptions['clearTimeoutFunction'],
 ): () => void {
+  const scheduleTimeout = setTimeoutFunction ?? runtime.timers.setTimeout;
+  const cancelTimeout = clearTimeoutFunction ?? runtime.timers.clearTimeout;
   let remaining = Math.max(0, delay);
   let cancelled = false;
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  let timer: unknown;
   const schedule = () => {
     if (cancelled) return;
     const chunk = Math.min(remaining, maximumTimerDelay);
-    timer = (setTimeoutFunction ?? setTimeout)(() => {
+    timer = scheduleTimeout(() => {
       if (cancelled) return;
       remaining -= chunk;
       if (remaining <= 0) callback();
       else schedule();
-    }, chunk) as ReturnType<typeof setTimeout>;
+    }, chunk);
   };
   schedule();
   return () => {
     cancelled = true;
-    if (timer !== undefined) (clearTimeoutFunction ?? clearTimeout)(timer);
+    if (timer !== undefined) cancelTimeout(timer);
   };
 }
 
@@ -78,6 +82,7 @@ function isToolCall(value: unknown): value is ToolCallWithArguments {
 async function inputMatchesToolSchema(
   tool: Tool,
   params: unknown,
+  runtime: RuntimeServices,
   options?: ToolExecuteOptions,
 ): Promise<boolean> {
   const input = (
@@ -95,17 +100,18 @@ async function inputMatchesToolSchema(
   // e.g. a non-Zod Standard Schema wrapped via `wrapStandardSchema`, whose
   // validation runs through an async `transform` — resolve instead of
   // throwing synchronously ("Encountered Promise during synchronous parse").
-  const result = await raceIdempotencyAwait(() => safeParseAsync(params), options);
+  const result = await raceIdempotencyAwait(() => safeParseAsync(params), runtime, options);
   return result.success;
 }
 
 function raceIdempotencyAwait<T>(
   operation: () => Promise<T>,
+  runtime: RuntimeServices,
   options?: ToolExecuteOptions,
 ): Promise<T> {
   const signal = options?.signal;
   const deadline = options?.requestContext?.deadline;
-  const now = options?.now ?? Date.now;
+  const now = options?.now ?? runtime.clock.now;
   if (deadline !== undefined && !Number.isFinite(deadline)) {
     return Promise.reject(createUnsupportedDeadlineError());
   }
@@ -128,12 +134,8 @@ function raceIdempotencyAwait<T>(
   }
 
   return new Promise<T>((resolve, reject) => {
-    const setTimeoutFunction =
-      options?.setTimeoutFunction ??
-      ((callback, milliseconds) => setTimeout(callback, milliseconds));
-    const clearTimeoutFunction =
-      options?.clearTimeoutFunction ??
-      ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+    const setTimeoutFunction = options?.setTimeoutFunction ?? runtime.timers.setTimeout;
+    const clearTimeoutFunction = options?.clearTimeoutFunction ?? runtime.timers.clearTimeout;
     let deadlineTimer: unknown;
     let deadlineTimerScheduled = false;
     let settled = false;
@@ -218,13 +220,14 @@ function createStartedExecution(
   ttl: number,
   leaseDurationMs: number,
   maximumExecutionDurationMs: number,
+  runtime: RuntimeServices,
 ): StartedToolExecution {
   return {
     status: 'started',
     toolName,
     startedAt,
     ttl,
-    attemptId: crypto.randomUUID(),
+    attemptId: runtime.identifiers.next('attempt'),
     leaseExpiresAt: Math.min(startedAt + leaseDurationMs, startedAt + maximumExecutionDurationMs),
     absoluteDeadline: startedAt + maximumExecutionDurationMs,
     inputDigest,
@@ -248,12 +251,13 @@ export function withIdempotency<T extends Tool>(
   tool: T,
   options: IdempotencyOptions,
 ): IdempotentTool<T> {
+  const runtime: RuntimeServices = options.runtime ?? createDefaultRuntimeServices();
   const {
     cache,
     tenantId,
     toolRevision: configuredToolRevision,
     ttl = DEFAULT_TTL,
-    now = Date.now,
+    now = runtime.clock.now,
     onCacheHit,
     onUnknownOutcome,
     verifyResolutionReceipt,
@@ -310,7 +314,7 @@ export function withIdempotency<T extends Tool>(
       idempotencyKey!(params),
     ]);
 
-    await inputMatchesToolSchema(tool, params, executeOptions);
+    await inputMatchesToolSchema(tool, params, runtime, executeOptions);
 
     const returnAuthorizedCachedResult = async (cached: CachedToolResult): Promise<unknown> => {
       if (cached.input === undefined) {
@@ -344,7 +348,11 @@ export function withIdempotency<T extends Tool>(
     const originalInput = serializeOriginalInput(params);
     const inputDigest = createInputDigest(originalInput);
 
-    const cached = await raceIdempotencyAwait(() => getCacheEntry(cache, key), executeOptions);
+    const cached = await raceIdempotencyAwait(
+      () => getCacheEntry(cache, key),
+      runtime,
+      executeOptions,
+    );
     if (cached && cached.status !== 'started') {
       return returnAuthorizedCachedResult(cached);
     }
@@ -372,6 +380,7 @@ export function withIdempotency<T extends Tool>(
           validLegacyReceipt = Boolean(
             await raceIdempotencyAwait(
               () => Promise.resolve(verifyLegacyResolutionReceipt(legacyReceipt)),
+              runtime,
               executeOptions,
             ),
           );
@@ -391,6 +400,7 @@ export function withIdempotency<T extends Tool>(
           ttl,
           leaseDurationMs,
           maximumExecutionDurationMs,
+          runtime,
         );
         if (
           !(await cache.replaceLegacyStarted(
@@ -428,6 +438,7 @@ export function withIdempotency<T extends Tool>(
           validReceipt = Boolean(
             await raceIdempotencyAwait(
               () => Promise.resolve(verifyResolutionReceipt(receipt)),
+              runtime,
               executeOptions,
             ),
           );
@@ -447,6 +458,7 @@ export function withIdempotency<T extends Tool>(
           ttl,
           leaseDurationMs,
           maximumExecutionDurationMs,
+          runtime,
         );
         const cachedAttemptId = cached.attemptId;
         if (
@@ -468,7 +480,7 @@ export function withIdempotency<T extends Tool>(
         toolName: tool.name,
         startedAt,
         ttl,
-        attemptId: crypto.randomUUID(),
+        attemptId: runtime.identifiers.next('attempt'),
         leaseExpiresAt: Math.min(
           startedAt + leaseDurationMs,
           startedAt + maximumExecutionDurationMs,
@@ -489,7 +501,7 @@ export function withIdempotency<T extends Tool>(
       }
     }
     try {
-      await raceIdempotencyAwait(() => Promise.resolve(), executeOptions);
+      await raceIdempotencyAwait(() => Promise.resolve(), runtime, executeOptions);
     } catch (error) {
       await cache.deleteStarted(key, startedExecution.attemptId!);
       throw error;
@@ -513,7 +525,7 @@ export function withIdempotency<T extends Tool>(
     );
     let leaseOwned: boolean;
     try {
-      leaseOwned = await raceIdempotencyAwait(() => initialRenewal, executeOptions);
+      leaseOwned = await raceIdempotencyAwait(() => initialRenewal, runtime, executeOptions);
     } catch (error) {
       void initialRenewal
         .then((owned) =>
@@ -573,6 +585,7 @@ export function withIdempotency<T extends Tool>(
             .finally(scheduleRenewal);
         },
         Math.max(1, Math.floor(leaseDurationMs / 2)),
+        runtime,
         executeOptions?.setTimeoutFunction,
         executeOptions?.clearTimeoutFunction,
       );
@@ -581,6 +594,7 @@ export function withIdempotency<T extends Tool>(
     const cancelDeadlineTimer = scheduleBoundedTimeout(
       stopRenewal,
       Math.max(0, (startedExecution.absoluteDeadline ?? now()) - startedExecution.startedAt),
+      runtime,
       executeOptions?.setTimeoutFunction,
       executeOptions?.clearTimeoutFunction,
     );
@@ -604,7 +618,7 @@ export function withIdempotency<T extends Tool>(
       stopRenewal();
       cancelDeadlineTimer();
       try {
-        await raceIdempotencyAwait(() => pendingRenewal, executeOptions);
+        await raceIdempotencyAwait(() => pendingRenewal, runtime, executeOptions);
       } catch {
         leaseOwned = false;
       }
@@ -637,6 +651,7 @@ export function withIdempotency<T extends Tool>(
       try {
         completed = await raceIdempotencyAwait(
           () => cache.completeStarted(key, startedExecution.attemptId!, entry, ttl, now()),
+          runtime,
           executeOptions,
         );
       } catch {

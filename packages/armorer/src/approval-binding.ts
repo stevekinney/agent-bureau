@@ -1,7 +1,16 @@
+import { createDefaultRuntimeServices } from 'lifecycle';
+
 import { stableStringifyJson } from './core/serialization/json';
 import type { ToolRequestContext } from './execution-context';
 
 export const APPROVAL_BINDING_VERSION = 1 as const;
+
+// `validateApprovalBinding` and `createProcessLocalApprovalStateStore` are
+// standalone public utilities. `createToolbox` always supplies its own
+// composed clock explicitly (`approvalNow()`); this process-local default
+// only backs a caller who invokes either function directly without one
+// (AB-92 AC4, AB-254).
+const defaultApprovalRuntime = createDefaultRuntimeServices();
 
 export type ApprovalBindingPayload = {
   version: typeof APPROVAL_BINDING_VERSION;
@@ -93,7 +102,7 @@ export interface ApprovalStateStore {
 export function validateApprovalBinding(
   binding: ApprovalBindingPayload,
   context?: Partial<ApprovalBindingContext>,
-  now = Date.now(),
+  now = defaultApprovalRuntime.clock.now(),
 ): void {
   const requiredStringFields = [
     'principalId',
@@ -141,7 +150,9 @@ export function validateApprovalBinding(
 }
 
 /** Process-local, atomic single-use approval state. */
-export function createProcessLocalApprovalStateStore(nowFunction = Date.now): ApprovalStateStore {
+export function createProcessLocalApprovalStateStore(
+  nowFunction = defaultApprovalRuntime.clock.now,
+): ApprovalStateStore {
   const issued = new Map<string, ApprovalBindingPayload>();
   const reserved = new Map<string, ApprovalBindingPayload>();
   const terminal = new Map<

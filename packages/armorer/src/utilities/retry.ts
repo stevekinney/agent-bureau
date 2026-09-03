@@ -1,3 +1,5 @@
+import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
+
 import type { AnyTool, ComposedTool, InferToolInput, InferToolOutput } from '../compose-types';
 import { createTool, type CreateToolOptions } from '../create-tool';
 import type { DefaultToolEvents, ToolContext, ToolMetadata } from '../is-tool';
@@ -21,6 +23,14 @@ type RetryOptions = {
     milliseconds: number,
     signal?: ToolContext<DefaultToolEvents>['signal'],
   ) => Promise<void>;
+  /**
+   * The injectable runtime-service seam (AB-92's `RuntimeServices`, AB-254)
+   * backing this wrap's default `sleep` timer. Resolved once, at wrap time.
+   * A test composes its own from `armorer/test`'s
+   * `createManualRuntimeServices()` and drives the backoff delay entirely
+   * through `advance()`, with no real timer, instead of supplying `sleep`.
+   */
+  runtime?: RuntimeServices;
 };
 
 /**
@@ -101,7 +111,13 @@ export function retry<TTool extends AnyTool>(
   }
 
   const backoff = options.backoff ?? 'fixed';
-  const { shouldRetry, onRetry, sleep = wait } = options;
+  const runtime = options.runtime ?? createDefaultRuntimeServices();
+  const {
+    shouldRetry,
+    onRetry,
+    sleep = (ms: number, signal?: ToolContext<DefaultToolEvents>['signal']) =>
+      wait(ms, signal, runtime),
+  } = options;
   const name = `retry(${tool.name})`;
   const description = `Retry tool: ${tool.description}`;
   const tags = tool.tags && tool.tags.length ? tool.tags : undefined;
@@ -229,20 +245,28 @@ function toError(error: unknown): Error {
   }
 }
 
-function wait(ms: number, signal?: ToolContext<DefaultToolEvents>['signal']): Promise<void> {
+const defaultWaitRuntime = createDefaultRuntimeServices();
+
+function wait(
+  ms: number,
+  signal?: ToolContext<DefaultToolEvents>['signal'],
+  runtime: RuntimeServices = defaultWaitRuntime,
+): Promise<void> {
+  const scheduleTimeout = runtime.timers.setTimeout;
+  const cancelTimeout = runtime.timers.clearTimeout;
   if (!signal) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+    return new Promise((resolve) => scheduleTimeout(resolve, ms));
   }
   if (signal.aborted) {
     return Promise.reject(toError(signal.reason ?? new Error('Cancelled')));
   }
   return new Promise((resolve, reject) => {
-    const id = setTimeout(() => {
+    const id = scheduleTimeout(() => {
       signal.removeEventListener('abort', onAbort);
       resolve();
     }, ms);
     const onAbort = () => {
-      clearTimeout(id);
+      cancelTimeout(id);
       reject(toError(signal.reason ?? new Error('Cancelled')));
     };
     signal.addEventListener('abort', onAbort, { once: true });

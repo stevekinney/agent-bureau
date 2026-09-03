@@ -1,3 +1,5 @@
+import { createDefaultRuntimeServices } from 'lifecycle';
+
 import type { ClearScheduledTimeout, ScheduleTimeout, ToolConfiguration } from '../is-tool';
 import {
   createTruncatingAsyncIterable,
@@ -6,6 +8,11 @@ import {
   truncateToolResultContent,
 } from '../truncation/index';
 import { isAsyncIterable } from '../type-guards';
+
+// These middleware factories each accept a per-call `now`/timer override for
+// testing; when a caller omits one, this process-local default backs it
+// instead of reaching the real globals directly (AB-92 AC4, AB-254).
+const defaultMiddlewareRuntime = createDefaultRuntimeServices();
 
 export type UntrustedOutputFencingOptions = {
   preamble?: string;
@@ -39,7 +46,7 @@ export function createRateLimitMiddleware(
   const windowMs = options.windowMs ?? 60000;
   const limit = options.limit ?? 10;
   const keyGenerator = options.keyGenerator ?? (() => 'global');
-  const nowFunction = options.now ?? Date.now;
+  const nowFunction = options.now ?? defaultMiddlewareRuntime.clock.now;
 
   // State: Map<ToolName, Map<Key, { count: number; resetTime: number }>>
   const state = new Map<string, Map<string, { count: number; resetTime: number }>>();
@@ -115,7 +122,7 @@ export function createCacheMiddleware(
 ) {
   const ttlMs = options.ttlMs ?? 60000;
   const maxSize = options.maxSize ?? 1000;
-  const nowFunction = options.now ?? Date.now;
+  const nowFunction = options.now ?? defaultMiddlewareRuntime.clock.now;
 
   // State: Map<ToolName, Map<CacheKey, { value: unknown; expiry: number }>>
   const cache = new Map<string, Map<string, { value: unknown; expiry: number }>>();
@@ -195,11 +202,9 @@ export function createTimeoutMiddleware(
   return (configuration: ToolConfiguration): ToolConfiguration => {
     const originalExecute = configuration.execute;
     const setTimeoutFunction =
-      options.setTimeoutFunction ??
-      ((callback, milliseconds) => setTimeout(callback, milliseconds));
+      options.setTimeoutFunction ?? defaultMiddlewareRuntime.timers.setTimeout;
     const clearTimeoutFunction =
-      options.clearTimeoutFunction ??
-      ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+      options.clearTimeoutFunction ?? defaultMiddlewareRuntime.timers.clearTimeout;
 
     const wrappedExecute = async (params: unknown, context: unknown) => {
       let executeFn: (params: unknown, context: unknown) => Promise<unknown>;
