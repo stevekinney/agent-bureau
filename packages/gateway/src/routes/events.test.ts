@@ -58,6 +58,84 @@ async function readChunk(reader: ReadableStreamDefaultReader<Uint8Array>) {
   return new TextDecoder().decode(chunk.value);
 }
 
+const RAW_SECRET = 'sk-real-secret-do-not-leak';
+
+function createResponseValidatedFrame(): ServerFrame {
+  return {
+    type: 'event',
+    runId: 'run-1',
+    event: 'response.validated',
+    detail: {
+      step: 0,
+      original: { content: RAW_SECRET, toolCalls: [] },
+      validated: { content: '[redacted]', toolCalls: [] },
+    },
+    sequence: 1,
+    runSeq: 1,
+    timestamp: Date.now(),
+  };
+}
+
+describe('events routes — AB-305 response.validated privilege', () => {
+  it('redacts "original" for a connection whose x-api-key-scopes names an actual scope — a scoped, not admin, key', async () => {
+    const broker = new LiveFrameBroker();
+    const app = new Hono();
+    app.route('/api/v1/events', createEventsRoutes(createBureauStub(), broker));
+
+    const response = await app.request('/api/v1/events?runId=run-1', {
+      headers: { 'x-api-key-scopes': 'runs:read' },
+    });
+    const reader = response.body?.getReader();
+    expect(reader).toBeDefined();
+    if (!reader) return;
+    await readChunk(reader);
+
+    broker.broadcast(createResponseValidatedFrame());
+    const payload = await readChunk(reader);
+    expect(payload).not.toContain(RAW_SECRET);
+
+    await reader.cancel();
+  });
+
+  it('delivers "original" unredacted for a missing x-api-key-scopes header (static token / unauthenticated)', async () => {
+    const broker = new LiveFrameBroker();
+    const app = new Hono();
+    app.route('/api/v1/events', createEventsRoutes(createBureauStub(), broker));
+
+    const response = await app.request('/api/v1/events?runId=run-1');
+    const reader = response.body?.getReader();
+    expect(reader).toBeDefined();
+    if (!reader) return;
+    await readChunk(reader);
+
+    broker.broadcast(createResponseValidatedFrame());
+    const payload = await readChunk(reader);
+    expect(payload).toContain(RAW_SECRET);
+
+    await reader.cancel();
+  });
+
+  it('delivers "original" unredacted for an empty x-api-key-scopes header (admin key)', async () => {
+    const broker = new LiveFrameBroker();
+    const app = new Hono();
+    app.route('/api/v1/events', createEventsRoutes(createBureauStub(), broker));
+
+    const response = await app.request('/api/v1/events?runId=run-1', {
+      headers: { 'x-api-key-scopes': '' },
+    });
+    const reader = response.body?.getReader();
+    expect(reader).toBeDefined();
+    if (!reader) return;
+    await readChunk(reader);
+
+    broker.broadcast(createResponseValidatedFrame());
+    const payload = await readChunk(reader);
+    expect(payload).toContain(RAW_SECRET);
+
+    await reader.cancel();
+  });
+});
+
 describe('events routes', () => {
   it('streams run frames over server-sent events', async () => {
     const broker = new LiveFrameBroker();

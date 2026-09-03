@@ -881,17 +881,13 @@ A step whose generation is entirely short-circuited by a `prepareStep` hook
 dispatches `generate.completed` at all — unchanged from before this fix.
 
 `ResponseValidatedEvent` (wire type `response.validated`) is untouched by
-this fix and is a fact, not a decision: its contract has always been to
-expose the pre/post redaction diff (`event.original` vs `event.validated`),
-so its `original` field still carries pre-guardrail content — over the same
-live SSE/WebSocket surface `generate.completed` uses. AB-302's coordinator
-ruling and delivery boundary named `generate.completed` (and streaming
-deltas) specifically; whether "any consumer-visible event carrying model
-output" is meant to reach `response.validated`'s `original` field too — and
-if so, how a redaction-diff event stays useful once both sides are
-redacted — is an open question this change does not resolve. Read this
-paragraph as "here is what `response.validated` does today," not as a
-ruling that it is exempt.
+this fix — its contract has always been to expose the pre/post redaction
+diff (`event.original` vs `event.validated`), so `original` still carries
+pre-guardrail content in-process. AB-302's coordinator ruling and delivery
+boundary named `generate.completed` (and streaming deltas) specifically;
+whether `response.validated`'s `original` field needed a decision of its
+own was left open at the time. AB-305 resolves it — see the next
+subsection.
 
 **Streaming deltas** are a separate, already-decided surface (AB-40,
 `packages/bureau/src/runtime-composition.ts`): bureau forces buffered,
@@ -904,6 +900,50 @@ caller has opted into managing that tradeoff themselves. This is not new
 behavior; AB-302 only confirms and documents it as the answer to "what about
 streaming deltas" for the `generate.completed` fix above, per the same file's
 existing comment.
+
+### `response.validated`'s live wire projection is privilege-gated (AB-305)
+
+`ResponseValidatedEvent`'s in-process contract is unchanged by this
+decision: `event.original` and `event.validated` both stay full,
+pre/post-guardrail `GenerateResponse` values — the whole point of the event
+is that diff, and the durable audit trail (which reads the bureau's own
+action log directly, never through the gateway's live wire) keeps the full
+event too.
+
+What changes is the gateway's live wire projection —
+`packages/gateway/src/live-events.ts`'s `LiveFrameBroker`. Every frame it
+delivers, whether a fresh live broadcast, an SSE `Last-Event-ID`/`since`
+reconnect replay, or a WebSocket `subscribe` replay, is projected per that
+connection's own privilege before it reaches the wire:
+
+- A **privileged** connection (an admin managed API key with no scope
+  restrictions, the static `authToken`, or a request with no auth
+  configured at all — the same "admin key" definition
+  `packages/gateway/src/middleware/scope-guard.ts` already applies, factored
+  out as `isPrivilegedGatewayConnection` in `middleware/authentication.ts`)
+  receives `response.validated` unchanged — `original` carries the real
+  pre-guardrail content.
+- Any other connection — a managed API key scoped down to specific
+  capabilities (`runs:read`, etc.) — receives `original` replaced by a
+  redaction marker: the same `GenerateResponse` shape (`content`,
+  `toolCalls`) with the content actually removed (`content: '[redacted]'`,
+  `toolCalls: []`), never redacted in place. `validated` is untouched
+  either way — it already carries only post-guardrail content.
+
+This is a general-versus-privileged wire projection in the sense AB-247's
+model-catalog projection and AB-70's native-content-contract discipline
+established: the same event, two different shapes depending on who is
+asking, decided once at the delivery boundary rather than left to every
+consumer to reason about. Every other event type passes through this
+projection unchanged — this is the only wire type it touches today.
+
+This decision is scoped to the live SSE/WebSocket wire only. A caller with
+`runs:read` (but not admin) can still read a run's full, unprojected
+`response.validated.original` through `GET /api/v1/runs/:id`'s assembled
+timeline, which serves the bureau's action log directly — the REST surface
+carries the same scope guard as `/api/v1/events` but was not part of
+AB-305's delivery boundary. Whether that REST path needs the same
+projection is a separate, not-yet-made decision.
 
 ## Started-work control contract
 

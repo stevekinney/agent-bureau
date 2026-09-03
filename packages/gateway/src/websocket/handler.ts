@@ -4,19 +4,27 @@ import type { LiveFrameBroker } from '../live-events';
 import type { ServerFrame } from '../types';
 import { parseClientFrame } from './protocol';
 
+/**
+ * Per-connection state attached to the socket at upgrade time (AB-305) —
+ * see `adapters/bun-adapter.ts`'s `server.upgrade(r, { data: { privileged } })`.
+ */
+export interface GatewayWebSocketData {
+  privileged: boolean;
+}
+
 export interface WebSocketHandlerOptions {
   broker: LiveFrameBroker;
 }
 
 export interface WebSocketHandler {
   dispose(): void;
-  open(ws: ServerWebSocket<unknown>): void;
-  message(ws: ServerWebSocket<unknown>, data: string | Buffer): void;
-  close(ws: ServerWebSocket<unknown>): void;
+  open(ws: ServerWebSocket<GatewayWebSocketData>): void;
+  message(ws: ServerWebSocket<GatewayWebSocketData>, data: string | Buffer): void;
+  close(ws: ServerWebSocket<GatewayWebSocketData>): void;
 }
 
 export function createWebSocketHandler(options: WebSocketHandlerOptions): WebSocketHandler {
-  function open(ws: ServerWebSocket<unknown>): void {
+  function open(ws: ServerWebSocket<GatewayWebSocketData>): void {
     options.broker.addSubscriber(
       ws,
       (frame) => {
@@ -26,11 +34,15 @@ export function createWebSocketHandler(options: WebSocketHandlerOptions): WebSoc
       // `LiveFrameBroker.closeAll()` can send a WebSocket close frame to
       // this connection as part of draining before the adapter's own
       // `stop()` is force-closed.
-      { closeConnection: () => ws.close() },
+      // AB-305: fail closed — a socket whose `data` is missing or
+      // malformed (a fake in a test, an upgrade path that forgot to set
+      // it) is treated as non-privileged, never the reverse. Redaction is
+      // the default; privilege is opt-in.
+      { closeConnection: () => ws.close(), privileged: ws.data?.privileged === true },
     );
   }
 
-  function message(ws: ServerWebSocket<unknown>, data: string | Buffer): void {
+  function message(ws: ServerWebSocket<GatewayWebSocketData>, data: string | Buffer): void {
     const frame = parseClientFrame(data);
 
     if (frame.type === 'error') {
@@ -70,7 +82,7 @@ export function createWebSocketHandler(options: WebSocketHandlerOptions): WebSoc
     }
   }
 
-  function close(ws: ServerWebSocket<unknown>): void {
+  function close(ws: ServerWebSocket<GatewayWebSocketData>): void {
     options.broker.removeSubscriber(ws);
   }
 

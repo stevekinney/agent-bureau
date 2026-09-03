@@ -1,6 +1,8 @@
 import { createMiddleware } from 'hono/factory';
 import { HTTPException } from 'hono/http-exception';
 
+import { isPrivilegedGatewayConnection } from './authentication';
+
 /**
  * Creates a scope guard middleware that checks whether the authenticated API
  * key has the required scopes. Scope information is read from the
@@ -21,20 +23,18 @@ export function createScopeGuard(requiredScopes: string[]) {
 
     const scopesHeader = context.req.header('x-api-key-scopes');
 
-    // No scopes header means static token or unauthenticated — let the auth
-    // middleware handle access control, not the scope guard.
-    if (scopesHeader === undefined) {
+    // No scopes header (static token or unauthenticated) or an empty scopes
+    // list (admin key) both mean this principal is privileged — see
+    // `isPrivilegedGatewayConnection`'s own doc comment for why the two
+    // are the same case.
+    if (isPrivilegedGatewayConnection(scopesHeader)) {
       await next();
       return;
     }
 
-    // Empty scopes means admin key — passes all checks
-    if (scopesHeader === '') {
-      await next();
-      return;
-    }
-
-    const keyScopes = scopesHeader.split(',').map((s) => s.trim());
+    // `isPrivilegedGatewayConnection` already ruled out `undefined` and `''`
+    // above; the fallback here is unreachable, not a behavior change.
+    const keyScopes = (scopesHeader ?? '').split(',').map((s) => s.trim());
     const missing = requiredScopes.filter((scope) => !keyScopes.includes(scope));
 
     if (missing.length > 0) {

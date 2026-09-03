@@ -5,7 +5,7 @@ import { cors } from 'hono/cors';
 import type { RuntimeServices } from 'lifecycle';
 import { createDefaultRuntimeServices } from 'lifecycle';
 
-import type { ServerAdapter } from './adapters/types';
+import type { ServerAdapter, WsAuthenticationResult } from './adapters/types';
 import { bootstrapApiKey, createApiKeyStore } from './keys';
 import type { ApiKeyStore } from './keys/types';
 import type { LiveFrameBrokerClock } from './live-events';
@@ -137,7 +137,13 @@ const gatewayValidatorState = new WeakMap<
 >();
 const STATIC_TOKEN_REVISION_SECRET_KEY = 'gateway:private:static-token-revision-secret';
 
-async function resolveStaticTokenRevisionSecret(
+/**
+ * Exported for direct unit testing (same rationale as {@link raceDrainTimeout}
+ * and {@link buildWsAuthenticate} above) — the "lost race" branch (every
+ * writer's `conditionalBatch` failed AND the winner's write never became
+ * visible) is otherwise unreachable through `createGateway` itself.
+ */
+export async function resolveStaticTokenRevisionSecret(
   store: Bureau['kv'],
   identifiers: RuntimeServices['identifiers'],
 ): Promise<string | undefined> {
@@ -169,8 +175,13 @@ function detectServerRuntime(): 'bun' | 'node' {
  * Resolves a ServerAdapter for the given server-runtime string.
  * Uses dynamic imports so that the unused adapter is never
  * pulled into the bundle.
+ *
+ * Exported for direct unit testing — `createGateway` itself always calls
+ * this through `dependencies.resolveAdapterFn`'s default, and every test in
+ * this file overrides that seam (so the real dynamic-import branches below
+ * are otherwise unreachable in this suite).
  */
-async function resolveAdapter(serverRuntime: 'bun' | 'node'): Promise<ServerAdapter> {
+export async function resolveAdapter(serverRuntime: 'bun' | 'node'): Promise<ServerAdapter> {
   if (serverRuntime === 'bun') {
     const { createBunAdapter } = await import('./adapters/bun-adapter');
     return createBunAdapter();
@@ -187,23 +198,28 @@ async function resolveAdapter(serverRuntime: 'bun' | 'node'): Promise<ServerAdap
  *    guard on the HTTP `/api/v1/events` route — so that a key
  *    scoped only for `keys:manage` or `runs:write` cannot subscribe
  *    to live run frames.
- *    Keys with an empty scopes list are treated as admin and pass.
+ *    Keys with an empty scopes list are treated as admin and pass —
+ *    and, per AB-305, are `privileged`.
  * 2. Static token comparison. The static `authToken` acts as an
- *    unrestricted admin credential with no scope requirements.
+ *    unrestricted admin credential with no scope requirements, and is
+ *    `privileged`.
  * 3. Pass-through when no auth is configured (returns `undefined`).
  *
  * This function is exported for direct unit testing. It is injected
  * into the server adapter so the `/ws` upgrade path enforces the same
  * auth + scope rules as the HTTP `/api/v1/events` route without
- * duplicating the logic.
+ * duplicating the logic. `privileged` on a successful result (AB-305)
+ * flows through to the resulting connection's `LiveFrameBroker` subscriber
+ * — see `websocket/handler.ts` — so a scoped key sees `response.validated`
+ * redacted over WebSocket exactly as it would over SSE.
  */
 export function buildWsAuthenticate(
   authToken: string | undefined,
   store: ApiKeyStore | undefined,
-): ((request: Request) => Promise<boolean>) | undefined {
+): ((request: Request) => Promise<WsAuthenticationResult>) | undefined {
   if (!authToken && !store) return undefined;
 
-  return async (request: Request): Promise<boolean> => {
+  return async (request: Request): Promise<WsAuthenticationResult> => {
     const authHeader = request.headers.get('authorization') ?? '';
     const headerToken = authHeader.toLowerCase().startsWith('bearer ')
       ? authHeader.slice(7).trim()
@@ -212,21 +228,25 @@ export function buildWsAuthenticate(
     const queryToken = url.searchParams.get('token') ?? undefined;
     const token = headerToken ?? queryToken;
 
-    if (!token) return false;
+    if (!token) return { allowed: false };
 
     if (store && token.startsWith('ab_live_')) {
       const key = await store.verify(token);
       if (key) {
-        // Admin keys (empty scopes array) pass all checks.
-        // Scoped keys must carry runs:read to subscribe to live frames.
+        // Admin keys (empty scopes array) pass all checks and are privileged.
+        // Scoped keys must carry runs:read to subscribe to live frames, and
+        // are never privileged regardless of which scopes they carry.
         const isAdmin = key.scopes.length === 0;
-        return isAdmin || key.scopes.includes(SCOPE.RUNS_READ);
+        if (isAdmin) return { allowed: true, privileged: true };
+        return key.scopes.includes(SCOPE.RUNS_READ)
+          ? { allowed: true, privileged: false }
+          : { allowed: false };
       }
     }
 
-    if (authToken && token === authToken) return true;
+    if (authToken && token === authToken) return { allowed: true, privileged: true };
 
-    return false;
+    return { allowed: false };
   };
 }
 

@@ -250,9 +250,13 @@ describe('Gateway transport conformance — Bun runtime', () => {
           // `response.validated` is a deliberately different surface — its
           // whole contract is to show the pre/post redaction diff
           // (`original` vs `validated`) to a live glass-box subscriber, so
-          // it is excluded from this scan by design, not by oversight.
-          // Only `generate.completed` is this scenario's target: AB-302's
-          // acceptance criterion names that frame specifically.
+          // it is excluded from this scan by design, not by oversight. This
+          // gateway connection is privileged (the harness's admin
+          // authToken), so it is exactly the case AB-305 later carves out —
+          // see that ticket's own scenarios below for the non-privileged
+          // redaction this connection does NOT get. Only `generate.completed`
+          // is this scenario's target: AB-302's acceptance criterion names
+          // that frame specifically.
           let generateCompleted: { type: 'event'; event: string; detail: unknown } | undefined;
           for (let attempt = 0; attempt < 50 && !generateCompleted; attempt++) {
             const frame = await sse.next();
@@ -311,7 +315,9 @@ describe('Gateway transport conformance — Bun runtime', () => {
           release();
 
           // `response.validated` is deliberately excluded from this scan —
-          // see the SSE scenario above for why.
+          // see the SSE scenario above for why. This connection is
+          // privileged (admin authToken), the case AB-305's scenarios below
+          // exercise for both privilege levels.
           let generateCompleted: { type: 'event'; event: string; detail: unknown } | undefined;
           for (let attempt = 0; attempt < 50 && !generateCompleted; attempt++) {
             const frame = await ws.next();
@@ -398,9 +404,184 @@ describe('Gateway transport conformance — Bun runtime', () => {
         // extends to this surface, not only the live SSE/WebSocket frame.
         // `response.validated` is excluded from this scan by design (see
         // the SSE/WebSocket scenarios above) — its `original` field is a
-        // deliberate pre-redaction audit diff, not a leak.
+        // deliberate pre-redaction audit diff, not a leak. This is the
+        // durable audit trail specifically (AB-305's ruling: it keeps the
+        // full event, privileged by construction, regardless of the live
+        // wire's per-connection projection).
         expect(generateCompletedRecord).toBeDefined();
         expect(JSON.stringify(generateCompletedRecord)).not.toContain(secret);
+      },
+    );
+  });
+
+  it('AB-305: a non-privileged SSE client sees response.validated redacted while a privileged one sees the raw diff', async () => {
+    const secret = 'sk-real-secret-do-not-leak-ab305-sse';
+    const redactedText = '[redacted]';
+    const secretValidator: OutputValidator = {
+      name: 'secret-detector',
+      validate: async (output) => ({
+        valid: !output.includes(secret),
+        category: 'secret',
+        confidence: 1,
+        redacted: redactedText,
+      }),
+    };
+    const { generate, release } = releasableGenerate(`Contact us at ${secret} for help.`);
+
+    await withGateway(
+      () =>
+        startLoopbackGateway({
+          agents: {},
+          generate,
+          guardrails: { output: { validators: [secretValidator], action: 'redact' } },
+        }),
+      async (gateway) => {
+        // A key scoped only for runs:read is a normal, non-admin connection
+        // — AB-305's "not privileged" case. The default authToken this
+        // harness configures is the admin/static-token credential — AB-305's
+        // "privileged" case — so both connections are real, differently
+        // authorized clients, not the same credential twice.
+        const scopedToken = await createScopedKey(gateway, [SCOPE.RUNS_READ]);
+
+        const runResponse = await gateway.fetch('/api/v1/runs', {
+          method: 'POST',
+          headers: { ...authHeader(gateway), 'content-type': 'application/json' },
+          body: JSON.stringify({ message: 'leak it' }),
+        });
+        expect(runResponse.status).toBe(201);
+        const run = (await runResponse.json()) as { id: string };
+
+        const privilegedSse = await gateway.openEventStream(`/api/v1/events?runId=${run.id}`, {
+          headers: authHeader(gateway),
+        });
+        const nonPrivilegedSse = await gateway.openEventStream(`/api/v1/events?runId=${run.id}`, {
+          headers: { authorization: `Bearer ${scopedToken}` },
+        });
+        try {
+          // Both subscriptions are live before generate() resolves, so the
+          // frame below arrives as a genuine live delivery to both, never a
+          // replay-buffer race.
+          release();
+
+          async function findResponseValidated(
+            reader: Awaited<ReturnType<typeof gateway.openEventStream>>,
+          ) {
+            for (let attempt = 0; attempt < 50; attempt++) {
+              const frame = await reader.next();
+              if (!frame) break;
+              if (frame.type === 'event' && frame.event === 'response.validated') {
+                return frame;
+              }
+            }
+            return undefined;
+          }
+
+          const [privilegedFrame, nonPrivilegedFrame] = await Promise.all([
+            findResponseValidated(privilegedSse),
+            findResponseValidated(nonPrivilegedSse),
+          ]);
+
+          expect(privilegedFrame).toBeDefined();
+          expect(JSON.stringify(privilegedFrame)).toContain(secret);
+          const privilegedDetail = privilegedFrame?.detail as {
+            original?: { content?: string };
+          };
+          expect(privilegedDetail.original?.content).toBe(`Contact us at ${secret} for help.`);
+
+          expect(nonPrivilegedFrame).toBeDefined();
+          expect(JSON.stringify(nonPrivilegedFrame)).not.toContain(secret);
+          const nonPrivilegedDetail = nonPrivilegedFrame?.detail as {
+            original?: { content?: string };
+          };
+          expect(nonPrivilegedDetail.original?.content).toBe(redactedText);
+        } finally {
+          await privilegedSse.close();
+          await nonPrivilegedSse.close();
+        }
+      },
+    );
+  });
+
+  it('AB-305: a non-privileged WebSocket client sees response.validated redacted while a privileged one sees the raw diff', async () => {
+    const secret = 'sk-real-secret-do-not-leak-ab305-ws';
+    const redactedText = '[redacted]';
+    const secretValidator: OutputValidator = {
+      name: 'secret-detector',
+      validate: async (output) => ({
+        valid: !output.includes(secret),
+        category: 'secret',
+        confidence: 1,
+        redacted: redactedText,
+      }),
+    };
+    const { generate, release } = releasableGenerate(`Contact us at ${secret} for help.`);
+
+    await withGateway(
+      () =>
+        startLoopbackGateway({
+          agents: {},
+          generate,
+          guardrails: { output: { validators: [secretValidator], action: 'redact' } },
+        }),
+      async (gateway) => {
+        const scopedToken = await createScopedKey(gateway, [SCOPE.RUNS_READ]);
+
+        const runResponse = await gateway.fetch('/api/v1/runs', {
+          method: 'POST',
+          headers: { ...authHeader(gateway), 'content-type': 'application/json' },
+          body: JSON.stringify({ message: 'leak it' }),
+        });
+        expect(runResponse.status).toBe(201);
+        const run = (await runResponse.json()) as { id: string };
+
+        const privilegedWs = await gateway.openWebSocket(`/ws?token=${gateway.authToken}`);
+        const nonPrivilegedWs = await gateway.openWebSocket(`/ws?token=${scopedToken}`);
+        try {
+          privilegedWs.send({ type: 'subscribe', runId: run.id });
+          const privilegedAck = await privilegedWs.next();
+          expect(privilegedAck.type).toBe('subscribed');
+          nonPrivilegedWs.send({ type: 'subscribe', runId: run.id });
+          const nonPrivilegedAck = await nonPrivilegedWs.next();
+          expect(nonPrivilegedAck.type).toBe('subscribed');
+
+          release();
+
+          async function findResponseValidated(
+            client: Awaited<ReturnType<typeof gateway.openWebSocket>>,
+          ) {
+            for (let attempt = 0; attempt < 50; attempt++) {
+              const frame = await client.next();
+              if (frame.type === 'event' && frame.event === 'response.validated') {
+                return frame;
+              }
+            }
+            return undefined;
+          }
+
+          const [privilegedFrame, nonPrivilegedFrame] = await Promise.all([
+            findResponseValidated(privilegedWs),
+            findResponseValidated(nonPrivilegedWs),
+          ]);
+
+          expect(privilegedFrame).toBeDefined();
+          expect(JSON.stringify(privilegedFrame)).toContain(secret);
+          const privilegedDetail = privilegedFrame?.detail as {
+            original?: { content?: string };
+          };
+          expect(privilegedDetail.original?.content).toBe(`Contact us at ${secret} for help.`);
+
+          expect(nonPrivilegedFrame).toBeDefined();
+          expect(JSON.stringify(nonPrivilegedFrame)).not.toContain(secret);
+          const nonPrivilegedDetail = nonPrivilegedFrame?.detail as {
+            original?: { content?: string };
+          };
+          expect(nonPrivilegedDetail.original?.content).toBe(redactedText);
+        } finally {
+          privilegedWs.close();
+          nonPrivilegedWs.close();
+          await privilegedWs.waitForClose();
+          await nonPrivilegedWs.waitForClose();
+        }
       },
     );
   });

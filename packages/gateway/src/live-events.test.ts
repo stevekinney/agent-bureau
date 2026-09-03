@@ -21,6 +21,24 @@ function createRunFrame(runSeq = 1): ServerFrame {
   };
 }
 
+const RAW_SECRET = 'sk-real-secret-do-not-leak';
+
+function createResponseValidatedFrame(runSeq = 1): ServerFrame {
+  return {
+    type: 'event',
+    runId: 'run-1',
+    event: 'response.validated',
+    detail: {
+      step: 0,
+      original: { content: RAW_SECRET, toolCalls: [] },
+      validated: { content: '[redacted]', toolCalls: [] },
+    },
+    sequence: runSeq,
+    runSeq,
+    timestamp: Date.now(),
+  };
+}
+
 describe('SSE response headers', () => {
   it('sets content-type to text/event-stream', () => {
     const broker = new LiveFrameBroker();
@@ -278,6 +296,147 @@ describe('LiveFrameBroker', () => {
     expect(text).not.toContain('data:');
 
     await reader.cancel();
+  });
+});
+
+describe('LiveFrameBroker — AB-305 response.validated wire projection', () => {
+  it('broadcasts the redaction marker in place of "original" to a non-privileged subscriber', () => {
+    const broker = new LiveFrameBroker();
+    const received: ServerFrame[] = [];
+    broker.addSubscriber({}, (frame) => received.push(frame), { runIds: ['run-1'] });
+
+    broker.broadcast(createResponseValidatedFrame());
+
+    expect(received).toHaveLength(1);
+    const frame = received[0];
+    expect(frame?.type).toBe('event');
+    expect(JSON.stringify(frame)).not.toContain(RAW_SECRET);
+    if (frame?.type === 'event') {
+      expect(frame.detail).toEqual({
+        step: 0,
+        original: { content: '[redacted]', toolCalls: [] },
+        validated: { content: '[redacted]', toolCalls: [] },
+      });
+    }
+  });
+
+  it('broadcasts the full "original" unredacted to a privileged subscriber', () => {
+    const broker = new LiveFrameBroker();
+    const received: ServerFrame[] = [];
+    broker.addSubscriber({}, (frame) => received.push(frame), {
+      runIds: ['run-1'],
+      privileged: true,
+    });
+
+    broker.broadcast(createResponseValidatedFrame());
+
+    expect(received).toHaveLength(1);
+    const frame = received[0];
+    expect(frame?.type).toBe('event');
+    if (frame?.type === 'event') {
+      expect(frame.detail).toEqual({
+        step: 0,
+        original: { content: RAW_SECRET, toolCalls: [] },
+        validated: { content: '[redacted]', toolCalls: [] },
+      });
+    }
+  });
+
+  it('leaves a non-"response.validated" event frame untouched for a non-privileged subscriber', () => {
+    const broker = new LiveFrameBroker();
+    const received: ServerFrame[] = [];
+    broker.addSubscriber({}, (frame) => received.push(frame), { runIds: ['run-1'] });
+
+    broker.broadcast(createRunFrame());
+
+    expect(received).toEqual([createRunFrame()]);
+  });
+
+  it('leaves a "response.validated" frame with a malformed detail untouched rather than throwing', () => {
+    const broker = new LiveFrameBroker();
+    const received: ServerFrame[] = [];
+    broker.addSubscriber({}, (frame) => received.push(frame), { runIds: ['run-1'] });
+    const malformed: ServerFrame = {
+      type: 'event',
+      runId: 'run-1',
+      event: 'response.validated',
+      detail: 'not an object',
+      sequence: 1,
+      runSeq: 1,
+      timestamp: Date.now(),
+    };
+
+    expect(() => broker.broadcast(malformed)).not.toThrow();
+    expect(received).toEqual([malformed]);
+  });
+
+  it('defaults an unspecified subscriber to non-privileged (redaction is the default)', () => {
+    const broker = new LiveFrameBroker();
+    const received: ServerFrame[] = [];
+    // No `privileged` option at all.
+    broker.addSubscriber({}, (frame) => received.push(frame), { runIds: ['run-1'] });
+
+    broker.broadcast(createResponseValidatedFrame());
+
+    expect(JSON.stringify(received)).not.toContain(RAW_SECRET);
+  });
+
+  it("projects a buffered frame returned by subscribe() per that subscriber's own privilege", () => {
+    const broker = new LiveFrameBroker();
+    broker.broadcast(createResponseValidatedFrame());
+
+    const nonPrivilegedKey = {};
+    broker.addSubscriber(nonPrivilegedKey, () => undefined);
+    const nonPrivilegedReplay = broker.subscribe(nonPrivilegedKey, 'run-1', 0);
+    expect(JSON.stringify(nonPrivilegedReplay)).not.toContain(RAW_SECRET);
+
+    const privilegedKey = {};
+    broker.addSubscriber(privilegedKey, () => undefined, { privileged: true });
+    const privilegedReplay = broker.subscribe(privilegedKey, 'run-1', 0);
+    expect(JSON.stringify(privilegedReplay)).toContain(RAW_SECRET);
+  });
+
+  it('returns an empty replay for a key that was never a tracked subscriber, without throwing', () => {
+    const broker = new LiveFrameBroker();
+    broker.broadcast(createResponseValidatedFrame());
+
+    expect(broker.subscribe({}, 'run-1', 0)).toEqual([]);
+  });
+
+  it('projects an SSE reconnect replay for a non-privileged connection, and leaves it unredacted for a privileged one', async () => {
+    const broker = new LiveFrameBroker();
+    broker.broadcast(createResponseValidatedFrame());
+
+    const nonPrivilegedRequest = new Request(
+      'http://example.test/api/v1/events?runId=run-1&since=run-1:0',
+    );
+    const nonPrivilegedResponse = broker.createEventStreamResponse(nonPrivilegedRequest, {
+      runIds: ['run-1'],
+    });
+    const nonPrivilegedReader = nonPrivilegedResponse.body?.getReader();
+    expect(nonPrivilegedReader).toBeDefined();
+    if (nonPrivilegedReader) {
+      const chunk = await nonPrivilegedReader.read();
+      const text = new TextDecoder().decode(chunk.value);
+      expect(text).not.toContain(RAW_SECRET);
+      await nonPrivilegedReader.cancel();
+    }
+
+    const privilegedRequest = new Request(
+      'http://example.test/api/v1/events?runId=run-1&since=run-1:0',
+    );
+    const privilegedResponse = broker.createEventStreamResponse(privilegedRequest, {
+      runIds: ['run-1'],
+      privileged: true,
+    });
+    const privilegedReader = privilegedResponse.body?.getReader();
+    expect(privilegedReader).toBeDefined();
+    if (privilegedReader) {
+      const chunk = await privilegedReader.read();
+      const text = new TextDecoder().decode(chunk.value);
+      expect(text).toContain(RAW_SECRET);
+      await privilegedReader.cancel();
+    }
   });
 });
 

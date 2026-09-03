@@ -2,6 +2,17 @@ import type { Hono } from 'hono';
 
 import type { WebSocketHandler } from '../websocket';
 
+/**
+ * Result of a WebSocket upgrade authentication check. `privileged` is only
+ * meaningful when `allowed` is `true` — a rejected upgrade never reaches
+ * the point of asking "sees what." AB-305 threads this through the
+ * upgrade so `websocket/handler.ts` can mark the resulting connection's
+ * `LiveFrameSubscriberOptions.privileged` the same way the HTTP `/api/v1/events`
+ * route does for SSE, using the same "admin key" definition
+ * ({@link isPrivilegedGatewayConnection}) rather than a separate flag.
+ */
+export type WsAuthenticationResult = { allowed: false } | { allowed: true; privileged: boolean };
+
 /** Options passed to a server adapter when starting the HTTP server. */
 export type ServerAdapterOptions = {
   port: number;
@@ -10,7 +21,7 @@ export type ServerAdapterOptions = {
   authToken?: string;
   /**
    * Optional async verifier for WebSocket upgrade requests. The adapter
-   * calls this before accepting an upgrade; returning `false` causes a 401.
+   * calls this before accepting an upgrade; `allowed: false` causes a 401.
    *
    * Build this from the same precedence as the HTTP auth middleware:
    * managed `ab_live_` keys verified via `ApiKeyStore.verify`, then static
@@ -18,10 +29,13 @@ export type ServerAdapterOptions = {
    * path from diverging from the HTTP path when the auth logic changes.
    *
    * When absent and `authToken` is also absent, all upgrades are accepted
-   * (no-auth deployment). When absent and `authToken` is present, the Bun
-   * adapter falls back to static-token comparison for backwards compatibility.
+   * (no-auth deployment) as privileged — no restriction was configured at
+   * all. When absent and `authToken` is present, the Bun adapter falls
+   * back to static-token comparison for backwards compatibility, and a
+   * successful match is privileged (the static token is an unrestricted
+   * admin credential, same as the HTTP path).
    */
-  authenticate?: (request: Request) => Promise<boolean>;
+  authenticate?: (request: Request) => Promise<WsAuthenticationResult>;
   /**
    * Explicit list of allowed origins for WebSocket upgrade requests. When
    * non-empty, upgrade requests whose `Origin` header is absent or not in
