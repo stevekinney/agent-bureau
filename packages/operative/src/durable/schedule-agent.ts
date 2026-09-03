@@ -187,8 +187,10 @@ export interface AgentScheduleHandle {
    * any individual fire. Resolves once no future fire can start: promptly
    * after this handle's own `cancel()` settles, and NEVER spontaneously for
    * a schedule that has not been cancelled — an active schedule's `closed()`
-   * stays pending even after a fire completes, until `cancel()` is called or
-   * the owning Bureau shuts down.
+   * stays pending even after a fire completes, until THIS handle's own
+   * `cancel()` is called and settles. (A Bureau shutdown that cancels the
+   * schedule through some other route does not resolve this promise; that
+   * wiring, if any, is Bureau's to add.)
    *
    * Never waits on any separately-tracked in-flight fire: a fire dispatched
    * before `cancel()` and still running is an ordinary run, reachable and

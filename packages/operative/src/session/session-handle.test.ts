@@ -3606,11 +3606,20 @@ describe('session.monitor()', () => {
   });
 
   it('clears its process-local inter-tick timer and stops when aborted', async () => {
-    const timerToken = Symbol('timer');
-    const clearedTimers: unknown[] = [];
-    let timerScheduled: (() => void) | undefined;
-    const timerWasScheduled = new Promise<void>((resolve) => {
-      timerScheduled = resolve;
+    // The FIRST `setTimeoutFunction` call under this fixture is actually the
+    // `session.monitor` liveness watchdog's own check timer (obs-02),
+    // scheduled synchronously at `monitor()` construction — before tick 0's
+    // run even starts. Waiting for only that first call and aborting
+    // immediately (as an earlier version of this test did) exercises
+    // mid-tick-0 abort and watchdog disposal, not the inter-tick timer this
+    // test is named for. Waiting for the SECOND call isolates the actual
+    // inter-tick sleep timer instead (see the AB-210 regression test below
+    // for the full discriminator rationale).
+    const calls: Array<{ token: symbol; milliseconds: number }> = [];
+    const clearedTokens: symbol[] = [];
+    let secondCallScheduled: (() => void) | undefined;
+    const secondCallWasScheduled = new Promise<void>((resolve) => {
+      secondCallScheduled = resolve;
     });
     const abortController = new AbortController();
     const kv = textValueStore(new MemoryStorage());
@@ -3619,12 +3628,14 @@ describe('session.monitor()', () => {
       store,
       agentName: 'test-agent',
       runOptions: createTestRunOptions(),
-      setTimeoutFunction: () => {
-        timerScheduled?.();
-        return timerToken;
+      setTimeoutFunction: (_callback, milliseconds) => {
+        const token = Symbol(`timer-${calls.length}`);
+        calls.push({ token, milliseconds });
+        if (calls.length === 2) secondCallScheduled?.();
+        return token;
       },
       clearTimeoutFunction: (timer) => {
-        clearedTimers.push(timer);
+        clearedTokens.push(timer as symbol);
       },
     });
     let doneEvents = 0;
@@ -3638,7 +3649,8 @@ describe('session.monitor()', () => {
       until: () => false,
       signal: abortController.signal,
     });
-    await timerWasScheduled;
+    await secondCallWasScheduled;
+    const sleepTimer = calls[1]!;
     abortController.abort();
 
     let caught: unknown;
@@ -3648,7 +3660,7 @@ describe('session.monitor()', () => {
       caught = error;
     }
     expect(caught).toMatchObject({ name: 'AbortError' });
-    expect(clearedTimers).toEqual([timerToken]);
+    expect(clearedTokens).toContain(sleepTimer.token);
     expect(doneEvents).toBe(1);
   });
 
@@ -3712,6 +3724,22 @@ describe('session.monitor()', () => {
   });
 
   it('AB-210 regression: stops within one tick when the signal fires mid-inter-tick-sleep — no next tick starts', async () => {
+    // Mocked timers, discriminated by CALL ORDER rather than duration: the
+    // `session.monitor` liveness watchdog (obs-02) schedules its own first
+    // check with the identical `everyMs` duration the inter-tick sleep
+    // below uses (`sessionMonitorPolicy`'s `graceMs`/`jitterMs` are both 0),
+    // so duration alone cannot tell the two timers apart. Order can: the
+    // watchdog's timer is scheduled synchronously at `monitor()` construction
+    // — before tick 0's tick-started event ever fires — so it is always
+    // call #1. The inter-tick sleep is only entered once tick 0 has fully
+    // completed, so it is always call #2. This is verified by a debug run
+    // against this exact fixture (only 1 event present when call #1 lands).
+    const calls: Array<{ token: symbol; milliseconds: number }> = [];
+    const clearedTokens: symbol[] = [];
+    let secondCallScheduled: (() => void) | undefined;
+    const secondCallWasScheduled = new Promise<void>((resolve) => {
+      secondCallScheduled = resolve;
+    });
     const abortController = new AbortController();
     const kv = textValueStore(new MemoryStorage());
     const store = createSessionStore(kv);
@@ -3721,39 +3749,50 @@ describe('session.monitor()', () => {
       agentName: 'test-agent',
       emitter,
       runOptions: createTestRunOptions(),
+      setTimeoutFunction: (_callback, milliseconds) => {
+        const token = Symbol(`timer-${calls.length}`);
+        calls.push({ token, milliseconds });
+        if (calls.length === 2) secondCallScheduled?.();
+        return token;
+      },
+      clearTimeoutFunction: (timer) => {
+        clearedTokens.push(timer as symbol);
+      },
     });
 
     const tickEvents: SessionMonitorTickEvent[] = [];
     emitter.addEventListener('session.monitor.tick', (e) => {
       tickEvents.push(e);
-      // Fire the signal the instant tick 0 finishes (its post-predicate
-      // event, met=false) — the loop is about to enter its inter-tick
-      // sleep. Real (unmocked) timers are used here on purpose: aborting
-      // synchronously inside this listener, before the sleep's own real
-      // timer has any chance to elapse, is what proves the loop stops
-      // DURING the sleep rather than merely never reaching it.
-      if (e.met === false) {
-        abortController.abort();
-      }
     });
+
+    const monitoring = handle.monitor({
+      every: 'PT1H',
+      input: 'check',
+      until: () => false,
+      signal: abortController.signal,
+    });
+
+    // Wait for the SECOND setTimeoutFunction call specifically — the sleep
+    // timer having already been scheduled (not merely about to be) is what
+    // makes this "mid-sleep" rather than "before the sleep starts".
+    await secondCallWasScheduled;
+    expect(tickEvents).toHaveLength(2);
+    expect(tickEvents.map((e) => e.tick)).toEqual([0, 0]);
+    const sleepTimer = calls[1]!;
+
+    abortController.abort();
 
     let caught: unknown;
     try {
-      await handle.monitor({
-        every: 5,
-        input: 'check',
-        until: () => false,
-        signal: abortController.signal,
-      });
+      await monitoring;
     } catch (error) {
       caught = error;
     }
     expect(caught).toMatchObject({ name: 'AbortError' });
-    // Tick 0 completed fully (both its tick-started and post-predicate
-    // events), the loop entered its inter-tick sleep, the signal fired
-    // there, and no tick 1 ever starts.
+    // No tick 1 ever starts, and the sleep timer specifically — not just
+    // some timer — was torn down by the abort.
     expect(tickEvents).toHaveLength(2);
-    expect(tickEvents.map((e) => e.tick)).toEqual([0, 0]);
+    expect(clearedTokens).toContain(sleepTimer.token);
   });
 
   it('returns true when the predicate is satisfied on the first tick', async () => {
