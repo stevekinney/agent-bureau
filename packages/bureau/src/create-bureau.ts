@@ -1024,7 +1024,10 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // the bureau's lifetime, dispatched by name through `bureau.run`.
   // Independent of `runtime` (bureau-level generate/toolbox/provider
   // composition, still used by `createRun`).
-  const agentCatalog = createAgentCatalog(agentsSnapshot);
+  // `selectorAvailable: false` — no selector is wired yet (AB-66); mod-03c
+  // flips this to `true` when `planSelection` lands, so the transition has
+  // one named mechanism in one named file (AB-247/mod-02e).
+  const agentCatalog = createAgentCatalog(agentsSnapshot, { selectorAvailable: false });
   // AB-246 — the model-catalog refresh service. Independent of `runtime`.
   // When the caller doesn't supply one, the default `descriptorSource`
   // re-derives `@lostgradient/operative/providers`'s static seed — this is
