@@ -27,6 +27,7 @@ function makeHandle(id = 'sched-1'): AgentScheduleHandle {
     resume: async () => {},
     cancel: async () => {},
     describe: async () => mockSummary,
+    closed: async () => ({ status: 'not-required' }),
   };
 }
 

@@ -699,6 +699,111 @@ describe('session.run()', () => {
 });
 
 // ---------------------------------------------------------------------------
+// session.closed() — AB-210, handle-scoped cleanup acknowledgement
+// ---------------------------------------------------------------------------
+
+describe('session.closed()', () => {
+  it('resolves not-required immediately when no run is currently live on the handle', async () => {
+    const { handle } = createSessionHandleFixture();
+
+    expect(await handle.closed()).toEqual({ status: 'not-required' });
+  });
+
+  it('resolves not-required again after a run has completed and cleared currentRun', async () => {
+    const { handle } = createSessionHandleFixture();
+
+    const run = handle.run('hello');
+    await run.result();
+    await Promise.resolve();
+
+    expect(await handle.closed()).toEqual({ status: 'not-required' });
+  });
+
+  it("delegates to the live run's own closed() and returns the IDENTICAL CleanupAcknowledgement object when a run is live", async () => {
+    let signalGenerateStarted!: () => void;
+    const generateStarted = new Promise<void>((resolve) => {
+      signalGenerateStarted = resolve;
+    });
+    const blockingGenerate: GenerateFunction = async ({ signal }) => {
+      signalGenerateStarted();
+      await new Promise<never>((_resolve, reject) => {
+        signal?.addEventListener('abort', () => reject(new Error('session run aborted')), {
+          once: true,
+        });
+      });
+      throw new Error('abort signal was not delivered');
+    };
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const handle = createSessionHandle('session-closed-delegates', {
+      store,
+      agentName: 'agent',
+      runOptions: createTestRunOptions(blockingGenerate),
+    });
+
+    const run = handle.run('abort me');
+    await generateStarted;
+
+    // `currentRun` is live (synchronously set inside `run()`, see
+    // session-handle.ts) — `session.closed()` must delegate to THIS run's
+    // own `closed()`, not resolve `not-required` on its own.
+    const sessionClosed = handle.closed();
+    const runClosed = run.closed();
+
+    run.abort('user stopped it');
+    const result = await run.result();
+    expect(result.finishReason).toBe('aborted');
+
+    const [sessionAcknowledgement, runAcknowledgement] = await Promise.all([
+      sessionClosed,
+      runClosed,
+    ]);
+    expect(sessionAcknowledgement).not.toEqual({ status: 'not-required' });
+    // Identity, not merely deep equality — session.closed() must return the
+    // SAME cached object the inner run's own closed() resolved, per the
+    // acceptance criterion.
+    expect(sessionAcknowledgement).toBe(runAcknowledgement);
+  });
+
+  it("forwards a caller-supplied signal to the delegated run's closed(), bounding only this caller's own wait", async () => {
+    let signalGenerateStarted!: () => void;
+    const generateStarted = new Promise<void>((resolve) => {
+      signalGenerateStarted = resolve;
+    });
+    const blockingGenerate: GenerateFunction = async ({ signal }) => {
+      signalGenerateStarted();
+      await new Promise<never>(() => {
+        signal?.addEventListener('abort', () => {
+          // Never settles on its own — only this test's explicit `run.abort()`
+          // (never called) would resolve the inner run. The point of this
+          // fixture is that the run stays in flight for the whole test.
+        });
+      });
+      // Unreachable — `await`ing a `Promise<never>` never resolves, so the
+      // function's inferred return type is `never`, assignable to the
+      // declared `Promise<GenerateResponse>` `GenerateFunction` signature.
+      throw new Error('unreachable');
+    };
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const handle = createSessionHandle('session-closed-signal', {
+      store,
+      agentName: 'agent',
+      runOptions: createTestRunOptions(blockingGenerate),
+    });
+
+    handle.run('never finishes');
+    await generateStarted;
+
+    const controller = new AbortController();
+    const closedPromise = handle.closed({ signal: controller.signal });
+    controller.abort();
+
+    expect(await closedPromise).toEqual({ status: 'unresolved', reason: 'timed-out' });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // recover() — re-attach to the in-flight run
 // ---------------------------------------------------------------------------
 
@@ -3545,6 +3650,110 @@ describe('session.monitor()', () => {
     expect(caught).toMatchObject({ name: 'AbortError' });
     expect(clearedTimers).toEqual([timerToken]);
     expect(doneEvents).toBe(1);
+  });
+
+  // AB-210 verifies and records — without code change — that monitor()
+  // already conforms to AB-38's "cancel inter-attempt sleep and validation
+  // immediately" requirement. These two regression tests document that with
+  // a passing assertion (a tick count), not merely a comment: signal.abort()
+  // stops the loop within the CURRENT tick, and no further tick starts,
+  // whether the signal fires mid-LLM-call or mid-inter-tick-sleep.
+  it('AB-210 regression: stops within one tick when the signal fires mid-LLM-call — no second tick starts', async () => {
+    let signalGenerateStarted!: () => void;
+    const generateStarted = new Promise<void>((resolve) => {
+      signalGenerateStarted = resolve;
+    });
+    const blockingGenerate: GenerateFunction = async ({ signal }) => {
+      signalGenerateStarted();
+      await new Promise<never>((_resolve, reject) => {
+        signal?.addEventListener('abort', () => reject(new Error('tick aborted')), {
+          once: true,
+        });
+      });
+      throw new Error('abort signal was not delivered');
+    };
+    const abortController = new AbortController();
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const emitter = new TypedEventTarget<OperativeEventMap>();
+    const handle = createSessionHandle('monitor-signal-mid-generate', {
+      store,
+      agentName: 'test-agent',
+      emitter,
+      runOptions: createTestRunOptions(blockingGenerate),
+    });
+
+    const tickEvents: SessionMonitorTickEvent[] = [];
+    emitter.addEventListener('session.monitor.tick', (e) => {
+      tickEvents.push(e);
+    });
+
+    const monitoring = handle.monitor({
+      every: 'PT1H',
+      input: 'check',
+      until: () => false,
+      signal: abortController.signal,
+    });
+    await generateStarted;
+    abortController.abort();
+
+    let caught: unknown;
+    try {
+      await monitoring;
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({ name: 'AbortError' });
+    // Only tick 0's tick-started event fires (met=null) — the run aborted
+    // mid-generate, before predicate evaluation, and no tick 1 ever starts.
+    expect(tickEvents).toHaveLength(1);
+    expect(tickEvents[0]!.tick).toBe(0);
+    expect(tickEvents[0]!.met).toBeNull();
+  });
+
+  it('AB-210 regression: stops within one tick when the signal fires mid-inter-tick-sleep — no next tick starts', async () => {
+    const abortController = new AbortController();
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const emitter = new TypedEventTarget<OperativeEventMap>();
+    const handle = createSessionHandle('monitor-signal-mid-sleep', {
+      store,
+      agentName: 'test-agent',
+      emitter,
+      runOptions: createTestRunOptions(),
+    });
+
+    const tickEvents: SessionMonitorTickEvent[] = [];
+    emitter.addEventListener('session.monitor.tick', (e) => {
+      tickEvents.push(e);
+      // Fire the signal the instant tick 0 finishes (its post-predicate
+      // event, met=false) — the loop is about to enter its inter-tick
+      // sleep. Real (unmocked) timers are used here on purpose: aborting
+      // synchronously inside this listener, before the sleep's own real
+      // timer has any chance to elapse, is what proves the loop stops
+      // DURING the sleep rather than merely never reaching it.
+      if (e.met === false) {
+        abortController.abort();
+      }
+    });
+
+    let caught: unknown;
+    try {
+      await handle.monitor({
+        every: 5,
+        input: 'check',
+        until: () => false,
+        signal: abortController.signal,
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({ name: 'AbortError' });
+    // Tick 0 completed fully (both its tick-started and post-predicate
+    // events), the loop entered its inter-tick sleep, the signal fired
+    // there, and no tick 1 ever starts.
+    expect(tickEvents).toHaveLength(2);
+    expect(tickEvents.map((e) => e.tick)).toEqual([0, 0]);
   });
 
   it('returns true when the predicate is satisfied on the first tick', async () => {
