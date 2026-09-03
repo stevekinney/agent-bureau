@@ -84,6 +84,11 @@ export type {
   ModelCatalog,
 } from './model-catalog.ts';
 export { createModelCatalog } from './model-catalog.ts';
+export {
+  GENERAL_PROJECTION_REDACTED_KEYS,
+  projectCatalog,
+  projectDescriptor,
+} from './model-catalog-projection.ts';
 export { createOpenAIProvider, createOpenAIProviderStream } from './openai.ts';
 export type {
   ComplexitySignals,

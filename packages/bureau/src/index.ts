@@ -6,6 +6,7 @@ export type {
   AgentOutput,
   AgentRunForName,
   BureauAgentCatalog,
+  CreateAgentCatalogOptions,
 } from './agent-catalog';
 export { createAgentCatalog } from './agent-catalog';
 export type { AuditEventType, AuditQueryOptions, AuditRecord, AuditTrail } from './audit-trail';
