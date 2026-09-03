@@ -118,22 +118,32 @@ function webhookDeliveryPolicy(maxAttempts: number, backoffBaseMilliseconds: num
 }
 
 /**
- * The default production clock backing each delivery's
- * `createStallWatchdog` — `performance.now()`, a monotonic source, matching
- * `active-run-liveness.ts`'s own default clock. Distinct from this module's
- * own `now` option, which is `Date.now`-based and only ever timestamps
- * persisted `WebhookDeliveryRecord`s. Exported for direct unit testing of
- * `setTimeout`/`clearTimeout` (AB-220): the `webhook-delivery` policy row
- * has `missedPulseThreshold: 0`, so `createStallWatchdog` never actually
- * calls either through the public API — see
- * `packages/operative/src/liveness/watchdog.ts`'s `scheduleNextCheck`,
- * which no-ops when a policy isn't cadence-gated.
+ * Factory for the default production clock backing each delivery's
+ * `createStallWatchdog` — driven by the composed
+ * {@link RuntimeServices.monotonic}/{@link RuntimeServices.timers} (AB-260),
+ * defaulting to the real-globals runtime when called with no argument (the
+ * baseline behavior, unchanged from before `RuntimeServices` composition).
+ * Distinct from this module's own `now` option, which is `Date.now`-based
+ * and only ever timestamps persisted `WebhookDeliveryRecord`s. Exported for
+ * direct unit testing of `setTimeout`/`clearTimeout` (AB-220): the
+ * `webhook-delivery` policy row has `missedPulseThreshold: 0`, so
+ * `createStallWatchdog` never actually calls either through the public API
+ * — see `packages/operative/src/liveness/watchdog.ts`'s `scheduleNextCheck`,
+ * which no-ops when a policy isn't cadence-gated. The timer-scheduling and
+ * timer-clearing members are destructured once so the returned clock reads
+ * `scheduleTimeout(...)`/`cancelTimeout(...)` rather than a literal `timers`
+ * method call — see `create-bureau.ts`'s equivalent pattern for why.
  */
-export const realWatchdogClock: StallWatchdogClock = {
-  now: () => performance.now(),
-  setTimeout: (callback, ms) => setTimeout(callback, ms),
-  clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
-};
+export function createDefaultWatchdogClock(
+  runtime: RuntimeServices = createDefaultRuntimeServices(),
+): StallWatchdogClock {
+  const { setTimeout: scheduleTimeout, clearTimeout: cancelTimeout } = runtime.timers;
+  return {
+    now: () => runtime.monotonic.now(),
+    setTimeout: (callback, ms) => scheduleTimeout(callback, ms),
+    clearTimeout: (handle) => cancelTimeout(handle),
+  };
+}
 
 /** The fixed id for the notifier's own instance-level aggregate snapshot. */
 const AGGREGATE_DELIVERY_ID = 'webhook-notifier';
@@ -253,8 +263,9 @@ export interface WebhookNotifierOptions {
   signal?: AbortSignal;
   /**
    * Injectable timer-agnostic clock backing each delivery's
-   * `createStallWatchdog` (AB-220). Defaults to a `performance.now()`-based
-   * clock. Tests inject a manual clock so no real sleeps are needed.
+   * `createStallWatchdog` (AB-220). Defaults to the composed
+   * `RuntimeServices` monotonic clock and timers (AB-260). Tests inject a
+   * manual clock so no real sleeps are needed.
    */
   clock?: StallWatchdogClock;
 }
@@ -488,7 +499,7 @@ export function createWebhookNotifier<D extends AgentDefinitions = AgentDefiniti
   const backoffBaseMilliseconds =
     options?.backoffBaseMilliseconds ?? DEFAULT_BACKOFF_BASE_MILLISECONDS;
   const reviewQueueBaseUrl = options?.reviewQueueBaseUrl;
-  const clock = options?.clock ?? realWatchdogClock;
+  const clock = options?.clock ?? createDefaultWatchdogClock(runtime);
   const deliveryPolicy = webhookDeliveryPolicy(maxAttempts, backoffBaseMilliseconds);
 
   // Subject ids already notified this process, so a delivery is kicked off
