@@ -203,12 +203,11 @@ describe('bureau.run', () => {
   it('drives the run through the durable engine when one is composed, checkpointed and discoverable via listDurableRuns', async () => {
     // Title deliberately does NOT claim "survives a crash simulation" — this
     // test only proves the run went through the durable engine and is
-    // checkpointed/discoverable mid-flight. It does NOT simulate a process
-    // restart and reattach, because that currently does not work for a
-    // catalog run: see the "Known gap, not yet closed" note on `runAgent`'s
-    // doc comment in create-bureau.ts (no session record is written for a
-    // catalog dispatch, so boot recovery's resolver has no owning session to
-    // find and returns `{ status: 'unavailable' }`).
+    // checkpointed/discoverable mid-flight. A process-restart reattach test
+    // (AB-240) lives in `create-bureau.test.ts` alongside the other
+    // cross-process recovery tests — see "reattaches a catalog-dispatched
+    // bureau.run() across a process restart, rebuilding deps from the
+    // catalog agent's own OPERATIVE_RESOLVE_RUN_OPTIONS".
     const bureau = await createBureau({
       agents: { echo: createAgent({ generate: mockGenerate('durable hello') }) },
       // No bureau-level generate/provider needed — `run()` dispatches through

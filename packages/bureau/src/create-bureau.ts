@@ -20,6 +20,7 @@ import {
   HumanWaitParkedEvent,
   type JSONValue,
   OPERATIVE_RESOLVE_RUN_OPTIONS,
+  readGenerationProfile,
   type RequestHumanInputContext,
   type RequestHumanInputInput,
   type RunnableAgent,
@@ -107,7 +108,7 @@ import {
   buildTerminalReportFromCompletedEvent,
   createRunFrameForwarder,
 } from './run-envelope';
-import type { BureauToolbox } from './runtime-composition';
+import type { BureauToolbox, CatalogAgentRunOptionsResolution } from './runtime-composition';
 import {
   createRuntimeComposition,
   createSchedulerServiceRequestContext,
@@ -1186,6 +1187,46 @@ export async function monitorRecoveredScheduledFire(
 }
 
 /**
+ * AB-240: the catalog-dispatch analog of {@link monitorRecoveredScheduledFire}.
+ * A catalog run (`bureau.run(...)`) has no bureau session and — like a
+ * scheduled fire — no interactive `ActiveRun` surface even live (it is
+ * tracked in `catalogRuns`, never registered onto `store`), so a recovered
+ * one gets the same headless detached-result monitor rather than the
+ * session-ownership reattach path.
+ */
+export async function monitorRecoveredCatalogRun(
+  handle: RecoveredRunHandle,
+  agentName: string,
+  diagnose: DiagnosticSink = resolveDiagnosticSink(undefined),
+): Promise<void> {
+  try {
+    const result = await handle.result();
+    if (
+      typeof result === 'object' &&
+      result !== null &&
+      'finishReason' in result &&
+      isRunFailureFinishReason(result.finishReason)
+    ) {
+      const errorMessage =
+        'errorMessage' in result && typeof result.errorMessage === 'string'
+          ? `: ${result.errorMessage}`
+          : '';
+      diagnose({
+        level: 'error',
+        scope: 'recovery',
+        message: `[bureau] Recovered catalog run "${handle.id}" (agent "${agentName}") finished with ${String(result.finishReason)}${errorMessage}`,
+      });
+    }
+  } catch (error) {
+    diagnose({
+      level: 'error',
+      scope: 'recovery',
+      message: `[bureau] Recovered catalog run "${handle.id}" (agent "${agentName}") failed: ${serializeUnknownError(error)}`,
+    });
+  }
+}
+
+/**
  * AB-194 — `BureauOptions.sessionInput`'s `sessionBacklogLimit`/
  * `principalBacklogLimit` must each be a positive integer when supplied.
  * Throws `BureauError('...', 'BAD_REQUEST')` for 0, a negative number, or a
@@ -1258,6 +1299,44 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // flips this to `true` when `planSelection` lands, so the transition has
   // one named mechanism in one named file (AB-247/mod-02e).
   const agentCatalog = createAgentCatalog(agentsSnapshot, { selectorAvailable: false });
+  // AB-240: wire boot recovery's catalog branch NOW that the catalog exists —
+  // `runtime` (built above, before this catalog) deliberately knows nothing
+  // about it (see `RuntimeCompositionOptions`'s doc comment), so this is the
+  // one place `resolveRunServices` reaches the catalog from, via the resolver
+  // it stores and calls back into. Registered before `recoverDurableRuns()`
+  // (called later, once this bureau's construction finishes) so every boot
+  // recovery pass sees it.
+  runtime.setCatalogAgentRunOptionsResolver(async (name, input, context) => {
+    const agent = agentCatalog.find(name);
+    if (!agent) return { status: 'missing-agent' };
+    const definitionResolvingAgent = agent as RunnableAgent<unknown, boolean> &
+      DefinitionResolvingAgent;
+    const resolver = definitionResolvingAgent[OPERATIVE_RESOLVE_RUN_OPTIONS];
+    if (typeof resolver !== 'function') return { status: 'missing-agent' };
+    try {
+      // Invoked through `definitionResolvingAgent`, matching `runAgent`'s own
+      // forwarding below (not a bare extracted `resolver(...)` call) — see its
+      // comment for why a method-shaped resolver needs its receiver preserved.
+      const resolvedOptions = await definitionResolvingAgent[OPERATIVE_RESOLVE_RUN_OPTIONS]!(
+        input,
+        context,
+      );
+      const resolution: CatalogAgentRunOptionsResolution = {
+        status: 'resolved',
+        options: resolvedOptions,
+        // Type-level-only correction (mirrors `agent-catalog.ts`'s own
+        // `buildCatalogGenerationProfile` cast): `readGenerationProfile`
+        // only reads `agent.generationProfile`, which doesn't depend on
+        // `RunnableAgent`'s O/H type parameters, but its parameter type
+        // defaults to `RunnableAgent<never, false>`, not structurally
+        // assignable from `AnyRunnableAgent`'s `RunnableAgent<any, true>` half.
+        definitionRevision: readGenerationProfile(agent as RunnableAgent).revision,
+      };
+      return resolution;
+    } catch (error) {
+      return { status: 'resolver-failed', error };
+    }
+  });
   // AB-246 — the model-catalog refresh service. Independent of `runtime`.
   // When the caller doesn't supply one, the default `descriptorSource`
   // re-derives `@lostgradient/operative/providers`'s static seed — this is
@@ -2370,20 +2449,19 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
    * run options, or awaiting the durable engine's setup) is deferred behind
    * `createDeferredAgentRun`.
    *
-   * **Known gap, not yet closed:** the durable branch checkpoints the run
-   * through the engine (it is discoverable via `bureau.listDurableRuns()`
-   * mid-flight — see `bureau-run.test.ts`), but does NOT write the session
-   * record `runtime-composition.ts`'s boot-recovery resolver requires
-   * (`session.metadata.lastRunId`/`lastRunStatus`, keyed by
-   * `runOptions?.sessionId ?? runId`). A process restart therefore does
-   * NOT reattach a catalog run in flight — `recoverAll()`'s resolver finds
-   * no owning session and returns `{ status: 'unavailable' }` for it, same
-   * as any other run with "no recoverable session". This is a real,
-   * open gap (flagged in review), not a documented design choice like the
-   * durable-recovery-failure-is-diagnosed-not-rejected behavior elsewhere in
-   * this file — closing it needs a session write parallel to
-   * `createRunFromRequest`'s, which `bureau.run` currently has no request
-   * context to draw an authority record from.
+   * AB-240: the durable branch checkpoints the run through the engine (it is
+   * discoverable via `bureau.listDurableRuns()` mid-flight — see
+   * `bureau-run.test.ts`) AND persists its own recovery record — agent name,
+   * `readGenerationProfile(agent).revision`, and the original `input` — via
+   * `runtime.persistCatalogRunRecoveryRecord`, independent of the bureau
+   * session record `createRunFromRequest` writes (a catalog dispatch has no
+   * request context to draw an authority record from, and never owns a
+   * bureau session). A process restart reattaches through
+   * `runtime-composition.ts`'s `resolveRunServices` catalog branch, which
+   * resolves that record back through `runtime.setCatalogAgentRunOptionsResolver`
+   * — i.e. the SAME catalog agent's `OPERATIVE_RESOLVE_RUN_OPTIONS` a live
+   * dispatch would have used, never the Bureau's default runtime
+   * composition.
    */
   /**
    * AB-22 review fix: `catalogRuns` (declared near `activeRuns` above) needs
@@ -2498,6 +2576,27 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           }
           throw error;
         }
+        // AB-240: persist a recovery record BEFORE starting the durable
+        // engine, so a crash immediately after `engine.start` still leaves
+        // enough, on the next boot, to reattach this run against the catalog
+        // agent's OWN run options rather than the Bureau's default runtime
+        // composition — a catalog dispatch has no bureau session to write
+        // `lastRunId`/`lastRunStatus` onto (see `resolveRunServices`'s
+        // catalog branch in runtime-composition.ts). A write failure here
+        // propagates uncaught, same as every other resolver failure in this
+        // function — better to fail this run's start than dispatch a durable
+        // run with no way to reattach it later.
+        await runtime.persistCatalogRunRecoveryRecord(runId, {
+          agentName: name,
+          // Type-level-only correction (mirrors `agent-catalog.ts`'s own
+          // `buildCatalogGenerationProfile` cast): `readGenerationProfile`
+          // only reads `agent.generationProfile`, which doesn't depend on
+          // `RunnableAgent`'s O/H type parameters, but its parameter type
+          // defaults to `RunnableAgent<never, false>`, not structurally
+          // assignable from `AnyRunnableAgent`'s `RunnableAgent<any, true>` half.
+          definitionRevision: readGenerationProfile(agent as RunnableAgent).revision,
+          input,
+        });
         const activeRun = createActiveRun(resolvedOptions, {
           engine: durable.engine,
           checkpointStore: durable.checkpointStore,
@@ -3414,6 +3513,18 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       return;
     }
 
+    // AB-240: a catalog-dispatched run (`bureau.run()`) never owns a bureau
+    // session — its recovery record (agent name + revision + input) is what
+    // `resolveRunServices`'s catalog branch already consulted to rebuild
+    // `info.services` from the catalog agent's OWN run options. Route it to
+    // the same headless monitor a native scheduled fire gets instead of the
+    // session-ownership classification below, which would otherwise treat
+    // it as an orphaned run and cancel it.
+    if (await runtime.isCatalogRecoveredRun(info.workflowId)) {
+      void monitorRecoveredCatalogRun(info.handle, info.input.agentName, diagnose);
+      return;
+    }
+
     let sessionLoad: SessionLoadOutcome;
     try {
       const session = await runtime.sessionStore.load(info.input.sessionId);
@@ -3531,6 +3642,14 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // before replay. The post-recovery pass only classifies the remaining
       // handles (scheduled fires, orphans, and unknown ownership).
       if (store.getRun(handle.id)) continue;
+
+      // AB-240: the awaited recovery hook (`onRecoveredWorkflow`) already
+      // routed a catalog-dispatched run to its own headless monitor above —
+      // skip it here too, the same way an already-registered interactive
+      // run is skipped, so it is never re-classified by the session-ownership
+      // logic below (which would treat its absent session as "orphaned" and
+      // cancel it).
+      if (await runtime.isCatalogRecoveredRun(handle.id)) continue;
 
       const readError = 'error' in rest ? rest.error : undefined;
       if (readError !== undefined) {

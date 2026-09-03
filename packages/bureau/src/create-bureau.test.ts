@@ -12,6 +12,7 @@ import type {
 } from '@lostgradient/operative';
 import {
   AbortAgentRunError,
+  createAgent,
   createAgentSession,
   createScheduleWakeupTool,
   createSessionStore,
@@ -71,6 +72,7 @@ import {
   isSessionRunTerminal,
   isTerminalApprovalBindingError,
   loadExistingScheduledSessionId,
+  monitorRecoveredCatalogRun,
   monitorRecoveredScheduledFire,
   omitKeysWithPrefix,
   recordedSessionAuthorityPrincipalId,
@@ -1458,6 +1460,165 @@ describe('createBureau', () => {
       // recovery-dependent assertions are done (its scheduler would
       // otherwise keep polling storage after this test deletes the sqlite
       // file below).
+      await bureauA.dispose();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it("reattaches a catalog-dispatched bureau.run() across a process restart, rebuilding deps from the catalog agent's OWN OPERATIVE_RESOLVE_RUN_OPTIONS (AB-240)", async () => {
+    // Same cross-process proof as the interactive-run recovery test above,
+    // but through `bureau.run(name, input)` — a catalog dispatch, which has
+    // no bureau session at all. Bureau A's `echo` agent and bureau B's
+    // `echo` agent are TWO SEPARATE `createAgent(...)` instances with
+    // DIFFERENT `generate` functions — bureau B's own generate (not bureau
+    // A's, not any bureau-level default — there IS no bureau-level generate
+    // configured here at all) is what must produce step 1's content, proving
+    // reattachment rebuilt deps from the CATALOG AGENT's own resolved run
+    // options, never a Bureau default runtime composition (this feature's
+    // rollback trigger).
+    const databasePath = join(
+      tmpdir(),
+      `bureau-catalog-recovery-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+
+    try {
+      let bureauAReachedStep1 = false;
+      const bureauA = await createBureau({
+        agents: {
+          echo: createAgent({
+            generate: async ({ step }) => {
+              if (step === 0) {
+                return { content: 'A step 0', toolCalls: [{ name: 'next', arguments: {} }] };
+              }
+              bureauAReachedStep1 = true; // step 0's saveCursor has committed
+              return new Promise<never>(() => {}); // the "process" dies here
+            },
+            toolbox: createToolbox([createNextTool()]),
+            stopWhen: stopWhen.noToolCalls(),
+          }),
+        },
+        // No bureau-level generate/toolbox/provider at all — `bureau.run()`
+        // dispatches entirely through the catalog agent's own composition.
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+      });
+
+      bureauA.run('echo', 'Recover me');
+      await pollUntil(() => bureauAReachedStep1);
+      expect(bureauAReachedStep1).toBe(true);
+      // `AgentRun.snapshot().id` is the CATALOG NAME ('echo'), not the
+      // minted workflow id — read the real durable workflow id back off the
+      // engine's own listing, the same way `bureau.run()`'s own
+      // "checkpointed and discoverable" test does.
+      const beforeRestart = await bureauA.listDurableRuns();
+      const runId = beforeRestart?.items.find((item) => item.id.startsWith('agent-run-'))?.id;
+      expect(runId).toBeDefined();
+      // Deliberately NOT disposing bureauA — see the interactive recovery
+      // test's comment above for the graceful-shutdown-vs-crash rationale;
+      // it applies identically here.
+
+      const bSteps: number[] = [];
+      const bureauB = await createBureau({
+        agents: {
+          echo: createAgent({
+            generate: async ({ step }) => {
+              bSteps.push(step);
+              return { content: `B recovered step ${step}`, toolCalls: [] };
+            },
+            toolbox: createToolbox([createNextTool()]),
+            stopWhen: stopWhen.noToolCalls(),
+          }),
+        },
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+      });
+
+      try {
+        await pollUntil(() => bSteps.includes(1));
+        // Resumed at step 1 (not 0) and took ONLY step 1 — the checkpointed
+        // step 0 short-circuited, proving this is a resume, not a restart
+        // from the top.
+        expect(bSteps).toEqual([1]);
+
+        const completed = await pollUntil(async () => {
+          const after = await bureauB.listDurableRuns();
+          return after?.items.find((item) => item.id === runId)?.status === 'completed';
+        });
+        expect(completed).toBe(true);
+      } finally {
+        await bureauB.dispose();
+      }
+      await bureauA.dispose();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it("fails the workflow observably (never silently unavailable) when a catalog-dispatched run's agent is no longer in the catalog on restart (AB-240 / AB-29 precedent)", async () => {
+    // Weft's own contract for `{ status: 'unavailable' }` (services-resolution.ts):
+    // "a deliberate, named outcome ... that fails just that recovered run" — so
+    // a missing catalog agent must surface as an observable terminal `'failed'`
+    // workflow, discoverable via `listDurableRuns()` (the same surface every
+    // other durable-run assertion in this suite uses), never a run that just
+    // silently stops advancing with no visible outcome.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-catalog-recovery-missing-agent-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+
+    try {
+      let bureauAReachedStep1 = false;
+      const bureauA = await createBureau({
+        agents: {
+          echo: createAgent({
+            generate: async ({ step }) => {
+              if (step === 0) {
+                return { content: 'A step 0', toolCalls: [{ name: 'next', arguments: {} }] };
+              }
+              bureauAReachedStep1 = true;
+              return new Promise<never>(() => {});
+            },
+            toolbox: createToolbox([createNextTool()]),
+            stopWhen: stopWhen.noToolCalls(),
+          }),
+        },
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+      });
+
+      bureauA.run('echo', 'Recover me');
+      await pollUntil(() => bureauAReachedStep1);
+      expect(bureauAReachedStep1).toBe(true);
+      // `AgentRun.snapshot().id` is the CATALOG NAME ('echo'), not the
+      // minted workflow id — read the real durable workflow id back off the
+      // engine's own listing, the same way `bureau.run()`'s own
+      // "checkpointed and discoverable" test does.
+      const beforeRestart = await bureauA.listDurableRuns();
+      const runId = beforeRestart?.items.find((item) => item.id.startsWith('agent-run-'))?.id;
+      expect(runId).toBeDefined();
+
+      // Bureau B's catalog has NO "echo" agent at all — simulates a
+      // deployment where the agent was retired between restarts.
+      const bureauB = await createBureau({
+        agents: {},
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+      });
+
+      try {
+        const failed = await pollUntil(async () => {
+          const after = await bureauB.listDurableRuns();
+          return after?.items.find((item) => item.id === runId)?.status === 'failed';
+        });
+        expect(failed).toBe(true);
+      } finally {
+        await bureauB.dispose();
+      }
       await bureauA.dispose();
     } finally {
       await rm(databasePath, { force: true });
@@ -4732,6 +4893,132 @@ describe('monitorRecoveredScheduledFire', () => {
     expect(messages).toHaveLength(1);
     expect(messages[0]).toContain('scheduled-fire-maximum');
     expect(messages[0]).toContain('finished with maximum-steps');
+  });
+});
+
+describe('monitorRecoveredCatalogRun (AB-240)', () => {
+  it('logs resolved error finish reasons from a recovered catalog run', async () => {
+    const messages: string[] = [];
+
+    await monitorRecoveredCatalogRun(
+      {
+        id: 'agent-run-catalog-1',
+        result: async () => ({
+          runId: 'agent-run-catalog-1',
+          steps: 1,
+          content: '',
+          finishReason: 'error',
+          errorMessage: 'provider unavailable',
+        }),
+      },
+      'echo',
+      (diagnostic) => {
+        messages.push(diagnostic.message);
+      },
+    );
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain('agent-run-catalog-1');
+    expect(messages[0]).toContain('echo');
+    expect(messages[0]).toContain('finished with error');
+    expect(messages[0]).toContain('provider unavailable');
+  });
+
+  it('logs maximum-steps from a recovered catalog run as a failure', async () => {
+    const messages: string[] = [];
+
+    await monitorRecoveredCatalogRun(
+      {
+        id: 'agent-run-catalog-2',
+        result: async () => ({
+          runId: 'agent-run-catalog-2',
+          steps: 25,
+          content: 'looping',
+          finishReason: 'maximum-steps',
+        }),
+      },
+      'echo',
+      (diagnostic) => {
+        messages.push(diagnostic.message);
+      },
+    );
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain('agent-run-catalog-2');
+    expect(messages[0]).toContain('finished with maximum-steps');
+  });
+
+  it('does not diagnose a successfully completed recovered catalog run', async () => {
+    const messages: string[] = [];
+
+    await monitorRecoveredCatalogRun(
+      {
+        id: 'agent-run-catalog-3',
+        result: async () => ({
+          runId: 'agent-run-catalog-3',
+          steps: 1,
+          content: 'done',
+          finishReason: 'completed',
+        }),
+      },
+      'echo',
+      (diagnostic) => {
+        messages.push(diagnostic.message);
+      },
+    );
+
+    expect(messages).toHaveLength(0);
+  });
+
+  it('logs a rejected result() (the handle itself failed, not just a bad finishReason)', async () => {
+    const messages: string[] = [];
+
+    await monitorRecoveredCatalogRun(
+      {
+        id: 'agent-run-catalog-4',
+        result: async () => {
+          throw new Error('engine.recoverAll rejected this handle');
+        },
+      },
+      'echo',
+      (diagnostic) => {
+        messages.push(diagnostic.message);
+      },
+    );
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain('agent-run-catalog-4');
+    expect(messages[0]).toContain('echo');
+    expect(messages[0]).toContain('engine.recoverAll rejected this handle');
+  });
+
+  it('defaults to the shared diagnostic sink when none is supplied', async () => {
+    const originalError = console.error;
+    const messages: string[] = [];
+    console.error = (...args: unknown[]) => {
+      messages.push(args.map(String).join(' '));
+    };
+
+    try {
+      await monitorRecoveredCatalogRun(
+        {
+          id: 'agent-run-catalog-5',
+          result: async () => ({
+            runId: 'agent-run-catalog-5',
+            steps: 1,
+            content: '',
+            finishReason: 'error',
+            errorMessage: 'default sink',
+          }),
+        },
+        'echo',
+      );
+    } finally {
+      console.error = originalError;
+    }
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain('default sink');
   });
 });
 

@@ -2,7 +2,12 @@ import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import type { GenerateFunction, SessionStore, StreamEventMap } from '@lostgradient/operative';
+import type {
+  GenerateFunction,
+  RunOptions,
+  SessionStore,
+  StreamEventMap,
+} from '@lostgradient/operative';
 import {
   createAgentSession,
   GuardrailTripwireError,
@@ -38,6 +43,7 @@ import { z } from 'zod';
 import {
   activeSkillsFromStepMetadata,
   applyCache,
+  CATALOG_RUN_RECOVERY_KEY_PREFIX,
   createMemoryPersistHook,
   createMemoryRecallHook,
   createRoutingStrategy,
@@ -4271,6 +4277,319 @@ describe('createRuntimeComposition durable execution', () => {
       await rm(`${databasePath}-wal`, { force: true });
       await rm(`${databasePath}-shm`, { force: true });
     }
+  });
+});
+
+describe('resolveRunServices catalog-run recovery branch (AB-240)', () => {
+  function fakeRunOptions(): RunOptions {
+    return {
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+      conversation: createConversationHistory({ id: 'catalog-recovered' }),
+    };
+  }
+
+  it('resolves a persisted catalog-run recovery record through the registered resolver — never through the Bureau default composition', async () => {
+    const runtime = await createRuntimeComposition({
+      // Deliberately no bureau-level `generate`/`toolbox` — proves the
+      // catalog branch never touches `buildRunDepsFromSession`/the default
+      // runtime composition (which would 404 with nothing configured here).
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    try {
+      const catalogOptions = fakeRunOptions();
+      const resolverCalls: Array<{ agentName: string; input: unknown }> = [];
+      runtime.setCatalogAgentRunOptionsResolver(async (agentName, input) => {
+        resolverCalls.push({ agentName, input });
+        return { status: 'resolved', options: catalogOptions, definitionRevision: 1 };
+      });
+
+      await runtime.persistCatalogRunRecoveryRecord('catalog-run-1', {
+        agentName: 'echo',
+        definitionRevision: 1,
+        input: 'hello',
+      });
+
+      const result = await getRuntimeCompositionTestingSeams(runtime).resolveRunServices({
+        workflowId: 'catalog-run-1',
+        workflowType: 'agentRun',
+        // The catalog branch is keyed on `workflowId` alone — the `input`
+        // shape here is irrelevant/never read for a catalog-recovered run.
+        input: { runId: 'catalog-run-1', sessionId: 'catalog-run-1', agentName: 'echo' },
+      });
+
+      expect(result).toMatchObject({
+        status: 'available',
+        services: { options: catalogOptions, toolbox: catalogOptions.toolbox },
+      });
+      expect(resolverCalls).toEqual([{ agentName: 'echo', input: 'hello' }]);
+      expect(await runtime.isCatalogRecoveredRun('catalog-run-1')).toBe(true);
+      expect(await runtime.isCatalogRecoveredRun('some-other-run')).toBe(false);
+    } finally {
+      runtime.durable?.engine[Symbol.dispose]?.();
+    }
+  });
+
+  it('round-trips a conversation-shaped (not plain-string) AgentInput through the recovery record', async () => {
+    const runtime = await createRuntimeComposition({
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    try {
+      const catalogOptions = fakeRunOptions();
+      let resolvedInput: unknown;
+      runtime.setCatalogAgentRunOptionsResolver(async (_agentName, input) => {
+        resolvedInput = input;
+        return { status: 'resolved', options: catalogOptions, definitionRevision: 1 };
+      });
+
+      const conversationInput = {
+        conversation: createConversationHistory({ id: 'catalog-conversation' }),
+      };
+      await runtime.persistCatalogRunRecoveryRecord('catalog-run-conversation', {
+        agentName: 'echo',
+        definitionRevision: 1,
+        input: conversationInput,
+      });
+
+      const result = await getRuntimeCompositionTestingSeams(runtime).resolveRunServices({
+        workflowId: 'catalog-run-conversation',
+        workflowType: 'agentRun',
+        input: {
+          runId: 'catalog-run-conversation',
+          sessionId: 'catalog-run-conversation',
+          agentName: 'echo',
+        },
+      });
+
+      expect(result).toMatchObject({ status: 'available' });
+      expect(resolvedInput).toEqual(conversationInput);
+    } finally {
+      runtime.durable?.engine[Symbol.dispose]?.();
+    }
+  });
+
+  it('reports a missing catalog agent through the existing unavailable+reason path, never a bare unavailable (AB-29 precedent)', async () => {
+    const runtime = await createRuntimeComposition({
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    try {
+      runtime.setCatalogAgentRunOptionsResolver(async () => ({ status: 'missing-agent' }));
+      await runtime.persistCatalogRunRecoveryRecord('catalog-run-missing', {
+        agentName: 'retired-agent',
+        definitionRevision: 1,
+        input: 'hello',
+      });
+
+      const result = await getRuntimeCompositionTestingSeams(runtime).resolveRunServices({
+        workflowId: 'catalog-run-missing',
+        workflowType: 'agentRun',
+        input: {
+          runId: 'catalog-run-missing',
+          sessionId: 'catalog-run-missing',
+          agentName: 'retired-agent',
+        },
+      });
+
+      expect(result).toMatchObject({ status: 'unavailable' });
+      expect((result as { reason: string }).reason).toContain('retired-agent');
+      expect((result as { reason: string }).reason).toContain('no longer in the catalog');
+    } finally {
+      runtime.durable?.engine[Symbol.dispose]?.();
+    }
+  });
+
+  it('reports a catalog resolver failure with the underlying error surfaced in the reason', async () => {
+    const runtime = await createRuntimeComposition({
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    try {
+      runtime.setCatalogAgentRunOptionsResolver(async () => ({
+        status: 'resolver-failed',
+        error: new Error('generate not configured on this process'),
+      }));
+      await runtime.persistCatalogRunRecoveryRecord('catalog-run-resolver-failed', {
+        agentName: 'echo',
+        definitionRevision: 1,
+        input: 'hello',
+      });
+
+      const result = await getRuntimeCompositionTestingSeams(runtime).resolveRunServices({
+        workflowId: 'catalog-run-resolver-failed',
+        workflowType: 'agentRun',
+        input: {
+          runId: 'catalog-run-resolver-failed',
+          sessionId: 'catalog-run-resolver-failed',
+          agentName: 'echo',
+        },
+      });
+
+      expect(result).toMatchObject({ status: 'unavailable' });
+      expect((result as { reason: string }).reason).toContain(
+        'generate not configured on this process',
+      );
+    } finally {
+      runtime.durable?.engine[Symbol.dispose]?.();
+    }
+  });
+
+  it('reattaches with a pin-and-warn diagnostic when the catalog agent definition revision drifted since checkpoint (AB-10 precedent)', async () => {
+    const diagnostics: string[] = [];
+    const runtime = await createRuntimeComposition({
+      storage: { type: 'memory' },
+      durableExecution: true,
+      onDiagnostic(event) {
+        diagnostics.push(event.message);
+      },
+    });
+
+    try {
+      const catalogOptions = fakeRunOptions();
+      runtime.setCatalogAgentRunOptionsResolver(async () => ({
+        status: 'resolved',
+        options: catalogOptions,
+        definitionRevision: 2,
+      }));
+      await runtime.persistCatalogRunRecoveryRecord('catalog-run-drift', {
+        agentName: 'echo',
+        definitionRevision: 1,
+        input: 'hello',
+      });
+
+      const result = await getRuntimeCompositionTestingSeams(runtime).resolveRunServices({
+        workflowId: 'catalog-run-drift',
+        workflowType: 'agentRun',
+        input: { runId: 'catalog-run-drift', sessionId: 'catalog-run-drift', agentName: 'echo' },
+      });
+
+      expect(result).toMatchObject({ status: 'available' });
+      expect(
+        diagnostics.some(
+          (message) =>
+            message.includes('echo') &&
+            message.includes('definition revision changed') &&
+            message.includes('was 1, now 2'),
+        ),
+      ).toBe(true);
+    } finally {
+      runtime.durable?.engine[Symbol.dispose]?.();
+    }
+  });
+
+  it('reports "no catalog agent recovery resolver configured" when a record exists but nothing ever registered a resolver', async () => {
+    const runtime = await createRuntimeComposition({
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    try {
+      await runtime.persistCatalogRunRecoveryRecord('catalog-run-no-resolver', {
+        agentName: 'echo',
+        definitionRevision: 1,
+        input: 'hello',
+      });
+
+      const result = await getRuntimeCompositionTestingSeams(runtime).resolveRunServices({
+        workflowId: 'catalog-run-no-resolver',
+        workflowType: 'agentRun',
+        input: {
+          runId: 'catalog-run-no-resolver',
+          sessionId: 'catalog-run-no-resolver',
+          agentName: 'echo',
+        },
+      });
+
+      expect(result).toMatchObject({ status: 'unavailable' });
+      expect((result as { reason: string }).reason).toContain(
+        'no catalog agent recovery resolver is configured',
+      );
+    } finally {
+      runtime.durable?.engine[Symbol.dispose]?.();
+    }
+  });
+
+  it('treats an unreadable catalog recovery record (a genuine decode failure, not merely absent) as unavailable', async () => {
+    const runtime = await createRuntimeComposition({
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    try {
+      // An incomplete msgpack fixmap header (0x81 = "1 key/value pair
+      // follows") with NO bytes after it — a genuine decode failure, unlike
+      // a merely-absent key or a decodable-but-wrong-shape value (both of
+      // which fall through to `'missing'`, not `'read-error'`).
+      await runtime.durable!.engine.storage.put(
+        `${CATALOG_RUN_RECOVERY_KEY_PREFIX}catalog-run-corrupt`,
+        new Uint8Array([0x81]),
+      );
+
+      const result = await getRuntimeCompositionTestingSeams(runtime).resolveRunServices({
+        workflowId: 'catalog-run-corrupt',
+        workflowType: 'agentRun',
+        input: {
+          runId: 'catalog-run-corrupt',
+          sessionId: 'catalog-run-corrupt',
+          agentName: 'echo',
+        },
+      });
+
+      expect(result).toMatchObject({
+        status: 'unavailable',
+        reason: 'run catalog-run-corrupt: catalog recovery record unreadable',
+      });
+    } finally {
+      runtime.durable?.engine[Symbol.dispose]?.();
+    }
+  });
+
+  it('falls through to the existing session-based path unchanged when no catalog record exists', async () => {
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    try {
+      // No `persistCatalogRunRecoveryRecord` call for this workflow id — the
+      // pre-existing "not owned by a running session" guard must still be
+      // the one that answers, proving the new catalog check is additive.
+      const result = await getRuntimeCompositionTestingSeams(runtime).resolveRunServices({
+        workflowId: 'no-catalog-record',
+        workflowType: 'agentRun',
+        input: { runId: 'no-catalog-record', sessionId: 'no-catalog-record', agentName: 'agent' },
+      });
+
+      expect(result).toMatchObject({
+        status: 'unavailable',
+        reason: 'run no-catalog-record not owned by a running session',
+      });
+    } finally {
+      runtime.durable?.engine[Symbol.dispose]?.();
+    }
+  });
+
+  it('persistCatalogRunRecoveryRecord is a no-op with no durable storage configured', async () => {
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+    });
+
+    const result = await runtime.persistCatalogRunRecoveryRecord('no-storage-run', {
+      agentName: 'echo',
+      definitionRevision: 1,
+      input: 'hello',
+    });
+    expect(result).toBeUndefined();
+    expect(await runtime.isCatalogRecoveredRun('no-storage-run')).toBe(false);
   });
 });
 
