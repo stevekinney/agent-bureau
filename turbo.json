@@ -18,6 +18,10 @@
       "dependsOn": ["^build"],
       "outputs": []
     },
+    "@lostgradient/operative#check-types": {
+      "dependsOn": ["^build", "build"],
+      "outputs": []
+    },
     "integration": {
       "dependsOn": ["^build"],
       "outputs": []
