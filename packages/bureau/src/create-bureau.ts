@@ -14,6 +14,7 @@ import {
   createRequestHumanInputTool,
   createRunFinishedFrame,
   createRunStartedFrame,
+  createScheduleWakeupTool,
   type DefinitionResolvingAgent,
   type FlowController,
   HumanWaitParkedEvent,
@@ -25,6 +26,7 @@ import {
   type RunReport,
   SchedulerTaskCompletedEvent,
   SchedulerTaskFailedEvent,
+  type ScheduleWakeupContext,
   type SessionListOptions,
   type SessionStore,
   type SessionSummary,
@@ -953,6 +955,33 @@ export function createHumanWaitContext(
     runId,
     // Only ever constructed inside the `options.humanInput && runtime.durable`
     // guard below, so this context always backs a real durable run
+    // (AB-41 / AB-43 — the durability signal threaded into the tool's context).
+    durable: true,
+  };
+}
+
+/**
+ * AB-201 — the `scheduleWakeup` analog of {@link createHumanWaitContext}: forwards
+ * reads/writes onto the run's REAL `ctx.services` object (via the same
+ * `servicesRef` capture) rather than spreading it, so the tool's `pendingWakeup`
+ * writes land where the durable `agentRun` workflow actually reads them.
+ * `ScheduleWakeupContext` carries no `runId` field (unlike
+ * `RequestHumanInputContext`), so this takes only the shared `servicesRef`.
+ */
+export function createWakeupContext(servicesRef: {
+  current?: DurableRunDeps;
+}): ScheduleWakeupContext {
+  return {
+    get pendingWakeup() {
+      return servicesRef.current?.pendingWakeup;
+    },
+    set pendingWakeup(value) {
+      if (servicesRef.current) {
+        servicesRef.current.pendingWakeup = value;
+      }
+    },
+    // Only ever constructed inside the `options.wakeup && runtime.durable`
+    // guard above, so this context always backs a real durable run
     // (AB-41 / AB-43 — the durability signal threaded into the tool's context).
     durable: true,
   };
@@ -2488,10 +2517,19 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // HumanWaitParkedEvent.type, …)` listener below (AB-13 `markParked`)
       // and `store`'s action log (AB-20 `listPendingReviews`).
       let humanInputEmitter: CompletableEventTarget<CombinedOperativeEventMap> | undefined;
-      let humanInputOnServices: ((services: DurableRunDeps) => void) | undefined;
       let runToolbox: BureauToolbox = runRuntime.toolbox;
+      // Shared `ctx.services` capture for BOTH durable-only opt-in tools this
+      // run may wire (`requestHumanInput` and, as of this issue, `scheduleWakeup`):
+      // Weft's durable adapter fires exactly one `onServices` hook per run
+      // (`DurableActiveRunOptions.onServices`, immediately before `engine.start`),
+      // so a SINGLE ref/hook is captured here and handed to whichever context(s)
+      // below need it — two separate hooks would have the later one clobber the
+      // earlier one's `onServices` property in the `createActiveRun` options
+      // object literal, silently breaking whichever tool composed first.
+      const servicesRef: { current?: DurableRunDeps } = {};
+      let needsServicesHook = false;
       if (options.humanInput && runtime.durable) {
-        const servicesRef: { current?: DurableRunDeps } = {};
+        needsServicesHook = true;
         humanInputEmitter = new CompletableEventTarget<CombinedOperativeEventMap>();
         const humanWaitContext = createHumanWaitContext(servicesRef, runId);
         const rawHumanInputTool = createRequestHumanInputTool({
@@ -2513,10 +2551,39 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           }),
         ]);
         runToolbox = combineToolboxes(runRuntime.toolbox, humanInputToolbox);
-        humanInputOnServices = (services) => {
-          servicesRef.current = services;
-        };
       }
+
+      // AB-201 — opt-in `scheduleWakeup` wiring for a REAL durable run
+      // (`options.wakeup`), mirroring `requestHumanInput`'s wiring immediately
+      // above: the tool's mutable `pendingWakeup` slot must be the EXACT
+      // `ctx.services` object Weft hands back, forwarded via the SAME
+      // `servicesRef`/`onServices` capture the human-input block sets up (see
+      // the comment above `servicesRef`). Unlike `requestHumanInput`,
+      // `scheduleWakeup` dispatches no event on park — `ctx.sleep` is itself
+      // the durable checkpoint, and recovery re-arms it with no live wiring
+      // needed (AB-41's decision record) — so no emitter is threaded here.
+      if (options.wakeup && runtime.durable) {
+        needsServicesHook = true;
+        const wakeupContext = createWakeupContext(servicesRef);
+        const rawWakeupTool = createScheduleWakeupTool({ context: wakeupContext });
+        const wakeupToolbox = createToolbox([
+          createTool({
+            ...rawWakeupTool,
+            // Same async-wrap rationale as `requestHumanInput` above: the raw
+            // tool's `execute` is synchronous and can throw synchronously
+            // (`DurableCapabilityUnavailableError`); armorer's contract is
+            // async, so wrapping converts a synchronous throw into a rejected
+            // Promise instead of letting it escape synchronously.
+            execute: async (input) => await Promise.resolve(rawWakeupTool.execute(input)),
+          }),
+        ]);
+        runToolbox = combineToolboxes(runToolbox, wakeupToolbox);
+      }
+      const durableServicesOnServices = needsServicesHook
+        ? (services: DurableRunDeps) => {
+            servicesRef.current = services;
+          }
+        : undefined;
 
       // AB-67/AB-199 — steering is scoped to in-memory (process-local)
       // sessions only: a durably-configured bureau's `submitSteeringCommand`
@@ -2603,7 +2670,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
               // table (see recoverDurableRuns / resolveRunServices).
               sessionId,
               ...(humanInputEmitter ? { emitter: humanInputEmitter } : {}),
-              ...(humanInputOnServices ? { onServices: humanInputOnServices } : {}),
+              ...(durableServicesOnServices ? { onServices: durableServicesOnServices } : {}),
             }
           : undefined,
       );
