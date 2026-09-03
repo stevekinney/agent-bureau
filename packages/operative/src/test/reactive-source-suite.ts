@@ -69,6 +69,17 @@ export interface ReactiveSourceConformanceOptions<TSnapshot> {
    * before the change started has been invalidated). Deterministic —
    * callers use an injected clock/timer seam rather than a real timer, so
    * this never depends on wall-clock timing.
+   *
+   * Must not make the change visible — through `getSnapshot()` or by
+   * invalidating any subscriber — until *after* the returned promise has
+   * handed control back to its caller at least once (an `await` of
+   * something other than the change itself, e.g. a microtask tick, before
+   * committing). `subscribeReadRaceClosure` subscribes and reads
+   * synchronously in the gap between calling `triggerChange` and it
+   * resolving; an implementation that commits synchronously, before ever
+   * yielding, collapses that gap to nothing and the case can only ever
+   * observe the already-committed state — never a genuine test of the
+   * "started, not yet committed" window.
    */
   triggerChange(subject: ReactiveSourceSubject<TSnapshot>): Promise<void>;
   /** Creates a subject whose represented work is already complete. */
