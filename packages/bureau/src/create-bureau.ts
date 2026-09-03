@@ -5131,7 +5131,13 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // session) lives in `createAgentSchedule` — the single chokepoint every caller
     // (bureau, AgentScheduler, the scheduleSelf tool) routes through — so it cannot
     // be bypassed. We surface its `InvalidScheduleError` as a BAD_REQUEST (400).
-    const scheduler = createAgentScheduler({ engine: runtime.durable.engine });
+    //
+    // Passing this bureau's own `emitter` here (unlike `pauseSchedule`/
+    // `resumeSchedule`/`cancelSchedule` below, which dispatch directly) forwards
+    // `createAgentSchedule`'s `AgentScheduledEvent` (`schedule.created`, AB-298)
+    // straight onto it, exactly once for the fresh registration this call makes —
+    // no separate dispatch needed here.
+    const scheduler = createAgentScheduler({ engine: runtime.durable.engine, emitter });
     let handle;
     try {
       handle = await scheduler.schedule(definition.agentName, {

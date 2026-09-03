@@ -9,6 +9,7 @@ import type {
   Toolbox,
 } from '@lostgradient/operative';
 import {
+  AgentScheduledEvent,
   ScheduleCancelledEvent,
   ScheduleCompletedEvent,
   ScheduleFailedEvent,
@@ -419,6 +420,43 @@ describe('AB-223: schedule definition and fire-terminal lifecycle events', () =>
         expect(paused.map((event) => event.scheduleId)).toEqual([summary!.id]);
         expect(resumed.map((event) => event.scheduleId)).toEqual([summary!.id]);
         expect(cancelled.map((event) => event.scheduleId)).toEqual([summary!.id]);
+      } finally {
+        bureau.dispose();
+      }
+    },
+    FIRE_TIMEOUT_MS,
+  );
+
+  it(
+    'dispatches AgentScheduledEvent (schedule.created) exactly once from Bureau.createSchedule, carrying scheduleId and the definition summary (AB-298)',
+    async () => {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createRecordingGenerate([]),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'memory' },
+        durableExecution: true,
+      });
+
+      try {
+        const created: AgentScheduledEvent[] = [];
+        bureau.addEventListener(AgentScheduledEvent.type, (event) => created.push(event));
+
+        const summary = await bureau.createSchedule({
+          agentName: 'researcher',
+          input: 'daily digest',
+          spec: '1h',
+          sessionId: 'daily-digest',
+        });
+        expect(summary).toBeDefined();
+
+        expect(created.map((event) => event.type)).toEqual(['schedule.created']);
+        expect(created[0]).toMatchObject({
+          agentName: 'researcher',
+          scheduleId: summary!.id,
+          spec: { every: '1h' },
+          sessionId: 'daily-digest',
+        });
       } finally {
         bureau.dispose();
       }

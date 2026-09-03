@@ -8,7 +8,7 @@ import { ScheduleHandle } from '@lostgradient/weft';
 import { describe, expect, it } from 'bun:test';
 import { createManualRuntimeServices } from 'lifecycle';
 
-import type { SchedulePausedEvent } from '../events';
+import type { AgentScheduledEvent, SchedulePausedEvent } from '../events';
 import type { ScheduledAgentRunInput, SchedulingEngine } from './schedule-agent';
 import {
   createAgentSchedule,
@@ -458,12 +458,13 @@ describe('createAgentSchedule', () => {
     await handle.cancel();
 
     expect(dispatched.map((event) => event.type)).toEqual([
+      'schedule.created',
       'schedule.paused',
       'schedule.resumed',
       'schedule.cancelled',
     ]);
     for (const event of dispatched) {
-      expect((event as SchedulePausedEvent).scheduleId).toBe(handle.id);
+      expect((event as SchedulePausedEvent | AgentScheduledEvent).scheduleId).toBe(handle.id);
     }
   });
 
@@ -543,6 +544,75 @@ describe('createAgentSchedule', () => {
       'schedule.resumed',
       'schedule.cancelled',
     ]);
+  });
+
+  it('dispatches AgentScheduledEvent exactly once for a fresh registration, carrying scheduleId and the spec/session summary (AB-298)', async () => {
+    const engine = makeSchedulingEngine();
+    const dispatched: AgentScheduledEvent[] = [];
+    const emitter = {
+      dispatch: (event: Event) => {
+        dispatched.push(event as AgentScheduledEvent);
+        return true;
+      },
+    };
+
+    const handle = await createAgentSchedule({
+      engine,
+      agentName: 'researcher',
+      spec: { every: '1h' },
+      input: 'hello',
+      session: 'daily-digest',
+      emitter,
+    });
+
+    expect(dispatched.map((event) => event.type)).toEqual(['schedule.created']);
+    expect(dispatched[0]).toMatchObject({
+      agentName: 'researcher',
+      scheduleId: handle.id,
+      spec: { every: '1h' },
+      sessionId: 'daily-digest',
+    });
+  });
+
+  it('dispatches no AgentScheduledEvent when idempotent registration reuses an existing schedule (AB-298)', async () => {
+    const existingSummary: ScheduleSummary = {
+      ...mockSummary,
+      id: 'schedule-self-run-step',
+      intervalMs: 3_600_000,
+    };
+    const engine = makeSchedulingEngine({ summaries: [existingSummary] });
+    const dispatched: Event[] = [];
+    const emitter = {
+      dispatch: (event: Event) => {
+        dispatched.push(event);
+        return true;
+      },
+    };
+
+    await createAgentSchedule({
+      engine,
+      agentName: 'researcher',
+      spec: { every: '1h' },
+      input: 'hello',
+      id: 'schedule-self-run-step',
+      idempotent: true,
+      emitter,
+    });
+
+    expect(dispatched.map((event) => event.type)).toEqual([]);
+  });
+
+  it('dispatches nothing when no emitter is supplied to a fresh registration (AB-298)', async () => {
+    const engine = makeSchedulingEngine();
+
+    // Exercises the emitter?.dispatch(...) no-op branch for AgentScheduledEvent
+    // — must not throw.
+    await createAgentSchedule({
+      engine,
+      agentName: 'researcher',
+      spec: { every: '1h' },
+      input: 'hello',
+    });
   });
 
   it('uses the trimmed schedule id when reusing an existing idempotent schedule', async () => {
@@ -865,7 +935,7 @@ describe('createAgentScheduler', () => {
     });
     await handle.pause();
 
-    expect(dispatched.map((event) => event.type)).toEqual(['schedule.paused']);
+    expect(dispatched.map((event) => event.type)).toEqual(['schedule.created', 'schedule.paused']);
   });
 
   it('schedule() carries agentName and session into the scheduled input', async () => {
