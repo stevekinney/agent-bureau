@@ -1,7 +1,7 @@
 import type { ToolboxEventMap } from 'armorer';
 import { Conversation, isConversation } from 'conversationalist';
 import type { ObservableLike, Observer, Subscription } from 'lifecycle';
-import { CompletableEventTarget, forwardEvents } from 'lifecycle';
+import { CompletableEventTarget, createDefaultRuntimeServices, forwardEvents } from 'lifecycle';
 
 import { createClosedAcknowledgement } from './closed-acknowledgement';
 import type { DurableActiveRunContext } from './durable/active-run-adapter';
@@ -21,7 +21,7 @@ import {
   ToolStartedBubbleEvent,
 } from './events';
 import type { AgentRunLivenessSnapshot, RunIdentifierSeam, StallWatchdogClock } from './liveness';
-import { createActiveRunLiveness, defaultRunIdentifierSeam } from './liveness';
+import { createActiveRunLiveness } from './liveness';
 import { executeLoop } from './loop';
 import { toOutputJsonSchema } from './structured-output/response-schema';
 import { createToolboxEventForwarder } from './toolbox-event-forwarding';
@@ -189,6 +189,11 @@ export function createActiveRun(
     );
   }
 
+  // AB-92/AB-252: resolved exactly once, here, at construction, and
+  // snapshotted into `loopOptions` below — nothing downstream reads
+  // `options.runtime` again or falls back to a global.
+  const runtime = options.runtime ?? createDefaultRuntimeServices();
+
   const emitter = new CompletableEventTarget<CombinedOperativeEventMap>();
   const abortController = new AbortController();
 
@@ -206,13 +211,17 @@ export function createActiveRun(
       // structuredClone-safe tree — see `durable/types.ts`.
       new Conversation(structuredClone(options.conversation));
 
-  // AB-88's Amendment 1 (corrected by AB-214's coordinator rulings): mint a
-  // process-local id for every standalone (no explicit `options.runId`)
-  // in-memory run, through the local identifier seam rather than a bare
-  // `crypto.randomUUID()` reached from inside run logic. A Bureau- or
-  // caller-supplied `runId` is always used as-is, so this id stays identical
-  // to whatever id `store.register` uses for a Bureau-started run.
-  const runId = options.runId ?? (dependencies?.identifiers ?? defaultRunIdentifierSeam).next();
+  // AB-88's Amendment 1, rebound by AB-252 (per AB-214's coordinator-ruling
+  // promise) onto `RuntimeServices.identifiers`: mint a process-local id for
+  // every standalone (no explicit `options.runId`) in-memory run through the
+  // resolved runtime's identifier seam, never a bare `crypto.randomUUID()`
+  // reached from inside run logic. `dependencies?.identifiers` (the
+  // narrower AB-214 seam) still takes precedence when a caller explicitly
+  // supplies one, for backward compatibility. A Bureau- or caller-supplied
+  // `runId` is always used as-is, so this id stays identical to whatever id
+  // `store.register` uses for a Bureau-started run.
+  const runId =
+    options.runId ?? dependencies?.identifiers?.next() ?? runtime.identifiers.next('run');
 
   const liveness = createActiveRunLiveness({
     id: runId,
@@ -230,6 +239,7 @@ export function createActiveRun(
     conversation,
     signal: combinedSignal,
     runId,
+    runtime,
   };
 
   const cleanups: (() => void)[] = [];
@@ -348,7 +358,7 @@ export function createActiveRun(
             toolName: e.call.name,
             toolCallId: e.call.id,
             params: e.params,
-            startedAt: Date.now(),
+            startedAt: runtime.clock.now(),
           },
         ),
       );

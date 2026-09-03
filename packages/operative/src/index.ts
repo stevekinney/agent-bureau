@@ -238,6 +238,25 @@ export type {
   SelectionGateSource,
 } from './selection-gate';
 export { createSelectionGate } from './selection-gate';
+// AB-92/AB-252 — the RuntimeServices contract and its real-globals default
+// implementation live in `lifecycle` (a private foundation package) and are
+// re-exported here so a consumer never has to depend on `lifecycle`
+// directly; inlined into this package's shipped artifact at build time,
+// the existing treatment `ObservableLike`/`Subscription` already receive.
+// The manual (deterministic) implementation is exported from
+// `@lostgradient/operative/test` instead — see `./test/index.ts`.
+export type {
+  DeferredDrainReport,
+  RuntimeClock,
+  RuntimeDeferred,
+  RuntimeIdentifiers,
+  RuntimeMonotonic,
+  RuntimeRandom,
+  RuntimeServices,
+  RuntimeTimeoutHandle,
+  RuntimeTimers,
+} from 'lifecycle';
+export { createDefaultRuntimeServices } from 'lifecycle';
 // C3 — curated tool.* bubble events
 export type { ToolEventStamp } from './events';
 export {

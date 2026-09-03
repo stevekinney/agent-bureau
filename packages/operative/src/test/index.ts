@@ -20,6 +20,14 @@ export { PROMPT_INJECTION_FIXTURES } from './prompt-injection-fixtures';
 export { createStepwiseBlockingGenerate } from './stepwise-generate';
 export { createTestStore } from './store';
 export { type RunLookup, waitForCondition, waitForRunState } from './wait';
+// AB-92/AB-252 — the deterministic `RuntimeServices` implementation lives in
+// `lifecycle` (a private foundation package, inlined at build time) and is
+// re-exported here so `@lostgradient/operative/test` stays the import path
+// a test author uses — a caller composes `runtime: createManualRuntimeServices()`
+// onto `createAgent`/`createActiveRun` instead of touching a real timer or
+// a real clock.
+export type { ManualRuntimeServices } from 'lifecycle';
+export { createManualRuntimeServices } from 'lifecycle';
 
 /**
  * Creates a mock generate function that returns responses in sequence.

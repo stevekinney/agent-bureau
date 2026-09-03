@@ -1,4 +1,6 @@
 import type { Conversation } from 'conversationalist';
+import type { RuntimeServices } from 'lifecycle';
+import { createDefaultRuntimeServices } from 'lifecycle';
 
 import { estimateCost, getModelPricing } from './cost-estimation';
 import {
@@ -216,6 +218,12 @@ export function makeCompletedResult(
   costEstimation?: RunOptions['costEstimation'],
   terminalError?: AgentRunError,
   hookTracker?: (promise: Promise<unknown>) => void,
+  // AB-92/AB-252 — the run's own resolved `RuntimeServices` instance, used
+  // for `totalDuration`'s monotonic reading below. Optional (falling back
+  // to a fresh default instance) only for a caller outside this issue's
+  // migrated run path that hasn't threaded one through; the in-memory
+  // driver (`loop.ts`) always supplies the run's own snapshotted instance.
+  runtime?: RuntimeServices,
 ): RunResult {
   const costEstimate = computeCostEstimate(runState.totalUsage, costEstimation);
   const maximumStepsError =
@@ -244,7 +252,7 @@ export function makeCompletedResult(
   } else {
     const onRunCompleteHookPromise = runHookSilently(hooks, 'onRunComplete', {
       result,
-      totalDuration: performance.now() - runStartTime,
+      totalDuration: (runtime ?? createDefaultRuntimeServices()).monotonic.now() - runStartTime,
     });
     hookTracker?.(onRunCompleteHookPromise);
   }

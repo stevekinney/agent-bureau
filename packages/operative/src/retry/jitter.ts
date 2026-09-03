@@ -1,9 +1,20 @@
+import { createDefaultRuntimeServices } from 'lifecycle';
+
 /** Options for controlling jitter behavior. */
 export interface JitterOptions {
   /** Whether jitter is enabled. When false, returns the exact delay. */
   enabled?: boolean;
   /** Maximum jitter offset in milliseconds. Defaults to half the delay. */
   maxJitter?: number;
+  /**
+   * AB-92/AB-252 — the pseudo-random source, matching `Math.random()`'s
+   * `[0, 1)` contract. Defaults to a fresh `createDefaultRuntimeServices()`
+   * instance's `random.next` (the real global, unconfigured) — pass
+   * `deps.runtime.random.next` (or a `createManualRuntimeServices()`
+   * instance's) from a caller that already has a resolved `RuntimeServices`,
+   * so this never reaches `Math.random()` directly on that path.
+   */
+  random?: () => number;
 }
 
 /**
@@ -20,6 +31,7 @@ export function addJitter(delay: number, options?: JitterOptions): number {
   const maxJitter = options?.maxJitter ?? delay / 2;
   if (maxJitter === 0) return delay;
 
-  const offset = (Math.random() * 2 - 1) * maxJitter;
+  const random = options?.random ?? createDefaultRuntimeServices().random.next;
+  const offset = (random() * 2 - 1) * maxJitter;
   return Math.max(0, Math.round(delay + offset));
 }

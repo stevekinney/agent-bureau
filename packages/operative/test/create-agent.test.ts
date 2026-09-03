@@ -16,6 +16,7 @@
 import { createTool, createToolbox, type SignedPendingToolApproval } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
+import { createManualRuntimeServices } from 'lifecycle';
 import { z } from 'zod';
 
 import { noToolCalls, pendingApproval } from '../src/conditions/predicates';
@@ -1190,5 +1191,73 @@ describe('createAgent — generationProfile', () => {
       { provider: 'anthropic', model: 'claude-opus-4-6' },
     ]);
     expect(Object.isFrozen(agent.generationProfile.allowedCandidates)).toBe(true);
+  });
+});
+
+describe('createAgent: AB-92/AB-252 RuntimeServices resolution', () => {
+  it('resolves options.runtime once, at agent construction, and shares that SAME instance across every run this agent starts', async () => {
+    const runtime = createManualRuntimeServices();
+    const generate: GenerateFunction = async () => textResponse('done');
+    const agent = createAgent({ generate, runtime });
+
+    const firstRun = agent.run('first');
+    await firstRun.result();
+    const secondRun = agent.run('second');
+    await secondRun.result();
+
+    // A single shared identifier counter, advanced once per run — proves
+    // both runs consulted the SAME resolved `RuntimeServices` instance
+    // rather than each resolving (or being handed) its own.
+    expect(firstRun.snapshot().id).toBe('run-1');
+    expect(secondRun.snapshot().id).toBe('run-2');
+  });
+
+  it('two different createAgent() calls with no runtime option never share a clock: each resolves its own independent default instance', async () => {
+    const generate: GenerateFunction = async () => textResponse('done');
+    const agentA = createAgent({ generate });
+    const agentB = createAgent({ generate });
+
+    const runA = agentA.run('a');
+    await runA.result();
+    const runB = agentB.run('b');
+    await runB.result();
+
+    expect(runA.snapshot().id).not.toBe(runB.snapshot().id);
+  });
+
+  it('resolves the SAME supplied runtime instance onto every RunOptions bag it builds (the [OPERATIVE_RESOLVE_RUN_OPTIONS] path createActiveRun also drives)', async () => {
+    const runtime = createManualRuntimeServices();
+    const generate: GenerateFunction = async () => textResponse('done');
+    const agent = createAgent({ generate, runtime });
+
+    const resolver = (
+      agent as typeof agent & {
+        [OPERATIVE_RESOLVE_RUN_OPTIONS]: (input: string) => Promise<{ runtime?: unknown }>;
+      }
+    )[OPERATIVE_RESOLVE_RUN_OPTIONS];
+
+    const firstOptions = await resolver('first');
+    const secondOptions = await resolver('second');
+
+    expect(firstOptions.runtime).toBe(runtime);
+    expect(secondOptions.runtime).toBe(runtime);
+  });
+
+  it('resolves a real, working createDefaultRuntimeServices() instance onto RunOptions when no runtime option is supplied', async () => {
+    const generate: GenerateFunction = async () => textResponse('done');
+    const agent = createAgent({ generate });
+
+    const resolver = (
+      agent as typeof agent & {
+        [OPERATIVE_RESOLVE_RUN_OPTIONS]: (
+          input: string,
+        ) => Promise<{ runtime?: { clock: { now(): number } } }>;
+      }
+    )[OPERATIVE_RESOLVE_RUN_OPTIONS];
+
+    const runOptions = await resolver('hello');
+
+    expect(runOptions.runtime).toBeDefined();
+    expect(typeof runOptions.runtime?.clock.now()).toBe('number');
   });
 });
