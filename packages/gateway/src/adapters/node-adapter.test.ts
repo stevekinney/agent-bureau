@@ -119,6 +119,61 @@ describe('defaultLoadServe', () => {
   });
 });
 
+describe('createNodeAdapter — port discovery (AB-272)', () => {
+  it('reports the real bound port from address() immediately when already listening', async () => {
+    const adapter = createNodeAdapter({
+      loadServe: async () => () => ({
+        close: (callback?: (error?: Error) => void) => callback?.(),
+        // Already bound by the time serve() returns — waitForListening's
+        // fast path (no wait for a 'listening' event that already fired).
+        address: () => ({ port: 54321 }),
+      }),
+    });
+
+    const handle = await adapter.serve(fakeApp(), { port: 0 });
+    expect(handle.port).toBe(54321);
+  });
+
+  it('waits for the listening event before reporting the port when address() starts null', async () => {
+    let listeningCallback: (() => void) | undefined;
+    let bound = false;
+
+    const adapter = createNodeAdapter({
+      loadServe: async () => () => ({
+        close: (callback?: (error?: Error) => void) => callback?.(),
+        once: (event, listener) => {
+          if (event === 'listening') listeningCallback = listener;
+        },
+        address: () => (bound ? { port: 9876 } : null),
+      }),
+    });
+
+    const servePromise = adapter.serve(fakeApp(), { port: 0 });
+
+    // Give serve() a turn to reach and start waiting on waitForListening()
+    // before the fake server "binds" — proves it genuinely waits rather
+    // than returning early with a stale/undefined port.
+    await Promise.resolve();
+    await Promise.resolve();
+    bound = true;
+    listeningCallback?.();
+
+    const handle = await servePromise;
+    expect(handle.port).toBe(9876);
+  });
+
+  it('falls back to the requested port when the injected server exposes no address()', async () => {
+    const adapter = createNodeAdapter({
+      loadServe: async () => () => ({
+        close: (callback?: (error?: Error) => void) => callback?.(),
+      }),
+    });
+
+    const handle = await adapter.serve(fakeApp(), { port: 4242 });
+    expect(handle.port).toBe(4242);
+  });
+});
+
 describe('createNodeAdapter — forceClose()', () => {
   it('calls closeAllConnections() when the underlying server implements it (AB-235)', async () => {
     let closeAllConnectionsCalled = false;

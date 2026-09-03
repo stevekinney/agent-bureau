@@ -49,6 +49,13 @@ export type ServerAdapterOptions = {
 
 /** A handle to a running server that can be stopped. */
 export type ServerHandle = {
+  /**
+   * The port the server actually bound to. When {@link ServerAdapterOptions.port}
+   * was `0` (ephemeral allocation), this is the operating-system-assigned
+   * port — never `0` itself — so a caller that requested an ephemeral port
+   * can discover the real one (AB-272's loopback conformance harness).
+   */
+  readonly port: number;
   /** Stops the server. Resolves only once the underlying server has closed. */
   stop(): Promise<void>;
   /**

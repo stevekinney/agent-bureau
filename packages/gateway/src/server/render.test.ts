@@ -1,4 +1,8 @@
-import { describe, expect, it } from 'bun:test';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import { afterEach, describe, expect, it } from 'bun:test';
 import { Conversation, createConversationHistory } from 'conversationalist';
 
 import {
@@ -12,11 +16,23 @@ import { createBrowserClientEnvironment } from '../ui/client-environment';
 import { createReviewsStore } from '../ui/hooks/use-reviews.svelte';
 import RunDetailPage from '../ui/pages/run-detail.svelte';
 import UsagePage from '../ui/pages/usage.svelte';
-import { renderPage } from './render';
+import { renderPage, resetAssetManifestCache } from './render';
 import Fixture from './test-fixtures/render-fixture.svelte';
 import { extractRootMarkup, stripHydrationMarkers } from './test-utilities';
 
 const baseProps = { initialData: { label: 'hello' }, pathname: '/dashboard' };
+
+// AB-92/AB-272: every renderPage() call in this file that does not pass its
+// own `manifestDirectory` relies on the from-source degrade path
+// (`cachedManifest` resolving to `{}`, since no `manifest.json` sits next to
+// this test's own compiled/source location). The manifest-cache describe
+// block below is the only one that ever populates `cachedManifest` with a
+// real build; resetting after every test in this file (not just that block)
+// keeps that population from leaking into an unrelated test run later in
+// the same process.
+afterEach(() => {
+  resetAssetManifestCache();
+});
 
 describe('renderPage', () => {
   it('returns a complete HTML document string', async () => {
@@ -592,5 +608,113 @@ describe('renderPage with a populated usage page', () => {
     expect(rootMarkup).toContain('aria-label="Usage totals"');
     expect(rootMarkup).not.toContain('Cache Write Tokens');
     expect(rootMarkup).not.toContain('Cache Read Tokens');
+  });
+});
+
+// AB-92/AB-272: `cachedManifest` (render.ts:10) is module-level state — a
+// single Bun process rendering pages for two independently built gateway
+// deployments (for example two loopback gateways in one test file, each
+// pointed at its own build output) would otherwise serve the FIRST build's
+// manifest to both, silently mismatching the second one's actual hashed
+// asset URLs. `resetAssetManifestCache()` is the public seam that clears it
+// between reads that must see a different build.
+describe('resetAssetManifestCache', () => {
+  const createdDirectories: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(
+      createdDirectories.splice(0).map((directory) => rm(directory, { recursive: true })),
+    );
+  });
+
+  async function writeManifestFixture(entryLabel: string): Promise<string> {
+    const directory = await mkdtemp(join(tmpdir(), 'gateway-render-manifest-'));
+    createdDirectories.push(directory);
+    await writeFile(
+      join(directory, 'manifest.json'),
+      JSON.stringify({
+        'entry.js': `/public/entry-${entryLabel}.js`,
+        'styles.css': `/public/styles-${entryLabel}.css`,
+      }),
+    );
+    return directory;
+  }
+
+  it('reads a manifest.json from manifestDirectory when present', async () => {
+    const directory = await writeManifestFixture('first');
+
+    const html = await renderPage({
+      title: 'Test',
+      component: Fixture,
+      props: baseProps,
+      manifestDirectory: directory,
+    });
+
+    expect(html).toContain('/public/entry-first.js');
+    expect(html).toContain('/public/styles-first.css');
+  });
+
+  it('without a reset, a later render over a different manifestDirectory incorrectly reuses the first cached manifest', async () => {
+    const firstDirectory = await writeManifestFixture('first');
+    const secondDirectory = await writeManifestFixture('second');
+
+    const firstHtml = await renderPage({
+      title: 'Test',
+      component: Fixture,
+      props: baseProps,
+      manifestDirectory: firstDirectory,
+    });
+    expect(firstHtml).toContain('/public/entry-first.js');
+
+    // No resetAssetManifestCache() call here — this documents the bug the
+    // reset exists to fix: the cache is process-wide, so the second read
+    // still returns the first build's manifest.
+    const secondHtmlWithoutReset = await renderPage({
+      title: 'Test',
+      component: Fixture,
+      props: baseProps,
+      manifestDirectory: secondDirectory,
+    });
+    expect(secondHtmlWithoutReset).toContain('/public/entry-first.js');
+    expect(secondHtmlWithoutReset).not.toContain('/public/entry-second.js');
+  });
+
+  it('two builds rendered in one process each render their own manifest once reset between them', async () => {
+    const firstDirectory = await writeManifestFixture('first');
+    const secondDirectory = await writeManifestFixture('second');
+
+    const firstHtml = await renderPage({
+      title: 'Test',
+      component: Fixture,
+      props: baseProps,
+      manifestDirectory: firstDirectory,
+    });
+    expect(firstHtml).toContain('/public/entry-first.js');
+    expect(firstHtml).toContain('/public/styles-first.css');
+
+    resetAssetManifestCache();
+
+    const secondHtml = await renderPage({
+      title: 'Test',
+      component: Fixture,
+      props: baseProps,
+      manifestDirectory: secondDirectory,
+    });
+    expect(secondHtml).toContain('/public/entry-second.js');
+    expect(secondHtml).toContain('/public/styles-second.css');
+    expect(secondHtml).not.toContain('/public/entry-first.js');
+
+    // Reset back to the first build and confirm it round-trips — proves the
+    // cache genuinely re-reads from disk each time rather than merely
+    // toggling between two remembered values.
+    resetAssetManifestCache();
+    const firstAgainHtml = await renderPage({
+      title: 'Test',
+      component: Fixture,
+      props: baseProps,
+      manifestDirectory: firstDirectory,
+    });
+    expect(firstAgainHtml).toContain('/public/entry-first.js');
+    expect(firstAgainHtml).not.toContain('/public/entry-second.js');
   });
 });

@@ -825,6 +825,7 @@ describe('createGateway — AB-235 shutdown drain', () => {
     let capturedWsHandler: Parameters<ServerAdapter['serve']>[1]['wsHandler'];
 
     const handle: ServerHandle = {
+      port: 0,
       stop: () => stopPromise,
       forceClose: () => {
         forceCloseCalls++;
@@ -849,6 +850,7 @@ describe('createGateway — AB-235 shutdown drain', () => {
   function createCleanAdapter() {
     let forceCloseCalls = 0;
     const handle: ServerHandle = {
+      port: 0,
       stop: async () => undefined,
       forceClose: () => {
         forceCloseCalls++;

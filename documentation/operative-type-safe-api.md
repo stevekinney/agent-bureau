@@ -339,8 +339,34 @@ instances in one process — including two toolboxes running concurrently in
 one test file — no longer share a counter. `armorer/test` re-exports
 `ManualRuntimeServices`/`createManualRuntimeServices` from `lifecycle`,
 matching the treatment `@lostgradient/operative/test` already receives. The
-`BureauOptions` amendment remains tst-03a's and the gateway construction
-amendment remains tst-07a's; neither lands here.
+`BureauOptions` amendment has since landed (`packages/bureau/src/types.ts:564`);
+the gateway construction amendment is recorded below (tst-07a/AB-272) as
+contract, not yet implemented.
+
+**Gateway server construction (`AB-92`/tst-07a/AB-272 — contract only).**
+The ratified shape is the identical `runtime?: RuntimeServices` field on
+`GatewayOptions` (`packages/gateway/src/types.ts`), resolved once at
+`createGateway()` construction the same way `createAgent`, `createBureau`,
+and `createToolbox` resolve theirs. **This field does not exist on
+`GatewayOptions` today.** `GatewayOptions` already has an unrelated
+`runtime?: 'bun' | 'node'` field (the server-runtime selector, predating
+this decision) that collides on name with the ratified shape — AB-92's
+decision record was written against baseline `22de20a4` and did not
+account for this collision, so landing the field under the name `runtime`
+requires either renaming the existing option or choosing a different name
+for the new one, and no record ratifies either choice. Renaming or
+disambiguating is therefore a **Not decided** item, left for whichever
+issue actually wires `RuntimeServices` composition into `createGateway`.
+Until then, `packages/gateway/src/test/loopback.ts`'s real-runtime
+conformance harness (AB-272) reaches deterministic composition the way
+every other test-tier consumer does today: by passing a
+`ManualRuntimeServices` instance into the `Bureau` it builds through
+`createBureauTestHarness` (`BureauOptions.runtime`, already landed), not
+into the gateway itself. The gateway's own remaining real-global call
+sites — `crypto.randomUUID()` in `resolveStaticTokenRevisionSecret` and
+`Date.now()`/`Date.parse()` in `buildRequestAuthorityValidator`
+(`create-gateway.ts`) — are the migration target once the naming collision
+above is resolved.
 
 ## Lazy loading
 

@@ -46,6 +46,15 @@ jobs:
       - name: Validate (format, lint, types, test)
         run: bun run validate
 
+      # AB-98/AB-272 — real Bun HTTP/SSE/WebSocket loopback conformance.
+      # Not run through turbo's `test` task (that already ran above, as
+      # part of `bun run validate`) so gateway's own dependencies are
+      # already built by the time this plain `bun test` runs. AB-282 owns
+      # this lane's intended long-term cadence; this wires it in as its
+      # own step for now.
+      - name: Gateway real-transport conformance (AB-98)
+        run: bun run test:gateway-conformance
+
   coverage-and-package-shape:
     runs-on: ubuntu-latest
     steps:

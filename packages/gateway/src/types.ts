@@ -162,7 +162,16 @@ export interface Gateway {
   readonly bureau: import('bureau').Bureau;
   readonly store: Store;
   readonly port: number;
-  start(): Promise<{ stop(): Promise<GatewayShutdownReport> }>;
+  start(): Promise<{
+    /**
+     * The port the server actually bound to (AB-272). When `options.port`
+     * was `0` (ephemeral allocation), this is the operating-system-assigned
+     * port — `Gateway.port` above stays the requested value (`0`) and is
+     * not useful for discovering it.
+     */
+    readonly port: number;
+    stop(): Promise<GatewayShutdownReport>;
+  }>;
 }
 
 // ── API Response Types (door-only) ──────────────────────────────────

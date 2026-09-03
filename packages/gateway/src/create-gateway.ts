@@ -413,6 +413,7 @@ export async function createGateway(
     });
 
     return {
+      port: handle.port,
       async stop(): Promise<GatewayShutdownReport> {
         // Start the server's own drain (stops accepting new connections,
         // then waits for in-flight requests/WebSocket connections to close)
