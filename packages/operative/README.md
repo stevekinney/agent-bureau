@@ -2557,9 +2557,64 @@ expect(report.quiescent).toBe(true);
 | `createTestStore()`                      | In-memory `Store` instance from `@lostgradient/operative/store`.                                                                                                                                                                                                                                                                     |
 | `createResourceScope(label, runtime)`    | AB-92/AB-256's `ResourceScope`: `register()` a run, timer, subscription, deferred-queue item, or `ChildRunRegistry`; `child(label)` nests a scope; `assertQuiescent()` probes without aborting; `close()` aborts every registered run, awaits its `closed()`, and rejects with a `QuiescenceError` naming every resource still live. |
 
-**Exported types:** `RunRecorder`, `EventRecorder`, `CausalTraceEntry`, `EventRecorderOwnerIdentity`, `FiredFault`, `ManualRuntimeServices`, `ResourceScope`, `QuiescenceReport`, `LeakedResource`, `LeakedResourceKind`, `LeakedResourceDiscoveredVia`, `DetachedResource`, `RegisterableResource`, `ClosableRun`.
+**Exported types:** `RunRecorder`, `EventRecorder`, `CausalTraceEntry`, `EventRecorderOwnerIdentity`, `ManualRuntimeServices`, `ResourceScope`, `QuiescenceReport`, `LeakedResource`, `LeakedResourceKind`, `LeakedResourceDiscoveredVia`, `DetachedResource`, `RegisterableResource`, `ClosableRun`.
 
 **Also exported (runtime value, not a type):** `QuiescenceError` — the `Error` subclass `close()` rejects with; import it normally (`import { QuiescenceError } from '@lostgradient/operative/test'`), not with `import type`.
+
+#### Scripted doubles and the `FaultPlan` vocabulary (AB-92/AB-257)
+
+`fault-plan.ts` ships AB-92's `FaultPlan` type vocabulary — `FaultBoundary`, `FaultOperation`, `FaultOccurrence`, `FaultPlanEntry`, `FaultPlan`, `FiredFault` — with no executor yet (a future fault engine applies a `FaultPlan` at a boundary; this slice ships only the shapes).
+
+`createScriptedGenerate`, `createScriptedTool`, and `createScriptedHook` are named doubles for the boundaries AB-92 enumerates — a `GenerateFunction`, a toolbox-ready `Tool`, and a `HookRegistry<OperativeHookMap>` handler, respectively — each driven by a script of steps consumed one per call:
+
+```typescript
+import { createToolbox } from 'armorer';
+import { HookRegistry, createManualRuntimeServices } from 'lifecycle';
+import { Conversation } from 'conversationalist';
+import {
+  createScriptedGenerate,
+  createScriptedHook,
+  createScriptedTool,
+} from '@lostgradient/operative/test';
+import { createActiveRun, stopWhen } from '@lostgradient/operative';
+import type { OperativeHookMap } from '@lostgradient/operative';
+
+const runtime = createManualRuntimeServices();
+
+// One ScriptedGenerateStep consumed per call: 'respond' | 'stream' | 'block' | 'fail' | 'ignore-abort'.
+const generate = createScriptedGenerate([
+  { kind: 'respond', response: { content: 'hi', toolCalls: [] } },
+]);
+
+// A toolbox-ready Tool double: 'resolve' | 'reject' | 'block' steps, settled() for async assertions.
+const tool = createScriptedTool('search', [{ kind: 'resolve', result: 'ok' }]);
+const toolbox = createToolbox([tool]);
+
+// A hook double for one of the four phases; `hookName` is the OperativeHookMap key to register it under.
+const hooks = new HookRegistry<OperativeHookMap>();
+const afterTool = createScriptedHook('after-tool', [{ kind: 'resolve', value: undefined }]);
+hooks.on(afterTool.hookName, afterTool);
+
+const activeRun = createActiveRun({
+  generate,
+  toolbox,
+  conversation: new Conversation(),
+  stopWhen: stopWhen.noToolCalls(),
+  hooks,
+  runtime,
+});
+await activeRun.result;
+
+// assertReceived compares only the fields you supply, against a call already recorded.
+generate.assertReceived(0, { tools: ['search'] });
+await tool.settled(); // readonly ScriptedSettlement[] — resolved/rejected outcome per call
+```
+
+A `block` step (`{ kind: 'block', barrier: 'name' }`) suspends the call until the test calls `release('name')`; `reached('name')` resolves once the double has arrived at that barrier, so a test awaits arrival instead of sleeping. `release` before `reached` is a latch, not a race — releasing a barrier no one has hit yet still unblocks the call once it gets there.
+
+**Exported:** `createScriptedGenerate(script)`, `createScriptedTool(name, script)`, `createScriptedHook(phase, script)`.
+
+**Exported types:** `FaultBoundary`, `FaultOperation`, `FaultOccurrence`, `FaultPlanEntry`, `FaultPlan`, `FiredFault`, `ScriptedGenerate`, `ScriptedGenerateStep`, `ScriptedGenerateCall`, `ScriptedGenerateExpectation`, `ScriptedTool`, `ScriptedToolStep`, `ScriptedToolCall`, `ScriptedHook`, `ScriptedHookPhase`, `ScriptedHookStep`, `ScriptedHookCall`, `ScriptedSettlement`.
 
 ---
 
