@@ -84,9 +84,13 @@ async function resolveToolStep(
   if (step.kind === 'reject') throw step.error;
 
   coordinator.arrive(step.barrier);
-  await coordinator.awaitRelease(step.barrier);
+  // Reserved synchronously, before awaiting release — see the matching
+  // comment in `scripted-generate.ts`'s `resolveStep`: `Toolbox.execute()`
+  // runs its calls in parallel, so two calls against the same double could
+  // otherwise race to advance `cursor.index` while each was blocked.
   const next = script[cursor.index];
   cursor.index++;
+  await coordinator.awaitRelease(step.barrier);
   if (!next) {
     throw new Error(
       `createScriptedTool: barrier "${step.barrier}" released but no step follows it`,
@@ -214,9 +218,13 @@ async function resolveHookStep<P extends ScriptedHookPhase>(
   if (step.kind === 'reject') throw step.error;
 
   coordinator.arrive(step.barrier);
-  await coordinator.awaitRelease(step.barrier);
+  // Reserved synchronously, before awaiting release — see the matching
+  // comment in `resolveToolStep`/`scripted-generate.ts`'s `resolveStep`: a
+  // hook double invoked concurrently could otherwise race to advance
+  // `cursor.index` while each call was blocked.
   const next = script[cursor.index];
   cursor.index++;
+  await coordinator.awaitRelease(step.barrier);
   if (!next) {
     throw new Error(
       `createScriptedHook: barrier "${step.barrier}" released but no step follows it`,

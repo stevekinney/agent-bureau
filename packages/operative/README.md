@@ -2570,6 +2570,7 @@ expect(report.quiescent).toBe(true);
 ```typescript
 import { createToolbox } from 'armorer';
 import { HookRegistry, createManualRuntimeServices } from 'lifecycle';
+import { Conversation } from 'conversationalist';
 import {
   createScriptedGenerate,
   createScriptedHook,
@@ -2585,9 +2586,6 @@ const generate = createScriptedGenerate([
   { kind: 'respond', response: { content: 'hi', toolCalls: [] } },
 ]);
 
-// assertReceived compares only the fields you supply.
-generate.assertReceived(0, { tools: [], model: undefined });
-
 // A toolbox-ready Tool double: 'resolve' | 'reject' | 'block' steps, settled() for async assertions.
 const tool = createScriptedTool('search', [{ kind: 'resolve', result: 'ok' }]);
 const toolbox = createToolbox([tool]);
@@ -2600,12 +2598,15 @@ hooks.on(afterTool.hookName, afterTool);
 const activeRun = createActiveRun({
   generate,
   toolbox,
-  conversation,
+  conversation: new Conversation(),
   stopWhen: stopWhen.noToolCalls(),
   hooks,
   runtime,
 });
 await activeRun.result;
+
+// assertReceived compares only the fields you supply, against a call already recorded.
+generate.assertReceived(0, { tools: ['search'] });
 await tool.settled(); // readonly ScriptedSettlement[] — resolved/rejected outcome per call
 ```
 

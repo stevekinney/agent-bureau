@@ -93,10 +93,12 @@ export type ScriptedGenerateStep =
 
 /**
  * Every input AB-93's source specification requires a script to assert a
- * generate call received. `assertReceived` compares only the fields the
- * caller supplies (an omitted field is never checked, including one the
- * caller explicitly sets to `undefined` — see that method's own doc
- * comment), so a partial expectation never over-asserts.
+ * generate call received. `assertReceived` compares only the fields present
+ * as keys on the caller's `expected` object — an omitted field is never
+ * checked, but a field the caller sets to `undefined` IS still checked
+ * (against `undefined`), since it iterates `Object.keys(expected)` rather
+ * than filtering out `undefined` values — see that method's own doc
+ * comment.
  */
 export interface ScriptedGenerateExpectation {
   readonly conversation: Conversation;
@@ -247,9 +249,15 @@ export function createScriptedGenerate(script: readonly ScriptedGenerateStep[]):
       }
       case 'block': {
         coordinator.arrive(step.barrier);
-        await coordinator.awaitRelease(step.barrier);
+        // Reserved synchronously, BEFORE awaiting release: if two calls are
+        // ever in flight concurrently against the same double, each must
+        // claim its own "next step" slot the instant it commits to needing
+        // one, not after an await where a concurrent call could have
+        // advanced `nextStepIndex` first and left this call consuming the
+        // wrong step.
         const next = script[nextStepIndex];
         nextStepIndex++;
+        await coordinator.awaitRelease(step.barrier);
         if (!next) {
           throw new Error(
             `createScriptedGenerate: barrier "${step.barrier}" released but no step follows it`,
