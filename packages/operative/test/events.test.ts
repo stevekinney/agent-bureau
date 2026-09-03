@@ -11,6 +11,11 @@ import {
   BudgetExceededEvent,
   BudgetThresholdEvent,
   type OperativeEventType,
+  ScheduleCancelledEvent,
+  ScheduleCompletedEvent,
+  ScheduleFailedEvent,
+  SchedulePausedEvent,
+  ScheduleResumedEvent,
   SessionCreatedEvent,
   SessionDeletedEvent,
   SessionLoadedEvent,
@@ -275,6 +280,27 @@ describe('events', () => {
     expect(wakeup.type).toBe('schedule.wakeup');
     expect(wakeup.duration).toBe(5000);
     expect(wakeup.note).toBe('resume work');
+  });
+
+  it('constructs schedule definition and fire-terminal lifecycle events with the expected payload (AB-223)', () => {
+    const paused = new SchedulePausedEvent('schedule-1');
+    const resumed = new ScheduleResumedEvent('schedule-1');
+    const cancelled = new ScheduleCancelledEvent('schedule-1');
+    const failed = new ScheduleFailedEvent('schedule-1', 'run-1');
+    const completed = new ScheduleCompletedEvent('schedule-1', 'run-1');
+
+    expect(paused.type).toBe('schedule.paused');
+    expect(paused.scheduleId).toBe('schedule-1');
+    expect(resumed.type).toBe('schedule.resumed');
+    expect(resumed.scheduleId).toBe('schedule-1');
+    expect(cancelled.type).toBe('schedule.cancelled');
+    expect(cancelled.scheduleId).toBe('schedule-1');
+    expect(failed.type).toBe('schedule.failed');
+    expect(failed.scheduleId).toBe('schedule-1');
+    expect(failed.runId).toBe('run-1');
+    expect(completed.type).toBe('schedule.completed');
+    expect(completed.scheduleId).toBe('schedule-1');
+    expect(completed.runId).toBe('run-1');
   });
 
   describe('steering events (AB-90 child ab90-01 / AB-221, AB-67 decision record)', () => {

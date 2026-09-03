@@ -13,6 +13,7 @@ import type {
 import {
   AbortAgentRunError,
   createAgentSession,
+  createScheduleWakeupTool,
   createSessionStore,
   DEFAULT_MAXIMUM_STEPS,
   DurableCapabilityUnavailableError,
@@ -35,7 +36,7 @@ import {
 import { createModelCatalog } from '@lostgradient/operative/providers';
 import { createStore } from '@lostgradient/operative/store';
 import { createMockGenerate as createSequentialGenerate } from '@lostgradient/operative/test';
-import { encode } from '@lostgradient/weft';
+import { encode, ScheduleHandle } from '@lostgradient/weft';
 import { KEYS, MemoryStorage, resolveStorage, textValueStore } from '@lostgradient/weft/storage';
 import type { ConditionalTextValueStore } from '@lostgradient/weft/storage/text-value-store';
 import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
@@ -60,6 +61,7 @@ import {
   classifyRecoveredRun,
   createBureau,
   createHumanWaitContext,
+  createWakeupContext,
   defaultSessionPersistenceSleep,
   detachBestEffortPromise,
   emptyRecoveredStepMetadata,
@@ -73,6 +75,7 @@ import {
   omitKeysWithPrefix,
   recordedSessionAuthorityPrincipalId,
   recoveredRequestContextFromMetadata,
+  ScheduleLocatorUnavailableError,
   wireFlowControlSchedulerEvents,
   wireStreamEventTargetFrames,
 } from './create-bureau';
@@ -3667,6 +3670,66 @@ describe('createBureau', () => {
       });
       expect(result).toBeUndefined();
     } finally {
+      bureau.dispose();
+    }
+  });
+
+  it('createSchedule throws ScheduleLocatorUnavailableError naming the scheduleId when describe() rejects after registration', async () => {
+    // Stub weft's own `ScheduleHandle.describe()` — what `createAgentSchedule`
+    // delegates `handle.describe()` to on the successful-registration path —
+    // to reject exactly once, simulating a schedule that registered but whose
+    // summary could not be retrieved immediately after. `createSchedule` must
+    // wrap that rejection in a typed `ScheduleLocatorUnavailableError` naming
+    // the scheduleId rather than letting the bare `Error` propagate untyped.
+    const describeFailure = new Error('Schedule "whatever" not found');
+    const describeSpy = spyOn(ScheduleHandle.prototype, 'describe').mockRejectedValueOnce(
+      describeFailure,
+    );
+
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+      stopWhen: stopWhen.noToolCalls(),
+    });
+
+    try {
+      let caught: unknown;
+      try {
+        await bureau.createSchedule({
+          agentName: 'researcher',
+          input: 'Summarize overnight activity',
+          spec: '0 9 * * *',
+        });
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught).toBeInstanceOf(ScheduleLocatorUnavailableError);
+      const locatorError = caught as ScheduleLocatorUnavailableError;
+      expect(locatorError.code).toBe('ScheduleLocatorUnavailableError');
+      expect(locatorError.category).toBe('unavailable');
+      expect(locatorError.retryable).toBe(false);
+      // `createSchedule` had no stable `id` to pass through (no `id` field on
+      // `DurableScheduleDefinition` — the uuid is Weft-assigned), so
+      // `.scheduleId` is the value this test can actually assert equals the
+      // one minted internally — not a generic placeholder — and `.message`
+      // names the same id.
+      expect(locatorError.scheduleId).toBeTruthy();
+      expect(locatorError.message).toContain(locatorError.scheduleId);
+      // The original `describe()` rejection is preserved for debugging, not
+      // discarded.
+      expect(locatorError.cause).toBe(describeFailure);
+
+      // The schedule IS registered despite the describe() failure — a fresh
+      // describe (via getSchedule, unaffected by the mockRejectedValueOnce)
+      // proves registration succeeded and only the locator call failed.
+      const fetched = await bureau.getSchedule(locatorError.scheduleId);
+      expect(fetched?.status).toBe('active');
+    } finally {
+      describeSpy.mockRestore();
       bureau.dispose();
     }
   });
@@ -8039,6 +8102,252 @@ describe('createBureau requestHumanInput availability across durability configur
     expect(error.code).toBe('DurableCapabilityUnavailableError');
     expect(error.category).toBe('unavailable');
     expect(error.retryable).toBe(false);
+  });
+});
+
+// ── AB-201: scheduleWakeup wired into Bureau composition ────────────────
+//
+// Mirrors `requestHumanInput`'s own wiring (F3 / AB-43 above) exactly, per
+// AB-41's decision record: `scheduleWakeup` is opt-in (`options.wakeup`),
+// gated on `runtime.durable`, and forwards onto the run's real `ctx.services`
+// object via the shared `servicesRef`/`onServices` capture. Unlike
+// `requestHumanInput` (a signal wait, resumed via `bureau.signalSession`),
+// `scheduleWakeup` parks via a durable `ctx.sleep` — there is no fake-clock
+// harness anywhere in this repository's Weft-backed tests, so these tests
+// drive the timer deterministically via `bureau.runDurableMaintenance(now)`
+// (Weft's `Engine.runMaintenance` ticks `internals.scheduler.tick(now)`
+// directly — the same seam `engine.scheduler.tick(deadline)` exercises at the
+// operative layer, reached here through Bureau's own public host-maintenance
+// surface since Bureau exposes no direct engine accessor). Composed with
+// `durableBackgroundTasks: 'manual'` so the scheduler poller is disarmed:
+// nothing but an explicit maintenance tick can ever fire the timer, which is
+// exactly what proves a genuine park rather than a real-time race.
+describe('createBureau scheduleWakeup wiring (AB-201)', () => {
+  it('createWakeupContext always signals durable: true (only ever constructed inside the runtime.durable guard)', () => {
+    const context = createWakeupContext({});
+    expect(context.durable).toBe(true);
+  });
+
+  it('createWakeupContext forwards pendingWakeup reads/writes onto the shared servicesRef, not a detached copy', () => {
+    const servicesRef: { current?: DurableRunDeps } = {};
+    const context = createWakeupContext(servicesRef);
+
+    // No live services yet: reads report undefined, writes are dropped rather
+    // than throwing (mirrors createHumanWaitContext's own guard).
+    expect(context.pendingWakeup).toBeUndefined();
+    context.pendingWakeup = { duration: '6h' };
+    expect(context.pendingWakeup).toBeUndefined();
+
+    // Once `onServices` fires (simulated here), the SAME object the durable
+    // workflow reads is mutated — not a copy the tool wrote to in isolation.
+    servicesRef.current = {} as DurableRunDeps;
+    context.pendingWakeup = { duration: '30m', note: 'check the deploy' };
+    expect(servicesRef.current.pendingWakeup).toEqual({
+      duration: '30m',
+      note: 'check the deploy',
+    });
+    expect(context.pendingWakeup).toEqual({ duration: '30m', note: 'check the deploy' });
+  });
+
+  it('a standalone scheduleWakeup tool (no Bureau composition) rejects DurableCapabilityUnavailableError rather than omitting itself', () => {
+    // The tool-level throw itself is out of scope for this issue (shipped by
+    // AB-43 upstream, covered by operative's own
+    // create-schedule-wakeup-tool.test.ts); this only anchors that the SAME
+    // error class Bureau's composition never needs (because it prefers
+    // omission, like config 2 below) is what a standalone caller sees.
+    const tool = createScheduleWakeupTool({
+      context: { pendingWakeup: undefined, durable: false },
+    });
+    let caught: unknown;
+    try {
+      tool.execute({ in: '6h' });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(DurableCapabilityUnavailableError);
+    expect((caught as DurableCapabilityUnavailableError).code).toBe(
+      'DurableCapabilityUnavailableError',
+    );
+    expect((caught as DurableCapabilityUnavailableError).category).toBe('unavailable');
+    expect((caught as DurableCapabilityUnavailableError).retryable).toBe(false);
+  });
+
+  it('config 2 — omits scheduleWakeup from the effective toolbox when no durable engine is attached', async () => {
+    const seenTools: string[] = [];
+    const generate: GenerateFunction = async (context) => {
+      seenTools.push(...context.toolbox.tools().map((tool) => tool.name));
+      return { content: 'no park here', toolCalls: [] };
+    };
+
+    const bureau = await createBureau({
+      agents: {},
+      generate,
+      toolbox: createEmptyToolbox(),
+      wakeup: true,
+      stopWhen: stopWhen.noToolCalls(),
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'no durable engine attached' });
+      await waitForRunCompletion(bureau, run.id);
+
+      expect(seenTools).not.toContain('scheduleWakeup');
+    } finally {
+      bureau.dispose();
+    }
+  });
+
+  it('config 3 — includes scheduleWakeup, genuinely parks over ephemeral (MemoryStorage) durable storage, and fires only on an explicit tick', async () => {
+    const seenTools: string[] = [];
+    const generate = createSequentialGenerate([
+      {
+        content: '',
+        toolCalls: [{ id: 'call-1', name: 'scheduleWakeup', arguments: { in: '6h' } }],
+      },
+      // AB-45 — a fired wakeup CONTINUES the same run with one more
+      // generation step, never just unparks it.
+      { content: 'resumed after the wakeup fired', toolCalls: [] },
+    ]);
+    const wrappedGenerate: GenerateFunction = async (context) => {
+      seenTools.push(...context.toolbox.tools().map((tool) => tool.name));
+      return generate(context);
+    };
+
+    const bureau = await createBureau({
+      agents: {},
+      generate: wrappedGenerate,
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+      wakeup: true,
+      durableBackgroundTasks: 'manual',
+      stopWhen: stopWhen.some(stopWhen.toolCalled('scheduleWakeup'), stopWhen.noToolCalls()),
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'park over ephemeral memory storage' });
+      await pollUntil(() => generate.callCount >= 1);
+
+      // Discovery: the model's first step already saw scheduleWakeup as an
+      // available tool.
+      expect(seenTools).toContain('scheduleWakeup');
+
+      // Genuine park proof: with the scheduler poller disarmed
+      // (durableBackgroundTasks: 'manual'), nothing can advance the durable
+      // timer without an explicit tick — polling WITHOUT ticking must never
+      // observe completion, and the continuation step must never run.
+      const firedWithoutTick = await pollUntil(
+        () => bureau.getRun(run.id)?.status === 'completed',
+        5,
+      );
+      expect(firedWithoutTick).toBe(false);
+      expect(bureau.getRun(run.id)?.status).not.toBe('completed');
+      expect(generate.callCount).toBe(1);
+
+      // Drive the scheduler directly past the wakeup's deadline — no real
+      // wall-clock wait. `bureau.runDurableMaintenance(now)` is the
+      // host-driven maintenance path, which ticks Weft's durable-timer
+      // scheduler (`Engine.runMaintenance` calls `internals.scheduler.tick(now)`
+      // internally) — the deterministic seam `engine.scheduler.tick(deadline)`
+      // exercises directly at the operative layer.
+      const deadline = Date.now() + 6 * 60 * 60 * 1000 + 60_000;
+      const completed = await pollUntil(async () => {
+        await bureau.runDurableMaintenance(deadline);
+        return bureau.getRun(run.id)?.status === 'completed';
+      });
+      expect(completed).toBe(true);
+      expect(generate.callCount).toBe(2);
+    } finally {
+      bureau.dispose();
+    }
+  });
+
+  it('config 4 — includes scheduleWakeup, genuinely parks over persistent (SQLite) durable storage, and the parked wakeup recovers and fires across a process restart via an explicit tick', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `ab-201-persistent-wakeup-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+
+    try {
+      // === Bureau A: schedules the wakeup and parks. "Crashes" (disposed)
+      // while parked — no tick is ever issued in this process, so the timer
+      // cannot have fired here. ===
+      const generateA = createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [{ id: 'call-1', name: 'scheduleWakeup', arguments: { in: '6h' } }],
+        },
+      ]);
+
+      const bureauA = await createBureau({
+        agents: {},
+        generate: generateA,
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        wakeup: true,
+        durableBackgroundTasks: 'manual',
+        stopWhen: stopWhen.toolCalled('scheduleWakeup'),
+      });
+
+      const run = await bureauA.createRun({ message: 'park over persistent sqlite storage' });
+      await pollUntil(() => generateA.callCount >= 1);
+
+      // Genuine park proof, same as config 3: no tick is issued in this
+      // process, so completion must never be observed here.
+      const firedInBureauA = await pollUntil(
+        () => bureauA.getRun(run.id)?.status === 'completed',
+        5,
+      );
+      expect(firedInBureauA).toBe(false);
+      bureauA.dispose();
+
+      // === FRESH PROCESS: bureau B is a wholly separate bureau over the same
+      // SQLite file. Recovery re-arms the durable `ctx.sleep` timer with no
+      // hand-injected state (AB-41: "Recovery: ctx.sleep is checkpointed;
+      // recovery re-arms it") — the resumed continuation step's deps are
+      // rebuilt from config, same as every other durable recovery test. ===
+      const generateB = createSequentialGenerate([
+        // AB-45 — the recovered run's continuation step after the wakeup fires.
+        { content: 'resumed after restart and explicit tick', toolCalls: [] },
+      ]);
+
+      const bureauB = await createBureau({
+        agents: {},
+        generate: generateB,
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        wakeup: true,
+        durableBackgroundTasks: 'manual',
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      try {
+        // The recovered run is visible immediately on boot.
+        expect(bureauB.getRun(run.id)).toBeDefined();
+        expect(bureauB.getRun(run.id)?.status).not.toBe('completed');
+
+        // Drive the rebooted engine's scheduler directly past the deadline —
+        // no real wall-clock wait for the fire.
+        const deadline = Date.now() + 6 * 60 * 60 * 1000 + 60_000;
+        const completed = await pollUntil(async () => {
+          await bureauB.runDurableMaintenance(deadline);
+          return bureauB.getRun(run.id)?.status === 'completed';
+        });
+        expect(completed).toBe(true);
+        expect(generateB.callCount).toBe(1);
+
+        const session = await bureauB.getSession(run.sessionId);
+        expect(session?.metadata['lastRunStatus']).toBe('completed');
+      } finally {
+        bureauB.dispose();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
   });
 });
 

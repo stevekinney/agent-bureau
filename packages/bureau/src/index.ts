@@ -17,7 +17,12 @@ export type {
   RecoveredRunSessionMetadata,
   SessionLoadOutcome,
 } from './create-bureau';
-export { BureauError, classifyRecoveredRun, createBureau } from './create-bureau';
+export {
+  BureauError,
+  classifyRecoveredRun,
+  createBureau,
+  ScheduleLocatorUnavailableError,
+} from './create-bureau';
 export type {
   AgentDescriptor,
   CreateSupervisorOptions,

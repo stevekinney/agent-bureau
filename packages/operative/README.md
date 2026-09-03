@@ -1470,9 +1470,43 @@ result[0]?.eligible; // boolean
 result[0]?.exclusionCode; // e.g. 'denied-by-deployment', when excluded
 ```
 
-`AgentPreferences` expresses needs, never denials: a missing `requiredCapabilities` entry or a `minimumContextWindowTokens` shortfall excludes with `missing-required-capability`, while `preferredProviders`/`preferredModels` exclude nothing and are carried through for the future selector to rank on (AB-66). `DelegatedAuthority` narrows by omission — `grantedProviders`/`grantedModels` absent narrows nothing, present-and-not-naming excludes with `exceeds-delegated-authority`, and `policyVersion` is traceable in every exclusion this layer produces. `user.exactOverride` must name both `provider` and `model` to identify exactly one descriptor — a partially specified override resolves to none, never an ambiguous multi-candidate result. A fully specified override is checked only against the four layers above the user's before being honored: a rejected override yields a single-candidate result carrying the denying layer's own code, never `denied-by-user`.
+`AgentPreferences` expresses needs, never denials: a missing `requiredCapabilities` entry or a `minimumContextWindowTokens` shortfall excludes with `missing-required-capability`, while `preferredProviders`/`preferredModels` exclude nothing and are carried through for the selector below to rank on. `DelegatedAuthority` narrows by omission — `grantedProviders`/`grantedModels` absent narrows nothing, present-and-not-naming excludes with `exceeds-delegated-authority`, and `policyVersion` is traceable in every exclusion this layer produces. `user.exactOverride` must name both `provider` and `model` to identify exactly one descriptor — a partially specified override resolves to none, never an ambiguous multi-candidate result. A fully specified override is checked only against the four layers above the user's before being honored: a rejected override yields a single-candidate result carrying the denying layer's own code, never `denied-by-user`.
 
-Ranking, tie-breaking, the deterministic selector, and the `SelectionPlan` itself remain AB-66's scope (AB-249) — this composition only produces the eligible/excluded candidate set that selector will consume.
+Ranking, tie-breaking, the deterministic selector, and the `SelectionPlan` itself are the next section's scope (AB-249) — this composition only produces the eligible/excluded candidate set that selector consumes.
+
+#### Deterministic Backend Selector and Selection Plan (AB-64, AB-249)
+
+`select(request, options)` (`@lostgradient/operative/providers`) is a pure, synchronous function: no input or output, no clock read except the injected `options.now`. It calls `composePolicy` internally for hard-constraint filtering, applies effort compatibility within the eligible set, then ranks by `costPreference`/`latencyPreference`/`preferredProviders`/`preferredModels`, breaking ties by `(provider, model)` lexicographic order. Two calls with the same recorded input produce deeply equal plans.
+
+```typescript
+import { composePolicy, createModelCatalog, select } from '@lostgradient/operative/providers';
+
+const catalog = createModelCatalog();
+
+const plan = select(
+  {
+    agentName: 'researcher',
+    catalogRevision: catalog.revision,
+    policyRevision: 1,
+    availabilitySnapshotRevision: 1,
+    requestedValue: { target: 'effort', override: 'high' },
+  },
+  {
+    catalog,
+    user: { costPreference: 'lowest-cost', effortFallbackMode: 'degrade' },
+    now: () => new Date().toISOString(),
+    newPlanId: () => crypto.randomUUID(),
+  },
+);
+
+plan.outcome; // 'selected' | 'no-candidate' | 'stale-catalog' | ...
+plan.selected; // { provider, model, effort? } | undefined
+plan.candidates[0]?.descriptorSnapshot; // inlined by value — safe to replay after the catalog moves on
+```
+
+Every eligible candidate's `descriptorSnapshot` is a deep, independent structural copy of the deciding `BackendDescriptor` — never a live reference — so a `SelectionPlan` replays its own eligibility reasoning unchanged after the source catalog has moved on, been mutated, or been discarded. `rankingInputs` names three signals per eligible candidate (`cost`, `latency`, `preferenceMatch`) rather than summarizing into one score. All seven `SelectionOutcomeKind` values are reachable; `failure` is present if and only if `outcome !== 'selected'`, enforced structurally by the exported type. `recordEffectiveGeneration(plan, effective)` folds a completed generation's actual backend into a `'selected'` plan without ever rewriting `selected`: a divergence produces a new terminal `'provider-effective-divergence'` plan alongside the original selection; a non-divergence returns `plan` unchanged, by reference.
+
+Bureau wiring, `BureauOptions.modelPolicy`, and `runStep` boundary revalidation remain AB-250's scope; cross-mode replay fixtures are AB-251's.
 
 #### Structured Output
 

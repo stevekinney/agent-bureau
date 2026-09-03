@@ -7,6 +7,7 @@ import type {
 import { ScheduleHandle } from '@lostgradient/weft';
 import { describe, expect, it } from 'bun:test';
 
+import type { SchedulePausedEvent } from '../events';
 import type { ScheduledAgentRunInput, SchedulingEngine } from './schedule-agent';
 import {
   createAgentSchedule,
@@ -182,7 +183,7 @@ describe('createAgentSchedule', () => {
       input: 'hello',
       description: 'Daily digest',
       session: 'daily-digest',
-      overlap: 'queue',
+      overlap: 'skip',
       id: 'daily-digest-sched',
     });
 
@@ -193,7 +194,7 @@ describe('createAgentSchedule', () => {
     expect((call.input as ScheduledAgentRunInput).sessionId).toBe('daily-digest');
     expect(call.options).toEqual({
       description: 'Daily digest',
-      overlap: 'queue',
+      overlap: 'skip',
       id: 'daily-digest-sched',
     });
   });
@@ -308,6 +309,47 @@ describe('createAgentSchedule', () => {
     expect((engine.calls[0]!.input as ScheduledAgentRunInput).scheduleId).toBe(handle.id);
   });
 
+  it("rejects overlap 'queue' at the chokepoint (before reaching the engine)", async () => {
+    const engine = makeSchedulingEngine();
+    let caught: unknown;
+    try {
+      await createAgentSchedule({
+        engine: engine,
+        agentName: 'a',
+        spec: { every: '1h' },
+        input: 'x',
+        // A caller coercing an untyped value (e.g. deserialized JSON) past the
+        // compiler is exactly what the runtime check must still catch, even
+        // though `overlap` is now typed `'skip' | 'allow'`.
+        overlap: 'queue' as unknown as 'skip' | 'allow',
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(InvalidScheduleError);
+    expect((caught as Error).message).toContain("overlap policy 'queue' is not supported");
+    expect(engine.calls).toHaveLength(0);
+  });
+
+  it("rejects overlap 'cancel-running' at the chokepoint (before reaching the engine)", async () => {
+    const engine = makeSchedulingEngine();
+    let caught: unknown;
+    try {
+      await createAgentSchedule({
+        engine: engine,
+        agentName: 'a',
+        spec: { every: '1h' },
+        input: 'x',
+        overlap: 'cancel-running' as unknown as 'skip' | 'allow',
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(InvalidScheduleError);
+    expect((caught as Error).message).toContain("overlap policy 'cancel-running' is not supported");
+    expect(engine.calls).toHaveLength(0);
+  });
+
   it('generates a schedule id without crypto helpers when none is supplied', async () => {
     const restoreCrypto = replaceGlobalCrypto({});
     const engine = makeSchedulingEngine({ scheduleId: 'ignored' });
@@ -400,6 +442,54 @@ describe('createAgentSchedule', () => {
     expect(summary.id).toBe('test-sched-1');
   });
 
+  it('dispatches SchedulePausedEvent/ScheduleResumedEvent/ScheduleCancelledEvent from a freshly-registered handle when an emitter is supplied (AB-223)', async () => {
+    const engine = makeSchedulingEngine();
+    const dispatched: Event[] = [];
+    const emitter = {
+      dispatch: (event: Event) => {
+        dispatched.push(event);
+        return true;
+      },
+    };
+
+    const handle = await createAgentSchedule({
+      engine,
+      agentName: 'researcher',
+      spec: { every: '1h' },
+      input: 'hello',
+      emitter,
+    });
+
+    await handle.pause();
+    await handle.resume();
+    await handle.cancel();
+
+    expect(dispatched.map((event) => event.type)).toEqual([
+      'schedule.paused',
+      'schedule.resumed',
+      'schedule.cancelled',
+    ]);
+    for (const event of dispatched) {
+      expect((event as SchedulePausedEvent).scheduleId).toBe(handle.id);
+    }
+  });
+
+  it('dispatches nothing when no emitter is supplied to a freshly-registered handle', async () => {
+    const engine = makeSchedulingEngine();
+
+    const handle = await createAgentSchedule({
+      engine,
+      agentName: 'researcher',
+      spec: { every: '1h' },
+      input: 'hello',
+    });
+
+    // Exercises the emitter?.dispatch(...) no-op branch — must not throw.
+    await handle.pause();
+    await handle.resume();
+    await handle.cancel();
+  });
+
   it('reuses an existing compatible schedule when idempotent registration is requested', async () => {
     const existingSummary: ScheduleSummary = {
       ...mockSummary,
@@ -424,6 +514,42 @@ describe('createAgentSchedule', () => {
     await handle.cancel();
     const summary = await handle.describe();
     expect(summary.id).toBe('schedule-self-run-step');
+  });
+
+  it('dispatches lifecycle events from a reused idempotent handle (scheduleHandleFromEngine) when an emitter is supplied (AB-223)', async () => {
+    const existingSummary: ScheduleSummary = {
+      ...mockSummary,
+      id: 'schedule-self-run-step',
+      intervalMs: 3_600_000,
+    };
+    const engine = makeSchedulingEngine({ summaries: [existingSummary] });
+    const dispatched: Event[] = [];
+    const emitter = {
+      dispatch: (event: Event) => {
+        dispatched.push(event);
+        return true;
+      },
+    };
+
+    const handle = await createAgentSchedule({
+      engine,
+      agentName: 'researcher',
+      spec: { every: '1h' },
+      input: 'hello',
+      id: 'schedule-self-run-step',
+      idempotent: true,
+      emitter,
+    });
+
+    await handle.pause();
+    await handle.resume();
+    await handle.cancel();
+
+    expect(dispatched.map((event) => event.type)).toEqual([
+      'schedule.paused',
+      'schedule.resumed',
+      'schedule.cancelled',
+    ]);
   });
 
   it('uses the trimmed schedule id when reusing an existing idempotent schedule', async () => {
@@ -727,6 +853,26 @@ describe('createAgentScheduler', () => {
     expect(engine.calls[0]!.type).toBe('agentRun');
     expect((engine.calls[0]!.input as ScheduledAgentRunInput).agentName).toBe('researcher');
     expect((engine.calls[0]!.input as ScheduledAgentRunInput).scheduleId).toBe(handle.id);
+  });
+
+  it('threads the constructor-bound emitter into every handle schedule() returns (AB-223)', async () => {
+    const engine = makeSchedulingEngine();
+    const dispatched: Event[] = [];
+    const emitter = {
+      dispatch: (event: Event) => {
+        dispatched.push(event);
+        return true;
+      },
+    };
+    const scheduler = createAgentScheduler({ engine, emitter });
+
+    const handle = await scheduler.schedule('researcher', {
+      spec: { every: '6h' },
+      input: 'Nightly report',
+    });
+    await handle.pause();
+
+    expect(dispatched.map((event) => event.type)).toEqual(['schedule.paused']);
   });
 
   it('schedule() carries agentName and session into the scheduled input', async () => {

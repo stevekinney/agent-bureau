@@ -21,6 +21,8 @@ import {
   createSessionStore,
   DEFAULT_MAXIMUM_STEPS,
   DEFAULT_PROMPT_INJECTION_TRIPWIRE_THRESHOLD,
+  ScheduleCompletedEvent,
+  ScheduleFailedEvent,
   withCache,
   withEnhancedStreaming,
   withMinimumTripwireConfidence,
@@ -59,6 +61,9 @@ import {
 import {
   decode,
   deserializeCheckpoint,
+  WorkflowCancelledEvent,
+  WorkflowCompletedEvent,
+  WorkflowFailedEvent,
   type WorkflowServicesResolution,
   type WorkflowServicesResolverInfo,
 } from '@lostgradient/weft';
@@ -85,7 +90,7 @@ import {
   type ConversationHistory,
   createConversationHistory,
 } from 'conversationalist';
-import type { HookReplayPolicy } from 'lifecycle';
+import type { EventMap, HookReplayPolicy } from 'lifecycle';
 import { TypedEventTarget } from 'lifecycle';
 import type { CreateMemoryOptions, Memory } from 'memory';
 import { createMemory } from 'memory';
@@ -401,6 +406,24 @@ function resolvePersistenceOptions(options: RuntimeCompositionOptions): {
     persistenceObservability: undefined,
     persistenceOnLog: undefined,
   };
+}
+
+/**
+ * Whether a `RunResult.finishReason` (or a Weft `WorkflowCompletedEvent.result`
+ * carrying one) represents a failure outcome rather than a clean stop. Shared
+ * by `monitorRecoveredScheduledFire` (create-bureau.ts, diagnostic logging for
+ * a recovered fire) and the fire-terminal `schedule.completed`/`schedule.failed`
+ * dispatch below (AB-223) — both must agree on what "failed" means for a
+ * scheduled fire, so this lives in exactly one place.
+ */
+export function isRunFailureFinishReason(finishReason: unknown): boolean {
+  return (
+    finishReason === 'error' ||
+    finishReason === 'tripwire' ||
+    finishReason === 'maximum-steps' ||
+    finishReason === 'elicitation-denied' ||
+    finishReason === 'budget-exceeded'
+  );
 }
 
 function isMemoryInstance(value: CreateMemoryOptions | Memory): value is Memory {
@@ -1142,6 +1165,15 @@ export interface DurableComposition {
   observability?: RunEngineObservability;
 }
 
+/**
+ * The two fire-terminal events a scheduled fire's AgentRun can dispatch onto
+ * {@link RuntimeComposition.scheduleFireEvents} (AB-223).
+ */
+export interface ScheduleFireEventMap extends EventMap {
+  [ScheduleCompletedEvent.type]: ScheduleCompletedEvent;
+  [ScheduleFailedEvent.type]: ScheduleFailedEvent;
+}
+
 export interface RuntimeComposition {
   kv: ConditionalTextValueStore | undefined;
   /**
@@ -1152,6 +1184,21 @@ export interface RuntimeComposition {
    * surface is unchanged, but the run is checkpointed and resumes after a crash.
    */
   durable: DurableComposition | undefined;
+  /**
+   * Dispatches `ScheduleCompletedEvent`/`ScheduleFailedEvent` (AB-223) for
+   * every scheduled fire's terminal outcome, live or recovered. Populated by a
+   * `durable.engine` `workflow:completed`/`workflow:failed` listener,
+   * correlated against the `scheduleId` recorded in `buildScheduledRunServices`
+   * when that fire's deps were built — the map entry it reads is deleted the
+   * instant this fires, so exactly one event dispatches per fire regardless of
+   * whether it settled as a live tick or was recovered on boot (both routes
+   * settle through this same Weft engine terminal event). `createBureau`
+   * forwards each event onto the bureau's own `emitter` (scheduled fires are
+   * headless — there is no per-run emitter to dispatch onto instead). A run
+   * with no correlated `scheduleId` (every ordinary, non-scheduled run) is
+   * silently ignored.
+   */
+  scheduleFireEvents: TypedEventTarget<ScheduleFireEventMap>;
   /**
    * Run ids the durable engine flagged, during boot recovery, as resuming
    * under a DIFFERENT workflow version than the one they were checkpointed
@@ -1250,6 +1297,16 @@ export async function createRuntimeComposition(
     string,
     { storedVersion: string; registeredVersion: string }
   >();
+
+  // AB-223: runId → scheduleId for a scheduled fire whose deps this composition
+  // has built (live tick or recovered), so the `workflow:completed`/
+  // `workflow:failed` engine listener wired below `createRunEngine` can
+  // correlate a terminal event back to its owning schedule. Populated in
+  // `buildScheduledRunServices`; each entry is deleted the instant its
+  // terminal event dispatches, so it never grows past the count of in-flight
+  // scheduled fires.
+  const scheduledFireScheduleIds = new Map<string, string>();
+  const scheduleFireEvents = new TypedEventTarget<ScheduleFireEventMap>();
 
   // Resolve the `persistence` option into its components. The three forms are:
   // - PersistenceOptions { store, history?, observability?, onLog? }
@@ -1385,6 +1442,49 @@ export async function createRuntimeComposition(
             `documentation/workflow-versioning.md.`,
         });
       },
+    });
+
+    // AB-223: schedule-fire terminal events. `workflow:completed`/
+    // `workflow:failed` fire on the engine for EVERY workflow (scheduled or
+    // not) — a live tick and a recovered fire both settle through this same
+    // pair, so listening here (rather than duplicating from
+    // `monitorRecoveredScheduledFire`'s recovery-only await) gives exactly one
+    // dispatch per fire regardless of how it settled. A run with no entry in
+    // `scheduledFireScheduleIds` (every ordinary, non-scheduled run) is
+    // silently ignored — `return` before either handler does anything else.
+    durable.engine.addEventListener(WorkflowCompletedEvent.type, (event) => {
+      const scheduleId = scheduledFireScheduleIds.get(event.workflowId);
+      if (scheduleId === undefined) return;
+      scheduledFireScheduleIds.delete(event.workflowId);
+      const result = event.result;
+      const finishReason =
+        typeof result === 'object' && result !== null && 'finishReason' in result
+          ? result.finishReason
+          : undefined;
+      // Two branches, each dispatching its own concrete event type, rather
+      // than one `dispatch(cond ? new A() : new B())` call: TypedEventTarget's
+      // `dispatch<K>` infers `K` from its argument's `type` literal, and a
+      // ternary's union argument defeats that inference (the argument's
+      // static `type` widens to `string`) — using the typed `dispatch` wrapper
+      // (not the untyped inherited `dispatchEvent`) needs single-type call
+      // sites.
+      if (isRunFailureFinishReason(finishReason)) {
+        scheduleFireEvents.dispatch(new ScheduleFailedEvent(scheduleId, event.workflowId));
+      } else {
+        scheduleFireEvents.dispatch(new ScheduleCompletedEvent(scheduleId, event.workflowId));
+      }
+    });
+    durable.engine.addEventListener(WorkflowFailedEvent.type, (event) => {
+      const scheduleId = scheduledFireScheduleIds.get(event.workflowId);
+      if (scheduleId === undefined) return;
+      scheduledFireScheduleIds.delete(event.workflowId);
+      scheduleFireEvents.dispatch(new ScheduleFailedEvent(scheduleId, event.workflowId));
+    });
+    // Not a fire-terminal dispatch (cancellation is out of this issue's scope),
+    // but the correlation entry must still be dropped on a cancelled fire, or
+    // it leaks for the lifetime of the engine.
+    durable.engine.addEventListener(WorkflowCancelledEvent.type, (event) => {
+      scheduledFireScheduleIds.delete(event.workflowId);
     });
   }
 
@@ -2032,6 +2132,18 @@ export async function createRuntimeComposition(
       (recoveredScheduleMarker?.status === 'found'
         ? recoveredScheduleMarker.scheduleId
         : undefined);
+    // AB-223: record the correlation the engine-level terminal listener needs
+    // to turn this fire's `workflow:completed`/`workflow:failed` into
+    // `schedule.completed`/`schedule.failed`. Every reachable branch above
+    // that resolves `{ status: 'available' }` has already confirmed a
+    // schedule marker exists (the `hasPersistedScheduleMarker`/`info.schedule`/
+    // `recoveredScheduleMarker` guard earlier in this function), so
+    // `recoveredScheduleId` is defined here in practice; the `undefined` guard
+    // is defensive, not a real branch this function's own preconditions
+    // permit — dropping the entry rather than recording a bogus correlation.
+    if (recoveredScheduleId !== undefined) {
+      scheduledFireScheduleIds.set(runId, recoveredScheduleId);
+    }
     const existingStatelessSessionId =
       !recurring && recoveredScheduleId === undefined
         ? recoveredMarkerSessionId(recoveredScheduleMarker)
@@ -2353,6 +2465,7 @@ export async function createRuntimeComposition(
     kv,
     durable,
     workflowVersionMismatches,
+    scheduleFireEvents,
     disposeStorage:
       durableStorage && ownsDurableStorage ? () => durableStorage[Symbol.dispose]() : undefined,
     memory,

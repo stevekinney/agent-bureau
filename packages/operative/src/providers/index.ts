@@ -122,6 +122,18 @@ export {
   extractComplexitySignals,
   withRoutingMetrics,
 } from './routing/index.ts';
+export type {
+  EffectiveGenerationResult,
+  RevalidationInput,
+  SelectionCandidate,
+  SelectionOutcomeFailure,
+  SelectionOutcomeKind,
+  SelectionPlan,
+  SelectionRequest,
+  SelectOptions,
+  TaskClassification,
+} from './selection.ts';
+export { recordEffectiveGeneration, select } from './selection.ts';
 export type { GeminiResolvedEffort } from './shared/effort.ts';
 export {
   ANTHROPIC_EFFORT_SUPPORT,

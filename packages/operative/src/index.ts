@@ -295,6 +295,7 @@ export { DurableCapabilityUnavailableError } from './durable/durable-capability-
 export type {
   AgentScheduleHandle,
   AgentScheduleOptions,
+  AgentScheduleOverlapPolicy,
   AgentScheduler,
   CreateAgentScheduleOptions,
   ScheduledAgentRunInput,
@@ -307,6 +308,13 @@ export {
   isScheduledAgentRunInput,
 } from './durable/schedule-agent';
 export { AgentScheduledEvent, WakeupScheduledEvent } from './events';
+export {
+  ScheduleCancelledEvent,
+  ScheduleCompletedEvent,
+  ScheduleFailedEvent,
+  SchedulePausedEvent,
+  ScheduleResumedEvent,
+} from './events';
 // AB-10 — workflow versioning for in-flight durable runs
 export { WorkflowVersionMismatchEvent } from './events';
 export { composeGenerate, createFallbackGenerate } from './generate-middleware';

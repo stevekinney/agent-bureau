@@ -8,7 +8,14 @@ import type {
   GenerateResponse,
   Toolbox,
 } from '@lostgradient/operative';
-import { stopWhen } from '@lostgradient/operative';
+import {
+  ScheduleCancelledEvent,
+  ScheduleCompletedEvent,
+  ScheduleFailedEvent,
+  SchedulePausedEvent,
+  ScheduleResumedEvent,
+  stopWhen,
+} from '@lostgradient/operative';
 import { createTool, createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import { getMessages } from 'conversationalist';
@@ -370,6 +377,132 @@ describe('D6 scheduled-fire path (#109)', () => {
           (message) => message.role === 'user',
         );
         expect(userTurns.some((message) => message.content === 'maxsteps prompt')).toBe(true);
+      } finally {
+        bureau.dispose();
+      }
+    },
+    FIRE_TIMEOUT_MS,
+  );
+});
+
+describe('AB-223: schedule definition and fire-terminal lifecycle events', () => {
+  it(
+    'dispatches SchedulePausedEvent/ScheduleResumedEvent/ScheduleCancelledEvent from Bureau.pauseSchedule/resumeSchedule/cancelSchedule',
+    async () => {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createRecordingGenerate([]),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'memory' },
+        durableExecution: true,
+      });
+
+      try {
+        const paused: SchedulePausedEvent[] = [];
+        const resumed: ScheduleResumedEvent[] = [];
+        const cancelled: ScheduleCancelledEvent[] = [];
+        bureau.addEventListener(SchedulePausedEvent.type, (event) => paused.push(event));
+        bureau.addEventListener(ScheduleResumedEvent.type, (event) => resumed.push(event));
+        bureau.addEventListener(ScheduleCancelledEvent.type, (event) => cancelled.push(event));
+
+        const summary = await bureau.createSchedule({
+          agentName: 'researcher',
+          input: 'paused forever',
+          spec: '1h',
+        });
+        expect(summary).toBeDefined();
+
+        await bureau.pauseSchedule(summary!.id);
+        await bureau.resumeSchedule(summary!.id);
+        await bureau.cancelSchedule(summary!.id);
+
+        expect(paused.map((event) => event.scheduleId)).toEqual([summary!.id]);
+        expect(resumed.map((event) => event.scheduleId)).toEqual([summary!.id]);
+        expect(cancelled.map((event) => event.scheduleId)).toEqual([summary!.id]);
+      } finally {
+        bureau.dispose();
+      }
+    },
+    FIRE_TIMEOUT_MS,
+  );
+
+  it(
+    'dispatches ScheduleCompletedEvent, correlated to the fired runId, for a fire that finishes successfully',
+    async () => {
+      const calls: RecordedCall[] = [];
+      const bureau = await createBureau({
+        agents: {},
+        generate: createRecordingGenerate(calls),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'memory' },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      try {
+        const completed: ScheduleCompletedEvent[] = [];
+        const failed: ScheduleFailedEvent[] = [];
+        bureau.addEventListener(ScheduleCompletedEvent.type, (event) => completed.push(event));
+        bureau.addEventListener(ScheduleFailedEvent.type, (event) => failed.push(event));
+
+        const summary = await bureau.createSchedule({
+          agentName: 'researcher',
+          input: 'completes successfully',
+          spec: '1s',
+        });
+        expect(summary).toBeDefined();
+
+        const fired = await waitForReal(() => completed.length >= 1, FIRE_TIMEOUT_MS);
+        await bureau.cancelSchedule(summary!.id);
+
+        expect(fired).toBe(true);
+        expect(completed[0]!.scheduleId).toBe(summary!.id);
+        // A stateless fire's session id embeds its own runId (see
+        // `buildScheduledRunServices`), so the correlated runId this event
+        // carries is provably the SAME fire whose conversation was recorded.
+        expect(calls[0]!.conversationId).toContain(completed[0]!.runId);
+        expect(failed).toHaveLength(0);
+      } finally {
+        bureau.dispose();
+      }
+    },
+    FIRE_TIMEOUT_MS,
+  );
+
+  it(
+    'dispatches ScheduleFailedEvent, not ScheduleCompletedEvent, for a fire whose finishReason is a failure classification',
+    async () => {
+      const bureau = await createBureau({
+        agents: {},
+        generate: async () => {
+          throw new Error('deliberate scheduled-fire failure');
+        },
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'memory' },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      try {
+        const completed: ScheduleCompletedEvent[] = [];
+        const failed: ScheduleFailedEvent[] = [];
+        bureau.addEventListener(ScheduleCompletedEvent.type, (event) => completed.push(event));
+        bureau.addEventListener(ScheduleFailedEvent.type, (event) => failed.push(event));
+
+        const summary = await bureau.createSchedule({
+          agentName: 'researcher',
+          input: 'always fails',
+          spec: '1s',
+        });
+        expect(summary).toBeDefined();
+
+        const fired = await waitForReal(() => failed.length >= 1, FIRE_TIMEOUT_MS);
+        await bureau.cancelSchedule(summary!.id);
+
+        expect(fired).toBe(true);
+        expect(failed[0]!.scheduleId).toBe(summary!.id);
+        expect(failed[0]!.runId.length).toBeGreaterThan(0);
+        expect(completed).toHaveLength(0);
       } finally {
         bureau.dispose();
       }

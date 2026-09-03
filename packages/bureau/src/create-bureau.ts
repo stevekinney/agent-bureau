@@ -14,6 +14,7 @@ import {
   createRequestHumanInputTool,
   createRunFinishedFrame,
   createRunStartedFrame,
+  createScheduleWakeupTool,
   type DefinitionResolvingAgent,
   type FlowController,
   HumanWaitParkedEvent,
@@ -23,8 +24,14 @@ import {
   type RunnableAgent,
   type RunOptions,
   type RunReport,
+  ScheduleCancelledEvent,
+  ScheduleCompletedEvent,
+  ScheduleFailedEvent,
+  SchedulePausedEvent,
+  ScheduleResumedEvent,
   SchedulerTaskCompletedEvent,
   SchedulerTaskFailedEvent,
+  type ScheduleWakeupContext,
   type SessionListOptions,
   type SessionStore,
   type SessionSummary,
@@ -102,6 +109,7 @@ import {
   createRuntimeComposition,
   createSchedulerServiceRequestContext,
   decodeScheduleRunMarker,
+  isRunFailureFinishReason,
 } from './runtime-composition';
 import {
   findRunAgentName,
@@ -608,6 +616,34 @@ class BureauError extends Error {
 
 export { BureauError };
 
+/**
+ * Thrown by `createSchedule` when a schedule registers successfully against
+ * the engine but its {@link import('@lostgradient/weft').ScheduleSummary}
+ * cannot be retrieved immediately afterward (`AgentScheduleHandle.describe()`
+ * rejects). Mirrors `DurableCapabilityUnavailableError`'s shape discipline
+ * (AB-41/AB-43) — `.code`, `.category`, `.retryable` — so the same
+ * `isToolError`-style consumer contract can discriminate it without a bare,
+ * untyped `Error` leaking through. The schedule itself IS registered; only
+ * its locator (the summary) is unavailable.
+ */
+export class ScheduleLocatorUnavailableError extends Error {
+  readonly code = 'ScheduleLocatorUnavailableError';
+  readonly category = 'unavailable' as const;
+  readonly retryable = false as const;
+  /** The already-registered schedule whose locator could not be read. */
+  readonly scheduleId: string;
+
+  constructor(scheduleId: string, options?: { cause?: unknown }) {
+    super(
+      `Schedule ${scheduleId} was registered, but its summary could not be retrieved. ` +
+        `The schedule is registered; retry describing it (e.g. bureau.getSchedule('${scheduleId}')) later.`,
+      options,
+    );
+    this.name = 'ScheduleLocatorUnavailableError';
+    this.scheduleId = scheduleId;
+  }
+}
+
 function toBadRequest(message: string): never {
   throw new BureauError(message, 'BAD_REQUEST');
 }
@@ -959,14 +995,33 @@ export function createHumanWaitContext(
   };
 }
 
-function isRunFailureFinishReason(finishReason: unknown): boolean {
-  return (
-    finishReason === 'error' ||
-    finishReason === 'tripwire' ||
-    finishReason === 'maximum-steps' ||
-    finishReason === 'elicitation-denied' ||
-    finishReason === 'budget-exceeded'
-  );
+/**
+ * AB-201 — the `scheduleWakeup` analog of {@link createHumanWaitContext}: forwards
+ * reads/writes onto the run's REAL `ctx.services` object (via the same
+ * `servicesRef` capture) rather than spreading it, so the tool's `pendingWakeup`
+ * writes land where the durable `agentRun` workflow actually reads them.
+ * `ScheduleWakeupContext` carries no `runId` field (unlike
+ * `RequestHumanInputContext`), so this takes only the shared `servicesRef`.
+ */
+export function createWakeupContext(servicesRef: {
+  current?: DurableRunDeps;
+}): ScheduleWakeupContext {
+  return {
+    get pendingWakeup() {
+      return servicesRef.current?.pendingWakeup;
+    },
+    set pendingWakeup(value) {
+      if (servicesRef.current) {
+        servicesRef.current.pendingWakeup = value;
+      }
+    },
+    // Only ever constructed inside the `options.wakeup && runtime.durable`
+    // guard (below, in `createBureau`'s run composition — same placement as
+    // `createHumanWaitContext`'s own guard), so this context always backs a
+    // real durable run (AB-41 / AB-43 — the durability signal threaded into
+    // the tool's context).
+    durable: true,
+  };
 }
 
 export async function monitorRecoveredScheduledFire(
@@ -1046,6 +1101,25 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // agent values, which is unchanged/out of scope.
   const agentsSnapshot: D = { ...options.agents };
   const runtime = await createRuntimeComposition(options);
+  // AB-223: scheduled fires are headless (no per-run emitter — see
+  // `runtime-composition.ts`'s `buildScheduledRunServices`), so a fire's
+  // terminal `schedule.completed`/`schedule.failed` has nowhere else to
+  // dispatch. Forward each onto this bureau's own emitter, the same sink
+  // `pauseSchedule`/`resumeSchedule`/`cancelSchedule` dispatch their
+  // definition-level siblings onto.
+  // A fresh Event instance for the forwarded dispatch, not a re-dispatch of
+  // `event` itself: the WHATWG dispatch algorithm tracks a "being dispatched"
+  // flag per Event OBJECT, so re-dispatching the SAME instance onto a second
+  // EventTarget while still inside the first target's listener throws
+  // "already being dispatched" (this failed loudly in schedule-fire.test.ts
+  // before this fix — every scheduled fire's terminal event forwards
+  // synchronously, from inside `scheduleFireEvents`' own dispatch).
+  runtime.scheduleFireEvents.addEventListener(ScheduleCompletedEvent.type, (event) => {
+    emitter.dispatch(new ScheduleCompletedEvent(event.scheduleId, event.runId));
+  });
+  runtime.scheduleFireEvents.addEventListener(ScheduleFailedEvent.type, (event) => {
+    emitter.dispatch(new ScheduleFailedEvent(event.scheduleId, event.runId));
+  });
   // AB-15/AB-22: the typed agent catalog — a plain literal map, fixed for
   // the bureau's lifetime, dispatched by name through `bureau.run`.
   // Independent of `runtime` (bureau-level generate/toolbox/provider
@@ -2489,10 +2563,19 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // HumanWaitParkedEvent.type, …)` listener below (AB-13 `markParked`)
       // and `store`'s action log (AB-20 `listPendingReviews`).
       let humanInputEmitter: CompletableEventTarget<CombinedOperativeEventMap> | undefined;
-      let humanInputOnServices: ((services: DurableRunDeps) => void) | undefined;
       let runToolbox: BureauToolbox = runRuntime.toolbox;
+      // Shared `ctx.services` capture for BOTH durable-only opt-in tools this
+      // run may wire (`requestHumanInput` and, as of this issue, `scheduleWakeup`):
+      // Weft's durable adapter fires exactly one `onServices` hook per run
+      // (`DurableActiveRunOptions.onServices`, immediately before `engine.start`),
+      // so a SINGLE ref/hook is captured here and handed to whichever context(s)
+      // below need it — two separate hooks would have the later one clobber the
+      // earlier one's `onServices` property in the `createActiveRun` options
+      // object literal, silently breaking whichever tool composed first.
+      const servicesRef: { current?: DurableRunDeps } = {};
+      let needsServicesHook = false;
       if (options.humanInput && runtime.durable) {
-        const servicesRef: { current?: DurableRunDeps } = {};
+        needsServicesHook = true;
         humanInputEmitter = new CompletableEventTarget<CombinedOperativeEventMap>();
         const humanWaitContext = createHumanWaitContext(servicesRef, runId);
         const rawHumanInputTool = createRequestHumanInputTool({
@@ -2514,10 +2597,39 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           }),
         ]);
         runToolbox = combineToolboxes(runRuntime.toolbox, humanInputToolbox);
-        humanInputOnServices = (services) => {
-          servicesRef.current = services;
-        };
       }
+
+      // AB-201 — opt-in `scheduleWakeup` wiring for a REAL durable run
+      // (`options.wakeup`), mirroring `requestHumanInput`'s wiring immediately
+      // above: the tool's mutable `pendingWakeup` slot must be the EXACT
+      // `ctx.services` object Weft hands back, forwarded via the SAME
+      // `servicesRef`/`onServices` capture the human-input block sets up (see
+      // the comment above `servicesRef`). Unlike `requestHumanInput`,
+      // `scheduleWakeup` dispatches no event on park — `ctx.sleep` is itself
+      // the durable checkpoint, and recovery re-arms it with no live wiring
+      // needed (AB-41's decision record) — so no emitter is threaded here.
+      if (options.wakeup && runtime.durable) {
+        needsServicesHook = true;
+        const wakeupContext = createWakeupContext(servicesRef);
+        const rawWakeupTool = createScheduleWakeupTool({ context: wakeupContext });
+        const wakeupToolbox = createToolbox([
+          createTool({
+            ...rawWakeupTool,
+            // Same async-wrap rationale as `requestHumanInput` above: the raw
+            // tool's `execute` is synchronous and can throw synchronously
+            // (`DurableCapabilityUnavailableError`); armorer's contract is
+            // async, so wrapping converts a synchronous throw into a rejected
+            // Promise instead of letting it escape synchronously.
+            execute: async (input) => await Promise.resolve(rawWakeupTool.execute(input)),
+          }),
+        ]);
+        runToolbox = combineToolboxes(runToolbox, wakeupToolbox);
+      }
+      const durableServicesOnServices = needsServicesHook
+        ? (services: DurableRunDeps) => {
+            servicesRef.current = services;
+          }
+        : undefined;
 
       // AB-67/AB-199 — steering is scoped to in-memory (process-local)
       // sessions only: a durably-configured bureau's `submitSteeringCommand`
@@ -2604,7 +2716,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
               // table (see recoverDurableRuns / resolveRunServices).
               sessionId,
               ...(humanInputEmitter ? { emitter: humanInputEmitter } : {}),
-              ...(humanInputOnServices ? { onServices: humanInputOnServices } : {}),
+              ...(durableServicesOnServices ? { onServices: durableServicesOnServices } : {}),
             }
           : undefined,
         // AB-214 review (PRRT_kwDORvupsc6esZTF): thread the authenticated
@@ -4331,7 +4443,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
 
   async function createSchedule(
     definition: DurableScheduleDefinition,
-  ): Promise<import('@lostgradient/weft').ScheduleSummary | null | undefined> {
+  ): Promise<import('@lostgradient/weft').ScheduleSummary | undefined> {
     if (!runtime.durable) return undefined;
     // A schedule whose every fire would fail is worse than rejecting up front:
     // without a configured generate/provider, each tick's `createRunRuntime` throws
@@ -4366,7 +4478,16 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       }
       throw error;
     }
-    return handle.describe();
+    // The schedule is already registered at this point — a `describe()`
+    // rejection here means only its locator (summary) is unavailable, not
+    // that registration failed. Wrap it in a typed error naming the
+    // `scheduleId` instead of letting `AgentScheduleHandle.describe()`'s bare
+    // `Error('Schedule … no longer exists.')` propagate untyped.
+    try {
+      return await handle.describe();
+    } catch (cause) {
+      throw new ScheduleLocatorUnavailableError(handle.id, { cause });
+    }
   }
 
   async function getSchedule(
@@ -4389,18 +4510,21 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   async function pauseSchedule(scheduleId: string): Promise<true | undefined> {
     if (!runtime.durable) return undefined;
     await runtime.durable.engine.pauseSchedule(scheduleId);
+    emitter.dispatch(new SchedulePausedEvent(scheduleId));
     return true;
   }
 
   async function resumeSchedule(scheduleId: string): Promise<true | undefined> {
     if (!runtime.durable) return undefined;
     await runtime.durable.engine.resumeSchedule(scheduleId);
+    emitter.dispatch(new ScheduleResumedEvent(scheduleId));
     return true;
   }
 
   async function cancelSchedule(scheduleId: string): Promise<true | undefined> {
     if (!runtime.durable) return undefined;
     await runtime.durable.engine.cancelSchedule(scheduleId);
+    emitter.dispatch(new ScheduleCancelledEvent(scheduleId));
     return true;
   }
 

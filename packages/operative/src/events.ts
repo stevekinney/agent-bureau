@@ -1051,6 +1051,113 @@ export class WakeupScheduledEvent extends Event {
 }
 
 // ---------------------------------------------------------------------------
+// Schedule definition lifecycle (AB-223, dispatching AB-87's decision record
+// and the coordinator ruling that re-scoped AB-223 to five events).
+//
+// `schedule.paused`/`schedule.resumed`/`schedule.cancelled` are dispatched from
+// each of the three sibling creation paths' own pause/resume/cancel: the
+// bureau's `pauseSchedule`/`resumeSchedule`/`cancelSchedule` (which call the
+// Weft engine directly), `AgentScheduleHandle`'s `pause`/`resume`/`cancel`
+// (`durable/schedule-agent.ts`, an optional `emitter` on
+// `CreateAgentScheduleOptions`/`createAgentScheduler`), and `DurableHeartbeat`'s
+// `pause`/`resume`/`cancel` (`scheduler/create-durable-heartbeat.ts`, an
+// optional `emitter` on `CreateDurableHeartbeatOptions`). Each site is a
+// standalone module with no ambient emitter of its own, so the emitter is
+// threaded in as an optional constructor/options field rather than assumed —
+// a caller with no event surface (a headless script, a test) gets no dispatch
+// and no error.
+//
+// `schedule.deleted` is reserved and UNREACHABLE, not built: Gateway's
+// `DELETE /schedules/:id` routes through `Bureau.cancelSchedule` — cancel and
+// delete are one call site — so only `ScheduleCancelledEvent` is ever
+// dispatched. No distinct delete surface exists anywhere in Agent Bureau's
+// public API today (coordinator ruling, AB-223, 2026-09-02).
+// ---------------------------------------------------------------------------
+
+/**
+ * Emitted when a durable agent schedule is paused. Fires exactly once per
+ * successful `pause()` call, from whichever of the three creation paths'
+ * handles the caller is holding.
+ */
+export class SchedulePausedEvent extends Event {
+  static readonly type = 'schedule.paused' as const;
+  readonly scheduleId: string;
+  constructor(scheduleId: string) {
+    super(SchedulePausedEvent.type);
+    this.scheduleId = scheduleId;
+  }
+}
+
+/**
+ * Emitted when a previously paused durable agent schedule is resumed. Fires
+ * exactly once per successful `resume()` call.
+ */
+export class ScheduleResumedEvent extends Event {
+  static readonly type = 'schedule.resumed' as const;
+  readonly scheduleId: string;
+  constructor(scheduleId: string) {
+    super(ScheduleResumedEvent.type);
+    this.scheduleId = scheduleId;
+  }
+}
+
+/**
+ * Emitted when a durable agent schedule is cancelled (terminal). Fires
+ * exactly once per successful `cancel()` call that actually cancels the
+ * underlying Weft schedule — `DurableHeartbeat.cancel()` unregistering one of
+ * several services sharing a schedule, without cancelling the schedule
+ * itself, does not fire this (the schedule is not cancelled; only this
+ * caller's participation ends).
+ */
+export class ScheduleCancelledEvent extends Event {
+  static readonly type = 'schedule.cancelled' as const;
+  readonly scheduleId: string;
+  constructor(scheduleId: string) {
+    super(ScheduleCancelledEvent.type);
+    this.scheduleId = scheduleId;
+  }
+}
+
+/**
+ * Emitted when a scheduled fire's AgentRun terminates in a failure outcome —
+ * a thrown/unhandled workflow error, or a `RunResult` whose `finishReason`
+ * `isRunFailureFinishReason` classifies as a failure (`error`, `tripwire`,
+ * `maximum-steps`, `elicitation-denied`, `budget-exceeded`). Distinct from the
+ * fired run's own `run.error`; correlates to it via `runId`. Dispatched from
+ * `runtime-composition.ts`'s fire-terminal path (a Weft engine
+ * `workflow:completed`/`workflow:failed` listener correlated against the
+ * scheduleId recorded when the fire's deps were built), for both a live tick
+ * and a recovered fire — exactly once either way, since both settle through
+ * the same engine-level terminal event.
+ */
+export class ScheduleFailedEvent extends Event {
+  static readonly type = 'schedule.failed' as const;
+  readonly scheduleId: string;
+  readonly runId: string;
+  constructor(scheduleId: string, runId: string) {
+    super(ScheduleFailedEvent.type);
+    this.scheduleId = scheduleId;
+    this.runId = runId;
+  }
+}
+
+/**
+ * Emitted when a scheduled fire's AgentRun terminates successfully. Distinct
+ * from the fired run's own `run.completed`; correlates to it via `runId`. See
+ * {@link ScheduleFailedEvent} for the dispatch path and live/recovered parity.
+ */
+export class ScheduleCompletedEvent extends Event {
+  static readonly type = 'schedule.completed' as const;
+  readonly scheduleId: string;
+  readonly runId: string;
+  constructor(scheduleId: string, runId: string) {
+    super(ScheduleCompletedEvent.type);
+    this.scheduleId = scheduleId;
+    this.runId = runId;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Workflow versioning (AB-10). Emitted, NOT through the per-run
 // `CombinedOperativeEventMap` emitter (a recovered run's dependencies —
 // including its emitter — are rebuilt AFTER this check runs, and a headless
@@ -1325,6 +1432,12 @@ export interface OperativeEventMap extends EventMap {
   // Scheduling events (D6 completeness rule)
   [AgentScheduledEvent.type]: AgentScheduledEvent;
   [WakeupScheduledEvent.type]: WakeupScheduledEvent;
+  // Schedule definition/fire-terminal lifecycle (AB-223)
+  [SchedulePausedEvent.type]: SchedulePausedEvent;
+  [ScheduleResumedEvent.type]: ScheduleResumedEvent;
+  [ScheduleCancelledEvent.type]: ScheduleCancelledEvent;
+  [ScheduleFailedEvent.type]: ScheduleFailedEvent;
+  [ScheduleCompletedEvent.type]: ScheduleCompletedEvent;
   // session.monitor loop events (D7)
   [SessionMonitorTickEvent.type]: SessionMonitorTickEvent;
   [SessionMonitorDoneEvent.type]: SessionMonitorDoneEvent;
