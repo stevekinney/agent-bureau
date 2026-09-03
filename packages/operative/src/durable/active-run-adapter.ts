@@ -4,6 +4,7 @@ import { Conversation, isConversation } from 'conversationalist';
 import type { RuntimeServices } from 'lifecycle';
 import { CompletableEventTarget, createDefaultRuntimeServices } from 'lifecycle';
 
+import type { ChildRunRegistry } from '../child-run';
 import { createClosedAcknowledgement } from '../closed-acknowledgement';
 import type { ActiveRun } from '../create-run';
 import {
@@ -349,6 +350,11 @@ export function createDurableActiveRun(
   durableRun: DurableActiveRunOptions,
 ): ActiveRun {
   const { runId, options } = durableRun;
+  // AB-304: forwarded straight through from `RunOptions.childRegistry`,
+  // matching `create-run.ts`'s identical extraction — see this file's
+  // `resolveDurableOutcome`/`hasInFlightWork` for how it folds into
+  // `closed()`.
+  const childRegistry = options.childRegistry;
   // AB-92/AB-252/AB-253: resolved exactly once, here — `create-run.ts`
   // already resolves and snapshots `options.runtime` before routing to this
   // durable path, so this default only covers a caller that constructs a
@@ -792,7 +798,13 @@ export function createDurableActiveRun(
       // settles — `runHookSilently` is fire-and-forget — so `completed`
       // must wait for genuine hook completion, matching `create-run.ts`'s
       // identical `Promise.allSettled(pendingHookPromises)` await.
-      await Promise.allSettled(pendingHookPromises);
+      // AB-304: and, matching `create-run.ts`'s identical AB-211 fold-in, a
+      // registered child's own `closed()` must also settle — not merely its
+      // `result()` — before this durable parent reports `completed`.
+      await Promise.all([
+        Promise.allSettled(pendingHookPromises),
+        childRegistry?.awaitChildrenClosed() ?? Promise.resolve(),
+      ]);
       return { status: 'completed' };
     }
     // abort() may have been called before `driveStarted` — the workflow did
@@ -818,7 +830,11 @@ export function createDurableActiveRun(
       // AB-291 (AC1): same hook-completion wait as the uncancelled branch
       // above — a cancelled run's `onRunAbort`/`onRunError` hook can still
       // be in flight even after the durable record confirms `cancelled`.
-      await Promise.allSettled(pendingHookPromises);
+      // AB-304: same children-closed fold-in as the uncancelled branch too.
+      await Promise.all([
+        Promise.allSettled(pendingHookPromises),
+        childRegistry?.awaitChildrenClosed() ?? Promise.resolve(),
+      ]);
       return { status: 'completed' };
     } catch (error) {
       return { status: 'unresolved', reason: 'persistence-failed', error };
@@ -842,7 +858,11 @@ export function createDurableActiveRun(
     // `combinedSignal` covers both, matching create-run.ts's identical fix.
     disqualifiesFastPath: () =>
       cancelRequested || combinedSignal.aborted || reachability.unreachable,
-    hasInFlightWork: () => inFlightTools > 0,
+    // AB-304: a registered child disqualifies the `not-required` fast path
+    // the same way an in-flight tool does — its own `closed()` can still be
+    // pending even once its `result()` has resolved — matching
+    // `create-run.ts`'s identical `hasInFlightWork` extension for AB-211.
+    hasInFlightWork: () => inFlightTools > 0 || (childRegistry?.children().length ?? 0) > 0,
     resolveOutcome: resolveDurableOutcome,
   });
 
@@ -1086,9 +1106,22 @@ export function reattachDurableActiveRun(
      * reattached run's own duration measurement stays deterministic too.
      */
     runtime?: RuntimeServices;
+    /**
+     * AB-304: the same `ChildRunRegistry` `RunOptions.childRegistry` supplies
+     * to a fresh run, forwarded through for a REATTACHED one. A reattached
+     * run has no in-process toolbox forwarding of its own (see
+     * `reattach.stopToolboxForward`), so this is the only source of
+     * children for this handle's `closed()` — a child dispatched by
+     * caller-owned code AFTER reattachment (e.g. a `createSubagentTool`
+     * bound to this same registry) is discovered here exactly as it would
+     * be for a fresh run. Omitted, `closed()` behaves identically to before
+     * this option existed.
+     */
+    childRegistry?: ChildRunRegistry;
   },
 ): ActiveRun {
   const { runId, handle } = reattach;
+  const childRegistry = reattach.childRegistry;
   const runtime = reattach.runtime ?? createDefaultRuntimeServices();
   const emitter = reattach.emitter ?? new CompletableEventTarget<CombinedOperativeEventMap>();
 
@@ -1224,7 +1257,13 @@ export function reattachDurableActiveRun(
 
   async function resolveReattachOutcome(): Promise<CleanupAcknowledgement> {
     if (reachability.unreachable) return { status: 'unresolved', reason: 'unreachable' };
-    if (abortCancelled === undefined) return { status: 'completed' };
+    if (abortCancelled === undefined) {
+      // AB-304: matching `createDurableActiveRun`'s identical fold-in — a
+      // registered child's own `closed()` must settle before this
+      // reattached parent reports `completed`, not merely its `result()`.
+      await (childRegistry?.awaitChildrenClosed() ?? Promise.resolve());
+      return { status: 'completed' };
+    }
     // Wait for the SAME cancel attempt abort() fired (never rejects: it is
     // already `.then(cancelSucceeded, cancelFailed)`), then re-read the
     // durable record — matching `createDurableActiveRun`'s AC7 reasoning: a
@@ -1238,6 +1277,8 @@ export function reattachDurableActiveRun(
       if (!state || !isTerminalWorkflowStatus(state.status)) {
         return { status: 'unresolved', reason: 'persistence-failed' };
       }
+      // AB-304: same children-closed fold-in as the uncancelled branch above.
+      await (childRegistry?.awaitChildrenClosed() ?? Promise.resolve());
       return { status: 'completed' };
     } catch (error) {
       return { status: 'unresolved', reason: 'persistence-failed', error };
@@ -1252,8 +1293,11 @@ export function reattachDurableActiveRun(
     // unresolved/unreachable (AC8), silently hiding the teardown race.
     disqualifiesFastPath: () => abortCancelled !== undefined || reachability.unreachable,
     // No toolbox forwarding is owned by this adapter — see `reattach.stopToolboxForward`
-    // above — so no in-flight-tool count is available to track here.
-    hasInFlightWork: () => false,
+    // above — so no in-flight-tool count is available to track here. AB-304:
+    // a registered child still disqualifies the fast path the same way it
+    // does for a fresh run — its own `closed()` can be pending even once its
+    // `result()` has resolved.
+    hasInFlightWork: () => (childRegistry?.children().length ?? 0) > 0,
     resolveOutcome: resolveReattachOutcome,
   });
 

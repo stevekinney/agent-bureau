@@ -1255,18 +1255,20 @@ with its own bounded wait (`closed({ signal })`) still observes
 `{ status: 'unresolved', reason: 'timed-out' }` if that signal fires before
 the callback returns.
 
-**Parent `closed()` awaits child cleanup (AB-211).** When a run was started
-with `childRegistry` (the same `ChildRunRegistry` backing `children()` /
-`abortChild()`), its `closed()` does not resolve `completed` while any
-registered child's own `closed()` is still pending — not merely while the
-child's `result()` is unresolved. A run with no `childRegistry`, or one with
-zero registered children, behaves identically to before this change, with no
-added latency. Aborting one child never affects an untouched sibling's own
-path to settlement. This gate is currently in-memory only: the durable
-`ActiveRun` path (`createDurableActiveRun` / `reattachDurableActiveRun`)
-does not thread `RunOptions.childRegistry` through at all yet (a pre-existing
-gap this issue did not introduce), so a durable parent's `closed()` does not
-await its children.
+**Parent `closed()` awaits child cleanup (AB-211/AB-304).** When a run was
+started with `childRegistry` (the same `ChildRunRegistry` backing
+`children()` / `abortChild()`), its `closed()` does not resolve `completed`
+while any registered child's own `closed()` is still pending — not merely
+while the child's `result()` is unresolved. A run with no `childRegistry`, or
+one with zero registered children, behaves identically to before this
+change, with no added latency. Aborting one child never affects an untouched
+sibling's own path to settlement. This gate applies uniformly to both the
+in-memory and durable `ActiveRun` paths: `createDurableActiveRun` and
+`reattachDurableActiveRun` (`durable/active-run-adapter.ts`) also thread
+`RunOptions.childRegistry` through and fold `awaitChildrenClosed()` into
+their own `closed()`, so a durable parent's `closed()` waits on its children
+exactly the same way an in-memory parent's does — including a child
+dispatched after a reattach/recovery, discovered through the same registry.
 
 **Supervisor:** moved to the `bureau` package (AB-22) — see its README for `createSupervisor`, `RoutingStrategy<D>`, and the built-in routing strategies, which now operate on a `BureauAgentCatalog<D>` and metadata-only `AgentDescriptor`s.
 
