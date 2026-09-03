@@ -23,7 +23,7 @@ import { type ActiveRun, createActiveRun as createRun } from '../src/create-run'
 import { AbortAgentRunError, MaximumStepsExceededError } from '../src/errors';
 import { TOOL_CALL_POLICY } from '../src/liveness';
 import type { RunnableAgent } from '../src/runnable-agent';
-import { createMockGenerate } from '../src/test/index';
+import { createBarrierRegistry, createMockGenerate } from '../src/test/index';
 import type {
   CleanupAcknowledgement,
   ClosedOptions,
@@ -543,9 +543,18 @@ describe('AgentRun.closed()', () => {
 // ---------------------------------------------------------------------------
 
 describe('AgentRun[Symbol.asyncIterator]()', () => {
+  // AB-266 worked replacement: both tests below need the run's own generate
+  // call to still be in flight when the SECOND concurrent iterator attempt
+  // happens — previously ordered with a real `setTimeout(resolve, 10)`
+  // delay inside `generate`. A `BarrierRegistry` barrier makes that ordering
+  // explicit and real-timer-free: `generate` suspends at `arrive()` until
+  // the test releases it, so "still slow" is a barrier's `pending` state,
+  // never elapsed wall-clock time.
   it('returns an empty iterator for a concurrent second iteration when configured', async () => {
+    const registry = createBarrierRegistry();
+    const barrier = registry.barrier('slow-generate');
     const generate = async () => {
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await barrier.arrive();
       return textResponse('slow');
     };
     const activeRun = createRun({
@@ -559,14 +568,20 @@ describe('AgentRun[Symbol.asyncIterator]()', () => {
     const firstIterator = run[Symbol.asyncIterator]();
     const secondIterator = run[Symbol.asyncIterator]();
 
+    await barrier.reached();
+    expect(barrier.inspect().pending).toBe(true);
+
     expect(await secondIterator.next()).toEqual({ value: undefined, done: true });
     await firstIterator.return?.();
+    barrier.release();
     await activeRun.result;
   });
 
   it('throws for a concurrent second iteration by default', async () => {
+    const registry = createBarrierRegistry();
+    const barrier = registry.barrier('slow-generate');
     const generate = async () => {
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await barrier.arrive();
       return textResponse('slow');
     };
     const activeRun = createRun({
@@ -578,8 +593,12 @@ describe('AgentRun[Symbol.asyncIterator]()', () => {
     const run = createAgentRun(activeRun);
     const firstIterator = run[Symbol.asyncIterator]();
 
+    await barrier.reached();
+    expect(barrier.inspect().pending).toBe(true);
+
     expect(() => run[Symbol.asyncIterator]()).toThrow(CompletedRunIterationError);
     await firstIterator.return?.();
+    barrier.release();
     await activeRun.result;
   });
 

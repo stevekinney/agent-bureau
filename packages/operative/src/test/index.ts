@@ -11,6 +11,8 @@ import { COMBINED_OPERATIVE_EVENT_TYPES } from '../events';
 import type { GenerateFunction, GenerateResponse, StepResult } from '../types';
 import { createEventRecorder } from './event-recorder';
 
+export type { Barrier, BarrierRegistry, BarrierState } from './barriers';
+export { createBarrierRegistry } from './barriers';
 export {
   createManualCheckpointStore,
   createManualDurableEngine,
