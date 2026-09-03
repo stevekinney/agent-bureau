@@ -36,7 +36,7 @@ import {
 import { createModelCatalog } from '@lostgradient/operative/providers';
 import { createStore } from '@lostgradient/operative/store';
 import { createMockGenerate as createSequentialGenerate } from '@lostgradient/operative/test';
-import { encode } from '@lostgradient/weft';
+import { encode, ScheduleHandle } from '@lostgradient/weft';
 import { KEYS, MemoryStorage, resolveStorage, textValueStore } from '@lostgradient/weft/storage';
 import type { ConditionalTextValueStore } from '@lostgradient/weft/storage/text-value-store';
 import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
@@ -75,6 +75,7 @@ import {
   omitKeysWithPrefix,
   recordedSessionAuthorityPrincipalId,
   recoveredRequestContextFromMetadata,
+  ScheduleLocatorUnavailableError,
   wireFlowControlSchedulerEvents,
   wireStreamEventTargetFrames,
 } from './create-bureau';
@@ -3669,6 +3670,62 @@ describe('createBureau', () => {
       });
       expect(result).toBeUndefined();
     } finally {
+      bureau.dispose();
+    }
+  });
+
+  it('createSchedule throws ScheduleLocatorUnavailableError naming the scheduleId when describe() rejects after registration', async () => {
+    // Stub weft's own `ScheduleHandle.describe()` — what `createAgentSchedule`
+    // delegates `handle.describe()` to on the successful-registration path —
+    // to reject exactly once, simulating a schedule that registered but whose
+    // summary could not be retrieved immediately after. `createSchedule` must
+    // wrap that rejection in a typed `ScheduleLocatorUnavailableError` naming
+    // the scheduleId rather than letting the bare `Error` propagate untyped.
+    const describeSpy = spyOn(ScheduleHandle.prototype, 'describe').mockRejectedValueOnce(
+      new Error('Schedule "whatever" not found'),
+    );
+
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+      stopWhen: stopWhen.noToolCalls(),
+    });
+
+    try {
+      let caught: unknown;
+      try {
+        await bureau.createSchedule({
+          agentName: 'researcher',
+          input: 'Summarize overnight activity',
+          spec: '0 9 * * *',
+        });
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught).toBeInstanceOf(ScheduleLocatorUnavailableError);
+      const locatorError = caught as ScheduleLocatorUnavailableError;
+      expect(locatorError.code).toBe('ScheduleLocatorUnavailableError');
+      expect(locatorError.category).toBe('unavailable');
+      expect(locatorError.retryable).toBe(false);
+      // `createSchedule` had no stable `id` to pass through (no `id` field on
+      // `DurableScheduleDefinition` — the uuid is Weft-assigned), so the
+      // scheduleId this error must name is the one it minted internally;
+      // extract it from `.message` to prove it's the SAME id, not a generic
+      // placeholder.
+      const [, scheduleId] = /^Schedule (\S+) was registered/.exec(locatorError.message) ?? [];
+      expect(scheduleId).toBeDefined();
+
+      // The schedule IS registered despite the describe() failure — a fresh
+      // describe (via getSchedule, unaffected by the mockRejectedValueOnce)
+      // proves registration succeeded and only the locator call failed.
+      const fetched = await bureau.getSchedule(scheduleId!);
+      expect(fetched?.status).toBe('active');
+    } finally {
+      describeSpy.mockRestore();
       bureau.dispose();
     }
   });

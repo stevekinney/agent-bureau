@@ -295,6 +295,7 @@ export { DurableCapabilityUnavailableError } from './durable/durable-capability-
 export type {
   AgentScheduleHandle,
   AgentScheduleOptions,
+  AgentScheduleOverlapPolicy,
   AgentScheduler,
   CreateAgentScheduleOptions,
   ScheduledAgentRunInput,

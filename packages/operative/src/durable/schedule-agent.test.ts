@@ -183,7 +183,7 @@ describe('createAgentSchedule', () => {
       input: 'hello',
       description: 'Daily digest',
       session: 'daily-digest',
-      overlap: 'queue',
+      overlap: 'skip',
       id: 'daily-digest-sched',
     });
 
@@ -194,7 +194,7 @@ describe('createAgentSchedule', () => {
     expect((call.input as ScheduledAgentRunInput).sessionId).toBe('daily-digest');
     expect(call.options).toEqual({
       description: 'Daily digest',
-      overlap: 'queue',
+      overlap: 'skip',
       id: 'daily-digest-sched',
     });
   });
@@ -307,6 +307,47 @@ describe('createAgentSchedule', () => {
     });
     expect(engine.calls).toHaveLength(1);
     expect((engine.calls[0]!.input as ScheduledAgentRunInput).scheduleId).toBe(handle.id);
+  });
+
+  it("rejects overlap 'queue' at the chokepoint (before reaching the engine)", async () => {
+    const engine = makeSchedulingEngine();
+    let caught: unknown;
+    try {
+      await createAgentSchedule({
+        engine: engine,
+        agentName: 'a',
+        spec: { every: '1h' },
+        input: 'x',
+        // A caller coercing an untyped value (e.g. deserialized JSON) past the
+        // compiler is exactly what the runtime check must still catch, even
+        // though `overlap` is now typed `'skip' | 'allow'`.
+        overlap: 'queue' as unknown as 'skip' | 'allow',
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(InvalidScheduleError);
+    expect((caught as Error).message).toContain("overlap policy 'queue' is not supported");
+    expect(engine.calls).toHaveLength(0);
+  });
+
+  it("rejects overlap 'cancel-running' at the chokepoint (before reaching the engine)", async () => {
+    const engine = makeSchedulingEngine();
+    let caught: unknown;
+    try {
+      await createAgentSchedule({
+        engine: engine,
+        agentName: 'a',
+        spec: { every: '1h' },
+        input: 'x',
+        overlap: 'cancel-running' as unknown as 'skip' | 'allow',
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(InvalidScheduleError);
+    expect((caught as Error).message).toContain("overlap policy 'cancel-running' is not supported");
+    expect(engine.calls).toHaveLength(0);
   });
 
   it('generates a schedule id without crypto helpers when none is supplied', async () => {
