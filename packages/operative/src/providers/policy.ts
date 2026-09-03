@@ -381,8 +381,13 @@ function matchesOverride(
   descriptor: BackendDescriptor,
   override: NonNullable<UserModelConfiguration['exactOverride']>,
 ): boolean {
-  if (override.provider !== undefined && descriptor.provider !== override.provider) return false;
-  if (override.model !== undefined && descriptor.model !== override.model) return false;
+  // An "exact" override must name exactly one descriptor: provider and
+  // model are both required to identify it unambiguously. A partially
+  // specified override (e.g. only `effort`, or only `provider`) cannot
+  // resolve to one candidate, so it matches nothing.
+  if (override.provider === undefined || override.model === undefined) return false;
+  if (descriptor.provider !== override.provider) return false;
+  if (descriptor.model !== override.model) return false;
   // `route` is not a field BackendDescriptor carries: an override naming a
   // route can never match a descriptor on that basis.
   if (override.route !== undefined) return false;
@@ -403,8 +408,13 @@ function matchesOverride(
  * the four layers above the user's (deployment, Bureau, Agent, delegated)
  * before being honored: a rejected override yields a single-candidate
  * result carrying the denying layer's own exclusion code, never
- * `denied-by-user`. An override naming no matching descriptor yields an
- * empty result.
+ * `denied-by-user`. An override must name both `provider` and `model` to
+ * identify exactly one descriptor — a partially specified override (only
+ * `route`, or only `effort`) cannot resolve to a single candidate and
+ * yields an empty result, as does one naming no matching descriptor. Input
+ * order is the tie-break if `descriptors` ever contains more than one row
+ * for the same `(provider, model)` pair — at most one candidate is ever
+ * returned.
  */
 export function composePolicy(input: ComposePolicyInput): readonly PolicyCandidate[] {
   const override = input.user?.exactOverride;
@@ -419,10 +429,7 @@ export function composePolicy(input: ComposePolicyInput): readonly PolicyCandida
     );
   }
 
-  const matching = input.descriptors.filter((descriptor) => matchesOverride(descriptor, override));
-  return Object.freeze(
-    matching.map((descriptor) =>
-      toCandidate(descriptor, evaluateThroughDelegated(descriptor, input)),
-    ),
-  );
+  const matched = input.descriptors.find((descriptor) => matchesOverride(descriptor, override));
+  if (matched === undefined) return Object.freeze([]);
+  return Object.freeze([toCandidate(matched, evaluateThroughDelegated(matched, input))]);
 }

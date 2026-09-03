@@ -306,6 +306,30 @@ describe('composePolicy: exactOverride', () => {
     const result = composePolicy({ descriptors: [anthropic, openai], user });
     expect(result).toHaveLength(0);
   });
+
+  it('yields an empty result for a partially specified override naming only a provider', () => {
+    // An "exact" override must identify exactly one descriptor; provider
+    // alone could match many, so it resolves to none rather than an
+    // ambiguous multi-candidate result.
+    const user: UserModelConfiguration = { exactOverride: { provider: 'anthropic' } };
+    const result = composePolicy({ descriptors: [anthropic, openai, gemini], user });
+    expect(result).toHaveLength(0);
+  });
+
+  it('yields an empty result for a partially specified override naming only an effort', () => {
+    const user: UserModelConfiguration = { exactOverride: { effort: 'low' } };
+    const result = composePolicy({ descriptors: [anthropic, openai, gemini], user });
+    expect(result).toHaveLength(0);
+  });
+
+  it('yields at most one candidate even if descriptors contains duplicate rows for the same provider and model', () => {
+    const duplicate: BackendDescriptor = { ...anthropic };
+    const user: UserModelConfiguration = {
+      exactOverride: { provider: anthropic.provider, model: anthropic.model },
+    };
+    const result = composePolicy({ descriptors: [anthropic, duplicate], user });
+    expect(result).toHaveLength(1);
+  });
 });
 
 describe('composePolicy: general contract', () => {
