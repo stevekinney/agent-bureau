@@ -73,6 +73,16 @@ export {
   serializeUnknownError,
 } from './serialization';
 export type {
+  BureauSteeringGate,
+  ImplementedSteeringCommand,
+  SteeringAdmissionContext,
+  SteeringCommandAdmissionOutcome,
+  SteeringCommandConflict,
+  SteeringCommandRequest,
+  SteeringCommandSnapshot,
+} from './steering';
+export { createSteeringGate } from './steering';
+export type {
   Bureau,
   BureauEventType,
   BureauOptions,

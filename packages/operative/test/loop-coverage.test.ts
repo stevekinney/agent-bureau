@@ -515,6 +515,72 @@ describe('loop helper coverage', () => {
       expect(generateCalls).toBe(1);
       expect(result.finishReason).toBe('stop-condition');
     });
+
+    it("AB-199: seeds a fresh run's dedupe cursor from SteeringGate.getAppliedFloor, so a configVersion a PRIOR run already applied is not re-fired as steering.applied", async () => {
+      const gate: SteeringGate = {
+        ...makeGate({ paused: false, configVersion: 3 }),
+        getAppliedFloor: () => 3,
+      };
+      const dispatched: Event[] = [];
+
+      const result = await executeLoop(
+        {
+          generate: async () => textResponse('done'),
+          toolbox: createTestToolbox([]),
+          conversation: new Conversation(),
+          stopWhen: noToolCalls(),
+          steering: gate,
+          runId: 'run-with-prior-applied-floor',
+        },
+        { dispatch: (event) => dispatched.push(event) && true },
+      );
+
+      expect(result.finishReason).toBe('stop-condition');
+      expect(dispatched.some((event) => event.type === 'steering.applied')).toBe(false);
+    });
+
+    it('AB-199: a configVersion ABOVE the seeded floor still fires steering.applied on this fresh run', async () => {
+      const gate: SteeringGate = {
+        ...makeGate({ paused: false, configVersion: 4 }),
+        getAppliedFloor: () => 3,
+      };
+      const dispatched: Event[] = [];
+
+      const result = await executeLoop(
+        {
+          generate: async () => textResponse('done'),
+          toolbox: createTestToolbox([]),
+          conversation: new Conversation(),
+          stopWhen: noToolCalls(),
+          steering: gate,
+          runId: 'run-with-new-configVersion',
+        },
+        { dispatch: (event) => dispatched.push(event) && true },
+      );
+
+      expect(result.finishReason).toBe('stop-condition');
+      expect(dispatched.some((event) => event.type === 'steering.applied')).toBe(true);
+    });
+
+    it('AB-199: a gate with no getAppliedFloor seeds the cursor at 0, matching pre-AB-199 behavior', async () => {
+      const gate = makeGate({ paused: false, configVersion: 1 });
+      const dispatched: Event[] = [];
+
+      const result = await executeLoop(
+        {
+          generate: async () => textResponse('done'),
+          toolbox: createTestToolbox([]),
+          conversation: new Conversation(),
+          stopWhen: noToolCalls(),
+          steering: gate,
+          runId: 'run-with-no-applied-floor-accessor',
+        },
+        { dispatch: (event) => dispatched.push(event) && true },
+      );
+
+      expect(result.finishReason).toBe('stop-condition');
+      expect(dispatched.some((event) => event.type === 'steering.applied')).toBe(true);
+    });
   });
 });
 

@@ -73,14 +73,24 @@ export function buildStepDeps(options: RunOptions): StepDeps {
   };
 }
 
-/** Construct the fresh, mutable run-level accumulators for a new run. */
-export function createRunState(): RunState {
+/**
+ * Construct the fresh, mutable run-level accumulators for a new run.
+ *
+ * `initialAppliedConfigVersion` seeds `lastAppliedConfigVersion` — normally
+ * left at its default of 0 for a run with no steering dependency, or for a
+ * reconstruction/recovery call site (AB-199's `SteeringGate.getAppliedFloor`
+ * is consulted only at the two brand-new-run call sites: `executeLoop`
+ * below and `run-workflow.ts`'s `initialCursor`). Seeding it here, rather
+ * than only in those two call sites, keeps `createRunState()` the single
+ * source of truth for what "fresh" means.
+ */
+export function createRunState(initialAppliedConfigVersion = 0): RunState {
   return {
     steps: [],
     totalUsage: { prompt: 0, completion: 0, total: 0 },
     lastContent: '',
     schemaAttempts: 0,
-    lastAppliedConfigVersion: 0,
+    lastAppliedConfigVersion: initialAppliedConfigVersion,
   };
 }
 
@@ -117,7 +127,10 @@ export async function executeLoop(
     : new Conversation(options.conversation);
 
   const deps = { ...buildStepDeps(options), hookTracker, trackToolCallIds, onStepToolbox };
-  const runState = createRunState();
+  // AB-199 cross-run dedupe: a brand-new run seeds its dedupe cursor from
+  // the gate's own cross-run memory, not always 0, so a `configVersion` a
+  // PRIOR run already applied is never re-observed as new by this one.
+  const runState = createRunState(options.steering?.getAppliedFloor?.() ?? 0);
 
   const runStartTime = performance.now();
 

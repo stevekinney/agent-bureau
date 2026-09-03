@@ -4528,6 +4528,39 @@ describe('recordedSessionAuthorityPrincipalId / isSessionAuthorityAuthorized (AB
     };
     expect(isSessionAuthorityAuthorized(metadataUncorrelatedLastRunId, 'anyone')).toBe(false);
   });
+
+  it("authorizes against an explicitly targeted run's own entry, not lastRunId, when a different concurrent run's more recent terminal transition left the map uncorrelated to lastRunId (PR #430 review, Codex P2, second wave — 'Authorize against the targeted live run')", () => {
+    // Two concurrent runs, A (still live) and B (completed first). B's own
+    // terminal transition prunes ONLY lastRequestAuthorities[B] (per this
+    // file's own pruning rule near `remainingAuthorities`), leaving
+    // lastRunId: 'run-b' and A's now-uncorrelated 'run-a' entry behind —
+    // exactly the shape the previous test proves fails closed for EVERY
+    // principal under the default (lastRunId-only) lookup.
+    const metadata = {
+      lastRunId: 'run-b',
+      lastRequestAuthorities: {
+        'run-a': {
+          principalId: 'alice',
+          tenantId: 'bureau',
+          ownerId: 'agent',
+          capabilities: ['tools:execute'],
+          authorizationRevision: 'bureau:1',
+        },
+      },
+    };
+    // The default (no targetRunId) lookup still fails closed — unchanged.
+    expect(isSessionAuthorityAuthorized(metadata, 'alice')).toBe(false);
+
+    // A command explicitly targeting the still-live run A resolves against
+    // A's own entry directly, authorizing alice and rejecting anyone else.
+    expect(isSessionAuthorityAuthorized(metadata, 'alice', 'run-a')).toBe(true);
+    expect(isSessionAuthorityAuthorized(metadata, 'mallory', 'run-a')).toBe(false);
+
+    // Targeting a run with no entry of its own at all still fails closed —
+    // this is defense against authorizing a run this map says nothing
+    // about, not a general bypass of the uncorrelated-map rule.
+    expect(isSessionAuthorityAuthorized(metadata, 'alice', 'run-c')).toBe(false);
+  });
 });
 
 describe('isSessionRunTerminal (AB-194)', () => {
@@ -4755,6 +4788,646 @@ describe('createBureau submitSessionInput pre-admission checks (AB-194)', () => 
         outcome: 'unsupported-capability',
         reason: 'durable-mailbox-unavailable',
       });
+    } finally {
+      await bureau.dispose();
+    }
+  });
+});
+
+describe('createBureau submitSteeringCommand (AB-67/AB-199)', () => {
+  // Pre-admission checks reuse submitSessionInput's fixed order (AB-42):
+  // authorization, then session lifecycle, then capability. Gate state
+  // machine details (idempotency, replay, conflict, agent-identity
+  // deferral, run-terminal transitions) are covered directly in
+  // steering.test.ts; this suite covers the checks unique to
+  // submitSteeringCommand and the end-to-end pause/resume gating rollback
+  // trigger names ("a pause that fails to gate runStep").
+
+  it('returns not-found for an unknown sessionId', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+    });
+    try {
+      const outcome = await bureau.submitSteeringCommand('unknown-session', {
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+      });
+      expect(outcome).toEqual({ outcome: 'not-found' });
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('returns not-found for an unauthorized caller, indistinguishable from an unknown session', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: () => new Promise<never>(() => {}),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+    });
+    try {
+      const run = await bureau.createRun({ message: 'Wait forever', principal: 'alice' });
+      await pollUntil(async () => {
+        const session = await bureau.getSession(run.sessionId);
+        return session?.metadata['lastRunStatus'] === 'running';
+      });
+
+      const outcome = await bureau.submitSteeringCommand(run.sessionId, {
+        principal: 'mallory',
+        requestedValue: { target: 'pause' },
+      });
+      expect(outcome).toEqual({ outcome: 'not-found' });
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('returns session-terminal for an authorized caller naming an already-terminal session', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      stopWhen: stopWhen.noToolCalls(),
+    });
+    try {
+      const run = await bureau.createRun({ message: 'Complete me', principal: 'alice' });
+      await waitForRunCompletion(bureau, run.id);
+
+      const outcome = await bureau.submitSteeringCommand(run.sessionId, {
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+      });
+      expect(outcome).toEqual({ outcome: 'session-terminal', sessionId: run.sessionId });
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('returns unsupported-capability/selector-unavailable for every target other than pause/resume', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: () => new Promise<never>(() => {}),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+    });
+    try {
+      const run = await bureau.createRun({ message: 'Wait forever', principal: 'alice' });
+      await pollUntil(async () => {
+        const session = await bureau.getSession(run.sessionId);
+        return session?.metadata['lastRunStatus'] === 'running';
+      });
+
+      for (const requestedValue of [
+        { target: 'route', override: 'r1' },
+        { target: 'model', override: 'm1' },
+        { target: 'provider', override: 'p1' },
+        { target: 'effort', override: 'high' },
+        { target: 'agent-identity', override: 'reviewer' },
+      ] as const) {
+        const outcome = await bureau.submitSteeringCommand(run.sessionId, {
+          principal: 'alice',
+          requestedValue,
+        });
+        expect(outcome).toEqual({
+          outcome: 'unsupported-capability',
+          reason: 'selector-unavailable',
+        });
+      }
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('returns unsupported-capability/durable-steering-unavailable for pause/resume when runtime.durable is configured', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: () => new Promise<never>(() => {}),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+    try {
+      const run = await bureau.createRun({ message: 'Wait forever', principal: 'alice' });
+      await pollUntil(async () => {
+        const session = await bureau.getSession(run.sessionId);
+        return session?.metadata['lastRunStatus'] === 'running';
+      });
+
+      const outcome = await bureau.submitSteeringCommand(run.sessionId, {
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+      });
+      expect(outcome).toEqual({
+        outcome: 'unsupported-capability',
+        reason: 'durable-steering-unavailable',
+      });
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('accepts a pause, is idempotent against a second distinct pause, and replays an exact retry', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: () => new Promise<never>(() => {}),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+    });
+    try {
+      const run = await bureau.createRun({ message: 'Wait forever', principal: 'alice' });
+      await pollUntil(async () => {
+        const session = await bureau.getSession(run.sessionId);
+        return session?.metadata['lastRunStatus'] === 'running';
+      });
+
+      const first = await bureau.submitSteeringCommand(run.sessionId, {
+        id: 'pause-1',
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+      });
+      expect(first.outcome).toBe('accepted');
+
+      const second = await bureau.submitSteeringCommand(run.sessionId, {
+        id: 'pause-2',
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+      });
+      expect(second.outcome).toBe('accepted');
+      if (first.outcome === 'accepted' && second.outcome === 'accepted') {
+        // The distinct second pause was idempotent: no new configVersion.
+        expect(second.command.configVersion).toBe(first.command.configVersion);
+      }
+
+      const replay = await bureau.submitSteeringCommand(run.sessionId, {
+        id: 'pause-1',
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+      });
+      expect(replay.outcome).toBe('replayed');
+      if (first.outcome === 'accepted' && replay.outcome === 'replayed') {
+        expect(replay.command).toEqual(first.command);
+      }
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('returns a typed target-mismatch conflict for a same-id reuse across pause and resume', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: () => new Promise<never>(() => {}),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+    });
+    try {
+      const run = await bureau.createRun({ message: 'Wait forever', principal: 'alice' });
+      await pollUntil(async () => {
+        const session = await bureau.getSession(run.sessionId);
+        return session?.metadata['lastRunStatus'] === 'running';
+      });
+
+      await bureau.submitSteeringCommand(run.sessionId, {
+        id: 'shared-id',
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+      });
+      const outcome = await bureau.submitSteeringCommand(run.sessionId, {
+        id: 'shared-id',
+        principal: 'alice',
+        requestedValue: { target: 'resume' },
+      });
+      expect(outcome.outcome).toBe('conflict');
+      if (outcome.outcome === 'conflict') {
+        expect(outcome.conflict.reason).toBe('target-mismatch');
+      }
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('a resume against a session that is not currently paused is accepted as a no-op', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: () => new Promise<never>(() => {}),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+    });
+    try {
+      const run = await bureau.createRun({ message: 'Wait forever', principal: 'alice' });
+      await pollUntil(async () => {
+        const session = await bureau.getSession(run.sessionId);
+        return session?.metadata['lastRunStatus'] === 'running';
+      });
+
+      const outcome = await bureau.submitSteeringCommand(run.sessionId, {
+        principal: 'alice',
+        requestedValue: { target: 'resume' },
+      });
+      expect(outcome.outcome).toBe('accepted');
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('a paused session actually blocks the run at the runStep boundary, and resume releases it (rollback trigger: a pause that fails to gate runStep)', async () => {
+    let releaseTool: (() => void) | undefined;
+    const toolGate = new Promise<void>((resolve) => {
+      releaseTool = resolve;
+    });
+    const nextTool = createTool({
+      name: 'next',
+      description: 'continue',
+      input: z.object({}),
+      execute: async () => {
+        await toolGate;
+        return 'ok';
+      },
+    });
+    const generate = createSequentialGenerate([
+      { content: 'step 0', toolCalls: [{ name: 'next', arguments: {} }] },
+      { content: 'done', toolCalls: [] },
+    ]);
+
+    const bureau = await createBureau({
+      agents: {},
+      generate,
+      toolbox: createToolbox([nextTool]),
+      storage: { type: 'memory' },
+      stopWhen: stopWhen.noToolCalls(),
+    });
+    try {
+      const run = await bureau.createRun({ message: 'go', principal: 'alice' });
+
+      // Wait until step 0's generate call has happened and the "next" tool
+      // is executing (blocked on toolGate) — the window between step 0's
+      // generate and step 1's boundary read.
+      await pollUntil(() => generate.callCount === 1);
+
+      const pause = await bureau.submitSteeringCommand(run.sessionId, {
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+      });
+      expect(pause.outcome).toBe('accepted');
+
+      releaseTool!();
+
+      // Step 1's boundary is now reached, but the pause must block it —
+      // generate must NOT be called a second time no matter how long we
+      // give the loop to (wrongly) proceed.
+      for (let i = 0; i < 10; i++) {
+        await yieldToPortableEventLoop();
+      }
+      expect(generate.callCount).toBe(1);
+
+      const resume = await bureau.submitSteeringCommand(run.sessionId, {
+        principal: 'alice',
+        requestedValue: { target: 'resume' },
+      });
+      expect(resume.outcome).toBe('accepted');
+
+      await waitForRunCompletion(bureau, run.id);
+      expect(generate.callCount).toBe(2);
+
+      const session = await bureau.getSession(run.sessionId);
+      expect(session?.metadata['lastRunStatus']).toBe('completed');
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('an accepted pause bound to a run that aborts while paused does not prevent the abort from completing cleanly', async () => {
+    // The rollback-trigger's "failed/run-terminal" transition (AB-67's
+    // Abort row: pause/resume never carries into a future run) is covered
+    // directly in steering.test.ts's `failAcceptedForRun` suite — Bureau
+    // exposes no read surface for a steering command's own state (no AB-88
+    // snapshot yet), and the session itself goes terminal the instant the
+    // abort settles, so `submitSteeringCommand` short-circuits to
+    // `session-terminal` before any inspection could reach the gate. This
+    // test instead proves the WIRING this issue adds at the abort listener
+    // (`steeringGate?.failAcceptedForRun(...)`) runs without throwing and
+    // the run still reaches its terminal state normally.
+    let releaseTool: (() => void) | undefined;
+    const toolGate = new Promise<void>((resolve) => {
+      releaseTool = resolve;
+    });
+    const nextTool = createTool({
+      name: 'next',
+      description: 'continue',
+      input: z.object({}),
+      execute: async () => {
+        await toolGate;
+        return 'ok';
+      },
+    });
+    const generate = createSequentialGenerate([
+      { content: 'step 0', toolCalls: [{ name: 'next', arguments: {} }] },
+      { content: 'done', toolCalls: [] },
+    ]);
+
+    const bureau = await createBureau({
+      agents: {},
+      generate,
+      toolbox: createToolbox([nextTool]),
+      storage: { type: 'memory' },
+      stopWhen: stopWhen.noToolCalls(),
+    });
+    try {
+      const run = await bureau.createRun({ message: 'go', principal: 'alice' });
+      await pollUntil(() => generate.callCount === 1);
+
+      const pause = await bureau.submitSteeringCommand(run.sessionId, {
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+      });
+      expect(pause.outcome).toBe('accepted');
+      releaseTool!();
+
+      bureau.abortRun(run.id);
+      await waitForRunCompletion(bureau, run.id);
+
+      const session = await bureau.getSession(run.sessionId);
+      expect(session?.metadata['lastRunStatus']).toBe('aborted');
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('deleteSession while a run is genuinely paused releases it at the runStep boundary instead of leaving its steering channel — and the run itself — stuck forever (PR #430 review, Codex P2, "Settle paused runs before deleting their steering gate")', async () => {
+    let releaseTool: (() => void) | undefined;
+    const toolGate = new Promise<void>((resolve) => {
+      releaseTool = resolve;
+    });
+    const nextTool = createTool({
+      name: 'next',
+      description: 'continue',
+      input: z.object({}),
+      execute: async () => {
+        await toolGate;
+        return 'ok';
+      },
+    });
+    const generate = createSequentialGenerate([
+      { content: 'step 0', toolCalls: [{ name: 'next', arguments: {} }] },
+      { content: 'done', toolCalls: [] },
+    ]);
+
+    const bureau = await createBureau({
+      agents: {},
+      generate,
+      toolbox: createToolbox([nextTool]),
+      storage: { type: 'memory' },
+      stopWhen: stopWhen.noToolCalls(),
+    });
+    try {
+      const run = await bureau.createRun({ message: 'go', principal: 'alice' });
+      await pollUntil(() => generate.callCount === 1);
+
+      const pause = await bureau.submitSteeringCommand(run.sessionId, {
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+      });
+      expect(pause.outcome).toBe('accepted');
+      releaseTool!();
+
+      // Step 1's boundary is now reached, but the pause blocks it.
+      for (let i = 0; i < 10; i++) {
+        await yieldToPortableEventLoop();
+      }
+      expect(generate.callCount).toBe(1);
+
+      // The session is deleted WHILE the run remains paused — no later
+      // `submitSteeringCommand` could ever reach a resume through the
+      // now-deleted session, so this must be the moment the paused run is
+      // released, not left blocked on a promise the discarded gate alone
+      // held.
+      await bureau.deleteSession(run.sessionId);
+
+      await waitForRunCompletion(bureau, run.id);
+      expect(generate.callCount).toBe(2);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('deleteSession does not let a run released from a pause recreate the session once it later completes (PR #430 review, Codex P1, second wave — "Prevent released runs from recreating deleted sessions")', async () => {
+    let releaseTool: (() => void) | undefined;
+    const toolGate = new Promise<void>((resolve) => {
+      releaseTool = resolve;
+    });
+    const nextTool = createTool({
+      name: 'next',
+      description: 'continue',
+      input: z.object({}),
+      execute: async () => {
+        await toolGate;
+        return 'ok';
+      },
+    });
+    const generate = createSequentialGenerate([
+      { content: 'step 0', toolCalls: [{ name: 'next', arguments: {} }] },
+      { content: 'done', toolCalls: [] },
+    ]);
+
+    const bureau = await createBureau({
+      agents: {},
+      generate,
+      toolbox: createToolbox([nextTool]),
+      storage: { type: 'memory' },
+      stopWhen: stopWhen.noToolCalls(),
+    });
+    try {
+      const run = await bureau.createRun({ message: 'go', principal: 'alice' });
+      await pollUntil(() => generate.callCount === 1);
+
+      const pause = await bureau.submitSteeringCommand(run.sessionId, {
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+      });
+      expect(pause.outcome).toBe('accepted');
+      releaseTool!();
+      for (let i = 0; i < 10; i++) {
+        await yieldToPortableEventLoop();
+      }
+      expect(generate.callCount).toBe(1);
+
+      await bureau.deleteSession(run.sessionId);
+      expect(await bureau.getSession(run.sessionId)).toBeUndefined();
+
+      // The released run keeps executing to its own natural completion —
+      // that part is unchanged — but its terminal `saveSession` call must
+      // not resurrect the record `deleteSession` just removed.
+      await waitForRunCompletion(bureau, run.id);
+      expect(generate.callCount).toBe(2);
+      expect(await bureau.getSession(run.sessionId)).toBeUndefined();
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('a second run on the same session does not re-fire steering.applied for a configVersion a prior run already applied (cross-run dedupe, end-to-end)', async () => {
+    let releaseTool: (() => void) | undefined;
+    const toolGate = new Promise<void>((resolve) => {
+      releaseTool = resolve;
+    });
+    const nextTool = createTool({
+      name: 'next',
+      description: 'continue',
+      input: z.object({}),
+      execute: async () => {
+        await toolGate;
+        return 'ok';
+      },
+    });
+    const generate = createSequentialGenerate([
+      { content: 'run 1 step 0', toolCalls: [{ name: 'next', arguments: {} }] },
+      { content: 'run 1 done', toolCalls: [] },
+      { content: 'run 2 done', toolCalls: [] },
+    ]);
+
+    const bureau = await createBureau({
+      agents: {},
+      generate,
+      toolbox: createToolbox([nextTool]),
+      storage: { type: 'memory' },
+      stopWhen: stopWhen.noToolCalls(),
+    });
+    try {
+      const run1Events: Array<{ event: string; runId: string }> = [];
+      const unsubscribeRun1 = bureau.subscribeLiveFrames((frame) => {
+        if (frame.type === 'event') run1Events.push({ event: frame.event, runId: frame.runId });
+      });
+
+      const run1 = await bureau.createRun({ message: 'go', principal: 'alice' });
+      await pollUntil(() => generate.callCount === 1);
+
+      const pause = await bureau.submitSteeringCommand(run1.sessionId, {
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+      });
+      expect(pause.outcome).toBe('accepted');
+      releaseTool!();
+      for (let i = 0; i < 5; i++) {
+        await yieldToPortableEventLoop();
+      }
+      const resume = await bureau.submitSteeringCommand(run1.sessionId, {
+        principal: 'alice',
+        requestedValue: { target: 'resume' },
+      });
+      expect(resume.outcome).toBe('accepted');
+      await waitForRunCompletion(bureau, run1.id);
+      unsubscribeRun1();
+
+      // Sanity: the mechanism is real — run-1 DID fire steering.applied for
+      // its own resume, so the run-2 negative assertion below is not
+      // vacuously true.
+      expect(
+        run1Events.filter((e) => e.runId === run1.id && e.event === 'steering.applied').length,
+      ).toBeGreaterThan(0);
+
+      // run-1's own runStep boundary already observed and applied
+      // configVersion 2 (the resume). Collect every live event frame from
+      // here on, then filter to run-2's own — it must NOT re-fire
+      // steering.applied for that same already-applied version.
+      const events: Array<{ event: string; runId: string }> = [];
+      const unsubscribe = bureau.subscribeLiveFrames((frame) => {
+        if (frame.type === 'event') events.push({ event: frame.event, runId: frame.runId });
+      });
+      const run2 = await bureau.createRun({
+        message: 'go again',
+        principal: 'alice',
+        sessionId: run1.sessionId,
+      });
+      await waitForRunCompletion(bureau, run2.id);
+      unsubscribe();
+
+      const run2Events = events.filter((e) => e.runId === run2.id).map((e) => e.event);
+      expect(run2Events).not.toContain('steering.applied');
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('two concurrent runs on the same session: an unscoped pause is run-ambiguous, an explicitly-scoped pause blocks only its own run (PR #430 review, Codex P2 — genuine live-run enumeration)', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: () => new Promise<never>(() => {}),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+    });
+    try {
+      const runA = await bureau.createRun({ message: 'go A', principal: 'alice' });
+      // A second run reusing runA's sessionId, so both are simultaneously
+      // 'running' — genuine concurrency, not a scheduling artifact.
+      const runB = await bureau.createRun({
+        message: 'go B',
+        principal: 'alice',
+        sessionId: runA.sessionId,
+      });
+      await pollUntil(async () => {
+        const detailA = bureau.getRun(runA.id);
+        const detailB = bureau.getRun(runB.id);
+        return detailA?.status === 'running' && detailB?.status === 'running';
+      });
+
+      // No runId: two live runs on this session — ambiguous.
+      const ambiguous = await bureau.submitSteeringCommand(runA.sessionId, {
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+      });
+      expect(ambiguous).toEqual({
+        outcome: 'rejected',
+        failure: expect.objectContaining({ reason: 'run-ambiguous' }),
+      });
+
+      // Explicit runId: scopes correctly, and does not affect the OTHER run.
+      const scoped = await bureau.submitSteeringCommand(runA.sessionId, {
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+        runId: runA.id,
+      });
+      expect(scoped.outcome).toBe('accepted');
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it("end-to-end: a pause explicitly targeting still-live run A is authorized after concurrent run B completes and prunes its own authority entry (PR #430 review, Codex P2, second wave — 'Authorize against the targeted live run')", async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: async (context) => {
+        const isRunB = context.conversation
+          .getMessages()
+          .some((message) => message.content === 'go B');
+        if (isRunB) return { content: 'B done', toolCalls: [] };
+        return new Promise<never>(() => {});
+      },
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      stopWhen: stopWhen.noToolCalls(),
+    });
+    try {
+      const runA = await bureau.createRun({ message: 'go A', principal: 'alice' });
+      const runB = await bureau.createRun({
+        message: 'go B',
+        principal: 'alice',
+        sessionId: runA.sessionId,
+      });
+      await waitForRunCompletion(bureau, runB.id);
+      await pollUntil(async () => bureau.getRun(runA.id)?.status === 'running');
+
+      // B's own terminal transition pruned lastRequestAuthorities[B],
+      // leaving lastRunId: B and A's now-uncorrelated entry behind — a
+      // command explicitly targeting still-live A must still authorize.
+      const scoped = await bureau.submitSteeringCommand(runA.sessionId, {
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+        runId: runA.id,
+      });
+      expect(scoped.outcome).toBe('accepted');
     } finally {
       await bureau.dispose();
     }
