@@ -1,0 +1,9 @@
+---
+'@lostgradient/operative': minor
+---
+
+Emit the schedule definition and fire-terminal lifecycle events AB-87's event and durability matrix reserved but never dispatched (AB-223, re-scoped by the 2026-09-02 coordinator ruling to the five buildable-now events; `schedule.attempted`/`schedule.skipped` move to AB-297, blocked on weft's WFT-136).
+
+`@lostgradient/operative`'s `events.ts` gains `SchedulePausedEvent`, `ScheduleResumedEvent`, `ScheduleCancelledEvent`, `ScheduleFailedEvent`, and `ScheduleCompletedEvent`. `AgentScheduleHandle` (`durable/schedule-agent.ts`, and `createAgentScheduler`'s constructor-bound emitter) and `DurableHeartbeat` (`scheduler/create-durable-heartbeat.ts`) each accept an optional `emitter` and dispatch the definition-level three from their own `pause`/`resume`/`cancel` — `DurableHeartbeat.cancel()` dispatches `schedule.cancelled` only on the call that actually cancels the underlying schedule, not one that merely unregisters a shared registration. `schedule.deleted` stays reserved and unreachable: Gateway's `DELETE /schedules/:id` routes through `Bureau.cancelSchedule`, so cancel and delete share one call site.
+
+`bureau`'s `create-bureau.ts` dispatches `schedule.paused`/`schedule.resumed`/`schedule.cancelled` from `Bureau.pauseSchedule`/`resumeSchedule`/`cancelSchedule` onto the bureau's own event emitter — added to `BureauEventMap`. `runtime-composition.ts` correlates a scheduled fire's `runId` to its `scheduleId` (recorded in `buildScheduledRunServices`) against the durable engine's `workflow:completed`/`workflow:failed` terminal events, dispatching `schedule.completed`/`schedule.failed` for both a live tick and a recovered fire exactly once either way — distinct from, and correlated via `runId` to, the fired run's own `run.completed`/`run.error`.
