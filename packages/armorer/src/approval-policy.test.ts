@@ -216,8 +216,14 @@ describe('createApprovalPolicyHooks', () => {
     const readOnlyDecision = await hooks.beforeExecute?.(buildContext({ readOnly: true }));
     const mutatingDecision = await hooks.beforeExecute?.(buildContext({ mutates: true }));
     expect(readOnlyDecision).toEqual({ allow: true, status: 'allow' });
-    expect(mutatingDecision?.allow).toBe(false);
-    expect(mutatingDecision?.status).toBe('needs_approval');
+    // `ToolPolicyHooks.beforeExecute` may also return a bare `boolean` (see
+    // AB-308), but `createApprovalPolicyHooks`'s hook never does — narrow
+    // before reading `.allow`/`.status` instead of casting.
+    if (typeof mutatingDecision !== 'object' || mutatingDecision === null) {
+      throw new Error('expected a ToolPolicyDecision, not a bare boolean');
+    }
+    expect(mutatingDecision.allow).toBe(false);
+    expect(mutatingDecision.status).toBe('needs_approval');
   });
 });
 

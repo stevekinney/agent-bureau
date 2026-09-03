@@ -19,6 +19,10 @@ export type InferToolInput<T> =
 /** Extract output type from a tool */
 export type InferToolOutput<T> = T extends Tool<infer _S, infer _E, infer R, infer _M> ? R : never;
 
+/** Extract the metadata type from a tool. */
+export type InferToolMetadata<T> =
+  T extends Tool<infer _S, infer _E, infer _R, infer M> ? M : ToolMetadata | undefined;
+
 /** Any tool (for constraint purposes) */
 export type AnyTool = Tool<ToolParametersSchema, ToolEventsMap, unknown, ToolMetadata | undefined>;
 
@@ -57,10 +61,17 @@ export type ComposedToolEvents = DefaultToolEvents & {
   [key: string]: unknown;
 };
 
-/** Composed tool result type - uses DefaultToolEvents by default */
-export type ComposedTool<TInput extends object, TOutput> = Tool<
-  z.ZodType<TInput>,
-  DefaultToolEvents,
+/**
+ * Composed tool result type - uses DefaultToolEvents by default.
+ *
+ * `TMetadata` defaults to `ToolMetadata | undefined` rather than the
+ * previously hardcoded `undefined`: `preprocess`/`postprocess`
+ * (`src/utilities/preprocess.ts`, `src/utilities/postprocess.ts`) carry the
+ * wrapped tool's `metadata` through onto the composed tool's configuration
+ * at runtime, so a composed tool's `.metadata` is not always `undefined`.
+ */
+export type ComposedTool<
+  TInput extends object,
   TOutput,
-  undefined
->;
+  TMetadata extends ToolMetadata | undefined = ToolMetadata | undefined,
+> = Tool<z.ZodType<TInput>, DefaultToolEvents, TOutput, TMetadata>;

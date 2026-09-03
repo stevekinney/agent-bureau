@@ -3,9 +3,7 @@ import type { StandardSchemaV1 } from 'interoperability';
 import { z } from 'zod';
 
 import { createTool, createToolCall } from '../src';
-import { serializeToolDefinition } from '../src/core/serialization';
 import type { JsonObject } from '../src/core/serialization/json';
-import type { AnyToolDefinition } from '../src/core/tool-definition';
 
 /**
  * A minimal hand-rolled Standard Schema V1 validator (no vendor dependency
@@ -105,11 +103,8 @@ describe('createTool with a non-Zod Standard Schema input', () => {
       execute: async (params: { name: string }) => `hello, ${params.name}`,
     });
 
-    // `toJSON` is attached to every tool at runtime (see `createTool` in
-    // `src/create-tool.ts`) but isn't declared on the public `Tool`
-    // interface, so this serializes through the same underlying helper
-    // directly instead.
-    const serialized = serializeToolDefinition(tool.configuration as AnyToolDefinition);
+    // AB-308: `Tool.toJSON()` is part of the public `Tool` type.
+    const serialized = tool.toJSON();
     expect(serialized.input).toEqual(greetingJsonSchema);
   });
 

@@ -95,6 +95,12 @@ export type {
   ToolAvailabilityHook,
   ToolDefinition,
 } from './core/tool-definition';
+// `Tool.toJSON()` (see `./is-tool`) returns `SerializedToolDefinition`, so
+// it must be part of the top-level public surface: a downstream package
+// whose own exported function infers a `Tool` return type (no explicit
+// annotation) needs to be able to name this type, not just reach it through
+// the `armorer/core` subpath.
+export type { SerializedToolDefinition } from './core/serialization';
 export type { CreateToolOptions, WithContext } from './create-tool';
 export { createTool, createToolCall, lazy, withContext } from './create-tool';
 export type {
@@ -231,6 +237,8 @@ export type {
   Tool,
   ToolCallWithArguments,
   ToolConfiguration,
+  ToolConfigurationInput,
+  ToolConfigurationShorthand,
   ToolContext,
   ToolCustomEvent,
   ToolDiagnostics,

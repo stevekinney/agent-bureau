@@ -62,10 +62,9 @@ describe('preprocess', () => {
     });
 
     const preprocessed = preprocess(tool, async (input: { value: number }) => input);
-    // `preprocess()`'s return type doesn't propagate the wrapped tool's
-    // metadata type parameter, so this reads it back as `unknown` even
-    // though the metadata is preserved at runtime.
-    expect(preprocessed.metadata as unknown).toEqual({ category: 'test', priority: 1 });
+    // AB-308: `preprocess()`'s return type now propagates the wrapped
+    // tool's metadata type parameter, so this reads it back typed, no cast.
+    expect(preprocessed.metadata).toEqual({ category: 'test', priority: 1 });
   });
 
   it('works with sync mapper', async () => {
@@ -204,10 +203,9 @@ describe('postprocess', () => {
     });
 
     const postprocessed = postprocess(tool, async (output) => output);
-    // `postprocess()`'s return type doesn't propagate the wrapped tool's
-    // metadata type parameter, so this reads it back as `unknown` even
-    // though the metadata is preserved at runtime.
-    expect(postprocessed.metadata as unknown).toEqual({ category: 'test', priority: 1 });
+    // AB-308: `postprocess()`'s return type now propagates the wrapped
+    // tool's metadata type parameter, so this reads it back typed, no cast.
+    expect(postprocessed.metadata).toEqual({ category: 'test', priority: 1 });
   });
 
   it('works with sync mapper', async () => {

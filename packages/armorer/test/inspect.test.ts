@@ -11,25 +11,29 @@ import {
   RegistryInspectionSchema,
   ToolInspectionSchema,
 } from '../src/inspect';
-import type { ToolConfiguration } from '../src/is-tool';
+import type { ToolConfigurationInput } from '../src/is-tool';
 
-// `createToolbox()` normalizes a friendly config shorthand like this one
-// (deriving `identity`/`id`/`display` at registration time — see
-// `registerConfiguration` in `src/create-toolbox.ts`), so the strict
-// `ToolConfiguration` type doesn't describe what a caller actually needs to
-// supply here. This mirrors that runtime leniency with one documented cast
-// instead of fighting the type at each call site.
-const makeConfiguration = (overrides?: Partial<ToolConfiguration>): ToolConfiguration =>
-  ({
-    name: 'sum',
-    description: 'add two numbers',
-    input: z.object({ a: z.number(), b: z.number() }),
-    tags: ['math'],
-    async execute({ a, b }: { a: number; b: number }) {
-      return a + b;
-    },
-    ...overrides,
-  }) as unknown as ToolConfiguration;
+// AB-308: `createToolbox()` accepts the friendly configuration shorthand
+// (`ToolConfigurationInput`) directly — `identity`/`id`/`display` are
+// derived at registration time (`registerConfiguration` in
+// `src/create-toolbox.ts`) — so this needs no cast to the strict
+// `ToolConfiguration` type.
+const makeConfiguration = (
+  overrides?: Partial<ToolConfigurationInput>,
+): ToolConfigurationInput => ({
+  name: 'sum',
+  description: 'add two numbers',
+  input: z.object({ a: z.number(), b: z.number() }),
+  tags: ['math'],
+  // `execute`'s declared parameter type is `unknown` (see `ToolConfiguration`
+  // in `src/is-tool.ts`) — TypeScript's function-type contravariance rejects
+  // a narrowed destructured parameter here, so this narrows inside instead.
+  async execute(params: unknown) {
+    const { a, b } = params as { a: number; b: number };
+    return a + b;
+  },
+  ...overrides,
+});
 
 describe('inspect', () => {
   describe('extractSchemaSummary', () => {

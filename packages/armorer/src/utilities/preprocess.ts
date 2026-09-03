@@ -1,8 +1,14 @@
 import { z } from 'zod';
 
-import type { AnyTool, ComposedTool, InferToolInput, InferToolOutput } from '../compose-types';
+import type {
+  AnyTool,
+  ComposedTool,
+  InferToolInput,
+  InferToolMetadata,
+  InferToolOutput,
+} from '../compose-types';
 import { createTool, type CreateToolOptions } from '../create-tool';
-import type { DefaultToolEvents, ToolContext, ToolMetadata } from '../is-tool';
+import type { DefaultToolEvents, ToolContext } from '../is-tool';
 
 type PreprocessMapper<TInput, TTransformedInput> = (
   input: TInput,
@@ -37,7 +43,7 @@ type PreprocessMapper<TInput, TTransformedInput> = (
 export function preprocess<TTool extends AnyTool, TNewInput extends object>(
   tool: TTool,
   mapper: PreprocessMapper<TNewInput, InferToolInput<TTool>>,
-): ComposedTool<TNewInput, InferToolOutput<TTool>> {
+): ComposedTool<TNewInput, InferToolOutput<TTool>, InferToolMetadata<TTool>> {
   const name = `preprocess(${tool.name})`;
   const description = `Preprocessed tool: ${tool.description}`;
   const tags = tool.tags && tool.tags.length ? tool.tags : undefined;
@@ -70,13 +76,13 @@ export function preprocess<TTool extends AnyTool, TNewInput extends object>(
       InferToolOutput<TTool>,
       DefaultToolEvents,
       readonly string[],
-      ToolMetadata | undefined,
+      InferToolMetadata<TTool>,
       ToolContext<DefaultToolEvents>,
       InferToolOutput<TTool>
     >,
     'metadata'
   > & {
-    metadata?: ToolMetadata | undefined;
+    metadata?: InferToolMetadata<TTool>;
   } = {
     name,
     description,
@@ -85,15 +91,20 @@ export function preprocess<TTool extends AnyTool, TNewInput extends object>(
       return runPreprocess(params, context);
     },
     ...(tags ? { tags } : {}),
-    ...(tool.metadata !== undefined ? { metadata: tool.metadata } : {}),
+    // `tool: TTool` (generic, constrained to `AnyTool`) makes `tool.metadata`
+    // resolve to `AnyTool`'s fixed `ToolMetadata | undefined`, not the
+    // caller's concrete `InferToolMetadata<TTool>` — TypeScript can't prove
+    // the two are the same type inside a generic function even though they
+    // structurally are. Narrowest correct cast at the one property read.
+    ...(tool.metadata !== undefined ? { metadata: tool.metadata as InferToolMetadata<TTool> } : {}),
   };
   return createTool<
     TNewInput,
     InferToolOutput<TTool>,
     DefaultToolEvents,
     readonly string[],
-    ToolMetadata | undefined,
+    InferToolMetadata<TTool>,
     ToolContext<DefaultToolEvents>,
     InferToolOutput<TTool>
-  >(toolOptions) as ComposedTool<TNewInput, InferToolOutput<TTool>>;
+  >(toolOptions) as ComposedTool<TNewInput, InferToolOutput<TTool>, InferToolMetadata<TTool>>;
 }

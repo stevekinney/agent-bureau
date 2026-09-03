@@ -1,6 +1,12 @@
-import type { AnyTool, ComposedTool, InferToolInput, InferToolOutput } from '../compose-types';
+import type {
+  AnyTool,
+  ComposedTool,
+  InferToolInput,
+  InferToolMetadata,
+  InferToolOutput,
+} from '../compose-types';
 import { createTool, type CreateToolOptions } from '../create-tool';
-import type { DefaultToolEvents, ToolContext, ToolMetadata } from '../is-tool';
+import type { DefaultToolEvents, ToolContext } from '../is-tool';
 
 type PostprocessMapper<TOutput, TNewOutput> = (
   output: TOutput,
@@ -36,7 +42,7 @@ type PostprocessMapper<TOutput, TNewOutput> = (
 export function postprocess<TTool extends AnyTool, TNewOutput>(
   tool: TTool,
   mapper: PostprocessMapper<InferToolOutput<TTool>, TNewOutput>,
-): ComposedTool<InferToolInput<TTool>, TNewOutput> {
+): ComposedTool<InferToolInput<TTool>, TNewOutput, InferToolMetadata<TTool>> {
   const name = `postprocess(${tool.name})`;
   const description = `Postprocessed tool: ${tool.description}`;
   const tags = tool.tags && tool.tags.length ? tool.tags : undefined;
@@ -60,13 +66,13 @@ export function postprocess<TTool extends AnyTool, TNewOutput>(
       TNewOutput,
       DefaultToolEvents,
       readonly string[],
-      ToolMetadata | undefined,
+      InferToolMetadata<TTool>,
       ToolContext<DefaultToolEvents>,
       TNewOutput
     >,
     'metadata'
   > & {
-    metadata?: ToolMetadata | undefined;
+    metadata?: InferToolMetadata<TTool>;
   } = {
     name,
     description,
@@ -75,15 +81,19 @@ export function postprocess<TTool extends AnyTool, TNewOutput>(
       return runPostprocess(params, context);
     },
     ...(tags ? { tags } : {}),
-    ...(tool.metadata !== undefined ? { metadata: tool.metadata } : {}),
+    // See the matching comment in `preprocess.ts`: `tool.metadata` resolves
+    // to `AnyTool`'s fixed metadata type inside this generic function, not
+    // the caller's concrete `InferToolMetadata<TTool>`, even though the two
+    // are structurally the same value.
+    ...(tool.metadata !== undefined ? { metadata: tool.metadata as InferToolMetadata<TTool> } : {}),
   };
   return createTool<
     InferToolInput<TTool>,
     TNewOutput,
     DefaultToolEvents,
     readonly string[],
-    ToolMetadata | undefined,
+    InferToolMetadata<TTool>,
     ToolContext<DefaultToolEvents>,
     TNewOutput
-  >(toolOptions) as ComposedTool<InferToolInput<TTool>, TNewOutput>;
+  >(toolOptions) as ComposedTool<InferToolInput<TTool>, TNewOutput, InferToolMetadata<TTool>>;
 }

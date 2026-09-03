@@ -10,7 +10,7 @@ import type {
   ToolRequestContext,
 } from '../src';
 import { createTool, createToolCall, isTool, lazy, withContext } from '../src';
-import { type SerializedToolDefinition, serializeToolDefinition } from '../src/core/serialization';
+import { serializeToolDefinition } from '../src/core/serialization';
 import type { AnyToolDefinition } from '../src/core/tool-definition';
 import { ToolProgressEvent } from '../src/events';
 import {
@@ -214,13 +214,9 @@ describe('createTool', () => {
     expect(tool.toString()).toContain('example');
     expect(tool[Symbol.toPrimitive]('string')).toBe('example');
     expect(`${tool}`).toBe('example');
-    // `toJSON` is attached to the runtime proxy (see `bag.toJSON` in
-    // `src/create-tool.ts`) but deliberately absent from the public `Tool`
-    // type — callers serialize a tool via its `configuration`, not this
-    // property — so it's accessed the same way the legacy `register`
-    // convenience above is: through a cast rather than a public type.
-    const toolWithToJSON = tool as unknown as { toJSON: () => SerializedToolDefinition };
-    expect(toolWithToJSON.toJSON()).toEqual(
+    // AB-308: `toJSON` is now part of the public `Tool` type, accessed
+    // directly instead of through a cast.
+    expect(tool.toJSON()).toEqual(
       serializeToolDefinition({
         ...tool.configuration,
         input: tool.configuration.input ?? tool.input,
@@ -854,11 +850,9 @@ describe('createTool', () => {
       execute: async () => null,
     });
 
-    // `toJSON` is attached to every tool at runtime (see `createTool` in
-    // `src/create-tool.ts`) but isn't declared on the public `Tool`
-    // interface, so this serializes through the same underlying helper
-    // directly instead.
-    const meta = serializeToolDefinition(tool.configuration as AnyToolDefinition);
+    // AB-308: `Tool.toJSON()` is now part of the public `Tool` type, so this
+    // calls it directly instead of going through `serializeToolDefinition`.
+    const meta = tool.toJSON();
     expect(meta.schemaVersion).toBe('2020-12');
     expect(meta.id).toBe('default:json-meta');
     expect(meta.identity).toEqual({ namespace: 'default', name: 'json-meta' });
@@ -2824,10 +2818,11 @@ describe('isTool', () => {
       input: z.object({ a: z.string() }),
       digests: true,
       policy: {
-        // `beforeExecute` tolerates a bare boolean at runtime (see
-        // `typeof decision === 'boolean'` in `src/create-toolbox.ts`), but
-        // its declared type only allows `ToolPolicyDecision | void`.
-        beforeExecute: (() => false) as unknown as () => { allow: boolean },
+        // AB-308: `beforeExecute`'s public type now declares the bare
+        // `boolean` return it already tolerated at runtime (see `typeof
+        // decision === 'boolean'` in `src/create-toolbox.ts`), so this
+        // needs no cast.
+        beforeExecute: () => false,
       },
       async execute() {
         return 'ok';

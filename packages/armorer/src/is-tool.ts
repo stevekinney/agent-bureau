@@ -3,6 +3,7 @@ import { z } from 'zod';
 
 import type { ToolContext as CoreToolContext } from './core/context';
 import type { ToolErrorCategory } from './core/errors';
+import type { SerializedToolDefinition } from './core/serialization';
 import type { JsonObject } from './core/serialization/json';
 import type { ToolAvailabilityHook, ToolDefinition } from './core/tool-definition';
 import type { ToolEventMap } from './events';
@@ -43,6 +44,27 @@ export type ToolConfiguration = ToolDefinition<Record<string, unknown>, unknown>
   concurrency?: number;
   diagnostics?: ToolDiagnostics;
 };
+
+/**
+ * The friendly configuration shorthand `createToolbox()`, `.extend()`, and
+ * toolbox registration accept alongside a full `ToolConfiguration`: every
+ * field a `ToolConfiguration` requires except `id`/`identity`/`display`,
+ * which `normalizeConfiguration` (`src/create-toolbox.ts`) derives from the
+ * flat `name`/`description` that `ToolDefinition` already requires, via
+ * `defineTool`, at registration time.
+ */
+export type ToolConfigurationShorthand = Omit<ToolConfiguration, 'id' | 'identity' | 'display'> & {
+  id?: ToolConfiguration['id'];
+  identity?: ToolConfiguration['identity'];
+  display?: ToolConfiguration['display'];
+};
+
+/**
+ * Anything `createToolbox()`, `.extend()`, or toolbox registration accepts
+ * as a tool entry's configuration: a fully-formed `ToolConfiguration`, or
+ * the friendly shorthand above.
+ */
+export type ToolConfigurationInput = ToolConfiguration | ToolConfigurationShorthand;
 
 export type ToolEventsMap = Record<string, unknown>;
 
@@ -165,9 +187,15 @@ export type ToolPolicyAfterContext = ToolPolicyContext & {
 };
 
 export type ToolPolicyHooks = {
+  /**
+   * `resolvePolicyDecision` (`src/create-tool.ts` and `src/create-toolbox.ts`)
+   * tolerates a bare `boolean` return at runtime — `typeof decision ===
+   * 'boolean'` is treated as an `allow` shorthand equivalent to `{ allow:
+   * decision }` — in addition to a full `ToolPolicyDecision`.
+   */
   beforeExecute?: (
     context: ToolPolicyContext,
-  ) => ToolPolicyDecision | void | Promise<ToolPolicyDecision | void>;
+  ) => ToolPolicyDecision | boolean | void | Promise<ToolPolicyDecision | boolean | void>;
   afterExecute?: (context: ToolPolicyAfterContext) => void | Promise<void>;
 };
 
@@ -496,6 +524,8 @@ export type Tool<
   };
   executeWith: (options: ToolExecuteWithOptions) => Promise<ToolExecutionResult>;
   rawExecute: (params: unknown, context: ToolContext<E>) => Promise<R>;
+  /** Serializes the tool's configuration (see `toJSON` in `src/create-tool.ts`). */
+  toJSON: () => SerializedToolDefinition;
 };
 
 export type RunnableTool<

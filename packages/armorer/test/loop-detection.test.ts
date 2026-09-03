@@ -9,10 +9,12 @@ describe('loop detection', () => {
     });
     it('handles null and undefined', () => {
       expect(stableStringify(null)).toBe('null');
-      // `stableStringify`'s declared return type is `string`, but it
-      // delegates to `JSON.stringify`, which returns `undefined` at runtime
-      // for `undefined` input.
-      expect(stableStringify(undefined) as unknown).toBe(undefined);
+      // AB-308: `stableStringify(undefined)` used to return the runtime
+      // value `undefined` (via `JSON.stringify`) despite its declared
+      // `string` return type — a runtime defect, not a type gap. It now
+      // returns `'null'`, matching the text `JSON.stringify` produces for
+      // `undefined` nested inside an array, with no cast needed.
+      expect(stableStringify(undefined)).toBe('null');
     });
     it('handles primitives', () => {
       expect(stableStringify(42)).toBe('42');
@@ -26,6 +28,24 @@ describe('loop detection', () => {
       const a = stableStringify({ x: { b: 2, a: 1 }, y: [3, 4] });
       const b = stableStringify({ y: [3, 4], x: { a: 1, b: 2 } });
       expect(a).toBe(b);
+    });
+    it('never returns the runtime value undefined for functions or symbols', () => {
+      // AB-308: the review-flagged gap. `JSON.stringify` returns the runtime
+      // value `undefined` (not a string) for a top-level function or symbol,
+      // which would violate stableStringify's declared `string` return type.
+      expect(stableStringify(() => {})).toBe('null');
+      expect(stableStringify(Symbol('x'))).toBe('null');
+    });
+    it('stringifies functions and symbols to null inside an array, matching JSON.stringify', () => {
+      expect(stableStringify([1, () => {}, Symbol('x'), 2])).toBe('[1,null,null,2]');
+    });
+    it('omits object properties whose value is undefined, a function, or a symbol', () => {
+      expect(stableStringify({ a: 1, b: undefined, c: () => {}, d: Symbol('x') })).toBe('{"a":1}');
+    });
+    it('never throws for a BigInt, unlike JSON.stringify', () => {
+      expect(() => JSON.stringify(123n)).toThrow();
+      expect(stableStringify(123n)).toBe('"123"');
+      expect(stableStringify([1n, 2n])).toBe('["1","2"]');
     });
   });
 
