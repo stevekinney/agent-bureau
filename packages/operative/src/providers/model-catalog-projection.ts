@@ -42,15 +42,23 @@ export const GENERAL_PROJECTION_REDACTED_KEYS: readonly (keyof BackendDescriptor
  * it exists to make the `'general'` projection's redaction genuinely
  * structural — enforced by transformation, not merely true by convention —
  * against a future descriptor row whose `endpoint` happens to be URL-shaped.
+ *
+ * Never falls back to any host-derived value: a URL with no path component
+ * (`'https://proxy.internal.example.com'`) returns `''`, not the hostname —
+ * returning the hostname there would leak exactly the host/origin detail
+ * this function exists to strip (review finding, PRRT_kwDORvupsc6e4ZXI). A
+ * value that contains `'://'` but fails to parse as a URL also returns `''`
+ * rather than the raw input, for the same reason: an unparseable string can
+ * still carry host-shaped text, and this function's contract is "never
+ * expose host/origin detail", not "best-effort strip it".
  */
 function toBareOperationName(endpoint: string): string {
   if (!endpoint.includes('://')) return endpoint;
   try {
     const url = new URL(endpoint);
-    const path = url.pathname.replace(/^\/+/, '');
-    return path.length > 0 ? path : url.hostname;
+    return url.pathname.replace(/^\/+/, '');
   } catch {
-    return endpoint;
+    return '';
   }
 }
 

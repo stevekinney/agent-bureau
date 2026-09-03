@@ -89,10 +89,17 @@ describe('projectDescriptor: general projection redacts exactly AC8s four things
     expect(general.endpoint.includes('://')).toBe(false);
   });
 
-  it('falls back to the raw endpoint value when it contains "://" but does not parse as a URL', () => {
+  it('redacts to an empty string — never the hostname — when the URL has no path component', () => {
+    const noPath = { ...FULL_DESCRIPTOR, endpoint: 'https://proxy.internal.example.com' };
+    const general = projectDescriptor(noPath, 'general');
+    expect(general.endpoint).toBe('');
+    expect(general.endpoint.includes('proxy.internal.example.com')).toBe(false);
+  });
+
+  it('redacts to an empty string — never the raw value — when it contains "://" but does not parse as a URL', () => {
     const unparseable = { ...FULL_DESCRIPTOR, endpoint: 'http://[invalid' };
     const general = projectDescriptor(unparseable, 'general');
-    expect(general.endpoint).toBe('http://[invalid');
+    expect(general.endpoint).toBe('');
   });
 
   it('is a no-op on an already-bare endpoint, matching the real seed rows', () => {
