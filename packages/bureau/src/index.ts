@@ -49,6 +49,20 @@ export {
 export type { BureauEventMap } from './events';
 export { ActionEvent, BureauDisposedEvent, RunRegisteredEvent, RunRemovedEvent } from './events';
 export type {
+  LivenessSnapshotEnvelope,
+  TaskDiagnosticsFilter,
+  TaskDiagnosticsResult,
+  WeftLivenessSource,
+  WorkerDiagnosticsResult,
+} from './liveness-projection';
+export {
+  buildTaskDiagnosticsInput,
+  projectEngineLeaseSnapshot,
+  projectStreamLivenessSnapshot,
+  projectTaskLivenessSnapshot,
+  projectWorkerLivenessSnapshot,
+} from './liveness-projection';
+export type {
   CatalogDescriptorSource,
   CatalogRefreshCleanupAcknowledgement,
   CatalogRefreshHandle,
