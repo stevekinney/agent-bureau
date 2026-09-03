@@ -74,6 +74,14 @@ async function triggerCounterChange(
   subject: InMemoryCounterSubject,
 ): Promise<void> {
   const done = subject.applyChange();
+  // Yield once *before* driving the virtual clock. `applyChange()` above
+  // has already scheduled its timer but nothing has fired yet, so this is
+  // what puts `subscribeReadRaceClosure`'s read genuinely between "change
+  // started" and "change committed" — without it, `advance()` below would
+  // fire the (single, synchronous) timer before control ever returns to a
+  // caller reading mid-flight, and the case would only ever observe the
+  // already-committed state.
+  await Promise.resolve();
   await runtime.advance(50);
   await done;
 }
@@ -316,20 +324,16 @@ it('fails only subscribeReadRaceClosure when a change commits in two non-atomic 
         };
       },
       async applyChange() {
-        await new Promise<void>((resolve) => {
-          runtime.timers.setTimeout(() => {
-            // BUG: two separate reassignments with a real suspension point
-            // between them — a reader in that window sees `value` already
-            // advanced but `version` still stale: a torn intermediate
-            // snapshot, matching neither the pre- nor the post-change state.
-            current = { value: current.value + 1, version: current.version };
-            runtime.timers.setTimeout(() => {
-              current = { value: current.value, version: current.version + 1 };
-              for (const listener of listeners) listener();
-              resolve();
-            }, 1);
-          }, 1);
-        });
+        // BUG: two separate reassignments with a real suspension point
+        // between them (phase 1 lands synchronously, before this call even
+        // returns — the immediate read below observes it directly) — a
+        // reader in that window sees `value` already advanced but
+        // `version` still stale: a torn intermediate snapshot, matching
+        // neither the pre- nor the post-change state.
+        current = { value: current.value + 1, version: current.version };
+        await Promise.resolve();
+        current = { value: current.value, version: current.version + 1 };
+        for (const listener of listeners) listener();
       },
     };
   }
@@ -337,8 +341,12 @@ it('fails only subscribeReadRaceClosure when a change commits in two non-atomic 
   const options: ReactiveSourceConformanceOptions<CounterSnapshot> = {
     ...createCleanOptions(runtime),
     createSubject: createTornCounterSubject,
+    // Deliberately not `triggerCounterChange`: this fixture's own
+    // `applyChange` already contains its suspension point (the mutation's
+    // first phase runs synchronously, before this call returns), so no
+    // additional yield or virtual-clock advance is needed to expose it.
     triggerChange(subject: InMemoryCounterSubject) {
-      return triggerCounterChange(runtime, subject);
+      return subject.applyChange();
     },
     reattach: undefined,
   };
