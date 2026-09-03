@@ -29,6 +29,24 @@ describe('loop detection', () => {
       const b = stableStringify({ y: [3, 4], x: { a: 1, b: 2 } });
       expect(a).toBe(b);
     });
+    it('never returns the runtime value undefined for functions or symbols', () => {
+      // AB-308: the review-flagged gap. `JSON.stringify` returns the runtime
+      // value `undefined` (not a string) for a top-level function or symbol,
+      // which would violate stableStringify's declared `string` return type.
+      expect(stableStringify(() => {})).toBe('null');
+      expect(stableStringify(Symbol('x'))).toBe('null');
+    });
+    it('stringifies functions and symbols to null inside an array, matching JSON.stringify', () => {
+      expect(stableStringify([1, () => {}, Symbol('x'), 2])).toBe('[1,null,null,2]');
+    });
+    it('omits object properties whose value is undefined, a function, or a symbol', () => {
+      expect(stableStringify({ a: 1, b: undefined, c: () => {}, d: Symbol('x') })).toBe('{"a":1}');
+    });
+    it('never throws for a BigInt, unlike JSON.stringify', () => {
+      expect(() => JSON.stringify(123n)).toThrow();
+      expect(stableStringify(123n)).toBe('"123"');
+      expect(stableStringify([1n, 2n])).toBe('["1","2"]');
+    });
   });
 
   describe('LoopDetector recordCall', () => {

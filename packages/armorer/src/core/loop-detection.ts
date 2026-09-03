@@ -321,29 +321,41 @@ export class LoopDetector {
 }
 
 /**
+ * Values `JSON.stringify` treats as absent: `undefined` itself, and the two
+ * other primitive types it silently drops (functions, symbols). `JSON.stringify`
+ * returns the runtime value `undefined` for these at the top level, stringifies
+ * them to `'null'` inside an array, and omits them entirely as object properties.
+ */
+function isOmittedByJson(value: unknown): boolean {
+  return value === undefined || typeof value === 'function' || typeof value === 'symbol';
+}
+
+/**
  * Stable stringify: produces consistent JSON-like output for objects.
  * Recursively sorts object keys so that key order does not affect the result.
- * Similar to JSON.stringify but omits undefined values (same behavior as JSON.stringify).
- * Does NOT preserve function values, BigInt, circular refs, or symbols.
+ * Mirrors `JSON.stringify`'s treatment of `undefined`, functions, and symbols:
+ * `'null'` at the top level or inside an array, omitted as an object property.
+ * Does NOT preserve circular refs.
  *
- * Always returns a string: unlike `JSON.stringify`, which returns the
- * runtime value `undefined` (not a string) for `undefined` input, this
- * stringifies a top-level `undefined` to `'null'` — the same text
- * `JSON.stringify` produces for `undefined` nested inside an array — so
- * every caller (loop-detection's hash function included) can rely on the
- * declared `string` return type.
+ * Always returns a string and never throws, for every `unknown` input:
+ * unlike `JSON.stringify`, which returns the runtime value `undefined` (not
+ * a string) for a top-level `undefined`/function/symbol and throws a
+ * `TypeError` for a `BigInt`, this stringifies the former group to `'null'`
+ * and the latter to its decimal text (e.g. `123n` becomes `"123"`) — so every
+ * caller (loop-detection's hash function included) can rely on the declared
+ * `string` return type.
  */
 export function stableStringify(value: unknown): string {
-  if (value === undefined) return 'null';
+  if (isOmittedByJson(value)) return 'null';
   if (value === null) return JSON.stringify(value);
+  if (typeof value === 'bigint') return JSON.stringify(value.toString());
   if (typeof value !== 'object') return JSON.stringify(value);
   if (Array.isArray(value)) return '[' + value.map(stableStringify).join(',') + ']';
-  const sorted = Object.keys(value).sort();
+  const record = value as Record<string, unknown>;
+  const sorted = Object.keys(record)
+    .filter((k) => !isOmittedByJson(record[k]))
+    .sort();
   return (
-    '{' +
-    sorted
-      .map((k) => JSON.stringify(k) + ':' + stableStringify((value as Record<string, unknown>)[k]))
-      .join(',') +
-    '}'
+    '{' + sorted.map((k) => JSON.stringify(k) + ':' + stableStringify(record[k])).join(',') + '}'
   );
 }
