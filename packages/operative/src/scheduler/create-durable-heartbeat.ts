@@ -10,6 +10,8 @@ import {
   DURABLE_HEARTBEAT_TICK_WORKFLOW_TYPE,
   registerDurableHeartbeatTickServices,
 } from '../durable/durable-heartbeat-tick-workflow';
+import { ScheduleCancelledEvent, SchedulePausedEvent, ScheduleResumedEvent } from '../events';
+import type { EventDispatcher } from '../run-step';
 import type { RunResult } from '../types';
 import type { Scheduler } from './create-scheduler';
 import type { SchedulerPriority, SchedulerRunOptions } from './types';
@@ -22,6 +24,16 @@ export interface CreateDurableHeartbeatOptions {
   priority?: SchedulerPriority;
   onTick?: (result: RunResult | null) => void | Promise<void>;
   onFailure?: (error: unknown) => void | Promise<void>;
+  /**
+   * Optional event dispatcher. When supplied, the returned handle's
+   * `pause`/`resume` each dispatch `SchedulePausedEvent`/`ScheduleResumedEvent`
+   * (AB-223) exactly once per successful call. `cancel()` dispatches
+   * `ScheduleCancelledEvent` only when it actually cancels the underlying Weft
+   * schedule — not when it merely unregisters this caller's services while
+   * another registration keeps the schedule alive (see `cancel`'s branches
+   * below). Omitted entirely for a caller with no event surface.
+   */
+  emitter?: EventDispatcher;
 }
 
 export interface DurableHeartbeat extends Disposable {
@@ -155,13 +167,20 @@ export async function createDurableHeartbeat(
 
   return {
     id: scheduleId,
-    pause: () => engine.pauseSchedule(scheduleId),
-    resume: () => engine.resumeSchedule(scheduleId),
+    async pause() {
+      await engine.pauseSchedule(scheduleId);
+      options.emitter?.dispatch(new SchedulePausedEvent(scheduleId));
+    },
+    async resume() {
+      await engine.resumeSchedule(scheduleId);
+      options.emitter?.dispatch(new ScheduleResumedEvent(scheduleId));
+    },
     async cancel() {
       await withDurableHeartbeatLifecycleLock(engine, scheduleId, async () => {
         if (servicesRegistered && servicesRegistration.isOnlyRegistration()) {
           await engine.cancelSchedule(scheduleId);
           unregister();
+          options.emitter?.dispatch(new ScheduleCancelledEvent(scheduleId));
           return;
         }
         unregister();

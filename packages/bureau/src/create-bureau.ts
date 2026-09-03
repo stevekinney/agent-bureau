@@ -24,6 +24,11 @@ import {
   type RunnableAgent,
   type RunOptions,
   type RunReport,
+  ScheduleCancelledEvent,
+  ScheduleCompletedEvent,
+  ScheduleFailedEvent,
+  SchedulePausedEvent,
+  ScheduleResumedEvent,
   SchedulerTaskCompletedEvent,
   SchedulerTaskFailedEvent,
   type ScheduleWakeupContext,
@@ -104,6 +109,7 @@ import {
   createRuntimeComposition,
   createSchedulerServiceRequestContext,
   decodeScheduleRunMarker,
+  isRunFailureFinishReason,
 } from './runtime-composition';
 import {
   findRunAgentName,
@@ -990,16 +996,6 @@ export function createWakeupContext(servicesRef: {
   };
 }
 
-function isRunFailureFinishReason(finishReason: unknown): boolean {
-  return (
-    finishReason === 'error' ||
-    finishReason === 'tripwire' ||
-    finishReason === 'maximum-steps' ||
-    finishReason === 'elicitation-denied' ||
-    finishReason === 'budget-exceeded'
-  );
-}
-
 export async function monitorRecoveredScheduledFire(
   handle: RecoveredRunHandle,
   diagnose: DiagnosticSink = resolveDiagnosticSink(undefined),
@@ -1077,6 +1073,25 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // agent values, which is unchanged/out of scope.
   const agentsSnapshot: D = { ...options.agents };
   const runtime = await createRuntimeComposition(options);
+  // AB-223: scheduled fires are headless (no per-run emitter — see
+  // `runtime-composition.ts`'s `buildScheduledRunServices`), so a fire's
+  // terminal `schedule.completed`/`schedule.failed` has nowhere else to
+  // dispatch. Forward each onto this bureau's own emitter, the same sink
+  // `pauseSchedule`/`resumeSchedule`/`cancelSchedule` dispatch their
+  // definition-level siblings onto.
+  // A fresh Event instance for the forwarded dispatch, not a re-dispatch of
+  // `event` itself: the WHATWG dispatch algorithm tracks a "being dispatched"
+  // flag per Event OBJECT, so re-dispatching the SAME instance onto a second
+  // EventTarget while still inside the first target's listener throws
+  // "already being dispatched" (this failed loudly in schedule-fire.test.ts
+  // before this fix — every scheduled fire's terminal event forwards
+  // synchronously, from inside `scheduleFireEvents`' own dispatch).
+  runtime.scheduleFireEvents.addEventListener(ScheduleCompletedEvent.type, (event) => {
+    emitter.dispatch(new ScheduleCompletedEvent(event.scheduleId, event.runId));
+  });
+  runtime.scheduleFireEvents.addEventListener(ScheduleFailedEvent.type, (event) => {
+    emitter.dispatch(new ScheduleFailedEvent(event.scheduleId, event.runId));
+  });
   // AB-15/AB-22: the typed agent catalog — a plain literal map, fixed for
   // the bureau's lifetime, dispatched by name through `bureau.run`.
   // Independent of `runtime` (bureau-level generate/toolbox/provider
@@ -4458,18 +4473,21 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   async function pauseSchedule(scheduleId: string): Promise<true | undefined> {
     if (!runtime.durable) return undefined;
     await runtime.durable.engine.pauseSchedule(scheduleId);
+    emitter.dispatch(new SchedulePausedEvent(scheduleId));
     return true;
   }
 
   async function resumeSchedule(scheduleId: string): Promise<true | undefined> {
     if (!runtime.durable) return undefined;
     await runtime.durable.engine.resumeSchedule(scheduleId);
+    emitter.dispatch(new ScheduleResumedEvent(scheduleId));
     return true;
   }
 
   async function cancelSchedule(scheduleId: string): Promise<true | undefined> {
     if (!runtime.durable) return undefined;
     await runtime.durable.engine.cancelSchedule(scheduleId);
+    emitter.dispatch(new ScheduleCancelledEvent(scheduleId));
     return true;
   }
 
