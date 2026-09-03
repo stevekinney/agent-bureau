@@ -1330,7 +1330,13 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     const definitionResolvingAgent = agent as RunnableAgent<unknown, boolean> &
       DefinitionResolvingAgent;
     const resolver = definitionResolvingAgent[OPERATIVE_RESOLVE_RUN_OPTIONS];
-    if (typeof resolver !== 'function') return { status: 'missing-agent' };
+    // AB-240 review finding: distinct from `'missing-agent'` — the name IS
+    // still in the catalog, it just no longer (or never did) exposes AB-21's
+    // resolver, e.g. the catalog was reconfigured between restarts to swap
+    // this name to a different `RunnableAgent`. Conflating the two produced
+    // a misleading "is no longer in the catalog" reason for an agent that
+    // genuinely is still there.
+    if (typeof resolver !== 'function') return { status: 'not-durable-capable' };
     try {
       // Invoked through `definitionResolvingAgent`, matching `runAgent`'s own
       // forwarding below (not a bare extracted `resolver(...)` call) — see its

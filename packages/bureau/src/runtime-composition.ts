@@ -542,6 +542,18 @@ function isCatalogRunRecoveryRecord(value: unknown): value is CatalogRunRecovery
 export type CatalogAgentRunOptionsResolution =
   | { status: 'resolved'; options: RunOptions; definitionRevision: number }
   | { status: 'missing-agent' }
+  /**
+   * The named agent exists in the catalog but does not (or no longer)
+   * expose AB-21's `OPERATIVE_RESOLVE_RUN_OPTIONS` — distinct from
+   * `'missing-agent'` (review finding: conflating the two produced the
+   * misleading "is no longer in the catalog" reason for an agent that
+   * genuinely IS still there, just not durable-resolution-capable). This is
+   * reachable at recovery even though live dispatch only reaches the
+   * durable branch for a resolver-exposing agent: the catalog can be
+   * reconfigured between restarts to swap the same name to a different
+   * `RunnableAgent` that lacks the capability.
+   */
+  | { status: 'not-durable-capable' }
   | { status: 'resolver-failed'; error: unknown };
 
 export type CatalogAgentRunOptionsResolver = (
@@ -2120,10 +2132,19 @@ export async function createRuntimeComposition(
    * scheduled fire) instead of the session-ownership classification, which
    * would otherwise treat it as an orphaned run and cancel it (a catalog run
    * deliberately owns no bureau session).
+   *
+   * True for `'read-error'` as well as `'found'` (review finding): a corrupt
+   * record still marks this workflow id as catalog territory. `'missing'`
+   * is the only status that means "genuinely not a catalog run" — treating
+   * `'read-error'` as `false` would let a merely-corrupt (not absent) record
+   * fall through to the session-ownership classification below, which would
+   * then cancel the run as an unowned orphan instead of leaving it to the
+   * `{ status: 'unavailable', reason: '... unreadable' }` outcome
+   * `resolveRunServices`'s catalog branch already produced for it.
    */
   async function isCatalogRecoveredRun(runId: string): Promise<boolean> {
     const load = await loadCatalogRunRecoveryRecord(runId);
-    return load.status === 'found';
+    return load.status !== 'missing';
   }
 
   /**
@@ -2152,6 +2173,14 @@ export async function createRuntimeComposition(
       return {
         status: 'unavailable',
         reason: `run ${runId}: catalog agent "${record.agentName}" is no longer in the catalog`,
+      };
+    }
+    if (resolution.status === 'not-durable-capable') {
+      return {
+        status: 'unavailable',
+        reason:
+          `run ${runId}: catalog agent "${record.agentName}" no longer supports durable ` +
+          `definition resolution (OPERATIVE_RESOLVE_RUN_OPTIONS)`,
       };
     }
     if (resolution.status === 'resolver-failed') {

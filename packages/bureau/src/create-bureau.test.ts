@@ -7,6 +7,7 @@ import type {
   CombinedOperativeEventMap,
   GenerateFunction,
   GenerateResponse,
+  RunnableAgent,
   StreamEventMap,
   Toolbox,
 } from '@lostgradient/operative';
@@ -1606,6 +1607,81 @@ describe('createBureau', () => {
       // deployment where the agent was retired between restarts.
       const bureauB = await createBureau({
         agents: {},
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+      });
+
+      try {
+        const failed = await pollUntil(async () => {
+          const after = await bureauB.listDurableRuns();
+          return after?.items.find((item) => item.id === runId)?.status === 'failed';
+        });
+        expect(failed).toBe(true);
+      } finally {
+        await bureauB.dispose();
+      }
+      await bureauA.dispose();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('fails the workflow observably with a distinct reason when the catalog agent exists on restart but no longer supports durable definition resolution (AB-240 review finding)', async () => {
+    // Distinct from the "no longer in the catalog" case above: here the name
+    // IS still present, but between restarts it was reconfigured to a
+    // hand-written `RunnableAgent` that never exposed
+    // `OPERATIVE_RESOLVE_RUN_OPTIONS` — proving `createBureau`'s registered
+    // catalog resolver returns `'not-durable-capable'`, not the misleading
+    // `'missing-agent'`, for this distinct failure mode.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-catalog-recovery-not-durable-capable-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+
+    try {
+      let bureauAReachedStep1 = false;
+      const bureauA = await createBureau({
+        agents: {
+          echo: createAgent({
+            generate: async ({ step }) => {
+              if (step === 0) {
+                return { content: 'A step 0', toolCalls: [{ name: 'next', arguments: {} }] };
+              }
+              bureauAReachedStep1 = true;
+              return new Promise<never>(() => {});
+            },
+            toolbox: createToolbox([createNextTool()]),
+            stopWhen: stopWhen.noToolCalls(),
+          }),
+        },
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+      });
+
+      bureauA.run('echo', 'Recover me');
+      await pollUntil(() => bureauAReachedStep1);
+      expect(bureauAReachedStep1).toBe(true);
+
+      const beforeRestart = await bureauA.listDurableRuns();
+      const runId = beforeRestart?.items.find((item) => item.id.startsWith('agent-run-'))?.id;
+      expect(runId).toBeDefined();
+
+      // Bureau B's "echo" is a hand-written agent with no
+      // OPERATIVE_RESOLVE_RUN_OPTIONS — same shape as the non-lazy
+      // "falls back to direct execution" fixture in bureau-run.test.ts.
+      const nonResolvingAgent: RunnableAgent<never, false> = {
+        name: 'echo',
+        hasOutput: false,
+        run: (input, context) =>
+          createAgent({ generate: async () => ({ content: 'plain', toolCalls: [] }) }).run(
+            input,
+            context,
+          ),
+      };
+      const bureauB = await createBureau({
+        agents: { echo: nonResolvingAgent },
         storage: { type: 'sqlite', path: databasePath },
         durableExecution: true,
       });

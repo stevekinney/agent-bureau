@@ -4545,6 +4545,46 @@ describe('resolveRunServices catalog-run recovery branch (AB-240)', () => {
         status: 'unavailable',
         reason: 'run catalog-run-corrupt: catalog recovery record unreadable',
       });
+      // Review finding: a corrupt (not merely absent) record must still
+      // mark this workflow id as catalog territory, so `createBureau`'s
+      // boot classification routes it to the headless catalog monitor
+      // rather than falling through to session-ownership classification
+      // (which would otherwise cancel it as an orphan).
+      expect(await runtime.isCatalogRecoveredRun('catalog-run-corrupt')).toBe(true);
+    } finally {
+      runtime.durable?.engine[Symbol.dispose]?.();
+    }
+  });
+
+  it('reports a distinct reason (never "no longer in the catalog") when the catalog agent exists but no longer supports durable definition resolution', async () => {
+    const runtime = await createRuntimeComposition({
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    try {
+      runtime.setCatalogAgentRunOptionsResolver(async () => ({ status: 'not-durable-capable' }));
+      await runtime.persistCatalogRunRecoveryRecord('catalog-run-not-durable-capable', {
+        agentName: 'echo',
+        definitionRevision: 1,
+        input: 'hello',
+      });
+
+      const result = await getRuntimeCompositionTestingSeams(runtime).resolveRunServices({
+        workflowId: 'catalog-run-not-durable-capable',
+        workflowType: 'agentRun',
+        input: {
+          runId: 'catalog-run-not-durable-capable',
+          sessionId: 'catalog-run-not-durable-capable',
+          agentName: 'echo',
+        },
+      });
+
+      expect(result).toMatchObject({ status: 'unavailable' });
+      const reason = (result as { reason: string }).reason;
+      expect(reason).toContain('echo');
+      expect(reason).toContain('durable definition resolution');
+      expect(reason).not.toContain('no longer in the catalog');
     } finally {
       runtime.durable?.engine[Symbol.dispose]?.();
     }
