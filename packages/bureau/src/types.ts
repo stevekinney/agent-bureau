@@ -373,6 +373,23 @@ export interface BureauOptions<D extends AgentDefinitions = AgentDefinitions> {
    * is opt-in, never an ambient grant.
    */
   humanInput?: boolean;
+  /**
+   * AB-201 — opt into operative's `scheduleWakeup` self-scheduling tool for
+   * durable runs (`createRun` only; has no effect without a durable engine
+   * composed), mirroring {@link BureauOptions.humanInput}'s wiring exactly.
+   * When `true`, bureau adds a `scheduleWakeup` tool to each durable run's
+   * toolbox, bound to that run's real `ctx.services` object so a call
+   * genuinely parks the workflow via `ctx.sleep` (AB-41's decision record)
+   * rather than merely returning a success-shaped no-op. Omit (the default,
+   * or `false`) to leave the toolbox as configured — this tool is opt-in,
+   * never an ambient grant, and is simply absent from the toolbox rather than
+   * wired to throw when disabled (mirroring `requestHumanInput`'s own
+   * omission behavior). A standalone `scheduleWakeup` tool built outside
+   * Bureau's composition with `durable: false` throws
+   * `DurableCapabilityUnavailableError` instead (AB-41 / AB-43), unchanged by
+   * this option.
+   */
+  wakeup?: boolean;
   stopWhen?: StopCondition | StopCondition[];
   sessionPersistenceRetryDelayMilliseconds?: number;
   sessionPersistenceSleep?: (milliseconds: number) => Promise<void>;
