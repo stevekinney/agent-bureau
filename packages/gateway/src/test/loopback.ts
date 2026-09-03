@@ -164,7 +164,7 @@ class FrameQueue<T> {
   private readonly pending: T[] = [];
   private readonly waiters: Array<{
     resolve: (value: T | undefined) => void;
-    reject: (error: unknown) => void;
+    reject: (error: Error) => void;
   }> = [];
   private ended = false;
   private endError: unknown;
@@ -181,8 +181,10 @@ class FrameQueue<T> {
   end(error?: unknown): void {
     this.ended = true;
     this.endError = error;
+    const normalizedError =
+      error instanceof Error ? error : error ? new Error('stream ended') : undefined;
     for (const waiter of this.waiters.splice(0)) {
-      if (error) waiter.reject(error);
+      if (normalizedError) waiter.reject(normalizedError);
       else waiter.resolve(undefined);
     }
   }
@@ -207,15 +209,26 @@ class FrameQueue<T> {
         reject(signal.reason instanceof Error ? signal.reason : new Error('aborted'));
         return;
       }
-      signal.addEventListener(
-        'abort',
-        () => {
-          const index = this.waiters.indexOf(waiter);
-          if (index >= 0) this.waiters.splice(index, 1);
-          reject(signal.reason instanceof Error ? signal.reason : new Error('aborted'));
-        },
-        { once: true },
-      );
+      const onAbort = (): void => {
+        const index = this.waiters.indexOf(waiter);
+        if (index >= 0) this.waiters.splice(index, 1);
+        reject(signal.reason instanceof Error ? signal.reason : new Error('aborted'));
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+      // A waiter that resolves normally (a real frame arrives, or `end()`
+      // settles it) must still remove this listener — otherwise every read
+      // on a long-lived socket leaves its `abort` listener attached to the
+      // signal for as long as the signal itself lives, accumulating one per
+      // read (copilot review, PR #469).
+      const detach = (): void => signal.removeEventListener('abort', onAbort);
+      waiter.resolve = (value) => {
+        detach();
+        resolve(value);
+      };
+      waiter.reject = (error: Error) => {
+        detach();
+        reject(error);
+      };
     });
   }
 }
@@ -378,9 +391,16 @@ export async function startLoopbackGateway(
     path: string,
     init?: { headers?: HeadersInit },
   ): Promise<ServerEventStreamReader> {
-    const response = await fetchLoopback(path, {
-      headers: { ...init?.headers, accept: 'text/event-stream' },
-    });
+    // A plain object spread over `init?.headers` silently drops entries
+    // when the caller passes a `Headers` instance or a header-tuple array
+    // (spreading either yields only its own enumerable own-properties, not
+    // its header entries) — which can drop an Authorization header and
+    // turn into a confusing 401 rather than the auth failure a caller
+    // actually intended to test (copilot review, PR #469). `Headers`
+    // itself merges every input shape correctly.
+    const headers = new Headers(init?.headers);
+    headers.set('accept', 'text/event-stream');
+    const response = await fetchLoopback(path, { headers });
     if (!response.ok) {
       throw new Error(
         `startLoopbackGateway: SSE request to "${path}" failed with status ${response.status}`,
@@ -395,12 +415,15 @@ export async function startLoopbackGateway(
     }
     const socket = new WebSocket(`${wsUrl}${path}`);
     await new Promise<void>((resolve, reject) => {
+      const connectionFailed = (): void =>
+        reject(new Error(`startLoopbackGateway: WebSocket connection to "${path}" failed`));
       socket.addEventListener('open', () => resolve(), { once: true });
-      socket.addEventListener(
-        'error',
-        () => reject(new Error(`startLoopbackGateway: WebSocket connection to "${path}" failed`)),
-        { once: true },
-      );
+      socket.addEventListener('error', connectionFailed, { once: true });
+      // A rejected upgrade (401/403 from the origin check or auth) fires
+      // 'close' without ever firing 'error' on Bun's WebSocket — without
+      // this, the promise above would hang forever rather than reject
+      // (copilot review, PR #469).
+      socket.addEventListener('close', connectionFailed, { once: true });
     });
     return wrapWebSocket(socket);
   }

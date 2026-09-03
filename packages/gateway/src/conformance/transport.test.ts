@@ -182,9 +182,20 @@ describe('Gateway transport conformance — Bun runtime', () => {
       async (gateway) => {
         const ws = await gateway.openWebSocket(`/ws?token=${gateway.authToken}`);
         try {
+          // `ws.send` JSON-encodes a typed `ClientFrame`, so sending a bare
+          // string through it produces a syntactically valid JSON VALUE
+          // (a string) that is still the wrong SHAPE (not an object) — the
+          // real malformed-frame contract `parseClientFrame` enforces.
+          // Tightened to the specific typed error code/message so this
+          // documents that contract rather than merely "some error came
+          // back" (copilot review, PR #469).
           ws.send('this is not json' as never);
           const errorFrame = await ws.next();
-          expect(errorFrame.type).toBe('error');
+          expect(errorFrame).toMatchObject({
+            type: 'error',
+            code: 'INVALID_FRAME',
+            message: 'Frame must be a JSON object',
+          });
 
           // The connection stays open and the protocol keeps working — a
           // ping still round-trips a pong.
@@ -539,6 +550,32 @@ describe('Gateway transport conformance — bounded reads over a real socket', (
             caught = error;
           }
           expect(caught).toBeInstanceOf(Error);
+        } finally {
+          ws.close();
+          await ws.waitForClose();
+        }
+      },
+    );
+  });
+
+  it('resolves a pending read normally when a frame arrives before its AbortSignal ever fires', async () => {
+    await withGateway(
+      () =>
+        startLoopbackGateway({
+          agents: { echo: createAgent({ name: 'echo', generate: immediateGenerate() }) },
+          generate: immediateGenerate(),
+        }),
+      async (gateway) => {
+        const ws = await gateway.openWebSocket(`/ws?token=${gateway.authToken}`);
+        try {
+          // A live, never-aborted signal on a read that DOES resolve
+          // normally — proves the abort listener this read registered is
+          // cleaned up on the success path too, not only on abort.
+          const controller = new AbortController();
+          ws.send({ type: 'ping' });
+          const frame = await ws.next(controller.signal);
+          expect(frame.type).toBe('pong');
+          expect(controller.signal.aborted).toBe(false);
         } finally {
           ws.close();
           await ws.waitForClose();
