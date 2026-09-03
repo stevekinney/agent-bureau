@@ -345,7 +345,7 @@ function assertSupportedOverlapPolicy(
   if (overlap !== undefined && !SUPPORTED_OVERLAP_POLICIES.has(overlap)) {
     throw new InvalidScheduleError(
       `overlap policy '${overlap}' is not supported by Agent Bureau; only 'skip' and 'allow' ` +
-        "are exposed ('queue' and 'cancel-running' are intentionally hidden, see AB-41)",
+        "are exposed ('queue' and 'cancel-running' are intentionally hidden)",
     );
   }
 }

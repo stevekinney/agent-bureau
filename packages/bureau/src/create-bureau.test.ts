@@ -3681,8 +3681,9 @@ describe('createBureau', () => {
     // summary could not be retrieved immediately after. `createSchedule` must
     // wrap that rejection in a typed `ScheduleLocatorUnavailableError` naming
     // the scheduleId rather than letting the bare `Error` propagate untyped.
+    const describeFailure = new Error('Schedule "whatever" not found');
     const describeSpy = spyOn(ScheduleHandle.prototype, 'describe').mockRejectedValueOnce(
-      new Error('Schedule "whatever" not found'),
+      describeFailure,
     );
 
     const bureau = await createBureau({
@@ -3712,17 +3713,20 @@ describe('createBureau', () => {
       expect(locatorError.category).toBe('unavailable');
       expect(locatorError.retryable).toBe(false);
       // `createSchedule` had no stable `id` to pass through (no `id` field on
-      // `DurableScheduleDefinition` — the uuid is Weft-assigned), so the
-      // scheduleId this error must name is the one it minted internally;
-      // extract it from `.message` to prove it's the SAME id, not a generic
-      // placeholder.
-      const [, scheduleId] = /^Schedule (\S+) was registered/.exec(locatorError.message) ?? [];
-      expect(scheduleId).toBeDefined();
+      // `DurableScheduleDefinition` — the uuid is Weft-assigned), so
+      // `.scheduleId` is the value this test can actually assert equals the
+      // one minted internally — not a generic placeholder — and `.message`
+      // names the same id.
+      expect(locatorError.scheduleId).toBeTruthy();
+      expect(locatorError.message).toContain(locatorError.scheduleId);
+      // The original `describe()` rejection is preserved for debugging, not
+      // discarded.
+      expect(locatorError.cause).toBe(describeFailure);
 
       // The schedule IS registered despite the describe() failure — a fresh
       // describe (via getSchedule, unaffected by the mockRejectedValueOnce)
       // proves registration succeeded and only the locator call failed.
-      const fetched = await bureau.getSchedule(scheduleId!);
+      const fetched = await bureau.getSchedule(locatorError.scheduleId);
       expect(fetched?.status).toBe('active');
     } finally {
       describeSpy.mockRestore();

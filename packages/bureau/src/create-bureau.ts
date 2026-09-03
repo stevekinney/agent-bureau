@@ -630,13 +630,17 @@ export class ScheduleLocatorUnavailableError extends Error {
   readonly code = 'ScheduleLocatorUnavailableError';
   readonly category = 'unavailable' as const;
   readonly retryable = false as const;
+  /** The already-registered schedule whose locator could not be read. */
+  readonly scheduleId: string;
 
-  constructor(scheduleId: string) {
+  constructor(scheduleId: string, options?: { cause?: unknown }) {
     super(
       `Schedule ${scheduleId} was registered, but its summary could not be retrieved. ` +
         `The schedule is registered; retry describing it (e.g. bureau.getSchedule('${scheduleId}')) later.`,
+      options,
     );
     this.name = 'ScheduleLocatorUnavailableError';
+    this.scheduleId = scheduleId;
   }
 }
 
@@ -4481,8 +4485,8 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // `Error('Schedule … no longer exists.')` propagate untyped.
     try {
       return await handle.describe();
-    } catch {
-      throw new ScheduleLocatorUnavailableError(handle.id);
+    } catch (cause) {
+      throw new ScheduleLocatorUnavailableError(handle.id, { cause });
     }
   }
 
