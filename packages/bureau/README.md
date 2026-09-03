@@ -252,10 +252,63 @@ const discoveryTool = createAgentDiscoveryTool(bureau.agents);
 ## `bureau/test`
 
 ```typescript
-import { createBureau, waitForCondition, waitForRunState } from 'bureau/test';
+import {
+  createBureau,
+  createBureauTestHarness,
+  createLmdbStorageFixture,
+  createMemoryStorageFixture,
+  createSqliteStorageFixture,
+  waitForCondition,
+  waitForRunState,
+} from 'bureau/test';
 ```
 
 Re-exports `createBureau` (identical to the top-level export — useful when a test file already imports other test utilities from this subpath) alongside `@lostgradient/operative/test`'s `waitForCondition` and `waitForRunState`, which poll a run/condition without a fixed sleep.
+
+### `createBureauTestHarness(options)` (AB-261)
+
+Composes a real `Bureau` over an injected `ManualRuntimeServices` (`options.runtime`, defaulting to a freshly constructed one) and an owned `BureauStorageFixture` (`options.storage`, required). The returned promise resolves only once `bureau.ready` is `true` and boot recovery has completed. Every other `BureauOptions` field passes through unchanged.
+
+```typescript
+import { createAgent } from '@lostgradient/operative';
+import { createBureauTestHarness, createSqliteStorageFixture } from 'bureau/test';
+import { createManualRuntimeServices } from 'lifecycle';
+
+const runtime = createManualRuntimeServices();
+const storage = createSqliteStorageFixture({ runtime });
+
+const harness = await createBureauTestHarness({
+  agents: { worker: createAgent({ generate: myGenerate }) },
+  runtime,
+  storage,
+});
+
+const run = harness.startRun('worker', 'hello');
+await run.unwrap();
+
+await harness.bureau.dispose();
+await storage.dispose();
+```
+
+The harness exposes `bureau`, `runtime`, and `storage` directly, plus thin lifecycle drivers over the corresponding public `Bureau` method — `startRun` (`Bureau.run`), `startSession` (`Bureau.createRun`), `startChild` (dispatches through `bureau.agents` and operative's public `dispatchChildRun`, correlated to a caller-supplied `parentRunId`), `submitSchedulerTask`, `createRecurringSchedule` (`Bureau.createSchedule`), `resolveReview`, `deliverSignal` (`Bureau.signalSession`), and `reattachDurable` (`Bureau.getDurableRun`). None of them reach a private map or a raw Weft workflow handle.
+
+`harness.supports(capability)` reports `false` for `'managed-goal'` and `'scheduler-task-result'` — product surfaces that don't exist on this baseline yet (AB-101/AB-102 and AB-180, respectively). Calling `harness.startManagedGoal()` or `harness.getSchedulerTaskResult()` throws a typed `BureauHarnessUnsupportedError` naming the owning issue(s) rather than silently no-oping.
+
+Two harnesses constructed independently in one process — each with its own `runtime`/`storage` — share no state: their clocks, timers, identifier sequences, storage paths, and events are fully isolated.
+
+Out of scope for this harness: the quiescence report and a `close()` that delegates to `Bureau.shutdown()` (AB-262), the reproduction-artifact assembler and Bureau-scoped fault selectors (AB-263), and packed-consumer tarball verification (AB-264).
+
+### Storage fixtures
+
+```typescript
+import {
+  createLmdbStorageFixture,
+  createMemoryStorageFixture,
+  createSqliteStorageFixture,
+} from 'bureau/test';
+```
+
+Each factory returns a `BureauStorageFixture`: `{ configuration, path?, owned, dispose() }`. `configuration` passes straight to `BureauOptions.storage`. `createSqliteStorageFixture`/`createLmdbStorageFixture` take `{ runtime, path? }` — omit `path` for a fresh, unique path allocated from `runtime.identifiers.next('storage-fixture')` (`owned: true`, removed by `dispose()`), or supply your own `path` for a fixture that never allocates or deletes anything (`owned: false`). The fixture itself never opens a live storage handle — the real backend connection is owned and closed by whatever composes `configuration` (typically `Bureau`), so `dispose()` only ever governs the filesystem lifecycle of a path this fixture allocated.
 
 ## Development
 
