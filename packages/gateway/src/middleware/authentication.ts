@@ -35,6 +35,25 @@ export function gatewayCapabilitiesForScopes(scopes: readonly string[]): string[
     : Array.from(new Set([TOOL_EXECUTION_CAPABILITY, ...normalizedScopes]));
 }
 
+/**
+ * Whether the `x-api-key-scopes` header value (as read by any downstream
+ * middleware or route) marks this connection's principal as privileged —
+ * the same "admin key" definition {@link createScopeGuard} already applies
+ * (`scope-guard.ts`) and {@link gatewayCapabilitiesForScopes} mirrors via
+ * `UNRESTRICTED_CAPABILITY`: an empty scopes list (`''`, a managed key
+ * created with no scope restrictions) or a missing header entirely (a
+ * static-token principal, or no auth configured at all — both unrestricted
+ * by construction) both mean "sees everything." Any other value is a
+ * scoped-down managed key and is not privileged.
+ *
+ * AB-305 reuses this exact definition — rather than inventing a new
+ * flag — to decide whether a live SSE/WebSocket connection sees
+ * `response.validated`'s pre-guardrail `original` or a redaction marker.
+ */
+export function isPrivilegedGatewayConnection(scopesHeader: string | undefined): boolean {
+  return scopesHeader === undefined || scopesHeader === '';
+}
+
 export function gatewayAuthorizationRevisionForApiKey(apiKeyId: string): string {
   return `gateway:api-key:${apiKeyId}`;
 }

@@ -3,6 +3,7 @@ import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import type { ToolRequestContext } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import { createBureau } from 'bureau';
+import { waitForCondition, waitForRunState } from 'bureau/test';
 import { sha256HexSync } from 'interoperability';
 
 import { createBunAdapter, handleWsUpgrade } from './adapters/bun-adapter';
@@ -13,6 +14,8 @@ import {
   createGateway,
   DEFAULT_GATEWAY_DRAIN_TIMEOUT_MS,
   raceDrainTimeout,
+  resolveAdapter,
+  resolveStaticTokenRevisionSecret,
 } from './create-gateway';
 import type { ApiKey, ApiKeyStore } from './keys/types';
 import {
@@ -377,6 +380,59 @@ describe('createGateway', () => {
     expect(await first.getRequestAuthorityValidator()!(secondContext)).toBe(true);
     expect(await second.getRequestAuthorityValidator()!(firstContext)).toBe(true);
   });
+
+  it("drops a run's SSE replay buffer once the run is removed from the bureau (clearRunBufferOnRemoval)", async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: async () => ({ content: 'done', toolCalls: [] }),
+    });
+    const gateway = await createGateway(bureau);
+
+    try {
+      const summary = await bureau.createRun({ message: 'go' });
+      await waitForRunState(bureau, summary.id);
+
+      const cursor = `${encodeURIComponent(summary.id)}:0`;
+      const beforeDelete = await gateway.app.request(
+        `/api/v1/events?runId=${summary.id}&since=${cursor}`,
+      );
+      expect(beforeDelete.status).toBe(200);
+      const readerBefore = beforeDelete.body?.getReader();
+      expect(readerBefore).toBeDefined();
+      if (!readerBefore) return;
+      const chunkBefore = await readerBefore.read();
+      const textBefore = new TextDecoder().decode(chunkBefore.value);
+      // The replay buffer still holds this run's frames — a reconnect from
+      // the start replays at least one.
+      expect(textBefore).toContain('data:');
+      await readerBefore.cancel();
+
+      await bureau.deleteRun(summary.id);
+      // `store.removeRun()` dispatches `RunRemovedEvent` through the same
+      // synchronous store-subscription path `emitLiveFrame` uses, but this
+      // waits explicitly rather than assuming ordering, matching this
+      // suite's own AB-15 replay tests.
+      await waitForCondition(
+        () => bureau.store.getRun(summary.id) === undefined,
+        'run was not removed from the store',
+      );
+
+      const afterDelete = await gateway.app.request(
+        `/api/v1/events?runId=${summary.id}&since=${cursor}`,
+      );
+      expect(afterDelete.status).toBe(200);
+      const readerAfter = afterDelete.body?.getReader();
+      expect(readerAfter).toBeDefined();
+      if (!readerAfter) return;
+      const chunkAfter = await readerAfter.read();
+      const textAfter = new TextDecoder().decode(chunkAfter.value);
+      // The buffer was dropped when the run was removed — nothing left to replay.
+      expect(textAfter).not.toContain('data:');
+      await readerAfter.cancel();
+    } finally {
+      bureau.dispose();
+    }
+  });
 });
 
 describe('createBunAdapter', () => {
@@ -525,70 +581,70 @@ describe('buildWsAuthenticate', () => {
     expect(verifier).toBeUndefined();
   });
 
-  it('allows a managed key with runs:read scope', async () => {
+  it('allows a managed key with runs:read scope, not privileged (AB-305)', async () => {
     const store = makeApiKeyStore(makeKey(['runs:read']));
     const verifier = buildWsAuthenticate(undefined, store);
     const request = makeWsRequest({ authorization: 'Bearer ab_live_token' });
-    expect(await verifier!(request)).toBe(true);
+    expect(await verifier!(request)).toEqual({ allowed: true, privileged: false });
   });
 
   it('rejects a managed key scoped only for keys:manage (missing runs:read)', async () => {
     const store = makeApiKeyStore(makeKey(['keys:manage']));
     const verifier = buildWsAuthenticate(undefined, store);
     const request = makeWsRequest({ authorization: 'Bearer ab_live_token' });
-    expect(await verifier!(request)).toBe(false);
+    expect(await verifier!(request)).toEqual({ allowed: false });
   });
 
   it('rejects a managed key scoped only for runs:write (missing runs:read)', async () => {
     const store = makeApiKeyStore(makeKey(['runs:write']));
     const verifier = buildWsAuthenticate(undefined, store);
     const request = makeWsRequest({ authorization: 'Bearer ab_live_token' });
-    expect(await verifier!(request)).toBe(false);
+    expect(await verifier!(request)).toEqual({ allowed: false });
   });
 
-  it('allows an admin key with empty scopes array', async () => {
+  it('allows an admin key with empty scopes array, privileged (AB-305)', async () => {
     const store = makeApiKeyStore(makeKey([]));
     const verifier = buildWsAuthenticate(undefined, store);
     const request = makeWsRequest({ authorization: 'Bearer ab_live_token' });
-    expect(await verifier!(request)).toBe(true);
+    expect(await verifier!(request)).toEqual({ allowed: true, privileged: true });
   });
 
-  it('allows a key with runs:read among multiple scopes', async () => {
+  it('allows a key with runs:read among multiple scopes, not privileged (AB-305)', async () => {
     const store = makeApiKeyStore(makeKey(['runs:read', 'runs:write', 'sessions:read']));
     const verifier = buildWsAuthenticate(undefined, store);
     const request = makeWsRequest({ authorization: 'Bearer ab_live_token' });
-    expect(await verifier!(request)).toBe(true);
+    expect(await verifier!(request)).toEqual({ allowed: true, privileged: false });
   });
 
   it('rejects an invalid or expired managed key', async () => {
     const store = makeApiKeyStore(null);
     const verifier = buildWsAuthenticate(undefined, store);
     const request = makeWsRequest({ authorization: 'Bearer ab_live_token' });
-    expect(await verifier!(request)).toBe(false);
+    expect(await verifier!(request)).toEqual({ allowed: false });
   });
 
-  it('allows the static authToken without scope restriction', async () => {
+  it('allows the static authToken without scope restriction, privileged (AB-305)', async () => {
     const verifier = buildWsAuthenticate('admin-secret', undefined);
     const request = makeWsRequest({ authorization: 'Bearer admin-secret' });
-    expect(await verifier!(request)).toBe(true);
+    expect(await verifier!(request)).toEqual({ allowed: true, privileged: true });
   });
 
   it('rejects a static token mismatch', async () => {
     const verifier = buildWsAuthenticate('admin-secret', undefined);
     const request = makeWsRequest({ authorization: 'Bearer wrong-token' });
-    expect(await verifier!(request)).toBe(false);
+    expect(await verifier!(request)).toEqual({ allowed: false });
   });
 
-  it('accepts a static token via query string', async () => {
+  it('accepts a static token via query string, privileged (AB-305)', async () => {
     const verifier = buildWsAuthenticate('admin-secret', undefined);
     const request = makeWsRequest({}, '?token=admin-secret');
-    expect(await verifier!(request)).toBe(true);
+    expect(await verifier!(request)).toEqual({ allowed: true, privileged: true });
   });
 
   it('rejects when no token is provided and auth is configured', async () => {
     const verifier = buildWsAuthenticate('admin-secret', undefined);
     const request = makeWsRequest({});
-    expect(await verifier!(request)).toBe(false);
+    expect(await verifier!(request)).toEqual({ allowed: false });
   });
 
   it('prefers managed key verification over static token when token starts with ab_live_', async () => {
@@ -596,7 +652,7 @@ describe('buildWsAuthenticate', () => {
     const store = makeApiKeyStore(makeKey(['runs:read']));
     const verifier = buildWsAuthenticate('fallback-token', store);
     const request = makeWsRequest({ authorization: 'Bearer ab_live_token' });
-    expect(await verifier!(request)).toBe(true);
+    expect(await verifier!(request)).toEqual({ allowed: true, privileged: false });
   });
 });
 
@@ -657,6 +713,23 @@ describe('buildRequestAuthorityValidator', () => {
     expect(await inactiveValidator!(requestContext)).toBe(false);
     expect(await expiredValidator!(requestContext)).toBe(false);
     expect(await changedScopeValidator!(requestContext)).toBe(false);
+  });
+
+  it('rejects a request context whose authorizationRevision does not match the live key (AB-305 coverage)', async () => {
+    const validator = buildRequestAuthorityValidator(undefined, makeStore(makeKey()));
+    expect(validator).toBeDefined();
+
+    const staleRevisionContext = {
+      ...requestContext,
+      authority: {
+        ...requestContext.authority,
+        // A different revision than `gatewayAuthorizationRevisionForApiKey('key-1')`
+        // computes — e.g. a request context minted before the key was rotated.
+        authorizationRevision: 'gateway:api-key:key-1:stale',
+      },
+    };
+
+    expect(await validator!(staleRevisionContext)).toBe(false);
   });
 
   it('leaves the authority validator unset when no credential mechanism exists', () => {
@@ -814,6 +887,90 @@ describe('raceDrainTimeout', () => {
     // this proves the default wiring, not a real wait.
     const result = await raceDrainTimeout(Promise.resolve(), 10_000);
     expect(result).toBe(true);
+  });
+});
+
+describe('resolveAdapter', () => {
+  it('resolves the Bun adapter for "bun"', async () => {
+    const adapter = await resolveAdapter('bun');
+    expect(typeof adapter.serve).toBe('function');
+    expect(typeof adapter.mountStaticFiles).toBe('function');
+  });
+
+  it('resolves the Node adapter for "node"', async () => {
+    // `createGateway` always calls this through `dependencies.resolveAdapterFn`,
+    // which every other test in this file overrides — this is the only
+    // place the real Node-adapter dynamic-import branch runs.
+    const adapter = await resolveAdapter('node');
+    expect(typeof adapter.serve).toBe('function');
+    expect(typeof adapter.mountStaticFiles).toBe('function');
+  });
+});
+
+describe('resolveStaticTokenRevisionSecret', () => {
+  type FakeKvStore = Parameters<typeof resolveStaticTokenRevisionSecret>[0];
+
+  function fakeIdentifiers(): Parameters<typeof resolveStaticTokenRevisionSecret>[1] {
+    return { next: () => 'candidate-revision-secret' };
+  }
+
+  it('returns undefined when no kv store is configured', async () => {
+    const result = await resolveStaticTokenRevisionSecret(undefined, fakeIdentifiers());
+    expect(result).toBeUndefined();
+  });
+
+  it('returns the already-persisted secret without writing', async () => {
+    let setCalled = false;
+    const store = {
+      get: async () => 'already-persisted-secret',
+      conditionalBatch: async () => {
+        setCalled = true;
+        return true;
+      },
+    } as unknown as FakeKvStore;
+
+    const result = await resolveStaticTokenRevisionSecret(store, fakeIdentifiers());
+    expect(result).toBe('already-persisted-secret');
+    expect(setCalled).toBe(false);
+  });
+
+  it('writes and returns a fresh candidate when nothing is persisted yet', async () => {
+    const store = {
+      get: async () => null,
+      conditionalBatch: async () => true,
+    } as unknown as FakeKvStore;
+
+    const result = await resolveStaticTokenRevisionSecret(store, fakeIdentifiers());
+    expect(result).toBe('candidate-revision-secret');
+  });
+
+  it('reads back the winner when a concurrent writer beat this one to the compare-and-swap', async () => {
+    let callCount = 0;
+    const store = {
+      get: async () => {
+        // First call (the initial persisted-check) sees nothing; by the
+        // time the losing `conditionalBatch` returns, a concurrent writer
+        // has already committed — this second `get` call sees its value.
+        callCount += 1;
+        return callCount === 1 ? null : 'concurrent-winner-secret';
+      },
+      conditionalBatch: async () => false,
+    } as unknown as FakeKvStore;
+
+    const result = await resolveStaticTokenRevisionSecret(store, fakeIdentifiers());
+    expect(result).toBe('concurrent-winner-secret');
+  });
+
+  it('throws when the compare-and-swap loses AND the winner never becomes visible', async () => {
+    const store = {
+      get: async () => null,
+      conditionalBatch: async () => false,
+    } as unknown as FakeKvStore;
+
+    // eslint-disable-next-line @typescript-eslint/await-thenable -- bun-types declares `Matchers.rejects` as synchronous (`Matchers<unknown>`), not a Promise, though it resolves correctly at runtime — same known gap `compose.test.ts` disables this rule for.
+    await expect(resolveStaticTokenRevisionSecret(store, fakeIdentifiers())).rejects.toThrow(
+      'Static-token revision secret initialization lost without a persisted winner.',
+    );
   });
 });
 

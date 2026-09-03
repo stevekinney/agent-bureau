@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 
 import { ALL_RUNS_SUBSCRIPTION, type LiveFrameBroker } from '../live-events';
+import { isPrivilegedGatewayConnection } from '../middleware/authentication';
 import type { Bureau, ServerFrame } from '../types';
 
 function collectRunIds(url: URL): string[] {
@@ -32,10 +33,16 @@ export function createEventsRoutes(bureau: Bureau, broker: LiveFrameBroker) {
       });
     }
 
+    // AB-305: reuses the same "admin key" privilege definition the scope
+    // guard already applies (`x-api-key-scopes`, injected by the
+    // authentication middleware ahead of this route) — never a new flag.
+    const privileged = isPrivilegedGatewayConnection(context.req.header('x-api-key-scopes'));
+
     return broker.createEventStreamResponse(context.req.raw, {
       runIds,
       includeScheduler,
       initialFrames,
+      privileged,
     });
   });
 

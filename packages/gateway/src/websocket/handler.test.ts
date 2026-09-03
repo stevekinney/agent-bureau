@@ -2,18 +2,26 @@ import type { ServerWebSocket } from 'bun';
 import { describe, expect, it } from 'bun:test';
 
 import { LiveFrameBroker } from '../live-events';
+import type { GatewayWebSocketData } from './handler';
 import { createWebSocketHandler } from './handler';
 
-/** A minimal fake shaped like the subset of `ServerWebSocket` the handler touches. */
-function createFakeWebSocket() {
+/**
+ * A minimal fake shaped like the subset of `ServerWebSocket` the handler
+ * touches. `data` defaults to `undefined` — a socket whose upgrade path
+ * never attached `data` (AB-305's fail-closed case) — rather than
+ * `{ privileged: false }`, so the "no data at all" case is exercised
+ * distinctly from "data present, not privileged".
+ */
+function createFakeWebSocket(data?: GatewayWebSocketData) {
   let closeCalled = false;
   const sent: string[] = [];
   const ws = {
-    send: (data: string) => sent.push(data),
+    data,
+    send: (payload: string) => sent.push(payload),
     close: () => {
       closeCalled = true;
     },
-  } as unknown as ServerWebSocket<unknown>;
+  } as unknown as ServerWebSocket<GatewayWebSocketData>;
   return { ws, sent, wasCloseCalled: () => closeCalled };
 }
 
@@ -135,5 +143,102 @@ describe('createWebSocketHandler — connection watchdog pulses (AB-219)', () =>
     expect(evidence).toHaveLength(1);
     expect(evidence?.[0]?.source).toBe('transport-keepalive');
     expect(sent).toEqual([JSON.stringify({ type: 'pong' })]);
+  });
+});
+
+describe('createWebSocketHandler — AB-305 response.validated privilege', () => {
+  const RAW_SECRET = 'sk-real-secret-do-not-leak';
+
+  function responseValidatedFrame(): {
+    type: 'event';
+    runId: string;
+    event: string;
+    detail: unknown;
+    sequence: number;
+    runSeq: number;
+    timestamp: number;
+  } {
+    return {
+      type: 'event',
+      runId: 'run-1',
+      event: 'response.validated',
+      detail: {
+        step: 0,
+        original: { content: RAW_SECRET, toolCalls: [] },
+        validated: { content: '[redacted]', toolCalls: [] },
+      },
+      sequence: 1,
+      runSeq: 1,
+      timestamp: Date.now(),
+    };
+  }
+
+  it('redacts "original" over a broadcast when ws.data.privileged is false', () => {
+    const broker = new LiveFrameBroker();
+    const handler = createWebSocketHandler({ broker });
+    const { ws, sent } = createFakeWebSocket({ privileged: false });
+
+    handler.open(ws);
+    handler.message(ws, JSON.stringify({ type: 'subscribe', runId: 'run-1' }));
+    sent.length = 0;
+
+    broker.broadcast(responseValidatedFrame());
+
+    expect(sent).toHaveLength(1);
+    expect(sent.join()).not.toContain(RAW_SECRET);
+  });
+
+  it('delivers "original" unredacted over a broadcast when ws.data.privileged is true', () => {
+    const broker = new LiveFrameBroker();
+    const handler = createWebSocketHandler({ broker });
+    const { ws, sent } = createFakeWebSocket({ privileged: true });
+
+    handler.open(ws);
+    handler.message(ws, JSON.stringify({ type: 'subscribe', runId: 'run-1' }));
+    sent.length = 0;
+
+    broker.broadcast(responseValidatedFrame());
+
+    expect(sent).toHaveLength(1);
+    expect(sent.join()).toContain(RAW_SECRET);
+  });
+
+  it('fails closed to redaction when ws.data is missing entirely', () => {
+    const broker = new LiveFrameBroker();
+    const handler = createWebSocketHandler({ broker });
+    // No `data` passed at all — an upgrade path that forgot to attach it.
+    const { ws, sent } = createFakeWebSocket();
+
+    handler.open(ws);
+    handler.message(ws, JSON.stringify({ type: 'subscribe', runId: 'run-1' }));
+    sent.length = 0;
+
+    broker.broadcast(responseValidatedFrame());
+
+    expect(sent.join()).not.toContain(RAW_SECRET);
+  });
+
+  it('redacts a buffered replay frame delivered on subscribe() for a non-privileged connection', () => {
+    const broker = new LiveFrameBroker();
+    broker.broadcast(responseValidatedFrame());
+    const handler = createWebSocketHandler({ broker });
+    const { ws, sent } = createFakeWebSocket({ privileged: false });
+
+    handler.open(ws);
+    handler.message(ws, JSON.stringify({ type: 'subscribe', runId: 'run-1', since: 0 }));
+
+    expect(sent.join()).not.toContain(RAW_SECRET);
+  });
+
+  it('replays a buffered frame unredacted for a privileged connection', () => {
+    const broker = new LiveFrameBroker();
+    broker.broadcast(responseValidatedFrame());
+    const handler = createWebSocketHandler({ broker });
+    const { ws, sent } = createFakeWebSocket({ privileged: true });
+
+    handler.open(ws);
+    handler.message(ws, JSON.stringify({ type: 'subscribe', runId: 'run-1', since: 0 }));
+
+    expect(sent.join()).toContain(RAW_SECRET);
   });
 });

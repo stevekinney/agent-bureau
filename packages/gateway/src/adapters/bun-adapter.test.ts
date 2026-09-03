@@ -4,6 +4,7 @@ import type { Hono } from 'hono';
 
 import { createApiKeyStore } from '../keys/create-api-key-store';
 import { createBunAdapter, handleWsUpgrade } from './bun-adapter';
+import type { WsAuthenticationResult } from './types';
 
 /**
  * A minimal fake shaped like the subset of Bun's `Server` the adapter
@@ -55,6 +56,21 @@ function rejectUpgrade(_request: Request): boolean {
 
 function makeRequest(url: string, headers: Record<string, string> = {}): Request {
   return new Request(url, { headers });
+}
+
+/** An upgrade function that records the `privileged` argument it was called with (AB-305). */
+function capturingUpgrade(): {
+  upgrade: (request: Request, privileged: boolean) => boolean;
+  privilegedValues: boolean[];
+} {
+  const privilegedValues: boolean[] = [];
+  return {
+    upgrade: (_request, privileged) => {
+      privilegedValues.push(privileged);
+      return true;
+    },
+    privilegedValues,
+  };
 }
 
 describe('handleWsUpgrade — no auth configured', () => {
@@ -111,7 +127,7 @@ describe('handleWsUpgrade — managed API key store (the fixed bug path)', () =>
     // bypass auth and receive 400 (upgrade failed) instead of 401.
     const kv = textValueStore(new MemoryStorage());
     const store = createApiKeyStore(kv);
-    const authenticate = async (request: Request): Promise<boolean> => {
+    const authenticate = async (request: Request): Promise<WsAuthenticationResult> => {
       const authHeader = request.headers.get('authorization') ?? '';
       const headerToken = authHeader.toLowerCase().startsWith('bearer ')
         ? authHeader.slice(7).trim()
@@ -119,12 +135,12 @@ describe('handleWsUpgrade — managed API key store (the fixed bug path)', () =>
       const url = new URL(request.url);
       const queryToken = url.searchParams.get('token') ?? undefined;
       const token = headerToken ?? queryToken;
-      if (!token) return false;
+      if (!token) return { allowed: false };
       if (token.startsWith('ab_live_')) {
         const key = await store.verify(token);
-        return key !== null;
+        return key !== null ? { allowed: true, privileged: false } : { allowed: false };
       }
-      return false;
+      return { allowed: false };
     };
 
     const request = makeRequest('http://localhost/ws');
@@ -137,17 +153,17 @@ describe('handleWsUpgrade — managed API key store (the fixed bug path)', () =>
   it('rejects WebSocket upgrade with an invalid managed API key', async () => {
     const kv = textValueStore(new MemoryStorage());
     const store = createApiKeyStore(kv);
-    const authenticate = async (request: Request): Promise<boolean> => {
+    const authenticate = async (request: Request): Promise<WsAuthenticationResult> => {
       const authHeader = request.headers.get('authorization') ?? '';
       const token = authHeader.toLowerCase().startsWith('bearer ')
         ? authHeader.slice(7).trim()
         : undefined;
-      if (!token) return false;
+      if (!token) return { allowed: false };
       if (token.startsWith('ab_live_')) {
         const key = await store.verify(token);
-        return key !== null;
+        return key !== null ? { allowed: true, privileged: false } : { allowed: false };
       }
-      return false;
+      return { allowed: false };
     };
 
     const request = makeRequest('http://localhost/ws', {
@@ -164,17 +180,17 @@ describe('handleWsUpgrade — managed API key store (the fixed bug path)', () =>
     const store = createApiKeyStore(kv);
     const { plaintext } = await store.create({ name: 'ws-key' });
 
-    const authenticate = async (request: Request): Promise<boolean> => {
+    const authenticate = async (request: Request): Promise<WsAuthenticationResult> => {
       const authHeader = request.headers.get('authorization') ?? '';
       const token = authHeader.toLowerCase().startsWith('bearer ')
         ? authHeader.slice(7).trim()
         : undefined;
-      if (!token) return false;
+      if (!token) return { allowed: false };
       if (token.startsWith('ab_live_')) {
         const key = await store.verify(token);
-        return key !== null;
+        return key !== null ? { allowed: true, privileged: false } : { allowed: false };
       }
-      return false;
+      return { allowed: false };
     };
 
     const request = makeRequest('http://localhost/ws', {
@@ -215,6 +231,78 @@ describe('handleWsUpgrade — upgrade failure', () => {
     const url = new URL(request.url);
     const result = await handleWsUpgrade(request, url, rejectUpgrade, {});
     expect(result?.status).toBe(400);
+  });
+});
+
+describe('handleWsUpgrade — AB-305 privileged threading', () => {
+  it('passes privileged=true to upgrade() when no auth is configured at all', async () => {
+    const request = makeRequest('http://localhost/ws');
+    const url = new URL(request.url);
+    const { upgrade, privilegedValues } = capturingUpgrade();
+
+    await handleWsUpgrade(request, url, upgrade, {});
+
+    expect(privilegedValues).toEqual([true]);
+  });
+
+  it('passes privileged=true to upgrade() on a successful static-token-only match', async () => {
+    const request = makeRequest('http://localhost/ws', { authorization: 'Bearer secret' });
+    const url = new URL(request.url);
+    const { upgrade, privilegedValues } = capturingUpgrade();
+
+    await handleWsUpgrade(request, url, upgrade, { authToken: 'secret' });
+
+    expect(privilegedValues).toEqual([true]);
+  });
+
+  it("passes through the injected authenticate result's privileged value on success", async () => {
+    const request = makeRequest('http://localhost/ws');
+    const url = new URL(request.url);
+    const { upgrade, privilegedValues } = capturingUpgrade();
+    const authenticate = async () => ({ allowed: true, privileged: false }) as const;
+
+    await handleWsUpgrade(request, url, upgrade, { authenticate });
+
+    expect(privilegedValues).toEqual([false]);
+  });
+
+  it('never calls upgrade() when the injected authenticate rejects the request', async () => {
+    const request = makeRequest('http://localhost/ws');
+    const url = new URL(request.url);
+    const { upgrade, privilegedValues } = capturingUpgrade();
+    const authenticate = async () => ({ allowed: false }) as const;
+
+    const result = await handleWsUpgrade(request, url, upgrade, { authenticate });
+
+    expect(result?.status).toBe(401);
+    expect(privilegedValues).toEqual([]);
+  });
+});
+
+describe('createBunAdapter — serve() with no wsHandler', () => {
+  const originalServe = Bun.serve;
+
+  afterEach(() => {
+    Bun.serve = originalServe;
+  });
+
+  it('delegates every request straight to the Hono app.fetch()', async () => {
+    let capturedFetch: ((request: Request) => Response | Promise<Response>) | undefined;
+    const fake = createFakeBunServer();
+    Bun.serve = ((options: { fetch: typeof capturedFetch }) => {
+      capturedFetch = options.fetch;
+      return fake.server;
+    }) as unknown as typeof Bun.serve;
+
+    const response = new Response('from the app');
+    const app = { fetch: () => response } as unknown as Hono;
+
+    const adapter = createBunAdapter();
+    await adapter.serve(app, { port: 0 });
+
+    expect(capturedFetch).toBeDefined();
+    const result = await capturedFetch?.(new Request('http://localhost/anything'));
+    expect(result).toBe(response);
   });
 });
 

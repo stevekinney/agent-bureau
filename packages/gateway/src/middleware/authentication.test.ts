@@ -40,6 +40,24 @@ describe('authentication', () => {
     expect(body.error.message).toBe('Missing authorization header');
   });
 
+  it('rejects a "Bearer " header whose token is empty after trimming', async () => {
+    const app = createApp('secret-token');
+    // A trailing plain space is stripped by the Fetch `Headers` normalization
+    // itself (HTTP whitespace, RFC 9110), collapsing this header value back to
+    // "Bearer" before it ever reaches the middleware — which fails the
+    // `startsWith('bearer ')` check instead of reaching this branch. A
+    // trailing non-breaking space (U+00A0) is NOT header-whitespace, so it
+    // survives that normalization, but IS whitespace per `String.prototype.trim()`
+    // — landing exactly on the "header present, well-formed, token empty
+    // after trim" case this branch guards.
+    const response = await app.request('/protected', {
+      headers: { authorization: 'Bearer  ' },
+    });
+    expect(response.status).toBe(401);
+    const body = await response.json();
+    expect(body.error.message).toBe('Missing authorization token');
+  });
+
   it('rejects requests with wrong token', async () => {
     const app = createApp('secret-token');
     const response = await app.request('/protected', {

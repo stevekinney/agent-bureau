@@ -9,6 +9,7 @@ import { z } from 'zod';
 
 import { LiveFrameBroker } from './live-events';
 import type { ServerFrame } from './types';
+import type { GatewayWebSocketData } from './websocket/handler';
 import { createWebSocketHandler } from './websocket/handler';
 
 /**
@@ -179,7 +180,9 @@ describe('AB-15 resumable streaming: reconnect replays missed frames', () => {
       function createFakeSocket() {
         const sent: string[] = [];
         return {
-          ws: { send: (data: string) => sent.push(data) } as unknown as ServerWebSocket<unknown>,
+          ws: {
+            send: (data: string) => sent.push(data),
+          } as unknown as ServerWebSocket<GatewayWebSocketData>,
           sent,
         };
       }

@@ -202,6 +202,8 @@ type Subscriber = {
   closeConnection: () => void;
   runIds: Set<string>;
   includeScheduler: boolean;
+  /** AB-305: whether this connection's principal is privileged — see {@link LiveFrameSubscriberOptions.privileged}. */
+  privileged: boolean;
   watchdog: StallWatchdog;
   /**
    * Records `evidenceSource: 'transport-keepalive'` pulse evidence AND
@@ -237,6 +239,16 @@ export type LiveFrameSubscriberOptions = {
    * concrete cadence rather than an undefined one.
    */
   heartbeatIntervalMs?: number;
+  /**
+   * Whether this connection's principal is privileged (AB-305) — the same
+   * "admin key" definition {@link isPrivilegedGatewayConnection} applies:
+   * an unrestricted managed key, a static-token principal, or no auth
+   * configured at all. Defaults to `false` (redaction is the connection's
+   * default; privilege is opt-in) so a caller that never resolves this —
+   * most existing subscribers/tests — gets the safer, redacted projection
+   * of `response.validated` rather than silently leaking `original`.
+   */
+  privileged?: boolean;
 };
 
 export type EventStreamResponseOptions = LiveFrameSubscriberOptions & {
@@ -264,6 +276,76 @@ function getRunId(frame: ServerFrame): string | undefined {
  */
 function getRunSeq(frame: ServerFrame): number | undefined {
   return 'runSeq' in frame ? frame.runSeq : undefined;
+}
+
+// ── AB-305: response.validated wire projection ─────────────────────────
+
+const RESPONSE_VALIDATED_EVENT_TYPE = 'response.validated';
+
+/**
+ * What a non-privileged connection sees in place of `response.validated`'s
+ * `original` field — the coordinator's AB-305 ruling on AB-302: the
+ * in-process `ResponseValidatedEvent` keeps its full pre/post diff
+ * contract (`original` vs `validated`), but the gateway's live wire
+ * projection replaces `original` with this marker for any connection whose
+ * principal is not privileged. Same shape as the `GenerateResponse`
+ * `original` normally carries (`content`, `toolCalls`) with the content
+ * actually removed, never redacted in place — a wholesale substitution
+ * needs no validator that knows what to look for, unlike AB-302's
+ * guardrail-driven `action: 'redact'`. `usage`/`metadata` are omitted
+ * outright rather than passed through, since either could still carry
+ * pre-guardrail content.
+ */
+const RESPONSE_VALIDATED_REDACTION_MARKER: Readonly<Record<string, unknown>> = Object.freeze({
+  content: '[redacted]',
+  // This marker is a shared singleton reused across every projected frame
+  // for every non-privileged subscriber — `Object.freeze` is shallow, so
+  // the nested array must be frozen too, or an accidental downstream
+  // mutation of `toolCalls` (e.g. `.push()`) would leak across every
+  // subscriber and frame that reused this same object (copilot review).
+  toolCalls: Object.freeze([]),
+});
+
+/** The shape `response.validated`'s frame `detail` carries — see `ResponseValidatedEvent`. */
+interface ResponseValidatedDetail {
+  readonly step: unknown;
+  readonly original: unknown;
+  readonly validated: unknown;
+}
+
+function isResponseValidatedDetail(detail: unknown): detail is ResponseValidatedDetail {
+  return (
+    typeof detail === 'object' &&
+    detail !== null &&
+    'step' in detail &&
+    'original' in detail &&
+    'validated' in detail
+  );
+}
+
+/**
+ * Projects one frame for delivery to a connection with the given
+ * privilege, per AB-305's coordinator ruling. A no-op for every frame
+ * except `response.validated` delivered to a non-privileged connection,
+ * where `detail.original` is replaced by {@link RESPONSE_VALIDATED_REDACTION_MARKER}.
+ * Applied at every point a frame reaches the wire — live broadcast, SSE
+ * replay, and WebSocket `subscribe` replay — never at recording time, so
+ * the in-memory replay buffer (and the durable audit trail, which reads
+ * the bureau's own action log directly, never through this broker) always
+ * holds the full, unprojected frame.
+ */
+function projectFrameForPrivilege(frame: ServerFrame, privileged: boolean): ServerFrame {
+  if (privileged) return frame;
+  if (frame.type !== 'event' || frame.event !== RESPONSE_VALIDATED_EVENT_TYPE) return frame;
+  if (!isResponseValidatedDetail(frame.detail)) return frame;
+
+  return {
+    ...frame,
+    detail: {
+      ...frame.detail,
+      original: RESPONSE_VALIDATED_REDACTION_MARKER,
+    },
+  };
 }
 
 /**
@@ -379,6 +461,7 @@ export class LiveFrameBroker {
       closeConnection,
       runIds: new Set(options.runIds ?? []),
       includeScheduler: options.includeScheduler ?? false,
+      privileged: options.privileged ?? false,
       watchdog,
       recordKeepalive: () => {
         watchdog.recordPulse('transport-keepalive', 0);
@@ -423,6 +506,11 @@ export class LiveFrameBroker {
    * emitted after this call can be missed, and none already covered by the
    * replay can be double-delivered, because nothing else can run on this
    * (single) thread until this function returns.
+   *
+   * AB-305: every returned frame is projected for this subscriber's own
+   * privilege — a reconnecting non-privileged WebSocket client must not
+   * see a buffered `response.validated.original` any more than a live one
+   * does.
    */
   subscribe(key: object, runId: string, since?: number): ServerFrame[] {
     const subscriber = this.subscribers.get(key);
@@ -431,7 +519,9 @@ export class LiveFrameBroker {
     }
 
     subscriber.runIds.add(runId);
-    return this.getFramesSince(runId, since);
+    return this.getFramesSince(runId, since).map((frame) =>
+      projectFrameForPrivilege(frame, subscriber.privileged),
+    );
   }
 
   unsubscribe(key: object, runId: string): void {
@@ -497,6 +587,12 @@ export class LiveFrameBroker {
     }
   }
 
+  /**
+   * Fans `frame` out to every matching subscriber, recording it into the
+   * per-run replay buffer first (unprojected — see {@link projectFrameForPrivilege}'s
+   * doc comment) and then projecting a fresh copy for each subscriber's own
+   * privilege (AB-305) before invoking its `sendFrame`.
+   */
   broadcast(frame: ServerFrame): void {
     this.recordFrame(frame);
     const failedSubscribers: object[] = [];
@@ -518,7 +614,7 @@ export class LiveFrameBroker {
       }
 
       try {
-        subscriber.sendFrame(frame);
+        subscriber.sendFrame(projectFrameForPrivilege(frame, subscriber.privileged));
       } catch {
         failedSubscribers.push(key);
       }
@@ -586,6 +682,7 @@ export class LiveFrameBroker {
     const streamKey = {};
     const encoder = new TextEncoder();
     const heartbeatIntervalMs = options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
+    const privileged = options.privileged ?? false;
     let heartbeat: unknown;
     let closed = false;
     let controllerForClose: ReadableStreamDefaultController<Uint8Array> | undefined;
@@ -689,8 +786,11 @@ export class LiveFrameBroker {
             continue;
           }
 
+          // AB-305: this replay bypasses `subscribe()`/`broadcast()` (it
+          // reads the buffer directly), so it must project for this
+          // connection's own privilege itself.
           for (const frame of this.getFramesSince(runId, resumeCursor.get(runId))) {
-            sendFrame(frame);
+            sendFrame(projectFrameForPrivilege(frame, privileged));
           }
         }
 
