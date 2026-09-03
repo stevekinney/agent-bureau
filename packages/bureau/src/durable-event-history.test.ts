@@ -571,6 +571,37 @@ describe('createDurableEventHistory', () => {
       await history.dispose();
     });
 
+    it('honors an exclusive since cursor: the event AT since is never replayed, only what comes strictly after it', async () => {
+      const storage = await createMemoryStorage();
+      const runtime = createManualRuntimeServices();
+      const history = createDurableEventHistory(storage, runtime);
+      const owner = { kind: 'run' as const, id: 'run-1' };
+
+      const first = await history.record(owner, 'run.started', {});
+      const second = await history.record(owner, 'step.completed', {});
+
+      const collector = createCollector();
+      const subscription = history.subscribeEventHistory(owner, collector.push, {
+        since: first.cursor,
+      });
+
+      await collector.waitForSequence(second.sequence);
+      // Exclusive: `first` itself never arrives, only `second` (and later
+      // live events) — proving `since` behaves the same way here as it
+      // already does for `page()`'s own exclusive cursor.
+      expect(collector.events.map((event) => event.kind)).toEqual(['step.completed']);
+
+      const third = await history.record(owner, 'run.completed', {});
+      await collector.waitForSequence(third.sequence);
+      expect(collector.events.map((event) => event.kind)).toEqual([
+        'step.completed',
+        'run.completed',
+      ]);
+
+      subscription.unsubscribe();
+      await history.dispose();
+    });
+
     it('never delivers another owner’s events', async () => {
       const storage = await createMemoryStorage();
       const runtime = createManualRuntimeServices();
