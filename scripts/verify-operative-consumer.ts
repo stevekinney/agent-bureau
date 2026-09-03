@@ -605,8 +605,8 @@ export { RegistryAgent };
 };
 
 // AB-259: an executed probe of `@lostgradient/operative/test` — the test
-// kit AB-92/AB-252/255/256/257/258 built. Every value export the issue
-// names is genuinely called (not merely imported): `createManualRuntimeServices`,
+// kit AB-92/AB-252/AB-255/AB-256/AB-257/AB-258 built. Every value export the
+// issue names is genuinely exercised, not merely imported: `createManualRuntimeServices`,
 // `createEventRecorder`, `createResourceScope`, `createScriptedGenerate`,
 // and `createScriptedTool` drive one real agent run to completion through a
 // `ResourceScope`, whose normalized causal trace and quiescent close are
