@@ -2,7 +2,9 @@ import { parseAnthropicToolCalls } from 'armorer/adapters/anthropic';
 import { toAnthropicMessages } from 'conversationalist/adapters/anthropic';
 import type { ToolCallInput } from 'interoperability';
 
+import { withBackendDescriptors } from './backend-descriptor-attachment.ts';
 import { ProviderError, ToolCallParseError } from './errors.ts';
+import { createModelCatalog } from './model-catalog.ts';
 import { createCacheAwareAssembly } from './shared/cache-aware-assembly.ts';
 import { resolveAnthropicEffort } from './shared/effort.ts';
 import { resolveAnthropicModel } from './shared/model-registry.ts';
@@ -244,6 +246,19 @@ function buildAnthropicUsage(
 }
 
 /**
+ * The single `BackendDescriptor` (AB-64 AC2) matching `model` on the
+ * `'messages'` endpoint, from the static seed catalog — an array of zero or
+ * one entries, never fabricated. Zero when `model` has no seed row (a model
+ * newer than the seed, or a typo): the resulting `GenerateFunction` then
+ * reports `mode: 'opaque'` rather than an invented descriptor.
+ */
+function anthropicDescriptorsFor(model: string) {
+  return createModelCatalog().descriptors.filter(
+    (descriptor) => descriptor.provider === 'anthropic' && descriptor.model === model,
+  );
+}
+
+/**
  * Creates a GenerateFunction backed by the Anthropic Messages API.
  *
  * When no `client` is provided, dynamically imports `@anthropic-ai/sdk`
@@ -281,7 +296,9 @@ export function createAnthropicProvider(options: AnthropicProviderOptions): Gene
     return clientPromise;
   }
 
-  return async (context: GenerateContext): Promise<GenerateResponse> => {
+  const generate: GenerateFunction = async (
+    context: GenerateContext,
+  ): Promise<GenerateResponse> => {
     const effectiveMaximumTokens = context.maximumTokens ?? maximumTokens;
     assertThinkingBudgetBelowMaximum(options.thinking, effectiveMaximumTokens);
     const client = await getClient();
@@ -353,6 +370,8 @@ export function createAnthropicProvider(options: AnthropicProviderOptions): Gene
       throw new ProviderError({ provider: 'anthropic', cause: error });
     }
   };
+
+  return withBackendDescriptors(generate, anthropicDescriptorsFor(resolvedModel));
 }
 
 /**
@@ -395,7 +414,7 @@ export function createAnthropicProviderStream(
     return clientPromise;
   }
 
-  return async (
+  const generate: StreamingGenerateFunction = async (
     context: GenerateContext & { streaming: StreamingHandle },
   ): Promise<GenerateResponse> => {
     const effectiveMaximumTokens = context.maximumTokens ?? maximumTokens;
@@ -586,6 +605,8 @@ export function createAnthropicProviderStream(
       throw new ProviderError({ provider: 'anthropic', cause: error });
     }
   };
+
+  return withBackendDescriptors(generate, anthropicDescriptorsFor(resolvedModel));
 }
 
 /**

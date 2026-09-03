@@ -263,6 +263,97 @@ describe('createDurableHeartbeat', () => {
     }
   });
 
+  it('dispatches SchedulePausedEvent/ScheduleResumedEvent/ScheduleCancelledEvent when an emitter is supplied (AB-223)', async () => {
+    const { engine } = await createRunEngine({
+      storage: new MemoryStorage(),
+      runWorkflow: createAgentRunProbeWorkflow(),
+      recover: false,
+      startScheduler: false,
+    });
+    const { scheduler } = createRecordingScheduler();
+    const dispatched: Event[] = [];
+    const emitter = {
+      dispatch: (event: Event) => {
+        dispatched.push(event);
+        return true;
+      },
+    };
+
+    try {
+      const heartbeat = await createDurableHeartbeat(engine, {
+        scheduler,
+        scheduleId: 'heartbeat-events',
+        spec: { every: '1h' },
+        createHeartbeatRun: () => ({ conversation: new Conversation() }),
+        emitter,
+      });
+
+      await heartbeat.pause();
+      await heartbeat.resume();
+      await heartbeat.cancel();
+
+      expect(dispatched.map((event) => event.type)).toEqual([
+        'schedule.paused',
+        'schedule.resumed',
+        'schedule.cancelled',
+      ]);
+      for (const event of dispatched) {
+        expect((event as { scheduleId: string }).scheduleId).toBe('heartbeat-events');
+      }
+    } finally {
+      await engine.cancelSchedule('heartbeat-events').catch(() => {});
+      engine[Symbol.dispose]();
+    }
+  });
+
+  it('does not dispatch ScheduleCancelledEvent when cancel() only unregisters a shared registration (AB-223)', async () => {
+    const { engine } = await createRunEngine({
+      storage: new MemoryStorage(),
+      runWorkflow: createAgentRunProbeWorkflow(),
+      recover: false,
+      startScheduler: false,
+    });
+    const firstScheduler = createRecordingScheduler();
+    const secondScheduler = createRecordingScheduler();
+    const dispatched: Event[] = [];
+    const emitter = {
+      dispatch: (event: Event) => {
+        dispatched.push(event);
+        return true;
+      },
+    };
+
+    try {
+      const first = await createDurableHeartbeat(engine, {
+        scheduler: firstScheduler.scheduler,
+        scheduleId: 'heartbeat-shared-cancel',
+        spec: { every: '1h' },
+        createHeartbeatRun: () => ({ conversation: new Conversation() }),
+        emitter,
+      });
+      const second = await createDurableHeartbeat(engine, {
+        scheduler: secondScheduler.scheduler,
+        scheduleId: 'heartbeat-shared-cancel',
+        spec: { every: '1h' },
+        createHeartbeatRun: () => ({ conversation: new Conversation() }),
+        emitter,
+      });
+
+      // The second handle's cancel() only unregisters its own services — the
+      // schedule itself stays active because `first` still holds a
+      // registration. No ScheduleCancelledEvent for this call.
+      await second.cancel();
+      expect(dispatched).toHaveLength(0);
+
+      // The first handle's cancel() is the last registration standing, so it
+      // actually cancels the underlying schedule — exactly one event.
+      await first.cancel();
+      expect(dispatched.map((event) => event.type)).toEqual(['schedule.cancelled']);
+    } finally {
+      engine[Symbol.dispose]();
+    }
+  });
+
   it('keeps an earlier same-schedule registration alive after a later handle is disposed', async () => {
     const { engine } = await createRunEngine({
       storage: new MemoryStorage(),
@@ -579,6 +670,13 @@ describe('createDurableHeartbeat', () => {
     });
     const originalCancelSchedule = engine.cancelSchedule.bind(engine);
     const { scheduler, submittedTasks } = createRecordingScheduler();
+    const dispatched: Event[] = [];
+    const emitter = {
+      dispatch: (event: Event) => {
+        dispatched.push(event);
+        return true;
+      },
+    };
     engine.addEventListener(weft.WorkflowFailedEvent.type, (event) => {
       failedWorkflowMessages.push((event as weft.WorkflowFailedEvent).error.message);
     });
@@ -589,6 +687,7 @@ describe('createDurableHeartbeat', () => {
         scheduleId: 'heartbeat-cancel-failure',
         spec: { every: '1h' },
         createHeartbeatRun: () => ({ conversation: new Conversation() }),
+        emitter,
       });
       engine.cancelSchedule = async () => {
         throw new Error('cancel failed');
@@ -599,6 +698,9 @@ describe('createDurableHeartbeat', () => {
       expect(await engine.getSchedule('heartbeat-cancel-failure')).toMatchObject({
         status: 'active',
       });
+      // A failed cancel() must not dispatch ScheduleCancelledEvent (AB-223) —
+      // the schedule was never actually cancelled.
+      expect(dispatched).toHaveLength(0);
       await fireSchedule(engine, 'heartbeat-cancel-failure');
       expect(submittedTasks).toHaveLength(1);
       expect(failedWorkflowMessages).toHaveLength(0);
@@ -608,6 +710,7 @@ describe('createDurableHeartbeat', () => {
       expect(await engine.getSchedule('heartbeat-cancel-failure')).toMatchObject({
         status: 'cancelled',
       });
+      expect(dispatched.map((event) => event.type)).toEqual(['schedule.cancelled']);
     } finally {
       engine.cancelSchedule = originalCancelSchedule;
       await originalCancelSchedule('heartbeat-cancel-failure').catch(() => {});

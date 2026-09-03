@@ -22,6 +22,7 @@ import type {
   SessionInputAdmissionOutcome,
   SessionInputAdmissionRequest,
 } from '@lostgradient/operative/durable';
+import type { LivenessSnapshot } from '@lostgradient/operative/liveness';
 import type { Store } from '@lostgradient/operative/store';
 import type {
   HistoryPolicy,
@@ -64,6 +65,7 @@ import type { AuditTrail } from './audit-trail';
 import type { BureauEventMap } from './events';
 import type { ModelCatalogService } from './model-catalog-refresh';
 import type { OnlineEvalSampler, OnlineEvalSamplerOptions } from './online-evals';
+import type { SteeringCommandAdmissionOutcome, SteeringCommandRequest } from './steering';
 import type { WebhookNotifier, WebhookNotifierOptions } from './webhook-notifier';
 
 // ── Provider Configuration ───────────────────────────────────────────
@@ -371,9 +373,39 @@ export interface BureauOptions<D extends AgentDefinitions = AgentDefinitions> {
    * is opt-in, never an ambient grant.
    */
   humanInput?: boolean;
+  /**
+   * AB-201 — opt into operative's `scheduleWakeup` self-scheduling tool for
+   * durable runs (`createRun` only; has no effect without a durable engine
+   * composed), mirroring {@link BureauOptions.humanInput}'s wiring exactly.
+   * When `true`, bureau adds a `scheduleWakeup` tool to each durable run's
+   * toolbox, bound to that run's real `ctx.services` object so a call
+   * genuinely parks the workflow via `ctx.sleep` (AB-41's decision record)
+   * rather than merely returning a success-shaped no-op. Omit (the default,
+   * or `false`) to leave the toolbox as configured — this tool is opt-in,
+   * never an ambient grant, and is simply absent from the toolbox rather than
+   * wired to throw when disabled (mirroring `requestHumanInput`'s own
+   * omission behavior). A standalone `scheduleWakeup` tool built outside
+   * Bureau's composition with `durable: false` throws
+   * `DurableCapabilityUnavailableError` instead (AB-41 / AB-43), unchanged by
+   * this option.
+   */
+  wakeup?: boolean;
   stopWhen?: StopCondition | StopCondition[];
   sessionPersistenceRetryDelayMilliseconds?: number;
   sessionPersistenceSleep?: (milliseconds: number) => Promise<void>;
+  /**
+   * Injectable sleep used ONLY to bound `shutdown({ timeoutMilliseconds })`'s
+   * wait (AB-207). Defaults to a real `setTimeout`-backed sleep, cleared via
+   * `signal` once the real teardown chain wins the race first — otherwise a
+   * `shutdown({ timeoutMilliseconds })` call on a bureau whose teardown
+   * finishes quickly would still hold a live timer open for the full
+   * duration. Tests supply a manually-controlled promise here instead of a
+   * fake system clock — the same pattern `sessionPersistenceSleep` already
+   * establishes — so the timeout-elapsed acceptance criterion never depends
+   * on a real wall-clock wait; a test implementation should also honor
+   * `signal` so it does not itself leak a pending timer/interval.
+   */
+  shutdownTimeoutSleep?: (milliseconds: number, signal: AbortSignal) => Promise<void>;
   maximumSteps?: number;
   systemPrompt?: string;
   /**
@@ -615,6 +647,71 @@ export interface ResolveReviewResult {
 }
 
 /**
+ * Armorer's cleanup-outcome vocabulary
+ * (`packages/armorer/src/execution-lifecycle.ts`'s `ExecutionCleanupOutcome`
+ * `status`), reused verbatim per AB-34's vocabulary constraint — the same
+ * reuse `CatalogRefreshCleanupAcknowledgement` makes in
+ * `model-catalog-refresh.ts`.
+ *
+ * - `'completed'` — the owner's drain settled normally.
+ * - `'failed'` — the owner's drain settled by rejecting; the failure is
+ *   diagnosed and teardown continues past it.
+ * - `'unresolved'` — a `shutdown({ timeoutMilliseconds })` wait elapsed
+ *   before this owner's drain settled. The drain itself is not abandoned —
+ *   only `shutdown()`'s wait for it is.
+ * - `'not-required'` — this owner had nothing to release.
+ */
+export type CleanupAcknowledgement = 'not-required' | 'completed' | 'failed' | 'unresolved';
+
+/**
+ * Options for {@link Bureau.shutdown}. `policy` defaults to `'abort'` when
+ * omitted (including when `options` itself is omitted) — matching
+ * `dispose()`'s existing behavior.
+ */
+export interface BureauShutdownOptions {
+  readonly policy?: 'abort' | 'drain';
+  /**
+   * Bounds `shutdown()`'s WAIT only — see {@link Bureau.shutdown}. Omit to
+   * wait indefinitely.
+   */
+  readonly timeoutMilliseconds?: number;
+}
+
+/** One row of {@link BureauShutdownReport.owners} — one Bureau-composed subsystem's drain outcome. */
+export interface BureauShutdownOwnerReport {
+  /**
+   * Which Bureau-composed subsystem this row reports on. A row is emitted
+   * only for a subsystem this bureau actually composes — `'heartbeat'` is
+   * reserved for the day Bureau composes one; no row carries it today.
+   */
+  readonly kind:
+    | 'scheduler'
+    | 'online-evals'
+    | 'webhook-notifier'
+    | 'audit-trail'
+    | 'durable-engine'
+    | 'heartbeat';
+  readonly id?: string;
+  readonly outcome: CleanupAcknowledgement;
+}
+
+/**
+ * Returned by {@link Bureau.shutdown}, modeled on armorer's
+ * `ExecutionCleanupReport` shape (`packages/armorer/src/execution-lifecycle.ts`)
+ * rather than a new report vocabulary.
+ */
+export interface BureauShutdownReport {
+  readonly admissionClosed: true;
+  readonly policy: 'abort' | 'drain';
+  readonly requested: number;
+  readonly completed: number;
+  readonly failed: number;
+  readonly unresolved: number;
+  readonly notRequired: number;
+  readonly owners: readonly BureauShutdownOwnerReport[];
+}
+
+/**
  * Per-call options accepted by {@link Bureau.run} — session/tracing/
  * attribution concerns that are properties of the CALL, not the agent (AB-15).
  * There is deliberately no `systemPrompt`, `maximumSteps`, or `maximumTokens`
@@ -700,6 +797,26 @@ export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
   submitSchedulerTask(request: SubmitSchedulerTaskRequest): Promise<SubmitSchedulerTaskResponse>;
   listRuns(status?: string): RunSummary[];
   getRun(id: string): RunDetail | undefined;
+
+  /**
+   * Subscribes to live liveness updates for a run (AB-88/AB-214),
+   * delegating to the underlying `ActiveRun`'s `subscribeSnapshot`. Delivers
+   * the current snapshot synchronously before returning, then a new
+   * snapshot on every revision change; already-terminal work delivers the
+   * terminal snapshot once. A caller with only `getRun(id)` sees the
+   * liveness observed at that call; a caller wanting live updates uses this
+   * instead of polling `getRun`.
+   *
+   * Throws when `id` names no known run — matching `abortRun`'s unknown-id
+   * behavior rather than `getRun`'s `undefined`-returning one, because there
+   * is no snapshot value to hand back synchronously to `observer` for an id
+   * this bureau has never registered.
+   */
+  subscribeRunSnapshot(
+    runId: string,
+    observer: (snapshot: LivenessSnapshot) => void,
+    options?: { signal?: AbortSignal },
+  ): Subscription;
 
   /**
    * Synchronously returns the versioned, JSON-serializable {@link RunReport}
@@ -810,6 +927,44 @@ export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
   ): Promise<SessionInputAdmissionOutcome>;
 
   /**
+   * AB-67/AB-199 — admit a `pause` or `resume` steering command as a sixth
+   * session verb, scoped to an in-memory (process-local) session. Reads
+   * authority and terminal status through the same mechanism
+   * `submitSessionInput` uses ({@link isSessionAuthorityAuthorized},
+   * {@link isSessionRunTerminal}): an unauthorized caller or unknown
+   * `sessionId` returns `{ outcome: 'not-found' }`; an authorized caller
+   * naming an already-terminal session returns `{ outcome: 'session-terminal',
+   * sessionId }`.
+   *
+   * Every target other than `pause`/`resume` returns `{ outcome:
+   * 'unsupported-capability', reason: 'selector-unavailable' }` — `ab-67-
+   * bureau-b` owns admitting them (`policyRef` resolution through AB-66's
+   * selector, `override`-against-catalog validation). A `pause`/`resume`
+   * request against a session with `runtime.durable` configured likewise
+   * returns `unsupported-capability`, with `reason:
+   * 'durable-steering-unavailable'`: this method never holds process-local
+   * pause/resume state a restart would lose.
+   *
+   * A `pause` against an authorized, non-terminal, in-memory session is
+   * accepted, increments the session's `configVersion` by exactly one, and
+   * is idempotent against a second `pause` while the first is still
+   * `accepted`/`applied` (no second increment). A `resume` against a session
+   * that is not currently paused is accepted as a no-op, matching the
+   * idempotent-abort precedent at
+   * `documentation/operative-type-safe-api.md:765`. An `accepted`
+   * pause/resume transitions to `failed` with `SteeringCommandFailure.reason
+   * = 'run-terminal'` if the targeted run aborts or completes before its
+   * `runStep` boundary is reached. An exact retry of the same
+   * `(principal, id)` with an identical `requestedValue` replays the
+   * original command's current state; a same-`id`, different-`requestedValue`
+   * reuse returns a typed conflict.
+   */
+  submitSteeringCommand(
+    sessionId: string,
+    request: SteeringCommandRequest,
+  ): Promise<SteeringCommandAdmissionOutcome>;
+
+  /**
    * Synchronous, constant capability discovery for the three session verbs
    * (AB-192) — lets a caller check `update`/`query` support before calling
    * either method, rather than only by catching `UNSUPPORTED_CAPABILITY`.
@@ -871,12 +1026,12 @@ export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
 
   /**
    * Register a durable recurring schedule via `engine.schedule(...)`.
-   * Returns `null` when the schedule was created but could not be immediately
-   * retrieved. Returns `undefined` when no durable engine is composed.
+   * Throws `ScheduleLocatorUnavailableError` when the schedule was created
+   * but its summary could not be immediately retrieved — the schedule IS
+   * registered in that case, only its locator failed. Returns `undefined`
+   * when no durable engine is composed.
    */
-  createSchedule(
-    definition: DurableScheduleDefinition,
-  ): Promise<ScheduleSummary | null | undefined>;
+  createSchedule(definition: DurableScheduleDefinition): Promise<ScheduleSummary | undefined>;
 
   /**
    * Retrieve a durable schedule by id. Returns `null` when the schedule does not
@@ -953,6 +1108,32 @@ export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
   readonly signal: AbortSignal;
 
   dispose(): Promise<void>;
+
+  /**
+   * Awaited drain of everything Bureau owns (AB-207/AB-37). `dispose()` is a
+   * thin wrapper — `shutdown({ policy: 'abort' })` awaited to completion —
+   * kept for the existing `Promise<void>` external shape; prefer `shutdown()`
+   * directly when the report is useful.
+   *
+   * `'abort'` (the default when `policy` is omitted) aborts every active run
+   * immediately, then awaits every drain. `'drain'` closes admission
+   * identically but lets every already-active caller-owned agent run
+   * (`bureau.run`/session-owned) reach its own natural terminal result while
+   * Bureau-owned background work (scheduler, online-evals, webhook notifier,
+   * audit trail) is stopped/awaited exactly as under `'abort'`.
+   *
+   * `timeoutMilliseconds` bounds the WAIT only: on elapse, `shutdown()`
+   * resolves (never rejects) with every already-settled owner's real outcome
+   * and every still-outstanding owner reported `'unresolved'` — the
+   * underlying teardown keeps running to completion in the background, it is
+   * never abandoned. Omitting it waits indefinitely, matching today's
+   * `dispose()`.
+   *
+   * Calling `shutdown()` (or `dispose()`) more than once is idempotent: every
+   * call after the first returns the same cached report promise, regardless
+   * of the policy passed to the later call.
+   */
+  shutdown(options?: BureauShutdownOptions): Promise<BureauShutdownReport>;
 
   readonly sessionStore: SessionStore | undefined;
   readonly kv: ConditionalTextValueStore | undefined;
@@ -1061,6 +1242,13 @@ export interface RunDetail extends RunSummary {
   events: RunEventRecord[];
   stepDetails: RunStepDetail[];
   latestSnapshot: ConversationSnapshot | undefined;
+  /**
+   * The run's current liveness snapshot (AB-88/AB-214), plain-data and
+   * JSON-safe. `getRun(id)` carries the value observed at call time; a
+   * caller wanting live updates calls `bureau.subscribeRunSnapshot(id, ...)`
+   * instead of polling `getRun`.
+   */
+  liveness: LivenessSnapshot;
 }
 
 export interface CreateRunRequest {

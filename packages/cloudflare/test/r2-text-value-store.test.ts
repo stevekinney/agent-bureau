@@ -5,6 +5,15 @@ import { createCloudflareR2TextValueStore } from '../src/create-cloudflare-r2-te
 import type { R2Bucket } from '../src/r2';
 import { createFakeR2 } from '../src/test/fake-r2';
 
+/**
+ * AB-277 fold-or-exclude: `close()` non-owning-no-op coverage folded into
+ * `runCloudflareBackendContract` (see `src/test/behavior-contract.ts`'s
+ * "rehydrates identically ... (restart proof)" R2 case). Everything else
+ * here stays DOUBLE-ONLY: it reaches through `FakeR2`'s own call-recording
+ * (`headCalls`/`getCalls`/`listCalls`) or drives a deliberately malformed
+ * `R2Bucket` (`truncated: true` with no `cursor`) that a real or
+ * correctly-behaving fake binding never produces.
+ */
 describe('createCloudflareR2TextValueStore', () => {
   it('round-trips a value through set/get', async () => {
     const store = createCloudflareR2TextValueStore({ bucket: createFakeR2() });
@@ -111,11 +120,6 @@ describe('createCloudflareR2TextValueStore', () => {
 
     expect(caught).toBeInstanceOf(Error);
     expect((caught as Error).message).toContain('truncated: true without a cursor');
-  });
-
-  it('close() is a non-owning no-op', async () => {
-    const store = createCloudflareR2TextValueStore({ bucket: createFakeR2() });
-    await expect(store.close()).resolves.toBeUndefined();
   });
 
   it('satisfies the TextValueStore shape used by createStorageSkillProvider', () => {

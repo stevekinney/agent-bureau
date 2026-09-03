@@ -1,4 +1,6 @@
 import { AbortAgentRunError, AsyncDefinitionLoadError } from './errors.ts';
+import { withBackendDescriptors } from './providers/backend-descriptor-attachment.ts';
+import type { BackendDescriptor } from './providers/model-catalog.ts';
 import type { GenerateFunction } from './types.ts';
 
 export type LazyGenerateLoader = () => GenerateFunction | PromiseLike<GenerateFunction>;
@@ -6,6 +8,15 @@ export type LazyGenerateLoader = () => GenerateFunction | PromiseLike<GenerateFu
 export interface CreateLazyGenerateOptions {
   /** Human-readable label included in lazy loading error messages. */
   label?: string;
+
+  /**
+   * `BackendDescriptor`(s) attached to the RETURNED wrapper function at
+   * construction time (AB-64, AB-245) — never derived from the loader,
+   * which must not run just to answer a capability read. A profile read off
+   * the wrapper (`readBackendDescriptors`/`readGenerationProfile`) reports
+   * these without ever invoking `loader`.
+   */
+  descriptors?: readonly BackendDescriptor[];
 }
 
 function isGenerateFunction(value: unknown): value is GenerateFunction {
@@ -109,7 +120,7 @@ export function createLazyGenerate(
     return pending;
   };
 
-  return async (context) => {
+  const wrapper: GenerateFunction = async (context) => {
     const { signal } = context;
     throwIfAborted(signal);
 
@@ -118,4 +129,9 @@ export function createLazyGenerate(
 
     return generate(context);
   };
+
+  // Attached to the WRAPPER at construction time, never derived from the
+  // loader — a profile read must never invoke `loader` (see
+  // `CreateLazyGenerateOptions.descriptors`'s doc comment).
+  return withBackendDescriptors(wrapper, options.descriptors ?? []);
 }

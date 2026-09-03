@@ -1,7 +1,7 @@
-import type { ScheduleOverlapPolicy, ScheduleSpec } from '@lostgradient/weft';
+import type { ScheduleSpec } from '@lostgradient/weft';
 import { z } from 'zod';
 
-import type { AgentScheduleHandle } from './durable/schedule-agent';
+import type { AgentScheduleHandle, AgentScheduleOverlapPolicy } from './durable/schedule-agent';
 
 /**
  * Input shape for the `scheduleSelf` tool. The agent calls this tool to
@@ -47,7 +47,7 @@ export interface ScheduleSelfInput {
    * How to handle a tick that fires while a previous run is still in progress.
    * Defaults to `'skip'` (drop the new run silently).
    */
-  overlap?: ScheduleOverlapPolicy;
+  overlap?: AgentScheduleOverlapPolicy;
 }
 
 /** Output returned to the LLM when `scheduleSelf` is called. */
@@ -68,7 +68,7 @@ export type ScheduleSelfFn = (
     spec: ScheduleSpec;
     input: string;
     session?: string;
-    overlap?: ScheduleOverlapPolicy;
+    overlap?: AgentScheduleOverlapPolicy;
     id?: string;
     idempotent?: boolean;
   },
@@ -189,7 +189,7 @@ export function createScheduleSelfTool(options: CreateScheduleSelfToolOptions) {
             'a fresh standalone session.',
         ),
       overlap: z
-        .enum(['skip', 'queue', 'cancel-running', 'allow'])
+        .enum(['skip', 'allow'])
         .optional()
         .describe(
           'How to handle a tick that fires while a previous run is still in progress. ' +

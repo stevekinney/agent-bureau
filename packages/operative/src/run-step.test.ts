@@ -957,6 +957,40 @@ describe('runStep: AB-221 steering.applied dispatch', () => {
     expect(runState.lastAppliedConfigVersion).toBe(0);
   });
 
+  it("does not re-fire steering.applied for a configVersion BELOW the run's own seeded lastAppliedConfigVersion (PR #430 review, Codex P2, second wave — 'Do not seed a run above its visible steering version')", async () => {
+    // A brand-new run's `lastAppliedConfigVersion` is seeded from the
+    // gate's SESSION-WIDE `getAppliedFloor()` (see `executeLoop`), which
+    // can already exceed this particular run's own VISIBLE configVersion —
+    // e.g. a pause bound to a different, earlier run raised the floor past
+    // an identity-only baseline this run actually starts at. The dedupe
+    // check must compare `>`, not merely `!==`, or a state genuinely BELOW
+    // the seed re-fires as if it were new.
+    const recorder = createEventRecorder();
+    // Seeded floor (2) is ABOVE this run's own visible configVersion (1) —
+    // exactly the cross-run scenario above.
+    const gate = createTestSteeringGate({ paused: false, configVersion: 1, model: 'real-model' });
+    const deps = buildStepDeps({
+      generate: async () => textResponse('done'),
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      steering: gate,
+      runId: 'run-2',
+    });
+    const runState: RunState = {
+      steps: [],
+      totalUsage: { prompt: 0, completion: 0, total: 0 },
+      lastContent: '',
+      schemaAttempts: 0,
+      lastAppliedConfigVersion: 2,
+    };
+
+    await runStep(deps, runState, new Conversation(), 0, recorder);
+
+    expect(steeringAppliedEvents(recorder)).toHaveLength(0);
+    expect(runState.lastAppliedConfigVersion).toBe(2);
+  });
+
   it('fires once at the boundary for an already-accepted command, with sessionId and the exact SteeringEffectiveState payload', async () => {
     const recorder = createEventRecorder();
     const gate = createTestSteeringGate({

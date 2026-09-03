@@ -141,6 +141,21 @@ export interface StepDeps {
    * run's calls on the same toolbox.
    */
   readonly trackToolCallIds?: (ids: readonly string[]) => void;
+  /**
+   * AB-239 — invoked by `runStep` itself ONCE, at step start, with that
+   * step's resolved toolbox (`deps.toolbox`, or a `selectTools`
+   * replacement), immediately after resolution. The driver (`loop.ts`'s
+   * `executeLoop` / `run-workflow.ts`) invokes the SAME callback a second
+   * time, at step end (after `runStep` returns) with `deps.toolbox` — so
+   * across one step this fires twice: swapped-or-base at start, base at end.
+   * Lets the driver (`create-run.ts` / `active-run-adapter.ts`) keep
+   * `toolbox.*` event forwarding attached to whichever toolbox instance this
+   * step actually executes tools against, for exactly that step's duration.
+   * `undefined` for a driver that builds no run emitter (e.g.
+   * `startDurableRunResult`'s headless scheduler runs) — see
+   * `ToolboxEventForwarder`.
+   */
+  readonly onStepToolbox?: (toolbox: AnyToolbox) => void;
 }
 
 /**
@@ -610,7 +625,19 @@ export async function runStep(
     if (
       steeringGate &&
       state.configVersion > 0 &&
-      state.configVersion !== runState.lastAppliedConfigVersion &&
+      // Strictly greater, not merely unequal (review finding, PR #430 —
+      // Codex P2, "Do not seed a run above its visible steering version"):
+      // `RunState.lastAppliedConfigVersion` is seeded from the gate's
+      // SESSION-WIDE `getAppliedFloor()` (`executeLoop`/`run-workflow.ts`'s
+      // `initialCursor`), which can already exceed a brand-new run's own
+      // VISIBLE `configVersion` when a differently-scoped command (a pause
+      // bound to a different, earlier run) advanced the floor past this
+      // run's own identity-only baseline. An unequal-only comparison would
+      // then re-fire `steering.applied` for that lower, already-applied
+      // version the moment this run's boundary observes it — the cursor
+      // must only ever advance, never treat a state genuinely BELOW its
+      // current seed as new.
+      state.configVersion > runState.lastAppliedConfigVersion &&
       deps.runId !== undefined &&
       // Advancing the dedupe cursor must be conditioned on an emitter
       // actually being present to dispatch to, exactly like `deps.runId`
@@ -796,6 +823,7 @@ export async function runStep(
       stepToolbox = registryToolbox;
     }
   }
+  deps.onStepToolbox?.(stepToolbox);
 
   // Resolve per-step tool choice: hook override → RunOptions default → undefined
   let stepToolChoice: ToolChoice | undefined = deps.defaultToolChoice;

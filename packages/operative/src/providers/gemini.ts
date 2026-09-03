@@ -4,7 +4,9 @@ import type { ConversationHistory } from 'conversationalist';
 import { toGeminiMessages } from 'conversationalist/adapters/gemini';
 import { sha256HexSync } from 'interoperability';
 
+import { withBackendDescriptors } from './backend-descriptor-attachment.ts';
 import { ProviderError } from './errors.ts';
+import { createModelCatalog } from './model-catalog.ts';
 import { createCacheAwareAssembly } from './shared/cache-aware-assembly.ts';
 import { resolveGeminiEffort } from './shared/effort.ts';
 import { resolveGeminiApiKey } from './shared/gemini-api-key.ts';
@@ -719,6 +721,26 @@ async function importGeminiClient(options: {
 }
 
 /**
+ * The single `BackendDescriptor` (AB-64 AC2) matching `model` on the
+ * `'generateContent'` endpoint, from the static seed catalog — zero or one
+ * entries, never fabricated.
+ *
+ * This row describes `models.generateContent` specifically. It is only
+ * accurate for {@link createGeminiProvider}, which calls that method — not
+ * for {@link createGeminiProviderStream}, which calls the distinct
+ * `models.generateContentStream` (`:streamGenerateContent`) operation. The
+ * seed catalog (mod-02a, out of this issue's scope) has no stream-specific
+ * row, so `createGeminiProviderStream` deliberately attaches nothing rather
+ * than misreport an endpoint it never invokes; see
+ * `providers/gemini.ts`'s streaming factory below.
+ */
+function geminiDescriptorsFor(model: string) {
+  return createModelCatalog().descriptors.filter(
+    (descriptor) => descriptor.provider === 'gemini' && descriptor.model === model,
+  );
+}
+
+/**
  * Creates a GenerateFunction backed by the Google Gemini API.
  *
  * When no `client` (a `GoogleGenAI` instance) is provided, dynamically
@@ -760,7 +782,9 @@ export function createGeminiProvider(options: GeminiProviderOptions): GenerateFu
     importClient,
   });
 
-  return async (context: GenerateContext): Promise<GenerateResponse> => {
+  const generate: GenerateFunction = async (
+    context: GenerateContext,
+  ): Promise<GenerateResponse> => {
     const client = await getClient();
     const tools = await context.toolbox.toGeminiTools();
 
@@ -822,6 +846,8 @@ export function createGeminiProvider(options: GeminiProviderOptions): GenerateFu
       },
     });
   };
+
+  return withBackendDescriptors(generate, geminiDescriptorsFor(resolvedModel));
 }
 
 /**
@@ -868,7 +894,7 @@ export function createGeminiProviderStream(
     importClient,
   });
 
-  return async (
+  const generate: StreamingGenerateFunction = async (
     context: GenerateContext & { streaming: StreamingHandle },
   ): Promise<GenerateResponse> => {
     const client = await getClient();
@@ -950,6 +976,15 @@ export function createGeminiProviderStream(
       },
     });
   };
+
+  // The seed catalog's Gemini row describes `models.generateContent`
+  // (`geminiDescriptorsFor`'s own doc comment), not the distinct
+  // `models.generateContentStream` operation this factory actually calls.
+  // Attaching that row here would misreport an endpoint this function never
+  // invokes, so this stream factory is left opaque (no descriptor attached)
+  // until the seed catalog (mod-02a, out of this issue's scope) gains a
+  // stream-specific row. See the review thread on PR #433.
+  return generate;
 }
 
 /**

@@ -11,9 +11,40 @@ import {
   AsyncDefinitionLoadError,
 } from './errors';
 import { RunCompletedEvent } from './events';
+import type { AgentGenerationProfile } from './generation-profile';
+import { readGenerationProfile } from './generation-profile';
+import type { AgentRunLivenessSnapshot } from './liveness';
+import { LIVENESS_POLICY_VERSION } from './liveness';
+import type { BackendDescriptor } from './providers/model-catalog';
+import type { ProviderName } from './providers/types';
 import type { RunnableAgent } from './runnable-agent';
 import { OPERATIVE_RESOLVE_RUN_OPTIONS } from './runnable-agent';
 import type { CleanupAcknowledgement, RunOptions, RunResult } from './types';
+
+/** Mechanical AB-214 fixture stub shared by this file's hand-built `AgentRun` handles. */
+function stubLivenessSnapshot(id: string): AgentRunLivenessSnapshot {
+  return {
+    id,
+    kind: 'agent-run',
+    startedAt: new Date(0).toISOString(),
+    revision: 0,
+    status: 'running',
+    lastTransitionAt: new Date(0).toISOString(),
+    projection: 'redacted',
+    ownership: 'independent',
+    detached: false,
+    durability: 'process-local',
+    cancellable: true,
+    attempt: 0,
+    reachability: 'unknown',
+    progress: 'unknown',
+    assessment: 'healthy',
+    observedAt: 0,
+    missedPulseCount: 0,
+    policyVersion: LIVENESS_POLICY_VERSION,
+    evidence: [],
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Test doubles
@@ -64,6 +95,11 @@ function createFakeAgentRun(): {
     },
     closed(): Promise<CleanupAcknowledgement> {
       return resultPromise.then(() => ({ status: 'completed' }) as const);
+    },
+    snapshot: () => stubLivenessSnapshot('fake-handle'),
+    subscribeSnapshot: (observer: (snapshot: AgentRunLivenessSnapshot) => void) => {
+      observer(stubLivenessSnapshot('fake-handle'));
+      return { unsubscribe: () => {}, closed: false };
     },
     [Symbol.dispose](): void {
       disposed = true;
@@ -356,6 +392,29 @@ describe('createLazyAgent', () => {
     expect((result.error as AgentContractError).code).toBe('INVALID_AGENT_HANDLE');
     // The provisional (pre-load) witness, since the loaded agent's own
     // hasOutput is not a valid boolean and is never trusted.
+    expect(lazy.hasOutput).toBe(false);
+  });
+
+  it('does not throw from the hasOutput getter when the loader resolves to null (AB-234 review round 2 — Codex P2)', async () => {
+    // `resolve()` caches whatever the loader resolved to BEFORE
+    // `isRunnableAgent` gets a chance to reject it — so `state.agent` can be
+    // `null` (or any other non-object), not just a well-formed-but-untyped
+    // object. A bare `state.agent.hasOutput` dereference on `null` throws a
+    // raw TypeError from the getter itself, masking the AgentContractError
+    // the run itself surfaces.
+    const lazy = createLazyAgent(() => null as unknown as RunnableAgent<never, false>, {
+      label: 'null-export',
+    });
+
+    const run = lazy.run('one');
+    const result = await run.result();
+
+    expect(result.finishReason).toBe('error');
+    expect(result.error).toBeInstanceOf(AgentContractError);
+    expect((result.error as AgentContractError).code).toBe('INVALID_AGENT_HANDLE');
+    // Reading the getter after the (invalid) load has settled must fall
+    // back to the provisional witness, never throw.
+    expect(() => lazy.hasOutput).not.toThrow();
     expect(lazy.hasOutput).toBe(false);
   });
 
@@ -744,6 +803,11 @@ describe('createLazyAgent', () => {
       children: () => [],
       abortChild() {},
       closed: () => Promise.resolve(closedFailure),
+      snapshot: () => stubLivenessSnapshot('cancelled-after-resolution'),
+      subscribeSnapshot: (observer: (snapshot: AgentRunLivenessSnapshot) => void) => {
+        observer(stubLivenessSnapshot('cancelled-after-resolution'));
+        return { unsubscribe: () => {}, closed: false };
+      },
       [Symbol.dispose]() {},
       [Symbol.asyncIterator]: () => (async function* () {})(),
     } as unknown as AgentRun<string, false>;
@@ -848,6 +912,103 @@ describe('createLazyAgent', () => {
     await run.result();
 
     expect(fake.abortChildCalls).toEqual([{ childId: 'child-1', reason: 'now resolved' }]);
+  });
+
+  it('AB-88/AB-214: snapshot()/subscribeSnapshot() read a synthetic created snapshot before resolution and delegate once resolved', async () => {
+    const fake = createFakeAgentRun();
+    const agent: RunnableAgent<string, false> = {
+      name: 'fake',
+      hasOutput: false,
+      run: () => fake.handle,
+    };
+    const lazy = createLazyAgent(() => agent, { label: 'lazy-liveness' });
+
+    const run = lazy.run('hello');
+
+    // Before the internal resolution microtask has run, there is no
+    // underlying handle yet — a synthetic 'created' snapshot, not a throw.
+    const beforeSnapshot = run.snapshot();
+    expect(beforeSnapshot.status).toBe('created');
+    expect(beforeSnapshot.id).toBe('lazy-liveness');
+
+    // AB-214 review (PRRT_kwDORvupsc6esZSA): a subscription registered
+    // before `underlying` resolves must stay OPEN and keep receiving
+    // updates once it does — not close itself off after the one synchronous
+    // synthetic snapshot.
+    const beforeReceived: string[] = [];
+    const beforeSubscription = run.subscribeSnapshot((snapshot) =>
+      beforeReceived.push(snapshot.status),
+    );
+    expect(beforeReceived).toEqual(['created']);
+    expect(beforeSubscription.closed).toBe(false);
+
+    await flushMicrotasks();
+
+    // Once resolved, both delegate straight through to the underlying
+    // handle — including the PRE-EXISTING subscription above, which was
+    // transferred to a real one rather than left stuck on 'created'.
+    expect(run.snapshot().id).toBe('fake-handle');
+    // The transferred subscription received the real handle's own status
+    // ('running', per `stubLivenessSnapshot`) as its second delivery.
+    expect(beforeReceived).toEqual(['created', 'running']);
+    const afterReceived: string[] = [];
+    run.subscribeSnapshot((snapshot) => afterReceived.push(snapshot.id));
+    expect(afterReceived).toEqual(['fake-handle']);
+
+    expect(() => beforeSubscription.unsubscribe()).not.toThrow();
+    expect(beforeSubscription.closed).toBe(true);
+
+    fake.settle(successResult('done'));
+    await run.result();
+  });
+
+  it('AB-214 review (PRRT_kwDORvupsc6esZSF): notifies a pending subscriber with a synthetic terminal snapshot when the run finalizes with no underlying handle', async () => {
+    const controller = new AbortController();
+    const lazy = createLazyAgent(
+      () =>
+        new Promise<RunnableAgent<string, false>>(() => {
+          // Never resolves — this run stays 'waiting' until aborted.
+        }),
+      { label: 'never-resolves' },
+    );
+
+    const run = lazy.run('hello', { signal: controller.signal });
+
+    const received: string[] = [];
+    const subscription = run.subscribeSnapshot((snapshot) => received.push(snapshot.status));
+    expect(received).toEqual(['created']);
+    expect(subscription.closed).toBe(false);
+
+    // A second, already-closed-by-then subscriber exercises the
+    // `record.closed` skip branch inside `notifySyntheticTerminal`.
+    const alreadyClosed = run.subscribeSnapshot(() => {});
+    alreadyClosed.unsubscribe();
+
+    // A throwing subscriber must not stop the others from being notified
+    // (same observer-isolation contract as `ActiveRunLiveness`).
+    const throwingReceived: string[] = [];
+    run.subscribeSnapshot((snapshot) => {
+      throwingReceived.push(snapshot.status);
+      throw new Error('a badly behaved subscriber');
+    });
+
+    controller.abort('cancelled while waiting for the loader');
+    await run.result();
+
+    expect(received).toEqual(['created', 'terminal']);
+    expect(throwingReceived).toEqual(['created', 'terminal']);
+    expect(subscription.closed).toBe(true);
+    expect(run.snapshot().status).toBe('terminal');
+
+    // A subscription registered AFTER the synthetic terminal finalize must
+    // deliver the terminal snapshot once and close immediately, same as
+    // `ActiveRunLiveness`'s own already-terminal contract.
+    const afterReceived: string[] = [];
+    const afterSubscription = run.subscribeSnapshot((snapshot) =>
+      afterReceived.push(snapshot.status),
+    );
+    expect(afterReceived).toEqual(['terminal']);
+    expect(afterSubscription.closed).toBe(true);
   });
 
   it('honors an already-aborted context.signal without calling the loader', async () => {
@@ -1090,6 +1251,11 @@ describe('createLazyAgent', () => {
       children: () => [],
       abortChild() {},
       closed: () => Promise.resolve({ status: 'completed' }),
+      snapshot: () => stubLivenessSnapshot('throwing-handle-gated'),
+      subscribeSnapshot: (observer: (snapshot: AgentRunLivenessSnapshot) => void) => {
+        observer(stubLivenessSnapshot('throwing-handle-gated'));
+        return { unsubscribe: () => {}, closed: false };
+      },
       [Symbol.dispose]() {},
       [Symbol.asyncIterator](): AsyncIterator<RunEvent> {
         return {
@@ -1125,6 +1291,11 @@ describe('createLazyAgent', () => {
       children: () => [],
       abortChild() {},
       closed: () => Promise.resolve({ status: 'completed' }),
+      snapshot: () => stubLivenessSnapshot('throwing-handle'),
+      subscribeSnapshot: (observer: (snapshot: AgentRunLivenessSnapshot) => void) => {
+        observer(stubLivenessSnapshot('throwing-handle'));
+        return { unsubscribe: () => {}, closed: false };
+      },
       [Symbol.dispose]() {},
       [Symbol.asyncIterator](): AsyncIterator<RunEvent> {
         return {
@@ -1244,6 +1415,11 @@ describe('createLazyAgent', () => {
       children: () => [],
       abortChild() {},
       closed: () => Promise.resolve({ status: 'completed' }),
+      snapshot: () => stubLivenessSnapshot('queueless-handle'),
+      subscribeSnapshot: (observer: (snapshot: AgentRunLivenessSnapshot) => void) => {
+        observer(stubLivenessSnapshot('queueless-handle'));
+        return { unsubscribe: () => {}, closed: false };
+      },
       [Symbol.dispose]() {},
       [Symbol.asyncIterator](): AsyncIterator<RunEvent> {
         return {
@@ -1561,5 +1737,226 @@ describe('createLazyAgent', () => {
     await resolving;
 
     expect(observedAgentName).toBe('original');
+  });
+});
+
+describe('createLazyAgent — generationProfile (AB-64 AC2, AB-245)', () => {
+  it('exposes no generationProfile when options.generationProfile is omitted', () => {
+    const lazy = createLazyAgent(() => {
+      throw new Error('the loader must not run for a capability read');
+    });
+
+    expect(readGenerationProfile(lazy).mode).toBe('opaque');
+  });
+
+  it('exposes the supplied generationProfile without invoking the loader', () => {
+    const profile: AgentGenerationProfile = Object.freeze({
+      mode: 'fixed',
+      revision: 1,
+      projection: 'privileged',
+      descriptors: [],
+      freshness: '2026-09-02T12:00:00.000Z',
+      selector: 'unavailable',
+    });
+    const lazy = createLazyAgent(
+      () => {
+        throw new Error('the loader must not run for a capability read');
+      },
+      { generationProfile: profile },
+    );
+
+    expect(readGenerationProfile(lazy)).toEqual(profile);
+    // Reads the identical object by reference across two consecutive calls
+    // — the profile is computed and frozen once, not rebuilt per read.
+    expect(readGenerationProfile(lazy)).toBe(readGenerationProfile(lazy));
+  });
+
+  it('reports its name alongside the generationProfile without either forcing a load', () => {
+    const profile: AgentGenerationProfile = Object.freeze({
+      mode: 'opaque',
+      revision: 1,
+      projection: 'privileged',
+      descriptors: [],
+      freshness: '2026-09-02T12:00:00.000Z',
+      selector: 'unavailable',
+    });
+    let loaderCalls = 0;
+    const lazy = createLazyAgent(
+      () => {
+        loaderCalls += 1;
+        throw new Error('unreachable');
+      },
+      { label: 'catalog-agent', generationProfile: profile },
+    );
+
+    expect(lazy.name).toBe('catalog-agent');
+    expect(readGenerationProfile(lazy)).toEqual(profile);
+    expect(loaderCalls).toBe(0);
+  });
+
+  it('freezes a caller-supplied (not pre-frozen) generationProfile on receipt, closing the mutation vector (review)', () => {
+    const preferences: {
+      requiredCapabilities: (keyof BackendDescriptor)[];
+      preferredProviders: ProviderName[];
+      preferredModels: string[];
+    } = {
+      requiredCapabilities: ['streaming'],
+      preferredProviders: ['anthropic'],
+      preferredModels: ['claude-opus-4-6'],
+    };
+    const allowedCandidates: { provider: ProviderName; model: string }[] = [
+      { provider: 'anthropic', model: 'claude-opus-4-6' },
+    ];
+    // Deliberately NOT Object.freeze()'d — a caller who built this by hand,
+    // not through createAgent, might hand createLazyAgent a fully mutable
+    // object.
+    const mutableProfile: AgentGenerationProfile = {
+      mode: 'selectable',
+      revision: 1,
+      projection: 'privileged',
+      descriptors: [],
+      preferences,
+      allowedCandidates,
+      freshness: '2026-09-02T12:00:00.000Z',
+      selector: 'unavailable',
+    };
+
+    const lazy = createLazyAgent(
+      () => {
+        throw new Error('the loader must not run for a capability read');
+      },
+      { generationProfile: mutableProfile },
+    );
+
+    const exposed = readGenerationProfile(lazy);
+    expect(Object.isFrozen(exposed)).toBe(true);
+    expect(Object.isFrozen(exposed.preferences)).toBe(true);
+    expect(Object.isFrozen(exposed.preferences?.requiredCapabilities)).toBe(true);
+    expect(Object.isFrozen(exposed.preferences?.preferredProviders)).toBe(true);
+    expect(Object.isFrozen(exposed.preferences?.preferredModels)).toBe(true);
+    expect(Object.isFrozen(exposed.allowedCandidates)).toBe(true);
+
+    // Mutating the ORIGINAL objects the caller still holds a reference to
+    // must not silently change what a later read reports — freezing in
+    // place is exactly what prevents that.
+    expect(() => preferences.requiredCapabilities.push('tools')).toThrow();
+    expect(() => preferences.preferredProviders.push('openai')).toThrow();
+    expect(() => preferences.preferredModels.push('claude-sonnet-5')).toThrow();
+    expect(() => allowedCandidates.push({ provider: 'openai', model: 'gpt-4o' })).toThrow();
+    expect(exposed.preferences?.requiredCapabilities).toEqual(['streaming']);
+    expect(exposed.preferences?.preferredProviders).toEqual(['anthropic']);
+    expect(exposed.preferences?.preferredModels).toEqual(['claude-opus-4-6']);
+    expect(exposed.allowedCandidates).toEqual([
+      { provider: 'anthropic', model: 'claude-opus-4-6' },
+    ]);
+  });
+
+  it('forces selector: unavailable even when the caller-supplied profile claims available (review)', () => {
+    // AB-64's verification walk: a createLazyAgent agent has no Bureau, no
+    // policy, and no catalog, so it can never select — this must not
+    // survive a caller's mistaken (or malicious) claim otherwise.
+    const claimedAvailable: AgentGenerationProfile = {
+      mode: 'selectable',
+      revision: 1,
+      projection: 'privileged',
+      descriptors: [],
+      freshness: '2026-09-02T12:00:00.000Z',
+      selector: 'available',
+    };
+
+    const lazy = createLazyAgent(
+      () => {
+        throw new Error('the loader must not run for a capability read');
+      },
+      { generationProfile: claimedAvailable },
+    );
+
+    expect(readGenerationProfile(lazy).selector).toBe('unavailable');
+  });
+
+  it('forces projection: privileged even when the caller-supplied profile claims general (review)', () => {
+    // AB-64's contract: a profile read directly off an agent is always
+    // 'privileged' — the caller already holds the GenerateFunction and
+    // therefore its descriptors. mod-02e's Bureau catalog read is the only
+    // surface that ever stamps 'general'.
+    const claimedGeneral: AgentGenerationProfile = {
+      mode: 'opaque',
+      revision: 1,
+      projection: 'general',
+      descriptors: [],
+      freshness: '2026-09-02T12:00:00.000Z',
+      selector: 'unavailable',
+    };
+
+    const lazy = createLazyAgent(
+      () => {
+        throw new Error('the loader must not run for a capability read');
+      },
+      { generationProfile: claimedGeneral },
+    );
+
+    expect(readGenerationProfile(lazy).projection).toBe('privileged');
+  });
+
+  it('deep-freezes a hand-built descriptor carried in the supplied profile, not just the containing array (review)', () => {
+    const mutableAliases = [{ alias: 'custom-alias', resolvesTo: 'custom-model' }];
+    const customDescriptor: BackendDescriptor = {
+      descriptorVersion: 1,
+      provider: 'anthropic',
+      endpoint: 'messages',
+      model: 'custom-model',
+      aliases: mutableAliases,
+      lifecycle: 'stable',
+      modalities: {
+        text: { input: true, output: true, sourceForms: ['inline'] },
+        image: { input: false, output: false, sourceForms: [] },
+        document: { input: false, output: false, sourceForms: [] },
+        audio: { input: false, output: false, sourceForms: [] },
+        video: { input: false, output: false, sourceForms: [] },
+        file: { input: false, output: false, sourceForms: [] },
+      },
+      mimeFamilies: [],
+      mediaLimits: [],
+      contextWindowTokens: 1000,
+      maxOutputTokens: 100,
+      streaming: true,
+      tools: true,
+      parallelTools: true,
+      structuredOutput: true,
+      parameterCompatibility: [],
+      caching: false,
+      batchInference: false,
+      explicitThinkingRequest: false,
+      serverSideTokenCounting: false,
+      effort: { portable: [], nativeMapping: 'unsupported', degradesTo: {} },
+      availability: 'available',
+      health: 'unknown',
+      source: 'static',
+      freshness: '2026-01-01T00:00:00.000Z',
+    };
+    const profile: AgentGenerationProfile = {
+      mode: 'fixed',
+      revision: 1,
+      projection: 'privileged',
+      descriptors: [customDescriptor],
+      freshness: '2026-09-02T12:00:00.000Z',
+      selector: 'unavailable',
+    };
+
+    const lazy = createLazyAgent(
+      () => {
+        throw new Error('the loader must not run for a capability read');
+      },
+      { generationProfile: profile },
+    );
+
+    const [attached] = readGenerationProfile(lazy).descriptors;
+    if (!attached) throw new Error('expected exactly one attached descriptor');
+    expect(Object.isFrozen(attached)).toBe(true);
+    expect(Object.isFrozen(attached.aliases)).toBe(true);
+    expect(() => mutableAliases.push({ alias: 'injected', resolvesTo: 'custom-model' })).toThrow();
+    expect(readGenerationProfile(lazy).descriptors[0]?.aliases).toEqual([
+      { alias: 'custom-alias', resolvesTo: 'custom-model' },
+    ]);
   });
 });

@@ -6,6 +6,8 @@ import {
   AsyncDefinitionLoadError,
   createLazyGenerate,
 } from './index';
+import { readBackendDescriptors } from './providers/backend-descriptor-attachment';
+import { createModelCatalog } from './providers/model-catalog';
 import type { GenerateContext, GenerateFunction, GenerateResponse } from './types';
 
 const response = { content: 'loaded', toolCalls: [] } satisfies GenerateResponse;
@@ -256,5 +258,48 @@ describe('createLazyGenerate', () => {
     expect('reset' in lazy).toBe(false);
     expect(AsyncDefinitionLoadError).toBeDefined();
     expect(AbortAgentRunError).toBeDefined();
+  });
+});
+
+describe('createLazyGenerate — descriptors (AB-64 AC2, AB-245)', () => {
+  const FIXED_NOW = () => '2026-09-02T12:00:00.000Z';
+
+  function anthropicDescriptor() {
+    const descriptor = createModelCatalog({ now: FIXED_NOW }).descriptors.find(
+      (row) => row.provider === 'anthropic',
+    );
+    if (!descriptor)
+      throw new Error('expected at least one anthropic descriptor in the seed catalog');
+    return descriptor;
+  }
+
+  it('returns a frozen empty descriptor list when none are supplied', () => {
+    const lazy = createLazyGenerate(async () => async () => response);
+    expect(readBackendDescriptors(lazy)).toEqual([]);
+  });
+
+  it('reports the supplied descriptors without invoking the loader', () => {
+    const descriptor = anthropicDescriptor();
+    const loader = (): never => {
+      throw new Error('the loader must not run for a capability read');
+    };
+    const lazy = createLazyGenerate(loader, { descriptors: [descriptor] });
+
+    expect(readBackendDescriptors(lazy)).toEqual([descriptor]);
+  });
+
+  it('attaches descriptors at construction time, before the wrapper is ever called', () => {
+    const descriptor = anthropicDescriptor();
+    let loaderCalls = 0;
+    const lazy = createLazyGenerate(
+      () => {
+        loaderCalls += 1;
+        return Promise.resolve(async () => response);
+      },
+      { descriptors: [descriptor] },
+    );
+
+    expect(readBackendDescriptors(lazy)).toEqual([descriptor]);
+    expect(loaderCalls).toBe(0);
   });
 });

@@ -315,13 +315,20 @@ function tripwireDetailFrom(error: unknown): AgentRunWorkflowResult['tripwire'] 
  * versioning). `version` is `undefined` when the engine was built without
  * {@link CreateRunWorkflowOptions.version}.
  */
-function initialCursor(version: string | undefined): RunCursor {
+/**
+ * `initialAppliedConfigVersion` seeds `lastAppliedConfigVersion` from the
+ * run's `SteeringGate.getAppliedFloor()` (AB-199 cross-run dedupe), mirroring
+ * `loop.ts`'s `createRunState()` seed. Defaults to 0 — a run with no
+ * steering dependency, or replay reconstructing this same value again, is
+ * unaffected.
+ */
+function initialCursor(version: string | undefined, initialAppliedConfigVersion = 0): RunCursor {
   return {
     step: 0,
     totalUsage: { prompt: 0, completion: 0, total: 0 },
     lastContent: '',
     schemaAttempts: 0,
-    lastAppliedConfigVersion: 0,
+    lastAppliedConfigVersion: initialAppliedConfigVersion,
     ...(version !== undefined ? { workflowVersion: version } : {}),
   };
 }
@@ -429,7 +436,10 @@ export function createRunWorkflow(
         // instance. The checkpoint-store writes below exist only so the ActiveRun
         // adapter can reconstruct the RunResult post-completion; they are not the
         // workflow's own resume mechanism.
-        let cursor: RunCursor = initialCursor(workflowVersion);
+        let cursor: RunCursor = initialCursor(
+          workflowVersion,
+          runDepsFrom(ctx.services).options.steering?.getAppliedFloor?.() ?? 0,
+        );
 
         // Seed the conversation on the first run from the run's options + prompt,
         // then persist it so the adapter and any external reader see the transcript.
@@ -549,6 +559,9 @@ export function createRunWorkflow(
               const stepDeps = {
                 ...buildStepDeps(deps.options),
                 toolbox: deps.toolbox,
+                // AB-239: threads the driver's toolbox-event forwarder through so a
+                // `selectTools`-swapped step toolbox is forwarded for that step too.
+                onStepToolbox: deps.onStepToolbox,
                 runId,
                 durableOperationKeys: true,
               };
@@ -568,6 +581,12 @@ export function createRunWorkflow(
                 stepIndex,
                 deps.emitter,
               );
+              // AB-239: revert the forwarder to the base toolbox now that the
+              // step has ended — still inside this no-`yield*` memo region, so
+              // this runs before the workflow can park (`ctx.waitForSignal`,
+              // `ctx.sleep`) for a step that requested one. See
+              // `ToolboxEventForwarder`'s JSDoc.
+              deps.onStepToolbox?.(deps.toolbox);
 
               // Project the (at most one) pushed StepResult to a plain StepRecord —
               // dropping the live Conversation instance — and re-snapshot the

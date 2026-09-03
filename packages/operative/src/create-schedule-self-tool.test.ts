@@ -99,9 +99,9 @@ describe('createScheduleSelfTool', () => {
     };
     const tool = createScheduleSelfTool({ agentName: 'agent', schedule });
 
-    await tool.execute({ spec: { every: '1h' }, input: 'test', overlap: 'queue' });
+    await tool.execute({ spec: { every: '1h' }, input: 'test', overlap: 'allow' });
 
-    expect(captured?.overlap).toBe('queue');
+    expect(captured?.overlap).toBe('allow');
   });
 
   it('passes a deterministic idempotent schedule id when durable operation context is present', async () => {
@@ -367,9 +367,9 @@ describe('createScheduleSelfTool', () => {
         schedule: async () => makeHandle(),
       });
 
-      const parsed = tool.input.parse({ spec: { every: '1h' }, input: 'test', overlap: 'queue' });
+      const parsed = tool.input.parse({ spec: { every: '1h' }, input: 'test', overlap: 'allow' });
 
-      expect(parsed.overlap).toBe('queue');
+      expect(parsed.overlap).toBe('allow');
     });
 
     it('input schema treats overlap as optional', () => {
@@ -381,6 +381,28 @@ describe('createScheduleSelfTool', () => {
       const parsed = tool.input.parse({ spec: { every: '1h' }, input: 'test' });
 
       expect(parsed.overlap).toBeUndefined();
+    });
+
+    it("input schema rejects overlap 'queue' at the Zod boundary (not forwarded to Weft)", () => {
+      const tool = createScheduleSelfTool({
+        agentName: 'x',
+        schedule: async () => makeHandle(),
+      });
+
+      expect(() =>
+        tool.input.parse({ spec: { every: '1h' }, input: 'test', overlap: 'queue' }),
+      ).toThrow();
+    });
+
+    it("input schema rejects overlap 'cancel-running' at the Zod boundary (not forwarded to Weft)", () => {
+      const tool = createScheduleSelfTool({
+        agentName: 'x',
+        schedule: async () => makeHandle(),
+      });
+
+      expect(() =>
+        tool.input.parse({ spec: { every: '1h' }, input: 'test', overlap: 'cancel-running' }),
+      ).toThrow();
     });
 
     it('input schema rejects calls with no spec field', () => {

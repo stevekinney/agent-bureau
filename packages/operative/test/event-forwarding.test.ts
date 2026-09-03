@@ -293,7 +293,7 @@ describe('event forwarding', () => {
     const generate = createMockGenerate(responses);
 
     const toolbox = createToolbox([weatherTool], {
-      loopDetection: { warningThreshold: 2, blockThreshold: 4, windowSize: 30 },
+      loopDetection: { warningThreshold: 2, blockThreshold: 4, maxWindowSize: 30 },
     });
     const conversation = new Conversation();
 
@@ -322,5 +322,113 @@ describe('event forwarding', () => {
       );
     });
     expect(loopBlockedError).toBeDefined();
+  });
+});
+
+describe('event forwarding — selectTools-swapped step toolbox (AB-239)', () => {
+  it('forwards a budget-exceeded event from a swapped step toolbox with the toolbox prefix', async () => {
+    const baseToolbox = createToolbox([weatherTool]);
+    const swappedToolbox = createToolbox([weatherTool], { budget: { maxCalls: 1 } });
+    const conversation = new Conversation();
+
+    const generate = createMockGenerate([
+      toolCallResponse([weatherToolCall('Denver')]),
+      toolCallResponse([weatherToolCall('Denver')]),
+      textResponse('Done.'),
+    ]);
+
+    const activeRun = createActiveRun({
+      generate,
+      toolbox: baseToolbox,
+      conversation,
+      stopWhen: noToolCalls(),
+      // Every step uses the swapped toolbox, never the base one.
+      selectTools: () => swappedToolbox,
+    });
+
+    const forwardedEvents: string[] = [];
+    activeRun.toObservable().subscribe({
+      next(event) {
+        if (event.type.startsWith('toolbox.')) forwardedEvents.push(event.type);
+      },
+    });
+
+    await activeRun.result;
+
+    // The first call passes the budget; the second (same swapped toolbox,
+    // second step) trips `maxCalls: 1`.
+    expect(forwardedEvents).toContain('toolbox.budget-exceeded');
+    expect(forwardedEvents).toContain('toolbox.error');
+    // Exactly two `toolbox.call`s, both from the swapped toolbox (the base
+    // toolbox is never used, so it never contributes a duplicate).
+    expect(forwardedEvents.filter((type) => type === 'toolbox.call')).toHaveLength(2);
+  });
+
+  it('forwards a loop-blocked companion error from a swapped step toolbox with the toolbox prefix', async () => {
+    const baseToolbox = createToolbox([weatherTool]);
+    const swappedToolbox = createToolbox([weatherTool], {
+      loopDetection: { warningThreshold: 2, blockThreshold: 4, maxWindowSize: 30 },
+    });
+    const conversation = new Conversation();
+
+    const responses: GenerateResponse[] = [];
+    for (let i = 0; i < 5; i++) {
+      responses.push(toolCallResponse([weatherToolCall('Denver')]));
+    }
+    responses.push(textResponse('Done.'));
+    const generate = createMockGenerate(responses);
+
+    const activeRun = createActiveRun({
+      generate,
+      toolbox: baseToolbox,
+      conversation,
+      stopWhen: noToolCalls(),
+      selectTools: () => swappedToolbox,
+    });
+
+    const forwardedErrorEvents: Array<{ originalEvent: unknown }> = [];
+    activeRun.addEventListener('toolbox.error', (event) => {
+      forwardedErrorEvents.push(event as { originalEvent: unknown });
+    });
+
+    await activeRun.result;
+
+    const loopBlockedError = forwardedErrorEvents.find((e) => {
+      const original = e.originalEvent as {
+        result?: { error?: { code?: string; category?: string } };
+      };
+      return (
+        original.result?.error?.code === 'LOOP_BLOCKED' &&
+        original.result?.error?.category === 'conflict'
+      );
+    });
+    expect(loopBlockedError).toBeDefined();
+  });
+
+  it('does not duplicate toolbox events when selectTools returns the original toolbox instance', async () => {
+    const toolbox = createToolbox([weatherTool]);
+    const conversation = new Conversation();
+
+    const generate = createMockGenerate([
+      toolCallResponse([weatherToolCall('Denver')]),
+      textResponse('Done.'),
+    ]);
+
+    const activeRun = createActiveRun({
+      generate,
+      toolbox,
+      conversation,
+      stopWhen: noToolCalls(),
+      // Explicitly returns the SAME instance as `options.toolbox` — this is
+      // the "no swap" case the forwarder must not double-subscribe for.
+      selectTools: () => toolbox,
+    });
+
+    const callEvents: unknown[] = [];
+    activeRun.addEventListener('toolbox.call', (event) => callEvents.push(event));
+
+    await activeRun.result;
+
+    expect(callEvents).toHaveLength(1);
   });
 });

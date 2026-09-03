@@ -86,6 +86,34 @@ function createParkedActiveRun(): {
     events: emitter.events.bind(emitter) as ActiveRun['events'],
     toObservable: emitter.toObservable.bind(emitter),
     complete: emitter.complete.bind(emitter),
+    // AB-214: mechanical addition — this never-settling stub run reports a
+    // static 'running' snapshot and delivers it once; matching `abort`'s
+    // never-resolving `result` above, it never reaches a revision change.
+    snapshot: () => ({
+      id: 'parked',
+      kind: 'agent-run',
+      startedAt: new Date(0).toISOString(),
+      revision: 0,
+      status: 'running',
+      lastTransitionAt: new Date(0).toISOString(),
+      projection: 'redacted',
+      ownership: 'independent',
+      detached: false,
+      durability: 'process-local',
+      cancellable: true,
+      attempt: 0,
+      reachability: 'unknown',
+      progress: 'unknown',
+      assessment: 'healthy',
+      observedAt: 0,
+      missedPulseCount: 0,
+      policyVersion: 'ab-88/2026-09-01',
+      evidence: [],
+    }),
+    subscribeSnapshot: (observer) => {
+      observer(activeRun.snapshot());
+      return { unsubscribe: () => {}, closed: false };
+    },
     [Symbol.dispose]: () => {},
   };
   return { activeRun, emitter };

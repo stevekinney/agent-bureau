@@ -13,6 +13,12 @@ import { createSqliteDouble, type SqliteDouble } from '../src/test/sqlite-double
  *   durable-bytes decode test);
  * - a missing-or-empty `tenantId` (this backend requires one) and an empty
  *   `namespace` throw at the storage boundary.
+ *
+ * AB-277 fold-or-exclude: stays DOUBLE-ONLY. These cases inject already-
+ * corrupt bytes directly into the SQL double's rows to prove the READ-side
+ * decode boundary distrusts stored JSON — no real or fast-double WRITE path
+ * can produce that corrupt state to begin with, so there is nothing here a
+ * positive-path shared contract case could exercise.
  */
 
 const TENANT = 'tenant-a';

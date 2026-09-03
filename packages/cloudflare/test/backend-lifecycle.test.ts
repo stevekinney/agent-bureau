@@ -11,10 +11,19 @@ import { createFakeVectorize } from '../src/test/fake-vectorize';
 import { createSqliteDouble } from '../src/test/sqlite-double';
 
 /**
- * Cloudflare-backend lifecycle behavior NOT covered by the shared contract
- * suite: `close()` is a non-owning no-op (it must NOT dispose the injected SQL /
- * Vectorize bindings, which are shared with the rest of the Worker), and the
- * test-harness wiring exposes the doubles it builds.
+ * AB-277 coordinator ruling: this file's `close()`/dispose "non-owning no-op"
+ * case was folded into `runCloudflareBackendContract` (see
+ * `src/test/behavior-contract.ts`'s "rehydrates identically ... (restart
+ * proof)" cases — SQLite, R2, and memory-record, run against both the fast
+ * double and the real Miniflare lane in `test/cloudflare-backend-contract.test.ts`),
+ * since it doubles as the restart/rehydration proof AB-277 also requires.
+ *
+ * Everything remaining here stays DOUBLE-ONLY by necessity: it reaches
+ * through `sqliteDouble`/`fakeVectorize`'s own internals (harness wiring, raw
+ * SQL row assertions, a `close()`d in-memory database, an instrumented `Sql`
+ * that lies about a read to simulate corruption) or drives the adversarial
+ * fake's poison-injection API — none of which a correct production binding
+ * (real or double) can be made to do through the public adapter surface.
  */
 
 const TENANT = 'tenant-a';
@@ -37,24 +46,6 @@ function makeRecord(id: string, overrides: Partial<MemoryRecord> = {}): MemoryRe
     ...overrides,
   };
 }
-
-describe('close() is a non-owning no-op', () => {
-  it('leaves the injected SQL and Vectorize bindings usable for a new view', async () => {
-    const sql = createSqliteDouble();
-    const vectorize = createFakeVectorize();
-    const storage = createCloudflareMemoryRecordStorage({ sql, vectorize });
-    await storage.init();
-    await storage.put(makeRecord('a'));
-
-    await storage.close();
-
-    // close() did not dispose the shared SQL binding: a fresh view over the same
-    // bindings still reads the row. (init() is idempotent — CREATE IF NOT EXISTS.)
-    const survivor = createCloudflareMemoryRecordStorage({ sql, vectorize });
-    await survivor.init();
-    expect(await survivor.get('a', SCOPE)).toBeDefined();
-  });
-});
 
 describe('createSqliteDouble close()', () => {
   it('closes the underlying in-memory database', () => {

@@ -2,7 +2,9 @@ import { parseOpenAIToolCalls } from 'armorer/adapters/openai';
 import { toOpenAIMessagesGrouped } from 'conversationalist/adapters/openai';
 import type { ToolCallInput } from 'interoperability';
 
+import { withBackendDescriptors } from './backend-descriptor-attachment.ts';
 import { ProviderError, ToolCallParseError } from './errors.ts';
+import { createModelCatalog } from './model-catalog.ts';
 import { resolveOpenAIEffort } from './shared/effort.ts';
 import { resolveOpenAIModel } from './shared/model-registry.ts';
 import { resolveCommonParameters } from './shared/resolve-common-parameters.ts';
@@ -51,6 +53,21 @@ function buildOpenAIUsage(
 }
 
 /**
+ * The single `BackendDescriptor` (AB-64 AC2) matching `model` on the
+ * `'chat.completions'` endpoint, from the static seed catalog — zero or one
+ * entries, never fabricated. `baseURL` is threaded through so a custom
+ * endpoint reads as `endpointAmbiguous` and reports no descriptor for a
+ * `chat.completions`-shaped model that may not really be OpenAI's own,
+ * exactly as `createModelCatalog`'s own `endpointAmbiguous` rule already
+ * does for `getProviderCapabilities`.
+ */
+function openAIDescriptorsFor(model: string, baseURL: string | undefined) {
+  return createModelCatalog({ openAIBaseURL: baseURL }).descriptors.filter(
+    (descriptor) => descriptor.provider === 'openai' && descriptor.model === model,
+  );
+}
+
+/**
  * Creates a GenerateFunction backed by the OpenAI Chat Completions API.
  *
  * When no `client` is provided, dynamically imports `openai`
@@ -84,7 +101,9 @@ export function createOpenAIProvider(options: OpenAIProviderOptions): GenerateFu
     return clientPromise;
   }
 
-  return async (context: GenerateContext): Promise<GenerateResponse> => {
+  const generate: GenerateFunction = async (
+    context: GenerateContext,
+  ): Promise<GenerateResponse> => {
     const client = await getClient();
     const messages = toOpenAIMessagesGrouped(context.conversation.current);
     const tools = await context.toolbox.toOpenAITools();
@@ -141,6 +160,8 @@ export function createOpenAIProvider(options: OpenAIProviderOptions): GenerateFu
       throw new ProviderError({ provider: 'openai', cause: error });
     }
   };
+
+  return withBackendDescriptors(generate, openAIDescriptorsFor(resolvedModel, baseURL));
 }
 
 /**
@@ -179,7 +200,7 @@ export function createOpenAIProviderStream(
     return clientPromise;
   }
 
-  return async (
+  const generate: StreamingGenerateFunction = async (
     context: GenerateContext & { streaming: StreamingHandle },
   ): Promise<GenerateResponse> => {
     const client = await getClient();
@@ -370,4 +391,6 @@ export function createOpenAIProviderStream(
       throw new ProviderError({ provider: 'openai', cause: error });
     }
   };
+
+  return withBackendDescriptors(generate, openAIDescriptorsFor(resolvedModel, baseURL));
 }

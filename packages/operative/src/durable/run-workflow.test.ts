@@ -3460,6 +3460,46 @@ describe('durable agentRun workflow', () => {
       }
     });
 
+    it("AB-199: seeds a fresh durable run's cursor from SteeringGate.getAppliedFloor, so a configVersion a PRIOR run already applied is not re-fired", async () => {
+      const { engine } = await buildEngine(new MemoryStorage(), false);
+      const gate: SteeringGate = {
+        sessionId: 'test-session',
+        getDesiredState: () => ({ paused: false, configVersion: 3, model: 'durable-model' }),
+        awaitResume: () => new Promise<void>(() => {}),
+        getAppliedFloor: () => 3,
+      };
+      const events: Event[] = [];
+      const emitter: EventDispatcher = {
+        dispatch(event) {
+          events.push(event);
+          return true;
+        },
+      };
+      const toolbox = continuingToolbox();
+      const services: DurableRunDeps = {
+        toolbox,
+        emitter,
+        options: {
+          generate: async () => ({ content: 'done', toolCalls: [] }),
+          toolbox,
+          conversation: createConversationHistory(),
+          stopWhen: noToolCalls(),
+          steering: gate,
+          runId: 'run-1',
+        },
+      };
+
+      try {
+        await runToCompletion(engine, { runId: 'ab-199-applied-floor-durable' }, services);
+        const applied = events.filter(
+          (event): event is SteeringAppliedEvent => event instanceof SteeringAppliedEvent,
+        );
+        expect(applied).toHaveLength(0);
+      } finally {
+        engine[Symbol.dispose]();
+      }
+    });
+
     it('a paused steering gate blocks the durable driver at the same runStep boundary, then proceeds once resumed', async () => {
       const { engine } = await buildEngine(new MemoryStorage(), false);
       let paused = true;

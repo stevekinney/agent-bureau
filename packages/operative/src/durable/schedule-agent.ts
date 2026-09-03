@@ -8,6 +8,24 @@ import type {
 } from '@lostgradient/weft';
 import { parseDuration, ScheduleHandle } from '@lostgradient/weft';
 
+import { ScheduleCancelledEvent, SchedulePausedEvent, ScheduleResumedEvent } from '../events';
+import type { EventDispatcher } from '../run-step';
+
+/**
+ * The overlap policies Agent Bureau exposes on its three schedule-creation
+ * paths (`Bureau.createSchedule`, `createAgentSchedule`/`AgentScheduleOptions`,
+ * and the `scheduleSelf` tool). Weft's own {@link ScheduleOverlapPolicy} also
+ * includes `'queue'` and `'cancel-running'`; AB-41's decision record names
+ * those intentionally hidden, not a gap to close, so Agent Bureau narrows to
+ * this subset everywhere a caller supplies an overlap policy.
+ */
+export type AgentScheduleOverlapPolicy = Extract<ScheduleOverlapPolicy, 'skip' | 'allow'>;
+
+const SUPPORTED_OVERLAP_POLICIES: ReadonlySet<string> = new Set<AgentScheduleOverlapPolicy>([
+  'skip',
+  'allow',
+]);
+
 type ScheduleIdCrypto = {
   randomUUID?: () => string;
   getRandomValues?: <T extends Uint8Array>(array: T) => T;
@@ -134,9 +152,10 @@ export interface CreateAgentScheduleOptions {
   session?: string;
   /**
    * How to handle a tick that fires while the previous run is still in
-   * progress. Defaults to `'skip'` (drop the new run silently).
+   * progress. Defaults to `'skip'` (drop the new run silently). Agent Bureau
+   * exposes only `'skip' | 'allow'` — see {@link AgentScheduleOverlapPolicy}.
    */
-  overlap?: ScheduleOverlapPolicy;
+  overlap?: AgentScheduleOverlapPolicy;
   /**
    * Optional stable id for this schedule (used by `getSchedule`/`pauseSchedule`
    * etc.). Defaults to a uuid assigned by Weft.
@@ -147,6 +166,15 @@ export interface CreateAgentScheduleOptions {
    * success. This is for durable replay of effectful schedule registration.
    */
   idempotent?: boolean;
+  /**
+   * Optional event dispatcher. When supplied, the returned handle's
+   * `pause`/`resume`/`cancel` each dispatch `SchedulePausedEvent`/
+   * `ScheduleResumedEvent`/`ScheduleCancelledEvent` (AB-223) exactly once per
+   * successful call, after the underlying engine call settles. Omitted
+   * entirely for a caller with no event surface — this module never
+   * manufactures one.
+   */
+  emitter?: EventDispatcher;
 }
 
 /**
@@ -239,8 +267,11 @@ export interface AgentScheduleOptions {
    * relationship).
    */
   session?: string;
-  /** Overlap policy. Defaults to `'skip'`. */
-  overlap?: ScheduleOverlapPolicy;
+  /**
+   * Overlap policy. Defaults to `'skip'`. Agent Bureau exposes only
+   * `'skip' | 'allow'` — see {@link AgentScheduleOverlapPolicy}.
+   */
+  overlap?: AgentScheduleOverlapPolicy;
   /** Optional stable schedule id (defaults to Weft-assigned uuid). */
   id?: string;
   /**
@@ -268,12 +299,22 @@ export class InvalidScheduleError extends Error {
 function scheduleHandleFromEngine(
   engine: SchedulingEngine,
   scheduleId: string,
+  emitter?: EventDispatcher,
 ): AgentScheduleHandle {
   return {
     id: scheduleId,
-    pause: () => engine.pauseSchedule(scheduleId),
-    resume: () => engine.resumeSchedule(scheduleId),
-    cancel: () => engine.cancelSchedule(scheduleId),
+    async pause() {
+      await engine.pauseSchedule(scheduleId);
+      emitter?.dispatch(new SchedulePausedEvent(scheduleId));
+    },
+    async resume() {
+      await engine.resumeSchedule(scheduleId);
+      emitter?.dispatch(new ScheduleResumedEvent(scheduleId));
+    },
+    async cancel() {
+      await engine.cancelSchedule(scheduleId);
+      emitter?.dispatch(new ScheduleCancelledEvent(scheduleId));
+    },
     async describe(): Promise<ScheduleSummary> {
       const schedule = await engine.getSchedule(scheduleId);
       if (!schedule) {
@@ -282,6 +323,31 @@ function scheduleHandleFromEngine(
       return schedule;
     },
   };
+}
+
+/**
+ * Reject an overlap policy Agent Bureau does not expose (`'queue'` /
+ * `'cancel-running'`) before any Weft-side `engine.schedule()` call. The
+ * `overlap` fields on {@link CreateAgentScheduleOptions} and
+ * {@link AgentScheduleOptions} are already typed
+ * {@link AgentScheduleOverlapPolicy} (`'skip' | 'allow'`), so a well-typed
+ * caller cannot construct one of the hidden values — but the `scheduleSelf`
+ * tool's Zod boundary and any caller coercing an untyped value past the
+ * compiler still can, so this validates the value actually supplied at
+ * runtime, not just its declared type.
+ *
+ * @throws {InvalidScheduleError} when `overlap` is defined and is not
+ * `'skip'` or `'allow'`.
+ */
+function assertSupportedOverlapPolicy(
+  overlap: string | undefined,
+): asserts overlap is AgentScheduleOverlapPolicy | undefined {
+  if (overlap !== undefined && !SUPPORTED_OVERLAP_POLICIES.has(overlap)) {
+    throw new InvalidScheduleError(
+      `overlap policy '${overlap}' is not supported by Agent Bureau; only 'skip' and 'allow' ` +
+        "are exposed ('queue' and 'cancel-running' are intentionally hidden)",
+    );
+  }
 }
 
 function assertCompatibleAgentSchedule(
@@ -343,14 +409,17 @@ function assertCompatibleAgentSchedule(
  * @throws {InvalidScheduleError} when `session` or `id` is blank, or
  * `overlap: 'allow'` is combined with a recurring `session` (a recurring
  * conversation is sequential, so overlapping fires would interleave turns and
- * race the session write-back).
+ * race the session write-back), or an `overlap` value outside
+ * {@link AgentScheduleOverlapPolicy} reaches this function at runtime.
  */
 export async function createAgentSchedule(
   options: CreateAgentScheduleOptions,
 ): Promise<AgentScheduleHandle> {
-  const { engine, agentName, spec, input, description, session, overlap, id, idempotent } = options;
+  const { engine, agentName, spec, input, description, session, overlap, id, idempotent, emitter } =
+    options;
   const workflowType = options.workflowType ?? 'agentRun';
 
+  assertSupportedOverlapPolicy(overlap);
   if (session !== undefined && session.trim().length === 0) {
     throw new InvalidScheduleError('schedule session must be a non-empty string');
   }
@@ -391,7 +460,7 @@ export async function createAgentSchedule(
         overlap,
         description,
       );
-      return scheduleHandleFromEngine(engine, scheduleId);
+      return scheduleHandleFromEngine(engine, scheduleId, emitter);
     }
   }
 
@@ -410,7 +479,7 @@ export async function createAgentSchedule(
           overlap,
           description,
         );
-        return scheduleHandleFromEngine(engine, scheduleId);
+        return scheduleHandleFromEngine(engine, scheduleId, emitter);
       }
     }
     throw error;
@@ -418,9 +487,18 @@ export async function createAgentSchedule(
 
   return {
     id: handle.id,
-    pause: () => handle.pause(),
-    resume: () => handle.resume(),
-    cancel: () => handle.cancel(),
+    async pause() {
+      await handle.pause();
+      emitter?.dispatch(new SchedulePausedEvent(handle.id));
+    },
+    async resume() {
+      await handle.resume();
+      emitter?.dispatch(new ScheduleResumedEvent(handle.id));
+    },
+    async cancel() {
+      await handle.cancel();
+      emitter?.dispatch(new ScheduleCancelledEvent(handle.id));
+    },
     describe: () => handle.describe(),
   };
 }
@@ -448,8 +526,15 @@ export async function createAgentSchedule(
 export function createAgentScheduler(options: {
   engine: SchedulingEngine;
   workflowType?: string;
+  /**
+   * Optional event dispatcher bound at construction. Threaded into every
+   * `createAgentSchedule` call this scheduler makes, so every handle it
+   * returns dispatches `SchedulePausedEvent`/`ScheduleResumedEvent`/
+   * `ScheduleCancelledEvent` (AB-223) from `pause`/`resume`/`cancel`.
+   */
+  emitter?: EventDispatcher;
 }): AgentScheduler {
-  const { engine } = options;
+  const { engine, emitter } = options;
   const workflowType = options.workflowType ?? 'agentRun';
 
   return {
@@ -461,6 +546,7 @@ export function createAgentScheduler(options: {
         engine,
         workflowType,
         agentName,
+        emitter,
         ...scheduleOptions,
       });
     },

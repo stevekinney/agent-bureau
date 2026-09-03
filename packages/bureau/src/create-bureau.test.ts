@@ -13,6 +13,7 @@ import type {
 import {
   AbortAgentRunError,
   createAgentSession,
+  createScheduleWakeupTool,
   createSessionStore,
   DEFAULT_MAXIMUM_STEPS,
   DurableCapabilityUnavailableError,
@@ -35,7 +36,7 @@ import {
 import { createModelCatalog } from '@lostgradient/operative/providers';
 import { createStore } from '@lostgradient/operative/store';
 import { createMockGenerate as createSequentialGenerate } from '@lostgradient/operative/test';
-import { encode } from '@lostgradient/weft';
+import { encode, ScheduleHandle } from '@lostgradient/weft';
 import { KEYS, MemoryStorage, resolveStorage, textValueStore } from '@lostgradient/weft/storage';
 import type { ConditionalTextValueStore } from '@lostgradient/weft/storage/text-value-store';
 import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
@@ -60,6 +61,7 @@ import {
   classifyRecoveredRun,
   createBureau,
   createHumanWaitContext,
+  createWakeupContext,
   defaultSessionPersistenceSleep,
   detachBestEffortPromise,
   emptyRecoveredStepMetadata,
@@ -73,6 +75,7 @@ import {
   omitKeysWithPrefix,
   recordedSessionAuthorityPrincipalId,
   recoveredRequestContextFromMetadata,
+  ScheduleLocatorUnavailableError,
   wireFlowControlSchedulerEvents,
   wireStreamEventTargetFrames,
 } from './create-bureau';
@@ -743,6 +746,81 @@ describe('createBureau', () => {
     expect(bureau.store.getRun(summary.id)).toBeDefined();
   });
 
+  it('AB-88/AB-214: getRun(id).liveness is a JSON-safe plain-data snapshot', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    const summary = await bureau.createRun({ message: 'Hello' });
+    const detail = bureau.getRun(summary.id);
+
+    expect(detail?.liveness).toBeDefined();
+    expect(detail?.liveness.kind).toBe('agent-run');
+    expect(detail?.liveness.id).toBe(summary.id);
+    // Round-trips through JSON — proves toJsonSafe ran over it.
+    expect(() => JSON.stringify(detail)).not.toThrow();
+    const parsed = JSON.parse(JSON.stringify(detail));
+    expect(parsed.liveness.id).toBe(summary.id);
+  });
+
+  it('AB-88/AB-214 review (PRRT_kwDORvupsc6esZTF): getRun(id).liveness.owner carries the authenticated principal that started the run', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    const summary = await bureau.createRun({ message: 'Hello', principal: 'user-42' });
+    const detail = bureau.getRun(summary.id);
+
+    expect(detail?.liveness.owner).toBe('user-42');
+  });
+
+  it('AB-88/AB-214: getRun(id).liveness.owner is absent when the run has no authenticated principal', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    const summary = await bureau.createRun({ message: 'Hello' });
+    const detail = bureau.getRun(summary.id);
+
+    expect(detail?.liveness.owner).toBeUndefined();
+  });
+
+  it('AB-88/AB-214: subscribeRunSnapshot delivers the current snapshot synchronously, then live updates', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    const summary = await bureau.createRun({ message: 'Hello' });
+
+    const received: string[] = [];
+    const subscription = bureau.subscribeRunSnapshot(summary.id, (snapshot) => {
+      received.push(snapshot.status);
+    });
+
+    expect(received.length).toBeGreaterThan(0);
+    subscription.unsubscribe();
+  });
+
+  it('AB-88/AB-214: subscribeRunSnapshot throws NOT_FOUND for an unknown run id', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    expect(() => bureau.subscribeRunSnapshot('does-not-exist', () => {})).toThrow(
+      expect.objectContaining({ code: 'NOT_FOUND' }),
+    );
+  });
+
   it('stamps tool.started events with agentName and runId when agentName is supplied (regression PRRT_kwDORvupsc6MV8Xf)', async () => {
     // REGRESSION: createRunFromRequest omitted `agentName` and `runId` from
     // the RunOptions passed to createActiveRun, so curated tool.* bubble events
@@ -1279,7 +1357,16 @@ describe('createBureau', () => {
       // checkpointed (see the anchor rationale above).
       await pollUntil(() => bureauAReachedStep1);
       expect(bureauAReachedStep1).toBe(true);
-      bureauA.dispose();
+      // AB-207: deliberately NOT disposing bureauA here. `dispose()`
+      // now fully awaits `activeRun.abort()`'s durable-engine `cancel()`
+      // handoff before returning, which genuinely completes the
+      // in-flight workflow's cancellation and removes it from a fresh
+      // engine's `recoverAll()` candidate set — a properly graceful
+      // shutdown correctly leaves nothing to recover. Simulating a real
+      // crash (the durable workflow still owned by a dead worker, which
+      // IS recoverable) means leaving bureauA un-disposed here: it stays
+      // parked at step 1's hung `generate()` call until disposed at the
+      // end of this test, well after bureauB's recovery.
 
       // === FRESH PROCESS: bureau B is a wholly separate bureau over the same
       // SQLite file, with its own engine and its own `resolveWorkflowServices`
@@ -1366,6 +1453,11 @@ describe('createBureau', () => {
       } finally {
         bureauB.dispose();
       }
+      // AB-207: release bureauA's engine now that bureauB's
+      // recovery-dependent assertions are done (its scheduler would
+      // otherwise keep polling storage after this test deletes the sqlite
+      // file below).
+      await bureauA.dispose();
     } finally {
       await rm(databasePath, { force: true });
       await rm(`${databasePath}-wal`, { force: true });
@@ -1417,7 +1509,16 @@ describe('createBureau', () => {
       expect(preRestartMaxRunSeq).toBeGreaterThan(0);
       expect(preRestartMaxRunSeq).toBeLessThan(1000);
       unsubscribeA();
-      bureauA.dispose();
+      // AB-207: deliberately NOT disposing bureauA here. `dispose()`
+      // now fully awaits `activeRun.abort()`'s durable-engine `cancel()`
+      // handoff before returning, which genuinely completes the
+      // in-flight workflow's cancellation and removes it from a fresh
+      // engine's `recoverAll()` candidate set — a properly graceful
+      // shutdown correctly leaves nothing to recover. Simulating a real
+      // crash (the durable workflow still owned by a dead worker, which
+      // IS recoverable) means leaving bureauA un-disposed here: it stays
+      // parked at step 1's hung `generate()` call until disposed at the
+      // end of this test, well after bureauB's recovery.
 
       const bSteps: number[] = [];
       const runSeqsFromB: number[] = [];
@@ -1453,6 +1554,11 @@ describe('createBureau', () => {
         unsubscribeB();
         bureauB.dispose();
       }
+      // AB-207: release bureauA's engine now that bureauB's
+      // recovery-dependent assertions are done (its scheduler would
+      // otherwise keep polling storage after this test deletes the sqlite
+      // file below).
+      await bureauA.dispose();
     } finally {
       await rm(databasePath, { force: true });
       await rm(`${databasePath}-wal`, { force: true });
@@ -1492,7 +1598,16 @@ describe('createBureau', () => {
       const run = await bureauA.createRun({ message: 'Recover me under a new version' });
       await pollUntil(() => bureauAReachedStep1);
       expect(bureauAReachedStep1).toBe(true);
-      bureauA.dispose();
+      // AB-207: deliberately NOT disposing bureauA here. `dispose()`
+      // now fully awaits `activeRun.abort()`'s durable-engine `cancel()`
+      // handoff before returning, which genuinely completes the
+      // in-flight workflow's cancellation and removes it from a fresh
+      // engine's `recoverAll()` candidate set — a properly graceful
+      // shutdown correctly leaves nothing to recover. Simulating a real
+      // crash (the durable workflow still owned by a dead worker, which
+      // IS recoverable) means leaving bureauA un-disposed here: it stays
+      // parked at step 1's hung `generate()` call until disposed at the
+      // end of this test, well after bureauB's recovery.
 
       const warnSpy = spyOn(console, 'warn');
       const bSteps: number[] = [];
@@ -1550,6 +1665,11 @@ describe('createBureau', () => {
         warnSpy.mockRestore();
         bureauB.dispose();
       }
+      // AB-207: release bureauA's engine now that bureauB's
+      // recovery-dependent assertions are done (its scheduler would
+      // otherwise keep polling storage after this test deletes the sqlite
+      // file below).
+      await bureauA.dispose();
     } finally {
       await rm(databasePath, { force: true });
       await rm(`${databasePath}-wal`, { force: true });
@@ -1818,7 +1938,16 @@ describe('createBureau', () => {
           ],
         },
       }));
-      bureauA.dispose();
+      // AB-207: deliberately NOT disposing bureauA here. `dispose()`
+      // now fully awaits `activeRun.abort()`'s durable-engine `cancel()`
+      // handoff before returning, which genuinely completes the
+      // in-flight workflow's cancellation and removes it from a fresh
+      // engine's `recoverAll()` candidate set — a properly graceful
+      // shutdown correctly leaves nothing to recover. Simulating a real
+      // crash (the durable workflow still owned by a dead worker, which
+      // IS recoverable) means leaving bureauA un-disposed here: it stays
+      // parked at step 1's hung `generate()` call until disposed at the
+      // end of this test, well after bureauB's recovery.
 
       // Observe boot ordering via a spy on `createAuditTrail`. Recovery REATTACHES
       // each recovered run and `store.register`s it SYNCHRONOUSLY inside
@@ -1876,6 +2005,11 @@ describe('createBureau', () => {
       } finally {
         bureauB.dispose();
       }
+      // AB-207: release bureauA's engine now that bureauB's
+      // recovery-dependent assertions are done (its scheduler would
+      // otherwise keep polling storage after this test deletes the sqlite
+      // file below).
+      await bureauA.dispose();
     } finally {
       await rm(databasePath, { force: true });
       await rm(`${databasePath}-wal`, { force: true });
@@ -1912,7 +2046,16 @@ describe('createBureau', () => {
       });
       const run = await bureauA.createRun({ message: 'Recover with a tool' });
       await pollUntil(() => reachedStep1);
-      bureauA.dispose();
+      // AB-207: deliberately NOT disposing bureauA here. `dispose()`
+      // now fully awaits `activeRun.abort()`'s durable-engine `cancel()`
+      // handoff before returning, which genuinely completes the
+      // in-flight workflow's cancellation and removes it from a fresh
+      // engine's `recoverAll()` candidate set — a properly graceful
+      // shutdown correctly leaves nothing to recover. Simulating a real
+      // crash (the durable workflow still owned by a dead worker, which
+      // IS recoverable) means leaving bureauA un-disposed here: it stays
+      // parked at step 1's hung `generate()` call until disposed at the
+      // end of this test, well after bureauB's recovery.
 
       // Bureau B: resumes at step 1, which calls the `next` tool again before
       // settling — so a toolbox action fires on the RECOVERED run's surface.
@@ -1948,6 +2091,11 @@ describe('createBureau', () => {
       } finally {
         bureauB.dispose();
       }
+      // AB-207: release bureauA's engine now that bureauB's
+      // recovery-dependent assertions are done (its scheduler would
+      // otherwise keep polling storage after this test deletes the sqlite
+      // file below).
+      await bureauA.dispose();
     } finally {
       await rm(databasePath, { force: true });
       await rm(`${databasePath}-wal`, { force: true });
@@ -1988,7 +2136,16 @@ describe('createBureau', () => {
 
       const run = await bureauA.createRun({ message: 'Recover with envelope frames' });
       await pollUntil(() => bureauAReachedStep1);
-      bureauA.dispose();
+      // AB-207: deliberately NOT disposing bureauA here. `dispose()`
+      // now fully awaits `activeRun.abort()`'s durable-engine `cancel()`
+      // handoff before returning, which genuinely completes the
+      // in-flight workflow's cancellation and removes it from a fresh
+      // engine's `recoverAll()` candidate set — a properly graceful
+      // shutdown correctly leaves nothing to recover. Simulating a real
+      // crash (the durable workflow still owned by a dead worker, which
+      // IS recoverable) means leaving bureauA un-disposed here: it stays
+      // parked at step 1's hung `generate()` call until disposed at the
+      // end of this test, well after bureauB's recovery.
 
       // Bureau B: resumes at step 1, which calls the `next` tool again before
       // settling — so step/tool-pre/tool-post frames should surface on the
@@ -2028,6 +2185,11 @@ describe('createBureau', () => {
       } finally {
         bureauB.dispose();
       }
+      // AB-207: release bureauA's engine now that bureauB's
+      // recovery-dependent assertions are done (its scheduler would
+      // otherwise keep polling storage after this test deletes the sqlite
+      // file below).
+      await bureauA.dispose();
     } finally {
       await rm(databasePath, { force: true });
       await rm(`${databasePath}-wal`, { force: true });
@@ -2068,7 +2230,16 @@ describe('createBureau', () => {
         agentName: 'recovery-agent',
       });
       await pollUntil(() => bureauAReachedStep1);
-      bureauA.dispose();
+      // AB-207: deliberately NOT disposing bureauA here. `dispose()`
+      // now fully awaits `activeRun.abort()`'s durable-engine `cancel()`
+      // handoff before returning, which genuinely completes the
+      // in-flight workflow's cancellation and removes it from a fresh
+      // engine's `recoverAll()` candidate set — a properly graceful
+      // shutdown correctly leaves nothing to recover. Simulating a real
+      // crash (the durable workflow still owned by a dead worker, which
+      // IS recoverable) means leaving bureauA un-disposed here: it stays
+      // parked at step 1's hung `generate()` call until disposed at the
+      // end of this test, well after bureauB's recovery.
 
       // Bureau B: resumes at step 1, which calls the `next` tool. After recovery
       // the resolver now wires the C3 block so the tool.started event emitted
@@ -2112,6 +2283,11 @@ describe('createBureau', () => {
       } finally {
         bureauB.dispose();
       }
+      // AB-207: release bureauA's engine now that bureauB's
+      // recovery-dependent assertions are done (its scheduler would
+      // otherwise keep polling storage after this test deletes the sqlite
+      // file below).
+      await bureauA.dispose();
     } finally {
       await rm(databasePath, { force: true });
       await rm(`${databasePath}-wal`, { force: true });
@@ -2150,7 +2326,16 @@ describe('createBureau', () => {
 
       const run = await bureauA.createRun({ message: 'Recover then abort' });
       await pollUntil(() => bureauAReachedStep1);
-      bureauA.dispose();
+      // AB-207: deliberately NOT disposing bureauA here. `dispose()`
+      // now fully awaits `activeRun.abort()`'s durable-engine `cancel()`
+      // handoff before returning, which genuinely completes the
+      // in-flight workflow's cancellation and removes it from a fresh
+      // engine's `recoverAll()` candidate set — a properly graceful
+      // shutdown correctly leaves nothing to recover. Simulating a real
+      // crash (the durable workflow still owned by a dead worker, which
+      // IS recoverable) means leaving bureauA un-disposed here: it stays
+      // parked at step 1's hung `generate()` call until disposed at the
+      // end of this test, well after bureauB's recovery.
 
       const bureauB = await createBureau({
         agents: {},
@@ -2182,6 +2367,11 @@ describe('createBureau', () => {
       } finally {
         bureauB.dispose();
       }
+      // AB-207: release bureauA's engine now that bureauB's
+      // recovery-dependent assertions are done (its scheduler would
+      // otherwise keep polling storage after this test deletes the sqlite
+      // file below).
+      await bureauA.dispose();
     } finally {
       await rm(databasePath, { force: true });
       await rm(`${databasePath}-wal`, { force: true });
@@ -2222,7 +2412,16 @@ describe('createBureau', () => {
       const run = await bureauA.createRun({ message: 'Recover me' });
       await pollUntil(() => bureauAReachedStep1);
       expect(bureauAReachedStep1).toBe(true);
-      bureauA.dispose();
+      // AB-207: deliberately NOT disposing bureauA here. `dispose()`
+      // now fully awaits `activeRun.abort()`'s durable-engine `cancel()`
+      // handoff before returning, which genuinely completes the
+      // in-flight workflow's cancellation and removes it from a fresh
+      // engine's `recoverAll()` candidate set — a properly graceful
+      // shutdown correctly leaves nothing to recover. Simulating a real
+      // crash (the durable workflow still owned by a dead worker, which
+      // IS recoverable) means leaving bureauA un-disposed here: it stays
+      // parked at step 1's hung `generate()` call until disposed at the
+      // end of this test, well after bureauB's recovery.
 
       // === Bureau B: same file, durable forced on, but NO generate and NO
       // provider — so reconstructing the run's deps throws on this process. ===
@@ -2255,6 +2454,11 @@ describe('createBureau', () => {
       } finally {
         bureauB.dispose();
       }
+      // AB-207: release bureauA's engine now that bureauB's
+      // recovery-dependent assertions are done (its scheduler would
+      // otherwise keep polling storage after this test deletes the sqlite
+      // file below).
+      await bureauA.dispose();
     } finally {
       await rm(databasePath, { force: true });
       await rm(`${databasePath}-wal`, { force: true });
@@ -3595,6 +3799,66 @@ describe('createBureau', () => {
       bureau.dispose();
     }
   });
+
+  it('createSchedule throws ScheduleLocatorUnavailableError naming the scheduleId when describe() rejects after registration', async () => {
+    // Stub weft's own `ScheduleHandle.describe()` — what `createAgentSchedule`
+    // delegates `handle.describe()` to on the successful-registration path —
+    // to reject exactly once, simulating a schedule that registered but whose
+    // summary could not be retrieved immediately after. `createSchedule` must
+    // wrap that rejection in a typed `ScheduleLocatorUnavailableError` naming
+    // the scheduleId rather than letting the bare `Error` propagate untyped.
+    const describeFailure = new Error('Schedule "whatever" not found');
+    const describeSpy = spyOn(ScheduleHandle.prototype, 'describe').mockRejectedValueOnce(
+      describeFailure,
+    );
+
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+      stopWhen: stopWhen.noToolCalls(),
+    });
+
+    try {
+      let caught: unknown;
+      try {
+        await bureau.createSchedule({
+          agentName: 'researcher',
+          input: 'Summarize overnight activity',
+          spec: '0 9 * * *',
+        });
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught).toBeInstanceOf(ScheduleLocatorUnavailableError);
+      const locatorError = caught as ScheduleLocatorUnavailableError;
+      expect(locatorError.code).toBe('ScheduleLocatorUnavailableError');
+      expect(locatorError.category).toBe('unavailable');
+      expect(locatorError.retryable).toBe(false);
+      // `createSchedule` had no stable `id` to pass through (no `id` field on
+      // `DurableScheduleDefinition` — the uuid is Weft-assigned), so
+      // `.scheduleId` is the value this test can actually assert equals the
+      // one minted internally — not a generic placeholder — and `.message`
+      // names the same id.
+      expect(locatorError.scheduleId).toBeTruthy();
+      expect(locatorError.message).toContain(locatorError.scheduleId);
+      // The original `describe()` rejection is preserved for debugging, not
+      // discarded.
+      expect(locatorError.cause).toBe(describeFailure);
+
+      // The schedule IS registered despite the describe() failure — a fresh
+      // describe (via getSchedule, unaffected by the mockRejectedValueOnce)
+      // proves registration succeeded and only the locator call failed.
+      const fetched = await bureau.getSchedule(locatorError.scheduleId);
+      expect(fetched?.status).toBe('active');
+    } finally {
+      describeSpy.mockRestore();
+      bureau.dispose();
+    }
+  });
 });
 
 describe('createBureau durable inspection surface', () => {
@@ -4528,6 +4792,39 @@ describe('recordedSessionAuthorityPrincipalId / isSessionAuthorityAuthorized (AB
     };
     expect(isSessionAuthorityAuthorized(metadataUncorrelatedLastRunId, 'anyone')).toBe(false);
   });
+
+  it("authorizes against an explicitly targeted run's own entry, not lastRunId, when a different concurrent run's more recent terminal transition left the map uncorrelated to lastRunId (PR #430 review, Codex P2, second wave — 'Authorize against the targeted live run')", () => {
+    // Two concurrent runs, A (still live) and B (completed first). B's own
+    // terminal transition prunes ONLY lastRequestAuthorities[B] (per this
+    // file's own pruning rule near `remainingAuthorities`), leaving
+    // lastRunId: 'run-b' and A's now-uncorrelated 'run-a' entry behind —
+    // exactly the shape the previous test proves fails closed for EVERY
+    // principal under the default (lastRunId-only) lookup.
+    const metadata = {
+      lastRunId: 'run-b',
+      lastRequestAuthorities: {
+        'run-a': {
+          principalId: 'alice',
+          tenantId: 'bureau',
+          ownerId: 'agent',
+          capabilities: ['tools:execute'],
+          authorizationRevision: 'bureau:1',
+        },
+      },
+    };
+    // The default (no targetRunId) lookup still fails closed — unchanged.
+    expect(isSessionAuthorityAuthorized(metadata, 'alice')).toBe(false);
+
+    // A command explicitly targeting the still-live run A resolves against
+    // A's own entry directly, authorizing alice and rejecting anyone else.
+    expect(isSessionAuthorityAuthorized(metadata, 'alice', 'run-a')).toBe(true);
+    expect(isSessionAuthorityAuthorized(metadata, 'mallory', 'run-a')).toBe(false);
+
+    // Targeting a run with no entry of its own at all still fails closed —
+    // this is defense against authorizing a run this map says nothing
+    // about, not a general bypass of the uncorrelated-map rule.
+    expect(isSessionAuthorityAuthorized(metadata, 'alice', 'run-c')).toBe(false);
+  });
 });
 
 describe('isSessionRunTerminal (AB-194)', () => {
@@ -4755,6 +5052,646 @@ describe('createBureau submitSessionInput pre-admission checks (AB-194)', () => 
         outcome: 'unsupported-capability',
         reason: 'durable-mailbox-unavailable',
       });
+    } finally {
+      await bureau.dispose();
+    }
+  });
+});
+
+describe('createBureau submitSteeringCommand (AB-67/AB-199)', () => {
+  // Pre-admission checks reuse submitSessionInput's fixed order (AB-42):
+  // authorization, then session lifecycle, then capability. Gate state
+  // machine details (idempotency, replay, conflict, agent-identity
+  // deferral, run-terminal transitions) are covered directly in
+  // steering.test.ts; this suite covers the checks unique to
+  // submitSteeringCommand and the end-to-end pause/resume gating rollback
+  // trigger names ("a pause that fails to gate runStep").
+
+  it('returns not-found for an unknown sessionId', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+    });
+    try {
+      const outcome = await bureau.submitSteeringCommand('unknown-session', {
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+      });
+      expect(outcome).toEqual({ outcome: 'not-found' });
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('returns not-found for an unauthorized caller, indistinguishable from an unknown session', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: () => new Promise<never>(() => {}),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+    });
+    try {
+      const run = await bureau.createRun({ message: 'Wait forever', principal: 'alice' });
+      await pollUntil(async () => {
+        const session = await bureau.getSession(run.sessionId);
+        return session?.metadata['lastRunStatus'] === 'running';
+      });
+
+      const outcome = await bureau.submitSteeringCommand(run.sessionId, {
+        principal: 'mallory',
+        requestedValue: { target: 'pause' },
+      });
+      expect(outcome).toEqual({ outcome: 'not-found' });
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('returns session-terminal for an authorized caller naming an already-terminal session', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      stopWhen: stopWhen.noToolCalls(),
+    });
+    try {
+      const run = await bureau.createRun({ message: 'Complete me', principal: 'alice' });
+      await waitForRunCompletion(bureau, run.id);
+
+      const outcome = await bureau.submitSteeringCommand(run.sessionId, {
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+      });
+      expect(outcome).toEqual({ outcome: 'session-terminal', sessionId: run.sessionId });
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('returns unsupported-capability/selector-unavailable for every target other than pause/resume', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: () => new Promise<never>(() => {}),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+    });
+    try {
+      const run = await bureau.createRun({ message: 'Wait forever', principal: 'alice' });
+      await pollUntil(async () => {
+        const session = await bureau.getSession(run.sessionId);
+        return session?.metadata['lastRunStatus'] === 'running';
+      });
+
+      for (const requestedValue of [
+        { target: 'route', override: 'r1' },
+        { target: 'model', override: 'm1' },
+        { target: 'provider', override: 'p1' },
+        { target: 'effort', override: 'high' },
+        { target: 'agent-identity', override: 'reviewer' },
+      ] as const) {
+        const outcome = await bureau.submitSteeringCommand(run.sessionId, {
+          principal: 'alice',
+          requestedValue,
+        });
+        expect(outcome).toEqual({
+          outcome: 'unsupported-capability',
+          reason: 'selector-unavailable',
+        });
+      }
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('returns unsupported-capability/durable-steering-unavailable for pause/resume when runtime.durable is configured', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: () => new Promise<never>(() => {}),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+    try {
+      const run = await bureau.createRun({ message: 'Wait forever', principal: 'alice' });
+      await pollUntil(async () => {
+        const session = await bureau.getSession(run.sessionId);
+        return session?.metadata['lastRunStatus'] === 'running';
+      });
+
+      const outcome = await bureau.submitSteeringCommand(run.sessionId, {
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+      });
+      expect(outcome).toEqual({
+        outcome: 'unsupported-capability',
+        reason: 'durable-steering-unavailable',
+      });
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('accepts a pause, is idempotent against a second distinct pause, and replays an exact retry', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: () => new Promise<never>(() => {}),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+    });
+    try {
+      const run = await bureau.createRun({ message: 'Wait forever', principal: 'alice' });
+      await pollUntil(async () => {
+        const session = await bureau.getSession(run.sessionId);
+        return session?.metadata['lastRunStatus'] === 'running';
+      });
+
+      const first = await bureau.submitSteeringCommand(run.sessionId, {
+        id: 'pause-1',
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+      });
+      expect(first.outcome).toBe('accepted');
+
+      const second = await bureau.submitSteeringCommand(run.sessionId, {
+        id: 'pause-2',
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+      });
+      expect(second.outcome).toBe('accepted');
+      if (first.outcome === 'accepted' && second.outcome === 'accepted') {
+        // The distinct second pause was idempotent: no new configVersion.
+        expect(second.command.configVersion).toBe(first.command.configVersion);
+      }
+
+      const replay = await bureau.submitSteeringCommand(run.sessionId, {
+        id: 'pause-1',
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+      });
+      expect(replay.outcome).toBe('replayed');
+      if (first.outcome === 'accepted' && replay.outcome === 'replayed') {
+        expect(replay.command).toEqual(first.command);
+      }
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('returns a typed target-mismatch conflict for a same-id reuse across pause and resume', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: () => new Promise<never>(() => {}),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+    });
+    try {
+      const run = await bureau.createRun({ message: 'Wait forever', principal: 'alice' });
+      await pollUntil(async () => {
+        const session = await bureau.getSession(run.sessionId);
+        return session?.metadata['lastRunStatus'] === 'running';
+      });
+
+      await bureau.submitSteeringCommand(run.sessionId, {
+        id: 'shared-id',
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+      });
+      const outcome = await bureau.submitSteeringCommand(run.sessionId, {
+        id: 'shared-id',
+        principal: 'alice',
+        requestedValue: { target: 'resume' },
+      });
+      expect(outcome.outcome).toBe('conflict');
+      if (outcome.outcome === 'conflict') {
+        expect(outcome.conflict.reason).toBe('target-mismatch');
+      }
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('a resume against a session that is not currently paused is accepted as a no-op', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: () => new Promise<never>(() => {}),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+    });
+    try {
+      const run = await bureau.createRun({ message: 'Wait forever', principal: 'alice' });
+      await pollUntil(async () => {
+        const session = await bureau.getSession(run.sessionId);
+        return session?.metadata['lastRunStatus'] === 'running';
+      });
+
+      const outcome = await bureau.submitSteeringCommand(run.sessionId, {
+        principal: 'alice',
+        requestedValue: { target: 'resume' },
+      });
+      expect(outcome.outcome).toBe('accepted');
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('a paused session actually blocks the run at the runStep boundary, and resume releases it (rollback trigger: a pause that fails to gate runStep)', async () => {
+    let releaseTool: (() => void) | undefined;
+    const toolGate = new Promise<void>((resolve) => {
+      releaseTool = resolve;
+    });
+    const nextTool = createTool({
+      name: 'next',
+      description: 'continue',
+      input: z.object({}),
+      execute: async () => {
+        await toolGate;
+        return 'ok';
+      },
+    });
+    const generate = createSequentialGenerate([
+      { content: 'step 0', toolCalls: [{ name: 'next', arguments: {} }] },
+      { content: 'done', toolCalls: [] },
+    ]);
+
+    const bureau = await createBureau({
+      agents: {},
+      generate,
+      toolbox: createToolbox([nextTool]),
+      storage: { type: 'memory' },
+      stopWhen: stopWhen.noToolCalls(),
+    });
+    try {
+      const run = await bureau.createRun({ message: 'go', principal: 'alice' });
+
+      // Wait until step 0's generate call has happened and the "next" tool
+      // is executing (blocked on toolGate) — the window between step 0's
+      // generate and step 1's boundary read.
+      await pollUntil(() => generate.callCount === 1);
+
+      const pause = await bureau.submitSteeringCommand(run.sessionId, {
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+      });
+      expect(pause.outcome).toBe('accepted');
+
+      releaseTool!();
+
+      // Step 1's boundary is now reached, but the pause must block it —
+      // generate must NOT be called a second time no matter how long we
+      // give the loop to (wrongly) proceed.
+      for (let i = 0; i < 10; i++) {
+        await yieldToPortableEventLoop();
+      }
+      expect(generate.callCount).toBe(1);
+
+      const resume = await bureau.submitSteeringCommand(run.sessionId, {
+        principal: 'alice',
+        requestedValue: { target: 'resume' },
+      });
+      expect(resume.outcome).toBe('accepted');
+
+      await waitForRunCompletion(bureau, run.id);
+      expect(generate.callCount).toBe(2);
+
+      const session = await bureau.getSession(run.sessionId);
+      expect(session?.metadata['lastRunStatus']).toBe('completed');
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('an accepted pause bound to a run that aborts while paused does not prevent the abort from completing cleanly', async () => {
+    // The rollback-trigger's "failed/run-terminal" transition (AB-67's
+    // Abort row: pause/resume never carries into a future run) is covered
+    // directly in steering.test.ts's `failAcceptedForRun` suite — Bureau
+    // exposes no read surface for a steering command's own state (no AB-88
+    // snapshot yet), and the session itself goes terminal the instant the
+    // abort settles, so `submitSteeringCommand` short-circuits to
+    // `session-terminal` before any inspection could reach the gate. This
+    // test instead proves the WIRING this issue adds at the abort listener
+    // (`steeringGate?.failAcceptedForRun(...)`) runs without throwing and
+    // the run still reaches its terminal state normally.
+    let releaseTool: (() => void) | undefined;
+    const toolGate = new Promise<void>((resolve) => {
+      releaseTool = resolve;
+    });
+    const nextTool = createTool({
+      name: 'next',
+      description: 'continue',
+      input: z.object({}),
+      execute: async () => {
+        await toolGate;
+        return 'ok';
+      },
+    });
+    const generate = createSequentialGenerate([
+      { content: 'step 0', toolCalls: [{ name: 'next', arguments: {} }] },
+      { content: 'done', toolCalls: [] },
+    ]);
+
+    const bureau = await createBureau({
+      agents: {},
+      generate,
+      toolbox: createToolbox([nextTool]),
+      storage: { type: 'memory' },
+      stopWhen: stopWhen.noToolCalls(),
+    });
+    try {
+      const run = await bureau.createRun({ message: 'go', principal: 'alice' });
+      await pollUntil(() => generate.callCount === 1);
+
+      const pause = await bureau.submitSteeringCommand(run.sessionId, {
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+      });
+      expect(pause.outcome).toBe('accepted');
+      releaseTool!();
+
+      bureau.abortRun(run.id);
+      await waitForRunCompletion(bureau, run.id);
+
+      const session = await bureau.getSession(run.sessionId);
+      expect(session?.metadata['lastRunStatus']).toBe('aborted');
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('deleteSession while a run is genuinely paused releases it at the runStep boundary instead of leaving its steering channel — and the run itself — stuck forever (PR #430 review, Codex P2, "Settle paused runs before deleting their steering gate")', async () => {
+    let releaseTool: (() => void) | undefined;
+    const toolGate = new Promise<void>((resolve) => {
+      releaseTool = resolve;
+    });
+    const nextTool = createTool({
+      name: 'next',
+      description: 'continue',
+      input: z.object({}),
+      execute: async () => {
+        await toolGate;
+        return 'ok';
+      },
+    });
+    const generate = createSequentialGenerate([
+      { content: 'step 0', toolCalls: [{ name: 'next', arguments: {} }] },
+      { content: 'done', toolCalls: [] },
+    ]);
+
+    const bureau = await createBureau({
+      agents: {},
+      generate,
+      toolbox: createToolbox([nextTool]),
+      storage: { type: 'memory' },
+      stopWhen: stopWhen.noToolCalls(),
+    });
+    try {
+      const run = await bureau.createRun({ message: 'go', principal: 'alice' });
+      await pollUntil(() => generate.callCount === 1);
+
+      const pause = await bureau.submitSteeringCommand(run.sessionId, {
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+      });
+      expect(pause.outcome).toBe('accepted');
+      releaseTool!();
+
+      // Step 1's boundary is now reached, but the pause blocks it.
+      for (let i = 0; i < 10; i++) {
+        await yieldToPortableEventLoop();
+      }
+      expect(generate.callCount).toBe(1);
+
+      // The session is deleted WHILE the run remains paused — no later
+      // `submitSteeringCommand` could ever reach a resume through the
+      // now-deleted session, so this must be the moment the paused run is
+      // released, not left blocked on a promise the discarded gate alone
+      // held.
+      await bureau.deleteSession(run.sessionId);
+
+      await waitForRunCompletion(bureau, run.id);
+      expect(generate.callCount).toBe(2);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('deleteSession does not let a run released from a pause recreate the session once it later completes (PR #430 review, Codex P1, second wave — "Prevent released runs from recreating deleted sessions")', async () => {
+    let releaseTool: (() => void) | undefined;
+    const toolGate = new Promise<void>((resolve) => {
+      releaseTool = resolve;
+    });
+    const nextTool = createTool({
+      name: 'next',
+      description: 'continue',
+      input: z.object({}),
+      execute: async () => {
+        await toolGate;
+        return 'ok';
+      },
+    });
+    const generate = createSequentialGenerate([
+      { content: 'step 0', toolCalls: [{ name: 'next', arguments: {} }] },
+      { content: 'done', toolCalls: [] },
+    ]);
+
+    const bureau = await createBureau({
+      agents: {},
+      generate,
+      toolbox: createToolbox([nextTool]),
+      storage: { type: 'memory' },
+      stopWhen: stopWhen.noToolCalls(),
+    });
+    try {
+      const run = await bureau.createRun({ message: 'go', principal: 'alice' });
+      await pollUntil(() => generate.callCount === 1);
+
+      const pause = await bureau.submitSteeringCommand(run.sessionId, {
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+      });
+      expect(pause.outcome).toBe('accepted');
+      releaseTool!();
+      for (let i = 0; i < 10; i++) {
+        await yieldToPortableEventLoop();
+      }
+      expect(generate.callCount).toBe(1);
+
+      await bureau.deleteSession(run.sessionId);
+      expect(await bureau.getSession(run.sessionId)).toBeUndefined();
+
+      // The released run keeps executing to its own natural completion —
+      // that part is unchanged — but its terminal `saveSession` call must
+      // not resurrect the record `deleteSession` just removed.
+      await waitForRunCompletion(bureau, run.id);
+      expect(generate.callCount).toBe(2);
+      expect(await bureau.getSession(run.sessionId)).toBeUndefined();
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('a second run on the same session does not re-fire steering.applied for a configVersion a prior run already applied (cross-run dedupe, end-to-end)', async () => {
+    let releaseTool: (() => void) | undefined;
+    const toolGate = new Promise<void>((resolve) => {
+      releaseTool = resolve;
+    });
+    const nextTool = createTool({
+      name: 'next',
+      description: 'continue',
+      input: z.object({}),
+      execute: async () => {
+        await toolGate;
+        return 'ok';
+      },
+    });
+    const generate = createSequentialGenerate([
+      { content: 'run 1 step 0', toolCalls: [{ name: 'next', arguments: {} }] },
+      { content: 'run 1 done', toolCalls: [] },
+      { content: 'run 2 done', toolCalls: [] },
+    ]);
+
+    const bureau = await createBureau({
+      agents: {},
+      generate,
+      toolbox: createToolbox([nextTool]),
+      storage: { type: 'memory' },
+      stopWhen: stopWhen.noToolCalls(),
+    });
+    try {
+      const run1Events: Array<{ event: string; runId: string }> = [];
+      const unsubscribeRun1 = bureau.subscribeLiveFrames((frame) => {
+        if (frame.type === 'event') run1Events.push({ event: frame.event, runId: frame.runId });
+      });
+
+      const run1 = await bureau.createRun({ message: 'go', principal: 'alice' });
+      await pollUntil(() => generate.callCount === 1);
+
+      const pause = await bureau.submitSteeringCommand(run1.sessionId, {
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+      });
+      expect(pause.outcome).toBe('accepted');
+      releaseTool!();
+      for (let i = 0; i < 5; i++) {
+        await yieldToPortableEventLoop();
+      }
+      const resume = await bureau.submitSteeringCommand(run1.sessionId, {
+        principal: 'alice',
+        requestedValue: { target: 'resume' },
+      });
+      expect(resume.outcome).toBe('accepted');
+      await waitForRunCompletion(bureau, run1.id);
+      unsubscribeRun1();
+
+      // Sanity: the mechanism is real — run-1 DID fire steering.applied for
+      // its own resume, so the run-2 negative assertion below is not
+      // vacuously true.
+      expect(
+        run1Events.filter((e) => e.runId === run1.id && e.event === 'steering.applied').length,
+      ).toBeGreaterThan(0);
+
+      // run-1's own runStep boundary already observed and applied
+      // configVersion 2 (the resume). Collect every live event frame from
+      // here on, then filter to run-2's own — it must NOT re-fire
+      // steering.applied for that same already-applied version.
+      const events: Array<{ event: string; runId: string }> = [];
+      const unsubscribe = bureau.subscribeLiveFrames((frame) => {
+        if (frame.type === 'event') events.push({ event: frame.event, runId: frame.runId });
+      });
+      const run2 = await bureau.createRun({
+        message: 'go again',
+        principal: 'alice',
+        sessionId: run1.sessionId,
+      });
+      await waitForRunCompletion(bureau, run2.id);
+      unsubscribe();
+
+      const run2Events = events.filter((e) => e.runId === run2.id).map((e) => e.event);
+      expect(run2Events).not.toContain('steering.applied');
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('two concurrent runs on the same session: an unscoped pause is run-ambiguous, an explicitly-scoped pause blocks only its own run (PR #430 review, Codex P2 — genuine live-run enumeration)', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: () => new Promise<never>(() => {}),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+    });
+    try {
+      const runA = await bureau.createRun({ message: 'go A', principal: 'alice' });
+      // A second run reusing runA's sessionId, so both are simultaneously
+      // 'running' — genuine concurrency, not a scheduling artifact.
+      const runB = await bureau.createRun({
+        message: 'go B',
+        principal: 'alice',
+        sessionId: runA.sessionId,
+      });
+      await pollUntil(async () => {
+        const detailA = bureau.getRun(runA.id);
+        const detailB = bureau.getRun(runB.id);
+        return detailA?.status === 'running' && detailB?.status === 'running';
+      });
+
+      // No runId: two live runs on this session — ambiguous.
+      const ambiguous = await bureau.submitSteeringCommand(runA.sessionId, {
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+      });
+      expect(ambiguous).toEqual({
+        outcome: 'rejected',
+        failure: expect.objectContaining({ reason: 'run-ambiguous' }),
+      });
+
+      // Explicit runId: scopes correctly, and does not affect the OTHER run.
+      const scoped = await bureau.submitSteeringCommand(runA.sessionId, {
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+        runId: runA.id,
+      });
+      expect(scoped.outcome).toBe('accepted');
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it("end-to-end: a pause explicitly targeting still-live run A is authorized after concurrent run B completes and prunes its own authority entry (PR #430 review, Codex P2, second wave — 'Authorize against the targeted live run')", async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: async (context) => {
+        const isRunB = context.conversation
+          .getMessages()
+          .some((message) => message.content === 'go B');
+        if (isRunB) return { content: 'B done', toolCalls: [] };
+        return new Promise<never>(() => {});
+      },
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      stopWhen: stopWhen.noToolCalls(),
+    });
+    try {
+      const runA = await bureau.createRun({ message: 'go A', principal: 'alice' });
+      const runB = await bureau.createRun({
+        message: 'go B',
+        principal: 'alice',
+        sessionId: runA.sessionId,
+      });
+      await waitForRunCompletion(bureau, runB.id);
+      await pollUntil(async () => bureau.getRun(runA.id)?.status === 'running');
+
+      // B's own terminal transition pruned lastRequestAuthorities[B],
+      // leaving lastRunId: B and A's now-uncorrelated entry behind — a
+      // command explicitly targeting still-live A must still authorize.
+      const scoped = await bureau.submitSteeringCommand(runA.sessionId, {
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+        runId: runA.id,
+      });
+      expect(scoped.outcome).toBe('accepted');
     } finally {
       await bureau.dispose();
     }
@@ -5093,6 +6030,34 @@ function createParkedActiveRun(): {
     events: emitter.events.bind(emitter) as ActiveRun['events'],
     toObservable: emitter.toObservable.bind(emitter),
     complete: emitter.complete.bind(emitter),
+    // AB-214: mechanical addition — this never-settling stub run reports a
+    // static 'running' snapshot and delivers it once; matching `abort`'s
+    // never-resolving `result` above, it never reaches a revision change.
+    snapshot: () => ({
+      id: 'parked',
+      kind: 'agent-run',
+      startedAt: new Date(0).toISOString(),
+      revision: 0,
+      status: 'running',
+      lastTransitionAt: new Date(0).toISOString(),
+      projection: 'redacted',
+      ownership: 'independent',
+      detached: false,
+      durability: 'process-local',
+      cancellable: true,
+      attempt: 0,
+      reachability: 'unknown',
+      progress: 'unknown',
+      assessment: 'healthy',
+      observedAt: 0,
+      missedPulseCount: 0,
+      policyVersion: 'ab-88/2026-09-01',
+      evidence: [],
+    }),
+    subscribeSnapshot: (observer) => {
+      observer(activeRun.snapshot());
+      return { unsubscribe: () => {}, closed: false };
+    },
     [Symbol.dispose]: () => {},
   };
   return { activeRun, emitter };
@@ -5969,7 +6934,16 @@ describe('createBureau review queue (AB-20)', () => {
         [run.id]: expect.objectContaining({ authorizationRevision: 'bureau:1' }),
       });
 
-      bureauA.dispose();
+      // AB-207: deliberately NOT disposing bureauA here. `dispose()`
+      // now fully awaits `activeRun.abort()`'s durable-engine `cancel()`
+      // handoff before returning, which genuinely completes the
+      // in-flight workflow's cancellation and removes it from a fresh
+      // engine's `recoverAll()` candidate set — a properly graceful
+      // shutdown correctly leaves nothing to recover. Simulating a real
+      // crash (the durable workflow still owned by a dead worker, which
+      // IS recoverable) means leaving bureauA un-disposed here: it stays
+      // parked at step 1's hung `generate()` call until disposed at the
+      // end of this test, well after bureauB's recovery.
 
       const diagnostics: string[] = [];
       const bureauB = await createBureau({
@@ -6027,6 +7001,11 @@ describe('createBureau review queue (AB-20)', () => {
       } finally {
         bureauB.dispose();
       }
+      // AB-207: release bureauA's engine now that bureauB's
+      // recovery-dependent assertions are done (its scheduler would
+      // otherwise keep polling storage after this test deletes the sqlite
+      // file below).
+      await bureauA.dispose();
     } finally {
       await rm(databasePath, { force: true });
       await rm(`${databasePath}-wal`, { force: true });
@@ -7266,6 +8245,270 @@ describe('createBureau requestHumanInput availability across durability configur
   });
 });
 
+// ── AB-201: scheduleWakeup wired into Bureau composition ────────────────
+//
+// Mirrors `requestHumanInput`'s own wiring (F3 / AB-43 above) exactly, per
+// AB-41's decision record: `scheduleWakeup` is opt-in (`options.wakeup`),
+// gated on `runtime.durable`, and forwards onto the run's real `ctx.services`
+// object via the shared `servicesRef`/`onServices` capture. Unlike
+// `requestHumanInput` (a signal wait, resumed via `bureau.signalSession`),
+// `scheduleWakeup` parks via a durable `ctx.sleep` — there is no fake-clock
+// harness anywhere in this repository's Weft-backed tests, so these tests
+// drive the timer deterministically via `bureau.runDurableMaintenance(now)`
+// (Weft's `Engine.runMaintenance` ticks `internals.scheduler.tick(now)`
+// directly — the same seam `engine.scheduler.tick(deadline)` exercises at the
+// operative layer, reached here through Bureau's own public host-maintenance
+// surface since Bureau exposes no direct engine accessor). Composed with
+// `durableBackgroundTasks: 'manual'` so the scheduler poller is disarmed:
+// nothing but an explicit maintenance tick can ever fire the timer, which is
+// exactly what proves a genuine park rather than a real-time race.
+describe('createBureau scheduleWakeup wiring (AB-201)', () => {
+  it('createWakeupContext always signals durable: true (only ever constructed inside the runtime.durable guard)', () => {
+    const context = createWakeupContext({});
+    expect(context.durable).toBe(true);
+  });
+
+  it('createWakeupContext forwards pendingWakeup reads/writes onto the shared servicesRef, not a detached copy', () => {
+    const servicesRef: { current?: DurableRunDeps } = {};
+    const context = createWakeupContext(servicesRef);
+
+    // No live services yet: reads report undefined, writes are dropped rather
+    // than throwing (mirrors createHumanWaitContext's own guard).
+    expect(context.pendingWakeup).toBeUndefined();
+    context.pendingWakeup = { duration: '6h' };
+    expect(context.pendingWakeup).toBeUndefined();
+
+    // Once `onServices` fires (simulated here), the SAME object the durable
+    // workflow reads is mutated — not a copy the tool wrote to in isolation.
+    servicesRef.current = {} as DurableRunDeps;
+    context.pendingWakeup = { duration: '30m', note: 'check the deploy' };
+    expect(servicesRef.current.pendingWakeup).toEqual({
+      duration: '30m',
+      note: 'check the deploy',
+    });
+    expect(context.pendingWakeup).toEqual({ duration: '30m', note: 'check the deploy' });
+  });
+
+  it('a standalone scheduleWakeup tool (no Bureau composition) rejects DurableCapabilityUnavailableError rather than omitting itself', () => {
+    // The tool-level throw itself is out of scope for this issue (shipped by
+    // AB-43 upstream, covered by operative's own
+    // create-schedule-wakeup-tool.test.ts); this only anchors that the SAME
+    // error class Bureau's composition never needs (because it prefers
+    // omission, like config 2 below) is what a standalone caller sees.
+    const tool = createScheduleWakeupTool({
+      context: { pendingWakeup: undefined, durable: false },
+    });
+    let caught: unknown;
+    try {
+      tool.execute({ in: '6h' });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(DurableCapabilityUnavailableError);
+    expect((caught as DurableCapabilityUnavailableError).code).toBe(
+      'DurableCapabilityUnavailableError',
+    );
+    expect((caught as DurableCapabilityUnavailableError).category).toBe('unavailable');
+    expect((caught as DurableCapabilityUnavailableError).retryable).toBe(false);
+  });
+
+  it('config 2 — omits scheduleWakeup from the effective toolbox when no durable engine is attached', async () => {
+    const seenTools: string[] = [];
+    const generate: GenerateFunction = async (context) => {
+      seenTools.push(...context.toolbox.tools().map((tool) => tool.name));
+      return { content: 'no park here', toolCalls: [] };
+    };
+
+    const bureau = await createBureau({
+      agents: {},
+      generate,
+      toolbox: createEmptyToolbox(),
+      wakeup: true,
+      stopWhen: stopWhen.noToolCalls(),
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'no durable engine attached' });
+      await waitForRunCompletion(bureau, run.id);
+
+      expect(seenTools).not.toContain('scheduleWakeup');
+    } finally {
+      bureau.dispose();
+    }
+  });
+
+  it('config 3 — includes scheduleWakeup, genuinely parks over ephemeral (MemoryStorage) durable storage, and fires only on an explicit tick', async () => {
+    const seenTools: string[] = [];
+    const generate = createSequentialGenerate([
+      {
+        content: '',
+        toolCalls: [{ id: 'call-1', name: 'scheduleWakeup', arguments: { in: '6h' } }],
+      },
+      // AB-45 — a fired wakeup CONTINUES the same run with one more
+      // generation step, never just unparks it.
+      { content: 'resumed after the wakeup fired', toolCalls: [] },
+    ]);
+    const wrappedGenerate: GenerateFunction = async (context) => {
+      seenTools.push(...context.toolbox.tools().map((tool) => tool.name));
+      return generate(context);
+    };
+
+    const bureau = await createBureau({
+      agents: {},
+      generate: wrappedGenerate,
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+      wakeup: true,
+      durableBackgroundTasks: 'manual',
+      stopWhen: stopWhen.some(stopWhen.toolCalled('scheduleWakeup'), stopWhen.noToolCalls()),
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'park over ephemeral memory storage' });
+      await pollUntil(() => generate.callCount >= 1);
+
+      // Discovery: the model's first step already saw scheduleWakeup as an
+      // available tool.
+      expect(seenTools).toContain('scheduleWakeup');
+
+      // Genuine park proof: with the scheduler poller disarmed
+      // (durableBackgroundTasks: 'manual'), nothing can advance the durable
+      // timer without an explicit tick — polling WITHOUT ticking must never
+      // observe completion, and the continuation step must never run.
+      const firedWithoutTick = await pollUntil(
+        () => bureau.getRun(run.id)?.status === 'completed',
+        5,
+      );
+      expect(firedWithoutTick).toBe(false);
+      expect(bureau.getRun(run.id)?.status).not.toBe('completed');
+      expect(generate.callCount).toBe(1);
+
+      // Drive the scheduler directly past the wakeup's deadline — no real
+      // wall-clock wait. `bureau.runDurableMaintenance(now)` is the
+      // host-driven maintenance path, which ticks Weft's durable-timer
+      // scheduler (`Engine.runMaintenance` calls `internals.scheduler.tick(now)`
+      // internally) — the deterministic seam `engine.scheduler.tick(deadline)`
+      // exercises directly at the operative layer.
+      const deadline = Date.now() + 6 * 60 * 60 * 1000 + 60_000;
+      const completed = await pollUntil(async () => {
+        await bureau.runDurableMaintenance(deadline);
+        return bureau.getRun(run.id)?.status === 'completed';
+      });
+      expect(completed).toBe(true);
+      expect(generate.callCount).toBe(2);
+    } finally {
+      bureau.dispose();
+    }
+  });
+
+  it('config 4 — includes scheduleWakeup, genuinely parks over persistent (SQLite) durable storage, and the parked wakeup recovers and fires across a process restart via an explicit tick', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `ab-201-persistent-wakeup-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+
+    try {
+      // === Bureau A: schedules the wakeup and parks. "Crashes" while parked
+      // — no tick is ever issued in this process, so the timer cannot have
+      // fired here. ===
+      const generateA = createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [{ id: 'call-1', name: 'scheduleWakeup', arguments: { in: '6h' } }],
+        },
+      ]);
+
+      const bureauA = await createBureau({
+        agents: {},
+        generate: generateA,
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        wakeup: true,
+        durableBackgroundTasks: 'manual',
+        stopWhen: stopWhen.toolCalled('scheduleWakeup'),
+      });
+
+      const run = await bureauA.createRun({ message: 'park over persistent sqlite storage' });
+      await pollUntil(() => generateA.callCount >= 1);
+
+      // Genuine park proof, same as config 3: no tick is issued in this
+      // process, so completion must never be observed here.
+      const firedInBureauA = await pollUntil(
+        () => bureauA.getRun(run.id)?.status === 'completed',
+        5,
+      );
+      expect(firedInBureauA).toBe(false);
+      // AB-207: deliberately NOT disposed here — `dispose()`/`shutdown()`'s
+      // `'abort'` policy aborts every active run it still tracks, including
+      // one durably parked on a `scheduleWakeup` wait, which calls
+      // `engine.cancel()` and permanently marks the durable workflow record
+      // `cancelled`. That is real cancellation, not a crash: a genuine
+      // process crash never runs any graceful-shutdown code at all, so the
+      // durable checkpoint is left exactly as last written and stays
+      // recoverable. Simulating the crash by simply moving on to bureauB
+      // without disposing bureauA (the same pattern every other
+      // process-restart test in this file already uses — see the
+      // `bureauA.dispose()` calls placed at the END of those tests, AFTER
+      // bureauB's recovery assertions) is what actually proves recovery
+      // survives a crash; disposing first proves only that `dispose()`
+      // cancels active runs, a different (and already covered) property.
+
+      // === FRESH PROCESS: bureau B is a wholly separate bureau over the same
+      // SQLite file. Recovery re-arms the durable `ctx.sleep` timer with no
+      // hand-injected state (AB-41: "Recovery: ctx.sleep is checkpointed;
+      // recovery re-arms it") — the resumed continuation step's deps are
+      // rebuilt from config, same as every other durable recovery test. ===
+      const generateB = createSequentialGenerate([
+        // AB-45 — the recovered run's continuation step after the wakeup fires.
+        { content: 'resumed after restart and explicit tick', toolCalls: [] },
+      ]);
+
+      const bureauB = await createBureau({
+        agents: {},
+        generate: generateB,
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        wakeup: true,
+        durableBackgroundTasks: 'manual',
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      try {
+        // The recovered run is visible immediately on boot.
+        expect(bureauB.getRun(run.id)).toBeDefined();
+        expect(bureauB.getRun(run.id)?.status).not.toBe('completed');
+
+        // Drive the rebooted engine's scheduler directly past the deadline —
+        // no real wall-clock wait for the fire.
+        const deadline = Date.now() + 6 * 60 * 60 * 1000 + 60_000;
+        const completed = await pollUntil(async () => {
+          await bureauB.runDurableMaintenance(deadline);
+          return bureauB.getRun(run.id)?.status === 'completed';
+        });
+        expect(completed).toBe(true);
+        expect(generateB.callCount).toBe(1);
+
+        const session = await bureauB.getSession(run.sessionId);
+        expect(session?.metadata['lastRunStatus']).toBe('completed');
+      } finally {
+        bureauB.dispose();
+      }
+      // AB-207: release bureauA's engine now that bureauB's
+      // recovery-dependent assertions are done — the same ordering every
+      // other process-restart test in this file uses (see the comment
+      // above where bureauA was deliberately left undisposed).
+      await bureauA.dispose();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+});
+
 describe('Bureau.modelCatalog (AB-246)', () => {
   it('is present regardless of D, and defaults to a service seeded from the operative static catalog', async () => {
     const bureau = await createBureau({ agents: {} });
@@ -7422,5 +8665,499 @@ describe('Bureau.modelCatalog (AB-246)', () => {
     resolveClosed('completed');
     await disposePromise;
     expect(disposeSettled).toBe(true);
+  });
+});
+
+describe('Bureau.shutdown() (AB-207)', () => {
+  it('reports an empty owners array for a bureau composing no owners', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+    const report = await bureau.shutdown();
+    expect(report).toMatchObject({
+      admissionClosed: true,
+      policy: 'abort',
+      requested: 0,
+      completed: 0,
+      failed: 0,
+      unresolved: 0,
+      notRequired: 0,
+      owners: [],
+    });
+  });
+
+  it('reports audit-trail and durable-engine owners for a persistent bureau, and no webhook-notifier when none is configured', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+    const report = await bureau.shutdown();
+    const kinds = report.owners.map((owner) => owner.kind).sort();
+    expect(kinds).toEqual(['audit-trail', 'durable-engine']);
+    for (const owner of report.owners) {
+      expect(owner.outcome).toBe('completed');
+    }
+    expect(report.requested).toBe(2);
+    expect(report.completed).toBe(2);
+  });
+
+  it('reports a webhook-notifier owner, awaited to completion, for a bureau configured with a webhook target', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      webhooks: {
+        targets: [{ url: 'https://example.test/webhook' }],
+        fetch: (async () => new Response(null, { status: 200 })) as unknown as typeof fetch,
+      },
+    });
+    expect(bureau.webhookNotifier).toBeDefined();
+
+    const report = await bureau.shutdown();
+    const webhookOwner = report.owners.find((owner) => owner.kind === 'webhook-notifier');
+    expect(webhookOwner?.outcome).toBe('completed');
+  });
+
+  it("dispose() awaits shutdown({ policy: 'abort' }) to completion — the durable engine's teardown (the same finally block that closes raw storage) does not run before online-evals has settled its in-flight work", async () => {
+    // A controllable ("gated") judge: `evaluate()` does not resolve until the
+    // test calls `releaseJudge()`, so this deterministically proves ordering
+    // instead of racing real timing.
+    let releaseJudge!: () => void;
+    const judgeGate = new Promise<void>((resolve) => {
+      releaseJudge = resolve;
+    });
+    let evaluateCalls = 0;
+    const generate = createMockGenerate('Done.');
+
+    // Spy on the SHARED engine class prototype (the established pattern in
+    // this file's durable-recovery describe blocks) so it observes whichever
+    // instance `createBureau` builds internally. `[Symbol.asyncDispose]` and
+    // `runtime.disposeStorage()` run in the SAME unconditional `finally`
+    // block, strictly AFTER `Promise.allSettled(ownerDrains)` — so this spy
+    // stands in for "the critical backend teardown has not run yet" without
+    // needing to intercept `resolveStorage()`'s own internal instance
+    // directly (which a `'memory'` backend does not expose reliably).
+    const probe = await createRuntimeComposition({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+    const enginePrototype = Object.getPrototypeOf(probe.durable!.engine) as {
+      [Symbol.asyncDispose]: () => Promise<void>;
+    };
+    probe.durable!.engine[Symbol.dispose]?.();
+    probe.disposeStorage?.();
+
+    let engineDisposed = false;
+    const originalAsyncDispose = enginePrototype[Symbol.asyncDispose];
+    const asyncDisposeSpy = spyOn(enginePrototype, Symbol.asyncDispose).mockImplementation(
+      async function (this: unknown) {
+        engineDisposed = true;
+        return originalAsyncDispose.call(this as never);
+      },
+    );
+
+    const bureau = await createBureau({
+      agents: {},
+      generate,
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+      onlineEvals: {
+        judges: [
+          {
+            name: 'gated-judge',
+            async evaluate() {
+              evaluateCalls += 1;
+              await judgeGate;
+              return { pass: true, score: 1, message: 'ok' };
+            },
+          },
+        ],
+        sampleRate: 1,
+        rng: () => 0,
+      },
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'Trigger a sampled evaluation' });
+      await waitForRunCompletion(bureau, run.id);
+      await waitForCondition(() => evaluateCalls > 0, 'online-eval judge was never invoked');
+
+      let shutdownSettled = false;
+      const shutdownPromise = bureau.shutdown().then((report) => {
+        shutdownSettled = true;
+        return report;
+      });
+
+      // The judge is still gated — the engine's teardown must not have run,
+      // and shutdown() must not have resolved.
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(engineDisposed).toBe(false);
+      expect(shutdownSettled).toBe(false);
+
+      releaseJudge();
+      const report = await shutdownPromise;
+
+      expect(shutdownSettled).toBe(true);
+      expect(engineDisposed).toBe(true);
+      const onlineEvalsOwner = report.owners.find((owner) => owner.kind === 'online-evals');
+      expect(onlineEvalsOwner?.outcome).toBe('completed');
+    } finally {
+      asyncDisposeSpy.mockRestore();
+    }
+  });
+
+  it("policy: 'drain' lets a caller-owned run reach its own natural terminal result while Bureau-owned background work (scheduler) is stopped exactly as under 'abort'", async () => {
+    let releaseGenerate!: () => void;
+    const generateGate = new Promise<void>((resolve) => {
+      releaseGenerate = resolve;
+    });
+    const bureau = await createBureau({
+      agents: {},
+      generate: async () => {
+        await generateGate;
+        return { content: 'Drained to completion', toolCalls: [] };
+      },
+      toolbox: createEmptyToolbox(),
+    });
+
+    const run = await bureau.createRun({ message: 'Still running during drain' });
+    await waitForCondition(
+      () => bureau.getRun(run.id)?.status === 'running',
+      'run never reached running before shutdown() was called',
+    );
+
+    let shutdownSettled = false;
+    const shutdownPromise = bureau.shutdown({ policy: 'drain' }).then((report) => {
+      shutdownSettled = true;
+      return report;
+    });
+
+    // The run is still gated (not aborted — 'drain' does not touch
+    // caller-owned runs) and shutdown() has not resolved yet.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(bureau.getRun(run.id)?.status).toBe('running');
+    expect(shutdownSettled).toBe(false);
+
+    releaseGenerate();
+    const report = await shutdownPromise;
+
+    expect(shutdownSettled).toBe(true);
+    expect(report.policy).toBe('drain');
+    await waitForCondition(
+      () => bureau.getRun(run.id)?.status === 'completed',
+      'drained run never reached its own natural terminal result',
+    );
+  });
+
+  it('shutdown({ timeoutMilliseconds }) resolves within a bounded margin of N, reporting a still-unresolved owner "unresolved" and every other owner its real outcome — the underlying drain keeps running rather than being abandoned', async () => {
+    // The gated owner here is the durable engine's `[Symbol.asyncDispose]`,
+    // not an online-eval judge: `backgroundShutdownController.abort()` fires
+    // before the owner drains even start (see `shutdown()`), and AB-206's
+    // `raceAgainstAbort` makes a gated judge settle PROMPTLY once that
+    // signal aborts regardless of whether the judge itself ever resolves —
+    // so a judge gate cannot stay "still in flight" long enough to prove the
+    // timeout-elapsed case. The engine's teardown has no such abort-race
+    // shortcut, so gating it directly is what actually stays unresolved
+    // across the elapsed timeout.
+    let releaseEngineDispose!: () => void;
+    const engineDisposeGate = new Promise<void>((resolve) => {
+      releaseEngineDispose = resolve;
+    });
+
+    let capturedSignal: AbortSignal | undefined;
+    let releaseSleep!: () => void;
+    const sleep = (_milliseconds: number, signal: AbortSignal) => {
+      capturedSignal = signal;
+      return new Promise<void>((resolve) => {
+        releaseSleep = resolve;
+        signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+    };
+
+    // See the ordering test above for why the durable engine's shared
+    // prototype is spied on instead of `resolveStorage()`'s own internal
+    // `'memory'` instance.
+    const probe = await createRuntimeComposition({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+    const enginePrototype = Object.getPrototypeOf(probe.durable!.engine) as {
+      [Symbol.asyncDispose]: () => Promise<void>;
+    };
+    probe.durable!.engine[Symbol.dispose]?.();
+    probe.disposeStorage?.();
+
+    let engineDisposeCalls = 0;
+    let engineDisposed = false;
+    const originalAsyncDispose = enginePrototype[Symbol.asyncDispose];
+    const asyncDisposeSpy = spyOn(enginePrototype, Symbol.asyncDispose).mockImplementation(
+      async function (this: unknown) {
+        engineDisposeCalls += 1;
+        await engineDisposeGate;
+        engineDisposed = true;
+        return originalAsyncDispose.call(this as never);
+      },
+    );
+
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+      shutdownTimeoutSleep: sleep,
+    });
+
+    try {
+      const shutdownPromise = bureau.shutdown({ timeoutMilliseconds: 50 });
+      await waitForCondition(() => capturedSignal !== undefined, 'injected sleep was never called');
+      await waitForCondition(
+        () => engineDisposeCalls > 0,
+        'the durable engine dispose was never invoked',
+      );
+
+      // Let every OTHER owner's already-fast drain (audit-trail has nothing
+      // gating it) actually settle and record its outcome before the timer
+      // elapses — otherwise the timeout branch could win the race before
+      // those genuinely-quick drains have had a chance to run at all,
+      // which would prove nothing about the timeout-elapsed case
+      // specifically.
+      for (let tick = 0; tick < 20; tick += 1) {
+        await Promise.resolve();
+      }
+
+      // Elapse the injected timer WITHOUT releasing the gated engine
+      // dispose — this is the deterministic stand-in for the real 50ms
+      // passing.
+      releaseSleep();
+      const report = await shutdownPromise;
+
+      expect(report.owners.find((owner) => owner.kind === 'durable-engine')?.outcome).toBe(
+        'unresolved',
+      );
+      expect(report.owners.find((owner) => owner.kind === 'audit-trail')?.outcome).toBe(
+        'completed',
+      );
+      expect(report.unresolved).toBe(1);
+      // Never rejects, and the underlying drain is NOT abandoned — only the
+      // wait for it was. Releasing the still-gated engine dispose lets the
+      // real chain finish.
+      expect(engineDisposed).toBe(false);
+      releaseEngineDispose();
+      await waitForCondition(() => engineDisposed, 'the real teardown chain never completed');
+    } finally {
+      asyncDisposeSpy.mockRestore();
+    }
+  });
+
+  it('aborts the injected shutdownTimeoutSleep signal once the real teardown wins the race, so the timer does not outlive a fast shutdown()', async () => {
+    let capturedSignal: AbortSignal | undefined;
+    const sleep = (_milliseconds: number, signal: AbortSignal) => {
+      capturedSignal = signal;
+      return new Promise<void>(() => {
+        // Never resolves on its own — only `signal` aborting settles this
+        // call's role in the race, proving the real chain wins and the
+        // timer is told to stop.
+      });
+    };
+
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      shutdownTimeoutSleep: sleep,
+    });
+
+    await bureau.shutdown({ timeoutMilliseconds: 10_000 });
+    expect(capturedSignal?.aborted).toBe(true);
+  });
+
+  it('shutdown() (and dispose()) called a second time returns the SAME promise, regardless of the policy the second call requests', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    const first = bureau.shutdown({ policy: 'abort' });
+    const second = bureau.shutdown({ policy: 'drain' });
+    expect(second).toBe(first);
+    await first;
+  });
+
+  it('never rejects even when the injected shutdownTimeoutSleep rejects, resolving with a best-effort report instead (review finding, PR #442)', async () => {
+    const sleep = (_milliseconds: number, _signal: AbortSignal) =>
+      Promise.reject(new Error('injected shutdownTimeoutSleep failure'));
+
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      shutdownTimeoutSleep: sleep,
+    });
+
+    // `Promise.race([chain, shutdownTimeoutSleep(...).then(buildReport)])`
+    // would otherwise propagate this rejection straight through `shutdown()`
+    // — the fallback `.catch` fence must resolve with a best-effort report
+    // instead of rejecting.
+    const report = await bureau.shutdown({ timeoutMilliseconds: 10_000 });
+    expect(report.admissionClosed).toBe(true);
+  });
+
+  it('uses the real default shutdownTimeoutSleep (a real setTimeout, cleared on abort) when no shutdownTimeoutSleep option is supplied', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    // No `shutdownTimeoutSleep` option — this exercises
+    // `defaultShutdownTimeoutSleep`'s real `setTimeout`, generously bounded
+    // so the real (fast) teardown always wins the race and the abort
+    // listener fires, clearing the timer before it would otherwise elapse.
+    const report = await bureau.shutdown({ timeoutMilliseconds: 60_000 });
+    expect(report.admissionClosed).toBe(true);
+  });
+
+  it('prefers [Symbol.asyncDispose] over [Symbol.dispose] on the composed durable engine', async () => {
+    // Spy on the SHARED engine class prototype (the established pattern in
+    // this file — see the durable-recovery describe blocks above) so the
+    // spy observes whichever instance `createBureau` builds internally.
+    const probe = await createRuntimeComposition({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+    const enginePrototype = Object.getPrototypeOf(probe.durable!.engine) as {
+      [Symbol.asyncDispose]: () => Promise<void>;
+      [Symbol.dispose]: () => void;
+    };
+    probe.durable!.engine[Symbol.dispose]?.();
+    probe.disposeStorage?.();
+
+    const asyncDisposeSpy = spyOn(enginePrototype, Symbol.asyncDispose).mockImplementation(
+      async function (this: unknown) {
+        return undefined;
+      },
+    );
+    const syncDisposeSpy = spyOn(enginePrototype, Symbol.dispose).mockImplementation(function (
+      this: unknown,
+    ) {
+      return undefined;
+    });
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'memory' },
+        durableExecution: true,
+      });
+      await bureau.dispose();
+
+      expect(asyncDisposeSpy).toHaveBeenCalledTimes(1);
+      expect(syncDisposeSpy).not.toHaveBeenCalled();
+    } finally {
+      asyncDisposeSpy.mockRestore();
+      syncDisposeSpy.mockRestore();
+    }
+  });
+});
+
+describe('deleteSession aborts every run it owns (AB-207)', () => {
+  // The pending-approval flavor of "a run owned by the deleted session" is
+  // already covered by the pre-existing "revokes pending approval on delete"
+  // regression test above — that run reaches `action_required` and settles
+  // as `'completed'` (parked for a human decision, not consuming a running
+  // slot), so `persistedApprovalRunIds`'s existing revoke loop is untouched
+  // by this fix. This test targets the actual gap: a session run that is
+  // GENUINELY still `'running'` and has NO pending approval at all —
+  // `persistedApprovalRunIds` would never see it, so the pre-fix
+  // `deleteSession` called `abortRun` on nothing. Two such runs prove the
+  // wider `getRunSessionIdentifier`-based set catches every one of them.
+  it("calls abortRun for every session run still running, found via getRunSessionIdentifier, and its own promise does not resolve until each run's terminal event fires", async () => {
+    let releaseFirstRun!: () => void;
+    let releaseSecondRun!: () => void;
+    const firstRunGate = new Promise<void>((resolve) => {
+      releaseFirstRun = resolve;
+    });
+    const secondRunGate = new Promise<void>((resolve) => {
+      releaseSecondRun = resolve;
+    });
+    let generateCalls = 0;
+
+    const bureau = await createBureau({
+      agents: {},
+      generate: async () => {
+        generateCalls += 1;
+        if (generateCalls === 1) {
+          await firstRunGate;
+          return { content: 'run 1 settled', toolCalls: [] };
+        }
+        await secondRunGate;
+        return { content: 'run 2 settled', toolCalls: [] };
+      },
+      toolbox: createEmptyToolbox(),
+      persistence: { store: { type: 'memory' } },
+    });
+
+    const firstRun = await bureau.createRun({ message: 'First session run' });
+    await waitForCondition(
+      () => bureau.getRun(firstRun.id)?.status === 'running',
+      'first run never reached running before deleteSession() was called',
+    );
+    const secondRun = await bureau.createRun({
+      message: 'Second session run',
+      sessionId: firstRun.sessionId,
+    });
+    await waitForCondition(
+      () => bureau.getRun(secondRun.id)?.status === 'running',
+      'second run never reached running before deleteSession() was called',
+    );
+
+    // Neither run has any pending-approval bookkeeping at all — the
+    // narrower `persistedApprovalRunIds` set is empty for this session.
+    expect(bureau.getRun(firstRun.id)?.status).toBe('running');
+    expect(bureau.getRun(secondRun.id)?.status).toBe('running');
+
+    let deleteSessionSettled = false;
+    const deletion = bureau.deleteSession(firstRun.sessionId).then(() => {
+      deleteSessionSettled = true;
+    });
+
+    // Both generates are still gated — deleteSession() must not have
+    // resolved yet, proving it awaited each run's terminal event rather
+    // than merely requesting the abort.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(deleteSessionSettled).toBe(false);
+
+    releaseFirstRun();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(deleteSessionSettled).toBe(false);
+
+    releaseSecondRun();
+    await deletion;
+    expect(deleteSessionSettled).toBe(true);
+
+    expect(bureau.getRun(firstRun.id)?.status).toBe('aborted');
+    expect(bureau.getRun(secondRun.id)?.status).toBe('aborted');
+    await bureau.dispose();
   });
 });

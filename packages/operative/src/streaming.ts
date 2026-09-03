@@ -1,3 +1,7 @@
+import {
+  readBackendDescriptors,
+  withBackendDescriptors,
+} from './providers/backend-descriptor-attachment';
 import { cancelStreamingIfActive } from './streaming/cancel-streaming';
 import type {
   GenerateContext,
@@ -12,9 +16,15 @@ import type {
  *
  * The wrapper manages the streaming lifecycle on the Conversation:
  * appendStreamingMessage → updateStreamingMessage → finalizeStreamingMessage.
+ *
+ * Propagates `fn`'s attached `BackendDescriptor`(s) (AB-64, AB-245) onto the
+ * returned wrapper — without this, `createAgent({ generate:
+ * withStreaming(createOpenAIProviderStream(...)) })`, the documented way to
+ * use a streaming provider factory as an Agent's `generate`, would silently
+ * lose the descriptor the factory attached and report `mode: 'opaque'`.
  */
 export function withStreaming(fn: StreamingGenerateFunction): GenerateFunction {
-  return async (context: GenerateContext): Promise<GenerateResponse> => {
+  const wrapped: GenerateFunction = async (context: GenerateContext): Promise<GenerateResponse> => {
     const { conversation } = context;
 
     const messageId = conversation.appendStreamingMessage('assistant');
@@ -40,4 +50,6 @@ export function withStreaming(fn: StreamingGenerateFunction): GenerateFunction {
       throw error;
     }
   };
+
+  return withBackendDescriptors(wrapped, readBackendDescriptors(fn));
 }

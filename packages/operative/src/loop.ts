@@ -1,3 +1,4 @@
+import type { AnyToolbox } from 'armorer';
 import { Conversation, isConversation } from 'conversationalist';
 
 import { MaximumStepsExceededError } from './errors';
@@ -72,14 +73,24 @@ export function buildStepDeps(options: RunOptions): StepDeps {
   };
 }
 
-/** Construct the fresh, mutable run-level accumulators for a new run. */
-export function createRunState(): RunState {
+/**
+ * Construct the fresh, mutable run-level accumulators for a new run.
+ *
+ * `initialAppliedConfigVersion` seeds `lastAppliedConfigVersion` — normally
+ * left at its default of 0 for a run with no steering dependency, or for a
+ * reconstruction/recovery call site (AB-199's `SteeringGate.getAppliedFloor`
+ * is consulted only at the two brand-new-run call sites: `executeLoop`
+ * below and `run-workflow.ts`'s `initialCursor`). Seeding it here, rather
+ * than only in those two call sites, keeps `createRunState()` the single
+ * source of truth for what "fresh" means.
+ */
+export function createRunState(initialAppliedConfigVersion = 0): RunState {
   return {
     steps: [],
     totalUsage: { prompt: 0, completion: 0, total: 0 },
     lastContent: '',
     schemaAttempts: 0,
-    lastAppliedConfigVersion: 0,
+    lastAppliedConfigVersion: initialAppliedConfigVersion,
   };
 }
 
@@ -104,6 +115,10 @@ export async function executeLoop(
   // AB-204: forwarded to `buildStepDeps`'s output — see
   // `StepDeps.trackToolCallIds` and `create-run.ts`'s `ownedToolCallIds`.
   trackToolCallIds?: (ids: readonly string[]) => void,
+  // AB-239: notifies the driver's toolbox-event forwarder of each step's
+  // resolved toolbox (base or `selectTools`-swapped). Not part of RunOptions —
+  // it is a driver-internal wire, not user-facing configuration.
+  onStepToolbox?: (toolbox: AnyToolbox) => void,
 ): Promise<RunResult> {
   const { maximumSteps = DEFAULT_MAXIMUM_STEPS, hooks, onMaximumSteps, costEstimation } = options;
 
@@ -111,8 +126,11 @@ export async function executeLoop(
     ? options.conversation
     : new Conversation(options.conversation);
 
-  const deps = { ...buildStepDeps(options), hookTracker, trackToolCallIds };
-  const runState = createRunState();
+  const deps = { ...buildStepDeps(options), hookTracker, trackToolCallIds, onStepToolbox };
+  // AB-199 cross-run dedupe: a brand-new run seeds its dedupe cursor from
+  // the gate's own cross-run memory, not always 0, so a `configVersion` a
+  // PRIOR run already applied is never re-observed as new by this one.
+  const runState = createRunState(options.steering?.getAppliedFloor?.() ?? 0);
 
   const runStartTime = performance.now();
 
@@ -133,6 +151,12 @@ export async function executeLoop(
 
   for (let step = 0; step < maximumSteps; step++) {
     const outcome = await runStep(deps, runState, conversation, step, emitter);
+    // AB-239: revert the forwarder to the base toolbox now that the step
+    // (which called `onStepToolbox` with its own resolved toolbox) has ended —
+    // see `ToolboxEventForwarder`'s JSDoc for why this must happen at the
+    // step's actual end, not merely before the next step resolves its own
+    // toolbox (a durable step can park for arbitrarily long in between).
+    onStepToolbox?.(deps.toolbox);
 
     if (outcome.kind === 'abort') {
       return makeAbortResult(

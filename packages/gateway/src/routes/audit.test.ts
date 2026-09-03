@@ -393,7 +393,7 @@ describe('GET /api/v1/audit', () => {
     const stubAuditTrail: AuditTrail = {
       query: async () => [durableRecord],
       record: async () => {},
-      dispose: () => {},
+      dispose: async () => {},
     };
 
     // Stub a Store whose live actions list contains:
@@ -461,7 +461,7 @@ describe('GET /api/v1/audit', () => {
       complete: () => {},
       completed: false,
       signal: new AbortController().signal,
-      dispose: () => {},
+      dispose: async () => {},
       sessionStore: undefined,
       kv: undefined,
     } as unknown as Bureau;

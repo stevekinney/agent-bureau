@@ -6,6 +6,7 @@ export type {
   AgentOutput,
   AgentRunForName,
   BureauAgentCatalog,
+  CreateAgentCatalogOptions,
 } from './agent-catalog';
 export { createAgentCatalog } from './agent-catalog';
 export type { AuditEventType, AuditQueryOptions, AuditRecord, AuditTrail } from './audit-trail';
@@ -16,7 +17,12 @@ export type {
   RecoveredRunSessionMetadata,
   SessionLoadOutcome,
 } from './create-bureau';
-export { BureauError, classifyRecoveredRun, createBureau } from './create-bureau';
+export {
+  BureauError,
+  classifyRecoveredRun,
+  createBureau,
+  ScheduleLocatorUnavailableError,
+} from './create-bureau';
 export type {
   AgentDescriptor,
   CreateSupervisorOptions,
@@ -73,11 +79,25 @@ export {
   serializeUnknownError,
 } from './serialization';
 export type {
+  BureauSteeringGate,
+  ImplementedSteeringCommand,
+  SteeringAdmissionContext,
+  SteeringCommandAdmissionOutcome,
+  SteeringCommandConflict,
+  SteeringCommandRequest,
+  SteeringCommandSnapshot,
+} from './steering';
+export { createSteeringGate } from './steering';
+export type {
   Bureau,
   BureauEventType,
   BureauOptions,
   BureauRunOptions,
+  BureauShutdownOptions,
+  BureauShutdownOwnerReport,
+  BureauShutdownReport,
   CacheConfiguration,
+  CleanupAcknowledgement,
   ConfigurationResponse,
   CreateRunRequest,
   DurableGuardrailsConfiguration,

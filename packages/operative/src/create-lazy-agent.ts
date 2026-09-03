@@ -19,6 +19,7 @@
  */
 
 import { Conversation } from 'conversationalist';
+import type { Subscription } from 'lifecycle';
 
 import type { AgentRun, RunEvent, UnwrappedValue } from './agent-run';
 import { CompletedRunIterationError } from './agent-run';
@@ -32,6 +33,10 @@ import {
   toAgentRunError,
 } from './errors';
 import { RunAbortedEvent, RunCompletedEvent, RunErrorEvent } from './events';
+import type { AgentGenerationProfile } from './generation-profile';
+import type { AgentRunLivenessSnapshot } from './liveness';
+import { LIVENESS_POLICY_VERSION } from './liveness';
+import { deepFreeze } from './providers/backend-descriptor-attachment';
 import type {
   AgentInput,
   AgentRunContext,
@@ -81,6 +86,15 @@ export interface CreateLazyAgentOptions<H extends boolean = false> {
    * this witness exists at all.
    */
   hasOutput?: H;
+
+  /**
+   * The generation-capability snapshot exposed on the returned agent (AB-64,
+   * AB-245), alongside `name: options.label ?? '(lazy)'`. Never derived
+   * from the underlying agent — a profile read must never trigger a module
+   * load. Omitted means the lazy agent reports `mode: 'opaque'`
+   * (`readGenerationProfile`'s default fallback).
+   */
+  generationProfile?: AgentGenerationProfile;
 }
 
 // A fresh object per call — never a shared module-level singleton. `RunResult.usage`
@@ -128,6 +142,13 @@ function isValidAgentRunHandle(value: unknown): value is AgentRun<unknown, boole
     // TypeError the first time this wrapper's own `closed()` delegates to
     // it, instead of the contract failure this validator exists to surface.
     isCallable(candidate['closed']) &&
+    // AB-214 review (PRRT_kwDORvupsc6esZSb): `snapshot`/`subscribeSnapshot`
+    // are mandatory `AgentRun` members too — an untyped, JavaScript, or
+    // older third-party handle missing either must fail this contract
+    // check with `AgentContractError`, not a raw `TypeError` the first time
+    // this wrapper delegates to a liveness method that isn't there.
+    isCallable(candidate['snapshot']) &&
+    isCallable(candidate['subscribeSnapshot']) &&
     isCallable(candidate[Symbol.asyncIterator]) &&
     isCallable(candidate[Symbol.dispose])
   );
@@ -365,6 +386,61 @@ export function createDeferredAgentRun<O, H extends boolean>(
   // (and may have failed) rather than genuinely unnecessary.
   let invalidHandleDisposalOutcome: CleanupAcknowledgement | undefined;
 
+  // AB-88/AB-214 liveness state for the window before `underlying` exists
+  // (or when it never will — a synthetic finalize). `syntheticTerminal`
+  // flips once `finalizeSynthetic` runs, so `snapshot()`/`subscribeSnapshot`
+  // stop reporting a fresh 'created' snapshot after the wrapper's OWN
+  // `result()` has already settled (AB-214 review PRRT_kwDORvupsc6esZSF).
+  // `pendingSnapshotObservers` holds every `subscribeSnapshot` registered
+  // before `underlying` resolves so it can be transferred to a real
+  // subscription once `underlying` exists (PRRT_kwDORvupsc6esZSA).
+  let syntheticTerminal = false;
+  interface PendingSnapshotRecord {
+    readonly observer: (snapshot: AgentRunLivenessSnapshot) => void;
+    closed: boolean;
+    realSubscription?: Subscription;
+  }
+  const pendingSnapshotObservers = new Set<PendingSnapshotRecord>();
+
+  function syntheticSnapshot(): AgentRunLivenessSnapshot {
+    const now = new Date().toISOString();
+    return {
+      id: label,
+      kind: 'agent-run',
+      startedAt: now,
+      revision: syntheticTerminal ? 1 : 0,
+      status: syntheticTerminal ? 'terminal' : 'created',
+      lastTransitionAt: now,
+      projection: 'redacted',
+      ownership: 'independent',
+      detached: false,
+      durability: 'process-local',
+      cancellable: !syntheticTerminal,
+      attempt: 0,
+      reachability: syntheticTerminal ? 'not-applicable' : 'unknown',
+      progress: syntheticTerminal ? 'not-applicable' : 'unknown',
+      assessment: syntheticTerminal ? 'terminal' : 'healthy',
+      observedAt: Date.now(),
+      missedPulseCount: 0,
+      policyVersion: LIVENESS_POLICY_VERSION,
+      evidence: [],
+    };
+  }
+
+  function notifySyntheticTerminal(): void {
+    const terminalSnapshot = syntheticSnapshot();
+    for (const record of [...pendingSnapshotObservers]) {
+      if (record.closed) continue;
+      record.closed = true;
+      try {
+        record.observer(terminalSnapshot);
+      } catch {
+        // Same observer-isolation reasoning as `ActiveRunLiveness.notify()`.
+      }
+    }
+    pendingSnapshotObservers.clear();
+  }
+
   const queue = createEventQueue();
 
   let settleResultPromise!: (result: RunResult<O, H>) => void;
@@ -387,6 +463,14 @@ export function createDeferredAgentRun<O, H extends boolean>(
   ): void {
     if (state === 'terminal') return;
     state = 'terminal';
+    // Only a genuinely underlying-less finalize (this run never got a real
+    // `ActiveRun` at all) needs the synthetic terminal snapshot — one that
+    // resolved `underlying` reports its own real terminal state instead
+    // (AB-214 review PRRT_kwDORvupsc6esZSF).
+    if (!underlying) {
+      syntheticTerminal = true;
+      notifySyntheticTerminal();
+    }
     const conversation = buildFallbackConversation(input);
     const result = {
       conversation,
@@ -641,6 +725,18 @@ export function createDeferredAgentRun<O, H extends boolean>(
     // this point, `requestAbort` sees `state === 'started'` and forwards
     // directly to `underlying`, exactly once (guarded by `abortForwarded`).
     underlying = handle;
+    // AB-214 review (PRRT_kwDORvupsc6esZSA): an observer registered while
+    // `underlying` was still unresolved must keep receiving updates once it
+    // exists, not stay stuck on the one synthetic 'created' snapshot it got
+    // synchronously at subscribe time. Transfer each pending subscription to
+    // a real one against `underlying`, so THIS record's own `unsubscribe()`
+    // closure (already handed to the caller) now tears down the real
+    // subscription instead.
+    for (const record of pendingSnapshotObservers) {
+      if (record.closed) continue;
+      record.realSubscription = underlying.subscribeSnapshot(record.observer);
+    }
+    pendingSnapshotObservers.clear();
     state = 'started';
     // From here on, `context.signal` (already passed to `agent.run()`
     // above) is the underlying agent's own responsibility to honor — this
@@ -740,6 +836,58 @@ export function createDeferredAgentRun<O, H extends boolean>(
           : Promise.resolve(invalidHandleDisposalOutcome ?? { status: 'completed' }),
     }),
 
+    // AB-88/AB-214 — before `underlying` resolves there is no real
+    // `ActiveRun` to delegate a snapshot to yet, so this wrapper reports a
+    // synthetic snapshot (mirroring `children()`'s empty-default pattern
+    // above): 'created' while still waiting, 'terminal' once a genuinely
+    // underlying-less finalize has run (PRRT_kwDORvupsc6esZSF). Once
+    // `underlying` resolves, both delegate straight through.
+    snapshot(): AgentRunLivenessSnapshot {
+      if (underlying) return underlying.snapshot();
+      return syntheticSnapshot();
+    },
+
+    subscribeSnapshot(
+      observer: (snapshot: AgentRunLivenessSnapshot) => void,
+      options?: { signal?: AbortSignal },
+    ) {
+      if (underlying) return underlying.subscribeSnapshot(observer, options);
+
+      const record: PendingSnapshotRecord = { observer, closed: false };
+      const alreadyAborted = options?.signal?.aborted ?? false;
+
+      try {
+        observer(syntheticSnapshot());
+      } catch {
+        // Same observer-isolation reasoning as `ActiveRunLiveness.notify()`.
+      }
+
+      function unsubscribe(): void {
+        if (record.closed) return;
+        record.closed = true;
+        pendingSnapshotObservers.delete(record);
+        record.realSubscription?.unsubscribe();
+      }
+
+      if (alreadyAborted || syntheticTerminal) {
+        record.closed = true;
+      } else {
+        // Kept pending (AB-214 review PRRT_kwDORvupsc6esZSA) — transferred
+        // to a real subscription against `underlying` once it exists, or
+        // notified once if this run finalizes synthetically first. Never
+        // closed here just because `underlying` doesn't exist YET.
+        pendingSnapshotObservers.add(record);
+        options?.signal?.addEventListener('abort', unsubscribe, { once: true });
+      }
+
+      return {
+        unsubscribe,
+        get closed() {
+          return record.closed || (record.realSubscription?.closed ?? false);
+        },
+      };
+    },
+
     [Symbol.dispose](): void {
       cancelRequested = true;
       if (underlying) {
@@ -776,6 +924,55 @@ type LazyAgentState<O, H extends boolean> =
   | { kind: 'unloaded' }
   | { kind: 'loading'; pending: Promise<RunnableAgent<O, H>> }
   | { kind: 'loaded'; agent: RunnableAgent<O, H> };
+
+/**
+ * Deep-freezes a caller-supplied `AgentGenerationProfile` before it is
+ * exposed on the returned agent, and forces `selector: 'unavailable'` and
+ * `projection: 'privileged'` regardless of what the caller's profile claims.
+ * `generationProfile` is documented as an immutable snapshot; unlike
+ * `createAgent` (which builds the object itself from scratch),
+ * `createLazyAgent` receives it ready-made from the caller, so freezing the
+ * nested collections here — in place, their references shared with (never
+ * copied from) the caller's own objects — is what actually closes the
+ * mutation vector for a caller who built the profile by hand rather than
+ * through `createAgent`. Each attached descriptor's own object graph is
+ * deep-frozen too, via `backend-descriptor-attachment.ts`'s `deepFreeze`
+ * (shared rather than duplicated) — freezing only the containing
+ * `descriptors` array would leave a hand-built descriptor's own fields
+ * (`model`, `aliases`, …) mutable.
+ *
+ * The top-level object IS a fresh shallow copy (never the caller's own
+ * object): AB-64's verification walk fixes `selector: 'unavailable'`
+ * permanently for a standalone or lazy agent, which has no Bureau, no
+ * policy, and no catalog to select through, and fixes `projection:
+ * 'privileged'` for any profile read directly off an agent (the caller
+ * already holds the `GenerateFunction` and therefore its descriptors) — so
+ * a caller-supplied `'available'` selector or `'general'` projection must
+ * never survive unchanged. Reusing the caller's object in place would make
+ * forcing these two fields impossible without also being able to mutate a
+ * field the `Object.freeze` below has already locked.
+ */
+function freezeGenerationProfile(profile: AgentGenerationProfile): AgentGenerationProfile {
+  if (profile.preferences) {
+    if (profile.preferences.requiredCapabilities) {
+      Object.freeze(profile.preferences.requiredCapabilities);
+    }
+    if (profile.preferences.preferredProviders) {
+      Object.freeze(profile.preferences.preferredProviders);
+    }
+    if (profile.preferences.preferredModels) {
+      Object.freeze(profile.preferences.preferredModels);
+    }
+    Object.freeze(profile.preferences);
+  }
+  if (profile.allowedCandidates) {
+    for (const candidate of profile.allowedCandidates) Object.freeze(candidate);
+    Object.freeze(profile.allowedCandidates);
+  }
+  for (const descriptor of profile.descriptors) deepFreeze(descriptor);
+  Object.freeze(profile.descriptors);
+  return Object.freeze({ ...profile, projection: 'privileged', selector: 'unavailable' });
+}
 
 /**
  * Lazily loads and memoizes a `RunnableAgent`, sharing its first load across
@@ -886,6 +1083,9 @@ export function createLazyAgent<O = never, H extends boolean = false>(
 
   const agent = {
     name: options.label ?? '(lazy)',
+    ...(options.generationProfile
+      ? { generationProfile: freezeGenerationProfile(options.generationProfile) }
+      : {}),
     /**
      * A live witness, not a value frozen at construction time (AB-234
      * review, Codex: `options.hasOutput` alone left exactly the gap this
@@ -905,11 +1105,18 @@ export function createLazyAgent<O = never, H extends boolean = false>(
       // `state.agent` is whatever the loader resolved to — `resolve()`
       // caches it before `isRunnableAgent` gets a chance to reject it (that
       // rejection happens per-call-site, as an `AgentContractError` on the
-      // run itself, not by unsetting `state`). Guard with `typeof` here too
-      // (belt-and-suspenders alongside the `isRunnableAgent` contract
-      // check both call sites already perform) so a malformed loaded value
-      // can never make this getter return anything but a real `boolean`.
-      if (state.kind === 'loaded' && typeof state.agent.hasOutput === 'boolean') {
+      // run itself, not by unsetting `state`). So `state.agent` can be
+      // `null`, a primitive, or any other malformed value here, not just a
+      // well-formed-but-untyped object (AB-234 review round 2, Codex P2:
+      // a bare `typeof state.agent.hasOutput` on a `null`-resolved loader
+      // throws a raw `TypeError` from THIS getter, masking the promised
+      // `AgentContractError`/`SubagentRunError` the run itself would
+      // otherwise surface). Route through the same `isRunnableAgent` guard
+      // both call sites already use — it null/object-checks `state.agent`
+      // before ever touching `.hasOutput` — instead of dereferencing it
+      // directly, so a malformed loaded value can never make this getter
+      // throw or return anything but a real `boolean`.
+      if (state.kind === 'loaded' && isRunnableAgent(state.agent)) {
         return state.agent.hasOutput;
       }
       return options.hasOutput ?? false;

@@ -286,6 +286,36 @@ describe('session.run()', () => {
     expect(await run.closed()).not.toEqual({ status: 'not-required' });
   });
 
+  it('AB-88/AB-214: snapshot()/subscribeSnapshot() read a synthetic created snapshot before the inner run exists and delegate once it does', async () => {
+    const { handle } = createSessionHandleFixture();
+
+    const run = handle.run('hello');
+
+    // Synchronous return means `activeInnerRun` cannot exist yet (it's set
+    // inside the async reservation IIFE) — this must be the synthetic
+    // 'created' snapshot, not a throw.
+    const beforeSnapshot = run.snapshot();
+    expect(beforeSnapshot.status).toBe('created');
+    expect(beforeSnapshot.kind).toBe('agent-run');
+
+    const beforeReceived: string[] = [];
+    const beforeSubscription = run.subscribeSnapshot((snapshot) =>
+      beforeReceived.push(snapshot.status),
+    );
+    expect(beforeReceived).toEqual(['created']);
+    expect(beforeSubscription.closed).toBe(true);
+    expect(() => beforeSubscription.unsubscribe()).not.toThrow();
+
+    await run.result();
+
+    // Once the inner run exists and has settled, this delegates straight
+    // through to its own terminal snapshot.
+    expect(run.snapshot().status).toBe('terminal');
+    const afterReceived: string[] = [];
+    run.subscribeSnapshot((snapshot) => afterReceived.push(snapshot.status));
+    expect(afterReceived).toEqual(['terminal']);
+  });
+
   it('appends a RunRef to the session when the run completes', async () => {
     const { handle, store } = createSessionHandleFixture();
 

@@ -1556,5 +1556,63 @@ describe('createSubagentTool', () => {
       expect(registryB.children()).toHaveLength(1);
       expect(registryA.children()[0]?.id).not.toBe(registryB.children()[0]?.id);
     });
+
+    it('AB-214: a bare createAgent().run() with no explicit runId still gives createSubagentTool a per-call parentRunId, via the minted standalone-run id', async () => {
+      // Before AB-214, `RunOptions.runId` stayed undefined for a bare
+      // `createAgent().run()` with no explicit `runId`/`childRegistry`, so
+      // `run-step.ts`'s toolbox execute call site never populated
+      // `executionContext.parentRunId` at all — `createSubagentTool` fell
+      // all the way back to `parentContext.parentRunId`'s construction-time
+      // default. AB-214 mints a process-local id for every in-memory run
+      // through the local identifier seam, so this per-call value is now
+      // always present, even for the bare case this test exercises.
+      const { agent: child } = makeMockAgent(() => makeSuccessfulResult('child result'));
+      const emitter = makeEmitter();
+      const received: ChildWorkflowStartedEvent[] = [];
+      emitter.addEventListener(ChildWorkflowStartedEvent.type, (event) => received.push(event));
+
+      const tool = createSubagentTool({
+        name: 'delegate',
+        description: 'Delegate',
+        agent: child,
+        agentName: 'child',
+        input: z.object({ q: z.string() }),
+        parentContext: {
+          emitter,
+          parentAgentName: 'orchestrator',
+          // A deliberately different construction-time fallback, so the
+          // assertion below proves the per-call value won, not this one.
+          parentRunId: 'construction-time-fallback',
+          durable: false,
+        },
+      });
+
+      let generateCalls = 0;
+      const parent = createAgent({
+        generate: async () => {
+          generateCalls++;
+          if (generateCalls === 1) {
+            return {
+              content: '',
+              toolCalls: [{ id: 'call-1', name: 'delegate', arguments: { q: 'hi' } }],
+            };
+          }
+          return textResponse('done');
+        },
+        tools: { delegate: tool },
+      });
+
+      // Bare — no options at all, so `RunOptions.runId` is absent and
+      // `createActiveRun` mints one through the identifier seam.
+      const run = parent.run('go');
+      await run.result();
+
+      expect(received).toHaveLength(1);
+      expect(received[0]?.parentRunId).not.toBe('');
+      expect(received[0]?.parentRunId).not.toBe('construction-time-fallback');
+      // The minted id is the same one the run's own liveness snapshot
+      // reports — one identifier seam, not two independent sources.
+      expect(received[0]?.parentRunId).toBe(run.snapshot().id);
+    });
   });
 });

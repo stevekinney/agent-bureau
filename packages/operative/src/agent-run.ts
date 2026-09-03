@@ -15,9 +15,12 @@
  * architecture.md for the 3-reviewer consensus on this decision.
  */
 
+import type { Subscription } from 'lifecycle';
+
 import type { ChildRunDescriptor, ChildRunRegistry } from './child-run';
 import type { ActiveRun } from './create-run';
 import type { CombinedOperativeEventMap, CombinedOperativeEventType } from './events';
+import type { AgentRunLivenessSnapshot } from './liveness';
 import type { CleanupAcknowledgement, ClosedOptions, RunResult, RunResultBase } from './types';
 
 export type { ChildRunDescriptor, ChildRunRegistry } from './child-run';
@@ -120,6 +123,25 @@ export type AgentRun<O = never, H extends boolean = false> = AsyncIterable<RunEv
     closed(options?: ClosedOptions): Promise<CleanupAcknowledgement>;
 
     /**
+     * Synchronous, never starts work, never blocks, never mutates (AB-88's
+     * `LivenessObservable`, implemented by AB-214/obs-01). Delegates to the
+     * wrapped `ActiveRun.snapshot()`.
+     */
+    snapshot(): AgentRunLivenessSnapshot;
+
+    /**
+     * Independent, non-consuming observer (AB-88's `LivenessObservable`).
+     * Delivers the current snapshot synchronously before returning, then a
+     * new snapshot on every revision change; already-terminal work delivers
+     * the terminal snapshot once. Delegates to the wrapped
+     * `ActiveRun.subscribeSnapshot()`.
+     */
+    subscribeSnapshot(
+      observer: (snapshot: AgentRunLivenessSnapshot) => void,
+      options?: { signal?: AbortSignal },
+    ): Subscription;
+
+    /**
      * Dispose the run handle and release internal resources. Equivalent to
      * `abort()` when the run is still in flight.
      */
@@ -144,6 +166,13 @@ export interface DiagnosticAgentRun extends AsyncIterable<RunEvent> {
    * passes through identically.
    */
   closed(options?: ClosedOptions): Promise<CleanupAcknowledgement>;
+  /** See `AgentRun.snapshot()` — AB-88/AB-214 apply the same capability here. */
+  snapshot(): AgentRunLivenessSnapshot;
+  /** See `AgentRun.subscribeSnapshot()` — AB-88/AB-214 apply the same capability here. */
+  subscribeSnapshot(
+    observer: (snapshot: AgentRunLivenessSnapshot) => void,
+    options?: { signal?: AbortSignal },
+  ): Subscription;
   [Symbol.dispose](): void;
 }
 
@@ -397,6 +426,17 @@ export function createAgentRun<O = never, H extends boolean = false>(
 
     closed(options?: ClosedOptions): Promise<CleanupAcknowledgement> {
       return activeRun.closed(options);
+    },
+
+    snapshot(): AgentRunLivenessSnapshot {
+      return activeRun.snapshot();
+    },
+
+    subscribeSnapshot(
+      observer: (snapshot: AgentRunLivenessSnapshot) => void,
+      options?: { signal?: AbortSignal },
+    ): Subscription {
+      return activeRun.subscribeSnapshot(observer, options);
     },
 
     [Symbol.dispose](): void {

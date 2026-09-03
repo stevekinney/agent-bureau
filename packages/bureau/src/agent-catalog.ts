@@ -8,7 +8,9 @@
  * `query`, and nothing that mutates.
  */
 
-import type { AgentRun, RunnableAgent } from '@lostgradient/operative';
+import type { AgentGenerationProfile, AgentRun, RunnableAgent } from '@lostgradient/operative';
+import { readGenerationProfile } from '@lostgradient/operative';
+import { projectDescriptor } from '@lostgradient/operative/providers';
 
 /**
  * A plain literal map of agent name to `RunnableAgent`. There is no
@@ -147,6 +149,37 @@ export interface BureauAgentCatalog<D extends AgentDefinitions> {
   names(): Array<keyof D & string>;
   entries(): Array<AgentCatalogEntry<D>>;
   query(predicate: (entry: AgentCatalogEntry<D>) => boolean): Array<AgentCatalogEntry<D>>;
+  /**
+   * The `'general'`-projection form of the named agent's `AgentGenerationProfile`
+   * (AB-64 AC8, AB-247/mod-02e) — every descriptor redacted through
+   * `projectDescriptor(descriptor, 'general')`, and `projection: 'general'`
+   * stamped on the returned profile itself, per AB-34's "a caller reads
+   * which projection it received" contract. `undefined` for a name this
+   * catalog does not hold — never a fabricated default profile for an
+   * unknown name; that's a distinct case from a known agent with no
+   * `generationProfile` of its own, which `readGenerationProfile`'s
+   * `mode: 'opaque'` fallback already covers.
+   *
+   * Computed once per agent at `createAgentCatalog` call time and cached, so
+   * repeated reads for the same name return the identical object by
+   * reference. Synchronous, side-effect-free: no network input or output,
+   * no clock read, no background work — never a channel for request-time
+   * provider configuration (AB-64's AB-15/AB-22 boundaries, AC9).
+   */
+  generationProfile(name: string): AgentGenerationProfile | undefined;
+}
+
+/**
+ * Options for {@link createAgentCatalog}. `selectorAvailable` defaults to
+ * `false`: `createBureau` passes `false` today (no selector wired yet); a
+ * future selector integration (AB-66) flips it to `true` so a `selectable`
+ * agent's catalog-read profile reports `selector: 'available'` — the
+ * transition has this one named mechanism in this one file, rather than an
+ * implicit reflection over whether a selector happens to be configured
+ * elsewhere.
+ */
+export interface CreateAgentCatalogOptions {
+  readonly selectorAvailable?: boolean;
 }
 
 /**
@@ -164,7 +197,11 @@ export interface BureauAgentCatalog<D extends AgentDefinitions> {
  * case-insensitive *search* is still available through `query(predicate)`,
  * where the predicate can lower-case both sides itself.
  */
-export function createAgentCatalog<D extends AgentDefinitions>(agents: D): BureauAgentCatalog<D> {
+export function createAgentCatalog<D extends AgentDefinitions>(
+  agents: D,
+  options?: CreateAgentCatalogOptions,
+): BureauAgentCatalog<D> {
+  const selectorAvailable = options?.selectorAvailable ?? false;
   // `Object.entries`/`Map` widen each value to the Record's own bound
   // (`RunnableAgent<never, false> | RunnableAgent<any, true>`), losing the
   // per-key precision `AgentCatalogEntry<D>` promises. The cast below
@@ -186,6 +223,16 @@ export function createAgentCatalog<D extends AgentDefinitions>(agents: D): Burea
     ([name, agent]) => Object.freeze({ name, agent }) as AgentCatalogEntry<D>,
   );
   const byName = new Map<string, AgentCatalogEntry<D>>(entries.map((entry) => [entry.name, entry]));
+  // Computed once, here, not lazily per call — "cached, side-effect-free
+  // read" (AC9) means a `generationProfile(name)` call is a plain Map
+  // lookup, never a recomputation, so repeated reads for the same name
+  // return the identical object by reference.
+  const generationProfiles = new Map<string, AgentGenerationProfile>(
+    entries.map((entry) => [
+      entry.name,
+      buildCatalogGenerationProfile(entry.agent, selectorAvailable),
+    ]),
+  );
 
   const catalog: BureauAgentCatalog<D> = {
     // Same cast rationale as above: `byName.get(name)!.agent` is genuinely
@@ -214,7 +261,47 @@ export function createAgentCatalog<D extends AgentDefinitions>(agents: D): Burea
     query(predicate) {
       return entries.filter(predicate);
     },
+    generationProfile(name) {
+      return generationProfiles.get(name);
+    },
   };
 
   return Object.freeze(catalog);
+}
+
+/**
+ * Builds the `'general'`-projection `AgentGenerationProfile` `createAgentCatalog`
+ * caches for one agent: reads the agent's own profile (or the frozen
+ * `mode: 'opaque'` default `readGenerationProfile` falls back to), projects
+ * every descriptor to `'general'`, and — for a `'selectable'` agent only —
+ * reports `selector: 'available'` when `selectorAvailable` is `true`.
+ * `selectorAvailable` never affects a non-`'selectable'` agent's `selector`,
+ * which stays whatever `readGenerationProfile` reported (`'unavailable'` for
+ * every mode `createAgent`/`createLazyAgent` can produce today).
+ */
+function buildCatalogGenerationProfile(
+  agent: AnyRunnableAgent,
+  selectorAvailable: boolean,
+): AgentGenerationProfile {
+  // `readGenerationProfile` only ever reads `agent.generationProfile`, a
+  // field whose presence and shape don't depend on `RunnableAgent`'s `O`/`H`
+  // type parameters — but its parameter type defaults to
+  // `RunnableAgent<never, false>`, which `RunnableAgent<any, true>` (half of
+  // `AnyRunnableAgent`) isn't structurally assignable to, for the same
+  // `run()`-return-type reason `AgentDefinitions`'s own doc comment above
+  // documents. This is a type-level-only correction, mirroring the other
+  // casts in this file: at runtime `agent` genuinely has whatever
+  // `generationProfile` it has, regardless of `O`/`H`.
+  const profile = readGenerationProfile(agent as RunnableAgent);
+  const descriptors = Object.freeze(
+    profile.descriptors.map((descriptor) => projectDescriptor(descriptor, 'general')),
+  );
+  const selector: AgentGenerationProfile['selector'] =
+    profile.mode === 'selectable' && selectorAvailable ? 'available' : profile.selector;
+  return Object.freeze({
+    ...profile,
+    projection: 'general',
+    descriptors,
+    selector,
+  });
 }

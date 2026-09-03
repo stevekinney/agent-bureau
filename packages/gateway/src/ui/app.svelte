@@ -1,4 +1,6 @@
 <script lang="ts">
+  import type { LivenessSnapshot } from '@lostgradient/operative/liveness';
+  import { LIVENESS_POLICY_VERSION } from '@lostgradient/operative/liveness';
   import { untrack } from 'svelte';
 
   import type { RunDetailResponse } from '../routes/runs';
@@ -66,6 +68,32 @@
     environment?: GatewayClientEnvironment;
   } = $props();
 
+  // AB-88/AB-214: a placeholder liveness snapshot for this client-side empty
+  // state — never served over the wire. Defined locally, not imported from
+  // `../routes/runs` (a server-side module that pulls `bureau` and, through
+  // it, node-only crypto APIs into the browser bundle).
+  const EMPTY_LIVENESS_SNAPSHOT: LivenessSnapshot = {
+    id: '',
+    kind: 'agent-run',
+    startedAt: new Date(0).toISOString(),
+    revision: 0,
+    status: 'created',
+    lastTransitionAt: new Date(0).toISOString(),
+    projection: 'redacted',
+    ownership: 'independent',
+    detached: false,
+    durability: 'process-local',
+    cancellable: true,
+    attempt: 0,
+    reachability: 'unknown',
+    progress: 'unknown',
+    assessment: 'healthy',
+    observedAt: 0,
+    missedPulseCount: 0,
+    policyVersion: LIVENESS_POLICY_VERSION,
+    evidence: [],
+  };
+
   const EMPTY_RUN_DETAIL: RunDetailResponse = {
     id: '',
     sessionId: '',
@@ -81,6 +109,7 @@
     events: [],
     stepDetails: [],
     latestSnapshot: undefined,
+    liveness: EMPTY_LIVENESS_SNAPSHOT,
     timeline: [],
   };
 

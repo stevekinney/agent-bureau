@@ -14,6 +14,7 @@ import {
   createRequestHumanInputTool,
   createRunFinishedFrame,
   createRunStartedFrame,
+  createScheduleWakeupTool,
   type DefinitionResolvingAgent,
   type FlowController,
   HumanWaitParkedEvent,
@@ -24,11 +25,19 @@ import {
   type RunnableAgent,
   type RunOptions,
   type RunReport,
+  ScheduleCancelledEvent,
+  ScheduleCompletedEvent,
+  ScheduleFailedEvent,
+  SchedulePausedEvent,
+  ScheduleResumedEvent,
   SchedulerTaskCompletedEvent,
   SchedulerTaskFailedEvent,
+  type ScheduleWakeupContext,
+  type ScheduleWakeupInput,
   type SessionListOptions,
   type SessionStore,
   type SessionSummary,
+  SteeringAppliedEvent,
   type StreamEventMap,
   TaskCancelledEvent,
   TaskDispatchedEvent,
@@ -48,6 +57,7 @@ import {
   type SessionInputAdmissionOutcome,
   type SessionInputAdmissionRequest,
 } from '@lostgradient/operative/durable';
+import type { LivenessSnapshot, Subscription } from '@lostgradient/operative/liveness';
 import { createModelCatalog } from '@lostgradient/operative/providers';
 import {
   createStore,
@@ -101,6 +111,7 @@ import {
   createRuntimeComposition,
   createSchedulerServiceRequestContext,
   decodeScheduleRunMarker,
+  isRunFailureFinishReason,
 } from './runtime-composition';
 import {
   findRunAgentName,
@@ -111,10 +122,22 @@ import {
   serializeRunState,
   serializeUnknownError,
 } from './serialization';
+import {
+  type BureauSteeringGate,
+  createSteeringCommandLedger,
+  createSteeringGate,
+  type ImplementedSteeringCommand,
+  type SteeringCommandAdmissionOutcome,
+  type SteeringCommandRequest,
+} from './steering';
 import type {
   Bureau,
   BureauOptions,
   BureauRunOptions,
+  BureauShutdownOptions,
+  BureauShutdownOwnerReport,
+  BureauShutdownReport,
+  CleanupAcknowledgement,
   ConfigurationResponse,
   CreateRunRequest,
   DiagnosticSink,
@@ -284,10 +307,23 @@ function isPlainAuthorityRecord(value: JSONValue | undefined): value is Record<s
 
 function lookupSessionAuthority(
   metadata: Record<string, JSONValue>,
+  // AB-67/AB-199 review finding (PR #430 — Codex P2, "Authorize against the
+  // targeted live run"): defaults to `metadata['lastRunId']` — the prior,
+  // single-run behavior every existing caller (`submitSessionInput`) keeps
+  // unchanged — but a caller that already knows which run a command
+  // actually targets (`submitSteeringCommand`, once it resolves an
+  // explicit `runId` or the session's sole live run) passes it explicitly.
+  // Without this, a run B that completes first prunes only its OWN
+  // `lastRequestAuthorities[B]` entry (see the terminal-transition cleanup
+  // below) while leaving `lastRunId: B` and A's now-uncorrelated entry
+  // behind; the uncorrelated-map branch below then fails EVERY principal
+  // closed before a command explicitly naming still-live run A ever gets a
+  // chance to authorize against A's own (perfectly valid) entry.
+  targetRunId?: string,
 ):
   | { readonly recorded: false }
   | { readonly recorded: true; readonly principalId: string | undefined } {
-  const lastRunId = metadata['lastRunId'];
+  const lastRunId = targetRunId ?? metadata['lastRunId'];
   const authorities = metadata['lastRequestAuthorities'];
   // A PRESENT-but-malformed `lastRequestAuthorities` value (not absent — a
   // string or array where a map belongs) is itself evidence something was
@@ -364,8 +400,11 @@ export function recordedSessionAuthorityPrincipalId(
 export function isSessionAuthorityAuthorized(
   metadata: Record<string, JSONValue>,
   principal: string,
+  // See {@link lookupSessionAuthority}'s doc comment on its own `targetRunId`
+  // parameter — forwarded verbatim.
+  targetRunId?: string,
 ): boolean {
-  const lookup = lookupSessionAuthority(metadata);
+  const lookup = lookupSessionAuthority(metadata, targetRunId);
   if (!lookup.recorded) return true;
   return lookup.principalId === principal;
 }
@@ -435,6 +474,23 @@ function omitStringsWithPrefix(values: readonly JSONValue[], prefix: string): JS
 
 export function defaultSessionPersistenceSleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+/**
+ * Default `BureauOptions.shutdownTimeoutSleep` — a real `setTimeout`, cleared
+ * (never resolving) if `signal` aborts first so a `shutdown()` whose real
+ * teardown wins the race does not leave this timer pending for the rest of
+ * its duration.
+ */
+export function defaultShutdownTimeoutSleep(
+  milliseconds: number,
+  signal: AbortSignal,
+): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) return;
+    const handle = setTimeout(resolve, milliseconds);
+    signal.addEventListener('abort', () => clearTimeout(handle), { once: true });
+  });
 }
 
 function ignoreBestEffortPromiseRejection(): void {}
@@ -582,6 +638,34 @@ class BureauError extends Error {
 }
 
 export { BureauError };
+
+/**
+ * Thrown by `createSchedule` when a schedule registers successfully against
+ * the engine but its {@link import('@lostgradient/weft').ScheduleSummary}
+ * cannot be retrieved immediately afterward (`AgentScheduleHandle.describe()`
+ * rejects). Mirrors `DurableCapabilityUnavailableError`'s shape discipline
+ * (AB-41/AB-43) — `.code`, `.category`, `.retryable` — so the same
+ * `isToolError`-style consumer contract can discriminate it without a bare,
+ * untyped `Error` leaking through. The schedule itself IS registered; only
+ * its locator (the summary) is unavailable.
+ */
+export class ScheduleLocatorUnavailableError extends Error {
+  readonly code = 'ScheduleLocatorUnavailableError';
+  readonly category = 'unavailable' as const;
+  readonly retryable = false as const;
+  /** The already-registered schedule whose locator could not be read. */
+  readonly scheduleId: string;
+
+  constructor(scheduleId: string, options?: { cause?: unknown }) {
+    super(
+      `Schedule ${scheduleId} was registered, but its summary could not be retrieved. ` +
+        `The schedule is registered; retry describing it (e.g. bureau.getSchedule('${scheduleId}')) later.`,
+      options,
+    );
+    this.name = 'ScheduleLocatorUnavailableError';
+    this.scheduleId = scheduleId;
+  }
+}
 
 function toBadRequest(message: string): never {
   throw new BureauError(message, 'BAD_REQUEST');
@@ -934,14 +1018,33 @@ export function createHumanWaitContext(
   };
 }
 
-function isRunFailureFinishReason(finishReason: unknown): boolean {
-  return (
-    finishReason === 'error' ||
-    finishReason === 'tripwire' ||
-    finishReason === 'maximum-steps' ||
-    finishReason === 'elicitation-denied' ||
-    finishReason === 'budget-exceeded'
-  );
+/**
+ * AB-201 — the `scheduleWakeup` analog of {@link createHumanWaitContext}: forwards
+ * reads/writes onto the run's REAL `ctx.services` object (via the same
+ * `servicesRef` capture) rather than spreading it, so the tool's `pendingWakeup`
+ * writes land where the durable `agentRun` workflow actually reads them.
+ * `ScheduleWakeupContext` carries no `runId` field (unlike
+ * `RequestHumanInputContext`), so this takes only the shared `servicesRef`.
+ */
+export function createWakeupContext(servicesRef: {
+  current?: DurableRunDeps;
+}): ScheduleWakeupContext {
+  return {
+    get pendingWakeup() {
+      return servicesRef.current?.pendingWakeup;
+    },
+    set pendingWakeup(value) {
+      if (servicesRef.current) {
+        servicesRef.current.pendingWakeup = value;
+      }
+    },
+    // Only ever constructed inside the `options.wakeup && runtime.durable`
+    // guard (below, in `createBureau`'s run composition — same placement as
+    // `createHumanWaitContext`'s own guard), so this context always backs a
+    // real durable run (AB-41 / AB-43 — the durability signal threaded into
+    // the tool's context).
+    durable: true,
+  };
 }
 
 export async function monitorRecoveredScheduledFire(
@@ -1021,11 +1124,33 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // agent values, which is unchanged/out of scope.
   const agentsSnapshot: D = { ...options.agents };
   const runtime = await createRuntimeComposition(options);
+  // AB-223: scheduled fires are headless (no per-run emitter — see
+  // `runtime-composition.ts`'s `buildScheduledRunServices`), so a fire's
+  // terminal `schedule.completed`/`schedule.failed` has nowhere else to
+  // dispatch. Forward each onto this bureau's own emitter, the same sink
+  // `pauseSchedule`/`resumeSchedule`/`cancelSchedule` dispatch their
+  // definition-level siblings onto.
+  // A fresh Event instance for the forwarded dispatch, not a re-dispatch of
+  // `event` itself: the WHATWG dispatch algorithm tracks a "being dispatched"
+  // flag per Event OBJECT, so re-dispatching the SAME instance onto a second
+  // EventTarget while still inside the first target's listener throws
+  // "already being dispatched" (this failed loudly in schedule-fire.test.ts
+  // before this fix — every scheduled fire's terminal event forwards
+  // synchronously, from inside `scheduleFireEvents`' own dispatch).
+  runtime.scheduleFireEvents.addEventListener(ScheduleCompletedEvent.type, (event) => {
+    emitter.dispatch(new ScheduleCompletedEvent(event.scheduleId, event.runId));
+  });
+  runtime.scheduleFireEvents.addEventListener(ScheduleFailedEvent.type, (event) => {
+    emitter.dispatch(new ScheduleFailedEvent(event.scheduleId, event.runId));
+  });
   // AB-15/AB-22: the typed agent catalog — a plain literal map, fixed for
   // the bureau's lifetime, dispatched by name through `bureau.run`.
   // Independent of `runtime` (bureau-level generate/toolbox/provider
   // composition, still used by `createRun`).
-  const agentCatalog = createAgentCatalog(agentsSnapshot);
+  // `selectorAvailable: false` — no selector is wired yet (AB-66); mod-03c
+  // flips this to `true` when `planSelection` lands, so the transition has
+  // one named mechanism in one named file (AB-247/mod-02e).
+  const agentCatalog = createAgentCatalog(agentsSnapshot, { selectorAvailable: false });
   // AB-246 — the model-catalog refresh service. Independent of `runtime`.
   // When the caller doesn't supply one, the default `descriptorSource`
   // re-derives `@lostgradient/operative/providers`'s static seed — this is
@@ -1056,7 +1181,36 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   const catalogRuns = new Set<AgentRun<unknown, boolean>>();
   const runToolboxes = new Set<BureauToolbox>();
   const runToolboxesByRunId = new Map<string, BureauToolbox>();
-  let disposePromise: Promise<void> | undefined;
+  let shutdownPromise: Promise<BureauShutdownReport> | undefined;
+  // AB-207: Bureau-owned background work (scheduler, online-evals, webhook
+  // notifier, audit trail) shares this signal so `shutdown()` can tell an
+  // in-flight judge invocation / webhook delivery to hurry up and settle
+  // instead of stalling the awaited drain. Threaded into each subsystem at
+  // construction time (merged with any caller-supplied signal via
+  // `AbortSignal.any`), aborted at the top of `shutdown()` under BOTH
+  // policies — Bureau-owned work is stopped identically under `'drain'`
+  // (only caller-owned runs get the drain treatment).
+  const backgroundShutdownController = new AbortController();
+  function withBackgroundShutdownSignal(callerSignal: AbortSignal | undefined): AbortSignal {
+    return callerSignal
+      ? AbortSignal.any([callerSignal, backgroundShutdownController.signal])
+      : backgroundShutdownController.signal;
+  }
+  // AB-67/AB-199 review finding (PR #430 — Codex P1, "Prevent released runs
+  // from recreating deleted sessions"): `deleteSession` releases a paused
+  // run rather than aborting it (see `settleForDeletion`'s own doc
+  // comment), so that run keeps executing with no session left to write
+  // to; its terminal `run.completed`/`run.aborted` listener's `saveSession`
+  // call would otherwise recreate the just-deleted record via its own
+  // `existingSession ?? createAgentSession(...)` fallback. Every runId
+  // still live at the moment its session is deleted is marked here;
+  // `saveSession` below checks this set (via `metadata['lastRunId']`, the
+  // field every terminal listener already passes) and skips the write
+  // entirely for an orphaned run's own terminal transition. Consumed
+  // (deleted) exactly once, by whichever terminal listener observes the
+  // run first, so a session id legitimately reused later is never blocked
+  // by a stale entry.
+  const orphanedRunIds = new Set<string>();
   // Ids of PendingReview items already resolved via resolveReview() (AB-20).
   // Neither resolution path (resumeApproval, signalSession) mutates the live
   // store in a way listPendingReviews() can detect on its own — resumeApproval
@@ -1098,6 +1252,26 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // never persisted durably. Entries are removed on `deleteRun` so this map
   // does not outlive the run it describes.
   const runAttribution = new Map<string, RunAttribution>();
+  // AB-67/AB-199 — one SteeringGate per session, created (or reused)
+  // EAGERLY by `createRunFromRequest` at the start of every in-memory run —
+  // NOT lazily on the first `submitSteeringCommand` call, which would miss
+  // every run already in flight by the time a caller first pauses it (see
+  // the identical note at `createRunFromRequest`'s own gate lookup, and
+  // `steering.ts`'s `createSteeringGate` doc comment). `submitSteeringCommand`
+  // also creates one on demand for the (rare) case a caller pauses a session
+  // whose current run started before this map existed at all (recovery
+  // paths), but in ordinary operation the run-start path always wins the
+  // race. Held for the bureau's lifetime, like the other per-session maps
+  // above, EXCEPT this one is explicitly cleaned up on `deleteSession` (see
+  // `deleteSession` below) so a reused session id never inherits a deleted
+  // session's pause state / command history / applied floor.
+  const steeringGates = new Map<string, BureauSteeringGate>();
+  // AB-67/AB-199 — the bureau-wide `(principal, id)` idempotency ledger
+  // every session's gate shares (see `steering.ts`'s `createSteeringGate`
+  // `ledger` parameter doc comment): a same-`(principal, id)` retry against
+  // a DIFFERENT session must resolve to `session-mismatch`, not be silently
+  // admitted as an unrelated command in that other session's own ledger.
+  const steeringCommandLedger = createSteeringCommandLedger();
   // Keep the exact host-supplied (or bureau-derived) context for approval
   // resumption. Approval bindings identify the original caller, but are not a
   // substitute for the complete request context and must not mint authority.
@@ -1158,9 +1332,31 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     options.sessionPersistenceRetryDelayMilliseconds ??
     SESSION_PERSISTENCE_RETRY_DELAY_MILLISECONDS;
   const sessionPersistenceSleep = options.sessionPersistenceSleep ?? defaultSessionPersistenceSleep;
+  const shutdownTimeoutSleep = options.shutdownTimeoutSleep ?? defaultShutdownTimeoutSleep;
 
   function getRunSessionIdentifier(runState: { activeRun: ActiveRun }): string {
     return runSessionIdentifiers.get(runState.activeRun) ?? '';
+  }
+
+  /**
+   * Resolves once `activeRun` reaches ITS OWN terminal event — mirrors the
+   * exact `run.completed` / `run.aborted` / `run.error` contract gateway
+   * already wires (`run-lifecycle.ts`'s module doc), so a fourth listener
+   * here observes the same terminal moment as every other terminal-run
+   * consumer in this file. Only safe to call for an `activeRun` known NOT
+   * to have already settled (callers check `activeRuns.has(...)` or
+   * `runState.status === 'running'` first) — `once()` ties the listener to
+   * `activeRun`'s own completion signal, which an already-terminal run has
+   * already aborted, silently dropping a listener registered after the
+   * fact per DOM `addEventListener` semantics.
+   */
+  function whenActiveRunTerminal(activeRun: ActiveRun): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const settle = () => resolve();
+      activeRun.once('run.completed', settle);
+      activeRun.once('run.aborted', settle);
+      activeRun.once('run.error', settle);
+    });
   }
 
   function emitLiveFrame(frame: ServerFrame): void {
@@ -1353,6 +1549,18 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   ): Promise<void> {
     const sessionStore = runtime.sessionStore;
     if (!sessionStore) {
+      return;
+    }
+
+    // AB-67/AB-199 review finding (PR #430 — Codex P1, "Prevent released
+    // runs from recreating deleted sessions"): a run this bureau explicitly
+    // orphaned via `deleteSession` must never resurrect the session record
+    // it belonged to, however this call arrived (terminal completion,
+    // abort, live or recovered driver) — see `orphanedRunIds`'s own doc
+    // comment. Consumed (removed) here so the set never grows unboundedly
+    // and a session id reused later is unaffected.
+    const candidateRunId = metadata['lastRunId'];
+    if (typeof candidateRunId === 'string' && orphanedRunIds.delete(candidateRunId)) {
       return;
     }
 
@@ -2088,7 +2296,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     input: AgentInput,
     runOptions?: BureauRunOptions,
   ): AgentRun<unknown, boolean> {
-    if (disposePromise) {
+    if (shutdownPromise) {
       throw new BureauError('Cannot run an agent: bureau is disposed', 'CONFLICT');
     }
     const agent = agentCatalog.find(name);
@@ -2414,10 +2622,19 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // HumanWaitParkedEvent.type, …)` listener below (AB-13 `markParked`)
       // and `store`'s action log (AB-20 `listPendingReviews`).
       let humanInputEmitter: CompletableEventTarget<CombinedOperativeEventMap> | undefined;
-      let humanInputOnServices: ((services: DurableRunDeps) => void) | undefined;
       let runToolbox: BureauToolbox = runRuntime.toolbox;
+      // Shared `ctx.services` capture for BOTH durable-only opt-in tools this
+      // run may wire (`requestHumanInput` and, as of this issue, `scheduleWakeup`):
+      // Weft's durable adapter fires exactly one `onServices` hook per run
+      // (`DurableActiveRunOptions.onServices`, immediately before `engine.start`),
+      // so a SINGLE ref/hook is captured here and handed to whichever context(s)
+      // below need it — two separate hooks would have the later one clobber the
+      // earlier one's `onServices` property in the `createActiveRun` options
+      // object literal, silently breaking whichever tool composed first.
+      const servicesRef: { current?: DurableRunDeps } = {};
+      let needsServicesHook = false;
       if (options.humanInput && runtime.durable) {
-        const servicesRef: { current?: DurableRunDeps } = {};
+        needsServicesHook = true;
         humanInputEmitter = new CompletableEventTarget<CombinedOperativeEventMap>();
         const humanWaitContext = createHumanWaitContext(servicesRef, runId);
         const rawHumanInputTool = createRequestHumanInputTool({
@@ -2447,10 +2664,75 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           }),
         ]);
         runToolbox = combineToolboxes(runRuntime.toolbox, humanInputToolbox);
-        humanInputOnServices = (services) => {
-          servicesRef.current = services;
-        };
       }
+
+      // AB-201 — opt-in `scheduleWakeup` wiring for a REAL durable run
+      // (`options.wakeup`), mirroring `requestHumanInput`'s wiring immediately
+      // above: the tool's mutable `pendingWakeup` slot must be the EXACT
+      // `ctx.services` object Weft hands back, forwarded via the SAME
+      // `servicesRef`/`onServices` capture the human-input block sets up (see
+      // the comment above `servicesRef`). Unlike `requestHumanInput`,
+      // `scheduleWakeup` dispatches no event on park — `ctx.sleep` is itself
+      // the durable checkpoint, and recovery re-arms it with no live wiring
+      // needed (AB-41's decision record) — so no emitter is threaded here.
+      if (options.wakeup && runtime.durable) {
+        needsServicesHook = true;
+        const wakeupContext = createWakeupContext(servicesRef);
+        const rawWakeupTool = createScheduleWakeupTool({ context: wakeupContext });
+        const wakeupToolbox = createToolbox([
+          createTool({
+            ...rawWakeupTool,
+            // Same async-wrap rationale as `requestHumanInput` above: the raw
+            // tool's `execute` is synchronous and can throw synchronously
+            // (`DurableCapabilityUnavailableError`); armorer's contract is
+            // async, so wrapping converts a synchronous throw into a rejected
+            // Promise instead of letting it escape synchronously.
+            // AB-234: same contravariant-checking annotation as the
+            // `requestHumanInput` wiring above — `RunnableAgent.run`'s
+            // property-typed function signature changes how much this
+            // unrelated call site's `execute` parameter gets inferred
+            // structurally, so it's pinned explicitly.
+            execute: async (input: ScheduleWakeupInput) =>
+              await Promise.resolve(rawWakeupTool.execute(input)),
+          }),
+        ]);
+        runToolbox = combineToolboxes(runToolbox, wakeupToolbox);
+      }
+      const durableServicesOnServices = needsServicesHook
+        ? (services: DurableRunDeps) => {
+            servicesRef.current = services;
+          }
+        : undefined;
+
+      // AB-67/AB-199 — steering is scoped to in-memory (process-local)
+      // sessions only: a durably-configured bureau's `submitSteeringCommand`
+      // always rejects pause/resume as `unsupported-capability`, so a
+      // durable run never needs a gate. An in-memory run's gate is created
+      // (or reused) HERE, eagerly, before `createActiveRun` — not lazily
+      // inside `submitSteeringCommand` — because a pause admitted mid-run
+      // must gate THIS run's own `runStep` boundary; a gate created only on
+      // first use would miss every run already started before the first
+      // `submitSteeringCommand` call for its session. A gate with no
+      // `pause`/`resume` ever admitted against it is inert: `getDesiredState()`
+      // stays `{ paused: false, configVersion: 0 }`, which `run-step.ts`'s
+      // `maybeDispatchSteeringApplied` never fires for (`configVersion > 0`
+      // guard) — identical to today's no-`steering`-dependency behavior.
+      // `promoteForNewRun()` promotes any agent-identity bump a prior run
+      // deferred (AB-199's coordinator amendments, 2026-09-02 addendum); a
+      // no-op when nothing was pending.
+      let steeringGate: BureauSteeringGate | undefined;
+      if (!runtime.durable) {
+        steeringGate = steeringGates.get(sessionId);
+        if (!steeringGate) {
+          steeringGate = createSteeringGate(sessionId, steeringCommandLedger);
+          steeringGates.set(sessionId, steeringGate);
+        }
+      }
+      steeringGate?.promoteForNewRun(runId, new Date().toISOString());
+      // AB-67/AB-199 — a per-run VIEW of the shared session gate (see
+      // `steering.ts`'s `forRun` doc comment): a pause bound to a DIFFERENT
+      // concurrent run on this same session must never block this one.
+      const runSteeringGate = steeringGate?.forRun(runId);
 
       const activeRun = createActiveRun(
         {
@@ -2461,6 +2743,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           maximumTokens: request.maximumTokens,
           stopWhen: options.stopWhen,
           prepareStep: runRuntime.prepareStep,
+          ...(runSteeringGate ? { steering: runSteeringGate } : {}),
           onStep: [
             ...runRuntime.onStep,
             async (stepResult) => {
@@ -2506,9 +2789,14 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
               // table (see recoverDurableRuns / resolveRunServices).
               sessionId,
               ...(humanInputEmitter ? { emitter: humanInputEmitter } : {}),
-              ...(humanInputOnServices ? { onServices: humanInputOnServices } : {}),
+              ...(durableServicesOnServices ? { onServices: durableServicesOnServices } : {}),
             }
           : undefined,
+        // AB-214 review (PRRT_kwDORvupsc6esZTF): thread the authenticated
+        // principal starting this run into `LivenessSnapshot.owner` — AC4
+        // reserves an absent owner for a standalone (non-Bureau) run, and a
+        // Bureau-started run always has one to give.
+        request.principal !== undefined ? { owner: request.principal } : undefined,
       );
       activeRuns.add(activeRun);
       runToolboxes.add(runToolbox);
@@ -2543,10 +2831,33 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         });
       }
 
+      // AB-67/AB-199 — the write side of cross-run steering dedupe:
+      // `SteeringGate.getAppliedFloor()` (the read side `run-step.ts`
+      // consults) only reflects reality once something raises it.
+      // `runStep` dispatches `SteeringAppliedEvent` on this exact run's
+      // emitter the moment it observes a `configVersion` at its boundary
+      // (`run-step.ts`'s `maybeDispatchSteeringApplied`), so listening here
+      // is the one place that fires for both drivers identically.
+      if (steeringGate) {
+        activeRun.addEventListener(SteeringAppliedEvent.type, (event) => {
+          steeringGate.recordApplied(
+            event.effective.appliedAtRunId,
+            event.effective.configVersion,
+            event.effective.appliedAt,
+          );
+        });
+      }
+
       activeRun.once('run.completed', (event) => {
         activeRuns.delete(activeRun);
         runToolboxes.delete(runToolbox);
         disposeRegisteredStreamListeners(disposeStreamListeners);
+        // AB-67's ratified Abort row: a session's pause/resume never carries
+        // into a future run. Any command still `accepted` and bound to this
+        // run transitions to `failed`/`'run-terminal'` the moment the run
+        // reaches ANY terminal state — completed here, aborted in the
+        // sibling listener below.
+        steeringGate?.failAcceptedForRun(runId, new Date().toISOString());
         flowController?.settle(runId);
         queueMicrotask(() => releaseTerminalRunReviewState(runId));
 
@@ -2591,6 +2902,8 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         disposeRegisteredStreamListeners(disposeStreamListeners);
         flowController?.settle(runId);
         queueMicrotask(() => releaseTerminalRunReviewState(runId));
+        // See the identical call in the `run.completed` listener above.
+        steeringGate?.failAcceptedForRun(runId, new Date().toISOString());
 
         const report = buildTerminalReportFromAbortedEvent(runId, {
           usage: event.usage,
@@ -3404,6 +3717,19 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     return serializeRunDetail(runState, getRunSessionIdentifier(runState), runAttribution.get(id));
   }
 
+  function subscribeRunSnapshot(
+    runId: string,
+    observer: (snapshot: LivenessSnapshot) => void,
+    options?: { signal?: AbortSignal },
+  ): Subscription {
+    const runState = store.getRun(runId);
+    if (!runState) {
+      throw new BureauError('Run not found', 'NOT_FOUND');
+    }
+
+    return runState.activeRun.subscribeSnapshot(observer, options);
+  }
+
   function getRunReport(id: string): RunReport | undefined {
     const cached = runReports.get(id);
     if (cached) return cached;
@@ -3540,6 +3866,85 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         for (const reviewId of invalidApprovalReviewIds) {
           if (reviewId.startsWith(`approval:${runId}:`)) invalidApprovalReviewIds.delete(reviewId);
         }
+      }
+
+      // AB-207: abort every NON-PAUSED run this session owns, found the same
+      // way `listRuns` attributes a run to a session — via
+      // `getRunSessionIdentifier` — not the narrower `persistedApprovalRunIds`
+      // set above (a run with no pending approval was previously left
+      // running past its session's deletion). A run currently paused via
+      // this session's steering gate is deliberately left alone here: it is
+      // RELEASED (not aborted) by `settleForDeletion` further down, exactly
+      // as PR #430's P1 finding ("Prevent released runs from recreating
+      // deleted sessions") already established — aborting it here instead
+      // would abort-terminate it via a different path than that release,
+      // regressing the "retain a usable control path until they terminate"
+      // behavior that fix relies on. Every running run's own terminal event
+      // (`run.completed`/`run.aborted`/`run.error`) — whether reached via
+      // this abort or via the later release — is awaited AFTER
+      // `settleForDeletion` runs, so this function's returned promise never
+      // resolves while a session run is still cleanup-pending.
+      const state = store.getState();
+      const sessionRunIds = new Set<string>();
+      for (const [, runState] of state.runs) {
+        if (getRunSessionIdentifier(runState) === id) sessionRunIds.add(runState.id);
+      }
+
+      // AB-67/AB-199 review finding (PR #430 — Codex P1, "Prevent released
+      // runs from recreating deleted sessions"): every still-live run this
+      // session owns is marked here BEFORE any of it is aborted or released
+      // below, so its eventual terminal `saveSession` call never resurrects
+      // the record it belonged to. This is deliberately independent of HOW
+      // that run settles: a paused in-memory run is released (not aborted)
+      // by `settleForDeletion` below, runs that were never paused are
+      // aborted immediately, and either way its `run.completed`/
+      // `run.aborted` listener now finds itself orphaned and skips the
+      // write instead of recreating the deleted session.
+      for (const runId of sessionRunIds) {
+        const runState = store.getRun(runId);
+        if (runState?.status === 'running') orphanedRunIds.add(runId);
+      }
+
+      const steeringGateForAbort = steeringGates.get(id);
+      const runTerminals: Array<Promise<void>> = [];
+      for (const runId of sessionRunIds) {
+        const runState = store.getRun(runId);
+        if (runState?.status !== 'running') continue;
+        runTerminals.push(whenActiveRunTerminal(runState.activeRun));
+        const isPaused = steeringGateForAbort?.forRun(runId).getDesiredState().paused ?? false;
+        if (!isPaused) abortRun(runId);
+      }
+
+      await sessionStore.delete(id);
+      // AB-67/AB-199 review findings (PR #430 — Codex P2): a deleted
+      // session's steering gate — and its entries in the shared,
+      // bureau-wide idempotency ledger — must not survive to be inherited
+      // by a session id that gets reused later, or a stale
+      // pause/configVersion/command-ledger entry would block or mis-replay
+      // against the logically new session. Both removals happen ONLY AFTER
+      // `sessionStore.delete` above has actually succeeded ("Keep the gate
+      // until session deletion succeeds") — a rejected deletion leaves the
+      // still-live session's gate and ledger entries untouched, rather than
+      // orphaning a replacement gate a subsequent `submitSteeringCommand`
+      // call would otherwise create.
+      //
+      // `settleForDeletion` runs FIRST, before the gate is discarded: a run
+      // still paused when its session is deleted would otherwise have its
+      // steering channel simply vanish with the gate — every later
+      // `submitSteeringCommand` against the now-deleted session already
+      // returns `not-found`, so nothing could ever resume it, and its
+      // `runStep` would await a promise this gate's own closure held
+      // forever (review finding, PR #430 — Codex P2, "Settle paused runs
+      // before deleting their steering gate"). This is also the moment a
+      // still-paused run above actually gets released, so `runTerminals`
+      // must be awaited AFTER this call, not before it.
+      steeringGateForAbort?.settleForDeletion(new Date().toISOString());
+      steeringGateForAbort?.purgeFromLedger();
+      steeringGates.delete(id);
+
+      await Promise.allSettled(runTerminals);
+
+      for (const runId of sessionRunIds) {
         runRequestContexts.delete(runId);
         runToolboxesByRunId.delete(runId);
         terminalReviewSessions.delete(runId);
@@ -3547,6 +3952,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           if (cleanup.runId === runId) reviewResolutionCleanupPending.delete(reviewId);
         }
       }
+      return;
     }
     await sessionStore.delete(id);
   }
@@ -3677,6 +4083,102 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       return { outcome: 'session-terminal', sessionId };
     }
     return { outcome: 'unsupported-capability', reason: 'durable-mailbox-unavailable' };
+  }
+
+  /**
+   * AB-67/AB-199 — admit a `pause`/`resume` steering command. Pre-admission
+   * checks reuse `submitSessionInput`'s fixed order (authorization, then
+   * session lifecycle, then capability): an unauthorized caller or unknown
+   * `sessionId` returns `not-found`; an authorized caller naming an
+   * already-terminal session returns `session-terminal`. Every target other
+   * than `pause`/`resume`, and a durably-configured bureau's `pause`/
+   * `resume`, returns `unsupported-capability` before this session's
+   * `SteeringGate` is ever consulted or created — see
+   * `SteeringCommandAdmissionOutcome`'s doc comment for the exact reasons.
+   */
+  async function submitSteeringCommand(
+    sessionId: string,
+    request: SteeringCommandRequest,
+  ): Promise<SteeringCommandAdmissionOutcome> {
+    const session = runtime.sessionStore ? await runtime.sessionStore.load(sessionId) : undefined;
+    if (!session) {
+      return { outcome: 'not-found' };
+    }
+
+    // AB-67/AB-199 review finding (PR #430 — Codex P2): genuinely enumerate
+    // this session's live runs through the store's own run registry, rather
+    // than inferring cardinality/liveness from the single
+    // `metadata['lastRunId']` field — a field that "identifies only the
+    // most recently persisted writer, not the sole non-terminal run" under
+    // real concurrent runs. `store.getState().runs` + `getRunSessionIdentifier`
+    // is Bureau's own existing live-run registry (used identically by
+    // `listRuns`/`listPendingReviews` above), not new infrastructure.
+    // Computed BEFORE the terminal check below (review finding, PR #430 —
+    // Codex P2, "Consult live runs before declaring the session terminal"):
+    // `metadata['lastRunStatus']` reflects only the MOST RECENTLY persisted
+    // run's own completion, which can go terminal while an OLDER, still
+    // non-terminal concurrent run on the same session remains genuinely
+    // live — a metadata-only check would reject a command explicitly
+    // targeting that still-live run.
+    //
+    // Computed BEFORE the authorization check too (review finding, PR #430
+    // — Codex P2, "Authorize against the targeted live run"): resolving
+    // which run this command actually targets — the caller's own explicit
+    // `runId`, or the session's sole live run when omitted — lets
+    // authorization consult THAT run's own `lastRequestAuthorities` entry
+    // directly, rather than `lookupSessionAuthority`'s single-run default
+    // (`metadata['lastRunId']`), which a DIFFERENT concurrent run's more
+    // recent terminal transition can leave pointing at an unrelated,
+    // uncorrelated entry — see `lookupSessionAuthority`'s own doc comment.
+    // This computation touches only the internal run registry, never
+    // anything derived from `request.principal`, so it leaks nothing to an
+    // unauthorized caller ahead of the `not-found` check below.
+    const liveRunIds: string[] = [];
+    for (const [runId, runState] of store.getState().runs) {
+      if (runState.status === 'running' && getRunSessionIdentifier(runState) === sessionId) {
+        liveRunIds.push(runId);
+      }
+    }
+    const targetRunId = request.runId ?? (liveRunIds.length === 1 ? liveRunIds[0] : undefined);
+    if (!isSessionAuthorityAuthorized(session.metadata, request.principal, targetRunId)) {
+      return { outcome: 'not-found' };
+    }
+    if (isSessionRunTerminal(session.metadata) && liveRunIds.length === 0) {
+      return { outcome: 'session-terminal', sessionId };
+    }
+    if (request.requestedValue.target !== 'pause' && request.requestedValue.target !== 'resume') {
+      return { outcome: 'unsupported-capability', reason: 'selector-unavailable' };
+    }
+    if (runtime.durable) {
+      return { outcome: 'unsupported-capability', reason: 'durable-steering-unavailable' };
+    }
+
+    let gate = steeringGates.get(sessionId);
+    if (!gate) {
+      gate = createSteeringGate(sessionId, steeringCommandLedger);
+      steeringGates.set(sessionId, gate);
+    }
+
+    const now = new Date().toISOString();
+    const id = request.id ?? crypto.randomUUID();
+    const command: ImplementedSteeringCommand = {
+      id,
+      idOrigin: request.id !== undefined ? 'caller' : 'generated',
+      sessionId,
+      principal: request.principal,
+      // Narrowed by the `target !== 'pause' && target !== 'resume'` early
+      // return above — TypeScript tracks this back through `request.requestedValue`
+      // without a cast because `request` is never reassigned.
+      requestedValue: request.requestedValue,
+      requestedAt: now,
+      ...(request.expectedRevision !== undefined
+        ? { expectedRevision: request.expectedRevision }
+        : {}),
+      ...(request.deadline !== undefined ? { deadline: request.deadline } : {}),
+      ...(request.runId !== undefined ? { runId: request.runId } : {}),
+    };
+
+    return gate.admit(command, { liveRunIds, now });
   }
 
   function listPendingReviews(): PendingReview[] {
@@ -4053,7 +4555,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
 
   async function createSchedule(
     definition: DurableScheduleDefinition,
-  ): Promise<import('@lostgradient/weft').ScheduleSummary | null | undefined> {
+  ): Promise<import('@lostgradient/weft').ScheduleSummary | undefined> {
     if (!runtime.durable) return undefined;
     // A schedule whose every fire would fail is worse than rejecting up front:
     // without a configured generate/provider, each tick's `createRunRuntime` throws
@@ -4088,7 +4590,16 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       }
       throw error;
     }
-    return handle.describe();
+    // The schedule is already registered at this point — a `describe()`
+    // rejection here means only its locator (summary) is unavailable, not
+    // that registration failed. Wrap it in a typed error naming the
+    // `scheduleId` instead of letting `AgentScheduleHandle.describe()`'s bare
+    // `Error('Schedule … no longer exists.')` propagate untyped.
+    try {
+      return await handle.describe();
+    } catch (cause) {
+      throw new ScheduleLocatorUnavailableError(handle.id, { cause });
+    }
   }
 
   async function getSchedule(
@@ -4111,18 +4622,21 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   async function pauseSchedule(scheduleId: string): Promise<true | undefined> {
     if (!runtime.durable) return undefined;
     await runtime.durable.engine.pauseSchedule(scheduleId);
+    emitter.dispatch(new SchedulePausedEvent(scheduleId));
     return true;
   }
 
   async function resumeSchedule(scheduleId: string): Promise<true | undefined> {
     if (!runtime.durable) return undefined;
     await runtime.durable.engine.resumeSchedule(scheduleId);
+    emitter.dispatch(new ScheduleResumedEvent(scheduleId));
     return true;
   }
 
   async function cancelSchedule(scheduleId: string): Promise<true | undefined> {
     if (!runtime.durable) return undefined;
     await runtime.durable.engine.cancelSchedule(scheduleId);
+    emitter.dispatch(new ScheduleCancelledEvent(scheduleId));
     return true;
   }
 
@@ -4140,21 +4654,39 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     };
   }
 
-  function dispose(): Promise<void> {
-    // Idempotency guard: dispose() may be called more than once (the harness
-    // does in tests, and `[Symbol.dispose]` may re-enter). Disposing the engine
-    // and especially the raw Storage twice can close an already-closed SQLite
-    // connection; a second pass is a no-op.
-    if (disposePromise) return disposePromise;
+  /**
+   * Every subsystem kind {@link BureauShutdownReport.owners} can report on.
+   * `'heartbeat'` is reserved for the day Bureau composes one — see
+   * `composedOwnerKinds` below, which decides which kinds actually get a row.
+   */
+  const ALL_SHUTDOWN_OWNER_KINDS = [
+    'scheduler',
+    'online-evals',
+    'webhook-notifier',
+    'audit-trail',
+    'durable-engine',
+  ] as const;
+
+  function shutdown(shutdownOptions?: BureauShutdownOptions): Promise<BureauShutdownReport> {
+    // Idempotency guard: shutdown()/dispose() may be called more than once
+    // (the harness does in tests, and `[Symbol.dispose]` may re-enter).
+    // Disposing the engine and especially the raw Storage twice can close an
+    // already-closed SQLite connection; a second call returns the first
+    // call's already-cached report promise, ignoring whatever `policy` it
+    // was given — the FIRST call's policy is what actually ran.
+    if (shutdownPromise) return shutdownPromise;
+
+    const policy: 'abort' | 'drain' = shutdownOptions?.policy ?? 'abort';
+    const timeoutMilliseconds = shutdownOptions?.timeoutMilliseconds;
 
     // AB-246/AB-64 (2026-09-02 amendment): a model-catalog refresh is
     // INDEPENDENTLY owned by Bureau's catalog, not parent-owned by a run — so
-    // it isn't touched by the run/toolbox teardown below, and `dispose()`
+    // it isn't touched by the run/toolbox teardown below, and `shutdown()`
     // awaits it here rather than aborting it out from under a caller who may
     // still be awaiting the same handle. Captured synchronously, BEFORE the
     // teardown below runs, but awaited only at the very end (not blocking
     // admission closure, active-run cancellation, or backend teardown — a
-    // slow or never-settling refresh must not stall the rest of `dispose()`,
+    // slow or never-settling refresh must not stall the rest of `shutdown()`,
     // per review finding on PR #432). Awaits `closed()`, not `result()`: the
     // started-work contract lets a handle's cleanup acknowledgement settle
     // AFTER its result (result() only means the refresh's business outcome
@@ -4164,59 +4696,155 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // finding, PR #432).
     const modelCatalogRefreshClosedPromise = modelCatalog.inFlightRefresh()?.closed();
 
-    disposePromise = (async () => {
-      // Stop admission before cancelling runs. The canonical toolbox is the
+    // Which owners this bureau actually composes — a report row is emitted
+    // ONLY for a composed owner (2026-09-02 coordinator ruling).
+    const composedOwnerKinds = ALL_SHUTDOWN_OWNER_KINDS.filter((kind) => {
+      if (kind === 'scheduler') return Boolean(runtime.scheduler);
+      if (kind === 'online-evals') return Boolean(onlineEvalSamplerInstance);
+      if (kind === 'webhook-notifier') return Boolean(webhookNotifierInstance);
+      if (kind === 'audit-trail') return Boolean(auditTrailInstance);
+      return Boolean(runtime.durable);
+    });
+    const ownerOutcomes = new Map<
+      (typeof ALL_SHUTDOWN_OWNER_KINDS)[number],
+      CleanupAcknowledgement
+    >();
+
+    function buildReport(): BureauShutdownReport {
+      const owners: BureauShutdownOwnerReport[] = composedOwnerKinds.map((kind) => ({
+        kind,
+        outcome: ownerOutcomes.get(kind) ?? 'unresolved',
+      }));
+      // A `.filter().length` per outcome (armorer's own `ExecutionCleanupReport`
+      // shape) rather than one accumulating loop: every predicate runs for
+      // every owner regardless of count, so `notRequired` reads as covered
+      // even on a run with zero `'not-required'` owners today (the union
+      // member is reserved per the shared vocabulary; no Bureau owner
+      // currently produces it).
+      return Object.freeze({
+        admissionClosed: true,
+        policy,
+        requested: owners.length,
+        completed: owners.filter((owner) => owner.outcome === 'completed').length,
+        failed: owners.filter((owner) => owner.outcome === 'failed').length,
+        unresolved: owners.filter((owner) => owner.outcome === 'unresolved').length,
+        notRequired: owners.filter((owner) => owner.outcome === 'not-required').length,
+        owners: Object.freeze(owners),
+      });
+    }
+
+    // Awaits `run()`, recording its outcome ('completed'/'failed') into
+    // `ownerOutcomes`. Never throws — a rejecting owner drain is diagnosed
+    // and recorded, not propagated, so one failing owner cannot skip the
+    // unconditional backend teardown below (same isolation the pre-AB-207
+    // `dispose()` already gave catalog-run `abort()` failures).
+    async function settleOwner(
+      kind: (typeof ALL_SHUTDOWN_OWNER_KINDS)[number],
+      run: () => Promise<unknown>,
+    ): Promise<void> {
+      try {
+        await run();
+        ownerOutcomes.set(kind, 'completed');
+      } catch (error) {
+        ownerOutcomes.set(kind, 'failed');
+        diagnose({
+          level: 'error',
+          scope: 'shutdown',
+          message: `[bureau] Error during ${kind} shutdown: ${serializeUnknownError(error)}`,
+        });
+      }
+    }
+
+    const chain = (async (): Promise<BureauShutdownReport> => {
+      // Stop admission before touching runs. The canonical toolbox is the
       // owner of local execution lifecycle; await its shutdown as the
       // quiescence fence before releasing durable resources.
       runtime.baseToolbox.closeAdmission();
       for (const toolbox of runToolboxes) toolbox.closeAdmission();
-      for (const activeRun of activeRuns) activeRun.abort('Bureau disposed');
-      // AB-22 review fix: `bureau.run(...)` dispatches are tracked separately
-      // (see `trackCatalogRun`) since a catalog `RunnableAgent`'s returned
-      // handle is not necessarily backed by a bureau-owned `ActiveRun` — its
-      // `abort()` can be arbitrary, untrusted code. Snapshot before
-      // iterating (a synchronous catalog agent can settle result()
-      // immediately from inside abort(), whose trackCatalogRun cleanup
-      // deletes from catalogRuns mid-iteration), and isolate each call: an
-      // in-flight custom handle throwing from abort() must not reject this
-      // entire dispose() before the unconditional teardown below runs — that
-      // would skip toolbox shutdown, durable-engine disposal, and storage
-      // closure, and since disposePromise is already cached at this point,
-      // every subsequent dispose() call would return the same rejection
-      // forever instead of ever completing cleanup (review round 2, Codex).
-      for (const catalogRun of [...catalogRuns]) {
-        try {
-          catalogRun.abort('Bureau disposed');
-        } catch (error) {
-          diagnose({
-            level: 'error',
-            scope: 'dispose',
-            message: `[bureau] A catalog run's abort() threw during disposal; continuing teardown: ${serializeUnknownError(error)}`,
-          });
+
+      const runTerminals: Array<Promise<unknown>> = [];
+      if (policy === 'abort') {
+        // Deliberately NOT awaited here (or anywhere gating the
+        // unconditional engine/storage teardown below): a caller-owned
+        // `ActiveRun` whose underlying provider call never honors its
+        // `AbortSignal` (a hung dependency, not a well-behaved one) must
+        // never be able to wedge the WHOLE shutdown chain open forever —
+        // the critical backend teardown has to stay reachable regardless
+        // of whether any individual run ever actually settles. A
+        // well-behaved run's `abort()` drops its provider connection
+        // immediately (see `active-run-adapter.ts`'s `abort()` doc), so its
+        // terminal event — and any audit-trail/webhook-notifier write it
+        // triggers — has ample opportunity to land during the real async
+        // work the toolbox-shutdown await below already does, well before
+        // the owner drains further down snapshot each subsystem's in-flight
+        // writes.
+        for (const activeRun of activeRuns) activeRun.abort('Bureau disposed');
+        // AB-22 review fix: `bureau.run(...)` dispatches are tracked
+        // separately (see `trackCatalogRun`) since a catalog `RunnableAgent`'s
+        // returned handle is not necessarily backed by a bureau-owned
+        // `ActiveRun` — its `abort()` can be arbitrary, untrusted code.
+        // Snapshot before iterating (a synchronous catalog agent can settle
+        // result() immediately from inside abort(), whose trackCatalogRun
+        // cleanup deletes from catalogRuns mid-iteration), and isolate each
+        // call: an in-flight custom handle throwing from abort() must not
+        // reject this entire shutdown() before the unconditional teardown
+        // below runs — that would skip toolbox shutdown, durable-engine
+        // disposal, and storage closure, and since shutdownPromise is
+        // already cached at this point, every subsequent shutdown()/dispose()
+        // call would return the same rejection forever instead of ever
+        // completing cleanup (review round 2, Codex).
+        for (const catalogRun of [...catalogRuns]) {
+          try {
+            catalogRun.abort('Bureau disposed');
+          } catch (error) {
+            diagnose({
+              level: 'error',
+              scope: 'shutdown',
+              message: `[bureau] A catalog run's abort() threw during disposal; continuing teardown: ${serializeUnknownError(error)}`,
+            });
+          }
+        }
+      } else {
+        // 'drain': let every caller-owned run reach its own natural terminal
+        // result instead of aborting it — only Bureau-owned background work
+        // (above/below) is stopped like 'abort'.
+        for (const activeRun of activeRuns) {
+          runTerminals.push(whenActiveRunTerminal(activeRun));
+        }
+        for (const catalogRun of [...catalogRuns]) {
+          runTerminals.push(Promise.allSettled([catalogRun.result()]));
         }
       }
       const toolboxes = [
         ...new Set([runtime.baseToolbox, ...runToolboxes, ...runToolboxesByRunId.values()]),
       ];
-      const toolboxShutdownResults = await Promise.allSettled(
-        toolboxes.map((toolbox) =>
-          toolbox.shutdown({ policy: 'abort', reason: 'Bureau disposed' }),
-        ),
-      );
+      const toolboxShutdownResults = await Promise.allSettled([
+        ...toolboxes.map((toolbox) => toolbox.shutdown({ policy, reason: 'Bureau disposed' })),
+        ...runTerminals,
+      ]);
       for (const result of toolboxShutdownResults) {
         if (result.status === 'rejected') {
           diagnose({
             level: 'error',
-            scope: 'dispose',
+            scope: 'shutdown',
             message: `[bureau] Error during toolbox shutdown: ${serializeUnknownError(result.reason)}`,
           });
         }
       }
 
+      // Bureau-owned background work is stopped/awaited identically under
+      // BOTH policies (2026-09-02 coordinator ruling) — abort the shared
+      // signal now, AFTER runs are aborted/drained and toolbox shutdown is
+      // awaited above, so an in-flight judge invocation / webhook delivery
+      // settles promptly against the owner drains immediately below rather
+      // than being told to abort before shutdown has even started (which
+      // would make the audit trail's `if (signal?.aborted) return` above
+      // drop the very `run.aborted`/`tool.*` records this shutdown produces).
+      backgroundShutdownController.abort();
+
       // All pre-teardown is BEST-EFFORT, and the whole body is under an OUTER
       // try/finally so the critical backend teardown (engine → storage → store)
-      // ALWAYS runs. The async steps (`scheduler.stop`, `memory.close`) are
-      // already `.catch`'d; the synchronous steps below are equally fallible —
+      // ALWAYS runs. The synchronous steps below are fallible —
       // `emitter.dispatch`/`emitter.complete` route through
       // `CompletableEventTarget.dispatchEvent`, which loops over `toObservable()`
       // subscribers WITHOUT a try/catch, so a subscriber whose `next`/`complete`
@@ -4227,26 +4855,40 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // dispose no-ops), leaking it permanently. Covered by the
       // "toObservable subscriber throws during dispose" regression test.
       try {
-        if (runtime.scheduler) {
-          detachBestEffortPromise(runtime.scheduler.stop());
-        }
-
+        // `runtime.memory.close()` stays a detached best-effort call — it is
+        // not one of the owners this issue's report covers (2026-09-02
+        // ruling: scheduler, online-evals, webhook notifier, audit trail,
+        // durable engine).
         if (runtime.memory) {
           detachBestEffortPromise(runtime.memory.close());
         }
 
         try {
-          // Dispose the audit trail and webhook notifier before emitting
-          // bureau.disposed so any in-flight write/delivery callbacks are
-          // unsubscribed cleanly (the notifier also abandons in-flight backoff
+          // Dispose every Bureau-owned background subsystem — AWAITED, not
+          // detached (AB-207/AB-37): each is a report-tracked owner drain,
+          // run concurrently, before emitting bureau.disposed so any
+          // in-flight write/delivery/evaluation callback is unsubscribed
+          // cleanly (the webhook notifier also abandons in-flight backoff
           // waits so a disposed bureau never fires a webhook late).
-          auditTrailInstance?.dispose();
+          const ownerDrains: Array<Promise<void>> = [];
+          if (runtime.scheduler) {
+            const scheduler = runtime.scheduler;
+            ownerDrains.push(settleOwner('scheduler', () => scheduler.stop()));
+          }
+          if (auditTrailInstance) {
+            const auditTrail = auditTrailInstance;
+            ownerDrains.push(settleOwner('audit-trail', () => auditTrail.dispose()));
+          }
           if (webhookNotifierInstance) {
-            detachBestEffortPromise(webhookNotifierInstance.dispose());
+            const webhookNotifier = webhookNotifierInstance;
+            ownerDrains.push(settleOwner('webhook-notifier', () => webhookNotifier.dispose()));
           }
           if (onlineEvalSamplerInstance) {
-            detachBestEffortPromise(onlineEvalSamplerInstance.dispose());
+            const onlineEvalSampler = onlineEvalSamplerInstance;
+            ownerDrains.push(settleOwner('online-evals', () => onlineEvalSampler.dispose()));
           }
+          await Promise.allSettled(ownerDrains);
+
           emitter.dispatch(new BureauDisposedEvent());
           storeSubscription.unsubscribe();
           for (const disposeListener of schedulerCleanup) {
@@ -4259,8 +4901,8 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         } catch (error) {
           diagnose({
             level: 'error',
-            scope: 'dispose',
-            message: `[bureau] Error during dispose pre-teardown: ${serializeUnknownError(error)}`,
+            scope: 'shutdown',
+            message: `[bureau] Error during shutdown pre-teardown: ${serializeUnknownError(error)}`,
           });
         }
       } finally {
@@ -4291,11 +4933,19 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           } catch (error) {
             diagnose({
               level: 'error',
-              scope: 'dispose',
+              scope: 'shutdown',
               message: `[bureau] Error disposing durable observability: ${serializeUnknownError(error)}`,
             });
           }
-          runtime.durable?.engine[Symbol.dispose]?.();
+          // AB-207: prefer the async disposal path (`[Symbol.asyncDispose]`)
+          // over the synchronous one — `RegistryAgnosticEngine` always
+          // implements both `Disposable` and `AsyncDisposable`, so this
+          // await genuinely observes the engine's own drain rather than
+          // firing a sync teardown and moving on.
+          if (runtime.durable) {
+            const engine = runtime.durable.engine;
+            await settleOwner('durable-engine', () => engine[Symbol.asyncDispose]());
+          }
         } finally {
           try {
             runtime.disposeStorage?.();
@@ -4306,10 +4956,69 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           }
         }
       }
-      // Awaited last: everything above (admission, active runs, toolbox
-      // shutdown, backend teardown) already ran without waiting on this.
+      // Awaited last: everything above (admission, runs, toolbox shutdown,
+      // owner drains, backend teardown) already ran without waiting on this.
       await modelCatalogRefreshClosedPromise;
+      return buildReport();
     })();
+
+    // `shutdown()` is documented to never reject — every internal step above
+    // is already best-effort (`settleOwner` catches and records failures),
+    // but a caller-supplied `shutdownTimeoutSleep` rejecting, or some other
+    // unforeseen failure inside `chain`, must not propagate through
+    // `Promise.race`/the bare chain reference. This `.catch` is the single
+    // fallback fence: diagnose, then resolve with the best-effort report
+    // `buildReport()` can still produce from whatever `ownerOutcomes` were
+    // recorded before the failure (review finding, PR #442).
+    function settleNeverRejecting(
+      promise: Promise<BureauShutdownReport>,
+    ): Promise<BureauShutdownReport> {
+      return promise.catch((error: unknown) => {
+        diagnose({
+          level: 'error',
+          scope: 'shutdown',
+          message: `[bureau] shutdown() settled via an unexpected rejection, falling back to a best-effort report: ${serializeUnknownError(error)}`,
+        });
+        return buildReport();
+      });
+    }
+
+    if (timeoutMilliseconds === undefined) {
+      detachBestEffortPromise(chain);
+      shutdownPromise = settleNeverRejecting(chain);
+    } else {
+      // Aborted once `chain` itself settles (by either winning the race or
+      // losing it) so the timer never outlives this call — a `shutdown()`
+      // whose real teardown finishes well inside `timeoutMilliseconds` must
+      // not hold a live `setTimeout` open for the remainder of that budget.
+      // `detachBestEffortPromise`, not a bare `void`, on the SAME derived
+      // `.finally()` promise this covers both: an unhandled rejection from
+      // `chain` and the timer-abort side effect.
+      const timeoutAbort = new AbortController();
+      detachBestEffortPromise(chain.finally(() => timeoutAbort.abort()));
+      shutdownPromise = settleNeverRejecting(
+        Promise.race([
+          chain,
+          shutdownTimeoutSleep(timeoutMilliseconds, timeoutAbort.signal).then(() => buildReport()),
+        ]),
+      );
+    }
+
+    return shutdownPromise;
+  }
+
+  // Cached separately from `shutdownPromise`: `dispose()` must keep returning
+  // the SAME promise reference on repeat calls (no externally observable
+  // regression vs. the pre-AB-207 caller-visible contract) — `shutdown()`'s
+  // own idempotency guard caches its own report promise, but each call to
+  // `.then(() => undefined)` below would otherwise mint a new derived
+  // promise every time.
+  let disposePromise: Promise<void> | undefined;
+
+  function dispose(): Promise<void> {
+    if (!disposePromise) {
+      disposePromise = shutdown({ policy: 'abort' }).then(() => undefined);
+    }
     return disposePromise;
   }
 
@@ -4353,6 +5062,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     submitSchedulerTask,
     listRuns,
     getRun,
+    subscribeRunSnapshot,
     getRunReport,
     abortRun,
     deleteRun,
@@ -4366,6 +5076,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     updateSession,
     querySession,
     submitSessionInput,
+    submitSteeringCommand,
     // AB-192: constant, not computed from runtime state — the built-in
     // `agentRun` workflow never registers `ctx.onUpdate`/`ctx.onQuery`
     // handlers, so `update`/`query` are unsupported today regardless of
@@ -4427,6 +5138,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       return emitter.signal;
     },
     dispose,
+    shutdown,
   } satisfies Bureau<D>;
 
   // Wire the durable audit trail (Layer B) now that we have a bureau to
@@ -4438,7 +5150,12 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // settled, or settle during the awaits inside recoverDurableRuns() — are
   // captured in the durable trail rather than landing only in the live store.
   if (runtime.kv) {
-    auditTrailInstance = createAuditTrail(bureau, runtime.kv, diagnose);
+    // AB-207: threaded with the bureau-owned background-shutdown signal so
+    // `shutdown()` can bound this subsystem's drain the same way it bounds
+    // online-evals and the webhook notifier below.
+    auditTrailInstance = createAuditTrail(bureau, runtime.kv, diagnose, {
+      signal: backgroundShutdownController.signal,
+    });
   }
 
   // Wire the webhook notifier (AB-21) now that the audit trail exists (an
@@ -4450,7 +5167,12 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       bureau,
       runtime.kv,
       auditTrailInstance,
-      options.webhooks,
+      // AB-207: merge any caller-supplied signal with the bureau-owned
+      // background-shutdown signal so `shutdown()` can tell an in-flight
+      // delivery's `fetchImpl` to abort — the mechanism `dispose()`'s prior
+      // detached call gave up entirely, which is what let a delivery's
+      // write race `disposeStorage()` (AB-206 review finding, PR #402).
+      { ...options.webhooks, signal: withBackgroundShutdownSignal(options.webhooks.signal) },
       diagnose,
     );
   }
@@ -4470,7 +5192,12 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       bureau,
       auditTrailInstance,
       webhookNotifierInstance,
-      options.onlineEvals,
+      {
+        ...options.onlineEvals,
+        // AB-207: same bounded-abort wiring as the webhook notifier above, for
+        // an in-flight judge invocation.
+        signal: withBackgroundShutdownSignal(options.onlineEvals.signal),
+      },
     );
   }
 

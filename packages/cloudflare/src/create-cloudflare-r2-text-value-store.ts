@@ -1,5 +1,6 @@
 import type { TextValueStore } from '@lostgradient/weft/storage';
 
+import { assertBindingHasMembers } from './diagnostics';
 import type { R2Bucket } from './r2';
 
 /**
@@ -33,6 +34,7 @@ export function createCloudflareR2TextValueStore(
   options: CreateCloudflareR2TextValueStoreOptions,
 ): TextValueStore {
   const { bucket } = options;
+  assertBindingHasMembers('r2Bucket', bucket, ['head', 'get', 'put', 'delete', 'list']);
 
   /** Follow R2's `cursor` pagination to collect every key under `prefix`. */
   async function listKeys(prefix: string): Promise<string[]> {
