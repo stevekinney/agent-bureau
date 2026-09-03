@@ -420,6 +420,28 @@ describe('createStallWatchdog', () => {
     watchdog.dispose();
   });
 
+  it('measures absoluteDeadlineMs as a duration from construction, not a clock-coordinate timestamp, even when the clock starts nonzero (AB-214 review PRRT_kwDORvupsc6etXKc)', () => {
+    const clock = createManualClock();
+    // Production `performance.now()` is nonzero at construction — advance
+    // the clock first, matching that, before the watchdog is even built.
+    clock.advance(50_000);
+
+    const policy: StallPolicy = { ...toolCallPolicy(1000), absoluteDeadlineMs: 500 };
+    const watchdog = createStallWatchdog(policy, clock);
+
+    watchdog.recordPulse('tool-progress', 0);
+    clock.advance(499);
+    // Still within the 500ms deadline measured from construction (50000 +
+    // 499 < 50000 + 500) — a construction-time-rebased bug would instead
+    // compare against 50000 + 500, appearing reachable here regardless.
+    expect(watchdog.assess().reachability).toBe('reachable');
+
+    clock.advance(1);
+    expect(watchdog.assess().reachability).toBe('unreachable');
+
+    watchdog.dispose();
+  });
+
   it('enforces absoluteDeadlineMs even on a policy with no cadence at all', () => {
     const clock = createManualClock();
     const policy: StallPolicy = { ...NO_CADENCE_POLICY, absoluteDeadlineMs: 1000 };

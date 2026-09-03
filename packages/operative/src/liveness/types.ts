@@ -112,6 +112,16 @@ export interface StallPolicy {
   readonly graceMs: number;
   readonly jitterMs: number;
   readonly missedPulseThreshold: number;
+  /**
+   * A duration in milliseconds relative to the watchdog's construction time
+   * (`constructedAt + absoluteDeadlineMs`), never a raw clock-coordinate
+   * timestamp — "absolute" names this deadline's non-renewable, non-cadence
+   * relationship to attempts (AC7), not its unit. AB-88's stall-policy table
+   * ties every row's absolute deadline to an existing duration-style budget
+   * (a tool's `timeout`, a caller's per-request timeout), confirmed against
+   * the bot review at PRRT_kwDORvupsc6etXKc, which read this as a
+   * clock-coordinate deadline needing no rebasing — it is not.
+   */
   readonly absoluteDeadlineMs?: number;
   readonly clockSource: LivenessClockSource;
   readonly suspensionBehavior: LivenessSuspensionBehavior;

@@ -237,6 +237,51 @@ describe('createActiveRunLiveness', () => {
     liveness.dispose();
   });
 
+  it('detaches the abort listener on unsubscribe(), not only when the signal itself fires (AB-214 review PRRT_kwDORvupsc6etXKp)', () => {
+    const clock = createManualClock();
+    const liveness = createActiveRunLiveness({ id: 'run-1', durability: 'process-local', clock });
+    const controller = new AbortController();
+    const removed: [string, EventListenerOrEventListenerObject][] = [];
+    const originalRemove = controller.signal.removeEventListener.bind(controller.signal);
+    controller.signal.removeEventListener = ((
+      type: string,
+      listener: EventListenerOrEventListenerObject,
+    ) => {
+      removed.push([type, listener]);
+      originalRemove(type, listener);
+    }) as typeof controller.signal.removeEventListener;
+
+    const subscription = liveness.subscribeSnapshot(() => {}, { signal: controller.signal });
+    subscription.unsubscribe();
+
+    expect(removed).toHaveLength(1);
+    expect(removed[0]?.[0]).toBe('abort');
+
+    liveness.dispose();
+  });
+
+  it('detaches the abort listener on terminal delivery, not only on unsubscribe() or the signal firing (AB-214 review PRRT_kwDORvupsc6etXKp)', () => {
+    const clock = createManualClock();
+    const liveness = createActiveRunLiveness({ id: 'run-1', durability: 'process-local', clock });
+    const controller = new AbortController();
+    const removed: string[] = [];
+    const originalRemove = controller.signal.removeEventListener.bind(controller.signal);
+    controller.signal.removeEventListener = ((
+      type: string,
+      listener: EventListenerOrEventListenerObject,
+    ) => {
+      removed.push(type);
+      originalRemove(type, listener);
+    }) as typeof controller.signal.removeEventListener;
+
+    liveness.subscribeSnapshot(() => {}, { signal: controller.signal });
+    liveness.setStatus('terminal');
+
+    expect(removed).toEqual(['abort']);
+
+    liveness.dispose();
+  });
+
   it('an already-aborted AbortSignal never registers the observer for further delivery (AB-214 review PRRT_kwDORvupsc6esUt9)', () => {
     const clock = createManualClock();
     const liveness = createActiveRunLiveness({ id: 'run-1', durability: 'process-local', clock });
@@ -363,10 +408,15 @@ describe('createActiveRunLiveness', () => {
     expect(liveness.snapshot().missedPulseCount).toBe(1);
 
     liveness.endToolCall();
-    // Once the tool call ends, the watchdog is disposed — further elapsed
-    // time must not accrue more missed pulses.
+    // Once the tool call ends, the watchdog is disposed — its accrued
+    // missed-pulse count goes with it (AB-214 review PRRT_kwDORvupsc6etXKi:
+    // `endToolCall` now advances the revision on teardown, so this reads
+    // the current state — no tool watchdog contributing — not a stale
+    // cached snapshot from while the call was still in flight). Further
+    // elapsed time must not accrue more missed pulses either.
+    expect(liveness.snapshot().missedPulseCount).toBe(0);
     clock.advance(TOOL_CHECK_INTERVAL_MS * 5);
-    expect(liveness.snapshot().missedPulseCount).toBe(1);
+    expect(liveness.snapshot().missedPulseCount).toBe(0);
 
     liveness.dispose();
   });
@@ -384,9 +434,36 @@ describe('createActiveRunLiveness', () => {
     expect(liveness.snapshot().missedPulseCount).toBe(1);
 
     liveness.endToolCall();
+    // The last call ended and the watchdog is gone — same reasoning as the
+    // single-call test above (AB-214 review PRRT_kwDORvupsc6etXKi).
+    expect(liveness.snapshot().missedPulseCount).toBe(0);
     clock.advance(TOOL_CHECK_INTERVAL_MS * 5);
-    expect(liveness.snapshot().missedPulseCount).toBe(1);
+    expect(liveness.snapshot().missedPulseCount).toBe(0);
 
+    liveness.dispose();
+  });
+
+  it('advances the revision when the last tool call ends, so subscribers see the recovery immediately (AB-214 review PRRT_kwDORvupsc6etXKi)', () => {
+    const clock = createManualClock();
+    const liveness = createActiveRunLiveness({ id: 'run-1', durability: 'process-local', clock });
+
+    liveness.beginToolCall();
+    clock.advance(TOOL_CHECK_INTERVAL_MS);
+    // The call has gone late/unreachable — force the cache to observe it.
+    liveness.snapshot();
+    const revisionWhileStalled = liveness.snapshot().revision;
+
+    const received: string[] = [];
+    const subscription = liveness.subscribeSnapshot((snapshot) => received.push(snapshot.status));
+
+    liveness.endToolCall();
+
+    expect(liveness.snapshot().revision).toBeGreaterThan(revisionWhileStalled);
+    // The subscriber got a fresh delivery from the teardown itself, not
+    // only its synchronous initial read.
+    expect(received.length).toBeGreaterThan(1);
+
+    subscription.unsubscribe();
     liveness.dispose();
   });
 

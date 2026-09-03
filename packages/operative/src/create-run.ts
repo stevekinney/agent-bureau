@@ -25,7 +25,13 @@ import { createActiveRunLiveness, defaultRunIdentifierSeam } from './liveness';
 import { executeLoop } from './loop';
 import { toOutputJsonSchema } from './structured-output/response-schema';
 import { createToolboxEventForwarder } from './toolbox-event-forwarding';
-import type { CleanupAcknowledgement, ClosedOptions, RunOptions, RunResult } from './types';
+import {
+  type CleanupAcknowledgement,
+  type ClosedOptions,
+  type RunOptions,
+  type RunResult,
+  toRedactedRunResultSummary,
+} from './types';
 
 /**
  * The internal event-emitting agent loop run. This is the low-level engine
@@ -495,8 +501,12 @@ export function createActiveRun(
         // Atomic (AB-214 review PRRT_kwDORvupsc6esZSx): attach `result` and
         // transition to `terminal` as one revision, never two, so no
         // subscriber ever observes `status: 'running'` with a populated
-        // `result`.
-        liveness.settle(runResult);
+        // `result`. Redacted (AB-214 review PRRT_kwDORvupsc6es7pl): every
+        // standalone run's projection is `'redacted'` permanently, so the
+        // raw `RunResult` — full conversation, tool arguments/results,
+        // arbitrary errors — never reaches the snapshot; only the safe
+        // summary does.
+        liveness.settle(toRedactedRunResultSummary(runResult));
         return runResult;
       },
       (error: unknown) => {

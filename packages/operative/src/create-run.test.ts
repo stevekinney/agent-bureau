@@ -605,3 +605,28 @@ describe('AB-214: tool-progress pulses feed the liveness snapshot', () => {
     expect(result.finishReason).toBe('stop-condition');
   });
 });
+
+// AB-214 review (PRRT_kwDORvupsc6es7pl): a snapshot labeled `projection:
+// 'redacted'` must not carry the raw `RunResult` — its full conversation,
+// tool arguments/results, and arbitrary errors — since every standalone
+// run's projection is `'redacted'` permanently (AB-88) and nothing produces
+// `'privileged'`. `toRedactedRunResultSummary` (types.test.ts) covers the
+// redaction itself; this covers create-run.ts actually calling it.
+describe('AB-214: settle() redacts the RunResult before it reaches the snapshot', () => {
+  it('exposes only finishReason/hasError, never the conversation or tool content', async () => {
+    const activeRun = createActiveRun({
+      generate: createMockGenerate([textResponse('the secret is 42')]),
+      toolbox: createTestToolbox([weatherTool]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+    });
+
+    const result = await activeRun.result;
+    expect(result.finishReason).toBe('stop-condition');
+    expect(result.content).toBe('the secret is 42');
+
+    const snapshot = activeRun.snapshot();
+    expect(snapshot.projection).toBe('redacted');
+    expect(snapshot.result).toEqual({ finishReason: 'stop-condition', hasError: false });
+  });
+});

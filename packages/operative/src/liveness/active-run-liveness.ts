@@ -151,6 +151,15 @@ const realClock: StallWatchdogClock = {
 interface SubscriberRecord {
   readonly observer: (snapshot: AgentRunLivenessSnapshot) => void;
   closed: boolean;
+  /**
+   * Detaches this record's `abort` listener from its caller-supplied
+   * signal, if any. Called on every close path — `unsubscribe()` and
+   * terminal delivery's mass-close alike (AB-214 review
+   * PRRT_kwDORvupsc6etXKp) — not only when the signal itself eventually
+   * fires, so a long-lived signal shared across many completed-run
+   * subscriptions never accumulates listeners.
+   */
+  detachAbortListener: () => void;
 }
 
 export function createActiveRunLiveness(options: ActiveRunLivenessOptions): ActiveRunLiveness {
@@ -286,7 +295,10 @@ export function createActiveRunLiveness(options: ActiveRunLivenessOptions): Acti
       // calls — close every subscription record (not just the Set) so a
       // `Subscription.closed` reader sees the true state (AB-214 review
       // PRRT_kwDORvupsc6esjju), then clear the Set.
-      for (const record of subscribers) record.closed = true;
+      for (const record of subscribers) {
+        record.closed = true;
+        record.detachAbortListener();
+      }
       subscribers.clear();
     }
   }
@@ -332,6 +344,13 @@ export function createActiveRunLiveness(options: ActiveRunLivenessOptions): Acti
       if (toolCallsInFlight === 0 && toolWatchdog) {
         toolWatchdog.dispose();
         toolWatchdog = undefined;
+        // AB-214 review (PRRT_kwDORvupsc6etXKi): removing the tool
+        // watchdog changes represented liveness state — a late/unreachable
+        // tool-call assessment must not survive as the cached snapshot
+        // once the call that caused it has settled. Advance so
+        // `readSnapshot()`/subscribers see the recovered (agent-only)
+        // assessment immediately, not on some later, unrelated event.
+        advance();
       }
     },
 
@@ -364,11 +383,17 @@ export function createActiveRunLiveness(options: ActiveRunLivenessOptions): Acti
       observer: (snapshot: AgentRunLivenessSnapshot) => void,
       subscribeOptions?: { signal?: AbortSignal },
     ): Subscription {
-      const record: SubscriberRecord = { observer, closed: false };
+      const signal = subscribeOptions?.signal;
+      const record: SubscriberRecord = {
+        observer,
+        closed: false,
+        detachAbortListener: () => signal?.removeEventListener('abort', unsubscribe),
+      };
 
       function unsubscribe(): void {
         if (record.closed) return;
         record.closed = true;
+        record.detachAbortListener();
         subscribers.delete(record);
       }
 
@@ -377,7 +402,7 @@ export function createActiveRunLiveness(options: ActiveRunLivenessOptions): Acti
       // PRRT_kwDORvupsc6esUt9 / PRRT_kwDORvupsc6esZSg) — checked before
       // registration, not left to a listener that an already-fired signal
       // will never invoke.
-      const alreadyAborted = subscribeOptions?.signal?.aborted ?? false;
+      const alreadyAborted = signal?.aborted ?? false;
 
       if (alreadyAborted || status === 'terminal') {
         record.closed = true;
@@ -405,7 +430,7 @@ export function createActiveRunLiveness(options: ActiveRunLivenessOptions): Acti
       // transition. Registering first means that reentrant notification
       // reaches this observer too (as a nested, in-order second call).
       subscribers.add(record);
-      subscribeOptions?.signal?.addEventListener('abort', unsubscribe, { once: true });
+      signal?.addEventListener('abort', unsubscribe, { once: true });
 
       try {
         observer(readSnapshot());

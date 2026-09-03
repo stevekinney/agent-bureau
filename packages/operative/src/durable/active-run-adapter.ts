@@ -35,7 +35,13 @@ import {
 } from '../run-lifecycle';
 import type { RunState } from '../run-step';
 import { createToolboxEventForwarder } from '../toolbox-event-forwarding';
-import type { CleanupAcknowledgement, FinishReason, RunOptions, RunResult } from '../types';
+import {
+  type CleanupAcknowledgement,
+  type FinishReason,
+  type RunOptions,
+  type RunResult,
+  toRedactedRunResultSummary,
+} from '../types';
 import type { CheckpointStore } from './checkpoint-store';
 import type { RegistryAgnosticEngine } from './create-run-engine';
 import {
@@ -579,7 +585,10 @@ export function createDurableActiveRun(
     })
     .then(
       (runResult) => {
-        liveness.settle(runResult);
+        // Redacted (AB-214 review PRRT_kwDORvupsc6es7pl): every standalone
+        // run's projection is `'redacted'` permanently, so the raw
+        // `RunResult` never reaches the snapshot; only the safe summary does.
+        liveness.settle(toRedactedRunResultSummary(runResult));
         return runResult;
       },
       (error: unknown) => {
@@ -942,11 +951,24 @@ export function reattachDurableActiveRun(
       message: event.message,
     });
   };
+  // AB-214 review (PRRT_kwDORvupsc6etXKX): the in-memory driver
+  // (create-run.ts) starts/stops the tool watchdog from
+  // `execute-start`/`settled`, not from `tool.progress` alone — a tool that
+  // never reports progress would otherwise start no watchdog at all (never
+  // going late/unreachable), while a tool that reports exactly one progress
+  // event would leave its watchdog running forever after settlement,
+  // wrongly marking a later provider step unreachable. Mirror that here
+  // from the curated `tool.started`/`tool.settled` bubbles this recovered
+  // run's forwarded toolbox actions already produce.
+  const onToolStartedBubble = () => liveness.beginToolCall();
+  const onToolSettledBubble = () => liveness.endToolCall();
   emitter.addEventListener('generate.started', onGenerateStarted);
   emitter.addEventListener('generate.completed', onGenerateCompleted);
   emitter.addEventListener('generate.error', onGenerateError);
   emitter.addEventListener('generate.retry', onGenerateRetry);
   emitter.addEventListener(ToolProgressBubbleEvent.type, onToolProgressBubble);
+  emitter.addEventListener(ToolStartedBubbleEvent.type, onToolStartedBubble);
+  emitter.addEventListener(ToolSettledBubbleEvent.type, onToolSettledBubble);
 
   // The awaited recovery hook already forwards toolbox actions into `emitter`.
   // Reattach owns the teardown so the subscription stops on completion, plus
@@ -958,6 +980,8 @@ export function reattachDurableActiveRun(
     emitter.removeEventListener('generate.error', onGenerateError);
     emitter.removeEventListener('generate.retry', onGenerateRetry);
     emitter.removeEventListener(ToolProgressBubbleEvent.type, onToolProgressBubble);
+    emitter.removeEventListener(ToolStartedBubbleEvent.type, onToolStartedBubble);
+    emitter.removeEventListener(ToolSettledBubbleEvent.type, onToolSettledBubble);
   }
 
   // Resolves `true` only when an adapter-initiated `engine.cancel` SUCCEEDS for
@@ -1026,7 +1050,10 @@ export function reattachDurableActiveRun(
     .then(drive)
     .then(
       (runResult) => {
-        liveness.settle(runResult);
+        // Redacted (AB-214 review PRRT_kwDORvupsc6es7pl): every standalone
+        // run's projection is `'redacted'` permanently, so the raw
+        // `RunResult` never reaches the snapshot; only the safe summary does.
+        liveness.settle(toRedactedRunResultSummary(runResult));
         return runResult;
       },
       (error: unknown) => {

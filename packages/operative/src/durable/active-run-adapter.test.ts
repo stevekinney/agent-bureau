@@ -40,6 +40,7 @@ import {
   ToolStartedBubbleEvent,
 } from '../events';
 import type { OperativeHookMap } from '../hooks';
+import { type StallWatchdogClock, TOOL_CALL_POLICY } from '../liveness';
 import { UnsupportedRunResultVersionError } from '../run-envelope';
 import { createManualDurableEngine, spyEngine } from '../test/durable-engine';
 import { createManualCheckpointStore, createMockGenerate } from '../test/index';
@@ -58,6 +59,38 @@ import type { DurableRunDeps } from './types';
 
 const run = (...args: Parameters<typeof createActiveRun>) => createActiveRun(...args).result;
 const createRun = createActiveRun;
+
+/** A fully manual liveness clock — no real timers, no real sleeps. */
+function createManualLivenessClock(): StallWatchdogClock & { advance(ms: number): void } {
+  let time = 0;
+  let nextHandle = 1;
+  const timers = new Map<number, { at: number; callback: () => void }>();
+  return {
+    now: () => time,
+    setTimeout(callback, ms) {
+      const handle = nextHandle++;
+      timers.set(handle, { at: time + ms, callback });
+      return handle;
+    },
+    clearTimeout(handle) {
+      timers.delete(handle as number);
+    },
+    advance(ms: number) {
+      time += ms;
+      let fired = true;
+      while (fired) {
+        fired = false;
+        for (const [handle, timer] of [...timers]) {
+          if (timer.at <= time) {
+            timers.delete(handle);
+            fired = true;
+            timer.callback();
+          }
+        }
+      }
+    },
+  };
+}
 
 // Drain Weft's deferred inline-launch queue between tests — a pending setTimeout(0)
 // inline-launch left by one durable run can starve a later one under full
@@ -573,6 +606,10 @@ describe('createRun with durable routing', () => {
 
       expect(result.finishReason).toBe('error');
       expect((result.error as Error).message).toBe('start hook failed');
+      // AB-214 review (PRRT_kwDORvupsc6es7pl): the redacted projection
+      // reports hasError without leaking the error value itself.
+      expect(activeRun.snapshot().result).toEqual({ finishReason: 'error', hasError: true });
+      expect(JSON.stringify(activeRun.snapshot().result)).not.toContain('start hook failed');
     } finally {
       context.engine[Symbol.dispose]();
     }
@@ -2713,6 +2750,69 @@ describe('reattachDurableActiveRun', () => {
       await recoveredRun.result;
 
       expect(recoveredRun.snapshot().status).toBe('terminal');
+      // AB-214 review (PRRT_kwDORvupsc6es7pl): the redacted projection
+      // never carries the raw RunResult (conversation, tool content).
+      expect(recoveredRun.snapshot().result).toEqual({
+        finishReason: 'stop-condition',
+        hasError: false,
+      });
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('AB-214 review (PRRT_kwDORvupsc6etXKX): starts and stops the tool-call watchdog from tool.started/tool.settled, not tool.progress alone', async () => {
+    const context = await buildContext();
+    try {
+      const clock = createManualLivenessClock();
+      const emitter = new CompletableEventTarget<CombinedOperativeEventMap>();
+      let resolveResult!: (value: unknown) => void;
+      const handle = {
+        id: 'reattach-tool-lifecycle',
+        result: () => new Promise<unknown>((resolve) => (resolveResult = resolve)),
+      };
+      const recoveredRun = reattachDurableActiveRun(
+        { engine: context.engine, checkpointStore: context.checkpointStore },
+        { runId: 'reattach-tool-lifecycle', handle, emitter, livenessClock: clock },
+      );
+
+      // A tool that never reports progress still starts a watchdog — a
+      // hanging tool with no progress calls must be observable as late.
+      emitter.dispatchEvent(
+        new ToolStartedBubbleEvent(
+          { agentName: 'a', runId: 'reattach-tool-lifecycle', step: 0 },
+          { toolName: 'search', toolCallId: 'call-1', params: {}, startedAt: clock.now() },
+        ),
+      );
+      const toolCheckIntervalMs =
+        (TOOL_CALL_POLICY.cadenceMs ?? 0) + TOOL_CALL_POLICY.graceMs + TOOL_CALL_POLICY.jitterMs;
+      clock.advance(toolCheckIntervalMs);
+      expect(recoveredRun.snapshot().missedPulseCount).toBeGreaterThan(0);
+
+      // Settling the call tears the watchdog down — its accrued
+      // missed-pulse state does not survive to falsely mark a later
+      // provider step unreachable.
+      emitter.dispatchEvent(
+        new ToolSettledBubbleEvent(
+          { agentName: 'a', runId: 'reattach-tool-lifecycle', step: 0 },
+          { toolName: 'search', toolCallId: 'call-1', status: 'success' },
+        ),
+      );
+      expect(recoveredRun.snapshot().missedPulseCount).toBe(0);
+      clock.advance(toolCheckIntervalMs * 5);
+      expect(recoveredRun.snapshot().missedPulseCount).toBe(0);
+
+      // The adapter starts driving (and calls handle.result(), wiring
+      // resolveResult) on a deferred microtask — yield once first.
+      await Promise.resolve();
+      resolveResult({
+        schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
+        runId: 'reattach-tool-lifecycle',
+        steps: 0,
+        content: 'done',
+        finishReason: 'stop-condition',
+      });
+      await recoveredRun.result;
     } finally {
       context.engine[Symbol.dispose]();
     }
