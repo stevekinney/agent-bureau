@@ -488,7 +488,7 @@ describe('events', () => {
       childRunId: 'child-1',
     };
 
-    it('constructs child.completed/failed/aborted (per AB-87s matrix; ChildWorkflow*Event, AB-50) each carrying childRunId and parentRunId', () => {
+    it("constructs child.completed/failed/aborted (per AB-87's matrix; ChildWorkflow*Event, AB-50) each carrying childRunId and parentRunId", () => {
       const completed = new ChildWorkflowCompletedEvent(correlation);
       const failed = new ChildWorkflowFailedEvent({ ...correlation, reason: 'error' });
       const aborted = new ChildWorkflowAbortedEvent({ ...correlation, reason: 'user-requested' });

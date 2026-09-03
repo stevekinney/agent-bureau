@@ -1009,7 +1009,7 @@ describe('listChildRuns', () => {
 
 // ---------------------------------------------------------------------------
 // ChildWorkflowReattachedEvent / ChildWorkflowProgressEvent (AB-90 child
-// ab90-02, AB-222) — typed events this child defines; construction and
+// ab90-02, AB-222) — typed events this module defines; construction and
 // payload shape only, since neither is dispatched by this package today
 // (reattached awaits AB-53's recovery hook; see the class docstrings).
 // ---------------------------------------------------------------------------
