@@ -132,8 +132,15 @@ export interface AuditTrailOptions {
 
 const PREFIX = 'audit:v1:';
 
-/** Encode a key so chronological sort is lexicographic. */
-function encodeKey(timestampMs: number, sequence: number, runId: string): string {
+/**
+ * Encode a key so chronological sort is lexicographic. Exported so a reader
+ * of an already-queried {@link AuditRecord} (AB-263's Bureau-scoped
+ * audit-write fault selector, `packages/bureau/src/test/fault-plan.ts`) can
+ * reconstruct the exact key a record was written under from its own public
+ * fields (`timestampMs`, `sequence`, `runId`) — never a second, drifting
+ * reimplementation of this encoding.
+ */
+export function encodeKey(timestampMs: number, sequence: number, runId: string): string {
   // 16-digit zero-padded timestamp covers dates through year 9999.
   // Append the sequence number (within-millisecond tiebreak) and the runId
   // (cross-process-lifetime tiebreak) so the full key is globally unique.

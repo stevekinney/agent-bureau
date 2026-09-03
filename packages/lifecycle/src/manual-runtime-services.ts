@@ -15,6 +15,28 @@ import type {
  */
 export interface ManualRuntimeServices extends RuntimeServices {
   /**
+   * The virtual wall clock's starting value, as an ISO-8601 string — the
+   * exact `origin` this instance was constructed with (or the default when
+   * omitted). Read by AB-263's Bureau reproduction-artifact assembler,
+   * which needs the seed that produced this instance's clock, not merely
+   * its current reading.
+   */
+  readonly clockOrigin: string;
+  /**
+   * The identifier seed this instance was constructed with (or the default
+   * when omitted). Reserved for future per-instance identifier
+   * disambiguation (see {@link CreateManualRuntimeServicesOptions.identifierSeed}) —
+   * exposed here so a reproduction artifact always records the seed in
+   * effect, even though it does not currently affect minted identifiers.
+   */
+  readonly identifierSeed: string;
+  /**
+   * The random seed this instance was constructed with (or the default when
+   * omitted) — the exact seed `random.next()`'s sequence is deterministic
+   * from.
+   */
+  readonly randomSeed: string;
+  /**
    * Advances the virtual monotonic clock (and, in lockstep, the virtual
    * wall clock) by `milliseconds`, firing every timer whose deadline falls
    * within the advanced window, in deadline order. Awaits the microtask
@@ -57,6 +79,7 @@ export interface CreateManualRuntimeServicesOptions {
 
 const DEFAULT_ORIGIN = '2020-01-01T00:00:00.000Z';
 const DEFAULT_RANDOM_SEED = 'manual-runtime-services';
+const DEFAULT_IDENTIFIER_SEED = 'manual-runtime-services';
 
 /** FNV-1a — a small, dependency-free string hash, used only to seed the PRNG below. */
 function hashSeed(seed: string): number {
@@ -114,16 +137,21 @@ const DRAIN_QUIESCENCE_MICROTASK_TICKS = 25;
 export function createManualRuntimeServices(
   options: CreateManualRuntimeServicesOptions = {},
 ): ManualRuntimeServices {
-  const originEpochMilliseconds = options.origin
-    ? Date.parse(options.origin)
-    : Date.parse(DEFAULT_ORIGIN);
+  // `clockOrigin` is derived once here and `originEpochMilliseconds` parsed
+  // from that SAME string, so the recorded seed (exposed on the returned
+  // `ManualRuntimeServices` as `clockOrigin`) and the epoch the wall clock
+  // actually starts at can never drift apart.
+  const clockOrigin = options.origin ?? DEFAULT_ORIGIN;
+  const originEpochMilliseconds = Date.parse(clockOrigin);
 
   let monotonicMilliseconds = 0;
   // wallClockNow = wallClockOffsetMilliseconds + monotonicMilliseconds. `setTime` rewrites the
   // offset directly, so the wall clock and monotonic clock stay independently adjustable.
   let wallClockOffsetMilliseconds = originEpochMilliseconds;
 
-  const random = createSeededRandom(options.randomSeed ?? DEFAULT_RANDOM_SEED);
+  const randomSeed = options.randomSeed ?? DEFAULT_RANDOM_SEED;
+  const identifierSeed = options.identifierSeed ?? DEFAULT_IDENTIFIER_SEED;
+  const random = createSeededRandom(randomSeed);
 
   const identifierCounters = new Map<string, number>();
 
@@ -186,6 +214,9 @@ export function createManualRuntimeServices(
   }
 
   const services: ManualRuntimeServices = {
+    clockOrigin,
+    identifierSeed,
+    randomSeed,
     clock: {
       now: () => wallClockOffsetMilliseconds + monotonicMilliseconds,
       nowISO: () => new Date(wallClockOffsetMilliseconds + monotonicMilliseconds).toISOString(),
