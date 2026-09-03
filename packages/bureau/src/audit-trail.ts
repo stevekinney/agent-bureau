@@ -103,8 +103,28 @@ export interface AuditTrail {
     detail: unknown;
     principal?: string;
   }): Promise<void>;
-  /** Stop listening to bureau events and release the subscription. */
-  dispose(): void;
+  /**
+   * Stop listening to bureau events, release the subscription, and await
+   * every write already in flight (from the action-stream listener and from
+   * {@link record}) before resolving (AB-207). Never rejects — an
+   * individual write's own failure is diagnosed by its own `.catch`, not
+   * surfaced here. Calling `dispose()` more than once is safe; the second
+   * call resolves promptly.
+   */
+  dispose(): Promise<void>;
+}
+
+/** Options for {@link createAuditTrail}. */
+export interface AuditTrailOptions {
+  /**
+   * Owner-issued signal (AB-207/AB-206's same "no `AbortSignal` anywhere"
+   * gap, closed for audit writes here). `kv.set` has no cancellation hook,
+   * so aborting this signal cannot cancel a write already in flight; once
+   * aborted, the listener and {@link AuditTrail.record} refuse to START a
+   * new write. `dispose()` still fully awaits every write that was already
+   * in flight before the abort.
+   */
+  signal?: AbortSignal;
 }
 
 // ── Key encoding ────────────────────────────────────────────────────
@@ -151,10 +171,21 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
   bureau: Bureau<D>,
   kv: TextValueStore | undefined,
   onDiagnostic?: DiagnosticSink,
+  auditTrailOptions?: AuditTrailOptions,
 ): AuditTrail {
   const diagnose = resolveDiagnosticSink(onDiagnostic);
+  const signal = auditTrailOptions?.signal;
   // Determine which event types qualify as audit events.
   const auditEventSet = new Set<string>(AUDIT_EVENT_TYPES);
+
+  // Every write kicked off by the listener or by `record()`, so `dispose()`
+  // can await terminal state deterministically (AB-207) rather than leaving
+  // an in-flight `kv.set` unobserved.
+  const activeWrites = new Set<Promise<void>>();
+  function trackWrite(promise: Promise<void>): void {
+    activeWrites.add(promise);
+    void promise.finally(() => activeWrites.delete(promise));
+  }
 
   // Out-of-band records (via `record()`) have no operative store `Action` to
   // draw a `sequence` from — they happen outside any run's step loop.
@@ -176,6 +207,10 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     const { action } = event;
     if (!auditEventSet.has(action.type)) return;
     if (!kv) return;
+    // AB-207: once the owner-issued signal aborts (Bureau's shutdown() has
+    // begun), refuse new writes — a write already in flight (tracked below)
+    // still runs to completion and `dispose()` still awaits it.
+    if (signal?.aborted) return;
 
     // Serialize the detail through the same pipeline used for WebSocket frames:
     // strips Conversation instances, serializes Error objects, and removes
@@ -192,16 +227,20 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     };
 
     const key = encodeKey(action.timestamp, action.sequence, action.runId);
-    // Fire-and-forget: a write failure must never crash the run. The audit
-    // trail is best-effort — a gap is surfaced by log, never by a crash.
-    kv.set(key, JSON.stringify(record)).catch((error: unknown) => {
-      diagnose({
-        level: 'error',
-        scope: 'audit-trail',
-        message: `[audit-trail] Failed to persist audit record for key "${key}":`,
-        cause: error,
-      });
-    });
+    // Fire-and-forget from the run's perspective: a write failure must never
+    // crash the run, so nothing here is awaited inline. Tracked in
+    // `activeWrites` so `dispose()` can await it (AB-207) instead of racing
+    // storage closure against a write still in flight.
+    trackWrite(
+      kv.set(key, JSON.stringify(record)).catch((error: unknown) => {
+        diagnose({
+          level: 'error',
+          scope: 'audit-trail',
+          message: `[audit-trail] Failed to persist audit record for key "${key}":`,
+          cause: error,
+        });
+      }),
+    );
   };
 
   bureau.addEventListener('action', listener);
@@ -214,6 +253,7 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
       principal?: string;
     }): Promise<void> {
       if (!kv) return;
+      if (signal?.aborted) return;
 
       const timestampMs = Date.now();
       const sequence = manualSequence++;
@@ -229,9 +269,7 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
       };
 
       const key = encodeKey(timestampMs, sequence, entry.runId);
-      try {
-        await kv.set(key, JSON.stringify(record));
-      } catch (error: unknown) {
+      const writePromise = kv.set(key, JSON.stringify(record)).catch((error: unknown) => {
         // Best-effort, matching the listener above: a write failure must
         // never fail the caller's approve/deny decision.
         diagnose({
@@ -240,7 +278,11 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
           message: `[audit-trail] Failed to persist audit record for key "${key}":`,
           cause: error,
         });
-      }
+      });
+      // Tracked (AB-207) in addition to being returned: a caller that does
+      // not await `record()` must not strand this write past `dispose()`.
+      trackWrite(writePromise);
+      await writePromise;
     },
 
     async query(options: AuditQueryOptions = {}): Promise<AuditRecord[]> {
@@ -281,8 +323,13 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
       return records;
     },
 
-    dispose(): void {
+    async dispose(): Promise<void> {
       bureau.removeEventListener('action', listener);
+      // Await every write already in flight (AB-207) — `kv.set` has no
+      // cancellation hook, so there is nothing for the owner-issued `signal`
+      // to bound here beyond refusing new writes (above); a write already
+      // started runs to completion and `dispose()` waits for it.
+      await Promise.allSettled([...activeWrites]);
     },
   };
 }

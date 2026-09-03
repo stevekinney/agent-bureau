@@ -72,7 +72,7 @@ function createStubAuditTrail(): { auditTrail: AuditTrail; records: Record<strin
     async query() {
       return [];
     },
-    dispose() {},
+    async dispose() {},
   };
   return { auditTrail, records };
 }
@@ -658,7 +658,7 @@ describe('createOnlineEvalSampler', () => {
       async query() {
         return [];
       },
-      dispose() {},
+      async dispose() {},
     };
     const { webhookNotifier, notifications } = createStubWebhookNotifier();
 

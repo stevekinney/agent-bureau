@@ -1357,7 +1357,16 @@ describe('createBureau', () => {
       // checkpointed (see the anchor rationale above).
       await pollUntil(() => bureauAReachedStep1);
       expect(bureauAReachedStep1).toBe(true);
-      bureauA.dispose();
+      // AB-207: deliberately NOT disposing bureauA here. `dispose()`
+      // now fully awaits `activeRun.abort()`'s durable-engine `cancel()`
+      // handoff before returning, which genuinely completes the
+      // in-flight workflow's cancellation and removes it from a fresh
+      // engine's `recoverAll()` candidate set — a properly graceful
+      // shutdown correctly leaves nothing to recover. Simulating a real
+      // crash (the durable workflow still owned by a dead worker, which
+      // IS recoverable) means leaving bureauA un-disposed here: it stays
+      // parked at step 1's hung `generate()` call until disposed at the
+      // end of this test, well after bureauB's recovery.
 
       // === FRESH PROCESS: bureau B is a wholly separate bureau over the same
       // SQLite file, with its own engine and its own `resolveWorkflowServices`
@@ -1444,6 +1453,11 @@ describe('createBureau', () => {
       } finally {
         bureauB.dispose();
       }
+      // AB-207: release bureauA's engine now that bureauB's
+      // recovery-dependent assertions are done (its scheduler would
+      // otherwise keep polling storage after this test deletes the sqlite
+      // file below).
+      await bureauA.dispose();
     } finally {
       await rm(databasePath, { force: true });
       await rm(`${databasePath}-wal`, { force: true });
@@ -1495,7 +1509,16 @@ describe('createBureau', () => {
       expect(preRestartMaxRunSeq).toBeGreaterThan(0);
       expect(preRestartMaxRunSeq).toBeLessThan(1000);
       unsubscribeA();
-      bureauA.dispose();
+      // AB-207: deliberately NOT disposing bureauA here. `dispose()`
+      // now fully awaits `activeRun.abort()`'s durable-engine `cancel()`
+      // handoff before returning, which genuinely completes the
+      // in-flight workflow's cancellation and removes it from a fresh
+      // engine's `recoverAll()` candidate set — a properly graceful
+      // shutdown correctly leaves nothing to recover. Simulating a real
+      // crash (the durable workflow still owned by a dead worker, which
+      // IS recoverable) means leaving bureauA un-disposed here: it stays
+      // parked at step 1's hung `generate()` call until disposed at the
+      // end of this test, well after bureauB's recovery.
 
       const bSteps: number[] = [];
       const runSeqsFromB: number[] = [];
@@ -1531,6 +1554,11 @@ describe('createBureau', () => {
         unsubscribeB();
         bureauB.dispose();
       }
+      // AB-207: release bureauA's engine now that bureauB's
+      // recovery-dependent assertions are done (its scheduler would
+      // otherwise keep polling storage after this test deletes the sqlite
+      // file below).
+      await bureauA.dispose();
     } finally {
       await rm(databasePath, { force: true });
       await rm(`${databasePath}-wal`, { force: true });
@@ -1570,7 +1598,16 @@ describe('createBureau', () => {
       const run = await bureauA.createRun({ message: 'Recover me under a new version' });
       await pollUntil(() => bureauAReachedStep1);
       expect(bureauAReachedStep1).toBe(true);
-      bureauA.dispose();
+      // AB-207: deliberately NOT disposing bureauA here. `dispose()`
+      // now fully awaits `activeRun.abort()`'s durable-engine `cancel()`
+      // handoff before returning, which genuinely completes the
+      // in-flight workflow's cancellation and removes it from a fresh
+      // engine's `recoverAll()` candidate set — a properly graceful
+      // shutdown correctly leaves nothing to recover. Simulating a real
+      // crash (the durable workflow still owned by a dead worker, which
+      // IS recoverable) means leaving bureauA un-disposed here: it stays
+      // parked at step 1's hung `generate()` call until disposed at the
+      // end of this test, well after bureauB's recovery.
 
       const warnSpy = spyOn(console, 'warn');
       const bSteps: number[] = [];
@@ -1628,6 +1665,11 @@ describe('createBureau', () => {
         warnSpy.mockRestore();
         bureauB.dispose();
       }
+      // AB-207: release bureauA's engine now that bureauB's
+      // recovery-dependent assertions are done (its scheduler would
+      // otherwise keep polling storage after this test deletes the sqlite
+      // file below).
+      await bureauA.dispose();
     } finally {
       await rm(databasePath, { force: true });
       await rm(`${databasePath}-wal`, { force: true });
@@ -1896,7 +1938,16 @@ describe('createBureau', () => {
           ],
         },
       }));
-      bureauA.dispose();
+      // AB-207: deliberately NOT disposing bureauA here. `dispose()`
+      // now fully awaits `activeRun.abort()`'s durable-engine `cancel()`
+      // handoff before returning, which genuinely completes the
+      // in-flight workflow's cancellation and removes it from a fresh
+      // engine's `recoverAll()` candidate set — a properly graceful
+      // shutdown correctly leaves nothing to recover. Simulating a real
+      // crash (the durable workflow still owned by a dead worker, which
+      // IS recoverable) means leaving bureauA un-disposed here: it stays
+      // parked at step 1's hung `generate()` call until disposed at the
+      // end of this test, well after bureauB's recovery.
 
       // Observe boot ordering via a spy on `createAuditTrail`. Recovery REATTACHES
       // each recovered run and `store.register`s it SYNCHRONOUSLY inside
@@ -1954,6 +2005,11 @@ describe('createBureau', () => {
       } finally {
         bureauB.dispose();
       }
+      // AB-207: release bureauA's engine now that bureauB's
+      // recovery-dependent assertions are done (its scheduler would
+      // otherwise keep polling storage after this test deletes the sqlite
+      // file below).
+      await bureauA.dispose();
     } finally {
       await rm(databasePath, { force: true });
       await rm(`${databasePath}-wal`, { force: true });
@@ -1990,7 +2046,16 @@ describe('createBureau', () => {
       });
       const run = await bureauA.createRun({ message: 'Recover with a tool' });
       await pollUntil(() => reachedStep1);
-      bureauA.dispose();
+      // AB-207: deliberately NOT disposing bureauA here. `dispose()`
+      // now fully awaits `activeRun.abort()`'s durable-engine `cancel()`
+      // handoff before returning, which genuinely completes the
+      // in-flight workflow's cancellation and removes it from a fresh
+      // engine's `recoverAll()` candidate set — a properly graceful
+      // shutdown correctly leaves nothing to recover. Simulating a real
+      // crash (the durable workflow still owned by a dead worker, which
+      // IS recoverable) means leaving bureauA un-disposed here: it stays
+      // parked at step 1's hung `generate()` call until disposed at the
+      // end of this test, well after bureauB's recovery.
 
       // Bureau B: resumes at step 1, which calls the `next` tool again before
       // settling — so a toolbox action fires on the RECOVERED run's surface.
@@ -2026,6 +2091,11 @@ describe('createBureau', () => {
       } finally {
         bureauB.dispose();
       }
+      // AB-207: release bureauA's engine now that bureauB's
+      // recovery-dependent assertions are done (its scheduler would
+      // otherwise keep polling storage after this test deletes the sqlite
+      // file below).
+      await bureauA.dispose();
     } finally {
       await rm(databasePath, { force: true });
       await rm(`${databasePath}-wal`, { force: true });
@@ -2066,7 +2136,16 @@ describe('createBureau', () => {
 
       const run = await bureauA.createRun({ message: 'Recover with envelope frames' });
       await pollUntil(() => bureauAReachedStep1);
-      bureauA.dispose();
+      // AB-207: deliberately NOT disposing bureauA here. `dispose()`
+      // now fully awaits `activeRun.abort()`'s durable-engine `cancel()`
+      // handoff before returning, which genuinely completes the
+      // in-flight workflow's cancellation and removes it from a fresh
+      // engine's `recoverAll()` candidate set — a properly graceful
+      // shutdown correctly leaves nothing to recover. Simulating a real
+      // crash (the durable workflow still owned by a dead worker, which
+      // IS recoverable) means leaving bureauA un-disposed here: it stays
+      // parked at step 1's hung `generate()` call until disposed at the
+      // end of this test, well after bureauB's recovery.
 
       // Bureau B: resumes at step 1, which calls the `next` tool again before
       // settling — so step/tool-pre/tool-post frames should surface on the
@@ -2106,6 +2185,11 @@ describe('createBureau', () => {
       } finally {
         bureauB.dispose();
       }
+      // AB-207: release bureauA's engine now that bureauB's
+      // recovery-dependent assertions are done (its scheduler would
+      // otherwise keep polling storage after this test deletes the sqlite
+      // file below).
+      await bureauA.dispose();
     } finally {
       await rm(databasePath, { force: true });
       await rm(`${databasePath}-wal`, { force: true });
@@ -2146,7 +2230,16 @@ describe('createBureau', () => {
         agentName: 'recovery-agent',
       });
       await pollUntil(() => bureauAReachedStep1);
-      bureauA.dispose();
+      // AB-207: deliberately NOT disposing bureauA here. `dispose()`
+      // now fully awaits `activeRun.abort()`'s durable-engine `cancel()`
+      // handoff before returning, which genuinely completes the
+      // in-flight workflow's cancellation and removes it from a fresh
+      // engine's `recoverAll()` candidate set — a properly graceful
+      // shutdown correctly leaves nothing to recover. Simulating a real
+      // crash (the durable workflow still owned by a dead worker, which
+      // IS recoverable) means leaving bureauA un-disposed here: it stays
+      // parked at step 1's hung `generate()` call until disposed at the
+      // end of this test, well after bureauB's recovery.
 
       // Bureau B: resumes at step 1, which calls the `next` tool. After recovery
       // the resolver now wires the C3 block so the tool.started event emitted
@@ -2190,6 +2283,11 @@ describe('createBureau', () => {
       } finally {
         bureauB.dispose();
       }
+      // AB-207: release bureauA's engine now that bureauB's
+      // recovery-dependent assertions are done (its scheduler would
+      // otherwise keep polling storage after this test deletes the sqlite
+      // file below).
+      await bureauA.dispose();
     } finally {
       await rm(databasePath, { force: true });
       await rm(`${databasePath}-wal`, { force: true });
@@ -2228,7 +2326,16 @@ describe('createBureau', () => {
 
       const run = await bureauA.createRun({ message: 'Recover then abort' });
       await pollUntil(() => bureauAReachedStep1);
-      bureauA.dispose();
+      // AB-207: deliberately NOT disposing bureauA here. `dispose()`
+      // now fully awaits `activeRun.abort()`'s durable-engine `cancel()`
+      // handoff before returning, which genuinely completes the
+      // in-flight workflow's cancellation and removes it from a fresh
+      // engine's `recoverAll()` candidate set — a properly graceful
+      // shutdown correctly leaves nothing to recover. Simulating a real
+      // crash (the durable workflow still owned by a dead worker, which
+      // IS recoverable) means leaving bureauA un-disposed here: it stays
+      // parked at step 1's hung `generate()` call until disposed at the
+      // end of this test, well after bureauB's recovery.
 
       const bureauB = await createBureau({
         agents: {},
@@ -2260,6 +2367,11 @@ describe('createBureau', () => {
       } finally {
         bureauB.dispose();
       }
+      // AB-207: release bureauA's engine now that bureauB's
+      // recovery-dependent assertions are done (its scheduler would
+      // otherwise keep polling storage after this test deletes the sqlite
+      // file below).
+      await bureauA.dispose();
     } finally {
       await rm(databasePath, { force: true });
       await rm(`${databasePath}-wal`, { force: true });
@@ -2300,7 +2412,16 @@ describe('createBureau', () => {
       const run = await bureauA.createRun({ message: 'Recover me' });
       await pollUntil(() => bureauAReachedStep1);
       expect(bureauAReachedStep1).toBe(true);
-      bureauA.dispose();
+      // AB-207: deliberately NOT disposing bureauA here. `dispose()`
+      // now fully awaits `activeRun.abort()`'s durable-engine `cancel()`
+      // handoff before returning, which genuinely completes the
+      // in-flight workflow's cancellation and removes it from a fresh
+      // engine's `recoverAll()` candidate set — a properly graceful
+      // shutdown correctly leaves nothing to recover. Simulating a real
+      // crash (the durable workflow still owned by a dead worker, which
+      // IS recoverable) means leaving bureauA un-disposed here: it stays
+      // parked at step 1's hung `generate()` call until disposed at the
+      // end of this test, well after bureauB's recovery.
 
       // === Bureau B: same file, durable forced on, but NO generate and NO
       // provider — so reconstructing the run's deps throws on this process. ===
@@ -2333,6 +2454,11 @@ describe('createBureau', () => {
       } finally {
         bureauB.dispose();
       }
+      // AB-207: release bureauA's engine now that bureauB's
+      // recovery-dependent assertions are done (its scheduler would
+      // otherwise keep polling storage after this test deletes the sqlite
+      // file below).
+      await bureauA.dispose();
     } finally {
       await rm(databasePath, { force: true });
       await rm(`${databasePath}-wal`, { force: true });
@@ -6808,7 +6934,16 @@ describe('createBureau review queue (AB-20)', () => {
         [run.id]: expect.objectContaining({ authorizationRevision: 'bureau:1' }),
       });
 
-      bureauA.dispose();
+      // AB-207: deliberately NOT disposing bureauA here. `dispose()`
+      // now fully awaits `activeRun.abort()`'s durable-engine `cancel()`
+      // handoff before returning, which genuinely completes the
+      // in-flight workflow's cancellation and removes it from a fresh
+      // engine's `recoverAll()` candidate set — a properly graceful
+      // shutdown correctly leaves nothing to recover. Simulating a real
+      // crash (the durable workflow still owned by a dead worker, which
+      // IS recoverable) means leaving bureauA un-disposed here: it stays
+      // parked at step 1's hung `generate()` call until disposed at the
+      // end of this test, well after bureauB's recovery.
 
       const diagnostics: string[] = [];
       const bureauB = await createBureau({
@@ -6866,6 +7001,11 @@ describe('createBureau review queue (AB-20)', () => {
       } finally {
         bureauB.dispose();
       }
+      // AB-207: release bureauA's engine now that bureauB's
+      // recovery-dependent assertions are done (its scheduler would
+      // otherwise keep polling storage after this test deletes the sqlite
+      // file below).
+      await bureauA.dispose();
     } finally {
       await rm(databasePath, { force: true });
       await rm(`${databasePath}-wal`, { force: true });
@@ -8269,9 +8409,9 @@ describe('createBureau scheduleWakeup wiring (AB-201)', () => {
     );
 
     try {
-      // === Bureau A: schedules the wakeup and parks. "Crashes" (disposed)
-      // while parked — no tick is ever issued in this process, so the timer
-      // cannot have fired here. ===
+      // === Bureau A: schedules the wakeup and parks. "Crashes" while parked
+      // — no tick is ever issued in this process, so the timer cannot have
+      // fired here. ===
       const generateA = createSequentialGenerate([
         {
           content: '',
@@ -8300,7 +8440,20 @@ describe('createBureau scheduleWakeup wiring (AB-201)', () => {
         5,
       );
       expect(firedInBureauA).toBe(false);
-      bureauA.dispose();
+      // AB-207: deliberately NOT disposed here — `dispose()`/`shutdown()`'s
+      // `'abort'` policy aborts every active run it still tracks, including
+      // one durably parked on a `scheduleWakeup` wait, which calls
+      // `engine.cancel()` and permanently marks the durable workflow record
+      // `cancelled`. That is real cancellation, not a crash: a genuine
+      // process crash never runs any graceful-shutdown code at all, so the
+      // durable checkpoint is left exactly as last written and stays
+      // recoverable. Simulating the crash by simply moving on to bureauB
+      // without disposing bureauA (the same pattern every other
+      // process-restart test in this file already uses — see the
+      // `bureauA.dispose()` calls placed at the END of those tests, AFTER
+      // bureauB's recovery assertions) is what actually proves recovery
+      // survives a crash; disposing first proves only that `dispose()`
+      // cancels active runs, a different (and already covered) property.
 
       // === FRESH PROCESS: bureau B is a wholly separate bureau over the same
       // SQLite file. Recovery re-arms the durable `ctx.sleep` timer with no
@@ -8343,6 +8496,11 @@ describe('createBureau scheduleWakeup wiring (AB-201)', () => {
       } finally {
         bureauB.dispose();
       }
+      // AB-207: release bureauA's engine now that bureauB's
+      // recovery-dependent assertions are done — the same ordering every
+      // other process-restart test in this file uses (see the comment
+      // above where bureauA was deliberately left undisposed).
+      await bureauA.dispose();
     } finally {
       await rm(databasePath, { force: true });
       await rm(`${databasePath}-wal`, { force: true });
@@ -8507,5 +8665,499 @@ describe('Bureau.modelCatalog (AB-246)', () => {
     resolveClosed('completed');
     await disposePromise;
     expect(disposeSettled).toBe(true);
+  });
+});
+
+describe('Bureau.shutdown() (AB-207)', () => {
+  it('reports an empty owners array for a bureau composing no owners', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+    const report = await bureau.shutdown();
+    expect(report).toMatchObject({
+      admissionClosed: true,
+      policy: 'abort',
+      requested: 0,
+      completed: 0,
+      failed: 0,
+      unresolved: 0,
+      notRequired: 0,
+      owners: [],
+    });
+  });
+
+  it('reports audit-trail and durable-engine owners for a persistent bureau, and no webhook-notifier when none is configured', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+    const report = await bureau.shutdown();
+    const kinds = report.owners.map((owner) => owner.kind).sort();
+    expect(kinds).toEqual(['audit-trail', 'durable-engine']);
+    for (const owner of report.owners) {
+      expect(owner.outcome).toBe('completed');
+    }
+    expect(report.requested).toBe(2);
+    expect(report.completed).toBe(2);
+  });
+
+  it('reports a webhook-notifier owner, awaited to completion, for a bureau configured with a webhook target', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      webhooks: {
+        targets: [{ url: 'https://example.test/webhook' }],
+        fetch: (async () => new Response(null, { status: 200 })) as unknown as typeof fetch,
+      },
+    });
+    expect(bureau.webhookNotifier).toBeDefined();
+
+    const report = await bureau.shutdown();
+    const webhookOwner = report.owners.find((owner) => owner.kind === 'webhook-notifier');
+    expect(webhookOwner?.outcome).toBe('completed');
+  });
+
+  it("dispose() awaits shutdown({ policy: 'abort' }) to completion — the durable engine's teardown (the same finally block that closes raw storage) does not run before online-evals has settled its in-flight work", async () => {
+    // A controllable ("gated") judge: `evaluate()` does not resolve until the
+    // test calls `releaseJudge()`, so this deterministically proves ordering
+    // instead of racing real timing.
+    let releaseJudge!: () => void;
+    const judgeGate = new Promise<void>((resolve) => {
+      releaseJudge = resolve;
+    });
+    let evaluateCalls = 0;
+    const generate = createMockGenerate('Done.');
+
+    // Spy on the SHARED engine class prototype (the established pattern in
+    // this file's durable-recovery describe blocks) so it observes whichever
+    // instance `createBureau` builds internally. `[Symbol.asyncDispose]` and
+    // `runtime.disposeStorage()` run in the SAME unconditional `finally`
+    // block, strictly AFTER `Promise.allSettled(ownerDrains)` — so this spy
+    // stands in for "the critical backend teardown has not run yet" without
+    // needing to intercept `resolveStorage()`'s own internal instance
+    // directly (which a `'memory'` backend does not expose reliably).
+    const probe = await createRuntimeComposition({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+    const enginePrototype = Object.getPrototypeOf(probe.durable!.engine) as {
+      [Symbol.asyncDispose]: () => Promise<void>;
+    };
+    probe.durable!.engine[Symbol.dispose]?.();
+    probe.disposeStorage?.();
+
+    let engineDisposed = false;
+    const originalAsyncDispose = enginePrototype[Symbol.asyncDispose];
+    const asyncDisposeSpy = spyOn(enginePrototype, Symbol.asyncDispose).mockImplementation(
+      async function (this: unknown) {
+        engineDisposed = true;
+        return originalAsyncDispose.call(this as never);
+      },
+    );
+
+    const bureau = await createBureau({
+      agents: {},
+      generate,
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+      onlineEvals: {
+        judges: [
+          {
+            name: 'gated-judge',
+            async evaluate() {
+              evaluateCalls += 1;
+              await judgeGate;
+              return { pass: true, score: 1, message: 'ok' };
+            },
+          },
+        ],
+        sampleRate: 1,
+        rng: () => 0,
+      },
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'Trigger a sampled evaluation' });
+      await waitForRunCompletion(bureau, run.id);
+      await waitForCondition(() => evaluateCalls > 0, 'online-eval judge was never invoked');
+
+      let shutdownSettled = false;
+      const shutdownPromise = bureau.shutdown().then((report) => {
+        shutdownSettled = true;
+        return report;
+      });
+
+      // The judge is still gated — the engine's teardown must not have run,
+      // and shutdown() must not have resolved.
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(engineDisposed).toBe(false);
+      expect(shutdownSettled).toBe(false);
+
+      releaseJudge();
+      const report = await shutdownPromise;
+
+      expect(shutdownSettled).toBe(true);
+      expect(engineDisposed).toBe(true);
+      const onlineEvalsOwner = report.owners.find((owner) => owner.kind === 'online-evals');
+      expect(onlineEvalsOwner?.outcome).toBe('completed');
+    } finally {
+      asyncDisposeSpy.mockRestore();
+    }
+  });
+
+  it("policy: 'drain' lets a caller-owned run reach its own natural terminal result while Bureau-owned background work (scheduler) is stopped exactly as under 'abort'", async () => {
+    let releaseGenerate!: () => void;
+    const generateGate = new Promise<void>((resolve) => {
+      releaseGenerate = resolve;
+    });
+    const bureau = await createBureau({
+      agents: {},
+      generate: async () => {
+        await generateGate;
+        return { content: 'Drained to completion', toolCalls: [] };
+      },
+      toolbox: createEmptyToolbox(),
+    });
+
+    const run = await bureau.createRun({ message: 'Still running during drain' });
+    await waitForCondition(
+      () => bureau.getRun(run.id)?.status === 'running',
+      'run never reached running before shutdown() was called',
+    );
+
+    let shutdownSettled = false;
+    const shutdownPromise = bureau.shutdown({ policy: 'drain' }).then((report) => {
+      shutdownSettled = true;
+      return report;
+    });
+
+    // The run is still gated (not aborted — 'drain' does not touch
+    // caller-owned runs) and shutdown() has not resolved yet.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(bureau.getRun(run.id)?.status).toBe('running');
+    expect(shutdownSettled).toBe(false);
+
+    releaseGenerate();
+    const report = await shutdownPromise;
+
+    expect(shutdownSettled).toBe(true);
+    expect(report.policy).toBe('drain');
+    await waitForCondition(
+      () => bureau.getRun(run.id)?.status === 'completed',
+      'drained run never reached its own natural terminal result',
+    );
+  });
+
+  it('shutdown({ timeoutMilliseconds }) resolves within a bounded margin of N, reporting a still-unresolved owner "unresolved" and every other owner its real outcome — the underlying drain keeps running rather than being abandoned', async () => {
+    // The gated owner here is the durable engine's `[Symbol.asyncDispose]`,
+    // not an online-eval judge: `backgroundShutdownController.abort()` fires
+    // before the owner drains even start (see `shutdown()`), and AB-206's
+    // `raceAgainstAbort` makes a gated judge settle PROMPTLY once that
+    // signal aborts regardless of whether the judge itself ever resolves —
+    // so a judge gate cannot stay "still in flight" long enough to prove the
+    // timeout-elapsed case. The engine's teardown has no such abort-race
+    // shortcut, so gating it directly is what actually stays unresolved
+    // across the elapsed timeout.
+    let releaseEngineDispose!: () => void;
+    const engineDisposeGate = new Promise<void>((resolve) => {
+      releaseEngineDispose = resolve;
+    });
+
+    let capturedSignal: AbortSignal | undefined;
+    let releaseSleep!: () => void;
+    const sleep = (_milliseconds: number, signal: AbortSignal) => {
+      capturedSignal = signal;
+      return new Promise<void>((resolve) => {
+        releaseSleep = resolve;
+        signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+    };
+
+    // See the ordering test above for why the durable engine's shared
+    // prototype is spied on instead of `resolveStorage()`'s own internal
+    // `'memory'` instance.
+    const probe = await createRuntimeComposition({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+    const enginePrototype = Object.getPrototypeOf(probe.durable!.engine) as {
+      [Symbol.asyncDispose]: () => Promise<void>;
+    };
+    probe.durable!.engine[Symbol.dispose]?.();
+    probe.disposeStorage?.();
+
+    let engineDisposeCalls = 0;
+    let engineDisposed = false;
+    const originalAsyncDispose = enginePrototype[Symbol.asyncDispose];
+    const asyncDisposeSpy = spyOn(enginePrototype, Symbol.asyncDispose).mockImplementation(
+      async function (this: unknown) {
+        engineDisposeCalls += 1;
+        await engineDisposeGate;
+        engineDisposed = true;
+        return originalAsyncDispose.call(this as never);
+      },
+    );
+
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+      shutdownTimeoutSleep: sleep,
+    });
+
+    try {
+      const shutdownPromise = bureau.shutdown({ timeoutMilliseconds: 50 });
+      await waitForCondition(() => capturedSignal !== undefined, 'injected sleep was never called');
+      await waitForCondition(
+        () => engineDisposeCalls > 0,
+        'the durable engine dispose was never invoked',
+      );
+
+      // Let every OTHER owner's already-fast drain (audit-trail has nothing
+      // gating it) actually settle and record its outcome before the timer
+      // elapses — otherwise the timeout branch could win the race before
+      // those genuinely-quick drains have had a chance to run at all,
+      // which would prove nothing about the timeout-elapsed case
+      // specifically.
+      for (let tick = 0; tick < 20; tick += 1) {
+        await Promise.resolve();
+      }
+
+      // Elapse the injected timer WITHOUT releasing the gated engine
+      // dispose — this is the deterministic stand-in for the real 50ms
+      // passing.
+      releaseSleep();
+      const report = await shutdownPromise;
+
+      expect(report.owners.find((owner) => owner.kind === 'durable-engine')?.outcome).toBe(
+        'unresolved',
+      );
+      expect(report.owners.find((owner) => owner.kind === 'audit-trail')?.outcome).toBe(
+        'completed',
+      );
+      expect(report.unresolved).toBe(1);
+      // Never rejects, and the underlying drain is NOT abandoned — only the
+      // wait for it was. Releasing the still-gated engine dispose lets the
+      // real chain finish.
+      expect(engineDisposed).toBe(false);
+      releaseEngineDispose();
+      await waitForCondition(() => engineDisposed, 'the real teardown chain never completed');
+    } finally {
+      asyncDisposeSpy.mockRestore();
+    }
+  });
+
+  it('aborts the injected shutdownTimeoutSleep signal once the real teardown wins the race, so the timer does not outlive a fast shutdown()', async () => {
+    let capturedSignal: AbortSignal | undefined;
+    const sleep = (_milliseconds: number, signal: AbortSignal) => {
+      capturedSignal = signal;
+      return new Promise<void>(() => {
+        // Never resolves on its own — only `signal` aborting settles this
+        // call's role in the race, proving the real chain wins and the
+        // timer is told to stop.
+      });
+    };
+
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      shutdownTimeoutSleep: sleep,
+    });
+
+    await bureau.shutdown({ timeoutMilliseconds: 10_000 });
+    expect(capturedSignal?.aborted).toBe(true);
+  });
+
+  it('shutdown() (and dispose()) called a second time returns the SAME promise, regardless of the policy the second call requests', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    const first = bureau.shutdown({ policy: 'abort' });
+    const second = bureau.shutdown({ policy: 'drain' });
+    expect(second).toBe(first);
+    await first;
+  });
+
+  it('never rejects even when the injected shutdownTimeoutSleep rejects, resolving with a best-effort report instead (review finding, PR #442)', async () => {
+    const sleep = (_milliseconds: number, _signal: AbortSignal) =>
+      Promise.reject(new Error('injected shutdownTimeoutSleep failure'));
+
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      shutdownTimeoutSleep: sleep,
+    });
+
+    // `Promise.race([chain, shutdownTimeoutSleep(...).then(buildReport)])`
+    // would otherwise propagate this rejection straight through `shutdown()`
+    // — the fallback `.catch` fence must resolve with a best-effort report
+    // instead of rejecting.
+    const report = await bureau.shutdown({ timeoutMilliseconds: 10_000 });
+    expect(report.admissionClosed).toBe(true);
+  });
+
+  it('uses the real default shutdownTimeoutSleep (a real setTimeout, cleared on abort) when no shutdownTimeoutSleep option is supplied', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    // No `shutdownTimeoutSleep` option — this exercises
+    // `defaultShutdownTimeoutSleep`'s real `setTimeout`, generously bounded
+    // so the real (fast) teardown always wins the race and the abort
+    // listener fires, clearing the timer before it would otherwise elapse.
+    const report = await bureau.shutdown({ timeoutMilliseconds: 60_000 });
+    expect(report.admissionClosed).toBe(true);
+  });
+
+  it('prefers [Symbol.asyncDispose] over [Symbol.dispose] on the composed durable engine', async () => {
+    // Spy on the SHARED engine class prototype (the established pattern in
+    // this file — see the durable-recovery describe blocks above) so the
+    // spy observes whichever instance `createBureau` builds internally.
+    const probe = await createRuntimeComposition({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+    const enginePrototype = Object.getPrototypeOf(probe.durable!.engine) as {
+      [Symbol.asyncDispose]: () => Promise<void>;
+      [Symbol.dispose]: () => void;
+    };
+    probe.durable!.engine[Symbol.dispose]?.();
+    probe.disposeStorage?.();
+
+    const asyncDisposeSpy = spyOn(enginePrototype, Symbol.asyncDispose).mockImplementation(
+      async function (this: unknown) {
+        return undefined;
+      },
+    );
+    const syncDisposeSpy = spyOn(enginePrototype, Symbol.dispose).mockImplementation(function (
+      this: unknown,
+    ) {
+      return undefined;
+    });
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'memory' },
+        durableExecution: true,
+      });
+      await bureau.dispose();
+
+      expect(asyncDisposeSpy).toHaveBeenCalledTimes(1);
+      expect(syncDisposeSpy).not.toHaveBeenCalled();
+    } finally {
+      asyncDisposeSpy.mockRestore();
+      syncDisposeSpy.mockRestore();
+    }
+  });
+});
+
+describe('deleteSession aborts every run it owns (AB-207)', () => {
+  // The pending-approval flavor of "a run owned by the deleted session" is
+  // already covered by the pre-existing "revokes pending approval on delete"
+  // regression test above — that run reaches `action_required` and settles
+  // as `'completed'` (parked for a human decision, not consuming a running
+  // slot), so `persistedApprovalRunIds`'s existing revoke loop is untouched
+  // by this fix. This test targets the actual gap: a session run that is
+  // GENUINELY still `'running'` and has NO pending approval at all —
+  // `persistedApprovalRunIds` would never see it, so the pre-fix
+  // `deleteSession` called `abortRun` on nothing. Two such runs prove the
+  // wider `getRunSessionIdentifier`-based set catches every one of them.
+  it("calls abortRun for every session run still running, found via getRunSessionIdentifier, and its own promise does not resolve until each run's terminal event fires", async () => {
+    let releaseFirstRun!: () => void;
+    let releaseSecondRun!: () => void;
+    const firstRunGate = new Promise<void>((resolve) => {
+      releaseFirstRun = resolve;
+    });
+    const secondRunGate = new Promise<void>((resolve) => {
+      releaseSecondRun = resolve;
+    });
+    let generateCalls = 0;
+
+    const bureau = await createBureau({
+      agents: {},
+      generate: async () => {
+        generateCalls += 1;
+        if (generateCalls === 1) {
+          await firstRunGate;
+          return { content: 'run 1 settled', toolCalls: [] };
+        }
+        await secondRunGate;
+        return { content: 'run 2 settled', toolCalls: [] };
+      },
+      toolbox: createEmptyToolbox(),
+      persistence: { store: { type: 'memory' } },
+    });
+
+    const firstRun = await bureau.createRun({ message: 'First session run' });
+    await waitForCondition(
+      () => bureau.getRun(firstRun.id)?.status === 'running',
+      'first run never reached running before deleteSession() was called',
+    );
+    const secondRun = await bureau.createRun({
+      message: 'Second session run',
+      sessionId: firstRun.sessionId,
+    });
+    await waitForCondition(
+      () => bureau.getRun(secondRun.id)?.status === 'running',
+      'second run never reached running before deleteSession() was called',
+    );
+
+    // Neither run has any pending-approval bookkeeping at all — the
+    // narrower `persistedApprovalRunIds` set is empty for this session.
+    expect(bureau.getRun(firstRun.id)?.status).toBe('running');
+    expect(bureau.getRun(secondRun.id)?.status).toBe('running');
+
+    let deleteSessionSettled = false;
+    const deletion = bureau.deleteSession(firstRun.sessionId).then(() => {
+      deleteSessionSettled = true;
+    });
+
+    // Both generates are still gated — deleteSession() must not have
+    // resolved yet, proving it awaited each run's terminal event rather
+    // than merely requesting the abort.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(deleteSessionSettled).toBe(false);
+
+    releaseFirstRun();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(deleteSessionSettled).toBe(false);
+
+    releaseSecondRun();
+    await deletion;
+    expect(deleteSessionSettled).toBe(true);
+
+    expect(bureau.getRun(firstRun.id)?.status).toBe('aborted');
+    expect(bureau.getRun(secondRun.id)?.status).toBe('aborted');
+    await bureau.dispose();
   });
 });
