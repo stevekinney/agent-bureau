@@ -19,6 +19,7 @@ import type {
 } from '@lostgradient/operative';
 import type {
   CreateRunEngineOptions,
+  DurableEventEnvelope,
   DurableEventGap,
   DurableEventOwner,
   DurableEventPage,
@@ -67,7 +68,10 @@ import type {
   BureauAgentCatalog,
 } from './agent-catalog';
 import type { AuditTrail } from './audit-trail';
-import type { DurableEventHistoryPageOptions } from './durable-event-history';
+import type {
+  DurableEventHistoryPageOptions,
+  DurableEventHistorySubscribeOptions,
+} from './durable-event-history';
 import type { BureauEventMap } from './events';
 import type { ModelCatalogService } from './model-catalog-refresh';
 import type { BureauModelPolicyOptions, PlanSelectionRequest } from './model-policy';
@@ -1240,15 +1244,33 @@ export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
    * AB-91's own source spec and AB-42's precedent both use for a missing
    * durable backend.
    *
-   * This is a READ surface only: nothing on `Bureau` writes to the store
-   * automatically today (see `durable-event-history.ts`'s own doc comment
-   * on `createDurableEventHistory` for why, and the followUp filed
-   * against AB-310's pull request).
+   * A producer sinks the run/session/schedule-fire families AB-87's matrix
+   * classifies as durable into this store (AB-311's coordinator amendment
+   * — see `durable-event-history.ts`'s `createDurableEventProducer` doc
+   * comment for exactly which events, and why a `schedule.created`/
+   * `paused`/`resumed`/`cancelled` definition event is not among them).
    */
   eventHistory(
     owner: DurableEventOwner,
     options?: DurableEventHistoryPageOptions,
   ): Promise<DurableEventPage | DurableEventGap | EventHistoryUnsupportedOutcome>;
+
+  /**
+   * Replays `owner`'s durable event history from the exclusive `since`
+   * cursor, then transitions to live delivery with no gap and no
+   * duplicate at the handoff (AB-311) — see
+   * `durable-event-history.ts`'s `DurableEventHistory.subscribeEventHistory`
+   * doc comment for the full race-freedom, disposal, and error-isolation
+   * contract. Returns an already-closed, never-delivering `Subscription`
+   * for an ephemeral bureau (no persistent storage backend configured) —
+   * a caller that must distinguish "unsupported" from "supported but
+   * empty" calls `eventHistory()` first.
+   */
+  subscribeEventHistory(
+    owner: DurableEventOwner,
+    listener: (event: DurableEventEnvelope) => void,
+    options?: DurableEventHistorySubscribeOptions,
+  ): Subscription;
 }
 
 /**

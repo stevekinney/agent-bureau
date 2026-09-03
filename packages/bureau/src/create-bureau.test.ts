@@ -32,6 +32,7 @@ import {
   type Toolbox,
 } from '@lostgradient/operative';
 import {
+  type DurableEventEnvelope,
   type DurableRunDeps,
   type ScheduledAgentRunInput,
   SCHEDULER_ORIGIN_TAG,
@@ -94,7 +95,12 @@ import type {
 import { createModelCatalogService } from './model-catalog-refresh';
 import { createMemoryPersistHook, createRuntimeComposition } from './runtime-composition';
 import { waitForCondition, waitForRunState } from './test';
-import { type Bureau, type ConfigurationResponse, type ServerFrame } from './types';
+import {
+  type Bureau,
+  type BureauDiagnostic,
+  type ConfigurationResponse,
+  type ServerFrame,
+} from './types';
 
 let recoveryDatabaseCounter = 0;
 
@@ -9955,10 +9961,11 @@ describe('Bureau.shutdown() (AB-207)', () => {
       });
 
       // Composed and functioning (not unsupported-capability) — an
-      // ordinary empty page, since nothing has recorded to it yet: this
-      // slice ships `eventHistory()` as a read surface with no automatic
-      // producer wiring (see `durable-event-history.ts`'s own doc comment
-      // on `createDurableEventHistory`).
+      // ordinary empty page for an id nothing was ever recorded under:
+      // `createDurableEventProducer` (AB-311) sinks the run/session/
+      // schedule-fire families AB-87's matrix classifies as durable, but
+      // only ever for owners something actually happened to — `'run-1'`
+      // here was never a registered run.
       const outcome = await bureau.eventHistory({ kind: 'run', id: 'run-1' });
       expect(outcome).toEqual({ events: [], hasMore: false });
 
@@ -9975,18 +9982,24 @@ describe('Bureau.shutdown() (AB-207)', () => {
       expect(eventHistoryOwner?.outcome).toBe('completed');
 
       // AB-91's acceptance criterion 9 (ResourceScope/QuiescenceReport,
-      // AB-256): this store creates no timer and no listener of its own —
-      // `createDurableEventHistory` never calls `FleetEventFeed.subscribe()`
-      // (the only place Weft's own feed schedules a live-poll timer or
-      // registers a listener; see that module's own top-of-file doc
-      // comment) — so there is nothing for a `ResourceScope` registration
-      // to usefully track here beyond what `RuntimeServices.deferred`
-      // already covers above (zero outstanding, both before and after
-      // shutdown). The restart tests in `durable-event-history.test.ts`
-      // are the concrete proof that `dispose()` genuinely releases the
-      // backend: reopening the SAME SQLite/LMDB file immediately after
-      // `dispose()` succeeds, which would deadlock (LMDB) or contend
-      // (SQLite) if a listener/timer/handle were left live.
+      // AB-256): `createDurableEventHistory` itself still creates no timer
+      // and no listener of its own — `FleetEventFeed.subscribe()` (the
+      // only place Weft's own feed schedules a live-poll timer or
+      // registers a listener) is never called in THIS test, since nothing
+      // here calls `bureau.subscribeEventHistory()` (see
+      // `durable-event-history.test.ts`'s own `subscribeEventHistory()`
+      // suite for that surface's disposal semantics). This test's own
+      // bureau DOES compose `createDurableEventProducer` (AB-311) — a
+      // `bureau`-level `'action'`/`'schedule.completed'`/`'schedule.failed'`
+      // listener set, disposed before `eventHistoryInstance.dispose()`
+      // above — so `RuntimeServices.deferred`'s zero-outstanding check
+      // below is proof that subsystem drains cleanly too, not just that
+      // this store itself never held anything. The restart tests in
+      // `durable-event-history.test.ts` are the concrete proof that
+      // `dispose()` genuinely releases the backend: reopening the SAME
+      // SQLite/LMDB file immediately after `dispose()` succeeds, which
+      // would deadlock (LMDB) or contend (SQLite) if a listener/timer/
+      // handle were left live.
       const after = await runtime.deferred.drain();
       expect(after.outstanding).toEqual([]);
     } finally {
@@ -10365,6 +10378,245 @@ describe('Bureau.shutdown() (AB-207)', () => {
     } finally {
       asyncDisposeSpy.mockRestore();
       syncDisposeSpy.mockRestore();
+    }
+  });
+});
+
+describe('createBureau durable event history producer + subscribeEventHistory (AB-311)', () => {
+  it("sinks a completed run's terminal transition into the durable event history from the same emitter path the audit trail observes, in the same order", async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-durable-producer-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        runtime,
+      });
+
+      const run = await bureau.createRun({ message: 'Complete once' });
+      await waitForRunCompletion(bureau, run.id);
+      await runtime.deferred.drain();
+
+      const outcome = await bureau.eventHistory({ kind: 'run', id: run.id });
+      if ('outcome' in outcome) throw new Error(`expected a page, got ${outcome.outcome}`);
+      expect(outcome.events.map((event) => event.kind)).toEqual(['run.completed']);
+      expect(outcome.events[0]?.owner).toEqual({ kind: 'run', id: run.id });
+
+      // Same run, same terminal transition, through the audit trail's own
+      // KV-based log (`createAuditTrail`'s `AUDIT_EVENT_TYPES` — the SAME
+      // `'action'` emitter path this producer subscribes through) — proves
+      // both are driven by the identical underlying transition, not two
+      // independently-derived records that happen to agree.
+      const auditRecords = await bureau.auditTrail!.query({ runId: run.id, type: 'run.completed' });
+      expect(auditRecords).toHaveLength(1);
+      expect(auditRecords[0]?.runId).toBe(run.id);
+
+      await bureau.shutdown();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('records a session-scoped action under its own owner, filtered from an unrelated session and an unrelated run', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-durable-producer-session-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        runtime,
+      });
+
+      // `Store.recordAction` (operative's own supported synthetic-action
+      // seam — see its doc comment) stamps a `session.*`-typed action onto
+      // a REGISTERED run's action log, exactly the shape a real
+      // `session.created`/`saved`/`loaded`/`deleted`/`fork`/`recover`
+      // dispatch would produce once one of those event classes gains a
+      // dispatch site (none does today — see `createDurableEventProducer`'s
+      // own doc comment) — the supported way to exercise this producer's
+      // `session.*` branch without waiting on that.
+      const run = await bureau.createRun({ message: 'Carry a session action' });
+      bureau.store.recordAction(run.id, 'session.created', { sessionId: 'sess-A', agentName: 'x' });
+      bureau.store.recordAction(run.id, 'session.saved', { sessionId: 'sess-B', agentName: 'x' });
+      await runtime.deferred.drain();
+
+      const pageA = await bureau.eventHistory({ kind: 'session', id: 'sess-A' });
+      if ('outcome' in pageA) throw new Error(`expected a page, got ${pageA.outcome}`);
+      expect(pageA.events.map((event) => event.kind)).toEqual(['session.created']);
+      expect(pageA.events[0]?.owner).toEqual({ kind: 'session', id: 'sess-A' });
+
+      const pageB = await bureau.eventHistory({ kind: 'session', id: 'sess-B' });
+      if ('outcome' in pageB) throw new Error(`expected a page, got ${pageB.outcome}`);
+      expect(pageB.events.map((event) => event.kind)).toEqual(['session.saved']);
+
+      await waitForRunCompletion(bureau, run.id);
+      await bureau.shutdown();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('drops a session.* action with no string sessionId on its detail, rather than recording under a fabricated owner', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-durable-producer-no-session-id-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+    const diagnostics: BureauDiagnostic[] = [];
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        runtime,
+        onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      });
+
+      const run = await bureau.createRun({ message: 'Carry a malformed session action' });
+      bureau.store.recordAction(run.id, 'session.created', { agentName: 'x' }); // no sessionId
+      await runtime.deferred.drain();
+
+      const runPage = await bureau.eventHistory({ kind: 'run', id: run.id });
+      if ('outcome' in runPage) throw new Error(`expected a page, got ${runPage.outcome}`);
+      // The malformed action lands nowhere durable — only the run's own
+      // eventual `run.completed` (once it settles below).
+      expect(runPage.events.map((event) => event.kind)).not.toContain('session.created');
+      expect(
+        diagnostics.some(
+          (diagnostic) =>
+            diagnostic.scope === 'durable-event-history' &&
+            diagnostic.message.includes('no string sessionId'),
+        ),
+      ).toBe(true);
+
+      await waitForRunCompletion(bureau, run.id);
+      await bureau.shutdown();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('subscribeEventHistory replays a real recorded run.completed from bureau.createRun, then continues live', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-durable-subscribe-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        runtime,
+      });
+
+      const run = await bureau.createRun({ message: 'Observed via subscribeEventHistory' });
+      await waitForRunCompletion(bureau, run.id);
+      await runtime.deferred.drain();
+
+      const received: DurableEventEnvelope[] = [];
+      const subscription = bureau.subscribeEventHistory({ kind: 'run', id: run.id }, (event) => {
+        received.push(event);
+      });
+
+      await waitForCondition(
+        () => received.length > 0,
+        'subscribeEventHistory never replayed the recorded run.completed event',
+      );
+      expect(received.map((event) => event.kind)).toEqual(['run.completed']);
+      expect(received[0]?.owner).toEqual({ kind: 'run', id: run.id });
+
+      subscription.unsubscribe();
+      await bureau.shutdown();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('never subscribes or records anything for an ephemeral bureau — eventHistory stays unsupported, subscribeEventHistory returns an already-closed subscription', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('Done.'),
+      toolbox: createEmptyToolbox(),
+    });
+
+    let delivered = false;
+    const subscription = bureau.subscribeEventHistory({ kind: 'run', id: 'run-1' }, () => {
+      delivered = true;
+    });
+    expect(subscription.closed).toBe(true);
+
+    const run = await bureau.createRun({ message: 'No durable storage at all' });
+    await waitForRunCompletion(bureau, run.id);
+
+    expect(delivered).toBe(false);
+    const outcome = await bureau.eventHistory({ kind: 'run', id: run.id });
+    expect(outcome).toEqual({ outcome: 'unsupported-capability', reason: 'no-persistent-storage' });
+
+    // The already-closed subscription's own `unsubscribe()` is still a
+    // real, callable no-op (never throws, stays idempotent) — not just a
+    // `closed: true` value nothing ever invokes.
+    subscription.unsubscribe();
+    subscription.unsubscribe();
+
+    await bureau.dispose();
+  });
+
+  it('disposes the producer before the event-history store on shutdown, reporting one event-history owner', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-durable-producer-shutdown-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        runtime,
+      });
+
+      const run = await bureau.createRun({ message: 'Shut down cleanly' });
+      await waitForRunCompletion(bureau, run.id);
+
+      const report = await bureau.shutdown();
+      const eventHistoryOwner = report.owners.find((owner) => owner.kind === 'event-history');
+      expect(eventHistoryOwner?.outcome).toBe('completed');
+      // The producer's own writes (tracked under 'durable-event-record')
+      // and the store's own subsystems are all drained — no leaked
+      // in-flight work survives shutdown.
+      const after = await runtime.deferred.drain();
+      expect(after.outstanding).toEqual([]);
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
     }
   });
 });

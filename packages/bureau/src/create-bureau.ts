@@ -48,6 +48,7 @@ import {
 import {
   createAgentScheduler,
   createRecoveredRunEventSurface,
+  type DurableEventEnvelope,
   type DurableEventGap,
   type DurableEventOwner,
   type DurableEventPage,
@@ -104,8 +105,11 @@ import { type AgentDefinitions, createAgentCatalog } from './agent-catalog';
 import { type AuditTrail, createAuditTrail } from './audit-trail';
 import {
   createDurableEventHistory,
+  createDurableEventProducer,
   type DurableEventHistory,
   type DurableEventHistoryPageOptions,
+  type DurableEventHistorySubscribeOptions,
+  type DurableEventProducer,
 } from './durable-event-history';
 import {
   ActionEvent,
@@ -5462,7 +5466,17 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           }
           if (eventHistoryInstance) {
             const eventHistory = eventHistoryInstance;
-            ownerDrains.push(settleOwner('event-history', () => eventHistory.dispose()));
+            const durableEventProducer = durableEventProducerInstance;
+            ownerDrains.push(
+              settleOwner('event-history', async () => {
+                // The producer (its bureau-event listeners) is disposed
+                // BEFORE the store it writes into, so no in-flight
+                // `record()` call can start against an already-disposed
+                // `FleetEventFeed` (AB-311).
+                if (durableEventProducer) await durableEventProducer.dispose();
+                await eventHistory.dispose();
+              }),
+            );
           }
           if (webhookNotifierInstance) {
             const webhookNotifier = webhookNotifierInstance;
@@ -5635,8 +5649,13 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       ? runtime.durable.engine.storage
       : undefined;
   const eventHistoryInstance: DurableEventHistory | undefined = persistentDurableStorage
-    ? createDurableEventHistory(persistentDurableStorage, runtimeServices)
+    ? createDurableEventHistory(persistentDurableStorage, runtimeServices, diagnose)
     : undefined;
+  // The durable event producer (AB-311's coordinator amendment) — sinks
+  // `bureau`'s action stream into `eventHistoryInstance.record()`. Wired
+  // below, alongside `auditTrailInstance`, once `bureau` itself exists to
+  // subscribe to.
+  let durableEventProducerInstance: DurableEventProducer | undefined;
 
   const bureau: Bureau<D> = {
     store,
@@ -5669,6 +5688,23 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         });
       }
       return eventHistoryInstance.page(owner, eventHistoryOptions);
+    },
+    subscribeEventHistory(
+      owner: DurableEventOwner,
+      listener: (event: DurableEventEnvelope) => void,
+      subscribeOptions?: DurableEventHistorySubscribeOptions,
+    ): Subscription {
+      if (!eventHistoryInstance) {
+        // No persistent storage backend: nothing to subscribe to. Mirrors
+        // `eventHistory()`'s graceful `'unsupported-capability'` outcome,
+        // projected onto `Subscription`'s synchronous-return shape (which
+        // carries no room for an outcome value) as an already-closed
+        // subscription that never delivers — a caller that must
+        // distinguish "unsupported" from "supported but empty" calls
+        // `eventHistory()` first.
+        return { unsubscribe() {}, closed: true };
+      }
+      return eventHistoryInstance.subscribeEventHistory(owner, listener, subscribeOptions);
     },
     get webhookNotifier(): WebhookNotifier | undefined {
       return webhookNotifierInstance;
@@ -5781,6 +5817,23 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       diagnose,
       { signal: backgroundShutdownController.signal },
       runtimeServices,
+    );
+  }
+
+  // Wire the durable event history producer (AB-311's coordinator
+  // amendment) now that we have a bureau to subscribe to — same ordering
+  // rationale as the audit trail above: subscribed BEFORE durable run
+  // recovery so recovered/reattached runs' `run.*` transitions are sunk
+  // into the durable store too. Only created when `eventHistoryInstance`
+  // itself exists (a persistent storage backend is configured) — there is
+  // nothing to sink into otherwise.
+  if (eventHistoryInstance) {
+    durableEventProducerInstance = createDurableEventProducer(
+      bureau,
+      eventHistoryInstance,
+      runtimeServices,
+      diagnose,
+      { signal: backgroundShutdownController.signal },
     );
   }
 
