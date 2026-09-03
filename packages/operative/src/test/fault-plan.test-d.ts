@@ -15,6 +15,8 @@
 // literals; its members are pinned by one constructible value plus one
 // `@ts-expect-error` malformed-shape case each, not by `Exclude`.
 
+import type { FaultEffect } from './fault-engine';
+import { FAULT_BOUNDARY_EFFECT_KINDS } from './fault-engine';
 import type {
   FaultBoundary,
   FaultOccurrence,
@@ -149,3 +151,16 @@ const malformedFired: FiredFault = {
   firedAt: new Date(0).toISOString(),
 };
 void malformedFired;
+
+// --- AB-265: every FaultBoundary has at least one engine binding. ---------
+//
+// `FAULT_BOUNDARY_EFFECT_KINDS` (fault-engine.ts) is declared as a mapped
+// type over `FaultBoundary` itself, so TypeScript already rejects a missing
+// key at its own declaration site — this assignment is the second,
+// independent proof: it fails to compile if `FaultBoundary` ever gains a
+// member `FAULT_BOUNDARY_EFFECT_KINDS` doesn't (yet) have a matching key
+// for, exactly like `_faultBoundaryExhaustive` above but anchored to the
+// engine's own binding table rather than the `boundaries` literal.
+const _faultBoundaryEngineBindingExhaustive: Record<FaultBoundary, readonly FaultEffect['kind'][]> =
+  FAULT_BOUNDARY_EFFECT_KINDS;
+void _faultBoundaryEngineBindingExhaustive;

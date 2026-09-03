@@ -26,6 +26,26 @@ export { createDurableMultiAgentHarness } from './durable-multi-agent-harness';
 export type { CausalTraceEntry, EventRecorder, EventRecorderOwnerIdentity } from './event-recorder';
 export { createEventRecorder } from './event-recorder';
 export type {
+  FaultBlockEffect,
+  FaultCorruptPayloadEffect,
+  FaultDelayEffect,
+  FaultDropAcknowledgementEffect,
+  FaultDuplicateDeliveryEffect,
+  FaultEffect,
+  FaultEngine,
+  FaultFailAfterCommitEffect,
+  FaultFailAfterEffectEffect,
+  FaultFailBeforeCommitEffect,
+  FaultIgnoreAbortEffect,
+  FaultRejectBeforeWorkEffect,
+  FaultStaleReadEffect,
+} from './fault-engine';
+export {
+  createFaultEngine,
+  FAULT_BOUNDARY_EFFECT_KINDS,
+  UnsupportedFaultBoundaryError,
+} from './fault-engine';
+export type {
   FaultBoundary,
   FaultOccurrence,
   FaultOperation,
