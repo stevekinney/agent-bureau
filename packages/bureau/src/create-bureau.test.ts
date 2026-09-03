@@ -8348,9 +8348,9 @@ describe('createBureau scheduleWakeup wiring (AB-201)', () => {
     );
 
     try {
-      // === Bureau A: schedules the wakeup and parks. "Crashes" (disposed)
-      // while parked — no tick is ever issued in this process, so the timer
-      // cannot have fired here. ===
+      // === Bureau A: schedules the wakeup and parks. "Crashes" while parked
+      // — no tick is ever issued in this process, so the timer cannot have
+      // fired here. ===
       const generateA = createSequentialGenerate([
         {
           content: '',
@@ -8379,7 +8379,20 @@ describe('createBureau scheduleWakeup wiring (AB-201)', () => {
         5,
       );
       expect(firedInBureauA).toBe(false);
-      bureauA.dispose();
+      // AB-207: deliberately NOT disposed here — `dispose()`/`shutdown()`'s
+      // `'abort'` policy aborts every active run it still tracks, including
+      // one durably parked on a `scheduleWakeup` wait, which calls
+      // `engine.cancel()` and permanently marks the durable workflow record
+      // `cancelled`. That is real cancellation, not a crash: a genuine
+      // process crash never runs any graceful-shutdown code at all, so the
+      // durable checkpoint is left exactly as last written and stays
+      // recoverable. Simulating the crash by simply moving on to bureauB
+      // without disposing bureauA (the same pattern every other
+      // process-restart test in this file already uses — see the
+      // `bureauA.dispose()` calls placed at the END of those tests, AFTER
+      // bureauB's recovery assertions) is what actually proves recovery
+      // survives a crash; disposing first proves only that `dispose()`
+      // cancels active runs, a different (and already covered) property.
 
       // === FRESH PROCESS: bureau B is a wholly separate bureau over the same
       // SQLite file. Recovery re-arms the durable `ctx.sleep` timer with no
@@ -8422,6 +8435,11 @@ describe('createBureau scheduleWakeup wiring (AB-201)', () => {
       } finally {
         bureauB.dispose();
       }
+      // AB-207: release bureauA's engine now that bureauB's
+      // recovery-dependent assertions are done — the same ordering every
+      // other process-restart test in this file uses (see the comment
+      // above where bureauA was deliberately left undisposed).
+      await bureauA.dispose();
     } finally {
       await rm(databasePath, { force: true });
       await rm(`${databasePath}-wal`, { force: true });
@@ -8917,6 +8935,25 @@ describe('Bureau.shutdown() (AB-207)', () => {
     const second = bureau.shutdown({ policy: 'drain' });
     expect(second).toBe(first);
     await first;
+  });
+
+  it('never rejects even when the injected shutdownTimeoutSleep rejects, resolving with a best-effort report instead (review finding, PR #442)', async () => {
+    const sleep = (_milliseconds: number, _signal: AbortSignal) =>
+      Promise.reject(new Error('injected shutdownTimeoutSleep failure'));
+
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      shutdownTimeoutSleep: sleep,
+    });
+
+    // `Promise.race([chain, shutdownTimeoutSleep(...).then(buildReport)])`
+    // would otherwise propagate this rejection straight through `shutdown()`
+    // — the fallback `.catch` fence must resolve with a best-effort report
+    // instead of rejecting.
+    const report = await bureau.shutdown({ timeoutMilliseconds: 10_000 });
+    expect(report.admissionClosed).toBe(true);
   });
 
   it('uses the real default shutdownTimeoutSleep (a real setTimeout, cleared on abort) when no shutdownTimeoutSleep option is supplied', async () => {

@@ -3824,29 +3824,80 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         }
       }
 
-      // AB-207: abort EVERY run this session owns, found the same way
-      // `listRuns` attributes a run to a session — via `getRunSessionIdentifier`
-      // — not the narrower `persistedApprovalRunIds` set above (a run with no
-      // pending approval was previously left running past its session's
-      // deletion). Each running run's own terminal event
-      // (`run.completed`/`run.aborted`/`run.error`) is awaited before
-      // session-scoped bookkeeping is cleared and the session record is
-      // deleted, so this function's returned promise never resolves while a
-      // session run is still cleanup-pending.
+      // AB-207: abort every NON-PAUSED run this session owns, found the same
+      // way `listRuns` attributes a run to a session — via
+      // `getRunSessionIdentifier` — not the narrower `persistedApprovalRunIds`
+      // set above (a run with no pending approval was previously left
+      // running past its session's deletion). A run currently paused via
+      // this session's steering gate is deliberately left alone here: it is
+      // RELEASED (not aborted) by `settleForDeletion` further down, exactly
+      // as PR #430's P1 finding ("Prevent released runs from recreating
+      // deleted sessions") already established — aborting it here instead
+      // would abort-terminate it via a different path than that release,
+      // regressing the "retain a usable control path until they terminate"
+      // behavior that fix relies on. Every running run's own terminal event
+      // (`run.completed`/`run.aborted`/`run.error`) — whether reached via
+      // this abort or via the later release — is awaited AFTER
+      // `settleForDeletion` runs, so this function's returned promise never
+      // resolves while a session run is still cleanup-pending.
       const state = store.getState();
       const sessionRunIds = new Set<string>();
       for (const [, runState] of state.runs) {
         if (getRunSessionIdentifier(runState) === id) sessionRunIds.add(runState.id);
       }
 
+      // AB-67/AB-199 review finding (PR #430 — Codex P1, "Prevent released
+      // runs from recreating deleted sessions"): every still-live run this
+      // session owns is marked here BEFORE any of it is aborted or released
+      // below, so its eventual terminal `saveSession` call never resurrects
+      // the record it belonged to. This is deliberately independent of HOW
+      // that run settles: a paused in-memory run is released (not aborted)
+      // by `settleForDeletion` below, runs that were never paused are
+      // aborted immediately, and either way its `run.completed`/
+      // `run.aborted` listener now finds itself orphaned and skips the
+      // write instead of recreating the deleted session.
+      for (const runId of sessionRunIds) {
+        const runState = store.getRun(runId);
+        if (runState?.status === 'running') orphanedRunIds.add(runId);
+      }
+
+      const steeringGateForAbort = steeringGates.get(id);
       const runTerminals: Array<Promise<void>> = [];
       for (const runId of sessionRunIds) {
         const runState = store.getRun(runId);
-        if (runState?.status === 'running') {
-          runTerminals.push(whenActiveRunTerminal(runState.activeRun));
-          abortRun(runId);
-        }
+        if (runState?.status !== 'running') continue;
+        runTerminals.push(whenActiveRunTerminal(runState.activeRun));
+        const isPaused = steeringGateForAbort?.forRun(runId).getDesiredState().paused ?? false;
+        if (!isPaused) abortRun(runId);
       }
+
+      await sessionStore.delete(id);
+      // AB-67/AB-199 review findings (PR #430 — Codex P2): a deleted
+      // session's steering gate — and its entries in the shared,
+      // bureau-wide idempotency ledger — must not survive to be inherited
+      // by a session id that gets reused later, or a stale
+      // pause/configVersion/command-ledger entry would block or mis-replay
+      // against the logically new session. Both removals happen ONLY AFTER
+      // `sessionStore.delete` above has actually succeeded ("Keep the gate
+      // until session deletion succeeds") — a rejected deletion leaves the
+      // still-live session's gate and ledger entries untouched, rather than
+      // orphaning a replacement gate a subsequent `submitSteeringCommand`
+      // call would otherwise create.
+      //
+      // `settleForDeletion` runs FIRST, before the gate is discarded: a run
+      // still paused when its session is deleted would otherwise have its
+      // steering channel simply vanish with the gate — every later
+      // `submitSteeringCommand` against the now-deleted session already
+      // returns `not-found`, so nothing could ever resume it, and its
+      // `runStep` would await a promise this gate's own closure held
+      // forever (review finding, PR #430 — Codex P2, "Settle paused runs
+      // before deleting their steering gate"). This is also the moment a
+      // still-paused run above actually gets released, so `runTerminals`
+      // must be awaited AFTER this call, not before it.
+      steeringGateForAbort?.settleForDeletion(new Date().toISOString());
+      steeringGateForAbort?.purgeFromLedger();
+      steeringGates.delete(id);
+
       await Promise.allSettled(runTerminals);
 
       for (const runId of sessionRunIds) {
@@ -3857,49 +3908,9 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           if (cleanup.runId === runId) reviewResolutionCleanupPending.delete(reviewId);
         }
       }
-    }
-    // AB-67/AB-199 review finding (PR #430 — Codex P1, "Prevent released
-    // runs from recreating deleted sessions"): every still-live run this
-    // session owns — in-memory or durable-recovered — is marked here BEFORE
-    // the session record itself is deleted, so its eventual terminal
-    // `saveSession` call never resurrects the record it belonged to. This
-    // is deliberately independent of HOW that run settles: a paused
-    // in-memory run is released (not aborted) by `settleForDeletion` below,
-    // exactly as before ("retain a usable control path until they
-    // terminate" — one of the remediations the P1 finding names), runs
-    // that were never paused simply continue to their own natural
-    // terminal state, and either way its `run.completed`/`run.aborted`
-    // listener now finds itself orphaned and skips the write instead of
-    // recreating the deleted session.
-    for (const [runId, runState] of store.getState().runs) {
-      if (runState.status === 'running' && getRunSessionIdentifier(runState) === id) {
-        orphanedRunIds.add(runId);
-      }
+      return;
     }
     await sessionStore.delete(id);
-    // AB-67/AB-199 review findings (PR #430 — Codex P2): a deleted session's
-    // steering gate — and its entries in the shared, bureau-wide idempotency
-    // ledger — must not survive to be inherited by a session id that gets
-    // reused later, or a stale pause/configVersion/command-ledger entry
-    // would block or mis-replay against the logically new session. Both
-    // removals happen ONLY AFTER `sessionStore.delete` above has actually
-    // succeeded ("Keep the gate until session deletion succeeds") — a
-    // rejected deletion leaves the still-live session's gate and ledger
-    // entries untouched, rather than orphaning a replacement gate a
-    // subsequent `submitSteeringCommand` call would otherwise create.
-    //
-    // `settleForDeletion` runs FIRST, before the gate is discarded: a run
-    // still paused when its session is deleted would otherwise have its
-    // steering channel simply vanish with the gate — every later
-    // `submitSteeringCommand` against the now-deleted session already
-    // returns `not-found`, so nothing could ever resume it, and its
-    // `runStep` would await a promise this gate's own closure held forever
-    // (review finding, PR #430 — Codex P2, "Settle paused runs before
-    // deleting their steering gate").
-    const steeringGate = steeringGates.get(id);
-    steeringGate?.settleForDeletion(new Date().toISOString());
-    steeringGate?.purgeFromLedger();
-    steeringGates.delete(id);
   }
 
   /**
@@ -4898,12 +4909,30 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       return buildReport();
     })();
 
+    // `shutdown()` is documented to never reject — every internal step above
+    // is already best-effort (`settleOwner` catches and records failures),
+    // but a caller-supplied `shutdownTimeoutSleep` rejecting, or some other
+    // unforeseen failure inside `chain`, must not propagate through
+    // `Promise.race`/the bare chain reference. This `.catch` is the single
+    // fallback fence: diagnose, then resolve with the best-effort report
+    // `buildReport()` can still produce from whatever `ownerOutcomes` were
+    // recorded before the failure (review finding, PR #442).
+    function settleNeverRejecting(
+      promise: Promise<BureauShutdownReport>,
+    ): Promise<BureauShutdownReport> {
+      return promise.catch((error: unknown) => {
+        diagnose({
+          level: 'error',
+          scope: 'shutdown',
+          message: `[bureau] shutdown() settled via an unexpected rejection, falling back to a best-effort report: ${serializeUnknownError(error)}`,
+        });
+        return buildReport();
+      });
+    }
+
     if (timeoutMilliseconds === undefined) {
-      // The chain above is best-effort at every internal step and should
-      // never reject, but this guards against an unhandled rejection
-      // leaking out if it somehow does.
       detachBestEffortPromise(chain);
-      shutdownPromise = chain;
+      shutdownPromise = settleNeverRejecting(chain);
     } else {
       // Aborted once `chain` itself settles (by either winning the race or
       // losing it) so the timer never outlives this call — a `shutdown()`
@@ -4914,10 +4943,12 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // `chain` and the timer-abort side effect.
       const timeoutAbort = new AbortController();
       detachBestEffortPromise(chain.finally(() => timeoutAbort.abort()));
-      shutdownPromise = Promise.race([
-        chain,
-        shutdownTimeoutSleep(timeoutMilliseconds, timeoutAbort.signal).then(() => buildReport()),
-      ]);
+      shutdownPromise = settleNeverRejecting(
+        Promise.race([
+          chain,
+          shutdownTimeoutSleep(timeoutMilliseconds, timeoutAbort.signal).then(() => buildReport()),
+        ]),
+      );
     }
 
     return shutdownPromise;

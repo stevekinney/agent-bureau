@@ -196,7 +196,7 @@ await trail.dispose();
 
 This is a second, durable layer alongside the in-memory `@lostgradient/operative/store` ring buffer (which is bounded by `maxActions` and lost on restart): the operative store is the live/glass-box view, the audit trail is the durable/queryable one. `trail.query(options)` filters by `since`, `runId`, and `type`, returning up to `limit` records (default 500) oldest-first. Without a `kv` store, the trail still subscribes (so `dispose()` is always safe) but writes nothing.
 
-`trail.dispose()` returns `Promise<void>` (AB-207) — it resolves only after every write already in flight has settled, and accepts an owner-issued `AbortSignal` (threaded in by `bureau.shutdown()`) so a still-in-flight write is told to stop rather than racing the KV store's own close. `bureau.shutdown()`/`bureau.dispose()` await this the same way they await the webhook notifier and online-eval sampler's own async `dispose()`.
+`trail.dispose()` returns `Promise<void>` (AB-207) — it resolves only after every write already in flight has settled, and accepts an owner-issued `AbortSignal` (threaded in by `bureau.shutdown()`) that tells the trail to stop _starting new writes_ once aborted; a write already in flight when the signal fires cannot be cancelled (there is no cancellation hook for the underlying `kv.set`), so `dispose()` still fully awaits it rather than racing the KV store's own close. `bureau.shutdown()`/`bureau.dispose()` await this the same way they await the webhook notifier and online-eval sampler's own async `dispose()`.
 
 ## `AgentDefinitions` and the Agent Catalog
 
