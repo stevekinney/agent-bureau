@@ -1,5 +1,3 @@
-import { rm } from 'node:fs/promises';
-
 import type { GenerateFunction } from '@lostgradient/operative';
 import { createAgent, stopWhen } from '@lostgradient/operative';
 import { waitForCondition } from '@lostgradient/operative/test';
@@ -504,18 +502,28 @@ describe('two concurrent harnesses are fully isolated', () => {
         const unsubscribeA = harnessA.bureau.subscribeLiveFrames((frame) => {
           eventsSeenByA.push(frame.type);
         });
-        const runOnBOnly = await harnessB.startSession({ message: 'B-only run' });
-        await waitForRunCompletion(harnessB.bureau, runOnBOnly.id);
-        unsubscribeA();
+        // try/finally: if startSession or waitForRunCompletion throws, this
+        // still unsubscribes rather than leaking a live subscription on
+        // harnessA into afterAll's teardown, which could mask the real
+        // failure behind an unrelated dispose-time symptom.
+        try {
+          const runOnBOnly = await harnessB.startSession({ message: 'B-only run' });
+          await waitForRunCompletion(harnessB.bureau, runOnBOnly.id);
+        } finally {
+          unsubscribeA();
+        }
       });
 
       afterAll(async () => {
         await harnessA.bureau.dispose();
         await harnessB.bureau.dispose();
+        // Fixture dispose() already deletes only paths IT allocated
+        // (`owned: true`) and leaves a caller-supplied path untouched — a
+        // second, unconditional `rm` here would duplicate that ownership
+        // check and could delete a real caller-supplied path if this test
+        // ever passed one explicitly. Rely on the fixtures' own dispose().
         await storageA.dispose();
         await storageB.dispose();
-        if (storageA.path) await rm(storageA.path, { recursive: true, force: true });
-        if (storageB.path) await rm(storageB.path, { recursive: true, force: true });
       });
 
       it('has distinct storage paths (when persistent) and distinct clocks', () => {
