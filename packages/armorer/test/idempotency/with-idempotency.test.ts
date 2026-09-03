@@ -75,6 +75,20 @@ function createTestStore() {
   };
 }
 
+/**
+ * Polls a microtask-only predicate to completion, capped so a regression
+ * that never satisfies it fails the test fast instead of hanging CI in an
+ * unbounded busy-wait loop.
+ */
+async function waitUntil(predicate: () => boolean, description: string): Promise<void> {
+  const maximumAttempts = 1_000;
+  for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
+    if (predicate()) return;
+    await Promise.resolve();
+  }
+  throw new Error(`waitUntil timed out after ${maximumAttempts} microtask ticks: ${description}`);
+}
+
 function createManualDeadlineTiming(initialNow = 0): {
   clearCount: () => number;
   fireTimeout: () => void;
@@ -2285,9 +2299,10 @@ describe('withIdempotency', () => {
       // The renewal timer is armed at half the lease duration (5ms) — wait
       // for it to appear on the manual runtime's own bookkeeping rather than
       // a real timer.
-      while (runtime.pendingTimers().length === 0) {
-        await Promise.resolve();
-      }
+      await waitUntil(
+        () => runtime.pendingTimers().length > 0,
+        'lease-renewal timer armed on the manual runtime',
+      );
       const renewalsBeforeAdvance = renewals;
       await runtime.advance(5);
       expect(renewals).toBeGreaterThan(renewalsBeforeAdvance);

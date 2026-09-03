@@ -4,6 +4,20 @@ import { z } from 'zod';
 
 import { internalRetryTestUtilities, retry } from '../src/utilities/retry';
 
+/**
+ * Polls a microtask-only predicate to completion, capped so a regression
+ * that never satisfies it fails the test fast instead of hanging CI in an
+ * unbounded busy-wait loop.
+ */
+async function waitUntil(predicate: () => boolean, description: string): Promise<void> {
+  const maximumAttempts = 1_000;
+  for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
+    if (predicate()) return;
+    await Promise.resolve();
+  }
+  throw new Error(`waitUntil timed out after ${maximumAttempts} microtask ticks: ${description}`);
+}
+
 describe('retry coverage edges', () => {
   const makeRawTool = (execute: (input: unknown) => Promise<unknown>) => {
     const rawTool = async (input: unknown) => execute(input);
@@ -160,20 +174,20 @@ describe('retry coverage edges', () => {
       const resultPromise = wrapped({ value: 1 });
 
       // First failure schedules a 100ms delay before attempt 2.
-      while (runtime.pendingTimers().length === 0) {
-        await Promise.resolve();
-      }
+      await waitUntil(
+        () => runtime.pendingTimers().length > 0,
+        'retry delay timer armed before attempt 2',
+      );
       expect(attempts).toBe(1);
       await runtime.advance(100);
-      while (attempts < 2) {
-        await Promise.resolve();
-      }
+      await waitUntil(() => attempts >= 2, 'attempt 2 to run after the first advance');
 
       // Second failure schedules the exponential-backoff 200ms delay before
       // attempt 3.
-      while (runtime.pendingTimers().length === 0) {
-        await Promise.resolve();
-      }
+      await waitUntil(
+        () => runtime.pendingTimers().length > 0,
+        'retry delay timer armed before attempt 3',
+      );
       await runtime.advance(200);
 
       await expect(resultPromise).resolves.toBe('ok');
