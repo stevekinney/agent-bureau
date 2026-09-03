@@ -273,6 +273,9 @@ describe('event forwarding', () => {
         call: { id: 'call-1', name: 'get_weather' },
         percent: 50,
         message: 'halfway',
+        // AB-290: matches this run's own `runId` above — the curated
+        // `tool.progress` bubble now requires it before forwarding.
+        ownerId: 'run-a',
       } as never,
     );
     toolbox.emit(
@@ -459,6 +462,7 @@ describe('curated tool.* bubble events — selectTools-swapped step toolbox (AB-
     });
 
     const activeRun = createActiveRun({
+      runId: 'swapped-toolbox-forward-run',
       generate: () =>
         new Promise<GenerateResponse>((resolve) => {
           resolveGenerate = resolve;
@@ -488,15 +492,35 @@ describe('curated tool.* bubble events — selectTools-swapped step toolbox (AB-
     // forwarded exactly as a real tool call's would be.
     await generateStarted;
     const call = { id: 'call-1', name: 'echo', arguments: { message: 'hi' } };
-    swappedToolbox.emit('execute-start', { tool: echoTool, call, params: { message: 'hi' } });
-    swappedToolbox.emit('progress', { tool: echoTool, call, percent: 50, message: 'halfway' });
+    // AB-290: `ownerId` matches the `runId` supplied to `createActiveRun`
+    // above — the curated `tool.*` bubbles now require it before forwarding.
+    const ownerId = 'swapped-toolbox-forward-run';
+    swappedToolbox.emit('execute-start', {
+      tool: echoTool,
+      call,
+      params: { message: 'hi' },
+      ownerId,
+    });
+    swappedToolbox.emit('progress', {
+      tool: echoTool,
+      call,
+      percent: 50,
+      message: 'halfway',
+      ownerId,
+    });
     swappedToolbox.emit('policy-denied', {
       tool: echoTool,
       call,
       params: { message: 'hi' },
       reason: 'blocked',
     });
-    swappedToolbox.emit('settled', { tool: echoTool, call, result: 'hi', error: undefined });
+    swappedToolbox.emit('settled', {
+      tool: echoTool,
+      call,
+      result: 'hi',
+      error: undefined,
+      ownerId,
+    });
     resolveGenerate?.(textResponse('Done.'));
 
     await activeRun.result;

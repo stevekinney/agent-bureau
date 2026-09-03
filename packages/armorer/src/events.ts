@@ -28,6 +28,19 @@ type ToolEventDetailContext = {
   configuration: ToolConfiguration;
 };
 
+/**
+ * Run-identity fields echoed on the toolbox events a shared `Toolbox` needs
+ * to scope per owning run (AB-290). `executionId` is armorer's own id,
+ * minted per execution regardless of caller. `ownerId` is optional and
+ * carries only the caller-supplied identity (e.g. operative's run id) —
+ * never a fabricated default — so a consumer can tell "not supplied" apart
+ * from any real owner value.
+ */
+export type ToolExecutionIdentity = {
+  executionId?: string;
+  ownerId?: string;
+};
+
 // ---------------------------------------------------------------------------
 // Tool Event Classes
 // ---------------------------------------------------------------------------
@@ -46,11 +59,17 @@ export class ToolExecuteStartEvent extends Event {
   readonly params: unknown;
   readonly toolCall: ToolCall;
   readonly configuration: ToolConfiguration;
-  constructor(detail: { params: unknown } & ToolEventDetailContext) {
+  /** Armorer's own per-execution id (AB-290). */
+  readonly executionId?: string;
+  /** Caller-supplied owner identity, echoed verbatim when supplied (AB-290). */
+  readonly ownerId?: string;
+  constructor(detail: { params: unknown } & ToolEventDetailContext & ToolExecutionIdentity) {
     super(ToolExecuteStartEvent.type);
     this.params = detail.params;
     this.toolCall = detail.toolCall;
     this.configuration = detail.configuration;
+    this.executionId = detail.executionId;
+    this.ownerId = detail.ownerId;
   }
 }
 
@@ -135,12 +154,17 @@ export class ToolSettledEvent extends Event {
    * this promise to observe its real completion (AB-289).
    */
   readonly callbackCompletion?: Promise<ExecutionSnapshot>;
+  /** Armorer's own per-execution id (AB-290). */
+  readonly executionId?: string;
+  /** Caller-supplied owner identity, echoed verbatim when supplied (AB-290). */
+  readonly ownerId?: string;
   constructor(
     detail: {
       result?: unknown;
       error?: unknown;
       callbackCompletion?: Promise<ExecutionSnapshot>;
-    } & ToolEventDetailContext,
+    } & ToolEventDetailContext &
+      ToolExecutionIdentity,
   ) {
     super(ToolSettledEvent.type);
     this.result = detail.result;
@@ -148,6 +172,8 @@ export class ToolSettledEvent extends Event {
     this.toolCall = detail.toolCall;
     this.configuration = detail.configuration;
     this.callbackCompletion = detail.callbackCompletion;
+    this.executionId = detail.executionId;
+    this.ownerId = detail.ownerId;
   }
 }
 
@@ -254,11 +280,23 @@ export class ToolProgressEvent extends Event {
   readonly message?: string;
   /** Verbatim checkpoint value; never re-serialized or reconstructed. */
   readonly checkpoint?: unknown;
-  constructor(detail: { percent?: number; message?: string; checkpoint?: unknown }) {
+  /** Armorer's own per-execution id (AB-290). */
+  readonly executionId?: string;
+  /** Caller-supplied owner identity, echoed verbatim when supplied (AB-290). */
+  readonly ownerId?: string;
+  constructor(
+    detail: {
+      percent?: number;
+      message?: string;
+      checkpoint?: unknown;
+    } & ToolExecutionIdentity,
+  ) {
     super(ToolProgressEvent.type);
     this.percent = detail.percent;
     this.message = detail.message;
     this.checkpoint = detail.checkpoint;
+    this.executionId = detail.executionId;
+    this.ownerId = detail.ownerId;
   }
 }
 
@@ -478,11 +516,17 @@ export class ToolboxExecuteStartEvent extends Event {
   readonly tool: Tool;
   readonly call: ToolCall;
   readonly params: unknown;
-  constructor(detail: { tool: Tool; call: ToolCall; params: unknown }) {
+  /** Armorer's own per-execution id (AB-290). */
+  readonly executionId?: string;
+  /** Caller-supplied owner identity, echoed verbatim when supplied (AB-290). */
+  readonly ownerId?: string;
+  constructor(detail: { tool: Tool; call: ToolCall; params: unknown } & ToolExecutionIdentity) {
     super(ToolboxExecuteStartEvent.type);
     this.tool = detail.tool;
     this.call = detail.call;
     this.params = detail.params;
+    this.executionId = detail.executionId;
+    this.ownerId = detail.ownerId;
   }
 }
 
@@ -557,19 +601,27 @@ export class ToolboxSettledEvent extends Event {
    * `completed`) awaits this promise instead (AB-289).
    */
   readonly callbackCompletion?: Promise<ExecutionSnapshot>;
-  constructor(detail: {
-    tool: Tool;
-    call: ToolCall;
-    result?: unknown;
-    error?: unknown;
-    callbackCompletion?: Promise<ExecutionSnapshot>;
-  }) {
+  /** Armorer's own per-execution id (AB-290). */
+  readonly executionId?: string;
+  /** Caller-supplied owner identity, echoed verbatim when supplied (AB-290). */
+  readonly ownerId?: string;
+  constructor(
+    detail: {
+      tool: Tool;
+      call: ToolCall;
+      result?: unknown;
+      error?: unknown;
+      callbackCompletion?: Promise<ExecutionSnapshot>;
+    } & ToolExecutionIdentity,
+  ) {
     super(ToolboxSettledEvent.type);
     this.tool = detail.tool;
     this.call = detail.call;
     this.result = detail.result;
     this.error = detail.error;
     this.callbackCompletion = detail.callbackCompletion;
+    this.executionId = detail.executionId;
+    this.ownerId = detail.ownerId;
   }
 }
 
@@ -686,12 +738,25 @@ export class ToolboxProgressEvent extends Event {
   readonly call: ToolCall;
   readonly percent?: number;
   readonly message?: string;
-  constructor(detail: { tool: Tool; call: ToolCall; percent?: number; message?: string }) {
+  /** Armorer's own per-execution id (AB-290). */
+  readonly executionId?: string;
+  /** Caller-supplied owner identity, echoed verbatim when supplied (AB-290). */
+  readonly ownerId?: string;
+  constructor(
+    detail: {
+      tool: Tool;
+      call: ToolCall;
+      percent?: number;
+      message?: string;
+    } & ToolExecutionIdentity,
+  ) {
     super(ToolboxProgressEvent.type);
     this.tool = detail.tool;
     this.call = detail.call;
     this.percent = detail.percent;
     this.message = detail.message;
+    this.executionId = detail.executionId;
+    this.ownerId = detail.ownerId;
   }
 }
 

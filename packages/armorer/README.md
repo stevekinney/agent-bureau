@@ -1097,6 +1097,17 @@ tool.addEventListener('progress', (event) => {
 });
 ```
 
+`execute-start`, `progress`, and `settled` (at both the tool and toolbox level) carry `executionId` — a fresh id armorer mints for every execution — plus an `ownerId` field that echoes back whatever `ownerId` (or `requestContext.authority.ownerId`) the caller supplied to `execute()`, verbatim. `ownerId` stays `undefined` when nothing was supplied — it is never fabricated from armorer's own internal bookkeeping default. A caller sharing one `Tool`/`Toolbox` across more than one concurrent owner (a runtime that reuses a toolbox across separate agent runs, for instance) uses `ownerId` to scope its own accounting and bubble events to just its own calls, since the provider-supplied `ToolCall.id` is not guaranteed unique across owners:
+
+```typescript
+const result = await toolbox.execute(toolCall, { ownerId: myRunId });
+
+toolbox.addEventListener('settled', (event) => {
+  if (event.ownerId !== myRunId) return; // another owner's call on this shared toolbox
+  // ...
+});
+```
+
 ### Execution Lifetime
 
 Tools and toolboxes expose the lifetime of work they own. `activeExecutions` counts admitted calls, `executionSignal` aborts that work when the owner completes, and `whenIdle()` resolves once all admitted calls have reached a terminal or explicitly unknown-effect state. `complete()` is idempotent, closes admission, requests cancellation for active work, and returns a promise you can await during shutdown:

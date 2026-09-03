@@ -3513,3 +3513,109 @@ describe('RuntimeToolContext.progress()', () => {
     expect(timedOut).toBe(true);
   });
 });
+
+// AB-290: `execute-start`, `progress`, and `settled` carry armorer's own
+// per-execution `executionId` (always) and echo a caller-supplied `ownerId`
+// verbatim (only when actually supplied) — so a consumer sharing one
+// toolbox/tool across concurrent owners can scope its own accounting and
+// bubble events instead of trusting the provider-supplied, not-guaranteed-
+// unique `ToolCall.id`.
+describe('execution identity on execute-start/progress/settled (AB-290)', () => {
+  it('stamps a non-empty executionId on execute-start, progress, and settled, and leaves ownerId undefined when none was supplied', async () => {
+    const tool = createTool({
+      name: 'identity-tool',
+      description: 'reports progress once then settles',
+      input: z.object({}),
+      async execute(_params, context) {
+        context.progress({ percent: 50 });
+        return 'done';
+      },
+    });
+
+    const seen: Record<string, { executionId?: string; ownerId?: string }> = {};
+    tool.addEventListener('execute-start', (event: any) => {
+      seen['execute-start'] = { executionId: event.executionId, ownerId: event.ownerId };
+    });
+    tool.addEventListener('progress', (event: any) => {
+      seen['progress'] = { executionId: event.executionId, ownerId: event.ownerId };
+    });
+    tool.addEventListener('settled', (event: any) => {
+      seen['settled'] = { executionId: event.executionId, ownerId: event.ownerId };
+    });
+
+    await tool.execute(createToolCall('identity-tool', {}));
+
+    expect(seen['execute-start']?.executionId).toBeTruthy();
+    expect(seen['progress']?.executionId).toBeTruthy();
+    expect(seen['settled']?.executionId).toBeTruthy();
+    // All three fire for the same single execution.
+    expect(seen['progress']?.executionId).toBe(seen['execute-start']?.executionId);
+    expect(seen['settled']?.executionId).toBe(seen['execute-start']?.executionId);
+
+    // No caller ever supplied an owner — the field must stay undefined
+    // rather than leaking armorer's internal "anonymous" bookkeeping
+    // default onto the public event surface.
+    expect(seen['execute-start']?.ownerId).toBeUndefined();
+    expect(seen['progress']?.ownerId).toBeUndefined();
+    expect(seen['settled']?.ownerId).toBeUndefined();
+  });
+
+  it('echoes the caller-supplied ownerId verbatim on execute-start, progress, and settled', async () => {
+    const tool = createTool({
+      name: 'owned-identity-tool',
+      description: 'reports progress once then settles',
+      input: z.object({}),
+      async execute(_params, context) {
+        context.progress({ percent: 50 });
+        return 'done';
+      },
+    });
+
+    const seen: Record<string, { ownerId?: string }> = {};
+    tool.addEventListener('execute-start', (event: any) => {
+      seen['execute-start'] = { ownerId: event.ownerId };
+    });
+    tool.addEventListener('progress', (event: any) => {
+      seen['progress'] = { ownerId: event.ownerId };
+    });
+    tool.addEventListener('settled', (event: any) => {
+      seen['settled'] = { ownerId: event.ownerId };
+    });
+
+    await tool.execute(createToolCall('owned-identity-tool', {}), { ownerId: 'run-a' });
+
+    expect(seen['execute-start']?.ownerId).toBe('run-a');
+    expect(seen['progress']?.ownerId).toBe('run-a');
+    expect(seen['settled']?.ownerId).toBe('run-a');
+  });
+
+  it('resolves ownerId from requestContext.authority.ownerId when no explicit ownerId option is supplied', async () => {
+    const tool = createTool({
+      name: 'request-context-owned-tool',
+      description: 'settles immediately',
+      input: z.object({}),
+      async execute() {
+        return 'done';
+      },
+    });
+
+    let settledOwnerId: string | undefined;
+    tool.addEventListener('settled', (event: any) => {
+      settledOwnerId = event.ownerId;
+    });
+
+    await tool.execute(createToolCall('request-context-owned-tool', {}), {
+      requestContext: {
+        authority: {
+          principalId: 'principal-1',
+          tenantId: 'tenant-1',
+          ownerId: 'run-from-request-context',
+          capabilities: [],
+          authorizationRevision: 'rev-1',
+        },
+      } as ToolRequestContext,
+    });
+
+    expect(settledOwnerId).toBe('run-from-request-context');
+  });
+});

@@ -6,7 +6,7 @@ import type { ToolErrorCategory } from './core/errors';
 import type { SerializedToolDefinition } from './core/serialization';
 import type { JsonObject } from './core/serialization/json';
 import type { ToolAvailabilityHook, ToolDefinition } from './core/tool-definition';
-import type { ToolEventMap } from './events';
+import type { ToolEventMap, ToolExecutionIdentity } from './events';
 import type { EffectiveToolExecutionContext, ToolRequestContext } from './execution-context';
 import type { ExecutionHandle, ExecutionLifecycle, ExecutionSnapshot } from './execution-lifecycle';
 import { policyPauseDecisionsSymbol, policyPauseTierSymbol } from './internal/approval-resume';
@@ -213,7 +213,7 @@ export type ToolDigestOptions =
 
 export type DefaultToolEvents = {
   'status-update': { status: string };
-  'execute-start': { params: unknown } & ToolEventDetailContext;
+  'execute-start': { params: unknown } & ToolEventDetailContext & ToolExecutionIdentity;
   'validate-success': { params: unknown; parsed: unknown } & ToolEventDetailContext;
   'validate-error': {
     params: unknown;
@@ -232,7 +232,8 @@ export type DefaultToolEvents = {
      * (AB-289). See {@link ExecutionHandle.whenSettled}.
      */
     callbackCompletion?: Promise<ExecutionSnapshot>;
-  } & ToolEventDetailContext;
+  } & ToolEventDetailContext &
+    ToolExecutionIdentity;
   'policy-denied': { params: unknown; reason?: string } & ToolEventDetailContext;
   'policy-action-required': { params: unknown; reason?: string } & ToolEventDetailContext;
   'tool.started': {
@@ -252,7 +253,7 @@ export type DefaultToolEvents = {
     inputDigest?: string;
     outputDigest?: string;
   } & ToolEventDetailContext;
-  progress: { percent?: number; message?: string; checkpoint?: unknown };
+  progress: { percent?: number; message?: string; checkpoint?: unknown } & ToolExecutionIdentity;
   'stream-start': { mode: 'stream' | 'collect' };
   'stream-chunk': { chunk: unknown; index: number };
   'stream-end': { chunks: number; completed: boolean };

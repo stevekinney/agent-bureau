@@ -121,9 +121,6 @@ export async function executeLoop(
   // `onLLMInput`/`onLLMOutput` inside `runStep`) before acknowledging
   // cleanup — see `create-run.ts`'s `pendingHookPromises`.
   hookTracker?: (promise: Promise<unknown>) => void,
-  // AB-204: forwarded to `buildStepDeps`'s output — see
-  // `StepDeps.trackToolCallIds` and `create-run.ts`'s `ownedToolCallIds`.
-  trackToolCallIds?: (ids: readonly string[]) => void,
   // AB-239: notifies the driver's toolbox-event forwarder of each step's
   // resolved toolbox (base or `selectTools`-swapped). Not part of RunOptions —
   // it is a driver-internal wire, not user-facing configuration.
@@ -135,7 +132,7 @@ export async function executeLoop(
     ? options.conversation
     : new Conversation(options.conversation);
 
-  const deps = { ...buildStepDeps(options), hookTracker, trackToolCallIds, onStepToolbox };
+  const deps = { ...buildStepDeps(options), hookTracker, onStepToolbox };
   // AB-199 cross-run dedupe: a brand-new run seeds its dedupe cursor from
   // the gate's own cross-run memory, not always 0, so a `configVersion` a
   // PRIOR run already applied is never re-observed as new by this one.

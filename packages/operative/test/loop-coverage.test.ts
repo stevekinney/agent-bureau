@@ -645,7 +645,6 @@ describe('executeLoop onStepToolbox (AB-239)', () => {
       },
       undefined,
       undefined,
-      undefined,
       onStepToolbox,
     );
 

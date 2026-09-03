@@ -260,21 +260,22 @@ export function createActiveRun(
     if (inFlightTools === 0) return Promise.resolve();
     return new Promise((resolve) => toolDrainWaiters.push(resolve));
   }
-  // AB-204 review (PRRT_kwDORvupsc6erisq): a caller can supply the SAME
-  // `Toolbox` instance to more than one concurrent run — `create-agent.ts`
-  // explicitly preserves the supplied toolbox across `.run()` calls — and
-  // the toolbox's `execute-start`/`settled` events are toolbox-wide, not
-  // scoped to any one run. Without this, `inFlightTools` would also count
-  // another run's tool calls on the shared toolbox, so THIS run's
-  // `closed()` could wait on work it doesn't own (and never settle if that
-  // other run's tool hangs). `trackToolCallIds` (wired through
-  // `executeLoop` → `StepDeps`, called from `run-step.ts` right before
-  // `Toolbox.execute()`) records exactly the call ids this run itself
-  // dispatches, and `onExecuteStart`/`onSettled` below only count those.
-  const ownedToolCallIds = new Set<string>();
-  const trackToolCallIds = (ids: readonly string[]): void => {
-    for (const id of ids) ownedToolCallIds.add(id);
-  };
+  // AB-204 review (PRRT_kwDORvupsc6erisq), superseded by AB-290: a caller
+  // can supply the SAME `Toolbox` instance to more than one concurrent run
+  // — `create-agent.ts` explicitly preserves the supplied toolbox across
+  // `.run()` calls — and the toolbox's `execute-start`/`settled`/`progress`
+  // events are toolbox-wide, not scoped to any one run. Without scoping,
+  // `inFlightTools` would also count another run's tool calls on the
+  // shared toolbox, so THIS run's `closed()` could wait on work it doesn't
+  // own (and never settle if that other run's tool hangs) — and the bubble
+  // events below would leak another run's tool activity onto this run's own
+  // emitter. AB-290 replaces the old `ownedToolCallIds`/`ToolCall.id`
+  // tracking (a provider-supplied id, never guaranteed unique across
+  // concurrent runs) with `event.ownerId === runId`: `run-step.ts` stamps
+  // this run's own id as `ownerId` on every `Toolbox.execute()` call it
+  // makes, and armorer echoes it back verbatim on `execute-start`,
+  // `progress`, and `settled`.
+  const isOwnEvent = (event: { ownerId?: string }): boolean => event.ownerId === runId;
   // AB-204 (PRRT_kwDORvupsc6ekmeT / PRRT_kwDORvupsc6elvRf): every run-owned
   // hook (`onRunComplete`/`onRunAbort`/`onRunError`/`onLLMInput`/
   // `onLLMOutput`) fires via `runHookSilently`'s fire-and-forget
@@ -331,17 +332,20 @@ export function createActiveRun(
 
     // Map 'execute-start' → tool.started (reliably emitted for all tools, regardless of telemetry flag)
     const onExecuteStart = (e: ToolboxEventMap['execute-start']) => {
-      // AB-204 review (PRRT_kwDORvupsc6erisq): only count calls this run
-      // itself dispatched — see `ownedToolCallIds` above. Bubble events
-      // still fire for every toolbox call regardless, unchanged.
-      if (ownedToolCallIds.has(e.call.id)) {
-        inFlightTools += 1;
-        // AB-214 review (PRRT_kwDORvupsc6esZRy): the tool-call watchdog
-        // exists only while a tool call this run owns is actually in
-        // flight — an idle run producing no tool-progress events must not
-        // be reported stalled/unreachable for it.
-        liveness.beginToolCall();
-      }
+      // AB-290: `e.ownerId` is armorer's echo of the `ownerId` `run-step.ts`
+      // stamped on THIS run's own `Toolbox.execute()` calls. A concurrent
+      // run sharing the same toolbox stamps its own id, so this event is
+      // skipped entirely here — both the accounting below AND the bubble
+      // dispatch — rather than only gating the accounting as the old
+      // `ownedToolCallIds`/`ToolCall.id` tracking did, which let another
+      // run's tool activity leak onto this run's own `tool.started` stream.
+      if (!isOwnEvent(e)) return;
+      inFlightTools += 1;
+      // AB-214 review (PRRT_kwDORvupsc6esZRy): the tool-call watchdog
+      // exists only while a tool call this run owns is actually in
+      // flight — an idle run producing no tool-progress events must not
+      // be reported stalled/unreachable for it.
+      liveness.beginToolCall();
       emitter.dispatchEvent(
         new ToolStartedBubbleEvent(
           { agentName, runId, step: currentStep },
@@ -357,53 +361,47 @@ export function createActiveRun(
 
     // Map 'settled' → tool.settled (fired after every tool call regardless of outcome)
     const onSettled = (e: ToolboxEventMap['settled']) => {
-      // AB-204 review (PRRT_kwDORvupsc6erisq): only decrement for a call
-      // this run itself dispatched (mirrors the `onExecuteStart` guard
-      // above) — otherwise a concurrent run sharing the same toolbox could
-      // drive this negative (masked by the clamp below, but still wrong)
-      // or spuriously satisfy this run's drain wait for work it never
-      // started.
-      if (ownedToolCallIds.has(e.call.id)) {
-        // The tool-call watchdog (AB-214) tracks whether the RUN is still
-        // waiting on this call, not whether the callback has physically
-        // returned — once the cancellation race settles, the run itself has
-        // moved on (the call produced a result, even a cancelled one) and
-        // stops waiting, so ending the watchdog here is correct: keeping it
-        // alive until an abort-ignoring callback's own promise eventually
-        // returns (which may be never, for a genuinely leaked background
-        // task) would report the whole run stalled/unreachable for work the
-        // run no longer waits on.
-        liveness.endToolCall();
-        // AB-289: armorer's `settled` event fires as soon as the
-        // cancellation race against the execution signal settles — not
-        // once the tool callback's own returned promise has genuinely
-        // settled. A callback that ignores its abort signal keeps running
-        // after this event fires, and `e.callbackCompletion` is the promise
-        // that observes its real completion (see armorer's
-        // `ExecutionHandle.whenSettled`). Defer the drain decrement until
-        // that promise resolves so `awaitToolDrain()` — and therefore
-        // `resolveOutcome` below — never reports this call done while it is
-        // still actually running. A `settled` event with no
-        // `callbackCompletion` (e.g. a hand-constructed test event) drains
-        // synchronously, right here, matching the pre-AB-289 behavior
-        // exactly rather than deferring by a spurious microtask.
-        const release = () => {
-          // Clamped: armorer can emit 'settled' with no preceding
-          // 'execute-start' for a tool call cancelled before execution
-          // begins (an already-aborted signal path), which would otherwise
-          // drive this negative and corrupt hasInFlightWork()'s later reads.
-          inFlightTools = Math.max(0, inFlightTools - 1);
-          if (inFlightTools === 0 && toolDrainWaiters.length > 0) {
-            const waiters = toolDrainWaiters;
-            toolDrainWaiters = [];
-            for (const resolve of waiters) resolve();
-          }
-        };
-        if (e.callbackCompletion) {
-          void e.callbackCompletion.then(release, release);
-        } else {
-          release();
+      // AB-290: mirrors the `onExecuteStart` guard above — see its comment.
+      if (!isOwnEvent(e)) return;
+      // The tool-call watchdog (AB-214) tracks whether the RUN is still
+      // waiting on this call, not whether the callback has physically
+      // returned — once the cancellation race settles, the run itself has
+      // moved on (the call produced a result, even a cancelled one) and
+      // stops waiting, so ending the watchdog here is correct: keeping it
+      // alive until an abort-ignoring callback's own promise eventually
+      // returns (which may be never, for a genuinely leaked background
+      // task) would report the whole run stalled/unreachable for work the
+      // run no longer waits on.
+      liveness.endToolCall();
+      // AB-289: armorer's `settled` event fires as soon as the
+      // cancellation race against the execution signal settles — not
+      // once the tool callback's own returned promise has genuinely
+      // settled. A callback that ignores its abort signal keeps running
+      // after this event fires, and `e.callbackCompletion` is the promise
+      // that observes its real completion (see armorer's
+      // `ExecutionHandle.whenSettled`). Defer the drain decrement until
+      // that promise resolves so `awaitToolDrain()` — and therefore
+      // `resolveOutcome` below — never reports this call done while it is
+      // still actually running. A `settled` event with no
+      // `callbackCompletion` (e.g. a hand-constructed test event) drains
+      // synchronously, right here, matching the pre-AB-289 behavior
+      // exactly rather than deferring by a spurious microtask.
+      const release = () => {
+        // Clamped: armorer can emit 'settled' with no preceding
+        // 'execute-start' for a tool call cancelled before execution
+        // begins (an already-aborted signal path), which would otherwise
+        // drive this negative and corrupt hasInFlightWork()'s later reads.
+        inFlightTools = Math.max(0, inFlightTools - 1);
+        if (inFlightTools === 0 && toolDrainWaiters.length > 0) {
+          const waiters = toolDrainWaiters;
+          toolDrainWaiters = [];
+          for (const resolve of waiters) resolve();
         }
+      };
+      if (e.callbackCompletion) {
+        void e.callbackCompletion.then(release, release);
+      } else {
+        release();
       }
       const hasError = e.error !== undefined;
       const status: 'success' | 'error' = hasError ? 'error' : 'success';
@@ -435,6 +433,11 @@ export function createActiveRun(
     };
 
     const onToolProgress = (e: ToolboxEventMap['progress']) => {
+      // AB-290: mirrors the `onExecuteStart` guard above — see its comment.
+      // A caller can supply the SAME `Toolbox` instance to more than one
+      // concurrent run (`create-agent.ts`), so both the bubble dispatch and
+      // the liveness pulse below must skip a call this run doesn't own.
+      if (!isOwnEvent(e)) return;
       emitter.dispatchEvent(
         new ToolProgressBubbleEvent(
           { agentName, runId, step: currentStep },
@@ -450,23 +453,12 @@ export function createActiveRun(
       // always labeled 'tool-progress', never 'provider-io', even when the
       // tool internally wraps a provider call — the tool-call `StallPolicy`
       // row is the one this pulse is recorded against.
-      //
-      // AB-214 review (PRRT_kwDORvupsc6es7pO): only record a pulse for a
-      // tool call THIS run itself dispatched — mirrors the identical
-      // `ownedToolCallIds` guard `onExecuteStart`/`onSettled` already use.
-      // A caller can supply the SAME `Toolbox` instance to more than one
-      // concurrent run (`create-agent.ts`), and the toolbox's `progress`
-      // event is toolbox-wide, not scoped to any one run — without this
-      // guard, run B's tool progress would falsely mark run A's tool-call
-      // watchdog as active or recovered.
-      if (ownedToolCallIds.has(e.call.id)) {
-        liveness.recordToolProgressPulse({
-          toolCallId: e.call.id,
-          toolName: e.call.name,
-          percent: e.percent,
-          message: e.message,
-        });
-      }
+      liveness.recordToolProgressPulse({
+        toolCallId: e.call.id,
+        toolName: e.call.name,
+        percent: e.percent,
+        message: e.message,
+      });
     };
 
     const onPolicyDenied = (e: ToolboxEventMap['policy-denied']) => {
@@ -547,7 +539,7 @@ export function createActiveRun(
 
   const result = Promise.resolve()
     .then(() =>
-      executeLoop(loopOptions, emitter, hookTracker, trackToolCallIds, (toolbox) =>
+      executeLoop(loopOptions, emitter, hookTracker, (toolbox) =>
         toolboxForwarder.onStepToolbox(toolbox),
       ),
     )
