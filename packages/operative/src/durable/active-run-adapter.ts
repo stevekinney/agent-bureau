@@ -391,6 +391,19 @@ export function createDurableActiveRun(
   // closed()'s not-required fast path (coordinator ruling, AB-204) — see the
   // identical counter in `create-run.ts`.
   let inFlightTools = 0;
+  // AB-291 (AC1 — durable parity with AB-204's in-memory fix): every
+  // run-owned hook (`onRunStart`/`onRunAbort`/`onRunError`/`onRunComplete`)
+  // fires via `runHookSilently`'s fire-and-forget `Promise.allSettled`
+  // inside `run-lifecycle.ts`, so `result` can settle while one is still
+  // running — the identical gap `create-run.ts`'s `pendingHookPromises`/
+  // `hookTracker` close for the in-memory loop. Threaded through `drive()`
+  // into `driveDurableRun`/`finalizeRunResult` so every terminal-lifecycle
+  // helper call records its hook promise here; `resolveDurableOutcome`
+  // awaits all of them before reporting `completed`.
+  const pendingHookPromises: Promise<unknown>[] = [];
+  const hookTracker = (promise: Promise<unknown>): void => {
+    pendingHookPromises.push(promise);
+  };
   // AB-239: the base subscription covers the whole run; `toolboxForwarder.onStepToolbox`
   // (threaded through `driveDurableRun` into `services.onStepToolbox`, then into
   // per-step `StepDeps` by `run-workflow.ts`) additionally covers any step whose
@@ -556,6 +569,7 @@ export function createDurableActiveRun(
       reachability,
       (toolbox) => toolboxForwarder.onStepToolbox(toolbox),
       runtime,
+      hookTracker,
     );
   }
 
@@ -614,6 +628,22 @@ export function createDurableActiveRun(
   // a second one.
   let cancelRequested = false;
   let cancelSettled: Promise<void> | undefined;
+  // AB-291 (AC3): a workflow parked in `ctx.sleep`/`ctx.waitForSignal` can
+  // ONLY be unblocked by a resolving `engine.cancel()` call — if that call
+  // itself rejects, the workflow never advances, so `result` (the public,
+  // unmodified run-completion promise) never settles either, and `closed()`
+  // — gated on `result` — would hang forever, unable to unblock on a
+  // workflow that can't unblock itself. `cancelRejectionGate` only ever
+  // REJECTS (never resolves) with that `engine.cancel` failure; raced below
+  // against `result` for `closed()`'s OWN gate (`closedGate`) so a genuine
+  // cancel failure surfaces `{ status: 'failed', error }` instead of a
+  // silent, permanent hang. Matches AB-205's `cancelDurableRun` precedent: a
+  // rejecting `engine.cancel()` classifies `failed` with the caught error,
+  // never swallowed.
+  let rejectCancelGate: ((error: unknown) => void) | undefined;
+  const cancelRejectionGate = new Promise<never>((_resolve, reject) => {
+    rejectCancelGate = reject;
+  });
 
   function abort(reason?: string): void {
     cancelRequested = true;
@@ -645,9 +675,17 @@ export function createDurableActiveRun(
       // must not overwrite an already-in-flight (or already-settled) first
       // cancellation with a fresh, possibly slower or non-settling, one —
       // closed() would otherwise wait on the wrong promise.
-      cancelSettled ??= context.engine.cancel(runId).catch(() => {
-        // Swallow: run may already be terminal. The AbortController signal is
-        // the load-bearing stop; engine.cancel is belt-and-suspenders.
+      cancelSettled ??= context.engine.cancel(runId).catch((error: unknown) => {
+        // Swallowed for THIS promise: a failing cancel (run already
+        // terminal) is not an error for `cancelSettled`'s own callers below
+        // — the AbortController signal is the load-bearing stop, and the
+        // post-cancel re-read still disambiguates a genuine no-op from a
+        // real problem. But also surface the rejection onto
+        // `cancelRejectionGate` (AC3) so `closed()` doesn't hang forever if
+        // this was instead a genuinely parked workflow that `engine.cancel`
+        // failed to unblock — `result` would never settle on its own in
+        // that case.
+        rejectCancelGate?.(error);
       });
     }
   }
@@ -665,11 +703,17 @@ export function createDurableActiveRun(
   if (combinedSignal.aborted) {
     abort(typeof combinedSignal.reason === 'string' ? combinedSignal.reason : undefined);
   } else {
-    combinedSignal.addEventListener(
-      'abort',
-      () => abort(typeof combinedSignal.reason === 'string' ? combinedSignal.reason : undefined),
-      { once: true },
-    );
+    const onCombinedSignalAbort = (): void =>
+      abort(typeof combinedSignal.reason === 'string' ? combinedSignal.reason : undefined);
+    combinedSignal.addEventListener('abort', onCombinedSignalAbort, { once: true });
+    // AB-291 (AC2, matching create-run.ts's identical fix, AB-204 review
+    // PRRT_kwDORvupsc6erGS9): `options.signal` can be a long-lived signal a
+    // caller reuses across many runs. Left attached, this listener fires
+    // `abort()` — and issues a redundant `engine.cancel()` — on THIS
+    // already-terminal run whenever that shared signal later aborts for an
+    // unrelated reason. Detach once `result` settles; while the run is
+    // still in flight the listener stays live exactly as before.
+    cleanups.push(() => combinedSignal.removeEventListener('abort', onCombinedSignalAbort));
   }
 
   async function resolveDurableOutcome(): Promise<CleanupAcknowledgement> {
@@ -682,7 +726,14 @@ export function createDurableActiveRun(
     // successful durable acknowledgement for a cancellation that was never
     // recorded or confirmed. `cancelSettled ?? context.engine.cancel(...)`
     // below already handles firing that first call when nothing else has.
-    if (!cancelRequested && !combinedSignal.aborted) return { status: 'completed' };
+    if (!cancelRequested && !combinedSignal.aborted) {
+      // AB-291 (AC1): a run-owned hook can still be running when `result`
+      // settles — `runHookSilently` is fire-and-forget — so `completed`
+      // must wait for genuine hook completion, matching `create-run.ts`'s
+      // identical `Promise.allSettled(pendingHookPromises)` await.
+      await Promise.allSettled(pendingHookPromises);
+      return { status: 'completed' };
+    }
     // abort() may have been called before `driveStarted` — the workflow did
     // not exist yet, so it never fired engine.cancel(). By the time `result`
     // has settled the workflow certainly exists, so fire it here instead.
@@ -703,14 +754,28 @@ export function createDurableActiveRun(
       if (!state || !isTerminalWorkflowStatus(state.status)) {
         return { status: 'unresolved', reason: 'persistence-failed' };
       }
+      // AB-291 (AC1): same hook-completion wait as the uncancelled branch
+      // above — a cancelled run's `onRunAbort`/`onRunError` hook can still
+      // be in flight even after the durable record confirms `cancelled`.
+      await Promise.allSettled(pendingHookPromises);
       return { status: 'completed' };
     } catch (error) {
       return { status: 'unresolved', reason: 'persistence-failed', error };
     }
   }
 
+  // AB-291 (AC3): `closed()`'s own gate — races the run's real completion
+  // against `cancelRejectionGate` so a rejecting `engine.cancel()` against a
+  // genuinely parked workflow surfaces `{ status: 'failed', error }` instead
+  // of leaving `closed()` waiting on a `result` that will never settle. When
+  // `result` settles first (the ordinary case, including a harmless cancel
+  // rejection against an already-terminal run whose `result` was already on
+  // its way to settling), this behaves exactly as passing `result` directly
+  // would have.
+  const closedGate = Promise.race([result, cancelRejectionGate]);
+
   const closed = createClosedAcknowledgement({
-    result,
+    result: closedGate,
     // `cancelRequested` alone misses a cancellation that arrived through
     // `RunOptions.signal` rather than a direct `abort()` call —
     // `combinedSignal` covers both, matching create-run.ts's identical fix.
@@ -1410,6 +1475,7 @@ async function driveDurableRun(
   reachability: { unreachable: boolean },
   onStepToolbox: ((toolbox: AnyToolbox) => void) | undefined,
   runtime: RuntimeServices,
+  hookTracker: (promise: Promise<unknown>) => void,
 ): Promise<RunResult> {
   const runStartTime = runtime.monotonic.now();
   const { hooks } = options;
@@ -1428,6 +1494,8 @@ async function driveDurableRun(
       emitter,
       terminalErrorFromEvent ?? toAgentRunError(startError),
       options.costEstimation,
+      undefined,
+      hookTracker,
     );
   }
 
@@ -1542,6 +1610,7 @@ async function driveDurableRun(
           signal.aborted && typeof signal.reason === 'string' ? signal.reason : undefined,
         costEstimation: options.costEstimation,
         terminalError: terminalErrorFromEvent,
+        hookTracker,
       });
     }
     // A `history.maxEvents` circuit-breaker (or a genuine execution-deadline
@@ -1567,6 +1636,7 @@ async function driveDurableRun(
       runtime,
       errorMessage: message,
       costEstimation: options.costEstimation,
+      hookTracker,
     });
   }
 
@@ -1602,6 +1672,7 @@ async function driveDurableRun(
     costEstimation: options.costEstimation,
     terminalError:
       terminalErrorFromEvent ?? (result.error instanceof AgentRunError ? result.error : undefined),
+    hookTracker,
   });
 }
 
@@ -1703,6 +1774,15 @@ interface FinalizeArgs {
     confidence: number;
     detail?: string;
   };
+  /**
+   * AB-291 (AC1): collects every run-owned hook's fire-and-forget promise so
+   * `createDurableActiveRun`'s `resolveDurableOutcome` can await genuine hook
+   * completion before reporting `closed()` `completed` — the durable
+   * counterpart of `create-run.ts`'s `pendingHookPromises`. Omitted by
+   * `driveReattachedRun`'s call sites (`hooks: undefined` there — reattach
+   * never fires run hooks, so nothing to track).
+   */
+  hookTracker?: (promise: Promise<unknown>) => void;
 }
 
 /**
@@ -1735,6 +1815,7 @@ function finalizeRunResult(args: FinalizeArgs): RunResult {
       args.abortReason,
       args.costEstimation,
       terminalError,
+      args.hookTracker,
     );
   }
   if (
@@ -1750,6 +1831,8 @@ function finalizeRunResult(args: FinalizeArgs): RunResult {
       emitter,
       terminalError,
       args.costEstimation,
+      undefined,
+      args.hookTracker,
     );
   }
   const schemaValidation = reconstructSchemaValidation(args.schemaValidation, terminalError);
@@ -1765,7 +1848,7 @@ function finalizeRunResult(args: FinalizeArgs): RunResult {
     args.output,
     args.costEstimation,
     terminalError,
-    undefined,
+    args.hookTracker,
     args.runtime,
   );
 }
