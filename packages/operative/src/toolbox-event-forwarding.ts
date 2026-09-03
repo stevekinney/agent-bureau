@@ -2,9 +2,20 @@ import type { AnyToolbox } from 'armorer';
 import { forwardEvents } from 'lifecycle';
 
 /**
- * Manages `toolbox.*` event forwarding for a run's full duration, including
- * any step whose `selectTools` hook swaps in a different toolbox for that
- * step (AB-239).
+ * Attach whatever run-owned listeners a caller wants on one toolbox instance
+ * (e.g. the curated `tool.*` bubble listeners — AB-294) and return a function
+ * that detaches them again. Called once for the run's base toolbox at
+ * {@link createToolboxEventForwarder} construction, and again for each
+ * `selectTools`-swapped step toolbox — see {@link ToolboxEventForwarder}.
+ */
+export type ToolboxCuratedAttacher = (toolbox: AnyToolbox) => () => void;
+
+/**
+ * Manages `toolbox.*` event forwarding — and, when an `attachCurated` is
+ * supplied, any curated per-toolbox listeners a driver wants mirrored onto
+ * the same bracket — for a run's full duration, including any step whose
+ * `selectTools` hook swaps in a different toolbox for that step (AB-239,
+ * AB-294).
  *
  * A base subscription onto the run's original toolbox is installed for the
  * run's whole lifetime — this is what {@link forwardEvents} alone gave every
@@ -19,7 +30,10 @@ import { forwardEvents } from 'lifecycle';
  * `complete` / `budget-exceeded` / `loop-blocked` (and its companion `error`)
  * reach the run emitter with the `toolbox` prefix for exactly the duration of
  * the step that resolved that toolbox, exactly as base-toolbox events do for
- * the run's full duration.
+ * the run's full duration. When `attachCurated` is supplied, its curated
+ * listeners open and close on the identical bracket, so a swapped step
+ * toolbox's `tool.started` / `tool.settled` / `tool.progress` /
+ * `tool.policy-denied` bubble events reach the run emitter too (AB-294).
  *
  * Closing the swap subscription at the actual step end — not merely before
  * the NEXT step resolves ITS toolbox — matters for the durable driver: a step
@@ -30,8 +44,9 @@ import { forwardEvents } from 'lifecycle';
  * shared — into this (possibly long-parked) run's emitter.
  *
  * When the resolved toolbox IS the base instance, no second subscription is
- * opened — the base subscription already covers it, so there is never
- * duplicate delivery for an unswapped step.
+ * opened (for the low-level forward, or for `attachCurated`) — the base
+ * subscription already covers it, so there is never duplicate delivery for
+ * an unswapped step.
  */
 export interface ToolboxEventForwarder {
   /**
@@ -46,26 +61,35 @@ export interface ToolboxEventForwarder {
 export function createToolboxEventForwarder(
   baseToolbox: AnyToolbox,
   target: EventTarget,
+  attachCurated?: ToolboxCuratedAttacher,
 ): ToolboxEventForwarder {
   const baseForward = forwardEvents(baseToolbox, target, 'toolbox');
+  const detachBaseCurated = attachCurated?.(baseToolbox);
   let swapForward: { stop(): void } | undefined;
+  let detachSwapCurated: (() => void) | undefined;
   let stopped = false;
 
   return {
     onStepToolbox(toolbox: AnyToolbox): void {
       swapForward?.stop();
       swapForward = undefined;
+      detachSwapCurated?.();
+      detachSwapCurated = undefined;
       // Once `stop()` has run, `onStepToolbox` must stay a no-op — a late call
       // (e.g. a driver bug, or a step somehow resolving after cleanup) must
       // never re-open a subscription `stop()` was meant to make final.
       if (stopped || toolbox === baseToolbox) return;
       swapForward = forwardEvents(toolbox, target, 'toolbox');
+      detachSwapCurated = attachCurated?.(toolbox);
     },
     stop(): void {
       stopped = true;
       baseForward.stop();
       swapForward?.stop();
       swapForward = undefined;
+      detachBaseCurated?.();
+      detachSwapCurated?.();
+      detachSwapCurated = undefined;
     },
   };
 }

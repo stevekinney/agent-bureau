@@ -1491,6 +1491,159 @@ describe('createRun with durable routing', () => {
     }
   });
 
+  it('forwards tool.started, tool.settled, tool.progress, and tool.policy-denied from a selectTools-swapped step toolbox on the durable path (AB-294)', async () => {
+    const context = await buildContext();
+    try {
+      const echoTool = createTool({
+        name: 'echo',
+        description: 'Echo the input',
+        input: z.object({ message: z.string() }),
+        execute: async ({ message }: { message: string }) => message,
+      });
+
+      const baseToolbox = createToolbox([echoTool]) as unknown as RunOptions['toolbox'];
+      const swappedToolbox = createToolbox([echoTool]) as unknown as RunOptions['toolbox'];
+
+      let resolveGenerate: ((response: { content: string; toolCalls: [] }) => void) | undefined;
+      let markGenerateStarted: (() => void) | undefined;
+      const generateStarted = new Promise<void>((resolve) => {
+        markGenerateStarted = resolve;
+      });
+
+      const activeRun = createRun(
+        {
+          generate: () =>
+            new Promise((resolve) => {
+              resolveGenerate = resolve;
+              markGenerateStarted?.();
+            }),
+          toolbox: baseToolbox,
+          conversation: createConversationHistory(),
+          stopWhen: stopWhen.noToolCalls(),
+          runId: 'durable-swap-curated-run',
+          // Every step resolves to the swapped toolbox; the base toolbox
+          // never sees these injected events.
+          selectTools: () => swappedToolbox,
+        },
+        { ...context, runId: 'durable-swap-curated-run', prompt: 'Start' },
+      );
+
+      const started: ToolStartedBubbleEvent[] = [];
+      const settled: ToolSettledBubbleEvent[] = [];
+      const progress: ToolProgressBubbleEvent[] = [];
+      const denied: ToolPolicyDeniedBubbleEvent[] = [];
+      activeRun.addEventListener('tool.started', (e) => started.push(e));
+      activeRun.addEventListener('tool.settled', (e) => settled.push(e));
+      activeRun.addEventListener('tool.progress', (e) => progress.push(e));
+      activeRun.addEventListener('tool.policy-denied', (e) => denied.push(e));
+
+      // `onStepToolbox` opens the swap subscription before `generate` is
+      // called (see `run-step.ts`) — once the mock generate has started,
+      // events emitted directly on `swappedToolbox` are forwarded exactly
+      // as a real tool call's would be.
+      await generateStarted;
+      const call = { id: 'call-1', name: 'echo', arguments: { message: 'hi' } };
+      swappedToolbox.emit('execute-start', { tool: echoTool, call, params: { message: 'hi' } });
+      swappedToolbox.emit('progress', { tool: echoTool, call, percent: 50, message: 'halfway' });
+      swappedToolbox.emit('policy-denied', {
+        tool: echoTool,
+        call,
+        params: { message: 'hi' },
+        reason: 'blocked',
+      });
+      swappedToolbox.emit('settled', { tool: echoTool, call, result: 'hi', error: undefined });
+      resolveGenerate?.({ content: 'done', toolCalls: [] });
+
+      await activeRun.result;
+
+      expect(started).toHaveLength(1);
+      expect(started[0]?.toolName).toBe('echo');
+      expect(settled).toHaveLength(1);
+      expect(settled[0]?.toolName).toBe('echo');
+      expect(progress).toHaveLength(1);
+      expect(progress[0]?.percent).toBe(50);
+      expect(denied).toHaveLength(1);
+      expect(denied[0]?.reason).toBe('blocked');
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('does not duplicate curated tool.* bubble events on the durable path when selectTools returns the original toolbox instance', async () => {
+    const context = await buildContext();
+    try {
+      const echoTool = createTool({
+        name: 'echo',
+        description: 'Echo the input',
+        input: z.object({ message: z.string() }),
+        execute: async ({ message }: { message: string }) => message,
+      });
+
+      const toolbox = createToolbox([echoTool]) as unknown as RunOptions['toolbox'];
+
+      const generate = createMockGenerate([
+        { content: '', toolCalls: [{ name: 'echo', arguments: { message: 'hi' } }] },
+        { content: 'done', toolCalls: [] },
+      ]);
+
+      const activeRun = createRun(
+        {
+          generate,
+          toolbox,
+          conversation: createConversationHistory(),
+          stopWhen: stopWhen.noToolCalls(),
+          runId: 'durable-no-swap-curated-run',
+          selectTools: () => toolbox,
+        },
+        { ...context, runId: 'durable-no-swap-curated-run', prompt: 'Start' },
+      );
+
+      const started: ToolStartedBubbleEvent[] = [];
+      const settled: ToolSettledBubbleEvent[] = [];
+      activeRun.addEventListener('tool.started', (e) => started.push(e));
+      activeRun.addEventListener('tool.settled', (e) => settled.push(e));
+
+      await activeRun.result;
+
+      expect(started).toHaveLength(1);
+      expect(settled).toHaveLength(1);
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('does not throw when the base toolbox omits addEventListener (AB-294)', async () => {
+    const context = await buildContext();
+    try {
+      // A minimal stub toolbox without `addEventListener` — mirrors the
+      // guard `attachToolboxCuratedListeners` documents against mock/custom
+      // toolboxes that omit it (e.g. minimal stubs used in tests).
+      const stubToolbox = {
+        tools: () => [],
+        execute: async () => {
+          throw new Error('never called — no tool calls in this run');
+        },
+        toObservable: () => ({ subscribe: () => ({ unsubscribe: () => {} }) }),
+      };
+
+      const activeRun = createRun(
+        {
+          generate: createMockGenerate([{ content: 'done', toolCalls: [] }]),
+          toolbox: stubToolbox as unknown as RunOptions['toolbox'],
+          conversation: createConversationHistory(),
+          stopWhen: stopWhen.noToolCalls(),
+          runId: 'durable-no-addeventlistener-run',
+        },
+        { ...context, runId: 'durable-no-addeventlistener-run', prompt: 'Start' },
+      );
+
+      const result = await activeRun.result;
+      expect(result.content).toBe('done');
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
   it('calls onStepToolbox at each step start with the resolved toolbox and at step end with the base toolbox on the durable path (AB-239)', async () => {
     const context = await buildContext();
     try {
@@ -2488,6 +2641,113 @@ describe('createRecoveredRunEventSurface', () => {
       new ToolboxBudgetExceededEvent({ tool, call, reason: 'ignored after stop' }),
     );
     expect(forwardedTypes).toHaveLength(beforeStopCount);
+  });
+
+  it('forwards curated tool.* bubble events from a selectTools-swapped step toolbox and stops without duplicating base events (AB-294)', () => {
+    const tool = createTool({
+      name: 'recovered-swap-curated-tool',
+      description: 'A recovered-run swapped-toolbox curated-event source',
+      input: z.object({ value: z.string() }),
+      async execute({ value }) {
+        return { value };
+      },
+    });
+    const baseToolbox = createToolbox([tool]);
+    const swappedToolbox = createToolbox([tool]);
+    const options = {
+      ...runOptions(async () => ({ content: 'unused', toolCalls: [] })),
+      toolbox: baseToolbox as unknown as RunOptions['toolbox'],
+    };
+    const services: DurableRunDeps = { options, toolbox: baseToolbox };
+    const surface = createRecoveredRunEventSurface(
+      services,
+      'recovered-swap-curated-run',
+      'recovered-agent',
+    );
+
+    const started: ToolStartedBubbleEvent[] = [];
+    const settled: ToolSettledBubbleEvent[] = [];
+    const progress: ToolProgressBubbleEvent[] = [];
+    const denied: ToolPolicyDeniedBubbleEvent[] = [];
+    surface.emitter.addEventListener('tool.started', (event) => started.push(event));
+    surface.emitter.addEventListener('tool.settled', (event) => settled.push(event));
+    surface.emitter.addEventListener('tool.progress', (event) => progress.push(event));
+    surface.emitter.addEventListener('tool.policy-denied', (event) => denied.push(event));
+
+    // `run-workflow.ts` calls `deps.onStepToolbox` once per step with that
+    // step's resolved toolbox.
+    services.onStepToolbox?.(swappedToolbox);
+
+    const call = { id: 'swap-curated-call-id', name: tool.name, arguments: { value: 'hi' } };
+    swappedToolbox.dispatchEvent(
+      new ToolboxExecuteStartEvent({ tool, call, params: { value: 'hi' } }),
+    );
+    swappedToolbox.dispatchEvent(
+      new ToolboxProgressEvent({ tool, call, percent: 50, message: 'halfway' }),
+    );
+    swappedToolbox.dispatchEvent(
+      new ToolboxPolicyDeniedEvent({ tool, call, params: { value: 'hi' }, reason: 'blocked' }),
+    );
+    swappedToolbox.dispatchEvent(new ToolboxSettledEvent({ tool, call, result: { value: 'hi' } }));
+
+    expect(started).toHaveLength(1);
+    expect(started[0]?.toolName).toBe(tool.name);
+    expect(progress).toHaveLength(1);
+    expect(progress[0]?.percent).toBe(50);
+    expect(denied).toHaveLength(1);
+    expect(denied[0]?.reason).toBe('blocked');
+    expect(settled).toHaveLength(1);
+    expect(settled[0]?.status).toBe('success');
+
+    // The base toolbox's own curated subscription is untouched by the
+    // swap — it still forwards, and does not duplicate the swapped
+    // toolbox's events.
+    const beforeBaseStartedCount = started.length;
+    baseToolbox.dispatchEvent(
+      new ToolboxExecuteStartEvent({ tool, call, params: { value: 'hi' } }),
+    );
+    expect(started).toHaveLength(beforeBaseStartedCount + 1);
+
+    // Reverting to the base toolbox for the next step stops the swap
+    // subscription — the swapped toolbox's later events are no longer forwarded.
+    services.onStepToolbox?.(baseToolbox);
+    const beforeRevertProgressCount = progress.length;
+    swappedToolbox.dispatchEvent(
+      new ToolboxProgressEvent({ tool, call, percent: 100, message: 'ignored after revert' }),
+    );
+    expect(progress).toHaveLength(beforeRevertProgressCount);
+
+    surface.stopToolboxForward();
+    const beforeStopStartedCount = started.length;
+    baseToolbox.dispatchEvent(
+      new ToolboxExecuteStartEvent({ tool, call, params: { value: 'hi' } }),
+    );
+    expect(started).toHaveLength(beforeStopStartedCount);
+  });
+
+  it('does not throw when the base toolbox omits addEventListener (AB-294)', () => {
+    // A minimal stub toolbox without `addEventListener` — mirrors the guard
+    // `attachToolboxCuratedListeners` documents against mock/custom
+    // toolboxes that omit it (e.g. minimal stubs used in tests).
+    const stubToolbox = {
+      tools: () => [],
+      execute: async () => {
+        throw new Error('never called in this test');
+      },
+      toObservable: () => ({ subscribe: () => ({ unsubscribe: () => {} }) }),
+    };
+    const options = {
+      ...runOptions(async () => ({ content: 'unused', toolCalls: [] })),
+      toolbox: stubToolbox as unknown as RunOptions['toolbox'],
+    };
+    const services: DurableRunDeps = { options, toolbox: stubToolbox as unknown as AnyToolbox };
+
+    const surface = createRecoveredRunEventSurface(
+      services,
+      'recovered-no-listener-run',
+      'recovered-agent',
+    );
+    expect(() => surface.stopToolboxForward()).not.toThrow();
   });
 });
 

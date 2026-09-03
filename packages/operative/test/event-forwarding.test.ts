@@ -5,7 +5,13 @@ import { z } from 'zod';
 
 import { noToolCalls } from '../src/conditions/predicates';
 import { createActiveRun } from '../src/create-run';
-import type { CombinedOperativeEventType } from '../src/events';
+import type {
+  CombinedOperativeEventType,
+  ToolPolicyDeniedBubbleEvent,
+  ToolProgressBubbleEvent,
+  ToolSettledBubbleEvent,
+  ToolStartedBubbleEvent,
+} from '../src/events';
 import { createMockGenerate } from '../src/test/index';
 import type { GenerateResponse } from '../src/types';
 
@@ -430,5 +436,110 @@ describe('event forwarding — selectTools-swapped step toolbox (AB-239)', () =>
     await activeRun.result;
 
     expect(callEvents).toHaveLength(1);
+  });
+});
+
+describe('curated tool.* bubble events — selectTools-swapped step toolbox (AB-294)', () => {
+  const echoTool = createTool({
+    name: 'echo',
+    description: 'Echo the input',
+    input: z.object({ message: z.string() }),
+    execute: async ({ message }) => message,
+  });
+
+  it('forwards tool.started, tool.settled, tool.progress, and tool.policy-denied from a swapped step toolbox', async () => {
+    const baseToolbox = createToolbox([echoTool]);
+    const swappedToolbox = createToolbox([echoTool]);
+    const conversation = new Conversation();
+
+    let resolveGenerate: ((response: GenerateResponse) => void) | undefined;
+    let markGenerateStarted: (() => void) | undefined;
+    const generateStarted = new Promise<void>((resolve) => {
+      markGenerateStarted = resolve;
+    });
+
+    const activeRun = createActiveRun({
+      generate: () =>
+        new Promise<GenerateResponse>((resolve) => {
+          resolveGenerate = resolve;
+          markGenerateStarted?.();
+        }),
+      toolbox: baseToolbox,
+      conversation,
+      stopWhen: noToolCalls(),
+      // Every step uses the swapped toolbox, never the base one — the base
+      // toolbox's own listeners must never see these injected events.
+      selectTools: () => swappedToolbox,
+    });
+
+    const started: ToolStartedBubbleEvent[] = [];
+    const settled: ToolSettledBubbleEvent[] = [];
+    const progress: ToolProgressBubbleEvent[] = [];
+    const denied: ToolPolicyDeniedBubbleEvent[] = [];
+    activeRun.addEventListener('tool.started', (e) => started.push(e));
+    activeRun.addEventListener('tool.settled', (e) => settled.push(e));
+    activeRun.addEventListener('tool.progress', (e) => progress.push(e));
+    activeRun.addEventListener('tool.policy-denied', (e) => denied.push(e));
+
+    // The step's toolbox is resolved (and `onStepToolbox` opens the swap
+    // subscription) before `generate` is called — see `run-step.ts`. Once
+    // the mock generate has started, the swap subscription is guaranteed
+    // open, so events emitted directly on `swappedToolbox` here are
+    // forwarded exactly as a real tool call's would be.
+    await generateStarted;
+    const call = { id: 'call-1', name: 'echo', arguments: { message: 'hi' } };
+    swappedToolbox.emit('execute-start', { tool: echoTool, call, params: { message: 'hi' } });
+    swappedToolbox.emit('progress', { tool: echoTool, call, percent: 50, message: 'halfway' });
+    swappedToolbox.emit('policy-denied', {
+      tool: echoTool,
+      call,
+      params: { message: 'hi' },
+      reason: 'blocked',
+    });
+    swappedToolbox.emit('settled', { tool: echoTool, call, result: 'hi', error: undefined });
+    resolveGenerate?.(textResponse('Done.'));
+
+    await activeRun.result;
+
+    expect(started).toHaveLength(1);
+    expect(started[0]?.toolName).toBe('echo');
+    expect(settled).toHaveLength(1);
+    expect(settled[0]?.toolName).toBe('echo');
+    expect(progress).toHaveLength(1);
+    expect(progress[0]?.toolName).toBe('echo');
+    expect(progress[0]?.percent).toBe(50);
+    expect(denied).toHaveLength(1);
+    expect(denied[0]?.toolName).toBe('echo');
+    expect(denied[0]?.reason).toBe('blocked');
+  });
+
+  it('does not duplicate curated tool.* bubble events when selectTools returns the original toolbox instance', async () => {
+    const toolbox = createToolbox([echoTool]);
+    const conversation = new Conversation();
+
+    const generate = createMockGenerate([
+      toolCallResponse([{ name: 'echo', arguments: { message: 'hi' } }]),
+      textResponse('Done.'),
+    ]);
+
+    const activeRun = createActiveRun({
+      generate,
+      toolbox,
+      conversation,
+      stopWhen: noToolCalls(),
+      // Explicitly returns the SAME instance as `options.toolbox` — this is
+      // the "no swap" case the forwarder must not double-subscribe for.
+      selectTools: () => toolbox,
+    });
+
+    const started: ToolStartedBubbleEvent[] = [];
+    const settled: ToolSettledBubbleEvent[] = [];
+    activeRun.addEventListener('tool.started', (e) => started.push(e));
+    activeRun.addEventListener('tool.settled', (e) => settled.push(e));
+
+    await activeRun.result;
+
+    expect(started).toHaveLength(1);
+    expect(settled).toHaveLength(1);
   });
 });

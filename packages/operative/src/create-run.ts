@@ -1,4 +1,4 @@
-import type { ToolboxEventMap } from 'armorer';
+import type { AnyToolbox, ToolboxEventMap } from 'armorer';
 import { Conversation, isConversation } from 'conversationalist';
 import type { ObservableLike, Observer, Subscription } from 'lifecycle';
 import { CompletableEventTarget, createDefaultRuntimeServices, forwardEvents } from 'lifecycle';
@@ -287,12 +287,6 @@ export function createActiveRun(
     pendingHookPromises.push(promise);
   };
 
-  // AB-239: the base subscription covers the whole run; `toolboxForwarder.onStepToolbox`
-  // (wired below via `executeLoop`) additionally covers any step whose `selectTools`
-  // hook swaps in a different toolbox for that step.
-  const toolboxForwarder = createToolboxEventForwarder(options.toolbox, emitter);
-  cleanups.push(() => toolboxForwarder.stop());
-
   const conversationForward = forwardEvents(conversation, emitter, 'conversation');
   cleanups.push(() => conversationForward.stop());
 
@@ -320,24 +314,20 @@ export function createActiveRun(
   // the start of each step). The agentName comes from RunOptions (optional —
   // supplied by bureau.agent / createAgent / SessionHandle); runId is always
   // the minted-or-supplied id resolved above.
-  {
+  //
+  // AB-294: these listeners move onto the same per-step subscription
+  // `toolboxForwarder` uses for the low-level `toolbox.*` forward (AB-239) —
+  // `attachToolboxCuratedListeners` below is passed to
+  // `createToolboxEventForwarder` as its `attachCurated` argument, so a
+  // `selectTools`-swapped step toolbox gets these listeners for exactly the
+  // duration of the step that resolved it, with no duplicate delivery when
+  // the step toolbox is the original (same base+swap bracket as AB-239).
+  const toolboxForwarder = (() => {
     const agentName = options.agentName ?? '';
     let currentStep = 0;
     const stepListener = (e: StepStartedEvent) => (currentStep = e.step);
     emitter.addEventListener(StepStartedEvent.type, stepListener);
     cleanups.push(() => emitter.removeEventListener(StepStartedEvent.type, stepListener));
-    // Wire the curated toolbox events onto the run emitter.
-    // The toolbox addEventListener returns a cleanup function and also accepts
-    // an AbortSignal for automatic cleanup. We guard against mock/custom toolboxes
-    // that omit addEventListener (e.g. minimal stubs used in tests) — if the method
-    // is absent the bubbling simply does not happen; no exception.
-    const toolbox = options.toolbox as unknown as {
-      addEventListener?: <K extends keyof ToolboxEventMap>(
-        type: K,
-        listener: (e: ToolboxEventMap[K]) => void,
-        options?: AddEventListenerOptions,
-      ) => () => void;
-    };
 
     // Map 'execute-start' → tool.started (reliably emitted for all tools, regardless of telemetry flag)
     const onExecuteStart = (e: ToolboxEventMap['execute-start']) => {
@@ -492,20 +482,31 @@ export function createActiveRun(
       );
     };
 
-    // Each call returns a cleanup function; guard against stubs without addEventListener.
-    if (toolbox.addEventListener) {
-      const addListener = toolbox.addEventListener.bind(toolbox);
-      // AB-204 review (PRRT_kwDORvupsc6erisn): these must NOT be bound to
-      // `abortController.signal` — armorer's `addEventListener` merges a
-      // supplied signal for automatic removal, so `abort()` would strip
-      // `onExecuteStart`/`onSettled` immediately, synchronously, on the
-      // same tick, before a tool already in flight can ever emit its
-      // `settled` event. `inFlightTools` would then never reach zero and
-      // `awaitToolDrain()` (used by `resolveOutcome` below) would hang
-      // forever after an abort. Removal is handled entirely by the
-      // explicit, already-drain-aware `cleanups` entry below instead,
-      // which still runs on every termination path (abort included) once
-      // `result` settles via `.finally(complete)`.
+    // Attach the curated listeners onto one toolbox instance (the base
+    // toolbox, or a `selectTools`-swapped step toolbox — AB-294) and return a
+    // function that detaches them again. Guards against mock/custom toolboxes
+    // that omit `addEventListener` (e.g. minimal stubs used in tests) — if
+    // the method is absent the bubbling simply does not happen; no exception.
+    //
+    // AB-204 review (PRRT_kwDORvupsc6erisn): these must NOT be bound to
+    // `abortController.signal` — armorer's `addEventListener` merges a
+    // supplied signal for automatic removal, so `abort()` would strip
+    // `onExecuteStart`/`onSettled` immediately, synchronously, on the same
+    // tick, before a tool already in flight can ever emit its `settled`
+    // event. `inFlightTools` would then never reach zero and
+    // `awaitToolDrain()` (used by `resolveOutcome` below) would hang forever
+    // after an abort. Removal is handled entirely by the returned detach
+    // function instead.
+    const attachToolboxCuratedListeners = (toolboxInstance: AnyToolbox): (() => void) => {
+      const toolboxWithListener = toolboxInstance as unknown as {
+        addEventListener?: <K extends keyof ToolboxEventMap>(
+          type: K,
+          listener: (e: ToolboxEventMap[K]) => void,
+          options?: AddEventListenerOptions,
+        ) => () => void;
+      };
+      if (!toolboxWithListener.addEventListener) return () => {};
+      const addListener = toolboxWithListener.addEventListener.bind(toolboxWithListener);
       const toolboxCleanups = [
         addListener('execute-start', onExecuteStart),
         addListener('settled', onSettled),
@@ -515,24 +516,34 @@ export function createActiveRun(
       const removeToolboxListeners = (): void => {
         for (const cleanup of toolboxCleanups) cleanup?.();
       };
-      cleanups.push(() => {
-        // AB-204 (PRRT_kwDORvupsc6elvRf): a `failFast` parallel tool batch
-        // can settle `result` (via `makeErrorResult`) while sibling tool
-        // calls are still executing. Tearing this listener down right here,
-        // unconditionally, would mean `onSettled` never sees those siblings'
-        // `settled` events, so `inFlightTools` would never reach zero and
-        // `awaitToolDrain()` (used by `resolveOutcome` below) would hang
-        // forever. Defer the teardown until the counter actually drains;
-        // the common case (no in-flight tools left) tears down immediately,
-        // same as before.
-        if (inFlightTools === 0) {
+      // Drain-aware removal (AB-204, PRRT_kwDORvupsc6elvRf) applies only to
+      // the run's base toolbox — a `failFast` parallel tool batch can settle
+      // `result` while sibling tool calls on the base toolbox are still
+      // executing, and tearing this listener down right here, unconditionally,
+      // would mean `onSettled` never sees those siblings' `settled` events, so
+      // `inFlightTools` would never reach zero and `awaitToolDrain()` (used by
+      // `resolveOutcome` below) would hang forever. A step-swap toolbox's
+      // detach instead runs at the step's actual end (mirroring the low-level
+      // `toolbox.*` forward's swap-close in `toolbox-event-forwarding.ts`),
+      // by which point `runStep` has already awaited that step's own tool
+      // calls to completion, so no drain wait is needed there.
+      const isBaseToolbox = toolboxInstance === options.toolbox;
+      return () => {
+        if (!isBaseToolbox || inFlightTools === 0) {
           removeToolboxListeners();
         } else {
           void awaitToolDrain().then(removeToolboxListeners);
         }
-      });
-    }
-  }
+      };
+    };
+
+    // AB-239: the base subscription covers the whole run; `toolboxForwarder.onStepToolbox`
+    // (wired below via `executeLoop`) additionally covers any step whose `selectTools`
+    // hook swaps in a different toolbox for that step — including, since AB-294, the
+    // curated listeners defined above.
+    return createToolboxEventForwarder(options.toolbox, emitter, attachToolboxCuratedListeners);
+  })();
+  cleanups.push(() => toolboxForwarder.stop());
 
   const result = Promise.resolve()
     .then(() =>
