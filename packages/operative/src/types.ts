@@ -310,6 +310,26 @@ export type RunResult<O = unknown, H extends boolean = true> = RunResultBase &
   ([H] extends [true] ? { output?: O } : Record<never, never>);
 
 /**
+ * The `RunResult` fields safe to expose under a `'redacted'` liveness
+ * projection (AB-88/AC4) — never the full `conversation` transcript, raw
+ * model `content`, `output`, or `error`. Every standalone run's projection
+ * is `'redacted'` permanently (AB-88's "Standalone-run projection,
+ * resolved"); nothing in this codebase today produces `'privileged'`, so
+ * `LivenessSnapshot.result` would otherwise leak the complete conversation
+ * and tool arguments/results under a label that promises otherwise
+ * (AB-214 review PRRT_kwDORvupsc6es7pl).
+ */
+export interface RedactedRunResultSummary {
+  readonly finishReason: FinishReason;
+  readonly hasError: boolean;
+}
+
+/** Builds the `'redacted'`-safe summary — see {@link RedactedRunResultSummary}. */
+export function toRedactedRunResultSummary(result: RunResultBase): RedactedRunResultSummary {
+  return { finishReason: result.finishReason, hasError: result.error !== undefined };
+}
+
+/**
  * Per-session gate `runStep` consults at its entry boundary (AB-67, "Define
  * the runtime steering contract") to read desired steering state and, when
  * `paused: true`, block until released.

@@ -60,6 +60,14 @@ export interface Heartbeat {
 /**
  * Creates a heartbeat that periodically submits tasks to the scheduler.
  * Uses a sleep-loop (not setInterval) to prevent tick stacking.
+ *
+ * Naming note (AB-88, AC14): this schedules NEW recurring work — it is not a
+ * run-liveness or watchdog primitive, and shares no type, code path, or
+ * event with `packages/operative/src/liveness/`'s `LivenessObservable`/
+ * `createStallWatchdog` contract, whose vocabulary uses "pulse" for a
+ * liveness signal rather than "tick" for scheduled work. `createHeartbeat`
+ * keeps its existing name; do not read it as implementing AB-88's liveness
+ * semantics for the run it happens to be attached to.
  */
 export function createHeartbeat(options: CreateHeartbeatOptions): Heartbeat {
   let heartbeatIdCounter = 0;

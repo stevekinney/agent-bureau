@@ -48,6 +48,7 @@ Everything provider-specific stays behind a narrow seam: the `@lostgradient/oper
   - [`operative` — Core Entry Point](#operative--core-entry-point)
   - [`@lostgradient/operative/conditions` — Stop Conditions](#operativeconditions--stop-conditions)
   - [`@lostgradient/operative/guardrails` — Guardrails](#operativeguardrails--guardrails)
+  - [`@lostgradient/operative/liveness` — Liveness Watchdog](#operativeliveness--liveness-watchdog)
   - [`@lostgradient/operative/store` — Run Store](#operativestore--run-store)
   - [`@lostgradient/operative/streaming` — Streaming Helpers](#operativestreaming--streaming-helpers)
   - [`@lostgradient/operative/retry` — Retry Mutators](#operativeretry--retry-mutators)
@@ -402,7 +403,18 @@ interface RunResult {
 | `subscribe(type, observer)`           | RxJS-style subscription.                               |
 | `events(type, options?)`              | `AsyncIterableIterator` of typed events.               |
 | `toObservable()`                      | All events as a single `ObservableLike`.               |
+| `snapshot()`                          | Current `LivenessSnapshot` — see below.                |
+| `subscribeSnapshot(observer, opts?)`  | Non-consuming liveness observer — see below.           |
 | `[Symbol.dispose]()`                  | Aborts and completes—use with `using`.                 |
+
+**Liveness (AB-88, AB-214).** `ActiveRun`, `AgentRun`, and `DiagnosticAgentRun`
+all implement `LivenessObservable`: `snapshot()` returns the current
+`LivenessSnapshot` synchronously (never starts work, never blocks, never
+mutates); `subscribeSnapshot(observer, options?)` delivers that snapshot
+immediately, then a new one on every revision change, and delivers a
+terminal snapshot exactly once for already-terminal work. See
+`@lostgradient/operative/liveness` below for the full type contract and
+`createStallWatchdog`.
 
 **Event types** emitted on `ActiveRun` (all prefixed by their lifecycle stage):
 
@@ -1818,6 +1830,67 @@ const activeRun = createActiveRun({
 **Exported functions:** `createGuardrails`, `createInputGuardrail`, `createOutputGuardrail`, `createSessionTaintTracker`, `createCodeSafetyValidator`, `createGroundingValidator`, `createOutputPIIValidator`, `createInputLengthDetector`, `createPromptInjectionDetector`, `createTopicBoundaryDetector`, `withMinimumTripwireConfidence`, `DEFAULT_PROMPT_INJECTION_TRIPWIRE_THRESHOLD`.
 
 **Exported types:** `DetectionResult`, `DetectorContext`, `GuardrailHooks`, `GuardrailProvenance`, `GuardrailsOptions`, `GuardrailTriggeredEvent`, `InputDetector`, `InputGuardrailOptions`, `OutputGuardrailOptions`, `OutputGuardrailTriggeredEvent`, `OutputValidator`, `SessionTaintedEvent`, `SessionTaintOptions`, `SessionTaintTracker`, `ValidationResult`, `ValidatorContext`, `CodeSafetyValidatorOptions`, `GroundingValidatorOptions`, `InputLengthDetectorOptions`, `PromptInjectionDetectorOptions`, `TopicBoundaryDetectorOptions`.
+
+---
+
+### `@lostgradient/operative/liveness` — Liveness Watchdog
+
+AB-88's binding liveness, progress, and stuck-work contract, implemented by
+AB-214/obs-01. `LivenessSnapshot` is the plain-data, immutable-per-revision
+read every `LivenessObservable` (`ActiveRun`, `AgentRun`,
+`DiagnosticAgentRun`) returns from `snapshot()`/`subscribeSnapshot()`:
+lifecycle status, reachability, progress, a derived single-glance
+`assessment`, attempt-fenced evidence, and the `StallPolicy` version that
+produced it.
+
+```typescript
+import {
+  createStallWatchdog,
+  LIVENESS_POLICY_VERSION,
+  TOOL_CALL_POLICY,
+  toolCallPolicy,
+} from '@lostgradient/operative/liveness';
+
+const clock = {
+  now: () => Date.now(),
+  setTimeout: (cb, ms) => setTimeout(cb, ms),
+  clearTimeout: (handle) => clearTimeout(handle),
+};
+
+const watchdog = createStallWatchdog(toolCallPolicy(30_000), clock);
+watchdog.recordPulse('tool-progress', /* attempt */ 0, { percent: 50 });
+const { reachability, progress, missedPulseCount } = watchdog.assess();
+watchdog.dispose(); // clears the internal cadence timer
+```
+
+`createStallWatchdog` is the single timer-agnostic implementation of a
+`StallPolicy` row's cadence, grace, jitter, and missed-pulse math — every
+consumer (obs-02's `SessionHandle` wiring, obs-03's child-liveness rollup,
+obs-06's Gateway connection watchdog) imports it rather than reimplementing
+it. Evidence sources are isolated per AB-88's AC5 table: a `host-reachability`
+pulse never resets a missed-pulse count accrued from `provider-io`,
+`tool-progress`, `worker-session-heartbeat`, `task-attempt-heartbeat`, or
+`lease-renewal`; an evidence entry whose `attempt` is older than the
+watchdog's current attempt is discarded, never merged. Every
+`monotonic-observer` policy pauses accrual across a clock gap an order of
+magnitude larger than `cadenceMs + graceMs` (a suspected process/laptop
+suspension, not real silence).
+
+**Exported functions:** `createStallWatchdog`, `createDefaultRunIdentifierSeam`, `sessionMonitorPolicy`, `toolCallPolicy`.
+
+**Exported constants:** `LIVENESS_POLICY_VERSION`, `defaultRunIdentifierSeam`, `AGENT_RUN_PROVIDER_TURN_POLICY`, `TOOL_CALL_POLICY`, `SCHEDULER_TASK_POLICY`, `GATEWAY_CONNECTION_POLICY`, `BACKGROUND_EVALUATION_POLICY`, `WEBHOOK_DELIVERY_POLICY`, `WEFT_ACTIVITY_POLICY`, `WEFT_WORKER_POLICY`, `WEFT_TASK_POLICY`, `WEFT_STREAM_POLICY`.
+
+**Exported types:** `LivenessSnapshot`, `LivenessSubjectKind`, `LivenessLifecycleStatus`, `LivenessReachability`, `LivenessProgressState`, `LivenessAssessment`, `SemanticProgress`, `LivenessLeaseEvidence`, `LivenessEvidenceSource`, `LivenessEvidenceEntry`, `DeclaredWait`, `DeclaredWaitReason`, `StallPolicy`, `LivenessClockSource`, `LivenessSuspensionBehavior`, `LivenessRecoveryRule`, `LivenessObservable`, `StallWatchdog`, `StallWatchdogAssessment`, `StallWatchdogClock`, `RunIdentifierSeam`.
+
+**Standalone-run identity (AB-88's Amendment 1, corrected by AB-214).** A
+standalone (non-Bureau) run mints a process-local id at `ActiveRun`
+construction through `RunIdentifierSeam` — never `RuntimeServices.identifiers`,
+which does not exist in this repository — whenever `RunOptions.runId` is
+absent. The minted id populates `LivenessSnapshot.id` and stamps curated
+`tool.*` bubble events and `createSubagentTool`'s per-call `parentRunId`; it
+is never registered with Bureau's `Store` and confers no locator or
+reattachment capability. A Bureau- or caller-supplied `runId` is always used
+as-is.
 
 ---
 

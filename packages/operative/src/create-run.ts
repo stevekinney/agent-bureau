@@ -20,10 +20,18 @@ import {
   ToolSettledBubbleEvent,
   ToolStartedBubbleEvent,
 } from './events';
+import type { AgentRunLivenessSnapshot, RunIdentifierSeam, StallWatchdogClock } from './liveness';
+import { createActiveRunLiveness, defaultRunIdentifierSeam } from './liveness';
 import { executeLoop } from './loop';
 import { toOutputJsonSchema } from './structured-output/response-schema';
 import { createToolboxEventForwarder } from './toolbox-event-forwarding';
-import type { CleanupAcknowledgement, ClosedOptions, RunOptions, RunResult } from './types';
+import {
+  type CleanupAcknowledgement,
+  type ClosedOptions,
+  type RunOptions,
+  type RunResult,
+  toRedactedRunResultSummary,
+} from './types';
 
 /**
  * The internal event-emitting agent loop run. This is the low-level engine
@@ -73,7 +81,41 @@ export interface ActiveRun {
   ) => AsyncIterableIterator<CombinedOperativeEventMap[K]>;
   toObservable: () => ObservableLike<CombinedOperativeEventMap[CombinedOperativeEventType]>;
   complete: () => void;
+  /**
+   * Synchronous, never starts work, never blocks, never mutates
+   * (AB-88's `LivenessObservable`, implemented by AB-214/obs-01).
+   */
+  snapshot: () => AgentRunLivenessSnapshot;
+  /**
+   * Independent, non-consuming observer (AB-88's `LivenessObservable`).
+   * Delivers the current snapshot synchronously before returning, then a
+   * new snapshot on every revision change; already-terminal work delivers
+   * the terminal snapshot once.
+   */
+  subscribeSnapshot: (
+    observer: (snapshot: AgentRunLivenessSnapshot) => void,
+    options?: { signal?: AbortSignal },
+  ) => Subscription;
   [Symbol.dispose]: () => void;
+}
+
+/**
+ * Dependencies for the liveness identifier/clock seams (AB-88's Amendment 1,
+ * corrected by AB-214's coordinator rulings). Composition-root only — never
+ * reached from inside run logic a test would need to replace. Tests inject
+ * their own {@link RunIdentifierSeam} and/or clock instead of relying on the
+ * process-wide defaults.
+ */
+export interface CreateActiveRunDependencies {
+  identifiers?: RunIdentifierSeam;
+  clock?: StallWatchdogClock;
+  /**
+   * The authenticated principal or Bureau identifier that owns this run
+   * (`LivenessSnapshot.owner`, AC4). Absent for a standalone run (AB-88's
+   * standalone-run resolution) — Bureau supplies its own `request.principal`
+   * here when starting a run.
+   */
+  owner?: string;
 }
 
 /**
@@ -98,8 +140,24 @@ export interface ActiveRun {
  * When `durable` is provided (engine + checkpoint store + runId), the run is
  * driven through the Weft durable engine so it survives a crash and resumes.
  * Without `durable`, the in-memory loop runs.
+ *
+ * A standalone (non-Bureau) in-memory run — one whose `options.runId` is
+ * absent — mints a process-local id here from the `RunIdentifierSeam`
+ * (AB-88's Amendment 1, corrected by AB-214's coordinator rulings 2026-09-02
+ * to a local seam in `liveness/identifiers.ts` rather than the not-yet-built
+ * `RuntimeServices.identifiers`). The minted id becomes both
+ * `LivenessSnapshot.id` and `RunOptions.runId` for the rest of this run —
+ * including the curated `tool.*` bubble-event stamping and
+ * `createSubagentTool`'s per-call `parentRunId` — so a bare
+ * `createAgent().run()` has a stable run identity end to end. A Bureau- or
+ * caller-supplied `options.runId` is always used as-is, keeping this id
+ * identical to whatever id `store.register` later uses for the same run.
  */
-export function createActiveRun(options: RunOptions, durable?: DurableRunRouting): ActiveRun {
+export function createActiveRun(
+  options: RunOptions,
+  durable?: DurableRunRouting,
+  dependencies?: CreateActiveRunDependencies,
+): ActiveRun {
   // AB-18: an unrepresentable `output` schema fails synchronously here,
   // before either driver's async work begins — `createAgent` already runs
   // this same guard at its own call time; this covers `createActiveRun`
@@ -119,6 +177,8 @@ export function createActiveRun(options: RunOptions, durable?: DurableRunRouting
         agentName: options.agentName,
         options,
         prompt: durable.prompt,
+        ...(dependencies?.clock ? { livenessClock: dependencies.clock } : {}),
+        ...(dependencies?.owner !== undefined ? { livenessOwner: dependencies.owner } : {}),
         ...(durable.emitter
           ? {
               emitter: durable.emitter,
@@ -146,10 +206,26 @@ export function createActiveRun(options: RunOptions, durable?: DurableRunRouting
       // structuredClone-safe tree — see `durable/types.ts`.
       new Conversation(structuredClone(options.conversation));
 
+  // AB-88's Amendment 1 (corrected by AB-214's coordinator rulings): mint a
+  // process-local id for every standalone (no explicit `options.runId`)
+  // in-memory run, through the local identifier seam rather than a bare
+  // `crypto.randomUUID()` reached from inside run logic. A Bureau- or
+  // caller-supplied `runId` is always used as-is, so this id stays identical
+  // to whatever id `store.register` uses for a Bureau-started run.
+  const runId = options.runId ?? (dependencies?.identifiers ?? defaultRunIdentifierSeam).next();
+
+  const liveness = createActiveRunLiveness({
+    id: runId,
+    durability: 'process-local',
+    clock: dependencies?.clock,
+    owner: dependencies?.owner,
+  });
+
   const loopOptions: RunOptions = {
     ...options,
     conversation,
     signal: combinedSignal,
+    runId,
   };
 
   const cleanups: (() => void)[] = [];
@@ -205,13 +281,32 @@ export function createActiveRun(options: RunOptions, durable?: DurableRunRouting
   const conversationForward = forwardEvents(conversation, emitter, 'conversation');
   cleanups.push(() => conversationForward.stop());
 
+  // Provider I/O activity — the only source that populates `provider-io`
+  // evidence (AC11). A locally scheduled pulse is never labeled this way.
+  {
+    const onGenerateStarted = () => liveness.recordProviderPulse({ phase: 'started' });
+    const onGenerateCompleted = () => liveness.recordProviderPulse({ phase: 'completed' });
+    const onGenerateError = () => liveness.recordProviderPulse({ phase: 'error' });
+    const onGenerateRetry = () => liveness.recordProviderPulse({ phase: 'retry' });
+    emitter.addEventListener('generate.started', onGenerateStarted);
+    emitter.addEventListener('generate.completed', onGenerateCompleted);
+    emitter.addEventListener('generate.error', onGenerateError);
+    emitter.addEventListener('generate.retry', onGenerateRetry);
+    cleanups.push(() => {
+      emitter.removeEventListener('generate.started', onGenerateStarted);
+      emitter.removeEventListener('generate.completed', onGenerateCompleted);
+      emitter.removeEventListener('generate.error', onGenerateError);
+      emitter.removeEventListener('generate.retry', onGenerateRetry);
+    });
+  }
+
   // C3 — curated tool.* bubble events stamped with {agentName, runId, step}.
   // We track the current step by listening to StepStartedEvent (which fires at
-  // the start of each step). The agentName and runId come from RunOptions
-  // (optional — supplied by bureau.agent / createAgent / SessionHandle).
+  // the start of each step). The agentName comes from RunOptions (optional —
+  // supplied by bureau.agent / createAgent / SessionHandle); runId is always
+  // the minted-or-supplied id resolved above.
   {
     const agentName = options.agentName ?? '';
-    const runId = options.runId ?? '';
     let currentStep = 0;
     const stepListener = (e: StepStartedEvent) => (currentStep = e.step);
     emitter.addEventListener(StepStartedEvent.type, stepListener);
@@ -236,6 +331,11 @@ export function createActiveRun(options: RunOptions, durable?: DurableRunRouting
       // still fire for every toolbox call regardless, unchanged.
       if (ownedToolCallIds.has(e.call.id)) {
         inFlightTools += 1;
+        // AB-214 review (PRRT_kwDORvupsc6esZRy): the tool-call watchdog
+        // exists only while a tool call this run owns is actually in
+        // flight — an idle run producing no tool-progress events must not
+        // be reported stalled/unreachable for it.
+        liveness.beginToolCall();
       }
       emitter.dispatchEvent(
         new ToolStartedBubbleEvent(
@@ -264,6 +364,7 @@ export function createActiveRun(options: RunOptions, durable?: DurableRunRouting
         // aborted signal path), which would otherwise drive this negative and
         // corrupt hasInFlightWork()'s later reads.
         inFlightTools = Math.max(0, inFlightTools - 1);
+        liveness.endToolCall();
         if (inFlightTools === 0 && toolDrainWaiters.length > 0) {
           const waiters = toolDrainWaiters;
           toolDrainWaiters = [];
@@ -311,6 +412,27 @@ export function createActiveRun(options: RunOptions, durable?: DurableRunRouting
           },
         ),
       );
+      // AB-214/obs-01: a pulse arriving through this ingestion point is
+      // always labeled 'tool-progress', never 'provider-io', even when the
+      // tool internally wraps a provider call — the tool-call `StallPolicy`
+      // row is the one this pulse is recorded against.
+      //
+      // AB-214 review (PRRT_kwDORvupsc6es7pO): only record a pulse for a
+      // tool call THIS run itself dispatched — mirrors the identical
+      // `ownedToolCallIds` guard `onExecuteStart`/`onSettled` already use.
+      // A caller can supply the SAME `Toolbox` instance to more than one
+      // concurrent run (`create-agent.ts`), and the toolbox's `progress`
+      // event is toolbox-wide, not scoped to any one run — without this
+      // guard, run B's tool progress would falsely mark run A's tool-call
+      // watchdog as active or recovered.
+      if (ownedToolCallIds.has(e.call.id)) {
+        liveness.recordToolProgressPulse({
+          toolCallId: e.call.id,
+          toolName: e.call.name,
+          percent: e.percent,
+          message: e.message,
+        });
+      }
     };
 
     const onPolicyDenied = (e: ToolboxEventMap['policy-denied']) => {
@@ -374,12 +496,31 @@ export function createActiveRun(options: RunOptions, durable?: DurableRunRouting
         toolboxForwarder.onStepToolbox(toolbox),
       ),
     )
+    .then(
+      (runResult) => {
+        // Atomic (AB-214 review PRRT_kwDORvupsc6esZSx): attach `result` and
+        // transition to `terminal` as one revision, never two, so no
+        // subscriber ever observes `status: 'running'` with a populated
+        // `result`. Redacted (AB-214 review PRRT_kwDORvupsc6es7pl): every
+        // standalone run's projection is `'redacted'` permanently, so the
+        // raw `RunResult` — full conversation, tool arguments/results,
+        // arbitrary errors — never reaches the snapshot; only the safe
+        // summary does.
+        liveness.settle(toRedactedRunResultSummary(runResult));
+        return runResult;
+      },
+      (error: unknown) => {
+        liveness.setStatus('terminal');
+        throw error;
+      },
+    )
     .finally(complete);
 
   let cancelRequested = false;
 
   function abort(reason?: string): void {
     cancelRequested = true;
+    liveness.setStatus('aborting');
     abortController.abort(reason);
   }
 
@@ -411,6 +552,12 @@ export function createActiveRun(options: RunOptions, durable?: DurableRunRouting
   function complete(): void {
     for (const cleanup of cleanups) cleanup();
     emitter.complete();
+    // `complete()` is documented to complete only the event stream, not to
+    // abort or otherwise end the underlying run (AB-214 review
+    // PRRT_kwDORvupsc6esZSM) — liveness disposal happens exclusively via
+    // `setStatus('terminal')`/`settle()` above, which always run before this
+    // `.finally(complete)` callback does. No separate `liveness.dispose()`
+    // call belongs here.
   }
 
   // The in-memory loop resolves `result` for every terminal shape (stop,
@@ -447,6 +594,8 @@ export function createActiveRun(options: RunOptions, durable?: DurableRunRouting
     events: emitter.events.bind(emitter) as ActiveRun['events'],
     toObservable: emitter.toObservable.bind(emitter),
     complete,
+    snapshot: () => liveness.snapshot(),
+    subscribeSnapshot: (observer, options) => liveness.subscribeSnapshot(observer, options),
     [Symbol.dispose](): void {
       abort();
       complete();

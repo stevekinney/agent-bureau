@@ -13,11 +13,38 @@ import {
 import { RunCompletedEvent } from './events';
 import type { AgentGenerationProfile } from './generation-profile';
 import { readGenerationProfile } from './generation-profile';
+import type { AgentRunLivenessSnapshot } from './liveness';
+import { LIVENESS_POLICY_VERSION } from './liveness';
 import type { BackendDescriptor } from './providers/model-catalog';
 import type { ProviderName } from './providers/types';
 import type { RunnableAgent } from './runnable-agent';
 import { OPERATIVE_RESOLVE_RUN_OPTIONS } from './runnable-agent';
 import type { CleanupAcknowledgement, RunOptions, RunResult } from './types';
+
+/** Mechanical AB-214 fixture stub shared by this file's hand-built `AgentRun` handles. */
+function stubLivenessSnapshot(id: string): AgentRunLivenessSnapshot {
+  return {
+    id,
+    kind: 'agent-run',
+    startedAt: new Date(0).toISOString(),
+    revision: 0,
+    status: 'running',
+    lastTransitionAt: new Date(0).toISOString(),
+    projection: 'redacted',
+    ownership: 'independent',
+    detached: false,
+    durability: 'process-local',
+    cancellable: true,
+    attempt: 0,
+    reachability: 'unknown',
+    progress: 'unknown',
+    assessment: 'healthy',
+    observedAt: 0,
+    missedPulseCount: 0,
+    policyVersion: LIVENESS_POLICY_VERSION,
+    evidence: [],
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Test doubles
@@ -68,6 +95,11 @@ function createFakeAgentRun(): {
     },
     closed(): Promise<CleanupAcknowledgement> {
       return resultPromise.then(() => ({ status: 'completed' }) as const);
+    },
+    snapshot: () => stubLivenessSnapshot('fake-handle'),
+    subscribeSnapshot: (observer: (snapshot: AgentRunLivenessSnapshot) => void) => {
+      observer(stubLivenessSnapshot('fake-handle'));
+      return { unsubscribe: () => {}, closed: false };
     },
     [Symbol.dispose](): void {
       disposed = true;
@@ -617,6 +649,11 @@ describe('createLazyAgent', () => {
       children: () => [],
       abortChild() {},
       closed: () => Promise.resolve(closedFailure),
+      snapshot: () => stubLivenessSnapshot('cancelled-after-resolution'),
+      subscribeSnapshot: (observer: (snapshot: AgentRunLivenessSnapshot) => void) => {
+        observer(stubLivenessSnapshot('cancelled-after-resolution'));
+        return { unsubscribe: () => {}, closed: false };
+      },
       [Symbol.dispose]() {},
       [Symbol.asyncIterator]: () => (async function* () {})(),
     } as unknown as AgentRun<string, false>;
@@ -705,6 +742,99 @@ describe('createLazyAgent', () => {
     await run.result();
 
     expect(fake.abortChildCalls).toEqual([{ childId: 'child-1', reason: 'now resolved' }]);
+  });
+
+  it('AB-88/AB-214: snapshot()/subscribeSnapshot() read a synthetic created snapshot before resolution and delegate once resolved', async () => {
+    const fake = createFakeAgentRun();
+    const agent: RunnableAgent<string, false> = { name: 'fake', run: () => fake.handle };
+    const lazy = createLazyAgent(() => agent, { label: 'lazy-liveness' });
+
+    const run = lazy.run('hello');
+
+    // Before the internal resolution microtask has run, there is no
+    // underlying handle yet — a synthetic 'created' snapshot, not a throw.
+    const beforeSnapshot = run.snapshot();
+    expect(beforeSnapshot.status).toBe('created');
+    expect(beforeSnapshot.id).toBe('lazy-liveness');
+
+    // AB-214 review (PRRT_kwDORvupsc6esZSA): a subscription registered
+    // before `underlying` resolves must stay OPEN and keep receiving
+    // updates once it does — not close itself off after the one synchronous
+    // synthetic snapshot.
+    const beforeReceived: string[] = [];
+    const beforeSubscription = run.subscribeSnapshot((snapshot) =>
+      beforeReceived.push(snapshot.status),
+    );
+    expect(beforeReceived).toEqual(['created']);
+    expect(beforeSubscription.closed).toBe(false);
+
+    await flushMicrotasks();
+
+    // Once resolved, both delegate straight through to the underlying
+    // handle — including the PRE-EXISTING subscription above, which was
+    // transferred to a real one rather than left stuck on 'created'.
+    expect(run.snapshot().id).toBe('fake-handle');
+    // The transferred subscription received the real handle's own status
+    // ('running', per `stubLivenessSnapshot`) as its second delivery.
+    expect(beforeReceived).toEqual(['created', 'running']);
+    const afterReceived: string[] = [];
+    run.subscribeSnapshot((snapshot) => afterReceived.push(snapshot.id));
+    expect(afterReceived).toEqual(['fake-handle']);
+
+    expect(() => beforeSubscription.unsubscribe()).not.toThrow();
+    expect(beforeSubscription.closed).toBe(true);
+
+    fake.settle(successResult('done'));
+    await run.result();
+  });
+
+  it('AB-214 review (PRRT_kwDORvupsc6esZSF): notifies a pending subscriber with a synthetic terminal snapshot when the run finalizes with no underlying handle', async () => {
+    const controller = new AbortController();
+    const lazy = createLazyAgent(
+      () =>
+        new Promise<RunnableAgent<string, false>>(() => {
+          // Never resolves — this run stays 'waiting' until aborted.
+        }),
+      { label: 'never-resolves' },
+    );
+
+    const run = lazy.run('hello', { signal: controller.signal });
+
+    const received: string[] = [];
+    const subscription = run.subscribeSnapshot((snapshot) => received.push(snapshot.status));
+    expect(received).toEqual(['created']);
+    expect(subscription.closed).toBe(false);
+
+    // A second, already-closed-by-then subscriber exercises the
+    // `record.closed` skip branch inside `notifySyntheticTerminal`.
+    const alreadyClosed = run.subscribeSnapshot(() => {});
+    alreadyClosed.unsubscribe();
+
+    // A throwing subscriber must not stop the others from being notified
+    // (same observer-isolation contract as `ActiveRunLiveness`).
+    const throwingReceived: string[] = [];
+    run.subscribeSnapshot((snapshot) => {
+      throwingReceived.push(snapshot.status);
+      throw new Error('a badly behaved subscriber');
+    });
+
+    controller.abort('cancelled while waiting for the loader');
+    await run.result();
+
+    expect(received).toEqual(['created', 'terminal']);
+    expect(throwingReceived).toEqual(['created', 'terminal']);
+    expect(subscription.closed).toBe(true);
+    expect(run.snapshot().status).toBe('terminal');
+
+    // A subscription registered AFTER the synthetic terminal finalize must
+    // deliver the terminal snapshot once and close immediately, same as
+    // `ActiveRunLiveness`'s own already-terminal contract.
+    const afterReceived: string[] = [];
+    const afterSubscription = run.subscribeSnapshot((snapshot) =>
+      afterReceived.push(snapshot.status),
+    );
+    expect(afterReceived).toEqual(['terminal']);
+    expect(afterSubscription.closed).toBe(true);
   });
 
   it('honors an already-aborted context.signal without calling the loader', async () => {
@@ -915,6 +1045,11 @@ describe('createLazyAgent', () => {
       children: () => [],
       abortChild() {},
       closed: () => Promise.resolve({ status: 'completed' }),
+      snapshot: () => stubLivenessSnapshot('throwing-handle-gated'),
+      subscribeSnapshot: (observer: (snapshot: AgentRunLivenessSnapshot) => void) => {
+        observer(stubLivenessSnapshot('throwing-handle-gated'));
+        return { unsubscribe: () => {}, closed: false };
+      },
       [Symbol.dispose]() {},
       [Symbol.asyncIterator](): AsyncIterator<RunEvent> {
         return {
@@ -946,6 +1081,11 @@ describe('createLazyAgent', () => {
       children: () => [],
       abortChild() {},
       closed: () => Promise.resolve({ status: 'completed' }),
+      snapshot: () => stubLivenessSnapshot('throwing-handle'),
+      subscribeSnapshot: (observer: (snapshot: AgentRunLivenessSnapshot) => void) => {
+        observer(stubLivenessSnapshot('throwing-handle'));
+        return { unsubscribe: () => {}, closed: false };
+      },
       [Symbol.dispose]() {},
       [Symbol.asyncIterator](): AsyncIterator<RunEvent> {
         return {
@@ -1045,6 +1185,11 @@ describe('createLazyAgent', () => {
       children: () => [],
       abortChild() {},
       closed: () => Promise.resolve({ status: 'completed' }),
+      snapshot: () => stubLivenessSnapshot('queueless-handle'),
+      subscribeSnapshot: (observer: (snapshot: AgentRunLivenessSnapshot) => void) => {
+        observer(stubLivenessSnapshot('queueless-handle'));
+        return { unsubscribe: () => {}, closed: false };
+      },
       [Symbol.dispose]() {},
       [Symbol.asyncIterator](): AsyncIterator<RunEvent> {
         return {

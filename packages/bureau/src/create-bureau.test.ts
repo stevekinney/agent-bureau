@@ -743,6 +743,81 @@ describe('createBureau', () => {
     expect(bureau.store.getRun(summary.id)).toBeDefined();
   });
 
+  it('AB-88/AB-214: getRun(id).liveness is a JSON-safe plain-data snapshot', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    const summary = await bureau.createRun({ message: 'Hello' });
+    const detail = bureau.getRun(summary.id);
+
+    expect(detail?.liveness).toBeDefined();
+    expect(detail?.liveness.kind).toBe('agent-run');
+    expect(detail?.liveness.id).toBe(summary.id);
+    // Round-trips through JSON — proves toJsonSafe ran over it.
+    expect(() => JSON.stringify(detail)).not.toThrow();
+    const parsed = JSON.parse(JSON.stringify(detail));
+    expect(parsed.liveness.id).toBe(summary.id);
+  });
+
+  it('AB-88/AB-214 review (PRRT_kwDORvupsc6esZTF): getRun(id).liveness.owner carries the authenticated principal that started the run', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    const summary = await bureau.createRun({ message: 'Hello', principal: 'user-42' });
+    const detail = bureau.getRun(summary.id);
+
+    expect(detail?.liveness.owner).toBe('user-42');
+  });
+
+  it('AB-88/AB-214: getRun(id).liveness.owner is absent when the run has no authenticated principal', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    const summary = await bureau.createRun({ message: 'Hello' });
+    const detail = bureau.getRun(summary.id);
+
+    expect(detail?.liveness.owner).toBeUndefined();
+  });
+
+  it('AB-88/AB-214: subscribeRunSnapshot delivers the current snapshot synchronously, then live updates', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    const summary = await bureau.createRun({ message: 'Hello' });
+
+    const received: string[] = [];
+    const subscription = bureau.subscribeRunSnapshot(summary.id, (snapshot) => {
+      received.push(snapshot.status);
+    });
+
+    expect(received.length).toBeGreaterThan(0);
+    subscription.unsubscribe();
+  });
+
+  it('AB-88/AB-214: subscribeRunSnapshot throws NOT_FOUND for an unknown run id', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    expect(() => bureau.subscribeRunSnapshot('does-not-exist', () => {})).toThrow(
+      expect.objectContaining({ code: 'NOT_FOUND' }),
+    );
+  });
+
   it('stamps tool.started events with agentName and runId when agentName is supplied (regression PRRT_kwDORvupsc6MV8Xf)', async () => {
     // REGRESSION: createRunFromRequest omitted `agentName` and `runId` from
     // the RunOptions passed to createActiveRun, so curated tool.* bubble events
@@ -5766,6 +5841,34 @@ function createParkedActiveRun(): {
     events: emitter.events.bind(emitter) as ActiveRun['events'],
     toObservable: emitter.toObservable.bind(emitter),
     complete: emitter.complete.bind(emitter),
+    // AB-214: mechanical addition — this never-settling stub run reports a
+    // static 'running' snapshot and delivers it once; matching `abort`'s
+    // never-resolving `result` above, it never reaches a revision change.
+    snapshot: () => ({
+      id: 'parked',
+      kind: 'agent-run',
+      startedAt: new Date(0).toISOString(),
+      revision: 0,
+      status: 'running',
+      lastTransitionAt: new Date(0).toISOString(),
+      projection: 'redacted',
+      ownership: 'independent',
+      detached: false,
+      durability: 'process-local',
+      cancellable: true,
+      attempt: 0,
+      reachability: 'unknown',
+      progress: 'unknown',
+      assessment: 'healthy',
+      observedAt: 0,
+      missedPulseCount: 0,
+      policyVersion: 'ab-88/2026-09-01',
+      evidence: [],
+    }),
+    subscribeSnapshot: (observer) => {
+      observer(activeRun.snapshot());
+      return { unsubscribe: () => {}, closed: false };
+    },
     [Symbol.dispose]: () => {},
   };
   return { activeRun, emitter };

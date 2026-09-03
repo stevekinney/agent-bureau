@@ -48,6 +48,7 @@ import {
   type SessionInputAdmissionOutcome,
   type SessionInputAdmissionRequest,
 } from '@lostgradient/operative/durable';
+import type { LivenessSnapshot, Subscription } from '@lostgradient/operative/liveness';
 import { createModelCatalog } from '@lostgradient/operative/providers';
 import {
   createStore,
@@ -2606,6 +2607,11 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
               ...(humanInputOnServices ? { onServices: humanInputOnServices } : {}),
             }
           : undefined,
+        // AB-214 review (PRRT_kwDORvupsc6esZTF): thread the authenticated
+        // principal starting this run into `LivenessSnapshot.owner` — AC4
+        // reserves an absent owner for a standalone (non-Bureau) run, and a
+        // Bureau-started run always has one to give.
+        request.principal !== undefined ? { owner: request.principal } : undefined,
       );
       activeRuns.add(activeRun);
       runToolboxes.add(runToolbox);
@@ -3524,6 +3530,19 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     }
 
     return serializeRunDetail(runState, getRunSessionIdentifier(runState), runAttribution.get(id));
+  }
+
+  function subscribeRunSnapshot(
+    runId: string,
+    observer: (snapshot: LivenessSnapshot) => void,
+    options?: { signal?: AbortSignal },
+  ): Subscription {
+    const runState = store.getRun(runId);
+    if (!runState) {
+      throw new BureauError('Run not found', 'NOT_FOUND');
+    }
+
+    return runState.activeRun.subscribeSnapshot(observer, options);
   }
 
   function getRunReport(id: string): RunReport | undefined {
@@ -4612,6 +4631,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     submitSchedulerTask,
     listRuns,
     getRun,
+    subscribeRunSnapshot,
     getRunReport,
     abortRun,
     deleteRun,

@@ -19,6 +19,7 @@
  */
 
 import { Conversation } from 'conversationalist';
+import type { Subscription } from 'lifecycle';
 
 import type { AgentRun, RunEvent, UnwrappedValue } from './agent-run';
 import { CompletedRunIterationError } from './agent-run';
@@ -33,6 +34,8 @@ import {
 } from './errors';
 import { RunAbortedEvent, RunCompletedEvent, RunErrorEvent } from './events';
 import type { AgentGenerationProfile } from './generation-profile';
+import type { AgentRunLivenessSnapshot } from './liveness';
+import { LIVENESS_POLICY_VERSION } from './liveness';
 import { deepFreeze } from './providers/backend-descriptor-attachment';
 import type {
   AgentInput,
@@ -117,6 +120,13 @@ function isValidAgentRunHandle(value: unknown): value is AgentRun<unknown, boole
     // TypeError the first time this wrapper's own `closed()` delegates to
     // it, instead of the contract failure this validator exists to surface.
     isCallable(candidate['closed']) &&
+    // AB-214 review (PRRT_kwDORvupsc6esZSb): `snapshot`/`subscribeSnapshot`
+    // are mandatory `AgentRun` members too — an untyped, JavaScript, or
+    // older third-party handle missing either must fail this contract
+    // check with `AgentContractError`, not a raw `TypeError` the first time
+    // this wrapper delegates to a liveness method that isn't there.
+    isCallable(candidate['snapshot']) &&
+    isCallable(candidate['subscribeSnapshot']) &&
     isCallable(candidate[Symbol.asyncIterator]) &&
     isCallable(candidate[Symbol.dispose])
   );
@@ -339,6 +349,61 @@ export function createDeferredAgentRun<O, H extends boolean>(
   // (and may have failed) rather than genuinely unnecessary.
   let invalidHandleDisposalOutcome: CleanupAcknowledgement | undefined;
 
+  // AB-88/AB-214 liveness state for the window before `underlying` exists
+  // (or when it never will — a synthetic finalize). `syntheticTerminal`
+  // flips once `finalizeSynthetic` runs, so `snapshot()`/`subscribeSnapshot`
+  // stop reporting a fresh 'created' snapshot after the wrapper's OWN
+  // `result()` has already settled (AB-214 review PRRT_kwDORvupsc6esZSF).
+  // `pendingSnapshotObservers` holds every `subscribeSnapshot` registered
+  // before `underlying` resolves so it can be transferred to a real
+  // subscription once `underlying` exists (PRRT_kwDORvupsc6esZSA).
+  let syntheticTerminal = false;
+  interface PendingSnapshotRecord {
+    readonly observer: (snapshot: AgentRunLivenessSnapshot) => void;
+    closed: boolean;
+    realSubscription?: Subscription;
+  }
+  const pendingSnapshotObservers = new Set<PendingSnapshotRecord>();
+
+  function syntheticSnapshot(): AgentRunLivenessSnapshot {
+    const now = new Date().toISOString();
+    return {
+      id: label,
+      kind: 'agent-run',
+      startedAt: now,
+      revision: syntheticTerminal ? 1 : 0,
+      status: syntheticTerminal ? 'terminal' : 'created',
+      lastTransitionAt: now,
+      projection: 'redacted',
+      ownership: 'independent',
+      detached: false,
+      durability: 'process-local',
+      cancellable: !syntheticTerminal,
+      attempt: 0,
+      reachability: syntheticTerminal ? 'not-applicable' : 'unknown',
+      progress: syntheticTerminal ? 'not-applicable' : 'unknown',
+      assessment: syntheticTerminal ? 'terminal' : 'healthy',
+      observedAt: Date.now(),
+      missedPulseCount: 0,
+      policyVersion: LIVENESS_POLICY_VERSION,
+      evidence: [],
+    };
+  }
+
+  function notifySyntheticTerminal(): void {
+    const terminalSnapshot = syntheticSnapshot();
+    for (const record of [...pendingSnapshotObservers]) {
+      if (record.closed) continue;
+      record.closed = true;
+      try {
+        record.observer(terminalSnapshot);
+      } catch {
+        // Same observer-isolation reasoning as `ActiveRunLiveness.notify()`.
+      }
+    }
+    pendingSnapshotObservers.clear();
+  }
+
   const queue = createEventQueue();
 
   let settleResultPromise!: (result: RunResult<O, H>) => void;
@@ -361,6 +426,14 @@ export function createDeferredAgentRun<O, H extends boolean>(
   ): void {
     if (state === 'terminal') return;
     state = 'terminal';
+    // Only a genuinely underlying-less finalize (this run never got a real
+    // `ActiveRun` at all) needs the synthetic terminal snapshot — one that
+    // resolved `underlying` reports its own real terminal state instead
+    // (AB-214 review PRRT_kwDORvupsc6esZSF).
+    if (!underlying) {
+      syntheticTerminal = true;
+      notifySyntheticTerminal();
+    }
     const conversation = buildFallbackConversation(input);
     const result = {
       conversation,
@@ -615,6 +688,18 @@ export function createDeferredAgentRun<O, H extends boolean>(
     // this point, `requestAbort` sees `state === 'started'` and forwards
     // directly to `underlying`, exactly once (guarded by `abortForwarded`).
     underlying = handle;
+    // AB-214 review (PRRT_kwDORvupsc6esZSA): an observer registered while
+    // `underlying` was still unresolved must keep receiving updates once it
+    // exists, not stay stuck on the one synthetic 'created' snapshot it got
+    // synchronously at subscribe time. Transfer each pending subscription to
+    // a real one against `underlying`, so THIS record's own `unsubscribe()`
+    // closure (already handed to the caller) now tears down the real
+    // subscription instead.
+    for (const record of pendingSnapshotObservers) {
+      if (record.closed) continue;
+      record.realSubscription = underlying.subscribeSnapshot(record.observer);
+    }
+    pendingSnapshotObservers.clear();
     state = 'started';
     // From here on, `context.signal` (already passed to `agent.run()`
     // above) is the underlying agent's own responsibility to honor — this
@@ -713,6 +798,58 @@ export function createDeferredAgentRun<O, H extends boolean>(
           ? underlying.closed()
           : Promise.resolve(invalidHandleDisposalOutcome ?? { status: 'completed' }),
     }),
+
+    // AB-88/AB-214 — before `underlying` resolves there is no real
+    // `ActiveRun` to delegate a snapshot to yet, so this wrapper reports a
+    // synthetic snapshot (mirroring `children()`'s empty-default pattern
+    // above): 'created' while still waiting, 'terminal' once a genuinely
+    // underlying-less finalize has run (PRRT_kwDORvupsc6esZSF). Once
+    // `underlying` resolves, both delegate straight through.
+    snapshot(): AgentRunLivenessSnapshot {
+      if (underlying) return underlying.snapshot();
+      return syntheticSnapshot();
+    },
+
+    subscribeSnapshot(
+      observer: (snapshot: AgentRunLivenessSnapshot) => void,
+      options?: { signal?: AbortSignal },
+    ) {
+      if (underlying) return underlying.subscribeSnapshot(observer, options);
+
+      const record: PendingSnapshotRecord = { observer, closed: false };
+      const alreadyAborted = options?.signal?.aborted ?? false;
+
+      try {
+        observer(syntheticSnapshot());
+      } catch {
+        // Same observer-isolation reasoning as `ActiveRunLiveness.notify()`.
+      }
+
+      function unsubscribe(): void {
+        if (record.closed) return;
+        record.closed = true;
+        pendingSnapshotObservers.delete(record);
+        record.realSubscription?.unsubscribe();
+      }
+
+      if (alreadyAborted || syntheticTerminal) {
+        record.closed = true;
+      } else {
+        // Kept pending (AB-214 review PRRT_kwDORvupsc6esZSA) — transferred
+        // to a real subscription against `underlying` once it exists, or
+        // notified once if this run finalizes synthetically first. Never
+        // closed here just because `underlying` doesn't exist YET.
+        pendingSnapshotObservers.add(record);
+        options?.signal?.addEventListener('abort', unsubscribe, { once: true });
+      }
+
+      return {
+        unsubscribe,
+        get closed() {
+          return record.closed || (record.realSubscription?.closed ?? false);
+        },
+      };
+    },
 
     [Symbol.dispose](): void {
       cancelRequested = true;

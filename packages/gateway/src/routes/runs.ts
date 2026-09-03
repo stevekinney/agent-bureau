@@ -1,3 +1,5 @@
+import type { LivenessSnapshot } from '@lostgradient/operative/liveness';
+import { LIVENESS_POLICY_VERSION } from '@lostgradient/operative/liveness';
 import { BureauError } from 'bureau';
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
@@ -115,6 +117,34 @@ export function createRunsRoutes(bureau: Bureau) {
 export interface RunDetailResponse extends RunDetail {
   timeline: ReturnType<typeof assembleRunTimeline>;
 }
+
+/**
+ * A placeholder `LivenessSnapshot` (AB-88/AB-214) for UI/test fixtures that
+ * need a legal, structurally-complete value before a real run exists — never
+ * served over the wire (the JSON route always carries `bureau.getRun`'s own
+ * `liveness` field).
+ */
+export const EMPTY_LIVENESS_SNAPSHOT: LivenessSnapshot = {
+  id: '',
+  kind: 'agent-run',
+  startedAt: new Date(0).toISOString(),
+  revision: 0,
+  status: 'created',
+  lastTransitionAt: new Date(0).toISOString(),
+  projection: 'redacted',
+  ownership: 'independent',
+  detached: false,
+  durability: 'process-local',
+  cancellable: true,
+  attempt: 0,
+  reachability: 'unknown',
+  progress: 'unknown',
+  assessment: 'healthy',
+  observedAt: 0,
+  missedPulseCount: 0,
+  policyVersion: LIVENESS_POLICY_VERSION,
+  evidence: [],
+};
 
 /**
  * Finds the pending human-wait review (if any) parking `runId` — the resume

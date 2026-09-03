@@ -33,6 +33,8 @@ import {
   SessionSleepEvent,
   SessionUpdateEvent,
 } from '../events';
+import type { AgentRunLivenessSnapshot } from '../liveness';
+import { LIVENESS_POLICY_VERSION } from '../liveness';
 import type { FinishReason, RunOptions, RunResult } from '../types';
 import type { SessionStore } from './types';
 
@@ -920,6 +922,43 @@ export function createSessionHandle(
         events: outerEmitter.events.bind(outerEmitter) as ActiveRun['events'],
         toObservable: outerEmitter.toObservable.bind(outerEmitter),
         complete: outerEmitter.complete.bind(outerEmitter),
+        // SessionHandle's own `LivenessObservable` wiring is AB-89's obs-02
+        // slice, out of this issue's delivery boundary. This wrapper is a
+        // pass-through proxy to the inner `ActiveRun`'s liveness surface once
+        // it exists (after `loadOrCreate` resolves); before that, it reports
+        // a synthetic 'created' snapshot rather than throwing, so a caller
+        // that calls `snapshot()`/`subscribeSnapshot()` before the reservation
+        // completes gets a legal (if uninformative) value.
+        snapshot(): AgentRunLivenessSnapshot {
+          if (activeInnerRun) return activeInnerRun.snapshot();
+          const now = new Date().toISOString();
+          return {
+            id: currentRunId ?? sessionId,
+            kind: 'agent-run',
+            startedAt: now,
+            revision: 0,
+            status: 'created',
+            lastTransitionAt: now,
+            projection: 'redacted',
+            ownership: 'independent',
+            detached: false,
+            durability: 'process-local',
+            cancellable: true,
+            attempt: 0,
+            reachability: 'unknown',
+            progress: 'unknown',
+            assessment: 'healthy',
+            observedAt: Date.now(),
+            missedPulseCount: 0,
+            policyVersion: LIVENESS_POLICY_VERSION,
+            evidence: [],
+          };
+        },
+        subscribeSnapshot(observer, subscribeOptions) {
+          if (activeInnerRun) return activeInnerRun.subscribeSnapshot(observer, subscribeOptions);
+          observer(activeRunWrapper.snapshot());
+          return { unsubscribe(): void {}, closed: true };
+        },
         [Symbol.dispose](): void {
           cancelRequested = true;
           // Mirror abort(): fire the outer AbortController (stops billing) and

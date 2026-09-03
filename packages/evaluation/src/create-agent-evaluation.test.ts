@@ -5,12 +5,39 @@ import type {
   RunnableAgent,
   RunResult,
 } from '@lostgradient/operative';
+import type { AgentRunLivenessSnapshot } from '@lostgradient/operative/liveness';
+import { LIVENESS_POLICY_VERSION } from '@lostgradient/operative/liveness';
 import { createMockGenerate } from '@lostgradient/operative/test';
 import { createMockTool, createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 
 import { createAgentEvaluation } from './create-agent-evaluation';
 import type { EvaluationCase } from './types';
+
+/** Mechanical AB-214 fixture stub shared by this file's hand-built `AgentRun` handles. */
+function stubLivenessSnapshot(id: string): AgentRunLivenessSnapshot {
+  return {
+    id,
+    kind: 'agent-run',
+    startedAt: new Date(0).toISOString(),
+    revision: 0,
+    status: 'running',
+    lastTransitionAt: new Date(0).toISOString(),
+    projection: 'redacted',
+    ownership: 'independent',
+    detached: false,
+    durability: 'process-local',
+    cancellable: true,
+    attempt: 0,
+    reachability: 'unknown',
+    progress: 'unknown',
+    assessment: 'healthy',
+    observedAt: 0,
+    missedPulseCount: 0,
+    policyVersion: LIVENESS_POLICY_VERSION,
+    evidence: [],
+  };
+}
 
 /**
  * Builds a minimal `RunnableAgent<unknown, boolean>` fixture for these tests.
@@ -621,6 +648,11 @@ describe('createAgentEvaluation', () => {
         closed: () => {
           throw new Error('not used by this test');
         },
+        snapshot: () => stubLivenessSnapshot('hanging-agent'),
+        subscribeSnapshot: (observer) => {
+          observer(stubLivenessSnapshot('hanging-agent'));
+          return { unsubscribe: () => {}, closed: false };
+        },
         [Symbol.dispose]: () => {
           disposeCalls += 1;
         },
@@ -666,6 +698,11 @@ describe('createAgentEvaluation', () => {
         // written. Not exercised by this test, so a safe no-op.
         closed: () => {
           throw new Error('not used by this test');
+        },
+        snapshot: () => stubLivenessSnapshot('uncooperative-agent'),
+        subscribeSnapshot: (observer) => {
+          observer(stubLivenessSnapshot('uncooperative-agent'));
+          return { unsubscribe: () => {}, closed: false };
         },
         [Symbol.dispose]: () => {
           disposeCalls += 1;

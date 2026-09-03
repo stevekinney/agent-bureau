@@ -185,7 +185,7 @@ describe('curated tool.* bubble events (C3)', () => {
     expect(settled[0]?.status).toBe('error');
   });
 
-  it('defaults agentName and runId to empty string when not supplied', async () => {
+  it('defaults agentName to empty string, but mints a runId, when not supplied (AB-214)', async () => {
     const generate = createMockGenerate([
       toolCallResponse([{ name: 'echo', arguments: { message: 'test' } }]),
       textResponse('done'),
@@ -205,7 +205,12 @@ describe('curated tool.* bubble events (C3)', () => {
     await run.result;
 
     expect(started[0]?.agentName).toBe('');
-    expect(started[0]?.runId).toBe('');
+    // AB-214/obs-01: a standalone (no explicit `runId`) in-memory run mints
+    // one through the local identifier seam, so it stamps a real, non-empty
+    // id rather than the pre-AB-214 empty-string fallback — and that id
+    // matches the run's own `LivenessSnapshot.id`.
+    expect(started[0]?.runId).not.toBe('');
+    expect(started[0]?.runId).toBe(run.snapshot().id);
   });
 
   it('does not emit tool.* events on text-only turns', async () => {
