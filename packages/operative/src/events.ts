@@ -7,6 +7,7 @@ import type { CostBudgetExceededEvent, CostBudgetThresholdEvent } from './cost-b
 import { estimateCacheHitRate } from './cost-estimation';
 import type { SteeringCommandFailure, SteeringEffectiveState } from './durable/types';
 import { type AgentRunError, type AgentRunErrorKind, toAgentRunError } from './errors';
+import type { SemanticProgress } from './liveness';
 import type { GenerateResponse, RunResult, StepResult, TokenUsage } from './types';
 
 // ---------------------------------------------------------------------------
@@ -952,6 +953,78 @@ export class ChildWorkflowAbortedEvent extends Event implements ChildWorkflowCor
 }
 
 /**
+ * Fields `ChildWorkflowReattachedEvent` carries — deliberately narrower
+ * than {@link ChildWorkflowCorrelation}: AB-53's persisted topology
+ * recovery (this event's only dispatch point, not yet wired — see below)
+ * reattaches a child run by its persisted identity, not by the
+ * `parentAgentName`/`childAgentName` labels a live dispatch call site
+ * supplies. AB-222's own acceptance criteria fix this payload shape at
+ * exactly `childRunId`/`parentRunId`.
+ */
+export interface ChildWorkflowReattachedPayload {
+  readonly childRunId: string;
+  readonly parentRunId: string;
+}
+
+/**
+ * Emitted when AB-53's persisted parent-child topology recovery reattaches
+ * a previously detached child's event stream to its parent — distinct from
+ * `ChildWorkflowStartedEvent`, which fires only for a fresh dispatch.
+ *
+ * AB-222 defines this event's type, payload shape, and (once AB-53 exists)
+ * intended dispatch point; it does not itself implement persisted topology
+ * or recovery, so nothing in this package dispatches this event today. It
+ * ships typed and exported, but never dispatched, until a later follow-up
+ * wires the dispatch call site against AB-53's recovery hook — the same
+ * pattern AB-87's matrix uses elsewhere for a not-yet-reachable transition.
+ */
+export class ChildWorkflowReattachedEvent extends Event implements ChildWorkflowReattachedPayload {
+  static readonly type = 'multiagent.child-workflow.reattached' as const;
+  readonly childRunId: string;
+  readonly parentRunId: string;
+  constructor(data: ChildWorkflowReattachedPayload) {
+    super(ChildWorkflowReattachedEvent.type);
+    this.childRunId = data.childRunId;
+    this.parentRunId = data.parentRunId;
+  }
+}
+
+/**
+ * Fields `ChildWorkflowProgressEvent` carries: the same
+ * `childRunId`/`parentRunId` correlation every `multiagent.child-workflow.*`
+ * event carries, plus the child's own `SemanticProgress` (AB-88's decision
+ * record, shipped by AB-214/obs-01 at `./liveness`).
+ */
+export interface ChildWorkflowProgressPayload {
+  readonly childRunId: string;
+  readonly parentRunId: string;
+  readonly progress: SemanticProgress;
+}
+
+/**
+ * A child run's own semantic-progress pulse, surfaced to its parent.
+ *
+ * Explicitly non-cursor-advancing (AB-87's AC5 exhaustive list, extended to
+ * this new family): an ephemeral delta describing the child's current
+ * phase/position, never a durable state transition. A consumer that needs
+ * the child's terminal outcome still waits for
+ * `ChildWorkflowCompletedEvent`/`ChildWorkflowFailedEvent`/`ChildWorkflowAbortedEvent`;
+ * this event never substitutes for one of those.
+ */
+export class ChildWorkflowProgressEvent extends Event implements ChildWorkflowProgressPayload {
+  static readonly type = 'multiagent.child-workflow.progress' as const;
+  readonly childRunId: string;
+  readonly parentRunId: string;
+  readonly progress: SemanticProgress;
+  constructor(data: ChildWorkflowProgressPayload) {
+    super(ChildWorkflowProgressEvent.type);
+    this.childRunId = data.childRunId;
+    this.parentRunId = data.parentRunId;
+    this.progress = data.progress;
+  }
+}
+
+/**
  * Emitted when a handoff tool transfers control to another agent.
  *
  * On the in-process path the handoff embeds a `HANDOFF_MARKER` in the result
@@ -1455,6 +1528,13 @@ export interface OperativeEventMap extends EventMap {
   [SteeringRejectedEvent.type]: SteeringRejectedEvent;
   [SteeringSupersededEvent.type]: SteeringSupersededEvent;
   [SteeringFailedEvent.type]: SteeringFailedEvent;
+  // Child lifecycle (AB-90 child ab90-02, AB-222): terminal events
+  // (completed/failed/aborted) are mapped above alongside child.started
+  // (AB-50); this block adds only the two new members AB-222 itself
+  // defines — reattached (typed, never dispatched until AB-53) and
+  // progress (the SemanticProgress-carrying, non-cursor-advancing pulse).
+  [ChildWorkflowReattachedEvent.type]: ChildWorkflowReattachedEvent;
+  [ChildWorkflowProgressEvent.type]: ChildWorkflowProgressEvent;
 }
 
 export type OperativeEventType = Extract<keyof OperativeEventMap, string>;

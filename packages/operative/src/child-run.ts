@@ -38,6 +38,12 @@
  * as before. `createSubagentTool` call sites that don't need discovery stay
  * exactly as simple as before: neither `AgentRunContext.childRegistry` nor
  * `parentContext`/`registry` is required.
+ *
+ * `listChildRuns(registry, parentRunId)` (AB-90 child ab90-02, AB-222) is a
+ * relationship-query function over the same registry: it enumerates a
+ * parent's children and each one's current terminal status (or `undefined`
+ * while still running) without polling each child's own `ChildRunHandle`.
+ * Deliberately not `bureau.*`-namespaced — see the function's own docstring.
  */
 
 import type { Subscription } from 'lifecycle';
@@ -343,6 +349,58 @@ export function createChildRunRegistry(): MutableChildRunRegistry {
       entry.abort(reason);
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// listChildRuns — relationship-query function (AB-90 child ab90-02, AB-222)
+// ---------------------------------------------------------------------------
+
+/** A `ChildRunStatus` narrowed to only its terminal members — never `'running'`. */
+export type ChildRunTerminalStatus = Exclude<ChildRunStatus, 'running'>;
+
+/**
+ * One child's summary as returned by {@link listChildRuns}: its identity
+ * plus current terminal status, or `undefined` while still running — never
+ * the `'running'` string a `ChildRunDescriptor.status` carries internally.
+ */
+export interface ChildRunSummary {
+  readonly id: string;
+  readonly parentId: string;
+  readonly agentName: string;
+  readonly durable: boolean;
+  readonly status: ChildRunTerminalStatus | undefined;
+}
+
+/**
+ * Enumerates every child of `parentRunId` known to `registry`, with each
+ * child's current terminal status (`'completed' | 'failed' | 'aborted'`)
+ * or `undefined` while still running — letting a caller inspect a run's
+ * children and their outcomes without polling each child's own
+ * `ChildRunHandle`. Deliberately operative-level, not `bureau.*` (AB-222):
+ * a Bureau-namespaced relationship-query API, if wanted later, wraps this
+ * function rather than being built here.
+ *
+ * Never throws for a `parentRunId` with zero registered children — it
+ * returns an empty array, same as `registry.children()` does for an empty
+ * registry. One registry can (though need not) track children dispatched
+ * from more than one parent run, since `ChildRunDescriptor.parentId` is
+ * per-entry, not per-registry — this function filters to just the
+ * requested parent.
+ */
+export function listChildRuns(
+  registry: ChildRunRegistry,
+  parentRunId: string,
+): readonly ChildRunSummary[] {
+  return registry
+    .children()
+    .filter((child) => child.parentId === parentRunId)
+    .map((child) => ({
+      id: child.id,
+      parentId: child.parentId,
+      agentName: child.agentName,
+      durable: child.durable,
+      status: child.status === 'running' ? undefined : child.status,
+    }));
 }
 
 // ---------------------------------------------------------------------------

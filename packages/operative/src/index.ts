@@ -46,10 +46,17 @@ export type {
   ChildRunHandle,
   ChildRunRegistry,
   ChildRunStatus,
+  ChildRunSummary,
+  ChildRunTerminalStatus,
   DispatchChildRunOptions,
   MutableChildRunRegistry,
 } from './child-run';
-export { attenuateDelegatedAuthority, createChildRunRegistry, dispatchChildRun } from './child-run';
+export {
+  attenuateDelegatedAuthority,
+  createChildRunRegistry,
+  dispatchChildRun,
+  listChildRuns,
+} from './child-run';
 export type { RepeatingToolCallsOptions, TokenBudgetOptions } from './conditions/index';
 export { stopWhen } from './conditions/index';
 export type {
@@ -270,6 +277,9 @@ export {
   ChildWorkflowCompletedEvent,
   ChildWorkflowFailedEvent,
 } from './events';
+// AB-90 child ab90-02 / AB-222 — child reattachment and progress events
+export type { ChildWorkflowProgressPayload, ChildWorkflowReattachedPayload } from './events';
+export { ChildWorkflowProgressEvent, ChildWorkflowReattachedEvent } from './events';
 // D6 — scheduling events
 export type {
   CreateScheduleSelfToolOptions,
