@@ -2477,11 +2477,12 @@ import {
   createManualRuntimeServices,
   createMockGenerate,
   createMockGenerateOnce,
+  createResourceScope,
   createRunRecorder,
   createMockScratchpad,
   createTestStore,
 } from '@lostgradient/operative/test';
-import type { EventRecorder, RunRecorder } from '@lostgradient/operative/test';
+import type { EventRecorder, QuiescenceReport, RunRecorder } from '@lostgradient/operative/test';
 import { createActiveRun, stopWhen } from '@lostgradient/operative';
 
 // Replay pre-canned responses in sequence
@@ -2521,21 +2522,29 @@ const once = createMockGenerateOnce({ content: 'Only once', toolCalls: [] });
 
 // In-memory store for testing operative/store consumers
 const store = createTestStore();
+
+// ResourceScope (AB-92/AB-256): register runs, subscriptions, timers, and
+// deferred-queue items a test expects to become quiescent, then prove it.
+const scope = createResourceScope('example-test', runtime);
+scope.register({ kind: 'run', identifier: 'run-1', run: activeRun });
+const report: QuiescenceReport = await scope.close(); // rejects with a QuiescenceError if anything leaked
+expect(report.quiescent).toBe(true);
 ```
 
 **Exported:**
 
-| Symbol                                   | Description                                                                                                                                                                                 |
-| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `createMockGenerate(responses)`          | Replays `GenerateResponse[]` in sequence; exposes `.calls` and `.callCount`.                                                                                                                |
-| `createMockGenerateOnce(response)`       | Returns response once; throws on subsequent calls.                                                                                                                                          |
-| `createRunRecorder(activeRun, runtime?)` | Records all events from an `ActiveRun` for assertion. Exposes `.events`, `.steps`, `.clear()`. Built on `createEventRecorder`.                                                              |
-| `createEventRecorder(runtime)`           | AB-92/AB-255's `EventRecorder`: `attach`/`attachIterable` a resource's complete event-map type, `normalize()` into a portable `CausalTraceEntry[]`, `assertSequence`/`assertHappensBefore`. |
-| `createManualRuntimeServices(options?)`  | Deterministic `RuntimeServices` (AB-92/AB-252): explicit `advance(ms)`/`setTime(epoch)` time control, seeded identifiers and randomness, no real timer.                                     |
-| `createMockScratchpad(initialValues?)`   | In-memory `Scratchpad` for testing scratchpad-dependent agents.                                                                                                                             |
-| `createTestStore()`                      | In-memory `Store` instance from `@lostgradient/operative/store`.                                                                                                                            |
+| Symbol                                   | Description                                                                                                                                                                                                                                                                                                                          |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `createMockGenerate(responses)`          | Replays `GenerateResponse[]` in sequence; exposes `.calls` and `.callCount`.                                                                                                                                                                                                                                                         |
+| `createMockGenerateOnce(response)`       | Returns response once; throws on subsequent calls.                                                                                                                                                                                                                                                                                   |
+| `createRunRecorder(activeRun, runtime?)` | Records all events from an `ActiveRun` for assertion. Exposes `.events`, `.steps`, `.clear()`. Built on `createEventRecorder`.                                                                                                                                                                                                       |
+| `createEventRecorder(runtime)`           | AB-92/AB-255's `EventRecorder`: `attach`/`attachIterable` a resource's complete event-map type, `normalize()` into a portable `CausalTraceEntry[]`, `assertSequence`/`assertHappensBefore`.                                                                                                                                          |
+| `createManualRuntimeServices(options?)`  | Deterministic `RuntimeServices` (AB-92/AB-252): explicit `advance(ms)`/`setTime(epoch)` time control, seeded identifiers and randomness, no real timer.                                                                                                                                                                              |
+| `createMockScratchpad(initialValues?)`   | In-memory `Scratchpad` for testing scratchpad-dependent agents.                                                                                                                                                                                                                                                                      |
+| `createTestStore()`                      | In-memory `Store` instance from `@lostgradient/operative/store`.                                                                                                                                                                                                                                                                     |
+| `createResourceScope(label, runtime)`    | AB-92/AB-256's `ResourceScope`: `register()` a run, timer, subscription, deferred-queue item, or `ChildRunRegistry`; `child(label)` nests a scope; `assertQuiescent()` probes without aborting; `close()` aborts every registered run, awaits its `closed()`, and rejects with a `QuiescenceError` naming every resource still live. |
 
-**Exported types:** `RunRecorder`, `EventRecorder`, `CausalTraceEntry`, `EventRecorderOwnerIdentity`, `FiredFault`, `ManualRuntimeServices`.
+**Exported types:** `RunRecorder`, `EventRecorder`, `CausalTraceEntry`, `EventRecorderOwnerIdentity`, `FiredFault`, `ManualRuntimeServices`, `ResourceScope`, `QuiescenceReport`, `LeakedResource`, `LeakedResourceKind`, `LeakedResourceDiscoveredVia`, `DetachedResource`, `RegisterableResource`, `ClosableRun`, `QuiescenceError`.
 
 ---
 
