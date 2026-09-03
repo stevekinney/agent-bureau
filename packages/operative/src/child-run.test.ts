@@ -860,6 +860,23 @@ describe('ChildRunRegistry.attachLiveness()/subscribeLiveness() (AB-216)', () =>
     expect(subscription.closed).toBe(true);
   });
 
+  it('isolates a throwing subscribeLiveness listener — a later listener still gets notified', () => {
+    const registry = createChildRunRegistry();
+    const agent = makeRealAgent();
+    const calls: string[] = [];
+    registry.subscribeLiveness(() => {
+      calls.push('first');
+      throw new Error('a listener bug, not this registry’s or the child’s');
+    });
+    registry.subscribeLiveness(() => calls.push('second'));
+
+    expect(() =>
+      dispatchChildRun(agent, 'go', { agentName: 'a', parentRunId: 'p', registry }),
+    ).not.toThrow();
+
+    expect(calls).toEqual(['first', 'second']);
+  });
+
   it('attachLiveness on an unknown id is a no-op, never throws, never subscribes', () => {
     const registry = createChildRunRegistry();
     let subscribeCalls = 0;

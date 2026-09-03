@@ -256,7 +256,22 @@ export function createChildRunRegistry(): MutableChildRunRegistry {
   const livenessListeners = new Set<() => void>();
 
   function notifyLivenessChange(): void {
-    for (const listener of [...livenessListeners]) listener();
+    // Isolate each listener the same way `ActiveRunLiveness.notify()` does
+    // (`active-run-liveness.ts`): a throwing listener must not prevent a
+    // later-registered one from being notified, and must not propagate out
+    // of this function — which is reached from inside a child's own
+    // `subscribeSnapshot` delivery (`attachLiveness` below), where an
+    // uncaught throw here would otherwise surface as this registry
+    // breaking that child's own liveness propagation to its OTHER
+    // subscribers, not just this one's bug.
+    for (const listener of [...livenessListeners]) {
+      try {
+        listener();
+      } catch {
+        // The listener's own bug is the listener's problem, not this
+        // registry's or the child's.
+      }
+    }
   }
 
   return {
