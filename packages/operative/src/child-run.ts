@@ -270,6 +270,32 @@ export function isMutableChildRunRegistry(value: unknown): value is MutableChild
 }
 
 /**
+ * Structural guard for {@link DelegatedAuthority}. Exists so a
+ * per-execution value read off an opaque bag (e.g.
+ * `ToolContext.executionContext['delegatedAuthority']`, AB-300) can be
+ * narrowed from `unknown` at the point of use without a cast — mirroring
+ * {@link isMutableChildRunRegistry}'s identical rationale for
+ * `childRegistry`. `policyVersion` is `DelegatedAuthority`'s only required
+ * field; the three narrowing fields are each optional, so this only checks
+ * their type when present rather than requiring all three.
+ */
+export function isDelegatedAuthority(value: unknown): value is DelegatedAuthority {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as Partial<DelegatedAuthority>;
+  if (typeof candidate.policyVersion !== 'string') return false;
+  if (candidate.grantedProviders !== undefined && !Array.isArray(candidate.grantedProviders)) {
+    return false;
+  }
+  if (candidate.grantedModels !== undefined && !Array.isArray(candidate.grantedModels)) {
+    return false;
+  }
+  if (candidate.maximumEffort !== undefined && typeof candidate.maximumEffort !== 'string') {
+    return false;
+  }
+  return true;
+}
+
+/**
  * Structural guard for a "child lifecycle handle" (AB-50's `ChildRunHandle`
  * wraps one; `dispatchChildRun` also has direct access to it) that actually
  * implements AB-88's `LivenessObservable` — checked with `typeof`, not

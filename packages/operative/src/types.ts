@@ -9,6 +9,7 @@ import type { ChildRunRegistry } from './child-run';
 import type { CostEstimate, CostEstimationOptions } from './cost-estimation';
 import type { SteeringDesiredState } from './durable/types';
 import type { OperativeHookMap } from './hooks';
+import type { DelegatedAuthority } from './providers/policy.ts';
 import type { RetryMutator } from './retry/types';
 import type { SelectionGate } from './selection-gate';
 import type { LiveStreamEvent } from './streaming/types';
@@ -550,6 +551,21 @@ export interface RunOptionsBase {
    * `selection` carries no `runId` coupling — see {@link SelectionGate}.
    */
   selection?: SelectionGate;
+  /**
+   * AB-300 — this run's ALREADY-attenuated delegated-authority grant
+   * (forwarded from `AgentRunContext.delegatedAuthority`, itself set by
+   * `dispatchChildRun`'s `DispatchChildRunOptions.delegatedAuthority` — see
+   * `child-run.ts`'s `attenuateDelegatedAuthority`), threaded into every
+   * tool call's per-execution `ToolContext.executionContext.delegatedAuthority`
+   * (see `run-step.ts`'s toolbox execute call site), matching the AB-233
+   * `childRegistry`/`parentRunId` pattern. `createSubagentTool` reads it
+   * there at execute time — never from a value captured once at
+   * tool-construction time — and attenuates it further with its own
+   * narrowing (if any) before forwarding it into the child's own
+   * `dispatchChildRun` call. `undefined` — the default — means this run
+   * inherits no delegated-authority narrowing from a dispatching parent.
+   */
+  delegatedAuthority?: DelegatedAuthority;
   /**
    * The AB-92/AB-252 injectable runtime-service seam: wall time, monotonic
    * time, timers, identifiers, randomness, and deferred-work tracking.
