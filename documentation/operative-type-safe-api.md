@@ -796,9 +796,10 @@ consumers can keep reading the flattened fields. There is no
 
 ### `generate.completed` carries post-guardrail content (AB-302)
 
-`GenerateCompletedEvent.response` is dispatched AFTER both output-guardrail
-validation stages `runStep` runs on a step's response — `RunOptions.validateResponse`
-(the array bureau's `createGuardrails().validateResponse` is pushed onto for
+`GenerateCompletedEvent` is dispatched AFTER both output-guardrail validation
+stages `runStep` runs on a step's response — `RunOptions.validateResponse`
+(a hook, or array of hooks, normalized into `deps.validateResponseHooks`;
+bureau's `createGuardrails().validateResponse` is pushed onto that array for
 its default and caller-supplied guardrail presets) and the `validateResponse`
 hook registry entry — never immediately after the raw provider response
 returns. A guardrail configured with `action: 'redact'` or `'block'`
