@@ -2638,6 +2638,42 @@ A `block` step (`{ kind: 'block', barrier: 'name' }`) suspends the call until th
 
 **Exported types:** `FaultBoundary`, `FaultOperation`, `FaultOccurrence`, `FaultPlanEntry`, `FaultPlan`, `FiredFault`, `ScriptedGenerate`, `ScriptedGenerateStep`, `ScriptedGenerateCall`, `ScriptedGenerateExpectation`, `ScriptedTool`, `ScriptedToolStep`, `ScriptedToolCall`, `ScriptedHook`, `ScriptedHookPhase`, `ScriptedHookStep`, `ScriptedHookCall`, `ScriptedSettlement`.
 
+#### The named barrier registry (AB-92/AB-266)
+
+`createBarrierRegistry(recorder?)` builds a `BarrierRegistry`: a named collection of `Barrier`s a deterministic suite uses in place of a real-timer sleep, at any coordination point where the public surface already offers a hook, an event, or an injected double — a model call, a tool call, a hook phase (through the scripted doubles' own `block` step), a durable checkpoint, a session commit, a child registration, a signal delivery, an event publication, or a cleanup boundary (through `closed()`).
+
+```typescript
+import { createBarrierRegistry } from '@lostgradient/operative/test';
+
+const registry = createBarrierRegistry();
+const barrier = registry.barrier('slow-write');
+
+// The guarded operation: suspends until the test releases it.
+async function guardedOperation() {
+  const value = await barrier.arrive(); // resolves to release()'s value, or throws reject()'s error
+  return value;
+}
+const pending = guardedOperation();
+
+// The test: waits for arrival (never hangs on a late subscribe), inspects
+// counts, then lets exactly one waiting arrival through.
+await barrier.reached();
+expect(barrier.inspect()).toEqual({ name: 'slow-write', arrivals: 1, released: 0, pending: true });
+barrier.release('ok');
+expect(await pending).toBe('ok');
+
+// A test that ends with an arrival never released fails loudly, naming it.
+registry.assertNoPending();
+```
+
+`release()` called before any arrival is banked and lets the next `arrive()` through without blocking — an over-release, not a race. `reject(error)` makes the waiting `arrive()` call throw `error`, doubling as a fault-placement mechanism at a point `fault-plan.ts`'s vocabulary doesn't name; it counts toward `released` the same way `release()` does, so a rejected arrival is never reported as still pending.
+
+When `recorder` (an `EventRecorder`) is supplied, every arrival, release, and rejection is recorded as a `CausalTraceEntry` with `resource: 'barrier:<name>'` and `event: 'barrier.reached' | 'barrier.released' | 'barrier.rejected'` — `attach`'s own `${kind}:${id}` resource shape, not the bare name, since `event-recorder.ts` exposes no lower-level entry-push API.
+
+**Exported:** `createBarrierRegistry(recorder?)`.
+
+**Exported types:** `Barrier`, `BarrierRegistry`, `BarrierState`.
+
 ---
 
 ## Development
