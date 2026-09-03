@@ -62,7 +62,7 @@
  * | `status: 'running'`, no steps yet                           | `TASK_STATE_SUBMITTED`  |
  * | `status: 'running'`, steps completed, not parked            | `TASK_STATE_WORKING`    |
  * | `status: 'running'`, parked on `requestHumanInput`           | `TASK_STATE_INPUT_REQUIRED` |
- * | `status: 'aborted'`                                          | `TASK_STATE_CANCELED`   |
+ * | `status: 'aborting'`/`'aborted'`                              | `TASK_STATE_CANCELED`   |
  * | `status: 'completed'`/`'error'`, `finishReason` failure       | `TASK_STATE_FAILED`     |
  * | `status: 'completed'`, `finishReason` success                | `TASK_STATE_COMPLETED`  |
  *
@@ -254,7 +254,11 @@ function deriveTaskState(
   bureau: Bureau,
   detail: RunDetail,
 ): { state: A2ATaskState; statusMessage?: A2AMessage } {
-  if (detail.status === 'aborted') {
+  // `'aborting'` (AB-205/AB-37) is the transitional status `Bureau.abortRun`
+  // reports while cleanup is still in flight — before its own terminal
+  // event has flipped the run's real status off `'running'`. A2A has no
+  // "canceling" sub-state of its own, so both map to `TASK_STATE_CANCELED`.
+  if (detail.status === 'aborted' || detail.status === 'aborting') {
     return { state: 'TASK_STATE_CANCELED' };
   }
 
@@ -424,12 +428,21 @@ function handleCancelTask(bureau: Bureau, params: unknown): { task: A2ATask } {
     if (error instanceof BureauError) throw error;
     throw new A2AError(INTERNAL_ERROR);
   }
+  // `abortRun` is idempotent (AB-205/AB-37): called against an
+  // already-terminal task it no longer throws `CONFLICT`, it just returns
+  // that task's current terminal summary. Preserve the A2A
+  // "cannot cancel a terminal task" contract explicitly here instead of
+  // relying on a thrown error that no longer arrives.
+  if (summary.status !== 'aborting') {
+    throw new A2AError(TASK_NOT_CANCELABLE);
+  }
   const detail = bureau.getRun(id);
   if (!detail) throw new A2AError(TASK_NOT_FOUND);
   // `abortRun`'s returned `RunSummary.status` is the authoritative
-  // `'aborted'` verdict — the store's own `RunDetail.status` reflects it only
-  // once the underlying run loop's abort signal has actually propagated,
-  // which is not necessarily synchronous with this call returning.
+  // `'aborting'` verdict — the store's own `RunDetail.status` reflects it
+  // only once the underlying run loop's abort signal has actually
+  // propagated, which is not necessarily synchronous with this call
+  // returning.
   return { task: buildTask(bureau, { ...detail, status: summary.status }) };
 }
 
