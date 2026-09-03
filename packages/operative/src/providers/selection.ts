@@ -759,9 +759,15 @@ export function select(request: SelectionRequest, options: SelectOptions): Selec
       options.user?.latencyPreference,
     );
     if (scoreA !== scoreB) return scoreB - scoreA;
-    const keyA = candidateKey(a.provider, a.model);
-    const keyB = candidateKey(b.provider, b.model);
-    return keyA < keyB ? -1 : keyA > keyB ? 1 : 0;
+    // Compare the (provider, model) tuple field-by-field rather than via a
+    // joined `candidateKey` string: a delimiter-joined comparison is only
+    // equivalent to tuple order when the delimiter sorts below every
+    // character a provider name can contain, which is not a guarantee this
+    // module should depend on (e.g. a provider name that is a prefix of
+    // another would otherwise invert the documented lexicographic order).
+    if (a.provider !== b.provider) return a.provider < b.provider ? -1 : 1;
+    if (a.model !== b.model) return a.model < b.model ? -1 : 1;
+    return 0;
   });
 
   const winner = sorted[0]!;

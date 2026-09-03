@@ -357,6 +357,17 @@ describe('select: tie-break by (provider, model) lexicographic order', () => {
     );
     expect(plan.selected?.provider).toBe('anthropic');
   });
+
+  it('resolves a true (provider, model) tie — a duplicate catalog entry — deterministically via the stable sort, never throwing', () => {
+    const plan = select(
+      baseRequest(),
+      baseOptions(catalogOf([candidateAnthropic, { ...candidateAnthropic }])),
+    );
+    expect(plan.outcome).toBe('selected');
+    expect(plan.selected?.provider).toBe('anthropic');
+    expect(plan.selected?.model).toBe('shared-model');
+    expect(plan.candidates).toHaveLength(2);
+  });
 });
 
 describe('select: exact override via requestedValue', () => {
