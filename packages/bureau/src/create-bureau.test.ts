@@ -3068,6 +3068,57 @@ describe('createBureau', () => {
 
         expect(outcome).toEqual({ status: 'failed', error: readError });
       });
+
+      it('resolves failed, not already-terminal, when the post-cancel re-read still reports a forcibly-terminable status (code-review regression fixture)', async () => {
+        // `cancel` resolving without rejecting is not proof the cancellation
+        // committed. If the post-cancel re-read still reports a status
+        // WITHIN the forcibly-terminable set (the cancellation genuinely
+        // never landed — neither committed nor lost to a race with normal
+        // completion), reporting `'already-terminal'` would be a false
+        // positive and `'requested'` would be an unproven claim; only
+        // `'failed'` is honest.
+        let getDurableRunCalls = 0;
+        const outcome = await resolveCancelDurableRun('run-6', {
+          getDurableRun: async () => {
+            getDurableRunCalls += 1;
+            return { id: 'run-6', type: 'agentRun', status: 'running', input: undefined } as never;
+          },
+          cancel: async () => {},
+        });
+
+        expect(outcome.status).toBe('failed');
+        expect(getDurableRunCalls).toBe(2);
+      });
+
+      it('resolves not-found when the post-cancel re-read observes the run was purged', async () => {
+        let getDurableRunCalls = 0;
+        const outcome = await resolveCancelDurableRun('run-7', {
+          getDurableRun: async () => {
+            getDurableRunCalls += 1;
+            return getDurableRunCalls === 1
+              ? ({ id: 'run-7', type: 'agentRun', status: 'suspended', input: undefined } as never)
+              : null;
+          },
+          cancel: async () => {},
+        });
+
+        expect(outcome).toEqual({ status: 'not-found' });
+      });
+
+      it('resolves unsupported-capability when the post-cancel re-read observes no durable engine composed', async () => {
+        let getDurableRunCalls = 0;
+        const outcome = await resolveCancelDurableRun('run-8', {
+          getDurableRun: async () => {
+            getDurableRunCalls += 1;
+            return getDurableRunCalls === 1
+              ? ({ id: 'run-8', type: 'agentRun', status: 'pending', input: undefined } as never)
+              : undefined;
+          },
+          cancel: async () => {},
+        });
+
+        expect(outcome).toEqual({ status: 'unsupported-capability' });
+      });
     });
   });
 

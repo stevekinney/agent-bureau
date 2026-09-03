@@ -540,9 +540,19 @@ export interface CancelDurableRunDependencies {
  * resolution triggers a REQUIRED post-cancel re-read via `getDurableRun`,
  * because `cancel` resolving is not proof a cancellation record committed (it
  * can win OR lose a race against the workflow completing on its own): a
- * re-read observing `status === 'cancelled'` resolves `'requested'`; any
- * other status (including the race where normal completion won) resolves
- * `'already-terminal'`.
+ * re-read observing `status === 'cancelled'` resolves `'requested'`; a
+ * re-read observing any OTHER status outside
+ * {@link DURABLE_FORCIBLY_TERMINABLE_STATUSES} (the race where normal
+ * completion won instead) resolves `'already-terminal'`; a re-read
+ * observing `null` (the run was purged between the two reads) resolves
+ * `'not-found'`; a re-read observing `undefined` (the durable engine
+ * vanished between the two reads — not expected in practice, since nothing
+ * decomposes a bureau's durable engine mid-call, but never assumed) resolves
+ * `'unsupported-capability'`; a re-read still reporting a status WITHIN
+ * {@link DURABLE_FORCIBLY_TERMINABLE_STATUSES} means `cancel` resolved
+ * without the cancellation actually committing — genuinely unproven, not a
+ * success — and resolves `'failed'` rather than being misreported as
+ * `'already-terminal'` (a code-review finding on this pull request).
  */
 export async function resolveCancelDurableRun(
   runId: string,
@@ -567,9 +577,30 @@ export async function resolveCancelDurableRun(
     }
 
     const rereadState = await dependencies.getDurableRun(runId);
-    return rereadState?.status === 'cancelled'
-      ? { status: 'requested' }
-      : { status: 'already-terminal' };
+    if (rereadState === undefined) {
+      return { status: 'unsupported-capability' };
+    }
+    if (rereadState === null) {
+      return { status: 'not-found' };
+    }
+    if (rereadState.status === 'cancelled') {
+      return { status: 'requested' };
+    }
+    if (!DURABLE_FORCIBLY_TERMINABLE_STATUSES.has(rereadState.status)) {
+      return { status: 'already-terminal' };
+    }
+    // `cancel` resolved without rejecting, but the post-cancel re-read still
+    // reports a forcibly-terminable status — the cancellation record did not
+    // actually commit. Reporting `'already-terminal'` here would be a false
+    // positive; reporting `'requested'` would be an unproven claim. Neither
+    // is honest, so this resolves `'failed'`.
+    return {
+      status: 'failed',
+      error: new Error(
+        `cancelDurableRun("${runId}"): engine.cancel resolved but the post-cancel re-read still ` +
+          `reports status "${rereadState.status}" — the cancellation did not commit.`,
+      ),
+    };
   } catch (error) {
     return { status: 'failed', error };
   }
