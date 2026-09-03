@@ -2,6 +2,7 @@ import { createTool } from 'armorer';
 import { createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
+import { createManualRuntimeServices } from 'lifecycle';
 import { z } from 'zod';
 
 import { stopWhen } from '../../src/conditions';
@@ -77,7 +78,7 @@ describe('createStore', () => {
   });
 
   it('register auto-generates sequential ids', async () => {
-    const store = createStore();
+    const store = createStore({ runtime: createManualRuntimeServices() });
     const activeRunA = makeTestRun();
     const activeRunB = makeTestRun();
 

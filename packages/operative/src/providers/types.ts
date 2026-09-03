@@ -1,4 +1,5 @@
 import type { Message } from 'conversationalist';
+import type { RuntimeServices } from 'lifecycle';
 
 import type { TokenBudget } from '../context/token-budget.ts';
 import type { ContextAssembler } from '../context/types.ts';
@@ -721,6 +722,15 @@ export interface GeminiProviderOptions extends BaseProviderOptions {
    * no `caches`, is rejected at factory-construction time.
    */
   cacheClient?: GeminiCacheCreatingClient;
+  /**
+   * The AB-92/AB-252/AB-253 injectable runtime-service seam: wall time
+   * (`managedCaches` entry `createdAt`/expiry comparisons). Resolved exactly
+   * once at construction — omitted, this provider reads the real globals via
+   * `createDefaultRuntimeServices()`; a test composes its own deterministic
+   * instance with `createManualRuntimeServices()` so cache-expiry timing is
+   * fully time-controlled.
+   */
+  runtime?: RuntimeServices;
 }
 
 // ── Streaming Types ─────────────────────────────────────────────────

@@ -1,3 +1,6 @@
+import type { RuntimeServices } from 'lifecycle';
+import { createDefaultRuntimeServices } from 'lifecycle';
+
 import type { ActiveRun } from '../create-run';
 import { createActiveRun } from '../create-run';
 import type { CheckpointStore, RegistryAgnosticEngine } from '../durable';
@@ -66,6 +69,16 @@ export interface CreateSchedulerOptions {
    * completion via the task callbacks, not run-level hooks, regardless of backend.
    */
   durable?: SchedulerDurableContext;
+  /**
+   * The AB-92/AB-252/AB-253 injectable runtime-service seam: wall time,
+   * monotonic time, timers, identifiers, randomness, and deferred-work
+   * tracking. Resolved exactly once at construction — omitted, this
+   * scheduler reads the real globals via `createDefaultRuntimeServices()`;
+   * a test composes its own deterministic instance with
+   * `createManualRuntimeServices()` from `@lostgradient/operative/test` so
+   * `sleep()`/idle-delay timing and task ids are fully time-controlled.
+   */
+  runtime?: RuntimeServices;
 }
 
 /** The durable-engine wiring a scheduler needs to suspend/resume preempted tasks. */
@@ -145,16 +158,22 @@ function taskSummary(task: SchedulerTask): SchedulerTaskSummary {
  * and handles preemption between operative steps.
  */
 export function createScheduler(options: CreateSchedulerOptions): Scheduler {
-  const { generate, toolbox, idleDelay = 1000, signal: externalSignal, durable } = options;
+  const {
+    generate,
+    toolbox,
+    idleDelay = 1000,
+    signal: externalSignal,
+    durable,
+    runtime = createDefaultRuntimeServices(),
+  } = options;
 
-  let taskIdCounter = 0;
   // Monotonic suffix for synthetic durable scheduler-run ids, so each fresh
   // dispatch of a task gets a distinct workflow id (a requeued resume reuses the
   // suspended run's id instead — see startAndAwaitTask).
   let durableRunCounter = 0;
 
   function generateTaskId(): string {
-    return `task-${++taskIdCounter}-${Date.now().toString(36)}`;
+    return runtime.identifiers.next('task');
   }
 
   const emitter = new EventTarget();
@@ -252,7 +271,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
       new Promise<void>((resolve) => {
         wakeResolver = resolve;
       }),
-      sleep(timeoutMs),
+      sleep(timeoutMs, runtime.timers),
     ]);
     wakeResolver = undefined;
   }
@@ -338,7 +357,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
         currentDispatch.delete(taskId);
         if (runResult.finishReason !== 'aborted') {
           completedCount++;
-          lastTaskCompletedAt = performance.now();
+          lastTaskCompletedAt = runtime.monotonic.now();
           emitEvent(new TaskCompletedEvent(taskId, runResult));
         }
         wakeLoop();
@@ -434,7 +453,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
 
       // Apply idle delay for non-immediate tasks
       if (nextTask.priority !== 'immediate' && lastTaskCompletedAt > 0) {
-        const elapsed = performance.now() - lastTaskCompletedAt;
+        const elapsed = runtime.monotonic.now() - lastTaskCompletedAt;
         if (elapsed < idleDelay) {
           await waitForWake(idleDelay - elapsed);
           // Re-check state after waking — a higher-priority task may have arrived
@@ -790,7 +809,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
       cancelledRunningTasks.delete(task.id);
       if (runResult.finishReason !== 'aborted') {
         completedCount++;
-        lastTaskCompletedAt = performance.now();
+        lastTaskCompletedAt = runtime.monotonic.now();
         emitEvent(new TaskCompletedEvent(task.id, runResult));
         const resolver = taskResolvers.get(task.id);
         if (resolver) {

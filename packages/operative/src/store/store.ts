@@ -1,4 +1,9 @@
-import { CompletableEventTarget, type Observer, type Subscription } from 'lifecycle';
+import {
+  CompletableEventTarget,
+  createDefaultRuntimeServices,
+  type Observer,
+  type Subscription,
+} from 'lifecycle';
 
 import type { ActiveRun } from '../create-run';
 import type { RunResult, StepResult, TokenUsage } from '../types';
@@ -48,13 +53,12 @@ function addUsage(accumulated: TokenUsage, incoming: TokenUsage | undefined): To
 }
 
 export function createStore(options: StoreOptions = {}): Store {
-  const { maxActions, maxSnapshots } = options;
+  const { maxActions, maxSnapshots, runtime = createDefaultRuntimeServices() } = options;
   const runs = new Map<string, RunState>();
   const actions: Action[] = [];
   const emitter = new CompletableEventTarget<StoreEventMap>();
   const runSubscriptions = new Map<string, { unsubscribe: () => void }>();
   let sequenceCounter = 0;
-  let idCounter = 0;
 
   function getState(): StoreState {
     return { runs, actions };
@@ -88,12 +92,12 @@ export function createStore(options: StoreOptions = {}): Store {
 
   function recordAction(runId: string, type: string, detail: unknown): void {
     if (!runs.has(runId)) return;
-    const action = appendAction(runId, type, detail, Date.now());
+    const action = appendAction(runId, type, detail, runtime.clock.now());
     emitter.dispatch(new StoreActionEvent(action));
   }
 
   function register(activeRun: ActiveRun, id?: string): string {
-    const runId = id ?? `run-${++idCounter}`;
+    const runId = id ?? runtime.identifiers.next('run');
 
     const initialState: RunState = {
       id: runId,
@@ -113,7 +117,7 @@ export function createStore(options: StoreOptions = {}): Store {
     const subscription = observable.subscribe({
       next(event) {
         const eventType = event.type;
-        const timestamp = Date.now();
+        const timestamp = runtime.clock.now();
         // Extract custom properties from native Event subclasses (skip inherited Event props)
         const eventProps: Record<string, unknown> = {};
         for (const key of Object.keys(event)) {

@@ -1,3 +1,5 @@
+import type { RuntimeServices } from 'lifecycle';
+
 import type { GenerateFunction } from '../types.ts';
 
 /**
@@ -35,6 +37,15 @@ export type FalloverOptions = {
   onRecovery?: (provider: string) => void;
   /** Override the default error classification logic. */
   classifyError?: (error: unknown) => ErrorClassification;
+  /**
+   * The AB-92/AB-252/AB-253 injectable runtime-service seam. Resolved
+   * exactly once at construction — omitted, `now`'s and `sleep`'s own
+   * defaults (above) read the real globals via
+   * `createDefaultRuntimeServices()`; a test composes its own deterministic
+   * instance with `createManualRuntimeServices()`. An explicitly supplied
+   * `now`/`sleep` still wins over this seam.
+   */
+  runtime?: RuntimeServices;
 };
 
 /**

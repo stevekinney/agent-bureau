@@ -1,5 +1,5 @@
 import type { ConversationSnapshot } from 'conversationalist';
-import type { ObservableLike, Subscription } from 'lifecycle';
+import type { ObservableLike, RuntimeServices, Subscription } from 'lifecycle';
 
 import type { ActiveRun } from '../create-run';
 import type { FinishReason, StepResult, TokenUsage } from '../types';
@@ -44,6 +44,14 @@ export interface StoreState {
 export interface StoreOptions {
   maxActions?: number;
   maxSnapshots?: number;
+  /**
+   * The AB-92/AB-252/AB-253 injectable runtime-service seam. Resolved
+   * exactly once at construction — omitted, this store reads the real
+   * globals via `createDefaultRuntimeServices()`; a test composes its own
+   * deterministic instance with `createManualRuntimeServices()` so action
+   * timestamps and synthetic run ids are fully time-controlled.
+   */
+  runtime?: RuntimeServices;
 }
 
 export type StoreListener = (state: StoreState, action: Action) => void;

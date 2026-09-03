@@ -1,3 +1,6 @@
+import type { RuntimeTimers } from 'lifecycle';
+import { createDefaultRuntimeServices } from 'lifecycle';
+
 import { extractStatusCode } from '../errors.ts';
 import type { GenerateFunction } from '../types.ts';
 import { classifyProviderError } from './classify-error.ts';
@@ -22,13 +25,14 @@ const RETRYABLE_CLASSIFICATIONS = new Set<ErrorClassification>(['server-error', 
  * When all providers are exhausted, throws `FalloverExhaustedError`.
  */
 export function createFalloverGenerate(options: FalloverOptions): GenerateFunction {
+  const runtime = options.runtime ?? createDefaultRuntimeServices();
   const {
     providers,
     retriesPerProvider = 1,
     retryDelay = 1000,
     cooldownDuration = 300_000,
-    now,
-    sleep: sleepFunction = sleep,
+    now = runtime.clock.now,
+    sleep: sleepFunction = (milliseconds, signal) => sleep(milliseconds, signal, runtime.timers),
     onFallover,
     onRecovery,
     classifyError = classifyProviderError,
@@ -141,19 +145,19 @@ function findNextAvailable(
   return undefined;
 }
 
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+function sleep(ms: number, signal: AbortSignal | undefined, timers: RuntimeTimers): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(new DOMException('The operation was aborted', 'AbortError'));
       return;
     }
 
-    const timer = setTimeout(resolve, ms);
+    const timer = timers.setTimeout(resolve, ms);
 
     signal?.addEventListener(
       'abort',
       () => {
-        clearTimeout(timer);
+        timers.clearTimeout(timer);
         reject(new DOMException('The operation was aborted', 'AbortError'));
       },
       { once: true },

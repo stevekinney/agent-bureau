@@ -6,6 +6,7 @@ import type {
 } from '@lostgradient/weft';
 import { ScheduleHandle } from '@lostgradient/weft';
 import { describe, expect, it } from 'bun:test';
+import { createManualRuntimeServices } from 'lifecycle';
 
 import type { SchedulePausedEvent } from '../events';
 import type { ScheduledAgentRunInput, SchedulingEngine } from './schedule-agent';
@@ -96,22 +97,6 @@ function makeSchedulingEngine(options?: {
     async pauseSchedule(): Promise<void> {},
     async resumeSchedule(): Promise<void> {},
     async cancelSchedule(): Promise<void> {},
-  };
-}
-
-function replaceGlobalCrypto(value: unknown): () => void {
-  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
-  Object.defineProperty(globalThis, 'crypto', {
-    configurable: true,
-    value,
-  });
-
-  return () => {
-    if (descriptor) {
-      Object.defineProperty(globalThis, 'crypto', descriptor);
-    } else {
-      Reflect.deleteProperty(globalThis, 'crypto');
-    }
   };
 }
 
@@ -350,74 +335,44 @@ describe('createAgentSchedule', () => {
     expect(engine.calls).toHaveLength(0);
   });
 
-  it('generates a schedule id without crypto helpers when none is supplied', async () => {
-    const restoreCrypto = replaceGlobalCrypto({});
+  it('generates a non-empty schedule id from the default runtime when none is supplied', async () => {
     const engine = makeSchedulingEngine({ scheduleId: 'ignored' });
 
-    try {
-      const handle = await createAgentSchedule({
-        engine: engine,
-        agentName: 'a',
-        spec: { every: '1h' },
-        input: 'x',
-      });
+    const handle = await createAgentSchedule({
+      engine: engine,
+      agentName: 'a',
+      spec: { every: '1h' },
+      input: 'x',
+    });
 
-      expect(handle.id).toMatch(/^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/);
-      expect((engine.calls[0]!.input as ScheduledAgentRunInput).scheduleId).toBe(handle.id);
-    } finally {
-      restoreCrypto();
-    }
+    expect(typeof handle.id).toBe('string');
+    expect(handle.id.length).toBeGreaterThan(0);
+    expect((engine.calls[0]!.input as ScheduledAgentRunInput).scheduleId).toBe(handle.id);
   });
 
-  it('generates a schedule id with crypto.getRandomValues when randomUUID is absent', async () => {
-    let nextByte = 0;
-    const restoreCrypto = replaceGlobalCrypto({
-      getRandomValues(array: Uint8Array) {
-        for (let index = 0; index < array.length; index += 1) {
-          array[index] = nextByte;
-          nextByte += 1;
-        }
-        return array;
-      },
-    });
+  it('generates a deterministic schedule id from an injected manual runtime (AB-92/AB-253)', async () => {
+    const runtime = createManualRuntimeServices();
     const engine = makeSchedulingEngine({ scheduleId: 'ignored' });
 
-    try {
-      const handle = await createAgentSchedule({
-        engine: engine,
-        agentName: 'a',
-        spec: { every: '1h' },
-        input: 'x',
-      });
-
-      expect(handle.id).toMatch(/^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/);
-      expect((engine.calls[0]!.input as ScheduledAgentRunInput).scheduleId).toBe(handle.id);
-    } finally {
-      restoreCrypto();
-    }
-  });
-
-  it('generates a schedule id with crypto.randomUUID when available', async () => {
-    const restoreCrypto = replaceGlobalCrypto({
-      randomUUID() {
-        return '123e4567-e89b-42d3-a456-426614174000';
-      },
+    const handleA = await createAgentSchedule({
+      engine: engine,
+      agentName: 'a',
+      spec: { every: '1h' },
+      input: 'x',
+      runtime,
     });
-    const engine = makeSchedulingEngine({ scheduleId: 'ignored' });
+    const handleB = await createAgentSchedule({
+      engine: engine,
+      agentName: 'a',
+      spec: { every: '1h' },
+      input: 'x',
+      runtime,
+    });
 
-    try {
-      const handle = await createAgentSchedule({
-        engine: engine,
-        agentName: 'a',
-        spec: { every: '1h' },
-        input: 'x',
-      });
-
-      expect(handle.id).toBe('123e4567-e89b-42d3-a456-426614174000');
-      expect((engine.calls[0]!.input as ScheduledAgentRunInput).scheduleId).toBe(handle.id);
-    } finally {
-      restoreCrypto();
-    }
+    expect(handleA.id).toBe('schedule-1');
+    expect(handleB.id).toBe('schedule-2');
+    expect((engine.calls[0]!.input as ScheduledAgentRunInput).scheduleId).toBe(handleA.id);
+    expect((engine.calls[1]!.input as ScheduledAgentRunInput).scheduleId).toBe(handleB.id);
   });
 
   it('returns a handle whose lifecycle methods delegate to the engine', async () => {

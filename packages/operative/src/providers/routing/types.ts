@@ -1,3 +1,5 @@
+import type { RuntimeServices } from 'lifecycle';
+
 import type { GenerateContext, GenerateFunction } from '../types.ts';
 
 /**
@@ -12,6 +14,14 @@ export type RoutingOptions = {
   onRoute?: (event: RoutingEvent) => void;
   /** Fallback route name when no strategy matches. Required. */
   fallback: string;
+  /**
+   * The AB-92/AB-252/AB-253 injectable runtime-service seam. Resolved
+   * exactly once at construction — omitted, `withRoutingMetrics` reads the
+   * real globals via `createDefaultRuntimeServices()`; a test composes its
+   * own deterministic instance with `createManualRuntimeServices()` so
+   * recorded latencies are fully time-controlled.
+   */
+  runtime?: RuntimeServices;
 };
 
 /**

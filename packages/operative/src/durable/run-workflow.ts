@@ -1,5 +1,6 @@
 import { workflow } from '@lostgradient/weft';
 import { Conversation, isConversation } from 'conversationalist';
+import { createDefaultRuntimeServices } from 'lifecycle';
 
 import { BudgetExceededError, ElicitationDeniedError, GuardrailTripwireError } from '../errors';
 import { RunErrorEvent } from '../events';
@@ -877,7 +878,10 @@ export function createRunWorkflow(
             const firedAt = yield* ctx.memo(
               `wakeup-fired-at-${cursor.step}`,
               // eslint-disable-next-line @typescript-eslint/require-await -- ctx.memo requires an async callback; this one has no await of its own.
-              async () => new Date().toISOString(),
+              async () =>
+                (
+                  runDepsFrom(ctx.services).options.runtime ?? createDefaultRuntimeServices()
+                ).clock.nowISO(),
             );
 
             const continuationInput = buildWakeupContinuationInput(
@@ -948,7 +952,10 @@ export function createRunWorkflow(
             const deliveredAt = yield* ctx.memo(
               `signal-delivered-at-${cursor.step}`,
               // eslint-disable-next-line @typescript-eslint/require-await -- ctx.memo requires an async callback; this one has no await of its own.
-              async () => new Date().toISOString(),
+              async () =>
+                (
+                  runDepsFrom(ctx.services).options.runtime ?? createDefaultRuntimeServices()
+                ).clock.nowISO(),
             );
 
             const continuationInput = buildSignalContinuationInput(

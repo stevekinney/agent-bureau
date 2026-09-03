@@ -1,3 +1,5 @@
+import { createDefaultRuntimeServices } from 'lifecycle';
+
 import {
   readBackendDescriptors,
   withBackendDescriptors,
@@ -17,6 +19,7 @@ import type { RoutingMetrics, RoutingMetricsResult, RoutingOptions } from './typ
  * Returns both the wrapped generate function and a metrics handle with a `reset()` method.
  */
 export function withRoutingMetrics(options: RoutingOptions): RoutingMetricsResult {
+  const runtime = options.runtime ?? createDefaultRuntimeServices();
   const routeCounts = new Map<string, number>();
   const routeCosts = new Map<string, number>();
   const routeLatencies = new Map<string, number[]>();
@@ -42,11 +45,11 @@ export function withRoutingMetrics(options: RoutingOptions): RoutingMetricsResul
   const wrappedGenerate: GenerateFunction = async (
     context: GenerateContext,
   ): Promise<GenerateResponse> => {
-    const start = performance.now();
+    const start = runtime.monotonic.now();
 
     try {
       const response = await innerGenerate(context);
-      const elapsed = performance.now() - start;
+      const elapsed = runtime.monotonic.now() - start;
 
       const route = routeByContext.get(context) ?? '';
 
@@ -66,7 +69,7 @@ export function withRoutingMetrics(options: RoutingOptions): RoutingMetricsResul
 
       return response;
     } catch (error) {
-      const elapsed = performance.now() - start;
+      const elapsed = runtime.monotonic.now() - start;
 
       // Record latency even on failure
       const failedRoute = routeByContext.get(context);

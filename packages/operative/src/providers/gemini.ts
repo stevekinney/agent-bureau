@@ -3,6 +3,8 @@ import { parseGeminiToolCalls } from 'armorer/adapters/gemini';
 import type { ConversationHistory } from 'conversationalist';
 import { toGeminiMessages } from 'conversationalist/adapters/gemini';
 import { sha256HexSync } from 'interoperability';
+import type { RuntimeServices } from 'lifecycle';
+import { createDefaultRuntimeServices } from 'lifecycle';
 
 import { withBackendDescriptors } from './backend-descriptor-attachment.ts';
 import { ProviderError } from './errors.ts';
@@ -402,8 +404,10 @@ function createGeminiContentResolver(input: {
   resolvedModel: string;
   cacheClient: GeminiCacheCreatingClient | undefined;
   importClient: () => Promise<GeminiCacheCreatingClient>;
+  /** The AB-92/AB-252/AB-253 resolved runtime — see `GeminiProviderOptions.runtime`. */
+  runtime: RuntimeServices;
 }): GeminiContentResolver {
-  const { options, resolvedModel } = input;
+  const { options, resolvedModel, runtime } = input;
   const cacheAwareAssembly =
     options.assembler && options.contextBudget
       ? createCacheAwareAssembly(options.assembler, options.contextBudget, options.pinnedMessages)
@@ -425,7 +429,7 @@ function createGeminiContentResolver(input: {
     // Gemini API call either factory makes outside its own `try`, and leaving
     // it unwrapped would let a raw SDK error escape a provider that normalizes
     // every other failure into `ProviderError`.
-    const createdAt = Date.now();
+    const createdAt = runtime.clock.now();
     let created: GeminiCachedContent;
     try {
       created = await client.caches.create({ model: resolvedModel, config });
@@ -489,7 +493,7 @@ function createGeminiContentResolver(input: {
       const managed = await existing;
       const current = managedCaches.get(cacheKey);
       if (current === existing) {
-        if (managed.expiresAt === undefined || managed.expiresAt > Date.now()) {
+        if (managed.expiresAt === undefined || managed.expiresAt > runtime.clock.now()) {
           // Re-insert so eviction sweeps a genuinely cold prefix, not a busy one.
           managedCaches.delete(cacheKey);
           managedCaches.set(cacheKey, existing);
@@ -752,6 +756,7 @@ function geminiDescriptorsFor(model: string) {
  * function that produces a `GenerateResponse` — not an SDK provider object.
  */
 export function createGeminiProvider(options: GeminiProviderOptions): GenerateFunction {
+  const runtime = options.runtime ?? createDefaultRuntimeServices();
   const resolvedModel = resolveGeminiModel(options.model);
   const resolvedEffort = options.effort
     ? resolveGeminiEffort(options.effort, resolvedModel)
@@ -780,6 +785,7 @@ export function createGeminiProvider(options: GeminiProviderOptions): GenerateFu
     resolvedModel,
     cacheClient,
     importClient,
+    runtime,
   });
 
   const generate: GenerateFunction = async (
@@ -864,6 +870,7 @@ export function createGeminiProvider(options: GeminiProviderOptions): GenerateFu
 export function createGeminiProviderStream(
   options: Omit<GeminiProviderOptions, 'client'> & { client?: GeminiStreamingModel },
 ): StreamingGenerateFunction {
+  const runtime = options.runtime ?? createDefaultRuntimeServices();
   const resolvedModel = resolveGeminiModel(options.model);
   const resolvedEffort = options.effort
     ? resolveGeminiEffort(options.effort, resolvedModel)
@@ -892,6 +899,7 @@ export function createGeminiProviderStream(
     resolvedModel,
     cacheClient,
     importClient,
+    runtime,
   });
 
   const generate: StreamingGenerateFunction = async (

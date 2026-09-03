@@ -1,7 +1,8 @@
 import { HISTORY_CIRCUIT_BREAKER_REASON, isWeftErrorLike } from '@lostgradient/weft';
 import type { AnyToolbox, ToolboxEventMap } from 'armorer';
 import { Conversation, isConversation } from 'conversationalist';
-import { CompletableEventTarget } from 'lifecycle';
+import type { RuntimeServices } from 'lifecycle';
+import { CompletableEventTarget, createDefaultRuntimeServices } from 'lifecycle';
 
 import { createClosedAcknowledgement } from '../closed-acknowledgement';
 import type { ActiveRun } from '../create-run';
@@ -150,7 +151,7 @@ export interface DurableActiveRunOptions {
   /**
    * Test-only clock seam for this run's `LivenessObservable` watchdogs
    * (AB-214/obs-01). Composition-root only — production callers omit this
-   * and get the real `Date.now()`/`setTimeout` clock.
+   * and get the real (`RuntimeServices`-backed) clock.
    */
   livenessClock?: StallWatchdogClock;
   /** See `CreateActiveRunDependencies.owner` (`create-run.ts`) — threaded through unchanged for a durable run. */
@@ -348,6 +349,11 @@ export function createDurableActiveRun(
   durableRun: DurableActiveRunOptions,
 ): ActiveRun {
   const { runId, options } = durableRun;
+  // AB-92/AB-252/AB-253: resolved exactly once, here — `create-run.ts`
+  // already resolves and snapshots `options.runtime` before routing to this
+  // durable path, so this default only covers a caller that constructs a
+  // durable run outside that composition root.
+  const runtime = options.runtime ?? createDefaultRuntimeServices();
   // F2: resolve agentName — explicit > RunOptions.agentName > empty string.
   const agentName = durableRun.agentName ?? options.agentName ?? '';
   // Use the caller-supplied emitter when provided (see `DurableActiveRunOptions.emitter`)
@@ -428,7 +434,7 @@ export function createDurableActiveRun(
             toolName: e.call.name,
             toolCallId: e.call.id,
             params: e.params,
-            startedAt: Date.now(),
+            startedAt: runtime.clock.now(),
           },
         ),
       );
@@ -549,6 +555,7 @@ export function createDurableActiveRun(
       durableRun.onServices,
       reachability,
       (toolbox) => toolboxForwarder.onStepToolbox(toolbox),
+      runtime,
     );
   }
 
@@ -760,6 +767,9 @@ export function createRecoveredRunEventSurface(
   runId: string,
   agentName: string,
 ): RecoveredRunEventSurface {
+  // AB-92/AB-252/AB-253: resolved exactly once, here — omitted, falls back
+  // to the real globals, matching `createDurableActiveRun`'s own default.
+  const runtime = services.options.runtime ?? createDefaultRuntimeServices();
   const emitter = new CompletableEventTarget<CombinedOperativeEventMap>();
   const abortController = new AbortController();
   services.options = {
@@ -811,7 +821,7 @@ export function createRecoveredRunEventSurface(
               toolName: event.call.name,
               toolCallId: event.call.id,
               params: event.params,
-              startedAt: Date.now(),
+              startedAt: runtime.clock.now(),
             },
           ),
         );
@@ -928,9 +938,18 @@ export function reattachDurableActiveRun(
     abort?: (reason?: string) => void;
     /** Test-only clock seam for this run's watchdogs (AB-214/obs-01). */
     livenessClock?: StallWatchdogClock;
+    /**
+     * The AB-92/AB-252/AB-253 injectable runtime-service seam. Resolved
+     * exactly once here — omitted, this reattach reads the real globals via
+     * `createDefaultRuntimeServices()`; a caller reattaching under a manual
+     * runtime (e.g. `SessionHandleContext.runtime`) passes it through so the
+     * reattached run's own duration measurement stays deterministic too.
+     */
+    runtime?: RuntimeServices;
   },
 ): ActiveRun {
   const { runId, handle } = reattach;
+  const runtime = reattach.runtime ?? createDefaultRuntimeServices();
   const emitter = reattach.emitter ?? new CompletableEventTarget<CombinedOperativeEventMap>();
 
   const liveness = createActiveRunLiveness({
@@ -1014,7 +1033,7 @@ export function reattachDurableActiveRun(
   }
 
   function drive(): Promise<RunResult> {
-    return driveReattachedRun(context, runId, handle, emitter, abortOutcome, reachability);
+    return driveReattachedRun(context, runId, handle, emitter, abortOutcome, reachability, runtime);
   }
 
   function cancelSucceeded(): boolean {
@@ -1252,8 +1271,9 @@ async function driveReattachedRun(
   emitter: OperativeEventEmitter,
   abortOutcome: () => Promise<boolean> | undefined,
   reachability: { unreachable: boolean },
+  runtime: RuntimeServices,
 ): Promise<RunResult> {
-  const runStartTime = performance.now();
+  const runStartTime = runtime.monotonic.now();
 
   let summary: AgentRunWorkflowResult;
   try {
@@ -1317,6 +1337,7 @@ async function driveReattachedRun(
         hooks: undefined,
         emitter,
         runStartTime,
+        runtime,
         errorMessage: message,
       });
     }
@@ -1359,6 +1380,7 @@ async function driveReattachedRun(
     hooks: undefined,
     emitter,
     runStartTime,
+    runtime,
     errorMessage: summary.errorMessage,
     abortReason: summary.abortReason,
     schemaValidation: summary.schemaValidation,
@@ -1387,8 +1409,9 @@ async function driveDurableRun(
   onServices: ((services: DurableRunDeps) => void) | undefined,
   reachability: { unreachable: boolean },
   onStepToolbox: ((toolbox: AnyToolbox) => void) | undefined,
+  runtime: RuntimeServices,
 ): Promise<RunResult> {
-  const runStartTime = performance.now();
+  const runStartTime = runtime.monotonic.now();
   const { hooks } = options;
   let terminalErrorFromEvent: AgentRunError | undefined;
   emitter.addEventListener('run.error', (event) => {
@@ -1514,6 +1537,7 @@ async function driveDurableRun(
         hooks,
         emitter,
         runStartTime,
+        runtime,
         abortReason:
           signal.aborted && typeof signal.reason === 'string' ? signal.reason : undefined,
         costEstimation: options.costEstimation,
@@ -1540,6 +1564,7 @@ async function driveDurableRun(
       hooks,
       emitter,
       runStartTime,
+      runtime,
       errorMessage: message,
       costEstimation: options.costEstimation,
     });
@@ -1568,6 +1593,7 @@ async function driveDurableRun(
     hooks,
     emitter,
     runStartTime,
+    runtime,
     errorMessage: summary.errorMessage,
     abortReason: summary.abortReason,
     schemaValidation: summary.schemaValidation,
@@ -1635,6 +1661,13 @@ interface FinalizeArgs {
   hooks: RunOptions['hooks'];
   emitter: OperativeEventEmitter;
   runStartTime: number;
+  /**
+   * The AB-92/AB-252/AB-253 runtime this run's `runStartTime` was measured
+   * against — threaded into `makeCompletedResult`'s `totalDuration` so the
+   * elapsed-time computation reads the SAME monotonic clock instance that
+   * produced `runStartTime`, never a mismatched fresh default.
+   */
+  runtime: RuntimeServices;
   /** Serialized terminal error message (when the durable run errored). */
   errorMessage?: string;
   /** The exact terminal error object captured from the live run event, when available. */
@@ -1732,5 +1765,7 @@ function finalizeRunResult(args: FinalizeArgs): RunResult {
     args.output,
     args.costEstimation,
     terminalError,
+    undefined,
+    args.runtime,
   );
 }

@@ -166,6 +166,12 @@ export function createActiveRun(
     toOutputJsonSchema(options.output);
   }
 
+  // AB-92/AB-252/AB-253: resolved exactly once, here, at construction — BEFORE
+  // branching on `durable` — and snapshotted into `options` for both the
+  // durable and in-memory paths below, so neither driver ever falls back to a
+  // global independently of the other.
+  const runtime = options.runtime ?? createDefaultRuntimeServices();
+
   if (durable) {
     return createDurableActiveRun(
       { engine: durable.engine, checkpointStore: durable.checkpointStore },
@@ -175,7 +181,7 @@ export function createActiveRun(
         // F2: thread agentName from RunOptions into the durable input. Falls
         // back to '' inside createDurableActiveRun if undefined here.
         agentName: options.agentName,
-        options,
+        options: { ...options, runtime },
         prompt: durable.prompt,
         ...(dependencies?.clock ? { livenessClock: dependencies.clock } : {}),
         ...(dependencies?.owner !== undefined ? { livenessOwner: dependencies.owner } : {}),
@@ -188,11 +194,6 @@ export function createActiveRun(
       },
     );
   }
-
-  // AB-92/AB-252: resolved exactly once, here, at construction, and
-  // snapshotted into `loopOptions` below — nothing downstream reads
-  // `options.runtime` again or falls back to a global.
-  const runtime = options.runtime ?? createDefaultRuntimeServices();
 
   const emitter = new CompletableEventTarget<CombinedOperativeEventMap>();
   const abortController = new AbortController();

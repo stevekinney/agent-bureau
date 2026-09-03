@@ -1,35 +1,17 @@
+import type { RuntimeTimers } from 'lifecycle';
+import { createDefaultRuntimeServices } from 'lifecycle';
+
 /**
- * Portable async sleep utility. Prefers Bun.sleep() when available
- * for better precision, falling back to setTimeout for Node.js and browsers.
- *
- * All timing in the scheduler imports from this module — never call
- * Bun.sleep, setTimeout, or setInterval directly.
+ * Portable async sleep utility, driven entirely by the composed
+ * `RuntimeServices.timers` seam (AB-92/AB-253) rather than a process-global
+ * `setTimeout`/`Bun.sleep`. Omitting `timers` resolves the real-globals
+ * default via `createDefaultRuntimeServices()` — today's behavior — while a
+ * scheduler constructed with a manual runtime passes its own `timers` so
+ * every sleep it drives is fully time-controlled by `advance()`.
  */
-type SleepRuntime = {
-  bunSleep?: (milliseconds: number) => Promise<void>;
-  setTimeoutFunction?: (callback: () => void, milliseconds?: number) => unknown;
-};
-
-const sleepRuntimeOverrideSymbol = Symbol.for('agent-bureau.operative.scheduler.sleep.runtime');
-
-function resolveSleepRuntime(): SleepRuntime {
-  const override = (globalThis as Record<symbol, SleepRuntime | undefined>)[
-    sleepRuntimeOverrideSymbol
-  ];
-  if (override) return override;
-
-  return {
-    bunSleep: typeof Bun !== 'undefined' ? Bun.sleep.bind(Bun) : undefined,
-  };
-}
-
-export async function sleep(milliseconds: number): Promise<void> {
-  const runtime = resolveSleepRuntime();
-
-  if (runtime.bunSleep) {
-    return runtime.bunSleep(milliseconds);
-  }
-  const setTimeoutFunction =
-    runtime.setTimeoutFunction ?? ((callback, delay) => setTimeout(callback, delay));
-  return new Promise((resolve) => setTimeoutFunction(resolve, milliseconds));
+export async function sleep(milliseconds: number, timers?: RuntimeTimers): Promise<void> {
+  const resolvedTimers = timers ?? createDefaultRuntimeServices().timers;
+  return new Promise((resolve) => {
+    resolvedTimers.setTimeout(resolve, milliseconds);
+  });
 }

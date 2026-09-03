@@ -1,89 +1,39 @@
 import { describe, expect, it } from 'bun:test';
+import { createManualRuntimeServices } from 'lifecycle';
 
 import { sleep } from '../../src/scheduler/sleep';
 
-const sleepRuntimeOverrideSymbol = Symbol.for('agent-bureau.operative.scheduler.sleep.runtime');
-
 describe('sleep', () => {
-  it('delegates to the Bun runtime when available', async () => {
-    const originalRuntime = (globalThis as Record<symbol, unknown>)[sleepRuntimeOverrideSymbol];
-    const requestedDelays: number[] = [];
+  it('resolves once the manual runtime advances past the requested delay', async () => {
+    const runtime = createManualRuntimeServices();
+    let resolved = false;
 
-    (globalThis as Record<symbol, unknown>)[sleepRuntimeOverrideSymbol] = {
-      bunSleep: async (milliseconds: number) => {
-        requestedDelays.push(milliseconds);
-      },
-    };
+    const pending = sleep(10, runtime.timers).then(() => {
+      resolved = true;
+    });
 
-    try {
-      await sleep(10);
-      expect(requestedDelays).toEqual([10]);
-    } finally {
-      (globalThis as Record<symbol, unknown>)[sleepRuntimeOverrideSymbol] = originalRuntime;
-    }
+    expect(resolved).toBe(false);
+    await runtime.advance(9);
+    expect(resolved).toBe(false);
+    await runtime.advance(1);
+    await pending;
+    expect(resolved).toBe(true);
   });
 
-  it('passes zero millisecond sleeps to the runtime', async () => {
-    const originalRuntime = (globalThis as Record<symbol, unknown>)[sleepRuntimeOverrideSymbol];
-    const requestedDelays: number[] = [];
+  it('resolves a zero millisecond sleep on the first advance', async () => {
+    const runtime = createManualRuntimeServices();
+    let resolved = false;
 
-    (globalThis as Record<symbol, unknown>)[sleepRuntimeOverrideSymbol] = {
-      bunSleep: async (milliseconds: number) => {
-        requestedDelays.push(milliseconds);
-      },
-    };
+    const pending = sleep(0, runtime.timers).then(() => {
+      resolved = true;
+    });
 
-    try {
-      await sleep(0);
-      expect(requestedDelays).toEqual([0]);
-    } finally {
-      (globalThis as Record<symbol, unknown>)[sleepRuntimeOverrideSymbol] = originalRuntime;
-    }
+    await runtime.advance(0);
+    await pending;
+    expect(resolved).toBe(true);
   });
 
-  it('falls back to the standard timer runtime when the Bun runtime is unavailable', async () => {
-    const originalRuntime = (globalThis as Record<symbol, unknown>)[sleepRuntimeOverrideSymbol];
-    let usedStandardTimer = false;
-
-    (globalThis as Record<symbol, unknown>)[sleepRuntimeOverrideSymbol] = {
-      bunSleep: undefined,
-      ['set' + 'TimeoutFunction']: (handler: TimerHandler, milliseconds?: number) => {
-        usedStandardTimer = true;
-        expect(milliseconds).toBe(5);
-        (handler as () => void)();
-        return 1 as never;
-      },
-    };
-
-    try {
-      await sleep(5);
-      expect(usedStandardTimer).toBe(true);
-    } finally {
-      (globalThis as Record<symbol, unknown>)[sleepRuntimeOverrideSymbol] = originalRuntime;
-    }
-  });
-
-  it('uses the default timer when the runtime override does not provide one', async () => {
-    const originalRuntime = (globalThis as Record<symbol, unknown>)[sleepRuntimeOverrideSymbol];
-    const originalSetTimeout = globalThis.setTimeout;
-    let usedDefaultTimer = false;
-
-    (globalThis as Record<symbol, unknown>)[sleepRuntimeOverrideSymbol] = {
-      bunSleep: undefined,
-    };
-    globalThis.setTimeout = ((handler: TimerHandler, milliseconds?: number) => {
-      usedDefaultTimer = true;
-      expect(milliseconds).toBe(7);
-      (handler as () => void)();
-      return 1 as never;
-    }) as typeof setTimeout;
-
-    try {
-      await sleep(7);
-      expect(usedDefaultTimer).toBe(true);
-    } finally {
-      globalThis.setTimeout = originalSetTimeout;
-      (globalThis as Record<symbol, unknown>)[sleepRuntimeOverrideSymbol] = originalRuntime;
-    }
+  it('falls back to the default runtime timers when none is supplied', async () => {
+    await sleep(0);
   });
 });
