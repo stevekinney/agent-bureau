@@ -91,6 +91,16 @@ export {
 } from './model-catalog-projection.ts';
 export { createOpenAIProvider, createOpenAIProviderStream } from './openai.ts';
 export type {
+  BureauInvariants,
+  ComposePolicyInput,
+  DelegatedAuthority,
+  DeploymentInvariants,
+  PolicyCandidate,
+  SelectionExclusionCode,
+  UserModelConfiguration,
+} from './policy.ts';
+export { composePolicy } from './policy.ts';
+export type {
   ComplexitySignals,
   ComplexityStrategyOptions,
   CostAwareStrategyOptions,

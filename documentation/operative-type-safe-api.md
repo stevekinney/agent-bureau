@@ -1578,7 +1578,91 @@ export type CatalogProjection = 'general' | 'privileged'; // the vault brief's o
 
 `voyage` and `ollama` are embedding-only and get no descriptor row. `getProviderCapabilities` (`packages/operative/src/providers/capabilities.ts`) is now a projection over `createModelCatalog`'s descriptor rows, with an identical public signature and bit-for-bit identical answers to its pre-AB-64 behavior — the ambiguous-`baseURL` rule is sourced from `descriptor.endpointAmbiguous`. `createModelCatalog` is synchronous, side-effect-free, performs no network input or output, and returns a deeply frozen catalog at `revision: 1`; `now` is the only clock it reads, defaulting to the wall clock and injectable in tests.
 
-The five-layer policy precedence, the deterministic selector, and `SelectionPlan` remain AB-66's scope (AB-248 in the Model Capability project). The `'general'`/`'privileged'` catalog projection itself ships here (AB-247/mod-02e, `packages/operative/src/providers/model-catalog-projection.ts`): `projectDescriptor(descriptor, projection)` and `projectCatalog(catalog, projection)` are synchronous, pure functions that read neither the environment nor the clock and return deeply frozen values. `'privileged'` returns a structural copy — nothing dropped. `'general'` redacts exactly what AB-64's `## Catalog discipline (AC8)` names: `pricing` omitted entirely; `endpoint` reduced to its bare operation name with any host or origin detail stripped; `endpointAmbiguous` omitted, because it discloses that a custom base URL or proxy is configured; and any account-level quota field omitted (`BackendDescriptor` has none today). `availability`, `health`, `source`, and `freshness` are retained, so a caller can still tell an unavailable backend from an available one. `GENERAL_PROJECTION_REDACTED_KEYS`, exported from the same module, is what `model-catalog-projection.test.ts`'s exhaustive key-enumeration test checks every `BackendDescriptor` key against — present in the `'general'` projection, or named here — so a field added to the descriptor later without a redaction decision fails that test instead of silently being exposed.
+The deterministic selector and `SelectionPlan` remain AB-66's scope (AB-249 in the Model Capability project); the five-layer policy precedence itself is covered below (AB-248). The `'general'`/`'privileged'` catalog projection ships here (AB-247/mod-02e, `packages/operative/src/providers/model-catalog-projection.ts`): `projectDescriptor(descriptor, projection)` and `projectCatalog(catalog, projection)` are synchronous, pure functions that read neither the environment nor the clock and return deeply frozen values. `'privileged'` returns a structural copy — nothing dropped. `'general'` redacts exactly what AB-64's `## Catalog discipline (AC8)` names: `pricing` omitted entirely; `endpoint` reduced to its bare operation name with any host or origin detail stripped; `endpointAmbiguous` omitted, because it discloses that a custom base URL or proxy is configured; and any account-level quota field omitted (`BackendDescriptor` has none today). `availability`, `health`, `source`, and `freshness` are retained, so a caller can still tell an unavailable backend from an available one. `GENERAL_PROJECTION_REDACTED_KEYS`, exported from the same module, is what `model-catalog-projection.test.ts`'s exhaustive key-enumeration test checks every `BackendDescriptor` key against — present in the `'general'` projection, or named here — so a field added to the descriptor later without a redaction decision fails that test instead of silently being exposed.
+
+### The five-layer model policy precedence composition
+
+Implemented by AB-248 (`packages/operative/src/providers/policy.ts`). `composePolicy` is a pure, synchronous function that composes five precedence layers over a fixed set of `BackendDescriptor`s — deployment invariants, Bureau invariants, Agent requirements and preferences, delegated authority, and user constraints and preferences — transcribed verbatim from AB-64's `## Precedence model and user configuration (AC3, AC4)` section:
+
+```ts
+export interface DeploymentInvariants {
+  readonly deniedProviders?: readonly ProviderName[];
+  readonly deniedModels?: readonly string[];
+  readonly deniedRoutes?: readonly string[];
+  readonly deniedRegions?: readonly string[];
+  readonly requireDataPolicy?: 'no-retention' | 'zero-day-retention' | 'standard';
+}
+/** May add denials; may never remove a deployment denial. */
+export interface BureauInvariants extends DeploymentInvariants {}
+
+/** AB-52's not-yet-decided grant, consumed as an opaque narrowing input. */
+export interface DelegatedAuthority {
+  readonly grantedProviders?: readonly ProviderName[];
+  readonly grantedModels?: readonly string[];
+  readonly maximumEffort?: Effort;
+  readonly policyVersion: string;
+}
+
+export interface UserModelConfiguration {
+  readonly allowedProviders?: readonly ProviderName[];
+  readonly deniedProviders?: readonly ProviderName[];
+  readonly allowedModels?: readonly string[];
+  readonly deniedModels?: readonly string[];
+  readonly allowedRoutes?: readonly string[];
+  readonly deniedRoutes?: readonly string[];
+  readonly allowedRegions?: readonly string[];
+  readonly deniedRegions?: readonly string[];
+  readonly dataPolicy?: 'no-retention' | 'zero-day-retention' | 'standard';
+  readonly defaultEffort?: Effort;
+  readonly exactOverride?: {
+    readonly provider?: ProviderName;
+    readonly model?: string;
+    readonly route?: string;
+    readonly effort?: Effort;
+  };
+  readonly costPreference?: 'lowest-cost' | 'balanced' | 'no-preference';
+  readonly latencyPreference?: 'lowest-latency' | 'balanced' | 'no-preference';
+  readonly fallbackOrder?: readonly string[];
+  readonly effortFallbackMode?: 'reject' | 'degrade';
+}
+
+export type SelectionExclusionCode =
+  | 'denied-by-deployment'
+  | 'denied-by-bureau'
+  | 'missing-required-capability'
+  | 'exceeds-delegated-authority'
+  | 'denied-by-user'
+  | 'incompatible-modality'
+  | 'incompatible-effort'
+  | 'unavailable'
+  | 'unhealthy'
+  | 'stale-catalog';
+
+export interface PolicyCandidate {
+  readonly provider: ProviderName;
+  readonly model: string;
+  readonly route?: string;
+  readonly descriptor: BackendDescriptor;
+  readonly eligible: boolean;
+  readonly exclusionCode?: SelectionExclusionCode;
+  readonly exclusionReason?: string;
+}
+
+declare function composePolicy(input: {
+  readonly descriptors: readonly BackendDescriptor[];
+  readonly deployment?: DeploymentInvariants;
+  readonly bureau?: BureauInvariants;
+  readonly agent?: AgentPreferences; // from generation-profile.ts, not redefined here
+  readonly delegated?: DelegatedAuthority;
+  readonly user?: UserModelConfiguration;
+}): readonly PolicyCandidate[];
+```
+
+Layers apply top to bottom in exactly this order — deployment, Bureau, Agent, delegated, user — and each layer's candidate set is the intersection of its rules with what the layer above allowed: a layer can only narrow what it inherited. The first layer to exclude a candidate owns the exclusion code; no later layer overwrites it, so `BureauInvariants` can add denials but can never re-admit a candidate the deployment layer already excluded. `AgentPreferences` expresses needs and preferences, never denials: a missing `requiredCapabilities` entry or a `minimumContextWindowTokens` shortfall excludes with `missing-required-capability`, while `preferredProviders`/`preferredModels` exclude nothing and are carried through untouched for the future selector to rank on. `DelegatedAuthority` narrows by omission — an absent `grantedProviders`/`grantedModels` array narrows nothing, a present one excludes everything it does not name — and `policyVersion` is copied into every exclusion this layer produces so a child's attenuation is traceable to the grant that caused it. `UserModelConfiguration`'s allow/deny lists exclude with `denied-by-user`; a descriptor with `availability: 'unavailable'` excludes with `unavailable` and `health: 'unhealthy'` excludes with `unhealthy`, evaluated ahead of any policy layer since "available" precedes "allowed" in the term table above. `route` and `region` are not fields `BackendDescriptor` carries yet, so a `denied*` rule targeting either narrows nothing (no candidate value can ever match) while an `allowed*` rule targeting either excludes every candidate (no candidate value can ever be named in it).
+
+`exactOverride` must name both `provider` and `model` to identify exactly one descriptor — a partially specified override (only `route`, or only `effort`) cannot resolve to a single candidate and yields an empty result, as does one naming no matching descriptor; at most one candidate is ever returned even if `descriptors` contains more than one row for the same `(provider, model)` pair. A fully specified override is checked only against the four layers above the user's (deployment, Bureau, Agent, delegated) before being honored: a rejected override yields a single-candidate result carrying the denying layer's own exclusion code, never `denied-by-user`, matching AB-64's verification walk (an override denied at the Bureau layer reports `denied-by-bureau`). Without `exactOverride`, `composePolicy` returns one frozen `PolicyCandidate` per input descriptor, in input order — never dropping a candidate silently. `composePolicy` reads no clock and performs no input or output: the same input object graph always produces a structurally equal result.
+
+Ranking, tie-breaking, the deterministic selector, and the `SelectionPlan` itself remain AB-66's scope (AB-249); this composition only produces the eligible/excluded candidate set that selector consumes.
 
 ### The Agent generation profile
 

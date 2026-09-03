@@ -1418,6 +1418,33 @@ const readOnly: AgentGenerationProfile = readGenerationProfile(agent);
 
 `AgentPreferences` (`requiredCapabilities`, `preferredProviders`, `preferredModels`, `minimumContextWindowTokens`) and `allowedCandidates` reach the profile through two new `createAgent` options, `generationPreferences` and `allowedCandidates` — the latter promotes the mode to `'selectable'`. `selector` always reads `'unavailable'` on a standalone agent (no Bureau, no policy, no catalog to select through); `'available'` is reported only through Bureau's future catalog read (AB-66/AB-247).
 
+#### Model Policy Precedence (AB-64, AB-248)
+
+`composePolicy` (`@lostgradient/operative/providers`) is a pure, synchronous function that composes AB-64's five precedence layers — deployment invariants, Bureau invariants, Agent requirements and preferences, delegated authority, and user constraints and preferences — over a fixed set of `BackendDescriptor`s. Each layer only narrows what the layer above allowed; the first layer to exclude a candidate owns its `exclusionCode`, and no later layer can overwrite it or re-admit a candidate a higher layer denied.
+
+```typescript
+import { composePolicy, createModelCatalog } from '@lostgradient/operative/providers';
+
+const { descriptors } = createModelCatalog();
+
+const result = composePolicy({
+  descriptors,
+  deployment: { deniedProviders: ['gemini'] },
+  bureau: { deniedModels: ['gpt-4o'] },
+  agent: { minimumContextWindowTokens: 100_000 },
+  delegated: { grantedProviders: ['anthropic', 'openai'], policyVersion: 'grant-v1' },
+  user: { deniedRegions: ['eu'] },
+});
+
+// One PolicyCandidate per descriptor, in input order — never dropped silently.
+result[0]?.eligible; // boolean
+result[0]?.exclusionCode; // e.g. 'denied-by-deployment', when excluded
+```
+
+`AgentPreferences` expresses needs, never denials: a missing `requiredCapabilities` entry or a `minimumContextWindowTokens` shortfall excludes with `missing-required-capability`, while `preferredProviders`/`preferredModels` exclude nothing and are carried through for the future selector to rank on (AB-66). `DelegatedAuthority` narrows by omission — `grantedProviders`/`grantedModels` absent narrows nothing, present-and-not-naming excludes with `exceeds-delegated-authority`, and `policyVersion` is traceable in every exclusion this layer produces. `user.exactOverride` must name both `provider` and `model` to identify exactly one descriptor — a partially specified override resolves to none, never an ambiguous multi-candidate result. A fully specified override is checked only against the four layers above the user's before being honored: a rejected override yields a single-candidate result carrying the denying layer's own code, never `denied-by-user`.
+
+Ranking, tie-breaking, the deterministic selector, and the `SelectionPlan` itself remain AB-66's scope (AB-249) — this composition only produces the eligible/excluded candidate set that selector will consume.
+
 #### Structured Output
 
 `output` (AB-18) is the single validated output contract: one Zod schema that
