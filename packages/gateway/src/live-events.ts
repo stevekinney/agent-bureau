@@ -54,17 +54,26 @@ export type GatewayConnectionSnapshot = LivenessSnapshot & { kind: 'gateway-conn
  * The timer seam {@link LiveFrameBroker} uses for its heartbeat interval and
  * per-connection watchdog. Extends obs-01's {@link StallWatchdogClock} with
  * `setInterval`/`clearInterval` — the existing SSE heartbeat mechanism —
- * so a test can inject one fake clock that drives both, per AB-219's
- * testing plan (no real timers, no real sleeps). Defaults to the real
- * globals so no existing caller (`new LiveFrameBroker()`) is affected.
+ * and `nowISO` for each connection's `startedAt` timestamp, so a test can
+ * inject one fake clock that drives all of it, per AB-219's testing plan
+ * (no real timers, no real sleeps). Defaults to the real globals so no
+ * existing caller (`new LiveFrameBroker()`) is affected. AB-303:
+ * `createGateway` builds this seam from its resolved `RuntimeServices`
+ * instance — `now` from `RuntimeServices.monotonic.now` (this is the
+ * cadence clock `StallWatchdogClock` expects, not wall time), `nowISO`
+ * from `RuntimeServices.clock.nowISO`, and the four timer members from
+ * `RuntimeServices.timers` — so the watchdog only advances when that same
+ * instance's clock or timers do.
  */
 export interface LiveFrameBrokerClock extends StallWatchdogClock {
+  nowISO(): string;
   setInterval(callback: () => void, ms: number): unknown;
   clearInterval(handle: unknown): void;
 }
 
 const realClock: LiveFrameBrokerClock = {
   now: () => performance.now(),
+  nowISO: () => new Date().toISOString(),
   setTimeout: (callback, ms) => setTimeout(callback, ms),
   clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
   setInterval: (callback, ms) => setInterval(callback, ms),
@@ -363,7 +372,7 @@ export class LiveFrameBroker {
       onAssessmentChange: bumpRevision,
     });
     const connectionId = `gateway-connection-${(this.nextConnectionId += 1)}`;
-    const startedAt = new Date().toISOString();
+    const startedAt = this.clock.nowISO();
     const clock = this.clock;
     this.subscribers.set(key, {
       sendFrame,

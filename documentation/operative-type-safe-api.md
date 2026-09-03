@@ -340,33 +340,45 @@ one test file — no longer share a counter. `armorer/test` re-exports
 `ManualRuntimeServices`/`createManualRuntimeServices` from `lifecycle`,
 matching the treatment `@lostgradient/operative/test` already receives. The
 `BureauOptions` amendment has since landed (`packages/bureau/src/types.ts:564`);
-the gateway construction amendment is recorded below (tst-07a/AB-272) as
-contract, not yet implemented.
+the gateway construction amendment (below) has since landed too (AB-303).
 
-**Gateway server construction (`AB-92`/tst-07a/AB-272 — contract only).**
-The ratified shape is the identical `runtime?: RuntimeServices` field on
-`GatewayOptions` (`packages/gateway/src/types.ts`), resolved once at
-`createGateway()` construction the same way `createAgent`, `createBureau`,
-and `createToolbox` resolve theirs. **This field does not exist on
-`GatewayOptions` today.** `GatewayOptions` already has an unrelated
-`runtime?: 'bun' | 'node'` field (the server-runtime selector, predating
-this decision) that collides on name with the ratified shape — AB-92's
-decision record was written against baseline `22de20a4` and did not
-account for this collision, so landing the field under the name `runtime`
-requires either renaming the existing option or choosing a different name
-for the new one, and no record ratifies either choice. Renaming or
-disambiguating is therefore a **Not decided** item, left for whichever
-issue actually wires `RuntimeServices` composition into `createGateway`.
-Until then, `packages/gateway/src/test/loopback.ts`'s real-runtime
-conformance harness (AB-272) reaches deterministic composition the way
-every other test-tier consumer does today: by passing a
-`ManualRuntimeServices` instance into the `Bureau` it builds through
-`createBureauTestHarness` (`BureauOptions.runtime`, already landed), not
-into the gateway itself. The gateway's own remaining real-global call
-sites — `crypto.randomUUID()` in `resolveStaticTokenRevisionSecret` and
-`Date.now()`/`Date.parse()` in `buildRequestAuthorityValidator`
-(`create-gateway.ts`) — are the migration target once the naming collision
-above is resolved.
+**Gateway server construction (`AB-92`/tst-07a/AB-272/AB-303 — implemented).**
+`GatewayOptions` (`packages/gateway/src/types.ts`) gains `runtime?:
+RuntimeServices`, resolved once at `createGateway()` construction the same
+way `createAgent`, `createBureau`, and `createToolbox` resolve theirs, and
+forwarded as that single instance to the composed Bureau (when
+`createGateway` itself constructs one — today it never does; the bureau is
+always the caller-supplied first argument), the live-events connection
+watchdogs (AB-219), and every other server-side timer/identifier read
+`createGateway` owns directly: the AB-235 shutdown-drain race
+(`raceDrainTimeout`'s `setTimeoutFn`/`clearTimeoutFn` now default from
+`RuntimeServices.timers`), `resolveStaticTokenRevisionSecret`'s identifier
+mint (`RuntimeServices.identifiers`, replacing `crypto.randomUUID()`),
+`buildRequestAuthorityValidator`'s expiry check (`RuntimeServices.clock.now`,
+replacing `Date.now()`), the `x-request-id` middleware
+(`createRequestIdentifier`, over `RuntimeServices.identifiers`), the rate
+limiter's clock, and the API key store's `createdAt`/`expiresAt`/
+`lastUsedAt` timestamps (`RuntimeServices.clock`). Omitting `runtime` gets
+`createDefaultRuntimeServices()`'s real-globals implementation —
+unconfigured production behavior is unchanged.
+
+AB-92's decision record was written against baseline `22de20a4` and did not
+account for `GatewayOptions` already having an unrelated `runtime?: 'bun' |
+'node'` field (the server-runtime selector, predating this decision), which
+collided on name with the ratified `RuntimeServices` shape. The coordinator
+ruling on AB-303 (2026-09-03) resolved the collision by renaming the
+pre-existing selector to `serverRuntime?: 'bun' | 'node'` — the name
+`packages/gateway/src/test/loopback.ts`'s loopback harness (AB-272) already
+used for its own same-named option — and landing `runtime?: RuntimeServices`
+under the now-free name, matching every other composition root. Gateway is
+private, so the rename is not a published breaking change.
+`packages/gateway/src/test/loopback.ts`'s `startLoopbackGateway` now forwards
+the Bureau harness's own `ManualRuntimeServices` (`harness.runtime`) into
+`createGateway`'s `runtime` option, so both sides of the wire — the Bureau
+underneath and the gateway door in front of it — share one deterministic
+clock; `packages/gateway/src/conformance/transport.test.ts` proves a
+connection watchdog reports `late`/`unreachable` only when that shared
+manual runtime is advanced, never from real wall-clock time passing.
 
 ## Lazy loading
 

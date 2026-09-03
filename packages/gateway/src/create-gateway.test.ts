@@ -123,11 +123,11 @@ describe('createGateway', () => {
     bureau.dispose();
   });
 
-  it('accepts runtime option', async () => {
+  it('accepts serverRuntime option', async () => {
     const bureau = await createBureau({
       agents: {},
     });
-    const gateway = await createGateway(bureau, { runtime: 'bun' });
+    const gateway = await createGateway(bureau, { serverRuntime: 'bun' });
     expect(gateway.app).toBeDefined();
     bureau.dispose();
   });
@@ -746,13 +746,13 @@ describe('buildRequestAuthorityValidator', () => {
 function createFakeTimer() {
   let scheduled: { callback: () => void } | undefined;
   let cleared = false;
-  const setTimeoutFn = ((callback: () => void) => {
+  const setTimeoutFn = (callback: () => void, _ms: number): unknown => {
     scheduled = { callback };
-    return 1 as unknown as ReturnType<typeof setTimeout>;
-  }) as typeof setTimeout;
-  const clearTimeoutFn = (() => {
+    return 1;
+  };
+  const clearTimeoutFn = (_handle: unknown): void => {
     cleared = true;
-  }) as typeof clearTimeout;
+  };
   return {
     setTimeoutFn,
     clearTimeoutFn,
@@ -803,6 +803,17 @@ describe('raceDrainTimeout', () => {
 
     // Clean up the still-pending stopping promise so it doesn't linger.
     releaseStopping?.();
+  });
+
+  it('falls back to the real global timers when no dependencies are provided', async () => {
+    // `createGateway` always supplies both `setTimeoutFn`/`clearTimeoutFn`
+    // explicitly (AB-303, from its resolved `RuntimeServices.timers`), so
+    // this real-timer default path is exercised only by a direct call like
+    // this one. `stopping` is already resolved, so `Promise.race` settles
+    // on that microtask long before the real 10s timer could ever fire —
+    // this proves the default wiring, not a real wait.
+    const result = await raceDrainTimeout(Promise.resolve(), 10_000);
+    expect(result).toBe(true);
   });
 });
 

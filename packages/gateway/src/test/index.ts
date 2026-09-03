@@ -46,6 +46,7 @@ export function createManualLiveFrameBrokerClock(): LiveFrameBrokerClock & {
 
   return {
     now: () => time,
+    nowISO: () => new Date(time).toISOString(),
     setTimeout(callback, ms) {
       const handle = nextHandle++;
       timeouts.set(handle, { at: time + ms, callback });

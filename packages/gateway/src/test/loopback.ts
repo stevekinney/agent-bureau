@@ -40,10 +40,15 @@ import type {
 
 /**
  * Which server runtime backs this loopback gateway. Named `serverRuntime`
- * (not `runtime`, which this options bag already uses for the harness's
- * `ManualRuntimeServices` — see the module doc on the naming collision
- * between that field and `GatewayOptions.runtime: 'bun' | 'node'` recorded
- * in `documentation/operative-type-safe-api.md`).
+ * — not `runtime`, which this options bag already uses for the harness's
+ * `ManualRuntimeServices` (AB-261) — because `GatewayOptions` itself now
+ * has both names (AB-303): `serverRuntime?: 'bun' | 'node'` selects the
+ * HTTP/WS adapter, and `runtime?: RuntimeServices` is the clock/timer/
+ * identifier seam. This harness forwards its own `ManualRuntimeServices`
+ * (`harness.runtime`) as `createGateway`'s `runtime` option, so the
+ * gateway's connection watchdogs, request identifiers, and every other
+ * server-side timer/identifier read share the same manual clock as the
+ * Bureau underneath it.
  *
  * `'bun'` exercises the real Bun adapter (HTTP, SSE, and WebSocket).
  * `'node'` exercises the real Node adapter over a real `node:http.Server`
@@ -375,6 +380,11 @@ export async function startLoopbackGateway(
       shutdown,
       a2a,
       evaluationReportsDirectory,
+      // AB-303: share the Bureau's own manual runtime with the gateway, so
+      // the connection watchdogs, request identifiers, and every other
+      // server-side timer/identifier read this harness drives advance only
+      // when `harness.runtime.advance()` is called — never a real timer.
+      runtime: harness.runtime,
     },
     { resolveAdapterFn: async () => adapter },
   );

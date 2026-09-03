@@ -563,10 +563,13 @@ describe('Gateway transport conformance — Bun runtime', () => {
         });
         // requestIdentifier middleware stamps a fresh x-request-id on every
         // real response; a patched-global fake would have no reason to
-        // produce this.
-        expect(response.headers.get('x-request-id')).toMatch(
-          /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
-        );
+        // produce this. This loopback gateway forwards the harness's
+        // ManualRuntimeServices as `runtime` (AB-303), so the identifier is
+        // the deterministic `identifiers.next('request')` shape
+        // (`request-<n>`) rather than a real UUID — still proof the real
+        // middleware ran, just over the injected runtime seam instead of
+        // `crypto.randomUUID()`.
+        expect(response.headers.get('x-request-id')).toMatch(/^request-\d+$/);
       },
     );
   });
@@ -641,6 +644,62 @@ describe('Gateway transport conformance — Bun runtime', () => {
     }
 
     await gateway.stop();
+  });
+
+  it('advances a connection watchdog only when the manual runtime advances (AB-303)', async () => {
+    const gateway = await startLoopbackGateway({
+      agents: { echo: createAgent({ name: 'echo', generate: immediateGenerate() }) },
+      generate: immediateGenerate(),
+    });
+
+    async function readyConnections(): Promise<{
+      total: number;
+      late: number;
+      unreachable: number;
+    }> {
+      const response = await gateway.fetch('/api/v1/health/ready', {
+        headers: authHeader(gateway),
+      });
+      const body = (await response.json()) as {
+        subsystems: { connections: { total: number; late: number; unreachable: number } };
+      };
+      return body.subsystems.connections;
+    }
+
+    // A WebSocket connection, not SSE: the SSE endpoint's own real
+    // `heartbeatIntervalMs` (8000ms) `setInterval` writes `: heartbeat`
+    // and records a fresh `transport-keepalive` pulse on every tick,
+    // which would refresh the watchdog's activity clock as we advance
+    // past it and mask exactly the thing this test wants to prove.
+    // WebSocket has no such server-driven interval — a keepalive pulse is
+    // only recorded when the client sends a `ping` frame — so a socket
+    // that never pings is a clean, timer-free surface for the watchdog's
+    // own check math.
+    const ws = await gateway.openWebSocket(`/ws?token=${gateway.authToken}`);
+    try {
+      // The default heartbeat cadence (8000ms) still sizes the watchdog's
+      // policy for this connection (AB-219: `cadenceMs` is always the
+      // connection's own resolved `heartbeatIntervalMs`, even though
+      // WebSocket doesn't use it to schedule a real interval the way SSE
+      // does). The watchdog's own check interval is therefore
+      // cadenceMs + graceMs + jitterMs = 8000 + 4000 + 800 = 12800
+      // (live-events.test.ts's own math for this same default).
+      expect(await readyConnections()).toEqual({ total: 1, late: 0, unreachable: 0 });
+
+      // Advancing the manual runtime past one check interval (12_800ms)
+      // — with no real `setTimeout` and no real sleep — is what moves the
+      // watchdog to `late`.
+      await gateway.runtime.advance(12_800);
+      expect(await readyConnections()).toEqual({ total: 1, late: 1, unreachable: 0 });
+
+      // A second check interval with still no fresh pulse moves it to
+      // `unreachable` (missedPulseThreshold: 2).
+      await gateway.runtime.advance(12_800);
+      expect(await readyConnections()).toEqual({ total: 1, late: 0, unreachable: 1 });
+    } finally {
+      ws.close();
+      await gateway.stop();
+    }
   });
 });
 

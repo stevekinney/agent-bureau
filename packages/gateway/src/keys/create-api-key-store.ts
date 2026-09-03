@@ -1,7 +1,17 @@
 import type { TextValueStore } from '@lostgradient/weft/storage';
+import type { RuntimeServices } from 'lifecycle';
 
 import { extractKeyId, generateApiKey, hashApiKey, verifyApiKey } from './key-utilities';
 import type { ApiKey, ApiKeyStore, CreateApiKeyOptions } from './types';
+
+/**
+ * The real-globals default for {@link createApiKeyStore}'s `clock`
+ * parameter — unconfigured production behavior is unchanged (AB-303).
+ */
+const realClock: RuntimeServices['clock'] = {
+  now: () => Date.now(),
+  nowISO: () => new Date().toISOString(),
+};
 
 const KEY_PREFIX = 'api-key:';
 const INVALID_SCOPE_ENTRY_MESSAGE = 'API key scope entries must be non-blank strings';
@@ -75,7 +85,10 @@ function parseApiKey(raw: string): ApiKey | undefined {
  * the `api-key:<id>` prefix. Plaintext keys are never persisted; only their
  * SHA-256 hashes are stored.
  */
-export function createApiKeyStore(kv: TextValueStore): ApiKeyStore {
+export function createApiKeyStore(
+  kv: TextValueStore,
+  clock: RuntimeServices['clock'] = realClock,
+): ApiKeyStore {
   async function create(options: CreateApiKeyOptions): Promise<{ key: ApiKey; plaintext: string }> {
     const scopes = normalizeApiKeyScopes(options.scopes);
     const plaintext = generateApiKey();
@@ -94,7 +107,7 @@ export function createApiKeyStore(kv: TextValueStore): ApiKeyStore {
       name: options.name,
       keyHash,
       scopes,
-      createdAt: new Date().toISOString(),
+      createdAt: clock.nowISO(),
       expiresAt: options.expiresAt,
       active: true,
     };
@@ -114,7 +127,7 @@ export function createApiKeyStore(kv: TextValueStore): ApiKeyStore {
 
     if (!key.active) return null;
 
-    if (key.expiresAt && new Date(key.expiresAt).getTime() <= Date.now()) {
+    if (key.expiresAt && new Date(key.expiresAt).getTime() <= clock.now()) {
       return null;
     }
 
@@ -122,7 +135,7 @@ export function createApiKeyStore(kv: TextValueStore): ApiKeyStore {
     if (!matches) return null;
 
     // Update lastUsedAt
-    key.lastUsedAt = new Date().toISOString();
+    key.lastUsedAt = clock.nowISO();
     await kv.set(`${KEY_PREFIX}${id}`, JSON.stringify(key));
 
     return { ...key, keyHash: '' };
