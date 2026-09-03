@@ -3,6 +3,13 @@ import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
 import { TypedEventTarget } from 'lifecycle';
 
+import { createAgent } from '../create-agent';
+import { readGenerationProfile } from '../generation-profile';
+import {
+  readBackendDescriptors,
+  withBackendDescriptors,
+} from '../providers/backend-descriptor-attachment';
+import { createModelCatalog } from '../providers/model-catalog';
 import type { GenerateContext, GenerateResponse, StreamingGenerateFunction } from '../types';
 import { withEnhancedStreaming } from './enhanced-streaming';
 import type { StreamCustomEvent, StreamEvent, StreamEventMap, StreamState } from './types';
@@ -913,5 +920,48 @@ describe('withEnhancedStreaming live tool calls', () => {
       ['toolu_01', '{"location":"Denver"}'],
       ['toolu_02', '{"zone":"MST"}'],
     ]);
+  });
+});
+
+describe('withEnhancedStreaming — backend-descriptor propagation (AB-64, AB-245, AB-288)', () => {
+  const FIXED_NOW = () => '2026-09-02T12:00:00.000Z';
+
+  function anthropicDescriptor() {
+    const descriptor = createModelCatalog({ now: FIXED_NOW }).descriptors.find(
+      (row) => row.provider === 'anthropic',
+    );
+    if (!descriptor)
+      throw new Error('expected at least one anthropic descriptor in the seed catalog');
+    return descriptor;
+  }
+
+  it("preserves the wrapped function's attached descriptors on the returned wrapper", () => {
+    const descriptor = anthropicDescriptor();
+    const streamingGenerate: StreamingGenerateFunction = withBackendDescriptors(
+      async ({ streaming }) => {
+        streaming.update('hi');
+        return { content: 'hi', toolCalls: [] };
+      },
+      [descriptor],
+    );
+
+    const wrapped = withEnhancedStreaming(streamingGenerate);
+
+    expect(readBackendDescriptors(wrapped)).toEqual([descriptor]);
+  });
+
+  it("reports a fixed generation profile, not opaque, for an Agent whose generate is the wrapper's output", () => {
+    const descriptor = anthropicDescriptor();
+    const streamingGenerate: StreamingGenerateFunction = withBackendDescriptors(
+      async ({ streaming }) => {
+        streaming.update('hi');
+        return { content: 'hi', toolCalls: [] };
+      },
+      [descriptor],
+    );
+
+    const agent = createAgent({ generate: withEnhancedStreaming(streamingGenerate) });
+
+    expect(readGenerationProfile(agent).mode).toBe('fixed');
   });
 });

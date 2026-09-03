@@ -1,3 +1,8 @@
+import {
+  readBackendDescriptors,
+  unionBackendDescriptors,
+  withBackendDescriptors,
+} from './providers/backend-descriptor-attachment';
 import type { GenerateFunction, GenerateMiddleware } from './types';
 
 /**
@@ -12,6 +17,12 @@ export function composeGenerate(
 
 /**
  * Tries providers in order; falls back on error.
+ *
+ * Attaches the ordered union of every provider's attached
+ * `BackendDescriptor`(s), deduplicated by `(provider, endpoint, model)`
+ * (AB-64 AC2, AB-245, AB-288) — see `unionBackendDescriptors` — onto the
+ * returned wrapper, so an Agent whose generate is `createFallbackGenerate`'s
+ * output reports the routed or fixed mode rather than opaque.
  */
 export function createFallbackGenerate(options: {
   providers: GenerateFunction[];
@@ -23,7 +34,7 @@ export function createFallbackGenerate(options: {
     throw new Error('createFallbackGenerate requires at least one provider');
   }
 
-  return async (context) => {
+  const wrapped: GenerateFunction = async (context) => {
     let lastError: unknown;
     for (const provider of providers) {
       try {
@@ -37,4 +48,9 @@ export function createFallbackGenerate(options: {
     }
     throw lastError;
   };
+
+  return withBackendDescriptors(
+    wrapped,
+    unionBackendDescriptors(providers.map((provider) => readBackendDescriptors(provider))),
+  );
 }

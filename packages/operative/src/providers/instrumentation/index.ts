@@ -1,6 +1,7 @@
 import type { Tracer } from '@opentelemetry/api';
 import { SpanKind, SpanStatusCode, trace } from '@opentelemetry/api';
 
+import { readBackendDescriptors, withBackendDescriptors } from '../backend-descriptor-attachment';
 import type { GenerateFunction, GenerateResponse, ProviderName } from '../types';
 
 export type InstrumentationOptions = {
@@ -62,6 +63,11 @@ function toGenAiOperationName(provider: ProviderName): 'chat' | 'generate_conten
  * Each call creates a CLIENT span named `{operation} {model}` tracking the
  * LLM request lifecycle, including provider, model, and token usage.
  *
+ * Propagates `generateFunction`'s attached `BackendDescriptor`(s) (AB-64,
+ * AB-245, AB-288) onto the returned wrapper, so instrumenting a provider
+ * factory's generate function doesn't silently downgrade the reported
+ * generation profile to `opaque`.
+ *
  * @param generateFunction - The GenerateFunction to instrument.
  * @param options - Provider metadata and optional tracer configuration.
  * @returns A wrapped GenerateFunction with tracing.
@@ -74,7 +80,7 @@ export function instrument(
     options.tracer ??
     trace.getTracer(options.tracerName ?? 'operative', options.tracerVersion ?? '0.0.0');
 
-  return async (context) => {
+  const wrapped: GenerateFunction = async (context) => {
     const operationName = toGenAiOperationName(options.provider);
     const span = tracer.startSpan(`${operationName} ${options.model}`, {
       kind: SpanKind.CLIENT,
@@ -122,4 +128,6 @@ export function instrument(
       throw error;
     }
   };
+
+  return withBackendDescriptors(wrapped, readBackendDescriptors(generateFunction));
 }
