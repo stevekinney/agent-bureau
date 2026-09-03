@@ -195,6 +195,11 @@ export interface AgentScheduleHandle {
    * Never waits on any separately-tracked in-flight fire: a fire dispatched
    * before `cancel()` and still running is an ordinary run, reachable and
    * awaitable through its own `closed()` (AB-204), not through this handle.
+   *
+   * A `cancel()` call that itself rejects (the underlying engine call
+   * throws) resolves this as `{ status: 'failed', error }` rather than
+   * hanging forever — the failed cancellation attempt is a genuine, observed
+   * problem, not silently swallowed into "stays pending".
    */
   closed(options?: ClosedOptions): Promise<CleanupAcknowledgement>;
 }
@@ -330,8 +335,10 @@ function scheduleHandleFromEngine(
   emitter?: EventDispatcher,
 ): AgentScheduleHandle {
   let resolveCancelled!: () => void;
-  const cancelled = new Promise<void>((resolve) => {
+  let rejectCancelled!: (error: unknown) => void;
+  const cancelled = new Promise<void>((resolve, reject) => {
     resolveCancelled = resolve;
+    rejectCancelled = reject;
   });
   return {
     id: scheduleId,
@@ -344,7 +351,16 @@ function scheduleHandleFromEngine(
       emitter?.dispatch(new ScheduleResumedEvent(scheduleId));
     },
     async cancel() {
-      await engine.cancelSchedule(scheduleId);
+      try {
+        await engine.cancelSchedule(scheduleId);
+      } catch (error) {
+        // A failed cancellation attempt is a genuine, observed problem for
+        // `closed()` too — reject `cancelled` so `createClosedAcknowledgement`
+        // classifies it `{ status: 'failed', error }` instead of hanging
+        // forever (a rejected `cancel()` here still propagates unchanged).
+        rejectCancelled(error);
+        throw error;
+      }
       emitter?.dispatch(new ScheduleCancelledEvent(scheduleId));
       resolveCancelled();
     },
@@ -521,8 +537,10 @@ export async function createAgentSchedule(
   }
 
   let resolveCancelled!: () => void;
-  const cancelled = new Promise<void>((resolve) => {
+  let rejectCancelled!: (error: unknown) => void;
+  const cancelled = new Promise<void>((resolve, reject) => {
     resolveCancelled = resolve;
+    rejectCancelled = reject;
   });
 
   return {
@@ -536,7 +554,15 @@ export async function createAgentSchedule(
       emitter?.dispatch(new ScheduleResumedEvent(handle.id));
     },
     async cancel() {
-      await handle.cancel();
+      try {
+        await handle.cancel();
+      } catch (error) {
+        // Same reasoning as `scheduleHandleFromEngine`'s `cancel()`: a
+        // failed cancellation attempt rejects `cancelled` so `closed()`
+        // classifies it `{ status: 'failed', error }` rather than hanging.
+        rejectCancelled(error);
+        throw error;
+      }
       emitter?.dispatch(new ScheduleCancelledEvent(handle.id));
       resolveCancelled();
     },

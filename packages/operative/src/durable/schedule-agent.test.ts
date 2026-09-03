@@ -46,7 +46,11 @@ interface ScheduleCall {
  * class over a stub engine that records lifecycle calls, so handle-delegation can
  * be asserted (`pause`/`resume`/`cancel` route to the engine by id).
  */
-function makeFakeHandle(id: string, recorder?: Record<string, string[]>): ScheduleHandle {
+function makeFakeHandle(
+  id: string,
+  recorder?: Record<string, string[]>,
+  cancelSchedule?: (scheduleId: string) => Promise<void>,
+): ScheduleHandle {
   const stubEngine = {
     pauseSchedule: async (scheduleId: string) => {
       recorder?.['pause']?.push(scheduleId);
@@ -56,6 +60,7 @@ function makeFakeHandle(id: string, recorder?: Record<string, string[]>): Schedu
     },
     cancelSchedule: async (scheduleId: string) => {
       recorder?.['cancel']?.push(scheduleId);
+      await cancelSchedule?.(scheduleId);
     },
     updateSchedule: async () => {},
     getSchedule: async () => mockSummary,
@@ -67,6 +72,14 @@ function makeSchedulingEngine(options?: {
   scheduleId?: string;
   summaries?: ScheduleSummary[];
   handleRecorder?: Record<string, string[]>;
+  /**
+   * Overrides the CANCELLATION behavior of the `ScheduleHandle` `schedule()`
+   * returns (its own internal stub engine, distinct from this
+   * `SchedulingEngine` mock's own `cancelSchedule` below) — used by the
+   * `closed()` "cancel() rejects" regression tests, which need the FRESH
+   * `createAgentSchedule` path's `handle.cancel()` to reject.
+   */
+  handleCancelSchedule?: (scheduleId: string) => Promise<void>;
 }): SchedulingEngine & { calls: ScheduleCall[] } {
   const scheduleId = options?.scheduleId ?? 'test-sched-1';
   const summaries = options?.summaries ?? [mockSummary];
@@ -81,7 +94,11 @@ function makeSchedulingEngine(options?: {
       opts?: ScheduleOptions,
     ): Promise<ScheduleHandle> {
       calls.push({ type, input, spec, options: opts });
-      return makeFakeHandle(opts?.id ?? scheduleId, options?.handleRecorder);
+      return makeFakeHandle(
+        opts?.id ?? scheduleId,
+        options?.handleRecorder,
+        options?.handleCancelSchedule,
+      );
     },
     async getSchedule(): Promise<ScheduleSummary | null> {
       return summaries[0] ?? null;
@@ -982,6 +999,62 @@ describe('AgentScheduleHandle.closed()', () => {
     await handle.cancel();
 
     expect(await handle.closed()).toEqual({ status: 'completed' });
+  });
+
+  it('resolves { status: "failed", error } rather than hanging forever when cancel() itself rejects', async () => {
+    const cancelError = new Error('engine.cancelSchedule exploded');
+    const engine = makeSchedulingEngine({
+      handleCancelSchedule: async () => {
+        throw cancelError;
+      },
+    });
+    const handle = await createAgentSchedule({
+      engine,
+      agentName: 'researcher',
+      spec: { every: '1h' },
+      input: 'poll',
+    });
+
+    let caught: unknown;
+    try {
+      await handle.cancel();
+    } catch (error) {
+      caught = error;
+    }
+    // cancel() itself still propagates the rejection to its own caller...
+    expect(caught).toBe(cancelError);
+    // ...and closed() classifies the same failed attempt instead of hanging.
+    expect(await handle.closed()).toEqual({ status: 'failed', error: cancelError });
+  });
+
+  it('scheduleHandleFromEngine (idempotent-reuse path): resolves { status: "failed", error } when cancel() rejects', async () => {
+    const cancelError = new Error('engine.cancelSchedule exploded');
+    const existingSummary: ScheduleSummary = {
+      ...mockSummary,
+      id: 'schedule-closed-cancel-fails',
+      intervalMs: 3_600_000,
+    };
+    const engine = makeSchedulingEngine({ summaries: [existingSummary] });
+    engine.cancelSchedule = async () => {
+      throw cancelError;
+    };
+    const handle = await createAgentSchedule({
+      engine,
+      agentName: 'researcher',
+      spec: { every: '1h' },
+      input: 'poll',
+      id: 'schedule-closed-cancel-fails',
+      idempotent: true,
+    });
+
+    let caught: unknown;
+    try {
+      await handle.cancel();
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBe(cancelError);
+    expect(await handle.closed()).toEqual({ status: 'failed', error: cancelError });
   });
 
   it('AC3 — "already canceled": resolves promptly and returns the identical cached object on a repeat call', async () => {
