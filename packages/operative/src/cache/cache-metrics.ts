@@ -6,6 +6,10 @@
  */
 
 import { estimateCost } from '../cost-estimation';
+import {
+  readBackendDescriptors,
+  withBackendDescriptors,
+} from '../providers/backend-descriptor-attachment';
 import type { GenerateContext, GenerateFunction } from '../types';
 import { conversationHashKey } from './cache-keys';
 import type { CacheKeyFunction, CacheMetrics, CacheOptions } from './types';
@@ -30,6 +34,11 @@ function resolveKeyStrategy(strategy: CacheOptions['keyStrategy']): CacheKeyFunc
  *
  * Returns both the cached generate function and a live `CacheMetrics` object
  * whose properties reflect the current state of the cache.
+ *
+ * Propagates `generate`'s attached `BackendDescriptor`(s) (AB-64, AB-245,
+ * AB-288) onto the returned `generate`, following the same single-inner-function
+ * reattachment pattern `withCache` uses, so an Agent built on
+ * `withCacheMetrics` doesn't silently downgrade to `opaque`.
  */
 export function withCacheMetrics(
   generate: GenerateFunction,
@@ -110,5 +119,8 @@ export function withCacheMetrics(
     },
   };
 
-  return { generate: trackedGenerate, metrics };
+  return {
+    generate: withBackendDescriptors(trackedGenerate, readBackendDescriptors(generate)),
+    metrics,
+  };
 }
