@@ -71,8 +71,12 @@ export type TaskDiagnosticsFilter = Pick<TaskDiagnosticsInput, 'workflowId' | 'q
  * `dist/server/operations/get-task-diagnostics.js`), mirrored verbatim
  * rather than invented: the client-generated `ClientOperationTypes` input
  * type requires every threshold explicitly (there is no way to omit a
- * field over this transport and let Weft's own server-side default apply),
- * so this module supplies exactly the values Weft itself would have used.
+ * field over this transport and let Weft's own server-side default apply).
+ * {@link buildTaskDiagnosticsInput} merges these onto a caller's filter so
+ * the real wiring passes exactly the values Weft itself would have used —
+ * this module's own `project*` functions never apply a threshold directly;
+ * they only classify whatever `WeftLivenessSource.getTaskDiagnostics`
+ * (wired by the caller) already returned.
  */
 const WEFT_TASK_DIAGNOSTICS_DEFAULTS = {
   staleQueuedAfterMs: 60_000,
@@ -481,10 +485,13 @@ function computeTaskLivenessFields(
 
 /**
  * Projects `weft.tasks.diagnostics`, filtered to one task, into a
- * `weft-task` `LivenessSnapshot`. Every threshold this module passes to the
- * operation mirrors Weft's own server-side default (see
- * `WEFT_TASK_DIAGNOSTICS_DEFAULTS`) — nothing tighter or looser is invented
- * locally.
+ * `weft-task` `LivenessSnapshot`. This function itself passes only `filter`
+ * to `source.getTaskDiagnostics` — it applies no threshold. The real wiring
+ * for `WeftLivenessSource.getTaskDiagnostics` calls
+ * {@link buildTaskDiagnosticsInput}`(filter)` before invoking
+ * `client.operations['weft.tasks.diagnostics']`, which mirrors Weft's own
+ * server-side defaults (`WEFT_TASK_DIAGNOSTICS_DEFAULTS`) — nothing tighter
+ * or looser than Weft's own defaults is ever invented.
  */
 export async function projectTaskLivenessSnapshot(
   source: Pick<WeftLivenessSource, 'getTaskDiagnostics'>,
