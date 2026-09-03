@@ -7,7 +7,7 @@
  *   (c) the async iterator is independent of result-resolution state
  *   (d) a second `for await` on a completed run errors or replays predictably, never hangs
  */
-import { createTestToolbox } from 'armorer/test';
+import { createMockTool, createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
 
@@ -17,10 +17,12 @@ import {
   createDiagnosticAgentRun,
   isSuccessfulRunResult,
 } from '../src/agent-run';
-import { createChildRunRegistry } from '../src/child-run';
+import { createChildRunRegistry, dispatchChildRun } from '../src/child-run';
 import { noToolCalls } from '../src/conditions/predicates';
 import { type ActiveRun, createActiveRun as createRun } from '../src/create-run';
 import { AbortAgentRunError, MaximumStepsExceededError } from '../src/errors';
+import { TOOL_CALL_POLICY } from '../src/liveness';
+import type { RunnableAgent } from '../src/runnable-agent';
 import { createMockGenerate } from '../src/test/index';
 import type {
   CleanupAcknowledgement,
@@ -1027,4 +1029,274 @@ describe('AgentRun.snapshot()/subscribeSnapshot()', () => {
 
     await run.result();
   });
+});
+
+// ---------------------------------------------------------------------------
+// AB-216 — child-liveness rollup into worstChildAssessment
+// ---------------------------------------------------------------------------
+
+function createManualClock(): {
+  now(): number;
+  setTimeout(callback: () => void, ms: number): unknown;
+  clearTimeout(handle: unknown): void;
+  advance(ms: number): void;
+} {
+  let time = 0;
+  let nextHandle = 1;
+  const timers = new Map<number, { at: number; callback: () => void }>();
+  return {
+    now: () => time,
+    setTimeout(callback, ms) {
+      const handle = nextHandle++;
+      timers.set(handle, { at: time + ms, callback });
+      return handle;
+    },
+    clearTimeout(handle) {
+      timers.delete(handle as number);
+    },
+    advance(ms) {
+      time += ms;
+      let fired = true;
+      while (fired) {
+        fired = false;
+        for (const [handle, timer] of [...timers.entries()]) {
+          if (timer.at <= time) {
+            timers.delete(handle);
+            timer.callback();
+            fired = true;
+          }
+        }
+      }
+    },
+  };
+}
+
+/**
+ * A `RunnableAgent` whose `run()` builds a real `ActiveRun` (via
+ * `createActiveRun`, wrapped by `createAgentRun`) against an injected
+ * clock — needed so a test can advance the CHILD's own stall-watchdog
+ * clock independently of the PARENT's, without any real `setTimeout`
+ * delay (this repository's "no real sleeps in deterministic tests" rule).
+ */
+function makeClockedAgent(
+  clock: ReturnType<typeof createManualClock>,
+  responses: GenerateResponse[],
+  toolbox: ReturnType<typeof createTestToolbox>,
+): RunnableAgent {
+  return {
+    name: 'clocked-child',
+    hasOutput: false,
+    run: (input, context) => {
+      const conversation = new Conversation();
+      conversation.appendUserMessage(typeof input === 'string' ? input : 'go');
+      const generate = createMockGenerate(responses);
+      const activeRun = createRun(
+        { generate, toolbox, conversation, agentName: 'clocked-child', signal: context?.signal },
+        undefined,
+        { clock },
+      );
+      return createAgentRun(activeRun);
+    },
+  };
+}
+
+/** `TOOL_CALL_POLICY.cadenceMs + graceMs + jitterMs`, times the missed-pulse threshold. */
+const TOOL_STALL_ADVANCE_MS =
+  ((TOOL_CALL_POLICY.cadenceMs ?? 0) + TOOL_CALL_POLICY.graceMs + TOOL_CALL_POLICY.jitterMs) *
+  TOOL_CALL_POLICY.missedPulseThreshold;
+
+describe('AgentRun worstChildAssessment rollup (AB-216)', () => {
+  function makeParent(childRegistry: ReturnType<typeof createChildRunRegistry>) {
+    const generate = createMockGenerate([textResponse('parent done')]);
+    const toolbox = createTestToolbox([]);
+    const conversation = new Conversation();
+    const activeRun = createRun({
+      generate,
+      toolbox,
+      conversation,
+      stopWhen: noToolCalls(),
+      childRegistry,
+    });
+    return createAgentRun(activeRun, { childRegistry });
+  }
+
+  /**
+   * A parent whose own turn never resolves — needed whenever a test awaits
+   * something else (a child settling, a clock advance) and must observe
+   * `worstChildAssessment` while the PARENT is still non-terminal. Once a
+   * parent's own run goes terminal it disposes its watchdogs (including
+   * the child-registry subscription — AB-88's AC1 terminal-collapse rule
+   * has no exception for a rollup field), so a parent that raced to its
+   * own completion first would freeze `worstChildAssessment` at whatever
+   * it last was, which is a different (and separately correct) behavior
+   * from the live-rollup behavior these tests exercise.
+   */
+  function makeLongLivedParent(childRegistry: ReturnType<typeof createChildRunRegistry>) {
+    const generate = () => new Promise<GenerateResponse>(() => {});
+    const toolbox = createTestToolbox([]);
+    const conversation = new Conversation();
+    const activeRun = createRun({
+      generate,
+      toolbox,
+      conversation,
+      stopWhen: noToolCalls(),
+      childRegistry,
+    });
+    return createAgentRun(activeRun, { childRegistry });
+  }
+
+  it('is absent on a parent with no children', async () => {
+    const registry = createChildRunRegistry();
+    const parent = makeParent(registry);
+
+    expect(parent.snapshot().worstChildAssessment).toBeUndefined();
+
+    await parent.result();
+  });
+
+  it('reflects a real dispatched child, healthy, then absent again once the child settles', async () => {
+    const registry = createChildRunRegistry();
+    const parent = makeLongLivedParent(registry);
+    const child: RunnableAgent = {
+      name: 'child',
+      hasOutput: false,
+      run: (_input, context) => {
+        const generate = createMockGenerate([textResponse('child done')]);
+        const toolbox = createTestToolbox([]);
+        const conversation = new Conversation();
+        const activeRun = createRun({
+          generate,
+          toolbox,
+          conversation,
+          stopWhen: noToolCalls(),
+          signal: context?.signal,
+        });
+        return createAgentRun(activeRun);
+      },
+    };
+
+    const handle = dispatchChildRun(child, 'go', {
+      agentName: 'child',
+      parentRunId: 'p',
+      registry,
+    });
+
+    expect(parent.snapshot().worstChildAssessment).toBe('healthy');
+
+    await handle.result();
+
+    expect(parent.snapshot().worstChildAssessment).toBeUndefined();
+  });
+
+  it(
+    'a breached child never flips the parent’s own reachability/progress/status — only ' +
+      'worstChildAssessment reflects it',
+    async () => {
+      // `TOOL_CALL_POLICY` (AB-214) uses ONE `missedPulseThreshold` for
+      // both `reachability` and `progress` — they cross into `unreachable`/
+      // `stalled` on the exact same tick, so `deriveAssessment`'s
+      // `reachability === 'unreachable'` branch always wins over the
+      // `progress === 'stalled'` branch for a real tool-call-only child:
+      // a genuinely stalled child's own top-level assessment is
+      // `'unreachable'`, never `'alive-but-stalled'`, under the shipped
+      // policy. This test proves the real end-to-end wiring with the
+      // assessment the system actually produces; the fold's
+      // `'alive-but-stalled'` case (and every other severity value) is
+      // exercised directly, against a controlled assessment, in
+      // `active-run-liveness.test.ts`'s "worstChildAssessment" suite —
+      // together they cover both "the fold is correct" and "the fold is
+      // wired to something real".
+      const registry = createChildRunRegistry();
+      const parent = makeLongLivedParent(registry);
+      const parentBefore = parent.snapshot();
+      expect(parentBefore.status).toBe('running');
+      expect(parentBefore.reachability).toBe('unknown');
+      expect(parentBefore.progress).toBe('unknown');
+
+      const childClock = createManualClock();
+      const hangingTool = createMockTool({
+        name: 'hang',
+        impl: () => new Promise<never>(() => {}), // never resolves
+      });
+      const childToolbox = createTestToolbox([hangingTool]);
+      const child = makeClockedAgent(
+        childClock,
+        [{ content: '', toolCalls: [{ name: 'hang', arguments: {} }] }],
+        childToolbox,
+      );
+
+      const toolDispatched = new Promise<void>((resolve) => {
+        childToolbox.addEventListener('execute-start', () => resolve(), { once: true });
+      });
+      dispatchChildRun(child, 'go', { agentName: 'child', parentRunId: 'p', registry });
+
+      // Wait for the child's tool call to actually start (the real
+      // `execute-start` event, not a guessed number of microtask ticks),
+      // then stall it by advancing ONLY the child's own clock — the
+      // parent's clock (the real one, untouched) never advances.
+      await toolDispatched;
+      childClock.advance(TOOL_STALL_ADVANCE_MS);
+
+      const parentAfter = parent.snapshot();
+      expect(parentAfter.worstChildAssessment).toBe('unreachable');
+      // The parent's own dimensions are exactly as they were BEFORE the
+      // child stalled — its own never-resolving `generate()` call has by
+      // now started (moving reachability/progress from 'unknown' to
+      // 'reachable'/'progressing' on its own provider-turn pulse, nothing
+      // to do with the child) but a breached child never additionally
+      // flips them toward 'unreachable'/'stalled'.
+      expect(parentAfter.status).toBe('running');
+      expect(parentAfter.reachability).toBe('reachable');
+      expect(parentAfter.progress).toBe('progressing');
+    },
+  );
+
+  it(
+    'delegated policy: the child classifies against its OWN tool-call StallPolicy/clock, ' +
+      'never the parent’s — changing what the parent does has no effect on the child’s ' +
+      'own assessment',
+    async () => {
+      const registry = createChildRunRegistry();
+      const parent = makeLongLivedParent(registry);
+
+      const childClock = createManualClock();
+      const hangingTool = createMockTool({
+        name: 'hang',
+        impl: () => new Promise<never>(() => {}),
+      });
+      const childToolbox = createTestToolbox([hangingTool]);
+      const child = makeClockedAgent(
+        childClock,
+        [{ content: '', toolCalls: [{ name: 'hang', arguments: {} }] }],
+        childToolbox,
+      );
+
+      const toolDispatched = new Promise<void>((resolve) => {
+        childToolbox.addEventListener('execute-start', () => resolve(), { once: true });
+      });
+      dispatchChildRun(child, 'go', { agentName: 'child', parentRunId: 'p', registry });
+
+      await toolDispatched;
+      childClock.advance(TOOL_STALL_ADVANCE_MS);
+
+      // The registry's tracked assessment for the child (fed only from the
+      // child's own `subscribeSnapshot`) and the parent's rollup of it
+      // agree — the parent applies no policy of its own to the child's
+      // evidence, it only reads the child's already-computed assessment
+      // (AB-88's "delegated policy" obligation; AB-216's own acceptance
+      // criteria).
+      expect(registry.children()[0]?.assessment).toBe('unreachable');
+      expect(parent.snapshot().worstChildAssessment).toBe('unreachable');
+
+      // The parent constructs no watchdog for the child and reads no
+      // `StallPolicy` selection from it — the parent's OWN provider-turn
+      // dimensions are governed by `AGENT_RUN_PROVIDER_TURN_POLICY`
+      // against the REAL clock the whole time, never the child's
+      // `TOOL_CALL_POLICY`/manual clock: 'reachable'/'progressing' here
+      // reflect only the parent's own never-resolving `generate()` call
+      // having started, unaffected by the child's stall either way.
+      expect(parent.snapshot().reachability).toBe('reachable');
+      expect(parent.snapshot().progress).toBe('progressing');
+    },
+  );
 });

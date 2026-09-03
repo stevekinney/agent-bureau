@@ -40,6 +40,8 @@
  * `parentContext`/`registry` is required.
  */
 
+import type { Subscription } from 'lifecycle';
+
 import type { RunEvent } from './agent-run';
 import {
   ChildWorkflowAbortedEvent,
@@ -47,6 +49,7 @@ import {
   ChildWorkflowFailedEvent,
   ChildWorkflowStartedEvent,
 } from './events';
+import type { LivenessAssessment, LivenessObservable, LivenessSnapshot } from './liveness';
 import type { DelegatedAuthority } from './providers/policy.ts';
 import type { Effort } from './providers/types.ts';
 import type { AgentInput, RunnableAgent } from './runnable-agent';
@@ -117,6 +120,19 @@ export interface ChildRunDescriptor {
    * `'aborted'` are guaranteed to carry one.
    */
   readonly result?: RunResult;
+  /**
+   * This child's own most recently observed `LivenessAssessment` (AB-88's
+   * `LivenessSnapshot.assessment`), populated once `attachLiveness` has
+   * received the child's first `subscribeSnapshot` delivery — which, per
+   * AB-88's AC10, happens synchronously, so this is set before
+   * `dispatchChildRun` returns the handle whenever a registry is supplied.
+   * Absent when no registry-attached liveness observable exists yet for
+   * this child (a synchronous `agent.run()` throw settles the child before
+   * any liveness was ever attached) — AB-216's rollup treats an absent
+   * `assessment` the same as a `'terminal'` one: excluded from the
+   * worst-child fold, never a stale value standing in for real evidence.
+   */
+  readonly assessment?: LivenessAssessment;
 }
 
 /**
@@ -135,11 +151,23 @@ export interface ChildRunRegistry {
    * Never propagates to any other registered child.
    */
   abortChild(childId: string, reason?: string): void;
+  /**
+   * Subscribes to "some child's `ChildRunDescriptor.assessment` may have
+   * changed" (AB-216) — fired after `attachLiveness` records a new
+   * assessment from a child's own `subscribeSnapshot` delivery. Carries no
+   * payload; a subscriber re-reads `children()` to fold the current set.
+   * A parent's own liveness rollup (`packages/operative/src/liveness/`)
+   * subscribes to this to recompute `LivenessSnapshot.worstChildAssessment`
+   * without polling.
+   */
+  subscribeLiveness(observer: () => void): Subscription;
 }
 
 interface RegisteredChild {
   descriptor: ChildRunDescriptor;
   abort: (reason?: string) => void;
+  /** Set by `attachLiveness`; released once the child settles or is re-attached. */
+  livenessSubscription?: Subscription;
 }
 
 /** Internal registration surface `dispatchChildRun` uses; not part of the public read contract. */
@@ -152,6 +180,19 @@ interface ChildRunRegistrar {
     abort: (reason?: string) => void;
   }): void;
   settle(id: string, status: Exclude<ChildRunStatus, 'running'>, result?: RunResult): void;
+  /**
+   * Wires a child's own `LivenessObservable` (its `AgentRun`, once
+   * `agent.run()` has returned one — AB-50's `ChildRunHandle` wraps the
+   * same object) into this registry so `ChildRunDescriptor.assessment`
+   * tracks the child's own `LivenessSnapshot.assessment` going forward.
+   * A no-op for an unknown `id` (never registered, or already settled and
+   * removed — this registry never removes entries, so in practice only
+   * "never registered" applies). `dispatchChildRun` calls this once, right
+   * after `agent.run()` returns successfully, never before — the delegated
+   * `RunnableAgent`'s own liveness authority (AB-216's AC5) is read, never
+   * recomputed or overridden here.
+   */
+  attachLiveness(id: string, observable: LivenessObservable<LivenessSnapshot>): void;
 }
 
 /** A `ChildRunRegistry` a `dispatchChildRun` caller can also register children into. */
@@ -173,8 +214,35 @@ export function isMutableChildRunRegistry(value: unknown): value is MutableChild
     value !== null &&
     typeof (value as Partial<MutableChildRunRegistry>).register === 'function' &&
     typeof (value as Partial<MutableChildRunRegistry>).settle === 'function' &&
+    typeof (value as Partial<MutableChildRunRegistry>).attachLiveness === 'function' &&
     typeof (value as Partial<MutableChildRunRegistry>).children === 'function' &&
-    typeof (value as Partial<MutableChildRunRegistry>).abortChild === 'function'
+    typeof (value as Partial<MutableChildRunRegistry>).abortChild === 'function' &&
+    typeof (value as Partial<MutableChildRunRegistry>).subscribeLiveness === 'function'
+  );
+}
+
+/**
+ * Structural guard for a "child lifecycle handle" (AB-50's `ChildRunHandle`
+ * wraps one; `dispatchChildRun` also has direct access to it) that actually
+ * implements AB-88's `LivenessObservable` — checked with `typeof`, not
+ * assumed from `RunnableAgent<O, H>.run()`'s declared return type, because
+ * a third-party or test-double `RunnableAgent` implementation can return an
+ * object that satisfies the type only structurally-on-paper (a common
+ * pattern in this repository's own test doubles, which cast `as unknown as
+ * ReturnType<RunnableAgent['run']>` past members they never implement).
+ * Calling `subscribeSnapshot` on such an object would throw at runtime;
+ * this guard keeps `dispatchChildRun` from ever doing that, matching this
+ * module's existing defensive posture toward a misbehaving `RunnableAgent`
+ * (the `agent.run()` / `agentRun.result()` try/catches above).
+ */
+export function hasLivenessObservable(
+  value: unknown,
+): value is LivenessObservable<LivenessSnapshot> {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as Partial<LivenessObservable<LivenessSnapshot>>).snapshot === 'function' &&
+    typeof (value as Partial<LivenessObservable<LivenessSnapshot>>).subscribeSnapshot === 'function'
   );
 }
 
@@ -187,6 +255,26 @@ export function isMutableChildRunRegistry(value: unknown): value is MutableChild
  */
 export function createChildRunRegistry(): MutableChildRunRegistry {
   const entries = new Map<string, RegisteredChild>();
+  const livenessListeners = new Set<() => void>();
+
+  function notifyLivenessChange(): void {
+    // Isolate each listener the same way `ActiveRunLiveness.notify()` does
+    // (`active-run-liveness.ts`): a throwing listener must not prevent a
+    // later-registered one from being notified, and must not propagate out
+    // of this function — which is reached from inside a child's own
+    // `subscribeSnapshot` delivery (`attachLiveness` below), where an
+    // uncaught throw here would otherwise surface as this registry
+    // breaking that child's own liveness propagation to its OTHER
+    // subscribers, not just this one's bug.
+    for (const listener of [...livenessListeners]) {
+      try {
+        listener();
+      } catch {
+        // The listener's own bug is the listener's problem, not this
+        // registry's or the child's.
+      }
+    }
+  }
 
   return {
     register(entry): void {
@@ -205,6 +293,37 @@ export function createChildRunRegistry(): MutableChildRunRegistry {
       const existing = entries.get(id);
       if (!existing) return;
       existing.descriptor = { ...existing.descriptor, status, ...(result ? { result } : {}) };
+      // Release the subscription now — the child's own `subscribeSnapshot`
+      // will already have delivered its one terminal snapshot (AB-88's
+      // AC10) by the time `dispatchChildRun`'s `settle()` runs, so
+      // `descriptor.assessment` is already `'terminal'`; this only stops
+      // holding a `Subscription` object this registry no longer needs.
+      existing.livenessSubscription?.unsubscribe();
+      existing.livenessSubscription = undefined;
+    },
+    attachLiveness(id, observable): void {
+      const existing = entries.get(id);
+      if (!existing) return;
+      existing.livenessSubscription = observable.subscribeSnapshot((snapshot) => {
+        const current = entries.get(id);
+        if (!current) return;
+        current.descriptor = { ...current.descriptor, assessment: snapshot.assessment };
+        notifyLivenessChange();
+      });
+    },
+    subscribeLiveness(observer): Subscription {
+      livenessListeners.add(observer);
+      let closed = false;
+      return {
+        unsubscribe(): void {
+          if (closed) return;
+          closed = true;
+          livenessListeners.delete(observer);
+        },
+        get closed() {
+          return closed;
+        },
+      };
     },
     children(): readonly ChildRunDescriptor[] {
       // A frozen clone per call, not the registry's own stored object: every
@@ -440,6 +559,20 @@ export function dispatchChildRun<O = never, H extends boolean = false>(
     throw error;
   }
   liveAgentRun.current = agentRun;
+
+  // AB-216 — wire this child's own liveness (its `AgentRun`'s
+  // `snapshot()`/`subscribeSnapshot()`, AB-88/AB-214) into the registry so
+  // a parent's rollup can read `ChildRunDescriptor.assessment`. Guarded by
+  // `hasLivenessObservable` rather than assumed from the declared
+  // `RunnableAgent<O, H>.run()` return type — see that guard's own doc
+  // comment for why an unguarded call here would be unsafe against a
+  // misbehaving or test-double `RunnableAgent`. Reads the child's own
+  // already-computed assessment only; never selects, overrides, or
+  // re-evaluates the child's own `StallPolicy` (AB-216's delegated-policy
+  // acceptance criterion) — this registry has no watchdog of its own.
+  if (options.registry && hasLivenessObservable(agentRun)) {
+    options.registry.attachLiveness(childRunId, agentRun);
+  }
 
   const settle = (result: RunResult<O, H>): RunResult<O, H> => {
     const asBaseResult = result as unknown as RunResult;

@@ -1,8 +1,61 @@
 import { describe, expect, it } from 'bun:test';
+import type { Subscription } from 'lifecycle';
 
+import type { ChildRunDescriptor, ChildRunRegistry } from '../child-run';
 import { createActiveRunLiveness } from './active-run-liveness';
 import { LIVENESS_POLICY_VERSION, TOOL_CALL_POLICY } from './policies';
+import type { LivenessAssessment } from './types';
 import type { StallWatchdogClock } from './watchdog';
+
+/**
+ * A `ChildRunRegistry` test double whose `children()` set and
+ * `subscribeLiveness` notifications are fully caller-controlled — for
+ * exercising AB-216's rollup logic in isolation from `dispatchChildRun`'s
+ * own child-dispatch machinery (covered separately in
+ * `packages/operative/test/agent-run.test.ts`).
+ */
+function createFakeChildRegistry(): ChildRunRegistry & {
+  setChildren(children: readonly ChildRunDescriptor[]): void;
+  notify(): void;
+} {
+  let children: readonly ChildRunDescriptor[] = [];
+  const listeners = new Set<() => void>();
+  return {
+    children: () => children,
+    abortChild: () => undefined,
+    subscribeLiveness(observer): Subscription {
+      listeners.add(observer);
+      let closed = false;
+      return {
+        unsubscribe() {
+          if (closed) return;
+          closed = true;
+          listeners.delete(observer);
+        },
+        get closed() {
+          return closed;
+        },
+      };
+    },
+    setChildren(next) {
+      children = next;
+    },
+    notify() {
+      for (const listener of [...listeners]) listener();
+    },
+  };
+}
+
+function child(id: string, assessment: LivenessAssessment | undefined): ChildRunDescriptor {
+  return {
+    id,
+    parentId: 'parent-1',
+    agentName: 'researcher',
+    durable: false,
+    status: assessment === 'terminal' ? 'completed' : 'running',
+    ...(assessment !== undefined ? { assessment } : {}),
+  };
+}
 
 /** `cadenceMs + graceMs + jitterMs` — see the identical helper in `watchdog.test.ts`. */
 const TOOL_CHECK_INTERVAL_MS =
@@ -474,5 +527,251 @@ describe('createActiveRunLiveness', () => {
 
     expect(() => liveness.beginToolCall()).not.toThrow();
     expect(() => liveness.endToolCall()).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AB-216 — worstChildAssessment rollup
+// ---------------------------------------------------------------------------
+
+describe('createActiveRunLiveness — worstChildAssessment (AB-216)', () => {
+  it('is absent when no childRegistry is supplied', () => {
+    const clock = createManualClock();
+    const liveness = createActiveRunLiveness({ id: 'run-1', durability: 'process-local', clock });
+
+    expect(liveness.snapshot().worstChildAssessment).toBeUndefined();
+
+    liveness.dispose();
+  });
+
+  it('is absent when the registry has no children', () => {
+    const clock = createManualClock();
+    const childRegistry = createFakeChildRegistry();
+    const liveness = createActiveRunLiveness({
+      id: 'run-1',
+      durability: 'process-local',
+      clock,
+      childRegistry,
+    });
+
+    expect(liveness.snapshot().worstChildAssessment).toBeUndefined();
+
+    liveness.dispose();
+  });
+
+  it('is absent when every child is terminal', () => {
+    const clock = createManualClock();
+    const childRegistry = createFakeChildRegistry();
+    childRegistry.setChildren([child('c1', 'terminal'), child('c2', 'terminal')]);
+    const liveness = createActiveRunLiveness({
+      id: 'run-1',
+      durability: 'process-local',
+      clock,
+      childRegistry,
+    });
+    childRegistry.notify();
+
+    expect(liveness.snapshot().worstChildAssessment).toBeUndefined();
+
+    liveness.dispose();
+  });
+
+  it('excludes a child with no assessment yet, same as a terminal one', () => {
+    const clock = createManualClock();
+    const childRegistry = createFakeChildRegistry();
+    childRegistry.setChildren([child('c1', undefined)]);
+    const liveness = createActiveRunLiveness({
+      id: 'run-1',
+      durability: 'process-local',
+      clock,
+      childRegistry,
+    });
+    childRegistry.notify();
+
+    expect(liveness.snapshot().worstChildAssessment).toBeUndefined();
+
+    liveness.dispose();
+  });
+
+  it('picks up children already present in the registry at construction time', () => {
+    const clock = createManualClock();
+    const childRegistry = createFakeChildRegistry();
+    childRegistry.setChildren([child('c1', 'healthy')]);
+    const liveness = createActiveRunLiveness({
+      id: 'run-1',
+      durability: 'process-local',
+      clock,
+      childRegistry,
+    });
+
+    expect(liveness.snapshot().worstChildAssessment).toBe('healthy');
+
+    liveness.dispose();
+  });
+
+  it.each([
+    [['healthy'], 'healthy'],
+    [['legitimately-waiting', 'healthy'], 'legitimately-waiting'],
+    [['cleaning-up', 'legitimately-waiting'], 'cleaning-up'],
+    [['aborting', 'cleaning-up'], 'aborting'],
+    [['alive-but-stalled', 'aborting'], 'alive-but-stalled'],
+    [['unreachable', 'alive-but-stalled'], 'unreachable'],
+    [['healthy', 'unreachable', 'alive-but-stalled', 'legitimately-waiting'], 'unreachable'],
+  ] as const)('folds %j to %s, most severe first', (assessments, expected) => {
+    const clock = createManualClock();
+    const childRegistry = createFakeChildRegistry();
+    const liveness = createActiveRunLiveness({
+      id: 'run-1',
+      durability: 'process-local',
+      clock,
+      childRegistry,
+    });
+
+    childRegistry.setChildren(
+      assessments.map((assessment, index) => child(`c${index}`, assessment)),
+    );
+    childRegistry.notify();
+
+    expect(liveness.snapshot().worstChildAssessment).toBe(expected);
+
+    liveness.dispose();
+  });
+
+  it('a terminal child mixed with a non-terminal one only counts the non-terminal one', () => {
+    const clock = createManualClock();
+    const childRegistry = createFakeChildRegistry();
+    const liveness = createActiveRunLiveness({
+      id: 'run-1',
+      durability: 'process-local',
+      clock,
+      childRegistry,
+    });
+
+    childRegistry.setChildren([child('c1', 'terminal'), child('c2', 'alive-but-stalled')]);
+    childRegistry.notify();
+
+    expect(liveness.snapshot().worstChildAssessment).toBe('alive-but-stalled');
+
+    liveness.dispose();
+  });
+
+  it('advances the parent revision when worstChildAssessment changes, even though none of the parent’s own dimensions changed', () => {
+    const clock = createManualClock();
+    const childRegistry = createFakeChildRegistry();
+    const liveness = createActiveRunLiveness({
+      id: 'run-1',
+      durability: 'process-local',
+      clock,
+      childRegistry,
+    });
+
+    const before = liveness.snapshot();
+    expect(before.status).toBe('running');
+    expect(before.reachability).toBe('unknown');
+    expect(before.progress).toBe('unknown');
+
+    childRegistry.setChildren([child('c1', 'alive-but-stalled')]);
+    childRegistry.notify();
+
+    const after = liveness.snapshot();
+    expect(after.revision).toBeGreaterThan(before.revision);
+    expect(after.worstChildAssessment).toBe('alive-but-stalled');
+    // The parent's own dimensions are untouched by a stalled child.
+    expect(after.status).toBe('running');
+    expect(after.reachability).toBe('unknown');
+    expect(after.progress).toBe('unknown');
+
+    liveness.dispose();
+  });
+
+  it('does NOT advance the revision when a registry notification leaves the folded value unchanged', () => {
+    const clock = createManualClock();
+    const childRegistry = createFakeChildRegistry();
+    childRegistry.setChildren([child('c1', 'healthy'), child('c2', 'legitimately-waiting')]);
+    const liveness = createActiveRunLiveness({
+      id: 'run-1',
+      durability: 'process-local',
+      clock,
+      childRegistry,
+    });
+
+    const before = liveness.snapshot();
+    expect(before.worstChildAssessment).toBe('legitimately-waiting');
+
+    // A different, but equally-severe-or-better, child set — the fold
+    // still comes out to 'legitimately-waiting'.
+    childRegistry.setChildren([child('c1', 'healthy'), child('c2', 'legitimately-waiting')]);
+    childRegistry.notify();
+
+    const after = liveness.snapshot();
+    expect(after.revision).toBe(before.revision);
+    expect(after.worstChildAssessment).toBe('legitimately-waiting');
+
+    liveness.dispose();
+  });
+
+  it('notifies subscribers when worstChildAssessment changes', () => {
+    const clock = createManualClock();
+    const childRegistry = createFakeChildRegistry();
+    const liveness = createActiveRunLiveness({
+      id: 'run-1',
+      durability: 'process-local',
+      clock,
+      childRegistry,
+    });
+
+    const received: (LivenessAssessment | undefined)[] = [];
+    const subscription = liveness.subscribeSnapshot((snapshot) =>
+      received.push(snapshot.worstChildAssessment),
+    );
+    expect(received).toEqual([undefined]);
+
+    childRegistry.setChildren([child('c1', 'unreachable')]);
+    childRegistry.notify();
+
+    expect(received).toEqual([undefined, 'unreachable']);
+
+    subscription.unsubscribe();
+    liveness.dispose();
+  });
+
+  it('reverts to absent once the last non-terminal child settles', () => {
+    const clock = createManualClock();
+    const childRegistry = createFakeChildRegistry();
+    const liveness = createActiveRunLiveness({
+      id: 'run-1',
+      durability: 'process-local',
+      clock,
+      childRegistry,
+    });
+
+    childRegistry.setChildren([child('c1', 'alive-but-stalled')]);
+    childRegistry.notify();
+    expect(liveness.snapshot().worstChildAssessment).toBe('alive-but-stalled');
+
+    childRegistry.setChildren([child('c1', 'terminal')]);
+    childRegistry.notify();
+    expect(liveness.snapshot().worstChildAssessment).toBeUndefined();
+
+    liveness.dispose();
+  });
+
+  it('stops recomputing after dispose (unsubscribes from the registry)', () => {
+    const clock = createManualClock();
+    const childRegistry = createFakeChildRegistry();
+    const liveness = createActiveRunLiveness({
+      id: 'run-1',
+      durability: 'process-local',
+      clock,
+      childRegistry,
+    });
+
+    liveness.dispose();
+
+    // A registry notification after dispose must not throw and must not
+    // resurrect a snapshot read (the run is already terminal-by-disposal
+    // for every other dimension too).
+    childRegistry.setChildren([child('c1', 'unreachable')]);
+    expect(() => childRegistry.notify()).not.toThrow();
   });
 });

@@ -1,5 +1,6 @@
 import type { Subscription } from 'lifecycle';
 
+import type { ChildRunDescriptor, ChildRunRegistry } from '../child-run';
 import {
   AGENT_RUN_PROVIDER_TURN_POLICY,
   LIVENESS_POLICY_VERSION,
@@ -32,6 +33,49 @@ export interface ActiveRunLivenessOptions {
    * detail level THIS caller sees.
    */
   readonly owner?: string;
+  /**
+   * Backs `LivenessSnapshot.worstChildAssessment` (AB-216). Optional and
+   * opt-in, matching `children()`/`abortChild()`'s own opt-in pattern
+   * (AB-50): omit it and `worstChildAssessment` stays permanently absent,
+   * never a throw.
+   */
+  readonly childRegistry?: ChildRunRegistry;
+}
+
+/**
+ * AB-216's severity ordering, most severe first — `'terminal'` is
+ * deliberately absent: a terminal child is excluded from the fold before
+ * this array is ever consulted, never ranked by it.
+ */
+const CHILD_ASSESSMENT_SEVERITY: readonly Exclude<LivenessAssessment, 'terminal'>[] = [
+  'unreachable',
+  'alive-but-stalled',
+  'aborting',
+  'cleaning-up',
+  'legitimately-waiting',
+  'healthy',
+];
+
+/**
+ * Folds a set of `ChildRunDescriptor`s down to the single most severe
+ * `LivenessAssessment` among the non-terminal ones (AB-216's AC2), or
+ * `undefined` when there are none — recomputed from the FULL current set
+ * every time, never incrementally, so "never a stale value from a prior
+ * tick" holds by construction rather than by careful bookkeeping.
+ */
+function foldWorstChildAssessment(
+  children: readonly ChildRunDescriptor[],
+): LivenessAssessment | undefined {
+  let worst: LivenessAssessment | undefined;
+  let worstRank = CHILD_ASSESSMENT_SEVERITY.length;
+  for (const child of children) {
+    if (child.assessment === undefined || child.assessment === 'terminal') continue;
+    const rank = CHILD_ASSESSMENT_SEVERITY.indexOf(child.assessment);
+    if (rank === -1 || rank >= worstRank) continue;
+    worstRank = rank;
+    worst = child.assessment;
+  }
+  return worst;
 }
 
 /**
@@ -188,6 +232,31 @@ export function createActiveRunLiveness(options: ActiveRunLivenessOptions): Acti
     return toolWatchdog;
   }
 
+  // AB-216 — child-liveness rollup. `worstChildAssessmentValue` is the
+  // only state; `recomputeChildRollup` always re-folds `children()`'s
+  // FULL current set (never incrementally) and advances the revision only
+  // when the folded value actually changed, per this issue's own
+  // acceptance criteria: "the parent's own `revision` advances ... even
+  // when none of the parent's own dimensions changed", and "never a stale
+  // value from a prior tick".
+  let worstChildAssessmentValue: LivenessAssessment | undefined;
+
+  function recomputeChildRollup(): void {
+    const next = foldWorstChildAssessment(options.childRegistry?.children() ?? []);
+    if (next === worstChildAssessmentValue) return;
+    worstChildAssessmentValue = next;
+    advance();
+  }
+
+  const childRollupSubscription = options.childRegistry?.subscribeLiveness(recomputeChildRollup);
+  // A registry can already hold children at construction time (e.g. a
+  // reused registry, or a test that registers before constructing this
+  // liveness) — establish the correct initial value rather than waiting
+  // for the next child-side change.
+  if (options.childRegistry) {
+    worstChildAssessmentValue = foldWorstChildAssessment(options.childRegistry.children());
+  }
+
   let cachedSnapshot: AgentRunLivenessSnapshot | undefined;
   let cachedRevision = -1;
 
@@ -257,6 +326,9 @@ export function createActiveRunLiveness(options: ActiveRunLivenessOptions): Acti
       missedPulseCount,
       policyVersion: LIVENESS_POLICY_VERSION,
       evidence,
+      ...(worstChildAssessmentValue !== undefined
+        ? { worstChildAssessment: worstChildAssessmentValue }
+        : {}),
     });
   }
 
@@ -313,6 +385,7 @@ export function createActiveRunLiveness(options: ActiveRunLivenessOptions): Acti
     disposed = true;
     agentWatchdog.dispose();
     toolWatchdog?.dispose();
+    childRollupSubscription?.unsubscribe();
   }
 
   return {

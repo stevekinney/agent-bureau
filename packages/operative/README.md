@@ -1110,8 +1110,9 @@ const researcherTool = createSubagentTool({
 
 const run = orchestratorAgent.run('...', { childRegistry: registry }); // <- same registry
 // ... after the orchestrator has dispatched some subagent calls ...
-run.children(); // [{ id, parentId, agentName: 'researcher', durable: false, status: 'running' | ... }]
+run.children(); // [{ id, parentId, agentName: 'researcher', durable: false, status: 'running' | ..., assessment: 'healthy' | ... }]
 run.abortChild(run.children()[0]?.id, 'no longer needed'); // scoped: this child only
+run.snapshot().worstChildAssessment; // AB-216 — most severe non-terminal child assessment, or absent
 ```
 
 `ChildRunDescriptor.parentId` carries the edge back to whatever id
@@ -1120,6 +1121,15 @@ toolbox — with every level threading through the SAME `registry` — makes
 the whole ownership tree reconstructable from one `registry.children()`
 call at the root, reassembled by `parentId`, even though the registry
 itself stores a flat list.
+
+`ChildRunDescriptor.assessment` (AB-216) tracks that child's own
+`LivenessSnapshot.assessment` — populated the moment `dispatchChildRun`
+attaches the child's `LivenessObservable` to `registry` (synchronously, at
+dispatch), and kept current by the child's own `subscribeSnapshot`
+deliveries thereafter. It is the source `AgentRun.snapshot().worstChildAssessment`
+folds over on the parent side (see "Child-liveness aggregation" above);
+reading it directly off one child's own descriptor is also useful on its
+own when a caller wants that one child's state without a parent-level fold.
 
 Omit `registry` on either side and `children()` reads back an empty array and
 `abortChild()` is a no-op — never a throw. `abortChild()` is idempotent on an
@@ -1944,9 +1954,13 @@ watchdog.dispose(); // clears the internal cadence timer
 
 `createStallWatchdog` is the single timer-agnostic implementation of a
 `StallPolicy` row's cadence, grace, jitter, and missed-pulse math — every
-consumer (obs-02's `SessionHandle` wiring, obs-03's child-liveness rollup,
+consumer that classifies its OWN silence (obs-02's `SessionHandle` wiring,
 obs-06's Gateway connection watchdog) imports it rather than reimplementing
-it. Evidence sources are isolated per AB-88's AC5 table: a `host-reachability`
+it. obs-03's child-liveness rollup (below) is deliberately NOT a
+`createStallWatchdog` consumer: a parent never classifies a child's silence
+with a watchdog of its own — it only folds each child's own
+already-computed `assessment`, per AB-88's delegated-policy rule. Evidence
+sources are isolated per AB-88's AC5 table: a `host-reachability`
 pulse never resets a missed-pulse count accrued from `provider-io`,
 `tool-progress`, `worker-session-heartbeat`, `task-attempt-heartbeat`, or
 `lease-renewal`; an evidence entry whose `attempt` is older than the
@@ -1960,6 +1974,23 @@ suspension, not real silence).
 **Exported constants:** `LIVENESS_POLICY_VERSION`, `defaultRunIdentifierSeam`, `AGENT_RUN_PROVIDER_TURN_POLICY`, `TOOL_CALL_POLICY`, `SCHEDULER_TASK_POLICY`, `GATEWAY_CONNECTION_POLICY`, `BACKGROUND_EVALUATION_POLICY`, `WEBHOOK_DELIVERY_POLICY`, `WEFT_ACTIVITY_POLICY`, `WEFT_WORKER_POLICY`, `WEFT_TASK_POLICY`, `WEFT_STREAM_POLICY`.
 
 **Exported types:** `LivenessSnapshot`, `LivenessSubjectKind`, `LivenessLifecycleStatus`, `LivenessReachability`, `LivenessProgressState`, `LivenessAssessment`, `SemanticProgress`, `LivenessLeaseEvidence`, `LivenessEvidenceSource`, `LivenessEvidenceEntry`, `DeclaredWait`, `DeclaredWaitReason`, `StallPolicy`, `LivenessClockSource`, `LivenessSuspensionBehavior`, `LivenessRecoveryRule`, `LivenessObservable`, `StallWatchdog`, `StallWatchdogAssessment`, `StallWatchdogClock`, `RunIdentifierSeam`.
+
+**Child-liveness aggregation (AB-216, obs-03).** When a run is dispatched
+through `dispatchChildRun`/`createSubagentTool` with a `ChildRunRegistry`
+(the same registry backing `children()`/`abortChild()`, below), that
+registry also tracks each child's own `LivenessAssessment` and notifies its
+parent on every change. A parent `ActiveRun`/`AgentRun` supplied that same
+`RunOptions.childRegistry` therefore also carries an optional
+`LivenessSnapshot.worstChildAssessment`: the most severe assessment among
+its non-terminal children (`assessment !== 'terminal'`), most severe first —
+`unreachable` > `alive-but-stalled` > `aborting` > `cleaning-up` >
+`legitimately-waiting` > `healthy` — or absent when there are no children or
+every child is terminal. The parent's own `revision` advances whenever the
+folded value changes, even when none of the parent's own dimensions did; a
+stalled or unreachable child never changes the parent's own
+`reachability`/`progress`/`status`. Omit `childRegistry` and
+`worstChildAssessment` stays permanently absent, matching `children()`'s
+own opt-in default.
 
 **Standalone-run identity (AB-88's Amendment 1, corrected by AB-214).** A
 standalone (non-Bureau) run mints a process-local id at `ActiveRun`

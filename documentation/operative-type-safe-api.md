@@ -912,6 +912,7 @@ requirements those signatures must satisfy, and nothing more.
 | Child discovery                 | The ownership graph is inspectable from the root to arbitrary depth. Runtime-created children stay visible even when never returned to a caller. Descriptors carry enough edge information to reassemble the tree without promoting any child to an independently owned resource.                                                                                                                                                                                                                                                                                                                                                                             | AB-50                 |
 | Scoped child cancellation       | Cancelling one child never propagates to its siblings. Idempotent: a repeat request, or one against already-terminal or unknown work, is not an error. It is distinct from `abort()`, which AB-15 fixed and this amendment does not change.                                                                                                                                                                                                                                                                                                                                                                                                                   | AB-50                 |
 | Cleanup acknowledgement         | Awaitable, and always resolves rather than rejecting — a failed or unresolved teardown is a value, not a thrown error. It reports at least: cleanup was not required, completed, failed, or could not be determined. For durable work **whose cleanup follows a cancellation request**, a **successful** acknowledgement resolves only after that cancellation record is committed; work that ran to normal completion has no such record and must not be held behind one. A persistence failure resolves with the failed or undetermined outcome instead — never hangs waiting for a write that will not land, and never reports success without the record. | AB-37                 |
+| Child-liveness aggregation      | A parent's own `LivenessSnapshot` carries an optional `worstChildAssessment`: the most severe `LivenessAssessment` among its non-terminal children (absent when there are none), using AB-88's own child-aggregation severity ordering. Computed exclusively from each child's already-computed `assessment` — a child's own `StallPolicy` selection, cadence, and watchdog instance are never read, overridden, or substituted by the parent's aggregation, and a stalled child never changes the parent's own `reachability`/`progress`/`status`. **Delivered (AB-216, obs-03).**                                                                           | AB-216 (delivered)    |
 
 Each capability's owning issue carries one obligation beyond delivering it:
 **remove its entry from `scripts/documentation-examples.test.ts`** when the
@@ -958,6 +959,40 @@ candidate, not a divergence to leave standing.
 `AgentRunContext` gains no principal field, and a standalone run's
 `LivenessSnapshot.projection` is always `'redacted'`. A caller needing a
 privileged view starts the work through `bureau.run`.
+
+**Amendment 3 — child-liveness aggregation (AB-216, obs-03).**
+`LivenessSnapshot` gains an optional `worstChildAssessment?: LivenessAssessment`
+field, added non-breakingly per this section's own extension discipline. A
+parent `ActiveRun`/`AgentRun` opted into child discovery (a
+`ChildRunRegistry` supplied to `createActiveRun`'s `RunOptions.childRegistry`)
+now also folds that registry's live children into its own snapshot: the most
+severe `LivenessAssessment` among non-terminal children
+(`assessment !== 'terminal'`), most severe first —
+`unreachable` > `alive-but-stalled` > `aborting` > `cleaning-up` >
+`legitimately-waiting` > `healthy` — or absent when there are no children or
+every child is terminal.
+
+The wiring is registry-side, not watchdog-side: `dispatchChildRun` (AB-50)
+attaches each dispatched child's own `LivenessObservable` (its `AgentRun`) to
+the registry via `ChildRunRegistry.attachLiveness`, which subscribes to that
+child's `subscribeSnapshot` and keeps `ChildRunDescriptor.assessment` current;
+`ChildRunRegistry.subscribeLiveness` notifies the parent's aggregation of
+every change so `ActiveRun.snapshot()`'s `worstChildAssessment` recomputes
+from the registry's full current child set on every child-side revision
+change — never incrementally, so it is never a stale value from a prior
+tick — and the parent's own `revision` advances whenever the folded value
+changes, even when none of the parent's own dimensions did. A parent
+therefore never constructs a watchdog for a child, or reads/overrides a
+child's own `StallPolicy` selection: each child is classified exclusively by
+its own `createStallWatchdog` instance against its own applicable
+`StallPolicy` row, and the parent only reads that child's already-computed
+`assessment`. A stalled or unreachable child accordingly never changes the
+parent's own `reachability`/`progress`/`status` — only `worstChildAssessment`
+reflects it. Durable recovery of child liveness across a process restart is
+out of scope; a caller not using `dispatchChildRun`/`createSubagentTool`
+`registry` wiring, or that never supplies `RunOptions.childRegistry`, sees
+`worstChildAssessment` stay permanently absent, matching `children()`'s own
+opt-in default.
 
 ### Handles versus locators
 
