@@ -74,6 +74,7 @@ await run(['bun', 'test', 'test/tribunal-conformance-providers.test.ts']);
 await run(['bun', 'test', 'test/tribunal-conformance-generality.test.ts']);
 await run(['bun', 'test', 'test/bureau-agent-definitions.test.ts']);
 await run(['bun', 'test', 'test/anthropic-interop.test.ts']);
+await run(['bun', 'test', 'test/model-selection-contract.test.ts']);
 const nodeEnvironment = Object.fromEntries(
   Object.entries(process.env).filter(
     ([key, value]) => value !== undefined && key !== 'NODE_OPTIONS' && !key.startsWith('BUN'),
