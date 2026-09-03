@@ -10,6 +10,12 @@ import {
   AgentScheduledEvent,
   BudgetExceededEvent,
   BudgetThresholdEvent,
+  ChildWorkflowAbortedEvent,
+  ChildWorkflowCompletedEvent,
+  ChildWorkflowFailedEvent,
+  ChildWorkflowProgressEvent,
+  ChildWorkflowReattachedEvent,
+  ChildWorkflowStartedEvent,
   type OperativeEventType,
   ScheduleCancelledEvent,
   ScheduleCompletedEvent,
@@ -470,6 +476,83 @@ describe('events', () => {
         'steering.rejected',
         'steering.superseded',
         'steering.failed',
+      ]);
+    });
+  });
+
+  describe('child terminal lifecycle and relationship-query events (AB-90 child ab90-02, AB-222)', () => {
+    const correlation = {
+      parentAgentName: 'supervisor',
+      parentRunId: 'parent-1',
+      childAgentName: 'researcher',
+      childRunId: 'child-1',
+    };
+
+    it("constructs child.completed/failed/aborted (per AB-87's matrix; ChildWorkflow*Event, AB-50) each carrying childRunId and parentRunId", () => {
+      const completed = new ChildWorkflowCompletedEvent(correlation);
+      const failed = new ChildWorkflowFailedEvent({ ...correlation, reason: 'error' });
+      const aborted = new ChildWorkflowAbortedEvent({ ...correlation, reason: 'user-requested' });
+
+      for (const event of [completed, failed, aborted]) {
+        expect(event.childRunId).toBe('child-1');
+        expect(event.parentRunId).toBe('parent-1');
+      }
+      expect(completed.type).toBe('multiagent.child-workflow.completed');
+      expect(failed.type).toBe('multiagent.child-workflow.failed');
+      expect(aborted.type).toBe('multiagent.child-workflow.aborted');
+    });
+
+    it('child.completed/failed/aborted are mutually exclusive: each event type has a distinct literal `type` string, so a listener keyed on one never observes another', () => {
+      const types = new Set([
+        ChildWorkflowCompletedEvent.type,
+        ChildWorkflowFailedEvent.type,
+        ChildWorkflowAbortedEvent.type,
+      ]);
+      expect(types.size).toBe(3);
+    });
+
+    it('constructs ChildWorkflowReattachedEvent (child.reattached) with exactly childRunId/parentRunId, distinct from child.started', () => {
+      const reattached = new ChildWorkflowReattachedEvent({
+        childRunId: 'child-1',
+        parentRunId: 'parent-1',
+      });
+
+      expect(reattached.type).toBe('multiagent.child-workflow.reattached');
+      expect(reattached.type).not.toBe(ChildWorkflowStartedEvent.type);
+      expect(reattached.childRunId).toBe('child-1');
+      expect(reattached.parentRunId).toBe('parent-1');
+    });
+
+    it('constructs ChildWorkflowProgressEvent (child.progress) carrying a SemanticProgress payload alongside childRunId/parentRunId', () => {
+      const progress = new ChildWorkflowProgressEvent({
+        childRunId: 'child-1',
+        parentRunId: 'parent-1',
+        progress: { phase: 'searching', current: 1, total: 3 },
+      });
+
+      expect(progress.type).toBe('multiagent.child-workflow.progress');
+      expect(progress.childRunId).toBe('child-1');
+      expect(progress.parentRunId).toBe('parent-1');
+      expect(progress.progress).toEqual({ phase: 'searching', current: 1, total: 3 });
+    });
+
+    it('exercises every child lifecycle event type as a valid OperativeEventType', () => {
+      const types: OperativeEventType[] = [
+        ChildWorkflowStartedEvent.type,
+        ChildWorkflowCompletedEvent.type,
+        ChildWorkflowFailedEvent.type,
+        ChildWorkflowAbortedEvent.type,
+        ChildWorkflowReattachedEvent.type,
+        ChildWorkflowProgressEvent.type,
+      ];
+
+      expect(types).toEqual([
+        'multiagent.child-workflow.started',
+        'multiagent.child-workflow.completed',
+        'multiagent.child-workflow.failed',
+        'multiagent.child-workflow.aborted',
+        'multiagent.child-workflow.reattached',
+        'multiagent.child-workflow.progress',
       ]);
     });
   });

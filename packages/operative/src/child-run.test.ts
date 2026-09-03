@@ -21,7 +21,7 @@ import { Conversation } from 'conversationalist';
 import { CompletableEventTarget } from 'lifecycle';
 
 import { createAgentRun } from './agent-run';
-import { createChildRunRegistry, dispatchChildRun } from './child-run';
+import { createChildRunRegistry, dispatchChildRun, listChildRuns } from './child-run';
 import { noToolCalls } from './conditions/predicates';
 import { createAgent } from './create-agent';
 import { createActiveRun as createRun } from './create-run';
@@ -30,6 +30,8 @@ import {
   ChildWorkflowAbortedEvent,
   ChildWorkflowCompletedEvent,
   ChildWorkflowFailedEvent,
+  ChildWorkflowProgressEvent,
+  ChildWorkflowReattachedEvent,
   ChildWorkflowStartedEvent,
 } from './events';
 import type { AgentInput, AgentRunContext, RunnableAgent } from './runnable-agent';
@@ -909,5 +911,156 @@ describe('ChildRunRegistry.attachLiveness()/subscribeLiveness() (AB-216)', () =>
 
     expect(registry.children()[0]?.status).toBe('failed');
     expect(registry.children()[0]?.assessment).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// listChildRuns — relationship-query function (AB-90 child ab90-02, AB-222)
+// ---------------------------------------------------------------------------
+
+describe('listChildRuns', () => {
+  it('returns an empty array for a parent with zero registered children, without throwing', () => {
+    const registry = createChildRunRegistry();
+    expect(() => listChildRuns(registry, 'no-such-parent')).not.toThrow();
+    expect(listChildRuns(registry, 'no-such-parent')).toEqual([]);
+  });
+
+  it("returns a still-running child's status as undefined, not the internal 'running' string", () => {
+    const registry = createChildRunRegistry();
+    const { agent } = makeControllableAgent();
+    const handle = dispatchChildRun(agent, 'go', {
+      agentName: 'researcher',
+      parentRunId: 'parent-1',
+      registry,
+    });
+
+    expect(listChildRuns(registry, 'parent-1')).toEqual([
+      {
+        id: handle.childRunId,
+        parentId: 'parent-1',
+        agentName: 'researcher',
+        durable: false,
+        status: undefined,
+      },
+    ]);
+  });
+
+  it("reports 'completed'/'failed'/'aborted' terminal statuses once each child settles", async () => {
+    const registry = createChildRunRegistry();
+    const completedChild = makeControllableAgent();
+    const failedChild = makeControllableAgent();
+    const abortedChild = makeControllableAgent();
+
+    const completedHandle = dispatchChildRun(completedChild.agent, 'a', {
+      agentName: 'completed-agent',
+      parentRunId: 'parent-1',
+      registry,
+      childRunId: 'child-completed',
+    });
+    const failedHandle = dispatchChildRun(failedChild.agent, 'b', {
+      agentName: 'failed-agent',
+      parentRunId: 'parent-1',
+      registry,
+      childRunId: 'child-failed',
+    });
+    const abortedHandle = dispatchChildRun(abortedChild.agent, 'c', {
+      agentName: 'aborted-agent',
+      parentRunId: 'parent-1',
+      registry,
+      childRunId: 'child-aborted',
+    });
+
+    completedChild.settle(makeResult({ finishReason: 'stop-condition' }));
+    failedChild.settle(makeResult({ finishReason: 'error' }));
+    abortedChild.settle(makeResult({ finishReason: 'aborted' }));
+    await Promise.all([completedHandle.result(), failedHandle.result(), abortedHandle.result()]);
+
+    const summaries = listChildRuns(registry, 'parent-1');
+    expect(summaries).toHaveLength(3);
+    expect(summaries.find((c) => c.id === 'child-completed')?.status).toBe('completed');
+    expect(summaries.find((c) => c.id === 'child-failed')?.status).toBe('failed');
+    expect(summaries.find((c) => c.id === 'child-aborted')?.status).toBe('aborted');
+  });
+
+  it('filters to only the requested parentRunId when the registry tracks children from more than one parent', () => {
+    const registry = createChildRunRegistry();
+    const forParentOne = makeControllableAgent();
+    const forParentTwo = makeControllableAgent();
+    dispatchChildRun(forParentOne.agent, 'a', {
+      agentName: 'child-of-one',
+      parentRunId: 'parent-1',
+      registry,
+    });
+    dispatchChildRun(forParentTwo.agent, 'b', {
+      agentName: 'child-of-two',
+      parentRunId: 'parent-2',
+      registry,
+    });
+
+    const forOne = listChildRuns(registry, 'parent-1');
+    const forTwo = listChildRuns(registry, 'parent-2');
+
+    expect(forOne).toHaveLength(1);
+    expect(forOne[0]?.agentName).toBe('child-of-one');
+    expect(forTwo).toHaveLength(1);
+    expect(forTwo[0]?.agentName).toBe('child-of-two');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ChildWorkflowReattachedEvent / ChildWorkflowProgressEvent (AB-90 child
+// ab90-02, AB-222) — typed events this module defines; construction and
+// payload shape only, since neither is dispatched by this package today
+// (reattached awaits AB-53's recovery hook; see the class docstrings).
+// ---------------------------------------------------------------------------
+
+describe('ChildWorkflowReattachedEvent / ChildWorkflowProgressEvent (AB-222)', () => {
+  it('constructs ChildWorkflowReattachedEvent with exactly childRunId and parentRunId', () => {
+    const event = new ChildWorkflowReattachedEvent({
+      childRunId: 'child-1',
+      parentRunId: 'parent-1',
+    });
+
+    expect(event.type).toBe('multiagent.child-workflow.reattached');
+    expect(event.childRunId).toBe('child-1');
+    expect(event.parentRunId).toBe('parent-1');
+  });
+
+  it('constructs ChildWorkflowProgressEvent carrying childRunId, parentRunId, and a SemanticProgress payload', () => {
+    const event = new ChildWorkflowProgressEvent({
+      childRunId: 'child-1',
+      parentRunId: 'parent-1',
+      progress: { phase: 'researching', current: 2, total: 5, message: 'reading docs' },
+    });
+
+    expect(event.type).toBe('multiagent.child-workflow.progress');
+    expect(event.childRunId).toBe('child-1');
+    expect(event.parentRunId).toBe('parent-1');
+    expect(event.progress).toEqual({
+      phase: 'researching',
+      current: 2,
+      total: 5,
+      message: 'reading docs',
+    });
+  });
+
+  it('is registered in OperativeEventMap under its literal type string', () => {
+    const emitter = makeEmitter();
+    const received: Array<ChildWorkflowReattachedEvent | ChildWorkflowProgressEvent> = [];
+    emitter.addEventListener(ChildWorkflowReattachedEvent.type, (e) => received.push(e));
+    emitter.addEventListener(ChildWorkflowProgressEvent.type, (e) => received.push(e));
+
+    emitter.dispatchEvent(
+      new ChildWorkflowReattachedEvent({ childRunId: 'child-1', parentRunId: 'parent-1' }),
+    );
+    emitter.dispatchEvent(
+      new ChildWorkflowProgressEvent({
+        childRunId: 'child-1',
+        parentRunId: 'parent-1',
+        progress: {},
+      }),
+    );
+
+    expect(received).toHaveLength(2);
   });
 });
