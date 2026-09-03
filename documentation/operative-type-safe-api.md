@@ -794,6 +794,52 @@ code should prefer `event.result.output` because it shares the same
 consumers can keep reading the flattened fields. There is no
 `event.structuredOutput` field.
 
+### `generate.completed` carries post-guardrail content (AB-302)
+
+`GenerateCompletedEvent` is dispatched AFTER both output-guardrail validation
+stages `runStep` runs on a step's response — `RunOptions.validateResponse`
+(a hook, or array of hooks, normalized into `deps.validateResponseHooks`;
+bureau's `createGuardrails().validateResponse` is pushed onto that array for
+its default and caller-supplied guardrail presets) and the `validateResponse`
+hook registry entry — never immediately after the raw provider response
+returns. A guardrail configured with `action: 'redact'` or `'block'`
+substitutes `response.content` in those stages; every consumer of this
+event — a live gateway subscriber over SSE or WebSocket, the
+`instrumentation` package's OTel span, any custom `generate.completed`
+listener — observes that substituted content, the same content the run's
+final result (`RunCompletedEvent`/`RunResult.content`) carries. This closes a
+gap where a redacted run still leaked its pre-redaction content on the live
+event frame even though the terminal result was correctly redacted.
+
+A step whose generation is entirely short-circuited by a `prepareStep` hook
+(the hook supplies the response directly, skipping the provider call) never
+dispatches `generate.completed` at all — unchanged from before this fix.
+
+`ResponseValidatedEvent` (wire type `response.validated`) is untouched by
+this fix and is a fact, not a decision: its contract has always been to
+expose the pre/post redaction diff (`event.original` vs `event.validated`),
+so its `original` field still carries pre-guardrail content — over the same
+live SSE/WebSocket surface `generate.completed` uses. AB-302's coordinator
+ruling and delivery boundary named `generate.completed` (and streaming
+deltas) specifically; whether "any consumer-visible event carrying model
+output" is meant to reach `response.validated`'s `original` field too — and
+if so, how a redaction-diff event stays useful once both sides are
+redacted — is an open question this change does not resolve. Read this
+paragraph as "here is what `response.validated` does today," not as a
+ruling that it is exempt.
+
+**Streaming deltas** are a separate, already-decided surface (AB-40,
+`packages/bureau/src/runtime-composition.ts`): bureau forces buffered,
+non-streaming generation whenever its auto-wired default guardrail preset is
+active (`options.guardrails === undefined`), specifically so no
+`stream:text-delta` frame reaches a client before the post-guardrail point.
+A caller who explicitly supplies a custom `guardrails` config keeps
+streaming, and that run's deltas remain pre-guardrail by design — the
+caller has opted into managing that tradeoff themselves. This is not new
+behavior; AB-302 only confirms and documents it as the answer to "what about
+streaming deltas" for the `generate.completed` fix above, per the same file's
+existing comment.
+
 ## Started-work control contract
 
 Added by AB-34, amending this document. Every public operation that creates

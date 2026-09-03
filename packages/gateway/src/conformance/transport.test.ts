@@ -15,6 +15,7 @@
  */
 import { readdir, readFile } from 'node:fs/promises';
 
+import type { OutputValidator } from '@lostgradient/operative';
 import { createAgent } from '@lostgradient/operative';
 import { describe, expect, it } from 'bun:test';
 
@@ -36,6 +37,41 @@ function blockingGenerate() {
         { once: true },
       );
     });
+}
+
+/**
+ * A `generate` function that stays pending until `release()` is called.
+ * AB-302's scenarios below use this so the SSE/WebSocket subscription is
+ * established BEFORE `generate.completed` dispatches — a live-delivered
+ * frame, never a replay-buffer race.
+ */
+function releasableGenerate(content: string): {
+  generate: () => Promise<{ content: string; toolCalls: never[] }>;
+  release: () => void;
+} {
+  let releaseFn: (() => void) | undefined;
+  // `release()` can race `generate()` under load — the run's first step may
+  // not have called `generate` yet when the test calls `release()` right
+  // after opening its SSE/WebSocket subscription. Track the released state
+  // independently so a `generate()` call that arrives AFTER `release()`
+  // resolves immediately instead of registering a `releaseFn` nothing ever
+  // calls (which would hang the test until bun's own timeout).
+  let released = false;
+  const generate = () =>
+    new Promise<{ content: string; toolCalls: never[] }>((resolve) => {
+      if (released) {
+        resolve({ content, toolCalls: [] });
+        return;
+      }
+      releaseFn = () => resolve({ content, toolCalls: [] });
+    });
+  return {
+    generate,
+    release: () => {
+      released = true;
+      releaseFn?.();
+    },
+  };
 }
 
 async function withGateway<T>(
@@ -168,6 +204,203 @@ describe('Gateway transport conformance — Bun runtime', () => {
         });
         const raw = await rawResponse.text();
         expect(raw).not.toContain(secretApiKey);
+      },
+    );
+  });
+
+  it('AB-302: an output guardrail redact action is applied before the generate.completed frame is delivered over SSE — the raw secret never appears on the wire', async () => {
+    const secret = 'sk-real-secret-do-not-leak-1234567890';
+    const redactedText = '[redacted]';
+    const secretValidator: OutputValidator = {
+      name: 'secret-detector',
+      validate: async (output) => ({
+        valid: !output.includes(secret),
+        category: 'secret',
+        confidence: 1,
+        redacted: redactedText,
+      }),
+    };
+    const { generate, release } = releasableGenerate(`Contact us at ${secret} for help.`);
+
+    await withGateway(
+      () =>
+        startLoopbackGateway({
+          agents: {},
+          generate,
+          guardrails: { output: { validators: [secretValidator], action: 'redact' } },
+        }),
+      async (gateway) => {
+        const runResponse = await gateway.fetch('/api/v1/runs', {
+          method: 'POST',
+          headers: { ...authHeader(gateway), 'content-type': 'application/json' },
+          body: JSON.stringify({ message: 'leak it' }),
+        });
+        expect(runResponse.status).toBe(201);
+        const run = (await runResponse.json()) as { id: string };
+
+        const sse = await gateway.openEventStream(`/api/v1/events?runId=${run.id}`, {
+          headers: authHeader(gateway),
+        });
+        try {
+          // Subscription is live BEFORE the generate call resolves, so the
+          // frame below arrives as a genuine live delivery, never a
+          // replay-buffer race.
+          release();
+
+          // `response.validated` is a deliberately different surface — its
+          // whole contract is to show the pre/post redaction diff
+          // (`original` vs `validated`) to a live glass-box subscriber, so
+          // it is excluded from this scan by design, not by oversight.
+          // Only `generate.completed` is this scenario's target: AB-302's
+          // acceptance criterion names that frame specifically.
+          let generateCompleted: { type: 'event'; event: string; detail: unknown } | undefined;
+          for (let attempt = 0; attempt < 50 && !generateCompleted; attempt++) {
+            const frame = await sse.next();
+            if (!frame) break;
+            if (frame.type === 'event' && frame.event === 'generate.completed') {
+              generateCompleted = frame;
+            }
+          }
+          expect(generateCompleted).toBeDefined();
+          expect(JSON.stringify(generateCompleted)).not.toContain(secret);
+          const detail = generateCompleted?.detail as { response?: { content?: string } };
+          expect(detail.response?.content).toBe(redactedText);
+        } finally {
+          await sse.close();
+        }
+      },
+    );
+  });
+
+  it('AB-302: an output guardrail redact action is applied before the generate.completed frame is delivered over WebSocket — the raw secret never appears on the wire', async () => {
+    const secret = 'sk-real-secret-do-not-leak-9876543210';
+    const redactedText = '[redacted]';
+    const secretValidator: OutputValidator = {
+      name: 'secret-detector',
+      validate: async (output) => ({
+        valid: !output.includes(secret),
+        category: 'secret',
+        confidence: 1,
+        redacted: redactedText,
+      }),
+    };
+    const { generate, release } = releasableGenerate(`Contact us at ${secret} for help.`);
+
+    await withGateway(
+      () =>
+        startLoopbackGateway({
+          agents: {},
+          generate,
+          guardrails: { output: { validators: [secretValidator], action: 'redact' } },
+        }),
+      async (gateway) => {
+        const runResponse = await gateway.fetch('/api/v1/runs', {
+          method: 'POST',
+          headers: { ...authHeader(gateway), 'content-type': 'application/json' },
+          body: JSON.stringify({ message: 'leak it' }),
+        });
+        expect(runResponse.status).toBe(201);
+        const run = (await runResponse.json()) as { id: string };
+
+        const ws = await gateway.openWebSocket(`/ws?token=${gateway.authToken}`);
+        try {
+          ws.send({ type: 'subscribe', runId: run.id });
+          const ack = await ws.next();
+          expect(ack.type).toBe('subscribed');
+
+          release();
+
+          // `response.validated` is deliberately excluded from this scan —
+          // see the SSE scenario above for why.
+          let generateCompleted: { type: 'event'; event: string; detail: unknown } | undefined;
+          for (let attempt = 0; attempt < 50 && !generateCompleted; attempt++) {
+            const frame = await ws.next();
+            if (frame.type === 'event' && frame.event === 'generate.completed') {
+              generateCompleted = frame;
+            }
+          }
+          expect(generateCompleted).toBeDefined();
+          expect(JSON.stringify(generateCompleted)).not.toContain(secret);
+          const detail = generateCompleted?.detail as { response?: { content?: string } };
+          expect(detail.response?.content).toBe(redactedText);
+        } finally {
+          ws.close();
+          await ws.waitForClose();
+        }
+      },
+    );
+  });
+
+  it('AB-302: the audit trail never carries the raw secret for a run under an output guardrail redact action — pinned, whether or not generate.completed is itself audited', async () => {
+    const secret = 'sk-real-secret-do-not-leak-1122334455';
+    const redactedText = '[redacted]';
+    const secretValidator: OutputValidator = {
+      name: 'secret-detector',
+      validate: async (output) => ({
+        valid: !output.includes(secret),
+        category: 'secret',
+        confidence: 1,
+        redacted: redactedText,
+      }),
+    };
+
+    await withGateway(
+      () =>
+        startLoopbackGateway({
+          agents: {},
+          generate: async () => ({ content: `Contact us at ${secret} for help.`, toolCalls: [] }),
+          guardrails: { output: { validators: [secretValidator], action: 'redact' } },
+        }),
+      async (gateway) => {
+        const runResponse = await gateway.fetch('/api/v1/runs', {
+          method: 'POST',
+          headers: { ...authHeader(gateway), 'content-type': 'application/json' },
+          body: JSON.stringify({ message: 'leak it' }),
+        });
+        expect(runResponse.status).toBe(201);
+        const run = (await runResponse.json()) as { id: string };
+
+        type AuditRecord = { type: string; detail?: Record<string, unknown> };
+        let stepCompletedRecord: AuditRecord | undefined;
+        let generateCompletedRecord: AuditRecord | undefined;
+        for (
+          let attempt = 0;
+          attempt < 50 && (!stepCompletedRecord || !generateCompletedRecord);
+          attempt++
+        ) {
+          const auditResponse = await gateway.fetch(`/api/v1/audit?runId=${run.id}`, {
+            headers: authHeader(gateway),
+          });
+          expect(auditResponse.status).toBe(200);
+          const records = (await auditResponse.json()) as AuditRecord[];
+          stepCompletedRecord = records.find((record) => record.type === 'step.completed');
+          generateCompletedRecord = records.find((record) => record.type === 'generate.completed');
+        }
+
+        // `step.completed` is one of `AUDIT_EVENT_TYPES` sunk into the
+        // durable trail (`packages/bureau/src/audit-trail.ts`) and its
+        // `content` is set from the SAME post-guardrail `response.content`
+        // `generate.completed` now carries — pinning that this audit
+        // record was never at risk from the ordering bug in the first
+        // place, independent of today's fix.
+        expect(stepCompletedRecord).toBeDefined();
+        expect(stepCompletedRecord?.detail?.['content']).toBe(redactedText);
+        expect(JSON.stringify(stepCompletedRecord)).not.toContain(secret);
+
+        // `generate.completed` is NOT one of `AUDIT_EVENT_TYPES`, so it is
+        // never sunk into the durable trail — but `routes/audit.ts`
+        // deliberately passes live-store (Layer A) actions of any type
+        // through unchanged for exactly this reason ("non-audited event
+        // types (e.g. generate.*) are never in durableRecords and must
+        // always pass through from the live store"). This run's
+        // `generate.completed` action is still in the live ring buffer, so
+        // this combined endpoint carries it too — proving the fix's reach
+        // extends to this surface, not only the live SSE/WebSocket frame.
+        // `response.validated` is excluded from this scan by design (see
+        // the SSE/WebSocket scenarios above) — its `original` field is a
+        // deliberate pre-redaction audit diff, not a leak.
+        expect(generateCompletedRecord).toBeDefined();
+        expect(JSON.stringify(generateCompletedRecord)).not.toContain(secret);
       },
     );
   });

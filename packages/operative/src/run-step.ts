@@ -889,8 +889,20 @@ export async function runStep(
   let stepRetryCount = 0;
   let shouldRetryStep: boolean;
   let stepSkipped = false;
+  // AB-302: hoisted out of the generate block below so `GenerateCompletedEvent`
+  // can be dispatched once, AFTER the output-guardrail validation blocks that
+  // follow the retry loop (`deps.validateResponseHooks` and the
+  // `validateResponse` hook registry) — never immediately after the raw
+  // provider response comes back. Reset at the top of every retry iteration:
+  // `undefined` after the loop means "no real generate call happened this
+  // step" (the `prepareResult` short-circuit below never sets it), which is
+  // also the signal the post-loop dispatch uses to skip the event entirely,
+  // matching this function's prior behavior of never emitting
+  // `generate.completed` for a prepareStep-short-circuited step.
+  let generateDurationMilliseconds: number | undefined;
   do {
     shouldRetryStep = false;
+    generateDurationMilliseconds = undefined;
     try {
       let prepareResult: GenerateResponse | void = undefined;
       for (const hook of deps.prepareStepHooks) {
@@ -1069,7 +1081,10 @@ export async function runStep(
           }
         }
 
-        emitter?.dispatch(new GenerateCompletedEvent(step, response, durationMilliseconds));
+        // AB-302: `GenerateCompletedEvent` is no longer dispatched here — see
+        // the post-guardrail dispatch after the retry loop below, which fires
+        // once for whichever attempt lands `generateDurationMilliseconds`.
+        generateDurationMilliseconds = durationMilliseconds;
       }
       backpressure?.onSuccess();
     } catch (error) {
@@ -1200,6 +1215,37 @@ export async function runStep(
       emitter?.dispatch(new RunErrorEvent(step, error, 'output'));
       return { kind: 'error', error, errorKind: 'output' };
     }
+  }
+
+  // AB-302: dispatch `generate.completed` here, after BOTH output-guardrail
+  // validation blocks above (`deps.validateResponseHooks` — e.g. the
+  // `createGuardrails().validateResponse` hook bureau wires into that array
+  // for its default and caller-supplied guardrail presets — and the
+  // `validateResponse` hook registry), rather than immediately after the
+  // raw provider response comes back. A guardrail configured with
+  // `action: 'redact'` (or `'block'`) replaces `response.content` in those
+  // blocks; consumers of this live event frame (SSE/WebSocket subscribers,
+  // OTel spans, any `generate.completed` listener) must see that
+  // substituted content, never the pre-guardrail original, so the event
+  // frame carries the same content the run's final result carries. Only
+  // fires when an actual generate call happened this step —
+  // `generateDurationMilliseconds` stays `undefined` when a `prepareStep`
+  // hook short-circuited generation entirely (see its declaration above),
+  // matching this function's prior behavior of never emitting
+  // `generate.completed` for a prepareStep-short-circuited step.
+  //
+  // Streaming deltas (`stream:text-delta`, emitted by
+  // `withEnhancedStreaming`/`composeConfiguredGenerate` while the provider
+  // call above is still in flight) are a separate, already-decided surface:
+  // bureau's `runtime-composition.ts` (AB-40) forces buffered, non-streaming
+  // generation whenever its auto-wired default guardrail preset is active,
+  // specifically so no delta reaches a client before this post-guardrail
+  // point. A caller who explicitly supplies a custom `guardrails` config (as
+  // opposed to leaving it `undefined`) has opted into managing that
+  // tradeoff themselves per that same file's comment, and streaming deltas
+  // for such a run remain pre-guardrail by design.
+  if (generateDurationMilliseconds !== undefined) {
+    emitter?.dispatch(new GenerateCompletedEvent(step, response, generateDurationMilliseconds));
   }
 
   if (signal?.aborted) {

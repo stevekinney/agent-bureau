@@ -24,7 +24,14 @@ import { z } from 'zod';
 
 import { noToolCalls } from './conditions/predicates';
 import type { SteeringDesiredState } from './durable/types';
-import { GenerateErrorEvent, SteeringAppliedEvent } from './events';
+import {
+  GenerateCompletedEvent,
+  GenerateErrorEvent,
+  RunErrorEvent,
+  SteeringAppliedEvent,
+} from './events';
+import { createGuardrails } from './guardrails';
+import type { OutputValidator } from './guardrails/types';
 import type { OperativeHookMap } from './hooks';
 import { buildStepDeps, executeLoop } from './loop';
 import { awaitResumeOrAbort, type EventDispatcher, type RunState, runStep } from './run-step';
@@ -1233,5 +1240,124 @@ describe('runStep/executeLoop: AB-92/AB-252 RuntimeServices migration boundary',
     expect(attempts).toBe(2);
     expect(result.finishReason).not.toBe('error');
     expect(result.content).toBe('recovered');
+  });
+});
+
+describe('runStep: AB-302 generate.completed carries post-guardrail content', () => {
+  const secret = 'sk-real-secret-do-not-leak-1234567890';
+  const redactedText = '[redacted]';
+
+  /** Flags any response containing `secret` and offers `redactedText` as the substitute. */
+  const secretValidator: OutputValidator = {
+    name: 'secret-detector',
+    validate: async (output) => ({
+      valid: !output.includes(secret),
+      category: 'secret',
+      confidence: 1,
+      redacted: redactedText,
+    }),
+  };
+
+  it('the built-in output guardrail (deps.validateResponseHooks) redacts before generate.completed dispatches, never the raw content', async () => {
+    const recorder = createEventRecorder();
+    const guardrails = createGuardrails({
+      output: { validators: [secretValidator], action: 'redact' },
+    });
+
+    const result = await executeLoop(
+      {
+        generate: async () => textResponse(`Contact us at ${secret} for help.`),
+        toolbox: createTestToolbox([]),
+        conversation: new Conversation(),
+        stopWhen: noToolCalls(),
+        validateResponse: guardrails.validateResponse,
+      },
+      recorder,
+    );
+
+    const generateCompleted = recorder.events.find(
+      (event): event is GenerateCompletedEvent => event instanceof GenerateCompletedEvent,
+    );
+    expect(generateCompleted).toBeDefined();
+    expect(generateCompleted?.response.content).toBe(redactedText);
+    expect(generateCompleted?.response.content).not.toContain(secret);
+    expect(result.content).toBe(redactedText);
+  });
+
+  it('a user-registered validateResponse hook also redacts before generate.completed dispatches', async () => {
+    const recorder = createEventRecorder();
+    const hooks = new HookRegistry<OperativeHookMap>();
+    hooks.on('validateResponse', async (response) =>
+      response.content.includes(secret) ? { content: redactedText, toolCalls: [] } : undefined,
+    );
+
+    const result = await executeLoop(
+      {
+        generate: async () => textResponse(`Contact us at ${secret} for help.`),
+        toolbox: createTestToolbox([]),
+        conversation: new Conversation(),
+        stopWhen: noToolCalls(),
+        hooks,
+      },
+      recorder,
+    );
+
+    const generateCompleted = recorder.events.find(
+      (event): event is GenerateCompletedEvent => event instanceof GenerateCompletedEvent,
+    );
+    expect(generateCompleted).toBeDefined();
+    expect(generateCompleted?.response.content).toBe(redactedText);
+    expect(generateCompleted?.response.content).not.toContain(secret);
+    expect(result.content).toBe(redactedText);
+  });
+
+  it('a step whose generation is entirely short-circuited by prepareStep never dispatches generate.completed', async () => {
+    const recorder = createEventRecorder();
+
+    await executeLoop(
+      {
+        generate: async () => textResponse('should never run'),
+        toolbox: createTestToolbox([]),
+        conversation: new Conversation(),
+        stopWhen: noToolCalls(),
+        prepareStep: async () => textResponse('short-circuited'),
+      },
+      recorder,
+    );
+
+    const generateCompleted = recorder.events.find(
+      (event): event is GenerateCompletedEvent => event instanceof GenerateCompletedEvent,
+    );
+    expect(generateCompleted).toBeUndefined();
+  });
+
+  it('a tripwire guardrail hard-halts the step before generate.completed would ever dispatch — no leaked event, no leaked span-bearing state', async () => {
+    const recorder = createEventRecorder();
+    const guardrails = createGuardrails({
+      output: { validators: [secretValidator] },
+      mode: 'tripwire',
+    });
+
+    const result = await executeLoop(
+      {
+        generate: async () => textResponse(`Contact us at ${secret} for help.`),
+        toolbox: createTestToolbox([]),
+        conversation: new Conversation(),
+        stopWhen: noToolCalls(),
+        validateResponse: guardrails.validateResponse,
+      },
+      recorder,
+    );
+
+    expect(result.finishReason).toBe('tripwire');
+    const generateCompleted = recorder.events.find(
+      (event): event is GenerateCompletedEvent => event instanceof GenerateCompletedEvent,
+    );
+    expect(generateCompleted).toBeUndefined();
+    const runError = recorder.events.find(
+      (event): event is RunErrorEvent => event instanceof RunErrorEvent,
+    );
+    expect(runError).toBeDefined();
+    expect(runError?.error.kind).toBe('policy');
   });
 });
