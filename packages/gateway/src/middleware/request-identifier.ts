@@ -22,9 +22,14 @@ export function createRequestIdentifier(identifiers: Pick<RuntimeServices['ident
 /**
  * Adds an `x-request-id` header to every response, minting a fresh UUID via
  * `crypto.randomUUID()` when the request carries none. This is
- * {@link createRequestIdentifier} bound to the real global — the default
- * `createGateway` itself uses when `options.runtime` is omitted (AB-303) —
- * kept as a standalone export for callers that want the middleware
- * directly, outside gateway construction.
+ * {@link createRequestIdentifier} bound directly to the real global.
+ *
+ * `createGateway` does NOT use this export (AB-303): it always calls
+ * `createRequestIdentifier(runtimeServices.identifiers)` itself, so with
+ * the default (unconfigured) `RuntimeServices` it gets a `request-<n>-
+ * <uuid>`-shaped identifier from `createDefaultRuntimeServices()`'s
+ * `identifiers.next('request')` — not the plain UUID this export produces.
+ * This standalone export exists for callers that want the `x-request-id`
+ * middleware directly, outside gateway construction.
  */
 export const requestIdentifier = createRequestIdentifier({ next: () => crypto.randomUUID() });
