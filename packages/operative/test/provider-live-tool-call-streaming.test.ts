@@ -18,7 +18,7 @@
  * from the resolved `GenerateResponse`, pairing each resolved tool call with
  * the live block at the same ordinal position.
  */
-import { createToolbox } from 'armorer';
+import { createTool, createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
 import { TypedEventTarget } from 'lifecycle';
@@ -38,12 +38,12 @@ import { withEnhancedStreaming } from '../src/streaming/index.ts';
 import type { StreamEventMap } from '../src/streaming/types.ts';
 import type { GenerateContext } from '../src/types.ts';
 
-const weatherTool = {
+const weatherTool = createTool({
   name: 'get_weather',
   description: 'Get the weather',
-  parameters: z.object({ location: z.string() }),
+  input: z.object({ location: z.string() }),
   execute: async () => 'sunny',
-};
+});
 
 function makeContext(): GenerateContext {
   return {

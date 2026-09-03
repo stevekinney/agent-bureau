@@ -109,7 +109,7 @@ describe('operative package exports', () => {
     // type without reaching into the internal module path.
     const target: HandoffTarget = {
       agentName: 'writer',
-      agent: { name: 'writer', run: () => Promise.resolve() as never },
+      agent: { name: 'writer', hasOutput: false, run: () => Promise.resolve() as never },
     };
     const tool = createHandoffTool({ agent: target });
     expect(tool.name).toBe('transfer_to_writer');

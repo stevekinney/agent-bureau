@@ -7,15 +7,22 @@ import { createRegistry } from '../src/core/registry/registry';
 import { createTool } from '../src/create-tool';
 import { createDeprecationWarningMiddleware } from '../src/middleware/index';
 
-const makeConfiguration = (overrides?: Partial<ToolConfiguration>): ToolConfiguration => ({
-  name: 'test-tool',
-  description: 'a test tool',
-  input: z.object({}),
-  async execute() {
-    return 'result';
-  },
-  ...overrides,
-});
+// `createToolbox()` normalizes a friendly config shorthand like this one
+// (deriving `identity`/`id`/`display` at registration time — see
+// `registerConfiguration` in `src/create-toolbox.ts`), so the strict
+// `ToolConfiguration` type doesn't describe what a caller actually needs to
+// supply here. This mirrors that runtime leniency with one documented cast
+// instead of fighting the type at each call site.
+const makeConfiguration = (overrides?: Partial<ToolConfiguration>): ToolConfiguration =>
+  ({
+    name: 'test-tool',
+    description: 'a test tool',
+    input: z.object({}),
+    async execute() {
+      return 'result';
+    },
+    ...overrides,
+  }) as unknown as ToolConfiguration;
 
 describe('version resolution', () => {
   it('resolves to the latest semver version by default', () => {
@@ -304,7 +311,7 @@ describe('getDeprecatedTools', () => {
 
 describe('onDeprecatedToolCalled', () => {
   it('fires callback when a deprecated tool is executed via toolbox', async () => {
-    const callback = mock(() => {});
+    const callback = mock((_tool: ToolConfiguration, _call: { name: string; id?: string }) => {});
 
     const tool = createTool({
       name: 'old-tool',
@@ -327,7 +334,7 @@ describe('onDeprecatedToolCalled', () => {
   });
 
   it('fires callback when a string-deprecated tool is executed', async () => {
-    const callback = mock(() => {});
+    const callback = mock((_tool: ToolConfiguration, _call: { name: string; id?: string }) => {});
 
     const tool = createTool({
       name: 'old-tool',
@@ -349,7 +356,7 @@ describe('onDeprecatedToolCalled', () => {
   });
 
   it('does not fire callback for non-deprecated tools', async () => {
-    const callback = mock(() => {});
+    const callback = mock((_tool: ToolConfiguration, _call: { name: string; id?: string }) => {});
 
     const tool = createTool({
       name: 'active-tool',
@@ -368,7 +375,7 @@ describe('onDeprecatedToolCalled', () => {
   });
 
   it('passes call id when available', async () => {
-    const callback = mock(() => {});
+    const callback = mock((_tool: ToolConfiguration, _call: { name: string; id?: string }) => {});
 
     const tool = createTool({
       name: 'old-tool',
@@ -439,8 +446,9 @@ describe('createDeprecationWarningMiddleware', () => {
           name: 'old-tool',
           description: 'Deprecated tool',
           input: z.object({ value: z.number() }),
-          async execute({ value }: { value: number }) {
-            return (value as number) * 2;
+          async execute(params) {
+            const { value } = params as { value: number };
+            return value * 2;
           },
           lifecycle: { deprecated: true },
         }),

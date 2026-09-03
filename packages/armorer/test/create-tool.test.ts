@@ -3,8 +3,15 @@ import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
-import type { EffectiveToolExecutionContext, ToolExecuteOptions, ToolRequestContext } from '../src';
+import type {
+  EffectiveToolExecutionContext,
+  Tool,
+  ToolExecuteOptions,
+  ToolRequestContext,
+} from '../src';
 import { createTool, createToolCall, isTool, lazy, withContext } from '../src';
+import { serializeToolDefinition } from '../src/core/serialization';
+import type { AnyToolDefinition } from '../src/core/tool-definition';
 import { ToolProgressEvent } from '../src/events';
 import {
   approvalConsumeSymbol,
@@ -56,7 +63,7 @@ function createManualExecutionTiming(initialNow = 0): {
       now: () => now,
       [scheduleTimeoutFunctionKey]: (handler, milliseconds) => {
         const handle = ++nextHandle;
-        timers.set(handle, { handler, milliseconds });
+        timers.set(handle, { handler, milliseconds: milliseconds ?? 0 });
         return handle;
       },
       [clearTimeoutFunctionKey]: (handle: unknown) => {
@@ -205,6 +212,7 @@ describe('createTool', () => {
         dispatch: tool.dispatchEvent,
         toolCall,
         configuration: tool.configuration,
+        progress: () => {},
       },
     );
     expect(result).toBe('OK');
@@ -376,9 +384,9 @@ describe('createTool', () => {
       name: 'lazy-reject',
       description: 'fails on load',
       input: z.object({ value: z.string() }),
-      execute: Promise.resolve().then(() => {
+      execute: Promise.resolve().then((): never => {
         throw new Error('lazy load failed');
-      }),
+      }) as unknown as Promise<(params: { value: string }) => Promise<unknown>>,
     });
 
     const result = await tool.execute(createToolCall('lazy-reject', { value: 'x' }));
@@ -391,9 +399,9 @@ describe('createTool', () => {
       name: 'lazy-reject-before-approval',
       description: 'fails before approval admission',
       input: z.object({ value: z.string() }),
-      execute: Promise.resolve().then(() => {
+      execute: Promise.resolve().then((): never => {
         throw new Error('lazy load failed before approval');
-      }),
+      }) as unknown as Promise<(params: { value: string }) => Promise<unknown>>,
     });
 
     const result = await tool.execute(
@@ -403,7 +411,7 @@ describe('createTool', () => {
           consumeCount += 1;
           return async () => {};
         },
-      },
+      } as any,
     );
 
     expect(result.error?.message).toContain('lazy load failed before approval');
@@ -432,7 +440,7 @@ describe('createTool', () => {
       input: z.object({ value: z.string() }),
       execute: lazy(async () => {
         loads += 1;
-        return async ({ value }: { value: string }) => value.toUpperCase();
+        return async (params: unknown) => (params as { value: string }).value.toUpperCase();
       }),
     });
 
@@ -474,7 +482,7 @@ describe('createTool', () => {
       },
     });
 
-    const result = await tool.execute(createToolCall('diagnostic-failure', { value: 123 } as any));
+    const result = await tool.executeWith({ params: { value: 123 } as any });
     expect(result.error).toBeDefined();
   });
 
@@ -488,11 +496,15 @@ describe('createTool', () => {
       },
     });
 
-    const value = await tool.configuration.execute({ a: 'ok' });
+    const value = await (tool.configuration.execute as (params: unknown) => Promise<unknown>)({
+      a: 'ok',
+    });
     expect(value).toBe('OK');
   });
 
   it('withContext injects values into the tool context', async () => {
+    // `withContext` returns `Tool` when called with both arguments, but its
+    // declared return type is the union with the curried builder form.
     const tool = withContext(
       { workspaceId: 'ws-1', role: 'admin' },
       {
@@ -505,14 +517,17 @@ describe('createTool', () => {
           return `${value}-${context.role}`;
         },
       },
-    );
+    ) as Tool;
 
     const result = await tool({ value: 'hello' });
     expect(result).toBe('hello-admin');
   });
 
   it('withContext supports currying for later reuse', async () => {
-    const builder = withContext({ region: 'eu' });
+    // `withContext` returns the curried builder function when called with
+    // only the context argument, but its declared return type is the union
+    // with the direct `Tool` form.
+    const builder = withContext({ region: 'eu' }) as (options: unknown) => Tool;
     const tool = builder({
       name: 'regional',
       description: 'curries context',
@@ -538,7 +553,7 @@ describe('createTool', () => {
     });
 
     // Missing required property returns a ToolResult failure shape
-    const res = await tool.execute(createToolCall('invalid-test', {} as any));
+    const res = await tool.executeWith({ params: {} as any });
     expect(res.toolName).toBe('invalid-test');
     expect(res.error?.category).toBe('validation');
     expect(res.error?.code).toBe('VALIDATION_ERROR');
@@ -798,7 +813,11 @@ describe('createTool', () => {
       execute: async () => null,
     });
 
-    const meta = tool.toJSON();
+    // `toJSON` is attached to every tool at runtime (see `createTool` in
+    // `src/create-tool.ts`) but isn't declared on the public `Tool`
+    // interface, so this serializes through the same underlying helper
+    // directly instead.
+    const meta = serializeToolDefinition(tool.configuration as AnyToolDefinition);
     expect(meta.schemaVersion).toBe('2020-12');
     expect(meta.id).toBe('default:json-meta');
     expect(meta.identity).toEqual({ namespace: 'default', name: 'json-meta' });
@@ -847,8 +866,8 @@ describe('createTool', () => {
       },
     });
 
-    expect(tool.metadata.requires).toEqual(['account']);
-    expect(tool.metadata.cost).toBe(3);
+    expect(tool.metadata?.['requires']).toEqual(['account']);
+    expect(tool.metadata?.['cost']).toBe(3);
   });
 
   it('supports metadata as a sync factory function', async () => {
@@ -925,7 +944,10 @@ describe('createTool', () => {
       streamEvents.push(`end:${(event as any).chunks}:${(event as any).completed}`);
     });
 
-    const result = await tool.execute({} as any);
+    // The execute call signature's inferred return type is the raw
+    // `execute()` shape (an async iterable); the actual runtime result is
+    // the collected array (see this test's own name/purpose).
+    const result = (await tool.execute({} as any)) as unknown as number[];
     expect(result).toEqual([1, 2]);
     const callResult = await tool.execute({ id: 'c1', name: 'collect-stream', arguments: {} });
     expect(callResult.result).toEqual([1, 2]);
@@ -1456,9 +1478,15 @@ describe('isTool', () => {
     });
 
     const calls: string[] = [];
-    const u1 = tool.addEventListener('ping' as any, () => calls.push('p1'));
-    const u2 = tool.addEventListener('ping' as any, () => calls.push('p2'));
-    tool.addEventListener('pong' as any, () => calls.push('g1'));
+    const u1 = tool.addEventListener('ping' as any, () => {
+      calls.push('p1');
+    });
+    const u2 = tool.addEventListener('ping' as any, () => {
+      calls.push('p2');
+    });
+    tool.addEventListener('pong' as any, () => {
+      calls.push('g1');
+    });
 
     await tool({ a: 'x' });
     expect(calls).toEqual(['p1', 'p2', 'g1']);
@@ -1586,11 +1614,13 @@ describe('isTool', () => {
   });
 
   it('tracks synchronous callback results through the execution lifecycle', async () => {
+    // Deliberately a synchronous (non-Promise-returning) `execute`, proving
+    // runtime tolerance beyond the declared `execute` type.
     const tool = createTool({
       name: 'synchronous-lifecycle',
       description: 'returns without creating a promise',
       input: z.object({}),
-      execute: () => 'synchronous result',
+      execute: (() => 'synchronous result') as unknown as () => Promise<string>,
     });
 
     const result = await tool.executeWith({ params: {}, callId: 'synchronous-call' });
@@ -1741,7 +1771,9 @@ describe('isTool', () => {
     while (!releaseFirst) await Promise.resolve();
     const queuedContext = createRequestContext('original-owner');
     const second = tool.execute({ order: 2 }, { requestContext: queuedContext });
-    queuedContext.authority.ownerId = 'mutated-owner';
+    // Deliberately mutates a readonly field after passing the context, to
+    // prove the tool already snapshotted it before entering the queue.
+    (queuedContext.authority as { ownerId: string }).ownerId = 'mutated-owner';
     releaseFirst();
 
     await Promise.all([first, second]);
@@ -2338,7 +2370,6 @@ describe('isTool', () => {
       expect((evt as any).toolCall.name).toBe('valerr');
     });
 
-    // @ts-expect-error - intentionally invalid
     await expect(tool({})).rejects.toBeDefined();
     expect(validateErr).toBe(1);
     expect(settled).toBe(1);
@@ -2472,7 +2503,7 @@ describe('isTool', () => {
         satisfiedPauses: [],
       },
     } satisfies ToolExecuteOptions & { [approvalResumeSymbol]: ApprovalResumeState };
-    const resumed = await tool.execute(toolCall, resumeOptions);
+    const resumed = await tool.execute(toolCall, resumeOptions as any);
 
     expect(resumed.outcome).toBe('success');
     expect(resumed.result).toBe('APPROVED');
@@ -2538,7 +2569,7 @@ describe('isTool', () => {
 
     const result = await tool.execute(
       createToolCall('authorization-only-telemetry', { value: 'x' }),
-      { [policyAuthorizationOnlySymbol]: true },
+      { [policyAuthorizationOnlySymbol]: true } as any,
     );
 
     expect(result.outcome).toBe('success');
@@ -2569,7 +2600,7 @@ describe('isTool', () => {
 
     const result = await tool.execute(
       createToolCall('authorization-only-lazy-executor', { value: 'x' }),
-      { [policyAuthorizationOnlySymbol]: true },
+      { [policyAuthorizationOnlySymbol]: true } as any,
     );
 
     expect(result.outcome).toBe('success');
@@ -2596,7 +2627,7 @@ describe('isTool', () => {
           rollbackCount += 1;
         };
       },
-    });
+    } as any);
 
     expect(result.outcome).toBe('error');
     expect(result.errorMessage).toBe('authorization cancelled');
@@ -2629,7 +2660,7 @@ describe('isTool', () => {
             rollbackCount += 1;
           };
         },
-      },
+      } as any,
     );
 
     expect(result).toMatchObject({
@@ -2669,7 +2700,7 @@ describe('isTool', () => {
             rollbackCount += 1;
           };
         },
-      },
+      } as any,
     );
 
     expect(result).toMatchObject({
@@ -2730,9 +2761,10 @@ describe('isTool', () => {
       policyContext: () => ({ runId: 'run-1' }),
       policy: {
         beforeExecute({ policyContext }) {
-          if (policyContext?.runId !== 'run-1') {
+          if ((policyContext as { runId?: string } | undefined)?.runId !== 'run-1') {
             return { allow: false, reason: 'missing runId' };
           }
+          return undefined;
         },
       },
       async execute({ a }) {
@@ -2751,7 +2783,10 @@ describe('isTool', () => {
       input: z.object({ a: z.string() }),
       digests: true,
       policy: {
-        beforeExecute: () => false,
+        // `beforeExecute` tolerates a bare boolean at runtime (see
+        // `typeof decision === 'boolean'` in `src/create-toolbox.ts`), but
+        // its declared type only allows `ToolPolicyDecision | void`.
+        beforeExecute: (() => false) as unknown as () => { allow: boolean },
       },
       async execute() {
         return 'ok';
@@ -2916,6 +2951,7 @@ describe('isTool', () => {
         dispatch: tool.dispatchEvent,
         toolCall: createToolCall('run-tool', { value: 'ok' }),
         configuration: tool.configuration,
+        progress: () => {},
       },
     );
     expect(result).toBe('ok:run-tool');

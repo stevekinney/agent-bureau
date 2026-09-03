@@ -10,6 +10,7 @@ import type {
   CachedToolResult,
   IdempotencyResolutionReceipt,
   LegacyIdempotencyResolutionReceipt,
+  StartedToolExecution,
   ToolResultCache,
 } from '../../src/idempotency/types';
 import {
@@ -137,7 +138,7 @@ function createManualDeadlineTiming(initialNow = 0): {
       [scheduleTimeoutFunctionKey]: (handler, milliseconds) => {
         const handle = nextTimerHandle++;
         timerHandlers.set(handle, handler);
-        delays.push(milliseconds);
+        delays.push(milliseconds ?? 0);
         resolveFirstTimeoutScheduled();
         return handle;
       },
@@ -184,7 +185,7 @@ describe('withIdempotency', () => {
       tenantId: 'tenant-a',
     });
 
-    const result = await wrapped({ a: 1, b: 2 }, { requestContext });
+    const result = await wrapped.execute({ a: 1, b: 2 }, { requestContext });
     expect(result).toBe(3);
     expect(callCount).toBe(1);
   });
@@ -192,7 +193,7 @@ describe('withIdempotency', () => {
   it('rejects streaming before claiming or executing an idempotency key', async () => {
     const wrapped = withIdempotency(createTestTool(), { cache, tenantId: 'tenant-a' });
 
-    await expect(wrapped({ a: 1, b: 2 }, { requestContext, stream: true })).rejects.toThrow(
+    await expect(wrapped.execute({ a: 1, b: 2 }, { requestContext, stream: true })).rejects.toThrow(
       'Idempotency does not support streaming executions',
     );
     expect(callCount).toBe(0);
@@ -205,8 +206,8 @@ describe('withIdempotency', () => {
       tenantId: 'tenant-a',
     });
 
-    const result1 = await wrapped({ a: 1, b: 2 }, { requestContext });
-    const result2 = await wrapped({ a: 1, b: 2 }, { requestContext });
+    const result1 = await wrapped.execute({ a: 1, b: 2 }, { requestContext });
+    const result2 = await wrapped.execute({ a: 1, b: 2 }, { requestContext });
 
     expect(result1).toBe(3);
     expect(result2).toBe(3);
@@ -221,8 +222,8 @@ describe('withIdempotency', () => {
       toolRevision: 'greet:1',
     });
 
-    await wrapped({ a: 1, b: 2 }, { requestContext });
-    await wrapped({ a: 3, b: 4 }, { requestContext });
+    await wrapped.execute({ a: 1, b: 2 }, { requestContext });
+    await wrapped.execute({ a: 3, b: 4 }, { requestContext });
 
     expect(callCount).toBe(2);
   });
@@ -255,8 +256,8 @@ describe('withIdempotency', () => {
     const onCacheHit = mock((key: string, result: CachedToolResult) => {});
     const wrapped = withIdempotency(tool, { cache, tenantId: 'tenant-a', onCacheHit });
 
-    await wrapped({ a: 1, b: 2 }, { requestContext });
-    await wrapped({ a: 1, b: 2 }, { requestContext });
+    await wrapped.execute({ a: 1, b: 2 }, { requestContext });
+    await wrapped.execute({ a: 1, b: 2 }, { requestContext });
 
     expect(onCacheHit).toHaveBeenCalledTimes(1);
     expect(onCacheHit.mock.calls[0]![1]!.result).toBe(3);
@@ -300,26 +301,28 @@ describe('withIdempotency', () => {
   it('fails closed for completed cache entries without original input', async () => {
     const tool = createTestTool();
     const wrapped = withIdempotency(tool, { cache, tenantId: 'tenant-a' });
-    await wrapped({ a: 1, b: 2 }, { requestContext });
+    await wrapped.execute({ a: 1, b: 2 }, { requestContext });
     const key = JSON.stringify(['tenant-a', tool.id, tool.name, fullInputKey({ a: 1, b: 2 })]);
     const cached = await cache.getState(key);
     expect(cached?.status).toBe('completed');
-    await cache.set(key, { ...cached!, input: undefined });
+    await cache.set(key, { ...(cached! as CachedToolResult), input: undefined });
 
-    await expect(wrapped({ a: 1, b: 2 }, { requestContext })).rejects.toThrow('original input');
+    await expect(wrapped.execute({ a: 1, b: 2 }, { requestContext })).rejects.toThrow(
+      'original input',
+    );
     expect(callCount).toBe(1);
   });
 
   it('fails closed for completed cache entries with invalid original input', async () => {
     const tool = createTestTool();
     const wrapped = withIdempotency(tool, { cache, tenantId: 'tenant-a' });
-    await wrapped({ a: 1, b: 2 }, { requestContext });
+    await wrapped.execute({ a: 1, b: 2 }, { requestContext });
     const key = JSON.stringify(['tenant-a', tool.id, tool.name, fullInputKey({ a: 1, b: 2 })]);
     const cached = await cache.getState(key);
     expect(cached?.status).toBe('completed');
-    await cache.set(key, { ...cached!, input: '{invalid' });
+    await cache.set(key, { ...(cached! as CachedToolResult), input: '{invalid' });
 
-    await expect(wrapped({ a: 1, b: 2 }, { requestContext })).rejects.toThrow(
+    await expect(wrapped.execute({ a: 1, b: 2 }, { requestContext })).rejects.toThrow(
       'invalid original input',
     );
     expect(callCount).toBe(1);
@@ -349,9 +352,9 @@ describe('withIdempotency', () => {
     });
     const wrapped = withIdempotency(tool, { cache, tenantId: 'tenant-a' });
 
-    await expect(wrapped({ value: 'unsafe' }, { requestContext })).resolves.toBe('unsafe');
+    await expect(wrapped.execute({ value: 'unsafe' }, { requestContext })).resolves.toBe('unsafe');
     allowAll = false;
-    await expect(wrapped({ value: 'safe' }, { requestContext })).rejects.toThrow(
+    await expect(wrapped.execute({ value: 'safe' }, { requestContext })).rejects.toThrow(
       'unsafe original input',
     );
     expect(callCount).toBe(1);
@@ -380,13 +383,15 @@ describe('withIdempotency', () => {
     });
     const key = `["tenant-a","charge:1","charge",${JSON.stringify(fullInputKey({ cents: 100 }))}]`;
 
-    await expect(wrapped({ cents: 100 }, { requestContext })).rejects.toThrow(
+    await expect(wrapped.execute({ cents: 100 }, { requestContext })).rejects.toThrow(
       'provider timeout after charge',
     );
     expect(callCount).toBe(1);
     expect(sideEffects).toEqual([100]);
 
-    await expect(wrapped({ cents: 100 }, { requestContext })).rejects.toThrow('unknown outcome');
+    await expect(wrapped.execute({ cents: 100 }, { requestContext })).rejects.toThrow(
+      'unknown outcome',
+    );
     expect(callCount).toBe(1);
     expect(sideEffects).toEqual([100]);
     expect(onUnknownOutcome).toHaveBeenCalledWith(
@@ -420,10 +425,10 @@ describe('withIdempotency', () => {
     });
     const key = JSON.stringify(['tenant-a', 'charge:1', 'charge', fullInputKey({ cents: 100 })]);
 
-    await expect(wrapped({ cents: 100 }, { requestContext })).rejects.toThrow(
+    await expect(wrapped.execute({ cents: 100 }, { requestContext })).rejects.toThrow(
       'provider timeout after charge',
     );
-    const started = await cache.getState(key);
+    const started = (await cache.getState(key)) as StartedToolExecution | undefined;
     expect(started?.status).toBe('started');
     expect(started?.attemptId).toBeString();
     expect(started?.inputDigest).toBeString();
@@ -940,10 +945,10 @@ describe('withIdempotency', () => {
     });
     const key = JSON.stringify(['tenant-a', 'charge:1', 'charge', fullInputKey({ cents: 100 })]);
 
-    await expect(wrapped({ cents: 100 }, { requestContext })).rejects.toThrow(
+    await expect(wrapped.execute({ cents: 100 }, { requestContext })).rejects.toThrow(
       'provider timeout after charge',
     );
-    const started = await cache.getState(key);
+    const started = (await cache.getState(key)) as StartedToolExecution | undefined;
     expect(started?.status).toBe('started');
     now = 110;
     const receipt: IdempotencyResolutionReceipt = {
@@ -985,7 +990,7 @@ describe('withIdempotency', () => {
     });
     const key = `["tenant-a","typed-input:1","typed-input",${JSON.stringify(fullInputKey({ x: '5' }))}]`;
 
-    await expect(wrapped({ x: '5' }, { requestContext })).rejects.toThrow();
+    await expect(wrapped.execute({ x: '5' }, { requestContext })).rejects.toThrow();
     expect(await cache.getState!(key)).toBeUndefined();
     expect(callCount).toBe(0);
   });
@@ -1032,8 +1037,8 @@ describe('withIdempotency', () => {
       toolRevision: 'json-schema-input:1',
     });
 
-    await expect(wrapped({ x: 5 }, { requestContext })).resolves.toBe(10);
-    await expect(wrapped({ x: 5 }, { requestContext })).resolves.toBe(10);
+    await expect(wrapped.execute({ x: 5 }, { requestContext })).resolves.toBe(10);
+    await expect(wrapped.execute({ x: 5 }, { requestContext })).resolves.toBe(10);
     expect(callCount).toBe(1);
   });
 
@@ -1064,7 +1069,7 @@ describe('withIdempotency', () => {
       onUnknownOutcome,
     });
 
-    await expect(wrapped({ x: 5 }, { requestContext })).rejects.toThrow('unknown outcome');
+    await expect(wrapped.execute({ x: 5 }, { requestContext })).rejects.toThrow('unknown outcome');
     expect(onUnknownOutcome).toHaveBeenCalledWith(
       key,
       expect.objectContaining({ status: 'started', toolName: 'flaky' }),
@@ -1205,8 +1210,8 @@ describe('withIdempotency', () => {
       onCacheHit: (_key, entry) => cacheHits.push(entry),
     });
 
-    await wrapped({ a: 1, b: 2 }, { requestContext });
-    await wrapped({ a: 1, b: 2 }, { requestContext });
+    await wrapped.execute({ a: 1, b: 2 }, { requestContext });
+    await wrapped.execute({ a: 1, b: 2 }, { requestContext });
 
     expect(cacheHits).toHaveLength(1);
     expect(cacheHits[0]?.executedAt).toBe(timestamp);
@@ -1226,12 +1231,12 @@ describe('withIdempotency', () => {
       now: () => 10_000_000,
     });
 
-    await expect(wrapped({ a: 1, b: 2 }, { requestContext })).resolves.toBe(3);
-    await expect(wrapped({ a: 1, b: 2 }, { requestContext })).resolves.toBe(3);
+    await expect(wrapped.execute({ a: 1, b: 2 }, { requestContext })).resolves.toBe(3);
+    await expect(wrapped.execute({ a: 1, b: 2 }, { requestContext })).resolves.toBe(3);
     expect(callCount).toBe(1);
 
     cacheClock = 1_101;
-    await expect(wrapped({ a: 1, b: 2 }, { requestContext })).resolves.toBe(3);
+    await expect(wrapped.execute({ a: 1, b: 2 }, { requestContext })).resolves.toBe(3);
     expect(callCount).toBe(2);
   });
 
@@ -1301,9 +1306,13 @@ describe('withIdempotency', () => {
       fullInputKey(input),
     ]);
 
-    await expect(wrapped(input, { requestContext })).rejects.toThrow('Callable approval required');
+    await expect(wrapped.execute(input, { requestContext })).rejects.toThrow(
+      'Callable approval required',
+    );
     expect(await cache.getState(key)).toBeUndefined();
-    await expect(wrapped(input, { requestContext })).rejects.toThrow('Callable approval required');
+    await expect(wrapped.execute(input, { requestContext })).rejects.toThrow(
+      'Callable approval required',
+    );
     expect(await cache.getState(key)).toBeUndefined();
     expect(executions).toBe(0);
   });
@@ -1366,9 +1375,13 @@ describe('withIdempotency', () => {
       fullInputKey(input),
     ]);
 
-    await expect(wrapped(input, { requestContext })).rejects.toThrow('Callable execution denied');
+    await expect(wrapped.execute(input, { requestContext })).rejects.toThrow(
+      'Callable execution denied',
+    );
     expect(await cache.getState(key)).toBeUndefined();
-    await expect(wrapped(input, { requestContext })).rejects.toThrow('Callable execution denied');
+    await expect(wrapped.execute(input, { requestContext })).rejects.toThrow(
+      'Callable execution denied',
+    );
     expect(await cache.getState(key)).toBeUndefined();
     expect(executions).toBe(0);
   });
@@ -1386,7 +1399,7 @@ describe('withIdempotency', () => {
     });
 
     await expect(
-      first(
+      first.execute(
         { a: 1, b: 2 },
         {
           requestContext: {
@@ -1397,7 +1410,7 @@ describe('withIdempotency', () => {
       ),
     ).resolves.toBe(3);
     await expect(
-      second(
+      second.execute(
         { a: 1, b: 2 },
         {
           requestContext: {
@@ -1430,7 +1443,7 @@ describe('withIdempotency', () => {
       claimStarted: async () => ({ outcome: 'existing', entry: completed }),
     };
     await expect(
-      withIdempotency(tool, { cache: completedRace, tenantId: 'tenant-a' })(
+      withIdempotency(tool, { cache: completedRace, tenantId: 'tenant-a' }).execute(
         { a: 1, b: 2 },
         { requestContext },
       ),
@@ -1442,7 +1455,7 @@ describe('withIdempotency', () => {
       claimStarted: async (_key, execution) => ({ outcome: 'existing', entry: execution }),
     };
     await expect(
-      withIdempotency(tool, { cache: startedRace, tenantId: 'tenant-a' })(
+      withIdempotency(tool, { cache: startedRace, tenantId: 'tenant-a' }).execute(
         { a: 1, b: 2 },
         { requestContext },
       ),
@@ -1453,7 +1466,7 @@ describe('withIdempotency', () => {
       completeStarted: async () => false,
     };
     await expect(
-      withIdempotency(tool, { cache: lostFence, tenantId: 'tenant-a' })(
+      withIdempotency(tool, { cache: lostFence, tenantId: 'tenant-a' }).execute(
         { a: 3, b: 4 },
         { requestContext },
       ),
@@ -1516,11 +1529,11 @@ describe('withIdempotency', () => {
     const tool = createTestTool();
     const wrapped = withIdempotency(tool, { cache, tenantId: 'tenant-a', ttl: 1000 });
 
-    await wrapped({ a: 1, b: 2 }, { requestContext });
+    await wrapped.execute({ a: 1, b: 2 }, { requestContext });
 
     // The cached entry should have the custom TTL
     // We verify indirectly: result should be returned from cache
-    const result = await wrapped({ a: 1, b: 2 }, { requestContext });
+    const result = await wrapped.execute({ a: 1, b: 2 }, { requestContext });
     expect(result).toBe(3);
     expect(callCount).toBe(1);
   });
@@ -1554,7 +1567,7 @@ describe('withIdempotency', () => {
       input: acceptsAnySchema(),
       inputSchema: {},
       idempotencyKey: () => 'undefined-input',
-      execute() {
+      async execute() {
         executions += 1;
         return 'ok';
       },
@@ -1587,9 +1600,9 @@ describe('withIdempotency', () => {
       }),
       idempotencyKey: () => 'invalid-async-input',
       policy: {
-        beforeExecute({ requestContext: currentRequestContext }) {
+        beforeExecute({ policyContext }) {
           policyCalls += 1;
-          expect(currentRequestContext).toEqual(requestContext);
+          expect(policyContext?.['requestContext']).toEqual(requestContext);
           return { allow: true };
         },
       },
@@ -1657,11 +1670,11 @@ describe('withIdempotency', () => {
       toolRevision: 'greet:1',
     });
 
-    const result = await wrapped({ name: 'ada' }, { requestContext });
+    const result = await wrapped.execute({ name: 'ada' }, { requestContext });
     expect(result).toBe('hello, ada');
     expect(callCount).toBe(1);
 
-    const cached = await wrapped({ name: 'ada' }, { requestContext });
+    const cached = await wrapped.execute({ name: 'ada' }, { requestContext });
     expect(cached).toBe('hello, ada');
     expect(callCount).toBe(1);
   });

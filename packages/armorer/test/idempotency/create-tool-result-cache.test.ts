@@ -687,13 +687,18 @@ describe('createToolResultCache', () => {
     await expect(cache.getState('bounded-renewal')).resolves.toBeUndefined();
 
     await expect(
-      cache.replaceUnknownStarted('bounded-renewal', 'stale-attempt', {
-        status: 'started',
-        toolName: 'charge',
-        startedAt: Date.now(),
-        ttl: 60_000,
-        attemptId: 'replacement',
-      }),
+      cache.replaceUnknownStarted(
+        'bounded-renewal',
+        'stale-attempt',
+        {
+          status: 'started',
+          toolName: 'charge',
+          startedAt: Date.now(),
+          ttl: 60_000,
+          attemptId: 'replacement',
+        },
+        Date.now(),
+      ),
     ).resolves.toBe(false);
   });
 });

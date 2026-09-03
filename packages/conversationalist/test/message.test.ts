@@ -100,7 +100,7 @@ describe('message helpers', () => {
       content: [
         { type: 'text', text: 'A' },
         { type: 'thinking', thinking: 'private', signature: 'sig==' },
-        { type: 'tool_use', id: 'c1', name: 't', input: { k: 1 } },
+        { type: 'server_tool_use', id: 'c1', name: 't', input: { k: 1 } },
         { type: 'text', text: 'B' },
       ],
       position: 0,

@@ -7,12 +7,8 @@ import {
   createConversationHistory as createConversation,
 } from '../src';
 import { createPIIRedactionPlugin, redactPii } from '../src/plugins/pii-redaction';
-import type { Message, MessageInput } from '../src/types';
-
-const getOrderedMessages = (conversation: Conversation): Message[] =>
-  conversation.ids
-    .map((id) => conversation.messages[id])
-    .filter((message): message is Message => Boolean(message));
+import type { MessageInput } from '../src/types';
+import { getOrderedMessages } from '../src/utilities/message-store';
 
 describe('redactPii', () => {
   it('should redact emails', () => {

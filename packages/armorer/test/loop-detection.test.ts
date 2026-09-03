@@ -9,7 +9,10 @@ describe('loop detection', () => {
     });
     it('handles null and undefined', () => {
       expect(stableStringify(null)).toBe('null');
-      expect(stableStringify(undefined)).toBe(undefined); // JSON.stringify(undefined) returns undefined
+      // `stableStringify`'s declared return type is `string`, but it
+      // delegates to `JSON.stringify`, which returns `undefined` at runtime
+      // for `undefined` input.
+      expect(stableStringify(undefined) as unknown).toBe(undefined);
     });
     it('handles primitives', () => {
       expect(stableStringify(42)).toBe('42');

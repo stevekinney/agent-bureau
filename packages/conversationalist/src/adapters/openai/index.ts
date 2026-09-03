@@ -256,7 +256,7 @@ function toConversationContent(
     return content;
   }
 
-  const parts: MultiModalContent[] = content.map((part) =>
+  const parts: MultiModalContent[] = content.map((part: OpenAIContentPart): MultiModalContent =>
     part.type === 'text'
       ? { type: 'text', text: part.text }
       : { type: 'image', url: part.image_url.url },

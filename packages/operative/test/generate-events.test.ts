@@ -6,6 +6,13 @@ import { z } from 'zod';
 
 import { noToolCalls } from '../src/conditions/predicates';
 import { createActiveRun } from '../src/create-run';
+import type {
+  GenerateCompletedEvent,
+  GenerateErrorEvent,
+  GenerateStartedEvent,
+  StepCompletedEvent,
+  UsageAccumulatedEvent,
+} from '../src/events';
 import { createMockGenerate, createRunRecorder } from '../src/test/index';
 import type { GenerateResponse, TokenUsage } from '../src/types';
 const run = (options: Parameters<typeof createActiveRun>[0]) => createActiveRun(options).result;
@@ -52,8 +59,8 @@ describe('generate lifecycle events', () => {
 
     const generateStartedEvents = recorder.events.filter((e) => e.type === 'generate.started');
     expect(generateStartedEvents).toHaveLength(2);
-    expect((generateStartedEvents[0].detail as { step: number }).step).toBe(0);
-    expect((generateStartedEvents[1].detail as { step: number }).step).toBe(1);
+    expect((generateStartedEvents[0].detail as GenerateStartedEvent).step).toBe(0);
+    expect((generateStartedEvents[1].detail as GenerateStartedEvent).step).toBe(1);
   });
 
   it('generate.completed emitted after with correct duration and response', async () => {
@@ -72,11 +79,7 @@ describe('generate lifecycle events', () => {
     const completedEvents = recorder.events.filter((e) => e.type === 'generate.completed');
     expect(completedEvents).toHaveLength(1);
 
-    const detail = completedEvents[0].detail as {
-      step: number;
-      response: GenerateResponse;
-      durationMilliseconds: number;
-    };
+    const detail = completedEvents[0].detail as GenerateCompletedEvent;
     expect(detail.step).toBe(0);
     expect(detail.response.content).toBe('Hello');
     expect(detail.durationMilliseconds).toBeGreaterThanOrEqual(0);
@@ -104,11 +107,7 @@ describe('generate lifecycle events', () => {
     const errorEvents = recorder.events.filter((e) => e.type === 'generate.error');
     expect(errorEvents).toHaveLength(1);
 
-    const detail = errorEvents[0].detail as {
-      step: number;
-      error: unknown;
-      durationMilliseconds: number;
-    };
+    const detail = errorEvents[0].detail as GenerateErrorEvent;
     expect(detail.step).toBe(0);
     expect(detail.error).toBeInstanceOf(Error);
     expect(detail.durationMilliseconds).toBeGreaterThanOrEqual(0);
@@ -152,7 +151,7 @@ describe('generate lifecycle events', () => {
     await activeRun.result;
 
     const completed = recorder.events.find((e) => e.type === 'generate.completed');
-    const detail = completed!.detail as { durationMilliseconds: number };
+    const detail = completed!.detail as GenerateCompletedEvent;
     expect(detail.durationMilliseconds).toBeGreaterThanOrEqual(0);
     expect(detail.durationMilliseconds).toBeLessThan(5000);
   });
@@ -212,7 +211,7 @@ describe('step metadata', () => {
 
     // Check step.completed event
     const stepCompleted = recorder.events.find((e) => e.type === 'step.completed');
-    expect((stepCompleted!.detail as { metadata?: Record<string, unknown> }).metadata).toEqual({
+    expect((stepCompleted!.detail as StepCompletedEvent).metadata).toEqual({
       provider: 'anthropic',
     });
 
@@ -241,20 +240,12 @@ describe('usage.accumulated event', () => {
     const usageEvents = recorder.events.filter((e) => e.type === 'usage.accumulated');
     expect(usageEvents).toHaveLength(2);
 
-    const first = usageEvents[0].detail as {
-      step: number;
-      stepUsage?: TokenUsage;
-      totalUsage: TokenUsage;
-    };
+    const first = usageEvents[0].detail as UsageAccumulatedEvent;
     expect(first.step).toBe(0);
     expect(first.stepUsage).toEqual({ prompt: 100, completion: 50, total: 150 });
     expect(first.totalUsage).toEqual({ prompt: 100, completion: 50, total: 150 });
 
-    const second = usageEvents[1].detail as {
-      step: number;
-      stepUsage?: TokenUsage;
-      totalUsage: TokenUsage;
-    };
+    const second = usageEvents[1].detail as UsageAccumulatedEvent;
     expect(second.step).toBe(1);
     expect(second.stepUsage).toEqual({ prompt: 80, completion: 30, total: 110 });
     expect(second.totalUsage).toEqual({ prompt: 180, completion: 80, total: 260 });
@@ -276,10 +267,7 @@ describe('usage.accumulated event', () => {
     const usageEvents = recorder.events.filter((e) => e.type === 'usage.accumulated');
     expect(usageEvents).toHaveLength(1);
 
-    const detail = usageEvents[0].detail as {
-      stepUsage?: TokenUsage;
-      totalUsage: TokenUsage;
-    };
+    const detail = usageEvents[0].detail as UsageAccumulatedEvent;
     expect(detail.stepUsage).toBeUndefined();
     expect(detail.totalUsage).toEqual({ prompt: 0, completion: 0, total: 0 });
   });
@@ -304,7 +292,7 @@ describe('usage.accumulated event', () => {
     const usageEvents = recorder.events.filter((e) => e.type === 'usage.accumulated');
     expect(usageEvents).toHaveLength(3);
 
-    const totals = usageEvents.map((e) => (e.detail as { totalUsage: TokenUsage }).totalUsage);
+    const totals = usageEvents.map((e) => (e.detail as UsageAccumulatedEvent).totalUsage);
     expect(totals[0]).toEqual({ prompt: 10, completion: 5, total: 15 });
     expect(totals[1]).toEqual({ prompt: 30, completion: 15, total: 45 });
     expect(totals[2]).toEqual({ prompt: 60, completion: 30, total: 90 });
@@ -340,7 +328,7 @@ describe('usage.accumulated event', () => {
     const result = await activeRun.result;
 
     const usageEvents = recorder.events.filter((e) => e.type === 'usage.accumulated');
-    const totals = usageEvents.map((e) => (e.detail as { totalUsage: TokenUsage }).totalUsage);
+    const totals = usageEvents.map((e) => (e.detail as UsageAccumulatedEvent).totalUsage);
 
     expect(totals[0]).toEqual({
       prompt: 10,
@@ -393,9 +381,7 @@ describe('usage.accumulated event', () => {
     await activeRun.result;
 
     const usageEvents = recorder.events.filter((e) => e.type === 'usage.accumulated');
-    const rates = usageEvents.map(
-      (e) => e.detail as { stepCacheHitRate?: number; totalCacheHitRate?: number },
-    );
+    const rates = usageEvents.map((e) => e.detail as UsageAccumulatedEvent);
 
     // Step 1: cacheReadTokens absent, cacheCreationTokens=100, prompt=0 → 0 / (0 + 100 + 0) = 0.
     expect(rates[0]?.stepCacheHitRate).toBe(0);
@@ -422,13 +408,10 @@ describe('usage.accumulated event', () => {
     await activeRun.result;
 
     const usageEvents = recorder.events.filter((e) => e.type === 'usage.accumulated');
-    const detail = usageEvents[0]?.detail as {
-      stepCacheHitRate?: number;
-      totalCacheHitRate?: number;
-    };
+    const detail = usageEvents[0]?.detail as UsageAccumulatedEvent | undefined;
 
-    expect(detail.stepCacheHitRate).toBeUndefined();
-    expect(detail.totalCacheHitRate).toBeUndefined();
+    expect(detail!.stepCacheHitRate).toBeUndefined();
+    expect(detail!.totalCacheHitRate).toBeUndefined();
   });
 });
 
@@ -502,7 +485,9 @@ describe('toolbox budget-exceeded reconciliation (AB-231)', () => {
     });
 
     const budgetExceededEvents: unknown[] = [];
-    toolbox.addEventListener('budget-exceeded', (e) => budgetExceededEvents.push(e));
+    toolbox.addEventListener('budget-exceeded', (e) => {
+      budgetExceededEvents.push(e);
+    });
 
     const result = await activeRun.result;
 

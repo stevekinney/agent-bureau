@@ -40,7 +40,7 @@ function makeContext(signal?: AbortSignal): GenerateContext {
 }
 
 function makeStreamingHandle(): StreamingHandle {
-  return { update: () => {} };
+  return { update: () => {}, messageId: 'test-message-id' };
 }
 
 describe('createAnthropicProvider — abort signal placement', () => {
@@ -109,7 +109,7 @@ function createStalledStreamingClient(): AnthropicStreamingClient & {
         params: AnthropicMessageCreateRequest,
         options?: AnthropicRequestOptions,
       ): AsyncIterable<AnthropicStreamEvent> {
-        bodySignals.push((params as Record<string, unknown>)['signal']);
+        bodySignals.push((params as unknown as Record<string, unknown>)['signal']);
         const signal = options?.signal;
         return (async function* () {
           yield {

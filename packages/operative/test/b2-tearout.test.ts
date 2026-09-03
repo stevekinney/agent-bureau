@@ -12,6 +12,7 @@
 import { describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
+import type { AgentRun } from '../src/agent-run';
 // Verify torn-out symbols are absent from the package index.
 // These imports must NOT compile — we test at runtime by checking the module shape.
 import * as operative from '../src/index';
@@ -93,20 +94,22 @@ describe('B2 tearout — remaining surface is coherent', () => {
       agentName: 'test',
       agent: {
         name: 'stub-agent',
-        run: (input) => ({
-          result: () =>
-            Promise.resolve({
-              conversation: {} as never,
-              steps: [],
-              content: `Result: ${String(input)}`,
-              usage: { prompt: 0, completion: 0, total: 0 },
-              finishReason: 'stop-condition' as const,
-            }),
-          unwrap: () => Promise.resolve(`Result: ${String(input)}`),
-          abort: () => {},
-          [Symbol.dispose]: () => {},
-          [Symbol.asyncIterator]: () => (async function* () {})(),
-        }),
+        hasOutput: false,
+        run: (input) =>
+          ({
+            result: () =>
+              Promise.resolve({
+                conversation: {} as never,
+                steps: [],
+                content: `Result: ${String(input)}`,
+                usage: { prompt: 0, completion: 0, total: 0 },
+                finishReason: 'stop-condition' as const,
+              }),
+            unwrap: () => Promise.resolve(`Result: ${String(input)}`),
+            abort: () => {},
+            [Symbol.dispose]: () => {},
+            [Symbol.asyncIterator]: () => (async function* () {})(),
+          }) as unknown as AgentRun<string, boolean>,
       },
       input: z.object({ query: z.string() }),
     });

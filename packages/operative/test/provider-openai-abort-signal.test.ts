@@ -33,7 +33,7 @@ function makeContext(signal?: AbortSignal): GenerateContext {
 }
 
 function makeStreamingHandle(): StreamingHandle {
-  return { update: () => {} };
+  return { update: () => {}, messageId: 'test-message-id' };
 }
 
 describe('createOpenAIProvider — abort signal placement', () => {

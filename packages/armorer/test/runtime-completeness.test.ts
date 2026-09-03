@@ -4,8 +4,8 @@ import { z } from 'zod';
 import { createNameMapper, toOpenAITools } from '../src/adapters/openai/index';
 import { pipe } from '../src/compose';
 import { createTool } from '../src/create-tool';
-import { createToolbox } from '../src/create-toolbox';
-import { type ToolResult } from '../src/is-tool';
+import { type ToolResult } from '../src/types';
+import { createMutableToolbox } from './helpers/mutable-toolbox';
 
 describe('Core Runtime Completeness', () => {
   describe('Composition Execution', () => {
@@ -46,15 +46,12 @@ describe('Core Runtime Completeness', () => {
         input: z.object({}),
         execute: async () => 'done',
         policy: {
+          // `status: 'needs_approval'` takes precedence over `allow` in the
+          // policy decision (see the `beforeExecute` handling below).
           beforeExecute: async () =>
             ({
-              allow: false, // Wait, status overrides allow?
+              allow: false,
               status: 'needs_approval',
-              allow: true, // Type definition says 'allow' is boolean.
-              // If status is present, does allow matter?
-              // Based on code:
-              // if (decision?.status === 'needs_approval' ...) return action_required
-              // So status takes precedence.
             }) as any,
         },
       });
@@ -106,7 +103,7 @@ describe('Core Runtime Completeness', () => {
         execute: async () => '2',
       });
 
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
       toolbox.register(tool1);
       toolbox.register(tool2);
 
@@ -138,7 +135,7 @@ describe('Core Runtime Completeness', () => {
         execute: async () => '2',
       });
 
-      const toolbox = createToolbox().register(tool1, tool2);
+      const toolbox = createMutableToolbox().register(tool1, tool2);
       const json = toolbox.toJSON();
       expect(json).toHaveLength(2);
       const ids = json.map((c) => c.id);

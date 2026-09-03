@@ -61,7 +61,7 @@ function createTestScheduler() {
         } satisfies RunResult;
       }
     },
-  } as Scheduler;
+  } as unknown as Scheduler;
 }
 
 // AB-208: `tick()` now awaits its `onTick` callback (and `stop()` awaits the
@@ -252,7 +252,7 @@ describe('createHeartbeat', () => {
           finishReason: 'tripwire',
           error: new Error('guardrail tripwire'),
         }) satisfies RunResult,
-    } as Scheduler;
+    } as unknown as Scheduler;
     const manualSleep = createManualSleep();
 
     let failureError: unknown;
@@ -422,7 +422,7 @@ describe('createHeartbeat', () => {
     const ticks: Array<GenerateResponse | null> = [];
     const scheduler = {
       submit: async () => null,
-    } as Scheduler;
+    } as unknown as Scheduler;
 
     const heartbeat = createHeartbeat({
       scheduler,
@@ -453,7 +453,7 @@ describe('createHeartbeat', () => {
       submit: async () => {
         throw new Error('submit failed');
       },
-    } as Scheduler;
+    } as unknown as Scheduler;
 
     const heartbeat = createHeartbeat({
       scheduler,
@@ -492,7 +492,7 @@ describe('createHeartbeat', () => {
 
       const scheduler = {
         submit: async () => submitGate,
-      } as Scheduler;
+      } as unknown as Scheduler;
 
       const heartbeat = createHeartbeat({
         scheduler,
@@ -554,7 +554,7 @@ describe('createHeartbeat', () => {
             usage: { prompt: 0, completion: 0, total: 0 },
             finishReason: 'stop-condition',
           }) satisfies RunResult,
-      } as Scheduler;
+      } as unknown as Scheduler;
 
       const heartbeat = createHeartbeat({
         scheduler,

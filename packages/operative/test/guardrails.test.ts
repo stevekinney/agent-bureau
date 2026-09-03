@@ -6,6 +6,7 @@ import { z } from 'zod';
 
 import { noToolCalls } from '../src/conditions/predicates';
 import { createActiveRun } from '../src/create-run';
+import type { ResponseValidatedEvent } from '../src/events';
 import { createRunRecorder } from '../src/test/index';
 import type { GenerateResponse } from '../src/types';
 const run = (options: Parameters<typeof createActiveRun>[0]) => createActiveRun(options).result;
@@ -118,10 +119,7 @@ describe('validateResponse guardrail', () => {
 
     const validatedEvents = recorder.events.filter((e) => e.type === 'response.validated');
     expect(validatedEvents).toHaveLength(1);
-    const detail = validatedEvents[0].detail as {
-      original: GenerateResponse;
-      validated: GenerateResponse;
-    };
+    const detail = validatedEvents[0].detail as ResponseValidatedEvent;
     expect(detail.original.content).toBe('original');
     expect(detail.validated.content).toBe('modified');
   });

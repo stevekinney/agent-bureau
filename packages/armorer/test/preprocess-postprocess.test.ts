@@ -34,7 +34,7 @@ describe('preprocess', () => {
       execute: async ({ value }) => value * 2,
     });
 
-    const preprocessed = preprocess(tool, async (input) => input);
+    const preprocessed = preprocess(tool, async (input: { value: number }) => input);
     expect(preprocessed.name).toBe('preprocess(original)');
     expect(preprocessed.description).toBe('Preprocessed tool: Original tool');
   });
@@ -48,7 +48,7 @@ describe('preprocess', () => {
       execute: async ({ value }) => value,
     });
 
-    const preprocessed = preprocess(tool, async (input) => input);
+    const preprocessed = preprocess(tool, async (input: { value: number }) => input);
     expect(preprocessed.tags).toEqual(['math', 'utility']);
   });
 
@@ -61,8 +61,11 @@ describe('preprocess', () => {
       execute: async ({ value }) => value,
     });
 
-    const preprocessed = preprocess(tool, async (input) => input);
-    expect(preprocessed.metadata).toEqual({ category: 'test', priority: 1 });
+    const preprocessed = preprocess(tool, async (input: { value: number }) => input);
+    // `preprocess()`'s return type doesn't propagate the wrapped tool's
+    // metadata type parameter, so this reads it back as `unknown` even
+    // though the metadata is preserved at runtime.
+    expect(preprocessed.metadata as unknown).toEqual({ category: 'test', priority: 1 });
   });
 
   it('works with sync mapper', async () => {
@@ -89,7 +92,7 @@ describe('preprocess', () => {
       execute: async ({ value }) => value,
     });
 
-    const preprocessed = preprocess(tool, async (input) => input);
+    const preprocessed = preprocess(tool, async (input: { value: number }) => input);
     expect(preprocessed.tags).toBeUndefined();
   });
 
@@ -106,7 +109,7 @@ describe('preprocess', () => {
       },
     });
 
-    const preprocessed = preprocess(tool, async (input) => input);
+    const preprocessed = preprocess(tool, async (input: { value: number }) => input);
     const controller = new AbortController();
     await (preprocessed as any).executeWith({
       params: { value: 1 },
@@ -132,7 +135,7 @@ describe('preprocess', () => {
       },
     });
 
-    const preprocessed = preprocess(tool, async (input) => input);
+    const preprocessed = preprocess(tool, async (input: { value: number }) => input);
     const result = await (preprocessed as any).executeWith({
       params: { value: 1 },
       stream: true,
@@ -201,7 +204,10 @@ describe('postprocess', () => {
     });
 
     const postprocessed = postprocess(tool, async (output) => output);
-    expect(postprocessed.metadata).toEqual({ category: 'test', priority: 1 });
+    // `postprocess()`'s return type doesn't propagate the wrapped tool's
+    // metadata type parameter, so this reads it back as `unknown` even
+    // though the metadata is preserved at runtime.
+    expect(postprocessed.metadata as unknown).toEqual({ category: 'test', priority: 1 });
   });
 
   it('works with sync mapper', async () => {

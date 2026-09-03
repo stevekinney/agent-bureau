@@ -3,6 +3,9 @@ import type { StandardSchemaV1 } from 'interoperability';
 import { z } from 'zod';
 
 import { createTool, createToolCall } from '../src';
+import { serializeToolDefinition } from '../src/core/serialization';
+import type { JsonObject } from '../src/core/serialization/json';
+import type { AnyToolDefinition } from '../src/core/tool-definition';
 
 /**
  * A minimal hand-rolled Standard Schema V1 validator (no vendor dependency
@@ -102,7 +105,11 @@ describe('createTool with a non-Zod Standard Schema input', () => {
       execute: async (params: { name: string }) => `hello, ${params.name}`,
     });
 
-    const serialized = tool.toJSON();
+    // `toJSON` is attached to every tool at runtime (see `createTool` in
+    // `src/create-tool.ts`) but isn't declared on the public `Tool`
+    // interface, so this serializes through the same underlying helper
+    // directly instead.
+    const serialized = serializeToolDefinition(tool.configuration as AnyToolDefinition);
     expect(serialized.input).toEqual(greetingJsonSchema);
   });
 
@@ -115,10 +122,7 @@ describe('createTool with a non-Zod Standard Schema input', () => {
         name: 'greet-bad-schema',
         description: 'Greets by name',
         input: greetingSchema(),
-        inputSchema: { type: 'object', createdAt: new Date() } as unknown as Record<
-          string,
-          unknown
-        >,
+        inputSchema: { type: 'object', createdAt: new Date() } as unknown as JsonObject,
         execute: async (params: { name: string }) => `hello, ${params.name}`,
       }),
     ).toThrow();

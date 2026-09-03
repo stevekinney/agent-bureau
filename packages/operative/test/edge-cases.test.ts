@@ -146,23 +146,23 @@ describe('test utility coverage', () => {
     const generate = createMockGenerate([{ content: 'only one', toolCalls: [] }]);
 
     // First call succeeds
-    await generate({ conversation: {} as any, step: 0 });
+    await generate({ conversation: {} as any, toolbox: {} as any, step: 0 });
 
     // Second call throws
-    await expect(generate({ conversation: {} as any, step: 1 })).rejects.toThrow(
-      'createMockGenerate: no response at index 1',
-    );
+    await expect(
+      generate({ conversation: {} as any, toolbox: {} as any, step: 1 }),
+    ).rejects.toThrow('createMockGenerate: no response at index 1');
   });
 
   it('createMockGenerateOnce returns response on first call, throws on second', async () => {
     const generate = createMockGenerateOnce({ content: 'once', toolCalls: [] });
 
-    const response = await generate({ conversation: {} as any, step: 0 });
+    const response = await generate({ conversation: {} as any, toolbox: {} as any, step: 0 });
     expect(response.content).toBe('once');
 
-    await expect(generate({ conversation: {} as any, step: 1 })).rejects.toThrow(
-      'createMockGenerateOnce: already called',
-    );
+    await expect(
+      generate({ conversation: {} as any, toolbox: {} as any, step: 1 }),
+    ).rejects.toThrow('createMockGenerateOnce: already called');
   });
 
   it('createRunRecorder clear resets events and steps', async () => {

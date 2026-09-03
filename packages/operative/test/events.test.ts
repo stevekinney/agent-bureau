@@ -17,6 +17,8 @@ import {
   ChildWorkflowReattachedEvent,
   ChildWorkflowStartedEvent,
   type OperativeEventType,
+  type RunCompletedEvent,
+  type RunStartedEvent,
   ScheduleCancelledEvent,
   ScheduleCompletedEvent,
   ScheduleFailedEvent,
@@ -31,6 +33,8 @@ import {
   SteeringFailedEvent,
   SteeringRejectedEvent,
   SteeringSupersededEvent,
+  type StepGeneratedEvent,
+  type StepStartedEvent,
   WakeupScheduledEvent,
 } from '../src/events';
 import { createMockGenerate, createRunRecorder } from '../src/test/index';
@@ -256,27 +260,25 @@ describe('events', () => {
     const runStarted = recorder.events.find((event) => event.type === 'run.started');
     expect(runStarted).toBeDefined();
     expect(runStarted!.detail).toHaveProperty('conversation');
-    expect((runStarted!.detail as { conversation: Conversation }).conversation).toBeInstanceOf(
-      Conversation,
-    );
+    expect((runStarted!.detail as RunStartedEvent).conversation).toBeInstanceOf(Conversation);
 
     // step.started details have step numbers
     const stepStartedEvents = recorder.events.filter((event) => event.type === 'step.started');
     expect(stepStartedEvents).toHaveLength(2);
-    expect((stepStartedEvents[0].detail as { step: number }).step).toBe(0);
-    expect((stepStartedEvents[1].detail as { step: number }).step).toBe(1);
+    expect((stepStartedEvents[0].detail as StepStartedEvent).step).toBe(0);
+    expect((stepStartedEvents[1].detail as StepStartedEvent).step).toBe(1);
 
     // step.generated details have step and content
     const stepGenerated = recorder.events.filter((event) => event.type === 'step.generated');
     expect(stepGenerated).toHaveLength(2);
-    expect((stepGenerated[0].detail as { step: number; content: string }).step).toBe(0);
-    expect((stepGenerated[1].detail as { step: number; content: string }).content).toBe('Done.');
+    expect((stepGenerated[0].detail as StepGeneratedEvent).step).toBe(0);
+    expect((stepGenerated[1].detail as StepGeneratedEvent).content).toBe('Done.');
 
     // run.completed detail has finishReason and steps
     const runCompleted = recorder.events.find((event) => event.type === 'run.completed');
     expect(runCompleted).toBeDefined();
-    expect((runCompleted!.detail as { finishReason: string }).finishReason).toBe('stop-condition');
-    expect((runCompleted!.detail as { steps: readonly unknown[] }).steps).toHaveLength(2);
+    expect((runCompleted!.detail as RunCompletedEvent).result.finishReason).toBe('stop-condition');
+    expect((runCompleted!.detail as RunCompletedEvent).result.steps).toHaveLength(2);
   });
 
   it('constructs budget and session events with the expected payload', () => {
@@ -399,9 +401,9 @@ describe('events', () => {
     });
 
     it('rejects at the type level a SteeringRejectedEvent constructed with session-terminal (exclusively a SteeringFailedEvent reason)', () => {
-      // @ts-expect-error -- 'session-terminal' belongs to SteeringFailedEvent only
       new SteeringRejectedEvent('session-1', 'command-1', {
         failedAt: 'x',
+        // @ts-expect-error -- 'session-terminal' belongs to SteeringFailedEvent only
         reason: 'session-terminal',
       });
     });
@@ -463,9 +465,9 @@ describe('events', () => {
       // AB-67: superseded is exclusively "a later command for the same
       // target was admitted first" — always `SteeringCommandFailure.reason:
       // 'superseded-by'`. No other reason describes a supersession.
-      // @ts-expect-error -- 'authorization-revoked' is not a superseded reason
       new SteeringSupersededEvent('session-1', 'command-1', {
         failedAt: 'x',
+        // @ts-expect-error -- 'authorization-revoked' is not a superseded reason
         reason: 'authorization-revoked',
       });
     });

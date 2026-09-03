@@ -5,16 +5,20 @@ import type { TaskStore } from '@modelcontextprotocol/sdk/experimental/tasks';
 import { InMemoryTaskStore } from '@modelcontextprotocol/sdk/experimental/tasks';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import type { AnySchema } from '@modelcontextprotocol/sdk/server/zod-compat.js';
 import { ReadBuffer, serializeMessage } from '@modelcontextprotocol/sdk/shared/stdio.js';
 import {
+  type CallToolResult,
   CallToolResultSchema,
   CreateTaskResultSchema,
   ElicitRequestSchema,
+  type JSONRPCMessage,
 } from '@modelcontextprotocol/sdk/types.js';
 import { describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
 import { createTool } from '../src/create-tool';
+import type { AnyToolbox } from '../src/create-toolbox';
 import { createToolbox } from '../src/create-toolbox';
 import {
   createMCP,
@@ -24,12 +28,31 @@ import {
   internalMcpTestUtilities,
   toMcpTools,
 } from '../src/integrations/mcp';
-import type { ToolElicitationRequest, ToolElicitationRequester } from '../src/is-tool';
+import type {
+  Tool,
+  ToolElicitationRequest,
+  ToolElicitationRequester,
+  ToolMetadata,
+} from '../src/is-tool';
 
 type ConnectedMcp = {
   client: Client;
-  server: ReturnType<typeof createMCP>;
+  server: Awaited<ReturnType<typeof createMCP>>;
 };
+
+/**
+ * MCP tool-call results carry a content-block union (text, image, audio,
+ * resource, resource_link) that only narrows to `{ text }` for the text
+ * variant. Every handler under test here returns a single text block, so
+ * this reads it back without repeating the narrowing at each call site.
+ */
+function textContent(content: unknown): string | undefined {
+  const first = Array.isArray(content) ? content[0] : undefined;
+  if (first && typeof first === 'object' && 'text' in first && typeof first.text === 'string') {
+    return first.text;
+  }
+  return undefined;
+}
 
 class LoopbackTransport {
   private readonly readBuffer = new ReadBuffer();
@@ -78,7 +101,7 @@ class LoopbackTransport {
     this.onclose?.();
   }
 
-  send(message: unknown) {
+  send(message: JSONRPCMessage) {
     return new Promise<void>((resolve) => {
       const json = serializeMessage(message);
       if (this.writable.write(json)) {
@@ -103,9 +126,9 @@ describe('createMCP', () => {
   it('aborts and awaits an in-flight plain call, then rejects admission after shutdown', async () => {
     const started = createDeferred<void>();
     const aborted = createDeferred<void>();
-    const toolbox = createToolbox();
-    createTool(
-      {
+    let toolbox: AnyToolbox = createToolbox();
+    toolbox = toolbox.extend(
+      createTool({
         name: 'shutdown-plain',
         description: 'plain call held open for shutdown',
         input: z.object({}),
@@ -118,8 +141,7 @@ describe('createMCP', () => {
             });
           });
         },
-      },
-      toolbox,
+      }),
     );
     const { client, server } = await connect(toolbox);
     try {
@@ -145,9 +167,9 @@ describe('createMCP', () => {
   it('aborts and awaits an in-flight task during server shutdown', async () => {
     const started = createDeferred<void>();
     const aborted = createDeferred<void>();
-    const toolbox = createToolbox();
-    createTool(
-      {
+    let toolbox: AnyToolbox = createToolbox();
+    toolbox = toolbox.extend(
+      createTool({
         name: 'shutdown-task',
         description: 'task held open for shutdown',
         input: z.object({}),
@@ -161,8 +183,7 @@ describe('createMCP', () => {
             });
           });
         },
-      },
-      toolbox,
+      }),
     );
     const { client, server } = await connect(toolbox);
     try {
@@ -187,9 +208,9 @@ describe('createMCP', () => {
   });
 
   it('reports terminal task-store write failures in shutdown cleanup evidence', async () => {
-    const toolbox = createToolbox();
-    createTool(
-      {
+    let toolbox: AnyToolbox = createToolbox();
+    toolbox = toolbox.extend(
+      createTool({
         name: 'shutdown-store-failure',
         description: 'task whose result cannot be stored',
         input: z.object({}),
@@ -197,8 +218,7 @@ describe('createMCP', () => {
         async execute() {
           return { ok: true };
         },
-      },
-      toolbox,
+      }),
     );
     const taskStore = createDelegatingTaskStore({
       async storeTaskResult() {
@@ -225,9 +245,9 @@ describe('createMCP', () => {
   });
 
   it('reports task result formatting failures in shutdown cleanup evidence', async () => {
-    const toolbox = createToolbox();
-    createTool(
-      {
+    let toolbox: AnyToolbox = createToolbox();
+    toolbox = toolbox.extend(
+      createTool({
         name: 'shutdown-format-failure',
         description: 'task whose result cannot be formatted',
         input: z.object({}),
@@ -235,8 +255,7 @@ describe('createMCP', () => {
         async execute() {
           return { ok: true };
         },
-      },
-      toolbox,
+      }),
     );
     const { client, server } = await connect(toolbox, {
       formatResult() {
@@ -262,17 +281,16 @@ describe('createMCP', () => {
   });
 
   it('retains the plain-call error result in lifecycle inspection', async () => {
-    const toolbox = createToolbox();
-    createTool(
-      {
+    let toolbox: AnyToolbox = createToolbox();
+    toolbox = toolbox.extend(
+      createTool({
         name: 'plain-error-outcome',
         description: 'plain tool with a deterministic failure',
         input: z.object({}),
         async execute() {
           throw new Error('plain execution failed');
         },
-      },
-      toolbox,
+      }),
     );
     const { client, server } = await connect(toolbox);
     try {
@@ -312,9 +330,9 @@ describe('createMCP', () => {
   });
 
   it('checks task admission before persisting a task after shutdown', async () => {
-    const toolbox = createToolbox();
-    createTool(
-      {
+    let toolbox: AnyToolbox = createToolbox();
+    toolbox = toolbox.extend(
+      createTool({
         name: 'closed-task',
         description: 'task rejected after shutdown',
         input: z.object({}),
@@ -322,8 +340,7 @@ describe('createMCP', () => {
         async execute() {
           return { reached: true };
         },
-      },
-      toolbox,
+      }),
     );
     let createCount = 0;
     const taskStore = createDelegatingTaskStore({
@@ -349,9 +366,9 @@ describe('createMCP', () => {
   });
 
   it('rolls back a task when shutdown races with task persistence', async () => {
-    const toolbox = createToolbox();
-    createTool(
-      {
+    let toolbox: AnyToolbox = createToolbox();
+    toolbox = toolbox.extend(
+      createTool({
         name: 'racing-task',
         description: 'task whose persistence races shutdown',
         input: z.object({}),
@@ -359,8 +376,7 @@ describe('createMCP', () => {
         async execute() {
           return { reached: true };
         },
-      },
-      toolbox,
+      }),
     );
     let createCount = 0;
     let admissionClosedInsideStore = false;
@@ -391,7 +407,7 @@ describe('createMCP', () => {
       expect(createdTaskId).toBeDefined();
       expect(result.task.status).toBe('cancelled');
       const storedTask = await backingStore.getTask(createdTaskId!);
-      expect(storedTask.status).toBe('cancelled');
+      expect(storedTask!.status).toBe('cancelled');
     } finally {
       await connected.client.close();
       await connected.server.close();
@@ -399,9 +415,9 @@ describe('createMCP', () => {
   });
 
   it('converts toolbox tools into MCP tool definitions', async () => {
-    const toolbox = createToolbox();
-    createTool(
-      {
+    let toolbox: AnyToolbox = createToolbox();
+    toolbox = toolbox.extend(
+      createTool({
         name: 'sum-local',
         description: 'adds two numbers',
         input: z.object({ a: z.number(), b: z.number() }),
@@ -409,8 +425,7 @@ describe('createMCP', () => {
         async execute({ a, b }) {
           return { total: a + b };
         },
-      },
-      toolbox,
+      }),
     );
 
     const [mcpTool] = toMcpTools(toolbox);
@@ -422,16 +437,25 @@ describe('createMCP', () => {
 
     const result = await mcpTool!.handler({ a: 2, b: 3 });
     expect(result.structuredContent).toEqual({ total: 5 });
-    expect(result.content?.[0]?.text).toContain('"total": 5');
+    expect(textContent(result.content)).toContain('"total": 5');
   });
 
   it('formats canonical and legacy execution payloads when exporting MCP handlers', async () => {
+    type CanonicalExecuteResult =
+      | { callId: string; outcome: 'success'; content: { ok: boolean } }
+      | {
+          callId: string;
+          outcome: 'error';
+          content: { message: string };
+          errorMessage?: string;
+        };
+
     const tool = {
       name: 'canonical-result',
       description: 'formats canonical results',
       input: z.object({}),
       metadata: {},
-      executeWith: async () => ({
+      executeWith: async (): Promise<CanonicalExecuteResult> => ({
         callId: 'canonical-call',
         outcome: 'success' as const,
         content: { ok: true },
@@ -441,7 +465,7 @@ describe('createMCP', () => {
     const [mcpTool] = toMcpTools(tool as any);
     const canonicalResult = await mcpTool!.handler({});
     expect(canonicalResult.structuredContent).toEqual({ ok: true });
-    expect(canonicalResult.content?.[0]?.text).toContain('"ok": true');
+    expect(textContent(canonicalResult.content)).toContain('"ok": true');
 
     tool.executeWith = async () => ({
       callId: 'legacy-call',
@@ -452,7 +476,7 @@ describe('createMCP', () => {
 
     const legacyErrorResult = await mcpTool!.handler({});
     expect(legacyErrorResult.isError).toBe(true);
-    expect(legacyErrorResult.content?.[0]?.text).toBe('legacy error');
+    expect(textContent(legacyErrorResult.content)).toBe('legacy error');
 
     tool.executeWith = async () => ({
       callId: 'content-fallback-call',
@@ -462,7 +486,7 @@ describe('createMCP', () => {
 
     const contentFallbackResult = await mcpTool!.handler({});
     expect(contentFallbackResult.isError).toBe(true);
-    expect(contentFallbackResult.content?.[0]?.text).toContain('content fallback');
+    expect(textContent(contentFallbackResult.content)).toContain('content fallback');
   });
 
   it('converts MCP tools with handlers into executable toolbox tools', async () => {
@@ -528,9 +552,9 @@ describe('createMCP', () => {
   });
 
   it('registers toolbox tools and exposes them via listTools', async () => {
-    const toolbox = createToolbox();
-    createTool(
-      {
+    let toolbox: AnyToolbox = createToolbox();
+    toolbox = toolbox.extend(
+      createTool({
         name: 'sum',
         description: 'adds two numbers',
         input: z.object({ a: z.number(), b: z.number() }),
@@ -538,8 +562,7 @@ describe('createMCP', () => {
         async execute({ a, b }) {
           return a + b;
         },
-      },
-      toolbox,
+      }),
     );
 
     const { client, server } = await connect(toolbox, {
@@ -566,7 +589,7 @@ describe('createMCP', () => {
   it('registers only available toolbox tools and rechecks availability on calls', async () => {
     let available = true;
     let executed = false;
-    const toolbox = createToolbox([
+    const toolbox: AnyToolbox = createToolbox([
       createTool({
         name: 'available-tool',
         description: 'available',
@@ -598,7 +621,7 @@ describe('createMCP', () => {
       expect(tools.tools.map((tool) => tool.name)).toEqual(['available-tool']);
       expect(executed).toBe(false);
       expect(result.isError).toBe(true);
-      expect(result.content?.[0]?.text).toContain('Tool unavailable: available-tool');
+      expect(textContent(result.content)).toContain('Tool unavailable: available-tool');
     } finally {
       await client.close();
       await server.close();
@@ -606,9 +629,9 @@ describe('createMCP', () => {
   });
 
   it('applies MCP metadata configuration when provided', async () => {
-    const toolbox = createToolbox();
-    createTool(
-      {
+    let toolbox: AnyToolbox = createToolbox();
+    toolbox = toolbox.extend(
+      createTool({
         name: 'meta-tool',
         description: 'reads metadata',
         input: z.object({}),
@@ -627,8 +650,7 @@ describe('createMCP', () => {
         async execute() {
           return { ok: true };
         },
-      },
-      toolbox,
+      }),
     );
 
     const { client, server } = await connect(toolbox);
@@ -647,9 +669,9 @@ describe('createMCP', () => {
   });
 
   it('uses tool metadata as _meta when not overridden', async () => {
-    const toolbox = createToolbox();
-    createTool(
-      {
+    let toolbox: AnyToolbox = createToolbox();
+    toolbox = toolbox.extend(
+      createTool({
         name: 'meta-default',
         description: 'uses metadata by default',
         input: z.object({}),
@@ -657,8 +679,7 @@ describe('createMCP', () => {
         async execute() {
           return { ok: true };
         },
-      },
-      toolbox,
+      }),
     );
 
     const { client, server } = await connect(toolbox);
@@ -674,9 +695,9 @@ describe('createMCP', () => {
   });
 
   it('adds readOnlyHint annotation for read-only tools', async () => {
-    const toolbox = createToolbox();
-    createTool(
-      {
+    let toolbox: AnyToolbox = createToolbox();
+    toolbox = toolbox.extend(
+      createTool({
         name: 'read-only-tool',
         description: 'read-only',
         input: z.object({}),
@@ -684,8 +705,7 @@ describe('createMCP', () => {
         async execute() {
           return { ok: true };
         },
-      },
-      toolbox,
+      }),
     );
 
     const { client, server } = await connect(toolbox);
@@ -701,18 +721,17 @@ describe('createMCP', () => {
   });
 
   it('ignores non-object metadata for _meta', async () => {
-    const toolbox = createToolbox();
-    createTool(
-      {
+    let toolbox: AnyToolbox = createToolbox();
+    toolbox = toolbox.extend(
+      createTool({
         name: 'meta-invalid',
         description: 'metadata is an array',
         input: z.object({}),
-        metadata: [] as unknown as Record<string, unknown>,
+        metadata: [] as unknown as ToolMetadata,
         async execute() {
           return { ok: true };
         },
-      },
-      toolbox,
+      }),
     );
 
     const { client, server } = await connect(toolbox);
@@ -728,9 +747,9 @@ describe('createMCP', () => {
   });
 
   it('prefers toolConfiguration over metadata mcp settings', async () => {
-    const toolbox = createToolbox();
-    createTool(
-      {
+    let toolbox: AnyToolbox = createToolbox();
+    toolbox = toolbox.extend(
+      createTool({
         name: 'override-configuration',
         description: 'should be overridden',
         input: z.object({}),
@@ -750,8 +769,7 @@ describe('createMCP', () => {
         async execute() {
           return { ok: true };
         },
-      },
-      toolbox,
+      }),
     );
 
     const { client, server } = await connect(toolbox, {
@@ -778,17 +796,16 @@ describe('createMCP', () => {
   });
 
   it('accepts non-object input schemas via toolConfiguration without falling back', async () => {
-    const toolbox = createToolbox();
-    createTool(
-      {
+    let toolbox: AnyToolbox = createToolbox();
+    toolbox = toolbox.extend(
+      createTool({
         name: 'string-input',
         description: 'accepts string input',
         input: z.object({ fromTool: z.boolean() }),
         async execute() {
           return { ok: true };
         },
-      },
-      toolbox,
+      }),
     );
 
     const { client, server } = await connect(toolbox, {
@@ -809,17 +826,16 @@ describe('createMCP', () => {
   });
 
   it('executes tools and returns structured content when output is an object', async () => {
-    const toolbox = createToolbox();
-    createTool(
-      {
+    let toolbox: AnyToolbox = createToolbox();
+    toolbox = toolbox.extend(
+      createTool({
         name: 'status',
         description: 'returns a status object',
         input: z.object({}),
         async execute() {
           return { ok: true };
         },
-      },
-      toolbox,
+      }),
     );
 
     const { client, server } = await connect(toolbox);
@@ -828,7 +844,7 @@ describe('createMCP', () => {
       const result = await client.callTool({ name: 'status', arguments: {} });
       expect(result.structuredContent).toEqual({ ok: true });
       expect(result.content?.[0]?.type).toBe('text');
-      expect(result.content?.[0]?.text).toContain('"ok": true');
+      expect(textContent(result.content)).toContain('"ok": true');
     } finally {
       await client.close();
       await server.close();
@@ -836,10 +852,10 @@ describe('createMCP', () => {
   });
 
   it('handles parallel tool calls', async () => {
-    const toolbox = createToolbox();
+    let toolbox: AnyToolbox = createToolbox();
     let calls = 0;
-    createTool(
-      {
+    toolbox = toolbox.extend(
+      createTool({
         name: 'echo',
         description: 'echoes the id after a delay',
         input: z.object({ id: z.number() }),
@@ -848,8 +864,7 @@ describe('createMCP', () => {
           await Promise.resolve();
           return { id };
         },
-      },
-      toolbox,
+      }),
     );
 
     const { client, server } = await connect(toolbox);
@@ -869,16 +884,18 @@ describe('createMCP', () => {
   });
 
   it('refreshes tool definitions when a server is recreated after re-registering', async () => {
-    const toolbox = createToolbox();
+    let toolbox: AnyToolbox = createToolbox();
 
-    toolbox.register({
-      name: 'swap',
-      description: 'first description',
-      input: z.object({}),
-      async execute() {
-        return 'first';
-      },
-    });
+    toolbox = toolbox.extend(
+      createTool({
+        name: 'swap',
+        description: 'first description',
+        input: z.object({}),
+        async execute() {
+          return 'first';
+        },
+      }),
+    );
 
     const first = await connect(toolbox);
     try {
@@ -891,14 +908,16 @@ describe('createMCP', () => {
       await first.server.close();
     }
 
-    toolbox.register({
-      name: 'swap',
-      description: 'second description',
-      input: z.object({}),
-      async execute() {
-        return 'second';
-      },
-    });
+    toolbox = toolbox.extend(
+      createTool({
+        name: 'swap',
+        description: 'second description',
+        input: z.object({}),
+        async execute() {
+          return 'second';
+        },
+      }),
+    );
 
     const second = await connect(toolbox);
     try {
@@ -913,17 +932,16 @@ describe('createMCP', () => {
   });
 
   it('supports stdio transports via a loopback pair', async () => {
-    const toolbox = createToolbox();
-    createTool(
-      {
+    let toolbox: AnyToolbox = createToolbox();
+    toolbox = toolbox.extend(
+      createTool({
         name: 'ping',
         description: 'ping tool',
         input: z.object({}),
         async execute() {
           return { ok: true };
         },
-      },
-      toolbox,
+      }),
     );
 
     const server = await createMCP(toolbox);
@@ -947,7 +965,7 @@ describe('createMCP', () => {
   });
 
   it('registers resources and prompts through registrars', async () => {
-    const toolbox = createToolbox();
+    const toolbox: AnyToolbox = createToolbox();
 
     const { client, server } = await connect(toolbox, {
       resources: (mcp) => {
@@ -980,17 +998,16 @@ describe('createMCP', () => {
   });
 
   it('marks failures as errors with a text payload', async () => {
-    const toolbox = createToolbox();
-    createTool(
-      {
+    let toolbox: AnyToolbox = createToolbox();
+    toolbox = toolbox.extend(
+      createTool({
         name: 'explode',
         description: 'throws',
         input: z.object({}),
         async execute() {
           throw new Error('boom');
         },
-      },
-      toolbox,
+      }),
     );
 
     const { client, server } = await connect(toolbox);
@@ -999,7 +1016,7 @@ describe('createMCP', () => {
       const result = await client.callTool({ name: 'explode', arguments: {} });
       expect(result.isError).toBe(true);
       expect(result.content?.[0]?.type).toBe('text');
-      expect(result.content?.[0]?.text).toContain('boom');
+      expect(textContent(result.content)).toContain('boom');
     } finally {
       await client.close();
       await server.close();
@@ -1007,18 +1024,17 @@ describe('createMCP', () => {
   });
 
   it('rejects the MCP call when the client aborts', async () => {
-    const toolbox = createToolbox();
+    let toolbox: AnyToolbox = createToolbox();
 
-    createTool(
-      {
+    toolbox = toolbox.extend(
+      createTool({
         name: 'wait',
         description: 'waits for abort',
         input: z.object({}),
         async execute() {
           return new Promise<{ ok: boolean }>(() => {});
         },
-      },
-      toolbox,
+      }),
     );
 
     const { client, server } = await connect(toolbox);
@@ -1038,9 +1054,9 @@ describe('createMCP', () => {
   });
 
   it('does not override explicit readOnlyHint annotations', async () => {
-    const toolbox = createToolbox();
-    createTool(
-      {
+    let toolbox: AnyToolbox = createToolbox();
+    toolbox = toolbox.extend(
+      createTool({
         name: 'readonly-override',
         description: 'read-only with explicit annotation',
         input: z.object({}),
@@ -1048,8 +1064,7 @@ describe('createMCP', () => {
         async execute() {
           return { ok: true };
         },
-      },
-      toolbox,
+      }),
     );
 
     const { client, server } = await connect(toolbox, {
@@ -1071,7 +1086,7 @@ describe('createMCP', () => {
   });
 
   it('applies registrars provided as arrays', async () => {
-    const toolbox = createToolbox();
+    const toolbox: AnyToolbox = createToolbox();
 
     const { client, server } = await connect(toolbox, {
       resources: [
@@ -1113,20 +1128,19 @@ describe('createMCP', () => {
   });
 
   it('converts JSON schema variants and raw shapes for MCP tools', async () => {
-    const toolbox = createToolbox();
+    let toolbox: AnyToolbox = createToolbox();
 
     const baseTool = (name: string) =>
-      createTool(
-        {
+      (toolbox = toolbox.extend(
+        createTool({
           name,
           description: 'schema conversion',
           input: z.object({ fromTool: z.boolean() }),
           async execute() {
             return { ok: true };
           },
-        },
-        toolbox,
-      );
+        }),
+      ));
 
     baseTool('any-of');
     baseTool('one-of');
@@ -1222,17 +1236,16 @@ describe('createMCP', () => {
   });
 
   it('uses formatResult when provided', async () => {
-    const toolbox = createToolbox();
-    createTool(
-      {
+    let toolbox: AnyToolbox = createToolbox();
+    toolbox = toolbox.extend(
+      createTool({
         name: 'custom-format',
         description: 'format',
         input: z.object({}),
         async execute() {
           return { ok: true };
         },
-      },
-      toolbox,
+      }),
     );
 
     const { client, server } = await connect(toolbox, {
@@ -1243,7 +1256,7 @@ describe('createMCP', () => {
 
     try {
       const result = await client.callTool({ name: 'custom-format', arguments: {} });
-      expect(result.content?.[0]?.text).toBe('formatted');
+      expect(textContent(result.content)).toBe('formatted');
     } finally {
       await client.close();
       await server.close();
@@ -1251,17 +1264,16 @@ describe('createMCP', () => {
   });
 
   it('returns empty content for undefined results', async () => {
-    const toolbox = createToolbox();
-    createTool(
-      {
+    let toolbox: AnyToolbox = createToolbox();
+    toolbox = toolbox.extend(
+      createTool({
         name: 'empty-result',
         description: 'returns nothing',
         input: z.object({}),
         async execute() {
           return undefined;
         },
-      },
-      toolbox,
+      }),
     );
 
     const { client, server } = await connect(toolbox);
@@ -1276,24 +1288,23 @@ describe('createMCP', () => {
   });
 
   it('stringifies unserializable results', async () => {
-    const toolbox = createToolbox();
-    createTool(
-      {
+    let toolbox: AnyToolbox = createToolbox();
+    toolbox = toolbox.extend(
+      createTool({
         name: 'bigint-result',
         description: 'returns bigint',
         input: z.object({}),
         async execute() {
           return 1n;
         },
-      },
-      toolbox,
+      }),
     );
 
     const { client, server } = await connect(toolbox);
 
     try {
       const result = await client.callTool({ name: 'bigint-result', arguments: {} });
-      expect(result.content?.[0]?.text).toBe('[unserializable]');
+      expect(textContent(result.content)).toBe('[unserializable]');
     } finally {
       await client.close();
       await server.close();
@@ -1325,7 +1336,7 @@ describe('createMCP', () => {
     try {
       const result = await client.callTool({ name: 'throwing-exec', arguments: {} });
       expect(result.isError).toBe(true);
-      expect(result.content?.[0]?.text).toContain('explode');
+      expect(textContent(result.content)).toContain('explode');
     } finally {
       await client.close();
       await server.close();
@@ -1333,19 +1344,15 @@ describe('createMCP', () => {
   });
 
   it('rejects invalid inputs when normalizing tools for MCP conversion', () => {
-    expect(() => toMcpTools([{} as unknown as ReturnType<typeof createTool>])).toThrow(
-      'Invalid tool input',
-    );
+    expect(() => toMcpTools([{} as unknown as Tool])).toThrow('Invalid tool input');
     expect(() =>
       toMcpTools({
         name: 'not-a-tool',
         description: 'missing executeWith',
         input: z.object({}),
-      } as unknown as ReturnType<typeof createTool>),
+      } as unknown as Tool),
     ).toThrow('Invalid input');
-    expect(() => toMcpTools(42 as unknown as ReturnType<typeof createTool>)).toThrow(
-      'Invalid input',
-    );
+    expect(() => toMcpTools(42 as unknown as Tool)).toThrow('Invalid input');
   });
 
   it('maps readOnly annotations and MCP labels into tool metadata', async () => {
@@ -1458,7 +1465,7 @@ describe('createMCP', () => {
       expect(tool?.description).toBe('second');
 
       const call = await client.callTool({ name: 'duplicate-name', arguments: {} });
-      expect(call.content?.[0]?.text).toContain('second');
+      expect(textContent(call.content)).toContain('second');
     } finally {
       await client.close();
       await server.close();
@@ -1502,14 +1509,14 @@ describe('createMCP', () => {
 
     const [unknownType] = toMcpTools([baseTool], {
       toolConfiguration: () => ({
-        schema: { type: 'mystery' } as unknown as object,
+        schema: { type: 'mystery' } as unknown as AnySchema,
       }),
     });
     expect(unknownType?.inputSchema).toBe(baseTool.input);
 
     const [emptyEnum] = toMcpTools([baseTool], {
       toolConfiguration: () => ({
-        schema: { enum: [] },
+        schema: { enum: [] } as unknown as AnySchema,
       }),
     });
     expect((emptyEnum?.inputSchema as z.ZodTypeAny).safeParse('value').success).toBe(false);
@@ -1527,7 +1534,7 @@ describe('createMCP', () => {
 
     const [mcpTool] = toMcpTools([tool]);
     const result = await mcpTool!.handler({});
-    expect(result.content?.[0]?.text).toBe('42');
+    expect(textContent(result.content)).toBe('42');
     expect(result.structuredContent).toBeUndefined();
   });
 
@@ -1549,7 +1556,7 @@ describe('createMCP', () => {
           toolName: 'single-tool-like',
         };
       },
-    } as unknown as ReturnType<typeof createTool>;
+    } as unknown as Tool;
 
     const [mcpTool] = toMcpTools(toolLike);
     expect(mcpTool?.name).toBe('single-tool-like');
@@ -1609,9 +1616,9 @@ describe('createMCP', () => {
 
 describe('MCP elicitation', () => {
   const createApprovalToolbox = () => {
-    const toolbox = createToolbox();
-    createTool(
-      {
+    let toolbox: AnyToolbox = createToolbox();
+    toolbox = toolbox.extend(
+      createTool({
         name: 'approve-purchase',
         description: 'requests human approval before completing a purchase',
         input: z.object({ amount: z.number() }),
@@ -1633,8 +1640,7 @@ describe('MCP elicitation', () => {
           }
           return { completed: true };
         },
-      },
-      toolbox,
+      }),
     );
     return toolbox;
   };
@@ -1718,7 +1724,7 @@ describe('MCP elicitation', () => {
         arguments: { amount: 42 },
       });
       expect(result.isError).toBe(true);
-      expect(result.content?.[0]?.text).toContain('did not match the requested schema');
+      expect(textContent(result.content)).toContain('did not match the requested schema');
     } finally {
       await client.close();
       await server.close();
@@ -1738,7 +1744,7 @@ describe('MCP elicitation', () => {
     try {
       const listed = await client.listTools();
       const [tool] = fromMcpTools(listed.tools, {
-        callTool: (request) => client.callTool(request),
+        callTool: (request) => client.callTool(request) as Promise<CallToolResult>,
       });
 
       const result = await tool!.execute({ amount: 10 });
@@ -1768,7 +1774,7 @@ describe('MCP elicitation', () => {
       });
 
       expect(result.isError).toBe(true);
-      expect(result.content?.[0]?.text).toBe('elicitation unavailable in this context');
+      expect(textContent(result.content)).toBe('elicitation unavailable in this context');
     } finally {
       await client.close();
       await server.close();
@@ -1814,9 +1820,9 @@ describe('MCP elicitation', () => {
     } as unknown as Parameters<typeof createMcpToolElicitationRequester>[0];
     const requester = createMcpToolElicitationRequester(fakeExtra);
 
-    await expect(requester({ message: 'Open approval page', mode: 'url' })).rejects.toThrow(
-      'requires a `url`',
-    );
+    await expect(
+      requester({ message: 'Open approval page', mode: 'url' } as ToolElicitationRequest),
+    ).rejects.toThrow('requires a `url`');
     await expect(
       requester({
         message: 'Open approval page',
@@ -1922,11 +1928,11 @@ function createDelegatingTaskStore(overrides: Partial<TaskStore> = {}): TaskStor
 
 describe('task-based tools (MCP Tasks extension)', () => {
   it('exposes a long-running tool as a task: create, poll via tasks/get, retrieve via tasks/result', async () => {
-    const toolbox = createToolbox();
+    let toolbox: AnyToolbox = createToolbox();
     const deferred = createDeferred<{ done: true }>();
 
-    createTool(
-      {
+    toolbox = toolbox.extend(
+      createTool({
         name: 'long-task',
         description: 'a long-running task-based tool',
         input: z.object({}),
@@ -1934,8 +1940,7 @@ describe('task-based tools (MCP Tasks extension)', () => {
         async execute() {
           return deferred.promise;
         },
-      },
-      toolbox,
+      }),
     );
 
     const { client, server } = await connect(toolbox);
@@ -1972,12 +1977,12 @@ describe('task-based tools (MCP Tasks extension)', () => {
   });
 
   it('cancels a running task via tasks/cancel, aborting the tool AbortSignal', async () => {
-    const toolbox = createToolbox();
+    let toolbox: AnyToolbox = createToolbox();
     const started = createDeferred<void>();
     let sawAbort = false;
 
-    createTool(
-      {
+    toolbox = toolbox.extend(
+      createTool({
         name: 'cancellable-task',
         description: 'a task-based tool that observes cancellation',
         input: z.object({}),
@@ -1991,8 +1996,7 @@ describe('task-based tools (MCP Tasks extension)', () => {
             });
           });
         },
-      },
-      toolbox,
+      }),
     );
 
     const { client, server } = await connect(toolbox);
@@ -2029,17 +2033,16 @@ describe('task-based tools (MCP Tasks extension)', () => {
   });
 
   it('does not advertise the tasks capability when no tool opts into task support', async () => {
-    const toolbox = createToolbox();
-    createTool(
-      {
+    let toolbox: AnyToolbox = createToolbox();
+    toolbox = toolbox.extend(
+      createTool({
         name: 'plain-tool',
         description: 'a regular, non-task tool',
         input: z.object({}),
         async execute() {
           return { ok: true };
         },
-      },
-      toolbox,
+      }),
     );
 
     const { client, server } = await connect(toolbox);
@@ -2053,9 +2056,9 @@ describe('task-based tools (MCP Tasks extension)', () => {
   });
 
   it('creates every task with a short poll interval so the SDK automatic-polling fallback does not stall', async () => {
-    const toolbox = createToolbox();
-    createTool(
-      {
+    let toolbox: AnyToolbox = createToolbox();
+    toolbox = toolbox.extend(
+      createTool({
         name: 'quick-task',
         description: 'a task-based tool',
         input: z.object({}),
@@ -2065,8 +2068,7 @@ describe('task-based tools (MCP Tasks extension)', () => {
         async execute() {
           return { ok: true };
         },
-      },
-      toolbox,
+      }),
     );
 
     const { client, server } = await connect(toolbox);
@@ -2087,9 +2089,9 @@ describe('task-based tools (MCP Tasks extension)', () => {
   });
 
   it('automatically polls an optional task tool for a plain tools/call request', async () => {
-    const toolbox = createToolbox();
-    createTool(
-      {
+    let toolbox: AnyToolbox = createToolbox();
+    toolbox = toolbox.extend(
+      createTool({
         name: 'optional-task',
         description: 'an optional task-backed tool',
         input: z.object({}),
@@ -2097,8 +2099,7 @@ describe('task-based tools (MCP Tasks extension)', () => {
         async execute() {
           return { completed: true };
         },
-      },
-      toolbox,
+      }),
     );
     const { client, server } = await connect(toolbox);
 
@@ -2226,9 +2227,9 @@ describe('task-based tools (MCP Tasks extension)', () => {
   });
 
   it('keeps non-task execution metadata on the plain MCP registration path', async () => {
-    const toolbox = createToolbox();
-    createTool(
-      {
+    let toolbox: AnyToolbox = createToolbox();
+    toolbox = toolbox.extend(
+      createTool({
         name: 'forbidden-task',
         description: 'a plain tool that explicitly forbids task augmentation',
         input: z.object({}),
@@ -2236,8 +2237,7 @@ describe('task-based tools (MCP Tasks extension)', () => {
         async execute() {
           return { ok: true };
         },
-      },
-      toolbox,
+      }),
     );
     const { client, server } = await connect(toolbox);
 
@@ -2291,9 +2291,9 @@ describe('task-based tools (MCP Tasks extension)', () => {
     internalMcpTestUtilities.setModuleLoader(() => ({ McpServer: CapturingMcpServer }) as never);
 
     try {
-      const toolbox = createToolbox();
-      createTool(
-        {
+      let toolbox: AnyToolbox = createToolbox();
+      toolbox = toolbox.extend(
+        createTool({
           name: 'captured-task',
           description: 'a task whose SDK handler contract is inspected',
           input: z.object({}),
@@ -2301,11 +2301,10 @@ describe('task-based tools (MCP Tasks extension)', () => {
           async execute() {
             return { ok: true };
           },
-        },
-        toolbox,
+        }),
       );
-      createTool(
-        {
+      toolbox = toolbox.extend(
+        createTool({
           name: 'captured-plain-tool',
           description: 'a plain tool whose SDK handler contract is inspected',
           input: z.object({}),
@@ -2313,8 +2312,7 @@ describe('task-based tools (MCP Tasks extension)', () => {
           async execute() {
             return { plain: true };
           },
-        },
-        toolbox,
+        }),
       );
       await createMCP(toolbox);
       if (!capturedHandler) throw new Error('Task handler was not registered.');
@@ -2370,9 +2368,9 @@ describe('task-based tools (MCP Tasks extension)', () => {
   });
 
   it('omits the task ttl when the client does not request one, letting the task store apply its own default', async () => {
-    const toolbox = createToolbox();
-    createTool(
-      {
+    let toolbox: AnyToolbox = createToolbox();
+    toolbox = toolbox.extend(
+      createTool({
         name: 'no-ttl-task',
         description: 'a task-based tool',
         input: z.object({}),
@@ -2380,8 +2378,7 @@ describe('task-based tools (MCP Tasks extension)', () => {
         async execute() {
           return { ok: true };
         },
-      },
-      toolbox,
+      }),
     );
 
     const recordedTtls: Array<number | null | undefined> = [];
@@ -2407,9 +2404,9 @@ describe('task-based tools (MCP Tasks extension)', () => {
   });
 
   it('passes through a client-requested task ttl', async () => {
-    const toolbox = createToolbox();
-    createTool(
-      {
+    let toolbox: AnyToolbox = createToolbox();
+    toolbox = toolbox.extend(
+      createTool({
         name: 'ttl-task',
         description: 'a task-based tool',
         input: z.object({}),
@@ -2417,8 +2414,7 @@ describe('task-based tools (MCP Tasks extension)', () => {
         async execute() {
           return { ok: true };
         },
-      },
-      toolbox,
+      }),
     );
 
     const recordedTtls: Array<number | null | undefined> = [];
@@ -2447,12 +2443,12 @@ describe('task-based tools (MCP Tasks extension)', () => {
   });
 
   it('does not abort the tool until the task store confirms the cancellation', async () => {
-    const toolbox = createToolbox();
+    let toolbox: AnyToolbox = createToolbox();
     const started = createDeferred<void>();
     let sawAbort = false;
 
-    createTool(
-      {
+    toolbox = toolbox.extend(
+      createTool({
         name: 'guarded-cancel-task',
         description: 'a task-based tool cancelled through a store that rejects the update',
         input: z.object({}),
@@ -2466,8 +2462,7 @@ describe('task-based tools (MCP Tasks extension)', () => {
             });
           });
         },
-      },
-      toolbox,
+      }),
     );
 
     const taskStore = createDelegatingTaskStore({
@@ -2506,9 +2501,9 @@ describe('task-based tools (MCP Tasks extension)', () => {
   });
 
   it('does not surface an unhandled rejection when storeTaskResult fails after the tool completes', async () => {
-    const toolbox = createToolbox();
-    createTool(
-      {
+    let toolbox: AnyToolbox = createToolbox();
+    toolbox = toolbox.extend(
+      createTool({
         name: 'unstorable-task',
         description: 'a task-based tool whose result the store refuses to persist',
         input: z.object({}),
@@ -2516,8 +2511,7 @@ describe('task-based tools (MCP Tasks extension)', () => {
         async execute() {
           return { ok: true };
         },
-      },
-      toolbox,
+      }),
     );
 
     const taskStore = createDelegatingTaskStore({
@@ -2553,9 +2547,9 @@ describe('task-based tools (MCP Tasks extension)', () => {
   });
 
   it('passes the elicitation requester into a task-backed tool, mirroring the plain call path', async () => {
-    const toolbox = createToolbox();
-    createTool(
-      {
+    let toolbox: AnyToolbox = createToolbox();
+    toolbox = toolbox.extend(
+      createTool({
         name: 'approve-task',
         description: 'a task-based tool that requests approval',
         input: z.object({}),
@@ -2577,8 +2571,7 @@ describe('task-based tools (MCP Tasks extension)', () => {
             approved: response.action === 'accept' && response.content?.['approved'] === true,
           };
         },
-      },
-      toolbox,
+      }),
     );
 
     const server = await createMCP(toolbox);

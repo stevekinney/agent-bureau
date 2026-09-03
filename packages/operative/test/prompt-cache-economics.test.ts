@@ -19,7 +19,7 @@ import { createTokenBudget } from '../src/context/token-budget.ts';
 import { estimateCacheHitRate, estimateCost } from '../src/cost-estimation.ts';
 import { createAnthropicProvider } from '../src/providers/anthropic.ts';
 import { createMockAnthropicClient } from '../src/providers/test/mock-clients.ts';
-import type { GenerateContext } from '../src/types.ts';
+import type { GenerateContext, GenerateResponse } from '../src/types.ts';
 
 const MODEL = 'claude-3-5-sonnet-20241022';
 // Roughly 2,000 tokens of unchanging system prompt — big enough that
@@ -66,7 +66,7 @@ describe('prompt-cache economics (deterministic bench, no live API calls)', () =
       toolbox: { toAnthropicTools: async () => [] } as unknown as GenerateContext['toolbox'],
     });
 
-    const responses = [];
+    const responses: GenerateResponse[] = [];
     for (let step = 0; step < 3; step++) {
       if (step > 0) {
         conversation.appendAssistantMessage(`Reply ${step}`);

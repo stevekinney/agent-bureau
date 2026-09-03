@@ -125,7 +125,7 @@ describe('createGeminiTokenCounter — injected client', () => {
     };
 
     expect(await counter.countTokens(request)).toEqual({
-      totalTokens: COUNT_RESPONSE.totalTokens,
+      totalTokens: COUNT_RESPONSE.totalTokens!,
       cachedTokens: COUNT_RESPONSE.cachedContentTokenCount,
       provider: 'gemini',
       model: request.model,
@@ -225,7 +225,7 @@ describe('createGeminiTokenCounter — SDK construction', () => {
       const result = await counter.countTokens({ model: 'gemini-2.0-flash', contents: 'hi' });
 
       expect(result).toEqual({
-        totalTokens: COUNT_RESPONSE.totalTokens,
+        totalTokens: COUNT_RESPONSE.totalTokens!,
         cachedTokens: COUNT_RESPONSE.cachedContentTokenCount,
         provider: 'gemini',
         model: 'gemini-2.0-flash',

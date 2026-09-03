@@ -25,7 +25,7 @@ const slowTool = createTool({
   name: 'slow_task',
   description: 'A slow task',
   input: z.object({}),
-  execute: () => {
+  execute: async () => {
     currentTime += 50;
     return 'done';
   },

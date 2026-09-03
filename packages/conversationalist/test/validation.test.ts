@@ -75,7 +75,13 @@ describe('Conversation state integrity', () => {
     conversation.appendUserMessage('second');
     const snapshot = conversation.snapshot();
 
-    const future = structuredClone(snapshot) as ConversationSnapshot & {
+    // `Omit` first: intersecting `ConversationSnapshot` directly with a wider
+    // `snapshotFormatVersion: number` would collapse back to its literal `1`
+    // (TypeScript narrows `1 & number` to `1`), defeating the point of this cast.
+    const future = structuredClone(snapshot) as Omit<
+      ConversationSnapshot,
+      'snapshotFormatVersion'
+    > & {
       snapshotFormatVersion: number;
     };
     future.snapshotFormatVersion = 2;

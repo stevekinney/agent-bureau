@@ -4,6 +4,7 @@ import { Conversation } from 'conversationalist';
 
 import { noToolCalls } from '../src/conditions/predicates';
 import { createActiveRun } from '../src/create-run';
+import type { GenerateRetryEvent } from '../src/events';
 import { createRunRecorder } from '../src/test/index';
 import type { GenerateResponse } from '../src/types';
 const run = (options: Parameters<typeof createActiveRun>[0]) => createActiveRun(options).result;
@@ -179,8 +180,8 @@ describe('retry on generate failure', () => {
 
     const retryEvents = recorder.events.filter((e) => e.type === 'generate.retry');
     expect(retryEvents).toHaveLength(2);
-    expect((retryEvents[0].detail as { attempt: number }).attempt).toBe(1);
-    expect((retryEvents[1].detail as { attempt: number }).attempt).toBe(2);
+    expect((retryEvents[0].detail as GenerateRetryEvent).attempt).toBe(1);
+    expect((retryEvents[1].detail as GenerateRetryEvent).attempt).toBe(2);
   });
 
   it('works without retry option (no retries by default)', async () => {

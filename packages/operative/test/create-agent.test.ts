@@ -15,7 +15,7 @@
 
 import { createTool, createToolbox, type SignedPendingToolApproval } from 'armorer';
 import { describe, expect, it } from 'bun:test';
-import { Conversation } from 'conversationalist';
+import { Conversation, isConversation } from 'conversationalist';
 import { createManualRuntimeServices } from 'lifecycle';
 import { z } from 'zod';
 
@@ -25,6 +25,7 @@ import { MaximumStepsExceededError, OutputSchemaConversionError } from '../src/e
 import { readGenerationProfile } from '../src/generation-profile';
 import { withBackendDescriptors } from '../src/providers/backend-descriptor-attachment';
 import { createModelCatalog } from '../src/providers/model-catalog';
+import type { ProviderName } from '../src/providers/types';
 import { OPERATIVE_RESOLVE_RUN_OPTIONS } from '../src/runnable-agent';
 import type { ConversationHistory, GenerateFunction, GenerateResponse } from '../src/types';
 
@@ -211,7 +212,7 @@ describe('createAgent', () => {
 
 describe('createAgent — instructions', () => {
   it('injects instructions as a system message on step 0', async () => {
-    let receivedMessages: unknown[] = [];
+    let receivedMessages: readonly unknown[] = [];
 
     const agent = createAgent({
       instructions: 'You are a test assistant.',
@@ -231,7 +232,7 @@ describe('createAgent — instructions', () => {
   });
 
   it('does not inject a system message when instructions are absent', async () => {
-    let receivedMessages: unknown[] = [];
+    let receivedMessages: readonly unknown[] = [];
 
     const agent = createAgent({
       generate: async ({ conversation }) => {
@@ -254,7 +255,7 @@ describe('createAgent — instructions', () => {
 
 describe('createAgent — ephemeral runs', () => {
   it('each run() call starts with a fresh conversation', async () => {
-    const conversations: unknown[][] = [];
+    const conversations: (readonly unknown[])[] = [];
 
     const agent = createAgent({
       generate: async ({ conversation }) => {
@@ -618,11 +619,14 @@ describe('createAgent — toolbox injection', () => {
     const toolbox = createToolbox([]);
 
     expect(() =>
+      // A cast is required here: `CreateAgentOptions` rejects this combination
+      // at the type level (see create-agent.test-d.ts), so this exercises the
+      // runtime guard a JS caller or a `as CreateAgentOptions` cast would hit.
       createAgent({
         generate: singleResponse('hello'),
         tools: {},
         toolbox,
-      }),
+      } as unknown as Parameters<typeof createAgent>[0]),
     ).toThrow(/tools.*toolbox.*mutually exclusive/i);
   });
 
@@ -630,11 +634,14 @@ describe('createAgent — toolbox injection', () => {
     const toolbox = createToolbox([]);
 
     expect(() =>
+      // A cast is required here: `CreateAgentOptions` rejects this combination
+      // at the type level (see create-agent.test-d.ts), so this exercises the
+      // runtime guard a JS caller or a `as CreateAgentOptions` cast would hit.
       createAgent({
         generate: singleResponse('hello'),
         toolbox,
         permissions: { allowList: [] },
-      }),
+      } as unknown as Parameters<typeof createAgent>[0]),
     ).toThrow(/permissions.*toolbox/i);
   });
 
@@ -650,7 +657,7 @@ describe('createAgent — toolbox injection', () => {
         tools: {},
         toolbox,
         permissions: { allowList: [] },
-      } as Parameters<typeof createAgent>[0]),
+      } as unknown as Parameters<typeof createAgent>[0]),
     ).toThrow(/tools.*toolbox.*mutually exclusive/i);
   });
 
@@ -692,7 +699,7 @@ describe('createAgent — conversation resume', () => {
   }
 
   it('starts the loop from a supplied ConversationHistory', async () => {
-    let receivedMessages: unknown[] = [];
+    let receivedMessages: readonly unknown[] = [];
 
     const agent = createAgent({
       generate: async ({ conversation }) => {
@@ -710,7 +717,7 @@ describe('createAgent — conversation resume', () => {
   });
 
   it('does NOT re-inject `instructions` as a system message when resuming a conversation', async () => {
-    let receivedMessages: unknown[] = [];
+    let receivedMessages: readonly unknown[] = [];
 
     const agent = createAgent({
       instructions: 'You are a test assistant.',
@@ -747,7 +754,7 @@ describe('createAgent — conversation resume', () => {
   });
 
   it('does not expose a mutable caller alias after a history enters a run', async () => {
-    let receivedMessages: unknown[] = [];
+    let receivedMessages: readonly unknown[] = [];
     let resolveGenerate!: () => void;
     const generateGate = new Promise<void>((resolve) => {
       resolveGenerate = resolve;
@@ -770,7 +777,9 @@ describe('createAgent — conversation resume', () => {
     const run = agent.run({ conversation: history });
 
     // Once accepted by the run boundary, the public value is runtime immutable.
-    const mutableHistory = history as { ids: string[] };
+    // Deliberately mutates a caller-owned object through a widened, writable
+    // view of its `readonly` `ids` field to prove the run doesn't alias it.
+    const mutableHistory = history as unknown as { ids: string[] };
     expect(() => {
       mutableHistory.ids = [...mutableHistory.ids, 'injected-id'];
     }).toThrow();
@@ -1035,16 +1044,20 @@ describe('createAgent — default stopWhen', () => {
 
     const resolver = (
       agent as typeof agent & {
-        [OPERATIVE_RESOLVE_RUN_OPTIONS]: (
-          input: string,
-        ) => Promise<{ generate: GenerateFunction; conversation: Conversation }>;
+        [OPERATIVE_RESOLVE_RUN_OPTIONS]: (input: string) => Promise<{
+          generate: GenerateFunction;
+          conversation: Conversation | ConversationHistory;
+        }>;
       }
     )[OPERATIVE_RESOLVE_RUN_OPTIONS];
 
     const runOptions = await resolver('hello');
 
     expect(runOptions.generate).toBe(generate);
-    expect(runOptions.conversation.hasSystemMessage()).toBe(true);
+    expect(isConversation(runOptions.conversation)).toBe(true);
+    expect(
+      isConversation(runOptions.conversation) && runOptions.conversation.hasSystemMessage(),
+    ).toBe(true);
     expect(runCalls).toBe(0);
   });
 });
@@ -1165,7 +1178,10 @@ describe('createAgent — generationProfile', () => {
 
   it('is not retroactively mutated by later changes to the caller’s generationPreferences object or its arrays (review)', () => {
     const generate: GenerateFunction = async () => textResponse('hi');
-    const preferences = { preferredProviders: ['anthropic' as const], preferredModels: ['a'] };
+    const preferences = {
+      preferredProviders: ['anthropic'] as ProviderName[],
+      preferredModels: ['a'],
+    };
     const agent = createAgent({ generate, generationPreferences: preferences });
 
     preferences.preferredProviders.push('openai');
@@ -1182,7 +1198,9 @@ describe('createAgent — generationProfile', () => {
 
   it('is not retroactively mutated by later changes to the caller’s allowedCandidates array (review)', () => {
     const generate: GenerateFunction = async () => textResponse('hi');
-    const candidates = [{ provider: 'anthropic' as const, model: 'claude-opus-4-6' }];
+    const candidates: Array<{ provider: ProviderName; model: string }> = [
+      { provider: 'anthropic', model: 'claude-opus-4-6' },
+    ];
     const agent = createAgent({ generate, allowedCandidates: candidates });
 
     candidates.push({ provider: 'openai', model: 'gpt-4o' });

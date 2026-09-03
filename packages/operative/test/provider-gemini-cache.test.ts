@@ -52,7 +52,7 @@ function makeContext(conversation: Conversation): GenerateContext {
 }
 
 function makeStreamingHandle(): StreamingHandle {
-  return { update: () => {} };
+  return { update: () => {}, messageId: 'test-message-id' };
 }
 
 function textResponse(text = 'ok'): GeminiGenerateContentResult {
@@ -1104,7 +1104,12 @@ describe('createGeminiProvider — recovery from a missing cache', () => {
     await expect(
       generate({
         ...makeContext(conversationWithSystem('You are helpful.')),
-        streaming: { update: (text: string) => updates.push(text) },
+        streaming: {
+          update: (text: string) => {
+            updates.push(text);
+          },
+          messageId: 'test-message-id',
+        },
       }),
     ).rejects.toThrow(ProviderError);
 

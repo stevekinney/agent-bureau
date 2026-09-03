@@ -1,11 +1,21 @@
 import { describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
-import { createTool, createToolbox } from '../src';
-import { createSearchTool } from '../src/tools';
+import { createTool } from '../src';
+import {
+  createSearchTool,
+  type CreateSearchToolOptions,
+  type SearchToolsResult,
+} from '../src/tools';
+import { createMutableToolbox } from './helpers/mutable-toolbox';
 
 describe('createSearchTool', () => {
-  const makeTool = (name: string, overrides: Partial<Parameters<typeof createTool>[0]> = {}) =>
+  const makeTool = (
+    name: string,
+    overrides: Partial<
+      Omit<Parameters<typeof createTool>[0], 'metadata' | 'input' | 'execute' | 'name'>
+    > = {},
+  ) =>
     createTool({
       name,
       description: `${name} tool`,
@@ -15,7 +25,7 @@ describe('createSearchTool', () => {
     });
 
   it('creates a search tool registered with the toolbox', () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     const searchTool = createSearchTool(toolbox);
 
     expect(searchTool.name).toBe('search-tools');
@@ -23,7 +33,7 @@ describe('createSearchTool', () => {
   });
 
   it('allows custom name', () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     const searchTool = createSearchTool(toolbox, { name: 'find-tools' });
 
     expect(searchTool.name).toBe('find-tools');
@@ -31,15 +41,21 @@ describe('createSearchTool', () => {
   });
 
   it('can skip registration', () => {
-    const toolbox = createToolbox();
-    const searchTool = createSearchTool(toolbox, { register: false });
+    const toolbox = createMutableToolbox();
+    // `register` is the legacy mutable-toolbox test convenience that
+    // `createSearchTool` reads via an internal cast under `isTestRuntime()`
+    // (see `src/tools/search-tools.ts`); it is deliberately not part of the
+    // public `CreateSearchToolOptions` type, so the test mirrors that cast.
+    const searchTool = createSearchTool(toolbox, { register: false } as CreateSearchToolOptions & {
+      register?: boolean;
+    });
 
     expect(toolbox.getTool('search-tools')).toBeUndefined();
     expect(searchTool.name).toBe('search-tools');
   });
 
   it('searches tools by query', async () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     toolbox.register(
       makeTool('send-email', { description: 'Send an email message' }),
       makeTool('send-sms', { description: 'Send a text message' }),
@@ -60,7 +76,7 @@ describe('createSearchTool', () => {
   });
 
   it('omits unavailable tools from search results', async () => {
-    const toolbox = createToolbox([
+    const toolbox = createMutableToolbox([
       makeTool('available-send', {
         description: 'Send an available message',
         availability: () => true,
@@ -84,7 +100,7 @@ describe('createSearchTool', () => {
   });
 
   it('respects limit parameter', async () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     toolbox.register(
       makeTool('tool-a'),
       makeTool('tool-b'),
@@ -104,7 +120,7 @@ describe('createSearchTool', () => {
   });
 
   it('filters by tags', async () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     toolbox.register(
       makeTool('send-email', { tags: ['communication'] }),
       makeTool('send-sms', { tags: ['communication'] }),
@@ -124,7 +140,7 @@ describe('createSearchTool', () => {
   });
 
   it('includes reasons when explain is enabled', async () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     toolbox.register(makeTool('send-email', { tags: ['email'] }));
     createSearchTool(toolbox, { explain: true });
 
@@ -140,7 +156,7 @@ describe('createSearchTool', () => {
   });
 
   it('returns tool descriptions and tags', async () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     toolbox.register(
       makeTool('send-email', {
         description: 'Send an email to recipients',
@@ -167,18 +183,18 @@ describe('createSearchTool', () => {
   });
 
   it('can be called directly', async () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     toolbox.register(makeTool('alpha'), makeTool('beta'));
     const searchTool = createSearchTool(toolbox);
 
-    const results = await searchTool({ query: 'alpha' });
+    const results = (await searchTool({ query: 'alpha' })) as SearchToolsResult[];
 
     expect(Array.isArray(results)).toBe(true);
     expect(results[0]?.name).toBe('alpha');
   });
 
   it('has readonly metadata', () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     const searchTool = createSearchTool(toolbox);
 
     expect(searchTool.metadata?.readOnly).toBe(true);
@@ -187,7 +203,7 @@ describe('createSearchTool', () => {
 
   describe('agent usability', () => {
     it('is available to agents via toolbox.execute()', async () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
       toolbox.register(makeTool('example-tool'));
       createSearchTool(toolbox);
 
@@ -204,7 +220,7 @@ describe('createSearchTool', () => {
     });
 
     it('is listed in toolbox.tools() for provider adapters', () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
       createSearchTool(toolbox);
 
       const tools = toolbox.tools();
@@ -217,7 +233,7 @@ describe('createSearchTool', () => {
 
   describe('dynamic tool discovery', () => {
     it('finds tools registered AFTER the search tool is installed', async () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
 
       // Install search tool FIRST
       createSearchTool(toolbox);
@@ -241,7 +257,7 @@ describe('createSearchTool', () => {
     });
 
     it('finds tools registered at any point in time', async () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
 
       // Register some tools before
       toolbox.register(makeTool('before-tool', { description: 'Registered before' }));
@@ -276,7 +292,7 @@ describe('createSearchTool', () => {
     });
 
     it('does not include itself in search results by default', async () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
       createSearchTool(toolbox);
       toolbox.register(makeTool('user-tool'));
 

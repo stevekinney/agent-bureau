@@ -13,6 +13,11 @@ import {
   type DurableHeartbeatTickResult,
   resolveDurableHeartbeatTickServices,
 } from '../../src/durable/durable-heartbeat-tick-workflow';
+import type {
+  ScheduleCancelledEvent,
+  SchedulePausedEvent,
+  ScheduleResumedEvent,
+} from '../../src/events';
 import { createDurableHeartbeat } from '../../src/scheduler/create-durable-heartbeat';
 import type { Scheduler } from '../../src/scheduler/create-scheduler';
 import type { SchedulerTask } from '../../src/scheduler/types';
@@ -82,7 +87,16 @@ function createRecordingScheduler(result: RunResult | null = createRunResult()) 
   return { scheduler, submittedTasks };
 }
 
-async function listStorageKeys(storage: MemoryStorage, prefix: string): Promise<string[]> {
+// `@lostgradient/weft/storage`'s published `.d.ts` re-exports `MemoryStorage`
+// through a `declare const exportedMemoryStorage: typeof MemoryStorage` alias,
+// which carries the value binding but not the class's type — `MemoryStorage`
+// is therefore usable as a constructor but not as a type annotation here.
+// `InstanceType<typeof MemoryStorage>` recovers the instance type without
+// patching the package. Filed upstream: WFT (weft storage barrel).
+async function listStorageKeys(
+  storage: InstanceType<typeof MemoryStorage>,
+  prefix: string,
+): Promise<string[]> {
   const keys: string[] = [];
   for await (const key of storage.keys(prefix)) {
     keys.push(key);
@@ -104,7 +118,7 @@ async function fireSchedule(engine: RunEngineInstance, scheduleId: string): Prom
 
 function createTickWorkflowHandler() {
   const tickWorkflow = createDurableHeartbeatTickWorkflow();
-  return tickWorkflow.handler as (
+  return tickWorkflow.handler as unknown as (
     context: {
       workflowId: string;
       services?: unknown;
@@ -298,7 +312,9 @@ describe('createDurableHeartbeat', () => {
         'schedule.cancelled',
       ]);
       for (const event of dispatched) {
-        expect((event as { scheduleId: string }).scheduleId).toBe('heartbeat-events');
+        expect(
+          (event as SchedulePausedEvent | ScheduleResumedEvent | ScheduleCancelledEvent).scheduleId,
+        ).toBe('heartbeat-events');
       }
     } finally {
       await engine.cancelSchedule('heartbeat-events').catch(() => {});

@@ -105,7 +105,7 @@ describe('createGeminiProviderStream — optional function-call fields', () => {
 
     const result = await generate({
       ...makeContext(),
-      streaming: { update: () => undefined },
+      streaming: { update: () => undefined, messageId: 'test-message-id' },
     });
 
     expect(result.toolCalls).toEqual([{ name: 'get_weather', arguments: {} }]);
@@ -123,7 +123,7 @@ describe('createGeminiProviderStream — optional function-call fields', () => {
 
     const result = await generate({
       ...makeContext(),
-      streaming: { update: () => undefined },
+      streaming: { update: () => undefined, messageId: 'test-message-id' },
     });
 
     expect(result.toolCalls).toEqual([]);
@@ -186,7 +186,12 @@ describe('createGeminiProviderStream — client injection (baseline)', () => {
 
     const result = await generate({
       ...makeContext(),
-      streaming: { update: (text) => updates.push(text) },
+      streaming: {
+        update: (text) => {
+          updates.push(text);
+        },
+        messageId: 'test-message-id',
+      },
     });
 
     expect(result.content).toBe('Hello from Gemini!');
@@ -204,7 +209,7 @@ describe('createGeminiProviderStream — client injection (baseline)', () => {
 
     await generate({
       ...makeContext(),
-      streaming: { update: () => undefined },
+      streaming: { update: () => undefined, messageId: 'test-message-id' },
     });
 
     expect(client._calls[0]?.['config']).toMatchObject({
@@ -234,7 +239,10 @@ describe('createGeminiProviderStream — API key handling (PRRT_kwDORvupsc6MX3PU
     const generate = createGeminiProviderStream({ model: 'gemini-pro' });
 
     await expect(
-      generate({ ...makeContext(), streaming: { update: () => undefined } }),
+      generate({
+        ...makeContext(),
+        streaming: { update: () => undefined, messageId: 'test-message-id' },
+      }),
     ).rejects.toBeInstanceOf(ProviderError);
   });
 
@@ -243,7 +251,7 @@ describe('createGeminiProviderStream — API key handling (PRRT_kwDORvupsc6MX3PU
 
     const error = await generate({
       ...makeContext(),
-      streaming: { update: () => undefined },
+      streaming: { update: () => undefined, messageId: 'test-message-id' },
     }).catch((e: unknown) => e);
 
     expect(error).toBeInstanceOf(ProviderError);

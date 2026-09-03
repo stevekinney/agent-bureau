@@ -1,12 +1,20 @@
 import { describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
+import type { AnyToolDefinition, ToolMetadata } from '../src';
 import { createRegistry, defineTool } from '../src/core';
 import { queryTools, reindexSearchIndex, searchTools } from '../src/core/registry';
 import { createTool } from '../src/create-tool';
-import { createToolbox } from '../src/create-toolbox';
+import { createMutableToolbox } from './helpers/mutable-toolbox';
 
-const makeTool = (name: string, overrides: Partial<Parameters<typeof createTool>[0]> = {}) =>
+const makeTool = (
+  name: string,
+  overrides: Partial<
+    Omit<Parameters<typeof createTool>[0], 'metadata' | 'input' | 'execute' | 'name'>
+  > & {
+    metadata?: ToolMetadata;
+  } = {},
+) =>
   createTool({
     name,
     description: `${name} tool`,
@@ -34,7 +42,7 @@ describe('registry helpers', () => {
       calls += 1;
       return texts.map(() => [1, 0]);
     };
-    const toolbox = createToolbox([], { embed });
+    const toolbox = createMutableToolbox([], { embed });
     toolbox.register(makeTool('reindex'));
 
     // Initial registration should have called the embedder
@@ -51,7 +59,7 @@ describe('registry helpers', () => {
   });
 
   it('treats empty text queries as match-all', () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     toolbox.register(makeTool('alpha'), makeTool('beta'));
 
     const results = queryTools(toolbox, { text: '   ' });
@@ -59,7 +67,7 @@ describe('registry helpers', () => {
   });
 
   it('supports AND query groups', () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     toolbox.register(makeTool('alpha', { tags: ['fast'] }), makeTool('beta', { tags: ['slow'] }));
 
     const results = queryTools(toolbox, {
@@ -69,7 +77,7 @@ describe('registry helpers', () => {
   });
 
   it('supports configuration and summary selection', () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     const tool = makeTool('meta', {
       tags: ['fast'],
       metadata: { tier: 'pro' },
@@ -90,7 +98,7 @@ describe('registry helpers', () => {
   });
 
   it('supports name and configuration selections in search', () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     toolbox.register(makeTool('alpha'), makeTool('beta'));
 
     const names = searchTools(toolbox, { select: 'name' });
@@ -101,7 +109,7 @@ describe('registry helpers', () => {
   });
 
   it('includes tag matches in explain details', () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     toolbox.register(makeTool('tagged', { tags: ['fast'] }));
 
     const results = searchTools(toolbox, {
@@ -113,7 +121,7 @@ describe('registry helpers', () => {
   });
 
   it('supports ranker exclude and match merging', () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     toolbox.register(
       makeTool('keep', { tags: ['fast'], metadata: { tier: 'pro' } }),
       makeTool('skip'),
@@ -124,7 +132,7 @@ describe('registry helpers', () => {
       explain: true,
       ranker: (tool) => {
         if (tool.name === 'skip') {
-          return { exclude: true };
+          return { score: 0, exclude: true };
         }
         return {
           score: 2,
@@ -146,7 +154,7 @@ describe('registry helpers', () => {
   });
 
   it('supports numeric ranker scores and tieBreaker none', () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     toolbox.register(makeTool('alpha'), makeTool('beta'));
 
     const results = searchTools(toolbox, {
@@ -158,10 +166,15 @@ describe('registry helpers', () => {
   });
 
   it('treats empty schema and tag filters as match-all', () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     toolbox.register(makeTool('alpha'), makeTool('beta'));
 
-    const bySchema = queryTools(toolbox, { schema: { keys: [''] } });
+    // Explicit type argument: an AnyToolbox-typed toolbox erases the schema
+    // marker (see MutableToolbox), which collapses `ToolQuerySchemaKey` to
+    // `never`. Instantiating against the base tool-definition type restores
+    // the broad `string` branch so an intentionally non-schema key ('') can
+    // exercise the match-all edge case.
+    const bySchema = queryTools<AnyToolDefinition>(toolbox, { schema: { keys: [''] } });
     expect(bySchema).toHaveLength(2);
 
     const byAnyTags = queryTools(toolbox, { tags: { any: [''] } });
@@ -172,7 +185,7 @@ describe('registry helpers', () => {
   });
 
   it('handles metadata filter edge cases', () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     toolbox.register(
       makeTool('meta', {
         metadata: {
@@ -215,7 +228,7 @@ describe('registry helpers', () => {
   it('handles embedding edge cases without crashing', () => {
     const embed = (texts: string[]) =>
       texts.map((text) => (text.includes('query') ? [1, 0] : [NaN]));
-    const toolbox = createToolbox([], { embed });
+    const toolbox = createMutableToolbox([], { embed });
     toolbox.register(makeTool('invalid-embedding'));
 
     const results = searchTools(toolbox, { rank: { text: 'query' } });
@@ -223,7 +236,7 @@ describe('registry helpers', () => {
   });
 
   it('filters tools by untrusted output risk', () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     toolbox.register(
       makeTool('web-fetch', { risk: { untrustedOutput: true } }),
       makeTool('calculator', { risk: { readOnly: true } }),
@@ -239,7 +252,7 @@ describe('registry helpers', () => {
   });
 
   it('requires every requested risk permission', () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     toolbox.register(
       makeTool('filesystem', { risk: { permissions: ['read', 'write'] } }),
       makeTool('read-only', { risk: { permissions: ['read'] } }),
@@ -267,7 +280,7 @@ describe('registry helpers', () => {
   it('skips embedding scores when vector lengths mismatch', () => {
     const embed = (texts: string[]) =>
       texts.map((text) => (text.includes('query') ? [1, 0, 0] : [1, 0]));
-    const toolbox = createToolbox([], { embed });
+    const toolbox = createMutableToolbox([], { embed });
     toolbox.register(makeTool('length-mismatch'));
 
     const results = searchTools(toolbox, { rank: { text: 'query' } });
@@ -276,7 +289,7 @@ describe('registry helpers', () => {
 
   it('handles sparse embedding vectors', () => {
     const embed = (texts: string[]) => texts.map(() => Array(2) as number[]);
-    const toolbox = createToolbox([], { embed });
+    const toolbox = createMutableToolbox([], { embed });
     toolbox.register(makeTool('sparse'));
 
     const results = searchTools(toolbox, { rank: { text: 'query' } });

@@ -85,7 +85,7 @@ describe('createGeminiEmbedder — client injection', () => {
     const client = createFakeEmbeddingClient([{ embeddings: [{}] }]);
     const embed = createGeminiEmbedder({ client });
 
-    const error = await embed(['alpha']).catch((caught: unknown) => caught);
+    const error = await Promise.resolve(embed(['alpha'])).catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(ProviderError);
     expect((error as ProviderError).provider).toBe('gemini');
     expect((error as ProviderError).message).toContain('gemini');
@@ -108,7 +108,7 @@ describe('createGeminiEmbedder — SDK construction', () => {
   it('throws a ProviderError when neither a client nor an apiKey is given', async () => {
     const embed = createGeminiEmbedder();
 
-    const error = await embed(['alpha']).catch((caught: unknown) => caught);
+    const error = await Promise.resolve(embed(['alpha'])).catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(ProviderError);
     expect((error as ProviderError).provider).toBe('gemini');
   });

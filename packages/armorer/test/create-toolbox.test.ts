@@ -3,11 +3,11 @@ import { hmacSha256HexSync } from 'interoperability';
 import { z } from 'zod';
 
 import {
+  type AnyToolDefinition,
   createMiddleware,
   createProcessLocalApprovalStateStore,
   createTool,
   createToolbox,
-  createToolCall,
   lazy,
   type SignedPendingToolApproval,
   type ToolConfiguration,
@@ -19,17 +19,26 @@ import { queryTools, reindexSearchIndex, searchTools } from '../src/core/registr
 import { stableStringifyJson } from '../src/core/serialization/json';
 import { internalToolboxTestUtilities } from '../src/create-toolbox';
 import { createTruncatingAsyncIterable } from '../src/truncation/index';
+import type { ToolExecutionResult } from '../src/types';
+import { createMutableToolbox } from './helpers/mutable-toolbox';
 
-const makeConfiguration = (overrides?: Partial<ToolConfiguration>): ToolConfiguration => ({
-  name: 'sum',
-  description: 'add two numbers',
-  input: z.object({ a: z.number(), b: z.number() }),
-  tags: ['math'],
-  async execute({ a, b }) {
-    return a + b;
-  },
-  ...overrides,
-});
+// `createToolbox()` normalizes a friendly config shorthand like this one
+// (deriving `identity`/`id`/`display` at registration time — see
+// `registerConfiguration` in `src/create-toolbox.ts`), so the strict
+// `ToolConfiguration` type doesn't describe what a caller actually needs to
+// supply here. This mirrors that runtime leniency with one documented cast
+// instead of fighting the type at each call site.
+const makeConfiguration = (overrides?: Partial<ToolConfiguration>): ToolConfiguration =>
+  ({
+    name: 'sum',
+    description: 'add two numbers',
+    input: z.object({ a: z.number(), b: z.number() }),
+    tags: ['math'],
+    async execute({ a, b }: { a: number; b: number }) {
+      return a + b;
+    },
+    ...overrides,
+  }) as unknown as ToolConfiguration;
 
 const approvalRequestContext = {
   authority: {
@@ -431,8 +440,8 @@ describe('createToolbox', () => {
     resolvers[0]?.(true);
 
     await expect(availablePromise).resolves.toEqual([
-      toolbox.getTool('first'),
-      toolbox.getTool('second'),
+      toolbox.getTool('first')!,
+      toolbox.getTool('second')!,
     ]);
   });
 
@@ -1044,7 +1053,7 @@ describe('createToolbox', () => {
       description: 'waits for durable approval state',
       version: '1.0.0',
       input: z.object({}),
-      execute: () => 'executed',
+      execute: async () => 'executed',
     });
     const options = {
       approvalSecret: 'long-approval-state-read-secret',
@@ -1098,7 +1107,7 @@ describe('createToolbox', () => {
       description: 'rejects durable approval state reads',
       version: '1.0.0',
       input: z.object({}),
-      execute: () => 'executed',
+      execute: async () => 'executed',
     });
     const options = {
       approvalSecret: 'rejected-approval-state-read-secret',
@@ -1518,7 +1527,7 @@ describe('createToolbox', () => {
           description: 'Requires an approval with an invalid numeric expiry',
           version: '1.0.0',
           input: z.object({}),
-          execute: () => 'executed',
+          execute: async () => 'executed',
         }),
       ],
       {
@@ -1552,7 +1561,7 @@ describe('createToolbox', () => {
             description: 'Requires approval',
             version: '1.0.0',
             input: z.object({}),
-            execute: () => 'executed',
+            execute: async () => 'executed',
           }),
         ],
         {
@@ -1631,6 +1640,7 @@ describe('createToolbox', () => {
       },
       release: deferredBaseStore.release,
       consume: deferredBaseStore.consume,
+      revoke: deferredBaseStore.revoke,
       state: deferredBaseStore.state,
     };
     const deferredToolbox = createApprovalToolbox(deferredStore);
@@ -1931,7 +1941,7 @@ describe('createToolbox', () => {
           version: '1.0.0',
           description: 'Requires approval',
           input: z.object({}),
-          execute: () => 'unexpected',
+          execute: async () => 'unexpected',
         }),
       ],
       {
@@ -1998,7 +2008,7 @@ describe('createToolbox', () => {
           version: '1.0.0',
           description: 'Executes only under the approved authority',
           input: z.object({}),
-          execute: () => {
+          execute: async () => {
             executions.push('executed');
             return 'ok';
           },
@@ -2039,7 +2049,7 @@ describe('createToolbox', () => {
       version: '1.0.0',
       description: 'Requires approval across process recovery',
       input: z.object({}),
-      execute: () => 'restored',
+      execute: async () => 'restored',
     });
     const options = {
       approvalSecret: 'restore-secret',
@@ -2077,7 +2087,7 @@ describe('createToolbox', () => {
       version: '1.0.0',
       description: 'Concurrent restore',
       input: z.object({}),
-      execute: () => 'restored',
+      execute: async () => 'restored',
     });
     const sourceStore = createProcessLocalApprovalStateStore();
     const options = {
@@ -2112,7 +2122,7 @@ describe('createToolbox', () => {
       version: '1.0.0',
       description: 'Rejects expired restored approvals',
       input: z.object({}),
-      execute: () => 'restored',
+      execute: async () => 'restored',
     });
     const sourceOptions = {
       approvalSecret: 'expired-restore-secret',
@@ -2141,7 +2151,7 @@ describe('createToolbox', () => {
         version,
         description: 'Rejects stale recovery bindings',
         input: z.object({}),
-        execute: () => 'restored',
+        execute: async () => 'restored',
       });
     const tool = makeTool('1.0.0');
     const sourceOptions = {
@@ -2248,7 +2258,7 @@ describe('createToolbox', () => {
         beforeExecute() {
           return {
             allow: false,
-            status: 'denied',
+            status: 'deny' as const,
             reason: 'approval no longer valid',
           };
         },
@@ -2598,10 +2608,15 @@ describe('createToolbox', () => {
       name: 'sum',
       description: 'add two numbers',
       input: z.object({ a: z.number(), b: z.number() }),
-    });
+    } as unknown as Omit<ToolConfiguration, 'execute'>);
 
     expect(execute).toBeDefined();
-    await expect(execute?.({ a: 1, b: 2 }, {} as never)).resolves.toBe(3);
+    await expect(
+      (execute as (params: unknown, context: unknown) => Promise<unknown>)?.(
+        { a: 1, b: 2 },
+        {} as never,
+      ),
+    ).resolves.toBe(3);
   });
 
   it('falls back to imported execute placeholders when an execute resolver cannot find a tool', async () => {
@@ -2610,12 +2625,12 @@ describe('createToolbox', () => {
       name: 'missing-tool',
       description: 'missing tool',
       input: z.object({}),
-    });
+    } as unknown as Omit<ToolConfiguration, 'execute'>);
 
     expect(execute).toBeDefined();
-    await expect(execute?.({}, {} as never)).rejects.toThrow(
-      'Imported tool "missing-tool" does not have an execute implementation',
-    );
+    await expect(
+      (execute as (params: unknown, context: unknown) => Promise<unknown>)?.({}, {} as never),
+    ).rejects.toThrow('Imported tool "missing-tool" does not have an execute implementation');
   });
 
   it('normalizes missing and non-serializable tool-call arguments through the internal helper seam', () => {
@@ -2796,12 +2811,15 @@ describe('createToolbox', () => {
     expect(configuration.concurrency).toBe(2);
     expect(configuration.diagnostics).toBe(diagnostics);
 
-    const placeholder = createImportedExecute('missing-tool');
+    const placeholder = createImportedExecute('missing-tool') as (
+      params: unknown,
+      context: unknown,
+    ) => Promise<unknown>;
     await expect(placeholder({}, {})).rejects.toThrow('Imported tool "missing-tool"');
   });
 
   it('generates a call id when missing', async () => {
-    const toolbox = createToolbox([makeConfiguration()]);
+    const toolbox = createMutableToolbox([makeConfiguration()]);
 
     const result = await toolbox.execute({
       name: 'sum',
@@ -2816,7 +2834,7 @@ describe('createToolbox', () => {
   });
 
   it('normalizes missing and non-JSON tool-call arguments before execution', async () => {
-    const toolbox = createToolbox([
+    const toolbox = createMutableToolbox([
       createTool({
         name: 'inspect-arguments',
         description: 'inspects arguments',
@@ -2866,12 +2884,11 @@ describe('createToolbox', () => {
   });
 
   it('supports lazy execute functions in configurations', async () => {
-    const executePromise = Promise.resolve().then(
-      () =>
-        async ({ a, b }: { a: number; b: number }) =>
-          a + b + 1,
-    );
-    const toolbox = createToolbox([
+    const executePromise = Promise.resolve().then(() => async (params: unknown) => {
+      const { a, b } = params as { a: number; b: number };
+      return a + b + 1;
+    });
+    const toolbox = createMutableToolbox([
       makeConfiguration({
         name: 'sum-lazy',
         execute: executePromise,
@@ -2888,12 +2905,15 @@ describe('createToolbox', () => {
 
   it('supports lazy helper in configurations', async () => {
     let loads = 0;
-    const toolbox = createToolbox([
+    const toolbox = createMutableToolbox([
       makeConfiguration({
         name: 'sum-lazy-helper',
         execute: lazy(async () => {
           loads += 1;
-          return async ({ a, b }: { a: number; b: number }) => a + b + 1;
+          return async (params: unknown) => {
+            const { a, b } = params as { a: number; b: number };
+            return a + b + 1;
+          };
         }),
       }),
     ]);
@@ -2917,7 +2937,7 @@ describe('createToolbox', () => {
   });
 
   it('returns an error when lazy execute rejects in configurations', async () => {
-    const toolbox = createToolbox([
+    const toolbox = createMutableToolbox([
       makeConfiguration({
         name: 'sum-lazy-fail',
         execute: Promise.resolve().then(() => {
@@ -2952,13 +2972,13 @@ describe('createToolbox', () => {
       createRepairHints: () => hints,
     };
 
-    const toolbox = createToolbox([
+    const toolbox = createMutableToolbox([
       makeConfiguration({
         name: 'diagnostic-tool',
         description: 'diagnostics',
         input: z.object({ value: z.string() }),
-        async execute({ value }) {
-          return value;
+        async execute(params) {
+          return (params as { value: string }).value;
         },
         diagnostics,
       }),
@@ -2970,7 +2990,7 @@ describe('createToolbox', () => {
       captured = event;
     });
 
-    const result = await tool.execute(createToolCall('diagnostic-tool', { value: 123 } as any));
+    const result = await tool.executeWith({ params: { value: 123 } as any });
 
     expect(result.error).toBeDefined();
     expect(captured.report).toEqual(report);
@@ -2978,7 +2998,7 @@ describe('createToolbox', () => {
   });
 
   it('serializes registered configurations and rehydrates clean copies', async () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     toolbox.register(makeConfiguration({ tags: ['math', 'utilities'] }));
 
     const serialized = toolbox.toJSON();
@@ -3009,12 +3029,14 @@ describe('createToolbox', () => {
       }),
     ]);
 
-    const extended = base.extend({
-      name: 'extended-tool',
-      description: 'extended',
-      input: z.object({}),
-      execute: async () => 'extended',
-    });
+    const extended = base.extend(
+      createTool({
+        name: 'extended-tool',
+        description: 'extended',
+        input: z.object({}),
+        execute: async () => 'extended',
+      }),
+    );
 
     const baseResult = await base.execute({
       id: 'base-call',
@@ -3060,12 +3082,14 @@ describe('createToolbox', () => {
         },
       },
     );
-    const extended = base.extend({
-      name: 'additional-tool',
-      description: 'Additional tool',
-      input: z.object({}),
-      execute: async () => 'additional',
-    });
+    const extended = base.extend(
+      createTool({
+        name: 'additional-tool',
+        description: 'Additional tool',
+        input: z.object({}),
+        execute: async () => 'additional',
+      }),
+    );
     const paused = await base.execute(
       { id: 'extend-approval', name: 'approved-action', arguments: {} },
       approvalExecutionOptions,
@@ -3081,19 +3105,19 @@ describe('createToolbox', () => {
   it('extend() can compose another toolbox and merges context (last wins)', async () => {
     const first = createToolbox(
       [
-        {
+        createTool({
           name: 'ctx-read',
           description: 'reads context',
           input: z.object({}),
           execute: async (_params, context) => {
-            const ctx = context as Record<string, unknown>;
+            const ctx = context as unknown as Record<string, unknown>;
             return {
               region: ctx.region,
               role: ctx.role,
               shared: ctx.shared,
             };
           },
-        },
+        }),
       ],
       { context: { region: 'us-east-1', shared: 'first' } },
     );
@@ -3139,7 +3163,7 @@ describe('createToolbox', () => {
   });
 
   it('exports registered tools as JSON Schema via toJSON({ format: "json-schema" })', () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     toolbox.register(makeConfiguration({ name: 'sum-json-schema' }));
 
     const serialized = toolbox.toJSON({ format: 'json-schema' });
@@ -3161,11 +3185,12 @@ describe('createToolbox', () => {
   });
 
   it('returns built tools via getTool()', async () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     toolbox.register(
       makeConfiguration({
         name: 'bump',
-        async execute({ a, b }) {
+        async execute(params) {
+          const { a, b } = params as { a: number; b: number };
           return a + b + 1;
         },
       }),
@@ -3186,7 +3211,7 @@ describe('createToolbox', () => {
       },
       tags: ['utility'],
     });
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     toolbox.register(built);
     const result = await toolbox.execute({
       id: 'echo-1',
@@ -3197,13 +3222,13 @@ describe('createToolbox', () => {
   });
 
   it('creates and registers tools via createTool()', async () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     const tool = toolbox.createTool({
       name: 'from-toolbox',
       description: 'created via toolbox',
       input: z.object({ value: z.string() }),
-      async execute({ value }) {
-        return value.toUpperCase();
+      async execute(params) {
+        return (params as { value: string }).value.toUpperCase();
       },
     });
 
@@ -3218,7 +3243,7 @@ describe('createToolbox', () => {
   });
 
   it('creates and registers tools via createTool() using input', async () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     const tool = toolbox.createTool({
       name: 'from-toolbox-input',
       description: 'created via toolbox with input',
@@ -3239,7 +3264,7 @@ describe('createToolbox', () => {
   });
 
   it('createTool supports tags and metadata', () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     const tool = toolbox.createTool({
       name: 'tagged',
       description: 'tagged tool',
@@ -3254,7 +3279,7 @@ describe('createToolbox', () => {
   });
 
   it('createTool supports metadata from a sync factory', async () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     const tool = toolbox.createTool({
       name: 'sync-factory-metadata',
       description: 'metadata from sync factory',
@@ -3275,7 +3300,7 @@ describe('createToolbox', () => {
   });
 
   it('createTool supports metadata from a promise', async () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     const toolPromise = toolbox.createTool({
       name: 'promise-metadata-toolbox',
       description: 'metadata from promise',
@@ -3293,7 +3318,7 @@ describe('createToolbox', () => {
   });
 
   it('createTool supports metadata from an async factory', async () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     const toolPromise = toolbox.createTool({
       name: 'async-factory-metadata-toolbox',
       description: 'metadata from async factory',
@@ -3311,7 +3336,7 @@ describe('createToolbox', () => {
   });
 
   it('enforces readOnly for mutating tools', async () => {
-    const toolbox = createToolbox([], { readOnly: true });
+    const toolbox = createMutableToolbox([], { readOnly: true });
     toolbox.register({
       name: 'mutating',
       description: 'mutates',
@@ -3330,7 +3355,7 @@ describe('createToolbox', () => {
   });
 
   it('enforces allowDangerous for dangerous tools', async () => {
-    const toolbox = createToolbox([], { allowDangerous: false });
+    const toolbox = createMutableToolbox([], { allowDangerous: false });
     toolbox.register({
       name: 'dangerous',
       description: 'dangerous tool',
@@ -3349,7 +3374,7 @@ describe('createToolbox', () => {
   });
 
   it('enforces session budgets for max calls', async () => {
-    const toolbox = createToolbox([], { budget: { maxCalls: 1 } });
+    const toolbox = createMutableToolbox([], { budget: { maxCalls: 1 } });
     toolbox.register({
       name: 'one',
       description: 'budgeted',
@@ -3374,7 +3399,7 @@ describe('createToolbox', () => {
   });
 
   it('enforces session budgets for max duration', async () => {
-    const toolbox = createToolbox([], { budget: { maxDurationMs: 0 } });
+    const toolbox = createMutableToolbox([], { budget: { maxDurationMs: 0 } });
     toolbox.register({
       name: 'time',
       description: 'budgeted',
@@ -3393,7 +3418,7 @@ describe('createToolbox', () => {
   });
 
   it('createTool accepts object schemas', () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     const tool = toolbox.createTool({
       name: 'object-schema',
       description: 'object schema',
@@ -3405,7 +3430,7 @@ describe('createToolbox', () => {
   });
 
   it('createTool accepts input in configuration normalization', async () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     toolbox.register({
       name: 'input-configuration',
       description: 'registered with input',
@@ -3424,7 +3449,7 @@ describe('createToolbox', () => {
   });
 
   it('createTool rejects invalid execute types', () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     expect(() =>
       toolbox.createTool({
         name: 'bad-execute',
@@ -3436,7 +3461,7 @@ describe('createToolbox', () => {
   });
 
   it('createTool rejects invalid schema types', () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     expect(() =>
       toolbox.createTool({
         name: 'bad-schema',
@@ -3448,7 +3473,7 @@ describe('createToolbox', () => {
   });
 
   it('createTool rejects non-object Zod schemas', () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     expect(() =>
       toolbox.createTool({
         name: 'bad-zod-schema',
@@ -3460,7 +3485,7 @@ describe('createToolbox', () => {
   });
 
   it('createTool throws when toolFactory returns mismatched name', () => {
-    const toolbox = createToolbox([], {
+    const toolbox = createMutableToolbox([], {
       toolFactory: (configuration) =>
         createTool({
           name: `other-${configuration.name}`,
@@ -3481,7 +3506,7 @@ describe('createToolbox', () => {
   });
 
   it('defaults input when using toolbox.createTool', async () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     const tool = toolbox.createTool({
       name: 'from-toolbox-default',
       description: 'default schema',
@@ -3499,7 +3524,7 @@ describe('createToolbox', () => {
   });
 
   it('defaults input when registering a raw tool configuration with no input', async () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     toolbox.register({
       name: 'configuration-default-schema',
       description: 'defaults schema for raw configurations too',
@@ -3520,7 +3545,7 @@ describe('createToolbox', () => {
   });
 
   it('returns an error when lazy execute resolves to non-function in configurations', async () => {
-    const toolbox = createToolbox([
+    const toolbox = createMutableToolbox([
       makeConfiguration({
         name: 'sum-lazy-bad',
         execute: Promise.resolve(123 as any),
@@ -3539,21 +3564,21 @@ describe('createToolbox', () => {
   });
 
   it('marks registry as completed', () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     expect(toolbox.completed).toBe(false);
     toolbox.complete();
     expect(toolbox.completed).toBe(true);
   });
 
   it('provides robust query support', () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     toolbox.register(
       makeConfiguration({
         name: 'increment',
         description: 'increase by one',
         tags: ['math'],
-        async execute({ a }) {
-          return a + 1;
+        async execute(params) {
+          return (params as { a: number }).a + 1;
         },
         input: z.object({ a: z.number() }),
       }),
@@ -3561,8 +3586,8 @@ describe('createToolbox', () => {
         name: 'double',
         description: 'double it',
         tags: ['math', 'fast'],
-        async execute({ a }) {
-          return a * 2;
+        async execute(params) {
+          return (params as { a: number }).a * 2;
         },
         input: z.object({ a: z.number() }),
       }),
@@ -3571,8 +3596,8 @@ describe('createToolbox', () => {
         description: 'describe value',
         tags: ['text'],
         input: z.object({ value: z.string() }),
-        async execute({ value }) {
-          return value.toUpperCase();
+        async execute(params) {
+          return (params as { value: string }).value.toUpperCase();
         },
       }),
     );
@@ -3586,7 +3611,9 @@ describe('createToolbox', () => {
     });
     expect(descriptorMatches.map((tool) => tool.name)).toEqual(['double']);
 
-    const argumentMatches = queryTools(toolbox, { schema: { keys: ['value'] } });
+    const argumentMatches = queryTools<AnyToolDefinition>(toolbox, {
+      schema: { keys: ['value'] },
+    });
     expect(argumentMatches.map((tool) => tool.name)).toEqual(['describe']);
 
     const schemaMatches = queryTools(toolbox, {
@@ -3601,7 +3628,7 @@ describe('createToolbox', () => {
   });
 
   it('supports boolean query groups', () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     toolbox.register(
       makeConfiguration({
         name: 'alpha',
@@ -3633,7 +3660,7 @@ describe('createToolbox', () => {
   });
 
   it('returns all tools when no query criteria is provided', () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     toolbox.register(makeConfiguration({ name: 'foo' }), makeConfiguration({ name: 'bar' }));
 
     const allTools = queryTools(toolbox);
@@ -3641,7 +3668,7 @@ describe('createToolbox', () => {
   });
 
   it('supports pagination and selection in queries', () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     toolbox.register(
       makeConfiguration({ name: 'alpha' }),
       makeConfiguration({ name: 'beta' }),
@@ -3656,7 +3683,7 @@ describe('createToolbox', () => {
   });
 
   it('throws when query input is not an object', () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     toolbox.register(makeConfiguration({ name: 'alpha' }), makeConfiguration({ name: 'beta' }));
 
     expect(() => queryTools(toolbox, 42 as unknown as any)).toThrow(
@@ -3665,14 +3692,14 @@ describe('createToolbox', () => {
   });
 
   it('supports schema descriptors within query objects', () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     const schema = z.object({ text: z.string(), flag: z.boolean().optional() });
     toolbox.register(
       makeConfiguration({
         name: 'writer',
         input: schema,
-        async execute({ text }) {
-          return text;
+        async execute(params) {
+          return (params as { text: string }).text;
         },
       }),
       makeConfiguration({ name: 'mathy', input: z.object({ a: z.number() }) }),
@@ -3683,7 +3710,7 @@ describe('createToolbox', () => {
   });
 
   it('ignores predicate errors while filtering', () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     toolbox.register(makeConfiguration({ name: 'ok' }), makeConfiguration({ name: 'nope' }));
 
     const matches = queryTools(toolbox, {
@@ -3699,7 +3726,7 @@ describe('createToolbox', () => {
   });
 
   it('handles invalid configurations by throwing a helpful error', () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     expect(() => {
       toolbox.register({} as any);
     }).toThrow(/ToolConfiguration/);
@@ -3741,7 +3768,7 @@ describe('createToolbox', () => {
   });
 
   it('emits lifecycle events for register, call, complete, error, and not-found', async () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     const events: Record<string, number> = {
       registering: 0,
       registered: 0,
@@ -3779,7 +3806,7 @@ describe('createToolbox', () => {
 
   it('passes toolbox context into registered tools', async () => {
     const contexts: any[] = [];
-    const toolbox = createToolbox([], {
+    const toolbox = createMutableToolbox([], {
       context: { workspaceId: 'ws-123', role: 'admin' },
     });
     toolbox.register({
@@ -3803,7 +3830,7 @@ describe('createToolbox', () => {
 
   it('clears listeners when provided signal aborts', async () => {
     const controller = new AbortController();
-    const toolbox = createToolbox([], { signal: controller.signal as any });
+    const toolbox = createMutableToolbox([], { signal: controller.signal as any });
 
     let calls = 0;
     toolbox.addEventListener('call', () => {
@@ -3874,7 +3901,7 @@ describe('createToolbox', () => {
         async execute(_params, context) {
           await new Promise<void>((resolve) => {
             release = resolve;
-            context.signal?.addEventListener('abort', resolve, { once: true });
+            context.signal?.addEventListener('abort', () => resolve(), { once: true });
           });
           return 'released';
         },
@@ -3903,7 +3930,7 @@ describe('createToolbox', () => {
 
   it('settles a deadline-aborted parent after a cancellation-ignoring callback returns', async () => {
     let release!: () => void;
-    const toolbox = createToolbox([
+    const toolbox = createMutableToolbox([
       createTool({
         name: 'ignore-deadline-abort',
         description: 'Returns only after an external release',
@@ -3941,7 +3968,7 @@ describe('createToolbox', () => {
   it('keeps a running callback unfinished when the tool deadline timer beats the parent timer', async () => {
     const timing = createManualToolboxDeadlineTiming();
     let release!: () => void;
-    const toolbox = createToolbox([
+    const toolbox = createMutableToolbox([
       createTool({
         name: 'tool-deadline-race',
         description: 'Returns only after an external release',
@@ -3989,7 +4016,7 @@ describe('createToolbox', () => {
 
   it('returns unconsumed child streams before toolbox shutdown resolves', async () => {
     let returned = 0;
-    const toolbox = createToolbox([
+    const toolbox = createMutableToolbox([
       createTool({
         name: 'toolbox-stream-shutdown',
         description: 'stream owned by a toolbox',
@@ -4026,7 +4053,7 @@ describe('createToolbox', () => {
   });
 
   it('reports raw toolbox streams that cannot acknowledge return', async () => {
-    const toolbox = createToolbox([], {
+    const toolbox = createMutableToolbox([], {
       toolFactory(configuration, { buildDefaultTool }) {
         const tool = buildDefaultTool(configuration);
         return new Proxy(tool, {
@@ -4072,7 +4099,7 @@ describe('createToolbox', () => {
   });
 
   it('reports raw toolbox stream return failures', async () => {
-    const toolbox = createToolbox([], {
+    const toolbox = createMutableToolbox([], {
       toolFactory(configuration, { buildDefaultTool }) {
         const tool = buildDefaultTool(configuration);
         return new Proxy(tool, {
@@ -4128,7 +4155,7 @@ describe('createToolbox', () => {
       percent?: number;
     }> = [];
 
-    const toolbox = createToolbox([], {
+    const toolbox = createMutableToolbox([], {
       context: { tabId: 42 },
     });
 
@@ -4176,7 +4203,7 @@ describe('createToolbox', () => {
   it('supports inspection, sequential execution, afterExecute hooks, and context.emit', async () => {
     const statuses: string[] = [];
     const afterExecuteCalls: string[] = [];
-    const toolbox = createToolbox([], {
+    const toolbox = createMutableToolbox([], {
       policy: {
         afterExecute(context) {
           afterExecuteCalls.push(`registry:${context.toolName}`);
@@ -4231,7 +4258,7 @@ describe('createToolbox', () => {
   });
 
   it('bubbles stream lifecycle events and forwards stream execute options', async () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     const events: string[] = [];
 
     toolbox.addEventListener('stream-start', (event) => {
@@ -4289,7 +4316,7 @@ describe('createToolbox', () => {
   });
 
   it('consumes stream results exposed only through result and keeps bubbling events', async () => {
-    const toolbox = createToolbox([], {
+    const toolbox = createMutableToolbox([], {
       toolFactory(configuration, { buildDefaultTool }) {
         const tool = buildDefaultTool(configuration);
         if (configuration.name !== 'result-only-stream') {
@@ -4353,7 +4380,7 @@ describe('createToolbox', () => {
   });
 
   it('surfaces unexpected tool execution errors as ToolResult errors', async () => {
-    const toolbox = createToolbox([], {
+    const toolbox = createMutableToolbox([], {
       toolFactory(configuration, { buildDefaultTool }) {
         const tool = buildDefaultTool(configuration);
         if (configuration.name !== 'fragile') {
@@ -4385,7 +4412,7 @@ describe('createToolbox', () => {
   });
 
   it('throws tool errors when errorMode is failFast', async () => {
-    const toolbox = createToolbox();
+    const toolbox = createMutableToolbox();
     toolbox.register({
       name: 'fail-fast-tool-error',
       description: 'returns a ToolResult error',
@@ -4404,7 +4431,7 @@ describe('createToolbox', () => {
   });
 
   it('throws unexpected execution errors when errorMode is failFast', async () => {
-    const toolbox = createToolbox([], {
+    const toolbox = createMutableToolbox([], {
       toolFactory(configuration, { buildDefaultTool }) {
         const tool = buildDefaultTool(configuration);
         if (configuration.name !== 'fail-fast-unexpected') {
@@ -4441,7 +4468,7 @@ describe('createToolbox', () => {
 
   describe('getMissingTools', () => {
     it('returns empty array when all tools are registered', () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
       toolbox.register(
         makeConfiguration({ name: 'toolA' }),
         makeConfiguration({ name: 'toolB' }),
@@ -4453,7 +4480,7 @@ describe('createToolbox', () => {
     });
 
     it('returns only the missing tool names when some are not registered', () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
       toolbox.register(makeConfiguration({ name: 'toolA' }), makeConfiguration({ name: 'toolC' }));
 
       const missing = toolbox.getMissingTools(['toolA', 'toolB', 'toolC', 'toolD']);
@@ -4461,14 +4488,14 @@ describe('createToolbox', () => {
     });
 
     it('returns all tool names when none are registered', () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
 
       const missing = toolbox.getMissingTools(['toolA', 'toolB']);
       expect(missing).toEqual(['toolA', 'toolB']);
     });
 
     it('returns empty array for empty input', () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
 
       const missing = toolbox.getMissingTools([]);
       expect(missing).toEqual([]);
@@ -4477,7 +4504,7 @@ describe('createToolbox', () => {
 
   describe('hasAllTools', () => {
     it('returns true when all tools are registered', () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
       toolbox.register(
         makeConfiguration({ name: 'toolA' }),
         makeConfiguration({ name: 'toolB' }),
@@ -4488,7 +4515,7 @@ describe('createToolbox', () => {
     });
 
     it('returns true when checking a subset of registered tools', () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
       toolbox.register(
         makeConfiguration({ name: 'toolA' }),
         makeConfiguration({ name: 'toolB' }),
@@ -4499,20 +4526,20 @@ describe('createToolbox', () => {
     });
 
     it('returns false when any tool is not registered', () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
       toolbox.register(makeConfiguration({ name: 'toolA' }), makeConfiguration({ name: 'toolB' }));
 
       expect(toolbox.hasAllTools(['toolA', 'toolB', 'toolC'])).toBe(false);
     });
 
     it('returns false when no tools are registered', () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
 
       expect(toolbox.hasAllTools(['toolA'])).toBe(false);
     });
 
     it('returns true for empty input array', () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
 
       expect(toolbox.hasAllTools([])).toBe(true);
     });
@@ -4520,7 +4547,7 @@ describe('createToolbox', () => {
 
   describe('tag filters', () => {
     it('excludes tools with forbidden tags', () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
       toolbox.register(
         makeConfiguration({ name: 'safe-tool', tags: ['safe', 'utility'] }),
         makeConfiguration({ name: 'dangerous-tool', tags: ['destructive', 'utility'] }),
@@ -4532,7 +4559,7 @@ describe('createToolbox', () => {
     });
 
     it('performs case-insensitive tag exclusions', () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
       toolbox.register(
         makeConfiguration({ name: 'tool-a', tags: ['safe'] }),
         makeConfiguration({ name: 'tool-b', tags: ['destructive'] }),
@@ -4543,7 +4570,7 @@ describe('createToolbox', () => {
     });
 
     it('requires all tags when using tags.all', () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
       toolbox.register(
         makeConfiguration({ name: 'math-fast', tags: ['math', 'fast'] }),
         makeConfiguration({ name: 'math-only', tags: ['math'] }),
@@ -4568,7 +4595,7 @@ describe('createToolbox', () => {
           return [0, 0];
         });
 
-      const toolbox = createToolbox([], { embed });
+      const toolbox = createMutableToolbox([], { embed });
       toolbox.register(
         makeConfiguration({
           name: 'forecast-tool',
@@ -4587,7 +4614,7 @@ describe('createToolbox', () => {
     });
 
     it('ranks tools by preferred tags', () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
       toolbox.register(
         makeConfiguration({ name: 'no-match', tags: ['other'] }),
         makeConfiguration({ name: 'one-match', tags: ['math'] }),
@@ -4606,7 +4633,7 @@ describe('createToolbox', () => {
     });
 
     it('applies filters before ranking', () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
       toolbox.register(
         makeConfiguration({ name: 'best', tags: ['math', 'fast', 'destructive'] }),
         makeConfiguration({ name: 'good', tags: ['math', 'fast'] }),
@@ -4621,7 +4648,7 @@ describe('createToolbox', () => {
     });
 
     it('supports tag boosts', () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
       toolbox.register(
         makeConfiguration({ name: 'standard', tags: ['misc'] }),
         makeConfiguration({ name: 'boosted', tags: ['fast'] }),
@@ -4633,7 +4660,7 @@ describe('createToolbox', () => {
     });
 
     it('supports custom rankers and tie breakers', () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
       toolbox.register(
         makeConfiguration({ name: 'alpha', tags: ['misc'] }),
         makeConfiguration({ name: 'beta', tags: ['misc'] }),
@@ -4652,7 +4679,7 @@ describe('createToolbox', () => {
     });
 
     it('limits results and includes text reasons', () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
       toolbox.register(
         makeConfiguration({ name: 'double', description: 'double it', tags: ['math'] }),
         makeConfiguration({
@@ -4669,7 +4696,7 @@ describe('createToolbox', () => {
     });
 
     it('supports selection and pagination in search results', () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
       toolbox.register(
         makeConfiguration({ name: 'alpha', tags: ['misc'] }),
         makeConfiguration({ name: 'beta', tags: ['misc'] }),
@@ -4688,7 +4715,7 @@ describe('createToolbox', () => {
     });
 
     it('sorts by name when scores tie', () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
       toolbox.register(
         makeConfiguration({ name: 'beta', tags: ['misc'] }),
         makeConfiguration({ name: 'alpha', tags: ['misc'] }),
@@ -4699,7 +4726,7 @@ describe('createToolbox', () => {
     });
 
     it('treats non-finite limits as no limit', () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
       toolbox.register(
         makeConfiguration({ name: 'first', tags: ['misc'] }),
         makeConfiguration({ name: 'second', tags: ['misc'] }),
@@ -4710,7 +4737,7 @@ describe('createToolbox', () => {
     });
 
     it('handles empty text ranking input', () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
       toolbox.register(makeConfiguration({ name: 'alpha', tags: ['misc'] }));
 
       const results = searchTools(toolbox, { rank: { text: '' } });
@@ -4719,7 +4746,7 @@ describe('createToolbox', () => {
     });
 
     it('applies ranking weights', () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
       toolbox.register(
         makeConfiguration({
           name: 'b-tagged',
@@ -4742,7 +4769,7 @@ describe('createToolbox', () => {
     });
 
     it('ranks by number of matched text tokens', () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
       toolbox.register(
         makeConfiguration({ name: 'one-token', tags: ['alpha'] }),
         makeConfiguration({ name: 'two-token', tags: ['alpha', 'beta'] }),
@@ -4753,7 +4780,7 @@ describe('createToolbox', () => {
     });
 
     it('respects text field weights', () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
       toolbox.register(
         makeConfiguration({
           name: 'summarize',
@@ -4791,7 +4818,7 @@ describe('createToolbox', () => {
           return [0, 0];
         });
 
-      const toolbox = createToolbox([], { embed });
+      const toolbox = createMutableToolbox([], { embed });
       toolbox.register(
         makeConfiguration({
           name: 'forecast-tool',
@@ -4820,7 +4847,7 @@ describe('createToolbox', () => {
     });
 
     it('includes tag and schema key text reasons', () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
       toolbox.register(
         makeConfiguration({
           name: 'audit-tool',
@@ -4851,7 +4878,7 @@ describe('createToolbox', () => {
     });
 
     it('reindexes cached search data on demand', () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
       toolbox.register(
         makeConfiguration({
           name: 'audit-tool',
@@ -4884,7 +4911,7 @@ describe('createToolbox', () => {
     });
 
     it('throws when search input is not an object', () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
       expect(() => searchTools(toolbox, 42 as unknown as any)).toThrow(
         'search expects a ToolSearchOptions object',
       );
@@ -4893,7 +4920,7 @@ describe('createToolbox', () => {
 
   describe('metadata filters', () => {
     it('filters by metadata predicate', () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
       toolbox.register(
         makeConfiguration({ name: 'tool-a', tags: ['test'] }),
         makeConfiguration({ name: 'tool-b', tags: ['test'] }),
@@ -4913,7 +4940,7 @@ describe('createToolbox', () => {
     });
 
     it('ignores metadata predicate errors', () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
       toolbox.register(
         makeConfiguration({
           name: 'safe-meta',
@@ -4939,7 +4966,7 @@ describe('createToolbox', () => {
     });
 
     it('filters tools with metadata eq and has', () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
       toolbox.register(
         makeConfiguration({
           name: 'premium-tool',
@@ -4974,7 +5001,7 @@ describe('createToolbox', () => {
     });
 
     it('supports contains, startsWith, and range metadata filters', () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
       toolbox.register(
         makeConfiguration({
           name: 'alpha-tool',
@@ -5008,7 +5035,7 @@ describe('createToolbox', () => {
     });
 
     it('preserves metadata through serialization and rehydration', () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
       toolbox.register(
         makeConfiguration({
           name: 'meta-tool',
@@ -5029,7 +5056,7 @@ describe('createToolbox', () => {
 
   describe('combined query options', () => {
     it('supports tags, schema keys, and text together', () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
       toolbox.register(
         makeConfiguration({
           name: 'increment',
@@ -5051,7 +5078,7 @@ describe('createToolbox', () => {
         }),
       );
 
-      const matches = queryTools(toolbox, {
+      const matches = queryTools<AnyToolDefinition>(toolbox, {
         tags: { any: ['math'], none: ['slow'] },
         schema: { keys: ['a'] },
         text: 'double',
@@ -5067,7 +5094,7 @@ describe('createToolbox', () => {
         description: `[Enhanced] ${configuration.description}`,
       });
 
-      const toolbox = createToolbox([], { middleware: [middleware] });
+      const toolbox = createMutableToolbox([], { middleware: [middleware] });
       toolbox.register(makeConfiguration({ name: 'test-tool' }));
 
       const tool = toolbox.getTool('test-tool');
@@ -5080,7 +5107,7 @@ describe('createToolbox', () => {
         description: `[Async] ${configuration.description}`,
       });
 
-      const toolbox = createToolbox([], { middleware: [asyncMiddleware as any] });
+      const toolbox = createMutableToolbox([], { middleware: [asyncMiddleware as any] });
       expect(() => toolbox.register(makeConfiguration())).toThrow(
         'Async middleware is not supported. Provide synchronous middleware only.',
       );
@@ -5089,13 +5116,29 @@ describe('createToolbox', () => {
 
   describe('tool replacement', () => {
     it('replaces an existing tool when re-registering with same name', () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
 
-      toolbox.register(makeConfiguration({ name: 'calc', execute: async ({ a, b }) => a + b }));
+      toolbox.register(
+        makeConfiguration({
+          name: 'calc',
+          execute: async (params) => {
+            const { a, b } = params as { a: number; b: number };
+            return a + b;
+          },
+        }),
+      );
       expect(toolbox.getTool('calc')).toBeDefined();
 
       // Register a replacement tool with the same name
-      toolbox.register(makeConfiguration({ name: 'calc', execute: async ({ a, b }) => a * b }));
+      toolbox.register(
+        makeConfiguration({
+          name: 'calc',
+          execute: async (params) => {
+            const { a, b } = params as { a: number; b: number };
+            return a * b;
+          },
+        }),
+      );
 
       // Should still have exactly one tool
       expect(toolbox.tools()).toHaveLength(1);
@@ -5151,7 +5194,7 @@ describe('createToolbox', () => {
           authorizationRevision: 'authorization:1',
         },
       };
-      const observedCapabilities: readonly string[][] = [];
+      const observedCapabilities: string[][] = [];
 
       const createCapabilityToolbox = (
         registryCapabilities: readonly string[],
@@ -5257,7 +5300,7 @@ describe('createToolbox', () => {
               name: 'malformed-policy-context',
               description: 'observes malformed request authority',
               input: z.object({}),
-              policyContext: { requestContext },
+              policyContext: () => ({ requestContext }),
               policy: {
                 beforeExecute(context) {
                   observedRequestContext = (
@@ -5442,7 +5485,7 @@ describe('createToolbox', () => {
           return 'write';
         },
       });
-      const toolbox = createToolbox([readTool, writeTool], {
+      const toolbox = createMutableToolbox([readTool, writeTool], {
         policy: { beforeExecute: () => ({ allow: true, capabilities: ['read', 'write'] }) },
       });
 
@@ -5515,7 +5558,7 @@ describe('createToolbox', () => {
           return 'stopped';
         },
       });
-      const toolbox = createToolbox([tool]);
+      const toolbox = createMutableToolbox([tool]);
       const execution = toolbox.execute(
         [
           { id: 'batch-abort-one', name: tool.name, arguments: {} },
@@ -5550,7 +5593,7 @@ describe('createToolbox', () => {
       expect(
         childSnapshots.map(({ snapshot }) => ({
           state: snapshot.state,
-          cleanup: snapshot.cleanup.status,
+          cleanup: snapshot.cleanup!.status,
         })),
       ).toEqual([
         { state: 'terminal', cleanup: 'completed' },
@@ -5559,7 +5602,7 @@ describe('createToolbox', () => {
     });
 
     it('createTool applies optional configuration fields', () => {
-      const toolbox = createToolbox([], { telemetry: true });
+      const toolbox = createMutableToolbox([], { telemetry: true });
       const tool = toolbox.createTool({
         name: 'configured',
         description: 'configured tool',
@@ -5579,7 +5622,7 @@ describe('createToolbox', () => {
 
     it('passes signal and timeout through execute', async () => {
       const observed: { signal?: AbortSignal; timeout?: number } = {};
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
       toolbox.register({
         name: 'capture',
         description: 'captures context',
@@ -5610,7 +5653,7 @@ describe('createToolbox', () => {
 
     it('uses request authority owner and deadline for toolbox lifecycle admission', async () => {
       let executions = 0;
-      const toolbox = createToolbox([
+      const toolbox = createMutableToolbox([
         createTool({
           name: 'expired-toolbox-deadline',
           description: 'rejects expired toolbox deadlines',
@@ -5644,7 +5687,7 @@ describe('createToolbox', () => {
     });
 
     it('uses metadata concurrency when provided', async () => {
-      const toolbox = createToolbox([], { concurrency: 10 });
+      const toolbox = createMutableToolbox([], { concurrency: 10 });
       toolbox.register({
         name: 'meta-concurrency',
         description: 'metadata concurrency',
@@ -5658,7 +5701,7 @@ describe('createToolbox', () => {
     });
 
     it('ignores non-positive concurrency values', () => {
-      const toolbox = createToolbox([], { concurrency: 0 });
+      const toolbox = createMutableToolbox([], { concurrency: 0 });
       toolbox.register({
         name: 'no-concurrency',
         description: 'invalid concurrency',
@@ -5671,9 +5714,12 @@ describe('createToolbox', () => {
     });
 
     it('honors boolean policy decisions', async () => {
-      const toolbox = createToolbox([], {
+      const toolbox = createMutableToolbox([], {
         policy: {
-          beforeExecute: () => false,
+          // `beforeExecute` tolerates a bare boolean at runtime (see
+          // `typeof decision === 'boolean'` in `src/create-toolbox.ts`),
+          // but its declared type only allows `ToolPolicyDecision | void`.
+          beforeExecute: (() => false) as unknown as () => { allow: boolean },
         },
       });
       toolbox.register({
@@ -5691,7 +5737,7 @@ describe('createToolbox', () => {
     });
 
     it('merges registry and tool policy contexts', async () => {
-      const toolbox = createToolbox([], {
+      const toolbox = createMutableToolbox([], {
         policyContext: { fromRegistry: true },
       });
       toolbox.register({
@@ -5716,7 +5762,7 @@ describe('createToolbox', () => {
     });
 
     it('denies mutating tools based on tags in read-only mode', async () => {
-      const toolbox = createToolbox([], { readOnly: true });
+      const toolbox = createMutableToolbox([], { readOnly: true });
       toolbox.register({
         name: 'tag-mutating',
         description: 'tag mutating',
@@ -5733,7 +5779,7 @@ describe('createToolbox', () => {
     });
 
     it('denies dangerous tools based on tags when allowDangerous is false', async () => {
-      const toolbox = createToolbox([], { allowDangerous: false });
+      const toolbox = createMutableToolbox([], { allowDangerous: false });
       toolbox.register({
         name: 'tag-dangerous',
         description: 'tag dangerous',
@@ -5758,7 +5804,7 @@ describe('createToolbox', () => {
         }
         return texts.map(() => [1, 0, 0]);
       };
-      const toolbox = createToolbox([], { embed });
+      const toolbox = createMutableToolbox([], { embed });
       toolbox.register(makeConfiguration({ name: 'retry-embed' }));
 
       await Promise.resolve();
@@ -5777,7 +5823,7 @@ describe('createToolbox', () => {
           resolveEmbeddings = resolve;
         });
 
-      const toolbox = createToolbox([], { embed });
+      const toolbox = createMutableToolbox([], { embed });
       toolbox.register(makeConfiguration({ name: 'swap' }));
       toolbox.register(makeConfiguration({ name: 'swap', description: 'second' }));
 
@@ -5797,7 +5843,7 @@ describe('createToolbox', () => {
     });
 
     it('supports async getTool resolvers during deserialization', async () => {
-      const toolbox = createToolbox(
+      const toolbox = createMutableToolbox(
         [
           {
             name: 'async-resolved-tool',
@@ -5821,7 +5867,7 @@ describe('createToolbox', () => {
     });
 
     it('returns a useful error when getTool resolves to a non-function', async () => {
-      const toolbox = createToolbox(
+      const toolbox = createMutableToolbox(
         [
           {
             name: 'broken-tool',
@@ -5852,7 +5898,7 @@ describe('createToolbox', () => {
         metadata: { ...configuration.metadata, enhanced: true },
       }));
 
-      const toolbox = createToolbox([], { middleware: [middleware] });
+      const toolbox = createMutableToolbox([], { middleware: [middleware] });
       toolbox.register(makeConfiguration({ name: 'test' }));
 
       const tool = toolbox.getTool('test');
@@ -5862,10 +5908,22 @@ describe('createToolbox', () => {
 
   describe('multi-tool execution', () => {
     it('executes multiple tools and returns results in order', async () => {
-      const toolbox = createToolbox();
+      const toolbox = createMutableToolbox();
       toolbox.register(
-        makeConfiguration({ name: 'add', execute: async ({ a, b }) => a + b }),
-        makeConfiguration({ name: 'subtract', execute: async ({ a, b }) => a - b }),
+        makeConfiguration({
+          name: 'add',
+          execute: async (params) => {
+            const { a, b } = params as { a: number; b: number };
+            return a + b;
+          },
+        }),
+        makeConfiguration({
+          name: 'subtract',
+          execute: async (params) => {
+            const { a, b } = params as { a: number; b: number };
+            return a - b;
+          },
+        }),
       );
 
       const results = await toolbox.execute([
@@ -6067,11 +6125,13 @@ describe('createToolbox', () => {
   describe('loop detection integration', () => {
     it('emits loop-warning for repeated calls', async () => {
       const toolbox = createToolbox([makeConfiguration()], {
-        loopDetection: { warningThreshold: 3, blockThreshold: 6, windowSize: 30 },
+        loopDetection: { warningThreshold: 3, blockThreshold: 6, maxWindowSize: 30 },
       });
 
       const warnings: unknown[] = [];
-      toolbox.addEventListener('loop-warning', (e) => warnings.push(e));
+      toolbox.addEventListener('loop-warning', (e) => {
+        warnings.push(e);
+      });
 
       for (let i = 0; i < 4; i++) {
         await toolbox.execute({ id: `lw-${i}`, name: 'sum', arguments: { a: 1, b: 2 } });
@@ -6082,17 +6142,19 @@ describe('createToolbox', () => {
 
     it('blocks at block threshold', async () => {
       const toolbox = createToolbox([makeConfiguration()], {
-        loopDetection: { warningThreshold: 2, blockThreshold: 4, windowSize: 30 },
+        loopDetection: { warningThreshold: 2, blockThreshold: 4, maxWindowSize: 30 },
       });
 
-      const results = [];
+      const results: ToolExecutionResult[] = [];
       for (let i = 0; i < 5; i++) {
         results.push(
           await toolbox.execute({ id: `lb-${i}`, name: 'sum', arguments: { a: 1, b: 2 } }),
         );
       }
 
-      const blocked = results.filter((r) => r.outcome === 'error' && r.content?.includes('loop'));
+      const blocked = results.filter(
+        (r) => r.outcome === 'error' && (r.content as string | undefined)?.includes('loop'),
+      );
       expect(blocked.length).toBeGreaterThan(0);
     });
 
@@ -6100,7 +6162,9 @@ describe('createToolbox', () => {
       const toolbox = createToolbox([makeConfiguration()]);
 
       const warnings: unknown[] = [];
-      toolbox.addEventListener('loop-warning', (e) => warnings.push(e));
+      toolbox.addEventListener('loop-warning', (e) => {
+        warnings.push(e);
+      });
 
       for (let i = 0; i < 5; i++) {
         await toolbox.execute({ id: `nd-${i}`, name: 'sum', arguments: { a: 1, b: 2 } });
@@ -6115,7 +6179,9 @@ describe('createToolbox', () => {
       });
 
       const warnings: unknown[] = [];
-      toolbox.addEventListener('loop-warning', (e) => warnings.push(e));
+      toolbox.addEventListener('loop-warning', (e) => {
+        warnings.push(e);
+      });
 
       // Default warningThreshold is 10, so 11 identical calls should trigger a warning
       for (let i = 0; i < 11; i++) {
@@ -6127,11 +6193,13 @@ describe('createToolbox', () => {
 
     it('emits loop-blocked event', async () => {
       const toolbox = createToolbox([makeConfiguration()], {
-        loopDetection: { warningThreshold: 2, blockThreshold: 4, windowSize: 30 },
+        loopDetection: { warningThreshold: 2, blockThreshold: 4, maxWindowSize: 30 },
       });
 
       const blocked: unknown[] = [];
-      toolbox.addEventListener('loop-blocked', (e) => blocked.push(e));
+      toolbox.addEventListener('loop-blocked', (e) => {
+        blocked.push(e);
+      });
 
       for (let i = 0; i < 5; i++) {
         await toolbox.execute({ id: `bl-${i}`, name: 'sum', arguments: { a: 1, b: 2 } });
@@ -6142,7 +6210,7 @@ describe('createToolbox', () => {
 
     it('dispatches a companion error event carrying the same rejected result for loop-blocked, mirroring budget-exceeded (AB-231)', async () => {
       const toolbox = createToolbox([makeConfiguration()], {
-        loopDetection: { warningThreshold: 2, blockThreshold: 4, windowSize: 30 },
+        loopDetection: { warningThreshold: 2, blockThreshold: 4, maxWindowSize: 30 },
       });
 
       const blocked: Array<{
@@ -6151,10 +6219,14 @@ describe('createToolbox', () => {
       const errors: Array<{
         result: { error?: { code?: string; category?: string } };
       }> = [];
-      toolbox.addEventListener('loop-blocked', (e) => blocked.push(e as (typeof blocked)[number]));
-      toolbox.addEventListener('error', (e) => errors.push(e as (typeof errors)[number]));
+      toolbox.addEventListener('loop-blocked', (e) => {
+        blocked.push(e as unknown as (typeof blocked)[number]);
+      });
+      toolbox.addEventListener('error', (e) => {
+        errors.push(e as (typeof errors)[number]);
+      });
 
-      let blockedResult: Awaited<ReturnType<typeof toolbox.execute>> | undefined;
+      let blockedResult: ToolExecutionResult | undefined;
       for (let i = 0; i < 5; i++) {
         const result = await toolbox.execute({
           id: `blce-${i}`,
@@ -6217,7 +6289,8 @@ describe('createToolbox', () => {
       const sumTool = makeConfiguration({ name: 'sum' });
       const diffTool = makeConfiguration({
         name: 'difference',
-        async execute({ a, b }: { a: number; b: number }) {
+        async execute(params) {
+          const { a, b } = params as { a: number; b: number };
           return a - b;
         },
       });

@@ -165,7 +165,7 @@
   ],
   "scripts": {
     "build": "tsdown",
-    "check-types": "tsc --noEmit --incremental false",
+    "check-types": "tsc --noEmit --incremental false && tsc -p tsconfig.test.json --incremental false",
     "ci": "bun run validate && bun run build",
     "coverage:check": "bun run ../../scripts/check-coverage.ts",
     "dev": "bun --watch run src/index.ts",

@@ -55,7 +55,13 @@ function encodeLegacyRecord(record: MemoryRecord): Uint8Array {
 }
 
 describe('createWeftMemoryRecordStorage (Weft-specific)', () => {
-  let underlying: MemoryStorage;
+  // `@lostgradient/weft/storage`'s published `.d.ts` re-exports `MemoryStorage`
+  // through a `declare const exportedMemoryStorage: typeof MemoryStorage` alias,
+  // which carries the value binding but not the class's type — `MemoryStorage`
+  // is therefore usable as a constructor but not as a type annotation here.
+  // `InstanceType<typeof MemoryStorage>` recovers the instance type without
+  // patching the package. Filed upstream: WFT (weft storage barrel).
+  let underlying: InstanceType<typeof MemoryStorage>;
   let storage: MemoryRecordStorage;
 
   beforeEach(async () => {

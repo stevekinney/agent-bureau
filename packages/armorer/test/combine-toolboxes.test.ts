@@ -11,21 +11,21 @@ describe('combineToolboxes', () => {
 
   it('combines tools from multiple toolboxes', async () => {
     const a = createToolbox([
-      {
+      createTool({
         name: 'tool-a',
         description: 'tool a',
         input: z.object({}),
         execute: async () => 'A',
-      },
+      }),
     ]);
 
     const b = createToolbox([
-      {
+      createTool({
         name: 'tool-b',
         description: 'tool b',
         input: z.object({}),
         execute: async () => 'B',
-      },
+      }),
     ]);
 
     const combined = combineToolboxes(a, b);
@@ -39,21 +39,21 @@ describe('combineToolboxes', () => {
 
   it('prefers later toolboxes on name collisions', async () => {
     const first = createToolbox([
-      {
+      createTool({
         name: 'echo',
         description: 'echo',
         input: z.object({ value: z.string() }),
         execute: async ({ value }) => `first:${value}`,
-      },
+      }),
     ]);
 
     const second = createToolbox([
-      {
+      createTool({
         name: 'echo',
         description: 'echo',
         input: z.object({ value: z.string() }),
         execute: async ({ value }) => `second:${value}`,
-      },
+      }),
     ]);
 
     const combined = combineToolboxes(first, second);
@@ -69,19 +69,19 @@ describe('combineToolboxes', () => {
   it('merges contexts from all toolboxes (last wins)', async () => {
     const a = createToolbox(
       [
-        {
+        createTool({
           name: 'ctx',
           description: 'ctx',
           input: z.object({}),
           execute: async (_params, context) => {
-            const ctx = context as Record<string, unknown>;
+            const ctx = context as unknown as Record<string, unknown>;
             return {
               workspaceId: ctx.workspaceId,
               role: ctx.role,
               shared: ctx.shared,
             };
           },
-        },
+        }),
       ],
       {
         context: { workspaceId: 'ws-1', shared: 'a' },

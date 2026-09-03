@@ -6,6 +6,7 @@ import { HookRegistry } from 'lifecycle';
 import { noToolCalls } from '../src/conditions/predicates';
 import { createActiveRun } from '../src/create-run';
 import { BudgetExceededError, ElicitationDeniedError, GuardrailTripwireError } from '../src/errors';
+import type { RunCompletedEvent, RunTripwireEvent } from '../src/events';
 import type { OperativeHookMap } from '../src/hooks';
 import { createRunRecorder } from '../src/test/index';
 import type { GenerateResponse } from '../src/types';
@@ -69,7 +70,7 @@ describe('expanded finish reasons', () => {
 
     const completedEvents = recorder.events.filter((e) => e.type === 'run.completed');
     expect(completedEvents).toHaveLength(1);
-    expect((completedEvents[0].detail as { finishReason: string }).finishReason).toBe(
+    expect((completedEvents[0].detail as RunCompletedEvent).result.finishReason).toBe(
       'elicitation-denied',
     );
   });
@@ -208,17 +209,11 @@ describe('expanded finish reasons', () => {
 
       const completedEvents = recorder.events.filter((e) => e.type === 'run.completed');
       expect(completedEvents).toHaveLength(1);
-      expect((completedEvents[0].detail as { finishReason: string }).finishReason).toBe('tripwire');
+      expect((completedEvents[0].detail as RunCompletedEvent).result.finishReason).toBe('tripwire');
 
       const tripwireEvents = recorder.events.filter((e) => e.type === 'run.tripwire');
       expect(tripwireEvents).toHaveLength(1);
-      const tripwireDetail = tripwireEvents[0].detail as {
-        guardrailName: string;
-        category: string;
-        phase: string;
-        confidence: number;
-        detail?: string;
-      };
+      const tripwireDetail = tripwireEvents[0].detail as RunTripwireEvent;
       expect(tripwireDetail.guardrailName).toBe('prompt-injection');
       expect(tripwireDetail.category).toBe('prompt-injection');
       expect(tripwireDetail.phase).toBe('input');

@@ -5,6 +5,7 @@ import { Conversation } from 'conversationalist';
 import { z } from 'zod';
 
 import { createActiveRun } from '../src/create-run';
+import type { RunCompletedEvent } from '../src/events';
 import { createMockGenerate, createRunRecorder } from '../src/test/index';
 import type { GenerateResponse } from '../src/types';
 const run = (options: Parameters<typeof createActiveRun>[0]) => createActiveRun(options).result;
@@ -178,6 +179,6 @@ describe('onMaximumSteps', () => {
 
     const completedEvents = recorder.events.filter((e) => e.type === 'run.completed');
     expect(completedEvents).toHaveLength(1);
-    expect((completedEvents[0].detail as { content: string }).content).toBe('Forced summary');
+    expect((completedEvents[0].detail as RunCompletedEvent).result.content).toBe('Forced summary');
   });
 });

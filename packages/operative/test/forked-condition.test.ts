@@ -63,6 +63,11 @@ describe('forked', () => {
         action: 'session.forked',
         conversation: conversation.current,
         previousConversation: conversation.current,
+        revision: 0,
+        sequence: 0,
+        correlationId: 'test-correlation-id',
+        durability: 'ephemeral',
+        outcome: 'accepted',
       }),
     );
 
@@ -83,6 +88,11 @@ describe('forked', () => {
         action: 'session.forked',
         conversation: conversation.current,
         previousConversation: conversation.current,
+        revision: 0,
+        sequence: 0,
+        correlationId: 'test-correlation-id',
+        durability: 'ephemeral',
+        outcome: 'accepted',
       }),
     );
 
@@ -101,6 +111,11 @@ describe('forked', () => {
         action: 'session.forked',
         conversation: conversation.current,
         previousConversation: conversation.current,
+        revision: 0,
+        sequence: 0,
+        correlationId: 'test-correlation-id',
+        durability: 'ephemeral',
+        outcome: 'accepted',
       }),
     );
 
@@ -130,6 +145,11 @@ describe('forked', () => {
               action: 'session.forked',
               conversation: conversation.current,
               previousConversation: conversation.current,
+              revision: 0,
+              sequence: 0,
+              correlationId: 'test-correlation-id',
+              durability: 'ephemeral',
+              outcome: 'accepted',
             }),
           );
         }
@@ -166,6 +186,11 @@ describe('forked', () => {
         action: 'session.forked',
         conversation: conversation.current,
         previousConversation: conversation.current,
+        revision: 0,
+        sequence: 0,
+        correlationId: 'test-correlation-id',
+        durability: 'ephemeral',
+        outcome: 'accepted',
       }),
     );
 
@@ -200,6 +225,11 @@ describe('forked', () => {
               action: 'session.forked',
               conversation: conversation.current,
               previousConversation: conversation.current,
+              revision: 0,
+              sequence: 0,
+              correlationId: 'test-correlation-id',
+              durability: 'ephemeral',
+              outcome: 'accepted',
             }),
           );
         }

@@ -33,7 +33,7 @@ describe('test helper exports', () => {
     expect(recorder.events).toHaveLength(0);
 
     expect(() => {
-      (recorder as { [Symbol.dispose]: () => void })[Symbol.dispose]();
+      recorder[Symbol.dispose]();
     }).not.toThrow();
   });
 });

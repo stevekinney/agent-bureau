@@ -96,7 +96,7 @@ describe('waitForRunState', () => {
 
   it('throws when the run never reaches the expected state', async () => {
     const store = {
-      getRun: (_id: string) => ({ status: 'running' as const }),
+      getRun: (_id: string): { status: 'running' | 'completed' } => ({ status: 'running' }),
     };
     await expect(
       waitForRunState({ getRun: store.getRun }, 'run-never', (r) => r.status === 'completed'),

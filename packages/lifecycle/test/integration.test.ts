@@ -11,6 +11,12 @@ class PingEvent extends Event {
     super(PingEvent.type);
     this.seq = seq;
   }
+
+  // Narrows the inherited `Event.type: string` to the literal so `dispatch`'s
+  // `M[K] & { type: K }` constraint can match this event to its map key.
+  override get type(): typeof PingEvent.type {
+    return PingEvent.type;
+  }
 }
 
 class PongEvent extends Event {
@@ -21,17 +27,24 @@ class PongEvent extends Event {
     super(PongEvent.type);
     this.data = data;
   }
+
+  override get type(): typeof PongEvent.type {
+    return PongEvent.type;
+  }
 }
 
-interface SourceMap {
+// `type` aliases, not `interface`s: only object type literals get TypeScript's
+// implicit index signature, letting these satisfy `EventMap`'s
+// `Record<string, Event>` constraint without a redundant explicit index signature.
+type SourceMap = {
   [PingEvent.type]: PingEvent;
   [PongEvent.type]: PongEvent;
-}
+};
 
-interface TargetMap {
+type TargetMap = {
   'source.ping': ForwardedEvent<PingEvent>;
   'source.pong': ForwardedEvent<PongEvent>;
-}
+};
 
 describe('integration', () => {
   it('dispatch + addEventListener + toObservable + events all work simultaneously', async () => {

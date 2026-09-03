@@ -327,6 +327,7 @@ describe('versioned frame parsing', () => {
 
     expect(frame.schemaVersion).toBe(RUN_ENVELOPE_SCHEMA_VERSION);
     expect(frame.type).toBe('run-finished');
+    if (frame.type !== 'run-finished') throw new Error('expected a run-finished frame');
     expect(frame.report.output).toEqual({ answer: 'current' });
     expect('structuredOutput' in frame.report).toBe(false);
   });

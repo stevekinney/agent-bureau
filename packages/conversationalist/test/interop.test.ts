@@ -20,7 +20,12 @@ describe('package-local structural interop', () => {
     });
 
     let conversation = createConversationHistory({ id: 'structural-loop' }, environment);
-    conversation = appendUserMessage(conversation, 'What is the weather in Denver?', environment);
+    conversation = appendUserMessage(
+      conversation,
+      'What is the weather in Denver?',
+      undefined,
+      environment,
+    );
     conversation = appendToolCalls(
       conversation,
       [
@@ -37,8 +42,6 @@ describe('package-local structural interop', () => {
       [
         {
           callId: 'call-1',
-          toolCallId: 'call-1',
-          toolName: 'get_weather',
           outcome: 'success',
           content: {
             location: 'Denver',
@@ -100,7 +103,12 @@ describe('package-local structural interop', () => {
     });
 
     let conversation = createConversationHistory({ id: 'stream-loop' }, environment);
-    conversation = appendUserMessage(conversation, 'Stream the weather for Denver.', environment);
+    conversation = appendUserMessage(
+      conversation,
+      'Stream the weather for Denver.',
+      undefined,
+      environment,
+    );
     conversation = appendToolCalls(
       conversation,
       [
@@ -117,8 +125,6 @@ describe('package-local structural interop', () => {
       [
         {
           callId: 'call-stream',
-          toolCallId: 'call-stream',
-          toolName: 'stream_weather',
           outcome: 'success',
           content: undefined,
           result: {

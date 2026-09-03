@@ -3,6 +3,7 @@ import { generateKeyPairSync, sign as signEd25519 } from 'node:crypto';
 import { describe, expect, it } from 'bun:test';
 import { sha256HexSync } from 'interoperability';
 
+import type { FetchFunction } from '../../src/ingestion/fetch-from-registry';
 import { fetchFromRegistry } from '../../src/ingestion/fetch-from-registry';
 import { createMockSkillProvider } from '../../src/test/index';
 
@@ -36,7 +37,7 @@ interface RecordedRequest {
 function createMockFetch(
   responses: Record<string, { status: number; body: string } | 'network-error'>,
   requests: RecordedRequest[] = [],
-): typeof fetch {
+): FetchFunction {
   return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url =
       typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;

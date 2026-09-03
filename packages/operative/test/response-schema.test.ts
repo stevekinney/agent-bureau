@@ -10,6 +10,7 @@ import {
   OutputSchemaConversionError,
   OutputValidationError,
 } from '../src/errors';
+import type { ResponseSchemaFailedEvent } from '../src/events';
 import { validateOutputValue } from '../src/structured-output/response-schema';
 import { createRunRecorder } from '../src/test/index';
 import type { GenerateResponse } from '../src/types';
@@ -232,10 +233,7 @@ describe('structured output enforcement', () => {
 
     const failedEvents = recorder.events.filter((e) => e.type === 'response.schema-failed');
     expect(failedEvents).toHaveLength(1);
-    const detail = failedEvents[0].detail as {
-      content: string;
-      retriesRemaining: number;
-    };
+    const detail = failedEvents[0].detail as ResponseSchemaFailedEvent;
     expect(detail.content).toBe('bad');
     expect(detail.retriesRemaining).toBe(0);
   });

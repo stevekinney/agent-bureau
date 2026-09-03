@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 
 import { createMemory } from '../src/create-memory';
+import type { IntervalHandle } from '../src/file-synchronizer';
 import { createFileSynchronizer } from '../src/file-synchronizer';
 import { createInMemoryMemoryRecordStorage, createMockEmbedder } from '../src/test/index';
 import type { Memory } from '../src/types';
@@ -226,11 +227,11 @@ describe('createFileSynchronizer', () => {
       memory,
       directory: tempDir,
       pollingInterval: 20,
-      setIntervalFunction: ((handler: TimerHandler) => {
-        poll = handler as () => void;
-        return 1 as unknown as ReturnType<typeof setInterval>;
-      }) as typeof setInterval,
-      clearIntervalFunction: (() => {}) as typeof clearInterval,
+      setIntervalFunction: (callback: () => void): IntervalHandle => {
+        poll = callback;
+        return 1;
+      },
+      clearIntervalFunction: (): void => {},
     });
 
     await synchronizer.start();

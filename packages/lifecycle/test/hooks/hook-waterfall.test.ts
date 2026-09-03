@@ -92,9 +92,11 @@ describe('HookRegistry waterfall execution', () => {
 
     registry.on(
       'transform',
-      (_value) => {
+      // Deliberately mistyped: exercises the waterfall's handling of a
+      // misbehaving handler that returns `void` instead of the next value.
+      ((_value: string) => {
         // Intentionally returns void
-      },
+      }) as (value: string) => string,
       { priority: 5 },
     );
 

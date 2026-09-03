@@ -16,6 +16,7 @@ import { redactPii } from '../src/plugins/pii-redaction';
 import type {
   AssistantMessage,
   ConversationHistory,
+  JSONValue,
   MessagePlugin,
   ToolResult,
 } from '../src/types';
@@ -588,11 +589,11 @@ describe('immutable transcript mutations', () => {
   });
 
   it('preserves cross-field plugin transformations caused by a replacement tool result', () => {
-    const annotateSuccessfulResult: MessagePlugin = (input) => ({
-      ...input,
-      metadata:
-        input.toolResult?.outcome === 'success' ? { reviewed: true } : { actionRequired: true },
-    });
+    const annotateSuccessfulResult: MessagePlugin = (input) => {
+      const metadata: Record<string, JSONValue> =
+        input.toolResult?.outcome === 'success' ? { reviewed: true } : { actionRequired: true };
+      return { ...input, metadata };
+    };
     const pluginEnvironment = { ...environment, plugins: [annotateSuccessfulResult] };
     let history = createConversationHistory({}, pluginEnvironment);
     history = appendMessages(

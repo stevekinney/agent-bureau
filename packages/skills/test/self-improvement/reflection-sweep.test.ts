@@ -84,7 +84,7 @@ describe('reflectionSweep — memory sink', () => {
   });
 
   it('uses an unknown initial query when there is no string user message', async () => {
-    const reflect = mock(async () => 'insight');
+    const reflect = mock(async (_runSummary: string) => 'insight');
     const { onStep } = reflectionSweep({
       sink: { type: 'memory', memory },
       reflect,

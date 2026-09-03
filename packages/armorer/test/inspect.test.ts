@@ -13,16 +13,23 @@ import {
 } from '../src/inspect';
 import type { ToolConfiguration } from '../src/is-tool';
 
-const makeConfiguration = (overrides?: Partial<ToolConfiguration>): ToolConfiguration => ({
-  name: 'sum',
-  description: 'add two numbers',
-  input: z.object({ a: z.number(), b: z.number() }),
-  tags: ['math'],
-  async execute({ a, b }) {
-    return a + b;
-  },
-  ...overrides,
-});
+// `createToolbox()` normalizes a friendly config shorthand like this one
+// (deriving `identity`/`id`/`display` at registration time — see
+// `registerConfiguration` in `src/create-toolbox.ts`), so the strict
+// `ToolConfiguration` type doesn't describe what a caller actually needs to
+// supply here. This mirrors that runtime leniency with one documented cast
+// instead of fighting the type at each call site.
+const makeConfiguration = (overrides?: Partial<ToolConfiguration>): ToolConfiguration =>
+  ({
+    name: 'sum',
+    description: 'add two numbers',
+    input: z.object({ a: z.number(), b: z.number() }),
+    tags: ['math'],
+    async execute({ a, b }: { a: number; b: number }) {
+      return a + b;
+    },
+    ...overrides,
+  }) as unknown as ToolConfiguration;
 
 describe('inspect', () => {
   describe('extractSchemaSummary', () => {

@@ -130,7 +130,7 @@ describe('createAnthropicTokenCounter — injected client', () => {
 
     const result = await counter.countTokens(request);
     expect(result).toStrictEqual({
-      totalTokens: COUNT_RESPONSE.input_tokens,
+      totalTokens: COUNT_RESPONSE.input_tokens!,
       provider: 'anthropic',
       model: request.model,
     });
@@ -251,7 +251,7 @@ describe('createAnthropicTokenCounter — SDK construction', () => {
       });
 
       expect(result).toStrictEqual({
-        totalTokens: COUNT_RESPONSE.input_tokens,
+        totalTokens: COUNT_RESPONSE.input_tokens!,
         provider: 'anthropic',
         model: 'claude-sonnet-5',
       });

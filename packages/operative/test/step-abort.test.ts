@@ -6,6 +6,7 @@ import { z } from 'zod';
 
 import { noToolCalls } from '../src/conditions/predicates';
 import { createActiveRun } from '../src/create-run';
+import type { StepAbortedEvent } from '../src/events';
 import { createMockGenerate, createRunRecorder } from '../src/test/index';
 import type { GenerateResponse } from '../src/types';
 const run = (options: Parameters<typeof createActiveRun>[0]) => createActiveRun(options).result;
@@ -109,10 +110,8 @@ describe('per-step abort granularity', () => {
 
     const stepAbortedEvents = recorder.events.filter((event) => event.type === 'step.aborted');
     expect(stepAbortedEvents).toHaveLength(1);
-    expect((stepAbortedEvents[0].detail as { step: number; reason?: string }).step).toBe(0);
-    expect((stepAbortedEvents[0].detail as { step: number; reason?: string }).reason).toBe(
-      'skip first',
-    );
+    expect((stepAbortedEvents[0].detail as StepAbortedEvent).step).toBe(0);
+    expect((stepAbortedEvents[0].detail as StepAbortedEvent).reason).toBe('skip first');
   });
 
   it('run-level abort still aborts step signals', async () => {
@@ -149,7 +148,7 @@ describe('per-step abort granularity', () => {
     const originalExecute = toolbox.execute.bind(toolbox);
     (toolbox as any).execute = async (...args: any[]) => {
       receivedSignal = args[1]?.signal;
-      return originalExecute(...args);
+      return (originalExecute as (...callArgs: any[]) => Promise<unknown>)(...args);
     };
 
     const generate = createMockGenerate([

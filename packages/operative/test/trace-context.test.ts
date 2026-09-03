@@ -4,6 +4,7 @@ import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
 import { z } from 'zod';
 
+import type { AgentRun } from '../src/agent-run.ts';
 import { noToolCalls } from '../src/conditions/predicates.ts';
 import { createActiveRun } from '../src/create-run.ts';
 import { createSubagentTool } from '../src/create-subagent-tool.ts';
@@ -29,15 +30,15 @@ describe('trace context propagation', () => {
       const traceContext = { traceId: 'parent-trace-123' };
       const toolbox = createToolbox(
         [
-          {
+          createTool({
             name: 'spy',
             description: 'spy tool',
             input: z.object({ input: z.string() }),
-            execute: async (_params: unknown, context: { traceContext?: unknown }) => {
-              receivedTraceContext = context.traceContext;
+            execute: async (_params, context) => {
+              receivedTraceContext = (context as { traceContext?: unknown }).traceContext;
               return 'ok';
             },
-          },
+          }),
         ],
         { context: { traceContext } },
       );
@@ -79,6 +80,7 @@ describe('trace context propagation', () => {
         agentName: 'sub',
         agent: {
           name: 'stub-agent',
+          hasOutput: false,
           run: (_input, context) => {
             receivedTraceContext = context?.traceContext;
             return {
@@ -94,7 +96,7 @@ describe('trace context propagation', () => {
               abort: () => {},
               [Symbol.dispose]: () => {},
               [Symbol.asyncIterator]: () => (async function* () {})(),
-            };
+            } as unknown as AgentRun<string, boolean>;
           },
         },
         input: z.object({ task: z.string() }),
@@ -131,6 +133,7 @@ describe('trace context propagation', () => {
         agentName: 'sub',
         agent: {
           name: 'stub-agent',
+          hasOutput: false,
           run: (_input, context) => {
             receivedTraceContext = context?.traceContext;
             return {
@@ -146,7 +149,7 @@ describe('trace context propagation', () => {
               abort: () => {},
               [Symbol.dispose]: () => {},
               [Symbol.asyncIterator]: () => (async function* () {})(),
-            };
+            } as unknown as AgentRun<string, boolean>;
           },
         },
         input: z.object({ task: z.string() }),

@@ -26,6 +26,7 @@ import { createToolbox, internalToolboxTestUtilities } from '../src/create-toolb
 import { createMCP, internalMcpTestUtilities } from '../src/integrations/mcp';
 import { createSearchTool } from '../src/tools/search-tools';
 import { internalRetryTestUtilities, retry } from '../src/utilities/retry';
+import { createMutableToolbox } from './helpers/mutable-toolbox';
 
 const {
   checkBudget,
@@ -87,7 +88,16 @@ describe('coverage edges', () => {
 
     expect(await resolvePolicyDecision(undefined, {} as any)).toBeUndefined();
     expect(await resolvePolicyDecision(async () => undefined, {} as any)).toBeUndefined();
-    expect(await resolvePolicyDecision(async () => false, {} as any)).toEqual({ allow: false });
+    // `resolvePolicyDecision` accepts a bare boolean at runtime (see
+    // `typeof decision === 'boolean'` in `src/create-toolbox.ts`), but the
+    // `beforeExecute` hook's declared type only allows `ToolPolicyDecision |
+    // void`, so this proves the runtime tolerance with a cast.
+    expect(
+      await resolvePolicyDecision(
+        (async () => false) as unknown as Parameters<typeof resolvePolicyDecision>[0],
+        {} as any,
+      ),
+    ).toEqual({ allow: false });
 
     expect(
       isMutatingToolContext({
@@ -153,7 +163,7 @@ describe('coverage edges', () => {
   });
 
   it('covers toolbox fail-fast and registration edge paths', async () => {
-    const failFastNotFound = createToolbox([], { errorMode: 'failFast' });
+    const failFastNotFound = createToolbox([]);
     await expect(
       failFastNotFound.execute([{ id: 'call-missing', name: 'missing', arguments: {} }], {
         errorMode: 'failFast',
@@ -172,7 +182,6 @@ describe('coverage edges', () => {
         }),
       ],
       {
-        errorMode: 'failFast',
         budget: { maxCalls: 0 },
       },
     );
@@ -189,13 +198,13 @@ describe('coverage edges', () => {
           description: 'bad',
           input: z.object({}),
           execute: { then: 'nope' } as any,
-        },
+        } as any,
       ]),
     ).toThrow(
       'Tool "bad-execute" has invalid execute. Expected a function or a promise that resolves to a function.',
     );
 
-    const toolboxWithAsyncMiddleware = createToolbox([], {
+    const toolboxWithAsyncMiddleware = createMutableToolbox([], {
       middleware: [async (configuration) => configuration] as any,
     });
     expect(() =>
@@ -231,7 +240,7 @@ describe('coverage edges', () => {
       new Promise<number[][]>((resolve) => {
         embeddingResolutions.push(resolve);
       });
-    const toolbox = createToolbox([], { embed });
+    const toolbox = createMutableToolbox([], { embed });
     const first = createTool({
       name: 'replace-me',
       description: 'first',
@@ -613,7 +622,7 @@ describe('coverage edges', () => {
   });
 
   it('covers retry helpers, search tool legacy guard, and small helper branches', async () => {
-    expect(resolveRetryDelay(2, 10, 'linear')).toBe(10);
+    expect(resolveRetryDelay(2, 10, 'fixed')).toBe(10);
     expect(resolveRetryDelay(3, 10, 'exponential', 25)).toBe(25);
     expect(toError({ ok: true }).message).toBe('{"ok":true}');
     expect(
