@@ -1,7 +1,15 @@
+import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
+
 import type { ActiveRun } from '../create-run';
 import { createScratchpad, type Scratchpad } from '../create-scratchpad';
-import type { OperativeEventMap, OperativeEventType } from '../events';
+import type {
+  CombinedOperativeEventClassMap,
+  CombinedOperativeEventMap,
+  CombinedOperativeEventType,
+} from '../events';
+import { COMBINED_OPERATIVE_EVENT_TYPES } from '../events';
 import type { GenerateFunction, GenerateResponse, StepResult } from '../types';
+import { createEventRecorder } from './event-recorder';
 
 export {
   createManualCheckpointStore,
@@ -15,6 +23,13 @@ export type {
   DurableMultiAgentHarness,
 } from './durable-multi-agent-harness';
 export { createDurableMultiAgentHarness } from './durable-multi-agent-harness';
+export type {
+  CausalTraceEntry,
+  EventRecorder,
+  EventRecorderOwnerIdentity,
+  FiredFault,
+} from './event-recorder';
+export { createEventRecorder } from './event-recorder';
 export type { PromptInjectionFixtureCase } from './prompt-injection-fixtures';
 export { PROMPT_INJECTION_FIXTURES } from './prompt-injection-fixtures';
 export { createStepwiseBlockingGenerate } from './stepwise-generate';
@@ -85,8 +100,8 @@ export function createMockGenerateOnce(response: GenerateResponse): GenerateFunc
  */
 export interface RunRecorder {
   events: Array<{
-    type: OperativeEventType;
-    detail: OperativeEventMap[OperativeEventType];
+    type: CombinedOperativeEventType;
+    detail: CombinedOperativeEventMap[CombinedOperativeEventType];
   }>;
   steps: StepResult[];
   clear: () => void;
@@ -96,53 +111,38 @@ export function createMockScratchpad(initialValues?: Record<string, unknown>): S
   return createScratchpad({ initialValues });
 }
 
-export function createRunRecorder(activeRun: ActiveRun): RunRecorder {
+/**
+ * Reimplemented on top of `createEventRecorder` (AB-255): the deleted
+ * hand-maintained 32-entry `eventTypes` array is replaced by
+ * `COMBINED_OPERATIVE_EVENT_TYPES`, the runtime-visible complete list
+ * `events.ts`'s exhaustiveness check keeps honest. `EventRecorder.attach`
+ * does the actual subscription (proving `createRunRecorder` is genuinely
+ * built on it, not merely importing the constant it exports); `events`/
+ * `steps` are captured through a second, independent listener registration
+ * over that same shared constant, kept in lockstep with `attach`'s
+ * subscription by construction (one array, not two hand-maintained lists)
+ * rather than by sharing storage — `EventRecorder.normalize()`'s portable,
+ * byte-identical-across-machines projection deliberately collapses a class
+ * instance (e.g. `Conversation`) to `{ $kind: 'Conversation' }`, which would
+ * break existing consumers that assert `.detail.conversation instanceof
+ * Conversation`. `RunRecorder`'s `.detail` stays the raw dispatched event,
+ * exactly as before this slice.
+ */
+export function createRunRecorder(
+  activeRun: ActiveRun,
+  runtime: RuntimeServices = createDefaultRuntimeServices(),
+): RunRecorder {
   const events: RunRecorder['events'] = [];
   const steps: StepResult[] = [];
 
-  const eventTypes: OperativeEventType[] = [
-    'run.started',
-    'step.started',
-    'step.generated',
-    'tools.executing',
-    'tools.executed',
-    'step.completed',
-    'run.completed',
-    'run.error',
-    'run.aborted',
-    'run.tripwire',
-    'step.aborted',
-    'generate.started',
-    'generate.completed',
-    'generate.error',
-    'generate.retry',
-    'response.validated',
-    'tool-result.validated',
-    'context.compacted',
-    'response.schema-failed',
-    'elicitation.requested',
-    'elicitation.resolved',
-    'backpressure.applied',
-    'backpressure.released',
-    'usage.accumulated',
-    'session.saved',
-    'session.loaded',
-    'context.budget-warning',
-    // Steering (AB-90 child ab90-01 / AB-221): only `steering.applied` is
-    // dispatched by this package today (from `runStep`'s AB-67/AB-198
-    // boundary); the other four are exported for AB-199's admission path to
-    // dispatch through the same ActiveRun surface once it exists. Listed
-    // here now so a consumer test using this recorder can assert on any of
-    // them without another silent gap.
-    'steering.accepted',
-    'steering.applied',
-    'steering.rejected',
-    'steering.superseded',
-    'steering.failed',
-  ];
+  const recorder = createEventRecorder(runtime);
+  recorder.attach<CombinedOperativeEventClassMap>(activeRun, {
+    kind: 'run-recorder',
+    id: 'legacy-run-recorder',
+  });
 
-  for (const type of eventTypes) {
-    activeRun.addEventListener(type, (event: Event) => {
+  for (const type of COMBINED_OPERATIVE_EVENT_TYPES) {
+    activeRun.addEventListener(type, (event) => {
       events.push({ type, detail: event });
       if (type === 'step.completed') {
         steps.push(event as unknown as StepResult);

@@ -2473,13 +2473,15 @@ Test helpers for the agent loop. Import in test files only.
 
 ```typescript
 import {
+  createEventRecorder,
+  createManualRuntimeServices,
   createMockGenerate,
   createMockGenerateOnce,
   createRunRecorder,
   createMockScratchpad,
   createTestStore,
 } from '@lostgradient/operative/test';
-import type { RunRecorder } from '@lostgradient/operative/test';
+import type { EventRecorder, RunRecorder } from '@lostgradient/operative/test';
 import { createActiveRun, stopWhen } from '@lostgradient/operative';
 
 // Replay pre-canned responses in sequence
@@ -2488,11 +2490,15 @@ const generate = createMockGenerate([
   { content: 'Step 2 response', toolCalls: [], usage: { prompt: 5, completion: 8, total: 13 } },
 ]);
 
+// A deterministic RuntimeServices — no real timer or real clock anywhere in it
+const runtime = createManualRuntimeServices();
+
 const activeRun = createActiveRun({
   generate,
   toolbox,
   conversation,
   stopWhen: stopWhen.noToolCalls(),
+  runtime,
 });
 
 // Record every event for assertion
@@ -2503,6 +2509,13 @@ expect(recorder.events.map((e) => e.type)).toContain('run.completed');
 expect(recorder.steps).toHaveLength(2);
 expect(generate.callCount).toBe(2);
 
+// EventRecorder (AB-92/AB-255): subscribes through the complete event-map
+// type, no hand-maintained allowlist, and normalizes into a portable,
+// byte-identical-across-machines causal trace.
+const eventRecorder: EventRecorder = createEventRecorder(runtime);
+eventRecorder.attach(activeRun, { kind: 'run', id: 'example' });
+eventRecorder.assertHappensBefore('run.started', 'run.completed');
+
 // Single-shot generate — throws if called more than once
 const once = createMockGenerateOnce({ content: 'Only once', toolCalls: [] });
 
@@ -2512,15 +2525,17 @@ const store = createTestStore();
 
 **Exported:**
 
-| Symbol                                 | Description                                                                                    |
-| -------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `createMockGenerate(responses)`        | Replays `GenerateResponse[]` in sequence; exposes `.calls` and `.callCount`.                   |
-| `createMockGenerateOnce(response)`     | Returns response once; throws on subsequent calls.                                             |
-| `createRunRecorder(activeRun)`         | Records all events from an `ActiveRun` for assertion. Exposes `.events`, `.steps`, `.clear()`. |
-| `createMockScratchpad(initialValues?)` | In-memory `Scratchpad` for testing scratchpad-dependent agents.                                |
-| `createTestStore()`                    | In-memory `Store` instance from `@lostgradient/operative/store`.                               |
+| Symbol                                   | Description                                                                                                                                                                                 |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `createMockGenerate(responses)`          | Replays `GenerateResponse[]` in sequence; exposes `.calls` and `.callCount`.                                                                                                                |
+| `createMockGenerateOnce(response)`       | Returns response once; throws on subsequent calls.                                                                                                                                          |
+| `createRunRecorder(activeRun, runtime?)` | Records all events from an `ActiveRun` for assertion. Exposes `.events`, `.steps`, `.clear()`. Built on `createEventRecorder`.                                                              |
+| `createEventRecorder(runtime)`           | AB-92/AB-255's `EventRecorder`: `attach`/`attachIterable` a resource's complete event-map type, `normalize()` into a portable `CausalTraceEntry[]`, `assertSequence`/`assertHappensBefore`. |
+| `createManualRuntimeServices(options?)`  | Deterministic `RuntimeServices` (AB-92/AB-252): explicit `advance(ms)`/`setTime(epoch)` time control, seeded identifiers and randomness, no real timer.                                     |
+| `createMockScratchpad(initialValues?)`   | In-memory `Scratchpad` for testing scratchpad-dependent agents.                                                                                                                             |
+| `createTestStore()`                      | In-memory `Store` instance from `@lostgradient/operative/store`.                                                                                                                            |
 
-| `RunRecorder`
+**Exported types:** `RunRecorder`, `EventRecorder`, `CausalTraceEntry`, `EventRecorderOwnerIdentity`, `FiredFault`, `ManualRuntimeServices`.
 
 ---
 

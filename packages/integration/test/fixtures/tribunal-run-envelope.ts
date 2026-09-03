@@ -218,7 +218,13 @@ export function captureRunEnvelope<O, H extends boolean>(
       }
       if (step.done) return;
       const event = step.value;
-      const listener = listeners.get(event.type);
+      // `event.type` is `string` (the DOM `Event.type` field's own type);
+      // AB-255 narrowed `CombinedOperativeEventType` from an effectively
+      // unconstrained `string` (a latent gap: `CombinedOperativeEventMap`'s
+      // `extends EventMap` index signature was collapsing `keyof` to
+      // `string`) to the real finite union, so this lookup needs the same
+      // cast `event-forwarding.test.ts` already uses for the same reason.
+      const listener = listeners.get(event.type as CombinedOperativeEventType);
       listener?.(event);
     }
   })();
