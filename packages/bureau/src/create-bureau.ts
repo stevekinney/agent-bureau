@@ -981,8 +981,10 @@ export function createWakeupContext(servicesRef: {
       }
     },
     // Only ever constructed inside the `options.wakeup && runtime.durable`
-    // guard above, so this context always backs a real durable run
-    // (AB-41 / AB-43 — the durability signal threaded into the tool's context).
+    // guard (below, in `createBureau`'s run composition — same placement as
+    // `createHumanWaitContext`'s own guard), so this context always backs a
+    // real durable run (AB-41 / AB-43 — the durability signal threaded into
+    // the tool's context).
     durable: true,
   };
 }
