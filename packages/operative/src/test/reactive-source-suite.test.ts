@@ -166,8 +166,8 @@ function createCapturingTestRunner(): {
 }
 
 /** Runs `options` through the suite and returns each case's outcome. */
-async function runCapturingly(
-  options: ReactiveSourceConformanceOptions<CounterSnapshot>,
+async function runCapturingly<TSnapshot>(
+  options: ReactiveSourceConformanceOptions<TSnapshot>,
 ): Promise<CapturedCase[]> {
   const { runner, run } = createCapturingTestRunner();
   runReactiveSourceConformanceSuite(options, runner);
@@ -484,4 +484,37 @@ it('does not register serializableLocatorRoundTrip when reattach is absent', asy
   const results = await runCapturingly(options);
   expect(results.some((result) => result.name === 'serializableLocatorRoundTrip')).toBe(false);
   expect(results.every((result) => result.error === undefined)).toBe(true);
+});
+
+it('names the failing case when a snapshot is not structured-cloneable', async () => {
+  // Not `CounterSnapshot`: this fixture's whole point is a snapshot shape
+  // `structuredClone` rejects, so it needs its own non-cloneable type.
+  interface UnclonableSnapshot {
+    readonly value: number;
+    readonly handler: () => void;
+  }
+
+  function createUnclonableSubject(): ReactiveSourceSubject<UnclonableSnapshot> {
+    const snapshot: UnclonableSnapshot = { value: 0, handler: () => {} };
+    return {
+      getSnapshot: () => snapshot,
+      subscribeSnapshot: () => () => {},
+    };
+  }
+
+  const options: ReactiveSourceConformanceOptions<UnclonableSnapshot> = {
+    label: 'unclonable snapshot',
+    createSubject: createUnclonableSubject,
+    triggerChange: async () => {},
+    createAlreadyTerminalSubject: createUnclonableSubject,
+  };
+
+  const results = await runCapturingly(options);
+  const result = results.find((entry) => entry.name === 'immutableReplacementAfterChange');
+  const error = result?.error;
+  if (!(error instanceof Error)) {
+    throw new Error('expected immutableReplacementAfterChange to fail with an Error');
+  }
+  expect(error.message).toContain('immutableReplacementAfterChange');
+  expect(error.message).toContain('structured-cloneable');
 });

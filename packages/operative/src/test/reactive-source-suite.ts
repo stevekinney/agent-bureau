@@ -106,6 +106,27 @@ export interface ReactiveSourceConformanceTestRunner {
 
 const defaultTestRunner: ReactiveSourceConformanceTestRunner = { describe, it };
 
+/**
+ * `structuredClone`, guarded: several cases below clone a snapshot purely
+ * to compare it against a later read without holding a live reference. A
+ * snapshot type containing something the structured clone algorithm
+ * rejects (a function, most host objects) makes that clone throw — without
+ * this wrapper, a low-signal `DOMException` naming neither the case nor the
+ * requirement violated. `caseName` names the `it()` this call is running
+ * inside, so the rethrown error is actionable on its own.
+ */
+function cloneSnapshot<TSnapshot>(snapshot: TSnapshot, caseName: string): TSnapshot {
+  try {
+    return structuredClone(snapshot);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `${caseName}: this suite clones each snapshot it reads, so TSnapshot must be structured-cloneable (see MDN's "structured clone algorithm"); structuredClone failed: ${reason}`,
+      { cause: error },
+    );
+  }
+}
+
 function assertStableSnapshotIdentity<TSnapshot>(subject: ReactiveSourceSubject<TSnapshot>): void {
   const first = subject.getSnapshot();
   const second = subject.getSnapshot();
@@ -117,7 +138,7 @@ async function assertImmutableReplacementAfterChange<TSnapshot>(
 ): Promise<void> {
   const subject = options.createSubject();
   const before = subject.getSnapshot();
-  const beforeClone = structuredClone(before);
+  const beforeClone = cloneSnapshot(before, 'immutableReplacementAfterChange');
   await options.triggerChange(subject);
   const after = subject.getSnapshot();
   expect(after).not.toBe(before);
@@ -154,7 +175,7 @@ async function assertSubscribeReadRaceClosure<TSnapshot>(
   options: ReactiveSourceConformanceOptions<TSnapshot>,
 ): Promise<void> {
   const subject = options.createSubject();
-  const before = structuredClone(subject.getSnapshot());
+  const before = cloneSnapshot(subject.getSnapshot(), 'subscribeReadRaceClosure');
 
   // The change starts here. `triggerChange` is deterministic (no wall-clock
   // sleep) but still asynchronous: control returns to this line before the
@@ -166,10 +187,10 @@ async function assertSubscribeReadRaceClosure<TSnapshot>(
   const unsubscribe = subject.subscribeSnapshot(() => {
     invalidated = true;
   });
-  const observed = structuredClone(subject.getSnapshot());
+  const observed = cloneSnapshot(subject.getSnapshot(), 'subscribeReadRaceClosure');
 
   await changeCommitted;
-  const after = structuredClone(subject.getSnapshot());
+  const after = cloneSnapshot(subject.getSnapshot(), 'subscribeReadRaceClosure');
   unsubscribe();
 
   const matchesBefore = Bun.deepEquals(observed, before);
@@ -187,12 +208,12 @@ async function assertEarlyCompletionBeforeSubscription<TSnapshot>(
   options: ReactiveSourceConformanceOptions<TSnapshot>,
 ): Promise<void> {
   const subject = options.createAlreadyTerminalSubject();
-  const immediate = structuredClone(subject.getSnapshot());
+  const immediate = cloneSnapshot(subject.getSnapshot(), 'earlyCompletionBeforeSubscription');
   const unsubscribe = subject.subscribeSnapshot(() => {});
   // One microtask tick — enough time for a subject that (incorrectly) needs
   // the act of subscribing to finish delivering its terminal state to do so.
   await Promise.resolve();
-  const afterSubscribe = structuredClone(subject.getSnapshot());
+  const afterSubscribe = cloneSnapshot(subject.getSnapshot(), 'earlyCompletionBeforeSubscription');
   unsubscribe();
   expect(afterSubscribe).toEqual(immediate);
 }
@@ -231,7 +252,7 @@ function assertSerializableLocatorRoundTrip<TSnapshot>(
     );
   }
 
-  const before = structuredClone(subject.getSnapshot());
+  const before = cloneSnapshot(subject.getSnapshot(), 'serializableLocatorRoundTrip');
   // Round-trip through JSON, proving the locator is actually serializable
   // rather than merely structurally cloneable.
   const serializedLocator: unknown = JSON.parse(JSON.stringify(toLocator()));
