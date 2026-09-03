@@ -1,6 +1,11 @@
 import type { RuntimeTimers } from 'lifecycle';
 import { createDefaultRuntimeServices } from 'lifecycle';
 
+import {
+  readBackendDescriptors,
+  unionBackendDescriptors,
+  withBackendDescriptors,
+} from '../backend-descriptor-attachment.ts';
 import { extractStatusCode } from '../errors.ts';
 import type { GenerateFunction } from '../types.ts';
 import { classifyProviderError } from './classify-error.ts';
@@ -23,6 +28,12 @@ const RETRYABLE_CLASSIFICATIONS = new Set<ErrorClassification>(['server-error', 
  * - **unknown**: skip to next provider immediately.
  *
  * When all providers are exhausted, throws `FalloverExhaustedError`.
+ *
+ * Attaches the ordered union of every provider's attached
+ * `BackendDescriptor`(s), deduplicated by `(provider, endpoint, model)`
+ * (AB-64 AC2, AB-245, AB-288) — see `unionBackendDescriptors` — onto the
+ * returned wrapper, so an Agent whose generate is `createFalloverGenerate`'s
+ * output reports the routed or fixed mode rather than opaque.
  */
 export function createFalloverGenerate(options: FalloverOptions): GenerateFunction {
   const runtime = options.runtime ?? createDefaultRuntimeServices();
@@ -43,7 +54,7 @@ export function createFalloverGenerate(options: FalloverOptions): GenerateFuncti
   // Track which providers have previously been on cooldown so we can detect recovery
   const previouslyFailed = new Set<string>();
 
-  return async (context) => {
+  const wrapped: GenerateFunction = async (context) => {
     if (context.signal?.aborted) {
       throw new DOMException('The operation was aborted', 'AbortError');
     }
@@ -130,6 +141,11 @@ export function createFalloverGenerate(options: FalloverOptions): GenerateFuncti
 
     throw new FalloverExhaustedError(collectedErrors);
   };
+
+  return withBackendDescriptors(
+    wrapped,
+    unionBackendDescriptors(providers.map((provider) => readBackendDescriptors(provider.generate))),
+  );
 }
 
 function findNextAvailable(

@@ -1,5 +1,9 @@
 import type { TypedEventTarget } from 'lifecycle';
 
+import {
+  readBackendDescriptors,
+  withBackendDescriptors,
+} from '../providers/backend-descriptor-attachment';
 import type {
   GenerateContext,
   GenerateFunction,
@@ -40,6 +44,11 @@ type ReportedToolCall = { blockId: string; toolName: string };
  *
  * The existing `withStreaming()` remains unchanged — this is a separate,
  * opt-in wrapper.
+ *
+ * Propagates `fn`'s attached `BackendDescriptor`(s) (AB-64, AB-245, AB-288)
+ * onto the returned wrapper — mirrors `withStreaming`'s own propagation, so
+ * an Agent wrapped with `withEnhancedStreaming` reports the same generation
+ * profile it would through the plain `withStreaming` path.
  */
 export function withEnhancedStreaming(
   fn: StreamingGenerateFunction,
@@ -47,7 +56,7 @@ export function withEnhancedStreaming(
 ): GenerateFunction {
   const { eventTarget, onTextDelta, onToolCallStart, onToolCallDelta, liveToolCalls } = options;
 
-  return async (context: GenerateContext): Promise<GenerateResponse> => {
+  const wrapped: GenerateFunction = async (context: GenerateContext): Promise<GenerateResponse> => {
     const { conversation } = context;
     const stateMachine = createStreamStateMachine();
 
@@ -404,6 +413,8 @@ export function withEnhancedStreaming(
       throw error;
     }
   };
+
+  return withBackendDescriptors(wrapped, readBackendDescriptors(fn));
 }
 
 function emitEvent<K extends StreamEvent['type']>(

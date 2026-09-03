@@ -123,3 +123,62 @@ export function readBackendDescriptors(
   const registry = generate as DescriptorBearingFunction & BackendDescriptorBearing;
   return registry[OPERATIVE_BACKEND_DESCRIPTORS] ?? EMPTY_DESCRIPTORS;
 }
+
+/** `(provider, endpoint, model)` as a collision-safe map key. */
+function tripleKey(descriptor: BackendDescriptor): string {
+  return JSON.stringify([descriptor.provider, descriptor.endpoint, descriptor.model]);
+}
+
+/**
+ * Total order over two descriptors sharing the same `(provider, endpoint,
+ * model)` triple — content-only, so which one `unionBackendDescriptors`
+ * keeps never depends on candidate array order. Mirrors
+ * `create-routing-generate.ts`'s `conservativeOrder` exactly: an
+ * `endpointAmbiguous` descriptor sorts first (the more conservative,
+ * capability-flags-false reading), and `freshness` (lexicographic, which is
+ * also chronological for an ISO 8601 UTC timestamp) is the final tiebreak
+ * when every other field is identical.
+ */
+function conservativeOrder(a: BackendDescriptor, b: BackendDescriptor): number {
+  const aAmbiguous = a.endpointAmbiguous === true;
+  const bAmbiguous = b.endpointAmbiguous === true;
+  if (aAmbiguous !== bAmbiguous) return aAmbiguous ? -1 : 1;
+  const { freshness: aFreshness, ...aRest } = a;
+  const { freshness: bFreshness, ...bRest } = b;
+  const aSerialized = JSON.stringify(aRest);
+  const bSerialized = JSON.stringify(bRest);
+  if (aSerialized !== bSerialized) return aSerialized < bSerialized ? -1 : 1;
+  return aFreshness < bFreshness ? -1 : aFreshness > bFreshness ? 1 : 0;
+}
+
+/**
+ * The ordered union of every list in `descriptorLists`, deduplicated by
+ * `(provider, endpoint, model)` and ordered by that triple lexicographically
+ * (AB-64 AC2, AB-245, AB-288) — so a multi-candidate wrapper's attached
+ * descriptors are deterministic regardless of candidate declaration order or
+ * which descriptors are shared across candidates. A collision (two
+ * candidates' descriptors sharing the same triple but disagreeing on
+ * content) is resolved by `conservativeOrder`, not by insertion order.
+ *
+ * Used by `createFallbackGenerate` and `createFalloverGenerate` (AB-288) to
+ * union their candidates' attached descriptors the same way
+ * `create-routing-generate.ts`'s own (route-shaped) `unionDescriptors`
+ * unions routes' — see that module for the fuller rationale this shares.
+ */
+export function unionBackendDescriptors(
+  descriptorLists: readonly (readonly BackendDescriptor[])[],
+): readonly BackendDescriptor[] {
+  const byKey = new Map<string, BackendDescriptor>();
+  for (const descriptors of descriptorLists) {
+    for (const descriptor of descriptors) {
+      const key = tripleKey(descriptor);
+      const existing = byKey.get(key);
+      if (!existing || conservativeOrder(descriptor, existing) < 0) {
+        byKey.set(key, descriptor);
+      }
+    }
+  }
+  return [...byKey.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([, descriptor]) => descriptor);
+}

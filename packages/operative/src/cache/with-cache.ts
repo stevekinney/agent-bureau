@@ -8,6 +8,10 @@
 
 import type { TextValueStore } from '@lostgradient/weft/storage';
 
+import {
+  readBackendDescriptors,
+  withBackendDescriptors,
+} from '../providers/backend-descriptor-attachment';
 import type { GenerateContext, GenerateFunction } from '../types';
 import { conversationHashKey, lastMessageKey } from './cache-keys';
 import type { CacheEntry, CacheKeyFunction, CacheOptions } from './types';
@@ -71,6 +75,11 @@ async function evictOldest(
  *
  * On cache hit the stored response is returned without calling the underlying
  * generate function. On miss, the response is computed, stored, and returned.
+ *
+ * Propagates `generate`'s attached `BackendDescriptor`(s) (AB-64, AB-245,
+ * AB-288) onto the returned wrapper, so caching a provider factory's
+ * generate function doesn't silently downgrade the reported generation
+ * profile to `opaque`.
  */
 export function withCache(generate: GenerateFunction, options: CacheOptions): GenerateFunction {
   const {
@@ -92,7 +101,7 @@ export function withCache(generate: GenerateFunction, options: CacheOptions): Ge
   let entryCount = -1;
   let countInitialized = false;
 
-  return async (context: GenerateContext) => {
+  const wrapped: GenerateFunction = async (context: GenerateContext) => {
     // Lazily initialize the entry count from the store on first call
     if (!countInitialized) {
       const keys = await store.list(namespace);
@@ -166,4 +175,6 @@ export function withCache(generate: GenerateFunction, options: CacheOptions): Ge
     onMiss?.({ key, duration });
     return response;
   };
+
+  return withBackendDescriptors(wrapped, readBackendDescriptors(generate));
 }

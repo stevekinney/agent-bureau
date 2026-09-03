@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'bun:test';
 import { createManualRuntimeServices } from 'lifecycle';
 
+import { createAgent } from '../../create-agent.ts';
+import { readGenerationProfile } from '../../generation-profile.ts';
+import {
+  readBackendDescriptors,
+  withBackendDescriptors,
+} from '../backend-descriptor-attachment.ts';
+import type { BackendDescriptor } from '../model-catalog.ts';
+import { createModelCatalog } from '../model-catalog.ts';
 import { makeContext } from '../routing/strategies/test-helpers.ts';
 import { classifyProviderError } from './classify-error.ts';
 import { createFalloverGenerate } from './create-fallover-generate.ts';
@@ -401,5 +409,65 @@ describe('createProviderHealthTracker', () => {
     expect(tracker.getAvailableProviders()).toEqual(['a', 'b']);
     expect(tracker.isAvailable('a')).toBe(true);
     expect(tracker.isAvailable('missing-provider')).toBe(false);
+  });
+});
+
+describe('createFalloverGenerate — backend-descriptor propagation (AB-64 AC2, AB-245, AB-288)', () => {
+  const FIXED_NOW = () => '2026-09-02T12:00:00.000Z';
+
+  function descriptorFor(provider: 'anthropic' | 'openai' | 'gemini'): BackendDescriptor {
+    const descriptor = createModelCatalog({ now: FIXED_NOW }).descriptors.find(
+      (row) => row.provider === provider,
+    );
+    if (!descriptor)
+      throw new Error(`expected at least one ${provider} descriptor in the seed catalog`);
+    return descriptor;
+  }
+
+  function providerWith(
+    name: string,
+    descriptors: readonly BackendDescriptor[] = [],
+  ): FalloverProvider {
+    return {
+      name,
+      generate: withBackendDescriptors(
+        async () => ({ content: `${name}-response`, toolCalls: [] }),
+        descriptors,
+      ),
+    };
+  }
+
+  it('attaches no descriptors when no provider carries any', () => {
+    const generate = createFalloverGenerate({ providers: [providerWith('a'), providerWith('b')] });
+
+    expect(readBackendDescriptors(generate)).toEqual([]);
+  });
+
+  it("attaches the ordered union of every provider's descriptors, deduplicated by (provider, endpoint, model)", () => {
+    const anthropic = descriptorFor('anthropic');
+    const openai = descriptorFor('openai');
+
+    const generate = createFalloverGenerate({
+      providers: [providerWith('a', [anthropic]), providerWith('b', [anthropic, openai])],
+    });
+
+    const attached = readBackendDescriptors(generate);
+    expect(attached).toHaveLength(2);
+    expect([...attached].sort((x, y) => (x.provider < y.provider ? -1 : 1))).toEqual(
+      [anthropic, openai].sort((x, y) => (x.provider < y.provider ? -1 : 1)),
+    );
+  });
+
+  it("reports a routed generation profile, not opaque, for an Agent whose generate is the wrapper's output", () => {
+    const anthropic = descriptorFor('anthropic');
+    const openai = descriptorFor('openai');
+
+    const wrapped = createFalloverGenerate({
+      providers: [providerWith('a', [anthropic]), providerWith('b', [openai])],
+    });
+
+    const agent = createAgent({ generate: wrapped });
+
+    expect(readGenerationProfile(agent).mode).toBe('routed');
   });
 });
