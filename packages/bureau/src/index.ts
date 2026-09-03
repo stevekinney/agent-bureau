@@ -52,8 +52,18 @@ export {
   TaskFailedEvent,
   TaskRoutedEvent,
 } from './create-supervisor';
-export type { DurableEventHistory, DurableEventHistoryPageOptions } from './durable-event-history';
-export { createDurableEventHistory, DEFAULT_PAGE_LIMIT } from './durable-event-history';
+export type {
+  DurableEventHistory,
+  DurableEventHistoryPageOptions,
+  DurableEventHistorySubscribeOptions,
+  DurableEventProducer,
+  DurableEventProducerOptions,
+} from './durable-event-history';
+export {
+  createDurableEventHistory,
+  createDurableEventProducer,
+  DEFAULT_PAGE_LIMIT,
+} from './durable-event-history';
 export type { BureauEventMap, RecoveredRunVerdict, RecoveryRejectionReason } from './events';
 export {
   ActionEvent,
