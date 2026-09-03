@@ -109,6 +109,14 @@ export interface StepDeps {
    * call site below), not captured once at tool-construction time.
    */
   readonly childRegistry: RunOptions['childRegistry'];
+  /**
+   * AB-300 — this run's own already-attenuated delegated-authority grant,
+   * passed to every tool call as
+   * `ToolContext.executionContext.delegatedAuthority` (see the toolbox
+   * execute call site below), matching `childRegistry`'s own AB-233
+   * pattern.
+   */
+  readonly delegatedAuthority: RunOptions['delegatedAuthority'];
   readonly durableOperationKeys: boolean;
   readonly defaultToolChoice: ToolChoice | undefined;
   /**
@@ -1346,17 +1354,20 @@ export async function runStep(
       deps.trackToolCallIds?.(callsToExecute.map((call) => call.id));
 
       try {
-        // AB-233 — thread the active trace context and a per-execution
-        // `executionContext` (this run's child registry and its own run id)
-        // through to every tool call. `executionContext` merges the
-        // caller's own `deps.executeOptions.executionContext` (if any)
-        // under the run-derived fields, so a caller-supplied key survives
-        // unless it collides with `childRegistry`/`parentRunId`.
+        // AB-233/AB-300 — thread the active trace context and a
+        // per-execution `executionContext` (this run's child registry, its
+        // own run id, and its own delegated-authority grant) through to
+        // every tool call. `executionContext` merges the caller's own
+        // `deps.executeOptions.executionContext` (if any) under the
+        // run-derived fields, so a caller-supplied key survives unless it
+        // collides with `childRegistry`/`parentRunId`/`delegatedAuthority`.
         const toolboxExecuteOptions = {
           ...deps.executeOptions,
           signal: stepSignal,
           ...(deps.parentContext !== undefined ? { traceContext: deps.parentContext } : {}),
-          ...(deps.childRegistry !== undefined || deps.runId !== undefined
+          ...(deps.childRegistry !== undefined ||
+          deps.runId !== undefined ||
+          deps.delegatedAuthority !== undefined
             ? {
                 executionContext: {
                   ...deps.executeOptions?.executionContext,
@@ -1364,6 +1375,9 @@ export async function runStep(
                     ? { childRegistry: deps.childRegistry }
                     : {}),
                   ...(deps.runId !== undefined ? { parentRunId: deps.runId } : {}),
+                  ...(deps.delegatedAuthority !== undefined
+                    ? { delegatedAuthority: deps.delegatedAuthority }
+                    : {}),
                 },
               }
             : {}),

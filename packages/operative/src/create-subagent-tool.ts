@@ -6,9 +6,15 @@ import type { ZodType } from 'zod';
 import type { SuccessfulRunResult } from './agent-run';
 import { isSuccessfulRunResult } from './agent-run';
 import type { MutableChildRunRegistry } from './child-run';
-import { dispatchChildRun, isMutableChildRunRegistry } from './child-run';
+import {
+  attenuateDelegatedAuthority,
+  dispatchChildRun,
+  isDelegatedAuthority,
+  isMutableChildRunRegistry,
+} from './child-run';
 import { SubagentRunError } from './errors';
 import type { OperativeEventMap } from './events';
+import type { DelegatedAuthority } from './providers/policy.ts';
 import type { AgentInput, RunnableAgent } from './runnable-agent';
 
 /**
@@ -221,6 +227,22 @@ interface CreateSubagentToolOptionsBase<
    * such callback), because it is a per-run wrapper, not per-call data.
    */
   withTraceContext?: <T>(parentContext: unknown, fn: () => Promise<T>) => Promise<T>;
+  /**
+   * AB-300 — this tool's OWN narrowing of the delegated-authority grant
+   * handed to every child it dispatches, composed via
+   * `attenuateDelegatedAuthority` with whatever grant the parent run itself
+   * carries (read per-execution from
+   * `ToolContext.executionContext.delegatedAuthority` — see the AB-233
+   * `childRegistry`/`parentRunId` pattern this mirrors). When the parent
+   * run carries no grant, this option (if supplied) is forwarded to the
+   * child UNCHANGED — there is nothing above it to narrow against. When
+   * this option is omitted and the parent run DOES carry a grant, that
+   * grant is forwarded to the child unchanged (no further narrowing this
+   * tool wants to apply). When both are absent, the child is dispatched
+   * with `delegatedAuthority` left `undefined`, exactly as before this
+   * option existed.
+   */
+  delegatedAuthority?: DelegatedAuthority;
 }
 
 /**
@@ -320,6 +342,7 @@ export function createSubagentTool<
     summaryTokenCap = 500,
     parentContext,
     withTraceContext,
+    delegatedAuthority: toolDelegatedAuthority,
   } = options;
 
   return createTool({
@@ -348,6 +371,24 @@ export function createSubagentTool<
           ? executionParentRunId
           : (parentContext?.parentRunId ?? '');
 
+      // AB-300 — read the parent run's own already-attenuated delegated-
+      // authority grant per-execution (mirroring `registry`/`parentRunId`
+      // above), then attenuate it further with this tool's own narrowing
+      // (if any) before forwarding it into the child's dispatch. A parent
+      // run with no grant and no tool-level narrowing dispatches with
+      // `delegatedAuthority` left `undefined`, unchanged from before this
+      // option existed.
+      const executionDelegatedAuthority = context.executionContext?.['delegatedAuthority'];
+      const parentDelegatedAuthority = isDelegatedAuthority(executionDelegatedAuthority)
+        ? executionDelegatedAuthority
+        : undefined;
+      const delegatedAuthority =
+        parentDelegatedAuthority === undefined
+          ? toolDelegatedAuthority
+          : toolDelegatedAuthority === undefined
+            ? parentDelegatedAuthority
+            : attenuateDelegatedAuthority(parentDelegatedAuthority, toolDelegatedAuthority);
+
       // AB-50 — dispatch through the lower-level child dispatch primitive.
       // It emits `ChildWorkflowStartedEvent` before the child run begins
       // (and the completed/failed/aborted siblings once it settles) when
@@ -367,6 +408,7 @@ export function createSubagentTool<
         emitter: parentContext?.emitter,
         durable: parentContext?.durable,
         registry,
+        ...(delegatedAuthority === undefined ? {} : { delegatedAuthority }),
       });
       const result = await childRun.result();
 

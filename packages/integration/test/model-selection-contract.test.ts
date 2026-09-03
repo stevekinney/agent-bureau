@@ -6,7 +6,7 @@
  *
  * ONE fixture — a fixed catalog revision, policy revision, availability
  * snapshot revision, task classification, and requested value, over a
- * single eligible `anthropic` descriptor — is driven through five different
+ * single eligible `anthropic` descriptor — is driven through six different
  * entry points and normalized (via {@link normalizePlan}, which strips only
  * `planId`/`createdAt`) into a comparable decision record:
  *
@@ -17,17 +17,14 @@
  * 3. A child dispatched through `dispatchChildRun` — the lower-level
  *    primitive `createSubagentTool`'s own `execute` calls verbatim (see
  *    `create-subagent-tool.ts`) — with an UNATTENUATED delegated-authority
- *    grant. `createSubagentTool` itself does not yet thread
- *    `delegatedAuthority` into that call (`model-policy.ts`'s own module
- *    docs: wiring `RunOptions.selection`/delegated authority automatically
- *    into every dispatch "is a later issue's to make") — a documented,
- *    intentional gap this fixtures-only issue must not close. This suite
- *    therefore supplies the grant directly to the SAME primitive
- *    `createSubagentTool` calls, exercising the real
- *    `attenuateDelegatedAuthority`/`dispatchChildRun` forwarding path
- *    AB-250's own `child-run.test.ts` validates, then computes the child's
- *    own decision record via `select()` with the CAPTURED, forwarded grant
- *    — never a value recomputed independently of the real dispatch.
+ *    grant, exercising the real `attenuateDelegatedAuthority`/
+ *    `dispatchChildRun` forwarding path AB-250's own `child-run.test.ts`
+ *    validates directly, then computes the child's own decision record via
+ *    `select()` with the CAPTURED, forwarded grant — never a value
+ *    recomputed independently of the real dispatch. AB-300 has since made
+ *    `createSubagentTool` itself thread `delegatedAuthority` automatically
+ *    (see Mode 6 below); this mode is unchanged and keeps exercising the
+ *    lower-level primitive directly, matching AB-251's original fixture.
  * 4. A durable recovery driven through `createDurableMultiAgentHarness` and
  *    `createManualCheckpointStore` (both from
  *    `@lostgradient/operative/test`): a custom `runWorkflow` built from a
@@ -42,13 +39,26 @@
  *    removed ENTIRELY — and the replayed value still reports the original
  *    `selected` and per-candidate eligibility reasoning, while a FRESH
  *    `select()` call against the advanced catalog does not.
+ * 6. (AB-300) A child dispatched through the ACTUAL `createSubagentTool`
+ *    (its real `rawExecute`, not the raw `dispatchChildRun` primitive Mode
+ *    3 exercises directly) from a parent whose own `ToolContext.executionContext.delegatedAuthority`
+ *    carries an UNATTENUATED grant and whose tool construction supplies no
+ *    narrowing of its own — proving the now-closed forwarding path
+ *    (`createSubagentTool` reads the parent's grant, attenuates it with its
+ *    own narrowing when supplied, and forwards it into `dispatchChildRun`)
+ *    reaches the identical canonical decision record end to end, not just
+ *    at the lower-level primitive Mode 3 already covers.
  *
- * A sixth, separate case proves attenuation is VISIBLE rather than
+ * A separate case proves attenuation is VISIBLE rather than
  * equal: over a two-candidate catalog (`anthropic`, `gemini`), a child
  * dispatched with an unattenuated grant (permits both) is compared against
  * one dispatched with an attenuated grant (permits only `anthropic`) — the
  * two normalized records differ only in the excluded `gemini` candidate and
- * its `exceeds-delegated-authority` code.
+ * its `exceeds-delegated-authority` code. A further AB-300 case repeats this
+ * comparison through the ACTUAL `createSubagentTool` (rather than the raw
+ * `dispatchChildRun` primitive), attenuating via the tool's own
+ * `delegatedAuthority` construction option against a parent that carries no
+ * grant of its own.
  *
  * No test reads the wall clock, calls `Bun.setSystemTime`, sleeps, retries,
  * or raises a timeout — every timestamp and plan id is injected, and the
@@ -82,6 +92,7 @@ import { createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import { createBureau, createModelCatalogService } from 'bureau';
 import { createConversationHistory } from 'conversationalist';
+import { z } from 'zod';
 
 // ── Shared fixture ─────────────────────────────────────────────────────────
 
@@ -351,6 +362,61 @@ function computeMode5(originalPlan: SelectionPlan): {
   return { deserializedPlan, freshPlanAgainstAdvancedCatalog };
 }
 
+// ── Mode 6 (AB-300): a child dispatched through the ACTUAL createSubagentTool
+// — its real `rawExecute`, which now reads the parent's delegatedAuthority
+// off `ToolContext.executionContext`, attenuates it with the tool's own
+// narrowing (if any), and forwards it into `dispatchChildRun` itself ──────
+
+/**
+ * Invokes a `createSubagentTool` result's raw `rawExecute` directly — the
+ * same low-level entry point `packages/operative/src/create-subagent-tool.test.ts`'s
+ * `callRaw` uses — bypassing armorer's full `ToolContext` construction
+ * (`dispatch`/`progress`/`toolCall`/`configuration`, none of which
+ * `createSubagentTool.execute` reads) since this suite only needs to supply
+ * `executionContext`.
+ */
+async function dispatchThroughToolAndCapturePlan(
+  catalog: ModelCatalog,
+  parentGrant: DelegatedAuthority | undefined,
+  request: SelectionRequest = fixtureRequest(),
+  toolNarrowing?: DelegatedAuthority,
+): Promise<SelectionPlan> {
+  const { agent, capturedContext } = makeCapturingChildAgent();
+  const tool = operative.createSubagentTool({
+    name: 'contract-delegate',
+    description: 'Dispatch the fixture child through the real createSubagentTool',
+    agent,
+    agentName: 'contract-child',
+    input: z.object({}),
+    ...(toolNarrowing === undefined ? {} : { delegatedAuthority: toolNarrowing }),
+  });
+
+  await (
+    tool as unknown as { rawExecute: (params: unknown, context: unknown) => Promise<unknown> }
+  ).rawExecute(
+    {},
+    {
+      executionContext: {
+        parentRunId: 'contract-parent-run',
+        ...(parentGrant === undefined ? {} : { delegatedAuthority: parentGrant }),
+      },
+    },
+  );
+
+  // Prove the forwarding itself, not just the resulting plan — mirroring
+  // Mode 3's own `dispatchChildAndCapturePlan` rationale.
+  const context = capturedContext();
+  expect(context).toBeDefined();
+
+  const forwardedGrant = context?.delegatedAuthority;
+  return select(request, {
+    catalog,
+    ...(forwardedGrant === undefined ? {} : { delegated: forwardedGrant }),
+    now,
+    newPlanId: freshNewPlanId(),
+  });
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────
 
 describe('cross-mode selection-plan replay contract (AB-251)', () => {
@@ -462,6 +528,66 @@ describe('cross-mode selection-plan replay contract (AB-251)', () => {
     // The two normalized records differ ONLY in the excluded gemini
     // candidate — proven by asserting explicit inequality of the raw plans
     // (never asserting equality) alongside the field-by-field diff above.
+    expect(normalizePlan(attenuatedPlan)).not.toEqual(normalizePlan(unattenuatedPlan));
+  });
+
+  it('(AB-300) a child dispatched through the ACTUAL createSubagentTool reaches the identical canonical decision record as the lower-level dispatchChildRun primitive', async () => {
+    const mode1Plan = computeMode1Plan();
+    const canonical = normalizePlan(mode1Plan);
+
+    const unattenuatedGrant: DelegatedAuthority = {
+      grantedProviders: ['anthropic'],
+      policyVersion: 'contract-mode6-v1',
+    };
+    const mode6Plan = await dispatchThroughToolAndCapturePlan(
+      fixtureCatalog([anthropic]),
+      unattenuatedGrant,
+    );
+
+    expect(normalizePlan(mode6Plan)).toEqual(canonical);
+
+    // A parent run with no grant and no tool-level narrowing still
+    // dispatches with `delegatedAuthority` left undefined, so the resulting
+    // plan is the same as if no `delegated` layer were supplied at all.
+    const mode6NoGrantPlan = await dispatchThroughToolAndCapturePlan(
+      fixtureCatalog([anthropic]),
+      undefined,
+    );
+    expect(normalizePlan(mode6NoGrantPlan)).toEqual(canonical);
+  });
+
+  it("(AB-300) through the ACTUAL createSubagentTool, a child dispatched with the tool's own narrowing excludes only the forbidden candidate, identically to the lower-level dispatchChildRun attenuation case", async () => {
+    const twoCandidateCatalog = fixtureCatalog([anthropic, gemini]);
+    const attenuationRequest = fixtureRequest();
+
+    // No grant on the parent run at all — this proves the tool's OWN
+    // `delegatedAuthority` construction option is forwarded unattenuated
+    // (there is nothing above it to narrow against), not merely a pass
+    // through of a parent-supplied grant.
+    const unattenuatedPlan = await dispatchThroughToolAndCapturePlan(
+      twoCandidateCatalog,
+      undefined,
+      attenuationRequest,
+      { grantedProviders: ['anthropic', 'gemini'], policyVersion: 'contract-tool-v1' },
+    );
+    const attenuatedPlan = await dispatchThroughToolAndCapturePlan(
+      twoCandidateCatalog,
+      undefined,
+      attenuationRequest,
+      { grantedProviders: ['anthropic'], policyVersion: 'contract-tool-v2' },
+    );
+
+    expect(unattenuatedPlan.selected).toEqual(attenuatedPlan.selected);
+    expect(unattenuatedPlan.selected?.provider).toBe('anthropic');
+
+    const unattenuatedGemini = unattenuatedPlan.candidates.find((c) => c.provider === 'gemini');
+    const attenuatedGemini = attenuatedPlan.candidates.find((c) => c.provider === 'gemini');
+    expect(unattenuatedGemini?.eligible).toBe(true);
+    expect(unattenuatedGemini?.exclusionCode).toBeUndefined();
+    expect(attenuatedGemini?.eligible).toBe(false);
+    expect(attenuatedGemini?.exclusionCode).toBe('exceeds-delegated-authority');
+    expect(attenuatedGemini?.exclusionReason).toContain('contract-tool-v2');
+
     expect(normalizePlan(attenuatedPlan)).not.toEqual(normalizePlan(unattenuatedPlan));
   });
 });

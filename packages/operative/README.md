@@ -1605,6 +1605,8 @@ A revalidated plan that no longer reaches `outcome: 'selected'` fails the step w
 
 `DelegatedAuthority` threads through `dispatchChildRun`'s `DispatchChildRunOptions.delegatedAuthority`, forwarded to `agent.run()` as the new `AgentRunContext.delegatedAuthority` — never through `BureauRunOptions`. `attenuateDelegatedAuthority(parent, child)` (`@lostgradient/operative`) composes a parent's grant with the authority a dispatch site wants to hand one specific child: `grantedProviders`/`grantedModels` intersect (never widen), `maximumEffort` takes the lower tier, and the result's `policyVersion` is the attenuating (child) grant's own version.
 
+`AgentRunContext.delegatedAuthority` also threads through `RunOptions.delegatedAuthority` into every tool call's per-execution `ToolContext.executionContext.delegatedAuthority` (AB-300), matching the AB-233 `childRegistry`/`parentRunId` pattern exactly. `createSubagentTool` reads it there at execute time, attenuates it with its own `delegatedAuthority` construction option (a tool's own narrowing for the specific child it dispatches, if any) via `attenuateDelegatedAuthority`, and forwards the result into `dispatchChildRun`. A parent run carrying no grant and a tool with no narrowing of its own dispatch with `delegatedAuthority` left `undefined`, exactly as before this wiring existed.
+
 Bureau's `planSelection`/`createSelectionGateFor` surface (`packages/bureau/src/model-policy.ts`) is documented in `packages/bureau/README.md`.
 
 #### Structured Output

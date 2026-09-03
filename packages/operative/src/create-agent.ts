@@ -624,6 +624,13 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknow
       // just `createAgentRun`'s option below), so `run-step.ts` can hand it
       // to every tool call as `ToolContext.executionContext.childRegistry`.
       ...(context?.childRegistry ? { childRegistry: context.childRegistry } : {}),
+      // AB-300 — thread `delegatedAuthority` into `RunOptions` itself, so
+      // `run-step.ts` can hand it to every tool call as
+      // `ToolContext.executionContext.delegatedAuthority`, exactly as
+      // `childRegistry` does above.
+      ...(context?.delegatedAuthority !== undefined
+        ? { delegatedAuthority: context.delegatedAuthority }
+        : {}),
       ...rest,
     };
   }

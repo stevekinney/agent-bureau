@@ -5,12 +5,15 @@ import { CompletableEventTarget } from 'lifecycle';
 import { z } from 'zod';
 
 import type { AgentRun, SuccessfulRunResult } from './agent-run';
-import { createChildRunRegistry } from './child-run';
+import { attenuateDelegatedAuthority, createChildRunRegistry } from './child-run';
 import { createAgent } from './create-agent';
 import { createSubagentTool, defaultSubagentSummarizer } from './create-subagent-tool';
 import { GuardrailTripwireError, SubagentRunError } from './errors';
 import type { CombinedOperativeEventMap } from './events';
 import { ChildWorkflowStartedEvent } from './events';
+import { createModelCatalog } from './providers/model-catalog.ts';
+import type { DelegatedAuthority } from './providers/policy.ts';
+import { select } from './providers/selection.ts';
 import type { AgentInput, AgentRunContext, RunnableAgent } from './runnable-agent';
 import type { GenerateFunction, GenerateResponse, RunResult } from './types';
 
@@ -1613,6 +1616,237 @@ describe('createSubagentTool', () => {
       // The minted id is the same one the run's own liveness snapshot
       // reports — one identifier seam, not two independent sources.
       expect(received[0]?.parentRunId).toBe(run.snapshot().id);
+    });
+  });
+
+  describe('AB-300 — parent delegatedAuthority forwarded into dispatchChildRun', () => {
+    const parentGrant: DelegatedAuthority = {
+      grantedProviders: ['anthropic', 'gemini'],
+      policyVersion: 'ab-300-parent-v1',
+    };
+
+    it("forwards the parent run's delegatedAuthority unchanged when the tool has no narrowing of its own", async () => {
+      const { agent: child, calls } = makeMockAgent(() => makeSuccessfulResult());
+      const tool = createSubagentTool({
+        name: 'delegate',
+        description: 'Delegate',
+        agent: child,
+        agentName: 'child',
+        input: z.object({ q: z.string() }),
+      });
+
+      await callRaw(tool, { q: 'hi' }, { executionContext: { delegatedAuthority: parentGrant } });
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.context?.delegatedAuthority).toBe(parentGrant);
+    });
+
+    it("attenuates the parent run's delegatedAuthority with the tool's own narrowing before forwarding", async () => {
+      const { agent: child, calls } = makeMockAgent(() => makeSuccessfulResult());
+      const toolNarrowing: DelegatedAuthority = {
+        grantedProviders: ['anthropic'],
+        policyVersion: 'ab-300-tool-v1',
+      };
+      const tool = createSubagentTool({
+        name: 'delegate',
+        description: 'Delegate',
+        agent: child,
+        agentName: 'child',
+        input: z.object({ q: z.string() }),
+        delegatedAuthority: toolNarrowing,
+      });
+
+      await callRaw(tool, { q: 'hi' }, { executionContext: { delegatedAuthority: parentGrant } });
+
+      // Proven against the real `attenuateDelegatedAuthority` composition,
+      // not a value that happens to coincide with either input.
+      expect(calls[0]?.context?.delegatedAuthority).toEqual(
+        attenuateDelegatedAuthority(parentGrant, toolNarrowing),
+      );
+      expect(calls[0]?.context?.delegatedAuthority?.grantedProviders).toEqual(['anthropic']);
+    });
+
+    it("forwards the tool's own narrowing unchanged when the parent run carries no grant", async () => {
+      const { agent: child, calls } = makeMockAgent(() => makeSuccessfulResult());
+      const toolNarrowing: DelegatedAuthority = {
+        grantedProviders: ['openai'],
+        policyVersion: 'ab-300-tool-only-v1',
+      };
+      const tool = createSubagentTool({
+        name: 'delegate',
+        description: 'Delegate',
+        agent: child,
+        agentName: 'child',
+        input: z.object({ q: z.string() }),
+        delegatedAuthority: toolNarrowing,
+      });
+
+      await callRaw(tool, { q: 'hi' }, {});
+
+      expect(calls[0]?.context?.delegatedAuthority).toBe(toolNarrowing);
+    });
+
+    it('dispatches with delegatedAuthority left undefined when neither the parent run nor the tool supplies a grant', async () => {
+      const { agent: child, calls } = makeMockAgent(() => makeSuccessfulResult());
+      const tool = createSubagentTool({
+        name: 'delegate',
+        description: 'Delegate',
+        agent: child,
+        agentName: 'child',
+        input: z.object({ q: z.string() }),
+      });
+
+      await callRaw(tool, { q: 'hi' }, {});
+
+      expect(calls[0]?.context?.delegatedAuthority).toBeUndefined();
+    });
+
+    it('treats a malformed executionContext.delegatedAuthority as absent rather than a valid grant', async () => {
+      const malformedValues: unknown[] = [
+        'not-an-object',
+        null,
+        {}, // missing the required policyVersion
+        { policyVersion: 42 }, // policyVersion not a string
+        { policyVersion: 'v1', grantedProviders: 'anthropic' }, // not an array
+        { policyVersion: 'v1', grantedModels: 'claude-fable-5' }, // not an array
+        { policyVersion: 'v1', maximumEffort: 3 }, // not a string
+        // A "looks-valid" string that is nonetheless outside the closed
+        // `Effort`/`ProviderName` unions must be rejected too — otherwise
+        // `attenuateDelegatedAuthority`'s `narrowerEffort` would compare an
+        // unknown tier's `EFFORT_ORDER.indexOf(-1)` as "lower" than every
+        // real tier, silently WIDENING authority instead of narrowing it.
+        { policyVersion: 'v1', maximumEffort: 'supermax' }, // not a real Effort tier
+        { policyVersion: 'v1', grantedProviders: ['anthropic', 42] }, // non-string element
+        { policyVersion: 'v1', grantedProviders: ['not-a-real-provider'] }, // not a ProviderName
+        { policyVersion: 'v1', grantedModels: ['claude-fable-5', 42] }, // non-string element
+      ];
+
+      for (const value of malformedValues) {
+        const { agent: child, calls } = makeMockAgent(() => makeSuccessfulResult());
+        const tool = createSubagentTool({
+          name: 'delegate',
+          description: 'Delegate',
+          agent: child,
+          agentName: 'child',
+          input: z.object({ q: z.string() }),
+        });
+
+        await callRaw(tool, { q: 'hi' }, { executionContext: { delegatedAuthority: value } });
+
+        expect(calls[0]?.context?.delegatedAuthority).toBeUndefined();
+      }
+    });
+
+    it('reads the per-call executionContext.delegatedAuthority through the ordinary createAgent loop (AgentRunContext.delegatedAuthority end to end)', async () => {
+      const { agent: child, calls } = makeMockAgent(() => makeSuccessfulResult('child result'));
+      const tool = createSubagentTool({
+        name: 'delegate',
+        description: 'Delegate',
+        agent: child,
+        agentName: 'child',
+        input: z.object({ q: z.string() }),
+      });
+
+      let generateCalls = 0;
+      const parent = createAgent({
+        generate: async () => {
+          generateCalls++;
+          if (generateCalls === 1) {
+            return {
+              content: '',
+              toolCalls: [{ id: 'call-1', name: 'delegate', arguments: { q: 'hi' } }],
+            };
+          }
+          return textResponse('done');
+        },
+        tools: { delegate: tool },
+      });
+
+      await parent.run('go', { delegatedAuthority: parentGrant }).result();
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.context?.delegatedAuthority).toEqual(parentGrant);
+    });
+
+    it("excludes a child-forbidden candidate from its own planSelection record with 'exceeds-delegated-authority'; a parent with no grant still dispatches with delegatedAuthority undefined", async () => {
+      const now = () => '2026-09-03T12:00:00.000Z';
+      const catalog = createModelCatalog({ now });
+      const anthropic = catalog.descriptors.find(
+        (d) => d.provider === 'anthropic' && d.model === 'claude-fable-5',
+      );
+      const gemini = catalog.descriptors.find(
+        (d) => d.provider === 'gemini' && d.model === 'gemini-2.5-pro',
+      );
+      if (!anthropic || !gemini) {
+        throw new Error('fixture descriptor not found in the default model catalog');
+      }
+
+      const forbiddingGrant: DelegatedAuthority = {
+        grantedProviders: ['anthropic'],
+        policyVersion: 'ab-300-forbidding-v1',
+      };
+
+      const { agent: child, calls } = makeMockAgent(() => makeSuccessfulResult());
+      const tool = createSubagentTool({
+        name: 'delegate',
+        description: 'Delegate',
+        agent: child,
+        agentName: 'child',
+        input: z.object({ q: z.string() }),
+      });
+
+      await callRaw(
+        tool,
+        { q: 'hi' },
+        { executionContext: { delegatedAuthority: forbiddingGrant } },
+      );
+      const forwardedGrant = calls[0]?.context?.delegatedAuthority;
+      expect(forwardedGrant).toEqual(forbiddingGrant);
+
+      const plan = select(
+        {
+          agentName: 'ab-300-child',
+          taskClassification: 'ab-300-suite',
+          catalogRevision: catalog.revision,
+          policyRevision: 1,
+          availabilitySnapshotRevision: 1,
+        },
+        {
+          catalog: {
+            revision: catalog.revision,
+            descriptors: [anthropic, gemini],
+            generatedAt: now(),
+            stale: false,
+            projection: 'privileged',
+          },
+          delegated: forwardedGrant,
+          now,
+          newPlanId: () => 'ab-300-plan-0000',
+        },
+      );
+
+      const geminiCandidate = plan.candidates.find((c) => c.provider === 'gemini');
+      expect(geminiCandidate?.eligible).toBe(false);
+      expect(geminiCandidate?.exclusionCode).toBe('exceeds-delegated-authority');
+
+      const anthropicCandidate = plan.candidates.find((c) => c.provider === 'anthropic');
+      expect(anthropicCandidate?.eligible).toBe(true);
+      expect(anthropicCandidate?.exclusionCode).toBeUndefined();
+
+      // A parent with no grant still dispatches with `delegatedAuthority`
+      // left undefined — never a fabricated all-permissive grant.
+      const { agent: unforbiddenChild, calls: unforbiddenCalls } = makeMockAgent(() =>
+        makeSuccessfulResult(),
+      );
+      const unforbiddenTool = createSubagentTool({
+        name: 'delegate',
+        description: 'Delegate',
+        agent: unforbiddenChild,
+        agentName: 'child',
+        input: z.object({ q: z.string() }),
+      });
+      await callRaw(unforbiddenTool, { q: 'hi' }, {});
+      expect(unforbiddenCalls[0]?.context?.delegatedAuthority).toBeUndefined();
     });
   });
 });
