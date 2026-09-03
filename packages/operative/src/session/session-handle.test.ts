@@ -23,7 +23,12 @@ import type {
   SessionUpdateEvent,
   ToolStartedBubbleEvent,
 } from '../events';
-import { SessionMonitorDoneEvent, SessionMonitorTickEvent, SessionSleepEvent } from '../events';
+import {
+  HumanWaitParkedEvent,
+  SessionMonitorDoneEvent,
+  SessionMonitorTickEvent,
+  SessionSleepEvent,
+} from '../events';
 import { UnsupportedRunResultVersionError } from '../run-envelope';
 import type { GenerateFunction } from '../types';
 import { createSessionStore } from './create-session-store';
@@ -4445,5 +4450,444 @@ describe('regression: recover() persists terminal state after recovered run sett
     } finally {
       engine2[Symbol.dispose]();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SessionHandle liveness — snapshot()/subscribeSnapshot() (AB-215)
+// ---------------------------------------------------------------------------
+
+describe('SessionHandle liveness — snapshot()/subscribeSnapshot() (AB-215)', () => {
+  it('reports a redacted, process-local, unknown-reachability snapshot before any activity', () => {
+    const { handle, sessionId } = createSessionHandleFixture();
+    const snap = handle.snapshot();
+
+    expect(snap.kind).toBe('session');
+    expect(snap.id).toBe(sessionId);
+    expect(snap.status).toBe('created');
+    expect(snap.projection).toBe('redacted');
+    expect(snap.ownership).toBe('independent');
+    expect(snap.detached).toBe(false);
+    // AC5: session liveness stays process-local, per AB-39.
+    expect(snap.durability).toBe('process-local');
+    expect(snap.reachability).toBe('unknown');
+    expect(snap.progress).toBe('unknown');
+    expect(snap.assessment).toBe('healthy');
+    expect(snap.missedPulseCount).toBe(0);
+    expect(snap.evidence).toEqual([]);
+    expect(snap.declaredWait).toBeUndefined();
+  });
+
+  it('returns the identical cached object by reference when no revision has advanced', () => {
+    const { handle } = createSessionHandleFixture();
+    const first = handle.snapshot();
+    const second = handle.snapshot();
+    expect(second).toBe(first);
+  });
+
+  it('subscribeSnapshot delivers the current snapshot synchronously, then a new one per revision', async () => {
+    const { handle } = createSessionHandleFixture();
+    const received: Array<ReturnType<typeof handle.snapshot>> = [];
+    const subscription = handle.subscribeSnapshot((snap) => {
+      received.push(snap);
+    });
+
+    expect(received.length).toBe(1);
+    expect(received[0]?.status).toBe('created');
+
+    await handle.run('hello').result();
+    // run() eagerly advances to 'running', then back to 'created' once it
+    // settles — at least two more deliveries beyond the initial one.
+    expect(received.length).toBeGreaterThan(1);
+    expect(subscription.closed).toBe(false);
+
+    subscription.unsubscribe();
+    expect(subscription.closed).toBe(true);
+    const beforeUnsubscribeCount = received.length;
+    await handle.run('hello again').result();
+    expect(received.length).toBe(beforeUnsubscribeCount);
+  });
+
+  it('delivers exactly once and never again when options.signal is already aborted', () => {
+    const { handle } = createSessionHandleFixture();
+    const received: unknown[] = [];
+    const subscription = handle.subscribeSnapshot((snap) => received.push(snap), {
+      signal: AbortSignal.abort(),
+    });
+    expect(received.length).toBe(1);
+    expect(subscription.closed).toBe(true);
+  });
+
+  it('stops delivering once options.signal aborts', async () => {
+    const { handle } = createSessionHandleFixture();
+    const controller = new AbortController();
+    const received: unknown[] = [];
+    handle.subscribeSnapshot((snap) => received.push(snap), { signal: controller.signal });
+    controller.abort();
+    const beforeCount = received.length;
+    await handle.run('hello').result();
+    expect(received.length).toBe(beforeCount);
+  });
+
+  it('isolates a throwing subscriber from other subscribers and from the caller driving the revision', async () => {
+    const { handle } = createSessionHandleFixture();
+    let goodCalls = 0;
+    handle.subscribeSnapshot(() => {
+      throw new Error('boom');
+    });
+    handle.subscribeSnapshot(() => {
+      goodCalls += 1;
+    });
+    await handle.run('hello').result();
+    expect(goodCalls).toBeGreaterThan(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SessionHandle liveness — session.monitor watchdog (AB-215 / AC2, AC3)
+// ---------------------------------------------------------------------------
+
+describe('SessionHandle liveness — session.monitor watchdog (AB-215 / AC2)', () => {
+  it('threads the constructor setTimeoutFunction/clearTimeoutFunction into the session.monitor watchdog and observes it obey the injected clock', async () => {
+    const scheduled: Array<() => void> = [];
+    const cleared: unknown[] = [];
+    let nextId = 0;
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+
+    let releaseGenerate!: () => void;
+    const generateGate = new Promise<void>((resolve) => {
+      releaseGenerate = resolve;
+    });
+    const blockingGenerate: GenerateFunction = async () => {
+      await generateGate;
+      return { content: 'done', toolCalls: [] };
+    };
+
+    const handle = createSessionHandle('watchdog-cadence-session', {
+      store,
+      agentName: 'test-agent',
+      runOptions: createTestRunOptions(blockingGenerate),
+      setTimeoutFunction: (callback) => {
+        scheduled.push(callback);
+        return ++nextId;
+      },
+      clearTimeoutFunction: (timer) => {
+        cleared.push(timer);
+      },
+    });
+
+    // No watchdog exists before monitor() ever runs — session.monitor's
+    // StallPolicy row needs the caller's `every`, only known then.
+    expect(handle.snapshot().reachability).toBe('unknown');
+
+    const monitoring = handle.monitor({
+      every: 20,
+      input: 'poll',
+      until: () => true,
+    });
+
+    // The tick-start pulse and the watchdog's own cadence-check scheduling
+    // both happen synchronously inside monitor() before its first `await` —
+    // no microtask flush is required, but a couple are harmless insurance.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(scheduled.length).toBeGreaterThan(0);
+    expect(handle.snapshot().reachability).toBe('reachable');
+
+    // The first manually-fired check sees the tick-start pulse as fresh
+    // (recorded after the watchdog's own construction) — no miss.
+    const firstCheck = scheduled.shift();
+    firstCheck?.();
+    expect(handle.snapshot().reachability).toBe('reachable');
+    expect(handle.snapshot().missedPulseCount).toBe(0);
+
+    // The second manually-fired check has seen no NEW pulse since the
+    // first check ran — a genuine missed pulse, and the threshold is 1.
+    const secondCheck = scheduled.shift();
+    secondCheck?.();
+    expect(handle.snapshot().reachability).toBe('unreachable');
+    expect(handle.snapshot().missedPulseCount).toBeGreaterThanOrEqual(1);
+
+    releaseGenerate();
+    const result = await monitoring;
+    expect(result).toBe(true);
+
+    // The watchdog is disposed once monitor() returns — its cadence timer
+    // is cleared and the session reports its resting, un-gated state again.
+    expect(cleared.length).toBeGreaterThan(0);
+    expect(handle.snapshot().reachability).toBe('unknown');
+    expect(handle.snapshot().status).toBe('created');
+  });
+
+  it("sets lastHeartbeatAt/lastActivityAt/lastProgressAt from the tick's 'host-reachability' pulse (AC3)", async () => {
+    const { handle } = createSessionHandleFixture();
+    const seen: Array<ReturnType<typeof handle.snapshot>> = [];
+    handle.subscribeSnapshot((snap) => seen.push(snap));
+
+    const result = await handle.monitor({ every: 5, input: 'poll', until: () => true });
+    expect(result).toBe(true);
+
+    const withActivity = seen.find((snap) => snap.lastActivityAt !== undefined);
+    expect(withActivity).toBeDefined();
+    expect(withActivity?.lastHeartbeatAt).toBe(withActivity?.lastActivityAt);
+    expect(withActivity?.lastProgressAt).toBe(withActivity?.lastActivityAt);
+    expect(withActivity?.evidence.length).toBeGreaterThan(0);
+    expect(withActivity?.evidence[0]?.source).toBe('host-reachability');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SessionHandle liveness — declared waits for parked human input (AB-215 / AC4)
+// ---------------------------------------------------------------------------
+
+/**
+ * A tool run through `createToolbox()` receives a context built from the
+ * toolbox's OWN `dispatchEvent`/`emit` (armorer's `create-toolbox.ts`
+ * registry-execution wrapper) — not `createTool`'s own `dispatch`, which is
+ * only populated on a tool's standalone execute path outside a toolbox.
+ * `dispatchEvent` is what `forwardEvents(toolbox, runEmitter, 'toolbox')`
+ * forwards onto the run's own emitter as a `ForwardedEvent`, which is what
+ * `session-handle.ts` unwraps looking for a `HumanWaitParkedEvent`. Not
+ * present on armorer's declared `RuntimeToolContext` type, hence the cast.
+ */
+function dispatchOnToolboxContext(context: unknown, event: Event): void {
+  (context as { dispatchEvent: (e: Event) => boolean }).dispatchEvent(event);
+}
+
+describe('SessionHandle liveness — declared waits for parked human input (AB-215 / AC4)', () => {
+  it('pauses missedPulseCount accrual for an unbounded review wait and resumes it once session.signal() releases it', async () => {
+    const sessionId = 'human-wait-liveness-session';
+    const runId = deriveRunId(sessionId, 0);
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const fakeEngine = { signal: async () => {} } as unknown as RegistryAgnosticEngine;
+
+    let releaseTool!: () => void;
+    const toolGate = new Promise<void>((resolve) => {
+      releaseTool = resolve;
+    });
+    let signalToolStarted!: () => void;
+    const toolStarted = new Promise<void>((resolve) => {
+      signalToolStarted = resolve;
+    });
+
+    const parkingTool = createTool({
+      name: 'requestHumanInput',
+      description: 'Park waiting for human input',
+      input: z.object({ signalName: z.string(), prompt: z.string().optional() }),
+      execute: async (input, context) => {
+        // Mirrors createRequestHumanInputTool: dispatches HumanWaitParkedEvent
+        // via RuntimeToolContext.dispatch, which the toolbox forwards onto
+        // this run's own emitter as a ForwardedEvent.
+        dispatchOnToolboxContext(
+          context,
+          new HumanWaitParkedEvent(input.signalName, runId, input.prompt),
+        );
+        signalToolStarted();
+        await toolGate;
+        return 'released';
+      },
+    });
+
+    let stepIndex = 0;
+    const scheduled: Array<() => void> = [];
+    const cleared: unknown[] = [];
+    let nextId = 0;
+
+    const handle = createSessionHandle(sessionId, {
+      store,
+      agentName: 'test-agent',
+      engine: fakeEngine,
+      runOptions: {
+        generate: async () => {
+          const index = stepIndex++;
+          if (index === 0) {
+            return {
+              content: '',
+              toolCalls: [
+                {
+                  name: 'requestHumanInput',
+                  arguments: { signalName: 'human-response', prompt: 'Approve this?' },
+                },
+              ],
+            };
+          }
+          return { content: 'done', toolCalls: [] };
+        },
+        toolbox: createToolbox([parkingTool]) as unknown as Toolbox,
+        maximumSteps: 2,
+      },
+      setTimeoutFunction: (callback) => {
+        scheduled.push(callback);
+        return ++nextId;
+      },
+      clearTimeoutFunction: (timer) => {
+        cleared.push(timer);
+      },
+    });
+
+    const monitoring = handle.monitor({ every: 20, input: 'poll', until: () => true });
+
+    // Let the tick's run reach the tool call and dispatch HumanWaitParkedEvent.
+    await toolStarted;
+
+    const parkedSnapshot = handle.snapshot();
+    expect(parkedSnapshot.status).toBe('waiting');
+    // A supplied `prompt` distinguishes a human review from a bare signal
+    // (AB-88: both surface through human-wait.parked today).
+    expect(parkedSnapshot.declaredWait?.reason).toBe('review');
+    expect(parkedSnapshot.declaredWait?.dependency).toBe('human-response');
+    // Legal only for 'signal'/'review' (AB-88's unbounded-wait exception).
+    expect(parkedSnapshot.declaredWait?.deadline).toBeUndefined();
+    expect(parkedSnapshot.assessment).toBe('legitimately-waiting');
+
+    // The session watchdog is paused while parked: firing every check
+    // scheduled before the park must not move missedPulseCount, and no
+    // watchdog is being consulted at all.
+    const pending = [...scheduled];
+    scheduled.length = 0;
+    for (const check of pending) check();
+    expect(handle.snapshot().missedPulseCount).toBe(0);
+    expect(handle.snapshot().reachability).toBe('unknown');
+
+    // Deliver the signal — releases the declared wait and resumes the watchdog.
+    await handle.signal('human-response', { approved: true });
+    const resumedSnapshot = handle.snapshot();
+    expect(resumedSnapshot.status).toBe('running');
+    expect(resumedSnapshot.declaredWait).toBeUndefined();
+    expect(resumedSnapshot.reachability).toBe('reachable');
+
+    releaseTool();
+    const result = await monitoring;
+    expect(result).toBe(true);
+    expect(cleared.length).toBeGreaterThan(0);
+  });
+
+  it('classifies an unprompted park as a "signal" wait, not "review"', async () => {
+    const sessionId = 'human-wait-signal-session';
+    const runId = deriveRunId(sessionId, 0);
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const fakeEngine = { signal: async () => {} } as unknown as RegistryAgnosticEngine;
+
+    let releaseTool!: () => void;
+    const toolGate = new Promise<void>((resolve) => {
+      releaseTool = resolve;
+    });
+    let signalToolStarted!: () => void;
+    const toolStarted = new Promise<void>((resolve) => {
+      signalToolStarted = resolve;
+    });
+
+    const parkingTool = createTool({
+      name: 'requestHumanInput',
+      description: 'Park waiting for an external signal',
+      input: z.object({ signalName: z.string() }),
+      execute: async (input, context) => {
+        dispatchOnToolboxContext(context, new HumanWaitParkedEvent(input.signalName, runId));
+        signalToolStarted();
+        await toolGate;
+        return 'released';
+      },
+    });
+
+    const handle = createSessionHandle(sessionId, {
+      store,
+      agentName: 'test-agent',
+      engine: fakeEngine,
+      runOptions: {
+        generate: async () => ({
+          content: '',
+          toolCalls: [{ name: 'requestHumanInput', arguments: { signalName: 'external-event' } }],
+        }),
+        toolbox: createToolbox([parkingTool]) as unknown as Toolbox,
+        maximumSteps: 1,
+      },
+    });
+
+    const run = handle.run('start');
+    await toolStarted;
+
+    expect(handle.snapshot().declaredWait?.reason).toBe('signal');
+    expect(handle.snapshot().declaredWait?.deadline).toBeUndefined();
+
+    releaseTool();
+    await run.result();
+  });
+
+  it('clears a still-outstanding park once the run settles even if session.signal() was never called', async () => {
+    const sessionId = 'human-wait-unsignaled-session';
+    const runId = deriveRunId(sessionId, 0);
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+
+    let releaseTool!: () => void;
+    const toolGate = new Promise<void>((resolve) => {
+      releaseTool = resolve;
+    });
+    let signalToolStarted!: () => void;
+    const toolStarted = new Promise<void>((resolve) => {
+      signalToolStarted = resolve;
+    });
+
+    const parkingTool = createTool({
+      name: 'requestHumanInput',
+      description: 'Park waiting for human input',
+      input: z.object({ signalName: z.string() }),
+      execute: async (input, context) => {
+        dispatchOnToolboxContext(context, new HumanWaitParkedEvent(input.signalName, runId));
+        signalToolStarted();
+        await toolGate;
+        return 'released';
+      },
+    });
+
+    const handle = createSessionHandle(sessionId, {
+      store,
+      agentName: 'test-agent',
+      runOptions: {
+        generate: async () => ({
+          content: 'done',
+          toolCalls: [{ name: 'requestHumanInput', arguments: { signalName: 'human-response' } }],
+        }),
+        toolbox: createToolbox([parkingTool]) as unknown as Toolbox,
+        maximumSteps: 1,
+      },
+    });
+
+    const run = handle.run('start');
+    await toolStarted;
+    expect(handle.snapshot().status).toBe('waiting');
+
+    // The run finishes on its own (maximumSteps: 1) without session.signal()
+    // ever being called — the park bookkeeping must not be left stranded.
+    releaseTool();
+    await run.result();
+    // The settle cleanup runs one extra microtask after `result()` resolves
+    // (it is chained via `.catch().finally()`, not attached directly to the
+    // same promise `result()` returns) — matches the pre-existing
+    // `currentRun`/`currentRunId` cleanup's own timing in this file.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(handle.snapshot().status).toBe('created');
+    expect(handle.snapshot().declaredWait).toBeUndefined();
+  });
+});
+
+describe('SessionHandle liveness — durability (AB-215 / AC5)', () => {
+  it('is always process-local, even mid-run and mid-monitor', async () => {
+    const { handle } = createSessionHandleFixture();
+    expect(handle.snapshot().durability).toBe('process-local');
+
+    const runPromise = handle.run('hello').result();
+    expect(handle.snapshot().durability).toBe('process-local');
+    await runPromise;
+    expect(handle.snapshot().durability).toBe('process-local');
+
+    await handle.monitor({ every: 5, input: 'poll', until: () => true });
+    expect(handle.snapshot().durability).toBe('process-local');
   });
 });

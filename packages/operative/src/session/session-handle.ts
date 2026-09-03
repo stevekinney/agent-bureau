@@ -1,7 +1,7 @@
 import type { WorkflowState } from '@lostgradient/weft';
 import type { ConversationHistory } from 'conversationalist';
 import { Conversation, createConversationHistory } from 'conversationalist';
-import { CompletableEventTarget, TypedEventTarget } from 'lifecycle';
+import { CompletableEventTarget, ForwardedEvent, TypedEventTarget } from 'lifecycle';
 
 import type { AgentRun } from '../agent-run';
 import { createAgentRun } from '../agent-run';
@@ -23,6 +23,7 @@ import type {
   SessionRecoverFailure,
 } from '../events';
 import {
+  HumanWaitParkedEvent,
   SessionCancelEvent,
   SessionForkEvent,
   SessionMonitorDoneEvent,
@@ -33,8 +34,19 @@ import {
   SessionSleepEvent,
   SessionUpdateEvent,
 } from '../events';
-import type { AgentRunLivenessSnapshot } from '../liveness';
-import { LIVENESS_POLICY_VERSION } from '../liveness';
+import type {
+  AgentRunLivenessSnapshot,
+  DeclaredWait,
+  LivenessAssessment,
+  LivenessLifecycleStatus,
+  LivenessProgressState,
+  LivenessReachability,
+  LivenessSnapshot,
+  StallWatchdog,
+  StallWatchdogClock,
+  Subscription,
+} from '../liveness';
+import { createStallWatchdog, LIVENESS_POLICY_VERSION, sessionMonitorPolicy } from '../liveness';
 import type { FinishReason, RunOptions, RunResult } from '../types';
 import type { SessionStore } from './types';
 
@@ -126,6 +138,12 @@ export interface MonitorOptions {
    */
   maxDuration?: number | string;
 }
+
+/**
+ * `SessionHandle`'s own `LivenessSnapshot`, narrowed to `kind: 'session'`
+ * (AB-88/AB-214/AB-215 — obs-02).
+ */
+export type SessionLivenessSnapshot = LivenessSnapshot & { kind: 'session' };
 
 /**
  * The live handle returned by `agent.session(id)` / `bureau.session(id)`.
@@ -253,6 +271,31 @@ export interface SessionHandle {
 
   /** Load the persisted session data from the store. */
   getSession(): Promise<AgentSession>;
+
+  /**
+   * Current `LivenessSnapshot` for this session (AB-88/AB-214/AB-215,
+   * obs-02). Synchronous, never starts work, never blocks, never mutates.
+   * Session liveness is process-local ({@link LivenessSnapshot.durability}
+   * is always `'process-local'`, per AB-39): a `session.monitor()` loop
+   * drives the watchdog while it runs, and delivering a signal that
+   * releases a `'signal'`/`'review'` declared wait (AB-88's unbounded-wait
+   * exception) clears it without the elapsed wait time counting as missed
+   * pulses.
+   */
+  snapshot(): SessionLivenessSnapshot;
+
+  /**
+   * Independent, non-consuming liveness observer (AC10). Delivers the
+   * current snapshot synchronously before returning, then a new snapshot on
+   * every revision change. Unlike an `AgentRun`, a `SessionHandle` never
+   * reaches a terminal liveness status — it can always accept another
+   * `run()` — so this subscription stays open until `unsubscribe()` or
+   * `options.signal` aborts it.
+   */
+  subscribeSnapshot(
+    observer: (snapshot: SessionLivenessSnapshot) => void,
+    options?: { signal?: AbortSignal },
+  ): Subscription;
 
   /**
    * The event emitter for session-scoped events (session.recover,
@@ -655,6 +698,187 @@ export function createSessionHandle(
   let currentRun: AgentRun | null = null;
   let currentRunId: string | null = null;
 
+  // ---------------------------------------------------------------------
+  // Liveness (AB-88/AB-214/AB-215 — obs-02).
+  //
+  // `livenessClock` threads the SAME `setTimeoutFunction`/`clearTimeoutFunction`
+  // pair already used by `sleep()`/`monitor()`'s inter-tick delay into
+  // `createStallWatchdog`'s `clock` parameter — no second timer seam is
+  // added. `now()` stays the real monotonic clock (matching AB-214's own
+  // `realClock`): a test drives `missedPulseCount` by manually invoking the
+  // captured `setTimeoutFunction` callback, which increments by at least one
+  // full missed interval regardless of how little real time has elapsed
+  // (`watchdog.ts`'s `Math.max(1, …)` floor), so faking `now()` separately
+  // is unnecessary to prove the injected clock drives the watchdog.
+  // ---------------------------------------------------------------------
+  const livenessClock: StallWatchdogClock = {
+    now: () => performance.now(),
+    setTimeout: setTimeoutFunction,
+    clearTimeout: clearTimeoutFunction,
+  };
+
+  const livenessStartedAt = new Date().toISOString();
+  let livenessRevision = 0;
+  let livenessStatus: LivenessLifecycleStatus = 'created';
+  let livenessLastTransitionAt = livenessStartedAt;
+  let declaredWait: DeclaredWait | undefined;
+
+  /**
+   * The `session.monitor` watchdog (obs-01's `sessionMonitorPolicy` row).
+   * Created when `monitor()` starts — its cadence is the caller's `every`,
+   * only known then — and disposed in `monitor()`'s `finally`: a session not
+   * currently being polled accrues no missed pulses. Also temporarily
+   * disposed (without clearing `sessionWatchdogCadenceMs`) while a
+   * `HumanWaitParkedEvent` is outstanding, per AB-88's unbounded-wait
+   * exception for `'signal'`/`'review'` declared waits: elapsed time during
+   * an unbounded human wait must not accrue toward stalled/unreachable, and
+   * disposing (rather than merely ignoring ticks) discards that elapsed time
+   * outright instead of letting it appear as a burst of missed pulses the
+   * moment the watchdog is asked to assess again.
+   */
+  let sessionWatchdog: StallWatchdog | undefined;
+  let sessionWatchdogCadenceMs: number | undefined;
+
+  /** The run + signal name a `HumanWaitParkedEvent` is currently parked on, if any. */
+  let parkedRunId: string | undefined;
+  let parkedSignalName: string | undefined;
+
+  interface LivenessSubscriberRecord {
+    readonly observer: (snapshot: SessionLivenessSnapshot) => void;
+    closed: boolean;
+    readonly detach: () => void;
+  }
+
+  const livenessSubscribers = new Set<LivenessSubscriberRecord>();
+  let cachedLivenessSnapshot: SessionLivenessSnapshot | undefined;
+  let cachedLivenessRevision = -1;
+
+  function deriveSessionAssessment(
+    reachability: LivenessReachability,
+    progress: LivenessProgressState,
+  ): LivenessAssessment {
+    if (declaredWait || livenessStatus === 'waiting') return 'legitimately-waiting';
+    if (reachability === 'unreachable') return 'unreachable';
+    if (progress === 'stalled') return 'alive-but-stalled';
+    return 'healthy';
+  }
+
+  function computeLivenessSnapshot(): SessionLivenessSnapshot {
+    const watchdogAssessment = sessionWatchdog?.assess();
+    const evidence = watchdogAssessment?.evidence ?? [];
+    // AC3: `session.monitor.tick`'s `'host-reachability'` pulse is this
+    // session's only evidence source, so it — and only it — governs
+    // `lastHeartbeatAt`/`lastActivityAt`/`lastProgressAt` here. Unlike
+    // `active-run-liveness.ts`'s agent-run-level aggregation (where a host
+    // pulse proves scheduling, not the watched work's own progress), a
+    // session has no finer-grained evidence to prefer.
+    const lastPulseAt = evidence.length > 0 ? evidence[evidence.length - 1]?.at : undefined;
+    const reachability: LivenessReachability = watchdogAssessment?.reachability ?? 'unknown';
+    const progress: LivenessProgressState = watchdogAssessment?.progress ?? 'unknown';
+
+    return Object.freeze({
+      id: sessionId,
+      kind: 'session',
+      startedAt: livenessStartedAt,
+      revision: livenessRevision,
+      status: livenessStatus,
+      lastTransitionAt: livenessLastTransitionAt,
+      projection: 'redacted',
+      ownership: 'independent',
+      detached: false,
+      durability: 'process-local',
+      cancellable: true,
+      attempt: 0,
+      reachability,
+      progress,
+      assessment: deriveSessionAssessment(reachability, progress),
+      observedAt: livenessClock.now(),
+      ...(lastPulseAt !== undefined
+        ? { lastHeartbeatAt: lastPulseAt, lastActivityAt: lastPulseAt, lastProgressAt: lastPulseAt }
+        : {}),
+      missedPulseCount: watchdogAssessment?.missedPulseCount ?? 0,
+      ...(declaredWait !== undefined ? { declaredWait } : {}),
+      policyVersion: LIVENESS_POLICY_VERSION,
+      evidence,
+    });
+  }
+
+  // "Cached snapshot" capability: repeated reads before a represented change
+  // return the identical object by reference — a real state change always
+  // advances `livenessRevision` first (via `advanceLiveness()`), so caching
+  // keyed on it is exact.
+  function readLivenessSnapshot(): SessionLivenessSnapshot {
+    if (cachedLivenessSnapshot && cachedLivenessRevision === livenessRevision) {
+      return cachedLivenessSnapshot;
+    }
+    cachedLivenessSnapshot = computeLivenessSnapshot();
+    cachedLivenessRevision = livenessRevision;
+    return cachedLivenessSnapshot;
+  }
+
+  function notifyLiveness(): void {
+    const snapshot = readLivenessSnapshot();
+    for (const record of [...livenessSubscribers]) {
+      if (record.closed) continue;
+      try {
+        record.observer(snapshot);
+      } catch {
+        // A throwing subscriber must not escape into the caller driving this
+        // revision — mirrors `active-run-liveness.ts`'s identical isolation.
+      }
+    }
+  }
+
+  function advanceLiveness(): void {
+    livenessRevision += 1;
+    notifyLiveness();
+  }
+
+  /**
+   * Sets this session's own lifecycle status and declared wait as ONE
+   * revision. Always advances (even when `next` equals the current status)
+   * so a wait payload change while already `'waiting'` (not expected today,
+   * but not excluded) still reaches subscribers. Omitting `wait` clears any
+   * previously declared wait.
+   */
+  function setLivenessState(next: LivenessLifecycleStatus, wait?: DeclaredWait): void {
+    if (livenessStatus !== next) {
+      livenessStatus = next;
+      livenessLastTransitionAt = new Date().toISOString();
+    }
+    declaredWait = wait;
+    advanceLiveness();
+  }
+
+  /**
+   * Disposes the active `session.monitor` watchdog without clearing
+   * `sessionWatchdogCadenceMs`, so `resumeSessionWatchdogAfterWait` can
+   * rebuild it once the outstanding wait clears. A no-op when no watchdog is
+   * active (a `HumanWaitParkedEvent` outside `monitor()`).
+   */
+  function pauseSessionWatchdogForWait(): void {
+    if (!sessionWatchdog) return;
+    sessionWatchdog.dispose();
+    sessionWatchdog = undefined;
+  }
+
+  /**
+   * Rebuilds the `session.monitor` watchdog with a FRESH instance (discarding
+   * whatever elapsed time and evidence accrued while paused) once an
+   * outstanding wait clears. A no-op when no `monitor()` loop is active
+   * (`sessionWatchdogCadenceMs` was never set, or its own `finally` already
+   * cleared it).
+   */
+  function resumeSessionWatchdogAfterWait(): void {
+    if (sessionWatchdogCadenceMs === undefined || sessionWatchdog !== undefined) return;
+    sessionWatchdog = createStallWatchdog(
+      sessionMonitorPolicy(sessionWatchdogCadenceMs),
+      livenessClock,
+      { onAssessmentChange: advanceLiveness },
+    );
+    sessionWatchdog.recordPulse('host-reachability', 0);
+  }
+
   /**
    * Load the session from the store, creating it if absent.
    */
@@ -730,6 +954,15 @@ export function createSessionHandle(
       // suspended at a durable step.
       let activeInnerRun: ActiveRun | null = null;
 
+      // This call's own run id, once the reservation resolves — used to
+      // correlate a `HumanWaitParkedEvent` and to clean up park bookkeeping
+      // when this run settles (liveness, AB-215).
+      let thisRunId: string | undefined;
+
+      // Eagerly reflect this run as the session's own current activity.
+      // Clears any leftover declared wait from a prior run.
+      setLivenessState('running');
+
       const resultPromise: Promise<RunResult> = (async () => {
         let reservation:
           | {
@@ -778,6 +1011,7 @@ export function createSessionHandle(
 
         const { runId, runningRef, baseConversationHistory, seededConversation } = reservation;
         currentRunId = runId;
+        thisRunId = runId;
 
         // Thread the eager AbortController's signal into the run options so
         // abort() works immediately — even before the inner run's own
@@ -820,7 +1054,41 @@ export function createSessionHandle(
         // see the full event stream.
         const completeOuterEmitter = outerEmitter.complete.bind(outerEmitter);
         const subscription = innerRun.toObservable().subscribe({
-          next: (e) => outerEmitter.dispatchEvent(e),
+          next: (e) => {
+            outerEmitter.dispatchEvent(e);
+            // A `requestHumanInput` tool typically dispatches via its
+            // `RuntimeToolContext.dispatch`, which lands on the toolbox's
+            // own event target and reaches this run's emitter wrapped as a
+            // `ForwardedEvent` (`toolbox-event-forwarding.ts`) — unwrap it
+            // so a `HumanWaitParkedEvent` is recognized either way (a bare
+            // dispatch onto a run-level emitter, or the toolbox-forwarded
+            // path used today).
+            const humanWait =
+              e instanceof HumanWaitParkedEvent
+                ? e
+                : e instanceof ForwardedEvent && e.originalEvent instanceof HumanWaitParkedEvent
+                  ? e.originalEvent
+                  : undefined;
+            // AB-88: 'review' and 'signal' are distinct DeclaredWaitReasons
+            // even though both surface through `human-wait.parked` today —
+            // a supplied `prompt` (requestHumanInput's reviewer-facing text)
+            // distinguishes a human review from a bare external signal.
+            // Deadline is intentionally omitted: both reasons are legal
+            // unbounded waits (AB-88's unbounded-wait exception), so the
+            // session watchdog is paused rather than left to accrue missed
+            // pulses purely from elapsed time.
+            if (humanWait && humanWait.runId === runId) {
+              parkedRunId = runId;
+              parkedSignalName = humanWait.signalName;
+              pauseSessionWatchdogForWait();
+              setLivenessState('waiting', {
+                reason: humanWait.prompt !== undefined ? 'review' : 'signal',
+                startedAt: livenessClock.now(),
+                dependency: humanWait.signalName,
+                wakeCondition: `session.signal('${humanWait.signalName}')`,
+              });
+            }
+          },
           error: completeOuterEmitter,
           complete: completeOuterEmitter,
         });
@@ -984,6 +1252,17 @@ export function createSessionHandle(
             currentRun = null;
             currentRunId = null;
           }
+          // Liveness (AB-215): this run is done. Clear a still-outstanding
+          // park (e.g. cancel()/abort() ended the run while parked) so a
+          // paused watchdog is not stranded, then reflect the session as
+          // idle again — a monitor tick's own pulse/wait overrides this
+          // immediately if this run() call was one of its ticks.
+          if (thisRunId !== undefined && parkedRunId === thisRunId) {
+            parkedRunId = undefined;
+            parkedSignalName = undefined;
+            resumeSessionWatchdogAfterWait();
+          }
+          setLivenessState('created');
         });
 
       return agentRun;
@@ -1234,6 +1513,17 @@ export function createSessionHandle(
       const runId = await requireRunningRunId('signal');
       emitter.dispatchEvent(new SessionSignalEvent(sessionId, runId, name, payload));
       await eng.signal(runId, name, payload);
+      // Liveness (AB-215): a matching signal releases this session's
+      // 'signal'/'review' declared wait (AB-88's unbounded-wait exception).
+      // Resuming the watchdog with a FRESH instance discards the paused
+      // interval entirely rather than letting it read as a burst of missed
+      // pulses now that assessment resumes.
+      if (parkedRunId === runId && parkedSignalName === name) {
+        parkedRunId = undefined;
+        parkedSignalName = undefined;
+        resumeSessionWatchdogAfterWait();
+        setLivenessState('running');
+      }
     },
 
     async update<TResult = unknown>(name: string, payload?: unknown): Promise<TResult> {
@@ -1334,91 +1624,190 @@ export function createSessionHandle(
       const startedAt = Date.now();
       let tick = 0;
 
-      while (true) {
-        // Deadline guard — check before starting a new tick.
-        if (maxMs !== undefined && Date.now() - startedAt >= maxMs) {
-          emitter.dispatchEvent(new SessionMonitorDoneEvent(sessionId, false, tick));
-          return false;
-        }
+      // Liveness (AB-215): the `session.monitor` `StallPolicy` row (obs-01's
+      // `policies.ts`) drives a watchdog for the lifetime of this loop only —
+      // created here (its cadence is `everyMs`, only known now) and disposed
+      // in `finally` below, so a session not currently being polled accrues
+      // no missed pulses.
+      sessionWatchdogCadenceMs = everyMs;
+      sessionWatchdog = createStallWatchdog(sessionMonitorPolicy(everyMs), livenessClock, {
+        onAssessmentChange: advanceLiveness,
+      });
 
-        // Emit tick-started (met = null — run hasn't completed yet).
-        // Each tick is a full agent run.
-        signal?.throwIfAborted();
-        emitter.dispatchEvent(new SessionMonitorTickEvent(sessionId, tick, null));
-        const run = handle.run(input);
-        const abortRun = () => run.abort('session monitor aborted');
-        signal?.addEventListener('abort', abortRun, { once: true });
-        let result: RunResult;
-        try {
-          result = await run.result();
-        } catch (err) {
-          // A run error is treated as a non-met tick — we emit done(false) and
-          // propagate. The caller should handle this as an error condition.
-          emitter.dispatchEvent(new SessionMonitorDoneEvent(sessionId, false, tick + 1));
-          if (signal?.aborted) throw processLocalAbortError();
-          throw err;
-        } finally {
-          signal?.removeEventListener('abort', abortRun);
-        }
-
-        // Surface terminal run FAILURES as errors instead of feeding them to the
-        // predicate. `run.result()` resolves (it does not throw) for normal
-        // operative failures — `error`, `aborted`, `budget-exceeded`,
-        // `elicitation-denied` — so the catch above never runs for these. Without
-        // this check a predicate that returns false would keep sleeping and
-        // re-running after a provider/tool failure instead of surfacing it, the
-        // same way the catch block does for thrown errors (PRRT_kwDORvupsc6MddwB).
-        if (signal?.aborted) {
-          emitter.dispatchEvent(new SessionMonitorDoneEvent(sessionId, false, tick + 1));
-          throw processLocalAbortError();
-        }
-        if (FAILURE_FINISH_REASONS.has(result.finishReason)) {
-          emitter.dispatchEvent(new SessionMonitorDoneEvent(sessionId, false, tick + 1));
-          // Prefer the run's own error; otherwise synthesize one naming the
-          // finish reason ('aborted'/'budget-exceeded'/'elicitation-denied'
-          // typically carry no `error`).
-          throw result.error instanceof Error
-            ? result.error
-            : new Error(
-                `monitor tick ended with finishReason '${result.finishReason}' before the ` +
-                  `predicate could be evaluated.`,
-              );
-        }
-
-        // Evaluate the predicate.
-        const met = until(result);
-        tick += 1;
-
-        // Emit tick-completed with the predicate result.
-        emitter.dispatchEvent(new SessionMonitorTickEvent(sessionId, tick - 1, met));
-
-        if (met) {
-          emitter.dispatchEvent(new SessionMonitorDoneEvent(sessionId, true, tick));
-          return true;
-        }
-
-        // Sleep between ticks — respects the maxDuration deadline (don't sleep
-        // past the deadline; wake up early if needed).
-        const elapsed = Date.now() - startedAt;
-        if (maxMs !== undefined && elapsed >= maxMs) {
-          emitter.dispatchEvent(new SessionMonitorDoneEvent(sessionId, false, tick));
-          return false;
-        }
-        const remainingMs = maxMs !== undefined ? maxMs - elapsed : Infinity;
-        const sleepMs = Math.min(everyMs, remainingMs);
-        if (sleepMs > 0) {
-          try {
-            await processLocalDelay(sleepMs, signal, setTimeoutFunction, clearTimeoutFunction);
-          } catch (error) {
+      try {
+        while (true) {
+          // Deadline guard — check before starting a new tick.
+          if (maxMs !== undefined && Date.now() - startedAt >= maxMs) {
             emitter.dispatchEvent(new SessionMonitorDoneEvent(sessionId, false, tick));
-            throw error;
+            return false;
+          }
+
+          // Emit tick-started (met = null — run hasn't completed yet).
+          // Each tick is a full agent run. `'host-reachability'` specifically
+          // (AB-215/AC3): a caller's own poll tick proves the process is
+          // scheduling callbacks, not that the underlying watched work is
+          // progressing.
+          signal?.throwIfAborted();
+          // Optional chaining: `sessionWatchdog` can be transiently paused
+          // (undefined) by a `HumanWaitParkedEvent` from the PREVIOUS tick's
+          // run racing this check — read the live reference each iteration
+          // rather than a value captured before the loop started.
+          sessionWatchdog?.recordPulse('host-reachability', 0);
+          setLivenessState('running');
+          emitter.dispatchEvent(new SessionMonitorTickEvent(sessionId, tick, null));
+          const run = handle.run(input);
+          const abortRun = () => run.abort('session monitor aborted');
+          signal?.addEventListener('abort', abortRun, { once: true });
+          let result: RunResult;
+          try {
+            result = await run.result();
+          } catch (err) {
+            // A run error is treated as a non-met tick — we emit done(false) and
+            // propagate. The caller should handle this as an error condition.
+            emitter.dispatchEvent(new SessionMonitorDoneEvent(sessionId, false, tick + 1));
+            if (signal?.aborted) throw processLocalAbortError();
+            throw err;
+          } finally {
+            signal?.removeEventListener('abort', abortRun);
+          }
+
+          // Surface terminal run FAILURES as errors instead of feeding them to the
+          // predicate. `run.result()` resolves (it does not throw) for normal
+          // operative failures — `error`, `aborted`, `budget-exceeded`,
+          // `elicitation-denied` — so the catch above never runs for these. Without
+          // this check a predicate that returns false would keep sleeping and
+          // re-running after a provider/tool failure instead of surfacing it, the
+          // same way the catch block does for thrown errors (PRRT_kwDORvupsc6MddwB).
+          if (signal?.aborted) {
+            emitter.dispatchEvent(new SessionMonitorDoneEvent(sessionId, false, tick + 1));
+            throw processLocalAbortError();
+          }
+          if (FAILURE_FINISH_REASONS.has(result.finishReason)) {
+            emitter.dispatchEvent(new SessionMonitorDoneEvent(sessionId, false, tick + 1));
+            // Prefer the run's own error; otherwise synthesize one naming the
+            // finish reason ('aborted'/'budget-exceeded'/'elicitation-denied'
+            // typically carry no `error`).
+            throw result.error instanceof Error
+              ? result.error
+              : new Error(
+                  `monitor tick ended with finishReason '${result.finishReason}' before the ` +
+                    `predicate could be evaluated.`,
+                );
+          }
+
+          // Evaluate the predicate.
+          const met = until(result);
+          tick += 1;
+
+          // Emit tick-completed with the predicate result.
+          emitter.dispatchEvent(new SessionMonitorTickEvent(sessionId, tick - 1, met));
+
+          if (met) {
+            emitter.dispatchEvent(new SessionMonitorDoneEvent(sessionId, true, tick));
+            return true;
+          }
+
+          // Sleep between ticks — respects the maxDuration deadline (don't sleep
+          // past the deadline; wake up early if needed).
+          const elapsed = Date.now() - startedAt;
+          if (maxMs !== undefined && elapsed >= maxMs) {
+            emitter.dispatchEvent(new SessionMonitorDoneEvent(sessionId, false, tick));
+            return false;
+          }
+          const remainingMs = maxMs !== undefined ? maxMs - elapsed : Infinity;
+          const sleepMs = Math.min(everyMs, remainingMs);
+          if (sleepMs > 0) {
+            // Liveness: a bounded 'sleep' declared wait — unlike 'signal'/
+            // 'review', AB-88 requires a deadline for this reason, and the
+            // session.monitor watchdog stays live through it (its own
+            // cadence check governs whether the next tick's pulse arrives
+            // in time).
+            setLivenessState('waiting', {
+              reason: 'sleep',
+              startedAt: livenessClock.now(),
+              deadline: livenessClock.now() + sleepMs,
+              wakeCondition: 'session.monitor inter-tick timer',
+            });
+            try {
+              await processLocalDelay(sleepMs, signal, setTimeoutFunction, clearTimeoutFunction);
+            } catch (error) {
+              emitter.dispatchEvent(new SessionMonitorDoneEvent(sessionId, false, tick));
+              throw error;
+            }
           }
         }
+      } finally {
+        sessionWatchdog?.dispose();
+        sessionWatchdog = undefined;
+        sessionWatchdogCadenceMs = undefined;
+        setLivenessState('created');
       }
     },
 
     async getSession(): Promise<AgentSession> {
       return loadOrCreate();
+    },
+
+    snapshot(): SessionLivenessSnapshot {
+      return readLivenessSnapshot();
+    },
+
+    subscribeSnapshot(
+      observer: (snapshot: SessionLivenessSnapshot) => void,
+      subscribeOptions?: { signal?: AbortSignal },
+    ): Subscription {
+      const abortSignal = subscribeOptions?.signal;
+      const record: LivenessSubscriberRecord = {
+        observer,
+        closed: false,
+        detach: () => abortSignal?.removeEventListener('abort', unsubscribe),
+      };
+
+      function unsubscribe(): void {
+        if (record.closed) return;
+        record.closed = true;
+        record.detach();
+        livenessSubscribers.delete(record);
+      }
+
+      // A session never reaches a terminal liveness status — it can always
+      // accept another `run()` — so, unlike `active-run-liveness.ts`, there
+      // is no already-terminal fast path; only an already-aborted signal
+      // short-circuits to a single synchronous delivery.
+      if (abortSignal?.aborted) {
+        record.closed = true;
+        try {
+          observer(readLivenessSnapshot());
+        } catch {
+          // Same isolation as `notifyLiveness()` above.
+        }
+        return {
+          unsubscribe,
+          get closed() {
+            return record.closed;
+          },
+        };
+      }
+
+      // Register BEFORE the synchronous initial delivery — mirrors
+      // `active-run-liveness.ts`'s identical reentrancy guard: an observer
+      // that itself synchronously triggers a revision change must still be
+      // registered when that notification runs.
+      livenessSubscribers.add(record);
+      abortSignal?.addEventListener('abort', unsubscribe, { once: true });
+
+      try {
+        observer(readLivenessSnapshot());
+      } catch {
+        // Same isolation as `notifyLiveness()` above.
+      }
+
+      return {
+        unsubscribe,
+        get closed() {
+          return record.closed;
+        },
+      };
     },
   };
 

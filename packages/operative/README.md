@@ -290,6 +290,23 @@ await monitoring; // rejects with AbortError
 
 Use a Weft-backed run wakeup or signal when a current run must survive restart, and use a Bureau recurring schedule when future runs must survive restart. Session timing does not switch to those durable capabilities implicitly.
 
+#### Session liveness (AB-88, AB-214, AB-215)
+
+`SessionHandle` implements `LivenessObservable` (`@lostgradient/operative/liveness`): `snapshot()` returns a `LivenessSnapshot` narrowed to `kind: 'session'`, and `subscribeSnapshot(observer, options?)` delivers it immediately, then again on every revision change. Unlike an `AgentRun`, a session never reaches a terminal liveness status — it can always accept another `run()` — so a `subscribeSnapshot` subscription stays open until `unsubscribe()` or `options.signal` aborts it. `durability` is always `'process-local'` (AB-39: session monitoring is not durable-ized by this record).
+
+```typescript
+const subscription = session.subscribeSnapshot((snapshot) => {
+  console.log(snapshot.status, snapshot.reachability, snapshot.missedPulseCount);
+});
+
+await session.monitor({ every: 'PT30S', input: 'Check deployment health', until: () => false });
+subscription.unsubscribe();
+```
+
+The `session.monitor` `StallPolicy` row (`policies.ts`) drives a watchdog for the lifetime of an active `monitor()` loop only — built via `createStallWatchdog` over the SAME `setTimeoutFunction`/`clearTimeoutFunction` pair `sleep()`/`monitor()` already use (no second timer seam), and disposed once the loop returns or throws, so a session not currently being polled accrues no missed pulses. Each `session.monitor.tick` records a `'host-reachability'` pulse — a caller's own poll tick proves the process is scheduling callbacks, not that the underlying watched work is progressing — which sets `lastActivityAt`/`lastHeartbeatAt`/`lastProgressAt` on the snapshot.
+
+A `HumanWaitParkedEvent` observed on a run this session started (typically from a `requestHumanInput`-style tool) moves the session to `status: 'waiting'` with a `DeclaredWait`: `reason: 'review'` when the event carries a `prompt`, `reason: 'signal'` otherwise, and `deadline` intentionally absent — both are legal unbounded waits per AB-88's unbounded-wait exception. The watchdog is paused (not merely ignored) for the wait's duration, so elapsed time never accrues toward stalled/unreachable, and resumes with a fresh instance once `session.signal()` delivers the matching signal.
+
 #### `createLazyAgent(loader, options?)`
 
 Type-preserving lazy loading for a whole `RunnableAgent` (AB-21) — instructions, tools, and output schema together, not just the `generate` function (`createLazyGenerate` covers that narrower case: `createAgent({ generate: createLazyGenerate(loader) })`). It defers `import()`ing an agent's module until the first `run()` call, while still returning an `AgentRun` handle synchronously:
