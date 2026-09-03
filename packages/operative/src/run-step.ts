@@ -5,7 +5,12 @@ import type { HookErrorHandler, HookRegistrationOptions } from 'lifecycle';
 import type { ZodType } from 'zod';
 
 import type { SteeringDesiredState } from './durable/types';
-import { type AgentRunErrorKind, GuardrailTripwireError, reclassifyToolError } from './errors';
+import {
+  type AgentRunErrorKind,
+  GuardrailTripwireError,
+  reclassifyToolError,
+  SelectionRevalidationError,
+} from './errors';
 import {
   BackpressureAppliedEvent,
   BackpressureReleasedEvent,
@@ -32,6 +37,7 @@ import {
 } from './events';
 import type { ErrorRecoveryAction } from './hooks/types';
 import { addJitter } from './retry/jitter';
+import type { SelectionGate } from './selection-gate';
 import { validateOutput } from './structured-output/response-schema';
 import type { ToolChoice } from './structured-output/types';
 import type {
@@ -111,6 +117,13 @@ export interface StepDeps {
    * boundary read below is skipped entirely and behavior is unchanged.
    */
   readonly steering: SteeringGate | undefined;
+  /**
+   * The AB-64/AB-250 selection-revalidation gate, threaded from
+   * `RunOptions.selection`. `undefined` when the run has no selection
+   * dependency configured — the boundary read below is skipped entirely
+   * and behavior is unchanged.
+   */
+  readonly selection: SelectionGate | undefined;
   readonly stopConditions: StopCondition[];
   readonly prepareStepHooks: PrepareStepHook[];
   readonly beforeToolExecutionHooks: BeforeToolExecutionHook[];
@@ -676,6 +689,34 @@ export async function runStep(
     }
     steeringDesiredState = { ...steeringGate.getDesiredState() };
     maybeDispatchSteeringApplied(steeringDesiredState);
+  }
+
+  // AB-64/AB-250 selection boundary: revalidate a previously planned
+  // backend selection against the CURRENT catalog/policy/availability
+  // snapshot, at the same shared entry point as the steering boundary above
+  // — after the pause-wait loop (a paused run must not revalidate until
+  // resumed) and before backpressure. `deps.selection` is undefined for a
+  // run with no selection dependency configured — that is a complete
+  // no-op, matching today's non-selecting behavior exactly.
+  //
+  // `revalidate()` is synchronous and pure (see `SelectionGate`'s doc
+  // comment): it performs no input or output and never awaits a provider.
+  // A plan that no longer reaches `outcome: 'selected'` fails the step
+  // outright with a typed `SelectionRevalidationError` carrying both the
+  // failed replacement plan and the superseded plan it replaces — never
+  // silently falling back to the superseded plan's model. Applying a
+  // replacement plan to this step's own generate call is out of scope
+  // (ABP-11 non-goal): a replacement plan is recorded and, on success,
+  // simply supersedes the run's prior plan for the NEXT boundary to read.
+  const selectionGate = deps.selection;
+  if (selectionGate) {
+    const supersededPlan = selectionGate.getPlan();
+    const revalidatedPlan = selectionGate.revalidate();
+    if (revalidatedPlan.outcome !== 'selected') {
+      const error = new SelectionRevalidationError(revalidatedPlan, supersededPlan);
+      emitter?.dispatch(new RunErrorEvent(step, error, 'policy'));
+      return { kind: 'error', error, errorKind: 'policy' };
+    }
   }
 
   // Backpressure: wait before proceeding if the strategy requires it

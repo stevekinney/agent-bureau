@@ -64,6 +64,13 @@ export type {
 } from './model-catalog-refresh';
 export { createModelCatalogService } from './model-catalog-refresh';
 export type {
+  BureauModelPolicyOptions,
+  CreateModelPolicyPlannerOptions,
+  ModelPolicyPlanner,
+  PlanSelectionRequest,
+} from './model-policy';
+export { createModelPolicyPlanner } from './model-policy';
+export type {
   EvalScore,
   OnlineEvalJudge,
   OnlineEvalSampler,

@@ -13,6 +13,7 @@ import type { ConversationHistory } from 'conversationalist';
 import type { AgentRun, RunEvent } from './agent-run';
 import type { ChildRunRegistry } from './child-run';
 import type { AgentGenerationProfile } from './generation-profile';
+import type { DelegatedAuthority } from './providers/policy.ts';
 import type { RunOptions } from './types';
 
 export type { RunEvent };
@@ -49,6 +50,14 @@ export interface AgentRunContext {
    * callers.
    */
   childRegistry?: ChildRunRegistry;
+  /**
+   * AB-64/AB-250 — this child's ALREADY-attenuated delegated-authority
+   * grant, forwarded from `dispatchChildRun`'s `DispatchChildRunOptions.delegatedAuthority`
+   * (see `child-run.ts`'s `attenuateDelegatedAuthority`). Absent means this
+   * run inherits no additional narrowing from a dispatching parent beyond
+   * whatever its own `RunOptions.selection` gate already enforces.
+   */
+  delegatedAuthority?: DelegatedAuthority;
 }
 
 /**

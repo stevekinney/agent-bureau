@@ -56,6 +56,8 @@ import {
   ChildWorkflowStartedEvent,
 } from './events';
 import type { LivenessAssessment, LivenessObservable, LivenessSnapshot } from './liveness';
+import type { DelegatedAuthority } from './providers/policy.ts';
+import type { Effort } from './providers/types.ts';
 import type { AgentInput, RunnableAgent } from './runnable-agent';
 import type { RunResult } from './types';
 
@@ -442,6 +444,80 @@ export interface DispatchChildRunOptions {
   childRunId?: string;
   /** When supplied, this dispatch registers into it — see `createChildRunRegistry`. */
   registry?: MutableChildRunRegistry;
+  /**
+   * AB-64/AB-250 — the child's delegated-authority grant, ALREADY attenuated
+   * (never widened) from whatever grant governs the dispatching parent —
+   * see {@link attenuateDelegatedAuthority}. Threaded to the child through
+   * this dispatch path, not `BureauRunOptions`, per AB-64's decision
+   * record: a per-run `BureauRunOptions` field would let a caller widen a
+   * child's authority by simply constructing a fresh options bag, whereas
+   * this field only ever narrows what `agent.run()` resolves for the
+   * child's own selection. Forwarded to `agent.run()` as
+   * `AgentRunContext.delegatedAuthority`; absent means the child inherits
+   * no additional narrowing beyond whatever its own `RunOptions.selection`
+   * gate already enforces.
+   */
+  delegatedAuthority?: DelegatedAuthority;
+}
+
+/**
+ * Portable effort tiers, low to high — mirrors `providers/model-catalog.ts`'s
+ * internal (unexported) `EFFORT_ORDER` array; kept local here rather than
+ * imported so this module (a dispatch primitive, not a selection module)
+ * doesn't reach into the catalog module for one five-element constant.
+ */
+const EFFORT_ORDER: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+/** The lower (more restrictive) of two optional effort tiers; either side
+ *  absent narrows nothing, matching `DelegatedAuthority.maximumEffort`'s own
+ *  "absent narrows nothing" rule. */
+function narrowerEffort(a: Effort | undefined, b: Effort | undefined): Effort | undefined {
+  if (a === undefined) return b;
+  if (b === undefined) return a;
+  return EFFORT_ORDER.indexOf(a) <= EFFORT_ORDER.indexOf(b) ? a : b;
+}
+
+/** The intersection of two optional named lists; either side absent narrows
+ *  nothing (returns the other side unchanged), matching
+ *  `DelegatedAuthority.grantedProviders`/`grantedModels`'s own
+ *  "absent-means-no-op" rule (AB-64's decision record). */
+function intersectGranted<T>(
+  a: readonly T[] | undefined,
+  b: readonly T[] | undefined,
+): readonly T[] | undefined {
+  if (a === undefined) return b;
+  if (b === undefined) return a;
+  return a.filter((value) => b.includes(value));
+}
+
+/**
+ * Composes a parent's `DelegatedAuthority` grant with the authority a
+ * dispatch site wants to hand one specific child, producing the child's own
+ * ATTENUATED grant — never wider than either input (AB-64's decision
+ * record: "a child can never select a provider, model, route, effort, cost,
+ * region, or data policy forbidden by any ancestor"). `parent === undefined`
+ * (the dispatching run itself carries no delegated authority, e.g. it is
+ * the top-level run) returns `child` unchanged — nothing above it to narrow
+ * against.
+ *
+ * `grantedProviders`/`grantedModels` intersect (present-and-present narrows
+ * to the overlap; either side absent narrows nothing); `maximumEffort`
+ * takes the lower of the two tiers. The result's `policyVersion` is the
+ * CHILD grant's own version — the version that performed this narrowing —
+ * so a child's attenuation is traceable to the grant that caused it
+ * (`composePolicy`'s own rule for `DelegatedAuthority`-layer exclusions).
+ */
+export function attenuateDelegatedAuthority(
+  parent: DelegatedAuthority | undefined,
+  child: DelegatedAuthority,
+): DelegatedAuthority {
+  if (parent === undefined) return child;
+  return {
+    grantedProviders: intersectGranted(parent.grantedProviders, child.grantedProviders),
+    grantedModels: intersectGranted(parent.grantedModels, child.grantedModels),
+    maximumEffort: narrowerEffort(parent.maximumEffort, child.maximumEffort),
+    policyVersion: child.policyVersion,
+  };
 }
 
 /** True when `result.finishReason` reflects a signal-driven abort. */
@@ -526,6 +602,9 @@ export function dispatchChildRun<O = never, H extends boolean = false>(
       signal,
       traceContext: options.traceContext,
       withTraceContext: options.withTraceContext,
+      ...(options.delegatedAuthority === undefined
+        ? {}
+        : { delegatedAuthority: options.delegatedAuthority }),
     });
   } catch (error) {
     options.registry?.settle(childRunId, 'failed');

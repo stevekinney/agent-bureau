@@ -60,6 +60,7 @@ export function buildStepDeps(options: RunOptions): StepDeps {
     durableOperationKeys: options.durableOperationKeys ?? false,
     defaultToolChoice: options.toolChoice,
     steering: options.steering,
+    selection: options.selection,
     stopConditions,
     prepareStepHooks: normalizeToArray(options.prepareStep),
     beforeToolExecutionHooks: normalizeToArray(options.beforeToolExecution),
