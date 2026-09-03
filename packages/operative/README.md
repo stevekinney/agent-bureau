@@ -1173,6 +1173,52 @@ the example above, has none: `AgentRunContext` has no `runId` field today, so
 stamped on that path. Supply `parentContext.parentRunId` explicitly when you
 need a correct value there.
 
+**Child terminal lifecycle and relationship-query events (AB-90 child ab90-02, AB-222).**
+Alongside `ChildWorkflowStartedEvent` (`child.started`), `dispatchChildRun`
+emits `ChildWorkflowCompletedEvent`/`ChildWorkflowFailedEvent`/`ChildWorkflowAbortedEvent`
+(`multiagent.child-workflow.completed`/`.failed`/`.aborted` — AB-87's decision
+record names these `child.completed`/`child.failed`/`child.aborted`; AB-50
+shipped them). They're mutually exclusive terminals for one child run, each
+carrying `childRunId` and `parentRunId`.
+
+Two further event classes are typed and exported by this package but not yet
+wired to a live dispatch call site: `ChildWorkflowReattachedEvent`
+(`multiagent.child-workflow.reattached`, `childRunId`/`parentRunId`) fires
+only once AB-53's persisted parent-child topology recovery reattaches a
+previously detached child's event stream to its parent — this package
+defines the type, payload shape, and intended dispatch point, but does not
+itself implement persisted topology or recovery. `ChildWorkflowProgressEvent`
+(`multiagent.child-workflow.progress`) additionally carries the child's own
+`SemanticProgress` (`@lostgradient/operative`'s `liveness` module, AB-88/AB-214)
+and is explicitly non-cursor-advancing — an ephemeral delta, never a durable
+state transition.
+
+`listChildRuns(registry, parentRunId)` is a relationship-query function over
+the same `ChildRunRegistry` `AgentRun.children()` reads from — it lets a
+caller enumerate a run's children and their outcomes without polling each
+child's own handle:
+
+```typescript
+import { createChildRunRegistry, dispatchChildRun, listChildRuns } from '@lostgradient/operative';
+
+const registry = createChildRunRegistry();
+dispatchChildRun(researcherAgent, 'Research topic A', {
+  agentName: 'researcher',
+  parentRunId: 'parent-1',
+  registry,
+});
+
+listChildRuns(registry, 'parent-1');
+// [{ id, parentId: 'parent-1', agentName: 'researcher', durable: false, status: undefined }]
+// status is 'completed' | 'failed' | 'aborted' once terminal, undefined while running.
+```
+
+A `parentRunId` with no registered children returns an empty array — never a
+throw. Deliberately not `bureau.*`-namespaced: `listChildRuns` is an
+operative-level export over operative's own in-process registry; a
+Bureau-level relationship-query API, if wanted later, wraps this function
+rather than being built here.
+
 **Cleanup acknowledgement.** `closed(options?)` (AB-37, delivered by AB-204)
 is on `ActiveRun`, `AgentRun`, and `DiagnosticAgentRun` alike — a truthful
 cleanup acknowledgement, backed by the same settlement `abort()` already
