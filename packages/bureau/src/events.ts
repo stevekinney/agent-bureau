@@ -1,4 +1,5 @@
 import type {
+  AgentScheduledEvent,
   ScheduleCancelledEvent,
   ScheduleCompletedEvent,
   ScheduleFailedEvent,
@@ -153,13 +154,18 @@ export class RecoveryLeaseReleasedEvent extends Event {
 /**
  * Maps event type strings to their corresponding Event subclasses.
  *
- * `schedule.paused`/`resumed`/`cancelled`/`failed`/`completed` (AB-223) are
- * defined in `@lostgradient/operative` (alongside `schedule.created`/
+ * `schedule.created`/`paused`/`resumed`/`cancelled`/`failed`/`completed`
+ * (AB-223/AB-298) are defined in `@lostgradient/operative` (alongside
  * `schedule.wakeup`) rather than here, but dispatched on THIS bureau-level
- * emitter — not a per-run operative emitter — because a schedule pause/
- * resume/cancel and a scheduled fire's terminal outcome are bureau-level
- * facts with no owning per-run surface (scheduled fires are headless; see
- * `runtime-composition.ts`'s `buildScheduledRunServices`).
+ * emitter — not a per-run operative emitter — because a schedule
+ * create/pause/resume/cancel and a scheduled fire's terminal outcome are
+ * bureau-level facts with no owning per-run surface (scheduled fires are
+ * headless; see `runtime-composition.ts`'s `buildScheduledRunServices`).
+ * `schedule.created` reaches this emitter differently from the other five:
+ * `Bureau.createSchedule` passes this bureau's own `emitter` into
+ * `createAgentScheduler`, so `createAgentSchedule` (AB-298) dispatches
+ * directly onto it, rather than `create-bureau.ts` dispatching a second copy
+ * itself the way `pauseSchedule`/`resumeSchedule`/`cancelSchedule` do.
  */
 export interface BureauEventMap extends EventMap {
   [ActionEvent.type]: ActionEvent;
@@ -169,6 +175,7 @@ export interface BureauEventMap extends EventMap {
   [RecoveryAttemptedEvent.type]: RecoveryAttemptedEvent;
   [RecoveryRejectedEvent.type]: RecoveryRejectedEvent;
   [RecoveryLeaseReleasedEvent.type]: RecoveryLeaseReleasedEvent;
+  'schedule.created': AgentScheduledEvent;
   'schedule.paused': SchedulePausedEvent;
   'schedule.resumed': ScheduleResumedEvent;
   'schedule.cancelled': ScheduleCancelledEvent;

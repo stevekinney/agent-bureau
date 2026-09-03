@@ -14,6 +14,7 @@ import {
   resolveDurableHeartbeatTickServices,
 } from '../../src/durable/durable-heartbeat-tick-workflow';
 import type {
+  AgentScheduledEvent,
   ScheduleCancelledEvent,
   SchedulePausedEvent,
   ScheduleResumedEvent,
@@ -307,13 +308,20 @@ describe('createDurableHeartbeat', () => {
       await heartbeat.cancel();
 
       expect(dispatched.map((event) => event.type)).toEqual([
+        'schedule.created',
         'schedule.paused',
         'schedule.resumed',
         'schedule.cancelled',
       ]);
       for (const event of dispatched) {
         expect(
-          (event as SchedulePausedEvent | ScheduleResumedEvent | ScheduleCancelledEvent).scheduleId,
+          (
+            event as
+              | AgentScheduledEvent
+              | SchedulePausedEvent
+              | ScheduleResumedEvent
+              | ScheduleCancelledEvent
+          ).scheduleId,
         ).toBe('heartbeat-events');
       }
     } finally {
@@ -355,17 +363,103 @@ describe('createDurableHeartbeat', () => {
         emitter,
       });
 
+      // `first` registered a genuinely new schedule (one AgentScheduledEvent,
+      // AB-298); `second` joined that same schedule and dispatched nothing.
+      expect(dispatched.map((event) => event.type)).toEqual(['schedule.created']);
+
       // The second handle's cancel() only unregisters its own services — the
       // schedule itself stays active because `first` still holds a
       // registration. No ScheduleCancelledEvent for this call.
       await second.cancel();
-      expect(dispatched).toHaveLength(0);
+      expect(dispatched.map((event) => event.type)).toEqual(['schedule.created']);
 
       // The first handle's cancel() is the last registration standing, so it
       // actually cancels the underlying schedule — exactly one event.
       await first.cancel();
-      expect(dispatched.map((event) => event.type)).toEqual(['schedule.cancelled']);
+      expect(dispatched.map((event) => event.type)).toEqual([
+        'schedule.created',
+        'schedule.cancelled',
+      ]);
     } finally {
+      engine[Symbol.dispose]();
+    }
+  });
+
+  it('dispatches AgentScheduledEvent exactly once for a fresh heartbeat registration, none for a shared re-registration (AB-298)', async () => {
+    const { engine } = await createRunEngine({
+      storage: new MemoryStorage(),
+      runWorkflow: createAgentRunProbeWorkflow(),
+      recover: false,
+      startScheduler: false,
+    });
+    const firstScheduler = createRecordingScheduler();
+    const secondScheduler = createRecordingScheduler();
+    const dispatched: AgentScheduledEvent[] = [];
+    const emitter = {
+      dispatch: (event: Event) => {
+        dispatched.push(event as AgentScheduledEvent);
+        return true;
+      },
+    };
+
+    try {
+      const first = await createDurableHeartbeat(engine, {
+        scheduler: firstScheduler.scheduler,
+        scheduleId: 'heartbeat-created-once',
+        spec: { every: '1h' },
+        createHeartbeatRun: () => ({ conversation: new Conversation() }),
+        emitter,
+      });
+
+      expect(dispatched.map((event) => event.type)).toEqual(['schedule.created']);
+      expect(dispatched[0]).toMatchObject({
+        agentName: DURABLE_HEARTBEAT_TICK_WORKFLOW_TYPE,
+        scheduleId: 'heartbeat-created-once',
+        spec: { every: '1h' },
+      });
+
+      // A second registration against the SAME scheduleId joins the existing
+      // schedule rather than creating a new one — no additional
+      // AgentScheduledEvent for this shared heartbeat re-registration.
+      const second = await createDurableHeartbeat(engine, {
+        scheduler: secondScheduler.scheduler,
+        scheduleId: 'heartbeat-created-once',
+        spec: { every: '1h' },
+        createHeartbeatRun: () => ({ conversation: new Conversation() }),
+        emitter,
+      });
+
+      expect(dispatched.map((event) => event.type)).toEqual(['schedule.created']);
+
+      second[Symbol.dispose]();
+      first[Symbol.dispose]();
+    } finally {
+      await engine.cancelSchedule('heartbeat-created-once').catch(() => {});
+      engine[Symbol.dispose]();
+    }
+  });
+
+  it('dispatches nothing when no emitter is supplied to a fresh heartbeat registration (AB-298)', async () => {
+    const { engine } = await createRunEngine({
+      storage: new MemoryStorage(),
+      runWorkflow: createAgentRunProbeWorkflow(),
+      recover: false,
+      startScheduler: false,
+    });
+    const { scheduler } = createRecordingScheduler();
+
+    try {
+      // Exercises the options.emitter?.dispatch(...) no-op branch for
+      // AgentScheduledEvent — must not throw.
+      const heartbeat = await createDurableHeartbeat(engine, {
+        scheduler,
+        scheduleId: 'heartbeat-no-emitter',
+        spec: { every: '1h' },
+        createHeartbeatRun: () => ({ conversation: new Conversation() }),
+      });
+      heartbeat[Symbol.dispose]();
+    } finally {
+      await engine.cancelSchedule('heartbeat-no-emitter').catch(() => {});
       engine[Symbol.dispose]();
     }
   });
@@ -715,8 +809,9 @@ describe('createDurableHeartbeat', () => {
         status: 'active',
       });
       // A failed cancel() must not dispatch ScheduleCancelledEvent (AB-223) —
-      // the schedule was never actually cancelled.
-      expect(dispatched).toHaveLength(0);
+      // the schedule was never actually cancelled. The fresh registration
+      // above already dispatched its one AgentScheduledEvent (AB-298).
+      expect(dispatched.map((event) => event.type)).toEqual(['schedule.created']);
       await fireSchedule(engine, 'heartbeat-cancel-failure');
       expect(submittedTasks).toHaveLength(1);
       expect(failedWorkflowMessages).toHaveLength(0);
@@ -726,7 +821,10 @@ describe('createDurableHeartbeat', () => {
       expect(await engine.getSchedule('heartbeat-cancel-failure')).toMatchObject({
         status: 'cancelled',
       });
-      expect(dispatched.map((event) => event.type)).toEqual(['schedule.cancelled']);
+      expect(dispatched.map((event) => event.type)).toEqual([
+        'schedule.created',
+        'schedule.cancelled',
+      ]);
     } finally {
       engine.cancelSchedule = originalCancelSchedule;
       await originalCancelSchedule('heartbeat-cancel-failure').catch(() => {});

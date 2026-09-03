@@ -12,7 +12,12 @@ import { createDefaultRuntimeServices } from 'lifecycle';
 
 import type { ClosedFunction } from '../closed-acknowledgement';
 import { createClosedAcknowledgement } from '../closed-acknowledgement';
-import { ScheduleCancelledEvent, SchedulePausedEvent, ScheduleResumedEvent } from '../events';
+import {
+  AgentScheduledEvent,
+  ScheduleCancelledEvent,
+  SchedulePausedEvent,
+  ScheduleResumedEvent,
+} from '../events';
 import type { EventDispatcher } from '../run-step';
 import type { CleanupAcknowledgement, ClosedOptions } from '../types';
 
@@ -147,8 +152,11 @@ export interface CreateAgentScheduleOptions {
    */
   idempotent?: boolean;
   /**
-   * Optional event dispatcher. When supplied, the returned handle's
-   * `pause`/`resume`/`cancel` each dispatch `SchedulePausedEvent`/
+   * Optional event dispatcher. When supplied, this call dispatches
+   * `AgentScheduledEvent` (`schedule.created`, AB-298) exactly once for a
+   * genuinely new registration — never for the idempotent-reuse branch,
+   * which joins an existing schedule rather than creating one. The returned
+   * handle's `pause`/`resume`/`cancel` each dispatch `SchedulePausedEvent`/
    * `ScheduleResumedEvent`/`ScheduleCancelledEvent` (AB-223) exactly once per
    * successful call, after the underlying engine call settles. Omitted
    * entirely for a caller with no event surface — this module never
@@ -535,6 +543,19 @@ export async function createAgentSchedule(
     }
     throw error;
   }
+
+  // This branch only runs for a genuinely new registration — the
+  // idempotent-reuse branches above both return early through
+  // `scheduleHandleFromEngine` before reaching here — so `AgentScheduledEvent`
+  // dispatches exactly once per registered schedule, never on reuse (AB-298).
+  emitter?.dispatch(
+    new AgentScheduledEvent({
+      agentName,
+      scheduleId: handle.id,
+      spec,
+      ...(scheduledInput.sessionId !== undefined ? { sessionId: scheduledInput.sessionId } : {}),
+    }),
+  );
 
   let resolveCancelled!: () => void;
   let rejectCancelled!: (error: unknown) => void;

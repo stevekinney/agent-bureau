@@ -1085,8 +1085,13 @@ export class HumanWaitParkedEvent extends Event {
 // ---------------------------------------------------------------------------
 
 /**
- * Emitted when a durable agent schedule is registered via `bureau.schedule()`
- * or the `scheduleSelf` tool.
+ * Emitted when a durable agent schedule is genuinely newly registered — never
+ * for an idempotent re-registration that reuses an existing schedule, nor for
+ * a shared heartbeat's re-registration (AB-298). Dispatched by
+ * `createAgentSchedule`/`createAgentScheduler` (`Bureau.createSchedule`,
+ * `AgentScheduler.schedule`, and the `scheduleSelf` tool all route through
+ * `createAgentSchedule`) and by `createDurableHeartbeat`, whenever a caller
+ * supplies an `emitter`.
  */
 export class AgentScheduledEvent extends Event {
   static readonly type = 'schedule.created' as const;

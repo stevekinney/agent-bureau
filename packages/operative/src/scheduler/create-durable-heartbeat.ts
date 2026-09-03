@@ -10,7 +10,12 @@ import {
   DURABLE_HEARTBEAT_TICK_WORKFLOW_TYPE,
   registerDurableHeartbeatTickServices,
 } from '../durable/durable-heartbeat-tick-workflow';
-import { ScheduleCancelledEvent, SchedulePausedEvent, ScheduleResumedEvent } from '../events';
+import {
+  AgentScheduledEvent,
+  ScheduleCancelledEvent,
+  SchedulePausedEvent,
+  ScheduleResumedEvent,
+} from '../events';
 import type { EventDispatcher } from '../run-step';
 import type { RunResult } from '../types';
 import type { Scheduler } from './create-scheduler';
@@ -25,13 +30,20 @@ export interface CreateDurableHeartbeatOptions {
   onTick?: (result: RunResult | null) => void | Promise<void>;
   onFailure?: (error: unknown) => void | Promise<void>;
   /**
-   * Optional event dispatcher. When supplied, the returned handle's
-   * `pause`/`resume` each dispatch `SchedulePausedEvent`/`ScheduleResumedEvent`
-   * (AB-223) exactly once per successful call. `cancel()` dispatches
-   * `ScheduleCancelledEvent` only when it actually cancels the underlying Weft
-   * schedule — not when it merely unregisters this caller's services while
-   * another registration keeps the schedule alive (see `cancel`'s branches
-   * below). Omitted entirely for a caller with no event surface.
+   * Optional event dispatcher. When supplied, this call dispatches
+   * `AgentScheduledEvent` (`schedule.created`, AB-298) exactly once when it
+   * actually registers a new underlying Weft schedule — never when it joins
+   * an existing schedule shared with another registration (see the
+   * `existingSchedule` branch below). `agentName` on that event is set to
+   * `DURABLE_HEARTBEAT_TICK_WORKFLOW_TYPE`, the honest analog of "what this
+   * schedule fires" for a heartbeat, which has no per-agent identity of its
+   * own. The returned handle's `pause`/`resume` each dispatch
+   * `SchedulePausedEvent`/`ScheduleResumedEvent` (AB-223) exactly once per
+   * successful call. `cancel()` dispatches `ScheduleCancelledEvent` only when
+   * it actually cancels the underlying Weft schedule — not when it merely
+   * unregisters this caller's services while another registration keeps the
+   * schedule alive (see `cancel`'s branches below). Omitted entirely for a
+   * caller with no event surface.
    */
   emitter?: EventDispatcher;
 }
@@ -151,6 +163,17 @@ export async function createDurableHeartbeat(
           } satisfies DurableHeartbeatTickInput,
           options.spec,
           { id: scheduleId, overlap: 'skip', backfill: false },
+        );
+        // Only this branch registers a genuinely new Weft schedule — the
+        // `existingSchedule` branch above joins one a prior registration
+        // already created — so this dispatches exactly once per registered
+        // schedule, never on a shared heartbeat's re-registration (AB-298).
+        options.emitter?.dispatch(
+          new AgentScheduledEvent({
+            agentName: DURABLE_HEARTBEAT_TICK_WORKFLOW_TYPE,
+            scheduleId,
+            spec: typeof options.spec === 'string' ? { cron: options.spec } : options.spec,
+          }),
         );
       }
       return registerDurableHeartbeatTickServices(engine, scheduleId, services);
