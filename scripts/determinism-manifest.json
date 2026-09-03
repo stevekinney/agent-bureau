@@ -16,6 +16,12 @@
       "reason": "Names a Bun.build glue entry temp file with crypto.randomUUID() so two concurrent agent-validation processes bundling the real Durable Object worker at once never write/read/race-delete the same file. No caller-injected options.identifiers value is safe here: a caller's identifier source is not guaranteed process-unique (test/cloudflare-backend-contract.test.ts uses a plain per-process counter), and this module ships as part of src/ (tsconfig.build.json rootDir is ./src), so it cannot import a default from outside src/test/ the way the *.test.ts files (excluded from the build) do.",
       "owner": "Agent Bureau team",
       "owningIssue": "AB-286"
+    },
+    {
+      "path": "packages/bureau/src/test/harness.test.ts",
+      "reason": "waitForRunCompletion's terminal-status poll needs a real per-iteration setTimeout delay, not the zero-delay MessageChannel macrotask loop waitForCondition (operative/test) and the rest of this codebase's polling uses. Measured directly against the new lmdb storage fixture (AB-261): a 5,000-iteration zero-delay macrotask spin (~600ms of real time) left two concurrently-running LMDB-backed runs still 'running', while the identical scenario polled with a real setTimeout(5) between checks completed both well within a couple hundred milliseconds. A tight macrotask-only loop evidently starves the lmdb native library's own async completion callbacks rather than merely running out of iterations, so more zero-delay attempts does not fix it — only letting real wall-clock time elapse between checks does. Still a bounded, condition-checked poll (asserts the observed run status every iteration, fails loudly past its cap), never a fixed-duration sleep standing in for a real check.",
+      "owner": "Agent Bureau team",
+      "owningIssue": "AB-261"
     }
   ]
 }
