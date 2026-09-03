@@ -1094,6 +1094,67 @@ describe('ChildRunRegistry.attachLiveness()/subscribeLiveness() (AB-216)', () =>
 });
 
 // ---------------------------------------------------------------------------
+// ChildRunRegistry.attachClosed()/awaitChildrenClosed() (AB-211)
+// ---------------------------------------------------------------------------
+
+describe('ChildRunRegistry.attachClosed()/awaitChildrenClosed() (AB-211)', () => {
+  it('never calls closed() against a RunnableAgent whose run() lacks it (hasClosedAcknowledgement guard)', async () => {
+    // makeControllableAgent()'s handle has no `closed()` — mirrors the
+    // `hasLivenessObservable` guard's own coverage above.
+    const registry = createChildRunRegistry();
+    const { agent, settle } = makeControllableAgent();
+
+    expect(() =>
+      dispatchChildRun(agent, 'go', { agentName: 'a', parentRunId: 'p', registry }),
+    ).not.toThrow();
+    settle(makeResult());
+
+    expect(await registry.awaitChildrenClosed()).toBeUndefined();
+  });
+
+  it("wires a real child AgentRun's closed() so awaitChildrenClosed genuinely awaits it", async () => {
+    const registry = createChildRunRegistry();
+    const agent = makeRealAgent();
+
+    const handle = dispatchChildRun(agent, 'go', { agentName: 'a', parentRunId: 'p', registry });
+    await handle.result();
+
+    // The child's own `closed()` never rejects and settles once its result
+    // has (AB-204) — `awaitChildrenClosed` genuinely calls it, not merely
+    // reading `ChildRunDescriptor.status`.
+    expect(await registry.awaitChildrenClosed()).toBeUndefined();
+  });
+
+  it('awaits every registered child, folding in one dispatched after the call started', async () => {
+    const registry = createChildRunRegistry();
+    const first = makeRealAgent();
+    dispatchChildRun(first, 'go', { agentName: 'a', parentRunId: 'p', registry });
+
+    const awaitAll = registry.awaitChildrenClosed();
+
+    // Register a second child from inside the same tick the first
+    // `awaitChildrenClosed()` call is already pending.
+    const second = makeRealAgent();
+    dispatchChildRun(second, 'go', { agentName: 'a', parentRunId: 'p', registry });
+
+    expect(await awaitAll).toBeUndefined();
+    expect(registry.children()).toHaveLength(2);
+  });
+
+  it('attachClosed on an unknown id is a no-op and never throws', () => {
+    const registry = createChildRunRegistry();
+    expect(() =>
+      registry.attachClosed('never-registered', () => Promise.resolve({ status: 'completed' })),
+    ).not.toThrow();
+  });
+
+  it('resolves immediately for a registry with zero children', async () => {
+    const registry = createChildRunRegistry();
+    expect(await registry.awaitChildrenClosed()).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // listChildRuns — relationship-query function (AB-90 child ab90-02, AB-222)
 // ---------------------------------------------------------------------------
 

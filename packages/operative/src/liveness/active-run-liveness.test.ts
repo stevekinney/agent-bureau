@@ -23,6 +23,7 @@ function createFakeChildRegistry(): ChildRunRegistry & {
   return {
     children: () => children,
     abortChild: () => undefined,
+    awaitChildrenClosed: () => Promise.resolve(),
     subscribeLiveness(observer): Subscription {
       listeners.add(observer);
       let closed = false;
