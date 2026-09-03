@@ -948,12 +948,12 @@ export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
 
   /**
    * Register a durable recurring schedule via `engine.schedule(...)`.
-   * Returns `null` when the schedule was created but could not be immediately
-   * retrieved. Returns `undefined` when no durable engine is composed.
+   * Throws `ScheduleLocatorUnavailableError` when the schedule was created
+   * but its summary could not be immediately retrieved — the schedule IS
+   * registered in that case, only its locator failed. Returns `undefined`
+   * when no durable engine is composed.
    */
-  createSchedule(
-    definition: DurableScheduleDefinition,
-  ): Promise<ScheduleSummary | null | undefined>;
+  createSchedule(definition: DurableScheduleDefinition): Promise<ScheduleSummary | undefined>;
 
   /**
    * Retrieve a durable schedule by id. Returns `null` when the schedule does not

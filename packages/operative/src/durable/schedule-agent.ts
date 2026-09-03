@@ -11,6 +11,21 @@ import { parseDuration, ScheduleHandle } from '@lostgradient/weft';
 import { ScheduleCancelledEvent, SchedulePausedEvent, ScheduleResumedEvent } from '../events';
 import type { EventDispatcher } from '../run-step';
 
+/**
+ * The overlap policies Agent Bureau exposes on its three schedule-creation
+ * paths (`Bureau.createSchedule`, `createAgentSchedule`/`AgentScheduleOptions`,
+ * and the `scheduleSelf` tool). Weft's own {@link ScheduleOverlapPolicy} also
+ * includes `'queue'` and `'cancel-running'`; AB-41's decision record names
+ * those intentionally hidden, not a gap to close, so Agent Bureau narrows to
+ * this subset everywhere a caller supplies an overlap policy.
+ */
+export type AgentScheduleOverlapPolicy = Extract<ScheduleOverlapPolicy, 'skip' | 'allow'>;
+
+const SUPPORTED_OVERLAP_POLICIES: ReadonlySet<string> = new Set<AgentScheduleOverlapPolicy>([
+  'skip',
+  'allow',
+]);
+
 type ScheduleIdCrypto = {
   randomUUID?: () => string;
   getRandomValues?: <T extends Uint8Array>(array: T) => T;
@@ -137,9 +152,10 @@ export interface CreateAgentScheduleOptions {
   session?: string;
   /**
    * How to handle a tick that fires while the previous run is still in
-   * progress. Defaults to `'skip'` (drop the new run silently).
+   * progress. Defaults to `'skip'` (drop the new run silently). Agent Bureau
+   * exposes only `'skip' | 'allow'` — see {@link AgentScheduleOverlapPolicy}.
    */
-  overlap?: ScheduleOverlapPolicy;
+  overlap?: AgentScheduleOverlapPolicy;
   /**
    * Optional stable id for this schedule (used by `getSchedule`/`pauseSchedule`
    * etc.). Defaults to a uuid assigned by Weft.
@@ -251,8 +267,11 @@ export interface AgentScheduleOptions {
    * relationship).
    */
   session?: string;
-  /** Overlap policy. Defaults to `'skip'`. */
-  overlap?: ScheduleOverlapPolicy;
+  /**
+   * Overlap policy. Defaults to `'skip'`. Agent Bureau exposes only
+   * `'skip' | 'allow'` — see {@link AgentScheduleOverlapPolicy}.
+   */
+  overlap?: AgentScheduleOverlapPolicy;
   /** Optional stable schedule id (defaults to Weft-assigned uuid). */
   id?: string;
   /**
@@ -304,6 +323,31 @@ function scheduleHandleFromEngine(
       return schedule;
     },
   };
+}
+
+/**
+ * Reject an overlap policy Agent Bureau does not expose (`'queue'` /
+ * `'cancel-running'`) before any Weft-side `engine.schedule()` call. The
+ * `overlap` fields on {@link CreateAgentScheduleOptions} and
+ * {@link AgentScheduleOptions} are already typed
+ * {@link AgentScheduleOverlapPolicy} (`'skip' | 'allow'`), so a well-typed
+ * caller cannot construct one of the hidden values — but the `scheduleSelf`
+ * tool's Zod boundary and any caller coercing an untyped value past the
+ * compiler still can, so this validates the value actually supplied at
+ * runtime, not just its declared type.
+ *
+ * @throws {InvalidScheduleError} when `overlap` is defined and is not
+ * `'skip'` or `'allow'`.
+ */
+function assertSupportedOverlapPolicy(
+  overlap: string | undefined,
+): asserts overlap is AgentScheduleOverlapPolicy | undefined {
+  if (overlap !== undefined && !SUPPORTED_OVERLAP_POLICIES.has(overlap)) {
+    throw new InvalidScheduleError(
+      `overlap policy '${overlap}' is not supported by Agent Bureau; only 'skip' and 'allow' ` +
+        "are exposed ('queue' and 'cancel-running' are intentionally hidden)",
+    );
+  }
 }
 
 function assertCompatibleAgentSchedule(
@@ -365,7 +409,8 @@ function assertCompatibleAgentSchedule(
  * @throws {InvalidScheduleError} when `session` or `id` is blank, or
  * `overlap: 'allow'` is combined with a recurring `session` (a recurring
  * conversation is sequential, so overlapping fires would interleave turns and
- * race the session write-back).
+ * race the session write-back), or an `overlap` value outside
+ * {@link AgentScheduleOverlapPolicy} reaches this function at runtime.
  */
 export async function createAgentSchedule(
   options: CreateAgentScheduleOptions,
@@ -374,6 +419,7 @@ export async function createAgentSchedule(
     options;
   const workflowType = options.workflowType ?? 'agentRun';
 
+  assertSupportedOverlapPolicy(overlap);
   if (session !== undefined && session.trim().length === 0) {
     throw new InvalidScheduleError('schedule session must be a non-empty string');
   }

@@ -616,6 +616,34 @@ class BureauError extends Error {
 
 export { BureauError };
 
+/**
+ * Thrown by `createSchedule` when a schedule registers successfully against
+ * the engine but its {@link import('@lostgradient/weft').ScheduleSummary}
+ * cannot be retrieved immediately afterward (`AgentScheduleHandle.describe()`
+ * rejects). Mirrors `DurableCapabilityUnavailableError`'s shape discipline
+ * (AB-41/AB-43) — `.code`, `.category`, `.retryable` — so the same
+ * `isToolError`-style consumer contract can discriminate it without a bare,
+ * untyped `Error` leaking through. The schedule itself IS registered; only
+ * its locator (the summary) is unavailable.
+ */
+export class ScheduleLocatorUnavailableError extends Error {
+  readonly code = 'ScheduleLocatorUnavailableError';
+  readonly category = 'unavailable' as const;
+  readonly retryable = false as const;
+  /** The already-registered schedule whose locator could not be read. */
+  readonly scheduleId: string;
+
+  constructor(scheduleId: string, options?: { cause?: unknown }) {
+    super(
+      `Schedule ${scheduleId} was registered, but its summary could not be retrieved. ` +
+        `The schedule is registered; retry describing it (e.g. bureau.getSchedule('${scheduleId}')) later.`,
+      options,
+    );
+    this.name = 'ScheduleLocatorUnavailableError';
+    this.scheduleId = scheduleId;
+  }
+}
+
 function toBadRequest(message: string): never {
   throw new BureauError(message, 'BAD_REQUEST');
 }
@@ -4415,7 +4443,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
 
   async function createSchedule(
     definition: DurableScheduleDefinition,
-  ): Promise<import('@lostgradient/weft').ScheduleSummary | null | undefined> {
+  ): Promise<import('@lostgradient/weft').ScheduleSummary | undefined> {
     if (!runtime.durable) return undefined;
     // A schedule whose every fire would fail is worse than rejecting up front:
     // without a configured generate/provider, each tick's `createRunRuntime` throws
@@ -4450,7 +4478,16 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       }
       throw error;
     }
-    return handle.describe();
+    // The schedule is already registered at this point — a `describe()`
+    // rejection here means only its locator (summary) is unavailable, not
+    // that registration failed. Wrap it in a typed error naming the
+    // `scheduleId` instead of letting `AgentScheduleHandle.describe()`'s bare
+    // `Error('Schedule … no longer exists.')` propagate untyped.
+    try {
+      return await handle.describe();
+    } catch (cause) {
+      throw new ScheduleLocatorUnavailableError(handle.id, { cause });
+    }
   }
 
   async function getSchedule(
