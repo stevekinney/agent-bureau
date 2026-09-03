@@ -76,7 +76,7 @@ describe('createResourceScope', () => {
       {
         kind: 'timer',
         identifier: 'timer-1',
-        owner: undefined,
+        owner: 'timer-leak',
         parentId: undefined,
         discoveredVia: 'runtime-services-timers',
       },
@@ -101,7 +101,7 @@ describe('createResourceScope', () => {
       {
         kind: 'queue-item',
         identifier: 'queue-1',
-        owner: undefined,
+        owner: 'deferred-leak',
         parentId: undefined,
         discoveredVia: 'runtime-services-deferred',
       },
@@ -126,7 +126,7 @@ describe('createResourceScope', () => {
       {
         kind: 'listener',
         identifier: 'listener-1',
-        owner: undefined,
+        owner: 'listener-leak',
         parentId: undefined,
         discoveredVia: 'public-child-discovery',
       },
@@ -177,7 +177,7 @@ describe('createResourceScope', () => {
       {
         kind: 'durable-owner',
         identifier: 'run-1',
-        owner: undefined,
+        owner: 'run-leak',
         parentId: undefined,
         discoveredVia: 'public-child-discovery',
       },
@@ -208,7 +208,7 @@ describe('createResourceScope', () => {
       {
         kind: 'timer',
         identifier: 'nested-timer',
-        owner: undefined,
+        owner: 'child-scope',
         parentId: undefined,
         discoveredVia: 'runtime-services-timers',
       },

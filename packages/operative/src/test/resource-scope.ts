@@ -211,9 +211,25 @@ function createNode(label: string): ScopeNode {
   return { label, registrations: [], children: [] };
 }
 
+/**
+ * A resource paired with the label of the scope it was registered on — the
+ * default `owner` for any leak it produces, per the AC's nested-scope
+ * attribution rule: a leak registered on a child scope is reported at
+ * whichever ancestor's `close()`/`assertQuiescent()` is called, with the
+ * child scope's label as that leak's `owner`, unless the registration
+ * supplied its own explicit `owner`.
+ */
+interface OwnedResource {
+  readonly resource: RegisterableResource;
+  readonly scopeLabel: string;
+}
+
 /** Every registration in this node and all of its descendants, deepest-first order irrelevant. */
-function collectRegistrations(node: ScopeNode): RegisterableResource[] {
-  const collected: RegisterableResource[] = [...node.registrations];
+function collectRegistrations(node: ScopeNode): OwnedResource[] {
+  const collected: OwnedResource[] = node.registrations.map((resource) => ({
+    resource,
+    scopeLabel: node.label,
+  }));
   for (const child of node.children) {
     collected.push(...collectRegistrations(child));
   }
@@ -240,7 +256,7 @@ async function probeRunAcknowledgement(run: ClosableRun): Promise<CleanupAcknowl
 
 async function evaluateResources(
   scopeLabel: string,
-  resources: RegisterableResource[],
+  ownedResources: OwnedResource[],
   runtime: RuntimeServices,
   resolveRun: (run: ClosableRun) => Promise<CleanupAcknowledgement>,
 ): Promise<QuiescenceReport> {
@@ -253,7 +269,14 @@ async function evaluateResources(
   const drainReport = await runtime.deferred.drain();
   const deferredOutstanding = new Set(drainReport.outstanding);
 
-  for (const resource of resources) {
+  for (const owned of ownedResources) {
+    const { resource } = owned;
+    // Every leak's default `owner` is the label of the scope this resource
+    // was registered on, so a leak registered on a child scope still names
+    // that child at an ancestor's `close()`/`assertQuiescent()` — unless
+    // the registration supplied its own explicit `owner`.
+    const owner = resource.owner ?? owned.scopeLabel;
+
     if (resource.detached) {
       detached.push({ kind: resource.kind, id: resource.identifier });
       continue;
@@ -266,7 +289,7 @@ async function evaluateResources(
           leaked.push({
             kind: 'durable-owner',
             identifier: resource.identifier,
-            owner: resource.owner,
+            owner,
             parentId: resource.parentId,
             discoveredVia: 'public-child-discovery',
           });
@@ -283,7 +306,7 @@ async function evaluateResources(
           leaked.push({
             kind: 'timer',
             identifier: resource.identifier,
-            owner: resource.owner,
+            owner,
             parentId: resource.parentId,
             discoveredVia: 'runtime-services-timers',
           });
@@ -295,7 +318,7 @@ async function evaluateResources(
           leaked.push({
             kind: 'listener',
             identifier: resource.identifier,
-            owner: resource.owner,
+            owner,
             parentId: resource.parentId,
             discoveredVia: 'public-child-discovery',
           });
@@ -307,7 +330,7 @@ async function evaluateResources(
           leaked.push({
             kind: 'queue-item',
             identifier: resource.identifier,
-            owner: resource.owner,
+            owner,
             parentId: resource.parentId,
             discoveredVia: 'runtime-services-deferred',
           });
@@ -320,7 +343,7 @@ async function evaluateResources(
           leaked.push({
             kind: 'child',
             identifier: descriptor.id,
-            owner: resource.owner ?? scopeLabel,
+            owner,
             parentId: descriptor.parentId,
             discoveredVia: 'public-child-discovery',
           });
@@ -395,7 +418,7 @@ export function createResourceScope(label: string, runtime: RuntimeServices): Re
         if (!closePromise) {
           closePromise = (async () => {
             const resources = collectRegistrations(node);
-            for (const resource of resources) {
+            for (const { resource } of resources) {
               if (resource.kind === 'run' && !resource.detached) {
                 resource.run.abort();
               }

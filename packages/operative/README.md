@@ -2544,7 +2544,9 @@ expect(report.quiescent).toBe(true);
 | `createTestStore()`                      | In-memory `Store` instance from `@lostgradient/operative/store`.                                                                                                                                                                                                                                                                     |
 | `createResourceScope(label, runtime)`    | AB-92/AB-256's `ResourceScope`: `register()` a run, timer, subscription, deferred-queue item, or `ChildRunRegistry`; `child(label)` nests a scope; `assertQuiescent()` probes without aborting; `close()` aborts every registered run, awaits its `closed()`, and rejects with a `QuiescenceError` naming every resource still live. |
 
-**Exported types:** `RunRecorder`, `EventRecorder`, `CausalTraceEntry`, `EventRecorderOwnerIdentity`, `FiredFault`, `ManualRuntimeServices`, `ResourceScope`, `QuiescenceReport`, `LeakedResource`, `LeakedResourceKind`, `LeakedResourceDiscoveredVia`, `DetachedResource`, `RegisterableResource`, `ClosableRun`, `QuiescenceError`.
+**Exported types:** `RunRecorder`, `EventRecorder`, `CausalTraceEntry`, `EventRecorderOwnerIdentity`, `FiredFault`, `ManualRuntimeServices`, `ResourceScope`, `QuiescenceReport`, `LeakedResource`, `LeakedResourceKind`, `LeakedResourceDiscoveredVia`, `DetachedResource`, `RegisterableResource`, `ClosableRun`.
+
+**Also exported (runtime value, not a type):** `QuiescenceError` — the `Error` subclass `close()` rejects with; import it normally (`import { QuiescenceError } from '@lostgradient/operative/test'`), not with `import type`.
 
 ---
 
