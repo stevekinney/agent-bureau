@@ -207,6 +207,30 @@ export interface HealthResponse {
   status: 'ok' | 'unavailable';
 }
 
+/**
+ * `GET /api/v1/health/ready`'s body shape (AB-219). Replaces the single
+ * aggregate `{ status: 'ok' | 'unavailable' }` ({@link HealthResponse})
+ * with named subsystem evidence: `bureau` mirrors today's `bureau.ready`
+ * check exactly (no regression — `503` when
+ * `bureau` is `'unavailable'`, matching the prior behavior), and
+ * `connections` aggregates the Gateway connection watchdog's per-connection
+ * `LivenessSnapshot.reachability` assessments (`live-events.ts`'s
+ * `getConnectionRegistry()`). `status: 'degraded'` is a new, additive
+ * classification returned with HTTP `200` — a consumer that only checks the
+ * HTTP status code sees no new failure mode.
+ */
+export interface ReadyResponse {
+  status: 'ok' | 'degraded' | 'unavailable';
+  subsystems: {
+    bureau: 'ok' | 'unavailable';
+    connections: {
+      total: number;
+      late: number;
+      unreachable: number;
+    };
+  };
+}
+
 // ── Constants ───────────────────────────────────────────────────────
 
 export const DEFAULT_PORT = 5555;

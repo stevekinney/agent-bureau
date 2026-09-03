@@ -1,6 +1,8 @@
+import { LIVENESS_POLICY_VERSION } from '@lostgradient/operative/liveness';
 import { describe, expect, it } from 'bun:test';
 
 import { LiveFrameBroker } from './live-events';
+import { createManualLiveFrameBrokerClock } from './test';
 import type { ServerFrame } from './types';
 
 function createRunFrame(runSeq = 1): ServerFrame {
@@ -108,6 +110,34 @@ describe('LiveFrameBroker', () => {
     expect(() => broker.broadcast(createRunFrame())).not.toThrow();
     expect(received).toHaveLength(1);
     expect(broker.getSubscriberCount('run-1')).toBe(1);
+  });
+
+  it('stops routing frames for a run after unsubscribe()', () => {
+    const broker = new LiveFrameBroker();
+    const received: ServerFrame[] = [];
+    const key = {};
+
+    broker.addSubscriber(key, (frame) => received.push(frame), { runIds: ['run-1'] });
+    broker.broadcast(createRunFrame(1));
+    expect(received).toHaveLength(1);
+
+    broker.unsubscribe(key, 'run-1');
+    broker.broadcast(createRunFrame(2));
+    expect(received).toHaveLength(1);
+  });
+
+  it('is a no-op for unsubscribe() on a key that is not a tracked subscriber', () => {
+    const broker = new LiveFrameBroker();
+    expect(() => broker.unsubscribe({}, 'run-1')).not.toThrow();
+  });
+
+  it('drops a run replay buffer via clearRunBuffer()', () => {
+    const broker = new LiveFrameBroker();
+    broker.broadcast(createRunFrame(1));
+    expect(broker.getFramesSince('run-1', 0)).toHaveLength(1);
+
+    broker.clearRunBuffer('run-1');
+    expect(broker.getFramesSince('run-1', 0)).toHaveLength(0);
   });
 
   it('does not broadcast control frames without a run identifier through run subscriptions', () => {
@@ -366,5 +396,191 @@ describe('LiveFrameBroker — AB-235 shutdown drain', () => {
     // out the rest of the drain timeout.
     const first = await reader.read();
     expect(first.done).toBe(true);
+  });
+});
+
+describe('gateway-connection watchdog (AB-219)', () => {
+  it('classifies a connection against its own heartbeatIntervalMs, never the 8000ms default', () => {
+    const clock = createManualLiveFrameBrokerClock();
+    const broker = new LiveFrameBroker({ clock });
+
+    const defaultCadenceKey = {};
+    const longCadenceKey = {};
+    broker.addSubscriber(defaultCadenceKey, () => {});
+    broker.addSubscriber(longCadenceKey, () => {}, { heartbeatIntervalMs: 20_000 });
+
+    // 13000ms crosses the default row's own check interval
+    // (8000 + 4000 + 800 = 12800ms) but is nowhere near the long-cadence
+    // connection's (20000 + 10000 + 2000 = 32000ms). Neither connection
+    // ever recorded a pulse, so a connection classified against the fixed
+    // 8000ms default would show a missed pulse here regardless of its own
+    // configured cadence — the long-cadence connection must not.
+    clock.advance(13_000);
+
+    const defaultSnapshot = broker.getConnectionRegistry().get(defaultCadenceKey)?.snapshot();
+    const longCadenceSnapshot = broker.getConnectionRegistry().get(longCadenceKey)?.snapshot();
+
+    expect(defaultSnapshot?.missedPulseCount).toBeGreaterThan(0);
+    expect(longCadenceSnapshot?.missedPulseCount).toBe(0);
+  });
+
+  it('never resolves reachability to reachable from transport-keepalive pulses alone', () => {
+    const clock = createManualLiveFrameBrokerClock();
+    const broker = new LiveFrameBroker({ clock });
+    const key = {};
+    broker.addSubscriber(key, () => {}, { heartbeatIntervalMs: 8_000 });
+
+    // Simulate several on-time SSE `: heartbeat` writes — exactly the
+    // evidence the generic createStallWatchdog() would otherwise treat as
+    // "reachable" (missedPulseCount stays 0).
+    for (let tick = 0; tick < 3; tick += 1) {
+      clock.advance(8_000);
+      broker.recordTransportKeepalive(key);
+    }
+
+    const snapshot = broker.getConnectionRegistry().get(key)?.snapshot();
+    expect(snapshot?.missedPulseCount).toBe(0);
+    expect(snapshot?.reachability).toBe('unknown');
+    expect(snapshot?.progress).toBe('unknown');
+    expect(snapshot?.evidence.every((entry) => entry.source === 'transport-keepalive')).toBe(true);
+  });
+
+  it('still classifies late/unreachable from missed transport-keepalive pulses (decay passes through unclamped)', () => {
+    const clock = createManualLiveFrameBrokerClock();
+    const broker = new LiveFrameBroker({ clock });
+    const key = {};
+    broker.addSubscriber(key, () => {}, { heartbeatIntervalMs: 8_000 });
+
+    // checkIntervalMs = 8000 + 4000 + 800 = 12800; missedPulseThreshold: 2.
+    clock.advance(12_800);
+    expect(broker.getConnectionRegistry().get(key)?.snapshot().reachability).toBe('late');
+
+    clock.advance(12_800);
+    expect(broker.getConnectionRegistry().get(key)?.snapshot().reachability).toBe('unreachable');
+    expect(broker.getConnectionRegistry().get(key)?.snapshot().assessment).toBe('unreachable');
+  });
+
+  it('exposes the subscribers map through getConnectionRegistry(), not a duplicate registry', () => {
+    const clock = createManualLiveFrameBrokerClock();
+    const broker = new LiveFrameBroker({ clock });
+    expect(broker.getConnectionRegistry().size).toBe(0);
+
+    const key = {};
+    broker.addSubscriber(key, () => {});
+    expect(broker.getConnectionRegistry().size).toBe(1);
+    expect(broker.getConnectionRegistry().has(key)).toBe(true);
+
+    broker.removeSubscriber(key);
+    expect(broker.getConnectionRegistry().size).toBe(0);
+  });
+
+  it('disposes the connection watchdog (no leaked timers) on removeSubscriber', () => {
+    const clock = createManualLiveFrameBrokerClock();
+    const broker = new LiveFrameBroker({ clock });
+    const key = {};
+    broker.addSubscriber(key, () => {});
+    expect(clock.pendingTimerCount()).toBe(1);
+
+    broker.removeSubscriber(key);
+    expect(clock.pendingTimerCount()).toBe(0);
+  });
+
+  it('produces a distinct, stable connection id per subscriber', () => {
+    const clock = createManualLiveFrameBrokerClock();
+    const broker = new LiveFrameBroker({ clock });
+    const keyA = {};
+    const keyB = {};
+    broker.addSubscriber(keyA, () => {});
+    broker.addSubscriber(keyB, () => {});
+
+    const idA = broker.getConnectionRegistry().get(keyA)?.snapshot().id;
+    const idB = broker.getConnectionRegistry().get(keyB)?.snapshot().id;
+    expect(idA).toBeDefined();
+    expect(idB).toBeDefined();
+    expect(idA).not.toBe(idB);
+    expect(broker.getConnectionRegistry().get(keyA)?.snapshot().id).toBe(idA);
+  });
+
+  it('advances revision on a fresh keepalive pulse', () => {
+    const clock = createManualLiveFrameBrokerClock();
+    const broker = new LiveFrameBroker({ clock });
+    const key = {};
+    broker.addSubscriber(key, () => {}, { heartbeatIntervalMs: 8_000 });
+
+    const initialRevision = broker.getConnectionRegistry().get(key)?.snapshot().revision;
+    expect(initialRevision).toBe(0);
+
+    broker.recordTransportKeepalive(key);
+    const afterPulse = broker.getConnectionRegistry().get(key)?.snapshot().revision;
+    expect(afterPulse).toBeGreaterThan(initialRevision ?? -1);
+  });
+
+  it('advances revision on a timer-driven missed-pulse check (onAssessmentChange), with no pulse recorded', () => {
+    const clock = createManualLiveFrameBrokerClock();
+    const broker = new LiveFrameBroker({ clock });
+    const key = {};
+    broker.addSubscriber(key, () => {}, { heartbeatIntervalMs: 8_000 });
+
+    const initialRevision = broker.getConnectionRegistry().get(key)?.snapshot().revision;
+    expect(initialRevision).toBe(0);
+
+    // checkIntervalMs = 8000 + 4000 + 800 = 12800 — no pulse was ever
+    // recorded, so this check genuinely changes missedPulseCount (0 -> 1),
+    // which is what drives createStallWatchdog's onAssessmentChange.
+    clock.advance(12_800);
+    const afterMiss = broker.getConnectionRegistry().get(key)?.snapshot().revision;
+    expect(afterMiss).toBeGreaterThan(initialRevision ?? -1);
+  });
+
+  it('records a WebSocket pong as transport-keepalive evidence via recordTransportKeepalive', () => {
+    const clock = createManualLiveFrameBrokerClock();
+    const broker = new LiveFrameBroker({ clock });
+    const key = {};
+    broker.addSubscriber(key, () => {});
+
+    broker.recordTransportKeepalive(key);
+
+    const snapshot = broker.getConnectionRegistry().get(key)?.snapshot();
+    expect(snapshot?.evidence).toHaveLength(1);
+    expect(snapshot?.evidence[0]?.source).toBe('transport-keepalive');
+  });
+
+  it('is a no-op for a key that is not (or is no longer) a tracked subscriber', () => {
+    const clock = createManualLiveFrameBrokerClock();
+    const broker = new LiveFrameBroker({ clock });
+    expect(() => broker.recordTransportKeepalive({})).not.toThrow();
+  });
+
+  it('the SSE heartbeat write records a transport-keepalive pulse through the real createEventStreamResponse path', async () => {
+    const clock = createManualLiveFrameBrokerClock();
+    const broker = new LiveFrameBroker({ clock });
+    const request = new Request('http://example.test/api/v1/events');
+    const response = broker.createEventStreamResponse(request, { heartbeatIntervalMs: 8_000 });
+
+    const reader = response.body?.getReader();
+    expect(reader).toBeDefined();
+    if (!reader) return;
+
+    await reader.read(); // ': connected'
+    clock.advance(8_000); // one heartbeat tick
+
+    const [key] = [...broker.getConnectionRegistry().keys()];
+    expect(key).toBeDefined();
+    if (!key) return;
+    const snapshot = broker.getConnectionRegistry().get(key)?.snapshot();
+    expect(snapshot?.evidence).toHaveLength(1);
+    expect(snapshot?.evidence[0]?.source).toBe('transport-keepalive');
+
+    await reader.cancel();
+  });
+
+  it('policyVersion matches obs-01 LIVENESS_POLICY_VERSION and kind is gateway-connection', () => {
+    const clock = createManualLiveFrameBrokerClock();
+    const broker = new LiveFrameBroker({ clock });
+    const key = {};
+    broker.addSubscriber(key, () => {});
+    const snapshot = broker.getConnectionRegistry().get(key)?.snapshot();
+    expect(snapshot?.kind).toBe('gateway-connection');
+    expect(snapshot?.policyVersion).toBe(LIVENESS_POLICY_VERSION);
   });
 });
