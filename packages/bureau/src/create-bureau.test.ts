@@ -2,32 +2,34 @@ import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import type {
-  ActiveRun,
-  CombinedOperativeEventMap,
-  GenerateFunction,
-  GenerateResponse,
-  RunnableAgent,
-  StreamEventMap,
-  Toolbox,
-} from '@lostgradient/operative';
 import {
   AbortAgentRunError,
+  type ActiveRun,
+  type AgentInput,
+  type AgentRunContext,
+  type CombinedOperativeEventMap,
   createAgent,
   createAgentSession,
   createScheduleWakeupTool,
   createSessionStore,
   DEFAULT_MAXIMUM_STEPS,
+  type DefinitionResolvingAgent,
   DurableCapabilityUnavailableError,
+  type GenerateFunction,
+  type GenerateResponse,
   HumanWaitParkedEvent,
+  OPERATIVE_RESOLVE_RUN_OPTIONS,
   RunAbortedEvent,
+  type RunnableAgent,
   SchedulerTaskCompletedEvent,
   SchedulerTaskFailedEvent,
   StepCompletedEvent,
   stopWhen,
+  type StreamEventMap,
   TaskCancelledEvent,
   TaskDispatchedEvent,
   TaskPreemptedEvent,
+  type Toolbox,
 } from '@lostgradient/operative';
 import {
   type DurableRunDeps,
@@ -1708,6 +1710,161 @@ describe('createBureau', () => {
       await rm(databasePath, { force: true });
       await rm(`${databasePath}-wal`, { force: true });
       await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  // AB-291 (AC4): `runAgent`'s durable catalog-dispatch branch remembers a
+  // cancellation requested BEFORE `dispatchedActiveRun` exists
+  // (`cancellationRequested`) and forwards it once the durable `ActiveRun`
+  // is created. But `createDeferredAgentRun`'s OWN `requestAbort` settles
+  // its synthetic `result()` — and therefore its `closed()` — IMMEDIATELY
+  // when abort arrives before its resolver has settled (the shared async
+  // dispatch is deliberately left running in the background, uncancelled,
+  // matching `createLazyAgent`'s module-load precedent). Left unfixed, the
+  // returned handle's `closed()` would report `completed` before the
+  // forwarded cancellation's own durable cleanup has even started.
+  it("awaits the forwarded cancellation's own durable ActiveRun.closed() before reporting closed() completed, for an abort requested before the durable ActiveRun exists (AB-291 AC4)", async () => {
+    const realAgent = createAgent({
+      generate: async () => ({ content: 'unused', toolCalls: [] }),
+      toolbox: createToolbox([]),
+      stopWhen: stopWhen.noToolCalls(),
+    });
+    const realResolver = (realAgent as unknown as DefinitionResolvingAgent)[
+      OPERATIVE_RESOLVE_RUN_OPTIONS
+    ]!;
+
+    // Gates `resolveDurableAgent`'s FIRST await — the point strictly BEFORE
+    // it creates the durable `ActiveRun` and forwards the cancellation onto
+    // it — so this test can deterministically observe `closed()` mid-flight
+    // rather than racing real timing.
+    let releaseResolver: (() => void) | undefined;
+    const resolverGate = new Promise<void>((resolve) => {
+      releaseResolver = resolve;
+    });
+    let resolverReached = false;
+    const gatedAgent = {
+      ...realAgent,
+      [OPERATIVE_RESOLVE_RUN_OPTIONS]: async (input: AgentInput, context?: AgentRunContext) => {
+        resolverReached = true;
+        await resolverGate;
+        return realResolver(input, context);
+      },
+    };
+
+    const bureau = await createBureau({
+      agents: { echo: gatedAgent },
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    try {
+      const handle = bureau.run('echo', 'hi');
+      // Synchronously, in the same tick `run()` returned — before ANY of
+      // `resolveDurableAgent`'s internal awaits have had a chance to run,
+      // so `dispatchedActiveRun` is guaranteed still undefined here.
+      handle.abort('early abort, before the durable run was dispatched');
+
+      let settled = false;
+      void handle.closed().then(() => {
+        settled = true;
+      });
+
+      // Let the resolver's own gate actually get reached, proving the
+      // deferred dispatch genuinely started (this test isn't just racing an
+      // unstarted resolver).
+      for (let tick = 0; tick < 10 && !resolverReached; tick++) {
+        await Promise.resolve();
+      }
+      expect(resolverReached).toBe(true);
+
+      // `dispatchedActiveRun` cannot exist yet — the resolver is still
+      // parked on `resolverGate` — so the forward has not run, and
+      // `closed()` must not have settled either.
+      for (let tick = 0; tick < 25; tick++) {
+        await Promise.resolve();
+      }
+      expect(settled).toBe(false);
+
+      // Release the resolver: `resolveDurableAgent` now creates the durable
+      // `ActiveRun`, forwards the cancellation onto it, and captures its
+      // OWN `closed()` as the cancellation forward.
+      releaseResolver?.();
+
+      const acknowledgement = await handle.closed();
+      expect(acknowledgement).toEqual({ status: 'completed' });
+      expect(settled).toBe(true);
+
+      // The forward genuinely reached a REAL durable run, not a synthetic
+      // one `closed()` merely delegated to eagerly.
+      const durableRuns = await bureau.listDurableRuns();
+      expect(durableRuns?.items.some((item) => item.id.startsWith('agent-run-'))).toBe(true);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  // AB-291 (AC4) — `options.signal` bounds ONE caller's own wait on the
+  // guardedRun's `closed()` (mirroring `createClosedAcknowledgement`'s own
+  // per-call `signal` contract): it never affects the shared
+  // `closedSettlement` cache other callers (or a later signal-less call)
+  // observe.
+  it('bounds guardedRun.closed() by a caller-supplied signal without affecting the shared settlement (AB-291 AC4)', async () => {
+    const bureau = await createBureau({
+      agents: {
+        echo: createAgent({
+          generate: async () => ({ content: 'unused', toolCalls: [] }),
+          toolbox: createToolbox([]),
+          stopWhen: stopWhen.noToolCalls(),
+        }),
+      },
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    try {
+      const handle = bureau.run('echo', 'hi');
+      handle.abort('early abort, before the durable run was dispatched');
+
+      // Already-aborted signal: resolves immediately, unresolved/timed-out,
+      // without waiting on the shared settlement at all.
+      const preAborted = new AbortController();
+      preAborted.abort();
+      expect(await handle.closed({ signal: preAborted.signal })).toEqual({
+        status: 'unresolved',
+        reason: 'timed-out',
+      });
+
+      // A live signal that fires BEFORE the shared settlement resolves —
+      // bounds THIS caller's own wait only.
+      const bounding = new AbortController();
+      const boundedAcknowledgement = handle.closed({ signal: bounding.signal });
+      bounding.abort();
+      expect(await boundedAcknowledgement).toEqual({ status: 'unresolved', reason: 'timed-out' });
+
+      // Let the real durable dispatch and its cancellation forward settle —
+      // the shared settlement is unaffected by either bounded call above.
+      const settled = await handle.closed();
+      expect(settled).toEqual({ status: 'completed' });
+
+      // A live signal that's never aborted, called AFTER the shared
+      // settlement already resolved, still resolves to the same outcome.
+      const nonAborting = new AbortController();
+      expect(await handle.closed({ signal: nonAborting.signal })).toEqual({
+        status: 'completed',
+      });
+
+      // Review finding: an ALREADY-aborted signal, passed AFTER the shared
+      // settlement genuinely resolved, still returns the identical cached
+      // acknowledgement — the post-settlement idempotency guarantee — not
+      // a fresh unresolved/timed-out manufactured from a signal that
+      // arrived too late to mean anything.
+      const postSettlementAborted = new AbortController();
+      postSettlementAborted.abort();
+      expect(await handle.closed({ signal: postSettlementAborted.signal })).toEqual({
+        status: 'completed',
+      });
+    } finally {
+      await bureau.dispose();
     }
   });
 

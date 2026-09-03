@@ -5,6 +5,7 @@ import {
   type AgentRun,
   type AgentRunContext,
   type AgentSession,
+  type ClosedOptions,
   type CombinedOperativeEventMap,
   createActiveRun,
   createAgentRun,
@@ -2630,6 +2631,32 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // instead, and act on it the instant the ActiveRun exists, whichever
       // order the two events happen in.
       let cancellationRequested: { reason: string | undefined; dispose: boolean } | undefined;
+      // AB-291 (AC4): the durable `ActiveRun`'s own `closed()` acknowledgement
+      // for a cancellation FORWARDED here (below, once `dispatchedActiveRun`
+      // exists) — set the instant that forward runs. `guardedRun.closed()`
+      // (below `deferredRun`) must await this, not `deferredRun.closed()`
+      // alone: `createDeferredAgentRun`'s own abort handling settles its
+      // synthetic `result()` — and therefore its `closed()` — IMMEDIATELY
+      // when `abort()` arrives before its resolver has settled (the shared
+      // async work is deliberately left running in the background,
+      // uncancelled, matching `createLazyAgent`'s module-load precedent).
+      // Left alone, `guardedRun.closed()` would report `completed` before
+      // the durable engine dispatch this forward targets has even started,
+      // let alone been cleaned up.
+      // Typed off `ActiveRun['closed']`'s own return, not this file's
+      // locally-imported `CleanupAcknowledgement` (bureau's distinct
+      // `BureauShutdownReport` string-status vocabulary, shadowing
+      // operative's `{ status, reason?, error? }` object shape that
+      // `ActiveRun.closed()` actually returns).
+      let cancellationForward: ReturnType<ActiveRun['closed']> | undefined;
+      // Resolves once `resolveDurableAgent` itself has settled (success,
+      // fallback, or throw) — i.e. once `cancellationForward` above has its
+      // final value (set or not). `guardedRun.closed()` gates on this before
+      // reading `cancellationForward`, so it never reads it too early.
+      let dispatchSettled: (() => void) | undefined;
+      const dispatchSettledPromise = new Promise<void>((resolve) => {
+        dispatchSettled = resolve;
+      });
       // `createDeferredAgentRun` resolves a `RunnableAgent` then calls its
       // `run()` — built for `createLazyAgent`'s "resolve a module" case, but
       // agnostic to WHY resolution is async. Wrapping the durable-engine
@@ -2713,13 +2740,53 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           } else {
             activeRun.abort(cancellationRequested.reason);
           }
+          // AB-291 (AC4): the real durable run's own acknowledgement for
+          // THIS forwarded cancellation — `guardedRun.closed()` awaits it
+          // below instead of the deferred wrapper's synthetic settlement.
+          cancellationForward = activeRun.closed();
         }
         const agentRun = createAgentRun<unknown, boolean>(activeRun, {
           hasOutput: resolvedOptions.output !== undefined,
         });
         return { name, hasOutput: resolvedOptions.output !== undefined, run: () => agentRun };
       };
-      const deferredRun = createDeferredAgentRun(resolveDurableAgent, input, context, name);
+      // AB-291 (AC4): wraps `resolveDurableAgent` purely to signal
+      // `dispatchSettledPromise` once it settles — by then
+      // `cancellationForward` above has its final value (set if a
+      // cancellation was forwarded, left `undefined` otherwise). Never
+      // swallows or alters `resolveDurableAgent`'s own result/rejection.
+      const trackDispatchSettlement = async (): Promise<RunnableAgent<unknown, boolean>> => {
+        try {
+          return await resolveDurableAgent();
+        } finally {
+          dispatchSettled?.();
+        }
+      };
+      const deferredRun = createDeferredAgentRun(trackDispatchSettlement, input, context, name);
+      // AB-291 (AC4): computed once — `dispatchSettledPromise` resolves only
+      // after `resolveDurableAgent` has settled, by which point
+      // `cancellationForward` (set inside it, above) has its final value.
+      // Reading `cancellationForward` lazily inside the `.then` (not
+      // captured now) is required: this expression is built before that
+      // assignment can possibly have happened yet.
+      const closedSettlement: ReturnType<ActiveRun['closed']> = dispatchSettledPromise.then(
+        () => cancellationForward ?? deferredRun.closed(),
+      );
+      // AB-291 (AC4 review finding): `closedSettlement`'s own genuine
+      // acknowledgement, captured once it settles — read by `closed()`
+      // below BEFORE `options.signal.aborted`, so a caller passing an
+      // already-aborted signal AFTER the shared settlement has genuinely
+      // resolved still gets the identical cached acknowledgement, per
+      // `createClosedAcknowledgement`'s own post-settlement idempotency
+      // guarantee ("a repeated call after the underlying cleanup has
+      // genuinely settled returns the identical cached acknowledgement
+      // object by reference"), rather than manufacturing a fresh
+      // `unresolved`/`timed-out` result for a signal that arrived too late
+      // to mean anything.
+      let cachedAcknowledgement: Awaited<ReturnType<ActiveRun['closed']>> | undefined;
+      void closedSettlement.then((acknowledgement) => {
+        cachedAcknowledgement = acknowledgement;
+      });
       const guardedRun: AgentRun<unknown, boolean> = {
         ...deferredRun,
         abort(reason?: string): void {
@@ -2740,6 +2807,42 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           } else if (!cancellationRequested) {
             cancellationRequested = { reason: undefined, dispose: true };
           }
+        },
+        // AB-291 (AC4): overrides `deferredRun.closed()` (otherwise inherited
+        // via the `...deferredRun` spread above) — see `closedSettlement`'s
+        // and `cancellationForward`'s doc comments for why the inherited one
+        // can report `completed` before a forwarded cancellation's own
+        // durable cleanup has even started. `options.signal` bounds THIS
+        // caller's own wait only, matching every other `closed()`
+        // implementation's per-call signal contract (never writes into the
+        // shared `closedSettlement` cache).
+        closed(options?: ClosedOptions): ReturnType<ActiveRun['closed']> {
+          const signal = options?.signal;
+          if (!signal) return closedSettlement;
+          // Post-settlement idempotency guarantee: once the shared
+          // acknowledgement has genuinely settled, every call — regardless
+          // of a per-call signal's state — returns that identical cached
+          // object, never a fresh `unresolved`/`timed-out` manufactured
+          // from a signal that arrived after the fact.
+          if (cachedAcknowledgement) return Promise.resolve(cachedAcknowledgement);
+          if (signal.aborted) {
+            return Promise.resolve({ status: 'unresolved', reason: 'timed-out' });
+          }
+          return new Promise((resolve) => {
+            let settled = false;
+            const onAbort = (): void => {
+              if (settled) return;
+              settled = true;
+              resolve({ status: 'unresolved', reason: 'timed-out' });
+            };
+            signal.addEventListener('abort', onAbort, { once: true });
+            void closedSettlement.then((acknowledgement) => {
+              if (settled) return;
+              settled = true;
+              signal.removeEventListener('abort', onAbort);
+              resolve(acknowledgement);
+            });
+          });
         },
       };
       return trackCatalogRun(guardedRun);

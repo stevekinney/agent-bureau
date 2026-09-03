@@ -2074,6 +2074,240 @@ describe('createDurableActiveRun.closed()', () => {
     expect(await closedAcknowledgement).toEqual({ status: 'completed' });
     expect(cancelCalls).toEqual([runId]);
   });
+
+  // AB-291 (AC1) — durable parity with AB-204's in-memory fix
+  // (create-run.test.ts's identical "does not resolve completed while an
+  // onRunComplete hook is still running" test): `onRunComplete` fires
+  // fire-and-forget via `runHookSilently`, so `result` can settle while it
+  // is still running. `closed()` is called BEFORE `result` settles (not
+  // after) — matching the reference test's own structure — because
+  // `createClosedAcknowledgement`'s `not-required` fast path only ever
+  // engages when `result` has ALREADY fulfilled at the moment `closed()` is
+  // first called; calling `closed()` first forces the real
+  // `resolveDurableOutcome` path so this test actually exercises the fix.
+  it('does not resolve durable closed() completed while an onRunComplete hook is still running, and resolves once it settles (AC1)', async () => {
+    const context = await buildContext();
+    try {
+      let releaseHook: (() => void) | undefined;
+      const hookGate = new Promise<void>((resolve) => {
+        releaseHook = resolve;
+      });
+      const hooks = new HookRegistry<OperativeHookMap>();
+      hooks.on('onRunComplete', async () => {
+        await hookGate;
+      });
+
+      const activeRun = createRun(
+        {
+          ...runOptions(async () => ({ content: 'done', toolCalls: [] })),
+          hooks,
+        },
+        { ...context, runId: 'ac1-durable-slow-hook', prompt: 'Hello' },
+      );
+
+      const closedAcknowledgement = activeRun.closed();
+      const result = await activeRun.result;
+      expect(result.finishReason).toBe('stop-condition');
+
+      let settledFlag = false;
+      void closedAcknowledgement.then(() => {
+        settledFlag = true;
+      });
+      // `hookGate` is only ever resolved by `releaseHook()`, so
+      // `resolveDurableOutcome` genuinely cannot reach `completed` while
+      // it's pending, at any tick count.
+      for (let tick = 0; tick < 25; tick++) {
+        await Promise.resolve();
+      }
+      expect(settledFlag).toBe(false);
+
+      releaseHook?.();
+
+      expect(await closedAcknowledgement).toEqual({ status: 'completed' });
+      expect(settledFlag).toBe(true);
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  // AB-291 (AC2) — durable parity with create-run.ts's identical fix
+  // (AB-204 review PRRT_kwDORvupsc6erGS9): `options.signal` can be a
+  // long-lived signal a caller reuses across many runs. An un-removed
+  // listener on an already-terminal run would fire `abort()` — and issue a
+  // redundant `engine.cancel()` — for that historical run too, the instant
+  // the shared signal later aborts for an unrelated (still-live) run.
+  it('removes the caller-signal abort listener on terminal state, so a reused signal fires engine.cancel only for the still-live durable run (AC2)', async () => {
+    const context = await buildContext();
+    try {
+      const controller = new AbortController();
+
+      // Run A settles to terminal on its own, never aborted while alive,
+      // with the shared signal attached for its whole life.
+      const finished = createRun(
+        {
+          ...runOptions(async () => ({ content: 'done', toolCalls: [] })),
+          signal: controller.signal,
+        },
+        { ...context, runId: 'ac2-terminal-run', prompt: 'Hello' },
+      );
+      await finished.result;
+
+      // Spy AFTER run A settles: a stale, un-removed listener on A would
+      // fire `abort()` (and `engine.cancel`) for A's OWN (already-terminal)
+      // runId too, once the shared signal aborts below, alongside the
+      // genuinely live run B.
+      const cancelCalls: string[] = [];
+      const realCancel = context.engine.cancel.bind(context.engine);
+      context.engine.cancel = async (id: string) => {
+        cancelCalls.push(id);
+        return realCancel(id);
+      };
+
+      // Run B is genuinely in flight — its generate() blocks on the shared
+      // signal — when the signal aborts.
+      const live = createRun(
+        {
+          ...runOptions(
+            ({ signal }) =>
+              new Promise((_resolve, reject) => {
+                signal?.addEventListener(
+                  'abort',
+                  () => reject(new Error('aborted during generate')),
+                  { once: true },
+                );
+              }),
+          ),
+          signal: controller.signal,
+        },
+        { ...context, runId: 'ac2-live-run', prompt: 'Hello' },
+      );
+
+      // Let the deferred-microtask `drive()` call begin for run B before
+      // aborting — matching this file's established pattern for exercising
+      // the real Weft engine (see e.g. "aborts a running durable run and
+      // propagates the abort reason" above); a real engine's inline launch
+      // is scheduled via a macrotask, so a bare microtask flush is not
+      // enough.
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      controller.abort('shared signal aborted');
+
+      await live.result;
+
+      // Only B's `engine.cancel` call — A's already-detached listener never
+      // fired a second, redundant one for its own runId.
+      expect(cancelCalls).toEqual(['ac2-live-run']);
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  // AB-291 (AC3): a workflow parked in `ctx.sleep`/`ctx.waitForSignal` can
+  // only be unblocked by a resolving `engine.cancel()` — if it rejects
+  // instead, the workflow never advances, `result` never settles, and
+  // `closed()` (gated on `result`) would hang forever without this fix.
+  // Uses the manual engine so the workflow's own `result` genuinely never
+  // settles on its own (unlike the real engine, or `createManualDurableEngine`'s
+  // DEFAULT `cancel`, which rejects `result` as its own side effect — the
+  // B6 race simulation other tests in this file rely on).
+  it('resolves closed() with failed (never hangs) when engine.cancel rejects against a genuinely parked workflow (AC3)', async () => {
+    const { engine } = createManualDurableEngine();
+    const cancelRejection = new Error('cancel rejected while parked');
+    engine.cancel = async () => {
+      // Reject WITHOUT settling the workflow's own result — the workflow
+      // stays parked, unable to advance, exactly as it would in production
+      // if the durable engine's own cancel command failed.
+      throw cancelRejection;
+    };
+
+    const runId = 'ac3-durable-cancel-rejects-while-parked';
+    const activeRun = createDurableActiveRun(
+      { engine, checkpointStore: createManualCheckpointStore() },
+      {
+        runId,
+        sessionId: runId,
+        options: runOptions(async () => ({ content: 'unused', toolCalls: [] })),
+        prompt: 'Hello',
+      },
+    );
+
+    // Let the deferred-microtask drive() call fire (driveStarted = true) so
+    // abort() below actually reaches engine.cancel().
+    await Promise.resolve();
+    activeRun.abort('stop the parked workflow');
+
+    const closedAcknowledgement = await activeRun.closed();
+    expect(closedAcknowledgement).toEqual({ status: 'failed', error: cancelRejection });
+
+    // The public `result` promise is UNCHANGED by this fix — the run's real
+    // completion signal stays genuinely pending (the workflow really is
+    // stuck); only `closed()`'s own gate resolved.
+    let resultSettled = false;
+    void activeRun.result.then(
+      () => {
+        resultSettled = true;
+      },
+      () => {
+        resultSettled = true;
+      },
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(resultSettled).toBe(false);
+  });
+
+  // Review finding on this pull request: `cancelRejectionGate` must trip
+  // ONLY for the genuinely-parked (suspended) case above — not for every
+  // `engine.cancel()` rejection. A cancel can also legitimately reject
+  // against a workflow that's already terminal, or mid-step and about to
+  // settle cleanly on its own (the B6 abort-into-generate race the "still
+  // settles when engine.cancel rejects during durable abort cleanup" test
+  // above exercises for `result`). Misclassifying THOSE as `failed` would
+  // be a regression on a clean cleanup. Overrides `engine.get` to report
+  // `'running'` (not `'suspended'`) at the moment of the rejection, proving
+  // the gate stays untripped and `closed()` instead falls through to the
+  // ordinary post-cancel re-read once the workflow settles on its own.
+  it('does not classify closed() failed for a benign engine.cancel rejection against a workflow that is not parked', async () => {
+    const { engine, resolveResult } = createManualDurableEngine();
+    engine.cancel = async () => {
+      throw new Error('cancel rejected but the workflow was never actually parked');
+    };
+    engine.get = (async () => ({ status: 'running' })) as unknown as RegistryAgnosticEngine['get'];
+
+    const runId = 'ac3-durable-cancel-rejects-not-parked';
+    const activeRun = createDurableActiveRun(
+      { engine, checkpointStore: createManualCheckpointStore() },
+      {
+        runId,
+        sessionId: runId,
+        options: runOptions(async () => ({ content: 'unused', toolCalls: [] })),
+        prompt: 'Hello',
+      },
+    );
+
+    await Promise.resolve();
+    activeRun.abort('abort races a workflow about to settle on its own');
+    const closedAcknowledgement = activeRun.closed();
+
+    // Let the rejected engine.cancel()'s own `engine.get` check resolve —
+    // it observes 'running', so `cancelRejectionGate` is never tripped —
+    // before the workflow settles on its own.
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // The workflow settles normally, as if the cancel simply lost the race.
+    resolveResult();
+
+    // `resolveDurableOutcome`'s OWN post-cancel re-read also observes the
+    // still-'running' (nonterminal) status, so this resolves
+    // unresolved/persistence-failed — never `failed` — proving the benign
+    // rejection above was correctly ignored, not misclassified.
+    expect(await closedAcknowledgement).toEqual({
+      status: 'unresolved',
+      reason: 'persistence-failed',
+    });
+  });
 });
 
 describe('createRecoveredRunEventSurface', () => {
