@@ -53,6 +53,17 @@
  * or credential is used anywhere in local verification — every agent uses a
  * hand-rolled deterministic `GenerateFunction` and an in-memory Armorer
  * toolbox.
+ *
+ * AB-259: the `@lostgradient/operative/test` subpath gets its own probe,
+ * type-checked with its own `tsc` invocation and then actually executed —
+ * not merely compiled — driving a real agent run (scripted generate +
+ * scripted tool) through a `ResourceScope`, asserting the recorded
+ * normalized causal trace, and closing the scope quiescent. A negative
+ * probe proves that importing a name the kit has never exported still
+ * fails to compile, and (local mode only) the packed tarball is asserted to
+ * actually contain `dist/test/index.js`, `dist/test/index.cjs`, and
+ * `dist/test/index.d.ts`, so a build-configuration regression that stops
+ * emitting the test subpath fails here rather than at a consumer's install.
  */
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -593,6 +604,249 @@ export { RegistryAgent };
 `,
 };
 
+// AB-259: an executed probe of `@lostgradient/operative/test` — the test
+// kit AB-92/AB-252/255/256/257/258 built. Every value export the issue
+// names is genuinely called (not merely imported): `createManualRuntimeServices`,
+// `createEventRecorder`, `createResourceScope`, `createScriptedGenerate`,
+// and `createScriptedTool` drive one real agent run to completion through a
+// `ResourceScope`, whose normalized causal trace and quiescent close are
+// then asserted; `createScriptedHook` is constructed and inspected on its
+// own (`createAgent`'s public options accept no `hooks` field — hooks
+// compose on the toolbox instead — so there is nothing to wire it into);
+// `runReactiveSourceConformanceSuite` registers and runs its real
+// `describe`/`it` cases against a minimal, genuinely conforming in-memory
+// subject. `FaultPlan`/`FaultPlanEntry`/`FiredFault` are compile-time-only
+// checks against real literal shapes — AB-95's fault engine does not exist
+// yet, so nothing here fires a fault.
+const KIT_PROBE_MODULE = `import { createAgent } from '@lostgradient/operative';
+import { noToolCalls } from '@lostgradient/operative/conditions';
+import type {
+  CausalTraceEntry,
+  FaultPlan,
+  FaultPlanEntry,
+  FiredFault,
+  LeakedResource,
+  ManualRuntimeServices,
+  QuiescenceReport,
+  ReactiveSourceSubject,
+} from '@lostgradient/operative/test';
+import {
+  createEventRecorder,
+  createManualRuntimeServices,
+  createResourceScope,
+  createScriptedGenerate,
+  createScriptedHook,
+  createScriptedTool,
+  runReactiveSourceConformanceSuite,
+} from '@lostgradient/operative/test';
+import { createToolbox } from 'armorer';
+
+// ---------------------------------------------------------------------------
+// FaultPlan / FaultPlanEntry / FiredFault — compile-time-only type-checks
+// against a real literal shape.
+// ---------------------------------------------------------------------------
+const kitProbeFaultPlanEntry: FaultPlanEntry = {
+  id: 'probe-fault',
+  boundary: 'before-work',
+  operation: 'generate',
+  occurrence: { kind: 'nth', n: 1 },
+  effect: undefined,
+};
+export const kitProbeFaultPlan: FaultPlan = [kitProbeFaultPlanEntry];
+export const kitProbeFiredFault: FiredFault = {
+  plan: 'probe-fault',
+  boundary: 'before-work',
+  occurrence: 1,
+  firedAt: '2026-01-01T00:00:00.000Z',
+};
+
+// ---------------------------------------------------------------------------
+// createScriptedHook — constructed and inspected for real.
+// ---------------------------------------------------------------------------
+export function buildProbeHook() {
+  const hook = createScriptedHook('after-tool', [{ kind: 'resolve', value: undefined }]);
+  if (hook.hookName !== 'afterToolExecution') {
+    throw new Error(\`kit probe: unexpected hookName \${hook.hookName}\`);
+  }
+  return hook;
+}
+
+// ---------------------------------------------------------------------------
+// runReactiveSourceConformanceSuite — a minimal, genuinely conforming
+// in-memory counter subject, registered through the real suite.
+// ---------------------------------------------------------------------------
+interface CounterSnapshot {
+  readonly value: number;
+}
+
+interface CounterSubject extends ReactiveSourceSubject<CounterSnapshot> {
+  applyChange(): Promise<void>;
+}
+
+function createCounterSubject(runtime: ManualRuntimeServices): CounterSubject {
+  let current: CounterSnapshot = { value: 0 };
+  const listeners = new Set<() => void>();
+  return {
+    getSnapshot: () => current,
+    subscribeSnapshot(invalidate) {
+      listeners.add(invalidate);
+      return () => {
+        listeners.delete(invalidate);
+      };
+    },
+    async applyChange() {
+      await new Promise<void>((resolve) => {
+        runtime.timers.setTimeout(() => {
+          current = { value: current.value + 1 };
+          for (const listener of listeners) listener();
+          resolve();
+        }, 5);
+      });
+    },
+  };
+}
+
+function createTerminalCounterSubject(): ReactiveSourceSubject<CounterSnapshot> {
+  const terminal: CounterSnapshot = { value: 99 };
+  return {
+    getSnapshot: () => terminal,
+    subscribeSnapshot: () => () => {},
+  };
+}
+
+export function registerKitProbeReactiveSuite(runtime: ManualRuntimeServices): void {
+  runReactiveSourceConformanceSuite({
+    label: 'kit probe in-memory counter',
+    createSubject: () => createCounterSubject(runtime),
+    async triggerChange(subject: CounterSubject) {
+      const done = subject.applyChange();
+      // Yield once before driving the virtual clock so a mid-flight read
+      // genuinely observes the "started, not yet committed" window.
+      await Promise.resolve();
+      await runtime.advance(50);
+      await done;
+    },
+    createAlreadyTerminalSubject: createTerminalCounterSubject,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// The executed scenario the issue's acceptance criteria names directly: a
+// manual runtime, a scripted generate and scripted tool, one run driven to
+// completion through a resource scope, the recorded normalized trace
+// asserted, and the scope closed quiescent.
+// ---------------------------------------------------------------------------
+export interface KitProbeOutcome {
+  readonly trace: readonly CausalTraceEntry[];
+  readonly report: QuiescenceReport;
+}
+
+export async function runKitProbe(): Promise<KitProbeOutcome> {
+  const runtime = createManualRuntimeServices();
+  const recorder = createEventRecorder(runtime);
+  const scope = createResourceScope('kit-probe', runtime);
+
+  const tool = createScriptedTool('echo', [{ kind: 'resolve', result: { echoed: 'hi, hi' } }]);
+  const toolbox = createToolbox([tool]);
+
+  const generate = createScriptedGenerate([
+    {
+      kind: 'respond',
+      response: { content: '', toolCalls: [{ name: 'echo', arguments: { message: 'hi' } }] },
+    },
+    { kind: 'respond', response: { content: 'done', toolCalls: [] } },
+  ]);
+
+  const agent = createAgent({
+    name: 'kit-probe-agent',
+    generate,
+    toolbox,
+    runtime,
+    // A step-count predicate (like the other fixtures in this file use)
+    // would need a THIRD scripted step to observe it: the run layer checks
+    // the stop condition against the step just completed, so a two-response
+    // script stopping cleanly needs the real "no tool calls left" condition
+    // instead of counting steps.
+    stopWhen: noToolCalls(),
+  });
+
+  const run = agent.run('Say hello.');
+  recorder.attachIterable(run, { kind: 'agent-run', id: 'kit-probe-run' });
+  scope.register({ kind: 'run', identifier: 'kit-probe-run', run });
+
+  const result = await run.result();
+  // \`result()\` resolving doesn't guarantee attachIterable's background
+  // consumption loop has caught up to the iterable's own end.
+  await runtime.deferred.drain();
+
+  if (result.finishReason !== 'stop-condition') {
+    throw new Error(\`kit probe: unexpected finishReason \${result.finishReason}\`);
+  }
+  if (tool.callCount !== 1) {
+    throw new Error(\`kit probe: expected the scripted tool to be called once, got \${tool.callCount}\`);
+  }
+
+  const trace = recorder.normalize();
+  const traceEvents = trace.map((entry) => entry.event);
+  if (trace.length === 0 || !traceEvents.includes('run.completed')) {
+    throw new Error(
+      \`kit probe: normalized trace never recorded run.completed: [\${traceEvents.join(', ')}]\`,
+    );
+  }
+
+  const report = await scope.close();
+  if (!report.quiescent) {
+    const leaked: readonly LeakedResource[] = report.leaked;
+    throw new Error(\`kit probe: resource scope not quiescent after close(): \${JSON.stringify(leaked)}\`);
+  }
+
+  return { trace, report };
+}
+`;
+
+const KIT_PROBE_TEST = `import { describe, expect, it } from 'bun:test';
+import { createManualRuntimeServices } from '@lostgradient/operative/test';
+
+import { buildProbeHook, registerKitProbeReactiveSuite, runKitProbe } from '../src/kit-probe';
+
+describe('operative test-kit probe (AB-259)', () => {
+  it('drives a real agent run through a resource scope and records a non-empty causal trace', async () => {
+    const { trace, report } = await runKitProbe();
+
+    expect(trace.length).toBeGreaterThan(0);
+    expect(trace.map((entry) => entry.event)).toContain('run.completed');
+    expect(report.quiescent).toBe(true);
+    expect(report.leaked).toEqual([]);
+  });
+
+  it('constructs a scripted hook double for the after-tool phase', () => {
+    const hook = buildProbeHook();
+
+    expect(hook.hookName).toBe('afterToolExecution');
+    expect(hook.callCount).toBe(0);
+  });
+});
+
+registerKitProbeReactiveSuite(createManualRuntimeServices());
+`;
+
+// AB-259: a negative probe naming an export the kit has never had. Kept
+// separate from REMOVED_API_PROBES (which proves a REMOVED name stays
+// removed) — this proves a NEVER-EXISTED name stays rejected, so a future
+// kit rename that silently drops or renames a real export cannot pass this
+// verifier by accident. Written outside \`src/\`/\`test/\` (a top-level
+// \`kit-negative/\` directory, exactly like \`removed/\`) so it is excluded
+// from the whole-project \`tsc --noEmit\` and checked individually instead.
+const KIT_EXPORT_NEGATIVE_PROBES: Record<string, string> = {
+  'kit-nonexistent-export.ts': `// This name has never existed on the @lostgradient/operative/test kit. If
+// this ever compiles, the negative probe has gone vacuous — a future kit
+// rename could then silently pass verification. See AB-259.
+import { createOperativeTestKitExportThatDoesNotExist } from '@lostgradient/operative/test';
+
+export { createOperativeTestKitExportThatDoesNotExist };
+`,
+};
+
 const OUTPUT_INFERENCE_TYPE_CHECKS = `// Compile-time-only checks: output inference and accessor availability.
 // This file is never executed — only type-checked.
 import { createAgent } from '@lostgradient/operative';
@@ -820,8 +1074,13 @@ async function writeConsumerSource(directory: string): Promise<void> {
   await Bun.write(join(directory, 'src', 'widened.ts'), WIDENED_DEFINITIONS);
   await Bun.write(join(directory, 'src', 'type-checks.ts'), OUTPUT_INFERENCE_TYPE_CHECKS);
   await Bun.write(join(directory, 'test', 'smoke.test.ts'), SMOKE_TEST);
+  await Bun.write(join(directory, 'src', 'kit-probe.ts'), KIT_PROBE_MODULE);
+  await Bun.write(join(directory, 'test', 'kit-probe.test.ts'), KIT_PROBE_TEST);
   for (const [filename, content] of Object.entries(REMOVED_API_PROBES)) {
     await Bun.write(join(directory, 'removed', filename), content);
+  }
+  for (const [filename, content] of Object.entries(KIT_EXPORT_NEGATIVE_PROBES)) {
+    await Bun.write(join(directory, 'kit-negative', filename), content);
   }
 }
 
@@ -965,9 +1224,20 @@ async function verifyLockfile(
   }
 }
 
-async function verifyRemovedApiProbesFailCompilation(directory: string): Promise<void> {
-  for (const filename of Object.keys(REMOVED_API_PROBES)) {
-    const relativePath = join('removed', filename);
+/**
+ * Checks every probe file in `subdirectory` (relative to `directory`)
+ * individually with its own `tsc` invocation, asserting each one FAILS to
+ * compile — used for both `REMOVED_API_PROBES` (a removed name must stay
+ * removed) and `KIT_EXPORT_NEGATIVE_PROBES` (a name the kit never had must
+ * stay rejected, so a future rename cannot silently pass verification).
+ */
+async function verifyProbesFailCompilation(
+  directory: string,
+  subdirectory: string,
+  probes: Readonly<Record<string, string>>,
+): Promise<void> {
+  for (const filename of Object.keys(probes)) {
+    const relativePath = join(subdirectory, filename);
     const result = await runExpectingFailure(
       [
         'bunx',
@@ -980,15 +1250,80 @@ async function verifyRemovedApiProbesFailCompilation(directory: string): Promise
         'bundler',
         '--target',
         'esnext',
+        // TypeScript 6's TS5112 refuses to run at all when a file is named
+        // on the command line inside a directory that also has a
+        // tsconfig.json, unless told to ignore it — without this flag every
+        // per-file probe invocation below "fails" on that config error
+        // regardless of whether the probe's own removed/nonexistent import
+        // would genuinely fail to compile, making the whole check vacuous.
+        '--ignoreConfig',
         relativePath,
       ],
       directory,
     );
     if (result.exitCode === 0) {
       throw new Error(
-        `Removed-API probe ${relativePath} unexpectedly compiled — the removed surface still exists:\n${result.output}`,
+        `Probe ${relativePath} unexpectedly compiled — the surface it targets still exists:\n${result.output}`,
       );
     }
+  }
+}
+
+/**
+ * AB-259: the executed kit probe (`src/kit-probe.ts`) type-checks on its
+ * own, with its own `tsc` invocation — the same pattern the removed-API and
+ * kit-negative probes use, but asserting SUCCESS instead of failure.
+ */
+async function verifyKitProbeTypeChecksStandalone(directory: string): Promise<void> {
+  const relativePath = join('src', 'kit-probe.ts');
+  const result = await runExpectingFailure(
+    [
+      'bunx',
+      'tsc',
+      '--noEmit',
+      '--strict',
+      '--module',
+      'esnext',
+      '--moduleResolution',
+      'bundler',
+      '--target',
+      'esnext',
+      // See the matching comment in `verifyProbesFailCompilation` — without
+      // this, TS5112 fails the invocation before the file is even checked.
+      '--ignoreConfig',
+      relativePath,
+    ],
+    directory,
+  );
+  if (result.exitCode !== 0) {
+    throw new Error(`Kit probe ${relativePath} failed to type-check on its own:\n${result.output}`);
+  }
+}
+
+/**
+ * AB-259: asserts a packed `@lostgradient/operative` tarball actually
+ * contains the `./test` subpath's build output — so a build-configuration
+ * regression that stops emitting it fails here, at verification time,
+ * rather than surfacing only at a real consumer's install.
+ */
+async function verifyTarballContainsTestSubpath(tarball: string): Promise<void> {
+  const requiredEntries = [
+    'package/dist/test/index.js',
+    'package/dist/test/index.cjs',
+    'package/dist/test/index.d.ts',
+  ];
+  const stdout = await runForStdout(['tar', '-tzf', tarball], root);
+  const entries = new Set(
+    stdout
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0),
+  );
+  const missing = requiredEntries.filter((entry) => !entries.has(entry));
+  if (missing.length > 0) {
+    throw new Error(
+      `Packed @lostgradient/operative tarball is missing the ./test subpath's build output: ${missing.join(', ')}`,
+    );
   }
 }
 
@@ -1010,8 +1345,10 @@ async function verifyConsumer(
   await verifyLockfile(directory, mode, expected, packedSiblings);
 
   await run(['bunx', 'tsc', '--noEmit'], directory);
+  await verifyKitProbeTypeChecksStandalone(directory);
   await run(['bun', 'test'], directory);
-  await verifyRemovedApiProbesFailCompilation(directory);
+  await verifyProbesFailCompilation(directory, 'removed', REMOVED_API_PROBES);
+  await verifyProbesFailCompilation(directory, 'kit-negative', KIT_EXPORT_NEGATIVE_PROBES);
 }
 
 async function main(): Promise<void> {
@@ -1039,6 +1376,7 @@ async function main(): Promise<void> {
     const directory = await mkdtemp(join(tmpdir(), 'operative-consumer-local-'));
     try {
       const tarball = await packLocal(staging);
+      await verifyTarballContainsTestSubpath(tarball);
 
       const siblingSpecifiers: Record<string, string> = {};
       const packedSiblings = new Map<string, string>();
@@ -1066,9 +1404,11 @@ async function main(): Promise<void> {
               .map((decision) => `${decision.name}@${decision.version} (${decision.reason})`)
               .join(', ')}`;
       console.log(
-        'Operative consumer verification (local) passed: tarball, lockfile boundary, ' +
-          'direct/inline/barrel/dynamic-import/lazy definitions, output inference, ' +
-          `widened-module runtime guards, and removed-API compile failures. AB-287: ${packedSummary}.`,
+        'Operative consumer verification (local) passed: tarball (including the ./test ' +
+          'subpath build output), lockfile boundary, direct/inline/barrel/dynamic-import/lazy ' +
+          'definitions, output inference, widened-module runtime guards, the executed ' +
+          '@lostgradient/operative/test kit probe, and removed-API/kit-negative compile ' +
+          `failures. AB-287: ${packedSummary}.`,
       );
     } finally {
       await rm(directory, { recursive: true, force: true });
