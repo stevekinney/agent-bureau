@@ -46,13 +46,18 @@ export function classifyRunAttachment(input: {
  * live `ActiveRun`, awaits its `closed()` cleanup acknowledgement (AB-204 —
  * never rejects), and records the outcome to the durable audit trail as a
  * `run.disconnect-aborted` entry. A no-op if the run is no longer registered
- * in the process-local store (already deleted) or if this bureau has no
- * audit trail composed (ephemeral bureau — the abort/closed cleanup still
- * runs; only the durable write is skipped).
+ * in the process-local store (already deleted), if this bureau has no audit
+ * trail composed (ephemeral bureau — the abort/closed cleanup still runs;
+ * only the durable write is skipped), or if the run has already reached a
+ * terminal status by the time this fires (a fast run that finished before a
+ * later disconnect arrived) — `ActiveRun.abort()` on an already-terminal run
+ * is a documented idempotent no-op, but calling it here would still write a
+ * misleading `run.disconnect-aborted` entry against a run this disconnect
+ * never actually affected (Copilot review).
  */
 async function abortAttachedRunOnDisconnect(bureau: Bureau, runId: string): Promise<void> {
   const runState = bureau.store.getRun(runId);
-  if (!runState) return;
+  if (!runState || runState.status !== 'running') return;
 
   runState.activeRun.abort('Client disconnected from the request that started this run');
   const acknowledgement: CleanupAcknowledgement = await runState.activeRun.closed();
@@ -68,27 +73,37 @@ async function abortAttachedRunOnDisconnect(bureau: Bureau, runId: string): Prom
  * Registers the disconnect propagation for an attached run: if `signal` is
  * already aborted (the client vanished while `bureau.createRun` was still
  * doing its own async setup), the handler fires immediately; otherwise it
- * fires the first time `signal` aborts. Exported for direct reuse by any
- * other route that starts an inline (process-local) run and awaits it
- * synchronously — the openai-compat non-streaming path is the other site
- * AB-37's "synchronous HTTP call awaiting a run" row describes.
+ * fires the first time `signal` aborts, and DETACHES that listener once the
+ * run itself settles — matching `create-run.ts`'s own signal-listener
+ * lifecycle — so a disconnect arriving after the run already finished on its
+ * own never fires this handler at all (Copilot review; the `status !==
+ * 'running'` guard in {@link abortAttachedRunOnDisconnect} above is a second,
+ * independent layer against the same race). A no-op if `runId` is not (or is
+ * no longer) registered in the process-local store. Exported for direct
+ * reuse by any other route that starts an inline (process-local) run and
+ * awaits it synchronously — the openai-compat non-streaming path is the
+ * other site AB-37's "synchronous HTTP call awaiting a run" row describes.
  */
 export function propagateDisconnectToAttachedRun(
   bureau: Bureau,
   runId: string,
   signal: AbortSignal,
 ): void {
+  const runState = bureau.store.getRun(runId);
+  if (!runState) return;
+
   if (signal.aborted) {
     void abortAttachedRunOnDisconnect(bureau, runId);
     return;
   }
-  signal.addEventListener(
-    'abort',
-    () => {
-      void abortAttachedRunOnDisconnect(bureau, runId);
-    },
-    { once: true },
-  );
+
+  const onAbort = (): void => {
+    void abortAttachedRunOnDisconnect(bureau, runId);
+  };
+  signal.addEventListener('abort', onAbort, { once: true });
+  void runState.activeRun.result.finally(() => {
+    signal.removeEventListener('abort', onAbort);
+  });
 }
 
 function publicCreateRunRequest(

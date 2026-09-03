@@ -1,4 +1,5 @@
 import type { GenerateFunction, Toolbox } from '@lostgradient/operative';
+import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createTool, createToolbox, type ToolRequestContext } from 'armorer';
 import { describe, expect, it, spyOn } from 'bun:test';
 import { BureauError } from 'bureau';
@@ -9,7 +10,6 @@ import {
   createTestGateway,
   expectedPersistedApiKeyAuthority,
   requestJSON,
-  waitForCondition,
   waitForRunState,
 } from '../test';
 import type { PendingReview, PendingToolApprovalReview, RunEventRecord } from '../types';
@@ -568,9 +568,16 @@ describe('POST /api/v1/runs: attached-run disconnect propagation (AB-212)', () =
     controller.abort();
 
     // A durable run must be left running: give the (absent) disconnect
-    // handler a bounded number of turns to (not) act, then assert the run
-    // is still running and no disconnect audit entry was written.
-    await waitForCondition(() => Promise.resolve(true), 'unreachable', 5);
+    // handler a bounded number of real event-loop turns to (not) act, then
+    // assert the run is still running and no disconnect audit entry was
+    // written. `classifyRunAttachment` deciding 'detached' means
+    // `propagateDisconnectToAttachedRun` is never called in the first place
+    // (see the sibling "attached" test above for the positive case this
+    // negative case mirrors) — these yields are for defense in depth against
+    // a future regression that wires it unconditionally.
+    for (let turn = 0; turn < 5; turn++) {
+      await yieldToPortableEventLoop();
+    }
     expect(gateway.bureau.getRun(id)?.status).toBe('running');
     const auditRecords = await gateway.bureau.auditTrail?.query({ runId: id });
     expect(auditRecords?.some((record) => record.type === 'run.disconnect-aborted')).toBe(false);

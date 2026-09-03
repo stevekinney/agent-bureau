@@ -7,6 +7,7 @@ import { waitForRunState } from 'bureau/test';
 import { LiveFrameBroker } from './live-events';
 import { createManualLiveFrameBrokerClock } from './test';
 import type { ServerFrame } from './types';
+import { createWebSocketHandler } from './websocket/handler';
 
 function createRunFrame(runSeq = 1): ServerFrame {
   return {
@@ -694,19 +695,17 @@ describe('detached run: an SSE disconnect never touches the run (AB-212)', () =>
 describe('WebSocket disconnect shares the SSE subscriber-removal mechanism (AB-212 AC4)', () => {
   it('WebSocket handler close() delegates to the same LiveFrameBroker.removeSubscriber() an SSE disconnect uses', () => {
     const broker = new LiveFrameBroker();
-    const key = {};
-    broker.addSubscriber(key, () => {});
+    // Exercises the real `createWebSocketHandler` — `open()` then `close()`
+    // — rather than calling `broker.removeSubscriber()` directly, so a
+    // future change to `close()`'s implementation (not just its current
+    // one-line delegation) would still be caught here (Copilot review).
+    const handler = createWebSocketHandler({ broker });
+    const fakeSocket = { send: () => {} } as unknown as Parameters<typeof handler.open>[0];
+
+    handler.open(fakeSocket);
     expect(broker.subscriberCount).toBe(1);
 
-    // `packages/gateway/src/websocket/handler.ts`'s `close(ws)` is exactly
-    // `options.broker.removeSubscriber(ws)` — the same call
-    // `createEventStreamResponse`'s `close()` makes for SSE. Calling it
-    // directly here (rather than driving a real WebSocket) proves it is the
-    // identical broker-level operation, so the detached-run guarantee
-    // proven above for SSE — never touching the run, only the subscriber —
-    // holds for WebSocket too without re-running the whole run-lifecycle
-    // scenario a second time.
-    broker.removeSubscriber(key);
+    handler.close(fakeSocket);
     expect(broker.subscriberCount).toBe(0);
   });
 });
