@@ -52,6 +52,7 @@ import type {
   EventObservableOptions,
   ObservableLike,
   Observer,
+  RuntimeServices,
   Subscription,
 } from 'lifecycle';
 import type { CreateMemoryOptions, Memory } from 'memory';
@@ -546,6 +547,21 @@ export interface BureauOptions<D extends AgentDefinitions = AgentDefinitions> {
    * future live provider probe attaches to).
    */
   modelCatalog?: ModelCatalogService;
+  /**
+   * AB-92/AB-252/AB-260 — the injectable runtime-service seam: wall time,
+   * monotonic time, timers, identifiers, randomness, and deferred-work
+   * tracking. `createBureau` resolves `options.runtime ?? createDefaultRuntimeServices()`
+   * exactly once, before any subsystem is constructed, and snapshots that
+   * single instance into every run, session, schedule, scheduler task,
+   * heartbeat tick, audit write, webhook delivery, and background evaluation
+   * the bureau starts — two bureaus in one process given independent manual
+   * runtimes never share a clock, an identifier sequence, or a deferred
+   * ledger. Omit to use the real globals (`createDefaultRuntimeServices()`),
+   * exactly as before this option existed. A test composes its own via
+   * `createManualRuntimeServices` from `@lostgradient/operative/test` (or
+   * `lifecycle`, which `@lostgradient/operative` re-exports it from).
+   */
+  runtime?: RuntimeServices;
 }
 
 /**

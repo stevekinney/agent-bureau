@@ -44,6 +44,7 @@ import {
   activeSkillsFromStepMetadata,
   applyCache,
   CATALOG_RUN_RECOVERY_KEY_PREFIX,
+  compositionReadyGuardResult,
   createMemoryPersistHook,
   createMemoryRecallHook,
   createRoutingStrategy,
@@ -51,11 +52,10 @@ import {
   decodeScheduleRunMarker,
   isActiveSkillEntryArray,
   recordedAgentStep,
+  recoveredRequestContext,
   removeLastScheduledFireTranscript,
   resolveProviderGenerate,
-  type RuntimeComposition,
 } from './runtime-composition';
-import { getRuntimeCompositionTestingSeams } from './test';
 import type { GenerateProviderName, ProviderConfiguration } from './types';
 
 // Drain Weft's deferred inline-launch queue between tests — a pending setTimeout(0)
@@ -113,12 +113,6 @@ async function saveRecoverableSession(sessionStore: SessionStore, runId: string)
 }
 
 describe('createRuntimeComposition', () => {
-  it('rejects test seam lookups for objects that are not registered runtime compositions', () => {
-    expect(() => getRuntimeCompositionTestingSeams({} as RuntimeComposition)).toThrow(
-      'Runtime composition testing seams are not registered for this composition',
-    );
-  });
-
   it('revalidates transport authority immediately before each tool execution', async () => {
     let authorityCurrent = true;
     let executions = 0;
@@ -395,11 +389,14 @@ describe('createRuntimeComposition', () => {
     runtime.disposeStorage?.();
   });
 
-  it('validates and restores persisted request authority for durable recovery', async () => {
-    const runtime = await createRuntimeComposition({
-      generate: async () => ({ content: 'x', toolCalls: [] }),
-    });
-    const recover = getRuntimeCompositionTestingSeams(runtime).recoveredRequestContext;
+  it('validates and restores persisted request authority for durable recovery', () => {
+    function recover(
+      metadataArgument: Parameters<typeof recoveredRequestContext>[0],
+      runId: Parameters<typeof recoveredRequestContext>[1],
+      agentName: Parameters<typeof recoveredRequestContext>[2],
+    ) {
+      return recoveredRequestContext(metadataArgument, runId, agentName, () => Date.now());
+    }
     const metadata = {
       lastRequestAuthority: {
         principalId: 'principal-a',
@@ -436,11 +433,14 @@ describe('createRuntimeComposition', () => {
     ).toBeUndefined();
   });
 
-  it('does not restore legacy request authority when a per-run map exists without the recovered run', async () => {
-    const runtime = await createRuntimeComposition({
-      generate: async () => ({ content: 'x', toolCalls: [] }),
-    });
-    const recover = getRuntimeCompositionTestingSeams(runtime).recoveredRequestContext;
+  it('does not restore legacy request authority when a per-run map exists without the recovered run', () => {
+    function recover(
+      metadataArgument: Parameters<typeof recoveredRequestContext>[0],
+      runId: Parameters<typeof recoveredRequestContext>[1],
+      agentName: Parameters<typeof recoveredRequestContext>[2],
+    ) {
+      return recoveredRequestContext(metadataArgument, runId, agentName, () => Date.now());
+    }
     const metadata = {
       lastRequestAuthority: {
         principalId: 'legacy-principal',
@@ -1292,24 +1292,32 @@ describe('createRuntimeComposition durable execution', () => {
     }
   });
 
-  it('exposes resolver guards for not-ready and no-session-store states', async () => {
+  it('reports the not-ready guard result directly (pure, no composition needed)', () => {
+    // AB-260: `resolveRunServices`'s composition-not-ready branch defends a
+    // TDZ race during `createRuntimeComposition`'s own construction — a
+    // window nothing outside this module can observe once construction
+    // returns (there is no public way to hold a `RuntimeComposition` handle
+    // while `compositionReady` is still `false`). Extracted as a pure
+    // function so the guard's exact return shape is proven here directly,
+    // rather than through a private mutation seam that could force the
+    // transient state after the fact.
+    expect(compositionReadyGuardResult(false, 'run-not-ready')).toEqual({
+      status: 'unavailable',
+      reason: 'run run-not-ready: composition not ready',
+    });
+    expect(compositionReadyGuardResult(true, 'run-ready')).toBeUndefined();
+  });
+
+  it('exposes a resolver guard for the no-session-store state', async () => {
+    // No `storage`/`persistence` configured, so `sessionStore` is naturally
+    // `undefined` — no seam needed to reach this branch.
     const runtime = await createRuntimeComposition({
       generate: async () => ({ content: 'x', toolCalls: [] }),
       toolbox: createToolbox([], { context: {} }),
     });
 
-    getRuntimeCompositionTestingSeams(runtime).setCompositionReady(false);
     expect(
-      await getRuntimeCompositionTestingSeams(runtime).resolveRunServices({
-        workflowId: 'run-not-ready',
-        workflowType: 'agentRun',
-        input: { runId: 'run-not-ready', sessionId: 'session', agentName: 'agent' },
-      }),
-    ).toMatchObject({ status: 'unavailable', reason: 'run run-not-ready: composition not ready' });
-
-    getRuntimeCompositionTestingSeams(runtime).setCompositionReady(true);
-    expect(
-      await getRuntimeCompositionTestingSeams(runtime).resolveRunServices({
+      await runtime.resolveRunServices({
         workflowId: 'run-no-store',
         workflowType: 'agentRun',
         input: { runId: 'run-no-store', sessionId: 'session', agentName: 'agent' },
@@ -1328,7 +1336,7 @@ describe('createRuntimeComposition durable execution', () => {
     try {
       expect(runtime.sessionStore).toBeDefined();
       expect(
-        await getRuntimeCompositionTestingSeams(runtime).buildScheduledRunServices(
+        await runtime.buildScheduledRunServices(
           {
             workflowId: 'scheduled-invalid',
             workflowType: 'other',
@@ -1343,7 +1351,7 @@ describe('createRuntimeComposition durable execution', () => {
       });
 
       expect(
-        await getRuntimeCompositionTestingSeams(runtime).buildScheduledRunServices(
+        await runtime.buildScheduledRunServices(
           {
             workflowId: 'scheduled-missing-marker',
             workflowType: 'agentRun',
@@ -1382,7 +1390,7 @@ describe('createRuntimeComposition durable execution', () => {
 
     try {
       expect(runtime.sessionStore).toBeDefined();
-      const resolution = await getRuntimeCompositionTestingSeams(runtime).buildScheduledRunServices(
+      const resolution = await runtime.buildScheduledRunServices(
         {
           workflowId: 'scheduled-authority-run',
           workflowType: 'agentRun',
@@ -1442,9 +1450,7 @@ describe('createRuntimeComposition durable execution', () => {
         // Populate the scheduleId correlation the same way a real fire does —
         // through buildScheduledRunServices — without needing a real weft
         // schedule timer tick.
-        const resolution = await getRuntimeCompositionTestingSeams(
-          runtime,
-        ).buildScheduledRunServices(
+        const resolution = await runtime.buildScheduledRunServices(
           {
             workflowId: 'fire-completed-1',
             workflowType: 'agentRun',
@@ -1497,9 +1503,7 @@ describe('createRuntimeComposition durable execution', () => {
       });
 
       try {
-        const resolution = await getRuntimeCompositionTestingSeams(
-          runtime,
-        ).buildScheduledRunServices(
+        const resolution = await runtime.buildScheduledRunServices(
           {
             workflowId: 'fire-failed-1',
             workflowType: 'agentRun',
@@ -1547,9 +1551,7 @@ describe('createRuntimeComposition durable execution', () => {
       });
 
       try {
-        const resolution = await getRuntimeCompositionTestingSeams(
-          runtime,
-        ).buildScheduledRunServices(
+        const resolution = await runtime.buildScheduledRunServices(
           {
             workflowId: 'fire-thrown-1',
             workflowType: 'agentRun',
@@ -1620,9 +1622,7 @@ describe('createRuntimeComposition durable execution', () => {
       });
 
       try {
-        const resolution = await getRuntimeCompositionTestingSeams(
-          runtime,
-        ).buildScheduledRunServices(
+        const resolution = await runtime.buildScheduledRunServices(
           {
             workflowId: 'fire-cancelled-1',
             workflowType: 'agentRun',
@@ -1766,7 +1766,7 @@ describe('createRuntimeComposition durable execution', () => {
       );
 
       expect(
-        await getRuntimeCompositionTestingSeams(runtime).resolveRunServices({
+        await runtime.resolveRunServices({
           workflowId: 'scheduled-run',
           workflowType: 'agentRun',
           input: {
@@ -1785,24 +1785,34 @@ describe('createRuntimeComposition durable execution', () => {
 
   it('diagnoses scheduled proof inspection failures and then falls back to interactive guards', async () => {
     const diagnostics: string[] = [];
-    const runtime = await createRuntimeComposition({
-      generate: async () => ({ content: 'x', toolCalls: [] }),
-      toolbox: createToolbox([], { context: {} }),
-      storage: { type: 'memory' },
-      durableExecution: true,
-      onDiagnostic(event) {
-        diagnostics.push(event.message);
+    // AB-260: a broken `SessionStore` is supplied through
+    // `RuntimeCompositionDependencies.createSessionStore` — the same
+    // non-test-gated dependency-injection parameter `resolveProviderGenerate`
+    // already establishes — rather than the retired `setSessionStore`
+    // mutation seam.
+    const runtime = await createRuntimeComposition(
+      {
+        generate: async () => ({ content: 'x', toolCalls: [] }),
+        toolbox: createToolbox([], { context: {} }),
+        storage: { type: 'memory' },
+        durableExecution: true,
+        onDiagnostic(event) {
+          diagnostics.push(event.message);
+        },
       },
-    });
+      {
+        resolveProviderGenerate,
+        createSessionStore: () =>
+          ({
+            async list() {
+              throw new Error('list failed');
+            },
+          }) as unknown as SessionStore,
+      },
+    );
 
     try {
-      getRuntimeCompositionTestingSeams(runtime).setSessionStore({
-        async list() {
-          throw new Error('list failed');
-        },
-      } as unknown as SessionStore);
-
-      const result = await getRuntimeCompositionTestingSeams(runtime).resolveRunServices({
+      const result = await runtime.resolveRunServices({
         workflowId: 'scheduled-proof-fails',
         workflowType: 'agentRun',
         input: { agentName: 'agent', input: 'run' },
@@ -1822,7 +1832,66 @@ describe('createRuntimeComposition durable execution', () => {
     }
   });
 
-  it('exposes interactive resolver ownership and reconstruction failure guards', async () => {
+  it('rejects a durable input whose runId does not match the workflow id', async () => {
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    try {
+      expect(
+        await runtime.resolveRunServices({
+          workflowId: 'run-real',
+          workflowType: 'agentRun',
+          input: { runId: 'run-other', sessionId: 'session-owned', agentName: 'agent' },
+        }),
+      ).toMatchObject({ status: 'unavailable', reason: 'run run-real input runId mismatch' });
+    } finally {
+      runtime.durable?.engine[Symbol.dispose]?.();
+    }
+  });
+
+  it('fails closed for a session the store cannot load', async () => {
+    // AB-260: a store whose `load()` always resolves `undefined` is supplied
+    // through `RuntimeCompositionDependencies.createSessionStore` rather
+    // than the retired `setSessionStore` mutation seam.
+    const runtime = await createRuntimeComposition(
+      {
+        generate: async () => ({ content: 'x', toolCalls: [] }),
+        toolbox: createToolbox([], { context: {} }),
+        storage: { type: 'memory' },
+        durableExecution: true,
+      },
+      {
+        resolveProviderGenerate,
+        createSessionStore: () =>
+          ({
+            async load() {
+              return undefined;
+            },
+          }) as unknown as SessionStore,
+      },
+    );
+
+    try {
+      expect(
+        await runtime.resolveRunServices({
+          workflowId: 'run-missing-session',
+          workflowType: 'agentRun',
+          input: { runId: 'run-missing-session', sessionId: 'session-missing', agentName: 'agent' },
+        }),
+      ).toMatchObject({
+        status: 'unavailable',
+        reason: 'run run-missing-session not owned by a running session',
+      });
+    } finally {
+      runtime.durable?.engine[Symbol.dispose]?.();
+    }
+  });
+
+  it('diagnoses a failed reconcile write when a recovered run cannot be reconstructed', async () => {
     const diagnostics: string[] = [];
     const session = createAgentSession({
       id: 'session-owned',
@@ -1842,54 +1911,40 @@ describe('createRuntimeComposition durable execution', () => {
         },
       },
     });
-    const runtime = await createRuntimeComposition({
-      generate: async () => ({ content: 'x', toolCalls: [] }),
-      toolbox: createToolbox([], { context: {} }),
-      storage: { type: 'memory' },
-      durableExecution: true,
-      onDiagnostic(event) {
-        diagnostics.push(event.message);
+    // No `generate`/`provider` configured, so `buildRunDepsFromSession`'s
+    // internal `createRunRuntime` call genuinely throws "No generate
+    // function configured" — the real production failure this branch
+    // defends against, reached here through public construction options
+    // rather than the retired `setBuildRunDepsFromSession` override seam.
+    // Combined with a session store whose `updateMetadata` also fails (via
+    // `RuntimeCompositionDependencies.createSessionStore`, not a seam) to
+    // reach the "failed reconcile write" diagnostic.
+    const runtime = await createRuntimeComposition(
+      {
+        toolbox: createToolbox([], { context: {} }),
+        storage: { type: 'memory' },
+        durableExecution: true,
+        onDiagnostic(event) {
+          diagnostics.push(event.message);
+        },
       },
-    });
+      {
+        resolveProviderGenerate,
+        createSessionStore: () =>
+          ({
+            async load() {
+              return session;
+            },
+            async updateMetadata() {
+              throw new Error('write failed');
+            },
+          }) as unknown as SessionStore,
+      },
+    );
 
     try {
       expect(
-        await getRuntimeCompositionTestingSeams(runtime).resolveRunServices({
-          workflowId: 'run-real',
-          workflowType: 'agentRun',
-          input: { runId: 'run-other', sessionId: 'session-owned', agentName: 'agent' },
-        }),
-      ).toMatchObject({ status: 'unavailable', reason: 'run run-real input runId mismatch' });
-
-      getRuntimeCompositionTestingSeams(runtime).setSessionStore({
-        async load() {
-          return undefined;
-        },
-      } as unknown as SessionStore);
-      expect(
-        await getRuntimeCompositionTestingSeams(runtime).resolveRunServices({
-          workflowId: 'run-missing-session',
-          workflowType: 'agentRun',
-          input: { runId: 'run-missing-session', sessionId: 'session-missing', agentName: 'agent' },
-        }),
-      ).toMatchObject({
-        status: 'unavailable',
-        reason: 'run run-missing-session not owned by a running session',
-      });
-
-      getRuntimeCompositionTestingSeams(runtime).setSessionStore({
-        async load() {
-          return session;
-        },
-        async updateMetadata() {
-          throw new Error('write failed');
-        },
-      } as unknown as SessionStore);
-      getRuntimeCompositionTestingSeams(runtime).setBuildRunDepsFromSession(async () => {
-        throw new Error('cannot rebuild');
-      });
-      expect(
-        await getRuntimeCompositionTestingSeams(runtime).resolveRunServices({
+        await runtime.resolveRunServices({
           workflowId: 'run-owned',
           workflowType: 'agentRun',
           input: { runId: 'run-owned', sessionId: 'session-owned', agentName: 'agent' },
@@ -1898,15 +1953,6 @@ describe('createRuntimeComposition durable execution', () => {
       expect(
         diagnostics.some((message) => message.includes('Failed to reconcile unrecoverable run')),
       ).toBe(true);
-
-      getRuntimeCompositionTestingSeams(runtime).setBuildRunDepsFromSession(async () => null);
-      expect(
-        await getRuntimeCompositionTestingSeams(runtime).resolveRunServices({
-          workflowId: 'run-owned',
-          workflowType: 'agentRun',
-          input: { runId: 'run-owned', sessionId: 'session-owned', agentName: 'agent' },
-        }),
-      ).toMatchObject({ status: 'unavailable', reason: 'run run-owned not reconstructable' });
     } finally {
       runtime.durable?.engine[Symbol.dispose]?.();
     }
@@ -1931,14 +1977,13 @@ describe('createRuntimeComposition durable execution', () => {
     });
 
     try {
-      getRuntimeCompositionTestingSeams(runtime).setSessionStore({
-        async load() {
-          return session;
-        },
-      } as unknown as SessionStore);
+      // AB-260: seeded through the composition's own genuine `sessionStore`
+      // (already public, never part of the retired seam) rather than a
+      // faked store.
+      await runtime.sessionStore!.save(session);
 
       expect(
-        await getRuntimeCompositionTestingSeams(runtime).resolveRunServices({
+        await runtime.resolveRunServices({
           workflowId: 'run-missing-authority',
           workflowType: 'agentRun',
           input: {
@@ -1983,14 +2028,13 @@ describe('createRuntimeComposition durable execution', () => {
     });
 
     try {
-      getRuntimeCompositionTestingSeams(runtime).setSessionStore({
-        async load() {
-          return session;
-        },
-      } as unknown as SessionStore);
+      // AB-260: seeded through the composition's own genuine `sessionStore`
+      // (already public, never part of the retired seam) rather than a
+      // faked store.
+      await runtime.sessionStore!.save(session);
 
       expect(
-        await getRuntimeCompositionTestingSeams(runtime).resolveRunServices({
+        await runtime.resolveRunServices({
           workflowId: 'run-custom-authority',
           workflowType: 'agentRun',
           input: {
@@ -2040,14 +2084,13 @@ describe('createRuntimeComposition durable execution', () => {
     });
 
     try {
-      getRuntimeCompositionTestingSeams(runtime).setSessionStore({
-        async load() {
-          return session;
-        },
-      } as unknown as SessionStore);
+      // AB-260: seeded through the composition's own genuine `sessionStore`
+      // (already public, never part of the retired seam) rather than a
+      // faked store.
+      await runtime.sessionStore!.save(session);
 
       expect(
-        await getRuntimeCompositionTestingSeams(runtime).resolveRunServices({
+        await runtime.resolveRunServices({
           workflowId: 'run-revoked-authority',
           workflowType: 'agentRun',
           input: {
@@ -2102,14 +2145,13 @@ describe('createRuntimeComposition durable execution', () => {
     });
 
     try {
-      getRuntimeCompositionTestingSeams(runtime).setSessionStore({
-        async load() {
-          return session;
-        },
-      } as unknown as SessionStore);
+      // AB-260: seeded through the composition's own genuine `sessionStore`
+      // (already public, never part of the retired seam) rather than a
+      // faked store.
+      await runtime.sessionStore!.save(session);
 
       expect(
-        await getRuntimeCompositionTestingSeams(runtime).resolveRunServices({
+        await runtime.resolveRunServices({
           workflowId: 'run-scheduler-authority',
           workflowType: 'agentRun',
           input: {
@@ -2158,11 +2200,7 @@ describe('createRuntimeComposition durable execution', () => {
       };
 
       expect(
-        await getRuntimeCompositionTestingSeams(runtime).loadCommittedScheduledActiveSkills(
-          session,
-          'scheduled-run',
-          true,
-        ),
+        await runtime.loadCommittedScheduledActiveSkills(session, 'scheduled-run', true),
       ).toBeUndefined();
       expect(
         logs.some((message) => message.includes('Unable to verify scheduled fire skill snapshot')),
@@ -2224,13 +2262,9 @@ describe('createRuntimeComposition durable execution', () => {
         serializeCheckpoint(checkpoint),
       );
 
-      expect(
-        await getRuntimeCompositionTestingSeams(runtime).loadCommittedScheduledActiveSkills(
-          session,
-          runId,
-          true,
-        ),
-      ).toEqual(activeSkills);
+      expect(await runtime.loadCommittedScheduledActiveSkills(session, runId, true)).toEqual(
+        activeSkills,
+      );
     } finally {
       runtime.durable?.engine[Symbol.dispose]?.();
     }
@@ -4312,7 +4346,7 @@ describe('resolveRunServices catalog-run recovery branch (AB-240)', () => {
         input: 'hello',
       });
 
-      const result = await getRuntimeCompositionTestingSeams(runtime).resolveRunServices({
+      const result = await runtime.resolveRunServices({
         workflowId: 'catalog-run-1',
         workflowType: 'agentRun',
         // The catalog branch is keyed on `workflowId` alone — the `input`
@@ -4355,7 +4389,7 @@ describe('resolveRunServices catalog-run recovery branch (AB-240)', () => {
         input: conversationInput,
       });
 
-      const result = await getRuntimeCompositionTestingSeams(runtime).resolveRunServices({
+      const result = await runtime.resolveRunServices({
         workflowId: 'catalog-run-conversation',
         workflowType: 'agentRun',
         input: {
@@ -4386,7 +4420,7 @@ describe('resolveRunServices catalog-run recovery branch (AB-240)', () => {
         input: 'hello',
       });
 
-      const result = await getRuntimeCompositionTestingSeams(runtime).resolveRunServices({
+      const result = await runtime.resolveRunServices({
         workflowId: 'catalog-run-missing',
         workflowType: 'agentRun',
         input: {
@@ -4421,7 +4455,7 @@ describe('resolveRunServices catalog-run recovery branch (AB-240)', () => {
         input: 'hello',
       });
 
-      const result = await getRuntimeCompositionTestingSeams(runtime).resolveRunServices({
+      const result = await runtime.resolveRunServices({
         workflowId: 'catalog-run-resolver-failed',
         workflowType: 'agentRun',
         input: {
@@ -4463,7 +4497,7 @@ describe('resolveRunServices catalog-run recovery branch (AB-240)', () => {
         input: 'hello',
       });
 
-      const result = await getRuntimeCompositionTestingSeams(runtime).resolveRunServices({
+      const result = await runtime.resolveRunServices({
         workflowId: 'catalog-run-drift',
         workflowType: 'agentRun',
         input: { runId: 'catalog-run-drift', sessionId: 'catalog-run-drift', agentName: 'echo' },
@@ -4496,7 +4530,7 @@ describe('resolveRunServices catalog-run recovery branch (AB-240)', () => {
         input: 'hello',
       });
 
-      const result = await getRuntimeCompositionTestingSeams(runtime).resolveRunServices({
+      const result = await runtime.resolveRunServices({
         workflowId: 'catalog-run-no-resolver',
         workflowType: 'agentRun',
         input: {
@@ -4531,7 +4565,7 @@ describe('resolveRunServices catalog-run recovery branch (AB-240)', () => {
         new Uint8Array([0x81]),
       );
 
-      const result = await getRuntimeCompositionTestingSeams(runtime).resolveRunServices({
+      const result = await runtime.resolveRunServices({
         workflowId: 'catalog-run-corrupt',
         workflowType: 'agentRun',
         input: {
@@ -4570,7 +4604,7 @@ describe('resolveRunServices catalog-run recovery branch (AB-240)', () => {
         input: 'hello',
       });
 
-      const result = await getRuntimeCompositionTestingSeams(runtime).resolveRunServices({
+      const result = await runtime.resolveRunServices({
         workflowId: 'catalog-run-not-durable-capable',
         workflowType: 'agentRun',
         input: {
@@ -4602,7 +4636,7 @@ describe('resolveRunServices catalog-run recovery branch (AB-240)', () => {
       // No `persistCatalogRunRecoveryRecord` call for this workflow id — the
       // pre-existing "not owned by a running session" guard must still be
       // the one that answers, proving the new catalog check is additive.
-      const result = await getRuntimeCompositionTestingSeams(runtime).resolveRunServices({
+      const result = await runtime.resolveRunServices({
         workflowId: 'no-catalog-record',
         workflowType: 'agentRun',
         input: { runId: 'no-catalog-record', sessionId: 'no-catalog-record', agentName: 'agent' },

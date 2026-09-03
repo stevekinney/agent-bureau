@@ -13,6 +13,7 @@
  * form the glass-box audit surface for the gateway.
  */
 import type { TextValueStore } from '@lostgradient/weft/storage';
+import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
 
 import type { AgentDefinitions } from './agent-catalog';
 import { resolveDiagnosticSink, serializeActionDetail } from './serialization';
@@ -172,6 +173,11 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
   kv: TextValueStore | undefined,
   onDiagnostic?: DiagnosticSink,
   auditTrailOptions?: AuditTrailOptions,
+  // AB-260: the bureau's single composed `RuntimeServices` instance. Defaults
+  // to the real-globals runtime so every pre-existing direct caller of this
+  // exported factory (including this package's own test suite) is
+  // unaffected by construction.
+  runtime: RuntimeServices = createDefaultRuntimeServices(),
 ): AuditTrail {
   const diagnose = resolveDiagnosticSink(onDiagnostic);
   const signal = auditTrailOptions?.signal;
@@ -185,6 +191,12 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
   function trackWrite(promise: Promise<void>): void {
     activeWrites.add(promise);
     void promise.finally(() => activeWrites.delete(promise));
+    // AB-260: layered on top of `activeWrites` (never replacing it) — every
+    // audit write also registers with the bureau's composed
+    // `RuntimeServices.deferred`, so `deferred.drain()` reports it under the
+    // stable `'audit-write'` label alongside every other subsystem's
+    // fire-and-forget work.
+    runtime.deferred.track(promise, 'audit-write');
   }
 
   // Out-of-band records (via `record()`) have no operative store `Action` to
@@ -255,7 +267,7 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
       if (!kv) return;
       if (signal?.aborted) return;
 
-      const timestampMs = Date.now();
+      const timestampMs = runtime.clock.now();
       const sequence = manualSequence++;
 
       const record: AuditRecord = {

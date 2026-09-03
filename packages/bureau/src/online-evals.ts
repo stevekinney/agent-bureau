@@ -14,9 +14,10 @@
  * `createWebhookNotifier` uses for approval-pending and human-wait alerts, so
  * an eval alert survives a transient delivery failure exactly like those do.
  *
- * Sampling is driven by an injectable RNG (`Math.random` by default) so
- * `sampleRate` is deterministic and testable — a fake RNG that returns a
- * fixed sequence exercises "sampled" and "not sampled" runs exactly.
+ * Sampling is driven by an injectable RNG (the composed `RuntimeServices`
+ * random source by default) so `sampleRate` is deterministic and testable —
+ * a fake RNG that returns a fixed sequence exercises "sampled" and
+ * "not sampled" runs exactly.
  *
  * Each in-flight evaluation also gets a per-evaluation `LivenessSnapshot`
  * (AB-220), watched via `createStallWatchdog` against the
@@ -44,6 +45,7 @@ import {
   type Subscription,
 } from '@lostgradient/operative/liveness';
 import { Conversation } from 'conversationalist';
+import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
 
 import type { AgentDefinitions } from './agent-catalog';
 import type { AuditTrail } from './audit-trail';
@@ -225,7 +227,7 @@ export interface OnlineEvalSamplerOptions {
   judges: OnlineEvalJudge[];
   /** Fraction of completed runs to sample, in `[0, 1]`. */
   sampleRate: number;
-  /** Injectable RNG returning a value in `[0, 1)`. Defaults to `Math.random`. */
+  /** Injectable RNG returning a value in `[0, 1)`. Defaults to the composed RuntimeServices random. */
   rng?: () => number;
   /**
    * Owner-issued signal threaded into every `evaluateRun()` judge invocation
@@ -374,6 +376,12 @@ export function createOnlineEvalSampler<D extends AgentDefinitions = AgentDefini
   auditTrail: AuditTrail | undefined,
   webhookNotifier: WebhookNotifier | undefined,
   options: OnlineEvalSamplerOptions | undefined,
+  // AB-260: the bureau's single composed `RuntimeServices` instance. Defaults
+  // to the real-globals runtime so every pre-existing direct caller of this
+  // exported factory (including this package's own test suite) is
+  // unaffected by construction. `options.rng` (this module's own
+  // pre-existing injectable seam) still takes precedence when supplied.
+  runtime: RuntimeServices = createDefaultRuntimeServices(),
 ): OnlineEvalSampler {
   const judges = options?.judges ?? [];
 
@@ -426,7 +434,7 @@ export function createOnlineEvalSampler<D extends AgentDefinitions = AgentDefini
   }
 
   const sampleRate = options.sampleRate;
-  const rng = options.rng ?? Math.random;
+  const rng = options.rng ?? runtime.random.next;
   const signal = options.signal;
   const clock = options.clock ?? realClock;
   const evaluationIds = options.evaluationIds ?? createDefaultEvaluationIdentifierSeam();
@@ -447,6 +455,12 @@ export function createOnlineEvalSampler<D extends AgentDefinitions = AgentDefini
   function trackEvaluation(promise: Promise<void>): void {
     activeEvaluations.add(promise);
     void promise.finally(() => activeEvaluations.delete(promise));
+    // AB-260: layered on top of `activeEvaluations` (never replacing it) —
+    // every judge evaluation also registers with the bureau's composed
+    // `RuntimeServices.deferred`, so `deferred.drain()` reports it under the
+    // stable `'background-evaluation'` label alongside every other
+    // subsystem's fire-and-forget work.
+    runtime.deferred.track(promise, 'background-evaluation');
   }
 
   // ── AB-220: per-evaluation liveness ─────────────────────────────────

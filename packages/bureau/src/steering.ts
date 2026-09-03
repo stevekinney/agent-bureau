@@ -5,6 +5,7 @@ import type {
   SteeringCommandState,
   SteeringRequestedValue,
 } from '@lostgradient/operative/durable';
+import { createDefaultRuntimeServices, type RuntimeClock } from 'lifecycle';
 
 /**
  * AB-199 — the caller-facing admission request for {@link Bureau.submitSteeringCommand}.
@@ -183,8 +184,8 @@ export type ImplementedSteeringCommand = SteeringCommand & {
  *   this list or admission fails `'run-terminal'`; an absent `runId` binds
  *   to the list's sole member, or fails `'run-ambiguous'` when the list has
  *   zero or more than one entry.
- * - `now` — the current timestamp (injected, not read from `Date.now()`
- *   internally, so admission stays deterministically testable).
+ * - `now` — the current timestamp (injected, not read from the wall clock
+ *   directly, so admission stays deterministically testable).
  */
 export interface SteeringAdmissionContext {
   readonly liveRunIds: readonly string[];
@@ -536,6 +537,16 @@ function registerPauseWaiter(
 export function createSteeringGate(
   sessionId: string,
   ledger: SteeringCommandLedger = new Map(),
+  // AB-260: the injected clock reads a promoted identity's expiry (`forRun`'s
+  // `getDesiredState`) against the composed `RuntimeServices.clock` rather
+  // than the real wall clock directly. Defaults to the real-globals runtime
+  // so every pre-existing caller (including this package's own extensive
+  // test suite, which constructs a gate with no third argument) is
+  // unaffected — this is not part of AB-260's retired
+  // `RuntimeCompositionTestingSeams` grouping, just the same
+  // real-globals-default injection pattern `RuntimeServices` establishes
+  // everywhere else.
+  clock: RuntimeClock = createDefaultRuntimeServices().clock,
 ): BureauSteeringGate {
   let rawConfigVersion = 0;
   let effectiveConfigVersion = 0;
@@ -806,7 +817,7 @@ export function createSteeringGate(
           // if it had never been captured — see `runAgentDeadline`'s own
           // doc comment.
           const deadline = runAgentDeadline.get(runId);
-          const identityExpired = deadline !== undefined && Date.now() > Date.parse(deadline);
+          const identityExpired = deadline !== undefined && clock.now() > Date.parse(deadline);
           return {
             paused: pausedRunIds.has(runId),
             // Scoped to THIS run: its own baseline plus any pause/resume
