@@ -211,6 +211,27 @@ export interface LivenessSnapshot<TResult = unknown, TCheckpoint = unknown> {
   readonly policyVersion: string;
   /** Ordered, most recent last. */
   readonly evidence: readonly LivenessEvidenceEntry[];
+  /**
+   * AB-216's child-liveness rollup (extension against AB-88's
+   * `## Decision (2026-09-01)` `LivenessSnapshot` section, added
+   * non-breakingly as an additional optional field, per that section's own
+   * extension discipline). The most severe `LivenessAssessment` among this
+   * run's non-terminal children (`assessment !== 'terminal'`), using the
+   * order `unreachable` > `alive-but-stalled` > `aborting` > `cleaning-up`
+   * > `legitimately-waiting` > `healthy` — `aborting` and `cleaning-up`
+   * rank between `alive-but-stalled` and `legitimately-waiting` because
+   * they are transitional-but-expected states worth surfacing above an
+   * ordinary healthy or waiting child, but are not themselves liveness
+   * breaches the way `unreachable`/`alive-but-stalled` are. Absent when
+   * there are no children, or every child is terminal — never a stale
+   * value from a prior tick. Computed from each child's own
+   * already-computed `assessment` only: a child's own `StallPolicy`
+   * selection, cadence, and watchdog instance are never read, overridden,
+   * or substituted by this run's aggregation (AB-88's "delegated policy"
+   * obligation), and a stalled child never changes this run's own
+   * `reachability`/`progress`/`status` — only this field reflects it.
+   */
+  readonly worstChildAssessment?: LivenessAssessment;
 }
 
 // ---------------------------------------------------------------------------

@@ -139,6 +139,23 @@ function textResponse(content: string): GenerateResponse {
   return { content, toolCalls: [] };
 }
 
+/**
+ * A `RunnableAgent` whose `.run()` returns a REAL `AgentRun` (wrapping a
+ * real `ActiveRun`, via `createRun`/`createAgentRun`) rather than a hand
+ * cast test double — the only kind of agent that actually implements
+ * AB-88's `LivenessObservable` (`snapshot()`/`subscribeSnapshot()`),
+ * needed to exercise AB-216's `attachLiveness` wiring end to end. A
+ * `makeControllableAgent()`/`makeRejectingAgent()` double deliberately does
+ * NOT implement this — `hasLivenessObservable`'s guard (see
+ * `child-run.ts`) is what keeps `dispatchChildRun` from throwing against
+ * those, exercised implicitly by every other test in this file.
+ */
+function makeRealAgent(responses: GenerateResponse[] = [textResponse('hello')]): RunnableAgent {
+  const generate = createMockGenerate(responses);
+  const toolbox = createTestToolbox([]);
+  return createAgent({ name: 'real-child', generate, toolbox, stopWhen: noToolCalls() });
+}
+
 // ---------------------------------------------------------------------------
 // The handle's own shape
 // ---------------------------------------------------------------------------
@@ -755,5 +772,142 @@ describe('AgentRun.children() / .abortChild()', () => {
     expect(beta.calls[0]?.context?.signal?.aborted).toBe(false);
 
     await run.result();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AB-216 — ChildRunRegistry.attachLiveness()/subscribeLiveness()
+// ---------------------------------------------------------------------------
+
+describe('ChildRunRegistry.attachLiveness()/subscribeLiveness() (AB-216)', () => {
+  it('never calls subscribeSnapshot against a RunnableAgent whose run() lacks it (hasLivenessObservable guard)', async () => {
+    // makeControllableAgent()'s handle is exactly this shape — used
+    // throughout this file — so this test documents, rather than merely
+    // relying on, why none of those other tests throw.
+    const registry = createChildRunRegistry();
+    const { agent, settle } = makeControllableAgent();
+
+    expect(() =>
+      dispatchChildRun(agent, 'go', { agentName: 'a', parentRunId: 'p', registry }),
+    ).not.toThrow();
+    settle(makeResult());
+
+    expect(registry.children()[0]?.assessment).toBeUndefined();
+  });
+
+  it('populates ChildRunDescriptor.assessment from a real child AgentRun, synchronously at dispatch', () => {
+    const registry = createChildRunRegistry();
+    const agent = makeRealAgent();
+
+    dispatchChildRun(agent, 'go', { agentName: 'a', parentRunId: 'p', registry });
+
+    // `subscribeSnapshot` delivers the current snapshot synchronously
+    // (AB-88's AC10) — the assessment is already set before this line, no
+    // await needed.
+    expect(registry.children()[0]?.assessment).toBe('healthy');
+  });
+
+  it("moves the descriptor's assessment to 'terminal' once the child settles", async () => {
+    const registry = createChildRunRegistry();
+    const agent = makeRealAgent();
+
+    const handle = dispatchChildRun(agent, 'go', { agentName: 'a', parentRunId: 'p', registry });
+    await handle.result();
+
+    expect(registry.children()[0]?.assessment).toBe('terminal');
+  });
+
+  it('notifies subscribeLiveness observers when a child assessment changes', () => {
+    const registry = createChildRunRegistry();
+    const agent = makeRealAgent();
+    let notifications = 0;
+    const subscription = registry.subscribeLiveness(() => {
+      notifications += 1;
+    });
+
+    dispatchChildRun(agent, 'go', { agentName: 'a', parentRunId: 'p', registry });
+
+    // The initial synchronous `subscribeSnapshot` delivery at attach time
+    // counts as one liveness change.
+    expect(notifications).toBeGreaterThan(0);
+
+    subscription.unsubscribe();
+  });
+
+  it('subscribeLiveness().unsubscribe() stops further notifications', async () => {
+    const registry = createChildRunRegistry();
+    const agent = makeRealAgent();
+    let notifications = 0;
+    const subscription = registry.subscribeLiveness(() => {
+      notifications += 1;
+    });
+    subscription.unsubscribe();
+
+    const handle = dispatchChildRun(agent, 'go', { agentName: 'a', parentRunId: 'p', registry });
+    await handle.result();
+
+    expect(notifications).toBe(0);
+  });
+
+  it('subscribeLiveness().unsubscribe() is idempotent and reflects .closed', () => {
+    const registry = createChildRunRegistry();
+    const subscription = registry.subscribeLiveness(() => undefined);
+
+    expect(subscription.closed).toBe(false);
+    subscription.unsubscribe();
+    expect(subscription.closed).toBe(true);
+    expect(() => subscription.unsubscribe()).not.toThrow();
+    expect(subscription.closed).toBe(true);
+  });
+
+  it('isolates a throwing subscribeLiveness listener — a later listener still gets notified', () => {
+    const registry = createChildRunRegistry();
+    const agent = makeRealAgent();
+    const calls: string[] = [];
+    registry.subscribeLiveness(() => {
+      calls.push('first');
+      throw new Error('a listener bug, not this registry’s or the child’s');
+    });
+    registry.subscribeLiveness(() => calls.push('second'));
+
+    expect(() =>
+      dispatchChildRun(agent, 'go', { agentName: 'a', parentRunId: 'p', registry }),
+    ).not.toThrow();
+
+    expect(calls).toEqual(['first', 'second']);
+  });
+
+  it('attachLiveness on an unknown id is a no-op, never throws, never subscribes', () => {
+    const registry = createChildRunRegistry();
+    let subscribeCalls = 0;
+    const observable = {
+      snapshot: () => ({}) as never,
+      subscribeSnapshot: () => {
+        subscribeCalls += 1;
+        return { unsubscribe: () => undefined, closed: false };
+      },
+    };
+
+    expect(() => registry.attachLiveness('never-registered', observable)).not.toThrow();
+    expect(subscribeCalls).toBe(0);
+    expect(registry.children()).toEqual([]);
+  });
+
+  it('a synchronous agent.run() throw settles the child with no assessment ever attached', () => {
+    const registry = createChildRunRegistry();
+    const throwingAgent: RunnableAgent = {
+      name: 'throws',
+      hasOutput: false,
+      run: () => {
+        throw new Error('boom');
+      },
+    };
+
+    expect(() =>
+      dispatchChildRun(throwingAgent, 'go', { agentName: 'a', parentRunId: 'p', registry }),
+    ).toThrow('boom');
+
+    expect(registry.children()[0]?.status).toBe('failed');
+    expect(registry.children()[0]?.assessment).toBeUndefined();
   });
 });
