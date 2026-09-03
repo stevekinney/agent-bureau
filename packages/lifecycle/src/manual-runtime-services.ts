@@ -137,9 +137,12 @@ const DRAIN_QUIESCENCE_MICROTASK_TICKS = 25;
 export function createManualRuntimeServices(
   options: CreateManualRuntimeServicesOptions = {},
 ): ManualRuntimeServices {
-  const originEpochMilliseconds = options.origin
-    ? Date.parse(options.origin)
-    : Date.parse(DEFAULT_ORIGIN);
+  // `clockOrigin` is derived once here and `originEpochMilliseconds` parsed
+  // from that SAME string, so the recorded seed (exposed on the returned
+  // `ManualRuntimeServices` as `clockOrigin`) and the epoch the wall clock
+  // actually starts at can never drift apart.
+  const clockOrigin = options.origin ?? DEFAULT_ORIGIN;
+  const originEpochMilliseconds = Date.parse(clockOrigin);
 
   let monotonicMilliseconds = 0;
   // wallClockNow = wallClockOffsetMilliseconds + monotonicMilliseconds. `setTime` rewrites the
@@ -148,7 +151,6 @@ export function createManualRuntimeServices(
 
   const randomSeed = options.randomSeed ?? DEFAULT_RANDOM_SEED;
   const identifierSeed = options.identifierSeed ?? DEFAULT_IDENTIFIER_SEED;
-  const clockOrigin = options.origin ?? DEFAULT_ORIGIN;
   const random = createSeededRandom(randomSeed);
 
   const identifierCounters = new Map<string, number>();

@@ -302,9 +302,11 @@ Out of scope for this harness: the quiescence report and a `close()` that delega
 
 ### `assembleReproductionArtifact(harness, recorder, options)` (AB-263)
 
+Builds on a `harness` already constructed with `createBureauTestHarness` (see above):
+
 ```typescript
 import { createEventRecorder } from '@lostgradient/operative/test';
-import { assembleReproductionArtifact, createBureauTestHarness } from 'bureau/test';
+import { assembleReproductionArtifact } from 'bureau/test';
 
 const recorder = createEventRecorder(harness.runtime);
 const run = harness.startRun('worker', 'hello');

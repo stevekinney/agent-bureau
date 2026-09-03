@@ -88,6 +88,39 @@ export class BureauFaultSelectorResolutionError extends Error {
 }
 
 /**
+ * Single-pass resolution shared by every selector below: walks `candidates`
+ * once, tracking at most the first two matches (never allocating a full
+ * `matches` array via `filter`), and stops scanning the instant a second
+ * match proves the resolution ambiguous. Throws
+ * {@link BureauFaultSelectorResolutionError} unless exactly one candidate
+ * satisfies `isMatch`.
+ */
+function resolveExactlyOne<TCandidate>(
+  operation: 'webhook-delivery' | 'audit-write' | 'scheduler-task',
+  targetDescription: string,
+  candidates: readonly TCandidate[],
+  isMatch: (candidate: TCandidate) => boolean,
+): TCandidate {
+  let match: TCandidate | undefined;
+  let matchCount = 0;
+  for (const candidate of candidates) {
+    if (!isMatch(candidate)) continue;
+    matchCount++;
+    if (matchCount === 1) {
+      match = candidate;
+    } else {
+      // A second match already makes this ambiguous — no need to keep
+      // scanning to find a precise final count for the error message.
+      throw new BureauFaultSelectorResolutionError(operation, targetDescription, matchCount);
+    }
+  }
+  if (matchCount !== 1 || !match) {
+    throw new BureauFaultSelectorResolutionError(operation, targetDescription, matchCount);
+  }
+  return match;
+}
+
+/**
  * Resolves a webhook-delivery fault target to exactly one
  * {@link WebhookDeliveryRecord} by its `id` (as listed by
  * `WebhookNotifier.listDeliveries()`). Throws
@@ -98,16 +131,12 @@ export function selectWebhookDeliveryFaultTarget(
   deliveries: readonly WebhookDeliveryRecord[],
   deliveryId: string,
 ): WebhookDeliveryRecord {
-  const matches = deliveries.filter((delivery) => delivery.id === deliveryId);
-  const [match] = matches;
-  if (matches.length !== 1 || !match) {
-    throw new BureauFaultSelectorResolutionError(
-      'webhook-delivery',
-      `delivery id "${deliveryId}"`,
-      matches.length,
-    );
-  }
-  return match;
+  return resolveExactlyOne(
+    'webhook-delivery',
+    `delivery id "${deliveryId}"`,
+    deliveries,
+    (delivery) => delivery.id === deliveryId,
+  );
 }
 
 /**
@@ -122,18 +151,12 @@ export function selectAuditWriteFaultTarget(
   records: readonly AuditRecord[],
   auditEntryKey: string,
 ): AuditRecord {
-  const matches = records.filter(
+  return resolveExactlyOne(
+    'audit-write',
+    `audit entry key "${auditEntryKey}"`,
+    records,
     (record) => encodeKey(record.timestampMs, record.sequence, record.runId) === auditEntryKey,
   );
-  const [match] = matches;
-  if (matches.length !== 1 || !match) {
-    throw new BureauFaultSelectorResolutionError(
-      'audit-write',
-      `audit entry key "${auditEntryKey}"`,
-      matches.length,
-    );
-  }
-  return match;
 }
 
 /**
@@ -146,14 +169,10 @@ export function selectSchedulerTaskFaultTarget(
   tasks: readonly SubmitSchedulerTaskResponse[],
   taskId: string,
 ): SubmitSchedulerTaskResponse {
-  const matches = tasks.filter((task) => task.taskId === taskId);
-  const [match] = matches;
-  if (matches.length !== 1 || !match) {
-    throw new BureauFaultSelectorResolutionError(
-      'scheduler-task',
-      `task id "${taskId}"`,
-      matches.length,
-    );
-  }
-  return match;
+  return resolveExactlyOne(
+    'scheduler-task',
+    `task id "${taskId}"`,
+    tasks,
+    (task) => task.taskId === taskId,
+  );
 }
