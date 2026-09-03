@@ -1,7 +1,7 @@
 import type { AnyToolbox, ToolExecuteOptions, ToolExecutionResult } from 'armorer';
 import type { Conversation, ConversationHistory, TokenUsage } from 'conversationalist';
 import type { JSONValue, ToolCall, ToolCallInput } from 'interoperability';
-import type { HookRegistry } from 'lifecycle';
+import type { HookRegistry, RuntimeServices } from 'lifecycle';
 import type { ZodType } from 'zod';
 
 import type { BackpressureStrategy } from './backpressure';
@@ -550,6 +550,18 @@ export interface RunOptionsBase {
    * `selection` carries no `runId` coupling — see {@link SelectionGate}.
    */
   selection?: SelectionGate;
+  /**
+   * The AB-92/AB-252 injectable runtime-service seam: wall time, monotonic
+   * time, timers, identifiers, randomness, and deferred-work tracking.
+   * `createActiveRun` resolves `options.runtime ?? createDefaultRuntimeServices()`
+   * exactly once at construction and snapshots the resolved instance into
+   * the run — nothing downstream reads `options.runtime` again or falls
+   * back to a global. Unconfigured (the default), a run reads the real
+   * globals via `createDefaultRuntimeServices()`; a test composes its own
+   * deterministic instance with `createManualRuntimeServices()` from
+   * `@lostgradient/operative/test`.
+   */
+  runtime?: RuntimeServices;
 }
 
 /**

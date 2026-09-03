@@ -19,12 +19,12 @@ import { createTool } from 'armorer';
 import { createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
-import { HookRegistry } from 'lifecycle';
+import { createManualRuntimeServices, HookRegistry } from 'lifecycle';
 import { z } from 'zod';
 
 import { noToolCalls } from './conditions/predicates';
 import type { SteeringDesiredState } from './durable/types';
-import { SteeringAppliedEvent } from './events';
+import { GenerateErrorEvent, SteeringAppliedEvent } from './events';
 import type { OperativeHookMap } from './hooks';
 import { buildStepDeps, executeLoop } from './loop';
 import { awaitResumeOrAbort, type EventDispatcher, type RunState, runStep } from './run-step';
@@ -1170,5 +1170,68 @@ describe('runStep: AB-221 steering.applied dispatch', () => {
 
     const applied = steeringAppliedEvents(recorder);
     expect(applied.map((event) => event.effective.configVersion)).toEqual([1, 3, 4]);
+  });
+});
+
+describe('runStep/executeLoop: AB-92/AB-252 RuntimeServices migration boundary', () => {
+  it('generate-duration timing reads the injected runtime.monotonic clock, not a real elapsed-time measurement', async () => {
+    const runtime = createManualRuntimeServices();
+    const recorder = createEventRecorder();
+
+    await executeLoop(
+      {
+        generate: async () => {
+          // Advances the SAME runtime instance `deps.runtime` reads from —
+          // a real-clock implementation would report near-zero here since
+          // no real time elapses inside this synchronous test.
+          await runtime.advance(750);
+          throw new Error('generate failed');
+        },
+        toolbox: createTestToolbox([]),
+        conversation: new Conversation(),
+        stopWhen: noToolCalls(),
+        runtime,
+      },
+      recorder,
+    );
+
+    const errorEvent = recorder.events.find(
+      (event): event is GenerateErrorEvent => event instanceof GenerateErrorEvent,
+    );
+    expect(errorEvent).toBeDefined();
+    expect(errorEvent?.durationMilliseconds).toBe(750);
+  });
+
+  it('retry backoff waits on the injected runtime.timers, never a real timer — the retry never proceeds until advance() fires it', async () => {
+    const runtime = createManualRuntimeServices();
+    let attempts = 0;
+
+    const resultPromise = executeLoop({
+      generate: async () => {
+        attempts++;
+        if (attempts === 1) throw new Error('transient');
+        return textResponse('recovered');
+      },
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      runtime,
+      retry: { attempts: 2, delay: 300, jitter: false },
+    });
+
+    // The retry's backoff timer is registered on `runtime` (the same
+    // instance passed above) — poll on the microtask queue (never a real
+    // timer) until it appears armed.
+    while (runtime.pendingTimers().length === 0) {
+      await Promise.resolve();
+    }
+    expect(attempts).toBe(1);
+
+    await runtime.advance(300);
+    const result = await resultPromise;
+
+    expect(attempts).toBe(2);
+    expect(result.finishReason).not.toBe('error');
+    expect(result.content).toBe('recovered');
   });
 });

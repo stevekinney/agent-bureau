@@ -262,6 +262,7 @@ could route around.
 
 ```ts
 import type { AnyToolbox, HeadlessPermissionPolicyConfiguration, Tool } from 'armorer';
+import type { RuntimeServices } from 'lifecycle';
 import type { ZodType } from 'zod';
 
 export interface CreateAgentOptions {
@@ -279,6 +280,17 @@ export interface CreateAgentOptions {
   contextManagement?: ContextManagementOptions;
   permissions?: HeadlessPermissionPolicyConfiguration;
   output?: ZodType<unknown>;
+  /**
+   * The injectable runtime-service seam (`AB-92`/`AB-252`): wall time,
+   * monotonic time, timers, identifiers, randomness, and deferred-work
+   * tracking. Unconfigured, an agent reads the real globals via
+   * `createDefaultRuntimeServices()`; a test composes its own deterministic
+   * instance with `createManualRuntimeServices()` from
+   * `@lostgradient/operative/test`. Resolved once, at agent construction,
+   * and shared by every run the agent starts — two runs from one agent
+   * share one clock, two agents never share one.
+   */
+  runtime?: RuntimeServices;
 }
 
 export function createAgent<O>(
@@ -304,6 +316,13 @@ An agent that used to inherit these from its bureau now declares them itself;
 a bureau with several agents that want the same guardrail policy shares it by
 sharing a `GuardrailsOptions` value across each agent's `createAgent({...})`
 call, not by bureau-level configuration.
+
+`runtime` (`AB-92`/`AB-252`) carries the same shape onto the shared run
+options `createActiveRun` accepts directly — a caller reaching that lower-level
+factory (rather than `createAgent`) supplies `runtime` on its own `RunOptions`
+bag the identical way, and `createActiveRun` resolves
+`options.runtime ?? createDefaultRuntimeServices()` exactly once, at
+construction, snapshotting the resolved instance into the run.
 
 ## Lazy loading
 
@@ -1069,6 +1088,20 @@ A test helper may supply a deterministic clock, a scripted dependency, or a conc
 
 Deliberately deferred, each with the reason. None is an oversight, and none is
 left implied to exist:
+
+**The `hooks/composition.ts` timer seam is now wired (`AB-92`/`AB-252`).**
+AB-92's decision record named `ScheduleTimeout`/`ClearScheduledTimeout`
+(`withTimeout`'s `setTimeoutFunction`/`clearTimeoutFunction` options) as a
+pre-existing, declared-but-unwired second timer seam competing with the new
+`RuntimeServices.timers` contract. `AB-252` closes that gap rather than
+leaving it open: `TimeoutHandle`/`ScheduleTimeout`/`ClearScheduledTimeout`
+are now aliases of `RuntimeServices`'s own `RuntimeTimeoutHandle`/
+`timers['setTimeout']`/`timers['clearTimeout']` shapes (keeping their
+exported names, so no consumer breaks), and `withTimeout`'s fallback timer
+functions default to a `RuntimeServices` instance's `timers` rather than a
+bare `globalThis.setTimeout`/`clearTimeout` call. Recorded here rather than
+silently dropped from the list, so the record of what AB-92 flagged and what
+closed it stays intact.
 
 **A compaction attempt gets no independent locator.** It stays parent-owned and
 embedded, observable through its owning session or run. If cross-run compaction

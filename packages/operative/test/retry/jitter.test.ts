@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test';
+import { createManualRuntimeServices } from 'lifecycle';
 
 import { addJitter } from '../../src/retry/jitter';
 
@@ -44,5 +45,32 @@ describe('addJitter', () => {
   it('returns the delay unchanged when maxJitter is zero', () => {
     const result = addJitter(500, { maxJitter: 0 });
     expect(result).toBe(500);
+  });
+
+  describe('AB-92/AB-252: injected RuntimeServices.random', () => {
+    it('produces the same jitter twice from the same seed, never touching Math.random', () => {
+      const firstRun = () => {
+        const runtime = createManualRuntimeServices({ randomSeed: 'jitter-determinism' });
+        return addJitter(1000, { maxJitter: 200, random: runtime.random.next });
+      };
+      expect(firstRun()).toBe(firstRun());
+    });
+
+    it('diverges when two runs use different seeds', () => {
+      const withSeed = (randomSeed: string) => {
+        const runtime = createManualRuntimeServices({ randomSeed });
+        return addJitter(1000, { maxJitter: 200, random: runtime.random.next });
+      };
+      expect(withSeed('seed-a')).not.toBe(withSeed('seed-b'));
+    });
+
+    it('falls back to a real default RuntimeServices instance, never a bare Math.random call, when no random option is supplied', () => {
+      const delay = 1000;
+      for (let i = 0; i < 20; i++) {
+        const result = addJitter(delay, { maxJitter: 500 });
+        expect(result).toBeGreaterThanOrEqual(500);
+        expect(result).toBeLessThanOrEqual(1500);
+      }
+    });
   });
 });

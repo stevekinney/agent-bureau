@@ -2,11 +2,12 @@ import { createTool, ToolboxProgressEvent, ToolboxSettledEvent } from 'armorer';
 import { createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
-import { HookRegistry } from 'lifecycle';
+import { createDefaultRuntimeServices, createManualRuntimeServices, HookRegistry } from 'lifecycle';
 import { z } from 'zod';
 
 import { noToolCalls } from './conditions/predicates';
 import { createActiveRun } from './create-run';
+import { ToolStartedBubbleEvent } from './events';
 import type { OperativeHookMap } from './hooks';
 import { createMockGenerate } from './test/index';
 import type { GenerateResponse } from './types';
@@ -628,5 +629,93 @@ describe('AB-214: settle() redacts the RunResult before it reaches the snapshot'
     const snapshot = activeRun.snapshot();
     expect(snapshot.projection).toBe('redacted');
     expect(snapshot.result).toEqual({ finishReason: 'stop-condition', hasError: false });
+  });
+});
+
+describe('createActiveRun: AB-92/AB-252 RuntimeServices resolution', () => {
+  it('resolves options.runtime ?? createDefaultRuntimeServices() exactly once and snapshots it into the run: a manual runtime pinned to a fixed origin produces tool-event timestamps derived from that origin, not the real clock', async () => {
+    const runtime = createManualRuntimeServices({ origin: '2024-03-01T00:00:00.000Z' });
+    await runtime.advance(5000);
+
+    const events: ToolStartedBubbleEvent[] = [];
+    const activeRun = createActiveRun({
+      generate: createMockGenerate([toolCallResponse([weatherToolCall()]), textResponse('done')]),
+      toolbox: createTestToolbox([weatherTool]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      runtime,
+    });
+    activeRun.addEventListener('tool.started', (event) => events.push(event));
+
+    await activeRun.result;
+
+    expect(events).toHaveLength(1);
+    // The pinned origin plus the 5-second advance, in epoch milliseconds —
+    // never a value anywhere near the real `Date.now()` at test-run time.
+    expect(events[0]?.startedAt).toBe(Date.parse('2024-03-01T00:00:05.000Z'));
+  });
+
+  it("rebinds the standalone-run identifier seam onto the resolved runtime's identifiers.next('run'), per AB-214's coordinator-ruling promise", async () => {
+    const runtime = createManualRuntimeServices();
+
+    const first = createActiveRun({
+      generate: createMockGenerate([textResponse('one')]),
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      runtime,
+    });
+    await first.result;
+
+    const second = createActiveRun({
+      generate: createMockGenerate([textResponse('two')]),
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      runtime,
+    });
+    await second.result;
+
+    expect(first.snapshot().id).toBe('run-1');
+    expect(second.snapshot().id).toBe('run-2');
+  });
+
+  it('a caller-supplied runId is always used as-is and never consumes the runtime identifier seam', async () => {
+    const runtime = createManualRuntimeServices();
+
+    const activeRun = createActiveRun({
+      generate: createMockGenerate([textResponse('done')]),
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      runtime,
+      runId: 'caller-supplied-run-id',
+    });
+    await activeRun.result;
+
+    expect(activeRun.snapshot().id).toBe('caller-supplied-run-id');
+    // The `run` kind counter was never advanced — proves the identifier
+    // seam was never reached for a caller-supplied id.
+    expect(runtime.identifiers.next('run')).toBe('run-1');
+  });
+
+  it('every existing call site that omits runtime behaves exactly as it did on the baseline: it still resolves a working default instance', async () => {
+    const activeRun = createActiveRun({
+      generate: createMockGenerate([textResponse('done')]),
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+    });
+
+    const result = await activeRun.result;
+    expect(result.finishReason).toBe('stop-condition');
+    // A real, unconfigured `createDefaultRuntimeServices()`-minted id shape.
+    expect(activeRun.snapshot().id).toMatch(/^run-\d+-[0-9a-f-]{36}$/);
+  });
+
+  it('two runs constructed with no runtime option each get an independent default instance (createDefaultRuntimeServices returns a fresh instance per call)', () => {
+    const first = createDefaultRuntimeServices();
+    const second = createDefaultRuntimeServices();
+    expect(first.identifiers.next('run')).not.toBe(second.identifiers.next('run'));
   });
 });

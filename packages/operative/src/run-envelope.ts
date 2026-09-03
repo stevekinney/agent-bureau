@@ -1,5 +1,6 @@
 import type { ConversationHistory, JSONValue, TokenUsage } from 'conversationalist';
 import { conversationSchema, jsonValueSchema, tokenUsageSchema } from 'conversationalist/schemas';
+import { createDefaultRuntimeServices } from 'lifecycle';
 import { z } from 'zod';
 
 import type { CostEstimate } from './cost-estimation';
@@ -361,8 +362,18 @@ export type RunFrame =
 // Frame constructors
 // ---------------------------------------------------------------------------
 
+// AB-92/AB-252: this module's own optional `clock` parameter is already the
+// pre-existing injectable seam — a caller with a resolved `RuntimeServices`
+// instance passes `() => runtime.clock.now()`. The fallback below, used only
+// when no `clock` is supplied, goes through `createDefaultRuntimeServices()`
+// (the real globals, unconfigured) rather than a bare `Date.now()` call, so
+// this file makes no direct `Date.now()` call of its own. A single
+// module-level default instance is enough here — this fallback only ever
+// backs a plain wall-clock read, never identifiers, timers, or randomness.
+const defaultRuntimeClock = createDefaultRuntimeServices().clock;
+
 function now(clock?: () => number): number {
-  return clock ? clock() : Date.now();
+  return clock ? clock() : defaultRuntimeClock.now();
 }
 
 export function createRunStartedFrame(

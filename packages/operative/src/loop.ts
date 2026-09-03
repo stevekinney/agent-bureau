@@ -1,5 +1,6 @@
 import type { AnyToolbox } from 'armorer';
 import { Conversation, isConversation } from 'conversationalist';
+import { createDefaultRuntimeServices } from 'lifecycle';
 
 import { MaximumStepsExceededError } from './errors';
 import { RunErrorEvent } from './events';
@@ -71,6 +72,12 @@ export function buildStepDeps(options: RunOptions): StepDeps {
     validateToolResultHooks: normalizeToArray(options.validateToolResult),
     /** Maximum number of retries the onError hook can request per step. */
     maxErrorRetries: 3,
+    // AB-92/AB-252: `createActiveRun` already resolves and snapshots this
+    // onto `options.runtime` exactly once, so this branch is only ever
+    // reached by an out-of-scope caller (e.g. the durable driver) that
+    // built its own `RunOptions` without going through `createActiveRun` —
+    // never a second resolution on the in-memory run path.
+    runtime: options.runtime ?? createDefaultRuntimeServices(),
   };
 }
 
@@ -133,7 +140,7 @@ export async function executeLoop(
   // PRIOR run already applied is never re-observed as new by this one.
   const runState = createRunState(options.steering?.getAppliedFloor?.() ?? 0);
 
-  const runStartTime = performance.now();
+  const runStartTime = deps.runtime.monotonic.now();
 
   // RunStartedEvent + onRunStart (error aborts the run). Shared with the adapter.
   const startError = await startRunLifecycle(options, conversation, emitter);
@@ -200,6 +207,7 @@ export async function executeLoop(
         costEstimation,
         undefined,
         hookTracker,
+        deps.runtime,
       );
     }
     // outcome.kind === 'next' — proceed to the next step
@@ -243,5 +251,6 @@ export async function executeLoop(
     costEstimation,
     new MaximumStepsExceededError(maximumSteps),
     hookTracker,
+    deps.runtime,
   );
 }

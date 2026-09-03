@@ -2,10 +2,12 @@ import { createTool } from 'armorer';
 import { createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
+import { createManualRuntimeServices } from 'lifecycle';
 import { z } from 'zod';
 
 import { noToolCalls } from '../src/conditions/predicates';
 import { createActiveRun } from '../src/create-run';
+import { withTimeout } from '../src/hooks/composition';
 import { createMockGenerate, createRunRecorder } from '../src/test/index';
 import type { GenerateResponse, Toolbox } from '../src/types';
 const run = (options: Parameters<typeof createActiveRun>[0]) => createActiveRun(options).result;
@@ -330,5 +332,51 @@ describe('hook composition (array-valued hooks)', () => {
       const errorEvents = recorder.events.filter((e) => e.type === 'run.error');
       expect(errorEvents).toHaveLength(1);
     });
+  });
+});
+
+describe('AB-92/AB-252: hooks/composition.ts timer seam wired onto RuntimeServices', () => {
+  it('withTimeout, given an injected RuntimeServices.timers pair, times a debounced hook out only when the injected timers advance — never on a real timer', async () => {
+    const runtime = createManualRuntimeServices();
+    let hookCalled = false;
+    const debouncedHook = withTimeout(
+      1000,
+      async () => {
+        hookCalled = true;
+        // A hook that never itself resolves — the only way this call
+        // settles is the injected timeout firing.
+        return new Promise(() => {});
+      },
+      'ignore',
+      {
+        setTimeoutFunction: runtime.timers.setTimeout,
+        clearTimeoutFunction: runtime.timers.clearTimeout,
+      },
+    );
+
+    const resultPromise = debouncedHook();
+
+    // Hasn't fired yet — the manual runtime's clock hasn't moved.
+    while (runtime.pendingTimers().length === 0) {
+      await Promise.resolve();
+    }
+    expect(hookCalled).toBe(true);
+
+    const settledBeforeAdvance = await Promise.race([
+      resultPromise.then(() => 'settled'),
+      Promise.resolve('still-pending'),
+    ]);
+    expect(settledBeforeAdvance).toBe('still-pending');
+
+    await runtime.advance(1000);
+    const result = await resultPromise;
+
+    expect(result).toBeUndefined();
+  });
+
+  it("withTimeout's fallback timer functions default to a RuntimeServices instance rather than a bare globalThis.setTimeout — the real-globals default still resolves without an explicit setTimeoutFunction/clearTimeoutFunction pair", async () => {
+    const hook = withTimeout(50, async () => 'quick');
+    const result = await hook();
+    expect(result).toBe('quick');
   });
 });

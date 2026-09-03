@@ -1,7 +1,7 @@
 import type { AnyToolbox, ToolExecutionResult } from 'armorer';
 import { Conversation, materializeToolCalls } from 'conversationalist';
 import type { ToolCall } from 'interoperability';
-import type { HookErrorHandler, HookRegistrationOptions } from 'lifecycle';
+import type { HookErrorHandler, HookRegistrationOptions, RuntimeServices } from 'lifecycle';
 import type { ZodType } from 'zod';
 
 import type { SteeringDesiredState } from './durable/types';
@@ -134,6 +134,12 @@ export interface StepDeps {
   readonly validateToolResultHooks: ValidateToolResultHook[];
   /** Maximum number of retries the onError hook can request per step. */
   readonly maxErrorRetries: number;
+  /**
+   * AB-92/AB-252 — the run's resolved `RuntimeServices` instance. Every
+   * wall-clock, monotonic-duration, timer, and randomness read inside this
+   * step goes through it, never a real global directly.
+   */
+  readonly runtime: RuntimeServices;
   /**
    * AB-204: when supplied, every run-owned hook's fire-and-forget promise
    * (`onLLMInput`/`onLLMOutput` here; `onRunComplete`/`onRunAbort`/
@@ -354,6 +360,7 @@ async function callGenerateWithRetry(
   context: GenerateContext,
   retry: RetryOptions | undefined,
   emitter: EventDispatcher | undefined,
+  runtime: RuntimeServices,
 ): Promise<GenerateResponse> {
   if (!retry || retry.attempts <= 1) {
     return generate(context);
@@ -397,7 +404,9 @@ async function callGenerateWithRetry(
 
       const rawDelay =
         typeof retry.delay === 'function' ? retry.delay(attempt) : (retry.delay ?? 0);
-      const delayMs = retry.jitter ? addJitter(rawDelay, { maxJitter: retry.maxJitter }) : rawDelay;
+      const delayMs = retry.jitter
+        ? addJitter(rawDelay, { maxJitter: retry.maxJitter, random: runtime.random.next })
+        : rawDelay;
 
       if (delayMs > 0) {
         if (currentContext.signal?.aborted) break;
@@ -405,10 +414,10 @@ async function callGenerateWithRetry(
           retry.sleep ??
           ((milliseconds: number, signal?: AbortSignal) =>
             new Promise<void>((resolve) => {
-              const timer = setTimeout(resolve, milliseconds);
+              const timer = runtime.timers.setTimeout(resolve, milliseconds);
               if (signal) {
                 const onAbort = () => {
-                  clearTimeout(timer);
+                  runtime.timers.clearTimeout(timer);
                   resolve();
                 };
                 signal.addEventListener('abort', onAbort, { once: true });
@@ -728,10 +737,10 @@ export async function runStep(
         return { kind: 'abort', reason: explicitAbortReason(signal) };
       }
       await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, backpressureDelay);
+        const timer = deps.runtime.timers.setTimeout(resolve, backpressureDelay);
         if (signal) {
           const onAbort = () => {
-            clearTimeout(timer);
+            deps.runtime.timers.clearTimeout(timer);
             resolve();
           };
           signal.addEventListener('abort', onAbort, { once: true });
@@ -976,18 +985,30 @@ export async function runStep(
         hookTracker?.(onLLMInputHookPromise);
 
         emitter?.dispatch(new GenerateStartedEvent(step));
-        const generateStart = performance.now();
+        const generateStart = deps.runtime.monotonic.now();
         let durationMilliseconds: number;
         try {
           response =
             deps.parentContext !== undefined && deps.withTraceContext !== undefined
               ? await deps.withTraceContext(deps.parentContext, () =>
-                  callGenerateWithRetry(deps.generate, generateContext, deps.retry, emitter),
+                  callGenerateWithRetry(
+                    deps.generate,
+                    generateContext,
+                    deps.retry,
+                    emitter,
+                    deps.runtime,
+                  ),
                 )
-              : await callGenerateWithRetry(deps.generate, generateContext, deps.retry, emitter);
-          durationMilliseconds = performance.now() - generateStart;
+              : await callGenerateWithRetry(
+                  deps.generate,
+                  generateContext,
+                  deps.retry,
+                  emitter,
+                  deps.runtime,
+                );
+          durationMilliseconds = deps.runtime.monotonic.now() - generateStart;
         } catch (generateError) {
-          durationMilliseconds = performance.now() - generateStart;
+          durationMilliseconds = deps.runtime.monotonic.now() - generateStart;
           emitter?.dispatch(new GenerateErrorEvent(step, generateError, durationMilliseconds));
           throw generateError;
         }

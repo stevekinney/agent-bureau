@@ -1,6 +1,21 @@
-export type TimeoutHandle = unknown;
-export type ScheduleTimeout = (callback: () => void, milliseconds?: number) => TimeoutHandle;
-export type ClearScheduledTimeout = (handle: TimeoutHandle) => void;
+import type { RuntimeServices, RuntimeTimeoutHandle } from 'lifecycle';
+import { createDefaultRuntimeServices } from 'lifecycle';
+
+/**
+ * AB-92/AB-252: this pre-existing declared-but-unwired timer seam is now an
+ * alias of `RuntimeServices`'s own shapes, rather than a second competing
+ * one — the exported names stay the same so no consumer breaks.
+ */
+export type TimeoutHandle = RuntimeTimeoutHandle;
+export type ScheduleTimeout = RuntimeServices['timers']['setTimeout'];
+export type ClearScheduledTimeout = RuntimeServices['timers']['clearTimeout'];
+
+// A single module-level default instance backs `withTimeout`'s fallback
+// timer functions below (used only when a caller supplies neither
+// `setTimeoutFunction` nor `clearTimeoutFunction`) — the real globals,
+// unconfigured, reached through `RuntimeServices` rather than a bare
+// `setTimeout`/`clearTimeout` call in this file.
+const defaultRuntimeTimers = createDefaultRuntimeServices().timers;
 
 /**
  * Creates a hook that only runs on a specific step number.
@@ -88,12 +103,9 @@ export function withTimeout<H extends (...args: any[]) => any>(
 ): H {
   return ((...args: unknown[]) => {
     return new Promise<unknown>((resolve, reject) => {
-      const setTimeoutFunction =
-        options.setTimeoutFunction ??
-        ((callback, milliseconds) => setTimeout(callback, milliseconds));
+      const setTimeoutFunction = options.setTimeoutFunction ?? defaultRuntimeTimers.setTimeout;
       const clearTimeoutFunction =
-        options.clearTimeoutFunction ??
-        ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+        options.clearTimeoutFunction ?? defaultRuntimeTimers.clearTimeout;
       const timer = setTimeoutFunction(() => {
         if (onTimeout === 'error') {
           reject(new Error(`Hook timed out after ${ms}ms`));

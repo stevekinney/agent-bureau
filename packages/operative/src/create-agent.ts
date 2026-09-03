@@ -1,6 +1,8 @@
 import type { AnyToolbox, HeadlessPermissionPolicyConfiguration, Tool } from 'armorer';
 import { createHeadlessPermissionPolicyHooks, createToolbox } from 'armorer';
 import { Conversation } from 'conversationalist';
+import type { RuntimeServices } from 'lifecycle';
+import { createDefaultRuntimeServices } from 'lifecycle';
 import type { ZodType } from 'zod';
 
 import type { AgentRun } from './agent-run';
@@ -118,6 +120,19 @@ export interface CreateAgentOptionsBase {
    * catalog, so it can never select (AB-64's verification walk).
    */
   allowedCandidates?: readonly { readonly provider: ProviderName; readonly model: string }[];
+
+  /**
+   * The AB-92/AB-252 injectable runtime-service seam: wall time, monotonic
+   * time, timers, identifiers, randomness, and deferred-work tracking.
+   * `createAgent` resolves `options.runtime ?? createDefaultRuntimeServices()`
+   * exactly once, at agent construction, and passes the SAME resolved
+   * instance into every run this agent starts — two runs from one agent
+   * share one clock; two agents never share one. Unconfigured (the
+   * default), a run reads the real globals; a test composes its own
+   * deterministic instance with `createManualRuntimeServices()` from
+   * `@lostgradient/operative/test`.
+   */
+  runtime?: RuntimeServices;
 }
 
 /**
@@ -486,10 +501,19 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknow
     // `RunOptions` bag `buildRunOptions` hands to `createActiveRun`.
     generationPreferences,
     allowedCandidates,
+    // AB-92/AB-252 — destructured out (rather than left in `...rest`) so it
+    // can be resolved to a concrete `RuntimeServices` instance exactly once
+    // below, at agent construction, and that SAME instance handed to every
+    // run this agent starts.
+    runtime: providedRuntime,
     ...rest
   } = options;
 
   const resolvedName = configuredName ?? '(agent)';
+
+  // AB-92/AB-252: resolved once, here, rather than per-run — two runs from
+  // this agent share one clock; two agents never share one.
+  const runtime = providedRuntime ?? createDefaultRuntimeServices();
 
   // AB-64 AC2/AB-245: exactly one attached descriptor is `'fixed'`, more
   // than one is `'routed'` (e.g. `createRoutingGenerate`'s union), none is
@@ -583,6 +607,9 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknow
       conversation,
       stopWhen,
       output,
+      // AB-92/AB-252 — the SAME instance resolved once above, shared by
+      // every run this agent starts.
+      runtime,
       // AB-21: `AgentRunContext` fields translate onto their `RunOptions`
       // equivalents — `agentName` stamps curated `tool.*` events (falling
       // back to this agent's own `name`), `signal` drives per-run abort,
