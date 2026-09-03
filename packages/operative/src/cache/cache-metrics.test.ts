@@ -3,6 +3,13 @@ import { createTestToolbox } from 'armorer/test';
 import { beforeEach, describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
 
+import { createAgent } from '../create-agent';
+import { readGenerationProfile } from '../generation-profile';
+import {
+  readBackendDescriptors,
+  withBackendDescriptors,
+} from '../providers/backend-descriptor-attachment';
+import { createModelCatalog } from '../providers/model-catalog';
 import type { GenerateContext, GenerateFunction, GenerateResponse } from '../types';
 import { withCacheMetrics } from './cache-metrics';
 
@@ -189,5 +196,41 @@ describe('withCacheMetrics', () => {
     const keys = await store.list('custom:');
     expect(keys).toHaveLength(1);
     expect(metrics.misses).toBe(1);
+  });
+});
+
+describe('withCacheMetrics — backend-descriptor propagation (AB-64, AB-245, AB-288)', () => {
+  const FIXED_NOW = () => '2026-09-03T12:00:00.000Z';
+
+  function anthropicDescriptor() {
+    const descriptor = createModelCatalog({ now: FIXED_NOW }).descriptors.find(
+      (row) => row.provider === 'anthropic',
+    );
+    if (!descriptor)
+      throw new Error('expected at least one anthropic descriptor in the seed catalog');
+    return descriptor;
+  }
+
+  it("preserves the wrapped function's attached descriptors on the returned generate", () => {
+    const descriptor = anthropicDescriptor();
+    const generate = withBackendDescriptors(createTrackingGenerate(), [descriptor]);
+
+    const { generate: wrapped } = withCacheMetrics(generate, {
+      store: textValueStore(new MemoryStorage()),
+    });
+
+    expect(readBackendDescriptors(wrapped)).toEqual([descriptor]);
+  });
+
+  it("reports a fixed generation profile, not opaque, for an Agent whose generate is withCacheMetrics's output", () => {
+    const descriptor = anthropicDescriptor();
+    const generate = withBackendDescriptors(createTrackingGenerate(), [descriptor]);
+    const { generate: wrapped } = withCacheMetrics(generate, {
+      store: textValueStore(new MemoryStorage()),
+    });
+
+    const agent = createAgent({ generate: wrapped });
+
+    expect(readGenerationProfile(agent).mode).toBe('fixed');
   });
 });
