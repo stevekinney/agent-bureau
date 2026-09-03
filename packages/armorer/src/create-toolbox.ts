@@ -3,8 +3,14 @@ import type {
   Link as OpenTelemetrySpanLink,
 } from '@opentelemetry/api';
 import { hmacSha256HexSync, timingSafeEqualHex } from 'interoperability';
-import type { EventIteratorOptions, ObservableLike, Observer, Subscription } from 'lifecycle';
-import { CompletableEventTarget } from 'lifecycle';
+import type {
+  EventIteratorOptions,
+  ObservableLike,
+  Observer,
+  RuntimeServices,
+  Subscription,
+} from 'lifecycle';
+import { CompletableEventTarget, createDefaultRuntimeServices } from 'lifecycle';
 import { z } from 'zod';
 
 import type { AnthropicTool } from './adapters/anthropic/types';
@@ -264,6 +270,17 @@ export interface ToolboxOptions {
   approvalBindingTtlMs?: number;
   approvalNow?: () => number;
   approvalNonce?: () => string;
+  /**
+   * The injectable runtime-service seam (AB-92's `RuntimeServices`, AB-254):
+   * wall time, monotonic time, timers, identifiers, and randomness for this
+   * toolbox, its `ExecutionLifecycle`, and every tool it constructs.
+   * Resolved once at construction — `options.runtime ?? createDefaultRuntimeServices()`
+   * — and snapshotted; a test composes its own from
+   * `armorer/test`'s `createManualRuntimeServices()` instead of touching a
+   * real timer or a real clock. Unconfigured, this defaults to the real
+   * globals, so an existing caller is unaffected.
+   */
+  runtime?: RuntimeServices;
 }
 
 export interface ImportedToolboxOptions extends ToolboxOptions {
@@ -425,10 +442,11 @@ async function validateResumedApprovalArguments(
   approval: SignedPendingToolApproval,
   validation: Promise<Awaited<ReturnType<ToolParametersSchema['safeParseAsync']>>>,
   options: ToolboxExecuteOptions,
+  runtime: RuntimeServices,
 ): Promise<ResumeApprovalValidationResult> {
   const signal = options.signal;
   const deadline = options.requestContext?.deadline;
-  const now = options.now ?? Date.now;
+  const now = options.now ?? runtime.clock.now;
   const cancelled = () =>
     createInterruptedResumeApprovalValidationResult(
       approval,
@@ -455,12 +473,8 @@ async function validateResumedApprovalArguments(
   }
 
   return new Promise<ResumeApprovalValidationResult>((resolve, reject) => {
-    const setTimeoutFunction =
-      options.setTimeoutFunction ??
-      ((callback, milliseconds) => setTimeout(callback, milliseconds));
-    const clearTimeoutFunction =
-      options.clearTimeoutFunction ??
-      ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+    const setTimeoutFunction = options.setTimeoutFunction ?? runtime.timers.setTimeout;
+    const clearTimeoutFunction = options.clearTimeoutFunction ?? runtime.timers.clearTimeout;
     let deadlineTimer: unknown;
     let deadlineTimerScheduled = false;
     let settled = false;
@@ -880,7 +894,8 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
 
   const storedConfigurations = new Map<string, ToolConfiguration>();
   const emitter = new CompletableEventTarget<ToolboxEventMap>();
-  const executionLifecycle = createExecutionLifecycle();
+  const runtime: RuntimeServices = options.runtime ?? createDefaultRuntimeServices();
+  const executionLifecycle = createExecutionLifecycle(undefined, runtime);
 
   const toolboxEventClassMap: Record<string, new (detail: any) => Event> = {
     [ToolboxCallEvent.type]: ToolboxCallEvent,
@@ -962,7 +977,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
   const registryDigests = options.digests;
   const registryConcurrency = options.concurrency;
   const budget = options.budget;
-  const budgetStart = Date.now();
+  const budgetStart = runtime.clock.now();
   let budgetCalls = 0;
   const embedder = options.embed ? createCachedEmbedder(options.embed) : undefined;
 
@@ -980,7 +995,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
   // Loop detection: instances are created on demand and stored
   const loopDetectors = new Map<string, LoopDetector>();
   let loopDetectorIdCounter = 0;
-  const approvalNow = options.approvalNow ?? Date.now;
+  const approvalNow = options.approvalNow ?? runtime.clock.now;
   const approvalSecret = options.approvalSecret;
   const approvalStateStore =
     options.approvalStateStore ??
@@ -989,7 +1004,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
   if (!Number.isFinite(approvalBindingTtlMs) || approvalBindingTtlMs <= 0) {
     throw new Error('approvalBindingTtlMs must be finite and positive.');
   }
-  const approvalNonce = options.approvalNonce ?? (() => crypto.randomUUID());
+  const approvalNonce = options.approvalNonce ?? (() => runtime.identifiers.next('approval'));
   const catalogRevision = options.catalogRevision ?? 'catalog:1';
   const toolboxRevision = options.toolboxRevision ?? 'toolbox:1';
   const policyRevision = options.policyRevision ?? 'policy:1';
@@ -1270,7 +1285,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
             detector.recordCall(toolCall.name, toolCall.arguments ?? {});
           }
 
-          const budgetReason = checkBudget(budget, budgetStart, budgetCalls);
+          const budgetReason = checkBudget(budget, budgetStart, budgetCalls, runtime.clock.now());
           if (budgetReason) {
             const toolError = createToolboxBudgetExceededToolError(budgetReason);
             const denied: ToolExecutionResult = {
@@ -1794,6 +1809,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       approval,
       currentTool.input.safeParseAsync(executeArguments),
       executeOptions,
+      runtime,
     );
     if (validation.outcome === 'interrupted') {
       return validation.result;
@@ -1818,7 +1834,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
           }
           if (
             requestDeadline !== undefined &&
-            requestDeadline <= (executeOptions.now ?? Date.now)()
+            requestDeadline <= (executeOptions.now ?? runtime.clock.now)()
           ) {
             // eslint-disable-next-line @typescript-eslint/only-throw-error
             throw createToolError('timeout', 'Execution deadline exceeded', 'TIMEOUT', false);
@@ -1833,7 +1849,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
           }
           if (
             requestDeadline !== undefined &&
-            requestDeadline <= (executeOptions.now ?? Date.now)()
+            requestDeadline <= (executeOptions.now ?? runtime.clock.now)()
           ) {
             // eslint-disable-next-line @typescript-eslint/only-throw-error
             throw createToolError('timeout', 'Execution deadline exceeded', 'TIMEOUT', false);
@@ -1901,7 +1917,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     | { outcome: 'read'; state: ApprovalState | undefined }
     | { outcome: 'interrupted'; result: ToolExecutionResult }
   > {
-    const now = options.now ?? Date.now;
+    const now = options.now ?? runtime.clock.now;
     const deadline = options.requestContext?.deadline;
     const cancelled = () =>
       createInterruptedResumeApprovalValidationResult(
@@ -1924,12 +1940,8 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       return { outcome: 'read', state: await store.state(binding) };
     return new Promise((resolve, reject) => {
       let settled = false;
-      const setTimeoutFunction =
-        options.setTimeoutFunction ??
-        ((callback: () => void, milliseconds?: number) => setTimeout(callback, milliseconds));
-      const clearTimeoutFunction =
-        options.clearTimeoutFunction ??
-        ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+      const setTimeoutFunction = options.setTimeoutFunction ?? runtime.timers.setTimeout;
+      const clearTimeoutFunction = options.clearTimeoutFunction ?? runtime.timers.clearTimeout;
       let timer: unknown;
       let timerScheduled = false;
       const cleanup = () => {
@@ -1983,7 +1995,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
   ): Promise<ToolExecutionResult | undefined> {
     const binding = approval.approvalBinding;
     if (!binding) return undefined;
-    const now = options.now ?? Date.now;
+    const now = options.now ?? runtime.clock.now;
     const deadline = options.requestContext?.deadline;
     const cancelled = () =>
       createInterruptedResumeApprovalValidationResult(
@@ -2018,12 +2030,8 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     };
     return new Promise((resolve, reject) => {
       let settled = false;
-      const setTimeoutFunction =
-        options.setTimeoutFunction ??
-        ((callback: () => void, milliseconds?: number) => setTimeout(callback, milliseconds));
-      const clearTimeoutFunction =
-        options.clearTimeoutFunction ??
-        ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+      const setTimeoutFunction = options.setTimeoutFunction ?? runtime.timers.setTimeout;
+      const clearTimeoutFunction = options.clearTimeoutFunction ?? runtime.timers.clearTimeout;
       let timer: unknown;
       let timerScheduled = false;
       const cleanup = () => {
@@ -2517,6 +2525,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     } = {
       name: configuration.identity.name,
       description: configuration.display.description,
+      runtime,
       ...(configuration.identity?.namespace !== undefined
         ? { namespace: configuration.identity.namespace }
         : {}),
@@ -3198,6 +3207,7 @@ function checkBudget(
   budget: ToolboxOptions['budget'] | undefined,
   startedAt: number,
   calls: number,
+  now: number,
 ): string | undefined {
   if (!budget) return undefined;
   if (typeof budget.maxCalls === 'number' && calls >= budget.maxCalls) {
@@ -3206,7 +3216,7 @@ function checkBudget(
   if (typeof budget.maxDurationMs !== 'number') {
     return undefined;
   }
-  const elapsed = Date.now() - startedAt;
+  const elapsed = now - startedAt;
   return elapsed >= budget.maxDurationMs
     ? `Budget exceeded: max duration ${budget.maxDurationMs}ms`
     : undefined;

@@ -1,3 +1,5 @@
+import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
+
 import {
   type EffectiveToolExecutionContext,
   freezeEffectiveToolExecutionContext,
@@ -136,7 +138,6 @@ type RecordState = {
   privilegedContext?: EffectiveToolExecutionContext;
 };
 
-let nextExecutionId = 0;
 const maximumTimerDelay = 2_147_483_647;
 
 function assertFiniteDeadline(deadline: number): void {
@@ -211,7 +212,10 @@ function retainTerminalPrivilegedContext(
   });
 }
 
-export function createExecutionLifecycle(defaultOwnerId = 'anonymous'): ExecutionLifecycle {
+export function createExecutionLifecycle(
+  defaultOwnerId = 'anonymous',
+  runtime: RuntimeServices = createDefaultRuntimeServices(),
+): ExecutionLifecycle {
   const ownerController = new AbortController();
   const records = new Map<string, RecordState>();
   const handles = new Map<string, ExecutionHandle>();
@@ -233,7 +237,11 @@ export function createExecutionLifecycle(defaultOwnerId = 'anonymous'): Executio
       idlePromise = undefined;
     }
   };
-  const publish = (record: RecordState, patch: Partial<ExecutionSnapshot>, now = Date.now()) => {
+  const publish = (
+    record: RecordState,
+    patch: Partial<ExecutionSnapshot>,
+    now = runtime.clock.now(),
+  ) => {
     record.snapshot = freeze({
       ...record.snapshot,
       ...patch,
@@ -274,12 +282,12 @@ export function createExecutionLifecycle(defaultOwnerId = 'anonymous'): Executio
     },
     begin(options) {
       if (closed) throw new Error('Execution admission is closed');
-      const now = options.now ?? Date.now;
+      const now = options.now ?? runtime.clock.now;
       if (options.deadline !== undefined) {
         assertFiniteDeadline(options.deadline);
       }
       const queuedAt = now();
-      const executionId = options.executionId ?? `execution-${++nextExecutionId}`;
+      const executionId = options.executionId ?? runtime.identifiers.next('execution');
       if (records.has(executionId)) {
         throw new Error(`Execution already exists: ${executionId}`);
       }
@@ -409,12 +417,8 @@ export function createExecutionLifecycle(defaultOwnerId = 'anonymous'): Executio
         }
       }
       if (options.deadline !== undefined && options.scheduleDeadline !== false) {
-        const schedule =
-          options.setTimeoutFunction ??
-          ((callback, milliseconds) => setTimeout(callback, milliseconds));
-        const clear =
-          options.clearTimeoutFunction ??
-          ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+        const schedule = options.setTimeoutFunction ?? runtime.timers.setTimeout;
+        const clear = options.clearTimeoutFunction ?? runtime.timers.clearTimeout;
         clearDeadline = scheduleAbsoluteDeadline({
           deadline: options.deadline,
           now,
@@ -430,7 +434,7 @@ export function createExecutionLifecycle(defaultOwnerId = 'anonymous'): Executio
     start() {
       const handle = lifecycle.begin({
         toolName: 'unknown',
-        callId: `call-${nextExecutionId + 1}`,
+        callId: runtime.identifiers.next('call'),
       });
       handle.activate();
       return () => handle.settle();

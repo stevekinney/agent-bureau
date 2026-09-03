@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { StandardSchemaV1 } from 'interoperability';
+import { createManualRuntimeServices } from 'lifecycle';
 import { z } from 'zod';
 
 import { createTool } from '../../src/create-tool';
@@ -72,6 +73,20 @@ function createTestStore() {
     },
     list: async (prefix: string) => [...map.keys()].filter((key) => key.startsWith(prefix)).sort(),
   };
+}
+
+/**
+ * Polls a microtask-only predicate to completion, capped so a regression
+ * that never satisfies it fails the test fast instead of hanging CI in an
+ * unbounded busy-wait loop.
+ */
+async function waitUntil(predicate: () => boolean, description: string): Promise<void> {
+  const maximumAttempts = 1_000;
+  for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
+    if (predicate()) return;
+    await Promise.resolve();
+  }
+  throw new Error(`waitUntil timed out after ${maximumAttempts} microtask ticks: ${description}`);
 }
 
 function createManualDeadlineTiming(initialNow = 0): {
@@ -2243,5 +2258,57 @@ describe('withIdempotency', () => {
     expect(() => input.safeParse({ name: 'ada' })).toThrow(
       'Encountered Promise during synchronous parse',
     );
+  });
+
+  describe('AB-92/AB-254: RuntimeServices composition', () => {
+    it('drives lease-renewal timing entirely through ManualRuntimeServices.advance, with no real timer', async () => {
+      const runtime = createManualRuntimeServices();
+      let release!: () => void;
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const tool = createTool({
+        name: 'slow-fenced-manual-runtime',
+        description: 'Slow fenced execution driven by a manual runtime',
+        version: '1.0.0',
+        input: z.object({ value: z.number() }),
+        idempotencyKey: (input: unknown) => fullInputKey(input),
+        async execute({ value }) {
+          await blocked;
+          return value;
+        },
+      });
+      let renewals = 0;
+      const renewingCache: ToolResultCache = {
+        ...cache,
+        async renewStarted(key, attemptId, leaseExpiresAt, observedAt) {
+          renewals++;
+          return cache.renewStarted(key, attemptId, leaseExpiresAt, observedAt);
+        },
+      };
+      const wrapped = withIdempotency(tool, {
+        cache: renewingCache,
+        tenantId: 'tenant-a',
+        leaseDurationMs: 10,
+        maximumExecutionDurationMs: 100,
+        runtime,
+      });
+
+      const execution = wrapped.execute({ value: 7 }, { requestContext });
+
+      // The renewal timer is armed at half the lease duration (5ms) — wait
+      // for it to appear on the manual runtime's own bookkeeping rather than
+      // a real timer.
+      await waitUntil(
+        () => runtime.pendingTimers().length > 0,
+        'lease-renewal timer armed on the manual runtime',
+      );
+      const renewalsBeforeAdvance = renewals;
+      await runtime.advance(5);
+      expect(renewals).toBeGreaterThan(renewalsBeforeAdvance);
+
+      release();
+      await expect(execution).resolves.toBe(7);
+    });
   });
 });

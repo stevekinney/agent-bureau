@@ -6,6 +6,16 @@ import type { ToolboxEventMap } from '../events';
 import type { Tool, ToolCallWithArguments } from '../is-tool';
 import type { ToolExecutionResult } from '../types';
 
+// AB-92/AB-254 — the deterministic `RuntimeServices` implementation lives in
+// `lifecycle` (a private foundation package, inlined at build time) and is
+// re-exported here so `armorer/test` stays the import path a
+// test author uses — a caller composes `runtime: createManualRuntimeServices()`
+// onto `createToolbox`/`createTool` instead of touching a real timer or a
+// real clock. This matches the treatment AB-252 already gave
+// `@lostgradient/operative/test`.
+export type { ManualRuntimeServices } from 'lifecycle';
+export { createManualRuntimeServices } from 'lifecycle';
+
 export type MockToolOptions<TInput = any, TOutput = any> = {
   name?: string;
   input?: z.ZodType<TInput>;

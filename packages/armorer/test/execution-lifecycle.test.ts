@@ -499,4 +499,36 @@ describe('execution lifecycle', () => {
     release();
     await first;
   });
+
+  it('mints independent executionId sequences for two lifecycles in one process (AB-254)', () => {
+    // On the baseline, `nextExecutionId` was module-level mutable state
+    // shared by every `createExecutionLifecycle()` call in the process, so
+    // two lifecycles constructed concurrently drew interleaved counter
+    // values from the same source. AB-254 moves the identifier onto each
+    // lifecycle's own composed `RuntimeServices` instance, so this fails on
+    // the baseline and passes once the counter is per-lifecycle.
+    const first = createExecutionLifecycle();
+    const second = createExecutionLifecycle();
+
+    const firstHandle = first.begin({ toolName: 'a', callId: 'a-call' });
+    const secondHandle = second.begin({ toolName: 'b', callId: 'b-call' });
+    const firstSecondHandle = first.begin({ toolName: 'a2', callId: 'a2-call' });
+    const secondSecondHandle = second.begin({ toolName: 'b2', callId: 'b2-call' });
+
+    // Independent per-lifecycle identifier sequences: each lifecycle's own
+    // first and second execution ids differ from each other and from the
+    // other lifecycle's, and neither lifecycle observes the other's ids.
+    expect(firstHandle.id).not.toBe(secondHandle.id);
+    expect(firstSecondHandle.id).not.toBe(secondSecondHandle.id);
+    expect(firstHandle.id).not.toBe(firstSecondHandle.id);
+    expect(secondHandle.id).not.toBe(secondSecondHandle.id);
+    expect(first.inspect().map((snapshot) => snapshot.executionId)).toEqual([
+      firstHandle.id,
+      firstSecondHandle.id,
+    ]);
+    expect(second.inspect().map((snapshot) => snapshot.executionId)).toEqual([
+      secondHandle.id,
+      secondSecondHandle.id,
+    ]);
+  });
 });

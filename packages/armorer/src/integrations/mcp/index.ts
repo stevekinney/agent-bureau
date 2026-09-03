@@ -27,6 +27,7 @@ import type {
   ToolAnnotations,
   ToolExecution,
 } from '@modelcontextprotocol/sdk/types.js';
+import { createDefaultRuntimeServices } from 'lifecycle';
 import { z } from 'zod';
 
 import { isZodSchema } from '../../core/schema-utilities';
@@ -137,6 +138,12 @@ const DEFAULT_SERVER_INFO: Implementation = {
   name: 'toolbox',
   version: '0.0.0',
 };
+
+// `toElicitRequestParams` is a standalone request-shaping utility, not
+// composed from any toolbox's own `RuntimeServices`, so its identifier
+// generation draws from one process-local default instance (AB-92 AC4,
+// AB-254).
+const defaultElicitationRuntime = createDefaultRuntimeServices();
 
 /**
  * Creates an MCP server from a toolbox.
@@ -1157,7 +1164,7 @@ function toElicitRequestParams(
       mode: 'url',
       message: request.message,
       url: request.url,
-      elicitationId: crypto.randomUUID(),
+      elicitationId: defaultElicitationRuntime.identifiers.next('elicitation'),
       // The precise literal-typed `url` params shape is generated from the MCP
       // spec's zod schema; our generic request only carries the plain fields
       // that schema requires, so this cast is a boundary translation, not a

@@ -56,6 +56,25 @@ export type {
   ExecutionState,
 } from './execution-lifecycle';
 export { createExecutionLifecycle } from './execution-lifecycle';
+// AB-92/AB-254 — the RuntimeServices contract and its real-globals default
+// implementation live in `lifecycle` (a private foundation package) and are
+// re-exported here so a consumer never has to depend on `lifecycle`
+// directly; inlined into this package's shipped artifact at build time,
+// the existing treatment `ObservableLike`/`Subscription` already receive.
+// The manual (deterministic) implementation is exported from
+// `armorer/test` instead — see `./test/index.ts`.
+export type {
+  DeferredDrainReport,
+  RuntimeClock,
+  RuntimeDeferred,
+  RuntimeIdentifiers,
+  RuntimeMonotonic,
+  RuntimeRandom,
+  RuntimeServices,
+  RuntimeTimeoutHandle,
+  RuntimeTimers,
+} from 'lifecycle';
+export { createDefaultRuntimeServices } from 'lifecycle';
 // `ToolDefinition` is part of the public `Tool` type's structure, so downstream
 // packages must be able to name it to emit their own declarations (TS2883).
 export type {
