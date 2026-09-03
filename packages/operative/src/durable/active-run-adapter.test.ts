@@ -1283,6 +1283,9 @@ describe('createRun with durable routing', () => {
         call: { id: 'call-1', name: 'durable_tool', arguments: {} },
         percent: 25,
         message: 'started',
+        // AB-290: matches the `runId` supplied to `createRun` above — the
+        // curated `tool.progress` bubble now requires it before forwarding.
+        ownerId: 'durable-forwarded-tool-events',
       });
       toolbox.emit('policy-denied', {
         tool: durableTool,
@@ -1967,8 +1970,23 @@ describe('createDurableActiveRun.closed()', () => {
       });
 
       expect(() => {
-        toolbox.dispatchEvent(new ToolboxSettledEvent({ tool, call: spuriousCall }));
-        toolbox.dispatchEvent(new ToolboxSettledEvent({ tool, call: spuriousCall }));
+        // AB-290: `ownerId` matches this run's own id above — the curated
+        // `settled` handling now requires it before treating the event as
+        // this run's own (the accounting it is meant to exercise here).
+        toolbox.dispatchEvent(
+          new ToolboxSettledEvent({
+            tool,
+            call: spuriousCall,
+            ownerId: 'ac-durable-spurious-settled',
+          }),
+        );
+        toolbox.dispatchEvent(
+          new ToolboxSettledEvent({
+            tool,
+            call: spuriousCall,
+            ownerId: 'ac-durable-spurious-settled',
+          }),
+        );
       }).not.toThrow();
 
       const closedAcknowledgement = activeRun.closed();
@@ -2707,9 +2725,25 @@ describe('createRecoveredRunEventSurface', () => {
       name: tool.name,
       arguments: { value: 'hello' },
     };
-    toolbox.dispatchEvent(new ToolboxExecuteStartEvent({ tool, call, params: { value: 'hello' } }));
+    // AB-290: each hand-constructed event's `ownerId` matches the
+    // `'recovered-run-id'` `runId` passed to `createRecoveredRunEventSurface`
+    // above — the curated `tool.*` bubbles now require it before forwarding.
     toolbox.dispatchEvent(
-      new ToolboxProgressEvent({ tool, call, percent: 50, message: 'halfway' }),
+      new ToolboxExecuteStartEvent({
+        tool,
+        call,
+        params: { value: 'hello' },
+        ownerId: 'recovered-run-id',
+      }),
+    );
+    toolbox.dispatchEvent(
+      new ToolboxProgressEvent({
+        tool,
+        call,
+        percent: 50,
+        message: 'halfway',
+        ownerId: 'recovered-run-id',
+      }),
     );
     toolbox.dispatchEvent(
       new ToolboxPolicyDeniedEvent({
@@ -2719,9 +2753,18 @@ describe('createRecoveredRunEventSurface', () => {
         reason: 'approval required',
       }),
     );
-    toolbox.dispatchEvent(new ToolboxSettledEvent({ tool, call, result: { value: 'hello' } }));
+    toolbox.dispatchEvent(
+      new ToolboxSettledEvent({
+        tool,
+        call,
+        result: { value: 'hello' },
+        ownerId: 'recovered-run-id',
+      }),
+    );
     const failure = new Error('recovered tool failed');
-    toolbox.dispatchEvent(new ToolboxSettledEvent({ tool, call, error: failure }));
+    toolbox.dispatchEvent(
+      new ToolboxSettledEvent({ tool, call, error: failure, ownerId: 'recovered-run-id' }),
+    );
 
     expect(services.options.toolbox).toBe(toolbox);
     expect(services.options.signal).not.toBe(callerAbortController.signal);

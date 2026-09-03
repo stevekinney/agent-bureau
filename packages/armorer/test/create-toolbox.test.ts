@@ -7309,3 +7309,135 @@ describe('toolbox settled event carries real callback completion (AB-289)', () =
     await expect(settledEvent!.callbackCompletion).resolves.toMatchObject({ state: 'terminal' });
   });
 });
+
+// AB-290: armorer mints an `executionId` per execution and echoes an
+// optional caller-supplied `ownerId` on the toolbox's `execute-start`,
+// `progress`, and `settled` events (bubbled up from the tool-level events of
+// the same names) — this is the seam a consumer sharing one `Toolbox`
+// across concurrent owners uses to scope its own accounting/bubble events,
+// since the provider-supplied `ToolCall.id` is not guaranteed unique across
+// them.
+describe('toolbox execute-start/progress/settled carry execution identity (AB-290)', () => {
+  it('stamps a non-empty executionId and leaves ownerId undefined when toolbox.execute() was not given one', async () => {
+    const tool = createTool({
+      name: 'toolbox-identity-tool',
+      description: 'reports progress once then settles',
+      input: z.object({}),
+      async execute(_params, context) {
+        context.progress({ percent: 50 });
+        return 'done';
+      },
+    });
+    const toolbox = createToolbox([tool]);
+
+    const seen: Record<string, { executionId?: string; ownerId?: string }> = {};
+    toolbox.addEventListener('execute-start', (event: any) => {
+      seen['execute-start'] = { executionId: event.executionId, ownerId: event.ownerId };
+    });
+    toolbox.addEventListener('progress', (event: any) => {
+      seen['progress'] = { executionId: event.executionId, ownerId: event.ownerId };
+    });
+    toolbox.addEventListener('settled', (event: any) => {
+      seen['settled'] = { executionId: event.executionId, ownerId: event.ownerId };
+    });
+
+    await toolbox.execute({
+      id: 'toolbox-identity-call',
+      name: 'toolbox-identity-tool',
+      arguments: {},
+    });
+
+    expect(seen['execute-start']?.executionId).toBeTruthy();
+    expect(seen['progress']?.executionId).toBeTruthy();
+    expect(seen['settled']?.executionId).toBeTruthy();
+
+    expect(seen['execute-start']?.ownerId).toBeUndefined();
+    expect(seen['progress']?.ownerId).toBeUndefined();
+    expect(seen['settled']?.ownerId).toBeUndefined();
+  });
+
+  it('echoes the ownerId supplied to toolbox.execute() on execute-start, progress, and settled', async () => {
+    const tool = createTool({
+      name: 'toolbox-owned-identity-tool',
+      description: 'reports progress once then settles',
+      input: z.object({}),
+      async execute(_params, context) {
+        context.progress({ percent: 50 });
+        return 'done';
+      },
+    });
+    const toolbox = createToolbox([tool]);
+
+    const seen: Record<string, { ownerId?: string }> = {};
+    toolbox.addEventListener('execute-start', (event: any) => {
+      seen['execute-start'] = { ownerId: event.ownerId };
+    });
+    toolbox.addEventListener('progress', (event: any) => {
+      seen['progress'] = { ownerId: event.ownerId };
+    });
+    toolbox.addEventListener('settled', (event: any) => {
+      seen['settled'] = { ownerId: event.ownerId };
+    });
+
+    await toolbox.execute(
+      { id: 'toolbox-owned-identity-call', name: 'toolbox-owned-identity-tool', arguments: {} },
+      { ownerId: 'run-b' },
+    );
+
+    expect(seen['execute-start']?.ownerId).toBe('run-b');
+    expect(seen['progress']?.ownerId).toBe('run-b');
+    expect(seen['settled']?.ownerId).toBe('run-b');
+  });
+
+  it('scopes two concurrent toolbox.execute() calls with the SAME ToolCall.id to their own ownerId', async () => {
+    let releaseA: (() => void) | undefined;
+    const gateA = new Promise<void>((resolve) => {
+      releaseA = resolve;
+    });
+    const sharedTool = createTool({
+      name: 'shared-identity-tool',
+      description: 'used by two concurrent owners on the same toolbox',
+      input: z.object({ who: z.string() }),
+      async execute({ who }) {
+        if (who === 'a') await gateA;
+        return who;
+      },
+    });
+    const toolbox = createToolbox([sharedTool]);
+
+    const seenByOwner: Record<string, { ownerId?: string; executionId?: string }[]> = {
+      'run-a': [],
+      'run-b': [],
+    };
+    toolbox.addEventListener('settled', (event: any) => {
+      if (event.ownerId === 'run-a' || event.ownerId === 'run-b') {
+        seenByOwner[event.ownerId]!.push({
+          ownerId: event.ownerId,
+          executionId: event.executionId,
+        });
+      }
+    });
+
+    const pendingA = toolbox.execute(
+      { id: 'same-call-id', name: 'shared-identity-tool', arguments: { who: 'a' } },
+      { ownerId: 'run-a' },
+    );
+    const pendingB = toolbox.execute(
+      { id: 'same-call-id', name: 'shared-identity-tool', arguments: { who: 'b' } },
+      { ownerId: 'run-b' },
+    );
+
+    // Run B settles first, using the exact same provider-supplied
+    // `ToolCall.id` as run A's still-in-flight call — proving `ownerId`,
+    // not `ToolCall.id`, is what tells the two apart.
+    await pendingB;
+    expect(seenByOwner['run-a']).toHaveLength(0);
+    expect(seenByOwner['run-b']).toHaveLength(1);
+
+    releaseA?.();
+    await pendingA;
+    expect(seenByOwner['run-a']).toHaveLength(1);
+    expect(seenByOwner['run-b']).toHaveLength(1);
+    expect(seenByOwner['run-a']![0]!.executionId).not.toBe(seenByOwner['run-b']![0]!.executionId);
+  });
+});

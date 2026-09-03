@@ -397,6 +397,13 @@ export function createDurableActiveRun(
   // closed()'s not-required fast path (coordinator ruling, AB-204) — see the
   // identical counter in `create-run.ts`.
   let inFlightTools = 0;
+  // AB-290: mirrors `create-run.ts`'s identically-named helper — a caller
+  // can supply the SAME `Toolbox` instance to more than one concurrent run,
+  // and armorer's `execute-start`/`progress`/`settled` events are
+  // toolbox-wide, not scoped to any one run. `run-step.ts` stamps this
+  // run's own id as `ownerId` on every `Toolbox.execute()` call it makes;
+  // armorer echoes it back verbatim.
+  const isOwnEvent = (event: { ownerId?: string }): boolean => event.ownerId === runId;
   // AB-291 (AC1 — durable parity with AB-204's in-memory fix): every
   // run-owned hook (`onRunStart`/`onRunAbort`/`onRunError`/`onRunComplete`)
   // fires via `runHookSilently`'s fire-and-forget `Promise.allSettled`
@@ -431,6 +438,9 @@ export function createDurableActiveRun(
     cleanups.push(() => emitter.removeEventListener(StepStartedEvent.type, stepListener));
 
     const onExecuteStart = (e: ToolboxEventMap['execute-start']) => {
+      // AB-290: only this run's own events — see `isOwnEvent` above and
+      // the identical guard in `create-run.ts`'s `onExecuteStart`.
+      if (!isOwnEvent(e)) return;
       inFlightTools += 1;
       // AB-214 review (PRRT_kwDORvupsc6esZRy): the tool-call watchdog exists
       // only while a tool call is actually in flight — see the identical
@@ -450,6 +460,8 @@ export function createDurableActiveRun(
     };
 
     const onSettled = (e: ToolboxEventMap['settled']) => {
+      // AB-290: mirrors the `onExecuteStart` guard above.
+      if (!isOwnEvent(e)) return;
       // Same reasoning as the identical call in create-run.ts's `onSettled`:
       // the tool-call watchdog tracks whether the run is still waiting on
       // this call, not whether the callback has physically returned, so
@@ -512,6 +524,8 @@ export function createDurableActiveRun(
     };
 
     const onToolProgress = (e: ToolboxEventMap['progress']) => {
+      // AB-290: mirrors the `onExecuteStart` guard above.
+      if (!isOwnEvent(e)) return;
       emitter.dispatchEvent(
         new ToolProgressBubbleEvent(
           { agentName, runId, step: currentStep },
@@ -938,6 +952,10 @@ export function createRecoveredRunEventSurface(
   // subscription `toolboxForwarder` uses for the low-level `toolbox.*`
   // forward (AB-239) — `attachToolboxCuratedListeners` below is passed to
   // `createToolboxEventForwarder` as its `attachCurated` argument.
+  //
+  // AB-290: mirrors `createDurableActiveRun`'s identically-named helper —
+  // see its comment.
+  const isOwnEvent = (event: { ownerId?: string }): boolean => event.ownerId === runId;
   const attachToolboxCuratedListeners = (toolboxInstance: AnyToolbox): (() => void) => {
     const toolboxWithListener = toolboxInstance as unknown as {
       addEventListener?: <K extends keyof ToolboxEventMap>(
@@ -950,6 +968,7 @@ export function createRecoveredRunEventSurface(
     const addListener = toolboxWithListener.addEventListener.bind(toolboxWithListener);
     const toolboxCleanups = [
       addListener('execute-start', (event) => {
+        if (!isOwnEvent(event)) return;
         emitter.dispatchEvent(
           new ToolStartedBubbleEvent(
             { agentName, runId, step: currentStep },
@@ -963,6 +982,7 @@ export function createRecoveredRunEventSurface(
         );
       }),
       addListener('settled', (event) => {
+        if (!isOwnEvent(event)) return;
         const hasError = event.error !== undefined;
         emitter.dispatchEvent(
           new ToolSettledBubbleEvent(
@@ -990,6 +1010,7 @@ export function createRecoveredRunEventSurface(
         }
       }),
       addListener('progress', (event) => {
+        if (!isOwnEvent(event)) return;
         emitter.dispatchEvent(
           new ToolProgressBubbleEvent(
             { agentName, runId, step: currentStep },

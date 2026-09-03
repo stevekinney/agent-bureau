@@ -159,16 +159,6 @@ export interface StepDeps {
    */
   readonly hookTracker?: (promise: Promise<unknown>) => void;
   /**
-   * AB-204: when supplied, called with the ids of the `ToolCall`s this run
-   * is about to dispatch to `Toolbox.execute()`, right before the call —
-   * see `create-run.ts`'s `ownedToolCallIds` for why: a caller-shared
-   * `Toolbox` (`create-agent.ts` explicitly preserves one across runs)
-   * emits toolbox-wide `execute-start`/`settled` events, so without this a
-   * run's in-flight tool accounting would also count another concurrent
-   * run's calls on the same toolbox.
-   */
-  readonly trackToolCallIds?: (ids: readonly string[]) => void;
-  /**
    * AB-239 — invoked by `runStep` itself ONCE, at step start, with that
    * step's resolved toolbox (`deps.toolbox`, or a `selectTools`
    * replacement), immediately after resolution. The driver (`loop.ts`'s
@@ -1343,15 +1333,6 @@ export async function runStep(
 
     if (callsToExecute.length > 0) {
       emitter?.dispatch(new ToolsExecutingEvent(step, callsToExecute));
-      // AB-204 review (PRRT_kwDORvupsc6erisq): when the caller supplies the
-      // same `Toolbox` instance to more than one concurrent run (a pattern
-      // `create-agent.ts` explicitly preserves), a run's own toolbox-wide
-      // `execute-start`/`settled` listeners would otherwise also count
-      // another run's tool calls, so one run's `closed()` could wait on
-      // work it doesn't own. `trackToolCallIds` records the exact call ids
-      // THIS run is about to dispatch so `createActiveRun`'s in-flight
-      // accounting can filter to only its own work.
-      deps.trackToolCallIds?.(callsToExecute.map((call) => call.id));
 
       try {
         // AB-233/AB-300 — thread the active trace context and a
@@ -1364,6 +1345,16 @@ export async function runStep(
         const toolboxExecuteOptions = {
           ...deps.executeOptions,
           signal: stepSignal,
+          // AB-290: stamp this run's own id as `ownerId` on every armorer
+          // execution this call dispatches — after the caller's own
+          // `executeOptions`, so this run's identity always wins over
+          // anything a caller supplied there. `createActiveRun`'s bubble
+          // listeners (`create-run.ts`/`active-run-adapter.ts`) filter
+          // `tool.started`/`tool.settled`/`tool.progress` by this same id,
+          // replacing the old `ownedToolCallIds`/`ToolCall.id` tracking,
+          // which was never guaranteed unique across concurrent runs
+          // sharing one `Toolbox`.
+          ...(deps.runId !== undefined ? { ownerId: deps.runId } : {}),
           ...(deps.parentContext !== undefined ? { traceContext: deps.parentContext } : {}),
           ...(deps.childRegistry !== undefined ||
           deps.runId !== undefined ||

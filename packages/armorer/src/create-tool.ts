@@ -91,6 +91,18 @@ import { isAsyncIterable, isPromise, isTestRuntime } from './type-guards';
 import type { SatisfiedPolicyPause, ToolAction, ToolCall, ToolExecutionResult } from './types';
 import { createConcurrencyLimiter, normalizeConcurrency } from './utilities/concurrency';
 
+/**
+ * The caller-supplied owner identity for an execution — never a fabricated
+ * default. Mirrors exactly what {@link ExecutionLifecycle.begin} is given as
+ * `ownerId`, before `createExecutionLifecycle`'s own internal default
+ * ("anonymous") fills a gap. Events echo this value (AB-290) so a listener
+ * can tell "no owner was supplied" apart from any real owner id, instead of
+ * every unscoped execution appearing to share the same fabricated owner.
+ */
+function resolveSuppliedOwnerId(options: ToolExecuteOptions): string | undefined {
+  return options.ownerId ?? options.requestContext?.authority.ownerId;
+}
+
 function isAbortSignalLike(signal: MinimalAbortSignal | undefined): signal is AbortSignal {
   return (
     signal !== undefined &&
@@ -748,7 +760,7 @@ export function createTool<
     deadline: number | undefined,
     nowFunction: () => number,
   ): ExecutionHandle => {
-    const ownerId = options?.ownerId ?? options?.requestContext?.authority.ownerId;
+    const ownerId = resolveSuppliedOwnerId(options ?? {});
     return executionLifecycle.begin({
       ...(options?.executionId ? { executionId: options.executionId } : {}),
       toolName: name,
@@ -852,7 +864,15 @@ export function createTool<
     toolCall: ToolCall & { arguments: unknown },
     options: InternalToolExecuteOptions = {},
   ): Promise<ToolExecutionResult> => {
-    const baseDetail = { toolCall, configuration };
+    // AB-290: executionId/ownerId ride along on every `execute-start`,
+    // `settled`, and `progress` event this call emits, spread from here so
+    // the emit call sites below don't each have to remember to attach them.
+    const baseDetail = {
+      toolCall,
+      configuration,
+      executionId: options.executionHandle?.id,
+      ownerId: resolveSuppliedOwnerId(options),
+    };
     const nowFunction = options.now ?? runtime.clock.now;
     const startedAt = telemetryEnabled ? nowFunction() : 0;
     const inputDigest = digestOptions.input
@@ -962,7 +982,12 @@ export function createTool<
         options.signal,
       )) as TInput;
       const typedToolCall = { ...toolCall, arguments: parsed } as ToolCallWithArguments;
-      const parsedDetail = { toolCall: typedToolCall, configuration };
+      const parsedDetail = {
+        toolCall: typedToolCall,
+        configuration,
+        executionId: baseDetail.executionId,
+        ownerId: baseDetail.ownerId,
+      };
       emit('validate-success', { ...parsedDetail, params: toolCall.arguments, parsed });
       if (options.signal?.aborted) {
         if (options.executionHandle?.snapshot().abortSource === 'deadline') {
@@ -1216,7 +1241,13 @@ export function createTool<
       options.signal?.addEventListener('abort', deactivateProgress, { once: true });
       const reportProgress: RuntimeToolContext['progress'] = (update) => {
         if (!progressActive || options.signal?.aborted) return;
-        dispatch(new ToolProgressEvent(update));
+        dispatch(
+          new ToolProgressEvent({
+            ...update,
+            executionId: baseDetail.executionId,
+            ownerId: baseDetail.ownerId,
+          }),
+        );
       };
 
       const toolContext: ToolContext<E> = {

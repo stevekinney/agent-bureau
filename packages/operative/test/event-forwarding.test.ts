@@ -273,6 +273,9 @@ describe('event forwarding', () => {
         call: { id: 'call-1', name: 'get_weather' },
         percent: 50,
         message: 'halfway',
+        // AB-290: matches this run's own `runId` above — the curated
+        // `tool.progress` bubble now requires it before forwarding.
+        ownerId: 'run-a',
       } as never,
     );
     toolbox.emit(

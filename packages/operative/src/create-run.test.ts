@@ -338,14 +338,16 @@ describe('ActiveRun.closed()', () => {
       spoofed = true;
       // Simulate a hand-constructed/legacy `settled` event for the SAME
       // call id armorer just started, carrying no `callbackCompletion`.
-      // `onSettled` must recognize the id as owned (it was tracked by the
-      // real `execute-start`) and drain synchronously via the fallback
-      // `else release()` branch, not `Promise.resolve().then(...)`.
+      // `ownerId` matches this run's own id (AB-290) — the same identity
+      // `onSettled` requires to recognize the event as owned — so it
+      // drains synchronously via the fallback `else release()` branch,
+      // not `Promise.resolve().then(...)`.
       toolbox.dispatchEvent(
         new ToolboxSettledEvent({
           tool: weatherTool,
           call: { id: event.toolCallId, name: weatherTool.name, arguments: {} },
           result: { temperature: 0, location: 'spoofed' },
+          ownerId: activeRun.snapshot().id,
         }),
       );
     });
@@ -478,6 +480,108 @@ describe('ActiveRun.closed()', () => {
     expect(await closedAcknowledgement).toEqual({ status: 'completed' });
 
     releaseOtherRunTool?.();
+  });
+
+  // AB-290 acceptance test: armorer mints an `executionId` per execution
+  // and echoes an optional caller-supplied `ownerId` on every event for
+  // that execution; operative stamps its own run id as `ownerId` on every
+  // `Toolbox.execute()` call and filters both in-flight accounting AND the
+  // curated `tool.*` bubble events by it. This is the case
+  // `ownedToolCallIds`/`ToolCall.id` tracking could never handle: the
+  // PROVIDER issues the exact same `ToolCall.id` to two concurrent runs
+  // sharing one toolbox — a real possibility since providers assign ids
+  // independently per conversation, with no cross-run coordination.
+  it('scopes accounting and tool.* bubble events to the owning run when two concurrent runs share one toolbox and the provider issues them the SAME ToolCall.id', async () => {
+    const gates = new Map<'a' | 'b', { promise: Promise<void>; release: () => void }>();
+    for (const owner of ['a', 'b'] as const) {
+      let release!: () => void;
+      const promise = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      gates.set(owner, { promise, release });
+    }
+    const sharedTool = createTool({
+      name: 'shared_tool',
+      description: 'Used by two concurrent runs on one shared toolbox',
+      input: z.object({ owner: z.enum(['a', 'b']) }),
+      execute: async ({ owner }) => {
+        await gates.get(owner)!.promise;
+        return { owner };
+      },
+    });
+    const toolbox = createTestToolbox([sharedTool]);
+    const sharedCallId = 'provider-issued-call-id';
+
+    const runA = createActiveRun({
+      runId: 'run-a',
+      generate: createMockGenerate([
+        toolCallResponse([{ id: sharedCallId, name: 'shared_tool', arguments: { owner: 'a' } }]),
+        textResponse('done'),
+      ]),
+      toolbox,
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+    });
+    const runB = createActiveRun({
+      runId: 'run-b',
+      generate: createMockGenerate([
+        toolCallResponse([{ id: sharedCallId, name: 'shared_tool', arguments: { owner: 'b' } }]),
+        textResponse('done'),
+      ]),
+      toolbox,
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+    });
+
+    const startedByRun: Record<'a' | 'b', string[]> = { a: [], b: [] };
+    const settledByRun: Record<'a' | 'b', string[]> = { a: [], b: [] };
+    runA.addEventListener('tool.started', (event) => startedByRun.a.push(event.toolCallId));
+    runA.addEventListener('tool.settled', (event) => settledByRun.a.push(event.toolCallId));
+    runB.addEventListener('tool.started', (event) => startedByRun.b.push(event.toolCallId));
+    runB.addEventListener('tool.settled', (event) => settledByRun.b.push(event.toolCallId));
+
+    // Let both calls reach the toolbox before either settles, so both are
+    // genuinely in flight — concurrently, on the SAME toolbox, with the
+    // SAME `ToolCall.id` — at the same time.
+    for (let tick = 0; tick < 20; tick++) {
+      await Promise.resolve();
+    }
+
+    // Each run sees exactly one `tool.started` for its own call, never the
+    // other run's, despite the shared id.
+    expect(startedByRun.a).toEqual([sharedCallId]);
+    expect(startedByRun.b).toEqual([sharedCallId]);
+    // Neither run's `closed()` waits on the OTHER run's still-executing
+    // call — each owns only its own in-flight accounting.
+    const closedA = runA.closed();
+    let closedAResolved = false;
+    void closedA.then(() => {
+      closedAResolved = true;
+    });
+    for (let tick = 0; tick < 10; tick++) {
+      await Promise.resolve();
+    }
+    expect(closedAResolved).toBe(false);
+
+    gates.get('a')!.release();
+    expect(await closedA).toEqual({ status: 'completed' });
+    const resultA = await runA.result;
+    expect(resultA.finishReason).toBe('stop-condition');
+
+    // Run A's own settlement never leaked into run B's bubble stream.
+    expect(settledByRun.a).toEqual([sharedCallId]);
+    expect(settledByRun.b).toEqual([]);
+
+    gates.get('b')!.release();
+    const resultB = await runB.result;
+    expect(resultB.finishReason).toBe('stop-condition');
+
+    // Each run saw exactly its own settlement, never a duplicate and never
+    // the other run's.
+    expect(startedByRun.a).toEqual([sharedCallId]);
+    expect(startedByRun.b).toEqual([sharedCallId]);
+    expect(settledByRun.a).toEqual([sharedCallId]);
+    expect(settledByRun.b).toEqual([sharedCallId]);
   });
 
   // Regression: a code-review finding on the AB-204 pull request
@@ -830,8 +934,8 @@ describe('ActiveRun.closed() awaits registered children (AB-211)', () => {
 
 // AB-214: the in-memory `createActiveRun` liveness wiring records a
 // tool-progress pulse only for a tool call THIS run itself dispatched (the
-// same `ownedToolCallIds` guard `onExecuteStart`/`onSettled` already use —
-// see the comment on the `progress` listener in create-run.ts).
+// same `ownerId`-based guard `onExecuteStart`/`onSettled` use since
+// AB-290 — see the comment on the `progress` listener in create-run.ts).
 describe('AB-214: tool-progress pulses feed the liveness snapshot', () => {
   it('records a tool-progress evidence entry when an owned tool call reports progress', async () => {
     // The evidence has to be observed WHILE the call is in flight: `endToolCall`
@@ -863,8 +967,7 @@ describe('AB-214: tool-progress pulses feed the liveness snapshot', () => {
       stopWhen: noToolCalls(),
     });
 
-    // Let the call reach the toolbox before the progress event arrives, so
-    // `ownedToolCallIds` already has 'call-1' when `onToolProgress` fires.
+    // Let the call reach the toolbox before the progress event arrives.
     // Deterministic microtask draining (no real timer) — matches the
     // `closed()` regression tests above in this same file.
     for (let tick = 0; tick < 50; tick++) {
@@ -876,6 +979,10 @@ describe('AB-214: tool-progress pulses feed the liveness snapshot', () => {
         call: { id: 'call-1', name: 'reporting_tool', arguments: {} },
         percent: 50,
         message: 'halfway',
+        // AB-290: matches this run's own id so `onToolProgress` recognizes
+        // the event as owned — see the identical `onSettled`/`onExecuteStart`
+        // guard.
+        ownerId: activeRun.snapshot().id,
       }),
     );
 

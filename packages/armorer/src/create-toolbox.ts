@@ -91,6 +91,7 @@ import {
   ToolboxToolStartedEvent,
   ToolboxValidateErrorEvent,
   ToolboxValidateSuccessEvent,
+  type ToolExecutionIdentity,
 } from './events';
 import {
   type EffectiveToolExecutionContext,
@@ -323,7 +324,7 @@ export interface ToolboxEvents {
   /** Tool status/progress updates for UI display */
   'status:update': ToolStatusUpdate;
   // Bubbled tool events (when executing multiple tools in parallel)
-  'execute-start': { tool: Tool; call: ToolCall; params: unknown };
+  'execute-start': { tool: Tool; call: ToolCall; params: unknown } & ToolExecutionIdentity;
   'validate-success': {
     tool: Tool;
     call: ToolCall;
@@ -349,7 +350,7 @@ export interface ToolboxEvents {
      * settlement — see {@link ExecutionHandle.whenSettled} (AB-289).
      */
     callbackCompletion?: Promise<ExecutionSnapshot>;
-  };
+  } & ToolExecutionIdentity;
   'policy-denied': {
     tool: Tool;
     call: ToolCall;
@@ -384,7 +385,12 @@ export interface ToolboxEvents {
     outputDigest?: string;
   };
   'budget-exceeded': { tool: Tool; call: ToolCall; reason: string };
-  progress: { tool: Tool; call: ToolCall; percent?: number; message?: string };
+  progress: {
+    tool: Tool;
+    call: ToolCall;
+    percent?: number;
+    message?: string;
+  } & ToolExecutionIdentity;
   'stream-start': { tool: Tool; call: ToolCall; mode: 'stream' | 'collect' };
   'stream-chunk': { tool: Tool; call: ToolCall; chunk: unknown; index: number };
   'stream-end': {
@@ -1101,13 +1107,17 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     const nowFunction = options?.now ?? Date.now;
     const requestDeadline = options?.requestContext?.deadline;
     const deadline = requestDeadline;
+    // AB-290: the caller-supplied owner identity, distinct from
+    // `executionHandle.snapshot().ownerId` below — that snapshot always
+    // reads a string (armorer's internal "anonymous" default fills the gap
+    // when nothing was supplied), so forwarding it verbatim onto a child
+    // tool call's events would fabricate an owner nobody actually supplied.
+    const suppliedOwnerId = options?.ownerId ?? requestContext?.authority.ownerId;
     const executionHandle = executionLifecycle.begin({
       ...(options?.executionId ? { executionId: options.executionId } : {}),
       toolName: Array.isArray(input) ? 'toolbox.batch' : (firstCall?.name ?? 'toolbox.unknown'),
       callId: firstCall?.id ?? `toolbox-call-${nowFunction()}`,
-      ...((options?.ownerId ?? requestContext?.authority.ownerId) !== undefined
-        ? { ownerId: options?.ownerId ?? requestContext?.authority.ownerId }
-        : {}),
+      ...(suppliedOwnerId !== undefined ? { ownerId: suppliedOwnerId } : {}),
       ...(options?.parentExecutionId ? { parentExecutionId: options.parentExecutionId } : {}),
       ...(options?.signal instanceof AbortSignal ? { signal: options.signal } : {}),
       ...(deadline !== undefined ? { deadline } : {}),
@@ -1398,6 +1408,16 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
         const privilegedContextMirrorHandle = hasSingleChild
           ? executionHandle
           : childExecutionHandle;
+        // AB-290: a deterministic id for THIS specific call, known before
+        // `tool.execute()` is even invoked (not minted by the tool itself)
+        // — so the bubble listeners below can filter the tool's broadcast
+        // events down to just this call's own, instead of every listener
+        // concurrently attached to the same `Tool` instance receiving
+        // every other concurrent call's events too. Reusing
+        // `childExecutionHandle.id` when one exists keeps a single id per
+        // call rather than minting two.
+        const childExecutionId =
+          childExecutionHandle?.id ?? `${executionHandle.id}:call:${callIndex + 1}`;
         const settleChildExecution = (result?: unknown) => {
           if (!childExecutionHandle) {
             return;
@@ -1441,8 +1461,29 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
           'status-update': 'status:update',
         };
 
+        // AB-290: `execute-start`/`progress`/`settled` carry `executionId`
+        // (armorer's own per-execution id). This same `Tool` instance can
+        // have more than one of these bubble subscriptions attached at
+        // once — one per concurrent `toolbox.execute()` call — and every
+        // one of them is broadcast every tool-level event regardless of
+        // which invocation actually produced it. Without this filter, a
+        // concurrent call's own `execute-start`/`progress`/`settled` would
+        // ALSO bubble out of THIS call's subscription (mislabeled with
+        // this call's own `toolCall` below), duplicating the toolbox-level
+        // event once per concurrently in-flight call to the same tool.
+        const identityScopedEventTypes = new Set<keyof DefaultToolEvents>([
+          'execute-start',
+          'progress',
+          'settled',
+        ]);
         for (const eventType of toolEventTypes) {
           const unsubscribe = tool.addEventListener(eventType, (toolEvent: Event) => {
+            if (
+              identityScopedEventTypes.has(eventType) &&
+              (toolEvent as unknown as { executionId?: string }).executionId !== childExecutionId
+            ) {
+              return;
+            }
             // Extract event properties (excluding standard Event fields)
             const eventProps: Record<string, unknown> = {};
             for (const key of Object.getOwnPropertyNames(toolEvent)) {
@@ -1489,6 +1530,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
               ? options.executionContext
               : (baseContext['executionContext'] as Record<string, unknown> | undefined);
           const executeOptions: InternalToolExecuteOptionsWithMirror =
+            suppliedOwnerId !== undefined ||
             options?.signal ||
             options?.timeout !== undefined ||
             options?.stream !== undefined ||
@@ -1522,7 +1564,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
                   ...(resolvedExecutionContext !== undefined
                     ? { executionContext: resolvedExecutionContext }
                     : {}),
-                  ownerId: executionHandle.snapshot().ownerId,
+                  ...(suppliedOwnerId !== undefined ? { ownerId: suppliedOwnerId } : {}),
                   parentExecutionId: executionHandle.id,
                   ...(privilegedContextMirrorHandle ? { privilegedContextMirrorHandle } : {}),
                   ...(options?.requestContext && initialEffectiveContext
@@ -1557,7 +1599,14 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
                 }
               : {};
 
-          const result = await tool.execute(toolCall, executeOptions as ToolExecuteOptions);
+          // AB-290: `executionId` is always supplied, regardless of which
+          // branch built `executeOptions` above — the tool must use THIS
+          // id (not mint its own) so the bubble-scoping filter installed
+          // above, which already knows `childExecutionId`, can match it.
+          const result = await tool.execute(toolCall, {
+            ...executeOptions,
+            executionId: childExecutionId,
+          } as ToolExecuteOptions);
           if (result.pendingApproval && approvalSecret && approvalStateStore) {
             const requestContext = options?.requestContext;
             if (!requestContext?.agentId || !requestContext.runId || !requestContext.audience) {
@@ -2558,6 +2607,16 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
           ...baseContext,
           dispatchEvent,
           emit,
+          // The full `RuntimeToolContext` this call's own `createTool`
+          // wrapper built (with `dispatch`/`progress` correctly wired to
+          // ITS execution) — forwarded through so a toolbox-registered
+          // tool's `context.dispatch`/`context.progress()` work exactly
+          // like a directly-executed tool's do, instead of silently
+          // dropping to `undefined`.
+          dispatch: toolContext.dispatch,
+          progress: toolContext.progress,
+          meta: toolContext.meta,
+          ...(toolContext.execution !== undefined ? { execution: toolContext.execution } : {}),
           configuration: toolContext.configuration,
           toolCall: toolContext.toolCall,
           ...(toolContext.durableOperationKey !== undefined
