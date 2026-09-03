@@ -48,6 +48,8 @@ export {
   TaskFailedEvent,
   TaskRoutedEvent,
 } from './create-supervisor';
+export type { DurableEventHistory, DurableEventHistoryPageOptions } from './durable-event-history';
+export { createDurableEventHistory, DEFAULT_PAGE_LIMIT } from './durable-event-history';
 export type { BureauEventMap, RecoveredRunVerdict, RecoveryRejectionReason } from './events';
 export {
   ActionEvent,
@@ -134,6 +136,7 @@ export type {
   CreateRunRequest,
   DurableGuardrailsConfiguration,
   DurableScheduleDefinition,
+  EventHistoryUnsupportedOutcome,
   FlowControlPolicy,
   GenerateProviderName,
   IdentityConfiguration,
