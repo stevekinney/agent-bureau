@@ -846,6 +846,20 @@ export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
   getDurableRun(runId: string): Promise<WorkflowState | null | undefined>;
 
   /**
+   * Cancel a durable run that has no live, process-local `ActiveRun` (AB-37,
+   * AB-205) — the boot-recovered fire that makes `abortRun` throw
+   * `NOT_FOUND`. Asynchronous, unlike `abortRun`, and never rejects: every
+   * failure mode resolves as a variant of {@link CancelDurableRunOutcome}
+   * instead. `engine.cancel` alone is not proof a cancellation committed (it
+   * resolves `void` unconditionally, whether it won or lost a race against
+   * the workflow completing on its own), so this always re-reads
+   * `getDurableRun(runId)` after `engine.cancel` resolves and reports
+   * `'requested'` only when that re-read observes `status === 'cancelled'`;
+   * any other terminal status resolves `'already-terminal'`.
+   */
+  cancelDurableRun(runId: string): Promise<CancelDurableRunOutcome>;
+
+  /**
    * List durable runs from the engine, optionally filtered (status, type, tags).
    * Backed by `engine.list(filter, options)`. Returns `undefined` when no durable
    * engine is composed. Note the engine internally types the filter as a
@@ -1212,6 +1226,18 @@ export interface RunSummary {
    */
   startedAt: number | undefined;
 }
+
+/**
+ * Resolution of a {@link Bureau.cancelDurableRun} call (AB-37, AB-205).
+ * Never a rejection — every failure mode, including one raised by the engine
+ * itself, is represented as a variant here instead.
+ */
+export type CancelDurableRunOutcome =
+  | { readonly status: 'requested' }
+  | { readonly status: 'already-terminal' }
+  | { readonly status: 'not-found' }
+  | { readonly status: 'unsupported-capability' }
+  | { readonly status: 'failed'; readonly error: unknown };
 
 export interface RunStepDetail {
   step: number;
