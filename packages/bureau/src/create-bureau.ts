@@ -292,10 +292,23 @@ function isPlainAuthorityRecord(value: JSONValue | undefined): value is Record<s
 
 function lookupSessionAuthority(
   metadata: Record<string, JSONValue>,
+  // AB-67/AB-199 review finding (PR #430 — Codex P2, "Authorize against the
+  // targeted live run"): defaults to `metadata['lastRunId']` — the prior,
+  // single-run behavior every existing caller (`submitSessionInput`) keeps
+  // unchanged — but a caller that already knows which run a command
+  // actually targets (`submitSteeringCommand`, once it resolves an
+  // explicit `runId` or the session's sole live run) passes it explicitly.
+  // Without this, a run B that completes first prunes only its OWN
+  // `lastRequestAuthorities[B]` entry (see the terminal-transition cleanup
+  // below) while leaving `lastRunId: B` and A's now-uncorrelated entry
+  // behind; the uncorrelated-map branch below then fails EVERY principal
+  // closed before a command explicitly naming still-live run A ever gets a
+  // chance to authorize against A's own (perfectly valid) entry.
+  targetRunId?: string,
 ):
   | { readonly recorded: false }
   | { readonly recorded: true; readonly principalId: string | undefined } {
-  const lastRunId = metadata['lastRunId'];
+  const lastRunId = targetRunId ?? metadata['lastRunId'];
   const authorities = metadata['lastRequestAuthorities'];
   // A PRESENT-but-malformed `lastRequestAuthorities` value (not absent — a
   // string or array where a map belongs) is itself evidence something was
@@ -372,8 +385,11 @@ export function recordedSessionAuthorityPrincipalId(
 export function isSessionAuthorityAuthorized(
   metadata: Record<string, JSONValue>,
   principal: string,
+  // See {@link lookupSessionAuthority}'s doc comment on its own `targetRunId`
+  // parameter — forwarded verbatim.
+  targetRunId?: string,
 ): boolean {
-  const lookup = lookupSessionAuthority(metadata);
+  const lookup = lookupSessionAuthority(metadata, targetRunId);
   if (!lookup.recorded) return true;
   return lookup.principalId === principal;
 }
@@ -1064,6 +1080,21 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   const catalogRuns = new Set<AgentRun<unknown, boolean>>();
   const runToolboxes = new Set<BureauToolbox>();
   const runToolboxesByRunId = new Map<string, BureauToolbox>();
+  // AB-67/AB-199 review finding (PR #430 — Codex P1, "Prevent released runs
+  // from recreating deleted sessions"): `deleteSession` releases a paused
+  // run rather than aborting it (see `settleForDeletion`'s own doc
+  // comment), so that run keeps executing with no session left to write
+  // to; its terminal `run.completed`/`run.aborted` listener's `saveSession`
+  // call would otherwise recreate the just-deleted record via its own
+  // `existingSession ?? createAgentSession(...)` fallback. Every runId
+  // still live at the moment its session is deleted is marked here;
+  // `saveSession` below checks this set (via `metadata['lastRunId']`, the
+  // field every terminal listener already passes) and skips the write
+  // entirely for an orphaned run's own terminal transition. Consumed
+  // (deleted) exactly once, by whichever terminal listener observes the
+  // run first, so a session id legitimately reused later is never blocked
+  // by a stale entry.
+  const orphanedRunIds = new Set<string>();
   let disposePromise: Promise<void> | undefined;
   // Ids of PendingReview items already resolved via resolveReview() (AB-20).
   // Neither resolution path (resumeApproval, signalSession) mutates the live
@@ -1381,6 +1412,18 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   ): Promise<void> {
     const sessionStore = runtime.sessionStore;
     if (!sessionStore) {
+      return;
+    }
+
+    // AB-67/AB-199 review finding (PR #430 — Codex P1, "Prevent released
+    // runs from recreating deleted sessions"): a run this bureau explicitly
+    // orphaned via `deleteSession` must never resurrect the session record
+    // it belonged to, however this call arrived (terminal completion,
+    // abort, live or recovered driver) — see `orphanedRunIds`'s own doc
+    // comment. Consumed (removed) here so the set never grows unboundedly
+    // and a session id reused later is unaffected.
+    const candidateRunId = metadata['lastRunId'];
+    if (typeof candidateRunId === 'string' && orphanedRunIds.delete(candidateRunId)) {
       return;
     }
 
@@ -3624,6 +3667,24 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         }
       }
     }
+    // AB-67/AB-199 review finding (PR #430 — Codex P1, "Prevent released
+    // runs from recreating deleted sessions"): every still-live run this
+    // session owns — in-memory or durable-recovered — is marked here BEFORE
+    // the session record itself is deleted, so its eventual terminal
+    // `saveSession` call never resurrects the record it belonged to. This
+    // is deliberately independent of HOW that run settles: a paused
+    // in-memory run is released (not aborted) by `settleForDeletion` below,
+    // exactly as before ("retain a usable control path until they
+    // terminate" — one of the remediations the P1 finding names), runs
+    // that were never paused simply continue to their own natural
+    // terminal state, and either way its `run.completed`/`run.aborted`
+    // listener now finds itself orphaned and skips the write instead of
+    // recreating the deleted session.
+    for (const [runId, runState] of store.getState().runs) {
+      if (runState.status === 'running' && getRunSessionIdentifier(runState) === id) {
+        orphanedRunIds.add(runId);
+      }
+    }
     await sessionStore.delete(id);
     // AB-67/AB-199 review findings (PR #430 — Codex P2): a deleted session's
     // steering gate — and its entries in the shared, bureau-wide idempotency
@@ -3794,7 +3855,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     request: SteeringCommandRequest,
   ): Promise<SteeringCommandAdmissionOutcome> {
     const session = runtime.sessionStore ? await runtime.sessionStore.load(sessionId) : undefined;
-    if (!session || !isSessionAuthorityAuthorized(session.metadata, request.principal)) {
+    if (!session) {
       return { outcome: 'not-found' };
     }
 
@@ -3813,11 +3874,28 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // non-terminal concurrent run on the same session remains genuinely
     // live — a metadata-only check would reject a command explicitly
     // targeting that still-live run.
+    //
+    // Computed BEFORE the authorization check too (review finding, PR #430
+    // — Codex P2, "Authorize against the targeted live run"): resolving
+    // which run this command actually targets — the caller's own explicit
+    // `runId`, or the session's sole live run when omitted — lets
+    // authorization consult THAT run's own `lastRequestAuthorities` entry
+    // directly, rather than `lookupSessionAuthority`'s single-run default
+    // (`metadata['lastRunId']`), which a DIFFERENT concurrent run's more
+    // recent terminal transition can leave pointing at an unrelated,
+    // uncorrelated entry — see `lookupSessionAuthority`'s own doc comment.
+    // This computation touches only the internal run registry, never
+    // anything derived from `request.principal`, so it leaks nothing to an
+    // unauthorized caller ahead of the `not-found` check below.
     const liveRunIds: string[] = [];
     for (const [runId, runState] of store.getState().runs) {
       if (runState.status === 'running' && getRunSessionIdentifier(runState) === sessionId) {
         liveRunIds.push(runId);
       }
+    }
+    const targetRunId = request.runId ?? (liveRunIds.length === 1 ? liveRunIds[0] : undefined);
+    if (!isSessionAuthorityAuthorized(session.metadata, request.principal, targetRunId)) {
+      return { outcome: 'not-found' };
     }
     if (isSessionRunTerminal(session.metadata) && liveRunIds.length === 0) {
       return { outcome: 'session-terminal', sessionId };

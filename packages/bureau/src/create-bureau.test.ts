@@ -4528,6 +4528,39 @@ describe('recordedSessionAuthorityPrincipalId / isSessionAuthorityAuthorized (AB
     };
     expect(isSessionAuthorityAuthorized(metadataUncorrelatedLastRunId, 'anyone')).toBe(false);
   });
+
+  it("authorizes against an explicitly targeted run's own entry, not lastRunId, when a different concurrent run's more recent terminal transition left the map uncorrelated to lastRunId (PR #430 review, Codex P2, second wave — 'Authorize against the targeted live run')", () => {
+    // Two concurrent runs, A (still live) and B (completed first). B's own
+    // terminal transition prunes ONLY lastRequestAuthorities[B] (per this
+    // file's own pruning rule near `remainingAuthorities`), leaving
+    // lastRunId: 'run-b' and A's now-uncorrelated 'run-a' entry behind —
+    // exactly the shape the previous test proves fails closed for EVERY
+    // principal under the default (lastRunId-only) lookup.
+    const metadata = {
+      lastRunId: 'run-b',
+      lastRequestAuthorities: {
+        'run-a': {
+          principalId: 'alice',
+          tenantId: 'bureau',
+          ownerId: 'agent',
+          capabilities: ['tools:execute'],
+          authorizationRevision: 'bureau:1',
+        },
+      },
+    };
+    // The default (no targetRunId) lookup still fails closed — unchanged.
+    expect(isSessionAuthorityAuthorized(metadata, 'alice')).toBe(false);
+
+    // A command explicitly targeting the still-live run A resolves against
+    // A's own entry directly, authorizing alice and rejecting anyone else.
+    expect(isSessionAuthorityAuthorized(metadata, 'alice', 'run-a')).toBe(true);
+    expect(isSessionAuthorityAuthorized(metadata, 'mallory', 'run-a')).toBe(false);
+
+    // Targeting a run with no entry of its own at all still fails closed —
+    // this is defense against authorizing a run this map says nothing
+    // about, not a general bypass of the uncorrelated-map rule.
+    expect(isSessionAuthorityAuthorized(metadata, 'alice', 'run-c')).toBe(false);
+  });
 });
 
 describe('isSessionRunTerminal (AB-194)', () => {
@@ -5180,6 +5213,61 @@ describe('createBureau submitSteeringCommand (AB-67/AB-199)', () => {
     }
   });
 
+  it('deleteSession does not let a run released from a pause recreate the session once it later completes (PR #430 review, Codex P1, second wave — "Prevent released runs from recreating deleted sessions")', async () => {
+    let releaseTool: (() => void) | undefined;
+    const toolGate = new Promise<void>((resolve) => {
+      releaseTool = resolve;
+    });
+    const nextTool = createTool({
+      name: 'next',
+      description: 'continue',
+      input: z.object({}),
+      execute: async () => {
+        await toolGate;
+        return 'ok';
+      },
+    });
+    const generate = createSequentialGenerate([
+      { content: 'step 0', toolCalls: [{ name: 'next', arguments: {} }] },
+      { content: 'done', toolCalls: [] },
+    ]);
+
+    const bureau = await createBureau({
+      agents: {},
+      generate,
+      toolbox: createToolbox([nextTool]),
+      storage: { type: 'memory' },
+      stopWhen: stopWhen.noToolCalls(),
+    });
+    try {
+      const run = await bureau.createRun({ message: 'go', principal: 'alice' });
+      await pollUntil(() => generate.callCount === 1);
+
+      const pause = await bureau.submitSteeringCommand(run.sessionId, {
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+      });
+      expect(pause.outcome).toBe('accepted');
+      releaseTool!();
+      for (let i = 0; i < 10; i++) {
+        await yieldToPortableEventLoop();
+      }
+      expect(generate.callCount).toBe(1);
+
+      await bureau.deleteSession(run.sessionId);
+      expect(await bureau.getSession(run.sessionId)).toBeUndefined();
+
+      // The released run keeps executing to its own natural completion —
+      // that part is unchanged — but its terminal `saveSession` call must
+      // not resurrect the record `deleteSession` just removed.
+      await waitForRunCompletion(bureau, run.id);
+      expect(generate.callCount).toBe(2);
+      expect(await bureau.getSession(run.sessionId)).toBeUndefined();
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
   it('a second run on the same session does not re-fire steering.applied for a configVersion a prior run already applied (cross-run dedupe, end-to-end)', async () => {
     let releaseTool: (() => void) | undefined;
     const toolGate = new Promise<void>((resolve) => {
@@ -5296,6 +5384,44 @@ describe('createBureau submitSteeringCommand (AB-67/AB-199)', () => {
       });
 
       // Explicit runId: scopes correctly, and does not affect the OTHER run.
+      const scoped = await bureau.submitSteeringCommand(runA.sessionId, {
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+        runId: runA.id,
+      });
+      expect(scoped.outcome).toBe('accepted');
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it("end-to-end: a pause explicitly targeting still-live run A is authorized after concurrent run B completes and prunes its own authority entry (PR #430 review, Codex P2, second wave — 'Authorize against the targeted live run')", async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: async (context) => {
+        const isRunB = context.conversation
+          .getMessages()
+          .some((message) => message.content === 'go B');
+        if (isRunB) return { content: 'B done', toolCalls: [] };
+        return new Promise<never>(() => {});
+      },
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      stopWhen: stopWhen.noToolCalls(),
+    });
+    try {
+      const runA = await bureau.createRun({ message: 'go A', principal: 'alice' });
+      const runB = await bureau.createRun({
+        message: 'go B',
+        principal: 'alice',
+        sessionId: runA.sessionId,
+      });
+      await waitForRunCompletion(bureau, runB.id);
+      await pollUntil(async () => bureau.getRun(runA.id)?.status === 'running');
+
+      // B's own terminal transition pruned lastRequestAuthorities[B],
+      // leaving lastRunId: B and A's now-uncorrelated entry behind — a
+      // command explicitly targeting still-live A must still authorize.
       const scoped = await bureau.submitSteeringCommand(runA.sessionId, {
         principal: 'alice',
         requestedValue: { target: 'pause' },

@@ -583,17 +583,90 @@ export function createSteeringGate(
   //    never actually observed, because a resume overtook it first, must
   //    not later be misreported as `applied`).
   //  - `recordApplied`'s deadline-expiry branch only releases `pausedRunIds`
-  //    when the EXPIRING command is this run's actual owner — a duplicate
-  //    idempotent replay sharing the owner's configVersion but carrying its
-  //    own (possibly earlier) deadline must never revert a pause it did not
-  //    itself create (review finding, PR #430 — Codex P2, "Do not release
-  //    pauses owned by another command").
-  const runOwningCommand = new Map<string, { principal: string; id: string }>();
+  //    when the EXPIRING command is one of this run's actual owners, and
+  //    only once EVERY owner has expired — a duplicate idempotent replay
+  //    (or a second, distinct pause admitted while already paused) sharing
+  //    the transition's configVersion but carrying its OWN (possibly
+  //    earlier or later) deadline must never revert a pause another,
+  //    still-valid owner is holding open (review finding, PR #430 — Codex
+  //    P2, "Do not release pauses owned by another command", and its
+  //    converse, "Keep a valid duplicate pause when the owner expires": a
+  //    single `{ principal, id }` owner cannot represent "the run stays
+  //    paused as long as ANY of several distinct pause commands admitted
+  //    for the same transition remain unexpired" — a per-run SET of owners
+  //    can). A resume, or a fresh pause transition that supersedes the
+  //    current one, clears every owner in the set at once (see
+  //    `clearPauseOwners`) — resuming or re-pausing ends every outstanding
+  //    pause command's hold on this run's state, not just one.
+  const runPauseOwners = new Map<string, Map<string, { principal: string; id: string }>>();
+
+  function pauseOwnerKey(principal: string, id: string): string {
+    return `${principal} ${id}`;
+  }
+
+  /** Adds `command` as one of `runId`'s current pause owners — called both
+   *  when a pause TRANSITIONS the run to paused (the first owner) and when
+   *  a further, distinct pause command is admitted as an idempotent no-op
+   *  while already paused (an additional owner holding the same pause
+   *  open). */
+  function addPauseOwner(runId: string, principal: string, id: string): void {
+    let owners = runPauseOwners.get(runId);
+    if (!owners) {
+      owners = new Map();
+      runPauseOwners.set(runId, owners);
+    }
+    owners.set(pauseOwnerKey(principal, id), { principal, id });
+  }
+
+  /** Marks every still-`accepted` current owner of `runId`'s pause
+   *  `superseded`/`'superseded-by'` and clears the owner set — called on a
+   *  resume (nothing left to own) and on a fresh pause transition (the
+   *  prior owners' pause intent is replaced by this new one), mirroring
+   *  the single-owner supersession `admit()` performed before this gate
+   *  tracked more than one owner. */
+  function clearPauseOwners(runId: string, now: string, supersededBy: string): void {
+    const owners = runPauseOwners.get(runId);
+    if (!owners) return;
+    for (const { principal, id } of owners.values()) {
+      const prior = ledgerGet(principal, id);
+      if (prior && prior.state === 'accepted') {
+        prior.state = 'superseded';
+        prior.failure = { failedAt: now, reason: 'superseded-by', supersededBy };
+      }
+    }
+    runPauseOwners.delete(runId);
+  }
   // The agentName `promoteForNewRun(runId, ...)` actually captured FOR THAT
   // RUN — never the live, session-wide `agentName` below, which a LATER
   // promotion for a different, concurrent run can change out from under an
   // already-running one (see `forRun`'s own doc comment).
   const runAgentName = new Map<string, string>();
+  // The `deadline` of whichever agent-identity command actually supplied
+  // `runAgentName.get(runId)`, if it had one — `undefined` means either no
+  // identity was captured for this run, or it was captured with no
+  // deadline at all. Read by `forRun`'s `getDesiredState()` to recheck
+  // validity at the moment the identity is actually EXPOSED to a step
+  // (review finding, PR #430 — Codex P2, "Recheck identity deadlines
+  // before exposing them to step zero"): an identity valid when
+  // `promoteForNewRun()` ran can still expire in the (typically brief, but
+  // real for a direct `SteeringGate` consumer) window before the new run's
+  // step 0 actually reads `forRun(runId).getDesiredState()` — recordApplied
+  // marking the underlying ledger command `failed` at that later boundary
+  // does not, by itself, remove an already-captured `agentName` from this
+  // per-run view, since the two are otherwise independent. Mirrors
+  // `agentNameDeadline` below at the session-wide (not-yet-promoted-to-a-
+  // run) level.
+  const runAgentDeadline = new Map<string, string>();
+  // The `deadline` of whichever agent-identity command most recently set
+  // session-wide `agentName` (mirrors `agentName` itself) — captured
+  // alongside it in `promoteForNewRun` from `pendingAgentDeadline` below,
+  // and copied into `runAgentDeadline` the same moment `agentName` is
+  // copied into `runAgentName`.
+  let agentNameDeadline: string | undefined;
+  // The `deadline` of the currently-pending `pendingAgentName`, mirroring
+  // it exactly — set in `admit()`'s identity branch alongside
+  // `pendingAgentName`, promoted into `agentNameDeadline` alongside it too.
+  let pendingAgentDeadline: string | undefined;
   // The highest configVersion any agent-identity command has reached
   // (pending or already promoted) — the ONLY session-scoped target this gate
   // implements. `promoteForNewRun` seeds a new run's baseline from THIS, not
@@ -724,6 +797,16 @@ export function createSteeringGate(
         sessionId,
         getDesiredState() {
           const promotedAgentName = runAgentName.get(runId);
+          // Rechecked HERE, at the moment the identity is actually exposed
+          // to a step, not only once at `promoteForNewRun` time — the
+          // deadline the promoted command carried (if any) can pass in the
+          // window between promotion and this read (review finding, PR
+          // #430 — Codex P2, "Recheck identity deadlines before exposing
+          // them to step zero"). An expired identity is treated exactly as
+          // if it had never been captured — see `runAgentDeadline`'s own
+          // doc comment.
+          const deadline = runAgentDeadline.get(runId);
+          const identityExpired = deadline !== undefined && Date.now() > Date.parse(deadline);
           return {
             paused: pausedRunIds.has(runId),
             // Scoped to THIS run: its own baseline plus any pause/resume
@@ -739,7 +822,9 @@ export function createSteeringGate(
             // `pendingAgentName` — a deferred identity change is not yet
             // effective for any run still in flight (see
             // `promoteForNewRun`'s doc comment).
-            ...(promotedAgentName !== undefined ? { agentName: promotedAgentName } : {}),
+            ...(promotedAgentName !== undefined && !identityExpired
+              ? { agentName: promotedAgentName }
+              : {}),
           };
         },
         awaitResume(signal?: AbortSignal): Promise<void> {
@@ -805,6 +890,27 @@ export function createSteeringGate(
         };
       }
 
+      // AB-67/AB-199 review finding (PR #430 — Codex P2, second wave,
+      // "Reject commands addressed to another gate"): the existing-ledger
+      // branch above already rejects a same-`(principal, id)` RETRY whose
+      // `sessionId` disagrees with the stored original, but a genuinely
+      // NEW `(principal, id)` pair (no `existing` entry, reached only past
+      // that whole block) had no check at all that `command.sessionId`
+      // even matches THIS gate's own `sessionId` — a direct consumer of
+      // the exported `createSteeringGate()` (never `submitSteeringCommand`
+      // itself, which always constructs `command.sessionId` from the same
+      // `sessionId` it looked this gate up by) could steer the wrong
+      // session's gate on the very first admission, no idempotency
+      // collision required. `'policy-denied'` is reused for the same
+      // reason `expectedRevision` mismatch below reuses it: no ratified
+      // reason fits "wrong gate" specifically.
+      if (command.sessionId !== sessionId) {
+        return {
+          outcome: 'rejected',
+          failure: { failedAt: context.now, reason: 'policy-denied' },
+        };
+      }
+
       if (command.deadline !== undefined) {
         const deadlineMs = Date.parse(command.deadline);
         // A malformed (non-ISO, unparseable) deadline parses to `NaN`, and
@@ -861,6 +967,15 @@ export function createSteeringGate(
           // paused (or a resume while already unpaused) is accepted as a
           // no-op — no new configVersion, no state change.
           const stored = record(command, boundRunId, runVisibleVersion(boundRunId), context.now);
+          if (target === 'pause') {
+            // A DISTINCT pause command admitted while the run is already
+            // paused is a genuine, additional owner of the pause — the run
+            // must stay paused until every such owner has either resumed
+            // or expired, not merely the FIRST one (review finding, PR
+            // #430 — Codex P2, "Keep a valid duplicate pause when the
+            // owner expires"). See `addPauseOwner`'s own doc comment.
+            addPauseOwner(boundRunId, command.principal, command.id);
+          }
           return { outcome: 'accepted', command: snapshotOf(stored) };
         }
         const version = bump();
@@ -876,26 +991,16 @@ export function createSteeringGate(
         const stored = record(command, boundRunId, version, context.now);
         // This is a genuinely NEW transition for `boundRunId` — the run's
         // next boundary read will observe THIS version, never an earlier
-        // one. A previous owning command still `accepted` (the run's own
-        // boundary never reached it before this transition overtook it) is
-        // now stale: mark it `superseded`, the same terminal-failure AB-67
-        // already fixes for exactly this "a later command replaces an
-        // earlier one before it ever applied" shape (review finding, PR
-        // #430 — Codex P2, "Do not mark skipped steering versions as
-        // applied"). See `runOwningCommand`'s own doc comment.
-        const previousOwner = runOwningCommand.get(boundRunId);
-        if (previousOwner !== undefined) {
-          const prior = ledgerGet(previousOwner.principal, previousOwner.id);
-          if (prior && prior.state === 'accepted') {
-            prior.state = 'superseded';
-            prior.failure = {
-              failedAt: context.now,
-              reason: 'superseded-by',
-              supersededBy: command.id,
-            };
-          }
-        }
-        runOwningCommand.set(boundRunId, { principal: command.principal, id: command.id });
+        // one. Every PREVIOUS owner of this run's pause still `accepted`
+        // (the run's own boundary never reached it before this transition
+        // overtook it) is now stale: mark each `superseded`, the same
+        // terminal-failure AB-67 already fixes for exactly this "a later
+        // command replaces an earlier one before it ever applied" shape
+        // (review finding, PR #430 — Codex P2, "Do not mark skipped
+        // steering versions as applied"). See `runPauseOwners`'s own doc
+        // comment for why this is now every current owner, not one.
+        clearPauseOwners(boundRunId, context.now, command.id);
+        if (target === 'pause') addPauseOwner(boundRunId, command.principal, command.id);
         return { outcome: 'accepted', command: snapshotOf(stored) };
       }
 
@@ -944,6 +1049,7 @@ export function createSteeringGate(
       }
       // Guaranteed present — the `policyRef` variant already returned above.
       pendingAgentName = command.requestedValue.override;
+      pendingAgentDeadline = command.deadline;
       const stored = record(command, undefined, version, context.now);
       pendingIdentityKey = { principal: command.principal, id: command.id };
       lastIdentityVersion = version;
@@ -965,7 +1071,7 @@ export function createSteeringGate(
       // still-deferred identity command by an in-run pause/resume bound to
       // this same run). See this method's own doc comment.
       const baseline = runBaseline.get(runId) ?? 0;
-      const owner = runOwningCommand.get(runId);
+      const owners = runPauseOwners.get(runId);
       for (const principalMap of ledger.values()) {
         for (const stored of principalMap.values()) {
           if (stored.sessionId !== sessionId) continue;
@@ -980,7 +1086,7 @@ export function createSteeringGate(
               // same run overtook it first, before this boundary ever fired
               // — must not be misreported as `applied` merely because its
               // version is numerically at or below the version this
-              // boundary DID observe. `admit()`'s `runOwningCommand`
+              // boundary DID observe. `admit()`'s `clearPauseOwners`
               // supersession already marks that stale command `superseded`
               // the moment it is overtaken (so it is normally no longer
               // `accepted` by the time this runs at all); this exact match
@@ -1005,19 +1111,26 @@ export function createSteeringGate(
             stored.deadline !== undefined &&
             Date.parse(now) > Date.parse(stored.deadline)
           ) {
-            // Only the command that actually OWNS this run's current pause
-            // transition may revert it on expiry. A duplicate idempotent
-            // replay sharing the owner's `configVersion` but carrying its
-            // own, earlier deadline never itself created the paused state
-            // and must not release a pause another, still-valid command
-            // owns (review finding, PR #430 — Codex P2, "Do not release
-            // pauses owned by another command").
-            const isOwner =
-              owner !== undefined && owner.principal === stored.principal && owner.id === stored.id;
-            if (isPause && isOwner && pausedRunIds.has(runId)) {
-              pausedRunIds.delete(runId);
-              releaseWaitersFor(runId);
-              releaseUnboundWaitersIfFullyResumed();
+            // Only a command that is actually one of this run's current
+            // pause OWNERS may revert anything on expiry, and reverting
+            // means removing just ITSELF from the owner set — the run
+            // stays paused as long as at least one other owner remains
+            // unexpired (review finding, PR #430 — Codex P2, "Do not
+            // release pauses owned by another command", and its converse,
+            // "Keep a valid duplicate pause when the owner expires": a
+            // duplicate idempotent replay, or a second distinct pause
+            // admitted while already paused, is itself an owner and must
+            // both avoid releasing a pause it does not solely hold AND
+            // keep the pause held when it is the LAST owner remaining).
+            const ownerKey = pauseOwnerKey(stored.principal, stored.id);
+            const isOwner = isPause && owners !== undefined && owners.has(ownerKey);
+            if (isOwner) {
+              owners?.delete(ownerKey);
+              if ((owners?.size ?? 0) === 0 && pausedRunIds.has(runId)) {
+                pausedRunIds.delete(runId);
+                releaseWaitersFor(runId);
+                releaseUnboundWaitersIfFullyResumed();
+              }
             }
             stored.state = 'failed';
             stored.failure = { failedAt: now, reason: 'deadline-passed' };
@@ -1053,7 +1166,9 @@ export function createSteeringGate(
       }
       if (pendingAgentName !== undefined) {
         agentName = pendingAgentName;
+        agentNameDeadline = pendingAgentDeadline;
         pendingAgentName = undefined;
+        pendingAgentDeadline = undefined;
       }
       // Unconditional, not only inside the `pendingAgentName !== undefined`
       // branch above: a `policyRef`-only identity command sets
@@ -1073,7 +1188,11 @@ export function createSteeringGate(
       // Captured for THIS run specifically — see `runAgentName`'s and
       // `forRun`'s own doc comments for why a later promotion for a
       // different run must never change what this run reports.
-      if (agentName !== undefined) runAgentName.set(runId, agentName);
+      if (agentName !== undefined) {
+        runAgentName.set(runId, agentName);
+        if (agentNameDeadline !== undefined) runAgentDeadline.set(runId, agentNameDeadline);
+        else runAgentDeadline.delete(runId);
+      }
     },
 
     failAcceptedForRun(runId: string, now: string): void {
@@ -1083,13 +1202,14 @@ export function createSteeringGate(
     settleForDeletion(now: string): void {
       // Every run this gate still has ANY bookkeeping for — not only
       // `pausedRunIds` — since a run that started but never paused still
-      // holds a `runBaseline`/`runOwningCommand`/`waitersByRunId` entry this
+      // holds a `runBaseline`/`runPauseOwners`/`waitersByRunId` entry this
       // gate is about to discard along with everything else (see this
       // method's own interface doc comment).
       const runIds = new Set<string>([
         ...pausedRunIds,
         ...runBaseline.keys(),
         ...runLastPauseVersion.keys(),
+        ...runPauseOwners.keys(),
         ...waitersByRunId.keys(),
       ]);
       for (const runId of runIds) releaseRun(runId, now);
@@ -1143,8 +1263,9 @@ export function createSteeringGate(
     runBaseline.delete(runId);
     runLastPauseVersion.delete(runId);
     runAppliedVersion.delete(runId);
-    runOwningCommand.delete(runId);
+    runPauseOwners.delete(runId);
     runAgentName.delete(runId);
+    runAgentDeadline.delete(runId);
     waitersByRunId.delete(runId);
   }
 

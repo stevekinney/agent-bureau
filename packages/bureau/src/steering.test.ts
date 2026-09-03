@@ -872,7 +872,11 @@ describe('createSteeringGate', () => {
         { liveRunIds: [], now: NOW },
       );
       expect(outcome.outcome).toBe('accepted');
-      gate.promoteForNewRun('run-2');
+      // Explicit `now`, well before the fixture's deadline above — the
+      // default (real wall-clock) `now` this call would otherwise use is
+      // not safe against a fixed 2026 fixture deadline indefinitely (this
+      // regressed for real once the calendar caught up to it).
+      gate.promoteForNewRun('run-2', NOW);
       const runVersion = gate.forRun('run-2').getDesiredState().configVersion;
       gate.recordApplied('run-2', runVersion, NOW);
       const replay = gate.admit(
@@ -1521,6 +1525,144 @@ describe('createSteeringGate', () => {
       const gate = createSteeringGate('session-1');
       gate.settleForDeletion(NOW);
       expect(gate.getDesiredState()).toEqual({ paused: false, configVersion: 0 });
+    });
+  });
+
+  describe('keep a valid duplicate pause when the owner expires (PR #430 review, Codex P2, second wave — "Keep a valid duplicate pause when the owner expires")', () => {
+    it('stays paused when a still-valid duplicate pause outlives the original, shorter-deadline owner', () => {
+      const gate = createSteeringGate('session-1');
+      const owner = gate.admit(
+        { ...pauseCommand({ id: 'owner' }), deadline: '2026-09-02T00:00:02.000Z' },
+        { liveRunIds: ['run-1'], now: NOW },
+      ); // v1, expires at 00:00:02
+      expect(owner.outcome).toBe('accepted');
+      expect(gate.forRun('run-1').getDesiredState().paused).toBe(true);
+
+      // A second, distinct pause admitted while already paused — an
+      // idempotent no-op against configVersion, but a genuinely additional
+      // owner with its own, LATER deadline.
+      const duplicate = gate.admit(
+        { ...pauseCommand({ id: 'duplicate' }), deadline: '2026-09-02T00:00:10.000Z' },
+        { liveRunIds: ['run-1'], now: NOW },
+      );
+      expect(duplicate.outcome).toBe('accepted');
+      if (owner.outcome !== 'accepted') return;
+
+      // The boundary read arrives after the OWNER's deadline but before the
+      // duplicate's.
+      const boundaryNow = '2026-09-02T00:00:05.000Z';
+      gate.recordApplied('run-1', owner.command.configVersion, boundaryNow);
+
+      // The owner expired and was removed as an owner, but the still-valid
+      // duplicate keeps the run paused.
+      expect(gate.forRun('run-1').getDesiredState().paused).toBe(true);
+
+      const ownerReplay = gate.admit(pauseCommand({ id: 'owner' }), {
+        liveRunIds: ['run-1'],
+        now: boundaryNow,
+      });
+      expect(ownerReplay).toEqual({
+        outcome: 'replayed',
+        command: expect.objectContaining({
+          state: 'failed',
+          failure: { failedAt: boundaryNow, reason: 'deadline-passed' },
+        }),
+      });
+
+      // The duplicate itself was eligible at this SAME boundary (it shares
+      // the owner's configVersion) and its own deadline had not yet
+      // passed, so it was consumed normally — 'applied', not 'accepted'.
+      // A command's deadline is only ever checked once, at the boundary
+      // that first observes it while still 'accepted' (AB-67's application-
+      // boundary model has no notion of re-litigating an already-consumed
+      // transition later); this is what keeps the run paused above, not a
+      // promise that a LATER boundary would revisit the duplicate's own
+      // now-past deadline.
+      const duplicateReplay = gate.admit(pauseCommand({ id: 'duplicate' }), {
+        liveRunIds: ['run-1'],
+        now: boundaryNow,
+      });
+      expect(duplicateReplay).toEqual({
+        outcome: 'replayed',
+        command: expect.objectContaining({ state: 'applied' }),
+      });
+    });
+  });
+
+  describe('reject commands addressed to another gate (PR #430 review, Codex P2, second wave — "Reject commands addressed to another gate")', () => {
+    it("rejects a brand-new (principal, id) command whose sessionId does not match this gate's own session", () => {
+      const gate = createSteeringGate('session-1');
+      const outcome = gate.admit(pauseCommand({ sessionId: 'session-2' }), {
+        liveRunIds: ['run-1'],
+        now: NOW,
+      });
+      expect(outcome).toEqual({
+        outcome: 'rejected',
+        failure: { failedAt: NOW, reason: 'policy-denied' },
+      });
+      // Nothing was admitted — the gate's own desired state is untouched.
+      expect(gate.getDesiredState()).toEqual({ paused: false, configVersion: 0 });
+    });
+  });
+
+  describe('recheck identity deadlines before exposing them to step zero (PR #430 review, Codex P2, second wave — "Recheck identity deadlines before exposing them to step zero")', () => {
+    it("omits agentName from a run's own view once its promoted identity's deadline has passed, even though promotion itself succeeded", () => {
+      const gate = createSteeringGate('session-1');
+      // Deadlines chosen well beyond this test's own execution so the
+      // "not yet expired" read below never depends on being fast; only the
+      // deliberately-mocked "expired" read below moves past it.
+      const deadline = '2030-01-01T00:00:02.000Z';
+      const identity = gate.admit(
+        {
+          id: 'identity-1',
+          idOrigin: 'caller',
+          sessionId: 'session-1',
+          principal: 'alice',
+          requestedValue: { target: 'agent-identity', override: 'reviewer' },
+          requestedAt: NOW,
+          deadline,
+        },
+        { liveRunIds: [], now: NOW },
+      );
+      expect(identity.outcome).toBe('accepted');
+
+      // Promotion itself runs before the deadline passes and succeeds.
+      gate.promoteForNewRun('run-1', '2030-01-01T00:00:01.500Z');
+      expect(gate.forRun('run-1').getDesiredState().agentName).toBe('reviewer');
+
+      // No `recordApplied` boundary has run yet — nothing has marked the
+      // underlying command failed — but reading the run's view again after
+      // the deadline has now passed must not keep reporting the identity.
+      // `forRun().getDesiredState()` has no `now` parameter of its own (a
+      // fixed operative-level interface), so this is the one place in this
+      // suite that mocks `Date.now` rather than injecting a clock —
+      // `packages/bureau/src/steering.test.ts` is not a deterministic test
+      // directory per `scripts/determinism-manifest.json`.
+      const originalNow = Date.now;
+      try {
+        Date.now = () => Date.parse('2030-01-01T00:00:03.000Z');
+        expect(gate.forRun('run-1').getDesiredState().agentName).toBeUndefined();
+      } finally {
+        Date.now = originalNow;
+      }
+    });
+
+    it('keeps reporting a promoted identity with no deadline at all, unaffected by the check', () => {
+      const gate = createSteeringGate('session-1');
+      const identity = gate.admit(
+        {
+          id: 'identity-1',
+          idOrigin: 'caller',
+          sessionId: 'session-1',
+          principal: 'alice',
+          requestedValue: { target: 'agent-identity', override: 'reviewer' },
+          requestedAt: NOW,
+        },
+        { liveRunIds: [], now: NOW },
+      );
+      expect(identity.outcome).toBe('accepted');
+      gate.promoteForNewRun('run-1', NOW);
+      expect(gate.forRun('run-1').getDesiredState().agentName).toBe('reviewer');
     });
   });
 });
