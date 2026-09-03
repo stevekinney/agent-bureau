@@ -34,7 +34,7 @@ export type {
   FaultEffect,
   FaultEngine,
   FaultFailAfterCommitEffect,
-  FaultFailAfterEffectEffect,
+  FaultFailAfterEffect,
   FaultFailBeforeCommitEffect,
   FaultIgnoreAbortEffect,
   FaultRejectBeforeWorkEffect,

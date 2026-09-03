@@ -1,4 +1,4 @@
-import type { AnyToolbox, ToolboxExecuteOptions } from 'armorer';
+import type { AnyToolbox, ToolboxExecuteOptions, ToolError } from 'armorer';
 import type { HookRegistrationOptions, RuntimeServices } from 'lifecycle';
 import { HookRegistry } from 'lifecycle';
 
@@ -57,7 +57,7 @@ export interface FaultRejectBeforeWorkEffect {
 }
 
 /** `after-effect`: the wrapped function runs to completion; its result is discarded and the caller sees `error`. */
-export interface FaultFailAfterEffectEffect {
+export interface FaultFailAfterEffect {
   readonly kind: 'fail-after-effect';
   readonly error?: unknown;
 }
@@ -106,7 +106,7 @@ export type FaultEffect =
   | FaultBlockEffect
   | FaultDelayEffect
   | FaultRejectBeforeWorkEffect
-  | FaultFailAfterEffectEffect
+  | FaultFailAfterEffect
   | FaultFailBeforeCommitEffect
   | FaultFailAfterCommitEffect
   | FaultStaleReadEffect
@@ -199,6 +199,32 @@ async function rejectedPromise<T>(error: unknown): Promise<T> {
   throw error;
 }
 
+/**
+ * Converts a fault-injected failure into the same `outcome: 'error'` shape
+ * a real `Toolbox.execute()` call under `errorMode: 'collect'` (the
+ * default) resolves with, so a wrapped toolbox's `execute()` never rejects
+ * on account of a fired fault — matching the public contract every other
+ * caller of a real toolbox already relies on.
+ */
+function toolExecutionErrorResult(call: ToolCallInput, error: unknown): ToolExecutionResult {
+  const message = error instanceof Error ? error.message : String(error);
+  const toolError: ToolError = {
+    code: 'FAULT_INJECTED',
+    category: 'internal',
+    retryable: false,
+    message,
+  };
+  return {
+    callId: call.id ?? '',
+    toolCallId: call.id ?? '',
+    toolName: call.name,
+    outcome: 'error',
+    content: null,
+    result: undefined,
+    error: toolError,
+  };
+}
+
 /** Reads `effect.kind` off an `unknown` value, or `undefined` when it isn't a `{ kind: string }` shape. */
 function readEffectKind(effect: unknown): string | undefined {
   if (typeof effect !== 'object' || effect === null || !('kind' in effect)) return undefined;
@@ -234,10 +260,20 @@ interface EntryOccurrenceState {
  * `runtime` — nothing here reads a real timer or a real clock.
  */
 export function createFaultEngine(plan: FaultPlan, runtime: RuntimeServices): FaultEngine {
+  const seenEntryIds = new Set<string>();
   for (const entry of plan) {
     if (entry.boundary === 'process-death') {
       throw new UnsupportedFaultBoundaryError(entry.id);
     }
+    // A duplicate id would silently alias two entries' occurrence-tracking
+    // state onto one map key below, corrupting `fired()`/`assertAllFired()`
+    // for both. Fail loudly at construction instead.
+    if (seenEntryIds.has(entry.id)) {
+      throw new Error(
+        `FaultEngine: duplicate FaultPlanEntry id "${entry.id}" — plan entry ids must be unique.`,
+      );
+    }
+    seenEntryIds.add(entry.id);
   }
 
   const fired: FiredFault[] = [];
@@ -507,12 +543,24 @@ export function createFaultEngine(plan: FaultPlan, runtime: RuntimeServices): Fa
         const results: ToolExecutionResult[] = [];
         for (const call of calls) {
           const operationKey: FaultOperation = `tool:${call.name}`;
-          const result = await dispatch<ToolExecutionResult>(
-            operationKey,
-            (signal) => toolbox.execute(call, signal ? { ...options, signal } : options),
-            options?.signal,
-          );
-          results.push(result);
+          try {
+            const result = await dispatch<ToolExecutionResult>(
+              operationKey,
+              (signal) => toolbox.execute(call, signal ? { ...options, signal } : options),
+              options?.signal,
+            );
+            results.push(result);
+          } catch (error) {
+            // `Toolbox.execute()`'s established contract (create-toolbox.ts's
+            // default `errorMode: 'collect'`) is to RESOLVE with an
+            // `outcome: 'error'` result on a tool failure, never to reject —
+            // a fault-injected failure must honor that same contract rather
+            // than making an injected failure look like a toolbox-level
+            // crash to a caller (e.g. run-step.ts's own catch path exists
+            // for genuine crashes, not tool failures). A batch keeps
+            // executing its remaining calls, matching 'collect' semantics.
+            results.push(toolExecutionErrorResult(call, error));
+          }
         }
         return isBatch ? results : results[0]!;
       };

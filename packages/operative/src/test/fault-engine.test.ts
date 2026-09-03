@@ -92,6 +92,30 @@ describe('createFaultEngine', () => {
     });
   });
 
+  describe('duplicate plan entry ids', () => {
+    it('is rejected at construction rather than silently aliasing occurrence-tracking state', () => {
+      const runtime = createManualRuntimeServices();
+      const plan: FaultPlan = [
+        {
+          id: 'shared-id',
+          boundary: 'before-work',
+          operation: 'generate',
+          occurrence: { kind: 'every' },
+          effect: { kind: 'reject-before-work', error: new Error('first') },
+        },
+        {
+          id: 'shared-id',
+          boundary: 'before-work',
+          operation: 'tool:other',
+          occurrence: { kind: 'every' },
+          effect: { kind: 'reject-before-work', error: new Error('second') },
+        },
+      ];
+
+      expect(() => createFaultEngine(plan, runtime)).toThrow('shared-id');
+    });
+  });
+
   describe('FAULT_BOUNDARY_EFFECT_KINDS', () => {
     it('names at least one effect kind for every non-process-death boundary', () => {
       const nonProcessDeath = Object.entries(FAULT_BOUNDARY_EFFECT_KINDS).filter(
@@ -515,9 +539,10 @@ describe('createFaultEngine', () => {
       const engine = createFaultEngine(plan, runtime);
       const wrapped = engine.wrapToolbox(toolbox);
 
-      expect(wrapped.execute({ id: 'call-a', name: 'tool-a', arguments: {} })).rejects.toThrow(
-        'a is down',
-      );
+      const aResult = await wrapped.execute({ id: 'call-a', name: 'tool-a', arguments: {} });
+      expect(aResult.outcome).toBe('error');
+      expect(aResult.error?.message).toBe('a is down');
+
       const bResult = await wrapped.execute({ id: 'call-b', name: 'tool-b', arguments: {} });
       expect(bResult.outcome).toBe('success');
       expect(bResult.result).toBe('b-ok');
@@ -550,12 +575,16 @@ describe('createFaultEngine', () => {
       const engine = createFaultEngine(plan, runtime);
       const wrapped = engine.wrapToolbox(toolbox);
 
-      expect(
-        wrapped.execute([
-          { id: 'call-a', name: 'tool-a', arguments: {} },
-          { id: 'call-b', name: 'tool-b', arguments: {} },
-        ]),
-      ).rejects.toThrow('a is down');
+      const [aResult, bResult] = await wrapped.execute([
+        { id: 'call-a', name: 'tool-a', arguments: {} },
+        { id: 'call-b', name: 'tool-b', arguments: {} },
+      ]);
+      expect(aResult?.outcome).toBe('error');
+      expect(aResult?.error?.message).toBe('a is down');
+      // The rest of the batch still executes — matching the toolbox's own
+      // default 'collect' error mode, which never aborts a batch early.
+      expect(bResult?.outcome).toBe('success');
+      expect(bResult?.result).toBe('b-ok');
     });
   });
 
@@ -861,8 +890,12 @@ describe('createFaultEngine', () => {
       });
       const wrapped = engine.wrapToolbox(createToolbox([toolA, toolB]));
 
-      expect(wrapped.execute({ id: '1', name: 'b', arguments: {} })).rejects.toThrow('b');
-      expect(wrapped.execute({ id: '2', name: 'a', arguments: {} })).rejects.toThrow('a');
+      // Each fault fires synchronously (within `applyMatch`'s own
+      // synchronous portion, before either call's promise is awaited) —
+      // `engine.fired()` already reflects both without awaiting either
+      // `execute()` call below.
+      void wrapped.execute({ id: '1', name: 'b', arguments: {} });
+      void wrapped.execute({ id: '2', name: 'a', arguments: {} });
 
       expect(engine.fired().map((f) => f.plan)).toEqual(['second', 'first']);
       engine.assertAllFired();
