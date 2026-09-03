@@ -1381,6 +1381,11 @@ export function createSessionHandle(
               {
                 runId,
                 handle: recoveredHandle,
+                // AB-304: the same registry a fresh run() call threads
+                // through `RunOptions.childRegistry` — see the identical
+                // reasoning on `reattachDurableActiveRun`'s own
+                // `childRegistry` option.
+                childRegistry: runOptions.childRegistry,
               },
             );
             const agentRun = createAgentRun(activeRun);

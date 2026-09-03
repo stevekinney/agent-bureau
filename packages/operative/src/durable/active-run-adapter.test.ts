@@ -11,12 +11,15 @@ import {
   ToolboxProgressEvent,
   ToolboxSettledEvent,
 } from 'armorer';
+import { createTestToolbox } from 'armorer/test';
 import { afterEach, describe, expect, it } from 'bun:test';
 import { Conversation, createConversationHistory } from 'conversationalist';
 import { CompletableEventTarget, createManualRuntimeServices, HookRegistry } from 'lifecycle';
 import { z } from 'zod';
 
+import { createChildRunRegistry, dispatchChildRun } from '../child-run';
 import { stopWhen } from '../conditions/index';
+import { createAgent } from '../create-agent';
 import { createActiveRun } from '../create-run';
 import {
   AbortAgentRunError,
@@ -42,6 +45,7 @@ import {
 import type { OperativeHookMap } from '../hooks';
 import { type StallWatchdogClock, TOOL_CALL_POLICY } from '../liveness';
 import { UnsupportedRunResultVersionError } from '../run-envelope';
+import type { RunnableAgent } from '../runnable-agent';
 import { createManualDurableEngine, spyEngine } from '../test/durable-engine';
 import { createManualCheckpointStore, createMockGenerate } from '../test/index';
 import type { RunOptions, RunResult } from '../types';
@@ -2460,6 +2464,206 @@ describe('createDurableActiveRun.closed()', () => {
       status: 'unresolved',
       reason: 'persistence-failed',
     });
+  });
+});
+
+/**
+ * AB-304: `createDurableActiveRun`/`reattachDurableActiveRun` thread
+ * `RunOptions.childRegistry`/the `childRegistry` reattach option through,
+ * folding `ChildRunRegistry.awaitChildrenClosed()` into their own
+ * `closed()` — the durable-path counterpart to `create-run.test.ts`'s
+ * identical AB-211 suite. The child is a REAL in-memory `RunnableAgent`
+ * (`createAgent`) dispatched via `dispatchChildRun`, with a tool gated on a
+ * manually-resolved promise (no real sleeps) so its own `closed()` stays
+ * pending on a slow tool drain — exactly the AB-289 pattern `create-run.ts`
+ * already exercises — until the test releases it.
+ */
+describe('AB-304: durable ActiveRun closed() awaits registered children', () => {
+  function buildSlowChildAgent(): { agent: RunnableAgent; release: () => void } {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const slowTool = createTool({
+      name: 'slow_child_tool',
+      description: 'Stays in flight until the test releases it.',
+      input: z.object({}),
+      execute: async () => {
+        await gate;
+        return { done: true };
+      },
+    });
+    const toolbox = createTestToolbox([slowTool]);
+    const generate = createMockGenerate([
+      { content: '', toolCalls: [{ name: 'slow_child_tool', arguments: {} }] },
+      { content: 'child done', toolCalls: [] },
+    ]);
+    const agent = createAgent({
+      name: 'ab-304-child',
+      generate,
+      toolbox,
+      stopWhen: stopWhen.noToolCalls(),
+    });
+    return { agent, release };
+  }
+
+  it('does not report completed until a dispatched child, kept pending by a slow tool drain, itself settles', async () => {
+    const context = await buildContext();
+    try {
+      const registry = createChildRunRegistry();
+      const { agent: childAgent, release: releaseChildTool } = buildSlowChildAgent();
+      const runId = 'ab-304-durable-parent';
+
+      const activeRun = createDurableActiveRun(context, {
+        runId,
+        sessionId: runId,
+        options: {
+          ...runOptions(async () => ({ content: 'done', toolCalls: [] })),
+          childRegistry: registry,
+        },
+        prompt: 'Hello',
+      });
+
+      dispatchChildRun(childAgent, 'go', {
+        agentName: 'ab-304-child',
+        parentRunId: runId,
+        registry,
+      });
+
+      const closedAcknowledgement = activeRun.closed();
+      const result = await activeRun.result;
+      expect(result.finishReason).toBe('stop-condition');
+
+      let settledFlag = false;
+      void closedAcknowledgement.then(() => {
+        settledFlag = true;
+      });
+      // The child's own `closed()` only settles once `slow_child_tool`'s
+      // callback genuinely returns (AB-289) — flush generously so a
+      // regression that skips the fold-in shows up unambiguously rather
+      // than surviving a lucky race against a handful of microtask hops.
+      for (let tick = 0; tick < 25; tick++) {
+        await Promise.resolve();
+      }
+      expect(settledFlag).toBe(false);
+
+      releaseChildTool();
+
+      expect(await closedAcknowledgement).toEqual({ status: 'completed' });
+      expect(settledFlag).toBe(true);
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('resolves not-required immediately for a zero-children run, identically to before this issue, even when a childRegistry is supplied but empty', async () => {
+    const context = await buildContext();
+    try {
+      const registry = createChildRunRegistry();
+      const runId = 'ab-304-durable-empty-registry';
+
+      const activeRun = createDurableActiveRun(context, {
+        runId,
+        sessionId: runId,
+        options: {
+          ...runOptions(async () => ({ content: 'done', toolCalls: [] })),
+          childRegistry: registry,
+        },
+        prompt: 'Hello',
+      });
+
+      await activeRun.result;
+      await Promise.resolve();
+
+      expect(await activeRun.closed()).toEqual({ status: 'not-required' });
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('a reattached parent after recovery waits the same way for a child dispatched onto the SAME registry after reattachment', async () => {
+    const context = await buildContext();
+    try {
+      const registry = createChildRunRegistry();
+      const { agent: childAgent, release: releaseChildTool } = buildSlowChildAgent();
+      const runId = 'ab-304-reattach-parent';
+
+      const handle = {
+        id: runId,
+        result: () =>
+          Promise.resolve({
+            schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
+            runId,
+            steps: 1,
+            content: 'recovered done',
+            finishReason: 'stop-condition' as const,
+          }),
+      };
+
+      const recoveredRun = reattachDurableActiveRun(
+        { engine: context.engine, checkpointStore: context.checkpointStore },
+        { runId, handle, childRegistry: registry },
+      );
+
+      // Dispatched AFTER reattachment — proving discovery isn't limited to
+      // children registered before the parent was rebuilt.
+      dispatchChildRun(childAgent, 'go', {
+        agentName: 'ab-304-child',
+        parentRunId: runId,
+        registry,
+      });
+
+      const closedAcknowledgement = recoveredRun.closed();
+      const result = await recoveredRun.result;
+      expect(result.finishReason).toBe('stop-condition');
+
+      let settledFlag = false;
+      void closedAcknowledgement.then(() => {
+        settledFlag = true;
+      });
+      for (let tick = 0; tick < 25; tick++) {
+        await Promise.resolve();
+      }
+      expect(settledFlag).toBe(false);
+
+      releaseChildTool();
+
+      expect(await closedAcknowledgement).toEqual({ status: 'completed' });
+      expect(settledFlag).toBe(true);
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('reattach resolves not-required immediately when a childRegistry is supplied but nothing was ever dispatched onto it', async () => {
+    const context = await buildContext();
+    try {
+      const registry = createChildRunRegistry();
+      const runId = 'ab-304-reattach-empty-registry';
+      const handle = {
+        id: runId,
+        result: () =>
+          Promise.resolve({
+            schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
+            runId,
+            steps: 0,
+            content: 'done',
+            finishReason: 'stop-condition' as const,
+          }),
+      };
+
+      const recoveredRun = reattachDurableActiveRun(
+        { engine: context.engine, checkpointStore: context.checkpointStore },
+        { runId, handle, childRegistry: registry },
+      );
+
+      await recoveredRun.result;
+      await Promise.resolve();
+
+      expect(await recoveredRun.closed()).toEqual({ status: 'not-required' });
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
   });
 });
 
