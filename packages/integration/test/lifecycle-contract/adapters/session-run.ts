@@ -45,6 +45,7 @@ const UNSUPPORTED: Readonly<Partial<Record<LifecycleCapability, string>>> = {
   detachment: 'AB-269',
   'signal-delivery': 'AB-269',
   recovery: 'AB-269',
+  'durable-reconstruction': 'AB-269', // no scenario yet — AB-269 owns it (see agent-run.ts)
 };
 const unsupported = createUnsupportedOutcomeFactory(MODE, UNSUPPORTED);
 
@@ -91,7 +92,6 @@ function child(
 ) {
   return dispatchTestChild(createAgent, runtime, registry, parentId, name, generate, signal);
 }
-
 export function createSessionRunAdapter(): LifecycleContractAdapter {
   return {
     mode: MODE,

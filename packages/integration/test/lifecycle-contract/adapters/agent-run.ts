@@ -41,6 +41,13 @@ const UNSUPPORTED: Readonly<Partial<Record<LifecycleCapability, string>>> = {
   detachment: 'AB-269',
   'signal-delivery': 'AB-269',
   recovery: 'AB-269',
+  // No scenario exercises this capability yet — AB-269 (the durable and
+  // recovered-durable contract adapters, explicitly out of scope here)
+  // owns both the scenario and the adapters that could support it. Declared
+  // explicitly rather than left to fall through `supports()`'s default
+  // `true`, so this adapter never silently claims a capability nothing
+  // tests (see the AB-268 PR review discussion).
+  'durable-reconstruction': 'AB-269',
 };
 const unsupported = createUnsupportedOutcomeFactory(MODE, UNSUPPORTED);
 

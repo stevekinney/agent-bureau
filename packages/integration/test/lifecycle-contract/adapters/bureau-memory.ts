@@ -42,6 +42,8 @@ const UNSUPPORTED: Readonly<Partial<Record<LifecycleCapability, string>>> = {
   detachment: 'AB-269',
   'signal-delivery': 'AB-269',
   recovery: 'AB-269',
+  // No scenario exercises this yet — AB-269 owns it (see agent-run.ts).
+  'durable-reconstruction': 'AB-269',
 };
 const unsupported = createUnsupportedOutcomeFactory(MODE, UNSUPPORTED);
 

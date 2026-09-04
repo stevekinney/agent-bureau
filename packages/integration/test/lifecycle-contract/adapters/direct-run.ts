@@ -10,10 +10,13 @@
  * capability `agent-run.ts`/`bureau-memory.ts` DO support);
  * `'detachment'`/`'signal-delivery'` need a durable owner this process-local
  * mode never has; `'recovery'` needs the excluded durable adapters (AB-269).
+ * Every scenario runs through `withRun`, which registers `run` on a
+ * `ResourceScope` and closes it in a `finally` — even a scenario whose own
+ * assertion throws still releases the run.
  */
-import type { ActiveRun } from '@lostgradient/operative';
+import type { ActiveRun, RuntimeServices } from '@lostgradient/operative';
 import { createActiveRun, stopWhen } from '@lostgradient/operative';
-import { createEventRecorder, createManualRuntimeServices } from '@lostgradient/operative/test';
+import { createEventRecorder } from '@lostgradient/operative/test';
 import { createToolbox } from 'armorer';
 import { Conversation } from 'conversationalist';
 
@@ -23,7 +26,7 @@ import {
   createFailingGenerate,
   createInstantGenerate,
   createUnsupportedOutcomeFactory,
-  scopeForRun,
+  withRun,
 } from '../support';
 
 const MODE = 'direct-run';
@@ -34,11 +37,13 @@ const UNSUPPORTED: Readonly<Partial<Record<LifecycleCapability, string>>> = {
   detachment: 'AB-269',
   'signal-delivery': 'AB-269',
   recovery: 'AB-269',
+  // No scenario exercises this yet — AB-269 owns it (see agent-run.ts).
+  'durable-reconstruction': 'AB-269',
 };
 const unsupported = createUnsupportedOutcomeFactory(MODE, UNSUPPORTED);
 
 function makeRun(
-  runtime: ReturnType<typeof createManualRuntimeServices>,
+  runtime: RuntimeServices,
   generateOverride?: Parameters<typeof createActiveRun>[0]['generate'],
 ): ActiveRun {
   return createActiveRun({
@@ -55,118 +60,120 @@ export function createDirectRunAdapter(): LifecycleContractAdapter {
     mode: MODE,
     supports: (capability) => !(capability in UNSUPPORTED),
 
-    async stableIdentity() {
-      const runtime = createManualRuntimeServices();
-      const run = makeRun(runtime);
-      const scope = scopeForRun('stableIdentity', runtime, run);
-      const firstId = run.snapshot().id;
-      await run.result;
-      const secondId = run.snapshot().id;
-      await scope.close();
-      return { firstId, secondId };
-    },
+    stableIdentity: () =>
+      withRun(
+        'stableIdentity',
+        (runtime) => makeRun(runtime),
+        async (run) => {
+          const firstId = run.snapshot().id;
+          await run.result;
+          return { firstId, secondId: run.snapshot().id };
+        },
+      ),
 
     parentage: () => Promise.resolve(unsupported('parentage')),
 
-    async readyAndRunningState() {
-      const runtime = createManualRuntimeServices();
+    readyAndRunningState: () => {
       const blocking = createBlockingGenerate();
-      const run = makeRun(runtime, blocking.generate);
-      const scope = scopeForRun('readyAndRunningState', runtime, run);
-      const observed: string[] = [run.snapshot().status];
-      const subscription = run.subscribeSnapshot((snapshot) => observed.push(snapshot.status));
-      // Deterministic, no wall-clock sleep: yields until the run's own
-      // microtask chain reaches the (blocked) generate call.
-      for (let attempt = 0; attempt < 50 && run.snapshot().status !== 'running'; attempt++) {
-        await Promise.resolve();
-      }
-      observed.push(run.snapshot().status);
-      blocking.release();
-      await run.result;
-      observed.push(run.snapshot().status);
-      subscription.unsubscribe();
-      await scope.close();
-      return {
-        sawNonTerminalStatus: observed.some((status) => status !== 'terminal'),
-        reachedTerminalStatus: observed.at(-1) === 'terminal',
-      };
+      return withRun(
+        'readyAndRunningState',
+        (runtime) => makeRun(runtime, blocking.generate),
+        async (run) => {
+          const observed: string[] = [run.snapshot().status];
+          const subscription = run.subscribeSnapshot((snapshot) => observed.push(snapshot.status));
+          // Deterministic, no wall-clock sleep: yields until the run's own
+          // microtask chain reaches the (blocked) generate call.
+          for (let attempt = 0; attempt < 50 && run.snapshot().status !== 'running'; attempt++) {
+            await Promise.resolve();
+          }
+          observed.push(run.snapshot().status);
+          blocking.release();
+          await run.result;
+          observed.push(run.snapshot().status);
+          subscription.unsubscribe();
+          return {
+            sawNonTerminalStatus: observed.includes('running'),
+            reachedTerminalStatus: observed.at(-1) === 'terminal',
+          };
+        },
+      );
     },
 
-    async terminalSuccess() {
-      const runtime = createManualRuntimeServices();
-      const run = makeRun(runtime);
-      const recorder = createEventRecorder(runtime);
-      recorder.attach(run, { kind: 'run', id: 'success' }, ['run.started', 'run.completed']);
-      const scope = scopeForRun('terminalSuccess', runtime, run);
-      const result = await run.result;
-      await scope.close();
-      return {
-        finishReason: result.finishReason,
-        hasError: result.error !== undefined,
-        recorder,
-        resourceKey: 'run:success',
-        terminalEventType: 'run.completed',
-      };
-    },
+    terminalSuccess: () =>
+      withRun(
+        'terminalSuccess',
+        (runtime) => makeRun(runtime),
+        async (run, runtime) => {
+          const recorder = createEventRecorder(runtime);
+          recorder.attach(run, { kind: 'run', id: 'success' }, ['run.started', 'run.completed']);
+          const result = await run.result;
+          return {
+            finishReason: result.finishReason,
+            hasError: result.error !== undefined,
+            recorder,
+            resourceKey: 'run:success',
+            terminalEventType: 'run.completed',
+          };
+        },
+      ),
 
-    async terminalFailure() {
-      const runtime = createManualRuntimeServices();
-      const run = makeRun(runtime, createFailingGenerate());
-      const recorder = createEventRecorder(runtime);
-      recorder.attach(run, { kind: 'run', id: 'failure' }, ['run.started', 'run.completed']);
-      const scope = scopeForRun('terminalFailure', runtime, run);
-      const result = await run.result;
-      await scope.close();
-      return {
-        finishReason: result.finishReason,
-        hasError: result.error !== undefined,
-        recorder,
-        resourceKey: 'run:failure',
-        terminalEventType: 'run.completed',
-      };
-    },
+    terminalFailure: () =>
+      withRun(
+        'terminalFailure',
+        (runtime) => makeRun(runtime, createFailingGenerate()),
+        async (run, runtime) => {
+          const recorder = createEventRecorder(runtime);
+          recorder.attach(run, { kind: 'run', id: 'failure' }, ['run.started', 'run.completed']);
+          const result = await run.result;
+          return {
+            finishReason: result.finishReason,
+            hasError: result.error !== undefined,
+            recorder,
+            resourceKey: 'run:failure',
+            terminalEventType: 'run.completed',
+          };
+        },
+      ),
 
-    async independentObservers() {
-      const runtime = createManualRuntimeServices();
-      const run = makeRun(runtime);
-      const scope = scopeForRun('independentObservers', runtime, run);
-      let countA = 0;
-      let countB = 0;
-      run.addEventListener('run.completed', () => (countA += 1));
-      run.addEventListener('run.completed', () => (countB += 1));
-      await run.result;
-      await scope.close();
-      return { counts: [countA, countB] };
-    },
+    independentObservers: () =>
+      withRun(
+        'independentObservers',
+        (runtime) => makeRun(runtime),
+        async (run) => {
+          let countA = 0;
+          let countB = 0;
+          run.addEventListener('run.completed', () => (countA += 1));
+          run.addEventListener('run.completed', () => (countB += 1));
+          await run.result;
+          return { counts: [countA, countB] };
+        },
+      ),
 
-    async idempotentResult() {
-      const runtime = createManualRuntimeServices();
-      const run = makeRun(runtime);
-      const scope = scopeForRun('idempotentResult', runtime, run);
-      const first = await run.result;
-      const second = await run.result;
-      await scope.close();
-      return { equal: first === second };
-    },
+    idempotentResult: () =>
+      withRun(
+        'idempotentResult',
+        (runtime) => makeRun(runtime),
+        async (run) => ({ equal: (await run.result) === (await run.result) }),
+      ),
 
-    async targetedAbort() {
-      const runtime = createManualRuntimeServices();
-      const blocking = createBlockingGenerate();
-      const run = makeRun(runtime, blocking.generate);
-      const recorder = createEventRecorder(runtime);
-      recorder.attach(run, { kind: 'run', id: 'abort' }, ['run.started', 'run.aborted']);
-      const scope = scopeForRun('targetedAbort', runtime, run);
-      run.abort('lifecycle-contract: targeted abort');
-      const result = await run.result;
-      await scope.close();
-      return {
-        finishReason: result.finishReason,
-        hasError: result.error !== undefined,
-        recorder,
-        resourceKey: 'run:abort',
-        terminalEventType: 'run.aborted',
-      };
-    },
+    targetedAbort: () =>
+      withRun(
+        'targetedAbort',
+        (runtime) => makeRun(runtime, createBlockingGenerate().generate),
+        async (run, runtime) => {
+          const recorder = createEventRecorder(runtime);
+          recorder.attach(run, { kind: 'run', id: 'abort' }, ['run.started', 'run.aborted']);
+          run.abort('lifecycle-contract: targeted abort');
+          const result = await run.result;
+          return {
+            finishReason: result.finishReason,
+            hasError: result.error !== undefined,
+            recorder,
+            resourceKey: 'run:abort',
+            terminalEventType: 'run.aborted',
+          };
+        },
+      ),
 
     rootSubtreeAbort: () => Promise.resolve(unsupported('root-subtree-abort')),
     siblingIsolation: () => Promise.resolve(unsupported('sibling-isolation')),
@@ -174,14 +181,15 @@ export function createDirectRunAdapter(): LifecycleContractAdapter {
     signalDelivery: () => Promise.resolve(unsupported('signal-delivery')),
     recovery: () => Promise.resolve(unsupported('recovery')),
 
-    async awaitableCleanup() {
-      const runtime = createManualRuntimeServices();
-      const run = makeRun(runtime);
-      const scope = scopeForRun('awaitableCleanup', runtime, run);
-      await run.result;
-      const acknowledgement = await run.closed();
-      await scope.close();
-      return { status: acknowledgement.status };
-    },
+    awaitableCleanup: () =>
+      withRun(
+        'awaitableCleanup',
+        (runtime) => makeRun(runtime),
+        async (run) => {
+          await run.result;
+          const acknowledgement = await run.closed();
+          return { status: acknowledgement.status };
+        },
+      ),
   };
 }

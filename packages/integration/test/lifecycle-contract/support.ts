@@ -66,7 +66,11 @@ export function createUnsupportedOutcomeFactory(
  * exact, stable `assertSequence` target `attach`'s own filter gives the
  * direct-`ActiveRun` adapter. Still fully drains the source (never leaves
  * an event unconsumed), so `attachIterable`'s own deferred-tracked loop
- * still resolves once the source completes.
+ * still resolves once the source completes. Forwards `return`/`throw` to
+ * the wrapped iterator (when the source provides them) so a caller that
+ * detaches early — `EventRecorder.attachIterable` calls `iterator.return?.()`
+ * on detach — still cancels the underlying source iteration instead of
+ * leaving it running.
  */
 export function filterRunEvents(
   source: AsyncIterable<RunEvent>,
@@ -82,6 +86,14 @@ export function filterRunEvents(
             if (result.done) return result;
             if (allowed.has(result.value.type)) return result;
           }
+        },
+        async return(value?: unknown): Promise<IteratorResult<RunEvent>> {
+          const returned = await iterator.return?.(value);
+          return returned ?? { done: true, value: undefined as unknown as RunEvent };
+        },
+        async throw(error?: unknown): Promise<IteratorResult<RunEvent>> {
+          if (!iterator.throw) throw error;
+          return iterator.throw(error);
         },
       };
     },
@@ -137,9 +149,11 @@ export async function withRun<TRun extends ClosableRun, TResult>(
   const runtime = createManualRuntimeServices();
   const run = build(runtime);
   const scope = scopeForRun(label, runtime, run);
-  const result = await use(run, runtime);
-  await scope.close();
-  return result;
+  try {
+    return await use(run, runtime);
+  } finally {
+    await scope.close();
+  }
 }
 
 /** The `run.started`/`run.completed` pair every terminal-success scenario filters its event trace to. Shared so `SUCCESS_EVENTS`/`ABORT_EVENTS` are defined once, not reconstructed identically in every adapter. */
@@ -180,7 +194,7 @@ export async function observeReadyAndRunning<TRun extends ObservableRun>(
   observed.push(run.snapshot().status);
   subscription.unsubscribe();
   return {
-    sawNonTerminalStatus: observed.some((status) => status !== 'terminal'),
+    sawNonTerminalStatus: observed.includes('running'),
     reachedTerminalStatus: observed.at(-1) === 'terminal',
   };
 }
@@ -319,9 +333,15 @@ export async function driveConcurrentPair(
 ) {
   const scope = scopeForRun(label, runtime, scopeRun);
   trigger();
-  const [parentResult, childResult] = await Promise.all([parent[2], child[2]]);
-  const entriesBeforeCleanup = recorder.normalize().length;
-  await scope.close();
+  let parentResult: { readonly finishReason: string };
+  let childResult: { readonly finishReason: string };
+  let entriesBeforeCleanup: number;
+  try {
+    [parentResult, childResult] = await Promise.all([parent[2], child[2]]);
+    entriesBeforeCleanup = recorder.normalize().length;
+  } finally {
+    await scope.close();
+  }
   const entriesAfterCleanup = recorder.normalize().length;
   return {
     recorder,
@@ -358,6 +378,14 @@ export function createBlockingGenerate(): {
     Promise.race([
       pending,
       new Promise<GenerateResponse>((resolve) => {
+        // A standard AbortSignal already aborted before this listener
+        // attaches never re-fires 'abort' — checking `.aborted` up front
+        // covers a run aborted immediately after creation, before its
+        // first generate call, which would otherwise hang forever.
+        if (context.signal?.aborted) {
+          resolve({ content: 'aborted', toolCalls: [] });
+          return;
+        }
         context.signal?.addEventListener(
           'abort',
           () => resolve({ content: 'aborted', toolCalls: [] }),
@@ -439,9 +467,11 @@ export async function withHarness<D extends AgentDefinitions, TResult>(
     runtime,
     storage,
   });
-  const result = await use(harness);
-  await harness.close();
-  return result;
+  try {
+    return await use(harness);
+  } finally {
+    await harness.close();
+  }
 }
 
 /** Drives `harness.startRun('p', ...)` to a terminal state (optionally aborting it while blocked) and captures its filtered event trace under `id`. */
