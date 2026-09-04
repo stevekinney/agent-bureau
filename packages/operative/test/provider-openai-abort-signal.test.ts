@@ -6,7 +6,6 @@
  * stream open until the model finished on its own, and an aborted run parked
  * on a stalled stream never resolved.
  */
-import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createToolbox } from 'armorer';
 import { createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
@@ -142,11 +141,16 @@ describe('run.abort() while the streaming OpenAI provider is blocked on the next
     });
     const run = createAgentRun(activeRun);
 
-    await yieldToPortableEventLoop();
+    // Wait for the streaming request to actually start (the client has
+    // observed a `chat.completions.create` call) rather than a single
+    // event-loop yield, which risks aborting before the request begins on a
+    // loaded host.
+    await waitForCondition(() => client.bodySignals.length > 0, 'streaming request never started');
     run.abort('user cancelled');
 
+    const resultPromise = run.result();
     let settled = false;
-    void run.result().then(
+    void resultPromise.then(
       () => {
         settled = true;
       },
@@ -155,7 +159,7 @@ describe('run.abort() while the streaming OpenAI provider is blocked on the next
       },
     );
     await waitForCondition(() => settled, 'result() hung after abort');
-    const result = await run.result();
+    const result = await resultPromise;
 
     expect(result.finishReason).toBe('aborted');
     expect(result.error).toBeInstanceOf(AbortAgentRunError);
