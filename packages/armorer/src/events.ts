@@ -48,9 +48,15 @@ export type ToolExecutionIdentity = {
 export class ToolStatusUpdateEvent extends Event {
   static readonly type = 'status-update' as const;
   readonly status: string;
-  constructor(detail: { status: string }) {
+  /** Armorer's own per-execution id (AB-318). */
+  readonly executionId?: string;
+  /** Caller-supplied owner identity, echoed verbatim when supplied (AB-318). */
+  readonly ownerId?: string;
+  constructor(detail: { status: string } & ToolExecutionIdentity) {
     super(ToolStatusUpdateEvent.type);
     this.status = detail.status;
+    this.executionId = detail.executionId;
+    this.ownerId = detail.ownerId;
   }
 }
 
@@ -79,12 +85,20 @@ export class ToolValidateSuccessEvent extends Event {
   readonly parsed: unknown;
   readonly toolCall: ToolCall;
   readonly configuration: ToolConfiguration;
-  constructor(detail: { params: unknown; parsed: unknown } & ToolEventDetailContext) {
+  /** Armorer's own per-execution id (AB-318). */
+  readonly executionId?: string;
+  /** Caller-supplied owner identity, echoed verbatim when supplied (AB-318). */
+  readonly ownerId?: string;
+  constructor(
+    detail: { params: unknown; parsed: unknown } & ToolEventDetailContext & ToolExecutionIdentity,
+  ) {
     super(ToolValidateSuccessEvent.type);
     this.params = detail.params;
     this.parsed = detail.parsed;
     this.toolCall = detail.toolCall;
     this.configuration = detail.configuration;
+    this.executionId = detail.executionId;
+    this.ownerId = detail.ownerId;
   }
 }
 
@@ -96,13 +110,18 @@ export class ToolValidateErrorEvent extends Event {
   readonly repairHints?: ToolRepairHint[];
   readonly toolCall: ToolCall;
   readonly configuration: ToolConfiguration;
+  /** Armorer's own per-execution id (AB-318). */
+  readonly executionId?: string;
+  /** Caller-supplied owner identity, echoed verbatim when supplied (AB-318). */
+  readonly ownerId?: string;
   constructor(
     detail: {
       params: unknown;
       error: unknown;
       report?: ToolValidationReport;
       repairHints?: ToolRepairHint[];
-    } & ToolEventDetailContext,
+    } & ToolEventDetailContext &
+      ToolExecutionIdentity,
   ) {
     super(ToolValidateErrorEvent.type);
     this.params = detail.params;
@@ -111,6 +130,8 @@ export class ToolValidateErrorEvent extends Event {
     this.repairHints = detail.repairHints;
     this.toolCall = detail.toolCall;
     this.configuration = detail.configuration;
+    this.executionId = detail.executionId;
+    this.ownerId = detail.ownerId;
   }
 }
 
@@ -119,11 +140,17 @@ export class ToolExecuteSuccessEvent extends Event {
   readonly result: unknown;
   readonly toolCall: ToolCall;
   readonly configuration: ToolConfiguration;
-  constructor(detail: { result: unknown } & ToolEventDetailContext) {
+  /** Armorer's own per-execution id (AB-318). */
+  readonly executionId?: string;
+  /** Caller-supplied owner identity, echoed verbatim when supplied (AB-318). */
+  readonly ownerId?: string;
+  constructor(detail: { result: unknown } & ToolEventDetailContext & ToolExecutionIdentity) {
     super(ToolExecuteSuccessEvent.type);
     this.result = detail.result;
     this.toolCall = detail.toolCall;
     this.configuration = detail.configuration;
+    this.executionId = detail.executionId;
+    this.ownerId = detail.ownerId;
   }
 }
 
@@ -132,11 +159,17 @@ export class ToolExecuteErrorEvent extends Event {
   readonly error: unknown;
   readonly toolCall: ToolCall;
   readonly configuration: ToolConfiguration;
-  constructor(detail: { error: unknown } & ToolEventDetailContext) {
+  /** Armorer's own per-execution id (AB-318). */
+  readonly executionId?: string;
+  /** Caller-supplied owner identity, echoed verbatim when supplied (AB-318). */
+  readonly ownerId?: string;
+  constructor(detail: { error: unknown } & ToolEventDetailContext & ToolExecutionIdentity) {
     super(ToolExecuteErrorEvent.type);
     this.error = detail.error;
     this.toolCall = detail.toolCall;
     this.configuration = detail.configuration;
+    this.executionId = detail.executionId;
+    this.ownerId = detail.ownerId;
   }
 }
 
@@ -183,12 +216,20 @@ export class ToolPolicyDeniedEvent extends Event {
   readonly reason?: string;
   readonly toolCall: ToolCall;
   readonly configuration: ToolConfiguration;
-  constructor(detail: { params: unknown; reason?: string } & ToolEventDetailContext) {
+  /** Armorer's own per-execution id (AB-318). */
+  readonly executionId?: string;
+  /** Caller-supplied owner identity, echoed verbatim when supplied (AB-318). */
+  readonly ownerId?: string;
+  constructor(
+    detail: { params: unknown; reason?: string } & ToolEventDetailContext & ToolExecutionIdentity,
+  ) {
     super(ToolPolicyDeniedEvent.type);
     this.params = detail.params;
     this.reason = detail.reason;
     this.toolCall = detail.toolCall;
     this.configuration = detail.configuration;
+    this.executionId = detail.executionId;
+    this.ownerId = detail.ownerId;
   }
 }
 
@@ -214,12 +255,17 @@ export class ToolStartedEvent extends Event {
   readonly inputDigest?: string;
   readonly toolCall: ToolCall;
   readonly configuration: ToolConfiguration;
+  /** Armorer's own per-execution id (AB-318). */
+  readonly executionId?: string;
+  /** Caller-supplied owner identity, echoed verbatim when supplied (AB-318). */
+  readonly ownerId?: string;
   constructor(
     detail: {
       params: unknown;
       startedAt: number;
       inputDigest?: string;
-    } & ToolEventDetailContext,
+    } & ToolEventDetailContext &
+      ToolExecutionIdentity,
   ) {
     super(ToolStartedEvent.type);
     this.params = detail.params;
@@ -227,6 +273,8 @@ export class ToolStartedEvent extends Event {
     this.inputDigest = detail.inputDigest;
     this.toolCall = detail.toolCall;
     this.configuration = detail.configuration;
+    this.executionId = detail.executionId;
+    this.ownerId = detail.ownerId;
   }
 }
 
@@ -244,6 +292,10 @@ export class ToolFinishedEvent extends Event {
   readonly outputDigest?: string;
   readonly toolCall: ToolCall;
   readonly configuration: ToolConfiguration;
+  /** Armorer's own per-execution id (AB-318). */
+  readonly executionId?: string;
+  /** Caller-supplied owner identity, echoed verbatim when supplied (AB-318). */
+  readonly ownerId?: string;
   constructor(
     detail: {
       status: 'success' | 'error' | 'denied' | 'cancelled' | 'paused';
@@ -256,7 +308,8 @@ export class ToolFinishedEvent extends Event {
       errorCategory?: ToolErrorCategory;
       inputDigest?: string;
       outputDigest?: string;
-    } & ToolEventDetailContext,
+    } & ToolEventDetailContext &
+      ToolExecutionIdentity,
   ) {
     super(ToolFinishedEvent.type);
     this.status = detail.status;
@@ -271,6 +324,8 @@ export class ToolFinishedEvent extends Event {
     this.outputDigest = detail.outputDigest;
     this.toolCall = detail.toolCall;
     this.configuration = detail.configuration;
+    this.executionId = detail.executionId;
+    this.ownerId = detail.ownerId;
   }
 }
 
@@ -303,9 +358,15 @@ export class ToolProgressEvent extends Event {
 export class ToolStreamStartEvent extends Event {
   static readonly type = 'stream-start' as const;
   readonly mode: 'stream' | 'collect';
-  constructor(detail: { mode: 'stream' | 'collect' }) {
+  /** Armorer's own per-execution id (AB-318). */
+  readonly executionId?: string;
+  /** Caller-supplied owner identity, echoed verbatim when supplied (AB-318). */
+  readonly ownerId?: string;
+  constructor(detail: { mode: 'stream' | 'collect' } & ToolExecutionIdentity) {
     super(ToolStreamStartEvent.type);
     this.mode = detail.mode;
+    this.executionId = detail.executionId;
+    this.ownerId = detail.ownerId;
   }
 }
 
@@ -313,10 +374,16 @@ export class ToolStreamChunkEvent extends Event {
   static readonly type = 'stream-chunk' as const;
   readonly chunk: unknown;
   readonly index: number;
-  constructor(detail: { chunk: unknown; index: number }) {
+  /** Armorer's own per-execution id (AB-318). */
+  readonly executionId?: string;
+  /** Caller-supplied owner identity, echoed verbatim when supplied (AB-318). */
+  readonly ownerId?: string;
+  constructor(detail: { chunk: unknown; index: number } & ToolExecutionIdentity) {
     super(ToolStreamChunkEvent.type);
     this.chunk = detail.chunk;
     this.index = detail.index;
+    this.executionId = detail.executionId;
+    this.ownerId = detail.ownerId;
   }
 }
 
@@ -324,10 +391,16 @@ export class ToolStreamEndEvent extends Event {
   static readonly type = 'stream-end' as const;
   readonly chunks: number;
   readonly completed: boolean;
-  constructor(detail: { chunks: number; completed: boolean }) {
+  /** Armorer's own per-execution id (AB-318). */
+  readonly executionId?: string;
+  /** Caller-supplied owner identity, echoed verbatim when supplied (AB-318). */
+  readonly ownerId?: string;
+  constructor(detail: { chunks: number; completed: boolean } & ToolExecutionIdentity) {
     super(ToolStreamEndEvent.type);
     this.chunks = detail.chunks;
     this.completed = detail.completed;
+    this.executionId = detail.executionId;
+    this.ownerId = detail.ownerId;
   }
 }
 
@@ -335,19 +408,31 @@ export class ToolStreamErrorEvent extends Event {
   static readonly type = 'stream-error' as const;
   readonly error: unknown;
   readonly index: number;
-  constructor(detail: { error: unknown; index: number }) {
+  /** Armorer's own per-execution id (AB-318). */
+  readonly executionId?: string;
+  /** Caller-supplied owner identity, echoed verbatim when supplied (AB-318). */
+  readonly ownerId?: string;
+  constructor(detail: { error: unknown; index: number } & ToolExecutionIdentity) {
     super(ToolStreamErrorEvent.type);
     this.error = detail.error;
     this.index = detail.index;
+    this.executionId = detail.executionId;
+    this.ownerId = detail.ownerId;
   }
 }
 
 export class ToolOutputChunkEvent extends Event {
   static readonly type = 'output-chunk' as const;
   readonly chunk: unknown;
-  constructor(detail: { chunk: unknown }) {
+  /** Armorer's own per-execution id (AB-318). */
+  readonly executionId?: string;
+  /** Caller-supplied owner identity, echoed verbatim when supplied (AB-318). */
+  readonly ownerId?: string;
+  constructor(detail: { chunk: unknown } & ToolExecutionIdentity) {
     super(ToolOutputChunkEvent.type);
     this.chunk = detail.chunk;
+    this.executionId = detail.executionId;
+    this.ownerId = detail.ownerId;
   }
 }
 
@@ -356,24 +441,38 @@ export class ToolLogEvent extends Event {
   readonly level: 'debug' | 'info' | 'warn' | 'error';
   readonly message: string;
   readonly data?: unknown;
-  constructor(detail: {
-    level: 'debug' | 'info' | 'warn' | 'error';
-    message: string;
-    data?: unknown;
-  }) {
+  /** Armorer's own per-execution id (AB-318). */
+  readonly executionId?: string;
+  /** Caller-supplied owner identity, echoed verbatim when supplied (AB-318). */
+  readonly ownerId?: string;
+  constructor(
+    detail: {
+      level: 'debug' | 'info' | 'warn' | 'error';
+      message: string;
+      data?: unknown;
+    } & ToolExecutionIdentity,
+  ) {
     super(ToolLogEvent.type);
     this.level = detail.level;
     this.message = detail.message;
     this.data = detail.data;
+    this.executionId = detail.executionId;
+    this.ownerId = detail.ownerId;
   }
 }
 
 export class ToolCancelledEvent extends Event {
   static readonly type = 'cancelled' as const;
   readonly reason?: string;
-  constructor(detail: { reason?: string }) {
+  /** Armorer's own per-execution id (AB-318). */
+  readonly executionId?: string;
+  /** Caller-supplied owner identity, echoed verbatim when supplied (AB-318). */
+  readonly ownerId?: string;
+  constructor(detail: { reason?: string } & ToolExecutionIdentity) {
     super(ToolCancelledEvent.type);
     this.reason = detail.reason;
+    this.executionId = detail.executionId;
+    this.ownerId = detail.ownerId;
   }
 }
 
@@ -432,10 +531,20 @@ export class ToolboxCompleteEvent extends Event {
   static readonly type = 'complete' as const;
   readonly tool: Tool;
   readonly result: ToolExecutionResult;
-  constructor(detail: { tool: Tool; result: ToolExecutionResult }) {
+  /**
+   * Armorer's own per-execution id (AB-318). Set only once this call's
+   * execution identity has actually been minted — `complete` always fires
+   * after that point, so this is always present here.
+   */
+  readonly executionId?: string;
+  /** Caller-supplied owner identity, echoed verbatim when supplied (AB-318). */
+  readonly ownerId?: string;
+  constructor(detail: { tool: Tool; result: ToolExecutionResult } & ToolExecutionIdentity) {
     super(ToolboxCompleteEvent.type);
     this.tool = detail.tool;
     this.result = detail.result;
+    this.executionId = detail.executionId;
+    this.ownerId = detail.ownerId;
   }
 }
 
@@ -443,10 +552,23 @@ export class ToolboxErrorEvent extends Event {
   static readonly type = 'error' as const;
   readonly tool?: Tool;
   readonly result: ToolExecutionResult;
-  constructor(detail: { tool?: Tool; result: ToolExecutionResult }) {
+  /**
+   * Armorer's own per-execution id (AB-318). Only the two `error` emits
+   * that fire after this call's execution identity has been minted (a
+   * failed `tool.execute()`, or an unexpected throw while running it) set
+   * this; the admission-path `error` emits — tool unavailable, budget
+   * exceeded, loop blocked — fire before that identity exists and leave it
+   * `undefined`.
+   */
+  readonly executionId?: string;
+  /** Caller-supplied owner identity, echoed verbatim when supplied (AB-318). */
+  readonly ownerId?: string;
+  constructor(detail: { tool?: Tool; result: ToolExecutionResult } & ToolExecutionIdentity) {
     super(ToolboxErrorEvent.type);
     this.tool = detail.tool;
     this.result = detail.result;
+    this.executionId = detail.executionId;
+    this.ownerId = detail.ownerId;
   }
 }
 
@@ -493,14 +615,20 @@ export class ToolboxStatusUpdateEvent extends Event {
   readonly percent?: number;
   readonly eta?: number;
   readonly message?: string;
-  constructor(detail: {
-    callId: string;
-    name: string;
-    status: string;
-    percent?: number;
-    eta?: number;
-    message?: string;
-  }) {
+  /** Armorer's own per-execution id (AB-318). */
+  readonly executionId?: string;
+  /** Caller-supplied owner identity, echoed verbatim when supplied (AB-318). */
+  readonly ownerId?: string;
+  constructor(
+    detail: {
+      callId: string;
+      name: string;
+      status: string;
+      percent?: number;
+      eta?: number;
+      message?: string;
+    } & ToolExecutionIdentity,
+  ) {
     super(ToolboxStatusUpdateEvent.type);
     this.callId = detail.callId;
     this.name = detail.name;
@@ -508,6 +636,8 @@ export class ToolboxStatusUpdateEvent extends Event {
     this.percent = detail.percent;
     this.eta = detail.eta;
     this.message = detail.message;
+    this.executionId = detail.executionId;
+    this.ownerId = detail.ownerId;
   }
 }
 
@@ -536,12 +666,25 @@ export class ToolboxValidateSuccessEvent extends Event {
   readonly call: ToolCall;
   readonly params: unknown;
   readonly parsed: unknown;
-  constructor(detail: { tool: Tool; call: ToolCall; params: unknown; parsed: unknown }) {
+  /** Armorer's own per-execution id (AB-318). */
+  readonly executionId?: string;
+  /** Caller-supplied owner identity, echoed verbatim when supplied (AB-318). */
+  readonly ownerId?: string;
+  constructor(
+    detail: {
+      tool: Tool;
+      call: ToolCall;
+      params: unknown;
+      parsed: unknown;
+    } & ToolExecutionIdentity,
+  ) {
     super(ToolboxValidateSuccessEvent.type);
     this.tool = detail.tool;
     this.call = detail.call;
     this.params = detail.params;
     this.parsed = detail.parsed;
+    this.executionId = detail.executionId;
+    this.ownerId = detail.ownerId;
   }
 }
 
@@ -551,12 +694,25 @@ export class ToolboxValidateErrorEvent extends Event {
   readonly call: ToolCall;
   readonly params: unknown;
   readonly error: unknown;
-  constructor(detail: { tool: Tool; call: ToolCall; params: unknown; error: unknown }) {
+  /** Armorer's own per-execution id (AB-318). */
+  readonly executionId?: string;
+  /** Caller-supplied owner identity, echoed verbatim when supplied (AB-318). */
+  readonly ownerId?: string;
+  constructor(
+    detail: {
+      tool: Tool;
+      call: ToolCall;
+      params: unknown;
+      error: unknown;
+    } & ToolExecutionIdentity,
+  ) {
     super(ToolboxValidateErrorEvent.type);
     this.tool = detail.tool;
     this.call = detail.call;
     this.params = detail.params;
     this.error = detail.error;
+    this.executionId = detail.executionId;
+    this.ownerId = detail.ownerId;
   }
 }
 
@@ -565,11 +721,17 @@ export class ToolboxExecuteSuccessEvent extends Event {
   readonly tool: Tool;
   readonly call: ToolCall;
   readonly result: unknown;
-  constructor(detail: { tool: Tool; call: ToolCall; result: unknown }) {
+  /** Armorer's own per-execution id (AB-318). */
+  readonly executionId?: string;
+  /** Caller-supplied owner identity, echoed verbatim when supplied (AB-318). */
+  readonly ownerId?: string;
+  constructor(detail: { tool: Tool; call: ToolCall; result: unknown } & ToolExecutionIdentity) {
     super(ToolboxExecuteSuccessEvent.type);
     this.tool = detail.tool;
     this.call = detail.call;
     this.result = detail.result;
+    this.executionId = detail.executionId;
+    this.ownerId = detail.ownerId;
   }
 }
 
@@ -578,11 +740,17 @@ export class ToolboxExecuteErrorEvent extends Event {
   readonly tool: Tool;
   readonly call: ToolCall;
   readonly error: unknown;
-  constructor(detail: { tool: Tool; call: ToolCall; error: unknown }) {
+  /** Armorer's own per-execution id (AB-318). */
+  readonly executionId?: string;
+  /** Caller-supplied owner identity, echoed verbatim when supplied (AB-318). */
+  readonly ownerId?: string;
+  constructor(detail: { tool: Tool; call: ToolCall; error: unknown } & ToolExecutionIdentity) {
     super(ToolboxExecuteErrorEvent.type);
     this.tool = detail.tool;
     this.call = detail.call;
     this.error = detail.error;
+    this.executionId = detail.executionId;
+    this.ownerId = detail.ownerId;
   }
 }
 
@@ -631,12 +799,25 @@ export class ToolboxPolicyDeniedEvent extends Event {
   readonly call: ToolCall;
   readonly params: unknown;
   readonly reason?: string;
-  constructor(detail: { tool: Tool; call: ToolCall; params: unknown; reason?: string }) {
+  /** Armorer's own per-execution id (AB-318). */
+  readonly executionId?: string;
+  /** Caller-supplied owner identity, echoed verbatim when supplied (AB-318). */
+  readonly ownerId?: string;
+  constructor(
+    detail: {
+      tool: Tool;
+      call: ToolCall;
+      params: unknown;
+      reason?: string;
+    } & ToolExecutionIdentity,
+  ) {
     super(ToolboxPolicyDeniedEvent.type);
     this.tool = detail.tool;
     this.call = detail.call;
     this.params = detail.params;
     this.reason = detail.reason;
+    this.executionId = detail.executionId;
+    this.ownerId = detail.ownerId;
   }
 }
 
@@ -649,15 +830,21 @@ export class ToolboxToolStartedEvent extends Event {
   readonly params: unknown;
   readonly startedAt: number;
   readonly inputDigest?: string;
-  constructor(detail: {
-    tool: Tool;
-    call: ToolCall;
-    toolCall: ToolCallWithArguments;
-    configuration: ToolConfiguration;
-    params: unknown;
-    startedAt: number;
-    inputDigest?: string;
-  }) {
+  /** Armorer's own per-execution id (AB-318). */
+  readonly executionId?: string;
+  /** Caller-supplied owner identity, echoed verbatim when supplied (AB-318). */
+  readonly ownerId?: string;
+  constructor(
+    detail: {
+      tool: Tool;
+      call: ToolCall;
+      toolCall: ToolCallWithArguments;
+      configuration: ToolConfiguration;
+      params: unknown;
+      startedAt: number;
+      inputDigest?: string;
+    } & ToolExecutionIdentity,
+  ) {
     super(ToolboxToolStartedEvent.type);
     this.tool = detail.tool;
     this.call = detail.call;
@@ -666,6 +853,8 @@ export class ToolboxToolStartedEvent extends Event {
     this.params = detail.params;
     this.startedAt = detail.startedAt;
     this.inputDigest = detail.inputDigest;
+    this.executionId = detail.executionId;
+    this.ownerId = detail.ownerId;
   }
 }
 
@@ -685,22 +874,28 @@ export class ToolboxToolFinishedEvent extends Event {
   readonly errorCategory?: ToolErrorCategory;
   readonly inputDigest?: string;
   readonly outputDigest?: string;
-  constructor(detail: {
-    tool: Tool;
-    call: ToolCall;
-    toolCall: ToolCallWithArguments;
-    configuration: ToolConfiguration;
-    status: 'success' | 'error' | 'denied' | 'cancelled' | 'paused';
-    durationMs: number;
-    startedAt: number;
-    finishedAt: number;
-    result?: unknown;
-    error?: unknown;
-    reason?: string;
-    errorCategory?: ToolErrorCategory;
-    inputDigest?: string;
-    outputDigest?: string;
-  }) {
+  /** Armorer's own per-execution id (AB-318). */
+  readonly executionId?: string;
+  /** Caller-supplied owner identity, echoed verbatim when supplied (AB-318). */
+  readonly ownerId?: string;
+  constructor(
+    detail: {
+      tool: Tool;
+      call: ToolCall;
+      toolCall: ToolCallWithArguments;
+      configuration: ToolConfiguration;
+      status: 'success' | 'error' | 'denied' | 'cancelled' | 'paused';
+      durationMs: number;
+      startedAt: number;
+      finishedAt: number;
+      result?: unknown;
+      error?: unknown;
+      reason?: string;
+      errorCategory?: ToolErrorCategory;
+      inputDigest?: string;
+      outputDigest?: string;
+    } & ToolExecutionIdentity,
+  ) {
     super(ToolboxToolFinishedEvent.type);
     this.tool = detail.tool;
     this.call = detail.call;
@@ -716,6 +911,8 @@ export class ToolboxToolFinishedEvent extends Event {
     this.errorCategory = detail.errorCategory;
     this.inputDigest = detail.inputDigest;
     this.outputDigest = detail.outputDigest;
+    this.executionId = detail.executionId;
+    this.ownerId = detail.ownerId;
   }
 }
 
@@ -765,11 +962,23 @@ export class ToolboxStreamStartEvent extends Event {
   readonly tool: Tool;
   readonly call: ToolCall;
   readonly mode: 'stream' | 'collect';
-  constructor(detail: { tool: Tool; call: ToolCall; mode: 'stream' | 'collect' }) {
+  /** Armorer's own per-execution id (AB-318). */
+  readonly executionId?: string;
+  /** Caller-supplied owner identity, echoed verbatim when supplied (AB-318). */
+  readonly ownerId?: string;
+  constructor(
+    detail: {
+      tool: Tool;
+      call: ToolCall;
+      mode: 'stream' | 'collect';
+    } & ToolExecutionIdentity,
+  ) {
     super(ToolboxStreamStartEvent.type);
     this.tool = detail.tool;
     this.call = detail.call;
     this.mode = detail.mode;
+    this.executionId = detail.executionId;
+    this.ownerId = detail.ownerId;
   }
 }
 
@@ -779,12 +988,25 @@ export class ToolboxStreamChunkEvent extends Event {
   readonly call: ToolCall;
   readonly chunk: unknown;
   readonly index: number;
-  constructor(detail: { tool: Tool; call: ToolCall; chunk: unknown; index: number }) {
+  /** Armorer's own per-execution id (AB-318). */
+  readonly executionId?: string;
+  /** Caller-supplied owner identity, echoed verbatim when supplied (AB-318). */
+  readonly ownerId?: string;
+  constructor(
+    detail: {
+      tool: Tool;
+      call: ToolCall;
+      chunk: unknown;
+      index: number;
+    } & ToolExecutionIdentity,
+  ) {
     super(ToolboxStreamChunkEvent.type);
     this.tool = detail.tool;
     this.call = detail.call;
     this.chunk = detail.chunk;
     this.index = detail.index;
+    this.executionId = detail.executionId;
+    this.ownerId = detail.ownerId;
   }
 }
 
@@ -794,12 +1016,25 @@ export class ToolboxStreamEndEvent extends Event {
   readonly call: ToolCall;
   readonly chunks: number;
   readonly completed: boolean;
-  constructor(detail: { tool: Tool; call: ToolCall; chunks: number; completed: boolean }) {
+  /** Armorer's own per-execution id (AB-318). */
+  readonly executionId?: string;
+  /** Caller-supplied owner identity, echoed verbatim when supplied (AB-318). */
+  readonly ownerId?: string;
+  constructor(
+    detail: {
+      tool: Tool;
+      call: ToolCall;
+      chunks: number;
+      completed: boolean;
+    } & ToolExecutionIdentity,
+  ) {
     super(ToolboxStreamEndEvent.type);
     this.tool = detail.tool;
     this.call = detail.call;
     this.chunks = detail.chunks;
     this.completed = detail.completed;
+    this.executionId = detail.executionId;
+    this.ownerId = detail.ownerId;
   }
 }
 
@@ -809,12 +1044,25 @@ export class ToolboxStreamErrorEvent extends Event {
   readonly call: ToolCall;
   readonly error: unknown;
   readonly index: number;
-  constructor(detail: { tool: Tool; call: ToolCall; error: unknown; index: number }) {
+  /** Armorer's own per-execution id (AB-318). */
+  readonly executionId?: string;
+  /** Caller-supplied owner identity, echoed verbatim when supplied (AB-318). */
+  readonly ownerId?: string;
+  constructor(
+    detail: {
+      tool: Tool;
+      call: ToolCall;
+      error: unknown;
+      index: number;
+    } & ToolExecutionIdentity,
+  ) {
     super(ToolboxStreamErrorEvent.type);
     this.tool = detail.tool;
     this.call = detail.call;
     this.error = detail.error;
     this.index = detail.index;
+    this.executionId = detail.executionId;
+    this.ownerId = detail.ownerId;
   }
 }
 
@@ -823,11 +1071,17 @@ export class ToolboxOutputChunkEvent extends Event {
   readonly tool: Tool;
   readonly call: ToolCall;
   readonly chunk: unknown;
-  constructor(detail: { tool: Tool; call: ToolCall; chunk: unknown }) {
+  /** Armorer's own per-execution id (AB-318). */
+  readonly executionId?: string;
+  /** Caller-supplied owner identity, echoed verbatim when supplied (AB-318). */
+  readonly ownerId?: string;
+  constructor(detail: { tool: Tool; call: ToolCall; chunk: unknown } & ToolExecutionIdentity) {
     super(ToolboxOutputChunkEvent.type);
     this.tool = detail.tool;
     this.call = detail.call;
     this.chunk = detail.chunk;
+    this.executionId = detail.executionId;
+    this.ownerId = detail.ownerId;
   }
 }
 
@@ -838,19 +1092,27 @@ export class ToolboxLogEvent extends Event {
   readonly level: 'debug' | 'info' | 'warn' | 'error';
   readonly message: string;
   readonly data?: unknown;
-  constructor(detail: {
-    tool: Tool;
-    call: ToolCall;
-    level: 'debug' | 'info' | 'warn' | 'error';
-    message: string;
-    data?: unknown;
-  }) {
+  /** Armorer's own per-execution id (AB-318). */
+  readonly executionId?: string;
+  /** Caller-supplied owner identity, echoed verbatim when supplied (AB-318). */
+  readonly ownerId?: string;
+  constructor(
+    detail: {
+      tool: Tool;
+      call: ToolCall;
+      level: 'debug' | 'info' | 'warn' | 'error';
+      message: string;
+      data?: unknown;
+    } & ToolExecutionIdentity,
+  ) {
     super(ToolboxLogEvent.type);
     this.tool = detail.tool;
     this.call = detail.call;
     this.level = detail.level;
     this.message = detail.message;
     this.data = detail.data;
+    this.executionId = detail.executionId;
+    this.ownerId = detail.ownerId;
   }
 }
 
@@ -859,11 +1121,17 @@ export class ToolboxCancelledEvent extends Event {
   readonly tool: Tool;
   readonly call: ToolCall;
   readonly reason?: string;
-  constructor(detail: { tool: Tool; call: ToolCall; reason?: string }) {
+  /** Armorer's own per-execution id (AB-318). */
+  readonly executionId?: string;
+  /** Caller-supplied owner identity, echoed verbatim when supplied (AB-318). */
+  readonly ownerId?: string;
+  constructor(detail: { tool: Tool; call: ToolCall; reason?: string } & ToolExecutionIdentity) {
     super(ToolboxCancelledEvent.type);
     this.tool = detail.tool;
     this.call = detail.call;
     this.reason = detail.reason;
+    this.executionId = detail.executionId;
+    this.ownerId = detail.ownerId;
   }
 }
 

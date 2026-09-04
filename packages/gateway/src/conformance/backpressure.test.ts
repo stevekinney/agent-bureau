@@ -82,13 +82,22 @@ async function wsReadUntil(
 describe('Gateway backpressure conformance — read from the production buffer policy', () => {
   it('the per-run replay buffer accounting stays within its declared bound for a run that emits far more than that bound', async () => {
     // One step, MANY parallel tool calls (armorer executes a response's
-    // tool calls concurrently): each call alone produces roughly a dozen
+    // tool calls concurrently): each call alone produces eight
     // `runSeq`-bearing frames (`toolbox.call`, `tool.started`,
     // `toolbox.execute-start`, `toolbox.validate-success`,
-    // `toolbox.execute-success`, `tool.settled`, ...) without growing the
-    // conversation the way dozens of sequential steps would — cheap frame
-    // volume, not cheap step count.
-    const callCount = 30;
+    // `toolbox.execute-success`, `tool.settled`, `toolbox.settled`,
+    // `toolbox.complete`) without growing the conversation the way dozens
+    // of sequential steps would — cheap frame volume, not cheap step count.
+    // Before AB-318, `validate-success`/`execute-success` cross-talked
+    // across every concurrently in-flight call on this shared `Tool`
+    // instance — each of the 30 calls' listeners saw all 30 calls' events,
+    // so those two types alone produced 900 frames apiece and 30 calls
+    // cleared `RUN_FRAME_BUFFER_LIMIT` easily. AB-318 fixed that
+    // duplication (each event now reaches only the call that produced it),
+    // so the real, non-duplicated total is 8 × `callCount` + a small fixed
+    // per-run overhead — `callCount` is raised here to keep clearing the
+    // bound on the corrected, honest count.
+    const callCount = 300;
     const nextTool = createNextTool();
     const generate = async (context: { step: number }) => {
       if (context.step === 0) {

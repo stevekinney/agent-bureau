@@ -317,13 +317,13 @@ export interface ToolboxEvents {
     parentContext?: OpenTelemetryContext;
     spanLinks?: OpenTelemetrySpanLink[];
   };
-  complete: { tool: Tool; result: ToolExecutionResult };
-  error: { tool?: Tool; result: ToolExecutionResult };
+  complete: { tool: Tool; result: ToolExecutionResult } & ToolExecutionIdentity;
+  error: { tool?: Tool; result: ToolExecutionResult } & ToolExecutionIdentity;
   'not-found': ToolCall;
   query: { criteria?: ToolQuery; results: QuerySelectionResult };
   search: { options: ToolSearchOptions; results: ToolMatch<unknown>[] };
   /** Tool status/progress updates for UI display */
-  'status:update': ToolStatusUpdate;
+  'status:update': ToolStatusUpdate & ToolExecutionIdentity;
   // Bubbled tool events (when executing multiple tools in parallel)
   'execute-start': { tool: Tool; call: ToolCall; params: unknown } & ToolExecutionIdentity;
   'validate-success': {
@@ -331,15 +331,15 @@ export interface ToolboxEvents {
     call: ToolCall;
     params: unknown;
     parsed: unknown;
-  };
+  } & ToolExecutionIdentity;
   'validate-error': {
     tool: Tool;
     call: ToolCall;
     params: unknown;
     error: unknown;
-  };
-  'execute-success': { tool: Tool; call: ToolCall; result: unknown };
-  'execute-error': { tool: Tool; call: ToolCall; error: unknown };
+  } & ToolExecutionIdentity;
+  'execute-success': { tool: Tool; call: ToolCall; result: unknown } & ToolExecutionIdentity;
+  'execute-error': { tool: Tool; call: ToolCall; error: unknown } & ToolExecutionIdentity;
   settled: {
     tool: Tool;
     call: ToolCall;
@@ -357,7 +357,7 @@ export interface ToolboxEvents {
     call: ToolCall;
     params: unknown;
     reason?: string;
-  };
+  } & ToolExecutionIdentity;
   'tool.started': {
     tool: Tool;
     call: ToolCall;
@@ -367,7 +367,7 @@ export interface ToolboxEvents {
     params: unknown;
     startedAt: number;
     inputDigest?: string;
-  };
+  } & ToolExecutionIdentity;
   'tool.finished': {
     tool: Tool;
     call: ToolCall;
@@ -384,7 +384,7 @@ export interface ToolboxEvents {
     errorCategory?: ToolErrorCategory;
     inputDigest?: string;
     outputDigest?: string;
-  };
+  } & ToolExecutionIdentity;
   'budget-exceeded': { tool: Tool; call: ToolCall; reason: string };
   progress: {
     tool: Tool;
@@ -392,24 +392,38 @@ export interface ToolboxEvents {
     percent?: number;
     message?: string;
   } & ToolExecutionIdentity;
-  'stream-start': { tool: Tool; call: ToolCall; mode: 'stream' | 'collect' };
-  'stream-chunk': { tool: Tool; call: ToolCall; chunk: unknown; index: number };
+  'stream-start': {
+    tool: Tool;
+    call: ToolCall;
+    mode: 'stream' | 'collect';
+  } & ToolExecutionIdentity;
+  'stream-chunk': {
+    tool: Tool;
+    call: ToolCall;
+    chunk: unknown;
+    index: number;
+  } & ToolExecutionIdentity;
   'stream-end': {
     tool: Tool;
     call: ToolCall;
     chunks: number;
     completed: boolean;
-  };
-  'stream-error': { tool: Tool; call: ToolCall; error: unknown; index: number };
-  'output-chunk': { tool: Tool; call: ToolCall; chunk: unknown };
+  } & ToolExecutionIdentity;
+  'stream-error': {
+    tool: Tool;
+    call: ToolCall;
+    error: unknown;
+    index: number;
+  } & ToolExecutionIdentity;
+  'output-chunk': { tool: Tool; call: ToolCall; chunk: unknown } & ToolExecutionIdentity;
   log: {
     tool: Tool;
     call: ToolCall;
     level: 'debug' | 'info' | 'warn' | 'error';
     message: string;
     data?: unknown;
-  };
-  cancelled: { tool: Tool; call: ToolCall; reason?: string };
+  } & ToolExecutionIdentity;
+  cancelled: { tool: Tool; call: ToolCall; reason?: string } & ToolExecutionIdentity;
   'name-resolved': { originalName: string; resolvedName: string; tier: string };
   'loop-warning': { tool: Tool; call: ToolCall; detector: string; count: number; message: string };
   'loop-blocked': { tool: Tool; call: ToolCall; detector: string; count: number; message: string };
@@ -1462,25 +1476,23 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
           'status-update': 'status:update',
         };
 
-        // AB-290: `execute-start`/`progress`/`settled` carry `executionId`
-        // (armorer's own per-execution id). This same `Tool` instance can
-        // have more than one of these bubble subscriptions attached at
-        // once — one per concurrent `toolbox.execute()` call — and every
-        // one of them is broadcast every tool-level event regardless of
-        // which invocation actually produced it. Without this filter, a
-        // concurrent call's own `execute-start`/`progress`/`settled` would
-        // ALSO bubble out of THIS call's subscription (mislabeled with
-        // this call's own `toolCall` below), duplicating the toolbox-level
-        // event once per concurrently in-flight call to the same tool.
-        const identityScopedEventTypes = new Set<keyof DefaultToolEvents>([
-          'execute-start',
-          'progress',
-          'settled',
-        ]);
+        // AB-290/AB-318: every type in `toolEventTypes` now carries
+        // `executionId` (armorer's own per-execution id) — AB-290 covered
+        // `execute-start`/`progress`/`settled`, AB-318 covers the rest,
+        // including the two dispatch-only types (`status-update`,
+        // `cancelled`) via `create-tool.ts`'s `contextDispatch` stamping.
+        // This same `Tool` instance can have more than one of these bubble
+        // subscriptions attached at once — one per concurrent
+        // `toolbox.execute()` call — and every one of them is broadcast
+        // every tool-level event regardless of which invocation actually
+        // produced it. Without this filter, a concurrent call's own event
+        // would ALSO bubble out of THIS call's subscription (mislabeled
+        // with this call's own `toolCall` below), duplicating the
+        // toolbox-level event once per concurrently in-flight call to the
+        // same tool.
         for (const eventType of toolEventTypes) {
           const unsubscribe = tool.addEventListener(eventType, (toolEvent: Event) => {
             if (
-              identityScopedEventTypes.has(eventType) &&
               (toolEvent as unknown as { executionId?: string }).executionId !== childExecutionId
             ) {
               return;
@@ -1704,7 +1716,12 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
             }
           }
           if (result.error) {
-            emit('error', { tool, result });
+            emit('error', {
+              tool,
+              result,
+              executionId: childExecutionId,
+              ownerId: suppliedOwnerId,
+            });
             cleanup.forEach((fn) => fn());
             if (!hasLiveStream) {
               settleChildExecution(result);
@@ -1714,7 +1731,12 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
               throw result.error;
             }
           } else {
-            emit('complete', { tool, result });
+            emit('complete', {
+              tool,
+              result,
+              executionId: childExecutionId,
+              ownerId: suppliedOwnerId,
+            });
             if (!hasLiveStream) {
               cleanup.forEach((fn) => fn());
               settleChildExecution(result);
@@ -1747,7 +1769,12 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
             errorMessage: toolError.message,
             errorCategory: toolError.category,
           };
-          emit('error', { tool, result: errResult });
+          emit('error', {
+            tool,
+            result: errResult,
+            executionId: childExecutionId,
+            ownerId: suppliedOwnerId,
+          });
           settleChildExecution(errResult);
           return errResult;
         }
