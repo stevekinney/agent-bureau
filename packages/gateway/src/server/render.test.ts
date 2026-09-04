@@ -10,10 +10,17 @@ import {
   EMPTY_LIVENESS_SNAPSHOT,
   type RunDetailResponse,
 } from '../routes/runs';
-import type { UsageResponse } from '../routes/usage';
-import type { PendingReview } from '../types';
+import type { UsageGroupTotals, UsageResponse } from '../routes/usage';
+import type { ConfigurationResponse, PendingReview, RunSummary } from '../types';
+import App from '../ui/app.svelte';
 import { createBrowserClientEnvironment } from '../ui/client-environment';
+import type { ChatStore } from '../ui/hooks/use-chat.svelte';
+import type { ReviewsStore } from '../ui/hooks/use-reviews.svelte';
 import { createReviewsStore } from '../ui/hooks/use-reviews.svelte';
+import ChatPage from '../ui/pages/chat.svelte';
+import ConfigurationPage from '../ui/pages/configuration.svelte';
+import DashboardPage from '../ui/pages/dashboard.svelte';
+import ReviewsPage from '../ui/pages/reviews.svelte';
 import RunDetailPage from '../ui/pages/run-detail.svelte';
 import UsagePage from '../ui/pages/usage.svelte';
 import { renderPage, resetAssetManifestCache } from './render';
@@ -609,6 +616,50 @@ describe('renderPage with a populated usage page', () => {
     expect(rootMarkup).not.toContain('Cache Write Tokens');
     expect(rootMarkup).not.toContain('Cache Read Tokens');
   });
+
+  it('renders a row per group in the By Agent, By Principal, and By Time Window tables, and appends "+" to an incomplete cost total', async () => {
+    function group(key: string, costComplete: boolean): UsageGroupTotals {
+      return {
+        key,
+        runCount: 3,
+        promptTokens: 100,
+        completionTokens: 50,
+        totalTokens: 150,
+        cacheCreationTokens: 0,
+        cacheReadTokens: 0,
+        totalCost: 0.5,
+        costComplete,
+      };
+    }
+    const populated: UsageResponse = {
+      ...usage,
+      analytics: {
+        byAgent: [group('bureau', true), group('reviewer', false)],
+        byPrincipal: [group('api-key:abc123', true)],
+        byWindow: [group('2026-09-01', true)],
+      },
+    };
+
+    const html = await renderPage({
+      title: 'Usage & Cost',
+      component: UsagePage,
+      props: { initialData: { usage: populated }, pathname: '/usage', usage: populated },
+    });
+    const rootMarkup = extractRootMarkup(html);
+
+    expect(rootMarkup).toContain('Usage by agent');
+    expect(rootMarkup).toContain('bureau');
+    expect(rootMarkup).toContain('reviewer');
+    expect(rootMarkup).toContain('Usage by authenticated principal');
+    expect(rootMarkup).toContain('api-key:abc123');
+    expect(rootMarkup).toContain('Usage by time window');
+    expect(rootMarkup).toContain('2026-09-01');
+
+    // The complete group's cost has no floor suffix; the incomplete one does.
+    const costCells = [...rootMarkup.matchAll(/\$0\.50\+?/g)].map((match) => match[0]);
+    expect(costCells).toContain('$0.50');
+    expect(costCells).toContain('$0.50+');
+  });
 });
 
 // AB-92/AB-272: `cachedManifest` (render.ts:10) is module-level state — a
@@ -795,5 +846,342 @@ describe('renderPage in built mode (assumeBuiltOutput override)', () => {
 
     expect(html).toContain('/public/entry-built.js');
     expect(html).toContain('/public/styles-built.css');
+  });
+});
+
+function makeRunSummary(overrides: Partial<RunSummary> = {}): RunSummary {
+  return {
+    id: 'run-1',
+    sessionId: 'session-1',
+    status: 'running',
+    steps: 0,
+    usage: { prompt: 0, completion: 0, total: 0 },
+    finishReason: undefined,
+    error: undefined,
+    actionCount: 0,
+    agentName: 'bureau',
+    principal: undefined,
+    startedAt: 0,
+    ...overrides,
+  };
+}
+
+describe('dashboard page (Table of RunRow, and RunRow/StatusBadge by extension)', () => {
+  it('renders the empty state when there are no runs', async () => {
+    const html = await renderPage({
+      title: 'Dashboard',
+      component: DashboardPage,
+      props: { initialData: { runs: [] }, pathname: '/', runs: [] },
+    });
+    const rootMarkup = extractRootMarkup(html);
+
+    expect(rootMarkup).toContain('No runs yet.');
+    expect(rootMarkup).not.toContain('<table');
+  });
+
+  it('renders one RunRow per run, linked by id, with steps/tokens/finish reason, and every status badge variant', async () => {
+    // Every branch of status-badge.svelte's statusToVariant switch,
+    // including its default fallback for an unrecognized status string.
+    const runs: RunSummary[] = [
+      makeRunSummary({
+        id: 'run-running',
+        status: 'running',
+        steps: 3,
+        usage: { prompt: 10, completion: 5, total: 15 },
+        finishReason: undefined,
+      }),
+      makeRunSummary({
+        id: 'run-completed',
+        status: 'completed',
+        steps: 5,
+        usage: { prompt: 20, completion: 10, total: 30 },
+        finishReason: 'stop-condition',
+      }),
+      makeRunSummary({ id: 'run-error', status: 'error' }),
+      makeRunSummary({ id: 'run-aborted', status: 'aborted' }),
+      makeRunSummary({ id: 'run-pending', status: 'pending' }),
+      makeRunSummary({ id: 'run-unknown-status', status: 'a-status-nobody-invented-yet' }),
+    ];
+
+    const html = await renderPage({
+      title: 'Dashboard',
+      component: DashboardPage,
+      props: { initialData: { runs }, pathname: '/', runs },
+    });
+    const rootMarkup = extractRootMarkup(html);
+
+    expect(rootMarkup).not.toContain('No runs yet.');
+    expect(rootMarkup).toContain('href="/runs/run-running"');
+    expect(rootMarkup).toContain('>run-running<');
+    expect(rootMarkup).toContain('>3<');
+    expect(rootMarkup).toContain('>15<');
+    // No finishReason renders the em dash fallback.
+    expect(rootMarkup).toContain('>—<');
+    expect(rootMarkup).toContain('>stop-condition<');
+
+    for (const status of [
+      'running',
+      'completed',
+      'error',
+      'aborted',
+      'pending',
+      'a-status-nobody-invented-yet',
+    ]) {
+      expect(rootMarkup).toContain(`>${status}<`);
+    }
+  });
+});
+
+function makeChatStore(overrides: Partial<ChatStore> = {}): ChatStore {
+  return {
+    conversation: createConversationHistory({ id: 'conversation-1' }),
+    runId: undefined,
+    sending: false,
+    error: undefined,
+    sessionId: undefined,
+    streamingAssistantContent: '',
+    toolActivity: [],
+    send: async () => {},
+    handleMessage: () => {},
+    ...overrides,
+  };
+}
+
+function makeReviewsStore(overrides: Partial<ReviewsStore> = {}): ReviewsStore {
+  return {
+    reviews: [],
+    loading: false,
+    pendingId: undefined,
+    error: undefined,
+    refresh: async () => {},
+    approve: async () => {},
+    deny: async () => {},
+    ...overrides,
+  };
+}
+
+describe('chat page (every {#if} branch: errors, pending-review inline surface, tool activity)', () => {
+  it('renders no error callouts, no pending-review section, and no tool-activity section when everything is idle', async () => {
+    const chat = makeChatStore();
+    const reviews = makeReviewsStore();
+
+    const html = await renderPage({
+      title: 'Chat',
+      component: ChatPage,
+      props: { initialData: { chat, reviews }, pathname: '/', chat, reviews },
+    });
+    const rootMarkup = extractRootMarkup(html);
+
+    expect(rootMarkup).not.toContain('Chat error');
+    expect(rootMarkup).not.toContain('Review error');
+    expect(rootMarkup).not.toContain('Needs your input');
+    expect(rootMarkup).not.toContain('Tool Activity');
+  });
+
+  it('renders the chat error callout, the review error callout, an inline ReviewRow scoped to the active run, and the tool-activity log', async () => {
+    const chat = makeChatStore({
+      runId: 'run-1',
+      error: 'The provider timed out.',
+      toolActivity: ['read_file → completed', 'write_file → completed'],
+    });
+    const reviews = makeReviewsStore({
+      error: 'Could not refresh reviews.',
+      reviews: [
+        // Belongs to the active run — must render inline in the chat.
+        {
+          kind: 'human-wait',
+          id: 'review-1',
+          runId: 'run-1',
+          sessionId: 'session-1',
+          agentName: 'bureau',
+          signalName: 'human-response',
+          prompt: 'What is your name?',
+          requestedAt: 0,
+          ageMilliseconds: 0,
+        },
+        // Belongs to a DIFFERENT run — must be filtered out of the inline surface.
+        {
+          kind: 'human-wait',
+          id: 'review-2',
+          runId: 'run-2',
+          sessionId: 'session-2',
+          agentName: 'bureau',
+          signalName: 'human-response',
+          prompt: 'Unrelated question',
+          requestedAt: 0,
+          ageMilliseconds: 0,
+        },
+      ] satisfies PendingReview[],
+    });
+
+    const html = await renderPage({
+      title: 'Chat',
+      component: ChatPage,
+      props: { initialData: { chat, reviews }, pathname: '/', chat, reviews },
+    });
+    const rootMarkup = extractRootMarkup(html);
+
+    expect(rootMarkup).toContain('Chat error');
+    expect(rootMarkup).toContain('The provider timed out.');
+    expect(rootMarkup).toContain('Review error');
+    expect(rootMarkup).toContain('Could not refresh reviews.');
+
+    expect(rootMarkup).toContain('Needs your input');
+    expect(rootMarkup).toContain('What is your name?');
+    expect(rootMarkup).not.toContain('Unrelated question');
+
+    expect(rootMarkup).toContain('Tool Activity');
+    expect(rootMarkup).toContain('read_file → completed');
+    expect(rootMarkup).toContain('write_file → completed');
+  });
+});
+
+describe('reviews page (Card list of ReviewRow, and ReviewRow by extension)', () => {
+  it('renders the empty state and no error callout when there are no reviews and no error', async () => {
+    const reviews = makeReviewsStore();
+
+    const html = await renderPage({
+      title: 'Review Queue',
+      component: ReviewsPage,
+      props: { initialData: { reviews }, pathname: '/reviews', reviews },
+    });
+    const rootMarkup = extractRootMarkup(html);
+
+    expect(rootMarkup).toContain('Nothing pending review.');
+    expect(rootMarkup).not.toContain('Review queue error');
+  });
+
+  it('renders the error callout, a tool-approval row with a reason and no agent, and a human-wait row with a prompt and an agent', async () => {
+    const reviews = makeReviewsStore({
+      error: 'Could not refresh reviews.',
+      reviews: [
+        {
+          kind: 'tool-approval',
+          id: 'approval-1',
+          runId: 'run-1',
+          sessionId: 'session-1',
+          agentName: undefined,
+          approval: {
+            callId: 'call-1',
+            toolName: 'delete_file',
+            arguments: { path: '/tmp/scratch.txt' },
+            action: { type: 'approval' },
+            reason: 'Destructive operation requires sign-off',
+          },
+          requestedAt: 0,
+          ageMilliseconds: 65_000,
+        },
+        {
+          kind: 'human-wait',
+          id: 'wait-1',
+          runId: 'run-2',
+          sessionId: 'session-2',
+          agentName: 'bureau',
+          signalName: 'human-response',
+          prompt: 'What is your name?',
+          requestedAt: 0,
+          ageMilliseconds: 500,
+        },
+      ] satisfies PendingReview[],
+    });
+
+    const html = await renderPage({
+      title: 'Review Queue',
+      component: ReviewsPage,
+      props: { initialData: { reviews }, pathname: '/reviews', reviews },
+    });
+    const rootMarkup = extractRootMarkup(html);
+
+    expect(rootMarkup).toContain('Review queue error');
+    expect(rootMarkup).toContain('Could not refresh reviews.');
+    expect(rootMarkup).not.toContain('Nothing pending review.');
+
+    expect(rootMarkup).toContain('Tool approval');
+    expect(rootMarkup).toContain('delete_file');
+    expect(rootMarkup).toContain('Destructive operation requires sign-off');
+    expect(rootMarkup).toContain('href="/runs/run-1"');
+
+    expect(rootMarkup).toContain('Human input');
+    expect(rootMarkup).toContain('human-response');
+    expect(rootMarkup).toContain('What is your name?');
+    expect(rootMarkup).toContain('href="/runs/run-2"');
+
+    // Only the human-wait row (agentName: 'bureau') renders the "· <agent>"
+    // suffix — the tool-approval row (agentName: undefined) renders none.
+    expect(
+      [...rootMarkup.matchAll(/review-row-agent">·\s*(\S+)<\/span>/g)].map((m) => m[1]),
+    ).toEqual(['bureau']);
+
+    expect(rootMarkup).toContain('1m ago');
+    expect(rootMarkup).toContain('just now');
+    expect(rootMarkup).not.toContain('just now ago');
+  });
+});
+
+describe('configuration page (purely presentational — every {#if} branch)', () => {
+  it('renders the no-provider empty state, "None" for an unset system prompt, and no Tools section when there are no tools', async () => {
+    const config: ConfigurationResponse = {
+      provider: undefined,
+      providers: [],
+      maximumSteps: 25,
+      systemPrompt: undefined,
+      tools: [],
+    };
+
+    const html = await renderPage({
+      title: 'Configuration',
+      component: ConfigurationPage,
+      props: { initialData: { config }, pathname: '/configuration', config },
+    });
+    const rootMarkup = extractRootMarkup(html);
+
+    expect(rootMarkup).toContain('No provider configured.');
+    expect(rootMarkup).toContain('25');
+    expect(rootMarkup).toContain('None');
+    expect(rootMarkup).not.toContain('Tools (');
+  });
+
+  it('renders the provider description list, the configured system prompt, and the tools list with names and descriptions', async () => {
+    const config: ConfigurationResponse = {
+      provider: { provider: 'anthropic', model: 'claude-opus-4-5' },
+      providers: [],
+      maximumSteps: 40,
+      systemPrompt: 'You are a helpful assistant.',
+      tools: [
+        { name: 'read_file', description: 'Reads a file from disk.' },
+        { name: 'write_file', description: 'Writes a file to disk.' },
+      ],
+    };
+
+    const html = await renderPage({
+      title: 'Configuration',
+      component: ConfigurationPage,
+      props: { initialData: { config }, pathname: '/configuration', config },
+    });
+    const rootMarkup = extractRootMarkup(html);
+
+    expect(rootMarkup).not.toContain('No provider configured.');
+    expect(rootMarkup).toContain('anthropic');
+    expect(rootMarkup).toContain('claude-opus-4-5');
+    expect(rootMarkup).toContain('40');
+    expect(rootMarkup).toContain('You are a helpful assistant.');
+    expect(rootMarkup).toContain('Tools (2)');
+    expect(rootMarkup).toContain('read_file');
+    expect(rootMarkup).toContain('Reads a file from disk.');
+    expect(rootMarkup).toContain('write_file');
+    expect(rootMarkup).toContain('Writes a file to disk.');
+  });
+});
+
+describe('App root shell', () => {
+  it('renders "Page not found." for a pathname none of the six routes match', async () => {
+    const html = await renderPage({
+      title: 'Not Found',
+      component: App,
+      props: { initialData: {}, pathname: '/nonexistent-route' },
+    });
+    const rootMarkup = extractRootMarkup(html);
+
+    expect(rootMarkup).toContain('Page not found.');
   });
 });

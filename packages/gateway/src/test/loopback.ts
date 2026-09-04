@@ -154,7 +154,7 @@ const DEFAULT_AUTH_TOKEN = 'loopback-gateway-test-token';
  * transport is unsupported here" from an actual connection failure.
  */
 export class LoopbackTransportUnsupportedError extends Error {
-  readonly transport = 'websocket' as const;
+  readonly transport: 'websocket';
   readonly serverRuntime: LoopbackServerRuntime;
 
   constructor(serverRuntime: LoopbackServerRuntime) {
@@ -163,6 +163,7 @@ export class LoopbackTransportUnsupportedError extends Error {
         'which has no WebSocket support (AB-98). Check LoopbackGateway.supportsWebSocket before calling openWebSocket.',
     );
     this.name = 'LoopbackTransportUnsupportedError';
+    this.transport = 'websocket';
     this.serverRuntime = serverRuntime;
   }
 }
@@ -179,13 +180,20 @@ export class LoopbackTransportUnsupportedError extends Error {
  * this plumbing in isolation does not fake a server response.
  */
 export class FrameQueue<T> {
-  private readonly pending: T[] = [];
+  private readonly pending: T[];
   private readonly waiters: Array<{
     resolve: (value: T | undefined) => void;
     reject: (error: Error) => void;
-  }> = [];
-  private ended = false;
+  }>;
+  private ended: boolean;
   private endError: unknown;
+
+  constructor() {
+    this.pending = [];
+    this.waiters = [];
+    this.ended = false;
+    this.endError = undefined;
+  }
 
   push(value: T): void {
     const waiter = this.waiters.shift();

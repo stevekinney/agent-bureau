@@ -121,6 +121,27 @@ describe('createReviewsStore', () => {
     expect(store.error).toBe('nope');
   });
 
+  it('records the thrown error message when refresh rejects with a network failure', async () => {
+    const fetchMock = mock(() => Promise.reject(new Error('network unreachable')));
+
+    const store = createReviewsStore([], createEnvironment(fetchMock as unknown as typeof fetch));
+    await store.refresh();
+
+    expect(store.error).toBe('network unreachable');
+    expect(store.loading).toBe(false);
+  });
+
+  it('records a generic status message when refresh fails and the error body is not JSON', async () => {
+    const fetchMock = mock(() =>
+      Promise.resolve(new Response('not json', { status: 503, statusText: 'Service Unavailable' })),
+    );
+
+    const store = createReviewsStore([], createEnvironment(fetchMock as unknown as typeof fetch));
+    await store.refresh();
+
+    expect(store.error).toBe('Request failed with status 503');
+  });
+
   it('approves a human-wait review with a payload and drops it from the list', async () => {
     const review = makeHumanWait();
     const fetchMock = mock((input: unknown, init?: RequestInit) => {
