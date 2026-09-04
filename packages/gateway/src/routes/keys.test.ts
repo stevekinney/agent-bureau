@@ -37,7 +37,7 @@ describe('key management routes', () => {
 
     it('accepts optional scopes and expiresAt', async () => {
       const { app } = createApp();
-      const expires = new Date(Date.now() + 86400000).toISOString();
+      const expires = new Date(1_900_000_000_000).toISOString();
       const response = await app.request('/api/v1/keys', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },

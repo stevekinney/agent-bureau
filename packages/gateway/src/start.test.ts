@@ -18,6 +18,15 @@ import type { GatewayShutdownReport } from './types';
 
 const BASE_ENVIRONMENT: Record<string, string | undefined> = {};
 
+// Unique per-invocation temp database paths for the real bun:sqlite-backed
+// boot tests below, without a real clock/random read (AB-333): `process.pid`
+// already separates concurrent test processes, and this plain in-process
+// counter separates the several such paths minted within one process.
+let temporaryPathCounter = 0;
+function nextTemporaryPathSuffix(): string {
+  return `${process.pid}-${temporaryPathCounter++}`;
+}
+
 describe('parseStartEnvironment', () => {
   it('defaults STORAGE_TYPE to sqlite and PROVIDER to anthropic', () => {
     const environment = parseStartEnvironment(BASE_ENVIRONMENT);
@@ -159,7 +168,7 @@ describe('resolveStartOptions', () => {
 
 describe('startGateway', () => {
   it('boots a listening gateway from parsed environment (ready=false without an API key)', async () => {
-    const databasePath = join(tmpdir(), `gateway-start-${process.pid}-${Date.now()}.sqlite`);
+    const databasePath = join(tmpdir(), `gateway-start-${nextTemporaryPathSuffix()}.sqlite`);
     const environment: StartEnvironment = parseStartEnvironment({
       STORAGE_TYPE: 'sqlite',
       STORAGE_PATH: databasePath,
@@ -207,7 +216,7 @@ describe('startGateway', () => {
     // SQLITE_CANTOPEN. This is exactly the shape of the documented default
     // (`./data/agent-bureau.sqlite`) on a machine where `./data` has never
     // been created.
-    const rootDirectory = join(tmpdir(), `gateway-start-mkdir-${process.pid}-${Date.now()}`);
+    const rootDirectory = join(tmpdir(), `gateway-start-mkdir-${nextTemporaryPathSuffix()}`);
     const databasePath = join(rootDirectory, 'nested', 'agent-bureau.sqlite');
     const environment: StartEnvironment = parseStartEnvironment({
       STORAGE_TYPE: 'sqlite',
@@ -364,7 +373,7 @@ describe('main', () => {
   });
 
   it('boots the gateway, warns for memory storage and a missing API key, and registers shutdown handlers', async () => {
-    const databasePath = join(tmpdir(), `gateway-main-${process.pid}-${Date.now()}.sqlite`);
+    const databasePath = join(tmpdir(), `gateway-main-${nextTemporaryPathSuffix()}.sqlite`);
     const warnings: unknown[][] = [];
     const originalWarn = console.warn;
     console.warn = (...args: unknown[]) => warnings.push(args);

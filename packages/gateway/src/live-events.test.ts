@@ -51,7 +51,7 @@ function createResponseValidatedFrame(runSeq = 1): ServerFrame {
     },
     sequence: runSeq,
     runSeq,
-    timestamp: Date.now(),
+    timestamp: frameClock.now(),
   };
 }
 
@@ -401,7 +401,7 @@ describe('LiveFrameBroker — AB-305 response.validated wire projection', () => 
       detail: 'not an object',
       sequence: 1,
       runSeq: 1,
-      timestamp: Date.now(),
+      timestamp: frameClock.now(),
     };
 
     expect(() => broker.broadcast(malformed)).not.toThrow();
@@ -485,7 +485,7 @@ describe('projectRunEventForPrivilege — AB-323 REST run-detail projection', ()
       runId: 'run-1',
       event: 'response.validated',
       detail: { step: 0, original: { content: RAW_SECRET, toolCalls: [] }, validated: {} },
-      timestamp: Date.now(),
+      timestamp: frameClock.now(),
       ...overrides,
     };
   }
@@ -1134,7 +1134,7 @@ describe('LiveFrameBroker — AB-312 durable-history reconnect fallback', () => 
       detail: {},
       sequence: 7,
       runSeq: 7,
-      timestamp: Date.now(),
+      timestamp: frameClock.now(),
     });
 
     const eventTypes = received.filter((f) => f.type === 'event').map((f) => f.event);
@@ -1157,7 +1157,7 @@ describe('LiveFrameBroker — AB-312 durable-history reconnect fallback', () => 
       detail: {},
       sequence: 1,
       runSeq: 1,
-      timestamp: Date.now(),
+      timestamp: frameClock.now(),
     });
 
     expect(received).toHaveLength(1);

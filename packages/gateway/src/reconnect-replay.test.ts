@@ -1,5 +1,6 @@
 import { stopWhen } from '@lostgradient/operative';
 import { createStepwiseBlockingGenerate } from '@lostgradient/operative/test';
+import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createTool, createToolbox } from 'armorer';
 import type { ServerWebSocket } from 'bun';
 import { describe, expect, it } from 'bun:test';
@@ -98,7 +99,7 @@ async function finishRun(bureau: Awaited<ReturnType<typeof createBureau>>, runId
   await waitForRunState(bureau, runId);
   // Drain deferred session-persistence listeners.
   for (let i = 0; i < 10; i++) {
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await yieldToPortableEventLoop();
   }
 }
 

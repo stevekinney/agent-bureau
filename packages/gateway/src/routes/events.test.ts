@@ -72,7 +72,7 @@ function createResponseValidatedFrame(): ServerFrame {
     },
     sequence: 1,
     runSeq: 1,
-    timestamp: Date.now(),
+    timestamp: 1_700_000_000_000,
   };
 }
 
@@ -161,7 +161,7 @@ describe('events routes', () => {
       detail: { content: 'Done.' },
       sequence: 1,
       runSeq: 1,
-      timestamp: Date.now(),
+      timestamp: 1_700_000_000_000,
     };
     broker.broadcast(frame);
 

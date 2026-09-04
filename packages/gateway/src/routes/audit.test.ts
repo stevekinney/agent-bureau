@@ -7,17 +7,41 @@
  * - Layer B (durable) trail captures run-transition events and they are
  *   available via `GET /api/v1/audit` after the run completes.
  */
+import { createStore } from '@lostgradient/operative/store';
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { describe, expect, it } from 'bun:test';
 import { BureauError } from 'bureau';
 import { Hono } from 'hono';
+import { createManualRuntimeServices } from 'lifecycle';
 
-import { createTestGateway, requestJSON, waitForRunState } from '../test';
-import type { AuditRecord, AuditTrail, Bureau } from '../types';
+import { createTestGateway, requestJSON, waitForCondition, waitForRunState } from '../test';
+import type { AuditRecord, AuditTrail, Bureau, Gateway } from '../types';
 import { createAuditRoutes, createConversationRoutes, createMemoryRoutes } from './audit';
 
 const AUTH_TOKEN = 'test-token';
 const authHeaders = { authorization: `Bearer ${AUTH_TOKEN}` };
+
+/**
+ * Polls the durable audit trail (never a fixed sleep) until at least one
+ * record for `runId` has landed — the audit trail's write off of
+ * `run.completed` is fire-and-forget, so a test that reads the trail right
+ * after `waitForRunState` resolves would otherwise race it (AB-333).
+ */
+async function waitForAuditRecord(gateway: Gateway, runId: string): Promise<void> {
+  const { auditTrail } = gateway.bureau;
+  // Fail fast (copilot review on #554): every caller configures durable
+  // persistence, so a missing audit trail is a test setup bug, not a
+  // "not written yet" race — polling on optional chaining would turn that
+  // bug into a slow, indirect waitForCondition timeout instead.
+  if (!auditTrail) {
+    throw new Error('waitForAuditRecord requires a gateway configured with a durable audit trail');
+  }
+
+  await waitForCondition(async () => {
+    const records = await auditTrail.query({ runId });
+    return records.length > 0;
+  }, `expected a durable audit trail record for run ${runId}`);
+}
 
 // ── Layer A: session conversation history ───────────────────────────
 
@@ -264,8 +288,8 @@ describe('GET /api/v1/audit', () => {
     // Wait for the run to complete.
     await waitForRunState(gateway.bureau, runId);
 
-    // Give the audit trail's fire-and-forget KV write a tick to settle.
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    // Wait for the audit trail's fire-and-forget KV write to settle.
+    await waitForAuditRecord(gateway, runId);
 
     const response = await requestJSON(gateway, '/api/v1/audit', {
       headers: authHeaders,
@@ -313,7 +337,7 @@ describe('GET /api/v1/audit', () => {
       waitForRunState(gateway.bureau, runId1),
       waitForRunState(gateway.bureau, runId2),
     ]);
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await Promise.all([waitForAuditRecord(gateway, runId1), waitForAuditRecord(gateway, runId2)]);
 
     // Filter by runId1.
     const response = await requestJSON(gateway, `/api/v1/audit?runId=${runId1}`, {
@@ -344,7 +368,7 @@ describe('GET /api/v1/audit', () => {
     });
     const { id: runId } = await createResponse.json();
     await waitForRunState(gateway.bureau, runId);
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitForAuditRecord(gateway, runId);
 
     const response = await requestJSON(gateway, '/api/v1/audit?type=run.completed', {
       headers: authHeaders,
@@ -359,13 +383,22 @@ describe('GET /api/v1/audit', () => {
   });
 
   it('filters by since timestamp', async () => {
+    // An audit record for a real run action is timestamped from the live
+    // store's own action clock, not read fresh from `runtime.clock` at
+    // write time — so `beforeMs`/`future` must be read from that SAME
+    // injected clock the store was built with, not merely any manual
+    // runtime, for the comparison to land in the same clock domain (AB-333).
+    const runtime = createManualRuntimeServices({ origin: '2030-01-01T00:00:00.000Z' });
+    const store = createStore({ runtime });
     const gateway = await createTestGateway({
       authToken: AUTH_TOKEN,
       persistence: textValueStore(new MemoryStorage()),
       generate: async () => ({ content: 'Done.', toolCalls: [] }),
+      runtime,
+      store,
     });
 
-    const beforeMs = Date.now();
+    const beforeMs = runtime.clock.now();
 
     const createResponse = await requestJSON(gateway, '/api/v1/runs', {
       method: 'POST',
@@ -374,7 +407,7 @@ describe('GET /api/v1/audit', () => {
     });
     const { id: runId } = await createResponse.json();
     await waitForRunState(gateway.bureau, runId);
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitForAuditRecord(gateway, runId);
 
     // Query with since=beforeMs should include the run's events.
     const withSince = await requestJSON(gateway, `/api/v1/audit?since=${beforeMs}`, {
@@ -385,7 +418,7 @@ describe('GET /api/v1/audit', () => {
     expect(recordsWithSince.length).toBeGreaterThan(0);
 
     // Query with since=now+1min should include nothing.
-    const future = Date.now() + 60_000;
+    const future = runtime.clock.now() + 60_000;
     const withFutureSince = await requestJSON(gateway, `/api/v1/audit?since=${future}`, {
       headers: authHeaders,
     });
@@ -447,7 +480,7 @@ describe('GET /api/v1/audit', () => {
     });
     const { id: runId2 } = await resp2.json();
     await waitForRunState(gateway.bureau, runId2);
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await Promise.all([waitForAuditRecord(gateway, runId1), waitForAuditRecord(gateway, runId2)]);
 
     const response = await requestJSON(gateway, '/api/v1/audit', {
       headers: authHeaders,
@@ -610,7 +643,7 @@ describe('GET /api/v1/audit', () => {
     });
     const { id: runId } = await createResponse.json();
     await waitForRunState(gateway.bureau, runId);
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitForAuditRecord(gateway, runId);
 
     // Layer A: check the live store has actions for this run.
     const liveState = gateway.bureau.store.getState();

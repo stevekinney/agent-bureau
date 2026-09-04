@@ -1,5 +1,6 @@
 import { MemoryStorage, type TextValueStore, textValueStore } from '@lostgradient/weft/storage';
 import { beforeEach, describe, expect, it, spyOn } from 'bun:test';
+import { createManualRuntimeServices } from 'lifecycle';
 
 import { createApiKeyStore } from './create-api-key-store';
 import type { ApiKeyStore } from './types';
@@ -101,8 +102,15 @@ describe('create', () => {
   });
 
   it('respects expiresAt', async () => {
-    const expires = new Date(Date.now() + 86400000).toISOString();
-    const result = await store.create({ name: 'expiring', expiresAt: expires });
+    const runtime = createManualRuntimeServices({
+      origin: '2030-01-01T00:00:00.000Z',
+      // Pinned (copilot review on #554) so this test never falls back to
+      // lifecycle's process-unique crypto.randomUUID()-seeded default.
+      identifierSeed: 'create-api-key-store-test',
+    });
+    const clockedStore = createApiKeyStore(kv, runtime.clock);
+    const expires = new Date(runtime.clock.now() + 86400000).toISOString();
+    const result = await clockedStore.create({ name: 'expiring', expiresAt: expires });
     expect(result.key.expiresAt).toBe(expires);
   });
 });
@@ -191,9 +199,16 @@ describe('verify', () => {
   });
 
   it('returns null for an expired key', async () => {
-    const expires = new Date(Date.now() - 1000).toISOString();
-    const { plaintext } = await store.create({ name: 'expired', expiresAt: expires });
-    const result = await store.verify(plaintext);
+    const runtime = createManualRuntimeServices({
+      origin: '2030-01-01T00:00:00.000Z',
+      // Pinned (copilot review on #554) so this test never falls back to
+      // lifecycle's process-unique crypto.randomUUID()-seeded default.
+      identifierSeed: 'create-api-key-store-test',
+    });
+    const clockedStore = createApiKeyStore(kv, runtime.clock);
+    const expires = new Date(runtime.clock.now() - 1000).toISOString();
+    const { plaintext } = await clockedStore.create({ name: 'expired', expiresAt: expires });
+    const result = await clockedStore.verify(plaintext);
     expect(result).toBeNull();
   });
 
