@@ -82,12 +82,19 @@ export type {
   ApprovalBindingPayload,
   ApprovalState,
   ApprovalStateStore,
+  GrantStateStore,
+  ReusableApprovalGrant,
 } from './approval-binding';
 export {
   APPROVAL_BINDING_VERSION,
   ApprovalBindingError,
   createProcessLocalApprovalStateStore,
+  createProcessLocalGrantStateStore,
+  GRANT_VERSION,
+  GrantError,
+  signGrant,
   validateApprovalBinding,
+  verifyGrantSignature,
 } from './approval-binding';
 export type {
   AnyToolDefinition,
