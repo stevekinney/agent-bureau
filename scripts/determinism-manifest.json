@@ -1,24 +1,7 @@
 {
   "deterministicDirectories": [
     "packages/*/src/test/**",
-    "packages/bureau/src/agent-catalog.test.ts",
-    "packages/bureau/src/audit-trail.test.ts",
-    "packages/bureau/src/bureau-run.test.ts",
-    "packages/bureau/src/create-agent-discovery-tool.test.ts",
-    "packages/bureau/src/create-bureau.test.ts",
-    "packages/bureau/src/create-supervisor.test.ts",
-    "packages/bureau/src/dist-bundling.test.ts",
-    "packages/bureau/src/durable-event-history.test.ts",
-    "packages/bureau/src/liveness-projection.test.ts",
-    "packages/bureau/src/model-catalog-refresh.test.ts",
-    "packages/bureau/src/model-policy.test.ts",
-    "packages/bureau/src/online-evals.test.ts",
-    "packages/bureau/src/run-envelope.test.ts",
-    "packages/bureau/src/runtime-composition.test.ts",
-    "packages/bureau/src/serialization.test.ts",
-    "packages/bureau/src/steering.test.ts",
-    "packages/bureau/src/webhook-notifier.test.ts",
-    "packages/bureau/src/websocket-frames.test.ts",
+    "packages/bureau/src/**/*.test.ts",
     "packages/gateway/src/conformance/**",
     "packages/integration/test/lifecycle-contract/**",
     "packages/lifecycle/src/**",
@@ -65,6 +48,12 @@
       "reason": "Names a Bun.build glue entry temp file with crypto.randomUUID() so two concurrent agent-validation processes bundling the real Durable Object worker at once never write/read/race-delete the same file. No caller-injected options.identifiers value is safe here: a caller's identifier source is not guaranteed process-unique (test/cloudflare-backend-contract.test.ts uses a plain per-process counter), and this module ships as part of src/ (tsconfig.build.json rootDir is ./src), so it cannot import a default from outside src/test/ the way the *.test.ts files (excluded from the build) do.",
       "owner": "Agent Bureau team",
       "owningIssue": "AB-286"
+    },
+    {
+      "path": "packages/bureau/src/schedule-fire.test.ts",
+      "reason": "Drives weft's engine.schedule() recurring-interval poller end to end (registers a real schedule, waits for the native poller to tick, asserts the fired agent run). AB-332's spike proved the poller has no deterministic drive: runDurableMaintenance only ticks the durable-timer scheduler, not engine.schedule()'s own interval poll, so there is no manual-runtime advance() that fires it. Filed upstream as WFT-141 (Backlog) to expose a deterministic drive for the poller; each wait here is a bounded, condition-checked real-time poll (waitForReal), never a fixed sleep standing in for a check. Removing this exemption is WFT-141's consumer follow-up.",
+      "owner": "Agent Bureau team",
+      "owningIssue": "WFT-141"
     },
     {
       "path": "packages/bureau/src/test/harness-lmdb-isolation.test.ts",
