@@ -146,6 +146,23 @@ describe('renderSignalContinuation', () => {
     );
   });
 
+  it('renders a fixed placeholder for a rejected input missing its rejectionReason', () => {
+    // Contractually unreachable via buildSignalContinuationInput (isRejectedSignalPayload
+    // requires a string reason), but a caller can construct SignalContinuationInput
+    // directly, so the renderer must not emit the literal word "undefined".
+    const input: SignalContinuationInput = {
+      kind: 'signal',
+      signalName: 'human-response',
+      payload: { __abRejected: true },
+      deliveredAt: '2026-09-02T10:00:00.000Z',
+      denied: false,
+      rejected: true,
+    };
+    expect(renderSignalContinuation(input)).toBe(
+      '[signal:human-response] rejected: [missing reason]',
+    );
+  });
+
   it('renders the rejected branch even when denied is also true, proving reject is checked first', () => {
     const input: SignalContinuationInput = {
       kind: 'signal',

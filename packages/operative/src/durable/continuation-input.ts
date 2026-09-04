@@ -35,9 +35,11 @@ export interface SignalContinuationInput<TPayload = unknown> {
    * non-deterministic across replay — the caller obtains it through a
    * checkpointed `ctx.memo` (or `ctx.run`) and passes it in. Carried on this
    * type per AB-41's ratified shape even though the fixed rendered message
-   * does not include it (the rendering is keyed on `signalName`/`payload`/
-   * `denied`/`rejected` only) — it is metadata for a caller inspecting the
-   * structured input, not the transcript text.
+   * does not include it (the rendering is keyed on `signalName` plus
+   * `rejected`/`rejectionReason`, `denied`/`denialReason`, or `payload` when
+   * none of those apply — see {@link renderSignalContinuation}) — it is
+   * metadata for a caller inspecting the structured input, not the
+   * transcript text.
    */
   readonly deliveredAt: string;
   /**
@@ -246,6 +248,15 @@ export function renderWakeupContinuation(input: WakeupContinuationInput): string
  *  rather than a thrown error inside the workflow body. */
 const UNSERIALIZABLE_PAYLOAD_PLACEHOLDER = '[unserializable payload]';
 
+/** The fixed placeholder rendered in place of a missing {@link SignalContinuationInput.rejectionReason}.
+ *  `rejected: true` is contractually always paired with a `rejectionReason` (AB-46's decision requires
+ *  `reject` to always carry a reason, and {@link isRejectedSignalPayload} enforces this when building the
+ *  input via {@link buildSignalContinuationInput}), so this branch should be unreachable in practice. It
+ *  exists only as a defensive fallback for a `SignalContinuationInput` a caller constructs directly with
+ *  an inconsistent `rejected`/`rejectionReason` pair — rendering deterministic text here rather than the
+ *  literal word `undefined` keeps the workflow-safe rendering contract intact even for a malformed input. */
+const MISSING_REJECTION_REASON_PLACEHOLDER = '[missing reason]';
+
 /**
  * Render a {@link SignalContinuationInput} into the fixed, parseable text AB-41's
  * decision record specifies, appended to the conversation as a single synthetic
@@ -265,7 +276,11 @@ const UNSERIALIZABLE_PAYLOAD_PLACEHOLDER = '[unserializable payload]';
  */
 export function renderSignalContinuation(input: SignalContinuationInput): string {
   if (input.rejected) {
-    return `[signal:${input.signalName}] rejected: ${input.rejectionReason}`;
+    return `[signal:${input.signalName}] rejected: ${
+      input.rejectionReason !== undefined
+        ? input.rejectionReason
+        : MISSING_REJECTION_REASON_PLACEHOLDER
+    }`;
   }
   if (input.denied) {
     return `[signal:${input.signalName}] denied${
