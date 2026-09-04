@@ -122,6 +122,7 @@
       "dependencies": {
         "@lostgradient/weft": "^0.23.1",
         "interoperability": "workspace:*",
+        "lifecycle": "workspace:*",
         "memory": "workspace:*",
         "zod": "^4.4.3",
       },

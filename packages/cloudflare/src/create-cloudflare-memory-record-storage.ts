@@ -1,4 +1,5 @@
 import type { EmbeddingVectorLike } from 'interoperability';
+import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
 import type {
   MemoryRecord,
   MemoryRecordScope,
@@ -32,6 +33,13 @@ export interface CreateCloudflareMemoryRecordStorageOptions {
    * colliding.
    */
   tableName?: string;
+  /**
+   * The injectable RuntimeServices instance (AB-327) backing every wall-clock
+   * read this store performs. Defaults to the real-globals implementation
+   * (AB-252) so unconfigured production behavior is unchanged; a test injects
+   * `createManualRuntimeServices()` for a deterministic clock.
+   */
+  runtime?: RuntimeServices;
 }
 
 /** Default table name for the canonical SQLite store. */
@@ -287,6 +295,7 @@ export function createCloudflareMemoryRecordStorage(
   options: CreateCloudflareMemoryRecordStorageOptions,
 ): MemoryRecordStorage {
   const { sql, vectorize } = options;
+  const runtime = options.runtime ?? createDefaultRuntimeServices();
   assertBindingHasMembers('sql', sql, ['exec']);
   assertBindingHasMembers('vectorize', vectorize, ['upsert', 'query', 'deleteByIds']);
 
@@ -439,7 +448,7 @@ export function createCloudflareMemoryRecordStorage(
       `UPDATE ${table}
          SET indexed_at = ?
        WHERE tenant_id = ? AND namespace = ? AND id = ?`,
-      Date.now(),
+      runtime.clock.now(),
       row.tenant_id,
       row.namespace,
       row.id,
@@ -497,7 +506,7 @@ export function createCloudflareMemoryRecordStorage(
             `UPDATE ${table}
                SET status = 'deleted', updated_at = ?
              WHERE tenant_id = ? AND namespace = ? AND id = ? AND status = 'active'`,
-            Date.now(),
+            runtime.clock.now(),
             row.tenant_id,
             row.namespace,
             row.id,
@@ -581,7 +590,7 @@ export function createCloudflareMemoryRecordStorage(
           `UPDATE ${table}
              SET indexed_at = ?
            WHERE tenant_id = ? AND namespace = ? AND id = ?`,
-          Date.now(),
+          runtime.clock.now(),
           tenantId,
           namespace,
           record.id,
@@ -652,7 +661,7 @@ export function createCloudflareMemoryRecordStorage(
           `UPDATE ${table}
              SET indexed_at = ?
            WHERE tenant_id = ? AND namespace = ? AND id = ?`,
-          Date.now(),
+          runtime.clock.now(),
           tenantId,
           namespace,
           record.id,
@@ -838,7 +847,7 @@ export function createCloudflareMemoryRecordStorage(
         content: patch.content ?? existing.content,
         vector: patch.vector ? new Float32Array(patch.vector) : existing.vector,
         metadata: patch.metadata ?? existing.metadata,
-        updatedAt: Date.now(),
+        updatedAt: runtime.clock.now(),
         version: existing.version + 1,
       };
 
@@ -869,7 +878,7 @@ export function createCloudflareMemoryRecordStorage(
         `UPDATE ${table}
            SET indexed_at = ?
          WHERE tenant_id = ? AND namespace = ? AND id = ?`,
-        Date.now(),
+        runtime.clock.now(),
         tenantId,
         namespace,
         id,
@@ -886,7 +895,7 @@ export function createCloudflareMemoryRecordStorage(
       // Tombstone in SQLite FIRST, THEN delete from Vectorize. Ordering is
       // load-bearing: a stale Vectorize hit for this id is already dropped on
       // rehydration the instant the canonical row stops being active.
-      const now = Date.now();
+      const now = runtime.clock.now();
       sql.exec(
         `UPDATE ${table}
            SET status = 'deleted', updated_at = ?
@@ -915,7 +924,7 @@ export function createCloudflareMemoryRecordStorage(
       const ids = idRows.map((r) => r.id);
       if (ids.length === 0) return 0;
 
-      const now = Date.now();
+      const now = runtime.clock.now();
       sql.exec(
         `UPDATE ${table}
            SET status = 'deleted', updated_at = ?
