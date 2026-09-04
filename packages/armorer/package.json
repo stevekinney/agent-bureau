@@ -265,7 +265,7 @@
   },
   "engines": {
     "bun": ">=1.4.0",
-    "node": "^20.16.0 || >=22.3.0"
+    "node": ">=22"
   },
   "publishConfig": {
     "access": "public",

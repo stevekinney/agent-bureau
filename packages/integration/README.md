@@ -12,7 +12,7 @@
 
 ## How It Works
 
-The `transit` script builds `armorer`, `conversationalist`, and `operative` from their source before the tests run—so every import resolves to real distribution output, not TypeScript source. `scripts/run-tests.ts` then sequences three Bun test files followed by a Node.js compatibility run.
+The `transit` script builds `armorer`, `conversationalist`, and `operative` from their source before the tests run—so every import resolves to real distribution output, not TypeScript source. `scripts/run-tests.ts` then sequences the Bun test files and directories listed below, followed by a Node.js compatibility run.
 
 This package intentionally tests from package boundaries instead of source internals. If an export map, build script, CommonJS output, or runtime assumption breaks consumers, the integration package is where that failure should surface.
 
@@ -58,18 +58,22 @@ bun run integration
 
 `scripts/run-tests.ts` executes these test files in order:
 
-| File                                           | Runner  | What it checks                                                                                               |
-| ---------------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------ |
-| `test/import-boundary.test.ts`                 | Bun     | Published entry points resolve and export the expected shapes                                                |
-| `test/operative.test.ts`                       | Bun     | `operative` consumer-style run behavior from dist output                                                     |
-| `test/operative-store.test.ts`                 | Bun     | `@lostgradient/operative/store` consumer-style store behavior from dist output                               |
-| `test/sandbox-embedding.test.ts`               | Bun     | AB-97 single-file bundle + filesystem/network isolation, against a mock endpoint                             |
-| `test/tribunal-conformance.test.ts`            | Bun     | AB-99 Tribunal runner conformance: deny-gate, budget stop, cache-read observability                          |
-| `test/tribunal-conformance-providers.test.ts`  | Bun     | AB-99 two-provider parity (Anthropic-mock / OpenAI-mock), same agent definition                              |
-| `test/tribunal-conformance-generality.test.ts` | Bun     | AB-99 non-PR runs, per-role structured output, SIGTERM partial result                                        |
-| `test/lifecycle-contract/`                     | Bun     | AB-268 shared lifecycle-invariant matrix over the direct, `AgentRun`, session, and Bureau in-memory adapters |
-| `test/crash/sqlite.test.ts` (smoke scenario)   | Bun     | AB-270 process-crash recovery smoke check (see below)                                                        |
-| `test/runtime.test.mjs`                        | Node.js | CommonJS/ESM compatibility and runtime assumptions under Node                                                |
+| File                                           | Runner  | What it checks                                                                                                |
+| ---------------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------- |
+| `test/import-boundary.test.ts`                 | Bun     | Published entry points resolve and export the expected shapes                                                 |
+| `test/operative.test.ts`                       | Bun     | `operative` consumer-style run behavior from dist output                                                      |
+| `test/operative-store.test.ts`                 | Bun     | `@lostgradient/operative/store` consumer-style store behavior from dist output                                |
+| `test/sandbox-embedding.test.ts`               | Bun     | AB-97 single-file bundle + filesystem/network isolation, against a mock endpoint                              |
+| `test/tribunal-conformance.test.ts`            | Bun     | AB-99 Tribunal runner conformance: deny-gate, budget stop, cache-read observability                           |
+| `test/tribunal-conformance-providers.test.ts`  | Bun     | AB-99 two-provider parity (Anthropic-mock / OpenAI-mock), same agent definition                               |
+| `test/tribunal-conformance-generality.test.ts` | Bun     | AB-99 non-PR runs, per-role structured output, SIGTERM partial result                                         |
+| `test/bureau-agent-definitions.test.ts`        | Bun     | AB-23 Bureau's typed `AgentDefinitions` catalog: direct, barrel, dynamic, and lazy-generate agents            |
+| `test/anthropic-interop.test.ts`               | Bun     | Anthropic SDK adapter interoperability: tool-call parsing and message conversion against real SDK types       |
+| `test/model-selection-contract.test.ts`        | Bun     | AB-251 cross-mode selection-plan replay and delegated-child attenuation contract, six entry points normalized |
+| `test/readme-test-sequencing.test.ts`          | Bun     | AB-283 asserts every file this table registers also appears as a row in this table                            |
+| `test/lifecycle-contract/`                     | Bun     | AB-268 shared lifecycle-invariant matrix over the direct, `AgentRun`, session, and Bureau in-memory adapters  |
+| `test/crash/sqlite.test.ts` (smoke scenario)   | Bun     | AB-270 process-crash recovery smoke check (see below)                                                         |
+| `test/runtime.test.mjs`                        | Node.js | CommonJS/ESM compatibility and runtime assumptions under Node                                                 |
 
 The Node.js binary is located automatically—`$NODE_BINARY`, `$NODE`, `Bun.which('node')`, and common install paths are all tried. The suite fails loudly if no Node binary is found.
 
