@@ -5,14 +5,19 @@ import { saveProposal } from '../../src/self-improvement/proposals';
 import { createMockKeyValueStore, createMockSkillProvider } from '../../src/test';
 import type { Proposal } from '../../src/types';
 
+// Fixed instant standing in for a proposal's createdAt below — saveProposal persists whatever
+// the caller provides verbatim, so a stable value is all these fixtures need.
+const FIXED_CREATED_AT = '2026-01-01T00:00:00.000Z';
+let nextProposalId = 0;
+
 function makeProposal(overrides: Partial<Proposal> = {}): Proposal {
   return {
-    id: crypto.randomUUID(),
+    id: overrides.id ?? `test-proposal-${nextProposalId++}`,
     type: 'skill',
     summary: 'Test proposal',
     content: '---\nname: test-skill\ndescription: A test skill\n---\n\nDo the thing.',
     sourceEntryIds: ['entry-1'],
-    createdAt: new Date().toISOString(),
+    createdAt: FIXED_CREATED_AT,
     status: 'pending',
     ...overrides,
   };
