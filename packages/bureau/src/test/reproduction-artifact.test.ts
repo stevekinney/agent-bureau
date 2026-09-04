@@ -119,6 +119,11 @@ async function assembleDeterministicCase(
     toolbox: createToolbox([]),
     provider: { provider: 'anthropic', model: 'claude-test' },
     storage,
+    // A fixed identifierSeed, not the generated (process-unique) default —
+    // this case's own byte-identical-serialization guarantee (below) needs
+    // two independently constructed harnesses to derive the SAME
+    // identifierPrefix (Coordinator ruling on AB-337).
+    runtime: createManualRuntimeServices({ identifierSeed: 'deterministic-case' }),
     ...overrides,
   });
   disposals.push(async () => {
@@ -201,7 +206,10 @@ describe('assembleReproductionArtifact', () => {
     const { artifact } = await runScriptedCase();
 
     expect(artifact.clockOrigin).toBe('2020-01-01T00:00:00.000Z');
-    expect(artifact.identifierSeed).toBe('manual-runtime-services');
+    // identifierSeed's default is generated and process-unique (Coordinator
+    // ruling on AB-337), so it can no longer be pinned to a literal — only
+    // that it was recorded at all, non-empty.
+    expect(artifact.identifierSeed.length).toBeGreaterThan(0);
     expect(artifact.randomSeed).toBe('manual-runtime-services');
   });
 

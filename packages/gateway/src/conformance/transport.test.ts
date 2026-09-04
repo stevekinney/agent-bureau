@@ -747,10 +747,11 @@ describe('Gateway transport conformance — Bun runtime', () => {
         // produce this. This loopback gateway forwards the harness's
         // ManualRuntimeServices as `runtime` (AB-303), so the identifier is
         // the deterministic `identifiers.next('request')` shape
-        // (`request-<n>`) rather than a real UUID — still proof the real
-        // middleware ran, just over the injected runtime seam instead of
+        // (`${identifierPrefix}-request-<n>`, Coordinator ruling on AB-337)
+        // rather than a real UUID — still proof the real middleware ran,
+        // just over the injected runtime seam instead of
         // `crypto.randomUUID()`.
-        expect(response.headers.get('x-request-id')).toMatch(/^request-\d+$/);
+        expect(response.headers.get('x-request-id')).toMatch(/^[a-z0-9]+-request-\d+$/);
       },
     );
   });

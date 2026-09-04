@@ -407,8 +407,8 @@ describe('createAgentSchedule', () => {
       runtime,
     });
 
-    expect(handleA.id).toBe('schedule-1');
-    expect(handleB.id).toBe('schedule-2');
+    expect(handleA.id).toBe(`${runtime.identifierPrefix}-schedule-1`);
+    expect(handleB.id).toBe(`${runtime.identifierPrefix}-schedule-2`);
     expect((engine.calls[0]!.input as ScheduledAgentRunInput).scheduleId).toBe(handleA.id);
     expect((engine.calls[1]!.input as ScheduledAgentRunInput).scheduleId).toBe(handleB.id);
   });

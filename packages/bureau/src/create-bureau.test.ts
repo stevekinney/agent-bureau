@@ -10779,14 +10779,16 @@ describe('AB-260: BureauOptions.runtime composition', () => {
       // Distinct identifier sequences: each Bureau mints its runId through
       // its own composed `RuntimeServices.identifiers` — two runs started
       // one on each Bureau both produce the SAME first-of-kind counter
-      // value (`run-1-...`) rather than a shared, monotonically-advancing
-      // sequence.
+      // value (`${identifierPrefix}-run-1`) rather than a shared,
+      // monotonically-advancing sequence.
       const runA = await bureauA.createRun({ message: 'On bureau A' });
       const runB = await bureauB.createRun({ message: 'On bureau B' });
       // Each Bureau's `identifiers.next('run')` counter starts at 1
-      // independently — a shared sequence would produce `run-1` then `run-2`.
-      expect(runA.id).toBe('run-1');
-      expect(runB.id).toBe('run-1');
+      // independently — a shared sequence would produce two counter values
+      // under the SAME prefix instead of each restarting at 1 under its
+      // own runtime's prefix.
+      expect(runA.id).toBe(`${runtimeA.identifierPrefix}-run-1`);
+      expect(runB.id).toBe(`${runtimeB.identifierPrefix}-run-1`);
       await waitForRunCompletion(bureauA, runA.id);
       await waitForRunCompletion(bureauB, runB.id);
 

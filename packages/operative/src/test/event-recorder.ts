@@ -128,9 +128,16 @@ function projectEvent(event: { type: string }): Record<string, unknown> {
   return projected;
 }
 
-/** A UUID (`crypto.randomUUID()`) or a `RuntimeIdentifiers.next(kind)` value (`${kind}-${n}`) — the two shapes `RuntimeServices.identifiers` ever produces. */
+/**
+ * A UUID (`crypto.randomUUID()`) or a `RuntimeIdentifiers.next(kind)` value
+ * — the two shapes `RuntimeServices.identifiers` ever produces. The manual
+ * runtime's own shape is `${identifierPrefix}-${kind}-${n}` (Coordinator
+ * ruling on AB-337): `identifierPrefix` is an alphanumeric base-36
+ * derivation of the seed, so it (like `kind` and `n`) may contain digits —
+ * the middle segment allows both, not just letters.
+ */
 const IDENTIFIER_SHAPE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$|^[a-z][a-zA-Z-]*-\d+$/;
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$|^[a-z0-9][a-zA-Z0-9-]*-\d+$/;
 
 /**
  * Rewrites every string produced by `RuntimeServices.identifiers` to its

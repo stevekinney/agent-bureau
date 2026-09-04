@@ -41,8 +41,14 @@ describe('writeReproductionArtifact / readReproductionArtifact — byte stabilit
   });
 
   it('produces byte-identical files from two independently assembled artifacts of the same seeded case', async () => {
-    const first = await assembleBaselineArtifact({ randomSeed: 'independent-assembly' });
-    const second = await assembleBaselineArtifact({ randomSeed: 'independent-assembly' });
+    const first = await assembleBaselineArtifact({
+      identifierSeed: 'independent-assembly',
+      randomSeed: 'independent-assembly',
+    });
+    const second = await assembleBaselineArtifact({
+      identifierSeed: 'independent-assembly',
+      randomSeed: 'independent-assembly',
+    });
 
     const pathA = scratchPath('independent-a');
     const pathB = scratchPath('independent-b');
