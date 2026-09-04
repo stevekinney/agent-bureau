@@ -85,30 +85,38 @@ type ManualClock = ReturnType<typeof createManualClock>;
  */
 function createCursorSaveSignal(checkpointStore: CheckpointStore) {
   const counts = new Map<string, number>();
-  const waiters = new Map<string, { target: number; resolvers: Array<() => void> }>();
+  // Each runId keeps its own list of independently-targeted waiters — a
+  // waiter registered for target=1 must resolve at count 1 even if a LATER
+  // waiter for the same runId asks for target=3; coalescing every waiter for
+  // a runId onto one shared `target` (the earlier design) would have forced
+  // the target=1 waiter to wait until count 3 as well.
+  const waiters = new Map<string, Array<{ target: number; resolve: () => void }>>();
   const wrapped: CheckpointStore = {
     ...checkpointStore,
     saveCursor: async (runId, cursor) => {
       await checkpointStore.saveCursor(runId, cursor);
       const next = (counts.get(runId) ?? 0) + 1;
       counts.set(runId, next);
-      const waiting = waiters.get(runId);
-      if (waiting && next >= waiting.target) {
+      const pending = waiters.get(runId);
+      if (pending === undefined) return;
+      const [ready, stillWaiting] = [
+        pending.filter((waiter) => next >= waiter.target),
+        pending.filter((waiter) => next < waiter.target),
+      ];
+      if (stillWaiting.length === 0) {
         waiters.delete(runId);
-        for (const resolve of waiting.resolvers) resolve();
+      } else {
+        waiters.set(runId, stillWaiting);
       }
+      for (const waiter of ready) waiter.resolve();
     },
   };
   const waitForCursorSave = (runId: string, target = 1): Promise<void> => {
     if ((counts.get(runId) ?? 0) >= target) return Promise.resolve();
     return new Promise((resolve) => {
-      const existing = waiters.get(runId);
-      if (existing) {
-        existing.target = Math.max(existing.target, target);
-        existing.resolvers.push(resolve);
-      } else {
-        waiters.set(runId, { target, resolvers: [resolve] });
-      }
+      const existing = waiters.get(runId) ?? [];
+      existing.push({ target, resolve });
+      waiters.set(runId, existing);
     });
   };
   return { checkpointStore: wrapped, waitForCursorSave };
