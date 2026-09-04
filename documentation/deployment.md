@@ -496,7 +496,7 @@ worse than one that exits non-zero immediately.
 
 Build with `bun build --target=bun <entry> --outfile=<outfile>` (or the
 `Bun.build()` API — the integration test spawns the CLI as a subprocess, see
-`sandbox-embedding.test.ts` and AB-340). This produces **one file**: no
+`packages/integration/test/sandbox-embedding.test.ts` and AB-340). This produces **one file**: no
 `node_modules` needs to travel with it inside the sandbox image.
 
 Prefer the CLI (as a subprocess) over the in-process `Bun.build()` API if

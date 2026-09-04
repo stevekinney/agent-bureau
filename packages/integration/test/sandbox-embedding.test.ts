@@ -144,7 +144,19 @@ describe('AB-97 sandbox-image embedding', () => {
       // recommends as the equivalent of the `Bun.build()` API.
       const buildStartedAt = performance.now();
       const buildProcess = Bun.spawn({
-        cmd: [process.execPath, 'build', FIXTURE_ENTRY, '--target=bun', `--outfile=${outfile}`],
+        cmd: [
+          process.execPath,
+          'build',
+          FIXTURE_ENTRY,
+          '--target=bun',
+          `--outfile=${outfile}`,
+          // Explicit, not relying on Bun's current defaults: single-outfile,
+          // no-sourcemap intent must stay stable even if a future Bun
+          // version starts splitting chunks or emitting sourcemaps by
+          // default. Matches the prior in-process `Bun.build({ splitting:
+          // false, sourcemap: 'none' })` configuration this replaced.
+          '--sourcemap=none',
+        ],
         // cwd is the fixture's own directory, not `bundleDirectory` (a
         // scratch temp dir with no `node_modules` above it in its path):
         // module resolution needs a real `node_modules` chain to walk.
