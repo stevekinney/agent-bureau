@@ -190,8 +190,16 @@ const SSE_HEARTBEAT_INTERVAL_MS = 8_000;
  * directly. Missing or unknown model → 422.
  *
  * Supports both standard JSON and SSE streaming (`stream: true`) responses.
+ *
+ * `heartbeatIntervalMs` (test-only; production callers never pass it)
+ * overrides {@link SSE_HEARTBEAT_INTERVAL_MS} so `openai-compat.test.ts` can
+ * drive the heartbeat's own tick — including its enqueue-failure → close()
+ * branch — without waiting out the real 8s cadence.
  */
-export function createOpenAICompatRoutes(bureau: Bureau) {
+export function createOpenAICompatRoutes(
+  bureau: Bureau,
+  heartbeatIntervalMs: number = SSE_HEARTBEAT_INTERVAL_MS,
+) {
   const app = new Hono();
 
   app.post('/chat/completions', async (context) => {
@@ -277,8 +285,21 @@ export function createOpenAICompatRoutes(bureau: Bureau) {
       // timer — without this, a client disconnect would leave the listeners
       // attached and the run executing (and billing provider tokens) for an
       // audience that has left.
+      //
+      // `detachRunListeners` keeps its `() => {}` default: the `!runState`
+      // branch below calls `close()` (which calls `detachRunListeners()`)
+      // BEFORE the real one is ever assigned (that assignment happens later,
+      // only once `runState` exists) — the default is genuinely reachable,
+      // not dead code.
+      //
+      // `stopHeartbeat`, by contrast, IS always reassigned to its real
+      // implementation (immediately below, synchronously within `start()`)
+      // strictly before `close()` — the only thing that calls it — can
+      // itself be reached, so its `() => {}` placeholder default's body is
+      // unreachable dead code no test could legitimately execute (AB-316);
+      // definite assignment (`!`) drops it instead.
       let detachRunListeners: () => void = () => {};
-      let stopHeartbeat: () => void = () => {};
+      let stopHeartbeat!: () => void;
 
       const body = new ReadableStream<Uint8Array>({
         start(controller) {
@@ -311,11 +332,17 @@ export function createOpenAICompatRoutes(bureau: Bureau) {
             } catch {
               close();
             }
-          }, SSE_HEARTBEAT_INTERVAL_MS);
+          }, heartbeatIntervalMs);
 
+          // `clearInterval` is idempotent (a no-op on an already-cleared or
+          // invalid handle) — a repeat `stopHeartbeat()` call (`close()` AND
+          // `cancel()` both call it, though never both for the same stream:
+          // `cancel()` on an already-closed stream is a spec no-op) needs no
+          // guard against calling it twice, so this doesn't self-replace with
+          // a no-op the way `detachRunListeners` intentionally is NOT
+          // reassigned defensively either.
           stopHeartbeat = (): void => {
             clearInterval(heartbeatId);
-            stopHeartbeat = () => {};
           };
 
           if (!runState) {

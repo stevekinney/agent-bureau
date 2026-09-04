@@ -257,8 +257,14 @@ export class FrameQueue<T> {
  * (blank-line-delimited, `data:`-prefixed) without depending on the
  * `EventSource` global — the whole point of this suite is a real client
  * over a real socket that is not a patched process global.
+ *
+ * Exported (only) so `loopback.test.ts` can drive `pump()`'s own
+ * body-stream-error → `queue.end(error)` branch directly against a
+ * synthetic `Response` whose body errors — every OTHER caller goes through
+ * `startLoopbackGateway`'s real fetch over a real socket, which has no way
+ * to make the OS-level connection fail mid-stream on demand (AB-316).
  */
-function readEventStream(response: Response): ServerEventStreamReader {
+export function readEventStream(response: Response): ServerEventStreamReader {
   const body = response.body;
   if (!body) {
     throw new Error('startLoopbackGateway: SSE response carried no readable body');

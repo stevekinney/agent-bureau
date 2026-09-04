@@ -11,6 +11,15 @@ import { createManualLiveFrameBrokerClock } from './test';
 import type { ServerFrame } from './types';
 import { createWebSocketHandler } from './websocket/handler';
 
+// AB-316: `createRunFrame()` and `createResponseValidatedFrame()` are each
+// invoked twice per assertion in some tests below (once for the broadcast
+// frame, once for the expected value via `toEqual`), so a `Date.now()`
+// timestamp raced the wall clock ticking between the two calls (reproduced
+// 1 in 3 locally, seen in CI on AB-274, AB-315, AB-301). Backing the
+// `timestamp` field with this manual, non-advancing clock instead of
+// `Date.now()` makes repeat calls agree deterministically.
+const frameClock = createManualLiveFrameBrokerClock();
+
 function createRunFrame(runSeq = 1): ServerFrame {
   return {
     type: 'event',
@@ -19,7 +28,7 @@ function createRunFrame(runSeq = 1): ServerFrame {
     detail: { content: 'Done.' },
     sequence: runSeq,
     runSeq,
-    timestamp: Date.now(),
+    timestamp: frameClock.now(),
   };
 }
 

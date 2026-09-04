@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 
 import type { ClientFrame, ServerFrame } from '../types';
-import { FrameQueue, wrapWebSocket } from './loopback';
+import { FrameQueue, readEventStream, wrapWebSocket } from './loopback';
 
 /**
  * A minimal fake `WebSocket` — just enough of the `EventTarget` +
@@ -131,6 +131,28 @@ describe('FrameQueue (test/loopback.ts internal plumbing)', () => {
   });
 });
 
+describe('readEventStream (test/loopback.ts internal plumbing)', () => {
+  it("ends the frame queue with the read error when the response body stream errors mid-read (AB-316: pump()'s catch branch)", async () => {
+    const failure = new Error('synthetic body read failure');
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(failure);
+      },
+    });
+    const response = new Response(body);
+    const reader = readEventStream(response);
+
+    let rejection: unknown;
+    try {
+      await reader.next();
+    } catch (error) {
+      rejection = error;
+    }
+
+    expect(rejection).toBe(failure);
+  });
+});
+
 describe('wrapWebSocket (test/loopback.ts internal plumbing)', () => {
   it('parses a message event into a ServerFrame available from next()', async () => {
     const { socket, dispatch } = createFakeWebSocket();
@@ -167,5 +189,18 @@ describe('wrapWebSocket (test/loopback.ts internal plumbing)', () => {
 
     expect(client.readyState).toBe(1);
     expect(() => client.send({ type: 'ping' } as unknown as ClientFrame)).not.toThrow();
+  });
+
+  it('forwards close() to the underlying socket', () => {
+    let closed = false;
+    const { socket } = createFakeWebSocket();
+    (socket as unknown as { close: () => void }).close = () => {
+      closed = true;
+    };
+    const client = wrapWebSocket(socket);
+
+    client.close();
+
+    expect(closed).toBe(true);
   });
 });

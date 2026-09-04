@@ -320,10 +320,27 @@ describe('main', () => {
     for (const key of ENV_KEYS) delete Bun.env[key];
     Object.assign(Bun.env, overrides);
     return run().finally(() => {
+      // AB-316: restore by DELETING a key that was originally unset, never
+      // by `Object.assign`-ing an `undefined` value back in — environment
+      // objects coerce assigned values to strings, so `Bun.env.KEY =
+      // undefined` leaves the literal string `"undefined"` behind instead
+      // of an absent key. See the regression test below.
       for (const key of ENV_KEYS) delete Bun.env[key];
-      Object.assign(Bun.env, snapshot);
+      for (const key of ENV_KEYS) {
+        const value = snapshot[key];
+        if (value !== undefined) Bun.env[key] = value;
+      }
     });
   }
+
+  it('withEnv restores an originally-unset key to fully absent, never the literal string "undefined" (AB-316 regression)', async () => {
+    delete Bun.env['PROVIDER'];
+    await withEnv({ PROVIDER: 'gemini' }, async () => {
+      expect(Bun.env['PROVIDER']).toBe('gemini');
+    });
+    expect(Bun.env['PROVIDER']).toBeUndefined();
+    expect('PROVIDER' in Bun.env).toBe(false);
+  });
 
   it('boots the gateway, warns for memory storage and a missing API key, and registers shutdown handlers', async () => {
     const databasePath = join(tmpdir(), `gateway-main-${process.pid}-${Date.now()}.sqlite`);

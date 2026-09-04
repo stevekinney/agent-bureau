@@ -5,7 +5,9 @@ import {
 } from '@lostgradient/operative';
 import { noToolCalls } from '@lostgradient/operative/conditions';
 import { createTool, createToolbox } from 'armorer';
-import { describe, expect, it } from 'bun:test';
+import { describe, expect, it, spyOn } from 'bun:test';
+import { BureauError } from 'bureau';
+import { Hono } from 'hono';
 import { z } from 'zod';
 
 import {
@@ -15,7 +17,7 @@ import {
   expectedPersistedApiKeyAuthority,
   requestJSON,
 } from '../test';
-import { formatRunErrorMessage } from './openai-compat';
+import { createOpenAICompatRoutes, formatRunErrorMessage } from './openai-compat';
 
 function createMockGenerate(): GenerateFunction {
   return async () => ({ content: 'Done.', toolCalls: [] });
@@ -90,6 +92,54 @@ describe('OpenAI-compat route (POST /v1/chat/completions)', () => {
       body: minimalRequest('bureau', 'Hello'),
     });
     expect(response.status).toBe(503);
+  });
+
+  it('returns 422 when createRun rejects with a BureauError BAD_REQUEST', async () => {
+    const gateway = await createTestGateway({ generate: createMockGenerate() });
+    spyOn(gateway.bureau, 'createRun').mockRejectedValue(
+      new BureauError('malformed run request', 'BAD_REQUEST'),
+    );
+    const response = await requestJSON(gateway, '/v1/chat/completions', {
+      method: 'POST',
+      body: minimalRequest('bureau', 'Hello'),
+    });
+    expect(response.status).toBe(422);
+  });
+
+  it('returns 404 when createRun rejects with a BureauError NOT_FOUND', async () => {
+    const gateway = await createTestGateway({ generate: createMockGenerate() });
+    spyOn(gateway.bureau, 'createRun').mockRejectedValue(
+      new BureauError('agent not found', 'NOT_FOUND'),
+    );
+    const response = await requestJSON(gateway, '/v1/chat/completions', {
+      method: 'POST',
+      body: minimalRequest('bureau', 'Hello'),
+    });
+    expect(response.status).toBe(404);
+  });
+
+  it('returns 429 when createRun rejects with a BureauError RATE_LIMITED (AB-13)', async () => {
+    const gateway = await createTestGateway({ generate: createMockGenerate() });
+    spyOn(gateway.bureau, 'createRun').mockRejectedValue(
+      new BureauError('too many concurrent runs', 'RATE_LIMITED'),
+    );
+    const response = await requestJSON(gateway, '/v1/chat/completions', {
+      method: 'POST',
+      body: minimalRequest('bureau', 'Hello'),
+    });
+    expect(response.status).toBe(429);
+  });
+
+  it('rethrows a BureauError from createRun whose code has no mapped status', async () => {
+    const gateway = await createTestGateway({ generate: createMockGenerate() });
+    spyOn(gateway.bureau, 'createRun').mockRejectedValue(
+      new BureauError('run authority is stale', 'CONFLICT'),
+    );
+    const response = await requestJSON(gateway, '/v1/chat/completions', {
+      method: 'POST',
+      body: minimalRequest('bureau', 'Hello'),
+    });
+    expect(response.status).toBe(500);
   });
 
   it('dispatches using model field as agent name and returns 200', async () => {
@@ -562,6 +612,118 @@ describe('OpenAI-compat route (POST /v1/chat/completions)', () => {
       expect(text).toContain('"Heartbeat test complete."');
       expect(text).toContain('[DONE]');
     });
+
+    it('sends a heartbeat comment on every tick while the run is still in flight (test-only short interval)', async () => {
+      let releaseGenerate!: () => void;
+      const generateGate = new Promise<void>((resolve) => {
+        releaseGenerate = resolve;
+      });
+      const generate: GenerateFunction = async () => {
+        await generateGate;
+        return { content: 'Done after heartbeats.', toolCalls: [] };
+      };
+
+      const gateway = await createTestGateway({ generate });
+      // A 5ms heartbeat interval (test-only override — production always
+      // uses the real 8s SSE_HEARTBEAT_INTERVAL_MS) so several ticks fire
+      // well within a normal test's timeout.
+      const app = new Hono();
+      app.route('/v1', createOpenAICompatRoutes(gateway.bureau, 5));
+
+      const responsePromise = app.request('/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'bureau',
+          messages: [{ role: 'user', content: 'Heartbeat interval test' }],
+          stream: true,
+        }),
+      });
+      const response = await responsePromise;
+      expect(response.status).toBe(200);
+
+      // Read a few chunks off the real stream so multiple 5ms heartbeat
+      // ticks land before the run completes.
+      const reader = response.body!.getReader();
+      const decoder = new TextDecoder();
+      let collected = '';
+      let heartbeatCount = 0;
+      while (heartbeatCount < 2) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        collected += decoder.decode(value, { stream: true });
+        heartbeatCount = collected.split(': heartbeat').length - 1;
+      }
+      expect(heartbeatCount).toBeGreaterThanOrEqual(2);
+
+      releaseGenerate();
+      await reader.cancel();
+    });
+
+    it("closes the stream when the heartbeat's own enqueue throws (AB-316: enqueue-failure → close() branch)", async () => {
+      // The heartbeat timer's `catch { close(); }` only runs when
+      // `controller.enqueue()` itself throws — which happens for a
+      // controller that has already errored or closed underneath it (a
+      // disconnected client the platform hasn't told us about yet, or a
+      // backpressure/consumer-side failure). Rather than reconstruct that
+      // exact platform condition, spy on the shared
+      // `ReadableStreamDefaultController.prototype.enqueue` and throw only
+      // for the heartbeat's own chunk — proving the catch branch runs
+      // `close()` (which stops the timer and detaches the run listeners)
+      // without disturbing any other stream in the process.
+      let releaseGenerate!: () => void;
+      const generateGate = new Promise<void>((resolve) => {
+        releaseGenerate = resolve;
+      });
+      const generate: GenerateFunction = async () => {
+        await generateGate;
+        return { content: 'Done after a broken heartbeat.', toolCalls: [] };
+      };
+
+      const gateway = await createTestGateway({ generate });
+      const app = new Hono();
+      app.route('/v1', createOpenAICompatRoutes(gateway.bureau, 5));
+
+      const originalEnqueue = ReadableStreamDefaultController.prototype.enqueue;
+      let heartbeatEnqueueAttempts = 0;
+      const enqueueSpy = spyOn(
+        ReadableStreamDefaultController.prototype,
+        'enqueue',
+      ).mockImplementation(function (this: ReadableStreamDefaultController, chunk: Uint8Array) {
+        if (new TextDecoder().decode(chunk).includes('heartbeat')) {
+          heartbeatEnqueueAttempts += 1;
+          throw new Error('simulated enqueue failure on a heartbeat tick');
+        }
+        return originalEnqueue.call(this, chunk);
+      });
+
+      try {
+        const response = await app.request('/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            model: 'bureau',
+            messages: [{ role: 'user', content: 'Broken heartbeat test' }],
+            stream: true,
+          }),
+        });
+        expect(response.status).toBe(200);
+
+        // The controller closes itself as soon as the first heartbeat tick's
+        // `enqueue` throws — read the stream to completion (`done`) as the
+        // deterministic signal that `close()` ran, rather than waiting a
+        // fixed duration.
+        const reader = response.body!.getReader();
+        for (;;) {
+          const { done } = await reader.read();
+          if (done) break;
+        }
+        expect(heartbeatEnqueueAttempts).toBeGreaterThanOrEqual(1);
+      } finally {
+        enqueueSpy.mockRestore();
+        releaseGenerate();
+      }
+    });
   });
 
   describe('SSE streaming: client disconnect aborts the run (regression: PRRT_kwDORvupsc6MarAf)', () => {
@@ -990,6 +1152,41 @@ describe('OpenAI-compat route (POST /v1/chat/completions)', () => {
     expect(response.status).toBe(500);
     const body = await response.json();
     expect(body.error.message).toBe('Run result unavailable after settlement');
+  });
+
+  it('SSE streaming: emits an empty content chunk and [DONE] when store.getRun finds no active run state at all', async () => {
+    // Distinct from the "already settled" describe block above, which
+    // models a run whose store entry is still present but terminal. This
+    // covers the case where `bureau.store.getRun(summary.id)` returns
+    // undefined entirely — the run vanished from the live store by the
+    // time the ReadableStream's start() callback runs.
+    const realGateway = await createTestGateway({ generate: createMockGenerate() });
+    const fakeBureau = {
+      ...realGateway.bureau,
+      createRun: async () => ({ id: 'vanished-run', sessionId: 'sess-1' }),
+      store: {
+        ...realGateway.bureau.store,
+        getRun: (id: string) =>
+          id === 'vanished-run' ? undefined : realGateway.bureau.store.getRun(id),
+      },
+    } as unknown as typeof realGateway.bureau;
+
+    const gateway = await createTestGateway(fakeBureau);
+    const response = await requestJSON(gateway, '/v1/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'bureau',
+        messages: [{ role: 'user', content: 'No active run state' }],
+        stream: true,
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    const text = await response.text();
+    expect(text).toContain('"content":""');
+    expect(text).toContain('[DONE]');
+
+    realGateway.bureau.dispose();
   });
 });
 
