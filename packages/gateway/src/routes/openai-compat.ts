@@ -142,7 +142,8 @@ function formatSseErrorChunk(model: string, message: string): string {
   return `data: ${JSON.stringify(chunk)}\n\n`;
 }
 
-function formatRunErrorMessage(error: unknown, fallback: string): string {
+/** Exported for direct unit tests of every branch (not just the ones a live run happens to reach). */
+export function formatRunErrorMessage(error: unknown, fallback: string): string {
   if (error instanceof Error) return error.message;
   if (typeof error === 'string' && error.length > 0) {
     try {

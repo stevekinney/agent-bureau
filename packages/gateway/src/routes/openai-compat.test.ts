@@ -15,6 +15,7 @@ import {
   expectedPersistedApiKeyAuthority,
   requestJSON,
 } from '../test';
+import { formatRunErrorMessage } from './openai-compat';
 
 function createMockGenerate(): GenerateFunction {
   return async () => ({ content: 'Done.', toolCalls: [] });
@@ -57,6 +58,20 @@ describe('OpenAI-compat route (POST /v1/chat/completions)', () => {
       body: JSON.stringify({ model: 'bureau', messages: [] }),
     });
     expect(response.status).toBe(422);
+  });
+
+  it('returns 400 when the messages array contains no user message', async () => {
+    const gateway = await createTestGateway({ generate: createMockGenerate() });
+    const response = await requestJSON(gateway, '/v1/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'bureau',
+        messages: [{ role: 'system', content: 'You are a helpful assistant.' }],
+      }),
+    });
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body.error.message).toBe('messages array must contain at least one user message');
   });
 
   it('returns 400 with invalid JSON body', async () => {
@@ -605,6 +620,49 @@ describe('OpenAI-compat route (POST /v1/chat/completions)', () => {
 
       gateway.bureau.dispose();
     });
+
+    it("emits an in-band abort error chunk when the run is aborted through the bureau's own abort API, not a stream cancel", async () => {
+      // Unlike the client-disconnect case above (which detaches the
+      // route's run.completed/run.aborted listeners before aborting, since
+      // the stream itself is going away), an abort that reaches the run
+      // through a different path entirely — bureau.abortRun() called from
+      // outside this request, e.g. DELETE/abort over the JSON API — must
+      // still be observed by this SSE stream's own `run.aborted` listener
+      // and surfaced in-band as an error chunk before [DONE].
+      const generate: GenerateFunction = (context) =>
+        new Promise((_resolve, reject) => {
+          context.signal?.addEventListener('abort', () => {
+            reject(new Error('aborted'));
+          });
+        });
+
+      const gateway = await createTestGateway({ generate });
+
+      const responsePromise = requestJSON(gateway, '/v1/chat/completions', {
+        method: 'POST',
+        body: JSON.stringify({
+          model: 'bureau',
+          messages: [{ role: 'user', content: 'Abort via API' }],
+          stream: true,
+        }),
+      });
+      const response = await responsePromise;
+      expect(response.status).toBe(200);
+
+      const runs = [...gateway.bureau.store.getState().runs.values()];
+      const runState = runs[0];
+      expect(runState).toBeDefined();
+
+      // Abort through the bureau's own API — never response.body.cancel() —
+      // so the route's run.aborted listener is still attached when it fires.
+      gateway.bureau.abortRun(runState!.id);
+
+      const text = await response.text();
+      expect(text).toContain('"error"');
+      expect(text).toContain('[DONE]');
+
+      gateway.bureau.dispose();
+    });
   });
 
   // AB-212 — this non-streaming path is AB-37's "synchronous HTTP call
@@ -906,5 +964,65 @@ describe('OpenAI-compat route (POST /v1/chat/completions)', () => {
 
       realGateway.bureau.dispose();
     });
+  });
+
+  it('non-stream: returns 500 when the run vanishes from the store after settling', async () => {
+    const gateway = await createTestGateway({ generate: createMockGenerate() });
+    const originalGetRun = gateway.bureau.getRun.bind(gateway.bureau);
+    let callCount = 0;
+    gateway.bureau.getRun = (id: string) => {
+      callCount += 1;
+      // Allow the durability-classification call (before the run settles)
+      // through, but return undefined for the post-settlement read this
+      // route uses to build the response — simulating a race where the run
+      // was deleted from the store between settling and this read.
+      return callCount === 1 ? originalGetRun(id) : undefined;
+    };
+
+    const response = await requestJSON(gateway, '/v1/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'bureau',
+        messages: [{ role: 'user', content: 'Vanish after settle' }],
+      }),
+    });
+
+    expect(response.status).toBe(500);
+    const body = await response.json();
+    expect(body.error.message).toBe('Run result unavailable after settlement');
+  });
+});
+
+describe('formatRunErrorMessage', () => {
+  it('returns an Error instance message directly', () => {
+    expect(formatRunErrorMessage(new Error('boom'), 'fallback')).toBe('boom');
+  });
+
+  it('extracts the message from a JSON-serialized diagnostic with the expected shape', () => {
+    const diagnostic = JSON.stringify({
+      name: 'AbortAgentRunError',
+      message: 'operator stopped it',
+      kind: 'abort',
+      code: 'ABORTED',
+    });
+    expect(formatRunErrorMessage(diagnostic, 'fallback')).toBe('operator stopped it');
+  });
+
+  it('returns the raw string when it parses as JSON but does not match the diagnostic shape', () => {
+    const notADiagnostic = JSON.stringify({ foo: 'bar' });
+    expect(formatRunErrorMessage(notADiagnostic, 'fallback')).toBe(notADiagnostic);
+  });
+
+  it('returns the raw string when it is not valid JSON', () => {
+    expect(formatRunErrorMessage('plain error text', 'fallback')).toBe('plain error text');
+  });
+
+  it('returns the fallback for an empty string', () => {
+    expect(formatRunErrorMessage('', 'fallback')).toBe('fallback');
+  });
+
+  it('returns the fallback for a non-string, non-Error value', () => {
+    expect(formatRunErrorMessage(undefined, 'fallback')).toBe('fallback');
+    expect(formatRunErrorMessage(42, 'fallback')).toBe('fallback');
   });
 });

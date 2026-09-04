@@ -1,6 +1,26 @@
 import { describe, expect, it } from 'bun:test';
 
-import { FrameQueue } from './loopback';
+import type { ClientFrame, ServerFrame } from '../types';
+import { FrameQueue, wrapWebSocket } from './loopback';
+
+/**
+ * A minimal fake `WebSocket` — just enough of the `EventTarget` +
+ * `send`/`close`/`readyState` surface for {@link wrapWebSocket} to wrap it,
+ * with `dispatch` exposed so a test can fire `message`/`close`/`error`
+ * events directly without a real socket.
+ */
+function createFakeWebSocket(): { socket: WebSocket; dispatch: (event: Event) => void } {
+  const target = new EventTarget();
+  const sent: string[] = [];
+  const socket = {
+    addEventListener: target.addEventListener.bind(target),
+    removeEventListener: target.removeEventListener.bind(target),
+    send: (data: string) => sent.push(data),
+    close: () => undefined,
+    readyState: 1,
+  } as unknown as WebSocket;
+  return { socket, dispatch: (event: Event) => target.dispatchEvent(event) };
+}
 
 describe('FrameQueue (test/loopback.ts internal plumbing)', () => {
   it('resolves push() against a pending next(signal) call and detaches the abort listener (PR #469)', async () => {
@@ -108,5 +128,44 @@ describe('FrameQueue (test/loopback.ts internal plumbing)', () => {
       rejection = error;
     }
     expect(rejection).toBe(failure);
+  });
+});
+
+describe('wrapWebSocket (test/loopback.ts internal plumbing)', () => {
+  it('parses a message event into a ServerFrame available from next()', async () => {
+    const { socket, dispatch } = createFakeWebSocket();
+    const client = wrapWebSocket(socket);
+
+    const frame: ServerFrame = { type: 'connected' } as unknown as ServerFrame;
+    const messageEvent = new MessageEvent('message', { data: JSON.stringify(frame) });
+    dispatch(messageEvent);
+
+    expect(await client.next()).toEqual(frame);
+  });
+
+  it('ends the frame queue and pushes onto the close queue when the socket closes', async () => {
+    const { socket, dispatch } = createFakeWebSocket();
+    const client = wrapWebSocket(socket);
+
+    const closeEvent = new CloseEvent('close', { code: 1000, reason: 'done' });
+    dispatch(closeEvent);
+
+    expect(await client.next()).toBeUndefined();
+    expect(await client.waitForClose()).toEqual({ code: 1000, reason: 'done' });
+  });
+
+  it('does not throw when the socket fires an unhandled error event (close is what tears down state)', () => {
+    const { socket, dispatch } = createFakeWebSocket();
+    wrapWebSocket(socket);
+
+    expect(() => dispatch(new Event('error'))).not.toThrow();
+  });
+
+  it('exposes readyState from the underlying socket and forwards send() as JSON', () => {
+    const { socket } = createFakeWebSocket();
+    const client = wrapWebSocket(socket);
+
+    expect(client.readyState).toBe(1);
+    expect(() => client.send({ type: 'ping' } as unknown as ClientFrame)).not.toThrow();
   });
 });

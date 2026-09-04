@@ -313,8 +313,15 @@ function readEventStream(response: Response): ServerEventStreamReader {
   };
 }
 
-/** Wraps a real `WebSocket` into the queue-based {@link LoopbackWebSocketClient} contract. */
-function wrapWebSocket(socket: WebSocket): LoopbackWebSocketClient {
+/**
+ * Wraps a real `WebSocket` into the queue-based {@link LoopbackWebSocketClient}
+ * contract. Exported (only) so `loopback.test.ts` can drive its `message`/
+ * `close`/`error` listeners directly against a minimal fake `WebSocket` —
+ * Bun and browsers always fire `close` right after `error` (see the no-op
+ * `error` listener's own comment below), so a real socket in this suite's
+ * loopback harness never exercises that branch on its own.
+ */
+export function wrapWebSocket(socket: WebSocket): LoopbackWebSocketClient {
   const queue = new FrameQueue<ServerFrame>();
   const closeQueue = new FrameQueue<{ code: number; reason: string }>();
 
