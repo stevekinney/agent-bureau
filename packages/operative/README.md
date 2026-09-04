@@ -8,12 +8,14 @@
 bun add @lostgradient/operative zod armorer conversationalist @lostgradient/weft
 ```
 
-Operative supports Bun and Node.js runtimes. Node.js consumers must use Node `>=20.19.0`: the
-published CJS exports keep `conversationalist@0.5.0` external as a declared dependency, and that
-ESM-only dependency requires Node's unflagged `require(esm)` support. Bun consumers must use Bun
-`>=1.4.0`. `zod` is required. Provider SDKs and OpenTelemetry are optional peers: install only
-the SDKs for the provider subpaths you use, and no provider SDK is loaded when its provider is
-unused.
+Operative supports Bun and Node.js runtimes. Node.js consumers must use Node `>=22`: CI proves
+this floor, not the lower floor `require(esm)` alone would allow (the published CJS exports keep
+`conversationalist@0.5.0` external as a declared dependency, and that ESM-only dependency needs
+Node's unflagged `require(esm)` support, available since Node 20.19/22.12 — but nothing in this
+repository's CI exercises a Node runtime below 22, so the declared floor matches what is actually
+proved). Bun consumers must use Bun `>=1.4.0`. `zod` is required. Provider SDKs and
+OpenTelemetry are optional peers: install only the SDKs for the provider subpaths you use, and no
+provider SDK is loaded when its provider is unused.
 
 The public package exports are `@lostgradient/operative`, `conditions`, `durable`,
 `guardrails`, `instrumentation`, `retry`, `streaming`, `store`, `test`, `anthropic`, `openai`,

@@ -48,7 +48,10 @@ describe('public API export map', () => {
   });
 
   it('keeps the minimum supported runtime boundaries explicit', () => {
-    expect(pkg.engines).toEqual({ bun: '>=1.4.0', node: '^20.16.0 || >=22.3.0' });
+    // AB-283: raised from `^20.16.0 || >=22.3.0` to `>=22`, the floor CI actually exercises —
+    // `scripts/check-runtime-matrix.ts` is the gate that keeps this declaration honest going
+    // forward.
+    expect(pkg.engines).toEqual({ bun: '>=1.4.0', node: '>=22' });
   });
 
   it('includes the canonical adapter subpaths', () => {

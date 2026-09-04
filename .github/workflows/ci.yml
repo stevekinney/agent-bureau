@@ -198,3 +198,51 @@ jobs:
           path: ${{ env.REPRODUCTION_ARTIFACT_DIR }}/
           if-no-files-found: ignore
           retention-days: 14
+
+  # AB-283 — `scripts/check-runtime-matrix.ts` requires that every declared `engines.node` floor
+  # (root `package.json`, plus `armorer`/`conversationalist`/`@lostgradient/operative`, all raised
+  # to `>=22`) be exercised by a real job here. The `validate` job above already installs Node 22
+  # and, through `bun run integration` → `packages/integration/scripts/run-tests.ts`, already runs
+  # `test/runtime.test.mjs` under it — that alone backs the `>=22` floor. This job goes further,
+  # per the AB-283 coordinator ruling: it runs that same cross-runtime test under both Node 22 (the
+  # declared floor, re-proved independently of the `validate` job) and Node's current release line
+  # (`node-version: current`, which `actions/setup-node` resolves to the newest Current release —
+  # not yet the declared floor, but proves forward compatibility beyond LTS). `runtime.test.mjs`
+  # only needs `armorer` and `conversationalist` built (it imports both, plus their `/test` and
+  # `/adapters/*` subpaths — see the file's own imports); it does not need Operative or the rest of
+  # the workspace, so this job builds only those two rather than the full `turbo run build`.
+  #
+  # The final step invokes `node` directly rather than through a `bun run <script>` command:
+  # `bunfig.toml` sets `[run] bun = true`, which makes `bun run` transparently substitute Bun's
+  # own runtime for any script whose command begins with the literal token `node`, defeating the
+  # whole point of this job (proving the test under the real, matrix-selected Node binary that
+  # `actions/setup-node` put on PATH). A plain shell `run:` step is not a `bun run` script
+  # invocation, so it is not subject to that substitution.
+  runtime-matrix:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [22, current]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+
+      - name: Set up Node.js (${{ matrix.node-version }})
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build armorer and conversationalist
+        run: bun run turbo run build --filter=armorer --filter=conversationalist
+
+      - name: Cross-runtime integration test (test/runtime.test.mjs) under Node ${{ matrix.node-version }}
+        run: node --test packages/integration/test/runtime.test.mjs

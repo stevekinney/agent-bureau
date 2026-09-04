@@ -75,6 +75,10 @@ await run(['bun', 'test', 'test/tribunal-conformance-generality.test.ts']);
 await run(['bun', 'test', 'test/bureau-agent-definitions.test.ts']);
 await run(['bun', 'test', 'test/anthropic-interop.test.ts']);
 await run(['bun', 'test', 'test/model-selection-contract.test.ts']);
+// AB-283 — keeps this README's "What `test` Runs" table in sync with the registrations in this
+// file, so a future registration added here without a matching README row fails loudly instead of
+// silently drifting (the gap AB-268's implementer found and this issue closed).
+await run(['bun', 'test', 'test/readme-test-sequencing.test.ts']);
 await run(['bun', 'test', 'test/lifecycle-contract']);
 // AB-270 — process-crash recovery conformance (real OS processes, real
 // SQLite backend). Only the smoke-tagged scenario runs here, keeping this

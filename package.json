@@ -6,6 +6,7 @@
     "build": "turbo run build",
     "check-changesets": "bun run scripts/check-changesets.ts",
     "check-determinism": "bun run scripts/check-determinism.ts",
+    "check-runtime-matrix": "bun run scripts/check-runtime-matrix.ts",
     "check-skip-manifest": "bun run scripts/check-skip-manifest.ts",
     "check-types": "turbo run check-types",
     "check:stale-dist": "bun run scripts/check-stale-workspace-dist.ts",
@@ -25,7 +26,7 @@
     "test:consumer:operative": "bun run scripts/verify-operative-consumer.ts --mode local",
     "verify:bureau:tarball-boundary": "bun run scripts/verify-bureau-tarball-boundary.ts",
     "prepare": "lefthook install",
-    "validate": "bun run check-changesets && bun run check-determinism && bun run check-skip-manifest && turbo run format:check lint check-types test --concurrency=2 && prettier --check \"**/*.{ts,tsx,js,jsx,mjs,cjs,json,md,yml,yaml}\" && bun run test:scripts",
+    "validate": "bun run check-changesets && bun run check-determinism && bun run check-runtime-matrix && bun run check-skip-manifest && turbo run format:check lint check-types test --concurrency=2 && prettier --check \"**/*.{ts,tsx,js,jsx,mjs,cjs,json,md,yml,yaml}\" && bun run test:scripts",
     "changeset": "changeset",
     "version": "changeset version",
     "release": "bun run scripts/release.ts",
@@ -55,7 +56,7 @@
     "typescript-eslint": "^8.67.0"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "packageManager": "bun@1.4.0",
   "workspaces": [
