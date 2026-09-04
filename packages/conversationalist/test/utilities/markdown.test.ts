@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { createManualRuntimeServices } from 'lifecycle';
 
 import {
   fromMarkdown,
@@ -738,6 +739,30 @@ Hello`;
       expect(conv2.id).toBeTruthy();
       expect(conv1.id).not.toBe(conv2.id);
       expect(getOrderedMessages(conv1)[0].id).not.toBe(getOrderedMessages(conv2)[0].id);
+    });
+
+    test('a manual runtime controls the minted conversation id, message id, and timestamps (AB-325)', async () => {
+      const markdown = `### User
+
+Hello`;
+
+      const runtime = createManualRuntimeServices({ identifierSeed: 'markdown-test' });
+      await runtime.advance(12_345);
+      const expectedRuntime = createManualRuntimeServices({ identifierSeed: 'markdown-test' });
+      await expectedRuntime.advance(12_345);
+
+      const conversation = fromMarkdown(markdown, runtime);
+
+      // parseMarkdownSimple mints each message id before the conversation id, in source order.
+      const expectedMessageId = expectedRuntime.identifiers.next('conversation');
+      const expectedConversationId = expectedRuntime.identifiers.next('conversation');
+      const expectedTimestamp = expectedRuntime.clock.nowISO();
+
+      expect(getOrderedMessages(conversation)[0]?.id).toBe(expectedMessageId);
+      expect(conversation.id).toBe(expectedConversationId);
+      expect(conversation.createdAt).toBe(expectedTimestamp);
+      expect(conversation.updatedAt).toBe(expectedTimestamp);
+      expect(getOrderedMessages(conversation)[0]?.createdAt).toBe(expectedTimestamp);
     });
 
     test('assigns positions based on message order', () => {

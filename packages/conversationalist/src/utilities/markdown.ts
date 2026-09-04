@@ -1,6 +1,7 @@
 import matter from 'gray-matter';
 
 import { assertConversationSafe } from '../conversation/validation';
+import { type ConversationRuntime, defaultConversationRuntime } from '../environment';
 import type { MultiModalContent } from '../multi-modal';
 import { copyContent, renderDocumentReferenceText } from '../multi-modal';
 import type {
@@ -503,9 +504,12 @@ export class MarkdownParseError extends Error {
 
 /**
  * Generates a simple unique ID for use when metadata is not available.
+ * Reads through `runtime.identifiers` (AB-92/AB-252's seam) so a manual
+ * runtime controls the ids `fromMarkdown` mints when parsing markdown that
+ * carries no frontmatter. Defaults to the real implementation.
  */
-function generateId(): string {
-  return crypto.randomUUID();
+function generateId(runtime: ConversationRuntime): string {
+  return runtime.identifiers.next('conversation');
 }
 
 /**
@@ -529,10 +533,16 @@ function generateId(): string {
  * - Defaults: status='active', hidden=false, empty metadata
  *
  * @param markdown - The markdown string to parse
+ * @param runtime - Identifier and clock seam (AB-92/AB-252) backing the ids and
+ *   timestamps `fromMarkdown` mints when `markdown` carries no frontmatter.
+ *   Defaults to the real implementation.
  * @returns A Conversation object
  * @throws {MarkdownParseError} If the markdown format is invalid (e.g., unknown role)
  */
-export function fromMarkdown(markdown: string): Conversation {
+export function fromMarkdown(
+  markdown: string,
+  runtime: ConversationRuntime = defaultConversationRuntime,
+): Conversation {
   const trimmed = markdown.trim();
 
   // Check if frontmatter exists
@@ -540,7 +550,7 @@ export function fromMarkdown(markdown: string): Conversation {
 
   const conversation = hasFrontmatter
     ? parseMarkdownWithMetadata(trimmed)
-    : parseMarkdownSimple(trimmed);
+    : parseMarkdownSimple(trimmed, runtime);
 
   try {
     assertConversationSafe(conversation);
@@ -669,8 +679,8 @@ function parseMarkdownWithMetadata(trimmed: string): Conversation {
 /**
  * Parses simple markdown without metadata, using sensible defaults.
  */
-function parseMarkdownSimple(body: string): Conversation {
-  const now = new Date().toISOString();
+function parseMarkdownSimple(body: string, runtime: ConversationRuntime): Conversation {
+  const now = runtime.clock.nowISO();
   const messages: Message[] = [];
 
   // Pattern for simple messages (no ID in header): ### Role
@@ -688,7 +698,7 @@ function parseMarkdownSimple(body: string): Conversation {
     }
 
     const message: Message = {
-      id: generateId(),
+      id: generateId(runtime),
       role,
       content: contentBody?.trim() ?? '',
       position,
@@ -703,7 +713,7 @@ function parseMarkdownSimple(body: string): Conversation {
 
   const conversation: Conversation = {
     schemaVersion: CURRENT_SCHEMA_VERSION,
-    id: generateId(),
+    id: generateId(runtime),
     status: 'active',
     metadata: toReadonly({}),
     ids: toReadonly(messages.map((message) => message.id)),

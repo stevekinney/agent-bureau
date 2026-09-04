@@ -665,6 +665,15 @@ const restored = conversationFromMarkdown(md);
 
 // Parse Markdown into raw ConversationHistory
 const rawHistory = fromMarkdown(md2);
+
+// Markdown with no frontmatter mints a fresh id/timestamp for the conversation and
+// every message — `fromMarkdown`'s second, optional `runtime` argument controls that
+// (AB-92/AB-252's `RuntimeServices` clock/identifiers seam; defaults to the real
+// implementation). `conversationFromMarkdown` forwards `environment?.runtime` into it,
+// so a manual runtime supplied for the returned `Conversation` also controls the parse.
+import { createManualRuntimeServices } from 'lifecycle';
+const runtime = createManualRuntimeServices({ identifierSeed: 'demo' });
+const deterministic = fromMarkdown(md2, runtime);
 ```
 
 **Key exports:** `toMarkdown`, `fromMarkdown`, `conversationToMarkdown`, `conversationFromMarkdown`, `getRoleLabel`, `getRoleFromLabel`, `ROLE_LABELS`, `LABEL_TO_ROLE`, `MarkdownParseError`. Also exports `ToMarkdownOptions` type.

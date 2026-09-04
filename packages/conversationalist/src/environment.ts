@@ -151,7 +151,7 @@ export function simpleTokenEstimator(message: Message): number {
  * every other real-implementation default in this package already follows
  * (one shared instance, not a fresh one per resolution).
  */
-const defaultConversationRuntime: ConversationRuntime = createDefaultRuntimeServices();
+export const defaultConversationRuntime: ConversationRuntime = createDefaultRuntimeServices();
 
 /**
  * Default environment reading through {@link defaultConversationRuntime}
