@@ -46,8 +46,8 @@ describe('resolveConversationEnvironment runtime seam (AB-321)', () => {
     const environment = resolveConversationEnvironment({ runtime });
 
     expect(environment.now()).toBe('2030-01-01T00:00:00.000Z');
-    expect(environment.randomId()).toBe('conversation-1');
-    expect(environment.randomId()).toBe('conversation-2');
+    expect(environment.randomId()).toBe(`${runtime.identifierPrefix}-conversation-1`);
+    expect(environment.randomId()).toBe(`${runtime.identifierPrefix}-conversation-2`);
   });
 
   it('lets an explicit now/randomId override win over a supplied runtime', () => {

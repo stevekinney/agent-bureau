@@ -62,7 +62,7 @@ describe('Conversation', () => {
     // for the id and timestamps.
     const history = new ConversationHistory(undefined, { runtime });
 
-    expect(history.current.id).toBe('conversation-1');
+    expect(history.current.id).toBe(`${runtime.identifierPrefix}-conversation-1`);
     expect(history.current.createdAt).toBe('2030-03-01T00:00:00.000Z');
   });
 
