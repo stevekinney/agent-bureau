@@ -139,6 +139,7 @@ export async function runEvaluationSuite(
     agent: options.agent,
     concurrency: options.concurrency,
     embedder: options.embedder,
+    runtime: options.runtime,
   });
 
   const report = await evaluation.run();

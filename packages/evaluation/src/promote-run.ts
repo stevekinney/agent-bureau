@@ -1,4 +1,5 @@
 import type { RunResult } from '@lostgradient/operative';
+import { createDefaultRuntimeServices } from '@lostgradient/operative';
 
 import { extractToolCallSequence } from './metrics';
 import type { EvaluationCase, ExpectedToolCall, PromoteRunToCaseOptions } from './types';
@@ -51,6 +52,7 @@ function toExpectedToolCalls(runResult: RunResult): ExpectedToolCall[] {
  */
 export function promoteRunToCase(options: PromoteRunToCaseOptions): EvaluationCase {
   const { sourceCase, runResult, origin, runId } = options;
+  const runtime = options.runtime ?? createDefaultRuntimeServices();
   const expectedToolCalls = toExpectedToolCalls(runResult);
 
   return {
@@ -71,7 +73,7 @@ export function promoteRunToCase(options: PromoteRunToCaseOptions): EvaluationCa
       origin,
       runId,
       sourceCaseName: sourceCase.name,
-      promotedAt: new Date().toISOString(),
+      promotedAt: runtime.clock.nowISO(),
       finishReason: runResult.finishReason,
     },
   };

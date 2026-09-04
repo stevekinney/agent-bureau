@@ -37,7 +37,9 @@ function createReport(
   const averageDuration = total > 0 ? cases.reduce((s, c) => s + c.metrics.duration, 0) / total : 0;
 
   return {
-    timestamp: new Date().toISOString(),
+    // Fixture data — the exact value is never asserted on, so a fixed
+    // literal avoids a real-clock read inside a deterministic directory.
+    timestamp: '2026-01-01T00:00:00.000Z',
     cases,
     summary: {
       total,

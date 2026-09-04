@@ -1,8 +1,10 @@
 import {
+  createDefaultRuntimeServices,
   createPromptInjectionDetector,
   DEFAULT_PROMPT_INJECTION_TRIPWIRE_THRESHOLD,
   type DetectorContext,
   type InputDetector,
+  type RuntimeServices,
   withMinimumTripwireConfidence,
 } from '@lostgradient/operative';
 import {
@@ -46,6 +48,7 @@ const BENCHMARK_CONTEXT: DetectorContext = {
 export async function benchmarkPromptInjectionDetector(
   detector: InputDetector,
   fixtures: readonly PromptInjectionFixtureCase[] = PROMPT_INJECTION_FIXTURES,
+  runtime: RuntimeServices = createDefaultRuntimeServices(),
 ): Promise<PromptInjectionBenchmarkResult> {
   const cases: EvaluationCaseResult[] = [];
 
@@ -55,9 +58,9 @@ export async function benchmarkPromptInjectionDetector(
   let falsePositiveCount = 0;
 
   for (const fixture of fixtures) {
-    const start = performance.now();
+    const start = runtime.monotonic.now();
     const result = await detector.detect(fixture.input, BENCHMARK_CONTEXT);
-    const duration = performance.now() - start;
+    const duration = runtime.monotonic.now() - start;
 
     const expectedTriggered = fixture.label === 'attack';
     const pass = result.triggered === expectedTriggered;
@@ -87,7 +90,7 @@ export async function benchmarkPromptInjectionDetector(
   }
 
   const report: EvaluationReport = {
-    timestamp: new Date().toISOString(),
+    timestamp: runtime.clock.nowISO(),
     cases,
     summary: computeSummary(cases),
   };

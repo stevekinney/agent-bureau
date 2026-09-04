@@ -5,6 +5,7 @@ import {
   type InputDetector,
 } from '@lostgradient/operative';
 import type { PromptInjectionFixtureCase } from '@lostgradient/operative/test';
+import { createManualRuntimeServices } from '@lostgradient/operative/test';
 import { describe, expect, it } from 'bun:test';
 
 import { compareEvaluationReports } from './comparison';
@@ -62,6 +63,20 @@ describe('benchmarkPromptInjectionDetector', () => {
     expect(result.report.cases[0]?.pass).toBe(true);
     expect(result.detectionRate).toBe(1);
     expect(result.falsePositiveRate).toBe(0);
+  });
+
+  it('derives the report timestamp from an injected manual runtime rather than the real clock', async () => {
+    const detector: InputDetector = {
+      name: 'always-trigger',
+      detect: () =>
+        Promise.resolve({ triggered: true, confidence: 0.9, category: 'prompt-injection' }),
+    };
+    const fixtures = [makeFixture({ name: 'an attack', input: 'x', label: 'attack' })];
+    const runtime = createManualRuntimeServices({ origin: '2026-06-15T00:00:00.000Z' });
+
+    const result = await benchmarkPromptInjectionDetector(detector, fixtures, runtime);
+
+    expect(result.report.timestamp).toBe('2026-06-15T00:00:00.000Z');
   });
 
   it('scores a case as failing when the detector misses an attack (false negative)', async () => {
