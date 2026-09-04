@@ -7,6 +7,7 @@ import { describe, expect, it } from 'bun:test';
 import { BureauError } from 'bureau';
 import { Conversation, createConversationHistory } from 'conversationalist';
 import { Hono } from 'hono';
+import { createManualRuntimeServices } from 'lifecycle';
 
 import type { SubmitSchedulerTaskRequest, SubmitSchedulerTaskResponse } from '../types';
 import { createSchedulerRoutes } from './scheduler';
@@ -172,6 +173,34 @@ describe('scheduler routes', () => {
 
     const historyBody = await historyResponse.json();
     expect(historyBody.entries[0]?.event).toBe('task.queued');
+
+    await scheduler.stop();
+  });
+
+  it('history timestamps (AB-327) follow the injected RuntimeServices clock, not the real wall clock', async () => {
+    const scheduler = createScheduler({
+      generate: createMockGenerate([textResponse('ok')]),
+      toolbox: createTestToolbox([]),
+      idleDelay: 1,
+    });
+
+    const runtime = createManualRuntimeServices({ origin: '2030-01-01T00:00:00.000Z' });
+    const app = new Hono();
+    app.route(
+      '/api/v1/scheduler',
+      createSchedulerRoutes(scheduler, createSubmitSchedulerTask(scheduler), runtime),
+    );
+
+    const submitResponse = await app.request('/api/v1/scheduler/tasks', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: 'Hello scheduler' }),
+    });
+    expect(submitResponse.status).toBe(202);
+
+    const historyResponse = await app.request('/api/v1/scheduler/history');
+    const historyBody = await historyResponse.json();
+    expect(historyBody.entries[0]?.timestamp).toBe(Date.parse('2030-01-01T00:00:00.000Z'));
 
     await scheduler.stop();
   });

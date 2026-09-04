@@ -96,17 +96,25 @@ export interface CreateGatewayDependencies {
  * unit-testable without waiting in real time — tests inject
  * `setTimeoutFn`/`clearTimeoutFn` and fire the timeout callback
  * themselves. `createGateway` always supplies both (from its resolved
- * `RuntimeServices.timers`), so the `setTimeout`/`clearTimeout` global
- * defaults below exist only for direct unit tests of this function.
+ * `RuntimeServices.timers`), so the composed-`RuntimeServices` defaults
+ * below (AB-327: the real implementation, AB-252, rather than a direct
+ * `setTimeout`/`clearTimeout` global reference) exist only for direct unit
+ * tests of this function.
  */
 export async function raceDrainTimeout(
   stopping: Promise<unknown>,
   drainTimeoutMs: number,
   dependencies: Pick<CreateGatewayDependencies, 'setTimeoutFn' | 'clearTimeoutFn'> = {},
 ): Promise<boolean> {
+  // Both defaults come from ONE RuntimeServices instance — never two
+  // separately constructed ones — so `clearTimeoutFn` is guaranteed to
+  // match `setTimeoutFn`'s own handle semantics rather than merely
+  // happening to today because both delegate to the same host globals
+  // (review finding, PR #548).
+  const defaultRuntimeTimers = createDefaultRuntimeServices().timers;
   const {
-    setTimeoutFn = (callback: () => void, ms: number) => setTimeout(callback, ms),
-    clearTimeoutFn = (handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+    setTimeoutFn = defaultRuntimeTimers.setTimeout,
+    clearTimeoutFn = defaultRuntimeTimers.clearTimeout,
   } = dependencies;
   let timer: unknown;
   const timedOut = new Promise<'timed-out'>((resolve) => {
@@ -441,6 +449,7 @@ export async function createGateway(
       apiKeyStore,
       a2a: options.a2a,
       hookIdempotencyRegistry,
+      runtime: runtimeServices,
     }),
   );
 

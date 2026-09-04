@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
 
 import type { ApiKeyStore } from '../keys/types';
 import type { LiveFrameBroker } from '../live-events';
@@ -29,6 +30,11 @@ type CreateRoutesOptions = {
   apiKeyStore?: ApiKeyStore;
   a2a?: A2AAgentCardOptions;
   hookIdempotencyRegistry?: HookIdempotencyRegistry;
+  // AB-327: defaults to the real-globals implementation (AB-252) so every
+  // pre-existing caller (including this package's own test suite) is
+  // unaffected. `createGateway` always forwards its single resolved
+  // `RuntimeServices` instance.
+  runtime?: RuntimeServices;
 };
 
 export function createRoutes({
@@ -37,6 +43,7 @@ export function createRoutes({
   apiKeyStore,
   a2a,
   hookIdempotencyRegistry = createHookIdempotencyRegistry(),
+  runtime = createDefaultRuntimeServices(),
 }: CreateRoutesOptions) {
   const app = new Hono();
 
@@ -96,7 +103,11 @@ export function createRoutes({
   schedulerRouter.delete('*', createScopeGuard([SCOPE.RUNS_WRITE]));
   schedulerRouter.route(
     '/',
-    createSchedulerRoutes(bureau.scheduler, (request) => bureau.submitSchedulerTask(request)),
+    createSchedulerRoutes(
+      bureau.scheduler,
+      (request) => bureau.submitSchedulerTask(request),
+      runtime,
+    ),
   );
   app.route('/api/v1/scheduler', schedulerRouter);
 
@@ -128,7 +139,7 @@ export function createRoutes({
   // dispatch with no routing. Uses the same RUNS_WRITE scope as direct runs.
   const openaiRouter = new Hono();
   openaiRouter.post('*', createScopeGuard([SCOPE.RUNS_WRITE]));
-  openaiRouter.route('/', createOpenAICompatRoutes(bureau));
+  openaiRouter.route('/', createOpenAICompatRoutes(bureau, undefined, runtime));
   app.route('/v1', openaiRouter);
 
   // Usage/cost accounting (PTDR observability — Layer A live data).
@@ -162,7 +173,7 @@ export function createRoutes({
 
   const a2aRouter = new Hono();
   a2aRouter.post('*', createScopeGuard([SCOPE.RUNS_WRITE]));
-  a2aRouter.route('/', createA2ARoutes(bureau));
+  a2aRouter.route('/', createA2ARoutes(bureau, runtime));
   app.route('/a2a', a2aRouter);
 
   return app;

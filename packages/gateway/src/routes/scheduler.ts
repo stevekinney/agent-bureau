@@ -2,6 +2,7 @@ import type { Scheduler, SchedulerPriority } from '@lostgradient/operative';
 import { BureauError } from 'bureau';
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
+import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
 import { z } from 'zod';
 
 import type { SubmitSchedulerTaskRequest, SubmitSchedulerTaskResponse } from '../types';
@@ -41,7 +42,21 @@ function appendSchedulerHistory(
   }
 }
 
-function getSchedulerHistory(scheduler: Scheduler): SchedulerHistoryEntry[] {
+/**
+ * `scheduler` is the WeakMap's key, so `getSchedulerHistory` memoizes its
+ * event listeners (and therefore its clock) once per scheduler instance:
+ * the FIRST caller for a given `scheduler` is the one whose `clock`
+ * actually backs every timestamp this history ever records, for that
+ * scheduler's lifetime — a later call with a different `clock` argument is
+ * a no-op past that point. In production there is exactly one caller
+ * (`createSchedulerRoutes`, itself called once per `createGateway`), so
+ * this only matters for a test that constructs the routes more than once
+ * over the same `Scheduler` with different injected clocks.
+ */
+function getSchedulerHistory(
+  scheduler: Scheduler,
+  clock: RuntimeServices['clock'],
+): SchedulerHistoryEntry[] {
   const existingHistory = schedulerHistoryByInstance.get(scheduler);
   if (existingHistory) {
     return existingHistory;
@@ -55,7 +70,7 @@ function getSchedulerHistory(scheduler: Scheduler): SchedulerHistoryEntry[] {
       taskId: event.taskId,
       priority: event.priority,
       metadata: event.metadata,
-      timestamp: Date.now(),
+      timestamp: clock.now(),
     });
   });
 
@@ -64,7 +79,7 @@ function getSchedulerHistory(scheduler: Scheduler): SchedulerHistoryEntry[] {
       event: event.type,
       taskId: event.taskId,
       priority: event.priority,
-      timestamp: Date.now(),
+      timestamp: clock.now(),
     });
   });
 
@@ -72,7 +87,7 @@ function getSchedulerHistory(scheduler: Scheduler): SchedulerHistoryEntry[] {
     appendSchedulerHistory(history, {
       event: event.type,
       taskId: event.taskId,
-      timestamp: Date.now(),
+      timestamp: clock.now(),
     });
   });
 
@@ -83,7 +98,7 @@ function getSchedulerHistory(scheduler: Scheduler): SchedulerHistoryEntry[] {
       metadata: {
         error: event.error instanceof Error ? event.error.message : String(event.error),
       },
-      timestamp: Date.now(),
+      timestamp: clock.now(),
     });
   });
 
@@ -92,7 +107,7 @@ function getSchedulerHistory(scheduler: Scheduler): SchedulerHistoryEntry[] {
       event: event.type,
       taskId: event.taskId,
       reason: event.reason,
-      timestamp: Date.now(),
+      timestamp: clock.now(),
     });
   });
 
@@ -101,7 +116,7 @@ function getSchedulerHistory(scheduler: Scheduler): SchedulerHistoryEntry[] {
       event: event.type,
       taskId: event.taskId,
       reason: event.phase,
-      timestamp: Date.now(),
+      timestamp: clock.now(),
     });
   });
 
@@ -116,9 +131,15 @@ export function createSchedulerRoutes(
   scheduler: Scheduler | undefined,
   submitSchedulerTask:
     ((request: SubmitSchedulerTaskRequest) => Promise<SubmitSchedulerTaskResponse>) | undefined,
+  // AB-327: defaults to the real-globals implementation (AB-252) so every
+  // pre-existing caller (including this package's own test suite, which
+  // constructs these routes with no third argument) is unaffected.
+  // `createRoutes` always forwards `createGateway`'s single resolved
+  // instance.
+  runtime: RuntimeServices = createDefaultRuntimeServices(),
 ) {
   const app = new Hono();
-  const history = scheduler ? getSchedulerHistory(scheduler) : [];
+  const history = scheduler ? getSchedulerHistory(scheduler, runtime.clock) : [];
 
   app.get('/', (context) => {
     if (!scheduler) {
