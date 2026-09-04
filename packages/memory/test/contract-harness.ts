@@ -2,6 +2,10 @@ import { beforeEach, describe, expect, it } from 'bun:test';
 
 import type { MemoryRecord, MemoryRecordScope, MemoryRecordStorage } from '../src/types';
 
+// Fixed instant used to stamp synthetic fixture records below — only a stable value is needed,
+// never the real clock.
+const FIXED_NOW = Date.parse('2026-01-01T00:00:00.000Z');
+
 /**
  * Options for {@link runMemoryRecordStorageContract}.
  */
@@ -58,7 +62,7 @@ export function runMemoryRecordStorageContract(
    * agree on a tenant-required backend.
    */
   function makeRecord(id: string, overrides: Partial<MemoryRecord> = {}): MemoryRecord {
-    const now = Date.now();
+    const now = FIXED_NOW;
     const baseNamespace = overrides.namespace ?? 'alpha';
     const baseScope: MemoryRecordScope =
       overrides.tenantId === undefined

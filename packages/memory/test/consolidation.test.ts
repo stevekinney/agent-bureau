@@ -6,6 +6,10 @@ import { createMemory } from '../src/create-memory';
 import { createInMemoryMemoryRecordStorage, createMockEmbedder } from '../src/test/index';
 import type { Memory, MemoryMetadata, MemorySearchResult } from '../src/types';
 
+// Fixed origin for the fake in-test memory double's synthetic timestamps below — only their
+// relative ordering matters to these tests, never the real clock.
+const FAKE_MEMORY_ORIGIN = Date.parse('2026-01-01T00:00:00.000Z');
+
 function createTestMemory(): Memory {
   return createMemory({
     embedder: createMockEmbedder(128),
@@ -73,7 +77,7 @@ function createStubMemory(
     forgotten,
     async remember(content: string, metadata?: Partial<MemoryMetadata>) {
       remembered.push({ content, metadata });
-      const now = Date.now() + rememberedEntryCount;
+      const now = FAKE_MEMORY_ORIGIN + rememberedEntryCount;
       const entry = {
         id: `remembered-${rememberedEntryCount++}`,
         content,
@@ -173,7 +177,7 @@ describe('createConsolidationTask', () => {
 
     // Add distinct entries
     for (let i = 0; i < 5; i++) {
-      await memory.remember(`Entry number ${i} with unique content ${Math.random()}`);
+      await memory.remember(`Entry number ${i} with unique content ${i}-unique`);
     }
 
     const task = createConsolidationTask({
@@ -248,7 +252,7 @@ describe('createConsolidationTask', () => {
     await memory.init();
 
     for (let i = 0; i < 5; i++) {
-      await memory.remember(`Distinct entry ${i} with random ${Math.random()}`);
+      await memory.remember(`Distinct entry ${i} with random ${i}-token`);
     }
 
     const task = createConsolidationTask({

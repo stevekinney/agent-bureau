@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { createManualRuntimeServices } from 'lifecycle';
 
@@ -17,6 +18,25 @@ async function drainMicrotasks(turns = 10): Promise<void> {
   for (let i = 0; i < turns; i++) {
     await Promise.resolve();
   }
+}
+
+/**
+ * Polls `condition` up to `maximumAttempts` times, yielding one real macrotask turn
+ * (`yieldToPortableEventLoop`, a zero-delay `MessageChannel` post — not a wall-clock timer)
+ * between tries. The synchronizer under test performs real filesystem I/O on macrotasks, so a
+ * microtask-only drain never observes its completion; this still needs a real event-loop turn,
+ * never a fixed-duration sleep. Bounded, never an unbounded spin.
+ */
+async function waitForCondition(
+  condition: () => boolean | Promise<boolean>,
+  failureMessage: string,
+  maximumAttempts = 200,
+): Promise<void> {
+  for (let attempt = 0; attempt < maximumAttempts; attempt++) {
+    if (await condition()) return;
+    await yieldToPortableEventLoop();
+  }
+  throw new Error(failureMessage);
 }
 
 describe('createFileSynchronizer', () => {
@@ -258,9 +278,10 @@ describe('createFileSynchronizer', () => {
     // polling error-swallow path.
     await writeFile(filePath, 'Updated once.');
     poll?.();
-    while (rememberCalls === 0) {
-      await new Promise((resolve) => setTimeout(resolve, 1));
-    }
+    await waitForCondition(
+      () => rememberCalls > 0,
+      'expected rememberOnce to be invoked after the first poll',
+    );
     // Flush the ingest → synchronize rejection through the interval's .catch
     // (swallow) and .finally (lock release).
     await drainMicrotasks();
@@ -271,9 +292,10 @@ describe('createFileSynchronizer', () => {
     const callsBeforeRecovery = rememberCalls;
     await writeFile(filePath, 'Updated twice.');
     poll?.();
-    while (rememberCalls === callsBeforeRecovery) {
-      await new Promise((resolve) => setTimeout(resolve, 1));
-    }
+    await waitForCondition(
+      () => rememberCalls > callsBeforeRecovery,
+      'expected rememberOnce to be invoked again after the recovery poll',
+    );
     await drainMicrotasks();
 
     await synchronizer.stop();
@@ -359,11 +381,10 @@ describe('createFileSynchronizer', () => {
     // to change rather than assuming microtask draining alone is enough.
     await writeFile(join(tempDir, 'polled.md'), 'Polled content.');
     await runtime.advance(1000);
-    let attempts = 0;
-    while ((await memory.count()) <= countAfterStart && attempts < 50) {
-      await new Promise((resolve) => setTimeout(resolve, 1));
-      attempts++;
-    }
+    await waitForCondition(
+      async () => (await memory.count()) > countAfterStart,
+      'expected memory.count() to increase after the polled sync',
+    );
 
     expect(await memory.count()).toBeGreaterThan(countAfterStart);
 

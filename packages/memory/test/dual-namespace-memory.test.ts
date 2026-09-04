@@ -34,6 +34,9 @@ import { createInMemoryMemoryRecordStorage, createMockEmbedder } from '../src/te
 import type { Memory, MemoryRecordStorage } from '../src/types';
 
 const DIMENSION = 64;
+// Fixed instant used to stamp fixture records below — only relative ordering (via `now + i`)
+// matters to these tests, never the real clock.
+const FIXED_NOW = Date.parse('2026-01-01T00:00:00.000Z');
 
 /**
  * Builds a createMemory instance scoped to a single namespace, backed by the
@@ -67,7 +70,7 @@ describe('D3 prefix namespacing — app:agent-bureau:memory:v1:', () => {
     const storage = createWeftMemoryRecordStorage(underlying);
     await storage.init();
 
-    const now = Date.now();
+    const now = FIXED_NOW;
     await storage.put({
       id: 'test-id',
       namespace: 'agent',
@@ -493,7 +496,7 @@ describe('D3 tenantId scoping — bureau is the tenant boundary', () => {
     const storage = createWeftMemoryRecordStorage(underlying);
     await storage.init();
 
-    const now = Date.now();
+    const now = FIXED_NOW;
     // Record in tenant 'bureau-a'.
     await storage.put({
       id: 'rec-a',
@@ -553,7 +556,7 @@ describe('createDualNamespaceMemory list() — deep pagination regression (PRRT_
     const mem = createMemory({ embedder, storage, namespace });
     await mem.init();
 
-    const now = Date.now();
+    const now = FIXED_NOW;
     for (let i = 0; i < count; i++) {
       await storage.put({
         id: `${namespace}-record-${i}`,

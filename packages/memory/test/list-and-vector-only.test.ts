@@ -35,7 +35,7 @@ describe('memory.list()', () => {
     await memory.init();
 
     for (let i = 0; i < 5; i++) {
-      await memory.remember(`Entry ${i} with unique content ${Math.random()}`);
+      await memory.remember(`Entry ${i} with unique content ${i}-token`);
     }
 
     const page1 = await memory.list({ limit: 2, offset: 0 });
