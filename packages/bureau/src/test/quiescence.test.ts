@@ -33,6 +33,29 @@ function hungGenerate(): GenerateFunction {
 }
 
 /**
+ * Blocks forever unless the run's `AbortSignal` fires, matching a
+ * well-behaved provider — `lifecycle-contract/support.ts`'s
+ * `createBlockingGenerate` (not exported from a shared package this suite
+ * can import, so reimplemented here). Used to reproduce AB-339's exact
+ * repro shape: `run.abort()` called synchronously, before the deferred
+ * durable workflow has even started driving.
+ */
+function blockingGenerate(): GenerateFunction {
+  return (context) =>
+    new Promise((resolve) => {
+      if (context.signal?.aborted) {
+        resolve({ content: 'aborted', toolCalls: [] });
+        return;
+      }
+      context.signal?.addEventListener(
+        'abort',
+        () => resolve({ content: 'aborted', toolCalls: [] }),
+        { once: true },
+      );
+    });
+}
+
+/**
  * A toolbox whose one tool never resolves, plus a `generate` that calls it
  * exactly once. A durable run built on these commits its first STEP (the
  * tool-call step) — persisting real durable state — before hanging inside
@@ -369,6 +392,58 @@ describe('assertBureauQuiescent / BureauTestHarness.close()', () => {
         await secondHarness.bureau.dispose();
         await storage2.dispose();
       }
+    } finally {
+      await rm(path, { force: true });
+      await rm(`${path}-wal`, { force: true });
+      await rm(`${path}-shm`, { force: true });
+    }
+  });
+
+  it('AB-339: a directly aborted durable run reports quiescent even when the harness closes without the caller awaiting closed() first', async () => {
+    // Real SQLite storage, matching the original reproduction
+    // (`adapters/bureau-durable.ts`) — this bug does not reproduce against
+    // the in-memory storage fixture, whose "disposed" backend still serves
+    // reads, masking the race a real closed SQLite connection exposes.
+    const runtime = createManualRuntimeServices();
+    const path = join(
+      tmpdir(),
+      `ab-339-direct-abort-${runtime.identifiers.next('ab-339-fixture')}.sqlite`,
+    );
+    try {
+      const generate = blockingGenerate();
+      const storage = createSqliteStorageFixture({ runtime, path });
+      const harness = await createBureauTestHarness({
+        agents: { worker: createAgent({ name: 'worker', generate }) },
+        generate,
+        toolbox: createToolbox([]),
+        runtime,
+        storage,
+        durableExecution: true,
+      });
+
+      // Abort called synchronously, right after `startRun` — matching
+      // `driveDurableSequential`'s `targetedAbort` shape exactly: the
+      // durable workflow has not even started driving yet
+      // (`driveStarted` is still false inside the adapter), so `abort()`
+      // fires the `AbortController` but does NOT yet call `engine.cancel()`
+      // — that call is deferred to whenever `closed()` first runs its
+      // `resolveDurableOutcome()`.
+      const run = harness.startRun('worker', 'go');
+      run.abort(
+        'AB-339 regression: direct abort, harness closes without an explicit closed() await',
+      );
+      await run.result();
+      // Deliberately NOT awaiting `run.closed()` here — AB-256's contract is
+      // that `ResourceScope.close()` (via `harness.close()`) aborts every
+      // registered run and awaits each `closed()` itself, so the caller
+      // should never need this extra call for the harness to report
+      // quiescent.
+
+      const report = await harness.close();
+
+      expect(report.quiescent).toBe(true);
+      expect(report.leaked).toEqual([]);
+      expect(report.activeRoots).toEqual([]);
     } finally {
       await rm(path, { force: true });
       await rm(`${path}-wal`, { force: true });

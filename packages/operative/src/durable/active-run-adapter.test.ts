@@ -2083,26 +2083,33 @@ describe('createDurableActiveRun.closed()', () => {
     expect(await activeRun.closed()).toBe(first);
   });
 
-  it('fires its own post-cancel re-read cancellation when abort() ran before the workflow existed, so cancelSettled was never set (AC7)', async () => {
-    const { engine, resolveResult } = createManualDurableEngine();
+  // AB-339: this test previously encoded the exact bug the issue fixed —
+  // it asserted that an abort landing before the deferred microtask fired
+  // still durably LAUNCHED the workflow (`engine.start`), then had
+  // `resolveDurableOutcome` fire its own `engine.cancel`/`engine.get`
+  // re-read against that just-launched record. That launch is what let a
+  // concurrent `Bureau.shutdown()` dispose the durable engine mid-flight
+  // and misclassify the run `unresolved`/`unreachable` (the false leak
+  // AB-339 reports). The fix (`drive()`'s `abortedBeforeDrive` snapshot,
+  // taken in the SAME synchronous step `driveStarted` flips in) makes this
+  // scenario settle WITHOUT ever calling `engine.start`, so there is
+  // nothing for `engine.cancel`/`engine.get` to confirm — updated to assert
+  // that instead, per the coordinator's note to update rather than delete
+  // a test whose scenario name is still exactly right.
+  it('settles completed without ever launching the workflow when abort() ran before the deferred microtask fired (AB-339)', async () => {
+    const { engine } = createManualDurableEngine();
+    const startCalls: unknown[] = [];
     const cancelledIds: string[] = [];
-    // Rejects (run already terminal, matching the comment on
-    // `resolveDurableOutcome`'s fallback call) rather than resolving — this
-    // exercises the `.catch(() => undefined)` swallow, not just the call
-    // itself. Doesn't touch the workflow result (the real `cancel` does that
-    // via `createManualDurableEngine`'s B6 race simulation); this scenario
-    // tests the OTHER way a run ends up cancel-requested-but-settled: the
-    // workflow completed on its own (`resolveResult` below) despite an
-    // abort that arrived before it even existed.
+    const realStart = engine.start.bind(engine);
+    engine.start = async (...args: Parameters<RegistryAgnosticEngine['start']>) => {
+      startCalls.push(args);
+      return realStart(...args);
+    };
     engine.cancel = async (id: string) => {
       cancelledIds.push(id);
-      throw new Error('already terminal');
     };
-    engine.get = (async () => ({
-      status: 'cancelled',
-    })) as unknown as RegistryAgnosticEngine['get'];
 
-    const runId = 'ac7-abort-before-drive-started';
+    const runId = 'ab-339-abort-before-drive-started';
     const activeRun = createDurableActiveRun(
       { engine, checkpointStore: createManualCheckpointStore() },
       {
@@ -2114,23 +2121,59 @@ describe('createDurableActiveRun.closed()', () => {
     );
 
     // Abort SYNCHRONOUSLY, before the deferred-microtask `drive()` call has
-    // fired — `driveStarted` is still false, so abort()'s own engine.cancel
-    // call is skipped (the workflow doesn't exist yet) and `cancelSettled`
-    // is never set. `resolveDurableOutcome` must fire its own cancel call
-    // instead of awaiting `undefined`.
+    // fired — `driveStarted` is still false. `drive()` captures this exact
+    // window (`combinedSignal.aborted` read in the SAME microtask
+    // `driveStarted` flips true in) and skips `context.engine.start`
+    // entirely once it runs.
     activeRun.abort();
     expect(cancelledIds).toEqual([]);
 
-    // The manual engine never settles its own result on its own; simulate
-    // the workflow completing normally so `result` (and therefore
-    // `resolveDurableOutcome`) can proceed.
-    resolveResult();
-
     const closedAcknowledgement = activeRun.closed();
-    await activeRun.result;
+    const result = await activeRun.result;
 
+    expect(result.finishReason).toBe('aborted');
     expect(await closedAcknowledgement).toEqual({ status: 'completed' });
-    expect(cancelledIds).toContain(runId);
+    // The load-bearing assertions: nothing was ever durably launched, so
+    // there was nothing for `engine.cancel` to confirm either.
+    expect(startCalls).toEqual([]);
+    expect(cancelledIds).toEqual([]);
+  });
+
+  it('returns an error result — never engine.start — when onRunStart fails on the abort-before-drive path (AB-339)', async () => {
+    const { engine } = createManualDurableEngine();
+    const startCalls: unknown[] = [];
+    const realStart = engine.start.bind(engine);
+    engine.start = async (...args: Parameters<RegistryAgnosticEngine['start']>) => {
+      startCalls.push(args);
+      return realStart(...args);
+    };
+    const hooks = new HookRegistry<OperativeHookMap>();
+    hooks.on('onRunStart', async () => {
+      throw new Error('start hook failed');
+    });
+
+    const runId = 'ab-339-abort-before-drive-onrunstart-fails';
+    const activeRun = createDurableActiveRun(
+      { engine, checkpointStore: createManualCheckpointStore() },
+      {
+        runId,
+        sessionId: runId,
+        options: { ...runOptions(async () => ({ content: 'unused', toolCalls: [] })), hooks },
+        prompt: 'Hello',
+      },
+    );
+
+    // Same synchronous-abort-before-drive shape as the previous test — but
+    // `startRunLifecycle` (fired identically on this path, per its own doc
+    // comment) itself fails, so `drive()`'s abort-before-drive branch must
+    // still classify `error`, matching `driveDurableRun`'s own identical
+    // `startError` branch — never silently swallowed into `completed`.
+    activeRun.abort();
+    const result = await activeRun.result;
+
+    expect(result.finishReason).toBe('error');
+    expect((result.error as Error).message).toBe('start hook failed');
+    expect(startCalls).toEqual([]);
   });
 
   it('resolves unresolved/persistence-failed when the post-cancel re-read throws (coordinator persistence-failed fixture)', async () => {
@@ -3979,9 +4022,26 @@ describe('B6 — abort-into-generate load-bearing abort', () => {
     context.engine[Symbol.dispose]();
   });
 
-  it('abort() before the first microtask fires the AbortSignal without hanging (pre-start abort)', async () => {
+  // AB-339: previously the only assertion here was "settles cleanly, never
+  // calls generate()" — true, but only because `runStep`'s OWN internal
+  // pre-aborted-signal check (`if (signal?.aborted) return { kind: 'abort'
+  // }`) rescued a workflow `driveDurableRun` had ALREADY durably launched
+  // via `context.engine.start`. That launch is exactly the false-leak
+  // mechanism AB-339 fixed: this run's `abortedBeforeDrive` snapshot
+  // (captured the same microtask `driveStarted` flips true in) is `true`
+  // here, so `driveDurableRun` now settles this run WITHOUT ever reaching
+  // the engine at all — never launched, so never at risk of racing
+  // `Bureau.shutdown()`'s engine disposal. `spy.starts` staying empty is
+  // the load-bearing assertion this scenario now proves.
+  it('abort() before the first microtask fires the AbortSignal without ever launching the workflow (AB-339)', async () => {
     const context = await buildContext();
     const spy = spyEngine(context.engine);
+    const startCalls: unknown[] = [];
+    const realStart = spy.engine.start.bind(spy.engine);
+    spy.engine.start = async (...args: Parameters<RegistryAgnosticEngine['start']>) => {
+      startCalls.push(args);
+      return realStart(...args);
+    };
     const { generate, abortFired } = makeBlockingGenerate();
 
     const runId = 'b6-pre-start-abort';
@@ -4007,7 +4067,55 @@ describe('B6 — abort-into-generate load-bearing abort', () => {
     const result = await activeRun.result;
 
     // The run must settle cleanly (not hang) even when aborted before the workflow
-    // was registered with the engine. The AbortSignal path is sufficient here.
+    // was registered with the engine.
+    expect(['aborted', 'error']).toContain(result.finishReason);
+    expect(abortFired.value).toBe(false);
+    expect(startCalls).toEqual([]);
+    expect(spy.cancels).toEqual([]);
+
+    context.engine[Symbol.dispose]();
+  });
+
+  // The genuine counterpart AB-339 leaves reachable: `runStep`'s own
+  // internal pre-aborted-signal check (`if (signal?.aborted) return {
+  // kind: 'abort' }`), exercised via the DURABLE engine, for a workflow
+  // that HAD already been durably launched before its signal aborted —
+  // `abortedBeforeDrive` is only ever `true` for an abort landing before
+  // `driveStarted` flips; an abort delivered ONE microtask later (after
+  // `driveStarted` is already `true`, matching this file's other
+  // "`await Promise.resolve(); activeRun.abort()`" tests) still reaches
+  // `context.engine.start`, with the signal already aborted by the time
+  // `runStep` itself checks it.
+  it('runStep detects a signal that aborted during startup and short-circuits without invoking generate()', async () => {
+    const context = await buildContext();
+    const spy = spyEngine(context.engine);
+    const { generate, abortFired } = makeBlockingGenerate();
+
+    const runId = 'b6-startup-abort-after-driveStarted';
+    const activeRun = createDurableActiveRun(
+      { engine: spy.engine, checkpointStore: context.checkpointStore },
+      {
+        runId,
+        sessionId: runId,
+        options: {
+          generate,
+          toolbox: createToolbox([]),
+          conversation: createConversationHistory(),
+          stopWhen: stopWhen.noToolCalls(),
+        },
+        prompt: 'Hello',
+      },
+    );
+
+    // One microtask so `driveStarted` has already flipped true (and
+    // `abortedBeforeDrive` was already captured `false`) before this fires
+    // — the run still reaches `context.engine.start`, matching every
+    // other "abort after the workflow started" test in this file.
+    await Promise.resolve();
+    activeRun.abort('abort races the workflow launch');
+
+    const result = await activeRun.result;
+
     expect(['aborted', 'error']).toContain(result.finishReason);
 
     // runStep detects the pre-aborted signal at its entry check (line: if
@@ -4015,6 +4123,11 @@ describe('B6 — abort-into-generate load-bearing abort', () => {
     // invoking generate() — so abortFired remains false. This is correct:
     // the signal was already fired on the controller before generate was called.
     expect(abortFired.value).toBe(false);
+    // Distinguishes this from the pre-`driveStarted` scenario above: THIS
+    // abort reaches `abort()`'s `if (driveStarted)` branch and fires
+    // `engine.cancel` for real, racing runStep's own signal check — proven
+    // by this count being non-zero (never zero, the way the test above's is).
+    expect(spy.cancels.length).toBeGreaterThan(0);
 
     context.engine[Symbol.dispose]();
   });

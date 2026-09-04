@@ -1801,10 +1801,22 @@ describe('createBureau', () => {
       expect(acknowledgement).toEqual({ status: 'completed' });
       expect(settled).toBe(true);
 
-      // The forward genuinely reached a REAL durable run, not a synthetic
-      // one `closed()` merely delegated to eagerly.
+      // The forward genuinely reached a REAL durable `ActiveRun` — not a
+      // synthetic one `closed()` merely delegated to eagerly — proven by
+      // `resolveDurableAgent` actually constructing `dispatchedActiveRun`
+      // and calling ITS OWN `closed()` as the cancellation forward (the
+      // property this test's `settled`/`acknowledgement` assertions above
+      // already establish). AB-339 changed what happens ONE LAYER DEEPER,
+      // inside that real `ActiveRun`: since ITS OWN `abort()` also runs
+      // before ITS OWN deferred microtask fires (synchronously, right
+      // after `createActiveRun` returns, same as this test's own outer
+      // abort), `drive()` skips `context.engine.start` too — so no durable
+      // workflow record is ever written for a run that was already doomed
+      // before dispatch. `bureau.listDurableRuns()` correctly stays empty
+      // of it; asserting the OPPOSITE (as this test did pre-AB-339) would
+      // reassert the exact false-leak-causing durable launch AB-339 fixed.
       const durableRuns = await bureau.listDurableRuns();
-      expect(durableRuns?.items.some((item) => item.id.startsWith('agent-run-'))).toBe(true);
+      expect(durableRuns?.items.some((item) => item.id.startsWith('agent-run-'))).toBe(false);
     } finally {
       await bureau.dispose();
     }
