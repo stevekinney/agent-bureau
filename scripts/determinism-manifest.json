@@ -12,7 +12,8 @@
     "packages/evaluation/src/**",
     "packages/memory/src/**",
     "packages/memory/test/**",
-    "packages/armorer/test/**"
+    "packages/armorer/test/**",
+    "packages/interoperability/src/**"
   ],
   "realRuntimeExemptions": [
     {
