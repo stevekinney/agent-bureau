@@ -2,9 +2,14 @@ import { readdir, readFile } from 'node:fs/promises';
 import { extname, join, relative } from 'node:path';
 
 import {
+  CompletableEventTarget,
   createDefaultRuntimeServices,
+  type EventMap,
+  type ObservableLike,
+  type Observer,
   type RuntimeServices,
   type RuntimeTimeoutHandle,
+  type Subscription,
 } from 'lifecycle';
 
 import type { ChunkingOptions } from './chunking';
@@ -61,6 +66,58 @@ export interface SynchronizeResult {
   removed: number;
 }
 
+/**
+ * Dispatched when a poll-triggered `synchronize()` pass settles (AB-341),
+ * whether it succeeded or threw. `result` is set on success; `error` is set
+ * on failure (the polling loop swallows the error — see the `start()` poll
+ * callback — but still reports it here so an observer, such as a test, can
+ * tell the two outcomes apart). Exactly one of `result`/`error` is set.
+ * This is the event-driven completion signal the coordinator ruling on
+ * AB-341 calls for, replacing a bounded yield-count wait: a listener sees
+ * this only after the synchronizing lock has already been released, so
+ * scheduling another poll tick immediately after observing it is safe.
+ */
+export class PollCycleCompletedEvent extends Event {
+  static readonly type = 'poll-cycle.completed' as const;
+  readonly result?: SynchronizeResult;
+  readonly error?: unknown;
+  constructor(data: { result: SynchronizeResult } | { error: unknown }) {
+    super(PollCycleCompletedEvent.type);
+    if ('result' in data) {
+      this.result = data.result;
+    } else {
+      this.error = data.error;
+    }
+  }
+  // Narrows the inherited `Event.type: string` back to the string-literal
+  // type — otherwise a `TypedEventTarget<FileSynchronizerEventMap>` sees
+  // this event's `type` as plain `string`, undermining the point of the
+  // typed dispatch/listener surface.
+  override get type(): typeof PollCycleCompletedEvent.type {
+    return PollCycleCompletedEvent.type;
+  }
+}
+
+/**
+ * Maps event type string to the Event subclass instance. Deliberately does
+ * NOT `extends EventMap` (`Record<string, Event>`, an index-signature
+ * type): a TypeScript object type that extends an index signature has its
+ * `keyof` collapse to `string` wherever a member was introduced by that
+ * signature, which would widen `FileSynchronizerEventType` below to
+ * `string` and silently accept a typo'd event-type literal.
+ * `FileSynchronizerEventMap` (below) re-adds `EventMap` for
+ * `CompletableEventTarget<FileSynchronizerEventMap>`, which needs it —
+ * same split as `OperativeEventClassMap`/`OperativeEventMap` in
+ * `operative/src/events.ts`.
+ */
+export interface FileSynchronizerEventClassMap {
+  [PollCycleCompletedEvent.type]: PollCycleCompletedEvent;
+}
+
+export interface FileSynchronizerEventMap extends FileSynchronizerEventClassMap, EventMap {}
+
+export type FileSynchronizerEventType = Extract<keyof FileSynchronizerEventClassMap, string>;
+
 export interface FileSynchronizer {
   /** Start watching for changes on a polling interval. */
   start(): Promise<void>;
@@ -73,6 +130,29 @@ export interface FileSynchronizer {
   stop(): Promise<void>;
   /** Synchronize all files once (no watching). */
   synchronize(): Promise<SynchronizeResult>;
+  addEventListener<K extends FileSynchronizerEventType>(
+    type: K,
+    listener: (event: FileSynchronizerEventMap[K]) => void,
+    options?: boolean | AddEventListenerOptions,
+  ): void;
+  removeEventListener<K extends FileSynchronizerEventType>(
+    type: K,
+    listener: (event: FileSynchronizerEventMap[K]) => void,
+    options?: boolean | EventListenerOptions,
+  ): void;
+  /** One-shot listener for a poll-cycle completion event. */
+  once<K extends FileSynchronizerEventType>(
+    type: K,
+    listener: (event: FileSynchronizerEventMap[K]) => void,
+  ): void;
+  on<K extends FileSynchronizerEventType>(type: K): ObservableLike<FileSynchronizerEventMap[K]>;
+  subscribe<K extends FileSynchronizerEventType>(
+    type: K,
+    observerOrNext?:
+      Observer<FileSynchronizerEventMap[K]> | ((value: FileSynchronizerEventMap[K]) => void),
+    error?: (err: unknown) => void,
+    complete?: () => void,
+  ): Subscription;
 }
 
 async function walkDirectory(directory: string, extensions: string[]): Promise<string[]> {
@@ -125,6 +205,8 @@ export function createFileSynchronizer(options: FileSynchronizerOptions): FileSy
   // delete them directly without relying on recall() (which applies
   // semantic search and source-document deduplication).
   const entryIdsBySource = new Map<string, string[]>();
+
+  const events = new CompletableEventTarget<FileSynchronizerEventMap>();
 
   let intervalId: IntervalHandle;
   let hasInterval = false;
@@ -245,13 +327,36 @@ export function createFileSynchronizer(options: FileSynchronizerOptions): FileSy
           intervalId = setIntervalFunction(() => {
             if (synchronizing) return;
             synchronizing = true;
-            void trackedSynchronize()
-              .catch(() => {
+            // The lock release is centralized in `finally` — it always runs,
+            // regardless of whether synchronize() or a listener the
+            // dispatch below invokes throws — and it runs strictly before
+            // the dispatch that can observe it (async/await, rather than a
+            // separate `.catch().finally()` chain, keeps that ordering
+            // simple), so a listener that immediately schedules another
+            // poll tick on hearing this event is safe (AB-341). The
+            // dispatch itself is wrapped in its own try/catch: `dispatch()`
+            // synchronously invokes listeners, and a listener that throws
+            // would otherwise reject this fire-and-forget IIFE as an
+            // unhandled rejection — swallow it, matching the "polling
+            // failures don't take down the interval" contract this
+            // callback already keeps for synchronize() itself.
+            void (async () => {
+              let outcome: { result: SynchronizeResult } | { error: unknown };
+              try {
+                outcome = { result: await trackedSynchronize() };
+              } catch (error) {
                 // Swallow errors during polling — will retry next interval.
-              })
-              .finally(() => {
+                outcome = { error };
+              } finally {
                 synchronizing = false;
-              });
+              }
+              try {
+                events.dispatch(new PollCycleCompletedEvent(outcome));
+              } catch {
+                // A listener threw. Never let that destabilize the polling
+                // loop — the next poll tick is unaffected either way.
+              }
+            })();
           }, pollingInterval);
           hasInterval = true;
         }
@@ -277,5 +382,11 @@ export function createFileSynchronizer(options: FileSynchronizerOptions): FileSy
     },
 
     synchronize: trackedSynchronize,
+
+    addEventListener: events.addEventListener.bind(events),
+    removeEventListener: events.removeEventListener.bind(events),
+    once: events.once.bind(events),
+    on: events.on.bind(events),
+    subscribe: events.subscribe.bind(events),
   };
 }
