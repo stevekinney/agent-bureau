@@ -9,13 +9,25 @@ import { z } from 'zod';
  * command first, so the fixture only ever advances when the parent tells it
  * to. No marker here is ever inferred from timing; each is reported by the
  * fixture itself, synchronously with the state transition it names.
+ *
+ * AB-271 adds three markers used only by the harder scenarios
+ * (`scenarios.ts`): `children-registered` (nested-children, fired once BOTH
+ * children are durably registered), `schedule-registered` (the
+ * running-schedule-fire scenario, fired once `bureau.createSchedule` commits
+ * and the fire's own effect step is dispatched), and `catalog-run-started`
+ * (the AB-29 recovery-failure scenario, fired once the `bureau.run()`
+ * catalog dispatch is durably checkpointed). None of the original AB-270
+ * markers changed meaning.
  */
 export const CRASH_MARKERS = [
   'ready',
   'run-started',
   'child-registered',
+  'children-registered',
   'effect-attempted',
   'checkpoint-committed',
+  'schedule-registered',
+  'catalog-run-started',
   'signal-parked',
   'cancellation-recorded',
   'cleanup-completed',
