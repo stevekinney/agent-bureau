@@ -2,6 +2,7 @@
   "deterministicDirectories": [
     "packages/*/src/test/**",
     "packages/bureau/src/**",
+    "packages/cloudflare/src/**",
     "packages/gateway/src/create-gateway.ts",
     "packages/gateway/src/keys/create-api-key-store.ts",
     "packages/gateway/src/live-events.ts",
