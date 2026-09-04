@@ -11,21 +11,28 @@ import { afterEach, describe, expect, it, spyOn } from 'bun:test';
 import { createRunEngine, type RegistryAgnosticEngine } from './create-run-engine';
 
 /**
- * AB-330: split out of `create-run-engine.test.ts` — these two tests
- * deliberately prove that Weft's durable-timer poller stays UNARMED
- * (`Scheduler.prototype.start` never called, and the run stays non-terminal
- * through a real detection window) when `createRunEngine` is configured with
- * `recover: false` or `startScheduler: false`. That is a real-time absence
- * proof — a manual/injected clock cannot substitute, since the point is
- * observing that NOTHING drives the timer over actual wall-clock time.
- * `createRunEngine`'s public options carry no `getNow`/clock passthrough to
- * Weft's `Engine.create` (unlike `run-workflow.test.ts`'s `buildEngine`
- * helper, which calls `Engine.create` directly); adding one is a production
- * API surface change out of this test-only issue's scope (no changeset).
- * Real-runtime-exempted in `scripts/determinism-manifest.json`, owned by this
- * issue (AB-330) — the same split-out pattern armorer's
- * `execution-lifecycle-default-runtime.test.ts` and
- * `with-idempotency-default-runtime.test.ts` use for AB-254.
+ * AB-348: split out of `create-run-engine.test.ts` (originally AB-330).
+ * These two tests prove that Weft's durable-timer poller stays UNARMED
+ * (`Scheduler.prototype.start` never called) when `createRunEngine` is
+ * configured with `recover: false` or `startScheduler: false`. The original
+ * form paired the `schedulerStartSpy` assertion with a real-time wait
+ * ("give a real-time poller adequate opportunity to fire") to observe the
+ * run staying non-terminal — reasoning that a manual clock cannot prove an
+ * absence over real wall-clock time.
+ *
+ * That real-time wait was never load-bearing: `Scheduler.prototype.start`
+ * is the ONE production call site (confirmed by reading `create-run-engine.ts`
+ * and Weft's `Engine.create`) through which anything could ever begin
+ * polling and firing due timers on a real interval — nothing else in
+ * `createRunEngine`'s or Weft's public surface can drive a real-time poller
+ * into existence. `expect(schedulerStartSpy).not.toHaveBeenCalled()` is
+ * therefore already a complete, deterministic proof that no real-time poller
+ * was ever armed; waiting afterward to see whether one fires anyway adds no
+ * coverage; it only pads runtime. This split-out issue confirmed there is no
+ * `getNow`/clock passthrough on `createRunEngine`'s options or on Weft's
+ * `Engine.create` (`grep -n '^\s*[a-zA-Z]\+?:' node_modules/@lostgradient/weft/dist/core/types/options.d.ts`
+ * has no `clock`/`now`/`getNow` field), so this is the "replace with an
+ * equivalent deterministic assertion" path, not a production seam addition.
  */
 
 const TERMINAL_STATUSES: ReadonlySet<WorkflowStatus> = new Set<WorkflowStatus>([
@@ -42,19 +49,10 @@ afterEach(async () => {
   await yieldToPortableEventLoop();
 });
 
-// Sleep duration used by these negative (unarmed-poller) tests: short enough that
-// a real-time poller WOULD fire it within POLLER_DETECTION_WINDOW_MS, making the
-// tests falsifiable — they fail if createRunEngine accidentally arms the scheduler.
+// Sleep duration parked workflows use — arbitrary, since nothing here waits
+// out real time against it; `assertRunStaysParkedWhenPollerUnarmed` drives
+// the scheduler directly, past any deadline, with `FAR_FUTURE_EPOCH_MILLISECONDS`.
 const PARKED_SLEEP_MILLISECONDS = 50;
-// Scheduler poll interval injected into these engines so that an accidentally
-// armed poller fires expired timers within a few milliseconds, well inside
-// POLLER_DETECTION_WINDOW_MS.
-const DETECTION_SCHEDULER_POLL_INTERVAL_MS = 1;
-// Window (ms) to wait after the run parks before asserting it is still
-// non-terminal. Must be > PARKED_SLEEP_MILLISECONDS + several
-// DETECTION_SCHEDULER_POLL_INTERVAL_MS cycles so a misfiring poller would have
-// fired the now-expired timer before the assertion runs.
-const POLLER_DETECTION_WINDOW_MS = PARKED_SLEEP_MILLISECONDS * 3 + 50;
 // Fixed, arbitrarily far-future epoch millisecond value used to tick the
 // scheduler unambiguously past a parked timer's deadline. Not derived from
 // the real clock: the deadline itself is computed from Weft's real getNow()
@@ -108,10 +106,6 @@ async function assertRunStaysParkedWhenPollerUnarmed(
     return snapshot !== null && !TERMINAL_STATUSES.has(snapshot.status);
   });
   expect(reachedSleepMarkers.length).toBe(1);
-  // Give a real-time poller adequate opportunity to fire the due timer. This is
-  // the one genuinely real-clock read in this file — proving the ABSENCE of
-  // poller activity over actual wall-clock time.
-  await new Promise<void>((resolve) => setTimeout(resolve, POLLER_DETECTION_WINDOW_MS));
   const parkedSnapshot = await handle.snapshot();
   expect(parkedSnapshot).not.toBeNull();
   expect(TERMINAL_STATUSES.has(parkedSnapshot!.status)).toBe(false);
@@ -134,7 +128,6 @@ describe('createRunEngine — poller-unarmed proof (#590)', () => {
       storage: new MemoryStorage(),
       runWorkflow: makeSleepingWorkflow(PARKED_SLEEP_MILLISECONDS),
       recover: false,
-      schedulerPollIntervalMs: DETECTION_SCHEDULER_POLL_INTERVAL_MS,
       onLog: (record) => {
         if (record.message === REACHED_SLEEP_MARKER) reachedSleep.push(record);
       },
@@ -159,7 +152,6 @@ describe('createRunEngine — poller-unarmed proof (#590)', () => {
       runWorkflow: makeSleepingWorkflow(PARKED_SLEEP_MILLISECONDS),
       recover: true,
       startScheduler: false,
-      schedulerPollIntervalMs: DETECTION_SCHEDULER_POLL_INTERVAL_MS,
       onLog: (record) => {
         if (record.message === REACHED_SLEEP_MARKER) reachedSleep.push(record);
       },

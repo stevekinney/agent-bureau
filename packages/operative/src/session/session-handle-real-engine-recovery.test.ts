@@ -1,4 +1,4 @@
-import { workflow } from '@lostgradient/weft';
+import { workflow, type WorkflowState } from '@lostgradient/weft';
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import type { Toolbox } from 'armorer';
@@ -15,19 +15,44 @@ import { createSessionStore } from './create-session-store';
 import { createSessionHandle } from './session-handle';
 
 /**
- * AB-330: split out of `session-handle.test.ts` — this test drives a REAL
- * Weft engine's `startScheduler: true` background poller to fire a durable
- * `ctx.sleep`, then polls `engine.get()` with a real per-iteration
- * `setTimeout` delay until the recovered run settles. `createRunEngine`'s
- * public options carry no `getNow`/clock passthrough to Weft's
- * `Engine.create` (unlike `run-workflow.test.ts`'s `buildEngine` helper,
- * which calls `Engine.create` directly), so nothing here can be driven by a
- * manual clock; adding a passthrough is a production API surface change out
- * of this test-only issue's scope (no changeset). Real-runtime-exempted in
- * `scripts/determinism-manifest.json`, owned by this issue (AB-330).
+ * AB-348: split out of `session-handle.test.ts` (originally AB-330, then
+ * re-owned to this issue per the coordinator note on 2026-09-04 — same root
+ * cause as this file's `create-run-engine-poller-unarmed.test.ts` and
+ * `create-run-engine-crash-and-adopt.test.ts` siblings). The original form
+ * drove a REAL Weft engine's `startScheduler: true` background poller (a
+ * real interval, since `createRunEngine` has no clock passthrough into
+ * Weft's own scheduler) to fire a durable `ctx.sleep`, then polled
+ * `engine.get()` with a real per-iteration `setTimeout` delay until the
+ * recovered run settled.
+ *
+ * The fix mirrors `create-run-engine-poller-unarmed.test.ts`'s technique:
+ * `startScheduler: false` (so no real background poller is ever armed) and
+ * `engine.scheduler.tick(FAR_FUTURE_EPOCH_MILLISECONDS)` drives the durable
+ * `ctx.sleep` past its deadline directly and synchronously, with no real
+ * timer or clock read anywhere. The completion poll afterward is
+ * microtask/event-loop-turn driven (`yieldToPortableEventLoop`, bounded),
+ * not a real `setTimeout` delay.
  */
 
 const fixtureRuntime = createManualRuntimeServices();
+
+// Fixed, arbitrarily far-future epoch millisecond value used to tick the
+// scheduler unambiguously past a parked timer's deadline. Not derived from
+// the real clock: the deadline itself is computed from Weft's real getNow()
+// when ctx.sleep() ran (bounded by whenever the test executes, far short of
+// this constant), so any sufficiently distant future instant works. Same
+// technique and constant as `create-run-engine-poller-unarmed.test.ts`.
+const FAR_FUTURE_EPOCH_MILLISECONDS = 4_102_444_800_000; // 2100-01-01T00:00:00.000Z
+
+// Bounded, event-loop-turn poll — never a real timer delay.
+const EVENT_LOOP_POLL_MAX_ATTEMPTS = 200;
+async function waitForEventLoop(predicate: () => Promise<boolean> | boolean): Promise<void> {
+  for (let attempt = 0; attempt < EVENT_LOOP_POLL_MAX_ATTEMPTS; attempt++) {
+    if (await predicate()) return;
+    await yieldToPortableEventLoop();
+  }
+  throw new Error('waitForEventLoop exceeded its attempt bound before the condition held');
+}
 
 function createTestRunOptions() {
   return {
@@ -103,25 +128,33 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path — 
       textValueStore(storage, { disposeUnderlyingStorage: false }),
     );
     // Default recover:true resumes the parked workflow synchronously during
-    // creation; startScheduler:true (with a short poll interval) arms the
-    // timer so its ctx.sleep actually fires within this test's window.
+    // creation; startScheduler:false means no real background poller is
+    // ever armed — the durable ctx.sleep is driven directly below instead.
     const { engine: engine2 } = await createRunEngine({
       storage,
       runWorkflow: makeParkingWorkflow(SLEEP_MS),
-      startScheduler: true,
-      schedulerPollIntervalMs: 5,
+      startScheduler: false,
     });
 
     try {
-      // Poll engine.get() until the recovered run settles to terminal BEFORE
-      // calling recover() — the exact race the issue describes. Capped at 5
-      // attempts per this repo's polling-loop convention.
-      let state: Awaited<ReturnType<typeof engine2.get>> = null;
-      for (let attempt = 0; attempt < 5; attempt++) {
-        state = await engine2.get(runId);
-        if (state && state.status !== 'running' && state.status !== 'pending') break;
-        await new Promise((resolve) => setTimeout(resolve, SLEEP_MS * 2));
-      }
+      // Drive the recovered ctx.sleep past its deadline directly — no real
+      // timer, no clock read. `Scheduler#tick` scans persisted `wf-deadline:`
+      // storage keys directly (it is not gated on `Scheduler#start` ever
+      // having run — `#stopped` starts `false`), so it works whether or not
+      // `startScheduler` armed the real-time poller. Poll engine.get() until
+      // the recovered run settles to terminal BEFORE calling recover() — the
+      // exact race the issue describes. Event-loop-turn driven, not a real
+      // timer delay; re-ticks the scheduler each attempt in case recovery's
+      // own checkpoint write for the resumed sleep settles asynchronously
+      // after `createRunEngine` returns.
+      const stateBox: { current: WorkflowState | null } = { current: null };
+      await waitForEventLoop(async () => {
+        await engine2.scheduler.tick(FAR_FUTURE_EPOCH_MILLISECONDS);
+        stateBox.current = await engine2.get(runId);
+        const current = stateBox.current;
+        return current !== null && current.status !== 'running' && current.status !== 'pending';
+      });
+      const state = stateBox.current;
 
       expect(state?.status).toBe('completed');
       // The real shape engine.get() returns .result in — this is exactly
