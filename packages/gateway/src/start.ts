@@ -254,15 +254,22 @@ export async function shutdownGateway(
 /**
  * The process entrypoint's own composition: parses `Bun.env`, boots the
  * gateway, logs the listening port, and registers the SIGTERM/SIGINT
- * shutdown handlers. Returns the booted `{ gateway, server }` — discarded by
- * the `if (import.meta.main)` call below in real process usage, but exported
- * so `start.test.ts` can call it directly and shut the real server back down
- * afterward rather than leaking a live listener across the test run. Safe to
- * call under test: the registered signal handlers only ever run if the test
- * process itself receives a real SIGTERM/SIGINT, which a normal test run
- * never sends.
+ * shutdown handler. Returns the booted `{ gateway, server, shutdown,
+ * handleShutdownSignal }` — all discarded by the `if (import.meta.main)`
+ * call below in real process usage, but exported so `start.test.ts` can call
+ * `main()` directly, shut the real server back down afterward rather than
+ * leaking a live listener across the test run, and call the returned
+ * `handleShutdownSignal` directly to exercise the exact function object
+ * registered as the SIGTERM/SIGINT listener — never through a real process
+ * signal or `process.exit`, both of which would affect the whole shared test
+ * process.
  */
-export async function main(): Promise<Awaited<ReturnType<typeof startGateway>>> {
+export async function main(): Promise<
+  Awaited<ReturnType<typeof startGateway>> & {
+    shutdown: (signal: string) => Promise<void>;
+    handleShutdownSignal: (signal: string) => void;
+  }
+> {
   const environment = parseStartEnvironment(Bun.env);
   if (environment.STORAGE_TYPE === 'memory') {
     console.warn(
@@ -282,16 +289,21 @@ export async function main(): Promise<Awaited<ReturnType<typeof startGateway>>> 
   console.log(`[gateway] listening on port ${gateway.port}`);
 
   let shuttingDown = false;
-  const shutdown = async (signal: string) => {
+  const shutdown = async (signal: string): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(`[gateway] received ${signal}, shutting down`);
     await shutdownGateway(gateway, server);
     process.exit(0);
   };
-  process.on('SIGTERM', () => void shutdown('SIGTERM'));
-  process.on('SIGINT', () => void shutdown('SIGINT'));
-  return booted;
+  // process.on wants a void-returning listener, not `shutdown` itself
+  // (an async function) — `handleShutdownSignal` is the actual function
+  // object registered for both signals, and the one `start.test.ts` calls
+  // directly to exercise the real listener without a real OS signal.
+  const handleShutdownSignal = (signal: string): void => void shutdown(signal);
+  process.on('SIGTERM', handleShutdownSignal);
+  process.on('SIGINT', handleShutdownSignal);
+  return { ...booted, shutdown, handleShutdownSignal };
 }
 
 if (import.meta.main) {

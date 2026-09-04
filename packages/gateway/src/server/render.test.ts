@@ -773,4 +773,27 @@ describe('renderPage in built mode (assumeBuiltOutput override)', () => {
     expect(rejection).toBeInstanceOf(Error);
     expect((rejection as Error).message).toContain('missing required styles.css entr(y/ies)');
   });
+
+  it('succeeds in built mode when the manifest carries every required key', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'gateway-render-built-complete-'));
+    createdDirectories.push(directory);
+    await writeFile(
+      join(directory, 'manifest.json'),
+      JSON.stringify({
+        'entry.js': '/public/entry-built.js',
+        'styles.css': '/public/styles-built.css',
+      }),
+    );
+
+    const html = await renderPage({
+      title: 'Test',
+      component: Fixture,
+      props: baseProps,
+      manifestDirectory: directory,
+      assumeBuiltOutput: true,
+    });
+
+    expect(html).toContain('/public/entry-built.js');
+    expect(html).toContain('/public/styles-built.css');
+  });
 });

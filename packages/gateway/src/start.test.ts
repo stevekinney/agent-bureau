@@ -2,7 +2,8 @@ import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { describe, expect, it } from 'bun:test';
+import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
+import { describe, expect, it, spyOn } from 'bun:test';
 
 import {
   apiKeyFor,
@@ -366,6 +367,46 @@ describe('main', () => {
       }
     } finally {
       console.warn = originalWarn;
+    }
+  });
+
+  it("returns handleShutdownSignal, the exact function registered as process.on's SIGTERM/SIGINT listener, and calling it drains, disposes, and exits exactly once", async () => {
+    const booted = await withEnv(
+      { STORAGE_TYPE: 'memory', PORT: '0', PROVIDER: 'anthropic', ANTHROPIC_API_KEY: 'key' },
+      () => main(),
+    );
+
+    const exitCalls: number[] = [];
+    const exitSpy = spyOn(process, 'exit').mockImplementation((code?: number) => {
+      exitCalls.push(code ?? 0);
+      return undefined as never;
+    });
+    const logs: unknown[][] = [];
+    const originalLog = console.log;
+    console.log = (...args: unknown[]) => logs.push(args);
+
+    try {
+      // Calling `handleShutdownSignal` directly is the same function object
+      // `main()` passed to `process.on` — no real signal, no shared-process
+      // side effects. It fires the async `shutdown` and returns void, so
+      // poll (bounded) for the process.exit call it drives.
+      booted.handleShutdownSignal('SIGTERM');
+      for (let attempt = 0; attempt < 50 && exitCalls.length === 0; attempt += 1) {
+        await yieldToPortableEventLoop();
+      }
+      expect(logs.some((args) => String(args[0]).includes('received SIGTERM'))).toBe(true);
+      expect(exitCalls).toEqual([0]);
+
+      // The debounce guard: a second call (even for a different signal, and
+      // even through the async `shutdown` this time) after `shuttingDown` is
+      // already true must be a genuine no-op — no second drain log, no
+      // second process.exit call.
+      await booted.shutdown('SIGINT');
+      expect(logs.filter((args) => String(args[0]).includes('received')).length).toBe(1);
+      expect(exitCalls).toEqual([0]);
+    } finally {
+      console.log = originalLog;
+      exitSpy.mockRestore();
     }
   });
 });

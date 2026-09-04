@@ -173,6 +173,21 @@ describe('sessions routes', () => {
     expect(response.status).toBe(503);
   });
 
+  it('DELETE /api/v1/sessions/:id rethrows a non-BureauError deleteSession failure', async () => {
+    const stubBureau = makeStubBureau({
+      deleteSession: async () => {
+        throw new Error('unexpected failure');
+      },
+    });
+    const gateway = await createTestGateway(stubBureau, { authToken: AUTH_TOKEN });
+
+    const response = await requestJSON(gateway, '/api/v1/sessions/any', {
+      method: 'DELETE',
+      headers: authHeaders,
+    });
+    expect(response.status).toBe(500);
+  });
+
   it('GET /api/v1/sessions/:id/events reaches bureau.eventHistory({kind: "session", id}) — AB-312 (501 over KV-only persistence, which has no durable engine)', async () => {
     const gateway = await createTestGateway({
       persistence: textValueStore(new MemoryStorage()),
