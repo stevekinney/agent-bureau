@@ -1,14 +1,13 @@
 import type { GenerateFunction } from '@lostgradient/operative';
 import { createAgent, stopWhen } from '@lostgradient/operative';
-import { waitForCondition } from '@lostgradient/operative/test';
-import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
+import { waitForCondition, waitForRunState } from '@lostgradient/operative/test';
 import { createProcessLocalApprovalStateStore, createTool, createToolbox } from 'armorer';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test';
 import type { ManualRuntimeServices } from 'lifecycle';
 import { createManualRuntimeServices } from 'lifecycle';
 import { z } from 'zod';
 
-import type { Bureau, RunSummary } from '../types';
+import type { RunSummary } from '../types';
 import {
   BureauHarnessUnsupportedError,
   type BureauTestHarness,
@@ -16,62 +15,12 @@ import {
 } from './harness';
 import {
   type BureauStorageFixture,
-  createLmdbStorageFixture,
   createMemoryStorageFixture,
   createSqliteStorageFixture,
 } from './storage-fixtures';
 
 function mockGenerate(content = 'Done.'): GenerateFunction {
   return async () => ({ content, toolCalls: [] });
-}
-
-/**
- * Same drain pattern `create-bureau.test.ts` uses for the durable
- * inline-launch queue, plus a real-delay poll for the terminal-status wait
- * itself (`waitForCondition`'s own default, a zero-delay `MessageChannel`
- * macrotask loop, is NOT enough here — root-caused directly, not a blind
- * workaround: with the `lmdb` backend, spinning that macrotask loop
- * measurably STARVES the native library's own async completion — a
- * 5,000-iteration zero-delay spin (~600ms of real time) left two
- * concurrent LMDB-backed runs still `'running'`, while the identical
- * scenario polled with real `setTimeout(5)` between checks completed both
- * well within a couple hundred milliseconds. `MessageChannel` macrotasks
- * evidently get scheduled ahead of `lmdb`'s own completion callbacks when
- * nothing yields real time between posts, so a tight macrotask-only loop
- * can spin forever without ever letting the pending write land. A tiny
- * real per-iteration delay breaks that starvation while remaining a
- * bounded, condition-checked POLL — this still asserts the observed
- * status each iteration and fails loudly past the cap, never a blind
- * "sleep N then assume it's done."
- */
-async function waitForRunCompletion(bureau: Bureau, runId: string): Promise<void> {
-  const maximumAttempts = 400;
-  let status: string | undefined;
-  let reachedTerminalStatus = false;
-  for (let attempt = 0; attempt < maximumAttempts; attempt++) {
-    status = bureau.getRun(runId)?.status;
-    // `undefined` (the run id is not yet, or never, known to this bureau) is
-    // NOT a terminal status — keep polling for it exactly like `'running'`,
-    // rather than treating "not found yet" as "already done" (a false
-    // positive `undefined !== 'running'` would produce).
-    if (status !== undefined && status !== 'running') {
-      reachedTerminalStatus = true;
-      break;
-    }
-    if (attempt < maximumAttempts - 1) {
-      await new Promise((resolve) => setTimeout(resolve, 5));
-    }
-  }
-  if (!reachedTerminalStatus) {
-    throw new Error(
-      status === undefined
-        ? `Run ${runId} was never observed by bureau.getRun`
-        : `Run ${runId} did not reach a terminal status`,
-    );
-  }
-  for (let i = 0; i < 10; i++) {
-    await yieldToPortableEventLoop();
-  }
 }
 
 const disposals: Array<() => Promise<void>> = [];
@@ -193,7 +142,7 @@ describe('createBureauTestHarness', () => {
       const harness = await harnessWithMemoryStorage();
 
       const summary = await harness.startSession({ message: 'hello session' });
-      await waitForRunCompletion(harness.bureau, summary.id);
+      await waitForRunState(harness.bureau, summary.id);
 
       expect(summary.sessionId).toBeDefined();
       expect(harness.bureau.getRun(summary.id)?.status).toBe('completed');
@@ -250,7 +199,7 @@ describe('createBureauTestHarness', () => {
       const harness = await harnessWithMemoryStorage();
 
       const summary = await harness.startSession({ message: 'no durable engine here' });
-      await waitForRunCompletion(harness.bureau, summary.id);
+      await waitForRunState(harness.bureau, summary.id);
 
       expect(harness.reattachDurable(summary.id)).resolves.toBeUndefined();
     });
@@ -261,7 +210,7 @@ describe('createBureauTestHarness', () => {
       const harness = await harnessWithMemoryStorage();
 
       const summary = await harness.startSession({ message: 'no durable engine here' });
-      await waitForRunCompletion(harness.bureau, summary.id);
+      await waitForRunState(harness.bureau, summary.id);
 
       expect(harness.deliverSignal(summary.sessionId, 'wake', {})).rejects.toThrow(/durable/i);
     });
@@ -305,7 +254,7 @@ describe('createBureauTestHarness', () => {
       });
 
       const summary = await harness.startSession({ message: 'trigger approval' });
-      await waitForRunCompletion(harness.bureau, summary.id);
+      await waitForRunState(harness.bureau, summary.id);
 
       const reviews = harness.bureau.listPendingReviews();
       expect(reviews).toHaveLength(1);
@@ -318,16 +267,6 @@ describe('createBureauTestHarness', () => {
 
       expect(outcome.decision).toBe('deny');
       expect(harness.bureau.listPendingReviews()).toHaveLength(0);
-    });
-  });
-
-  describe('waitForRunCompletion (this file’s own test helper)', () => {
-    it('keeps polling — never treats "not found yet" as done — and fails with a distinct message when a run id is never observed', async () => {
-      const harness = await harnessWithMemoryStorage();
-
-      expect(waitForRunCompletion(harness.bureau, 'no-such-run')).rejects.toThrow(
-        /never observed/i,
-      );
     });
   });
 
@@ -391,7 +330,7 @@ describe('createBureauTestHarness — durable backend (sqlite)', () => {
       expect(schedule?.status).toBe('active');
 
       const summary = await harness.startSession({ message: 'durable run' });
-      await waitForRunCompletion(harness.bureau, summary.id);
+      await waitForRunState(harness.bureau, summary.id);
 
       const durableRun = await harness.reattachDurable(summary.id);
       expect(durableRun).toBeDefined();
@@ -405,40 +344,22 @@ describe('createBureauTestHarness — durable backend (sqlite)', () => {
 
 describe('two concurrent harnesses are fully isolated', () => {
   /**
-   * AB-306: root-caused directly before restructuring anything. Timing the
-   * two storage-fixture creations, the two `createBureauTestHarness` calls,
-   * and the `waitForRunCompletion` polls separately under artificial load
-   * (six concurrent `bun test` runs of another package) showed fixture
-   * creation and Bureau construction together cost well under 200ms even
-   * loaded — not construction cost, as initially suspected. The real cost
-   * living inside the old single `it.each` body was three sequential
-   * `waitForRunCompletion` calls: each one polls with a REAL
-   * `setTimeout(5)` between checks (a documented, intentional fix for LMDB
-   * completion-callback starvation under a zero-delay macrotask loop — see
-   * that helper's own comment), and real timer delivery is exactly what
-   * degrades under host CPU contention, sometimes taking 100s of ms per
-   * 5ms-nominal tick. Stacking three such polls inside ONE test's 5000ms
-   * Bun default timeout is what actually timed out under load, not the
-   * fixture/construction cost.
-   *
-   * The fix moves every real-time-consuming step (fixture creation, Bureau
-   * construction, and — critically — each `waitForRunCompletion` poll) into
-   * its own `beforeAll` hook. Bun (confirmed empirically) gives each
-   * `beforeAll` call in a describe block its OWN default timeout budget
-   * rather than sharing one budget across the whole sequence, so splitting
-   * the three real waits into three separate hooks roughly triples the
-   * real-time headroom available before any single step could time out —
-   * without raising any timeout, retry, or resource cap. Every `it` body
-   * below is now a synchronous (or synthetic-clock-only) assertion with no
-   * real wall-clock dependency, so per-test budget pressure from load is
-   * gone. The isolation assertions themselves (paths differ, timers
-   * independent, identifiers independent, events not shared) are
-   * unchanged in meaning — only when the underlying work happens moved.
+   * AB-306 split the real-time-consuming steps (fixture creation, Bureau
+   * construction, and each run's completion wait) into their own `beforeAll`
+   * hooks so a loaded host doesn't stack multiple real waits inside one
+   * test's timeout budget. That restructuring stays for the memory and
+   * sqlite backends below even though AB-332 replaced their completion wait
+   * with `waitForRunState` (event-driven, no real timer): construction cost
+   * and the wait are still independent steps worth their own budget, and
+   * keeping the same shape as the lmdb variant
+   * (`harness-lmdb-isolation.test.ts`, AB-332) — which still needs a real
+   * wait per WFT-138 and so keeps its own `realRuntimeExemptions` entry —
+   * keeps the two files easy to compare and fold back together once WFT-138
+   * lands.
    */
   describe.each([
     ['memory', () => createMemoryStorageFixture()],
     ['sqlite', () => createSqliteStorageFixture({ runtime: createManualRuntimeServices() })],
-    ['lmdb', () => createLmdbStorageFixture({ runtime: createManualRuntimeServices() })],
   ] as const)(
     '%s: independent storage paths, timers, identifiers, and events',
     (_label, makeStorage) => {
@@ -484,13 +405,13 @@ describe('two concurrent harnesses are fully isolated', () => {
       beforeAll(async () => {
         runA = await harnessA.startSession({ message: 'on A' });
         runB = await harnessB.startSession({ message: 'on B' });
-        await waitForRunCompletion(harnessA.bureau, runA.id);
+        await waitForRunState(harnessA.bureau, runA.id);
       });
 
       // Drained in its own hook (rather than alongside runA's wait above) so
       // this real LMDB completion poll gets its own fresh timeout budget too.
       beforeAll(async () => {
-        await waitForRunCompletion(harnessB.bureau, runB.id);
+        await waitForRunState(harnessB.bureau, runB.id);
       });
 
       // Neither harness observes the other's events. Subscribing and
@@ -502,13 +423,13 @@ describe('two concurrent harnesses are fully isolated', () => {
         const unsubscribeA = harnessA.bureau.subscribeLiveFrames((frame) => {
           eventsSeenByA.push(frame.type);
         });
-        // try/finally: if startSession or waitForRunCompletion throws, this
+        // try/finally: if startSession or waitForRunState throws, this
         // still unsubscribes rather than leaking a live subscription on
         // harnessA into afterAll's teardown, which could mask the real
         // failure behind an unrelated dispose-time symptom.
         try {
           const runOnBOnly = await harnessB.startSession({ message: 'B-only run' });
-          await waitForRunCompletion(harnessB.bureau, runOnBOnly.id);
+          await waitForRunState(harnessB.bureau, runOnBOnly.id);
         } finally {
           unsubscribeA();
         }

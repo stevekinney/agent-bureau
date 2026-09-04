@@ -35,7 +35,7 @@ import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createTool, createToolbox, type ToolRequestContext } from 'armorer';
 import { afterEach, describe, expect, it } from 'bun:test';
 import { Conversation, createConversationHistory, getMessages } from 'conversationalist';
-import { TypedEventTarget } from 'lifecycle';
+import { createManualRuntimeServices, TypedEventTarget } from 'lifecycle';
 import type { Memory } from 'memory';
 import type { SkillProvider } from 'skills';
 import { z } from 'zod';
@@ -220,9 +220,11 @@ describe('createRuntimeComposition', () => {
   });
 
   it('rejects pre-aborted and deadline-expired transport authority checks', async () => {
+    const manualRuntime = createManualRuntimeServices();
     const runtime = await createRuntimeComposition({
       generate: async () => ({ content: 'x', toolCalls: [] }),
       requestAuthorityValidator: () => new Promise(() => {}),
+      runtime: manualRuntime,
       toolbox: createToolbox([
         createTool({
           name: 'bounded-authority-tool',
@@ -262,7 +264,7 @@ describe('createRuntimeComposition', () => {
     const expired = runRuntime.toolbox.execute(
       { id: 'expired-authority-call', name: 'bounded-authority-tool', arguments: {} },
       {
-        requestContext: { authority, audience: 'tenant', deadline: Date.now() - 1 },
+        requestContext: { authority, audience: 'tenant', deadline: manualRuntime.clock.now() - 1 },
       },
     ) as unknown as Promise<unknown>;
     const expiredError = await expired.then(
@@ -274,9 +276,14 @@ describe('createRuntimeComposition', () => {
     const deadline = runRuntime.toolbox.execute(
       { id: 'deadline-authority-call', name: 'bounded-authority-tool', arguments: {} },
       {
-        requestContext: { authority, audience: 'tenant', deadline: Date.now() + 5 },
+        requestContext: { authority, audience: 'tenant', deadline: manualRuntime.clock.now() + 5 },
       },
     ) as unknown as Promise<unknown>;
+    // The deadline hasn't passed yet at call time — this branch schedules a
+    // timer through the injected runtime's `timers.setTimeout` (AB-260)
+    // rather than a real one, so advancing the manual clock past the
+    // deadline fires it deterministically instead of racing real wall time.
+    await manualRuntime.advance(5);
     const deadlineError = await deadline.then(
       () => undefined,
       (error: unknown) => error,
@@ -395,7 +402,7 @@ describe('createRuntimeComposition', () => {
       runId: Parameters<typeof recoveredRequestContext>[1],
       agentName: Parameters<typeof recoveredRequestContext>[2],
     ) {
-      return recoveredRequestContext(metadataArgument, runId, agentName, () => Date.now());
+      return recoveredRequestContext(metadataArgument, runId, agentName, () => 0);
     }
     const metadata = {
       lastRequestAuthority: {
@@ -439,7 +446,7 @@ describe('createRuntimeComposition', () => {
       runId: Parameters<typeof recoveredRequestContext>[1],
       agentName: Parameters<typeof recoveredRequestContext>[2],
     ) {
-      return recoveredRequestContext(metadataArgument, runId, agentName, () => Date.now());
+      return recoveredRequestContext(metadataArgument, runId, agentName, () => 0);
     }
     const metadata = {
       lastRequestAuthority: {
@@ -2951,7 +2958,10 @@ describe('createRuntimeComposition durable execution', () => {
         // Weft 0.10+ native marker shape: an object, not a bare string.
         await firstRuntime.durable!.engine.storage.put(
           KEYS.scheduleRun(runId),
-          encode({ id: scheduleId, occurrence: Date.now() }),
+          // A fixed literal occurrence marker — this test only asserts the
+          // recovered run reaches 'running', never compares this value
+          // against real time.
+          encode({ id: scheduleId, occurrence: 1_700_000_000_000 }),
         );
 
         const running = await pollUntil(async () => {
@@ -4975,8 +4985,8 @@ describe('D4: skills catalog injection', () => {
         description: 'A skill seeded directly into KV',
         version: '1.0.0',
         tags: [],
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
+        createdAt: '2030-01-01T00:00:00.000Z',
+        updatedAt: '2030-01-01T00:00:00.000Z',
       }),
     );
     await kv.set('skill:stored-skill:enabled', 'true');

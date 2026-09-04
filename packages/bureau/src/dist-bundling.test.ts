@@ -41,7 +41,10 @@ describe('dist bundling (built output, not source)', () => {
   });
 
   it('resolves sqlite storage from the built dist without a bundling error', async () => {
-    const databasePath = join(tmpdir(), `bureau-dist-bundling-${process.pid}-${Date.now()}.sqlite`);
+    // `process.pid` alone disambiguates this path from any other process
+    // running the same test — each test process opens it exactly once, so no
+    // further uniqueness (a real timestamp) is needed.
+    const databasePath = join(tmpdir(), `bureau-dist-bundling-${process.pid}.sqlite`);
 
     try {
       const distEntrypoint = '../dist/index.js';

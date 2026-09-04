@@ -20,6 +20,7 @@ import {
   type StreamEventMap,
   type Toolbox,
 } from '@lostgradient/operative';
+import { waitForCondition } from '@lostgradient/operative/test';
 import { createTool, createToolbox } from 'armorer';
 import { createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
@@ -573,17 +574,12 @@ describe('Bureau.getRunReport', () => {
 
     const run = await bureau.createRun({ message: 'Hello' });
 
-    await new Promise<void>((resolve) => {
-      const check = () => {
-        const report = bureau.getRunReport(run.id);
-        if (report && report.status !== undefined && bureau.getRun(run.id)?.status !== 'running') {
-          resolve();
-        } else {
-          setTimeout(check, 0);
-        }
-      };
-      check();
-    });
+    await waitForCondition(() => {
+      const report = bureau.getRunReport(run.id);
+      return Boolean(
+        report && report.status !== undefined && bureau.getRun(run.id)?.status !== 'running',
+      );
+    }, `Run ${run.id} did not reach a terminal report`);
 
     const report = bureau.getRunReport(run.id);
     expect(report?.status).toBe('succeeded');
@@ -667,14 +663,10 @@ describe('Bureau.getRunReport', () => {
 
     // Wait until step 0 (the tool call) has been recorded in the store before
     // killing the run — this is what makes the report "partial but non-empty".
-    await new Promise<void>((resolve) => {
-      const check = () => {
-        const runState = bureau.store.getRun(run.id);
-        if (runState && runState.steps.length > 0) resolve();
-        else setTimeout(check, 0);
-      };
-      check();
-    });
+    await waitForCondition(() => {
+      const runState = bureau.store.getRun(run.id);
+      return Boolean(runState && runState.steps.length > 0);
+    }, `Run ${run.id} never recorded a step`);
 
     bureau.abortRun(run.id);
     // NO await here — this is the synchronous graceful-shutdown call.
