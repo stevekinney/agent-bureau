@@ -10,10 +10,11 @@ import {
   EMPTY_LIVENESS_SNAPSHOT,
   type RunDetailResponse,
 } from '../routes/runs';
-import type { UsageResponse } from '../routes/usage';
-import type { PendingReview } from '../types';
+import type { UsageGroupTotals, UsageResponse } from '../routes/usage';
+import type { PendingReview, RunSummary } from '../types';
 import { createBrowserClientEnvironment } from '../ui/client-environment';
 import { createReviewsStore } from '../ui/hooks/use-reviews.svelte';
+import DashboardPage from '../ui/pages/dashboard.svelte';
 import RunDetailPage from '../ui/pages/run-detail.svelte';
 import UsagePage from '../ui/pages/usage.svelte';
 import { renderPage, resetAssetManifestCache } from './render';
@@ -609,6 +610,50 @@ describe('renderPage with a populated usage page', () => {
     expect(rootMarkup).not.toContain('Cache Write Tokens');
     expect(rootMarkup).not.toContain('Cache Read Tokens');
   });
+
+  it('renders a row per group in the By Agent, By Principal, and By Time Window tables, and appends "+" to an incomplete cost total', async () => {
+    function group(key: string, costComplete: boolean): UsageGroupTotals {
+      return {
+        key,
+        runCount: 3,
+        promptTokens: 100,
+        completionTokens: 50,
+        totalTokens: 150,
+        cacheCreationTokens: 0,
+        cacheReadTokens: 0,
+        totalCost: 0.5,
+        costComplete,
+      };
+    }
+    const populated: UsageResponse = {
+      ...usage,
+      analytics: {
+        byAgent: [group('bureau', true), group('reviewer', false)],
+        byPrincipal: [group('api-key:abc123', true)],
+        byWindow: [group('2026-09-01', true)],
+      },
+    };
+
+    const html = await renderPage({
+      title: 'Usage & Cost',
+      component: UsagePage,
+      props: { initialData: { usage: populated }, pathname: '/usage', usage: populated },
+    });
+    const rootMarkup = extractRootMarkup(html);
+
+    expect(rootMarkup).toContain('Usage by agent');
+    expect(rootMarkup).toContain('bureau');
+    expect(rootMarkup).toContain('reviewer');
+    expect(rootMarkup).toContain('Usage by authenticated principal');
+    expect(rootMarkup).toContain('api-key:abc123');
+    expect(rootMarkup).toContain('Usage by time window');
+    expect(rootMarkup).toContain('2026-09-01');
+
+    // The complete group's cost has no floor suffix; the incomplete one does.
+    const costCells = [...rootMarkup.matchAll(/\$0\.50\+?/g)].map((match) => match[0]);
+    expect(costCells).toContain('$0.50');
+    expect(costCells).toContain('$0.50+');
+  });
 });
 
 // AB-92/AB-272: `cachedManifest` (render.ts:10) is module-level state — a
@@ -795,5 +840,88 @@ describe('renderPage in built mode (assumeBuiltOutput override)', () => {
 
     expect(html).toContain('/public/entry-built.js');
     expect(html).toContain('/public/styles-built.css');
+  });
+});
+
+function makeRunSummary(overrides: Partial<RunSummary> = {}): RunSummary {
+  return {
+    id: 'run-1',
+    sessionId: 'session-1',
+    status: 'running',
+    steps: 0,
+    usage: { prompt: 0, completion: 0, total: 0 },
+    finishReason: undefined,
+    error: undefined,
+    actionCount: 0,
+    agentName: 'bureau',
+    principal: undefined,
+    startedAt: 0,
+    ...overrides,
+  };
+}
+
+describe('dashboard page (Table of RunRow, and RunRow/StatusBadge by extension)', () => {
+  it('renders the empty state when there are no runs', async () => {
+    const html = await renderPage({
+      title: 'Dashboard',
+      component: DashboardPage,
+      props: { initialData: { runs: [] }, pathname: '/', runs: [] },
+    });
+    const rootMarkup = extractRootMarkup(html);
+
+    expect(rootMarkup).toContain('No runs yet.');
+    expect(rootMarkup).not.toContain('<table');
+  });
+
+  it('renders one RunRow per run, linked by id, with steps/tokens/finish reason, and every status badge variant', async () => {
+    // Every branch of status-badge.svelte's statusToVariant switch,
+    // including its default fallback for an unrecognized status string.
+    const runs: RunSummary[] = [
+      makeRunSummary({
+        id: 'run-running',
+        status: 'running',
+        steps: 3,
+        usage: { prompt: 10, completion: 5, total: 15 },
+        finishReason: undefined,
+      }),
+      makeRunSummary({
+        id: 'run-completed',
+        status: 'completed',
+        steps: 5,
+        usage: { prompt: 20, completion: 10, total: 30 },
+        finishReason: 'stop-condition',
+      }),
+      makeRunSummary({ id: 'run-error', status: 'error' }),
+      makeRunSummary({ id: 'run-aborted', status: 'aborted' }),
+      makeRunSummary({ id: 'run-pending', status: 'pending' }),
+      makeRunSummary({ id: 'run-unknown-status', status: 'a-status-nobody-invented-yet' }),
+    ];
+
+    const html = await renderPage({
+      title: 'Dashboard',
+      component: DashboardPage,
+      props: { initialData: { runs }, pathname: '/', runs },
+    });
+    const rootMarkup = extractRootMarkup(html);
+
+    expect(rootMarkup).not.toContain('No runs yet.');
+    expect(rootMarkup).toContain('href="/runs/run-running"');
+    expect(rootMarkup).toContain('>run-running<');
+    expect(rootMarkup).toContain('>3<');
+    expect(rootMarkup).toContain('>15<');
+    // No finishReason renders the em dash fallback.
+    expect(rootMarkup).toContain('>—<');
+    expect(rootMarkup).toContain('>stop-condition<');
+
+    for (const status of [
+      'running',
+      'completed',
+      'error',
+      'aborted',
+      'pending',
+      'a-status-nobody-invented-yet',
+    ]) {
+      expect(rootMarkup).toContain(`>${status}<`);
+    }
   });
 });
