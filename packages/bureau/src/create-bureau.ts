@@ -161,6 +161,8 @@ import type {
   CreateRunRequest,
   DiagnosticSink,
   DurableScheduleDefinition,
+  EventHistoryDeletedAggregateOutcome,
+  EventHistoryNotFoundOutcome,
   EventHistoryUnsupportedOutcome,
   PendingReview,
   ResolveReviewInput,
@@ -5635,6 +5637,80 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // subscribe to.
   let durableEventProducerInstance: DurableEventProducer | undefined;
 
+  /**
+   * AB-313 — authorization and deleted-aggregate handling layered over
+   * `eventHistoryInstance.page()`. This wrapper (not `page()` itself, which
+   * knows nothing about sessions, runs, or principals) is the only place
+   * that can answer "is `principal` allowed to see this owner's history" —
+   * it has `runtime.sessionStore` and `store` in closure, neither of which
+   * `DurableEventHistory` carries.
+   *
+   * Authorization (AB-42's ordering: checked before anything else, so an
+   * unauthorized caller cannot learn a run/session exists) runs ONLY when
+   * `options.principal` is provided AND the owner's live record still
+   * exists — a caller that omits `principal` (an internal/trusted caller,
+   * or a privileged gateway connection) skips it entirely, and an owner
+   * with NO recorded principal is open (matches every other session verb's
+   * "no recorded authority" rule). A denial reports the same
+   * not-found-shaped outcome `submitSessionInput` uses.
+   *
+   * Deleted-aggregate detection is evidence-based, not existence-based: it
+   * looks for the owner's own deletion marker EVENT inside the page that
+   * was just fetched (`session.deleted` for a session, `run.removed` for a
+   * run), never merely "the live record is missing" — a durable event can
+   * legitimately exist for an id that never had (or no longer has) a live
+   * record for other reasons (e.g. a synthetic action recorded before a
+   * session was ever saved), and reporting deleted-aggregate for those
+   * would be a false positive; a genuinely fresh, never-recorded id must
+   * still read back as an ordinary empty page.
+   *
+   * Schedule owners have no ownership/authorization or deletion concept in
+   * this codebase today, so they pass straight through to `page()`.
+   */
+  async function resolveEventHistory(
+    history: DurableEventHistory,
+    owner: DurableEventOwner,
+    options?: DurableEventHistoryPageOptions,
+  ): Promise<
+    | DurableEventPage
+    | DurableEventGap
+    | EventHistoryNotFoundOutcome
+    | EventHistoryDeletedAggregateOutcome
+  > {
+    const principal = options?.principal;
+
+    if (owner.kind === 'session' && principal !== undefined) {
+      const session = runtime.sessionStore ? await runtime.sessionStore.load(owner.id) : undefined;
+      if (session && !isSessionAuthorityAuthorized(session.metadata, principal)) {
+        return { outcome: 'not-found' };
+      }
+    }
+
+    if (owner.kind === 'run' && principal !== undefined) {
+      const runState = store.getRun(owner.id);
+      if (runState) {
+        const runPrincipal = runAttribution.get(owner.id)?.principal;
+        if (runPrincipal !== undefined && runPrincipal !== principal) {
+          return { outcome: 'not-found' };
+        }
+      }
+    }
+
+    const page = await history.page(owner, options);
+    if ('outcome' in page) return page; // a DurableEventGap
+
+    const deletionMarkerKind =
+      owner.kind === 'session'
+        ? 'session.deleted'
+        : owner.kind === 'run'
+          ? 'run.removed'
+          : undefined;
+    if (deletionMarkerKind && page.events.some((event) => event.kind === deletionMarkerKind)) {
+      return { outcome: 'deleted-aggregate', owner, ...page };
+    }
+    return page;
+  }
+
   const bureau: Bureau<D> = {
     store,
     memory: runtime.memory,
@@ -5658,14 +5734,20 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     eventHistory(
       owner: DurableEventOwner,
       eventHistoryOptions?: DurableEventHistoryPageOptions,
-    ): Promise<DurableEventPage | DurableEventGap | EventHistoryUnsupportedOutcome> {
+    ): Promise<
+      | DurableEventPage
+      | DurableEventGap
+      | EventHistoryUnsupportedOutcome
+      | EventHistoryNotFoundOutcome
+      | EventHistoryDeletedAggregateOutcome
+    > {
       if (!eventHistoryInstance) {
         return Promise.resolve({
           outcome: 'unsupported-capability',
           reason: 'no-persistent-storage',
         });
       }
-      return eventHistoryInstance.page(owner, eventHistoryOptions);
+      return resolveEventHistory(eventHistoryInstance, owner, eventHistoryOptions);
     },
     subscribeEventHistory(
       owner: DurableEventOwner,

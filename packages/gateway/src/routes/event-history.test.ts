@@ -49,9 +49,13 @@ describe('GET .../:id/events — durable event history paging', () => {
     expect(body.nextCursor).toBe('1');
   });
 
-  it('forwards "since" and "limit" query params to bureau.eventHistory', async () => {
+  it('forwards "since" and "limit" query params to bureau.eventHistory — a connection with no scopes header is privileged, so no "principal" is forwarded (AB-313)', async () => {
     let received:
-      { owner: DurableEventOwner; options?: { since?: string; limit?: number } } | undefined;
+      | {
+          owner: DurableEventOwner;
+          options?: { since?: string; limit?: number; principal?: string };
+        }
+      | undefined;
     const app = buildApp(async (owner, options) => {
       received = { owner, options };
       return { events: [], hasMore: false };
@@ -61,6 +65,34 @@ describe('GET .../:id/events — durable event history paging', () => {
 
     expect(received?.owner).toEqual({ kind: 'run', id: 'run-1' });
     expect(received?.options).toEqual({ since: '42', limit: 10 });
+  });
+
+  it('forwards the resolved principal for a non-privileged (scoped) connection — AB-313', async () => {
+    let received: { options?: { principal?: string } } | undefined;
+    const app = buildApp(async (_owner, options) => {
+      received = { options };
+      return { events: [], hasMore: false };
+    });
+
+    await app.request('/run-1/events', {
+      headers: { 'x-api-key-scopes': 'runs:read', 'x-auth-principal': 'alice' },
+    });
+
+    expect(received?.options?.principal).toBe('alice');
+  });
+
+  it('omits "principal" for a privileged (admin-key) connection — AB-313', async () => {
+    let received: { options?: { principal?: string } } | undefined;
+    const app = buildApp(async (_owner, options) => {
+      received = { options };
+      return { events: [], hasMore: false };
+    });
+
+    await app.request('/run-1/events', {
+      headers: { 'x-api-key-scopes': '', 'x-auth-principal': 'alice' },
+    });
+
+    expect(received?.options?.principal).toBeUndefined();
   });
 
   it('maps a DurableEventGap outcome to 410 Gone', async () => {
@@ -179,5 +211,48 @@ describe('GET .../:id/events — durable event history paging', () => {
     });
     const body = (await response.json()) as DurableEventPage;
     expect(body.events[0]?.payload).toEqual({ content: 'done' });
+  });
+
+  it('maps a not-found outcome to 404 "Run not found" — AB-313', async () => {
+    const app = buildApp(async () => ({ outcome: 'not-found' }));
+
+    const response = await app.request('/run-1/events', {
+      headers: { 'x-api-key-scopes': 'runs:read' },
+    });
+    expect(response.status).toBe(404);
+    const body = await response.text();
+    expect(body).toContain('Run not found');
+  });
+
+  it('maps a deleted-aggregate outcome to 200, projecting its events for privilege and carrying owner + hasMore/nextCursor — AB-313', async () => {
+    const secret = 'sk-real-secret-do-not-leak';
+    const app = buildApp(async (owner) => ({
+      outcome: 'deleted-aggregate',
+      owner,
+      events: [
+        createEnvelope({
+          kind: 'response.validated',
+          payload: { step: 0, original: { content: secret, toolCalls: [] }, validated: {} },
+        }),
+      ],
+      hasMore: true,
+      nextCursor: '2',
+    }));
+
+    const response = await app.request('/run-1/events', {
+      headers: { 'x-api-key-scopes': 'runs:read' },
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      outcome: string;
+      owner: DurableEventOwner;
+      hasMore: boolean;
+      nextCursor?: string;
+    };
+    expect(body.outcome).toBe('deleted-aggregate');
+    expect(body.owner).toEqual({ kind: 'run', id: 'run-1' });
+    expect(body.hasMore).toBe(true);
+    expect(body.nextCursor).toBe('2');
+    expect(JSON.stringify(body)).not.toContain(secret);
   });
 });

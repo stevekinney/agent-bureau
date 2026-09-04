@@ -10651,6 +10651,225 @@ describe('createBureau durable event history producer + subscribeEventHistory (A
   });
 });
 
+describe('bureau.eventHistory authorization and deleted-aggregate (AB-313)', () => {
+  it('returns not-found for a run owned by a different principal, indistinguishable from an unknown run', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-event-history-authz-run-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        runtime,
+      });
+
+      const run = await bureau.createRun({ message: 'Attribute me to alice', principal: 'alice' });
+      await waitForRunCompletion(bureau, run.id);
+      await runtime.deferred.drain();
+
+      const deniedOutcome = await bureau.eventHistory(
+        { kind: 'run', id: run.id },
+        { principal: 'mallory' },
+      );
+      expect(deniedOutcome).toEqual({ outcome: 'not-found' });
+
+      const unknownOutcome = await bureau.eventHistory(
+        { kind: 'run', id: 'no-such-run' },
+        { principal: 'mallory' },
+      );
+      expect(unknownOutcome).toEqual({ events: [], hasMore: false });
+
+      const allowedOutcome = await bureau.eventHistory(
+        { kind: 'run', id: run.id },
+        { principal: 'alice' },
+      );
+      if ('outcome' in allowedOutcome) throw new Error('expected a page');
+      expect(allowedOutcome.events.map((event) => event.kind)).toEqual(['run.completed']);
+
+      await bureau.shutdown();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('is open (no denial) for a run with no recorded principal, and skips the check entirely when the caller omits one', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-event-history-authz-open-run-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        runtime,
+      });
+
+      const run = await bureau.createRun({ message: 'No principal attribution' });
+      await waitForRunCompletion(bureau, run.id);
+      await runtime.deferred.drain();
+
+      const withPrincipal = await bureau.eventHistory(
+        { kind: 'run', id: run.id },
+        { principal: 'anyone' },
+      );
+      if ('outcome' in withPrincipal) throw new Error('expected a page');
+      expect(withPrincipal.events.map((event) => event.kind)).toEqual(['run.completed']);
+
+      const withoutPrincipal = await bureau.eventHistory({ kind: 'run', id: run.id });
+      if ('outcome' in withoutPrincipal) throw new Error('expected a page');
+      expect(withoutPrincipal.events.map((event) => event.kind)).toEqual(['run.completed']);
+
+      await bureau.shutdown();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('returns not-found for a session an unauthorized principal queries, and admits the recorded authority', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-event-history-authz-session-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: () => new Promise<never>(() => {}),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        runtime,
+      });
+
+      const run = await bureau.createRun({ message: 'Wait for a signal', principal: 'alice' });
+      await pollUntil(async () => {
+        const session = await bureau.getSession(run.sessionId);
+        return session?.metadata['lastRunStatus'] === 'running';
+      });
+
+      const deniedOutcome = await bureau.eventHistory(
+        { kind: 'session', id: run.sessionId },
+        { principal: 'mallory' },
+      );
+      expect(deniedOutcome).toEqual({ outcome: 'not-found' });
+
+      const allowedOutcome = await bureau.eventHistory(
+        { kind: 'session', id: run.sessionId },
+        { principal: 'alice' },
+      );
+      expect('outcome' in allowedOutcome).toBe(false);
+
+      await bureau.dispose();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('returns deleted-aggregate for a run whose Bureau record was removed, carrying the already-committed events', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-event-history-deleted-run-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        runtime,
+      });
+
+      const run = await bureau.createRun({ message: 'Delete me after completion' });
+      await waitForRunCompletion(bureau, run.id);
+      await runtime.deferred.drain();
+      await bureau.deleteRun(run.id);
+      await runtime.deferred.drain();
+
+      const outcome = await bureau.eventHistory({ kind: 'run', id: run.id });
+      if (!('outcome' in outcome) || outcome.outcome !== 'deleted-aggregate') {
+        throw new Error(`expected deleted-aggregate, got ${JSON.stringify(outcome)}`);
+      }
+      expect(outcome.owner).toEqual({ kind: 'run', id: run.id });
+      expect(outcome.events.map((event) => event.kind)).toEqual(['run.completed', 'run.removed']);
+
+      await bureau.shutdown();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('returns deleted-aggregate for a session.deleted owner, carrying the already-committed events, distinguishable from an unrelated empty page', async () => {
+    // `session.deleted` has no production dispatch site today (AB-87's own
+    // declared gap: "session.deleted durable only via the generic action
+    // stream, a gap" — no `emitter.dispatch(new SessionDeletedEvent(...))`
+    // call exists anywhere in `deleteSession`). This synthesizes it the
+    // same supported way the sibling "records a session-scoped action"
+    // test above does (`Store.recordAction`), proving this issue's own
+    // detection logic against the event shape a future dispatch site would
+    // produce, without inventing a new production dispatch beyond this
+    // issue's own delivery boundary.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-event-history-deleted-session-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        runtime,
+      });
+
+      const run = await bureau.createRun({ message: 'Carry a session-deleted action' });
+      bureau.store.recordAction(run.id, 'session.deleted', { sessionId: 'sess-deleted' });
+      await runtime.deferred.drain();
+      await waitForRunCompletion(bureau, run.id);
+      await runtime.deferred.drain();
+
+      const deletedOutcome = await bureau.eventHistory({ kind: 'session', id: 'sess-deleted' });
+      if (!('outcome' in deletedOutcome) || deletedOutcome.outcome !== 'deleted-aggregate') {
+        throw new Error(`expected deleted-aggregate, got ${JSON.stringify(deletedOutcome)}`);
+      }
+      expect(deletedOutcome.owner).toEqual({ kind: 'session', id: 'sess-deleted' });
+      expect(deletedOutcome.events.map((event) => event.kind)).toEqual(['session.deleted']);
+
+      // A genuinely never-recorded id stays an ordinary empty page — the
+      // detection is evidence-based (a `session.deleted` event inside the
+      // page), never "the live record is merely absent."
+      const freshOutcome = await bureau.eventHistory({ kind: 'session', id: 'never-existed' });
+      expect(freshOutcome).toEqual({ events: [], hasMore: false });
+
+      await bureau.shutdown();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+});
+
 describe('deleteSession aborts every run it owns (AB-207)', () => {
   // The pending-approval flavor of "a run owned by the deleted session" is
   // already covered by the pre-existing "revokes pending approval on delete"

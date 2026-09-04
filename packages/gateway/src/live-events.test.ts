@@ -7,7 +7,11 @@ import { createBureau } from 'bureau';
 import { waitForRunState } from 'bureau/test';
 
 import type { LiveFrameBrokerDurableEventHistory } from './live-events';
-import { LiveFrameBroker, projectRunEventForPrivilege } from './live-events';
+import {
+  LiveFrameBroker,
+  projectDurableEventForPrivilege,
+  projectRunEventForPrivilege,
+} from './live-events';
 import { createManualLiveFrameBrokerClock } from './test';
 import type { ServerFrame } from './types';
 import { createWebSocketHandler } from './websocket/handler';
@@ -48,6 +52,28 @@ function createResponseValidatedFrame(runSeq = 1): ServerFrame {
     sequence: runSeq,
     runSeq,
     timestamp: Date.now(),
+  };
+}
+
+/**
+ * AB-313 (AC4) — the durable-history analog of `createResponseValidatedFrame`
+ * above, same `RAW_SECRET`, same redaction-eligible shape
+ * (`isResponseValidatedDetail`), so the redaction-parity tests below assert
+ * both pipelines against literally the same underlying event.
+ */
+function createResponseValidatedDurableEnvelope(): DurableEventEnvelope {
+  return {
+    kind: 'response.validated',
+    owner: { kind: 'run', id: 'run-1' },
+    sequence: 1,
+    cursor: '0',
+    emittedAtMs: frameClock.now(),
+    payload: {
+      step: 0,
+      original: { content: RAW_SECRET, toolCalls: [] },
+      validated: { content: '[redacted]', toolCalls: [] },
+    },
+    schemaVersion: 1,
   };
 }
 
@@ -495,6 +521,61 @@ describe('projectRunEventForPrivilege — AB-323 REST run-detail projection', ()
 
     expect(() => projectRunEventForPrivilege(event, false)).not.toThrow();
     expect(projectRunEventForPrivilege(event, false)).toBe(event);
+  });
+});
+
+describe('AB-313 (AC4): redaction parity between the live and durable-history pipelines', () => {
+  it('redacts the identical response.validated event the same way through both pipelines for a non-privileged caller', () => {
+    const liveFrame = createResponseValidatedFrame();
+    const durableEnvelope = createResponseValidatedDurableEnvelope();
+
+    // Sanity: both carry the SAME raw secret before projection — proving
+    // the redaction below is doing real work, not asserting against an
+    // already-redacted fixture.
+    expect(JSON.stringify(liveFrame)).toContain(RAW_SECRET);
+    expect(JSON.stringify(durableEnvelope)).toContain(RAW_SECRET);
+
+    const broker = new LiveFrameBroker();
+    const receivedLive: ServerFrame[] = [];
+    broker.addSubscriber({}, (frame) => receivedLive.push(frame), { runIds: ['run-1'] });
+    broker.broadcast(liveFrame);
+
+    const projectedDurable = projectDurableEventForPrivilege(durableEnvelope, false);
+
+    expect(JSON.stringify(receivedLive)).not.toContain(RAW_SECRET);
+    expect(JSON.stringify(projectedDurable)).not.toContain(RAW_SECRET);
+
+    const liveDetail = receivedLive[0]?.type === 'event' ? receivedLive[0].detail : undefined;
+    expect(liveDetail).toEqual({
+      step: 0,
+      original: { content: '[redacted]', toolCalls: [] },
+      validated: { content: '[redacted]', toolCalls: [] },
+    });
+    // The SAME redaction marker shape on the durable path.
+    expect(projectedDurable.payload).toEqual({
+      step: 0,
+      original: { content: '[redacted]', toolCalls: [] },
+      validated: { content: '[redacted]', toolCalls: [] },
+    });
+  });
+
+  it('leaves the identical response.validated event fully unredacted through both pipelines for a privileged caller', () => {
+    const liveFrame = createResponseValidatedFrame();
+    const durableEnvelope = createResponseValidatedDurableEnvelope();
+
+    const broker = new LiveFrameBroker();
+    const receivedLive: ServerFrame[] = [];
+    broker.addSubscriber({}, (frame) => receivedLive.push(frame), {
+      runIds: ['run-1'],
+      privileged: true,
+    });
+    broker.broadcast(liveFrame);
+
+    const projectedDurable = projectDurableEventForPrivilege(durableEnvelope, true);
+
+    expect(JSON.stringify(receivedLive)).toContain(RAW_SECRET);
+    expect(JSON.stringify(projectedDurable)).toContain(RAW_SECRET);
+    expect(projectedDurable).toEqual(durableEnvelope);
   });
 });
 

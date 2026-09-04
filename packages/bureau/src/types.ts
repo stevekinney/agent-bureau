@@ -1268,11 +1268,43 @@ export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
    * — see `durable-event-history.ts`'s `createDurableEventProducer` doc
    * comment for exactly which events, and why a `schedule.created`/
    * `paused`/`resumed`/`cancelled` definition event is not among them).
+   *
+   * AB-313 adds two outcomes for `owner.kind` `'run'`/`'session'` (schedule
+   * owners are unaffected — no ownership/authorization concept exists for
+   * them yet):
+   *
+   * - `options.principal`, when provided, is checked against the run's
+   *   recorded `principal` (`AgentRun`'s own attribution) or the session's
+   *   recorded request authority (`isSessionAuthorityAuthorized`, AB-42's
+   *   precedent). A caller whose principal does not match an owner with a
+   *   RECORDED principal gets `{ outcome: 'not-found' }` — the same
+   *   not-found-shaped denial `submitSessionInput` (AB-194) uses, so an
+   *   unauthorized caller cannot distinguish "wrong id" from "exists, not
+   *   yours." An owner with NO recorded principal is open (matches every
+   *   existing session verb's "no recorded authority" rule); omitting
+   *   `options.principal` entirely skips the check (an internal/trusted
+   *   caller, or a gateway request from a privileged connection).
+   * - When the owner's live Bureau record is gone (the session was
+   *   deleted, or the run's record was removed via `deleteRun`) but this
+   *   store still holds committed events for it, this returns
+   *   `{ outcome: 'deleted-aggregate', owner, events, hasMore, nextCursor?
+   *   }` instead of an ordinary page — distinguishable from BOTH an
+   *   ordinary empty page (an id nothing was ever recorded under) and
+   *   `not-found` (no committed events at all): AB-87's retention/deletion
+   *   posture is that deleting the owner record never deletes its
+   *   history, so the events remain queryable through this same call
+   *   rather than requiring a second one.
    */
   eventHistory(
     owner: DurableEventOwner,
     options?: DurableEventHistoryPageOptions,
-  ): Promise<DurableEventPage | DurableEventGap | EventHistoryUnsupportedOutcome>;
+  ): Promise<
+    | DurableEventPage
+    | DurableEventGap
+    | EventHistoryUnsupportedOutcome
+    | EventHistoryNotFoundOutcome
+    | EventHistoryDeletedAggregateOutcome
+  >;
 
   /**
    * Replays `owner`'s durable event history from the exclusive `since`
@@ -1299,6 +1331,33 @@ export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
 export interface EventHistoryUnsupportedOutcome {
   readonly outcome: 'unsupported-capability';
   readonly reason: 'no-persistent-storage';
+}
+
+/**
+ * Returned by {@link Bureau.eventHistory} (AB-313) when `options.principal`
+ * is provided and does not match `owner`'s recorded principal — the same
+ * not-found-shaped denial `submitSessionInput` (AB-42/AB-194) returns, so an
+ * unauthorized caller cannot distinguish "no such run/session" from "exists,
+ * not yours."
+ */
+export interface EventHistoryNotFoundOutcome {
+  readonly outcome: 'not-found';
+}
+
+/**
+ * Returned by {@link Bureau.eventHistory} (AB-313) when `owner`'s live
+ * Bureau record is gone (`deleteRun`, or a deleted session) but this store
+ * still holds committed durable events for it — distinguishable from both
+ * an ordinary empty {@link DurableEventPage} (an id nothing was ever
+ * recorded under) and {@link EventHistoryNotFoundOutcome} (no committed
+ * events at all). Carries the same page fields as `DurableEventPage` so the
+ * already-committed events remain queryable through this one call — AB-87's
+ * retention/deletion posture is that deleting the owner record never
+ * deletes its history.
+ */
+export interface EventHistoryDeletedAggregateOutcome extends DurableEventPage {
+  readonly outcome: 'deleted-aggregate';
+  readonly owner: DurableEventOwner;
 }
 
 // ── API Request / Response Types ─────────────────────────────────────

@@ -15,8 +15,13 @@ import type { Context } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 
 import { projectDurableEventForPrivilege } from '../live-events';
-import { isPrivilegedGatewayConnection } from '../middleware/authentication';
-import type { Bureau, EventHistoryUnsupportedOutcome } from '../types';
+import { isPrivilegedGatewayConnection, resolvePrincipal } from '../middleware/authentication';
+import type {
+  Bureau,
+  EventHistoryDeletedAggregateOutcome,
+  EventHistoryNotFoundOutcome,
+  EventHistoryUnsupportedOutcome,
+} from '../types';
 
 /**
  * `packages/bureau/src/durable-event-history.ts`'s own validation-error
@@ -47,16 +52,29 @@ function parseLimit(raw: string | undefined): number | undefined {
   return limit;
 }
 
-function isGap(
-  outcome: DurableEventPage | DurableEventGap | EventHistoryUnsupportedOutcome,
-): outcome is DurableEventGap {
+type EventHistoryOutcome =
+  | DurableEventPage
+  | DurableEventGap
+  | EventHistoryUnsupportedOutcome
+  | EventHistoryNotFoundOutcome
+  | EventHistoryDeletedAggregateOutcome;
+
+function isGap(outcome: EventHistoryOutcome): outcome is DurableEventGap {
   return 'outcome' in outcome && outcome.outcome === 'gap';
 }
 
-function isUnsupported(
-  outcome: DurableEventPage | DurableEventGap | EventHistoryUnsupportedOutcome,
-): outcome is EventHistoryUnsupportedOutcome {
+function isUnsupported(outcome: EventHistoryOutcome): outcome is EventHistoryUnsupportedOutcome {
   return 'outcome' in outcome && outcome.outcome === 'unsupported-capability';
+}
+
+function isNotFound(outcome: EventHistoryOutcome): outcome is EventHistoryNotFoundOutcome {
+  return 'outcome' in outcome && outcome.outcome === 'not-found';
+}
+
+function isDeletedAggregate(
+  outcome: EventHistoryOutcome,
+): outcome is EventHistoryDeletedAggregateOutcome {
+  return 'outcome' in outcome && outcome.outcome === 'deleted-aggregate';
 }
 
 /**
@@ -88,12 +106,19 @@ export async function respondWithEventHistoryPage(
   const since = context.req.query('since');
   const limit = parseLimit(context.req.query('limit'));
   const privileged = isPrivilegedGatewayConnection(context.req.header('x-api-key-scopes'));
+  // AB-313: authorization is skipped for a privileged connection (AB-305's
+  // `x-api-key-scopes` admin-key definition) — `Bureau.eventHistory` treats
+  // an omitted `principal` as "skip authorization" (an internal/trusted
+  // caller), the same privilege model already governing the redaction
+  // check further down.
+  const principal = privileged ? undefined : resolvePrincipal(context);
 
-  let outcome: DurableEventPage | DurableEventGap | EventHistoryUnsupportedOutcome;
+  let outcome: EventHistoryOutcome;
   try {
     outcome = await bureau.eventHistory(owner, {
       ...(since !== undefined ? { since } : {}),
       ...(limit !== undefined ? { limit } : {}),
+      ...(principal !== undefined ? { principal } : {}),
     });
   } catch (error) {
     if (
@@ -121,6 +146,27 @@ export async function respondWithEventHistoryPage(
         },
       },
       501,
+    );
+  }
+
+  if (isNotFound(outcome)) {
+    // Same shape and status as `runs.ts`'s/`sessions.ts`'s own resource-
+    // not-found responses — never reveals whether `owner` genuinely
+    // doesn't exist or the caller simply isn't authorized for it.
+    const message = owner.kind === 'run' ? 'Run not found' : 'Session not found';
+    throw new HTTPException(404, { message });
+  }
+
+  if (isDeletedAggregate(outcome)) {
+    return context.json(
+      {
+        outcome: 'deleted-aggregate',
+        owner: outcome.owner,
+        events: outcome.events.map((event) => projectDurableEventForPrivilege(event, privileged)),
+        hasMore: outcome.hasMore,
+        ...(outcome.nextCursor !== undefined ? { nextCursor: outcome.nextCursor } : {}),
+      },
+      200,
     );
   }
 

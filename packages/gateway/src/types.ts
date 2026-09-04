@@ -19,6 +19,8 @@ export type {
   ConfigurationResponse,
   CreateRunRequest,
   DurableScheduleDefinition,
+  EventHistoryDeletedAggregateOutcome,
+  EventHistoryNotFoundOutcome,
   EventHistoryUnsupportedOutcome,
   PendingHumanWaitReview,
   PendingReview,
