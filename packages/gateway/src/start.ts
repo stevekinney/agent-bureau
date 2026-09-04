@@ -91,7 +91,8 @@ const DEFAULT_STORAGE_PATH: Record<'sqlite' | 'lmdb', string> = {
   lmdb: './data/agent-bureau-lmdb',
 };
 
-function apiKeyFor(environment: StartEnvironment): string | undefined {
+/** Exported for direct unit tests of the PROVIDER → API key lookup. */
+export function apiKeyFor(environment: StartEnvironment): string | undefined {
   switch (environment.PROVIDER) {
     case 'anthropic':
       return environment.ANTHROPIC_API_KEY;
@@ -250,7 +251,18 @@ export async function shutdownGateway(
   }
 }
 
-async function main(): Promise<void> {
+/**
+ * The process entrypoint's own composition: parses `Bun.env`, boots the
+ * gateway, logs the listening port, and registers the SIGTERM/SIGINT
+ * shutdown handlers. Returns the booted `{ gateway, server }` — discarded by
+ * the `if (import.meta.main)` call below in real process usage, but exported
+ * so `start.test.ts` can call it directly and shut the real server back down
+ * afterward rather than leaking a live listener across the test run. Safe to
+ * call under test: the registered signal handlers only ever run if the test
+ * process itself receives a real SIGTERM/SIGINT, which a normal test run
+ * never sends.
+ */
+export async function main(): Promise<Awaited<ReturnType<typeof startGateway>>> {
   const environment = parseStartEnvironment(Bun.env);
   if (environment.STORAGE_TYPE === 'memory') {
     console.warn(
@@ -265,7 +277,8 @@ async function main(): Promise<void> {
     );
   }
 
-  const { gateway, server } = await startGateway(environment);
+  const booted = await startGateway(environment);
+  const { gateway, server } = booted;
   console.log(`[gateway] listening on port ${gateway.port}`);
 
   let shuttingDown = false;
@@ -278,6 +291,7 @@ async function main(): Promise<void> {
   };
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
   process.on('SIGINT', () => void shutdown('SIGINT'));
+  return booted;
 }
 
 if (import.meta.main) {

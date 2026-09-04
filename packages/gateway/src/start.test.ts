@@ -5,6 +5,8 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'bun:test';
 
 import {
+  apiKeyFor,
+  main,
   parseStartEnvironment,
   resolveStartOptions,
   shutdownGateway,
@@ -285,5 +287,85 @@ describe('shutdownGateway', () => {
 
     expect(caught).toBe(failure);
     expect(wasDisposeCalled()).toBe(true);
+  });
+});
+
+describe('apiKeyFor', () => {
+  it('reads GEMINI_API_KEY when PROVIDER is gemini', () => {
+    const environment = parseStartEnvironment({ PROVIDER: 'gemini', GEMINI_API_KEY: 'gk' });
+    expect(apiKeyFor(environment)).toBe('gk');
+  });
+});
+
+describe('main', () => {
+  /** Snapshots and restores every env var `main()`/`parseStartEnvironment` reads. */
+  const ENV_KEYS = [
+    'PORT',
+    'GATEWAY_HOST',
+    'AUTH_TOKEN',
+    'STORAGE_TYPE',
+    'STORAGE_PATH',
+    'EVALUATION_REPORTS_DIRECTORY',
+    'PROVIDER',
+    'MODEL',
+    'SYSTEM_PROMPT',
+    'ANTHROPIC_API_KEY',
+    'OPENAI_API_KEY',
+    'GEMINI_API_KEY',
+  ] as const;
+
+  function withEnv<T>(overrides: Record<string, string | undefined>, run: () => Promise<T>) {
+    const snapshot = Object.fromEntries(ENV_KEYS.map((key) => [key, Bun.env[key]]));
+    for (const key of ENV_KEYS) delete Bun.env[key];
+    Object.assign(Bun.env, overrides);
+    return run().finally(() => {
+      for (const key of ENV_KEYS) delete Bun.env[key];
+      Object.assign(Bun.env, snapshot);
+    });
+  }
+
+  it('boots the gateway, warns for memory storage and a missing API key, and registers shutdown handlers', async () => {
+    const databasePath = join(tmpdir(), `gateway-main-${process.pid}-${Date.now()}.sqlite`);
+    const warnings: unknown[][] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => warnings.push(args);
+
+    try {
+      const booted = await withEnv(
+        { STORAGE_TYPE: 'memory', PORT: '0', PROVIDER: 'anthropic' },
+        () => main(),
+      );
+      try {
+        expect(booted.gateway.bureau.ready).toBe(false);
+        expect(warnings.some((args) => String(args[0]).includes('STORAGE_TYPE=memory'))).toBe(true);
+        expect(warnings.some((args) => String(args[0]).includes('No API key found'))).toBe(true);
+      } finally {
+        await shutdownGateway(booted.gateway, booted.server);
+      }
+    } finally {
+      console.warn = originalWarn;
+      await rm(databasePath, { force: true });
+    }
+  });
+
+  it('boots without warning when a provider API key is configured', async () => {
+    const warnings: unknown[][] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => warnings.push(args);
+
+    try {
+      const booted = await withEnv(
+        { STORAGE_TYPE: 'memory', PORT: '0', PROVIDER: 'anthropic', ANTHROPIC_API_KEY: 'key' },
+        () => main(),
+      );
+      try {
+        expect(booted.gateway.bureau.ready).toBe(true);
+        expect(warnings.some((args) => String(args[0]).includes('No API key found'))).toBe(false);
+      } finally {
+        await shutdownGateway(booted.gateway, booted.server);
+      }
+    } finally {
+      console.warn = originalWarn;
+    }
   });
 });
