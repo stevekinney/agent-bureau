@@ -374,6 +374,17 @@ const artifact = await assembleReproductionArtifact(harness, recorder, {
 
 Assembles the normalized `ReproductionArtifact` AB-92's decision record fixes (AC8) from one harness run: `sourceRevision` (`git rev-parse HEAD`, read once), `packageVersions` (every workspace package's `name`/`version`, read from its `package.json`), `effectiveModel` (`harness.bureau.getConfiguration().provider` — requires `BureauOptions.provider` to be set alongside a scripted `generate`; throws rather than inventing a provider/model when it is not), `clockOrigin`/`identifierSeed`/`randomSeed` (`harness.runtime`'s own recorded seeds — present even for an unpinned, default-constructed runtime), `scriptedOutcomes`/`firedFaults` (always empty until AB-95's fault engine exists), `causalTrace` (`recorder.normalize()` and nothing else), `terminalResult`, and `cleanupReport`. `terminalResult` is redacted through `summarizeToolInput` before embedding — a privileged key (`password`, `secret`, `token`, `apiKey`, `authorization`, `credential`, `privateKey`) never appears in the serialized artifact. The returned object's keys are always written in AB-92's fixed field order, so `JSON.stringify` is byte-identical across two runs of the same scripted case with the same seeds.
 
+`assembleReproductionArtifact` takes an optional fourth `environment` argument (AB-264): `{ sourceRevision?, packageVersions? }`. Supplying a field there replaces this function's own discovery for that field — `git rev-parse HEAD` and the `packages/*` manifest glob both assume a real repository checkout rooted at a `turbo.json`, neither of which exists inside a packed-and-path-installed tarball consumer (`scripts/verify-bureau-tarball-boundary.ts`'s probe passes both explicitly, since it already knows them from its own pack step). Omitted fields still discover normally, so every existing caller inside this repository is unaffected.
+
+```typescript
+const artifact = await assembleReproductionArtifact(
+  harness,
+  recorder,
+  { terminalResult, cleanupReport },
+  { sourceRevision, packageVersions },
+);
+```
+
 ### Bureau-scoped fault-plan vocabulary and selectors (AB-263)
 
 ```typescript

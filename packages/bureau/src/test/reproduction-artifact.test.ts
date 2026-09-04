@@ -252,6 +252,42 @@ describe('assembleReproductionArtifact', () => {
 
     expect(artifact.cleanupReport).toMatchObject({ status: expect.any(String) });
   });
+
+  it('bypasses sourceRevision/packageVersions discovery when an explicit environment is supplied (AB-264)', async () => {
+    const storage = createMemoryStorageFixture();
+    const harness = await createBureauTestHarness({
+      agents: {},
+      generate: mockGenerate(),
+      toolbox: createToolbox([]),
+      provider: { provider: 'anthropic', model: 'claude-test' },
+      storage,
+    });
+    disposals.push(async () => {
+      await harness.bureau.dispose();
+      await storage.dispose();
+    });
+
+    const recorder = createEventRecorder(harness.runtime);
+    const artifact = await assembleReproductionArtifact(
+      harness,
+      recorder,
+      { terminalResult: undefined, cleanupReport: { status: 'completed' } },
+      {
+        sourceRevision: 'explicit-revision-not-a-sha',
+        packageVersions: { 'explicit-package-one': '1.2.3', 'explicit-package-two': '4.5.6' },
+      },
+    );
+
+    // Neither value could have come from `git rev-parse HEAD` (a real sha)
+    // or the `packages/*/package.json` glob (which would include `bureau`
+    // itself, among many others) — this is only reachable through the
+    // explicit environment argument bypassing discovery.
+    expect(artifact.sourceRevision).toBe('explicit-revision-not-a-sha');
+    expect(artifact.packageVersions).toEqual({
+      'explicit-package-one': '1.2.3',
+      'explicit-package-two': '4.5.6',
+    });
+  });
 });
 
 describe('locateWorkspaceRoot', () => {
