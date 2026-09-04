@@ -43,55 +43,91 @@
  * discovery AB-256 declared but left unproduced on its own baseline (see
  * `resource-scope.ts`'s doc comment on that gap).
  *
- * Five rows stay permanently empty on this baseline, each for a reason
- * pinned in code rather than silently glossed over. Three are AB-92's own
- * inventoried gaps or an unbuilt public listing:
+ * Two rows stay permanently empty on this baseline (AB-322, narrowing the
+ * five inherited from AB-262): no public listing exists yet for either.
  *
  * - `parkedWaits` — no public per-signal-wait listing exists; a run's own
  *   `snapshot().status === 'waiting'` is visible per-run but there is no
  *   registry enumerating every outstanding wait the way `ChildRunRegistry`
- *   enumerates children.
+ *   enumerates children. AB-35 (Backlog) is the gap; this stays empty
+ *   until a public listing lands.
  * - `pendingHookEffects` — AB-92's own inventory: "hooks resolve to a new
  *   gap (the seam exists but is unwired)". There is no hook-effect
- *   identity or tracking surface yet (AB-35, Backlog).
- * - `openStorageResources` — `bureau.shutdown()` already disposes the raw
- *   `Storage` handle internally (`create-bureau.ts`'s `disposeStorage`/
- *   `store.dispose()` in its unconditional teardown `finally`), and no
- *   public surface exists to independently confirm that from outside.
+ *   identity or tracking surface yet (AB-35, Backlog); this stays empty
+ *   for the same reason as `parkedWaits`.
  *
- * The other two are empty for a DIFFERENT, verified reason: Bureau's own
- * `shutdown()` (AB-207) already AWAITS each of these owners' real drain
- * as part of `ownerDrains` (`settleOwner('scheduler', ...)` awaits
- * `scheduler.stop()`, which itself awaits every running task's result;
- * `settleOwner('online-evals', () => onlineEvalSampler.dispose())` awaits
- * `Promise.allSettled([...activeEvaluations])`) — so by the time an
- * UNBOUNDED `shutdown()` call (the one `assertBureauQuiescent` makes when
- * no `shutdownOptions` are passed) resolves, nothing genuinely in-flight
- * on either subsystem survives to be read as "still active": a hung task
- * makes the unbounded `shutdown()` call hang right along with it, never
- * resolve-with-a-leftover, and a BOUNDED (`timeoutMilliseconds`) call
- * correctly reports the still-draining owner under `incomplete`, never
- * here — recording it AGAIN via a live snapshot read would double-count
- * the exact same fact `incomplete` already carries:
+ * The other four (`runningScheduleFires`, `activeEvaluations`,
+ * `pendingAuditWrites`, `openStorageResources`) were ALSO permanently
+ * empty on AB-262's baseline, on the argument that an UNBOUNDED
+ * `shutdown()` awaits each owner's real drain as part of `ownerDrains`
+ * (`settleOwner('scheduler', ...)` awaits `scheduler.stop()`, which
+ * itself awaits every running task's result; `settleOwner('online-evals',
+ * () => onlineEvalSampler.dispose())` awaits `Promise.allSettled([
+ * ...activeEvaluations])`; `audit-trail.ts`'s `dispose()` awaits
+ * `Promise.allSettled([...activeWrites])`), so nothing genuinely
+ * in-flight ever survived to be read: a hung task made the unbounded call
+ * hang right along with it, and a BOUNDED (`timeoutMilliseconds`) call's
+ * still-draining owner was already visible under `incomplete` — no fault
+ * plan existed yet (AB-95/AB-265) to force a genuine leftover past a
+ * bounded wait and PROVE the argument, so the rows stayed unpopulated
+ * rather than approximated.
  *
- * - `runningScheduleFires` — `scheduler.getState()` cannot show a fire
- *   BureauShutdownReport didn't already resolve or classify unresolved.
- * - `activeEvaluations` — `onlineEvalSampler.activeEvaluationSnapshots()`
- *   is this same argument once more, over the sampler's own drained Set.
+ * AB-265's fault engine changes this: `createFaultEngine(...).wrapGenerate`/
+ * `.wrapStorage` can block a schedule fire's model call or a `kv.set` write
+ * (an audit write, or — this is the part that took a second design pass,
+ * see the test file — an evaluation's OWN audit-record write, never the
+ * judge's own generate call: `online-evals.ts`'s `evaluateRun` races EVERY
+ * judge call against the SAME background-shutdown `AbortSignal`
+ * `bureau.shutdown()` fires, so a judge blocked on its own generate call is
+ * untracked the instant that signal aborts, regardless of whether the call
+ * itself ever settles — never observable past shutdown that way. Blocking
+ * `recordScore`'s write instead, which is NOT raced against that signal,
+ * keeps the evaluation genuinely in flight) — deterministically, past a
+ * bounded `shutdown({ timeoutMilliseconds })` — so these four rows are now
+ * populated from a REAL public snapshot read once `bureau.shutdown()`
+ * returns, whether or not anything is actually still running (the common
+ * case: nothing is, and every row below reads empty):
  *
- * `pendingAuditWrites` joins those two for the identical reason, verified
- * directly in `audit-trail.ts`: its `dispose()` awaits
- * `Promise.allSettled([...activeWrites])`, which by definition never
- * rejects — so a `'failed'` `'audit-trail'` owner outcome is not reachable
- * through this owner's dispose() either. A write's own failure is already
- * diagnosed by `settleOwner`'s catch and by `audit-trail.ts`'s own
- * try/catch around each write; nothing is silently lost, it is just not
- * yet surfaced as a distinct quiescence row.
+ * - `runningScheduleFires` — `bureau.scheduler.getState().activeTask`
+ *   (public: the same read `create-bureau.ts` itself uses to report
+ *   `'scheduler.state'`). `scheduler.stop()`'s own `running` map entry for
+ *   a still-executing task is not deleted until the task's dispatch
+ *   completion path runs, so `getState()` keeps reporting it live for the
+ *   whole window a bounded `shutdown()` raced past.
+ * - `activeEvaluations` — `bureau.onlineEvalSampler.activeEvaluationSnapshots()`,
+ *   already documented as "every evaluation currently in flight" — read
+ *   AFTER `shutdown()` returns, so an evaluation blocked on its own
+ *   audit-record write (see above) past the bounded wait is still in this
+ *   list: `endTrackedEvaluation` — the only thing that removes it — runs
+ *   in `runTrackedEvaluation`'s `.finally()`, which cannot run until
+ *   `evaluateRun` itself returns, and it cannot return past a write that
+ *   never settles.
+ * - `pendingAuditWrites` — `harness.runtime.outstandingDeferred()`
+ *   (`ManualRuntimeServices`' own public, NON-destructive peek — never
+ *   `deferred.drain()`, which is destructive and would race the fault
+ *   engine's own `after-sequence` bookkeeping), filtered to the
+ *   `'audit-write'` label `audit-trail.ts` itself tracks every write
+ *   under (AB-260). A blocked `kv.set()` never settles, so its label
+ *   stays outstanding for as long as the block holds.
+ * - `openStorageResources` — the storage fixture's OWN public handle
+ *   accounting (`BureauStorageFixture.openHandles()`, AB-322): a call the
+ *   fixture's wrapped `Storage` instance has started but not yet
+ *   finished. Unlike the other three, this is not shadowed by any
+ *   `BureauShutdownReport` owner — `bureau.shutdown()` tracks no
+ *   "raw storage call" owner at all — so a lingering handle here is the
+ *   ONLY place this leak is ever reported, and (unlike the other three
+ *   rows) it IS folded into `leaked`/`quiescent` below.
  *
- * None of these six permanently-empty rows is one of the five negative-test
- * leak kinds this issue's Delivery boundary requires (`child`, `timer`,
- * `listener`, `queue-item`/webhook, `durable-owner`) — every one of those
- * five IS populated from a real public surface above.
+ * `runningScheduleFires`/`activeEvaluations`/`pendingAuditWrites` are
+ * deliberately NOT folded into `leaked`: the owner each names
+ * (`scheduler`/`online-evals`/`audit-trail`) is already reported under
+ * `incomplete` when a bounded `shutdown()` times out on it — promoting
+ * these into `leaked` too would report the identical bounded-shutdown-
+ * timeout fact under two different report fields for the same root
+ * cause, exactly the double-count AB-262's original design avoided by
+ * leaving them empty. Populating them now is strictly more informative
+ * (naming the specific resource, not just the owner) without changing
+ * `quiescent`.
  */
 
 import {
@@ -287,6 +323,50 @@ export async function assertBureauQuiescent<D extends AgentDefinitions = AgentDe
 
   const shutdownReport = await bureau.shutdown(shutdownOptions);
 
+  // Read AFTER `shutdown()` returns (AB-322): a bounded call races a
+  // still-draining owner's real work via `Promise.race` (`create-bureau.ts`'s
+  // `shutdown()`), so the moment this call resolves is exactly when a
+  // fault-forced leftover (AB-265's engine blocking a schedule fire, an
+  // audit write, or an evaluation's judge call) is still genuinely live on
+  // each public surface below — see the module doc for why each is (or is
+  // not) folded into `leaked`.
+  const runningScheduleFires: LeakedResource[] = [];
+  const activeTask = bureau.scheduler?.getState().activeTask;
+  if (activeTask) {
+    runningScheduleFires.push({
+      kind: 'queue-item',
+      identifier: activeTask.id,
+      owner: activeTask.priority,
+      discoveredVia: 'public-snapshot',
+    });
+  }
+
+  const activeEvaluations: LeakedResource[] = (
+    bureau.onlineEvalSampler?.activeEvaluationSnapshots() ?? []
+  ).map((snapshot) => ({
+    kind: 'queue-item',
+    identifier: snapshot.id,
+    ...(snapshot.owner !== undefined ? { owner: snapshot.owner } : {}),
+    discoveredVia: 'public-snapshot',
+  }));
+
+  const pendingAuditWrites: LeakedResource[] = harness.runtime
+    .outstandingDeferred()
+    .filter((label) => label === 'audit-write')
+    .map((label, index) => ({
+      kind: 'queue-item',
+      identifier: `${label}#${index + 1}`,
+      owner: 'audit-trail',
+      discoveredVia: 'runtime-services-deferred',
+    }));
+
+  const openStorageResources: LeakedResource[] = harness.storage.openHandles().map((handle) => ({
+    kind: 'queue-item',
+    identifier: handle,
+    owner: 'storage',
+    discoveredVia: 'public-snapshot',
+  }));
+
   // `close()`, never `assertQuiescent()`: by this point `bureau.shutdown()`
   // has already aborted every run it owns, so a REAL, unbounded
   // `run.closed()` settles promptly either way (the run finished cleanly
@@ -315,11 +395,15 @@ export async function assertBureauQuiescent<D extends AgentDefinitions = AgentDe
     }
   }
 
+  // `openStorageResources` is folded in (see the module doc); the other
+  // three fault-forced rows above are deliberately NOT — their owner is
+  // already named under `incomplete`.
   const leaked: LeakedResource[] = [
     ...scopeReport.leaked,
     ...activeDescendants,
     ...pendingWebhookDeliveries,
     ...durableAttempts,
+    ...openStorageResources,
   ];
 
   const detached = [...scopeReport.detached, ...detachedDurable];
@@ -331,13 +415,13 @@ export async function assertBureauQuiescent<D extends AgentDefinitions = AgentDe
     detached,
     activeRoots,
     activeDescendants,
-    runningScheduleFires: [],
+    runningScheduleFires,
     parkedWaits: [],
     pendingHookEffects: [],
-    pendingAuditWrites: [],
-    activeEvaluations: [],
+    pendingAuditWrites,
+    activeEvaluations,
     pendingWebhookDeliveries,
-    openStorageResources: [],
+    openStorageResources,
     durableAttempts,
     incomplete,
     shutdownReport,

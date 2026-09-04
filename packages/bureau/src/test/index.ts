@@ -35,6 +35,7 @@ export type {
 export { assembleReproductionArtifact, locateWorkspaceRoot } from './reproduction-artifact';
 export type {
   BureauStorageFixture,
+  CreateMemoryStorageFixtureOptions,
   CreatePersistentStorageFixtureOptions,
 } from './storage-fixtures';
 export {
