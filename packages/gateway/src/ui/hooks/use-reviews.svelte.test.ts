@@ -22,6 +22,7 @@ function makeToolApproval(
     },
     requestedAt: 0,
     ageMilliseconds: 0,
+    status: 'pending',
     ...overrides,
   };
 }
@@ -37,6 +38,7 @@ function makeHumanWait(overrides: Partial<PendingHumanWaitReview> = {}): Pending
     prompt: 'Approve this?',
     requestedAt: 0,
     ageMilliseconds: 0,
+    status: 'pending',
     ...overrides,
   };
 }

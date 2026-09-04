@@ -610,6 +610,30 @@ export type BureauEventType = keyof BureauEventMap & string;
 // ── Review queue (AB-20) ─────────────────────────────────────────────
 
 /**
+ * Shared review lifecycle vocabulary (AB-46) both {@link PendingToolApprovalReview}
+ * and {@link PendingHumanWaitReview} report a `status` from. `listPendingReviews()`
+ * only ever returns `'pending'` items; every other status surfaces through
+ * `getReview(id)`'s audit-trail reconstruction or the audit trail itself.
+ *
+ * - `'pending'` — awaiting a decision.
+ * - `'approved'` / `'denied'` — resolved via `resolveReview` with `decision: 'approve' | 'deny'`.
+ * - `'rejected'` — resolved via `resolveReview` with `decision: 'reject'` (requires a reason).
+ * - `'expired'` — a tool-approval review swept by `sweepExpiredReviews` past its binding's `expiresAt`.
+ * - `'revoked'` — transitioned by `deleteRun`/`deleteSession` via `revokePendingApprovalsForRun`.
+ * - `'canceled'` — transitioned by `abortRun`/`cancelDurableRun` via `revokePendingApprovalsForRun`.
+ * - `'superseded'` — a tool-approval review whose `resumeApproval` re-gate produced a new `pendingApproval` for the same `callId`.
+ */
+export type ReviewStatus =
+  | 'pending'
+  | 'approved'
+  | 'denied'
+  | 'rejected'
+  | 'expired'
+  | 'revoked'
+  | 'canceled'
+  | 'superseded';
+
+/**
  * A tool call parked by armorer's `needs_approval` policy decision. `approval`
  * is the exact {@link PendingToolApproval} (signed with `approvalToken` when
  * the bureau's toolbox was constructed with `approvalSecret`) that
@@ -627,6 +651,8 @@ export interface PendingToolApprovalReview {
   requestedAt: number;
   /** Milliseconds elapsed since `requestedAt`, computed at read time. */
   ageMilliseconds: number;
+  /** The review's current lifecycle status (AB-46). See {@link ReviewStatus}. */
+  status: ReviewStatus;
 }
 
 /**
@@ -647,6 +673,8 @@ export interface PendingHumanWaitReview {
   requestedAt: number;
   /** Milliseconds elapsed since `requestedAt`, computed at read time. */
   ageMilliseconds: number;
+  /** The review's current lifecycle status (AB-46). See {@link ReviewStatus}. */
+  status: ReviewStatus;
 }
 
 /** A single item in the gateway's review queue (AB-20). */
@@ -655,7 +683,13 @@ export type PendingReview = PendingToolApprovalReview | PendingHumanWaitReview;
 export interface ResolveReviewInput {
   /** The {@link PendingReview.id} to resolve. */
   id: string;
-  decision: 'approve' | 'deny';
+  /**
+   * `'reject'` (AB-46) is a `deny` outcome plus a REQUIRED caller-supplied
+   * `reason`: `resolveReview` throws `BureauError('reject requires a reason',
+   * 'BAD_REQUEST')` before any state change when `reason` is absent or empty,
+   * for both review kinds.
+   */
+  decision: 'approve' | 'deny' | 'reject';
   /**
    * The authenticated principal making the decision (e.g. `api-key:<id>` or
    * `static-token`). Recorded in the audit trail for attribution — required,
@@ -664,22 +698,31 @@ export interface ResolveReviewInput {
   principal: string;
   /**
    * `tool-approval` approve only: override the tool call's arguments instead
-   * of resuming with the originally-proposed ones. Ignored for `deny` and for
-   * `human-wait` reviews.
+   * of resuming with the originally-proposed ones. Ignored for `deny`/`reject`
+   * and for `human-wait` reviews.
    */
   arguments?: unknown;
   /** `human-wait` approve only: the payload delivered with the signal. */
   payload?: unknown;
-  /** Optional human-readable note, recorded in the audit trail either way. */
+  /**
+   * Optional human-readable note, recorded in the audit trail either way.
+   * REQUIRED (non-empty) when `decision` is `'reject'`.
+   */
   reason?: string;
 }
 
 export interface ResolveReviewResult {
   id: string;
   kind: PendingReview['kind'];
-  decision: 'approve' | 'deny';
+  decision: 'approve' | 'deny' | 'reject';
   /** The tool's `ToolExecutionResult` when a `tool-approval` was approved. */
   result?: unknown;
+  /**
+   * `tool-approval` reject only: echoes `input.reason` back so a caller
+   * building the next manual run (per `create-agent.ts`'s docstring) can
+   * splice it into the tool's `ToolExecutionResult`.
+   */
+  feedback?: string;
 }
 
 /**
@@ -1060,25 +1103,57 @@ export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
    * `needs_approval` tool-approval flow AND durable `requestHumanInput`
    * (`ctx.waitForSignal`) waits, across all live runs. Newest requests last
    * are NOT guaranteed — order is run-registration order, not age order.
-   * Excludes items already resolved via `resolveReview` (approved or denied),
-   * even if the underlying run has not produced further activity.
+   * Excludes items already resolved via `resolveReview` (approved, denied, or
+   * rejected), even if the underlying run has not produced further activity.
+   * Also excludes any `tool-approval` review whose binding's `expiresAt` is at
+   * or before the current clock time (AB-46) — a read-time filter with no
+   * write; see `sweepExpiredReviews` for the write that transitions it to
+   * `'expired'`.
    */
   listPendingReviews(): PendingReview[];
 
   /**
-   * Approve or deny a pending review. Approve resumes the run: a
-   * `tool-approval` calls `Toolbox.resumeApproval` on the bureau's toolbox and
-   * returns its `ToolExecutionResult`; a `human-wait` calls `signalSession`
-   * with the parked signal name. Deny records the decision without resuming
-   * anything — there is no built-in "reject and continue" verb for either
-   * primitive, so a denied tool call is simply never resumed and a denied
-   * human-wait run stays parked. Every resolution — approve or deny — is
-   * recorded in the audit trail attributed to `input.principal`.
+   * Look up one review by id, live or resolved (AB-46). For a still-pending
+   * id this is `listPendingReviews()`'s live scan. For a resolved id, this
+   * reconstructs `PendingReview & { status }` from the chronologically-last
+   * `review.*` audit-trail record matching `detail.review.id === id` —
+   * `undefined` when no audit trail is configured (ephemeral bureau) or when
+   * `id` matches nothing at all.
+   */
+  getReview(id: string): Promise<(PendingReview & { status: ReviewStatus }) | undefined>;
+
+  /**
+   * Approve, deny, or reject a pending review (AB-46). Approve resumes the
+   * run: a `tool-approval` calls `Toolbox.resumeApproval` on the bureau's
+   * toolbox and returns its `ToolExecutionResult`; a `human-wait` calls
+   * `signalSession` with the parked signal name. Deny records the decision
+   * without resuming anything for `tool-approval` (the binding is revoked; no
+   * run to continue), and delivers `{ __abDenied: true, reason? }` on the
+   * parked signal for `human-wait`, continuing that run one generation step.
+   * Reject is deny plus a REQUIRED `input.reason`: `resolveReview` throws
+   * `BureauError('reject requires a reason', 'BAD_REQUEST')` before any state
+   * change when it is absent or empty. A `tool-approval` reject echoes
+   * `input.reason` on `ResolveReviewResult.feedback`; a `human-wait` reject
+   * delivers `{ __abRejected: true, reason: input.reason }` on the signal.
+   * Every resolution is recorded in the audit trail attributed to
+   * `input.principal`.
    *
    * Throws `BureauError('NOT_FOUND')` when `input.id` does not match a
    * currently pending review (including an already-resolved one).
    */
   resolveReview(input: ResolveReviewInput): Promise<ResolveReviewResult>;
+
+  /**
+   * Host-driven expiry sweep (AB-46): scans every tool-approval review past
+   * its binding's `expiresAt` that is not already resolved, transitions each
+   * to `status: 'expired'`, writes one `review.tool-approval.expired` audit
+   * entry per review attributed to the synthetic principal
+   * `'system:expiry-sweep'`, and returns the count swept. Calling it twice in
+   * a row without new expirations returns `0` the second time. `human-wait`
+   * reviews are never swept — their expiry is Weft's own wait timeout.
+   * `now` defaults to the bureau's own clock.
+   */
+  sweepExpiredReviews(now?: number): Promise<number>;
 
   /**
    * Installs the host-owned authority freshness check used immediately before

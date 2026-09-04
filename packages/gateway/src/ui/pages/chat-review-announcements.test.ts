@@ -18,6 +18,7 @@ function humanReview(id: string, signalName = 'human-response'): PendingReview {
     prompt: 'Provide input',
     requestedAt: 0,
     ageMilliseconds: 0,
+    status: 'pending',
   };
 }
 
@@ -36,6 +37,7 @@ function toolReview(id: string, toolName = 'delete-file'): PendingReview {
     },
     requestedAt: 0,
     ageMilliseconds: 0,
+    status: 'pending',
   };
 }
 

@@ -646,6 +646,7 @@ describe('findParkedReview', () => {
       },
       requestedAt: 0,
       ageMilliseconds: 0,
+      status: 'pending',
     };
 
     expect(findParkedReview([toolApproval], 'run-1')).toBeUndefined();
