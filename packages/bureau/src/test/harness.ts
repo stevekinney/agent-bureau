@@ -416,7 +416,13 @@ export async function createBureauTestHarness<D extends AgentDefinitions = Agent
                 reportSettled = true;
               }),
             );
-            const expectedDueAt = runtime.monotonic.now() + timeoutMilliseconds;
+            // Clamped the same way `ManualRuntimeServices.timers.setTimeout`
+            // (and `.advance()`) themselves clamp a negative delay to `0` —
+            // without this, a negative `timeoutMilliseconds` would compute
+            // an `expectedDueAt` the real timer, armed at `now + 0`, never
+            // actually matches, and this loop would report a false
+            // "timeout was never armed" (review finding, PR #533).
+            const expectedDueAt = runtime.monotonic.now() + Math.max(0, timeoutMilliseconds);
             await waitForCondition(
               () =>
                 reportSettled ||

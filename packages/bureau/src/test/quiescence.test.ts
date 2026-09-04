@@ -551,6 +551,40 @@ describe('assertBureauQuiescent / BureauTestHarness.close()', () => {
     expect(report.shutdownReport.unresolved).toBe(0);
   });
 
+  it('AB-338: BureauTestHarness.close() with a negative timeoutMilliseconds still finds the timer it armed (clamped to "now", matching ManualRuntimeServices\' own clamp)', async () => {
+    // A negative `timeoutMilliseconds` is a degenerate caller input, but
+    // `ManualRuntimeServices.timers.setTimeout`/`.advance()` both clamp a
+    // negative delay to `0` rather than rejecting it — so the timer
+    // `bureau.shutdown()` actually arms lands at `now + 0`, never at
+    // `now + (a negative number)`. `close()` must compute the SAME
+    // clamped deadline it is waiting for, or it would report a false
+    // "timeout was never armed" against a timer that, in fact, armed and
+    // fired exactly as expected (review finding, PR #533).
+    const storage = createMemoryStorageFixture();
+    const harness = await createBureauTestHarness({
+      agents: {},
+      generate: hungGenerate(),
+      storage,
+      scheduler: { enabled: true, idleDelay: 1 },
+    });
+    disposals.push(async () => {
+      await harness.bureau.dispose();
+      await storage.dispose();
+    });
+
+    await harness.submitSchedulerTask({ priority: 'background', message: 'never finishes' });
+    await waitForCondition(
+      () => harness.bureau.scheduler?.getState().activeTask !== undefined,
+      'scheduler task never started running',
+    );
+
+    const report = await harness.close({ policy: 'drain', timeoutMilliseconds: -50 });
+
+    const schedulerIncomplete = report.incomplete.find((entry) => entry.kind === 'scheduler');
+    expect(schedulerIncomplete?.reason).toBe('unresolved');
+    expect(report.quiescent).toBe(true);
+  });
+
   it('BureauQuiescenceError renders the incomplete and detached rows too, when a report carries both alongside a real leak', () => {
     const report: BureauQuiescenceReport = {
       scope: 'unit-test',
