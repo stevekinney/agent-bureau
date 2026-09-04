@@ -187,11 +187,13 @@ async function loadRunStateFromCheckpoint(
     const checkpoint = await context.checkpointStore.loadCheckpoint(runId);
     const conversation =
       checkpoint.conversation !== null
-        ? Conversation.from(checkpoint.conversation)
-        : // AB-321: only reached when no checkpoint conversation was ever
-          // persisted — everywhere a checkpoint exists, its serialized id
-          // is preserved by `Conversation.from` instead.
-          new Conversation(undefined, { runtime });
+        ? // AB-321: forwards the resolved runtime so any append on this
+          // rehydrated instance mints ids/timestamps through the run's own
+          // seam rather than conversationalist's default — the snapshot's
+          // OWN id is unaffected either way (`Conversation.from` restores
+          // it verbatim).
+          Conversation.from(checkpoint.conversation, { runtime })
+        : new Conversation(undefined, { runtime });
 
     const runState = createRunState();
     runState.totalUsage = { ...checkpoint.cursor.totalUsage };

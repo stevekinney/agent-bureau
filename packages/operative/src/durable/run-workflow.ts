@@ -557,7 +557,12 @@ export function createRunWorkflow(
               // unaffected by this per-step reset.
               deps.pendingHumanWait = undefined;
               deps.pendingWakeup = undefined;
-              const conversation = Conversation.from(snapshot);
+              // AB-321: forwards the resolved runtime so any append on this
+              // rehydrated instance mints ids/timestamps through the run's
+              // own seam.
+              const conversation = Conversation.from(snapshot, {
+                runtime: deps.options.runtime ?? createDefaultRuntimeServices(),
+              });
               // Build StepDeps from the run's options (one code path with executeLoop),
               // overriding only the toolbox with the per-run (variance-widened) one
               // the engine supplied via `ctx.services`.
@@ -778,7 +783,11 @@ export function createRunWorkflow(
               const deps = runDepsFrom(ctx.services);
               const handler = deps.options.onMaximumSteps;
               if (!handler) return { kind: 'noop' as const };
-              const conversation = Conversation.from(snapshot);
+              // AB-321: forwards the resolved runtime — see the identical
+              // per-step rehydration above.
+              const conversation = Conversation.from(snapshot, {
+                runtime: deps.options.runtime ?? createDefaultRuntimeServices(),
+              });
               try {
                 const finalContent = await handler({
                   conversation,
@@ -895,7 +904,12 @@ export function createRunWorkflow(
             );
             const renderedMessage = renderWakeupContinuation(continuationInput);
 
-            const resumedConversation = Conversation.from(snapshot);
+            // AB-321: forwards the resolved runtime so the continuation
+            // message this appends mints its id/timestamp through the
+            // run's own seam.
+            const resumedConversation = Conversation.from(snapshot, {
+              runtime: runDepsFrom(ctx.services).options.runtime ?? createDefaultRuntimeServices(),
+            });
             resumedConversation.appendUserMessage(renderedMessage);
             snapshot = resumedConversation.snapshot();
             yield* ctx.run('saveConversation', { runId, snapshot });
@@ -969,7 +983,12 @@ export function createRunWorkflow(
             );
             const renderedMessage = renderSignalContinuation(continuationInput);
 
-            const resumedConversation = Conversation.from(snapshot);
+            // AB-321: forwards the resolved runtime so the continuation
+            // message this appends mints its id/timestamp through the
+            // run's own seam.
+            const resumedConversation = Conversation.from(snapshot, {
+              runtime: runDepsFrom(ctx.services).options.runtime ?? createDefaultRuntimeServices(),
+            });
             resumedConversation.appendUserMessage(renderedMessage);
             snapshot = resumedConversation.snapshot();
             yield* ctx.run('saveConversation', { runId, snapshot });
