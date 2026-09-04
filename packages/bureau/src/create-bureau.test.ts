@@ -9522,6 +9522,594 @@ describe('createBureau review lifecycle (AB-46)', () => {
   });
 });
 
+/**
+ * A plain-object snapshot of a `review.*` event's own fields — `type`,
+ * `reviewId`, `runId`, `principal`, `kind`. Never `{ ...event }`: the real
+ * DOM `Event` base class exposes `type` via a non-enumerable prototype
+ * getter (and adds its own enumerable `isTrusted`), so a spread silently
+ * drops `type` and picks up an unrelated DOM field — this reads exactly the
+ * five fields the `review.*` family defines, nothing more, nothing less.
+ */
+function reviewEventSnapshot(event: {
+  type: string;
+  reviewId: string;
+  runId: string;
+  principal: string;
+  kind: string;
+}): { type: string; reviewId: string; runId: string; principal: string; kind: string } {
+  return {
+    type: event.type,
+    reviewId: event.reviewId,
+    runId: event.runId,
+    principal: event.principal,
+    kind: event.kind,
+  };
+}
+
+describe('createBureau review lifecycle event family (AB-224)', () => {
+  it('recordReviewDecision dispatches review.approved live, alongside the durable write, with only id/runId/principal/kind', async () => {
+    const charges: number[] = [];
+    const bureau = await createBureau({
+      agents: {},
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [{ id: 'call-approved-1', name: 'charge-card', arguments: { cents: 200 } }],
+        },
+      ]),
+      toolbox: createNeedsApprovalToolbox('event-approved-secret', charges),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+
+    try {
+      const observed: unknown[] = [];
+      bureau.addEventListener('review.approved', (event) =>
+        observed.push(reviewEventSnapshot(event)),
+      );
+
+      const run = await bureau.createRun({ message: 'Charge the customer' });
+      await waitForRunCompletion(bureau, run.id);
+      const [review] = bureau.listPendingReviews();
+      expect(review).toBeDefined();
+
+      await bureau.resolveReview({
+        id: review!.id,
+        decision: 'approve',
+        principal: 'operator-approved',
+      });
+
+      // Exactly the five privileged fields — never the tool's own
+      // arguments/result/approval detail (see `reviewEventSnapshot`).
+      expect(observed).toEqual([
+        {
+          type: 'review.approved',
+          reviewId: review!.id,
+          runId: run.id,
+          principal: 'operator-approved',
+          kind: 'tool-approval',
+        },
+      ]);
+
+      const records = await bureau.auditTrail!.query({ runId: run.id });
+      expect(records.some((record) => record.type === 'review.tool-approval.approved')).toBe(true);
+    } finally {
+      bureau.dispose();
+    }
+  });
+
+  it('recordReviewDecision dispatches review.denied for deny and review.rejected for reject — never the other one', async () => {
+    const charges: number[] = [];
+    const bureau = await createBureau({
+      agents: {},
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [{ id: 'call-denied-1', name: 'charge-card', arguments: { cents: 300 } }],
+        },
+      ]),
+      toolbox: createNeedsApprovalToolbox('event-denied-secret', charges),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+    });
+    try {
+      const denied: unknown[] = [];
+      const rejected: unknown[] = [];
+      bureau.addEventListener('review.denied', (event) => denied.push(event.reviewId));
+      bureau.addEventListener('review.rejected', (event) => rejected.push(event.reviewId));
+
+      const run = await bureau.createRun({ message: 'Charge the customer' });
+      await waitForRunCompletion(bureau, run.id);
+      const [review] = bureau.listPendingReviews();
+      expect(review).toBeDefined();
+
+      await bureau.resolveReview({ id: review!.id, decision: 'deny', principal: 'operator-x' });
+
+      expect(denied).toEqual([review!.id]);
+      expect(rejected).toEqual([]);
+    } finally {
+      bureau.dispose();
+    }
+  });
+
+  it('recordReviewDecision dispatches review.rejected for reject — never review.denied', async () => {
+    const charges: number[] = [];
+    const bureau = await createBureau({
+      agents: {},
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [{ id: 'call-rejected-1', name: 'charge-card', arguments: { cents: 300 } }],
+        },
+      ]),
+      toolbox: createNeedsApprovalToolbox('event-rejected-secret', charges),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+    });
+    try {
+      const denied: unknown[] = [];
+      const rejected: unknown[] = [];
+      bureau.addEventListener('review.denied', (event) => denied.push(event.reviewId));
+      bureau.addEventListener('review.rejected', (event) => rejected.push(event.reviewId));
+
+      const run = await bureau.createRun({ message: 'Charge the customer' });
+      await waitForRunCompletion(bureau, run.id);
+      const [review] = bureau.listPendingReviews();
+      expect(review).toBeDefined();
+
+      await bureau.resolveReview({
+        id: review!.id,
+        decision: 'reject',
+        principal: 'operator-y',
+        reason: 'Suspicious amount',
+      });
+
+      expect(rejected).toEqual([review!.id]);
+      expect(denied).toEqual([]);
+    } finally {
+      bureau.dispose();
+    }
+  });
+
+  it('human-wait approve/deny/reject dispatch the matching live event', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+    try {
+      spyOn(bureau, 'signalSession').mockImplementation(async () => {});
+      const approved: unknown[] = [];
+      const denied: unknown[] = [];
+      const rejected: unknown[] = [];
+      bureau.addEventListener('review.approved', (event) => approved.push(event.reviewId));
+      bureau.addEventListener('review.denied', (event) => denied.push(event.reviewId));
+      bureau.addEventListener('review.rejected', (event) => rejected.push(event.reviewId));
+
+      const approveRun = createParkedActiveRun();
+      const approveRunId = bureau.store.register(approveRun.activeRun, 'run-hw-approve');
+      approveRun.emitter.dispatchEvent(
+        new HumanWaitParkedEvent('human-response', approveRunId, 'Approve?'),
+      );
+      const [approveReview] = bureau.listPendingReviews();
+      await bureau.resolveReview({
+        id: approveReview!.id,
+        decision: 'approve',
+        principal: 'operator-hw-a',
+      });
+
+      const denyRun = createParkedActiveRun();
+      const denyRunId = bureau.store.register(denyRun.activeRun, 'run-hw-deny');
+      denyRun.emitter.dispatchEvent(new HumanWaitParkedEvent('human-response', denyRunId, 'Deny?'));
+      const [denyReview] = bureau.listPendingReviews();
+      await bureau.resolveReview({
+        id: denyReview!.id,
+        decision: 'deny',
+        principal: 'operator-hw-d',
+      });
+
+      const rejectRun = createParkedActiveRun();
+      const rejectRunId = bureau.store.register(rejectRun.activeRun, 'run-hw-reject');
+      rejectRun.emitter.dispatchEvent(
+        new HumanWaitParkedEvent('human-response', rejectRunId, 'Reject?'),
+      );
+      const [rejectReview] = bureau.listPendingReviews();
+      await bureau.resolveReview({
+        id: rejectReview!.id,
+        decision: 'reject',
+        principal: 'operator-hw-r',
+        reason: 'Not authorized',
+      });
+
+      expect(approved).toEqual([approveReview!.id]);
+      expect(denied).toEqual([denyReview!.id]);
+      expect(rejected).toEqual([rejectReview!.id]);
+    } finally {
+      bureau.dispose();
+    }
+  });
+
+  it('sweepExpiredReviews dispatches review.expired live, attributed to system:expiry-sweep', async () => {
+    const runtime = createManualRuntimeServices();
+    const charges: number[] = [];
+    const bureau = await createBureau({
+      agents: {},
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [
+            { id: 'call-expired-event-1', name: 'charge-card', arguments: { cents: 900 } },
+          ],
+        },
+      ]),
+      toolbox: createToolbox(
+        [
+          createTool({
+            name: 'charge-card',
+            version: '1.0.0',
+            description: 'Charge a payment card',
+            input: z.object({ cents: z.number() }),
+            async execute({ cents }) {
+              charges.push(cents);
+              return { charged: cents };
+            },
+          }),
+        ],
+        {
+          approvalSecret: 'expiry-event-secret',
+          approvalBindingTtlMs: 1000,
+          runtime,
+          policy: {
+            beforeExecute() {
+              return {
+                allow: false,
+                status: 'needs_approval',
+                reason: 'Operator approval required',
+                action: { message: 'Approve charge' },
+              };
+            },
+          },
+        },
+      ),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+      persistence: textValueStore(new MemoryStorage()),
+      runtime,
+    });
+
+    try {
+      const expired: unknown[] = [];
+      bureau.addEventListener('review.expired', (event) =>
+        expired.push(reviewEventSnapshot(event)),
+      );
+
+      const run = await bureau.createRun({ message: 'Charge the customer' });
+      await waitForRunCompletion(bureau, run.id);
+      const [review] = bureau.listPendingReviews();
+      expect(review).toBeDefined();
+
+      await runtime.advance(1500);
+      const sweptCount = await bureau.sweepExpiredReviews();
+      expect(sweptCount).toBe(1);
+
+      expect(expired).toHaveLength(1);
+      expect(expired[0]).toMatchObject({
+        type: 'review.expired',
+        reviewId: review!.id,
+        runId: run.id,
+        principal: 'system:expiry-sweep',
+        kind: 'tool-approval',
+      });
+    } finally {
+      bureau.dispose();
+    }
+  });
+
+  it('deleteRun dispatches review.revoked attributed to system:run-deletion — never review.canceled', async () => {
+    const charges: number[] = [];
+    const bureau = await createBureau({
+      agents: {},
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [{ id: 'call-revoked-1', name: 'charge-card', arguments: { cents: 400 } }],
+        },
+      ]),
+      toolbox: createNeedsApprovalToolbox('event-revoked-secret', charges),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+    });
+    try {
+      const revoked: unknown[] = [];
+      const canceled: unknown[] = [];
+      bureau.addEventListener('review.revoked', (event) =>
+        revoked.push(reviewEventSnapshot(event)),
+      );
+      bureau.addEventListener('review.canceled', (event) => canceled.push(event.reviewId));
+
+      const run = await bureau.createRun({ message: 'Charge the customer' });
+      await waitForRunCompletion(bureau, run.id);
+      const [review] = bureau.listPendingReviews();
+      expect(review).toBeDefined();
+
+      await bureau.deleteRun(run.id);
+
+      expect(revoked).toHaveLength(1);
+      expect(revoked[0]).toMatchObject({
+        type: 'review.revoked',
+        reviewId: review!.id,
+        runId: run.id,
+        principal: 'system:run-deletion',
+        kind: 'tool-approval',
+      });
+      expect(canceled).toEqual([]);
+    } finally {
+      bureau.dispose();
+    }
+  });
+
+  it('deleteSession dispatches review.revoked attributed to system:session-deletion', async () => {
+    const charges: number[] = [];
+    const bureau = await createBureau({
+      agents: {},
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [{ id: 'call-revoked-2', name: 'charge-card', arguments: { cents: 450 } }],
+        },
+      ]),
+      toolbox: createNeedsApprovalToolbox('event-revoked-session-secret', charges),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+    try {
+      const revoked: unknown[] = [];
+      bureau.addEventListener('review.revoked', (event) =>
+        revoked.push(reviewEventSnapshot(event)),
+      );
+
+      const run = await bureau.createRun({ message: 'Charge the customer' });
+      await waitForRunCompletion(bureau, run.id);
+      const [review] = bureau.listPendingReviews();
+      expect(review).toBeDefined();
+      const session = await bureau.getSession(run.sessionId);
+      expect(session?.metadata['lastRunId']).toBe(run.id);
+
+      await bureau.deleteSession(run.sessionId);
+
+      expect(revoked).toHaveLength(1);
+      expect(revoked[0]).toMatchObject({
+        type: 'review.revoked',
+        reviewId: review!.id,
+        runId: run.id,
+        principal: 'system:session-deletion',
+        kind: 'tool-approval',
+      });
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('abortRun dispatches review.canceled attributed to system:run-abort for both kinds — never review.revoked', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+    });
+    try {
+      const canceled: unknown[] = [];
+      const revoked: unknown[] = [];
+      bureau.addEventListener('review.canceled', (event) =>
+        canceled.push(reviewEventSnapshot(event)),
+      );
+      bureau.addEventListener('review.revoked', (event) => revoked.push(event.reviewId));
+
+      const { activeRun, emitter } = createParkedActiveRun();
+      const runId = bureau.store.register(activeRun, 'run-abort-events');
+      emitter.dispatchEvent(
+        new StepCompletedEvent({
+          step: 0,
+          conversation: new Conversation(),
+          content: '',
+          toolCalls: [],
+          results: [
+            {
+              callId: 'call-abort-events-1',
+              outcome: 'action_required',
+              content: 'needs approval',
+              toolCallId: 'call-abort-events-1',
+              toolName: 'charge-card',
+              result: undefined,
+              action: { type: 'approval', message: 'Approve charge' },
+              pendingApproval: {
+                callId: 'call-abort-events-1',
+                toolName: 'charge-card',
+                arguments: { cents: 500 },
+                action: { type: 'approval', message: 'Approve charge' },
+              },
+            },
+          ],
+          final: true,
+        }),
+      );
+      emitter.dispatchEvent(new HumanWaitParkedEvent('human-response', runId, 'Approve?'));
+
+      const approvalReviewId = `approval:${runId}:call-abort-events-1`;
+      const humanWaitReviewId = `human-wait:${runId}:human-response`;
+
+      bureau.abortRun(runId);
+      await pollUntil(() => bureau.listPendingReviews().length === 0);
+
+      expect(canceled.map((event) => (event as { reviewId: string }).reviewId).sort()).toEqual(
+        [approvalReviewId, humanWaitReviewId].sort(),
+      );
+      expect(
+        (canceled as { principal: string }[]).every(
+          (event) => event.principal === 'system:run-abort',
+        ),
+      ).toBe(true);
+      expect(revoked).toEqual([]);
+    } finally {
+      bureau.dispose();
+    }
+  });
+
+  it("resolveReview approve's resumeApproval re-gate dispatches review.superseded, attributed to system:supersession, and writes the durable record", async () => {
+    const charges: number[] = [];
+    const bureau = await createBureau({
+      agents: {},
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [{ id: 'call-superseded-1', name: 'charge-card', arguments: { cents: 900 } }],
+        },
+      ]),
+      toolbox: createRegatingApprovalToolbox('event-superseded-secret', charges),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+      storage: { type: 'memory' },
+    });
+    try {
+      const superseded: unknown[] = [];
+      bureau.addEventListener('review.superseded', (event) =>
+        superseded.push(reviewEventSnapshot(event)),
+      );
+
+      const run = await bureau.createRun({ message: 'Charge the customer' });
+      await waitForRunCompletion(bureau, run.id);
+      const [review] = bureau.listPendingReviews();
+      expect(review).toBeDefined();
+
+      const outcome = await bureau.resolveReview({
+        id: review!.id,
+        decision: 'approve',
+        principal: 'operator-supersede',
+      });
+      expect(outcome.decision).toBe('approve');
+      expect(charges).toEqual([]); // gated again, never executed
+
+      // Still there, under the SAME id, now backed by the replacement approval.
+      const stillPending = bureau.listPendingReviews();
+      expect(stillPending).toHaveLength(1);
+      expect(stillPending[0]!.id).toBe(review!.id);
+
+      expect(superseded).toHaveLength(1);
+      expect(superseded[0]).toMatchObject({
+        type: 'review.superseded',
+        reviewId: review!.id,
+        runId: run.id,
+        principal: 'system:supersession',
+        kind: 'tool-approval',
+      });
+
+      const records = await bureau.auditTrail!.query({ runId: run.id });
+      const supersededRecord = records.find(
+        (record) => record.type === 'review.tool-approval.superseded',
+      );
+      expect(supersededRecord).toBeDefined();
+      expect(supersededRecord!.principal).toBe('system:supersession');
+      expect(
+        (supersededRecord!.detail as { status?: string; review?: { status?: string } }).status,
+      ).toBe('superseded');
+    } finally {
+      bureau.dispose();
+    }
+  });
+
+  it('does not double-fire a review.* event when sweepExpiredReviews and deleteRun both observe a lingering post-regate override for the same review id (regression)', async () => {
+    const runtime = createManualRuntimeServices();
+    const charges: number[] = [];
+    let evaluationCount = 0;
+    const toolbox = createToolbox(
+      [
+        createTool({
+          name: 'charge-card',
+          version: '1.0.0',
+          description: 'Charge a payment card',
+          input: z.object({ cents: z.number() }),
+          async execute({ cents }) {
+            charges.push(cents);
+            return { charged: cents };
+          },
+        }),
+      ],
+      {
+        approvalSecret: 'dup-guard-secret',
+        approvalBindingTtlMs: 1000,
+        runtime,
+        policy: {
+          beforeExecute() {
+            evaluationCount += 1;
+            return {
+              allow: false,
+              status: 'needs_approval',
+              reason: `Operator approval required (evaluation ${evaluationCount})`,
+              action: { message: 'Approve charge' },
+            };
+          },
+        },
+      },
+    );
+
+    const bureau = await createBureau({
+      agents: {},
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [{ id: 'call-dup-1', name: 'charge-card', arguments: { cents: 400 } }],
+        },
+      ]),
+      toolbox,
+      stopWhen: stopWhen.toolOutcome('action_required'),
+      persistence: textValueStore(new MemoryStorage()),
+      runtime,
+    });
+
+    try {
+      const canceled: string[] = [];
+      const revoked: string[] = [];
+      const expired: string[] = [];
+      bureau.addEventListener('review.canceled', (event) => canceled.push(event.reviewId));
+      bureau.addEventListener('review.revoked', (event) => revoked.push(event.reviewId));
+      bureau.addEventListener('review.expired', (event) => expired.push(event.reviewId));
+
+      const run = await bureau.createRun({ message: 'Charge the customer' });
+      await waitForRunCompletion(bureau, run.id);
+      const [review] = bureau.listPendingReviews();
+      expect(review).toBeDefined();
+
+      // Approve resumes the call; the policy gates it again on its SECOND
+      // evaluation, producing a fresh `pendingApproval` for the SAME review
+      // id and leaving `pendingApprovalOverrides` populated for it.
+      const outcome = await bureau.resolveReview({
+        id: review!.id,
+        decision: 'approve',
+        principal: 'operator-dup',
+      });
+      expect(outcome.decision).toBe('approve');
+      expect(charges).toEqual([]);
+      expect(bureau.listPendingReviews()).toHaveLength(1);
+      expect(bureau.listPendingReviews()[0]!.id).toBe(review!.id);
+
+      // Let the REPLACEMENT binding expire and sweep it — nothing clears
+      // the lingering override on expiry.
+      await runtime.advance(1500);
+      const sweptCount = await bureau.sweepExpiredReviews();
+      expect(sweptCount).toBe(1);
+      expect(expired).toEqual([review!.id]);
+
+      // Delete the run. Without the AB-224 fix, `revokePendingApprovalsForRun`'s
+      // override loop would find the SAME lingering override, unconditionally
+      // re-transition it, and fire a SECOND, duplicate `review.*` event for an
+      // id that is already resolved — this issue's own named rollback trigger.
+      await bureau.deleteRun(run.id);
+      expect(revoked).toEqual([]);
+      expect(canceled).toEqual([]);
+
+      const resolved = await bureau.getReview(review!.id);
+      expect(resolved?.status).toBe('expired');
+    } finally {
+      bureau.dispose();
+    }
+  });
+});
+
 // ── AB-13: flow control ───────────────────────────────────────────────
 
 async function rejectionOf<T>(promise: Promise<T>): Promise<unknown> {

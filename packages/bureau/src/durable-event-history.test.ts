@@ -32,7 +32,17 @@ import {
   DEFAULT_PAGE_LIMIT,
   type DurableEventHistory,
 } from './durable-event-history';
-import { ActionEvent, type BureauEventMap } from './events';
+import {
+  ActionEvent,
+  type BureauEventMap,
+  ReviewApprovedEvent,
+  ReviewCanceledEvent,
+  ReviewDeniedEvent,
+  ReviewExpiredEvent,
+  ReviewRejectedEvent,
+  ReviewRevokedEvent,
+  ReviewSupersededEvent,
+} from './events';
 import { createLmdbStorageFixture, createSqliteStorageFixture } from './test/storage-fixtures';
 import type { Bureau, BureauDiagnostic } from './types';
 
@@ -1068,6 +1078,13 @@ function createFakeBureauEventSurface(): {
   dispatchSchedulePaused(event: SchedulePausedEvent): void;
   dispatchScheduleResumed(event: ScheduleResumedEvent): void;
   dispatchScheduleCancelled(event: ScheduleCancelledEvent): void;
+  dispatchReviewApproved(event: ReviewApprovedEvent): void;
+  dispatchReviewDenied(event: ReviewDeniedEvent): void;
+  dispatchReviewRejected(event: ReviewRejectedEvent): void;
+  dispatchReviewExpired(event: ReviewExpiredEvent): void;
+  dispatchReviewRevoked(event: ReviewRevokedEvent): void;
+  dispatchReviewCanceled(event: ReviewCanceledEvent): void;
+  dispatchReviewSuperseded(event: ReviewSupersededEvent): void;
 } {
   const target = new CompletableEventTarget<BureauEventMap>();
   const bureau = {
@@ -1096,6 +1113,27 @@ function createFakeBureauEventSurface(): {
       target.dispatch(event);
     },
     dispatchScheduleCancelled: (event) => {
+      target.dispatch(event);
+    },
+    dispatchReviewApproved: (event) => {
+      target.dispatch(event);
+    },
+    dispatchReviewDenied: (event) => {
+      target.dispatch(event);
+    },
+    dispatchReviewRejected: (event) => {
+      target.dispatch(event);
+    },
+    dispatchReviewExpired: (event) => {
+      target.dispatch(event);
+    },
+    dispatchReviewRevoked: (event) => {
+      target.dispatch(event);
+    },
+    dispatchReviewCanceled: (event) => {
+      target.dispatch(event);
+    },
+    dispatchReviewSuperseded: (event) => {
       target.dispatch(event);
     },
   };
@@ -1394,6 +1432,135 @@ describe('createDurableEventProducer()', () => {
     await producer.dispose();
   });
 
+  it("records each review.* lifecycle event under the fired review's own run owner, with the minimal privileged payload (AB-224)", async () => {
+    const runtime = createManualRuntimeServices();
+    const {
+      bureau,
+      dispatchReviewApproved,
+      dispatchReviewDenied,
+      dispatchReviewRejected,
+      dispatchReviewExpired,
+      dispatchReviewRevoked,
+      dispatchReviewCanceled,
+      dispatchReviewSuperseded,
+    } = createFakeBureauEventSurface();
+    const { history, calls } = createRecordingHistory();
+    const producer = createDurableEventProducer(bureau, history, runtime);
+
+    dispatchReviewApproved(
+      new ReviewApprovedEvent('approval:run-1:call-1', 'run-1', 'operator-a', 'tool-approval'),
+    );
+    dispatchReviewDenied(
+      new ReviewDeniedEvent('approval:run-1:call-2', 'run-1', 'operator-b', 'tool-approval'),
+    );
+    dispatchReviewRejected(
+      new ReviewRejectedEvent('approval:run-1:call-3', 'run-1', 'operator-c', 'tool-approval'),
+    );
+    dispatchReviewExpired(
+      new ReviewExpiredEvent(
+        'approval:run-1:call-4',
+        'run-1',
+        'system:expiry-sweep',
+        'tool-approval',
+      ),
+    );
+    dispatchReviewRevoked(
+      new ReviewRevokedEvent(
+        'approval:run-1:call-5',
+        'run-1',
+        'system:run-deletion',
+        'tool-approval',
+      ),
+    );
+    dispatchReviewCanceled(
+      new ReviewCanceledEvent('human-wait:run-1:sig', 'run-1', 'system:run-abort', 'human-wait'),
+    );
+    dispatchReviewSuperseded(
+      new ReviewSupersededEvent(
+        'approval:run-1:call-6',
+        'run-1',
+        'system:supersession',
+        'tool-approval',
+      ),
+    );
+    await runtime.deferred.drain();
+
+    expect(calls).toEqual([
+      {
+        owner: { kind: 'run', id: 'run-1' },
+        kind: 'review.approved',
+        payload: {
+          reviewId: 'approval:run-1:call-1',
+          runId: 'run-1',
+          principal: 'operator-a',
+          kind: 'tool-approval',
+        },
+      },
+      {
+        owner: { kind: 'run', id: 'run-1' },
+        kind: 'review.denied',
+        payload: {
+          reviewId: 'approval:run-1:call-2',
+          runId: 'run-1',
+          principal: 'operator-b',
+          kind: 'tool-approval',
+        },
+      },
+      {
+        owner: { kind: 'run', id: 'run-1' },
+        kind: 'review.rejected',
+        payload: {
+          reviewId: 'approval:run-1:call-3',
+          runId: 'run-1',
+          principal: 'operator-c',
+          kind: 'tool-approval',
+        },
+      },
+      {
+        owner: { kind: 'run', id: 'run-1' },
+        kind: 'review.expired',
+        payload: {
+          reviewId: 'approval:run-1:call-4',
+          runId: 'run-1',
+          principal: 'system:expiry-sweep',
+          kind: 'tool-approval',
+        },
+      },
+      {
+        owner: { kind: 'run', id: 'run-1' },
+        kind: 'review.revoked',
+        payload: {
+          reviewId: 'approval:run-1:call-5',
+          runId: 'run-1',
+          principal: 'system:run-deletion',
+          kind: 'tool-approval',
+        },
+      },
+      {
+        owner: { kind: 'run', id: 'run-1' },
+        kind: 'review.canceled',
+        payload: {
+          reviewId: 'human-wait:run-1:sig',
+          runId: 'run-1',
+          principal: 'system:run-abort',
+          kind: 'human-wait',
+        },
+      },
+      {
+        owner: { kind: 'run', id: 'run-1' },
+        kind: 'review.superseded',
+        payload: {
+          reviewId: 'approval:run-1:call-6',
+          runId: 'run-1',
+          principal: 'system:supersession',
+          kind: 'tool-approval',
+        },
+      },
+    ]);
+
+    await producer.dispose();
+  });
+
   it('the schedule page excludes fires, and the fired run page excludes definition events (AB-320)', async () => {
     const runtime = createManualRuntimeServices();
     const storage = await createMemoryStorage();
@@ -1528,6 +1695,13 @@ describe('createDurableEventProducer()', () => {
       dispatchSchedulePaused,
       dispatchScheduleResumed,
       dispatchScheduleCancelled,
+      dispatchReviewApproved,
+      dispatchReviewDenied,
+      dispatchReviewRejected,
+      dispatchReviewExpired,
+      dispatchReviewRevoked,
+      dispatchReviewCanceled,
+      dispatchReviewSuperseded,
     } = createFakeBureauEventSurface();
     const { history, calls } = createRecordingHistory();
     const producer = createDurableEventProducer(bureau, history, runtime);
@@ -1544,6 +1718,42 @@ describe('createDurableEventProducer()', () => {
     dispatchSchedulePaused(new SchedulePausedEvent('sched-1'));
     dispatchScheduleResumed(new ScheduleResumedEvent('sched-1'));
     dispatchScheduleCancelled(new ScheduleCancelledEvent('sched-1'));
+    dispatchReviewApproved(
+      new ReviewApprovedEvent('approval:run-1:call-1', 'run-1', 'operator-a', 'tool-approval'),
+    );
+    dispatchReviewDenied(
+      new ReviewDeniedEvent('approval:run-1:call-2', 'run-1', 'operator-b', 'tool-approval'),
+    );
+    dispatchReviewRejected(
+      new ReviewRejectedEvent('approval:run-1:call-3', 'run-1', 'operator-c', 'tool-approval'),
+    );
+    dispatchReviewExpired(
+      new ReviewExpiredEvent(
+        'approval:run-1:call-4',
+        'run-1',
+        'system:expiry-sweep',
+        'tool-approval',
+      ),
+    );
+    dispatchReviewRevoked(
+      new ReviewRevokedEvent(
+        'approval:run-1:call-5',
+        'run-1',
+        'system:run-deletion',
+        'tool-approval',
+      ),
+    );
+    dispatchReviewCanceled(
+      new ReviewCanceledEvent('human-wait:run-1:sig', 'run-1', 'system:run-abort', 'human-wait'),
+    );
+    dispatchReviewSuperseded(
+      new ReviewSupersededEvent(
+        'approval:run-1:call-6',
+        'run-1',
+        'system:supersession',
+        'tool-approval',
+      ),
+    );
     await runtime.deferred.drain();
 
     expect(calls).toEqual([]);
