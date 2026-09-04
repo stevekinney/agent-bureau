@@ -9,6 +9,7 @@ import type {
   ToolExecutionHookContext,
   ToolExecutionResultContext,
 } from '../types';
+import type { BarrierRegistry } from './barriers';
 import { BarrierCoordinator } from './scripted-generate';
 
 /** One recorded settlement of a scripted tool or hook call. */
@@ -71,6 +72,8 @@ export interface ScriptedTool extends Tool {
   readonly callCount: number;
   reached(barrier: string): Promise<void>;
   release(barrier: string): void;
+  /** The `BarrierRegistry` (AB-266) this double's `block` steps arrive at and release through; see `ScriptedGenerate.barriers`. */
+  readonly barriers: BarrierRegistry;
   settled(): Promise<readonly ScriptedSettlement[]>;
 }
 
@@ -144,6 +147,7 @@ export function createScriptedTool(
   Object.defineProperty(scriptedTool, 'callCount', { get: () => calls.length });
   scriptedTool.reached = (barrier: string) => coordinator.reached(barrier);
   scriptedTool.release = (barrier: string) => coordinator.release(barrier);
+  Object.defineProperty(scriptedTool, 'barriers', { value: coordinator.registry });
   scriptedTool.settled = () => tracker.settled();
 
   return scriptedTool;
@@ -205,6 +209,8 @@ export interface ScriptedHook<P extends ScriptedHookPhase> {
   readonly callCount: number;
   reached(barrier: string): Promise<void>;
   release(barrier: string): void;
+  /** The `BarrierRegistry` (AB-266) this double's `block` steps arrive at and release through; see `ScriptedGenerate.barriers`. */
+  readonly barriers: BarrierRegistry;
   settled(): Promise<readonly ScriptedSettlement[]>;
 }
 
@@ -272,6 +278,7 @@ export function createScriptedHook<P extends ScriptedHookPhase>(
   const scriptedHook = handler as ScriptedHook<P>;
   scriptedHook.reached = (barrier: string) => coordinator.reached(barrier);
   scriptedHook.release = (barrier: string) => coordinator.release(barrier);
+  Object.defineProperty(scriptedHook, 'barriers', { value: coordinator.registry });
   scriptedHook.settled = () => tracker.settled();
 
   return scriptedHook;

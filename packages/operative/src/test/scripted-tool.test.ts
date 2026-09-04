@@ -68,6 +68,37 @@ describe('createScriptedTool', () => {
     expect(result?.result).toBe('unblocked');
   });
 
+  it('rejects the second call rather than deadlocking when two concurrent calls arrive at the same block barrier name (regression: PR #519 review)', async () => {
+    // `Toolbox.execute()` runs the two calls below in parallel: the first
+    // call's own `block`/reserve-next protocol consumes indices 0 and 1
+    // before the second call starts, so index 2's `block` is the second
+    // call's OWN step — a second, genuinely concurrent arrival at the same
+    // "gate" name while the first arrival is still awaiting release.
+    const tool = createScriptedTool('gated', [
+      { kind: 'block', barrier: 'gate' },
+      { kind: 'resolve', result: 'first' },
+      { kind: 'block', barrier: 'gate' },
+      { kind: 'resolve', result: 'second' },
+    ]);
+    const toolbox = createToolbox([tool]);
+
+    const executePromise = toolbox.execute([
+      { id: 'call-1', name: 'gated', arguments: {} },
+      { id: 'call-2', name: 'gated', arguments: {} },
+    ]);
+    await tool.reached('gate');
+
+    tool.release('gate');
+    const results = await executePromise;
+
+    const succeeded = results.find((result) => result.outcome === 'success');
+    const errored = results.find((result) => result.outcome === 'error');
+    expect(succeeded?.result).toBe('first');
+    expect(errored?.error?.message).toContain(
+      'arrive("gate") called while a previous arrival at "gate" is still awaiting release',
+    );
+  });
+
   describe('settled()', () => {
     it('resolves once every call so far has settled, including a rejected one', async () => {
       const tool = createScriptedTool('mixed', [

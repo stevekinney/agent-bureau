@@ -7,79 +7,85 @@ import type {
   GenerateResponse,
   StreamingHandle,
 } from '../types';
+import { type BarrierRegistry, createBarrierRegistry } from './barriers';
 
 // ---------------------------------------------------------------------------
-// Barrier: a named, two-phase latch. "Arrived" resolves the moment a
-// scripted double reaches the barrier (so a test can `await reached(name)`
-// instead of sleeping); "released" resolves once the test calls
-// `release(name)`, unblocking whichever double is waiting there. Both sides
-// are latches — calling `release` before anything has arrived, or awaiting
-// `reached` after the double already passed through, still resolves
-// immediately, because both promises are created once per name and reused.
+// Barrier coordination for the scripted doubles (`scripted-generate.ts` and
+// `scripted-tool.ts`). AB-319: a thin wrapper over AB-266's
+// `createBarrierRegistry` rather than a second barrier implementation —
+// `arrive`/`reached`/`release` delegate to the same named `Barrier`
+// instances the registry hands out, so a caller that obtains a barrier from
+// `coordinator.registry` by the block step's own name observes the
+// identical arrival/release the scripted double just went through. "Arrived"
+// resolves the moment a scripted double reaches the barrier (so a test can
+// `await reached(name)` instead of sleeping); "released" resolves once the
+// test calls `release(name)`, unblocking whichever double is waiting there.
 // No timer anywhere in this file: every wait is a Promise a caller resolves.
 // ---------------------------------------------------------------------------
 
-interface BarrierEntry {
-  readonly arrivedPromise: Promise<void>;
-  readonly resolveArrived: () => void;
-  readonly releasedPromise: Promise<void>;
-  readonly resolveReleased: () => void;
-}
-
-function createBarrierEntry(): BarrierEntry {
-  let resolveArrived!: () => void;
-  const arrivedPromise = new Promise<void>((resolve) => {
-    resolveArrived = resolve;
-  });
-  let resolveReleased!: () => void;
-  const releasedPromise = new Promise<void>((resolve) => {
-    resolveReleased = resolve;
-  });
-  return { arrivedPromise, resolveArrived, releasedPromise, resolveReleased };
-}
-
 /**
- * Shared barrier coordination for the scripted doubles (`scripted-generate.ts`
- * and `scripted-tool.ts`). Exported (not re-exported from `index.ts`) so
- * `scripted-tool.ts` reuses this one implementation instead of a second copy.
+ * Shared barrier coordination for the scripted doubles. Exported (not
+ * re-exported from `index.ts`) so `scripted-tool.ts` reuses this one
+ * implementation instead of a second copy.
  */
 export class BarrierCoordinator {
-  private readonly barriers = new Map<string, BarrierEntry>();
+  readonly registry: BarrierRegistry;
+  private readonly arrivals = new Map<string, Promise<unknown>>();
 
-  // Explicit (even though empty): Bun's coverage instrumenter counts a
-  // class's implicit default constructor as a function it can never mark
-  // hit, which fails `bun run coverage:check`'s 100%-functions gate even
-  // though `new BarrierCoordinator()` runs on every scripted double this
-  // module creates. An explicit constructor is instrumented normally.
-  constructor() {}
-
-  private entry(name: string): BarrierEntry {
-    let existing = this.barriers.get(name);
-    if (!existing) {
-      existing = createBarrierEntry();
-      this.barriers.set(name, existing);
-    }
-    return existing;
+  constructor(registry: BarrierRegistry = createBarrierRegistry()) {
+    this.registry = registry;
   }
 
-  /** Marks a barrier as arrived — called by the double when it reaches the block point. */
+  /**
+   * Marks a barrier as arrived — called by the double when it reaches the
+   * block point. Delegates to `Barrier.arrive()`, whose side effects
+   * (incrementing `arrivals`, resolving `reached()`) run synchronously
+   * before this returns; the settlement promise is retained so a later
+   * `awaitRelease(name)` call can await it. Throws if a previous arrival at
+   * `name` is still awaiting its release — two in-flight calls sharing one
+   * `block` barrier name would otherwise silently overwrite each other's
+   * entry, leaving the first `awaitRelease(name)` awaiting the SECOND
+   * arrival's promise instead of its own (a subtle deadlock: it would hang
+   * until an extra, unmatched `release()` happened to unblock it).
+   */
   arrive(name: string): void {
-    this.entry(name).resolveArrived();
+    if (this.arrivals.has(name)) {
+      throw new Error(
+        `BarrierCoordinator: arrive("${name}") called while a previous arrival at "${name}" ` +
+          'is still awaiting release — concurrent calls cannot share one block barrier name.',
+      );
+    }
+    this.arrivals.set(name, this.registry.barrier(name).arrive());
   }
 
   /** Resolves once the double has arrived at the named barrier. */
   reached(name: string): Promise<void> {
-    return this.entry(name).arrivedPromise;
+    return this.registry.barrier(name).reached();
   }
 
   /** Unblocks whichever double is waiting at the named barrier. */
   release(name: string): void {
-    this.entry(name).resolveReleased();
+    this.registry.barrier(name).release();
   }
 
-  /** Resolves once the named barrier has been released. */
-  awaitRelease(name: string): Promise<void> {
-    return this.entry(name).releasedPromise;
+  /**
+   * Resolves once the named barrier has been released, then clears the
+   * retained arrival so the same name can be used again by a later,
+   * non-concurrent `arrive`/`awaitRelease` pair (e.g. a script that reuses
+   * a barrier name across sequential calls).
+   */
+  async awaitRelease(name: string): Promise<void> {
+    const arrival = this.arrivals.get(name);
+    if (!arrival) {
+      throw new Error(
+        `BarrierCoordinator: awaitRelease("${name}") called before arrive("${name}")`,
+      );
+    }
+    try {
+      await arrival;
+    } finally {
+      this.arrivals.delete(name);
+    }
   }
 }
 
@@ -138,6 +144,14 @@ export interface ScriptedGenerate extends GenerateFunction {
   reached(barrier: string): Promise<void>;
   /** Unblocks whichever call is waiting at the named `block` barrier. */
   release(barrier: string): void;
+  /**
+   * The `BarrierRegistry` (AB-266) this double's `block` steps arrive at and
+   * release through — `barriers.barrier(name)` returns the same `Barrier`
+   * instance `reached`/`release` above operate on, so a test can observe a
+   * block step's arrival directly through the registry rather than a
+   * separate bridge.
+   */
+  readonly barriers: BarrierRegistry;
   /**
    * Wraps `RunOptions.withTraceContext`. A test that wants `assertReceived`
    * to see `traceContext` wires this in as `RunOptions.withTraceContext` —
@@ -313,6 +327,7 @@ export function createScriptedGenerate(script: readonly ScriptedGenerateStep[]):
   scriptedGenerate.assertReceived = assertReceived;
   scriptedGenerate.reached = (barrier: string) => coordinator.reached(barrier);
   scriptedGenerate.release = (barrier: string) => coordinator.release(barrier);
+  Object.defineProperty(scriptedGenerate, 'barriers', { value: coordinator.registry });
   scriptedGenerate.withTraceContext = async <T>(
     parentContext: unknown,
     fn: () => Promise<T>,
