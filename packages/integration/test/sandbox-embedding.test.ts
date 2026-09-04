@@ -119,20 +119,61 @@ describe('AB-97 sandbox-image embedding', () => {
       await writeFile(join(declaredRoot, 'manifest.txt'), 'sandbox-embedding-fixture\n');
 
       // --- 1. Bundle: single outfile, `bun build --target=bun` ---------
+      //
+      // Spawned as the `bun build` CLI in its own process rather than
+      // called in-process via `Bun.build()`. AB-340: `@msgpack/msgpack`
+      // (pulled in transitively through `@lostgradient/operative` ->
+      // `@lostgradient/weft`, which the fixture bundles) ships only legacy
+      // `main`/`module` package.json fields with no `exports` map — a
+      // dual-package hazard. Bun's runtime loader resolves it through
+      // `main` (`dist.cjs/index.cjs`) while an in-process `Bun.build()`
+      // resolves the same specifier through `module`
+      // (`dist.esm/index.mjs`). When another test in this `bun test`
+      // process (any test importing `@lostgradient/operative`'s top-level
+      // export, e.g. `operative.test.ts`) has already loaded the package
+      // at runtime before this test's `Bun.build()` call runs, Bun serves
+      // the already-cached CJS source (`require("./encode.cjs")`, ...)
+      // back under the ESM entry's path, and those `.cjs` siblings don't
+      // exist next to `dist.esm/index.mjs` — "Could not resolve:
+      // ./encode.cjs" etc. `Bun.resolveSync('@msgpack/msgpack', <weft's
+      // codec dir>)` confirms the runtime picks `dist.cjs/index.cjs`; `bun
+      // run` (no `bun test` runtime loader involved) never trips this. A
+      // fresh `bun build` subprocess has none of the parent process's
+      // module cache, so it always resolves the ESM entry cleanly — which
+      // is also what `documentation/deployment.md`'s embedding recipe
+      // recommends as the equivalent of the `Bun.build()` API.
       const buildStartedAt = performance.now();
-      const build = await Bun.build({
-        entrypoints: [FIXTURE_ENTRY],
-        target: 'bun',
-        outdir: bundleDirectory,
-        naming: 'sandbox-runner.js',
-        // Explicit, not relying on Bun's current defaults: single-outfile
-        // intent must stay stable even if a future Bun version starts
-        // splitting chunks or emitting sourcemaps by default.
-        splitting: false,
-        sourcemap: 'none',
+      const buildProcess = Bun.spawn({
+        cmd: [
+          process.execPath,
+          'build',
+          FIXTURE_ENTRY,
+          '--target=bun',
+          `--outfile=${outfile}`,
+          // Explicit, not relying on Bun's current defaults: single-outfile,
+          // no-sourcemap intent must stay stable even if a future Bun
+          // version starts splitting chunks or emitting sourcemaps by
+          // default. Matches the prior in-process `Bun.build({ splitting:
+          // false, sourcemap: 'none' })` configuration this replaced.
+          '--sourcemap=none',
+        ],
+        // cwd is the fixture's own directory, not `bundleDirectory` (a
+        // scratch temp dir with no `node_modules` above it in its path):
+        // module resolution needs a real `node_modules` chain to walk.
+        cwd: import.meta.dir,
+        stdout: 'pipe',
+        stderr: 'pipe',
       });
+      const [buildStdout, buildStderr, buildExitCode] = await Promise.all([
+        new Response(buildProcess.stdout).text(),
+        new Response(buildProcess.stderr).text(),
+        buildProcess.exited,
+      ]);
       const buildDurationMs = performance.now() - buildStartedAt;
-      expect(build.success).toBe(true);
+      if (buildExitCode !== 0) {
+        console.error(buildStdout, buildStderr);
+      }
+      expect(buildExitCode).toBe(0);
 
       const bundleDirectoryEntries = await readdir(bundleDirectory);
       // Exactly one artifact: proves this is a genuine single-outfile
@@ -202,7 +243,8 @@ describe('AB-97 sandbox-image embedding', () => {
         expect(bundleStat.size).toBeLessThan(50 * 1024 * 1024);
         console.log(
           `[AB-97] bundle size: ${bundleStat.size} bytes; build time: ` +
-            `${buildDurationMs.toFixed(1)}ms; cold start (spawn → first stdout line): ` +
+            `${buildDurationMs.toFixed(1)}ms (bun build subprocess, includes spawn ` +
+            `overhead — see AB-340); cold start (spawn → first stdout line): ` +
             `${coldStartDurationMs.toFixed(1)}ms`,
         );
       } finally {

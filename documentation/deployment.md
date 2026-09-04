@@ -495,9 +495,22 @@ worse than one that exits non-zero immediately.
 ### Bundling
 
 Build with `bun build --target=bun <entry> --outfile=<outfile>` (or the
-`Bun.build()` API — the integration test uses the latter, see
-`sandbox-embedding.test.ts`). This produces **one file**: no `node_modules`
-needs to travel with it inside the sandbox image.
+`Bun.build()` API — the integration test spawns the CLI as a subprocess, see
+`packages/integration/test/sandbox-embedding.test.ts` and AB-340). This produces **one file**: no
+`node_modules` needs to travel with it inside the sandbox image.
+
+Prefer the CLI (as a subprocess) over the in-process `Bun.build()` API if
+your own bundling code runs inside a `bun test` process that also imports
+`@lostgradient/operative`'s top-level export elsewhere: `@msgpack/msgpack`
+(pulled in transitively through `@lostgradient/weft`) ships only legacy
+`main`/`module` package.json fields with no `exports` map, a dual-package
+hazard. Bun's runtime loader resolves that specifier through `main`
+(`dist.cjs/index.cjs`); an in-process `Bun.build()` resolves the same
+specifier through `module` (`dist.esm/index.mjs`). If the runtime loader has
+already cached the package in that same process, `Bun.build()` can serve the
+cached CJS source back under the ESM entry's path and fail to resolve its
+`.cjs` siblings, which don't exist there. A `bun build` subprocess has no
+shared module cache with its parent and always resolves cleanly.
 
 The one thing worth verifying for your own entrypoint: `operative`'s
 Anthropic provider (`@lostgradient/operative/anthropic`) lazily `import()`s
@@ -587,7 +600,7 @@ this guide (Bun 1.3.13, `bun build --target=bun`, no minification):
 | Metric                                                                                                                 | Value                      |
 | ---------------------------------------------------------------------------------------------------------------------- | -------------------------- |
 | Bundle size (single outfile)                                                                                           | ~3.18 MB (3,184,923 bytes) |
-| Build time (`Bun.build()`, cold, dependencies pre-built)                                                               | ~60–100 ms                 |
+| Build time (`bun build` subprocess, cold, dependencies pre-built; includes process spawn overhead as of AB-340)        | ~60–100 ms                 |
 | Cold start (spawn bundled outfile → first stdout line, including a full two-step agent loop + mock network round trip) | ~140–200 ms                |
 
 These are point-in-time numbers from one machine and one run shape (a
