@@ -71,7 +71,7 @@ describe('ingest', () => {
 
     const result = await ingest(memory, 'Some content', { runtime });
 
-    expect(result.sourceIdentifier).toBe('source-document-1');
+    expect(result.sourceIdentifier).toBe(`${runtime.identifierPrefix}-source-document-1`);
   });
 
   it('attaches additional metadata to each chunk', async () => {
