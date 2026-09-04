@@ -4,7 +4,7 @@
  * This is deliberately narrow — one scenario, not the full matrix
  * `sqlite.test.ts` drives. AB-335's job was to root-cause and fix the one
  * LMDB-specific defect the "killed at child-registered" scenario exposed
- * (see `fixture.ts`'s `depsPromise` comment for the mechanism and fix);
+ * (see `fixture.ts`'s `getDeps()` comment for the mechanism and fix);
  * extracting a shared scenario list so every marker in the matrix runs over
  * BOTH backends is AB-271's scope, which was blocked on this issue.
  *
@@ -90,7 +90,7 @@ describe('crash conformance: LMDB backend (AB-335)', () => {
     // skipped straight to `perform-effect` with a `duplicateAttempt` of
     // `undefined`, never reaching armorer's `claimStarted` a second time.
     // Fixed by awaiting the fixture's own dependencies instead of throwing
-    // when they are not yet wired (`fixture.ts`'s `depsPromise`).
+    // when they are not yet wired (`fixture.ts`'s `getDeps()`).
     const secondChildMarker = marker(report.second, 'child-registered');
     expect(secondChildMarker?.detail?.['duplicateAttempt']).toBe(true);
 

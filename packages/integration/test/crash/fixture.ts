@@ -262,7 +262,7 @@ function createFixtureToolbox(getDeps: () => Promise<FixtureToolDeps>): AnyToolb
     input: z.object({}),
     async execute() {
       // AB-335: awaits real dependencies rather than throwing when they are
-      // not yet wired — see this file's `depsPromise` comment in `main()`.
+      // not yet wired — see this file's `getDeps()` comment in `main()`.
       const deps = await getDeps();
       const key = childKvKey(deps.rootRunId);
       const attemptId = `attempt-${crypto.randomUUID()}`;
@@ -323,7 +323,7 @@ function createFixtureToolbox(getDeps: () => Promise<FixtureToolDeps>): AnyToolb
     input: z.object({}),
     async execute() {
       // AB-335: awaits real dependencies rather than throwing when they are
-      // not yet wired — see this file's `depsPromise` comment in `main()`.
+      // not yet wired — see this file's `getDeps()` comment in `main()`.
       const deps = await getDeps();
       const key = effectKvKey(deps.rootRunId);
       const attemptId = `attempt-${crypto.randomUUID()}`;
@@ -447,7 +447,7 @@ async function main(): Promise<void> {
   // real tools need `bureau.createRun`/`bureau.kv` — which do not exist
   // until construction resolves. Break the cycle with a DEFERRED PROMISE,
   // not a throw-if-unset ref (AB-335's own root cause — see below): the
-  // toolbox is built FIRST, with tool bodies that `await` `depsPromise`,
+  // toolbox is built FIRST, with tool bodies that `await getDeps()`,
   // resolved once `createBureauTestHarness` below resolves and the real
   // deps are ready.
   //
@@ -479,9 +479,9 @@ async function main(): Promise<void> {
   // now correctly WAITS for its real dependencies instead of treating "not
   // yet ready" as a terminal error.
   let currentRootRunId = existingRootRunId ?? '';
-  // `rootRunId` is deliberately NOT captured inside `depsPromise`'s resolved
-  // value: in primary mode it is only assigned (below) strictly AFTER
-  // `depsPromise` resolves, so a tool call's `getDeps()` must re-read
+  // `rootRunId` is deliberately NOT captured inside `restOfDepsPromise`'s
+  // resolved value: in primary mode it is only assigned (below) strictly
+  // AFTER `restOfDepsPromise` resolves, so `getDeps()` must re-read
   // `currentRootRunId` live, on every call, the same way the old getter did.
   let resolveRestOfDeps!: (deps: Omit<FixtureToolDeps, 'rootRunId'>) => void;
   const restOfDepsPromise = new Promise<Omit<FixtureToolDeps, 'rootRunId'>>((resolve) => {
