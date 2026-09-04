@@ -1,18 +1,3 @@
-<script lang="ts" module>
-  /** Formats an age in milliseconds as a compact human string (e.g. `"2m"`, `"3h"`, `"just now"`). */
-  export function formatAge(milliseconds: number): string {
-    if (milliseconds < 1000) return 'just now';
-    const seconds = Math.floor(milliseconds / 1000);
-    if (seconds < 60) return `${seconds}s`;
-    const minutes = Math.floor(seconds / 60);
-    if (minutes < 60) return `${minutes}m`;
-    const hours = Math.floor(minutes / 60);
-    if (hours < 24) return `${hours}h`;
-    const days = Math.floor(hours / 24);
-    return `${days}d`;
-  }
-</script>
-
 <script lang="ts">
   import { Badge } from '@lostgradient/cinder/badge';
   import { Button } from '@lostgradient/cinder/button';
@@ -22,6 +7,7 @@
   import { Textarea } from '@lostgradient/cinder/textarea';
 
   import type { PendingReview } from '../../types';
+  import { formatAge, parseReviewPayload } from './review-row-helpers';
 
   let {
     review,
@@ -41,18 +27,8 @@
   let payloadText = $state('');
   let reasonText = $state('');
 
-  function parsePayload(): unknown {
-    const trimmed = payloadText.trim();
-    if (!trimmed) return undefined;
-    try {
-      return JSON.parse(trimmed);
-    } catch {
-      return trimmed; // not JSON — send as a plain string
-    }
-  }
-
   function handleApprove(): void {
-    onapprove(review.id, review.kind === 'human-wait' ? parsePayload() : undefined);
+    onapprove(review.id, review.kind === 'human-wait' ? parseReviewPayload(payloadText) : undefined);
   }
 
   function handleDeny(): void {

@@ -18,6 +18,7 @@ import type { ReviewsStore } from '../ui/hooks/use-reviews.svelte';
 import { createReviewsStore } from '../ui/hooks/use-reviews.svelte';
 import ChatPage from '../ui/pages/chat.svelte';
 import DashboardPage from '../ui/pages/dashboard.svelte';
+import ReviewsPage from '../ui/pages/reviews.svelte';
 import RunDetailPage from '../ui/pages/run-detail.svelte';
 import UsagePage from '../ui/pages/usage.svelte';
 import { renderPage, resetAssetManifestCache } from './render';
@@ -1030,5 +1031,86 @@ describe('chat page (every {#if} branch: errors, pending-review inline surface, 
     expect(rootMarkup).toContain('Tool Activity');
     expect(rootMarkup).toContain('read_file → completed');
     expect(rootMarkup).toContain('write_file → completed');
+  });
+});
+
+describe('reviews page (Card list of ReviewRow, and ReviewRow by extension)', () => {
+  it('renders the empty state and no error callout when there are no reviews and no error', async () => {
+    const reviews = makeReviewsStore();
+
+    const html = await renderPage({
+      title: 'Review Queue',
+      component: ReviewsPage,
+      props: { initialData: { reviews }, pathname: '/reviews', reviews },
+    });
+    const rootMarkup = extractRootMarkup(html);
+
+    expect(rootMarkup).toContain('Nothing pending review.');
+    expect(rootMarkup).not.toContain('Review queue error');
+  });
+
+  it('renders the error callout, a tool-approval row with a reason and no agent, and a human-wait row with a prompt and an agent', async () => {
+    const reviews = makeReviewsStore({
+      error: 'Could not refresh reviews.',
+      reviews: [
+        {
+          kind: 'tool-approval',
+          id: 'approval-1',
+          runId: 'run-1',
+          sessionId: 'session-1',
+          agentName: undefined,
+          approval: {
+            callId: 'call-1',
+            toolName: 'delete_file',
+            arguments: { path: '/tmp/scratch.txt' },
+            action: { type: 'approval' },
+            reason: 'Destructive operation requires sign-off',
+          },
+          requestedAt: 0,
+          ageMilliseconds: 65_000,
+        },
+        {
+          kind: 'human-wait',
+          id: 'wait-1',
+          runId: 'run-2',
+          sessionId: 'session-2',
+          agentName: 'bureau',
+          signalName: 'human-response',
+          prompt: 'What is your name?',
+          requestedAt: 0,
+          ageMilliseconds: 500,
+        },
+      ] satisfies PendingReview[],
+    });
+
+    const html = await renderPage({
+      title: 'Review Queue',
+      component: ReviewsPage,
+      props: { initialData: { reviews }, pathname: '/reviews', reviews },
+    });
+    const rootMarkup = extractRootMarkup(html);
+
+    expect(rootMarkup).toContain('Review queue error');
+    expect(rootMarkup).toContain('Could not refresh reviews.');
+    expect(rootMarkup).not.toContain('Nothing pending review.');
+
+    expect(rootMarkup).toContain('Tool approval');
+    expect(rootMarkup).toContain('delete_file');
+    expect(rootMarkup).toContain('Destructive operation requires sign-off');
+    expect(rootMarkup).toContain('href="/runs/run-1"');
+
+    expect(rootMarkup).toContain('Human input');
+    expect(rootMarkup).toContain('human-response');
+    expect(rootMarkup).toContain('What is your name?');
+    expect(rootMarkup).toContain('href="/runs/run-2"');
+
+    // Only the human-wait row (agentName: 'bureau') renders the "· <agent>"
+    // suffix — the tool-approval row (agentName: undefined) renders none.
+    expect(
+      [...rootMarkup.matchAll(/review-row-agent">·\s*(\S+)<\/span>/g)].map((m) => m[1]),
+    ).toEqual(['bureau']);
+
+    expect(rootMarkup).toContain('1m ago');
+    expect(rootMarkup).toContain('just now ago');
   });
 });
