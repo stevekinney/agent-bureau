@@ -48,7 +48,10 @@ A CI job step in both the `lifecycle-contract` and `crash-conformance-smoke`
 jobs uploads (`actions/upload-artifact@v4`, `if: failure()`,
 `if-no-files-found: ignore`) whatever a failing scenario wrote to the
 directory named by the `REPRODUCTION_ARTIFACT_DIR` environment variable
-(`${{ github.workspace }}/.reproduction-artifacts/` in both jobs). No suite writes
+(`${{ github.workspace }}/reproduction-artifacts/` in both jobs — deliberately
+not dot-prefixed, since `actions/upload-artifact@v4` excludes hidden files
+by default and the proof branch that validated this contract hit exactly
+that gap). No suite writes
 to that directory automatically today—the writer
 (`writeReproductionArtifact`, exported from `@lostgradient/operative/test`,
 AB-267) already exists and is proven against the committed
