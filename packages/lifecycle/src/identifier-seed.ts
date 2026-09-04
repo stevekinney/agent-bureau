@@ -13,9 +13,10 @@
  * FNV-1a — a small, dependency-free string hash. Two calls with the same
  * `seed` always return the same value; different seeds are astronomically
  * unlikely to collide (32-bit output space) for the handful of seeds any
- * one test suite compares.
+ * one test suite compares. Exported so `manual-runtime-services.ts` shares
+ * this one implementation instead of duplicating it to seed its PRNG.
  */
-function hashSeed(seed: string): number {
+export function hashSeed(seed: string): number {
   let hash = 0x811c9dc5;
   for (let index = 0; index < seed.length; index++) {
     hash ^= seed.charCodeAt(index);

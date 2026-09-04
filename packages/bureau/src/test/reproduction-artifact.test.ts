@@ -203,13 +203,14 @@ describe('assembleReproductionArtifact', () => {
   });
 
   it('records the generated (default) seeds rather than omitting them when the harness runtime is unpinned', async () => {
-    const { artifact } = await runScriptedCase();
+    const { harness, artifact } = await runScriptedCase();
 
     expect(artifact.clockOrigin).toBe('2020-01-01T00:00:00.000Z');
     // identifierSeed's default is generated and process-unique (Coordinator
-    // ruling on AB-337), so it can no longer be pinned to a literal — only
-    // that it was recorded at all, non-empty.
-    expect(artifact.identifierSeed.length).toBeGreaterThan(0);
+    // ruling on AB-337), so it can no longer be pinned to a literal — but
+    // the artifact must still record the harness runtime's ACTUAL seed,
+    // not merely some non-empty string.
+    expect(artifact.identifierSeed).toBe(harness.runtime.identifierSeed);
     expect(artifact.randomSeed).toBe('manual-runtime-services');
   });
 

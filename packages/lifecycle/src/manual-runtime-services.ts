@@ -1,4 +1,8 @@
-import { deriveIdentifierPrefix, generateProcessUniqueIdentifierSeed } from './identifier-seed';
+import {
+  deriveIdentifierPrefix,
+  generateProcessUniqueIdentifierSeed,
+  hashSeed,
+} from './identifier-seed';
 import type {
   DeferredDrainReport,
   RuntimeServices,
@@ -100,16 +104,6 @@ export interface CreateManualRuntimeServicesOptions {
 
 const DEFAULT_ORIGIN = '2020-01-01T00:00:00.000Z';
 const DEFAULT_RANDOM_SEED = 'manual-runtime-services';
-
-/** FNV-1a — a small, dependency-free string hash, used only to seed the PRNG below. */
-function hashSeed(seed: string): number {
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < seed.length; index++) {
-    hash ^= seed.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return hash >>> 0;
-}
 
 /**
  * mulberry32 — a small, dependency-free deterministic PRNG. Two generators
