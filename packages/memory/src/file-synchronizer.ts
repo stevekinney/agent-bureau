@@ -89,13 +89,34 @@ export class PollCycleCompletedEvent extends Event {
       this.error = data.error;
     }
   }
+  // Narrows the inherited `Event.type: string` back to the string-literal
+  // type — otherwise a `TypedEventTarget<FileSynchronizerEventMap>` sees
+  // this event's `type` as plain `string`, undermining the point of the
+  // typed dispatch/listener surface.
+  override get type(): typeof PollCycleCompletedEvent.type {
+    return PollCycleCompletedEvent.type;
+  }
 }
 
-export interface FileSynchronizerEventMap extends EventMap {
+/**
+ * Maps event type string to the Event subclass instance. Deliberately does
+ * NOT `extends EventMap` (`Record<string, Event>`, an index-signature
+ * type): a TypeScript object type that extends an index signature has its
+ * `keyof` collapse to `string` wherever a member was introduced by that
+ * signature, which would widen `FileSynchronizerEventType` below to
+ * `string` and silently accept a typo'd event-type literal.
+ * `FileSynchronizerEventMap` (below) re-adds `EventMap` for
+ * `CompletableEventTarget<FileSynchronizerEventMap>`, which needs it —
+ * same split as `OperativeEventClassMap`/`OperativeEventMap` in
+ * `operative/src/events.ts`.
+ */
+export interface FileSynchronizerEventClassMap {
   [PollCycleCompletedEvent.type]: PollCycleCompletedEvent;
 }
 
-export type FileSynchronizerEventType = keyof FileSynchronizerEventMap;
+export interface FileSynchronizerEventMap extends FileSynchronizerEventClassMap, EventMap {}
+
+export type FileSynchronizerEventType = Extract<keyof FileSynchronizerEventClassMap, string>;
 
 export interface FileSynchronizer {
   /** Start watching for changes on a polling interval. */
@@ -306,21 +327,34 @@ export function createFileSynchronizer(options: FileSynchronizerOptions): FileSy
           intervalId = setIntervalFunction(() => {
             if (synchronizing) return;
             synchronizing = true;
-            // The lock is released and the completion event dispatched from
-            // the same synchronous continuation (async/await, rather than a
-            // separate `.catch().finally()` chain) so a listener never
-            // observes the event before `synchronizing` has already been
-            // reset — a listener that immediately schedules another poll
-            // tick on hearing this event is safe (AB-341).
+            // The lock release is centralized in `finally` — it always runs,
+            // regardless of whether synchronize() or a listener the
+            // dispatch below invokes throws — and it runs strictly before
+            // the dispatch that can observe it (async/await, rather than a
+            // separate `.catch().finally()` chain, keeps that ordering
+            // simple), so a listener that immediately schedules another
+            // poll tick on hearing this event is safe (AB-341). The
+            // dispatch itself is wrapped in its own try/catch: `dispatch()`
+            // synchronously invokes listeners, and a listener that throws
+            // would otherwise reject this fire-and-forget IIFE as an
+            // unhandled rejection — swallow it, matching the "polling
+            // failures don't take down the interval" contract this
+            // callback already keeps for synchronize() itself.
             void (async () => {
+              let outcome: { result: SynchronizeResult } | { error: unknown };
               try {
-                const result = await trackedSynchronize();
-                synchronizing = false;
-                events.dispatch(new PollCycleCompletedEvent({ result }));
+                outcome = { result: await trackedSynchronize() };
               } catch (error) {
                 // Swallow errors during polling — will retry next interval.
+                outcome = { error };
+              } finally {
                 synchronizing = false;
-                events.dispatch(new PollCycleCompletedEvent({ error }));
+              }
+              try {
+                events.dispatch(new PollCycleCompletedEvent(outcome));
+              } catch {
+                // A listener threw. Never let that destabilize the polling
+                // loop — the next poll tick is unaffected either way.
               }
             })();
           }, pollingInterval);
@@ -351,16 +385,8 @@ export function createFileSynchronizer(options: FileSynchronizerOptions): FileSy
 
     addEventListener: events.addEventListener.bind(events),
     removeEventListener: events.removeEventListener.bind(events),
-    // `CompletableEventTarget`'s generic methods bind to a callable whose
-    // `K` is constrained to `string`, one step looser than
-    // `FileSynchronizerEventType` (`keyof FileSynchronizerEventMap`, a
-    // single-member string-literal union here) — the two are equivalent in
-    // practice since `FileSynchronizerEventMap` has no non-string keys, but
-    // TypeScript does not narrow a bound generic method's parameter that
-    // way, so the assignment needs an explicit cast (same pattern as
-    // `Scratchpad`'s `on`/`once`/`subscribe` in operative).
-    once: events.once.bind(events) as FileSynchronizer['once'],
-    on: events.on.bind(events) as FileSynchronizer['on'],
-    subscribe: events.subscribe.bind(events) as FileSynchronizer['subscribe'],
+    once: events.once.bind(events),
+    on: events.on.bind(events),
+    subscribe: events.subscribe.bind(events),
   };
 }

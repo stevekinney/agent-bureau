@@ -257,6 +257,15 @@ describe('createFileSynchronizer', () => {
 
     await synchronizer.start();
 
+    // Fail loudly (rather than silently no-op-ing) if the injected
+    // setIntervalFunction never ran, which would otherwise make every
+    // `poll()` call below a silent no-op and hang the test awaiting an
+    // event that never fires.
+    if (!poll) {
+      throw new Error('expected setIntervalFunction to have been invoked by start()');
+    }
+    const firePoll = poll;
+
     const originalRememberOnce = memory.rememberOnce.bind(memory);
     let failing = true;
     Object.assign(memory, {
@@ -278,8 +287,9 @@ describe('createFileSynchronizer', () => {
     // separate microtask drain is needed afterward.
     await writeFile(filePath, 'Updated once.');
     const firstCycle = waitForPollCycle(synchronizer);
-    poll?.();
+    firePoll();
     const firstEvent = await firstCycle;
+    expect(firstEvent.type).toBe('poll-cycle.completed');
     expect(firstEvent.error).toBeDefined();
     expect(firstEvent.result).toBeUndefined();
 
@@ -288,7 +298,7 @@ describe('createFileSynchronizer', () => {
     failing = false;
     await writeFile(filePath, 'Updated twice.');
     const secondCycle = waitForPollCycle(synchronizer);
-    poll?.();
+    firePoll();
     const secondEvent = await secondCycle;
     expect(secondEvent.error).toBeUndefined();
     expect(secondEvent.result).toBeDefined();

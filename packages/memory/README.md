@@ -790,6 +790,12 @@ interface FileSynchronizer {
   ): void;
   once(type: 'poll-cycle.completed', listener: (event: PollCycleCompletedEvent) => void): void;
   on(type: 'poll-cycle.completed'): ObservableLike<PollCycleCompletedEvent>;
+  subscribe(
+    type: 'poll-cycle.completed',
+    observerOrNext?: Observer<PollCycleCompletedEvent> | ((value: PollCycleCompletedEvent) => void),
+    error?: (err: unknown) => void,
+    complete?: () => void,
+  ): Subscription;
 }
 
 interface SynchronizeResult {
