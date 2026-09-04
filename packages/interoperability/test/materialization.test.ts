@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { createManualRuntimeServices } from 'lifecycle';
 
 import {
   assertJSONValue,
@@ -35,6 +36,15 @@ describe('interoperability materialization', () => {
         arguments: {},
       },
     ]);
+  });
+
+  test('a manual runtime controls the default identifier when no explicit id or generateId is supplied', () => {
+    const runtime = createManualRuntimeServices({ identifierSeed: 'materialization-test' });
+    const expectedRuntime = createManualRuntimeServices({ identifierSeed: 'materialization-test' });
+
+    const call = materializeToolCall({ name: 'weather', arguments: {} }, { runtime });
+
+    expect(call.id).toBe(expectedRuntime.identifiers.next('tool-call'));
   });
 
   test('materializes synchronous tool results and strips runtime-only fields', () => {

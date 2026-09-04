@@ -29,6 +29,9 @@
     "coverage:check": "bun run ../../scripts/check-coverage.ts",
     "validate": "bun run format:check && bun run check-types && bun run lint && bun run test && bun run build"
   },
+  "dependencies": {
+    "lifecycle": "workspace:*"
+  },
   "devDependencies": {
     "@types/bun": "^1.3.14"
   },

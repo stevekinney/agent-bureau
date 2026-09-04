@@ -60,6 +60,7 @@ type ToolCall = {
 ```typescript
 type MaterializeToolCallOptions = {
   generateId?: () => string;
+  runtime?: RuntimeServices; // from `lifecycle`; backs the default id when `generateId` is omitted, defaults to the real (crypto.randomUUID()-backed) implementation
 };
 ```
 
@@ -138,7 +139,7 @@ function materializeToolCall(
 ): ToolCall;
 ```
 
-Normalizes one `ToolCallInput` into a canonical `ToolCall`. Fills a missing `id` with `options.generateId?.()` or `crypto.randomUUID()`. Coerces `arguments` to a `JSONValue`—non-serializable values are round-tripped through `JSON.stringify` / `JSON.parse`, falling back to `String()`.
+Normalizes one `ToolCallInput` into a canonical `ToolCall`. Fills a missing `id` with `options.generateId?.()` or `options.runtime.identifiers.next('tool-call')` (the real `RuntimeServices` implementation—backed by `crypto.randomUUID()`—by default; pass a manual `RuntimeServices` from `lifecycle` for a deterministic id). Coerces `arguments` to a `JSONValue`—non-serializable values are round-tripped through `JSON.stringify` / `JSON.parse`, falling back to `String()`.
 
 #### `materializeToolCalls`
 
@@ -361,7 +362,7 @@ const finalDigest = hasher.digest();
 ## Notes
 
 - All materialized output is JSON-safe.
-- Missing tool-call identifiers are filled by `options.generateId?.()` when provided, or `crypto.randomUUID()` otherwise.
+- Missing tool-call identifiers are filled by `options.generateId?.()` when provided, or `options.runtime.identifiers.next('tool-call')` otherwise—the real runtime by default (`crypto.randomUUID()`-backed), or a manual `RuntimeServices` from `lifecycle` for deterministic ids.
 - Synchronous tool-result materializers throw when passed a streaming result—use the `Async` variants instead.
 - `armorer` and `conversationalist` both re-export this surface from their own package entry points.
 

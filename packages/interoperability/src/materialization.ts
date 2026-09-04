@@ -1,3 +1,5 @@
+import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
+
 import type {
   JSONValue,
   ToolAction,
@@ -9,6 +11,8 @@ import type {
 
 export interface MaterializeToolCallOptions {
   generateId?: () => string;
+  /** Runtime services from `lifecycle`; its `identifiers` seam backs the default id when neither `toolCall.id` nor `generateId` is supplied. Defaults to the real (`crypto.randomUUID()`-backed) implementation. */
+  runtime?: RuntimeServices;
 }
 
 export interface MaterializeToolResultOptions {
@@ -19,8 +23,9 @@ export function materializeToolCall(
   toolCall: ToolCallInput,
   options: MaterializeToolCallOptions = {},
 ): ToolCall {
+  const runtime = options.runtime ?? createDefaultRuntimeServices();
   return {
-    id: toolCall.id ?? options.generateId?.() ?? crypto.randomUUID(),
+    id: toolCall.id ?? options.generateId?.() ?? runtime.identifiers.next('tool-call'),
     name: toolCall.name,
     arguments: normalizeJSONValue(toolCall.arguments ?? {}),
   };

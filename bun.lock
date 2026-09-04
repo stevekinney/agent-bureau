@@ -261,6 +261,9 @@
     "packages/interoperability": {
       "name": "interoperability",
       "version": "0.0.1",
+      "dependencies": {
+        "lifecycle": "workspace:*",
+      },
       "devDependencies": {
         "@types/bun": "^1.3.14",
       },
