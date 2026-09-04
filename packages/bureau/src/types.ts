@@ -45,7 +45,10 @@ import type { Storage, StorageConfiguration, TextValueStore } from '@lostgradien
 import type { ConditionalTextValueStore } from '@lostgradient/weft/storage/text-value-store';
 import type {
   AnyToolbox,
+  GrantListFilter,
   PendingToolApproval,
+  ReusableApprovalGrant,
+  ReusableApprovalGrantInput,
   SignedPendingToolApproval,
   ToolRequestContext,
 } from 'armorer';
@@ -1154,6 +1157,21 @@ export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
    * `now` defaults to the bureau's own clock.
    */
   sweepExpiredReviews(now?: number): Promise<number>;
+
+  /**
+   * Mints and signs a reusable approval grant (AB-46, AB-346) via the
+   * bureau's base toolbox — a grant lets a matching future tool call skip
+   * human review entirely. Delegates to `Toolbox.issueGrant`, so it throws
+   * the same "approvalSecret is required" error when the base toolbox has
+   * no `approvalSecret`/`grantStateStore` configured.
+   */
+  issueGrant(input: ReusableApprovalGrantInput): Promise<ReusableApprovalGrant>;
+
+  /** Revokes a reusable approval grant by id; idempotent on an unknown or already-revoked id. */
+  revokeGrant(id: string): Promise<void>;
+
+  /** Lists reusable approval grants, optionally narrowed by principal, agent, or tool. */
+  listGrants(filter?: GrantListFilter): Promise<ReusableApprovalGrant[]>;
 
   /**
    * Installs the host-owned authority freshness check used immediately before

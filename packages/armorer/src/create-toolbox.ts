@@ -21,7 +21,13 @@ import {
   type ApprovalState,
   type ApprovalStateStore,
   createProcessLocalApprovalStateStore,
+  createProcessLocalGrantStateStore,
+  GRANT_VERSION,
+  type GrantStateStore,
+  type ReusableApprovalGrant,
+  signGrant,
   validateApprovalBinding,
+  verifyGrantSignature,
 } from './approval-binding';
 import type { ApprovalPolicyConfiguration } from './approval-policy';
 import { approvalStatusToDecision, evaluateCapabilityApproval } from './approval-policy';
@@ -71,6 +77,7 @@ import {
   ToolboxExecuteErrorEvent,
   ToolboxExecuteStartEvent,
   ToolboxExecuteSuccessEvent,
+  ToolboxGrantUsedEvent,
   ToolboxLogEvent,
   ToolboxLoopBlockedEvent,
   ToolboxLoopWarningEvent,
@@ -275,6 +282,17 @@ export interface ToolboxOptions {
   approvalNow?: () => number;
   approvalNonce?: () => string;
   /**
+   * Reusable-approval-grant storage (AB-46, AB-346). Grant matching inside
+   * `mergePolicies`'s `beforeExecute` checks for a matching, unrevoked,
+   * unexpired grant with `usesRemaining > 0` ahead of
+   * `evaluateCapabilityApproval`'s `ask` outcome; a match lets the call
+   * execute without prompting for approval. Grants are signed with the same
+   * `approvalSecret` pending approvals use, so this only ever defaults to a
+   * process-local store when `approvalSecret` is configured — there is no
+   * trustworthy default without a secret to verify against.
+   */
+  grantStateStore?: GrantStateStore;
+  /**
    * The injectable runtime-service seam (AB-92's `RuntimeServices`, AB-254):
    * wall time, monotonic time, timers, identifiers, and randomness for this
    * toolbox, its `ExecutionLifecycle`, and every tool it constructs.
@@ -427,7 +445,30 @@ export interface ToolboxEvents {
   'name-resolved': { originalName: string; resolvedName: string; tier: string };
   'loop-warning': { tool: Tool; call: ToolCall; detector: string; count: number; message: string };
   'loop-blocked': { tool: Tool; call: ToolCall; detector: string; count: number; message: string };
+  'grant.used': GrantUsedDetail;
 }
+
+/**
+ * Detail carried by the `'grant.used'` toolbox event (AB-46, AB-346): the
+ * audit entry a reusable-approval-grant match records when it short-circuits
+ * `evaluateCapabilityApproval`'s `ask` outcome to an allow.
+ */
+export type GrantUsedDetail = {
+  grantId: string;
+  toolName: string;
+  call: ToolCall;
+  principalId: string;
+  usesRemaining: number;
+  /**
+   * The consuming call's `requestContext.runId`/`agentId`, when supplied —
+   * a shared toolbox (e.g. Bureau's base toolbox) serves many runs, so an
+   * audit consumer needs run/agent identity to attribute a `grant.used`
+   * entry, the same way every other toolbox event carries
+   * `ToolExecutionIdentity`.
+   */
+  runId?: string;
+  agentId?: string;
+};
 
 type ToolboxEventType = Extract<keyof ToolboxEvents, string>;
 
@@ -652,6 +693,27 @@ type ToolboxResultForCall<TTools extends readonly Tool[], TCall extends { name: 
 
 type AvailableTools<TTools extends readonly Tool[]> = ReadonlyArray<TTools[number]>;
 
+/**
+ * Caller-supplied fields for {@link Toolbox.issueGrant} (AB-46, AB-346):
+ * every {@link ReusableApprovalGrant} field except the ones the toolbox
+ * mints itself (`version`, `id`, `issuedAt`, `usesRemaining`, `revoked`,
+ * `signature`). `policyRevision` is optional — omitted, it defaults to the
+ * issuing toolbox's current `policyRevision`.
+ */
+export type ReusableApprovalGrantInput = Omit<
+  ReusableApprovalGrant,
+  'version' | 'id' | 'issuedAt' | 'usesRemaining' | 'revoked' | 'signature' | 'policyRevision'
+> & {
+  policyRevision?: string;
+};
+
+/** Optional narrowing filter for {@link Toolbox.listGrants}. */
+export type GrantListFilter = {
+  principalId?: string;
+  agentId?: string;
+  toolName?: string;
+};
+
 export interface Toolbox<TTools extends readonly Tool[] = readonly Tool[]> {
   execute<const TCall extends ToolboxCallInputForTools<TTools>>(
     call: TCall,
@@ -669,6 +731,20 @@ export interface Toolbox<TTools extends readonly Tool[] = readonly Tool[]> {
   ): Promise<ToolExecutionResult>;
   restoreApproval(approval: SignedPendingToolApproval): Promise<void>;
   revokeApproval(approval: SignedPendingToolApproval): Promise<void>;
+  /**
+   * Mints and signs a {@link ReusableApprovalGrant} (AB-46, AB-346):
+   * `id`/`issuedAt` are minted from the toolbox's own nonce generator and
+   * clock, `usesRemaining` is initialized to `maxUses`, `policyRevision`
+   * defaults to the toolbox's current revision when omitted, and the result
+   * is signed with `approvalSecret` before being handed to the grant state
+   * store. Throws when the toolbox has no `approvalSecret` configured — an
+   * unsigned grant can never be trusted at match time.
+   */
+  issueGrant(input: ReusableApprovalGrantInput): Promise<ReusableApprovalGrant>;
+  /** Revokes a reusable approval grant by id; idempotent on an unknown or already-revoked id. */
+  revokeGrant(id: string): Promise<void>;
+  /** Lists reusable approval grants, optionally narrowed by principal, agent, or tool. */
+  listGrants(filter?: GrantListFilter): Promise<ReusableApprovalGrant[]>;
   extend<const TEntries extends ToolboxEntries>(
     ...entries: TEntries
   ): Toolbox<MergeTools<TTools, ToolsFromEntries<TEntries>>>;
@@ -960,6 +1036,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     [ToolboxNameResolvedEvent.type]: ToolboxNameResolvedEvent,
     [ToolboxLoopWarningEvent.type]: ToolboxLoopWarningEvent,
     [ToolboxLoopBlockedEvent.type]: ToolboxLoopBlockedEvent,
+    [ToolboxGrantUsedEvent.type]: ToolboxGrantUsedEvent,
   };
 
   const dispatchEvent: ToolboxEventDispatcher = (event: Event) => emitter.dispatchEvent(event);
@@ -1039,6 +1116,8 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     throw new Error('approvalBindingTtlMs must be finite and positive.');
   }
   const approvalNonce = options.approvalNonce ?? (() => runtime.identifiers.next('approval'));
+  const grantStateStore =
+    options.grantStateStore ?? (approvalSecret ? createProcessLocalGrantStateStore() : undefined);
   const catalogRevision = options.catalogRevision ?? 'catalog:1';
   const toolboxRevision = options.toolboxRevision ?? 'toolbox:1';
   const policyRevision = options.policyRevision ?? 'policy:1';
@@ -2171,6 +2250,51 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     });
   }
 
+  async function issueGrant(input: ReusableApprovalGrantInput): Promise<ReusableApprovalGrant> {
+    if (!approvalSecret || !grantStateStore) {
+      throw new Error('Toolbox approvalSecret is required to issue reusable approval grants.');
+    }
+    const unsigned: ReusableApprovalGrant = {
+      ...input,
+      version: GRANT_VERSION,
+      id: `grant:${approvalNonce()}`,
+      issuedAt: approvalNow(),
+      usesRemaining: input.maxUses,
+      revoked: false,
+      policyRevision: input.policyRevision ?? policyRevision,
+      signature: '',
+    };
+    const signed: ReusableApprovalGrant = {
+      ...unsigned,
+      signature: signGrant(unsigned, approvalSecret),
+    };
+    await grantStateStore.issue(signed);
+    return signed;
+  }
+
+  async function revokeGrant(id: string): Promise<void> {
+    if (!grantStateStore) {
+      throw new Error('Grant state store is required to revoke reusable approval grants.');
+    }
+    await grantStateStore.revoke(id);
+  }
+
+  async function listGrants(filter?: GrantListFilter): Promise<ReusableApprovalGrant[]> {
+    if (!grantStateStore) {
+      throw new Error('Grant state store is required to list reusable approval grants.');
+    }
+    const grants = await grantStateStore.list();
+    if (!filter) {
+      return grants;
+    }
+    return grants.filter(
+      (grant) =>
+        (filter.principalId === undefined || grant.principalId === filter.principalId) &&
+        (filter.agentId === undefined || grant.agentId === filter.agentId) &&
+        (filter.toolName === undefined || grant.toolName === filter.toolName),
+    );
+  }
+
   async function revokeApproval(approval: SignedPendingToolApproval): Promise<void> {
     verifyPendingApproval(approval);
     if (!approvalStateStore || !approval.approvalBinding) {
@@ -2271,6 +2395,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     return createToolboxBase(mergedEntries, {
       ...options,
       ...(approvalStateStore ? { approvalStateStore } : {}),
+      ...(grantStateStore ? { grantStateStore } : {}),
       context,
     });
   }
@@ -2472,6 +2597,9 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     resumeApproval,
     restoreApproval,
     revokeApproval,
+    issueGrant,
+    revokeGrant,
+    listGrants,
     extend,
     tools,
     getAvailable,
@@ -2592,6 +2720,15 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       allowMutation,
       allowDangerous,
       approvalPolicy,
+      ...(grantStateStore && approvalSecret
+        ? {
+            grantStateStore,
+            grantSecret: approvalSecret,
+            grantNow: approvalNow,
+            grantPolicyRevision: policyRevision,
+            onGrantUsed: (detail: GrantUsedDetail) => emit('grant.used', detail),
+          }
+        : {}),
     });
     const resolvedPolicyContext = mergePolicyContexts(
       registryPolicyContext,
@@ -3075,11 +3212,22 @@ function mergePolicies(
     allowMutation: boolean;
     allowDangerous: boolean;
     approvalPolicy?: ApprovalPolicyConfiguration;
+    /** Reusable-approval-grant matching (AB-46, AB-346); see `createToolbox`'s call site. */
+    grantStateStore?: GrantStateStore;
+    grantSecret?: string;
+    grantNow?: () => number;
+    grantPolicyRevision?: string;
+    onGrantUsed?: (detail: GrantUsedDetail) => void;
   },
 ): ToolPolicyHooks | undefined {
   const enforceMutating = options.readOnly || !options.allowMutation;
   const enforceDangerous = !options.allowDangerous;
   const approvalPolicy = options.approvalPolicy;
+  const grantStateStore = options.grantStateStore;
+  const grantSecret = options.grantSecret;
+  const grantNow = options.grantNow;
+  const grantPolicyRevision = options.grantPolicyRevision;
+  const onGrantUsed = options.onGrantUsed;
   const hasBefore =
     enforceMutating ||
     enforceDangerous ||
@@ -3109,19 +3257,65 @@ function mergePolicies(
       }
       // A capability `deny` is terminal — nothing downstream can be more
       // restrictive, so it's safe to short-circuit immediately. A capability
-      // `ask`, however, must NOT short-circuit: registry- and tool-level
+      // `ask` normally must NOT short-circuit: registry- and tool-level
       // hooks still need to run (both on this call and on every subsequent
       // approval-resume call) so an eventual `deny` from either of them is
       // never silently skipped just because the capability tier already
-      // asked. Skipping them would let a human's approval of the capability
+      // asked. Skipping them would let a HUMAN's approval of the capability
       // ask bypass a registry/tool deny that was never even evaluated.
+      //
+      // A reusable approval grant (AB-46, AB-346, below) is different in
+      // kind, not degree: it is a pre-authorization the toolbox itself
+      // minted and re-verifies on every consuming call — scoped to
+      // principal, tenant, owner, agent, tool, resource, and arguments, and
+      // reauthorized against the live request context — not a human
+      // rubber-stamping whatever `evaluateCapabilityApproval` happened to
+      // ask about. A match is therefore treated as satisfying the whole
+      // `beforeExecute` call, registry/tool hooks included, exactly as the
+      // decision record's "return `{ allow: true }` immediately" specifies.
       const pendingPauseDecisions: ToolPolicyDecision[] = [];
       if (approvalPolicy) {
         const result = evaluateCapabilityApproval(context, approvalPolicy);
         if (result.status === 'deny') {
+          // A capability deny is terminal and is never overridden by a
+          // reusable approval grant (AB-46 AC5) — grant matching only ever
+          // short-circuits an `ask` toward `allow`, never a `deny`.
           return approvalStatusToDecision(context.toolName, result);
         }
         if (result.status === 'ask') {
+          // Reusable approval grants (AB-46, AB-346): matched ahead of the
+          // registry/tool-level policy hooks below, so a valid, freshly
+          // reauthorized grant lets the call execute without ever entering
+          // the capability-approval `ask` pipeline this issue does not
+          // otherwise touch. A grant failing any check — no match, expired,
+          // revoked, exhausted, a stale `policyRevision`, or a signature
+          // that no longer verifies — is treated as absent, never an
+          // implicit deny or approve: falling through to the ordinary
+          // `pendingPauseDecisions` push below, unchanged from today.
+          const matchedGrant =
+            grantStateStore && grantSecret
+              ? await findMatchingGrant(
+                  context,
+                  grantStateStore,
+                  grantSecret,
+                  (grantNow ?? Date.now)(),
+                  grantPolicyRevision,
+                )
+              : undefined;
+          if (matchedGrant) {
+            const { usesRemaining } = await grantStateStore!.decrementUse(matchedGrant.id);
+            const requestContext = readPolicyRequestContext(context);
+            onGrantUsed?.({
+              grantId: matchedGrant.id,
+              toolName: context.toolName,
+              call: context.toolCall,
+              principalId: matchedGrant.principalId,
+              usesRemaining,
+              ...(requestContext?.runId !== undefined ? { runId: requestContext.runId } : {}),
+              ...(requestContext?.agentId !== undefined ? { agentId: requestContext.agentId } : {}),
+            });
+            return { allow: true } satisfies ToolPolicyDecision;
+          }
           pendingPauseDecisions.push({
             ...approvalStatusToDecision(context.toolName, result),
             [policyPauseTierSymbol]: 'capability',
@@ -3233,6 +3427,110 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isStringArray(value: unknown): value is readonly string[] {
   return Array.isArray(value) && value.every((item) => typeof item === 'string');
+}
+
+/**
+ * Finds the first reusable approval grant (AB-46, AB-346) whose principal,
+ * tenant, owner, agent, tool, resource pattern, argument constraints, and
+ * policy revision all match the current call and whose `requestContext`
+ * authority reauthorizes it, is unrevoked, unexpired, has `usesRemaining >
+ * 0`, and whose signature still verifies against `approvalSecret`. Every
+ * check failing treats the grant as absent — this function never throws for
+ * a mismatch, only returns `undefined` — so a stale, tampered, or
+ * over-scoped grant falls through to the ordinary `ask` pipeline exactly as
+ * it would with no grant at all.
+ */
+async function findMatchingGrant(
+  context: ToolPolicyContext,
+  grantStateStore: GrantStateStore,
+  approvalSecret: string,
+  now: number,
+  toolboxPolicyRevision: string | undefined,
+): Promise<ReusableApprovalGrant | undefined> {
+  const requestContext = readPolicyRequestContext(context);
+  // Every use reauthorizes principal, tenant, and owner against the request
+  // context (AB-46 AC2): absent authority means no grant can ever match,
+  // never an implicit approve.
+  if (!requestContext) {
+    return undefined;
+  }
+  const { authority } = requestContext;
+  const grants = await grantStateStore.list();
+  for (const grant of grants) {
+    if (
+      grant.version !== GRANT_VERSION ||
+      grant.revoked ||
+      grant.usesRemaining <= 0 ||
+      now >= grant.expiresAt ||
+      grant.policyRevision !== toolboxPolicyRevision ||
+      grant.toolName !== context.toolName ||
+      grant.principalId !== authority.principalId ||
+      grant.tenantId !== authority.tenantId ||
+      grant.ownerId !== authority.ownerId ||
+      (grant.agentId !== '*' && grant.agentId !== requestContext.agentId) ||
+      !matchesResourcePattern(grant.resourcePattern, context.params) ||
+      !matchesArgumentConstraints(grant.argumentConstraints, context.params)
+    ) {
+      continue;
+    }
+    try {
+      // The HMAC proves the record is unmodified since the toolbox signed
+      // it — it never proves who is asking; that's `authority` above.
+      verifyGrantSignature(grant, approvalSecret);
+    } catch {
+      continue;
+    }
+    return grant;
+  }
+  return undefined;
+}
+
+/**
+ * Glob-style match against a caller-declared `resource` field in the tool's
+ * arguments (AB-46's `resourcePattern` field comment). `undefined` matches
+ * any resource; a pattern present but no string `resource` field in the
+ * arguments never matches.
+ */
+function matchesResourcePattern(pattern: string | undefined, params: unknown): boolean {
+  if (pattern === undefined) {
+    return true;
+  }
+  if (!isRecord(params) || typeof params['resource'] !== 'string') {
+    return false;
+  }
+  const escaped = pattern.replace(/[.+^${}()|[\]\\?]/g, '\\$&').replace(/\*/g, '.*');
+  return new RegExp(`^${escaped}$`).test(params['resource']);
+}
+
+/**
+ * `argumentConstraints` is deliberately plain JSON data, not a live Zod
+ * schema instance — a `ZodType` embedded in a grant could never survive the
+ * `JSON.stringify` round trip `signGrant`'s HMAC payload goes through, so
+ * matching is a deep-equal check per declared key against the call's
+ * arguments, normalized through the same JSON round trip for a stable
+ * comparison.
+ */
+function matchesArgumentConstraints(
+  constraints: Record<string, unknown> | undefined,
+  params: unknown,
+): boolean {
+  if (constraints === undefined) {
+    return true;
+  }
+  // `createTool`/`createToolbox` only ever accept a Zod OBJECT input schema
+  // (enforced at tool-construction time — see `registerConfiguration`'s
+  // "Tool input must be a Zod object schema" check), so a validated call's
+  // `params` is always a plain record by the time `beforeExecute` runs.
+  const record = isRecord(params) ? params : ({} as Record<string, unknown>);
+  return Object.entries(constraints).every(
+    ([key, expected]) =>
+      stableStringifyJson(normalizeJsonValue(record[key])) ===
+      stableStringifyJson(normalizeJsonValue(expected)),
+  );
+}
+
+function normalizeJsonValue(value: unknown): JsonValue {
+  return JSON.parse(JSON.stringify(value ?? null)) as JsonValue;
 }
 
 function isPausePolicyDecision(

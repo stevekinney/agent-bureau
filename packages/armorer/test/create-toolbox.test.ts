@@ -7,10 +7,15 @@ import {
   type AnyToolDefinition,
   createMiddleware,
   createProcessLocalApprovalStateStore,
+  createProcessLocalGrantStateStore,
   createTool,
   createToolbox,
+  GRANT_VERSION,
   lazy,
+  type ReusableApprovalGrant,
   type SignedPendingToolApproval,
+  signGrant,
+  ToolboxGrantUsedEvent,
   ToolCancelledEvent,
   type ToolConfiguration,
   type ToolConfigurationInput,
@@ -7854,5 +7859,565 @@ describe('every per-call toolbox event class carries execution identity, attribu
     expect(seenPolicyDenied[0]?.ownerId).toBe('owner-denied');
     expect(seenPolicyDenied[0]?.executionId).toBeTruthy();
     expect(seenPolicyDenied[0]?.executionId).not.toBe(seenValidateError[0]?.executionId);
+  });
+});
+
+describe('reusable approval grants (AB-46, AB-346)', () => {
+  const grantSecret = 'grant-secret';
+  const FIXED_NOW = 1_000_000;
+  const approvalNow = () => FIXED_NOW;
+
+  async function usesRemainingOf(
+    grantStateStore: ReturnType<typeof createProcessLocalGrantStateStore>,
+    id: string,
+  ): Promise<number | undefined> {
+    const grant = await grantStateStore.get(id);
+    return grant?.usesRemaining;
+  }
+
+  const grantRequestContext = {
+    authority: {
+      principalId: 'principal-grant',
+      tenantId: 'tenant-grant',
+      ownerId: 'owner-grant',
+      capabilities: ['tools:execute'],
+      authorizationRevision: 'authorization:1',
+    },
+    audience: 'tenant' as const,
+    agentId: 'agent-grant',
+    runId: 'run-grant',
+  };
+
+  function buildGrant(overrides?: Partial<ReusableApprovalGrant>): ReusableApprovalGrant {
+    const unsigned: ReusableApprovalGrant = {
+      version: GRANT_VERSION,
+      id: overrides?.id ?? 'grant:test-1',
+      principalId: grantRequestContext.authority.principalId,
+      tenantId: grantRequestContext.authority.tenantId,
+      ownerId: grantRequestContext.authority.ownerId,
+      agentId: grantRequestContext.agentId,
+      toolName: 'read-file',
+      scope: 'session',
+      issuedAt: FIXED_NOW,
+      expiresAt: FIXED_NOW + 60_000,
+      maxUses: 3,
+      usesRemaining: 3,
+      policyRevision: 'policy:1',
+      revoked: false,
+      delegationBehavior: 'does-not-propagate',
+      signature: '',
+      ...overrides,
+    };
+    return { ...unsigned, signature: signGrant(unsigned, grantSecret) };
+  }
+
+  async function buildGrantToolbox(grants: ReusableApprovalGrant[]) {
+    const grantStateStore = createProcessLocalGrantStateStore();
+    for (const grant of grants) {
+      await grantStateStore.issue(grant);
+    }
+    const executions: unknown[] = [];
+    const toolbox = createToolbox(
+      [
+        createTool({
+          name: 'read-file',
+          version: '1.0.0',
+          description: 'reads a file',
+          input: z.object({ resource: z.string().optional(), value: z.string().optional() }),
+          async execute(params) {
+            executions.push(params);
+            return 'ok';
+          },
+        }),
+      ],
+      {
+        approvalSecret: grantSecret,
+        approvalPolicy: { mode: 'always' },
+        approvalNow,
+        grantStateStore,
+      },
+    );
+    return { toolbox, grantStateStore, executions };
+  }
+
+  it('lets a matching grant execute the call without prompting for approval', async () => {
+    const grant = buildGrant();
+    const { toolbox, grantStateStore, executions } = await buildGrantToolbox([grant]);
+
+    const grantUsedEvents: ToolboxGrantUsedEvent[] = [];
+    toolbox.addEventListener('grant.used', (event) => {
+      grantUsedEvents.push(event);
+    });
+
+    const result = await toolbox.execute(
+      { id: 'call-1', name: 'read-file', arguments: { resource: 'file-1' } },
+      { requestContext: grantRequestContext },
+    );
+
+    expect(result.outcome).toBe('success');
+    expect(executions).toHaveLength(1);
+    expect(await usesRemainingOf(grantStateStore, grant.id)).toBe(2);
+    expect(grantUsedEvents).toHaveLength(1);
+    expect(grantUsedEvents[0]?.grantId).toBe(grant.id);
+    expect(grantUsedEvents[0]?.toolName).toBe('read-file');
+    expect(grantUsedEvents[0]?.principalId).toBe(grantRequestContext.authority.principalId);
+    expect(grantUsedEvents[0]?.usesRemaining).toBe(2);
+    expect(grantUsedEvents[0]?.runId).toBe(grantRequestContext.runId);
+    expect(grantUsedEvents[0]?.agentId).toBe(grantRequestContext.agentId);
+  });
+
+  it('never consumes a grant when no request context is supplied', async () => {
+    // Absent authority means no grant can ever match (AB-46 AC2): the
+    // ordinary `ask` pipeline runs, which itself requires a request context
+    // to sign a pending approval, so this settles as an error rather than
+    // `action_required` — but the grant is provably untouched either way.
+    const grant = buildGrant();
+    const { toolbox, grantStateStore } = await buildGrantToolbox([grant]);
+
+    const result = await toolbox.execute({
+      id: 'call-no-context',
+      name: 'read-file',
+      arguments: {},
+    });
+
+    expect(result.outcome).not.toBe('success');
+    expect(await usesRemainingOf(grantStateStore, grant.id)).toBe(3);
+  });
+
+  it('never consumes a grant issued to a different principal', async () => {
+    const grant = buildGrant();
+    const { toolbox, grantStateStore } = await buildGrantToolbox([grant]);
+
+    const result = await toolbox.execute(
+      { id: 'call-wrong-principal', name: 'read-file', arguments: {} },
+      {
+        requestContext: {
+          ...grantRequestContext,
+          authority: { ...grantRequestContext.authority, principalId: 'someone-else' },
+        },
+      },
+    );
+
+    expect(result.outcome).toBe('action_required');
+    expect(await usesRemainingOf(grantStateStore, grant.id)).toBe(3);
+  });
+
+  it('never consumes a grant issued to a different tenant or owner', async () => {
+    for (const authorityOverride of [{ tenantId: 'other-tenant' }, { ownerId: 'other-owner' }]) {
+      const grant = buildGrant({ id: `grant:${JSON.stringify(authorityOverride)}` });
+      const { toolbox, grantStateStore } = await buildGrantToolbox([grant]);
+
+      const result = await toolbox.execute(
+        { id: 'call-wrong-authority', name: 'read-file', arguments: {} },
+        {
+          requestContext: {
+            ...grantRequestContext,
+            authority: { ...grantRequestContext.authority, ...authorityOverride },
+          },
+        },
+      );
+
+      expect(result.outcome).toBe('action_required');
+      expect(await usesRemainingOf(grantStateStore, grant.id)).toBe(3);
+    }
+  });
+
+  it('matches a wildcard agentId against any agent', async () => {
+    const grant = buildGrant({ agentId: '*' });
+    const { toolbox, grantStateStore } = await buildGrantToolbox([grant]);
+
+    const result = await toolbox.execute(
+      { id: 'call-wildcard-agent', name: 'read-file', arguments: {} },
+      { requestContext: { ...grantRequestContext, agentId: 'some-other-agent' } },
+    );
+
+    expect(result.outcome).toBe('success');
+  });
+
+  it('never matches a specific agentId against a missing request agentId', async () => {
+    const grant = buildGrant();
+    const { toolbox, grantStateStore } = await buildGrantToolbox([grant]);
+    const { agentId: _agentId, ...requestContextWithoutAgent } = grantRequestContext;
+
+    const result = await toolbox.execute(
+      { id: 'call-missing-agent', name: 'read-file', arguments: {} },
+      { requestContext: requestContextWithoutAgent },
+    );
+
+    expect(result.outcome).not.toBe('success');
+    expect(await usesRemainingOf(grantStateStore, grant.id)).toBe(3);
+  });
+
+  it('treats an expired grant as absent, never an implicit deny', async () => {
+    const grant = buildGrant({ issuedAt: -1000, expiresAt: -1 });
+    const { toolbox, grantStateStore } = await buildGrantToolbox([grant]);
+
+    const result = await toolbox.execute(
+      { id: 'call-expired', name: 'read-file', arguments: {} },
+      { requestContext: grantRequestContext },
+    );
+
+    expect(result.outcome).toBe('action_required');
+  });
+
+  it('treats a revoked grant as absent, never an implicit deny', async () => {
+    const grant = buildGrant();
+    const { toolbox, grantStateStore } = await buildGrantToolbox([grant]);
+    await grantStateStore.revoke(grant.id);
+
+    const result = await toolbox.execute(
+      { id: 'call-revoked', name: 'read-file', arguments: {} },
+      { requestContext: grantRequestContext },
+    );
+
+    expect(result.outcome).toBe('action_required');
+  });
+
+  it('treats an exhausted grant as absent, never an implicit deny', async () => {
+    const grant = buildGrant({ maxUses: 1, usesRemaining: 1 });
+    const { toolbox, grantStateStore } = await buildGrantToolbox([grant]);
+    await grantStateStore.decrementUse(grant.id);
+
+    const result = await toolbox.execute(
+      { id: 'call-exhausted', name: 'read-file', arguments: {} },
+      { requestContext: grantRequestContext },
+    );
+
+    expect(result.outcome).toBe('action_required');
+  });
+
+  it('treats a stale policyRevision as absent, never an implicit deny', async () => {
+    const grant = buildGrant({ policyRevision: 'policy:stale' });
+    const { toolbox, grantStateStore } = await buildGrantToolbox([grant]);
+
+    const result = await toolbox.execute(
+      { id: 'call-stale-revision', name: 'read-file', arguments: {} },
+      { requestContext: grantRequestContext },
+    );
+
+    expect(result.outcome).toBe('action_required');
+  });
+
+  it('treats a grant with a tampered signature as absent, never an implicit deny', async () => {
+    const grant = buildGrant();
+    const tampered: ReusableApprovalGrant = { ...grant, maxUses: 999 };
+    const { toolbox, grantStateStore } = await buildGrantToolbox([tampered]);
+
+    const result = await toolbox.execute(
+      { id: 'call-tampered', name: 'read-file', arguments: {} },
+      { requestContext: grantRequestContext },
+    );
+
+    expect(result.outcome).toBe('action_required');
+  });
+
+  it('treats a grant with an unrecognized version as absent, never an implicit deny', async () => {
+    // The HMAC alone can't protect against a version bump changing matching
+    // semantics — a grant must also declare the exact version this toolbox
+    // understands (Copilot review PRRT_kwDORvupsc6fN8yV).
+    const grant = buildGrant({ version: 2 as unknown as typeof GRANT_VERSION });
+    const { toolbox, grantStateStore } = await buildGrantToolbox([grant]);
+
+    const result = await toolbox.execute(
+      { id: 'call-unrecognized-version', name: 'read-file', arguments: {} },
+      { requestContext: grantRequestContext },
+    );
+
+    expect(result.outcome).toBe('action_required');
+    expect(await usesRemainingOf(grantStateStore, grant.id)).toBe(3);
+  });
+
+  it('never lets a matching grant override a capability deny', async () => {
+    const grant = buildGrant();
+    const grantStateStore = createProcessLocalGrantStateStore();
+    await grantStateStore.issue(grant);
+    const grantUsedEvents: ToolboxGrantUsedEvent[] = [];
+    const toolbox = createToolbox(
+      [
+        createTool({
+          name: 'read-file',
+          version: '1.0.0',
+          description: 'reads a file',
+          input: z.object({}),
+          async execute() {
+            return 'ok';
+          },
+        }),
+      ],
+      {
+        approvalSecret: grantSecret,
+        approvalPolicy: { mode: 'deny' },
+        grantStateStore,
+      },
+    );
+    toolbox.addEventListener('grant.used', (event) => {
+      grantUsedEvents.push(event);
+    });
+
+    const result = await toolbox.execute(
+      { id: 'call-deny', name: 'read-file', arguments: {} },
+      { requestContext: grantRequestContext },
+    );
+
+    expect(result.outcome).toBe('error');
+    expect(await usesRemainingOf(grantStateStore, grant.id)).toBe(3);
+    expect(grantUsedEvents).toHaveLength(0);
+  });
+
+  it('bypasses a registry-level policy pause on a grant match (full short-circuit, per the decision record)', async () => {
+    // AB-46's decision record: a grant match makes `beforeExecute` return
+    // `{ allow: true }` immediately — not only the capability tier's `ask`.
+    // This pins that specific, deliberate choice: without a matching grant
+    // the registry hook below would push its own `needs_approval` pause
+    // (proven by `registryHookCalls` staying 0 here, never incrementing).
+    const grant = buildGrant();
+    const grantStateStore = createProcessLocalGrantStateStore();
+    await grantStateStore.issue(grant);
+    let registryHookCalls = 0;
+    const toolbox = createToolbox(
+      [
+        createTool({
+          name: 'read-file',
+          version: '1.0.0',
+          description: 'reads a file',
+          input: z.object({}),
+          async execute() {
+            return 'ok';
+          },
+        }),
+      ],
+      {
+        approvalSecret: grantSecret,
+        approvalPolicy: { mode: 'always' },
+        approvalNow,
+        grantStateStore,
+        policy: {
+          beforeExecute() {
+            registryHookCalls += 1;
+            return { status: 'needs_approval', reason: 'Registry also requires approval' };
+          },
+        },
+      },
+    );
+
+    const result = await toolbox.execute(
+      { id: 'call-full-short-circuit', name: 'read-file', arguments: {} },
+      { requestContext: grantRequestContext },
+    );
+
+    expect(result.outcome).toBe('success');
+    expect(await usesRemainingOf(grantStateStore, grant.id)).toBe(2);
+    expect(registryHookCalls).toBe(0);
+  });
+
+  it('matches a resourcePattern glob against a caller-declared resource argument', async () => {
+    const grant = buildGrant({ resourcePattern: 'reports/*' });
+    const { toolbox, grantStateStore } = await buildGrantToolbox([grant]);
+
+    const matching = await toolbox.execute(
+      { id: 'call-matching-resource', name: 'read-file', arguments: { resource: 'reports/q1' } },
+      { requestContext: grantRequestContext },
+    );
+    expect(matching.outcome).toBe('success');
+
+    const nonMatching = await toolbox.execute(
+      {
+        id: 'call-non-matching-resource',
+        name: 'read-file',
+        arguments: { resource: 'secrets/q1' },
+      },
+      { requestContext: grantRequestContext },
+    );
+    expect(nonMatching.outcome).toBe('action_required');
+  });
+
+  it('never matches a resourcePattern when the arguments carry no resource field', async () => {
+    const grant = buildGrant({ resourcePattern: 'reports/*' });
+    const { toolbox, grantStateStore } = await buildGrantToolbox([grant]);
+
+    const result = await toolbox.execute(
+      { id: 'call-no-resource-field', name: 'read-file', arguments: {} },
+      { requestContext: grantRequestContext },
+    );
+
+    expect(result.outcome).toBe('action_required');
+  });
+
+  it('treats a literal `?` in a resourcePattern as a literal character, not a regex quantifier', async () => {
+    // Copilot review PRRT_kwDORvupsc6fN8zC: only `*` is a documented
+    // wildcard, so `?` must be escaped rather than left as a regex
+    // quantifier that would let "report" match a pattern like "report?".
+    const grant = buildGrant({ resourcePattern: 'report?' });
+    const { toolbox, grantStateStore } = await buildGrantToolbox([grant]);
+
+    const literalMatch = await toolbox.execute(
+      { id: 'call-literal-question-mark', name: 'read-file', arguments: { resource: 'report?' } },
+      { requestContext: grantRequestContext },
+    );
+    expect(literalMatch.outcome).toBe('success');
+
+    const wouldMatchIfQuantifier = await toolbox.execute(
+      {
+        id: 'call-question-mark-not-quantifier',
+        name: 'read-file',
+        arguments: { resource: 'report' },
+      },
+      { requestContext: grantRequestContext },
+    );
+    expect(wouldMatchIfQuantifier.outcome).toBe('action_required');
+    expect(await usesRemainingOf(grantStateStore, grant.id)).toBe(2);
+  });
+
+  it('matches argumentConstraints by deep equality against the call arguments', async () => {
+    const grant = buildGrant({ argumentConstraints: { value: 'expected' } });
+    const { toolbox, grantStateStore } = await buildGrantToolbox([grant]);
+
+    const matching = await toolbox.execute(
+      { id: 'call-matching-args', name: 'read-file', arguments: { value: 'expected' } },
+      { requestContext: grantRequestContext },
+    );
+    expect(matching.outcome).toBe('success');
+
+    const nonMatching = await toolbox.execute(
+      { id: 'call-non-matching-args', name: 'read-file', arguments: { value: 'other' } },
+      { requestContext: grantRequestContext },
+    );
+    expect(nonMatching.outcome).toBe('action_required');
+  });
+
+  it('is not consumed when the capability tier already allows without asking', async () => {
+    const grant = buildGrant();
+    const grantStateStore = createProcessLocalGrantStateStore();
+    await grantStateStore.issue(grant);
+    const toolbox = createToolbox(
+      [
+        createTool({
+          name: 'read-file',
+          version: '1.0.0',
+          description: 'reads a file',
+          input: z.object({}),
+          metadata: { readOnly: true },
+          async execute() {
+            return 'ok';
+          },
+        }),
+      ],
+      {
+        approvalSecret: grantSecret,
+        approvalPolicy: { mode: 'never' },
+        grantStateStore,
+      },
+    );
+
+    const result = await toolbox.execute(
+      { id: 'call-already-allowed', name: 'read-file', arguments: {} },
+      { requestContext: grantRequestContext },
+    );
+
+    expect(result.outcome).toBe('success');
+    expect(await usesRemainingOf(grantStateStore, grant.id)).toBe(3);
+  });
+
+  describe('Toolbox.issueGrant / revokeGrant / listGrants', () => {
+    it('mints and signs a grant with usesRemaining initialized to maxUses', async () => {
+      const toolbox = createToolbox([], { approvalSecret: grantSecret, approvalNow });
+
+      const grant = await toolbox.issueGrant({
+        principalId: 'principal-issue',
+        tenantId: 'tenant-issue',
+        ownerId: 'owner-issue',
+        agentId: 'agent-issue',
+        toolName: 'read-file',
+        scope: 'session',
+        expiresAt: FIXED_NOW + 60_000,
+        maxUses: 5,
+        delegationBehavior: 'does-not-propagate',
+      });
+
+      expect(grant.version).toBe(GRANT_VERSION);
+      expect(grant.id).toMatch(/^grant:/);
+      expect(grant.usesRemaining).toBe(5);
+      expect(grant.revoked).toBe(false);
+      expect(grant.policyRevision).toBe('policy:1');
+      expect(await toolbox.listGrants()).toEqual([grant]);
+    });
+
+    it('throws when the toolbox has no approvalSecret configured', async () => {
+      const toolbox = createToolbox([]);
+
+      await expect(
+        toolbox.issueGrant({
+          principalId: 'principal-issue',
+          tenantId: 'tenant-issue',
+          ownerId: 'owner-issue',
+          agentId: 'agent-issue',
+          toolName: 'read-file',
+          scope: 'session',
+          expiresAt: FIXED_NOW + 60_000,
+          maxUses: 5,
+          delegationBehavior: 'does-not-propagate',
+        }),
+      ).rejects.toThrow('approvalSecret is required');
+    });
+
+    it('rejects revokeGrant and listGrants when no grant state store is configured', async () => {
+      const toolbox = createToolbox([]);
+
+      await expect(toolbox.revokeGrant('grant:unconfigured')).rejects.toThrow(
+        'Grant state store is required',
+      );
+      await expect(toolbox.listGrants()).rejects.toThrow('Grant state store is required');
+    });
+
+    it('revokes a grant idempotently', async () => {
+      const toolbox = createToolbox([], { approvalSecret: grantSecret, approvalNow });
+      const grant = await toolbox.issueGrant({
+        principalId: 'principal-revoke',
+        tenantId: 'tenant-revoke',
+        ownerId: 'owner-revoke',
+        agentId: 'agent-revoke',
+        toolName: 'read-file',
+        scope: 'session',
+        expiresAt: FIXED_NOW + 60_000,
+        maxUses: 1,
+        delegationBehavior: 'does-not-propagate',
+      });
+
+      await toolbox.revokeGrant(grant.id);
+      await toolbox.revokeGrant(grant.id);
+      await toolbox.revokeGrant('unknown-grant-id');
+
+      const [listed] = await toolbox.listGrants();
+      expect(listed?.revoked).toBe(true);
+    });
+
+    it('filters listGrants by principal, agent, and tool', async () => {
+      const toolbox = createToolbox([], { approvalSecret: grantSecret, approvalNow });
+      const matching = await toolbox.issueGrant({
+        principalId: 'principal-a',
+        tenantId: 'tenant-a',
+        ownerId: 'owner-a',
+        agentId: 'agent-a',
+        toolName: 'read-file',
+        scope: 'session',
+        expiresAt: FIXED_NOW + 60_000,
+        maxUses: 1,
+        delegationBehavior: 'does-not-propagate',
+      });
+      await toolbox.issueGrant({
+        principalId: 'principal-b',
+        tenantId: 'tenant-a',
+        ownerId: 'owner-a',
+        agentId: 'agent-a',
+        toolName: 'read-file',
+        scope: 'session',
+        expiresAt: FIXED_NOW + 60_000,
+        maxUses: 1,
+        delegationBehavior: 'does-not-propagate',
+      });
+
+      const filtered = await toolbox.listGrants({ principalId: 'principal-a' });
+      expect(filtered).toEqual([matching]);
+    });
   });
 });
