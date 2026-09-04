@@ -158,6 +158,24 @@ manifest['styles.css'] = '/public/styles.css';
 
 await Bun.write('./dist/manifest.json', JSON.stringify(manifest, null, 2));
 
+// AB-275 — declaration-only emit alongside the bundled server/client JS
+// above, using `tsconfig.build.json` (already present, unused until now:
+// `main` points at `./src/index.ts` directly, so nothing outside this
+// package has ever needed `dist`'s own type information before). Without
+// this, a real cross-package consumer of `import ... from 'gateway'` (the
+// crash-conformance fixture, AB-275) forces `tsc` to resolve gateway's
+// entire runtime source tree as in-project files and re-check it under
+// the CONSUMING package's own compiler options rather than gateway's own —
+// `packages/integration`'s `exactOptionalPropertyTypes: true` against code
+// gateway itself compiles under `false`. `main` stays pointed at source
+// (see this file's own top comment on `dist/start.js` vs. `src/start.ts`
+// for why); only `types` (package.json) is repointed at this emitted
+// declaration tree, so TypeScript's separate "where do types come from"
+// resolution stops re-verifying gateway's implementation against a
+// stranger's stricter settings, while every runtime import is completely
+// unaffected.
+await $`bunx tsc --declaration --emitDeclarationOnly --project tsconfig.build.json`;
+
 console.log('Build complete!');
 console.log('  Server:', serverResult.outputs.length, 'files');
 console.log('  Client:', clientResult.outputs.length, 'files');

@@ -5,6 +5,7 @@
   "description": "HTTP gateway and web UI for agent-bureau",
   "type": "module",
   "main": "./src/index.ts",
+  "types": "./dist/index.d.ts",
   "scripts": {
     "build": "bun run scripts/build.ts",
     "check-svelte": "svelte-check --tsconfig ./tsconfig.json",
@@ -17,7 +18,7 @@
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "start": "bun run dist/start.js",
-    "test": "bun test",
+    "test": "bun test --test-name-pattern \"^(?!.*\\[nightly\\])\"",
     "test:coverage": "bun test --coverage",
     "validate": "bun run format:check && bun run lint && bun run check-types && bun run test"
   },

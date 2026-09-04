@@ -50,10 +50,19 @@ jobs:
       # Not run through turbo's `test` task (that already ran above, as
       # part of `bun run validate`) so gateway's own dependencies are
       # already built by the time this plain `bun test` runs. AB-282 owns
-      # this lane's intended long-term cadence; this wires it in as its
-      # own step for now.
+      # this lane's intended long-term cadence.
+      #
+      # AB-275 introduces the lane's first slower-cadence scenario (a real
+      # process kill/restart, tagged `[nightly]` in its own test name) —
+      # excluded here the same way `crash-conformance-smoke` excludes
+      # everything BUT its own tag, just inverted: a negative-lookahead
+      # `--test-name-pattern` keeps every test whose name does NOT contain
+      # `[nightly]`. `nightly.yml`'s own `gateway-conformance-full` job
+      # runs this same root command with no pattern, so the `[nightly]`
+      # scenario still runs there, unfiltered, on its own cadence. See
+      # `documentation/testing-cadence.md`.
       - name: Gateway real-transport conformance (AB-98)
-        run: bun run test:gateway-conformance
+        run: bun run test:gateway-conformance -- --test-name-pattern "^(?!.*\[nightly\])"
 
       # AB-267 — replays the committed reproduction-artifact fixture through
       # the one-command replay path on every pull request, so the replay

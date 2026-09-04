@@ -29,6 +29,27 @@ import {
 /** The persistent backends the crash-conformance harness can exercise. */
 export type CrashBackend = 'sqlite' | 'lmdb';
 
+/** Which fixture process generation a marker was observed on — the first (killed) process or the second (recovered) one. */
+export type CrashProcessGeneration = 1 | 2;
+
+/**
+ * AB-275: invoked once for every marker EITHER process reports, awaited
+ * before the harness decides how to answer it (kill, or the default
+ * `proceed`/`cancel` acknowledgement) — so a caller can drive out-of-band
+ * work (e.g. a real HTTP/SSE/WebSocket client against a fixture-started
+ * gateway) exactly bracketed around one marker, without re-implementing
+ * `driveProcess`'s own stdin/stdout pacing loop (the crash-fixture reuse
+ * requirement this issue's delivery boundary names). Never called for the
+ * kill marker AFTER the kill itself — only before, in the same position an
+ * acknowledgement would otherwise be sent.
+ */
+export type CrashMarkerHook = (context: {
+  readonly generation: CrashProcessGeneration;
+  readonly pid: number;
+  readonly marker: CrashMarker;
+  readonly detail: Record<string, JsonValue> | undefined;
+}) => Promise<void>;
+
 export interface CrashScenarioOptions {
   /** Names the marker the FIRST process is killed at, with `SIGKILL`, the instant it is reported. */
   readonly killAtMarker: CrashMarker;
@@ -41,6 +62,15 @@ export interface CrashScenarioOptions {
   readonly runtime: ManualRuntimeServices;
   /** `'sqlite'` (default) or `'lmdb'` (AB-271/AB-335). */
   readonly backend?: CrashBackend;
+  /**
+   * When `true` (AB-275), BOTH fixture processes are launched with
+   * `--gateway`: each starts a real Gateway loopback listener over the
+   * same bureau, reporting its bound port in the `'ready'` marker's own
+   * `detail.gatewayPort`. Defaults to `false`.
+   */
+  readonly gateway?: boolean;
+  /** See {@link CrashMarkerHook}. Optional — a scenario with no out-of-band work needs none. */
+  readonly onMarker?: CrashMarkerHook;
 }
 
 export interface CrashMarkerObservation {
@@ -137,6 +167,8 @@ async function driveProcess(
     kill(signal?: number | NodeJS.Signals): void;
   },
   killAtMarker: CrashMarker | undefined,
+  generation: CrashProcessGeneration,
+  onMarker: CrashMarkerHook | undefined,
 ): Promise<DriveResult> {
   const result: DriveResult = { markers: [], observations: [] };
 
@@ -160,6 +192,14 @@ async function driveProcess(
 
     if (message.type === 'marker') {
       result.markers.push(observation(message));
+      if (onMarker) {
+        await onMarker({
+          generation,
+          pid: child.pid,
+          marker: message.marker,
+          detail: message.detail,
+        });
+      }
       if (killAtMarker && message.marker === killAtMarker) {
         result.killedAt = message.marker;
         child.kill('SIGKILL');
@@ -192,8 +232,16 @@ async function spawnFixture(
   backend: CrashBackend,
   mode: 'primary' | 'recovery',
   rootRunId: string | undefined,
+  gateway: boolean,
 ): Promise<Bun.Subprocess<'pipe', 'pipe', 'inherit'>> {
-  const args = [fixtureEntryPath(), storagePath, backend, mode, ...(rootRunId ? [rootRunId] : [])];
+  const args = [
+    fixtureEntryPath(),
+    storagePath,
+    backend,
+    mode,
+    ...(rootRunId ? [rootRunId] : []),
+    ...(gateway ? ['--gateway'] : []),
+  ];
   return Bun.spawn({
     cmd: ['bun', ...args],
     stdin: 'pipe',
@@ -257,8 +305,9 @@ export async function runCrashScenario(
   }
 
   try {
-    const firstProcess = await spawnFixture(storagePath, backend, 'primary', undefined);
-    const firstDrive = await driveProcess(firstProcess, options.killAtMarker);
+    const gateway = options.gateway ?? false;
+    const firstProcess = await spawnFixture(storagePath, backend, 'primary', undefined, gateway);
+    const firstDrive = await driveProcess(firstProcess, options.killAtMarker, 1, options.onMarker);
     const firstExitCode = await firstProcess.exited;
 
     const first: CrashProcessOutcome = {
@@ -272,8 +321,8 @@ export async function runCrashScenario(
 
     const rootRunId = findRootRunId(firstDrive.markers);
 
-    const secondProcess = await spawnFixture(storagePath, backend, 'recovery', rootRunId);
-    const secondDrive = await driveProcess(secondProcess, undefined);
+    const secondProcess = await spawnFixture(storagePath, backend, 'recovery', rootRunId, gateway);
+    const secondDrive = await driveProcess(secondProcess, undefined, 2, options.onMarker);
     const secondExitCode = await secondProcess.exited;
 
     const second: CrashProcessOutcome = {

@@ -300,3 +300,11 @@ bun run dev
 When type-aware linting reports broad unsafe-import errors after workspace changes, rebuild the workspace from the repository root with `bun run build` before retrying package-local validation.
 
 `bun run coverage:check` (this package's own script, and now also `--filter=gateway` in the root `coverage:check`, so CI's coverage gate covers it too) requires 100 percent line and function coverage. Twelve Svelte UI files that are untestable in Bun's runner are excluded, each listed with its reason in the repository root's `scripts/check-coverage.ts` (AB-309, AB-316).
+
+### Consuming `gateway` as a workspace dependency (AB-275)
+
+`package.json`'s `main` still points at `./src/index.ts` directly — `bun run build`'s bundled `dist/` output (`Bun.build`, no declaration emission of its own) is the deployable server/client artifact, not something meant for another package to import types from. `types` now separately points at `./dist/index.d.ts` (`bun run build` also runs `tsc --declaration --emitDeclarationOnly --project tsconfig.build.json`, using this package's OWN `tsconfig.json` settings), so a consumer's `tsc` resolves gateway's public surface from that pre-checked declaration tree instead of pulling gateway's entire runtime source into its own compilation and re-checking it under its own, possibly stricter, compiler options. `packages/integration`'s crash-conformance fixture (AB-270/AB-275, `test/crash/fixture.ts`) is the first real cross-package consumer — before this, nothing outside this package imported it at all.
+
+### Restart and durable-history replay conformance (AB-275)
+
+`src/conformance/restart.test.ts` proves the durable-history paging-to-tailing boundary survives a REAL process boundary — a real `SIGKILL`, a fresh process over the same SQLite backend — rather than only a dropped socket (`durable-history.test.ts`'s own in-process double). It reuses `packages/integration/test/crash/harness.ts`'s `runCrashScenario` and `fixture.ts`'s `--gateway` flag rather than a second process harness. Tagged `[nightly]` in its own test name: excluded from the pull-request lane (`bun run test:gateway-conformance -- --test-name-pattern "^(?!.*\[nightly\])"`, and this package's own `test` script carries the same pattern), included in full at `nightly.yml`'s cadence. See `documentation/testing-cadence.md`.

@@ -40,6 +40,17 @@
  * parked when this fixture killed the prior one sees the SAME review,
  * reconstructed from the checkpoint rather than lost with the dead
  * process's in-memory action log.
+ *
+ * AB-275: an optional fifth argv flag (`--gateway`) additionally starts a
+ * REAL `Gateway` (a real `Bun.serve` loopback listener on an
+ * operating-system-assigned ephemeral port) over the SAME bureau this
+ * fixture already builds, sharing this file's own `ManualRuntimeServices`
+ * the same way `packages/gateway/src/test/loopback.ts` does. The bound
+ * port is reported in the `'ready'` marker's own `detail` — no new marker
+ * is needed, since `'ready'` already fires once the gateway (when enabled)
+ * has started, and `CrashFixtureMessage`'s `detail` bag already accepts an
+ * arbitrary JSON record. `sqlite.test.ts`'s existing bureau-only scenario
+ * never passes `--gateway`, so it is completely unaffected.
  */
 import type {
   AnyToolbox,
@@ -56,9 +67,11 @@ import {
   createLmdbStorageFixture,
   createSqliteStorageFixture,
 } from 'bureau/test';
+import { createGateway, type Gateway } from 'gateway';
 import { z } from 'zod';
 
 import {
+  CRASH_FIXTURE_GATEWAY_AUTH_TOKEN,
   type CrashFixtureMessage,
   type CrashMarker,
   type CrashParentCommand,
@@ -417,7 +430,7 @@ type FixtureMode = 'primary' | 'recovery';
 type FixtureBackend = 'sqlite' | 'lmdb';
 
 const USAGE =
-  'crash fixture: usage: fixture.ts <storage-path> <sqlite|lmdb> <primary|recovery> [rootRunId]';
+  'crash fixture: usage: fixture.ts <storage-path> <sqlite|lmdb> <primary|recovery> [rootRunId] [--gateway]';
 
 function parseMode(value: string | undefined): FixtureMode {
   if (value === 'primary' || value === 'recovery') return value;
@@ -430,7 +443,14 @@ function parseBackend(value: string | undefined): FixtureBackend {
 }
 
 async function main(): Promise<void> {
-  const [storagePath, backendArgument, modeArgument, existingRootRunId] = process.argv.slice(2);
+  const rawArguments = process.argv.slice(2);
+  // `--gateway` (AB-275) is a trailing flag, not a positional — strip it out
+  // first so the existing `<sqlite|lmdb>`/`<primary|recovery>`/`[rootRunId]`
+  // positional parsing below is unaffected whether or not it is present.
+  const enableGateway = rawArguments.includes('--gateway');
+  const [storagePath, backendArgument, modeArgument, existingRootRunId] = rawArguments.filter(
+    (argument) => argument !== '--gateway',
+  );
   if (!storagePath) {
     throw new Error(USAGE);
   }
@@ -532,7 +552,25 @@ async function main(): Promise<void> {
     toolResultCache,
   });
 
-  await reportMarker('ready');
+  // AB-275: started BEFORE the 'ready' marker fires, over the SAME
+  // `ManualRuntimeServices` (`runtime`, already shared with the storage
+  // fixture above) `startLoopbackGateway` shares between bureau and
+  // gateway — so the bound port is available to report in 'ready's own
+  // `detail`, matching `startLoopbackGateway`'s own composition.
+  let runningGateway: Awaited<ReturnType<Gateway['start']>> | undefined;
+  let gatewayPort: number | undefined;
+  if (enableGateway) {
+    const gateway = await createGateway(bureau, {
+      port: 0,
+      hostname: '127.0.0.1',
+      authToken: CRASH_FIXTURE_GATEWAY_AUTH_TOKEN,
+      runtime,
+    });
+    runningGateway = await gateway.start();
+    gatewayPort = runningGateway.port;
+  }
+
+  await reportMarker('ready', gatewayPort !== undefined ? { gatewayPort } : undefined);
 
   if (mode === 'primary') {
     const summary = await bureau.createRun({ message: 'crash-fixture-root' });
@@ -646,6 +684,15 @@ async function main(): Promise<void> {
 
   const effectCountRaw = currentRootRunId ? await kv.get(effectCountKvKey(currentRootRunId)) : null;
   reportObservation('effect-count', effectCountRaw ?? null);
+
+  // AB-275: the gateway's own listener is stopped BEFORE the bureau shuts
+  // down — `startLoopbackGateway.stop()`'s own ordering (`running.stop()`
+  // then `bureau.shutdown()`) — so no in-flight gateway request or stream
+  // is still touching the bureau while it tears down.
+  if (runningGateway) {
+    const gatewayShutdownReport = await runningGateway.stop();
+    reportObservation('gateway-shutdown-report', toJson(gatewayShutdownReport));
+  }
 
   const report = await harness.close();
   reportObservation('shutdown-report', toJson(report.shutdownReport));
