@@ -11,6 +11,7 @@ import {
   createToolbox,
   lazy,
   type SignedPendingToolApproval,
+  ToolCancelledEvent,
   type ToolConfiguration,
   type ToolConfigurationInput,
   type ToolContext,
@@ -7572,5 +7573,286 @@ describe('buildDefaultTool forwards progress and dispatch to the tool body (AB-3
 
     expect(seen).toHaveLength(1);
     expect(seen[0]?.status).toBe('working');
+  });
+});
+
+// AB-318: every per-call toolbox event class — the fifteen bubbled from a
+// tool that AB-290 left untouched (`validate-success`, `execute-success`,
+// `execute-error`, `tool.started`, `tool.finished`, the stream events,
+// `output-chunk`, `log`, `cancelled`, `status:update`, `validate-error`,
+// `policy-denied`), plus `execute-start`/`progress`/`settled` from AB-290,
+// plus the toolbox-native `complete`/`error` — now carries `executionId`
+// and `ownerId`. These tests prove the fix actually stops cross-talk (not
+// merely that the fields exist): each records a "solo" per-event-type
+// histogram from one execution running alone, then runs two GATED
+// concurrent executions of the same shared `Tool` on one toolbox — B
+// released first, then A — and asserts each owner's own histogram exactly
+// equals the solo baseline, with no event ever misattributed to the other
+// owner's `executionId`.
+describe('every per-call toolbox event class carries execution identity, attributable across concurrent calls (AB-318)', () => {
+  /** Counts events per type for one listener bag, keyed by `event.type`. */
+  function attachHistogram(
+    toolbox: { addEventListener: (type: never, listener: (event: unknown) => void) => () => void },
+    types: readonly string[],
+  ): { counts: Record<string, number>; unsubscribe: () => void } {
+    const counts: Record<string, number> = {};
+    const unsubscribers = types.map((type) => {
+      counts[type] = 0;
+      return toolbox.addEventListener(type as never, () => {
+        counts[type] = (counts[type] ?? 0) + 1;
+      });
+    });
+    return { counts, unsubscribe: () => unsubscribers.forEach((fn) => fn()) };
+  }
+
+  const successEventTypes = [
+    'execute-start',
+    'validate-success',
+    'progress',
+    'status:update',
+    'cancelled',
+    'tool.started',
+    'stream-start',
+    'stream-chunk',
+    'stream-end',
+    'output-chunk',
+    'execute-success',
+    'settled',
+    'tool.finished',
+    'complete',
+  ] as const;
+
+  function makeSuccessTool(gate: Promise<void>) {
+    return createTool({
+      name: 'ab-318-success-tool',
+      description: 'streams two chunks, reports progress, and dispatches a status update',
+      input: z.object({ who: z.string() }),
+      telemetry: true,
+      policy: {
+        afterExecute: async () => {
+          // Deliberately fails so armorer's own catch path emits `log`
+          // (AB-318 covers `log`'s identity too) without failing the call.
+          throw new Error('synthetic afterExecute failure exercises the log event');
+        },
+      },
+      async execute({ who }, context) {
+        if (who === 'a') await gate;
+        context.progress({ percent: 50, message: 'halfway' });
+        context.dispatch(new ToolStatusUpdateEvent({ status: 'working' }));
+        context.dispatch(new ToolCancelledEvent({ reason: 'synthetic, not a real cancellation' }));
+        return {
+          async *[Symbol.asyncIterator]() {
+            yield 'chunk-1';
+            yield 'chunk-2';
+          },
+        };
+      },
+    });
+  }
+
+  it('attributes every per-call SUCCESS-path event to exactly one of two concurrent executions', async () => {
+    // `telemetry` (gates `tool.started`/`tool.finished`) is a toolbox-level
+    // option, not part of a `Tool`'s serialized `.configuration` — passing
+    // an already-built `createTool()` result to `createToolbox()` rebuilds
+    // it from that configuration (see `buildDefaultTool`), so `telemetry`
+    // must be supplied here, not on `makeSuccessTool`'s `createTool()` call.
+    const soloTool = makeSuccessTool(Promise.resolve());
+    const soloToolbox = createToolbox([soloTool], { telemetry: true });
+    const { counts: soloCounts } = attachHistogram(soloToolbox, successEventTypes);
+    await soloToolbox.execute(
+      { id: 'solo-call', name: soloTool.name, arguments: { who: 'solo' } },
+      { ownerId: 'solo-owner' },
+    );
+    for (const type of successEventTypes) {
+      expect(soloCounts[type]).toBeGreaterThan(0);
+    }
+
+    let releaseA: (() => void) | undefined;
+    const gateA = new Promise<void>((resolve) => {
+      releaseA = resolve;
+    });
+    const sharedTool = makeSuccessTool(gateA);
+    const toolbox = createToolbox([sharedTool], { telemetry: true });
+
+    const perOwnerCounts: Record<string, Record<string, number>> = {
+      'owner-a': Object.fromEntries(successEventTypes.map((type) => [type, 0])),
+      'owner-b': Object.fromEntries(successEventTypes.map((type) => [type, 0])),
+    };
+    const executionIdsByOwner: Record<string, Set<string>> = {
+      'owner-a': new Set(),
+      'owner-b': new Set(),
+    };
+    const misattributed: unknown[] = [];
+    for (const type of successEventTypes) {
+      toolbox.addEventListener(type as never, (event: any) => {
+        const ownerId: unknown = event.ownerId;
+        if (ownerId !== 'owner-a' && ownerId !== 'owner-b') {
+          misattributed.push({ type, ownerId, executionId: event.executionId });
+          return;
+        }
+        perOwnerCounts[ownerId]![type] += 1;
+        executionIdsByOwner[ownerId]!.add(String(event.executionId));
+      });
+    }
+
+    const pendingA = toolbox.execute(
+      { id: 'same-call-id', name: sharedTool.name, arguments: { who: 'a' } },
+      { ownerId: 'owner-a' },
+    );
+    const pendingB = toolbox.execute(
+      { id: 'same-call-id', name: sharedTool.name, arguments: { who: 'b' } },
+      { ownerId: 'owner-b' },
+    );
+
+    // B — the same provider-supplied `ToolCall.id` as A's still-in-flight
+    // call — settles fully (including its gated-only-for-A tool body) while
+    // A is still parked on its own gate, proving the two interleave on one
+    // shared `Tool` instance rather than running one after the other.
+    await pendingB;
+    releaseA?.();
+    await pendingA;
+
+    // No event from either call ever reached a listener under the wrong
+    // owner (misattributed stays empty throughout, checked once here after
+    // both have fully settled), each owner's own histogram matches exactly
+    // one solo execution's worth of events (no duplication, no drops), and
+    // each owner's events all carry the SAME `executionId` — a single one,
+    // distinct from the other owner's — even though both calls shared the
+    // identical provider-supplied `ToolCall.id`.
+    expect(misattributed).toEqual([]);
+    expect(perOwnerCounts['owner-a']).toEqual(soloCounts);
+    expect(perOwnerCounts['owner-b']).toEqual(soloCounts);
+    expect(executionIdsByOwner['owner-a']!.size).toBe(1);
+    expect(executionIdsByOwner['owner-b']!.size).toBe(1);
+    expect([...executionIdsByOwner['owner-a']!][0]).not.toBe(
+      [...executionIdsByOwner['owner-b']!][0],
+    );
+  });
+
+  it('attributes every per-call EXECUTE-ERROR-path event to exactly one of two concurrent executions', async () => {
+    const errorEventTypes = ['execute-error', 'settled', 'tool.finished', 'error'] as const;
+
+    function makeThrowingTool(gate: Promise<void>) {
+      return createTool({
+        name: 'ab-318-error-tool',
+        description: 'throws after an optional gate',
+        input: z.object({ who: z.string() }),
+        telemetry: true,
+        async execute({ who }) {
+          if (who === 'a') await gate;
+          throw new Error(`synthetic failure for ${who}`);
+        },
+      });
+    }
+
+    const soloTool = makeThrowingTool(Promise.resolve());
+    const soloToolbox = createToolbox([soloTool], { telemetry: true });
+    const { counts: soloCounts } = attachHistogram(soloToolbox, errorEventTypes);
+    await soloToolbox.execute(
+      { id: 'solo-error-call', name: soloTool.name, arguments: { who: 'solo' } },
+      { ownerId: 'solo-owner' },
+    );
+    for (const type of errorEventTypes) {
+      expect(soloCounts[type]).toBeGreaterThan(0);
+    }
+
+    let releaseA: (() => void) | undefined;
+    const gateA = new Promise<void>((resolve) => {
+      releaseA = resolve;
+    });
+    const sharedTool = makeThrowingTool(gateA);
+    const toolbox = createToolbox([sharedTool], { telemetry: true });
+
+    const perOwnerCounts: Record<string, Record<string, number>> = {
+      'owner-a': Object.fromEntries(errorEventTypes.map((type) => [type, 0])),
+      'owner-b': Object.fromEntries(errorEventTypes.map((type) => [type, 0])),
+    };
+    for (const type of errorEventTypes) {
+      toolbox.addEventListener(type as never, (event: any) => {
+        const ownerId: unknown = event.ownerId;
+        if (ownerId === 'owner-a' || ownerId === 'owner-b') {
+          perOwnerCounts[ownerId]![type] += 1;
+        }
+      });
+    }
+
+    const pendingA = toolbox.execute(
+      { id: 'same-error-call-id', name: sharedTool.name, arguments: { who: 'a' } },
+      { ownerId: 'owner-a' },
+    );
+    const pendingB = toolbox.execute(
+      { id: 'same-error-call-id', name: sharedTool.name, arguments: { who: 'b' } },
+      { ownerId: 'owner-b' },
+    );
+
+    await pendingB;
+    expect(perOwnerCounts['owner-a']).toEqual(
+      Object.fromEntries(errorEventTypes.map((type) => [type, 0])),
+    );
+    expect(perOwnerCounts['owner-b']).toEqual(soloCounts);
+
+    releaseA?.();
+    await pendingA;
+    expect(perOwnerCounts['owner-a']).toEqual(soloCounts);
+    expect(perOwnerCounts['owner-b']).toEqual(soloCounts);
+  });
+
+  it('attributes validate-error and policy-denied events to the concurrent execution that produced them', async () => {
+    const invalidatingTool = createTool({
+      name: 'ab-318-validate-error-tool',
+      description: 'rejects any input via a schema that never parses',
+      input: z.object({ a: z.string() }),
+      async execute() {
+        return 'unreachable';
+      },
+    });
+    const deniedTool = createTool({
+      name: 'ab-318-policy-denied-tool',
+      description: 'always denied by policy',
+      input: z.object({}),
+      policy: {
+        beforeExecute: async () => false,
+      },
+      async execute() {
+        return 'unreachable';
+      },
+    });
+    const toolbox = createToolbox([invalidatingTool, deniedTool]);
+
+    const seenValidateError: { executionId?: string; ownerId?: string }[] = [];
+    const seenPolicyDenied: { executionId?: string; ownerId?: string }[] = [];
+    toolbox.addEventListener('validate-error', (event: any) => {
+      seenValidateError.push({ executionId: event.executionId, ownerId: event.ownerId });
+    });
+    toolbox.addEventListener('policy-denied', (event: any) => {
+      seenPolicyDenied.push({ executionId: event.executionId, ownerId: event.ownerId });
+    });
+
+    const [validateResult, deniedResult] = await Promise.all([
+      toolbox.execute(
+        {
+          id: 'validate-error-call',
+          name: invalidatingTool.name,
+          arguments: { a: 42 } as unknown as { a: string },
+        },
+        { ownerId: 'owner-validate' },
+      ),
+      toolbox.execute(
+        { id: 'policy-denied-call', name: deniedTool.name, arguments: {} },
+        { ownerId: 'owner-denied' },
+      ),
+    ]);
+
+    expect(validateResult.outcome).toBe('error');
+    expect(deniedResult.outcome).toBe('error');
+
+    expect(seenValidateError).toHaveLength(1);
+    expect(seenValidateError[0]?.ownerId).toBe('owner-validate');
+    expect(seenValidateError[0]?.executionId).toBeTruthy();
+
+    expect(seenPolicyDenied).toHaveLength(1);
+    expect(seenPolicyDenied[0]?.ownerId).toBe('owner-denied');
+    expect(seenPolicyDenied[0]?.executionId).toBeTruthy();
+    expect(seenPolicyDenied[0]?.executionId).not.toBe(seenValidateError[0]?.executionId);
   });
 });

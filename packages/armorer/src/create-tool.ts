@@ -31,6 +31,7 @@ import {
   ToolExecuteErrorEvent,
   ToolExecuteStartEvent,
   ToolExecuteSuccessEvent,
+  type ToolExecutionIdentity,
   ToolFinishedEvent,
   ToolLogEvent,
   ToolOutputChunkEvent,
@@ -159,6 +160,15 @@ const toolEventClassMap: Record<string, new (detail: any) => Event> = {
   [ToolLogEvent.type]: ToolLogEvent,
   [ToolCancelledEvent.type]: ToolCancelledEvent,
 };
+
+// AB-318: every per-call event class this map can construct now carries
+// `executionId`/`ownerId`. `execute-start`, `progress`, and `settled`
+// already did (AB-290); the rest (about fifteen classes) are these two
+// events' siblings. `status-update` and `cancelled` are dispatched by user
+// tool bodies via `context.dispatch(new ToolStatusUpdateEvent(...))` rather
+// than through `emit()`, so their identity is stamped by
+// `stampDispatchedEventIdentity` below instead of at an `emit()` call site.
+const identityBearingToolEventTypes = new Set<string>(Object.keys(toolEventClassMap));
 
 /**
  * Options for creating a tool.
@@ -695,6 +705,7 @@ export function createTool<
   const runPolicyAfter = async (
     context: ToolPolicyAfterContext,
     signal?: MinimalAbortSignal,
+    identity?: ToolExecutionIdentity,
   ): Promise<void> => {
     if (!policyHooks?.afterExecute) {
       return;
@@ -709,6 +720,8 @@ export function createTool<
         level: 'warn',
         message: 'policy afterExecute failed',
         data: error,
+        executionId: identity?.executionId,
+        ownerId: identity?.ownerId,
       });
     }
   };
@@ -1082,6 +1095,7 @@ export function createTool<
               reason,
             },
             options.signal,
+            parsedDetail,
           );
 
           finishTelemetry('paused', { reason });
@@ -1134,6 +1148,7 @@ export function createTool<
             reason,
           },
           options.signal,
+          parsedDetail,
         );
         const deniedDetails: {
           reason?: string;
@@ -1189,6 +1204,7 @@ export function createTool<
               result: undefined,
             },
             options.signal,
+            parsedDetail,
           );
         } catch (error) {
           // A cache hit has no side-effect callback, but approval admission is
@@ -1250,8 +1266,35 @@ export function createTool<
         );
       };
 
+      // AB-318: a tool body dispatches `ToolStatusUpdateEvent`/
+      // `ToolCancelledEvent` (or any other known event class) directly via
+      // `context.dispatch(new SomeEvent(...))`, bypassing the `emit()` call
+      // sites above that already attach `baseDetail`'s `executionId`/
+      // `ownerId`. Reconstruct any known, identity-bearing event with THIS
+      // call's identity stamped on — using the same own-props-extract-and-
+      // reconstruct approach `create-toolbox.ts`'s bubble listener uses —
+      // so a dispatched event can't reach listeners with no identity (or,
+      // worse, a stray identity the tool body fabricated itself).
+      const contextDispatch = (event: Event): boolean => {
+        const cls = toolEventClassMap[event.type];
+        if (!cls || !identityBearingToolEventTypes.has(event.type)) {
+          return dispatch(event);
+        }
+        const eventProps: Record<string, unknown> = {};
+        for (const key of Object.getOwnPropertyNames(event)) {
+          if (key !== 'type' && key !== 'isTrusted') {
+            eventProps[key] = (event as unknown as Record<string, unknown>)[key];
+          }
+        }
+        const stamped: ToolExecutionIdentity = {
+          executionId: baseDetail.executionId,
+          ownerId: baseDetail.ownerId,
+        };
+        return dispatch(new cls({ ...eventProps, ...stamped }));
+      };
+
       const toolContext: ToolContext<E> = {
-        dispatch,
+        dispatch: contextDispatch,
         progress: reportProgress,
         meta,
         toolCall: typedToolCall,
@@ -1363,8 +1406,8 @@ export function createTool<
         chunk: unknown,
         accumulator: ReturnType<typeof createStreamingAccumulator>,
       ) => {
-        emit('stream-chunk', { chunk, index: accumulator.index });
-        emit('output-chunk', { chunk });
+        emit('stream-chunk', { ...parsedDetail, chunk, index: accumulator.index });
+        emit('output-chunk', { ...parsedDetail, chunk });
         accumulator.chunks.push(chunk);
         if (accumulator.digest) {
           accumulator.digest.update(stableStringify(chunk));
@@ -1387,7 +1430,11 @@ export function createTool<
 
       if (isAsyncIterable(value)) {
         if (options.stream === true) {
-          emit('stream-start', { mode: 'stream' });
+          emit('stream-start', {
+            mode: 'stream',
+            executionId: baseDetail.executionId,
+            ownerId: baseDetail.ownerId,
+          });
           const streamSource = value;
           const streamIterator = streamSource[Symbol.asyncIterator]();
           const accumulator = createStreamingAccumulator();
@@ -1422,7 +1469,12 @@ export function createTool<
                 accumulator.completed = true;
               } catch (error) {
                 streamError = error;
-                emit('stream-error', { error, index: accumulator.index });
+                emit('stream-error', {
+                  error,
+                  index: accumulator.index,
+                  executionId: baseDetail.executionId,
+                  ownerId: baseDetail.ownerId,
+                });
                 throw error;
               } finally {
                 options.executionHandle?.signal.removeEventListener('abort', onExecutionAbort);
@@ -1430,6 +1482,8 @@ export function createTool<
                 emit('stream-end', {
                   chunks: accumulator.index,
                   completed: accumulator.completed,
+                  executionId: baseDetail.executionId,
+                  ownerId: baseDetail.ownerId,
                 });
                 if (streamError === undefined) {
                   emit('execute-success', {
@@ -1449,7 +1503,7 @@ export function createTool<
                   if (finalized.outputDigest !== undefined) {
                     policyAfter.outputDigest = finalized.outputDigest;
                   }
-                  await runPolicyAfter(policyAfter, options.signal);
+                  await runPolicyAfter(policyAfter, options.signal, parsedDetail);
                   const successDetails: {
                     result?: unknown;
                     inputDigest?: string;
@@ -1482,6 +1536,7 @@ export function createTool<
                       error: streamError,
                     },
                     options.signal,
+                    parsedDetail,
                   );
                   const errorDetails: {
                     error?: unknown;
@@ -1514,7 +1569,11 @@ export function createTool<
           };
         }
 
-        emit('stream-start', { mode: 'collect' });
+        emit('stream-start', {
+          mode: 'collect',
+          executionId: baseDetail.executionId,
+          ownerId: baseDetail.ownerId,
+        });
         const accumulator = createStreamingAccumulator();
         try {
           for await (const chunk of value) {
@@ -1522,9 +1581,19 @@ export function createTool<
             processStreamingChunk(chunk, accumulator);
           }
           accumulator.completed = true;
-          emit('stream-end', { chunks: accumulator.index, completed: true });
+          emit('stream-end', {
+            chunks: accumulator.index,
+            completed: true,
+            executionId: baseDetail.executionId,
+            ownerId: baseDetail.ownerId,
+          });
         } catch (error) {
-          emit('stream-error', { error, index: accumulator.index });
+          emit('stream-error', {
+            error,
+            index: accumulator.index,
+            executionId: baseDetail.executionId,
+            ownerId: baseDetail.ownerId,
+          });
           throw error;
         }
         const finalized = finalizeStreamingAccumulator(accumulator);
@@ -1549,7 +1618,7 @@ export function createTool<
       if (outputDigest !== undefined) {
         policyAfter.outputDigest = outputDigest;
       }
-      await runPolicyAfter(policyAfter, options.signal);
+      await runPolicyAfter(policyAfter, options.signal, parsedDetail);
       const successDetails: {
         result?: unknown;
         inputDigest?: string;
@@ -1670,6 +1739,7 @@ export function createTool<
             error: reportedError,
           },
           options.signal,
+          baseDetail,
         );
       } catch {
         // Preserve the original timeout/cancellation result when the lifecycle
