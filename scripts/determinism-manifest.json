@@ -3,9 +3,29 @@
     "packages/*/src/test/**",
     "packages/bureau/src/test/**",
     "packages/gateway/src/conformance/**",
-    "packages/integration/test/lifecycle-contract/**"
+    "packages/integration/test/lifecycle-contract/**",
+    "packages/lifecycle/src/**",
+    "packages/lifecycle/test/**"
   ],
   "realRuntimeExemptions": [
+    {
+      "path": "packages/lifecycle/src/runtime-services.ts",
+      "reason": "AB-278's ratified Decision (2026-09-03) names this module as \"the one module allowed to call the real globals because it is their injection point\": createDefaultRuntimeServices() is the sole real-globals implementation of the RuntimeServices contract (AB-252). Every other module composes against the RuntimeServices interface and swaps in createManualRuntimeServices() for tests instead.",
+      "owner": "Agent Bureau team",
+      "owningIssue": "AB-252"
+    },
+    {
+      "path": "packages/lifecycle/test/runtime-services.test.ts",
+      "reason": "This is the direct test of createDefaultRuntimeServices() itself (the real-globals implementation) — it asserts clock.now() tracks the real Date.now(), monotonic.now() tracks real elapsed time, and timers schedule and cancel real callbacks. Injecting createManualRuntimeServices() here would test the fake instead of the real adapter it exists to prove correct.",
+      "owner": "Agent Bureau team",
+      "owningIssue": "AB-252"
+    },
+    {
+      "path": "packages/lifecycle/test/manual-runtime-services.test.ts",
+      "reason": "One assertion (\"never calls a real timer — advance() settles synchronously with respect to wall-clock time\") measures real performance.now() before and after a 60-second virtual advance() to prove the manual runtime's advance() does not consume real wall-clock time. Proving the absence of a real timer necessarily requires measuring against the real clock as ground truth; an injected manual clock cannot serve as its own control.",
+      "owner": "Agent Bureau team",
+      "owningIssue": "AB-252"
+    },
     {
       "path": "packages/gateway/src/conformance/**",
       "reason": "AB-98's real-runtime conformance tier (AB-92's test-tier matrix): a real Bun HTTP/SSE/WebSocket loopback server bound to an operating-system-assigned ephemeral port, real fetch/WebSocket clients, and one deterministic bounded-drain read after a duplicate-subscription assertion (AbortSignal/ping-pong fenced, not a fixed sleep) — this tier exists specifically to exercise real sockets, which the deterministic tiers below it cannot.",
