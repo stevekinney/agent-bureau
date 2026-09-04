@@ -1,8 +1,9 @@
 /**
- * The process-crash conformance harness (AB-270): launches `fixture.ts` as a
- * real, separate OS process over a unique temporary SQLite backend,
- * SIGKILLs it the instant it reports a named `CrashMarker`, then launches a
- * fresh process over the SAME backend path and drives it to completion.
+ * The process-crash conformance harness (AB-270, extended to LMDB by
+ * AB-335/AB-271): launches `fixture.ts` as a real, separate OS process over
+ * a unique temporary persistent backend, SIGKILLs it the instant it reports
+ * a named `CrashMarker`, then launches a fresh process over the SAME
+ * backend path and drives it to completion.
  *
  * Every wait here is an IPC message (a line read off the child's stdout) or
  * `child.exited` — never a sleep, never a poll on wall time. The parent
@@ -14,7 +15,7 @@ import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import type { ManualRuntimeServices } from '@lostgradient/operative/test';
-import { createSqliteStorageFixture } from 'bureau/test';
+import { createLmdbStorageFixture, createSqliteStorageFixture } from 'bureau/test';
 
 import {
   type CrashFixtureMessage,
@@ -25,32 +26,21 @@ import {
   type JsonValue,
 } from './protocol';
 
-/** Thrown before any process is spawned when `options.backend` names a backend this harness cannot exercise yet. */
-export class CrashHarnessUnsupportedBackendError extends Error {
-  readonly backend: string;
-
-  constructor(backend: string) {
-    super(
-      `Crash-conformance harness (AB-270) supports only the "sqlite" backend on this ` +
-        `baseline; "${backend}" is not supported. LMDB is AB-271's scope.`,
-    );
-    this.name = 'CrashHarnessUnsupportedBackendError';
-    this.backend = backend;
-  }
-}
+/** The persistent backends the crash-conformance harness can exercise. */
+export type CrashBackend = 'sqlite' | 'lmdb';
 
 export interface CrashScenarioOptions {
   /** Names the marker the FIRST process is killed at, with `SIGKILL`, the instant it is reported. */
   readonly killAtMarker: CrashMarker;
   /**
    * The harness identifier source (AB-92's `RuntimeServices`) used to name
-   * the unique temporary SQLite path this scenario allocates. Two
+   * the unique temporary storage path this scenario allocates. Two
    * scenarios sharing one `runtime` still never collide — see
    * `storage-fixtures.ts`'s own per-instance sequence.
    */
   readonly runtime: ManualRuntimeServices;
-  /** Only `'sqlite'` is supported on this baseline (AB-271 owns LMDB). Defaults to `'sqlite'`. */
-  readonly backend?: 'sqlite';
+  /** `'sqlite'` (default) or `'lmdb'` (AB-271/AB-335). */
+  readonly backend?: CrashBackend;
 }
 
 export interface CrashMarkerObservation {
@@ -199,10 +189,11 @@ function fixtureEntryPath(): string {
 
 async function spawnFixture(
   storagePath: string,
+  backend: CrashBackend,
   mode: 'primary' | 'recovery',
   rootRunId: string | undefined,
 ): Promise<Bun.Subprocess<'pipe', 'pipe', 'inherit'>> {
-  const args = [fixtureEntryPath(), storagePath, mode, ...(rootRunId ? [rootRunId] : [])];
+  const args = [fixtureEntryPath(), storagePath, backend, mode, ...(rootRunId ? [rootRunId] : [])];
   return Bun.spawn({
     cmd: ['bun', ...args],
     stdin: 'pipe',
@@ -244,29 +235,29 @@ function findRootRunId(markers: readonly CrashMarkerObservation[]): string | und
 }
 
 /**
- * Runs one crash scenario end to end: allocates a unique temporary SQLite
+ * Runs one crash scenario end to end: allocates a unique temporary storage
  * path, launches `fixture.ts` as the first process, kills it at
  * `options.killAtMarker`, launches a second `fixture.ts` process over the
  * same path, drives it to a clean exit, and cleans up the temporary path
- * (including its `-wal`/`-shm` sidecars) — even when the first process was
- * killed mid-write.
+ * (a file plus its `-wal`/`-shm` sidecars for SQLite, a directory for LMDB)
+ * — even when the first process was killed mid-write.
  */
 export async function runCrashScenario(
   options: CrashScenarioOptions,
 ): Promise<CrashScenarioReport> {
   const backend = options.backend ?? 'sqlite';
-  if (backend !== 'sqlite') {
-    throw new CrashHarnessUnsupportedBackendError(backend);
-  }
 
-  const storage = createSqliteStorageFixture({ runtime: options.runtime });
+  const storage =
+    backend === 'lmdb'
+      ? createLmdbStorageFixture({ runtime: options.runtime })
+      : createSqliteStorageFixture({ runtime: options.runtime });
   const storagePath = storage.path;
   if (!storagePath) {
-    throw new Error('crash harness: sqlite storage fixture did not allocate a path');
+    throw new Error(`crash harness: ${backend} storage fixture did not allocate a path`);
   }
 
   try {
-    const firstProcess = await spawnFixture(storagePath, 'primary', undefined);
+    const firstProcess = await spawnFixture(storagePath, backend, 'primary', undefined);
     const firstDrive = await driveProcess(firstProcess, options.killAtMarker);
     const firstExitCode = await firstProcess.exited;
 
@@ -281,7 +272,7 @@ export async function runCrashScenario(
 
     const rootRunId = findRootRunId(firstDrive.markers);
 
-    const secondProcess = await spawnFixture(storagePath, 'recovery', rootRunId);
+    const secondProcess = await spawnFixture(storagePath, backend, 'recovery', rootRunId);
     const secondDrive = await driveProcess(secondProcess, undefined);
     const secondExitCode = await secondProcess.exited;
 
@@ -306,10 +297,12 @@ export async function runCrashScenario(
     };
   } finally {
     await storage.dispose();
-    // Belt-and-suspenders beyond the fixture's own `-wal`/`-shm` cleanup:
-    // confirm the primary file itself is gone too (dispose() already does
-    // this; this loop is here so a future dispose() regression fails this
-    // harness's own callers loudly instead of leaking silently).
-    await rm(storagePath, { force: true });
+    // Belt-and-suspenders beyond the fixture's own storage cleanup: confirm
+    // the path itself is gone too (dispose() already does this; this call
+    // is here so a future dispose() regression fails this harness's own
+    // callers loudly instead of leaking silently). LMDB's path is a
+    // directory, SQLite's a file — `recursive: true` is a safe no-op for a
+    // plain file.
+    await rm(storagePath, { recursive: true, force: true });
   }
 }
