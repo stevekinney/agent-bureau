@@ -1,7 +1,8 @@
 /**
- * The crash-conformance child-process entry point (AB-270). Launched by
- * `harness.ts` via `Bun.spawn`, once per process generation, against a
- * shared SQLite backend path. Talks to the parent EXCLUSIVELY over
+ * The crash-conformance child-process entry point (AB-270, extended to LMDB
+ * by AB-335). Launched by `harness.ts` via `Bun.spawn`, once per process
+ * generation, against a shared SQLite or LMDB backend path (`argv[2]` names
+ * the path, `argv[3]` the backend). Talks to the parent EXCLUSIVELY over
  * structured line-delimited JSON on stdout (see `protocol.ts`); every log
  * line this file itself wants to leave for a human goes to stderr instead,
  * so stdout stays pure protocol.
@@ -50,7 +51,11 @@ import { stopWhen } from '@lostgradient/operative';
 import { createManualRuntimeServices, waitForCondition } from '@lostgradient/operative/test';
 import { createTool, createToolbox, createToolResultCache, type ToolResultCache } from 'armorer';
 import type { PendingReview } from 'bureau';
-import { createBureauTestHarness, createSqliteStorageFixture } from 'bureau/test';
+import {
+  createBureauTestHarness,
+  createLmdbStorageFixture,
+  createSqliteStorageFixture,
+} from 'bureau/test';
 import { z } from 'zod';
 
 import {
@@ -243,7 +248,7 @@ interface FixtureToolDeps {
   readonly toolResultCache: ToolResultCache;
 }
 
-function createFixtureToolbox(deps: FixtureToolDeps): AnyToolbox {
+function createFixtureToolbox(getDeps: () => Promise<FixtureToolDeps>): AnyToolbox {
   // `register-child` dispatches `bureau.createRun` — an effect with no
   // caller-supplied idempotency key of its own — so it is guarded by the
   // SAME idempotency-cache pattern as `perform-effect` below: without this,
@@ -256,9 +261,13 @@ function createFixtureToolbox(deps: FixtureToolDeps): AnyToolbox {
     description: 'Dispatches a durable child run and records its identity, exactly once.',
     input: z.object({}),
     async execute() {
+      // AB-335: awaits real dependencies rather than throwing when they are
+      // not yet wired — see this file's `depsPromise` comment in `main()`.
+      const deps = await getDeps();
       const key = childKvKey(deps.rootRunId);
       const attemptId = `attempt-${crypto.randomUUID()}`;
-      const claim = await deps.toolResultCache.claimStarted(`register-child:${key}`, {
+      const cacheKey = `register-child:${key}`;
+      const claim = await deps.toolResultCache.claimStarted(cacheKey, {
         status: 'started',
         toolName: 'register-child',
         startedAt: Date.now(),
@@ -292,7 +301,7 @@ function createFixtureToolbox(deps: FixtureToolDeps): AnyToolbox {
       await reportMarker('child-registered', { childRunId: child.id, parentRunId: deps.rootRunId });
 
       await deps.toolResultCache.completeStarted(
-        `register-child:${key}`,
+        cacheKey,
         attemptId,
         {
           status: 'completed',
@@ -313,6 +322,9 @@ function createFixtureToolbox(deps: FixtureToolDeps): AnyToolbox {
     description: 'Performs one idempotency-guarded external effect exactly once.',
     input: z.object({}),
     async execute() {
+      // AB-335: awaits real dependencies rather than throwing when they are
+      // not yet wired — see this file's `depsPromise` comment in `main()`.
+      const deps = await getDeps();
       const key = effectKvKey(deps.rootRunId);
       const attemptId = `attempt-${crypto.randomUUID()}`;
       const claim = await deps.toolResultCache.claimStarted(key, {
@@ -383,56 +395,142 @@ function createFixtureToolbox(deps: FixtureToolDeps): AnyToolbox {
 
 const NON_TERMINAL_STATUSES = new Set(['pending', 'running', 'suspended']);
 
+/**
+ * AB-271/AB-335: a real (tiny) per-iteration delay for `waitForCondition`'s
+ * `yieldTurn` parameter, in place of its default zero-delay `MessageChannel`
+ * macrotask (`yieldToPortableEventLoop`). Root-caused directly (AB-306,
+ * `packages/bureau/src/test/harness-lmdb-isolation.test.ts`'s
+ * `waitForRunCompletion`): a tight zero-delay macrotask loop is scheduled
+ * AHEAD of `lmdb`'s own native write-completion callback, so a pending write
+ * the loop is waiting to observe never lands while the loop spins. This
+ * mirrors that already-established, already-merged mitigation rather than
+ * inventing a new one — WFT-138 (Backlog) tracks the actual production fix
+ * (a test-mode `noSync`/`noMetaSync` LMDBStorage option); once it lands this
+ * real-delay yield can be dropped for the default one everywhere in this
+ * file. Still a bounded, condition-checked poll — never a blind sleep.
+ */
+function realDelayYield(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 5));
+}
+
+/**
+ * AB-271/AB-335: reads `bureau.getDurableRun(runId)` right after THIS SAME
+ * process minted or reattached `runId`. Over LMDB, retries with a real
+ * per-iteration delay until the record is visible — this run was just
+ * created or reattached one line above, in this same process, so a
+ * genuinely absent record here is not a modeled outcome; it is riding out
+ * lmdb-js's own batched-write-visibility delay (`claimStarted`'s write for a
+ * tool call resolves once "the next batched transaction commits", per
+ * `@lostgradient/weft/storage/lmdb.ts`'s own doc comment — the FIRST read of
+ * a just-minted record can land before that batch's visibility settles).
+ * Every other read of `getDurableRun` in this file reads exactly once and
+ * returns whatever it sees — including `null`/`undefined` — as a genuine
+ * observation, never silently retried.
+ */
+async function readDurableRunWithRetry(
+  bureau: { getDurableRun(runId: string): Promise<{ status: string } | null | undefined> },
+  runId: string,
+  backend: FixtureBackend,
+  mode: FixtureMode,
+): Promise<{ status: string } | null | undefined> {
+  // Only primary mode rides out the same-process visibility race: a
+  // recovery-mode miss is reading a DIFFERENT process's write, so it is
+  // either a genuine recovery gap or evidence the write itself was never
+  // durable before the kill — never silently retried.
+  if (backend !== 'lmdb' || mode !== 'primary') return bureau.getDurableRun(runId);
+
+  let last: { status: string } | null | undefined;
+  await waitForCondition(
+    async () => {
+      last = await bureau.getDurableRun(runId);
+      return last !== null && last !== undefined;
+    },
+    `crash fixture: run "${runId}" was never visible through bureau.getDurableRun immediately after being minted in this same process`,
+    200,
+    realDelayYield,
+  );
+  return last;
+}
+
 type FixtureMode = 'primary' | 'recovery';
+type FixtureBackend = 'sqlite' | 'lmdb';
+
+const USAGE =
+  'crash fixture: usage: fixture.ts <storage-path> <sqlite|lmdb> <primary|recovery> [rootRunId]';
 
 function parseMode(value: string | undefined): FixtureMode {
   if (value === 'primary' || value === 'recovery') return value;
-  throw new Error(`crash fixture: usage: fixture.ts <sqlite-path> <primary|recovery> [rootRunId]`);
+  throw new Error(USAGE);
+}
+
+function parseBackend(value: string | undefined): FixtureBackend {
+  if (value === 'sqlite' || value === 'lmdb') return value;
+  throw new Error(USAGE);
 }
 
 async function main(): Promise<void> {
-  const [storagePath, modeArgument, existingRootRunId] = process.argv.slice(2);
+  const [storagePath, backendArgument, modeArgument, existingRootRunId] = process.argv.slice(2);
   if (!storagePath) {
-    throw new Error(
-      'crash fixture: usage: fixture.ts <sqlite-path> <primary|recovery> [rootRunId]',
-    );
+    throw new Error(USAGE);
   }
+  const backend = parseBackend(backendArgument);
   const mode = parseMode(modeArgument);
 
   const runtime = createManualRuntimeServices();
-  const storage = createSqliteStorageFixture({ runtime, path: storagePath });
+  const storage =
+    backend === 'lmdb'
+      ? createLmdbStorageFixture({ runtime, path: storagePath })
+      : createSqliteStorageFixture({ runtime, path: storagePath });
 
   // `BureauOptions.toolbox` is fixed at construction, but this fixture's
   // real tools need `bureau.createRun`/`bureau.kv` — which do not exist
-  // until construction resolves. Break the cycle with a mutable ref: the
-  // toolbox is built FIRST, with tool bodies that close over `deps` and
-  // read `deps.current` lazily — safe because no tool's `execute()` is
-  // ever invoked before the first run starts, which is strictly after
-  // `createBureauTestHarness` below resolves and populates the ref.
+  // until construction resolves. Break the cycle with a DEFERRED PROMISE,
+  // not a throw-if-unset ref (AB-335's own root cause — see below): the
+  // toolbox is built FIRST, with tool bodies that `await` `depsPromise`,
+  // resolved once `createBureauTestHarness` below resolves and the real
+  // deps are ready.
+  //
+  // AB-335: this file's own prior version used a mutable ref (`deps: {
+  // current?: FixtureToolDeps }`) with a `requireDeps()` that THREW
+  // immediately when a tool fired before the ref was populated, on the
+  // stated assumption that "no tool's `execute()` is ever invoked before
+  // the first run starts, which is strictly after `createBureauTestHarness`
+  // resolves." That assumption is false for a RECOVERED run:
+  // `create-bureau.ts`'s own boot-recovery doc comment is explicit that
+  // "Boot returns once `recoverAll()` has STARTED the handles and they are
+  // registered, not when they complete" — a recovered run's first step
+  // (generate + tool dispatch) can already be in flight before
+  // `createBureauTestHarness`'s promise resolves. Root-caused directly by
+  // instrumenting `generate`'s entry: over the LMDB backend the recovered
+  // process's SECOND `generate` call (step 1) showed a conversation already
+  // carrying a `tool-result` for `register-child` with
+  // `outcome: 'error'`, `message: 'crash fixture: toolbox invoked before
+  // bureau was ready'` — the OLD `requireDeps()` throw, fired by boot
+  // recovery's own eager tool dispatch, racing this file's post-construction
+  // `deps.current = {...}` assignment below. Weft's per-step memo then
+  // durably checkpoints that ERROR as step 0's final result, so replay never
+  // re-invokes `register-child` again — armorer's `claimStarted` is never
+  // even reached on the recovered process. LMDB's faster, more synchronous
+  // recovery path wins this race consistently (10/10 observed); SQLite's
+  // slower path consistently loses it, which is why this scenario has
+  // passed on SQLite. The fix is not a retry — the coordinator ruling
+  // (AB-335) explicitly forbids that — it removes the race: every tool body
+  // now correctly WAITS for its real dependencies instead of treating "not
+  // yet ready" as a terminal error.
   let currentRootRunId = existingRootRunId ?? '';
-  const deps: { current?: FixtureToolDeps } = {};
-  // Every forwarded callback below fails fast — the SAME behavior for all
-  // six — rather than some throwing and others silently no-opping when
-  // called before `deps.current` is populated. A silent no-op here (e.g.
-  // `registerDurableRun` dropping a run on the floor) would mask an
-  // initialization-order bug as a missing quiescence registration instead
-  // of a loud, immediate error.
-  function requireDeps(): FixtureToolDeps {
-    if (!deps.current) throw new Error('crash fixture: toolbox invoked before bureau was ready');
-    return deps.current;
-  }
-  const fixtureToolbox = createFixtureToolbox({
-    get rootRunId() {
-      return currentRootRunId;
-    },
-    createChildRun: (message) => requireDeps().createChildRun(message),
-    registerDurableRun: (runId) => requireDeps().registerDurableRun(runId),
-    kvGet: (key) => requireDeps().kvGet(key),
-    kvSet: (key, value) => requireDeps().kvSet(key, value),
-    get toolResultCache() {
-      return requireDeps().toolResultCache;
-    },
+  // `rootRunId` is deliberately NOT captured inside `depsPromise`'s resolved
+  // value: in primary mode it is only assigned (below) strictly AFTER
+  // `depsPromise` resolves, so a tool call's `getDeps()` must re-read
+  // `currentRootRunId` live, on every call, the same way the old getter did.
+  let resolveRestOfDeps!: (deps: Omit<FixtureToolDeps, 'rootRunId'>) => void;
+  const restOfDepsPromise = new Promise<Omit<FixtureToolDeps, 'rootRunId'>>((resolve) => {
+    resolveRestOfDeps = resolve;
   });
+  async function getDeps(): Promise<FixtureToolDeps> {
+    const rest = await restOfDepsPromise;
+    return { ...rest, rootRunId: currentRootRunId };
+  }
+  const fixtureToolbox = createFixtureToolbox(getDeps);
 
   const generate = createFixtureGenerate();
 
@@ -462,8 +560,7 @@ async function main(): Promise<void> {
   }
   const kv = bureau.kv;
   const toolResultCache = createToolResultCache({ store: kv, namespace: 'crash-fixture-cache' });
-  deps.current = {
-    rootRunId: '',
+  resolveRestOfDeps({
     async createChildRun(message: string) {
       const summary = await bureau.createRun({ message });
       return { id: summary.id, sessionId: summary.sessionId };
@@ -472,7 +569,7 @@ async function main(): Promise<void> {
     kvGet: (key) => kv.get(key),
     kvSet: (key, value) => kv.set(key, value),
     toolResultCache,
-  };
+  });
 
   await reportMarker('ready');
 
@@ -492,7 +589,9 @@ async function main(): Promise<void> {
     reportObservation('resumed-root-run-id', null);
   }
 
-  const rootState = currentRootRunId ? await bureau.getDurableRun(currentRootRunId) : null;
+  const rootState = currentRootRunId
+    ? await readDurableRunWithRetry(bureau, currentRootRunId, backend, mode)
+    : null;
   let rootIsNonTerminal = !!rootState && NON_TERMINAL_STATUSES.has(rootState.status);
 
   if (rootIsNonTerminal) {
@@ -520,7 +619,8 @@ async function main(): Promise<void> {
         return !state || !NON_TERMINAL_STATUSES.has(state.status);
       },
       `crash fixture: run "${currentRootRunId}" neither parked on requestHumanInput nor reached a terminal status`,
-      5000,
+      backend === 'lmdb' ? 400 : 5000,
+      backend === 'lmdb' ? realDelayYield : undefined,
     );
 
     if (humanWaitReview) {
@@ -556,7 +656,8 @@ async function main(): Promise<void> {
         return !!state && !NON_TERMINAL_STATUSES.has(state.status);
       },
       `crash fixture: run "${currentRootRunId}" never reached a terminal status`,
-      5000,
+      backend === 'lmdb' ? 400 : 5000,
+      backend === 'lmdb' ? realDelayYield : undefined,
     );
     await reportMarker('cancellation-recorded', { runId: currentRootRunId });
   }
