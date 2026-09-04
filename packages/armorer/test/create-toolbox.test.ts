@@ -8111,6 +8111,22 @@ describe('reusable approval grants (AB-46, AB-346)', () => {
     expect(result.outcome).toBe('action_required');
   });
 
+  it('treats a grant with an unrecognized version as absent, never an implicit deny', async () => {
+    // The HMAC alone can't protect against a version bump changing matching
+    // semantics — a grant must also declare the exact version this toolbox
+    // understands (Copilot review PRRT_kwDORvupsc6fN8yV).
+    const grant = buildGrant({ version: 2 as unknown as typeof GRANT_VERSION });
+    const { toolbox, grantStateStore } = await buildGrantToolbox([grant]);
+
+    const result = await toolbox.execute(
+      { id: 'call-unrecognized-version', name: 'read-file', arguments: {} },
+      { requestContext: grantRequestContext },
+    );
+
+    expect(result.outcome).toBe('action_required');
+    expect(await usesRemainingOf(grantStateStore, grant.id)).toBe(3);
+  });
+
   it('never lets a matching grant override a capability deny', async () => {
     const grant = buildGrant();
     const grantStateStore = createProcessLocalGrantStateStore();
@@ -8225,6 +8241,31 @@ describe('reusable approval grants (AB-46, AB-346)', () => {
     );
 
     expect(result.outcome).toBe('action_required');
+  });
+
+  it('treats a literal `?` in a resourcePattern as a literal character, not a regex quantifier', async () => {
+    // Copilot review PRRT_kwDORvupsc6fN8zC: only `*` is a documented
+    // wildcard, so `?` must be escaped rather than left as a regex
+    // quantifier that would let "report" match a pattern like "report?".
+    const grant = buildGrant({ resourcePattern: 'report?' });
+    const { toolbox, grantStateStore } = await buildGrantToolbox([grant]);
+
+    const literalMatch = await toolbox.execute(
+      { id: 'call-literal-question-mark', name: 'read-file', arguments: { resource: 'report?' } },
+      { requestContext: grantRequestContext },
+    );
+    expect(literalMatch.outcome).toBe('success');
+
+    const wouldMatchIfQuantifier = await toolbox.execute(
+      {
+        id: 'call-question-mark-not-quantifier',
+        name: 'read-file',
+        arguments: { resource: 'report' },
+      },
+      { requestContext: grantRequestContext },
+    );
+    expect(wouldMatchIfQuantifier.outcome).toBe('action_required');
+    expect(await usesRemainingOf(grantStateStore, grant.id)).toBe(2);
   });
 
   it('matches argumentConstraints by deep equality against the call arguments', async () => {

@@ -3458,6 +3458,7 @@ async function findMatchingGrant(
   const grants = await grantStateStore.list();
   for (const grant of grants) {
     if (
+      grant.version !== GRANT_VERSION ||
       grant.revoked ||
       grant.usesRemaining <= 0 ||
       now >= grant.expiresAt ||
@@ -3497,7 +3498,7 @@ function matchesResourcePattern(pattern: string | undefined, params: unknown): b
   if (!isRecord(params) || typeof params['resource'] !== 'string') {
     return false;
   }
-  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+  const escaped = pattern.replace(/[.+^${}()|[\]\\?]/g, '\\$&').replace(/\*/g, '.*');
   return new RegExp(`^${escaped}$`).test(params['resource']);
 }
 
