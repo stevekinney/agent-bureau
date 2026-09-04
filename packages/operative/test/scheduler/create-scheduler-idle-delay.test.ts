@@ -115,35 +115,43 @@ describe('createScheduler — idleDelay against a manual runtime', () => {
 
     scheduler.start();
 
-    // The first task has no prior completion to gate against, so it
-    // dispatches immediately.
-    await waitForEventLoop(() => dispatchOrder.length >= 1);
-    expect(dispatchOrder).toEqual(['first']);
+    try {
+      // The first task has no prior completion to gate against, so it
+      // dispatches immediately.
+      await waitForEventLoop(() => dispatchOrder.length >= 1);
+      expect(dispatchOrder).toEqual(['first']);
 
-    // Once the first task's run fully settles, the scheduling loop arms the
-    // idle-gate timer for the second (still-queued) task — its presence in
-    // `pendingTimers()` is itself the deterministic signal that the first
-    // task has completed and `lastTaskCompletedAt` was stamped.
-    await waitForEventLoop(() => runtime.pendingTimers().length > 0);
-    const [gateTimer] = runtime.pendingTimers();
-    if (!gateTimer) throw new Error('expected an idle-gate timer to be armed');
-    const completedAt = runtime.monotonic.now();
-    expect(gateTimer.dueAt).toBe(completedAt + idleDelay);
+      // Once the first task's run fully settles, the scheduling loop arms
+      // the idle-gate timer for the second (still-queued) task — its
+      // presence in `pendingTimers()` is itself the deterministic signal
+      // that the first task has completed and `lastTaskCompletedAt` was
+      // stamped.
+      await waitForEventLoop(() => runtime.pendingTimers().length > 0);
+      const [gateTimer] = runtime.pendingTimers();
+      if (!gateTimer) throw new Error('expected an idle-gate timer to be armed');
+      const completedAt = runtime.monotonic.now();
+      expect(gateTimer.dueAt).toBe(completedAt + idleDelay);
 
-    // Advancing to just short of the gate's due time must NOT release the
-    // second dispatch — this is the direct proof the original wall-clock
-    // measurement stood in for.
-    await runtime.advance(idleDelay - 1);
-    expect(dispatchOrder).toEqual(['first']);
-    expect(runtime.monotonic.now()).toBeLessThan(gateTimer.dueAt);
+      // Advancing to just short of the gate's due time must NOT release the
+      // second dispatch — this is the direct proof the original wall-clock
+      // measurement stood in for.
+      await runtime.advance(idleDelay - 1);
+      expect(dispatchOrder).toEqual(['first']);
+      expect(runtime.monotonic.now()).toBeLessThan(gateTimer.dueAt);
 
-    // The remaining millisecond crosses the gate's due time and releases it.
-    await runtime.advance(1);
-    expect(runtime.monotonic.now()).toBe(gateTimer.dueAt);
-    await waitForEventLoop(() => dispatchOrder.length >= 2);
-    expect(dispatchOrder).toEqual(['first', 'second']);
+      // The remaining millisecond crosses the gate's due time and releases
+      // it.
+      await runtime.advance(1);
+      expect(runtime.monotonic.now()).toBe(gateTimer.dueAt);
+      await waitForEventLoop(() => dispatchOrder.length >= 2);
+      expect(dispatchOrder).toEqual(['first', 'second']);
 
-    await Promise.all(results);
-    await scheduler.stop();
+      await Promise.all(results);
+    } finally {
+      // Guaranteed cleanup: a thrown assertion above must not leave the
+      // scheduling loop running and leaking work into later tests under
+      // bun's concurrent execution (review finding on this PR).
+      await scheduler.stop();
+    }
   });
 });
