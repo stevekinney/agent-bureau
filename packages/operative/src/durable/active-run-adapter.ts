@@ -875,10 +875,19 @@ export function createDurableActiveRun(
       ]);
       return { status: 'completed' };
     }
-    // abort() may have been called before `driveStarted` — the workflow did
-    // not exist yet, so it never fired engine.cancel(). By the time `result`
-    // has settled the workflow certainly exists, so fire it here instead.
-    await (cancelSettled ?? context.engine.cancel(runId).catch(() => undefined));
+    // `cancelSettled` is always set by this point. `neverLaunched` above
+    // has already returned for the one case that used to leave it unset —
+    // `abort()` (direct or signal-triggered) firing before `driveStarted`
+    // flipped true, when the workflow did not exist yet and `abort()`'s own
+    // `if (driveStarted)` guard skipped `engine.cancel()`. Every other way
+    // to reach this line — `cancelRequested` or `combinedSignal.aborted`
+    // becoming true — only happens through that same `abort()` function
+    // (there is no other writer), and by the time `result` has settled
+    // `driveDurableRun` has certainly already reached the deferred
+    // microtask, so `driveStarted` was already true when `abort()` ran and
+    // its `cancelSettled ??= context.engine.cancel(...)` assignment above
+    // already fired.
+    await cancelSettled;
     try {
       const state = await context.engine.get(runId);
       // `engine.cancel` resolving void is not proof the cancellation record
