@@ -1,9 +1,11 @@
 import type { GenerateFunction } from '@lostgradient/operative';
-import { LIVENESS_POLICY_VERSION } from '@lostgradient/operative/liveness';
+import type { DurableEventEnvelope, DurableEventOwner } from '@lostgradient/operative/durable';
+import { LIVENESS_POLICY_VERSION, type Subscription } from '@lostgradient/operative/liveness';
 import { describe, expect, it } from 'bun:test';
 import { createBureau } from 'bureau';
 import { waitForRunState } from 'bureau/test';
 
+import type { LiveFrameBrokerDurableEventHistory } from './live-events';
 import { LiveFrameBroker } from './live-events';
 import { createManualLiveFrameBrokerClock } from './test';
 import type { ServerFrame } from './types';
@@ -866,5 +868,275 @@ describe('WebSocket disconnect shares the SSE subscriber-removal mechanism (AB-2
 
     handler.close(fakeSocket);
     expect(broker.subscriberCount).toBe(0);
+  });
+});
+
+function createDurableEnvelope(
+  overrides: Partial<DurableEventEnvelope> = {},
+): DurableEventEnvelope {
+  return {
+    kind: 'run.completed',
+    owner: { kind: 'run', id: 'run-1' },
+    sequence: 1,
+    cursor: '1',
+    emittedAtMs: 1_000,
+    payload: { content: 'done' },
+    schemaVersion: 1,
+    ...overrides,
+  };
+}
+
+/**
+ * A fake `LiveFrameBrokerDurableEventHistory` (AB-312): delivers every
+ * envelope configured for an owner id synchronously, from inside
+ * `subscribeEventHistory` itself — sufficient for these unit tests, which
+ * exercise the broker's own wiring (what it calls, what it suppresses, what
+ * it forwards), not `Bureau.subscribeEventHistory`'s own async timing
+ * (covered by `durable-event-history.test.ts` and the conformance suite).
+ */
+function createFakeDurableEventHistory(envelopesByRunId: Record<string, DurableEventEnvelope[]>) {
+  const subscribeCalls: DurableEventOwner[] = [];
+  const subscriptions: { owner: DurableEventOwner; closed: boolean }[] = [];
+
+  const history: LiveFrameBrokerDurableEventHistory = {
+    subscribeEventHistory(owner, listener) {
+      subscribeCalls.push(owner);
+      for (const envelope of envelopesByRunId[owner.id] ?? []) {
+        listener(envelope);
+      }
+
+      const record = { owner, closed: false };
+      subscriptions.push(record);
+      const subscription: Subscription = {
+        unsubscribe: () => {
+          record.closed = true;
+        },
+        get closed() {
+          return record.closed;
+        },
+      };
+      return subscription;
+    },
+  };
+
+  return { history, subscribeCalls, subscriptions };
+}
+
+describe('LiveFrameBroker — AB-312 durable-history reconnect fallback', () => {
+  it('falls back to durable history when "since" is older than what the buffer holds (buffer empty — e.g. after a restart)', () => {
+    const { history, subscribeCalls } = createFakeDurableEventHistory({
+      'run-1': [createDurableEnvelope()],
+    });
+    const broker = new LiveFrameBroker({ durableEventHistory: history });
+    const received: ServerFrame[] = [];
+    const key = {};
+
+    broker.addSubscriber(key, (frame) => received.push(frame), {});
+    const replay = broker.subscribe(key, 'run-1', 5);
+
+    expect(replay).toEqual([]);
+    expect(subscribeCalls).toEqual([{ kind: 'run', id: 'run-1' }]);
+    expect(received).toHaveLength(1);
+    expect(received[0]).toMatchObject({
+      type: 'durable-event',
+      runId: 'run-1',
+      event: 'run.completed',
+      detail: { content: 'done' },
+      cursor: '1',
+    });
+    // The durable-event frame carries no `runSeq` — it is not part of the
+    // AB-15 in-memory replay cursor space.
+    expect(received[0]).not.toHaveProperty('runSeq');
+  });
+
+  it('does not fall back when the buffer already covers "since" (today\'s fast path is unchanged)', () => {
+    const { history, subscribeCalls } = createFakeDurableEventHistory({});
+    const broker = new LiveFrameBroker({ durableEventHistory: history });
+    const key = {};
+
+    broker.addSubscriber(key, () => undefined, {});
+    broker.broadcast(createRunFrame(1));
+    broker.broadcast(createRunFrame(2));
+
+    const replay = broker.subscribe(key, 'run-1', 1);
+
+    expect(subscribeCalls).toEqual([]);
+    expect(replay.map((frame) => ('runSeq' in frame ? frame.runSeq : undefined))).toEqual([2]);
+  });
+
+  it('falls back when "since" is older than the buffer\'s own floor (evicted, not merely empty)', () => {
+    const { history, subscribeCalls } = createFakeDurableEventHistory({ 'run-1': [] });
+    const broker = new LiveFrameBroker({ durableEventHistory: history });
+    const key = {};
+
+    broker.addSubscriber(key, () => undefined, {});
+    // Buffer's oldest frame is runSeq 5 — asking for runSeq > 1 is a gap.
+    broker.broadcast(createRunFrame(5));
+    broker.broadcast(createRunFrame(6));
+
+    const replay = broker.subscribe(key, 'run-1', 1);
+
+    expect(replay).toEqual([]);
+    expect(subscribeCalls).toEqual([{ kind: 'run', id: 'run-1' }]);
+  });
+
+  it('suppresses the ordinary live broadcast of a durable action kind for a run in fallback mode, but not other frames', () => {
+    const { history } = createFakeDurableEventHistory({ 'run-1': [] });
+    const broker = new LiveFrameBroker({ durableEventHistory: history });
+    const received: ServerFrame[] = [];
+    const key = {};
+
+    broker.addSubscriber(key, (frame) => received.push(frame), {});
+    broker.subscribe(key, 'run-1', 5); // gap -> fallback mode for run-1
+
+    broker.broadcast(createRunFrame(6)); // event: 'run.completed' — a durable kind
+    broker.broadcast({
+      type: 'event',
+      runId: 'run-1',
+      event: 'step.completed',
+      detail: {},
+      sequence: 7,
+      runSeq: 7,
+      timestamp: Date.now(),
+    });
+
+    const eventTypes = received.filter((f) => f.type === 'event').map((f) => f.event);
+    expect(eventTypes).toEqual(['step.completed']);
+  });
+
+  it('does not suppress a durable-kind broadcast for a DIFFERENT run than the one in fallback mode', () => {
+    const { history } = createFakeDurableEventHistory({ 'run-1': [] });
+    const broker = new LiveFrameBroker({ durableEventHistory: history });
+    const received: ServerFrame[] = [];
+    const key = {};
+
+    broker.addSubscriber(key, (frame) => received.push(frame), { runIds: ['run-2'] });
+    broker.subscribe(key, 'run-1', 5); // gap -> fallback mode for run-1 only
+
+    broker.broadcast({
+      type: 'event',
+      runId: 'run-2',
+      event: 'run.completed',
+      detail: {},
+      sequence: 1,
+      runSeq: 1,
+      timestamp: Date.now(),
+    });
+
+    expect(received).toHaveLength(1);
+  });
+
+  it('degrades gracefully (no throw, still returns []) when no durableEventHistory was configured', () => {
+    const broker = new LiveFrameBroker();
+    const key = {};
+
+    broker.addSubscriber(key, () => undefined, {});
+    expect(() => broker.subscribe(key, 'run-1', 5)).not.toThrow();
+    expect(broker.subscribe(key, 'run-1', 5)).toEqual([]);
+  });
+
+  it('projects a redacted response.validated durable event for a non-privileged connection (AB-305 applied to the durable path)', () => {
+    const secret = 'sk-real-secret-do-not-leak';
+    const { history } = createFakeDurableEventHistory({
+      'run-1': [
+        createDurableEnvelope({
+          kind: 'response.validated',
+          payload: { step: 0, original: { content: secret, toolCalls: [] }, validated: {} },
+        }),
+      ],
+    });
+    const broker = new LiveFrameBroker({ durableEventHistory: history });
+    const received: ServerFrame[] = [];
+    const key = {};
+
+    broker.addSubscriber(key, (frame) => received.push(frame), { privileged: false });
+    broker.subscribe(key, 'run-1', 5);
+
+    const payload = JSON.stringify(received[0]);
+    expect(payload).not.toContain(secret);
+  });
+
+  it('leaves a response.validated durable event unredacted for a privileged connection', () => {
+    const secret = 'sk-real-secret-do-not-leak';
+    const { history } = createFakeDurableEventHistory({
+      'run-1': [
+        createDurableEnvelope({
+          kind: 'response.validated',
+          payload: { step: 0, original: { content: secret, toolCalls: [] }, validated: {} },
+        }),
+      ],
+    });
+    const broker = new LiveFrameBroker({ durableEventHistory: history });
+    const received: ServerFrame[] = [];
+    const key = {};
+
+    broker.addSubscriber(key, (frame) => received.push(frame), { privileged: true });
+    broker.subscribe(key, 'run-1', 5);
+
+    const payload = JSON.stringify(received[0]);
+    expect(payload).toContain(secret);
+  });
+
+  it('ends the durable subscription on unsubscribe()', () => {
+    const { history, subscriptions } = createFakeDurableEventHistory({ 'run-1': [] });
+    const broker = new LiveFrameBroker({ durableEventHistory: history });
+    const key = {};
+
+    broker.addSubscriber(key, () => undefined, {});
+    broker.subscribe(key, 'run-1', 5);
+    expect(subscriptions).toHaveLength(1);
+    expect(subscriptions[0]?.closed).toBe(false);
+
+    broker.unsubscribe(key, 'run-1');
+    expect(subscriptions[0]?.closed).toBe(true);
+  });
+
+  it('ends every active durable subscription on removeSubscriber()', () => {
+    const { history, subscriptions } = createFakeDurableEventHistory({ 'run-1': [], 'run-2': [] });
+    const broker = new LiveFrameBroker({ durableEventHistory: history });
+    const key = {};
+
+    broker.addSubscriber(key, () => undefined, {});
+    broker.subscribe(key, 'run-1', 5);
+    broker.subscribe(key, 'run-2', 5);
+    expect(subscriptions).toHaveLength(2);
+
+    broker.removeSubscriber(key);
+    expect(subscriptions.every((s) => s.closed)).toBe(true);
+  });
+
+  it('is idempotent: a second gap on the same (key, runId) does not open a second durable subscription', () => {
+    const { history, subscribeCalls } = createFakeDurableEventHistory({ 'run-1': [] });
+    const broker = new LiveFrameBroker({ durableEventHistory: history });
+    const key = {};
+
+    broker.addSubscriber(key, () => undefined, {});
+    broker.subscribe(key, 'run-1', 5);
+    broker.subscribe(key, 'run-1', 5);
+
+    expect(subscribeCalls).toHaveLength(1);
+  });
+
+  it('falls back over the SSE reconnect path (createEventStreamResponse) exactly as it does for subscribe()', async () => {
+    const { history, subscribeCalls } = createFakeDurableEventHistory({
+      'run-1': [createDurableEnvelope()],
+    });
+    const broker = new LiveFrameBroker({ durableEventHistory: history });
+
+    const request = new Request(
+      `http://example.test/api/v1/events?runId=run-1&since=${encodeURIComponent('run-1')}:5`,
+    );
+    const response = broker.createEventStreamResponse(request, { runIds: ['run-1'] });
+    const reader = response.body?.getReader();
+    expect(reader).toBeDefined();
+    if (!reader) return;
+
+    const chunk = await reader.read();
+    const text = new TextDecoder().decode(chunk.value);
+    expect(text).toContain('"type":"durable-event"');
+    expect(text).toContain('"event":"run.completed"');
+    expect(subscribeCalls).toEqual([{ kind: 'run', id: 'run-1' }]);
+
+    await reader.cancel();
   });
 });

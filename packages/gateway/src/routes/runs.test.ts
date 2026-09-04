@@ -266,6 +266,21 @@ describe('runs routes', () => {
     expect(response.status).toBe(404);
   });
 
+  it('GET /api/v1/runs/:id/events reaches bureau.eventHistory({kind: "run", id}) — AB-312 (501 over this test gateway\'s ephemeral in-memory storage)', async () => {
+    const gateway = await createTestGateway({ generate: createMockGenerate() });
+    const response = await requestJSON(gateway, '/api/v1/runs/run-1/events');
+    // The default test bureau has no persistent storage backend, so this
+    // proves the route is wired to `bureau.eventHistory` with the right
+    // owner kind (it deterministically resolves `unsupported-capability`
+    // there) without needing a real sqlite/lmdb fixture in this file —
+    // the full paged/redacted response shape is covered by
+    // `event-history.test.ts`, and a real durable page by the conformance
+    // suite.
+    expect(response.status).toBe(501);
+    const body = (await response.json()) as { error: { code: string } };
+    expect(body.error.code).toBe('UNSUPPORTED_CAPABILITY');
+  });
+
   it('POST /api/v1/runs/:id/abort returns 404 for missing run', async () => {
     const gateway = await createTestGateway({ generate: createMockGenerate() });
     const response = await requestJSON(gateway, '/api/v1/runs/nonexistent/abort', {

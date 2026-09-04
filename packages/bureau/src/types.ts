@@ -1511,7 +1511,38 @@ export type ServerFrame =
   | { type: 'scheduler.state'; state: SchedulerState }
   | { type: 'scheduler.task.preempted'; taskId: string; reason: string; state: SchedulerState }
   | (StreamFrame & { runSeq: number })
-  | RunEnvelopeFrame;
+  | RunEnvelopeFrame
+  | {
+      /**
+       * A durable event delivered through the gateway's reconnect-across-
+       * restart fallback (AB-312), never through the ordinary in-memory
+       * replay buffer this file's `runSeq` doc comment describes. Sourced
+       * from `Bureau.subscribeEventHistory`'s replay-then-tail delivery
+       * once a client's resume cursor is older than the live buffer's own
+       * floor (or the buffer holds nothing at all, e.g. after a Gateway
+       * restart) — see `packages/gateway/src/live-events.ts`'s
+       * `durableEnvelopeToServerFrame`.
+       *
+       * Deliberately carries NO `runSeq`: it is not part of the AB-15
+       * in-memory replay-buffer cursor space (a `DurableEventEnvelope`'s
+       * own `sequence`/`cursor` is Weft's fleet-global position, not a
+       * per-run counter, and the two cannot be translated into each
+       * other — see this issue's own doc comment on the fallback path).
+       * Never buffered and never advances a client's live `runSeq`
+       * cursor, the same as every other non-`runSeq`-bearing frame.
+       */
+      type: 'durable-event';
+      runId: string;
+      /** The durable envelope's own `kind` (e.g. `'run.completed'`). */
+      event: string;
+      /** The durable envelope's own `payload`. */
+      detail: unknown;
+      /** The durable envelope's own opaque `cursor` — never parsed, only round-tripped. */
+      cursor: string;
+      schemaVersion: number;
+      /** The durable envelope's own `emittedAtMs`. */
+      timestamp: number;
+    };
 
 // ── Durable Schedule ────────────────────────────────────────────────
 

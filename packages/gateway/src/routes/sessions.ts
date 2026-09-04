@@ -9,6 +9,7 @@ import { z } from 'zod';
 
 import { resolvePrincipal } from '../middleware/authentication';
 import type { Bureau, SessionInputAdmissionOutcome, SessionInputAdmissionRequest } from '../types';
+import { respondWithEventHistoryPage } from './event-history';
 
 /**
  * AB-196 — runtime enforcement of the AB-42/AB-202 payload allowlist:
@@ -158,6 +159,11 @@ export function createSessionsRoutes(bureau: Bureau) {
       throw error;
     }
   });
+
+  // AB-312 — durable event history paging for this session.
+  app.get('/:id/events', (context) =>
+    respondWithEventHistoryPage(context, bureau, { kind: 'session', id: context.req.param('id') }),
+  );
 
   /**
    * POST /sessions/:id/signal — fire-and-forget signal delivery to a session's

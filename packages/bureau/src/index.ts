@@ -63,6 +63,7 @@ export {
   createDurableEventHistory,
   createDurableEventProducer,
   DEFAULT_PAGE_LIMIT,
+  RUN_DURABLE_EVENT_TYPES,
 } from './durable-event-history';
 export type { BureauEventMap, RecoveredRunVerdict, RecoveryRejectionReason } from './events';
 export {

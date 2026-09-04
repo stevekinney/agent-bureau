@@ -17,6 +17,7 @@ import { createKeysRoutes } from './keys';
 import { createOpenAICompatRoutes } from './openai-compat';
 import { createReviewsRoutes } from './reviews';
 import { createRunsRoutes } from './runs';
+import { createScheduleEventsRoutes } from './schedule-events';
 import { createSchedulerRoutes } from './scheduler';
 import { createSchedulesRoutes } from './schedules';
 import { createSessionsRoutes } from './sessions';
@@ -143,6 +144,15 @@ export function createRoutes({
   schedulesRouter.delete('*', createScopeGuard([SCOPE.SCHEDULES_WRITE]));
   schedulesRouter.route('/', createSchedulesRoutes(bureau));
   app.route('/schedules', schedulesRouter);
+
+  // AB-312 — durable event history paging for a schedule's definition
+  // events. Its own router because `schedulesRouter` above is mounted at
+  // `/schedules`, not `/api/v1/schedules` (the coordinator's specified
+  // path for this route) — see `schedule-events.ts`'s own doc comment.
+  const scheduleEventsRouter = new Hono();
+  scheduleEventsRouter.get('*', createScopeGuard([SCOPE.SCHEDULES_READ]));
+  scheduleEventsRouter.route('/', createScheduleEventsRoutes(bureau));
+  app.route('/api/v1/schedules', scheduleEventsRouter);
 
   // A2A (AB-71) — Agent Card discovery + JSON-RPC task endpoints.
   const agentCardRouter = new Hono();
