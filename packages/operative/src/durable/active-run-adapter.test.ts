@@ -688,6 +688,34 @@ describe('createRun with durable routing', () => {
     }
   });
 
+  it('AB-336/AB-88: a HumanWaitParkedEvent carrying a prompt declares reason "review", not "signal"', async () => {
+    const context = await buildContext();
+    try {
+      const emitter = new CompletableEventTarget<CombinedOperativeEventMap>();
+      const activeRun = createDurableActiveRun(context, {
+        runId: 'durable-liveness-human-review',
+        sessionId: 'durable-liveness-human-review',
+        options: runOptions(async () => ({ content: 'done', toolCalls: [] })),
+        emitter,
+      });
+
+      emitter.dispatchEvent(
+        new HumanWaitParkedEvent(
+          'human-response',
+          'durable-liveness-human-review',
+          'Approve this refund?',
+        ),
+      );
+
+      const parked = activeRun.snapshot();
+      expect(parked.declaredWait?.reason).toBe('review');
+
+      await activeRun.result;
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
   it('returns an interrupted result when the durable engine is disposed during a run', async () => {
     const disposedError = Object.assign(new Error('engine disposed'), {
       code: 'EngineDisposedError',

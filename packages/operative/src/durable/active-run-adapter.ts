@@ -373,8 +373,16 @@ function wireHumanWaitLiveness(
   liveness: ActiveRunLiveness,
 ): () => void {
   const onHumanWaitParked = (event: HumanWaitParkedEvent) => {
+    // AB-88: 'review' and 'signal' are distinct DeclaredWaitReasons even
+    // though both surface through `human-wait.parked` today — a supplied
+    // `prompt` (requestHumanInput's reviewer-facing text) distinguishes a
+    // human review from a bare external signal. Matches
+    // `session-handle.ts`'s identical derivation for `SessionHandle`'s own
+    // liveness (`documentation/operative-type-safe-api.md`'s "Session
+    // liveness" section) — the same event, the same rule, at a different
+    // observation layer.
     liveness.beginWait({
-      reason: 'signal',
+      reason: event.prompt !== undefined ? 'review' : 'signal',
       dependency: event.signalName,
       wakeCondition: `signal:${event.signalName}`,
     });

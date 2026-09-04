@@ -1,26 +1,40 @@
 // AB-336 — regression coverage for `requestHumanInput` failing to visibly
-// park a `bureau.createRun` session on a fresh (non-recovered) dispatch.
+// park a `bureau.createRun` session, on both a fresh dispatch and a
+// recovered one.
 //
-// Root cause (named in the pull request body): the durable park mechanism
-// itself was already correct — AB-44/AB-45's `stepResult.pendingHumanWait`
-// check forces the step loop to break regardless of `stopWhen`, and the
-// workflow's own `yield* ctx.waitForSignal(signalName)` genuinely parks. What
-// was actually broken (and what AB-270's crash fixture had to work around
-// with a bespoke `await-decision` tool) was the run's OBSERVABLE liveness:
-// `LivenessSnapshot.status` never left `'running'` for a human-wait park —
-// `deriveAssessment`'s `'waiting'` branch was unreachable — so nothing on the
-// public liveness surface distinguished a genuinely parked run from one still
-// generating. This file proves the park is now observable BEFORE any further
-// generation, and that resolving the review resumes with exactly one more
-// step, with NO `stopWhen` clause that would mask a loop that doesn't break
-// on its own.
+// Two independent, previously-broken mechanisms this file proves fixed:
+//
+// - On a FRESH dispatch, the durable park itself was already correct —
+//   AB-44/AB-45's `stepResult.pendingHumanWait` check forces the step loop
+//   to break regardless of `stopWhen`, and the workflow's own
+//   `yield* ctx.waitForSignal(signalName)` genuinely parks. What was
+//   actually broken was the run's OBSERVABLE liveness:
+//   `LivenessSnapshot.status` never left `'running'` for a human-wait park
+//   — `deriveAssessment`'s `'waiting'` branch was unreachable.
+// - On a RECOVERED dispatch — the case AB-270's crash fixture actually
+//   exercises — the bug was upstream of observability: `buildRunDepsFromSession`
+//   (the recovery-path toolbox reconstruction in `runtime-composition.ts`)
+//   never wired `requestHumanInput` into a recovered run's toolbox at all.
+//   A run recovered mid-step whose replay called `requestHumanInput` found
+//   no such tool, `pendingHumanWait` never got set, and the step loop simply
+//   continued to the next step — the "looped instead of parking" symptom
+//   AB-336 names, reproduced by this file's own recovery test below BEFORE
+//   the fix and green after it. A run recovered AFTER the park's own step
+//   already committed hits a third, narrower gap — bureau's own
+//   `listPendingReviews()` never reconstructed the pending review from a
+//   dead process's lost in-memory action log — covered separately.
+//
+// Every test here deliberately omits `stopWhen.toolCalled('requestHumanInput')`
+// (every pre-existing park test in `create-bureau.test.ts` uses it), so a
+// loop that doesn't break on its own is never masked.
 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { type GenerateFunction, stopWhen } from '@lostgradient/operative';
-import { createToolbox, type Toolbox } from 'armorer';
+import { createTool, createToolbox, type Toolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
+import { z } from 'zod';
 
 import { createBureau } from './create-bureau';
 import { waitForCondition } from './test';
@@ -31,6 +45,16 @@ import { waitForCondition } from './test';
 // bureau-provided `requestHumanInput`.
 function createEmptyToolbox(): Toolbox {
   return createToolbox([]) as unknown as Toolbox;
+}
+
+/** A trivial tool that keeps a step loop going without ever parking. */
+function createNextTool() {
+  return createTool({
+    name: 'next',
+    description: 'continue',
+    input: z.object({}),
+    execute: async () => 'ok',
+  });
 }
 
 let recoveryDatabaseCounter = 0;
@@ -103,7 +127,10 @@ describe('requestHumanInput park is observable on a fresh dispatch (AB-336)', ()
       expect(detail?.liveness.status).toBe('waiting');
       expect(detail?.liveness.assessment).toBe('legitimately-waiting');
       expect(detail?.liveness.declaredWait).toBeDefined();
-      expect(detail?.liveness.declaredWait?.reason).toBe('signal');
+      // AB-88: a supplied `prompt` (this run's `requestHumanInput` call
+      // includes one) makes the reason 'review', not 'signal' — matching
+      // `SessionHandle`'s identical derivation at its own observation layer.
+      expect(detail?.liveness.declaredWait?.reason).toBe('review');
       expect(detail?.liveness.declaredWait?.dependency).toBe('human-response');
 
       // No further generation happened while parked.
@@ -283,6 +310,121 @@ describe('requestHumanInput park survives a process restart while still parked (
         'expected resolving the recovered review to resume the run with exactly one more step',
       );
       expect(bCalls).toBe(1);
+
+      const finalRun = bureauB.getRun(run.id);
+      expect(finalRun?.status).toBe('completed');
+      expect(bureauB.listPendingReviews()).toHaveLength(0);
+    } finally {
+      await bureauA.dispose();
+      await bureauB.dispose();
+    }
+  });
+});
+
+describe('a run recovered mid-step whose replay reaches requestHumanInput actually parks (AB-336)', () => {
+  it('does not loop past requestHumanInput on a recovered dispatch — the recovery-path toolbox reconstruction wires it in', async () => {
+    // THE ROOT-CAUSE PROOF: unlike the other recovery test above (which
+    // crashes AFTER the requestHumanInput step already committed, and so
+    // never actually replays the tool call), this crashes DURING the
+    // PRECEDING step — bureau B's replay must call `generate` fresh for the
+    // requestHumanInput step, going through `buildRunDepsFromSession`'s
+    // toolbox reconstruction. Before AB-336's fix, that reconstruction
+    // never included `requestHumanInput`: the call would settle as a
+    // tool-not-found error, `pendingHumanWait` would never be set, and the
+    // step loop would continue straight past the park.
+    const databasePath = join(
+      tmpdir(),
+      `ab336-toolbox-recovery-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+
+    let bureauAReachedStep1 = false;
+    const bureauA = await createBureau({
+      agents: {},
+      generate: async ({ step }) => {
+        if (step === 0) {
+          return { content: '', toolCalls: [{ name: 'next', arguments: {} }] };
+        }
+        bureauAReachedStep1 = true; // step 0's checkpoint has committed
+        // Hang forever — the "process" dies here, before step 1's own
+        // generate call (the requestHumanInput call) ever resolves.
+        return new Promise<never>(() => {});
+      },
+      toolbox: createToolbox([createNextTool()]),
+      storage: { type: 'sqlite', path: databasePath },
+      durableExecution: true,
+      humanInput: true,
+      stopWhen: stopWhen.noToolCalls(),
+    });
+
+    const run = await bureauA.createRun({ message: 'park-me-after-recovery' });
+    await waitForCondition(
+      () => bureauAReachedStep1,
+      'expected bureau A to reach step 1 before the simulated crash',
+    );
+    // Deliberately NOT disposing bureauA — simulates a crash: the durable
+    // workflow is left non-terminal, parked mid-step-1's (never-resolving)
+    // generate call, for bureau B's recoverAll() to pick up.
+
+    let bCalls = 0;
+    const bureauB = await createBureau({
+      agents: {},
+      generate: async () => {
+        bCalls++;
+        if (bCalls === 1) {
+          return {
+            content: '',
+            toolCalls: [
+              {
+                id: 'call-1',
+                name: 'requestHumanInput',
+                arguments: { signalName: 'human-response' },
+              },
+            ],
+          };
+        }
+        return { content: 'resumed after recovery', toolCalls: [] };
+      },
+      toolbox: createToolbox([createNextTool()]),
+      storage: { type: 'sqlite', path: databasePath },
+      durableExecution: true,
+      humanInput: true,
+      stopWhen: stopWhen.noToolCalls(),
+    });
+
+    try {
+      await waitForCondition(
+        () => bureauB.listPendingReviews().some((review) => review.runId === run.id),
+        'expected bureau B to actually park on requestHumanInput during replay, not loop past it',
+      );
+
+      // The load-bearing assertion: exactly ONE generate call happened on
+      // bureau B before the park — a run that looped past a missing tool
+      // would show 2+ (it would keep calling generate with no tool call
+      // ever setting pendingHumanWait, running to noToolCalls()'s own stop
+      // or maximumSteps).
+      expect(bCalls).toBe(1);
+
+      const reviews = bureauB.listPendingReviews();
+      expect(reviews).toHaveLength(1);
+      const [review] = reviews;
+      expect(review?.kind).toBe('human-wait');
+      if (review?.kind !== 'human-wait') throw new Error('unreachable');
+      expect(review.runId).toBe(run.id);
+      expect(review.signalName).toBe('human-response');
+      expect(bureauB.getRun(run.id)?.liveness.status).toBe('waiting');
+
+      const result = await bureauB.resolveReview({
+        id: review.id,
+        decision: 'approve',
+        principal: 'test-operator',
+      });
+      expect(result.decision).toBe('approve');
+
+      await waitForCondition(
+        () => bCalls === 2,
+        'expected resolving the review to resume the run with exactly one more step',
+      );
+      expect(bCalls).toBe(2);
 
       const finalRun = bureauB.getRun(run.id);
       expect(finalRun?.status).toBe('completed');
