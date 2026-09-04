@@ -464,6 +464,26 @@ const RUN_DURABLE_ACTION_TYPES = new Set<string>([
 ]);
 
 /**
+ * Public alias of {@link RUN_DURABLE_ACTION_TYPES} (AB-312). The gateway's
+ * SSE/WebSocket durable-history reconnect fallback (`live-events.ts`) must
+ * suppress its own ORDINARY live broadcast of one of these action kinds for
+ * a run currently in durable-fallback mode — that run's own durable
+ * subscription (`Bureau.subscribeEventHistory`) already owns delivering it
+ * exactly once, and forwarding it a second time through the live path
+ * would double-deliver the same terminal fact. Exported here, rather than
+ * re-declared as a second literal list in `packages/gateway`, so the two
+ * packages can never drift out of sync on which kinds this applies to.
+ *
+ * A DEFENSIVE COPY, never the same `Set` instance as
+ * {@link RUN_DURABLE_ACTION_TYPES} — a `Set` is mutable at runtime
+ * regardless of its `ReadonlySet` type, so exporting the internal instance
+ * directly would let a downstream mutation (accidental or otherwise) also
+ * corrupt this module's own `createDurableEventProducer` classification
+ * (copilot review, PR #505).
+ */
+export const RUN_DURABLE_EVENT_TYPES: ReadonlySet<string> = new Set(RUN_DURABLE_ACTION_TYPES);
+
+/**
  * `session.*` action types AB-87's matrix classifies as durable — the
  * lifecycle and reattachment facts (`session.deleted`'s own row calls the
  * pre-AB-311 state "durable only via the generic action stream, a gap";

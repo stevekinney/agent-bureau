@@ -339,7 +339,18 @@ export async function createGateway(
     setInterval: runtimeServices.timers.setInterval,
     clearInterval: runtimeServices.timers.clearInterval,
   };
-  const liveFrameBroker = new LiveFrameBroker({ clock: liveFrameBrokerClock });
+  const liveFrameBroker = new LiveFrameBroker({
+    clock: liveFrameBrokerClock,
+    // AB-312: the SSE/WebSocket reconnect-across-restart fallback. Only
+    // `subscribeEventHistory` is forwarded — the broker never needs the
+    // rest of `Bureau`'s surface for this. Wrapped in an arrow function
+    // (rather than passed as a bare method reference) so the call is never
+    // separated from `bureau`, satisfying `@typescript-eslint/unbound-method`.
+    durableEventHistory: {
+      subscribeEventHistory: (owner, listener, options) =>
+        bureau.subscribeEventHistory(owner, listener, options),
+    },
+  });
   const unsubscribeLiveFrames = bureau.subscribeLiveFrames((frame) => {
     liveFrameBroker.broadcast(frame);
   });

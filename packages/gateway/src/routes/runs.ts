@@ -8,6 +8,7 @@ import { HTTPException } from 'hono/http-exception';
 import { resolvePrincipal, resolveTrustedRequestContext } from '../middleware/authentication';
 import { assembleRunTimeline } from '../timeline';
 import type { Bureau, CreateRunRequest, PendingReview, RunDetail } from '../types';
+import { respondWithEventHistoryPage } from './event-history';
 
 export { assembleRunTimeline, type RunTimelineEntry, type RunTimelineEntryKind } from '../timeline';
 
@@ -196,6 +197,11 @@ export function createRunsRoutes(bureau: Bureau) {
     if (!detail) throw new HTTPException(404, { message: 'Run not found' });
     return context.json(detail, 200);
   });
+
+  // AB-312 — durable event history paging for this run.
+  app.get('/:id/events', (context) =>
+    respondWithEventHistoryPage(context, bureau, { kind: 'run', id: context.req.param('id') }),
+  );
 
   app.post('/:id/abort', (context) => {
     try {

@@ -783,8 +783,43 @@ schedule DEFINITION lifecycle — `schedule.created`/`paused`/`resumed`/
 schedule's own durable page carries its four definition events only, never
 a fire; the fired run's own page carries the fire only, never a definition
 event. The Gateway paging/SSE/WebSocket projection over this store (AB-91's
-`ab91-03`) remains a separate, not-yet-built slice; AB-312 tracks widening
-it to accept the `'schedule'` owner kind.
+`ab91-03`) is delivered by AB-312: `GET /api/v1/runs/:id/events`,
+`GET /api/v1/sessions/:id/events`, and `GET /api/v1/schedules/:id/events`
+each call `bureau.eventHistory(owner, { since, limit })` and return the
+page as JSON, mapping a `DurableEventGap` to `410 Gone` (the retention
+floor has passed the requested cursor — the expired-locator precedent
+above, not an empty `200`) and `unsupported-capability` to `501`. Every
+returned event passes through the same AB-305 principal projection the
+live wire already applies (`packages/gateway/src/live-events.ts`'s
+`projectDurableEventForPrivilege`) — a non-privileged caller never sees a
+`response.validated` event's pre-guardrail `original` through the durable
+path any more than through the live one, even though no durable event kind
+this repository currently records carries that shape.
+
+The SSE and WebSocket subscribe handlers (`live-events.ts`) gain a
+matching resume path for run-scoped reconnects: when a client's reported
+cursor is older than what the in-memory `runFrameBuffers` replay currently
+holds for that run — evicted past `RUN_FRAME_BUFFER_LIMIT`, or the buffer
+holds nothing for it at all, as happens for every run after a Gateway
+restart — the handler falls back to `bureau.subscribeEventHistory({ kind:
+'run', id }, listener, { since: undefined })` instead of silently starting
+the client from "now" with a gap. It replays from the BEGINNING of that
+run's durable history, never from the client's own `runSeq`-space cursor:
+a durable envelope's own `cursor` is Weft's fleet-global position, with no
+correspondence to the live buffer's per-run `runSeq` counter, so the two
+cannot be translated into each other. This is sound because every durable
+kind a run can record (`RUN_DURABLE_ACTION_TYPES`, above) is a TERMINAL
+fact — a run reaches at most one of them ever, so a full replay can never
+re-deliver something the same connection already saw earlier in its own
+lifetime. While a run is in this fallback mode on a connection, the
+broker's ordinary live broadcast of one of those same durable kinds is
+suppressed for that connection (`RUN_DURABLE_EVENT_TYPES`, exported from
+`durable-event-history.ts` for exactly this reason) — the durable
+subscription already owns delivering it exactly once, as a new
+`'durable-event'` `ServerFrame` variant that deliberately carries no
+`runSeq` (it is not part of the AB-15 in-memory replay-cursor space).
+Ephemeral, non-cursor-advancing deltas are unaffected: they remain
+live-only, as before, and this reconnect path never recovers them.
 
 ### Session update/query capability
 

@@ -19,6 +19,7 @@ export type {
   ConfigurationResponse,
   CreateRunRequest,
   DurableScheduleDefinition,
+  EventHistoryUnsupportedOutcome,
   PendingHumanWaitReview,
   PendingReview,
   PendingToolApprovalReview,

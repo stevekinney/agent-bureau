@@ -1,3 +1,4 @@
+import type { DurableEventEnvelope, DurableEventOwner } from '@lostgradient/operative/durable';
 import type {
   LivenessAssessment,
   LivenessEvidenceEntry,
@@ -7,12 +8,14 @@ import type {
   StallPolicy,
   StallWatchdog,
   StallWatchdogClock,
+  Subscription,
 } from '@lostgradient/operative/liveness';
 import {
   createStallWatchdog,
   GATEWAY_CONNECTION_POLICY,
   LIVENESS_POLICY_VERSION,
 } from '@lostgradient/operative/liveness';
+import { RUN_DURABLE_EVENT_TYPES } from 'bureau';
 
 import type { ServerFrame } from './types';
 
@@ -80,8 +83,34 @@ const realClock: LiveFrameBrokerClock = {
   clearInterval: (handle) => clearInterval(handle as ReturnType<typeof setInterval>),
 };
 
+/**
+ * The narrow slice of `Bureau`'s durable-history surface the broker's
+ * reconnect-across-restart fallback (AB-312) needs — never the whole
+ * `Bureau`, so this module doesn't have to import that type (and so a test
+ * can inject a minimal fake rather than a full bureau stub).
+ */
+export interface LiveFrameBrokerDurableEventHistory {
+  subscribeEventHistory(
+    owner: DurableEventOwner,
+    listener: (event: DurableEventEnvelope) => void,
+    options?: { since?: string },
+  ): Subscription;
+}
+
 export type LiveFrameBrokerOptions = {
   clock?: LiveFrameBrokerClock;
+  /**
+   * Backs the SSE/WebSocket reconnect-across-restart fallback (AB-312):
+   * when a client's resume cursor is older than what {@link runFrameBuffers}
+   * currently holds for a run (including "holds nothing at all," e.g. right
+   * after a Gateway restart), the broker replays that run's durable history
+   * through this instead of silently starting the client from "now" with a
+   * gap. Omitted (the default) means no durable backend is available — the
+   * broker degrades to today's behavior for that case (no replay, live-only
+   * from this point on), matching `Bureau.subscribeEventHistory`'s own
+   * graceful "no persistent storage" outcome.
+   */
+  durableEventHistory?: LiveFrameBrokerDurableEventHistory;
 };
 
 /**
@@ -214,6 +243,17 @@ type Subscriber = {
    */
   recordKeepalive(): void;
   snapshot(): GatewayConnectionSnapshot;
+  /**
+   * Run ids for which this connection's replay is currently being served by
+   * the durable-history fallback (AB-312) rather than the ordinary live
+   * broadcast — {@link LiveFrameBroker.broadcast} consults this to suppress
+   * its own delivery of a {@link RUN_DURABLE_EVENT_TYPES} kind for one of
+   * these runs, since that run's own durable subscription (below) already
+   * owns delivering it exactly once.
+   */
+  durableFallbackRunIds: Set<string>;
+  /** This connection's active durable-history subscriptions, one per run id in {@link durableFallbackRunIds}. Disposed by {@link LiveFrameBroker.removeSubscriber}/{@link LiveFrameBroker.unsubscribe}. */
+  durableSubscriptions: Map<string, Subscription>;
 };
 
 export type LiveFrameSubscriberOptions = {
@@ -349,6 +389,54 @@ function projectFrameForPrivilege(frame: ServerFrame, privileged: boolean): Serv
 }
 
 /**
+ * The durable-history analog of {@link projectFrameForPrivilege} (AB-312's
+ * AC5): applied to a `DurableEventEnvelope` BEFORE it is converted to a
+ * wire `ServerFrame` (via {@link durableEnvelopeToServerFrame}) or returned
+ * from a paging route — a durable-history reconnect or page must never
+ * re-expose content the live path already redacts. No durable event kind
+ * this repository currently records is `response.validated`'s own action
+ * type (`RUN_DURABLE_ACTION_TYPES`/`SESSION_DURABLE_ACTION_TYPES` in
+ * `durable-event-history.ts` name only terminal/lifecycle facts), so this
+ * is a no-op today for every event actually flowing through the store —
+ * the SAME redaction guard exists here regardless, so a future durable
+ * kind that DOES carry this shape is covered without a second review.
+ */
+export function projectDurableEventForPrivilege(
+  envelope: DurableEventEnvelope,
+  privileged: boolean,
+): DurableEventEnvelope {
+  if (privileged) return envelope;
+  if (envelope.kind !== RESPONSE_VALIDATED_EVENT_TYPE) return envelope;
+  if (!isResponseValidatedDetail(envelope.payload)) return envelope;
+
+  return {
+    ...envelope,
+    payload: {
+      ...envelope.payload,
+      original: RESPONSE_VALIDATED_REDACTION_MARKER,
+    },
+  };
+}
+
+/**
+ * Converts one durable envelope into the wire `ServerFrame` shape the
+ * SSE/WebSocket reconnect fallback (AB-312) delivers it as — see
+ * `ServerFrame`'s `'durable-event'` variant doc comment (`bureau/src/types.ts`)
+ * for why it deliberately carries no `runSeq`.
+ */
+function durableEnvelopeToServerFrame(runId: string, envelope: DurableEventEnvelope): ServerFrame {
+  return {
+    type: 'durable-event',
+    runId,
+    event: envelope.kind,
+    detail: envelope.payload,
+    cursor: envelope.cursor,
+    schemaVersion: envelope.schemaVersion,
+    timestamp: envelope.emittedAtMs,
+  };
+}
+
+/**
  * Encodes a per-run replay cursor as a compact string suitable for an SSE
  * `id:` field (and, symmetrically, a `since` query param on manual
  * reconnect). One SSE connection can multiplex several runs, so the cursor
@@ -429,9 +517,12 @@ export class LiveFrameBroker {
   private readonly clock: LiveFrameBrokerClock;
   /** Monotonic per-broker counter used to mint each connection's `LivenessSnapshot.id`. */
   private nextConnectionId = 0;
+  /** Backs the reconnect-across-restart fallback (AB-312) — see {@link LiveFrameBrokerOptions.durableEventHistory}. */
+  private readonly durableEventHistory: LiveFrameBrokerDurableEventHistory | undefined;
 
   constructor(options: LiveFrameBrokerOptions = {}) {
     this.clock = options.clock ?? realClock;
+    this.durableEventHistory = options.durableEventHistory;
   }
 
   addSubscriber(
@@ -468,6 +559,8 @@ export class LiveFrameBroker {
         bumpRevision();
       },
       snapshot: () => buildConnectionSnapshot(connectionId, startedAt, watchdog, clock, revision),
+      durableFallbackRunIds: new Set(),
+      durableSubscriptions: new Map(),
     });
     if (this.closing) {
       // AB-235: shutdown already asked every existing connection to close
@@ -511,6 +604,30 @@ export class LiveFrameBroker {
    * privilege — a reconnecting non-privileged WebSocket client must not
    * see a buffered `response.validated.original` any more than a live one
    * does.
+   *
+   * AB-312: when this broker was constructed with a {@link durableEventHistory}
+   * AND `since` is a cursor the in-memory buffer no longer covers (evicted
+   * by {@link RUN_FRAME_BUFFER_LIMIT}, or the buffer holds NOTHING for
+   * `runId` at all — e.g. right after a Gateway restart, when this whole
+   * in-process buffer is empty), this returns `[]` synchronously and
+   * instead starts the durable-history fallback ({@link startDurableFallback})
+   * — delivered asynchronously, over time, through this same subscriber's
+   * `sendFrame`, rather than as part of this call's return value. See that
+   * method's own doc comment for why a synchronous return here is not
+   * possible for the durable case.
+   *
+   * When {@link startDurableFallback} reports no REAL durable subscription
+   * was established — this broker has no {@link durableEventHistory}
+   * configured at all, or the underlying bureau has no persistent storage
+   * backend (its own graceful "unsupported capability" outcome, projected
+   * onto `Subscription`'s synchronous shape as an already-closed
+   * subscription) — this degrades to the ORIGINAL, pre-AB-312 behavior for
+   * an uncovered `since`: whatever the buffer still holds is returned, gap
+   * and all. A best-effort partial replay is strictly better than
+   * delivering nothing at all when there is no durable store to fall back
+   * to (see `backpressure.test.ts`'s "buffer accounting stays within its
+   * bound" scenario, which depends on exactly this for an ephemeral
+   * gateway).
    */
   subscribe(key: object, runId: string, since?: number): ServerFrame[] {
     const subscriber = this.subscribers.get(key);
@@ -519,6 +636,13 @@ export class LiveFrameBroker {
     }
 
     subscriber.runIds.add(runId);
+
+    if (since !== undefined && !this.bufferCoversSince(runId, since)) {
+      if (this.startDurableFallback(key, runId)) {
+        return [];
+      }
+    }
+
     return this.getFramesSince(runId, since).map((frame) =>
       projectFrameForPrivilege(frame, subscriber.privileged),
     );
@@ -531,11 +655,129 @@ export class LiveFrameBroker {
     }
 
     subscriber.runIds.delete(runId);
+    this.stopDurableFallback(subscriber, runId);
   }
 
   removeSubscriber(key: object): void {
-    this.subscribers.get(key)?.watchdog.dispose();
+    const subscriber = this.subscribers.get(key);
+    if (subscriber) {
+      for (const runId of [...subscriber.durableFallbackRunIds]) {
+        this.stopDurableFallback(subscriber, runId);
+      }
+      subscriber.watchdog.dispose();
+    }
     this.subscribers.delete(key);
+  }
+
+  /**
+   * Whether {@link runFrameBuffers}'s current contents for `runId` cover
+   * `since` with no gap — i.e. either the buffer has never evicted anything
+   * older than `since` (its oldest frame's `runSeq` is `since + 1` or
+   * earlier), or `since` sits inside frames the buffer still holds. `false`
+   * when the buffer holds nothing at all for `runId` (either nothing was
+   * ever recorded, or a prior process's buffer is gone — e.g. right after a
+   * Gateway restart).
+   */
+  private bufferCoversSince(runId: string, since: number): boolean {
+    const buffer = this.runFrameBuffers.get(runId);
+    const oldest = buffer?.[0];
+    if (!oldest) {
+      return false;
+    }
+
+    return (getRunSeq(oldest) ?? 0) - 1 <= since;
+  }
+
+  /**
+   * Starts the durable-history reconnect fallback (AB-312) for `runId` on
+   * `key`'s connection: replays `runId`'s durable event history from the
+   * beginning and then tails it live, delivered through this subscriber's
+   * own `sendFrame` as each envelope arrives — via
+   * `Bureau.subscribeEventHistory`'s own race-free replay-then-tail
+   * contract (`ab91-02`), never a separate paged catch-up racing against
+   * live registration.
+   *
+   * Replays from the BEGINNING of `runId`'s durable history (`since:
+   * undefined`), never from the client's own reported cursor: that cursor
+   * lives in the live buffer's `runSeq` space (a per-run in-memory
+   * counter), which has no correspondence to the durable store's own
+   * fleet-global `cursor` space — the two cannot be translated into each
+   * other. This is sound because every durable kind a run can ever record
+   * (`RUN_DURABLE_ACTION_TYPES` in `durable-event-history.ts`) is a
+   * TERMINAL fact: a run reaches at most one of them, ever, so a full
+   * replay can never re-deliver something this same connection already
+   * received earlier in its own lifetime.
+   *
+   * Idempotent per `(key, runId)` — a second call while a REAL fallback is
+   * already active for this run on this connection is a no-op that
+   * reports `true` without re-subscribing.
+   *
+   * Returns `false` — establishing no subscription and marking the run in
+   * no fallback state — when either this broker was constructed with no
+   * {@link durableEventHistory} at all, or the underlying bureau's own
+   * `subscribeEventHistory` reports it has no persistent storage backend
+   * (its graceful "unsupported capability" outcome, projected onto
+   * `Subscription`'s synchronous shape as an ALREADY-CLOSED subscription —
+   * `create-bureau.ts`'s own `subscribeEventHistory` fallback). Either way
+   * there is nothing to fall back to; the caller (`subscribe()`,
+   * `createEventStreamResponse`) degrades to the pre-AB-312 best-effort
+   * partial buffer replay instead.
+   */
+  private startDurableFallback(key: object, runId: string): boolean {
+    const subscriber = this.subscribers.get(key);
+    if (!subscriber) {
+      return false;
+    }
+    if (subscriber.durableFallbackRunIds.has(runId)) {
+      return true;
+    }
+
+    const history = this.durableEventHistory;
+    if (!history) {
+      return false;
+    }
+
+    const subscription = history.subscribeEventHistory(
+      { kind: 'run', id: runId },
+      (envelope) => {
+        const current = this.subscribers.get(key);
+        if (!current) {
+          return;
+        }
+
+        const frame = durableEnvelopeToServerFrame(
+          runId,
+          projectDurableEventForPrivilege(envelope, current.privileged),
+        );
+
+        try {
+          current.sendFrame(frame);
+        } catch {
+          // Isolated per subscriber, matching broadcast()'s own
+          // per-subscriber isolation (below) — a send failure here is
+          // handled by this connection's own transport-level close/cleanup,
+          // not by tearing down this durable subscription.
+        }
+      },
+      { since: undefined },
+    );
+
+    if (subscription.closed) {
+      // No persistent storage backend on the underlying bureau — nothing
+      // was, or ever will be, delivered through this subscription.
+      return false;
+    }
+
+    subscriber.durableFallbackRunIds.add(runId);
+    subscriber.durableSubscriptions.set(runId, subscription);
+    return true;
+  }
+
+  /** Ends `runId`'s active durable fallback (if any) on `subscriber`'s connection. Idempotent. */
+  private stopDurableFallback(subscriber: Subscriber, runId: string): void {
+    subscriber.durableFallbackRunIds.delete(runId);
+    subscriber.durableSubscriptions.get(runId)?.unsubscribe();
+    subscriber.durableSubscriptions.delete(runId);
   }
 
   /**
@@ -592,6 +834,15 @@ export class LiveFrameBroker {
    * per-run replay buffer first (unprojected — see {@link projectFrameForPrivilege}'s
    * doc comment) and then projecting a fresh copy for each subscriber's own
    * privilege (AB-305) before invoking its `sendFrame`.
+   *
+   * AB-312: for a subscriber currently in durable-fallback mode for
+   * `frame`'s run (see {@link startDurableFallback}), an `event` frame
+   * whose action type is one of {@link RUN_DURABLE_EVENT_TYPES} is
+   * SUPPRESSED here — that run's own durable subscription already owns
+   * delivering it exactly once (as a `'durable-event'` frame), and
+   * forwarding this ordinary live copy too would double-deliver the same
+   * terminal fact. Every other frame type/run for that subscriber is
+   * unaffected.
    */
   broadcast(frame: ServerFrame): void {
     this.recordFrame(frame);
@@ -609,6 +860,14 @@ export class LiveFrameBroker {
         }
 
         if (!subscriber.runIds.has(runId) && !subscriber.runIds.has(ALL_RUNS_SUBSCRIPTION)) {
+          continue;
+        }
+
+        if (
+          frame.type === 'event' &&
+          subscriber.durableFallbackRunIds.has(runId) &&
+          RUN_DURABLE_EVENT_TYPES.has(frame.event)
+        ) {
           continue;
         }
       }
@@ -781,15 +1040,35 @@ export class LiveFrameBroker {
         // above and this loop both run synchronously with no `await` between
         // them, so no live frame emitted from this point on can race ahead
         // of (or be missed by) this replay.
+        //
+        // AB-312: when this broker has a durable backend AND the client's
+        // own reported cursor for a run is older than what the buffer
+        // currently covers (evicted, or the buffer holds nothing for this
+        // run at all — e.g. right after a Gateway restart), the in-memory
+        // replay above is skipped in favor of `startDurableFallback`,
+        // which delivers that run's durable history asynchronously
+        // through this same connection's `sendFrame` — see `subscribe()`'s
+        // own doc comment for the no-durable-backend degraded case, and
+        // `startDurableFallback`'s own doc comment for why this can't be
+        // folded into a synchronous loop the way the covered case is.
         for (const runId of options.runIds ?? []) {
           if (runId === ALL_RUNS_SUBSCRIPTION) {
+            continue;
+          }
+
+          const since = resumeCursor.get(runId);
+          if (
+            since !== undefined &&
+            !this.bufferCoversSince(runId, since) &&
+            this.startDurableFallback(streamKey, runId)
+          ) {
             continue;
           }
 
           // AB-305: this replay bypasses `subscribe()`/`broadcast()` (it
           // reads the buffer directly), so it must project for this
           // connection's own privilege itself.
-          for (const frame of this.getFramesSince(runId, resumeCursor.get(runId))) {
+          for (const frame of this.getFramesSince(runId, since)) {
             sendFrame(projectFrameForPrivilege(frame, privileged));
           }
         }

@@ -144,6 +144,24 @@ describe('sessions routes', () => {
     expect(response.status).toBe(404);
   });
 
+  it('GET /api/v1/sessions/:id/events reaches bureau.eventHistory({kind: "session", id}) — AB-312 (501 over KV-only persistence, which has no durable engine)', async () => {
+    const gateway = await createTestGateway({
+      persistence: textValueStore(new MemoryStorage()),
+      authToken: AUTH_TOKEN,
+    });
+
+    const response = await requestJSON(gateway, '/api/v1/sessions/my-session/events', {
+      headers: authHeaders,
+    });
+    // KV-only persistence composes no durable engine at all — this proves
+    // the route is wired to `bureau.eventHistory` with the right owner
+    // kind (deterministically `unsupported-capability` here). The full
+    // paged/redacted response shape is covered by `event-history.test.ts`.
+    expect(response.status).toBe(501);
+    const body = (await response.json()) as { error: { code: string } };
+    expect(body.error.code).toBe('UNSUPPORTED_CAPABILITY');
+  });
+
   describe('signal / update / query (HITL over the wire)', () => {
     it('POST /api/v1/sessions/:id/signal returns 501 when no durable engine is configured', async () => {
       const gateway = await createTestGateway({ authToken: AUTH_TOKEN });
