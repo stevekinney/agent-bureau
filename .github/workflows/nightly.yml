@@ -11,6 +11,15 @@ name: Nightly
 # a schedule too, independent of pull-request volume; cloudflare
 # conformance is not wired into `ci.yml` at all, so this is its only lane).
 #
+# AB-284/tst-09g added a fifth lane, `mutation-check`: the targeted lifecycle
+# mutation check (`bun run check-mutation`) re-runs its covering tests once
+# per candidate mutant across four target sets, which is exactly the kind
+# of repeated-test-run cost AB-100 rules out of the pull-request lane. It
+# has no pull-request-lane counterpart at all (unlike crash, which gets a
+# smoke scenario there) because a mutation check has no meaningful "smoke"
+# subset — a single mutant proves nothing about the other three target
+# sets.
+#
 # Schedule: 09:00 UTC. The most recent 100 `ci.yml` runs, checked when this
 # workflow was added, cluster between 19:00 and 02:00 UTC with zero runs
 # anywhere in the 03:00-18:00 UTC band — 09:00 UTC sits well inside that
@@ -113,3 +122,35 @@ jobs:
 
       - name: Cloudflare real-runtime conformance (workerd/Miniflare)
         run: time bun run test:cloudflare-conformance
+
+  mutation-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # `check-mutation.ts`'s pre-mutation sanity pass runs every target set's covering tests
+      # UNMUTATED first, before any package has been rebuilt by the script itself — including
+      # in-package tests like `packages/armorer/test/execution-lifecycle.test.ts`, which imports
+      # `from 'lifecycle'` and resolves it through that package's own `exports` map to `dist/`,
+      # not `src/`. A fresh checkout has no `dist/` anywhere, so without this step the sanity pass
+      # fails immediately with an import error, misreported as "covering tests do not pass" (the
+      # `gateway-conformance-full` job above hit exactly this class of failure on its own first
+      # dispatch — see its own comment). Once this step has built every workspace package,
+      # `check-mutation.ts` only needs to rebuild the SPECIFIC package(s) each cross-package
+      # covering test names in `mutation-targets.json`'s `rebuild` field before that mutant's own
+      # test run, and once more after each target set finishes to leave `dist/` matching the
+      # restored `src/` — see the script's own doc comment.
+      - name: Build every workspace package
+        run: bun run turbo run build
+
+      - name: Targeted lifecycle mutation check
+        run: time bun run check-mutation
