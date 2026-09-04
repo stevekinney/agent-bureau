@@ -409,7 +409,8 @@ describe('two concurrent harnesses are fully isolated', () => {
       });
 
       // Drained in its own hook (rather than alongside runA's wait above) so
-      // this real LMDB completion poll gets its own fresh timeout budget too.
+      // this wait gets its own fresh timeout budget too, matching the shape
+      // of the still-real-waiting lmdb variant this file split off from.
       beforeAll(async () => {
         await waitForRunState(harnessB.bureau, runB.id);
       });
@@ -450,7 +451,9 @@ describe('two concurrent harnesses are fully isolated', () => {
       it('has distinct storage paths (when persistent) and distinct clocks', () => {
         // Memory fixtures have no path — this assertion is vacuously
         // satisfied by both being `undefined` only when paths genuinely
-        // can't collide; sqlite/lmdb always assert a concrete inequality.
+        // can't collide; sqlite always asserts a concrete inequality (the
+        // lmdb variant's own equivalent assertion lives in
+        // harness-lmdb-isolation.test.ts).
         if (storageA.path !== undefined || storageB.path !== undefined) {
           expect(storageA.path).not.toBe(storageB.path);
         }
