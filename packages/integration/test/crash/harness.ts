@@ -150,9 +150,13 @@ async function driveProcess(
 ): Promise<DriveResult> {
   const result: DriveResult = { markers: [], observations: [] };
 
-  function send(command: CrashParentCommand): void {
-    child.stdin.write(`${encodeCrashLine(command)}\n`);
-    void child.stdin.flush();
+  async function send(command: CrashParentCommand): Promise<void> {
+    // Awaited, not fire-and-forget: `write`/`flush` can return a pending
+    // Promise, and a rejection left unhandled here would surface as an
+    // unhandled rejection while the fixture sits blocked on stdin forever
+    // — failing fast keeps IPC pacing deterministic instead of hanging.
+    await child.stdin.write(`${encodeCrashLine(command)}\n`);
+    await child.stdin.flush();
   }
 
   for await (const line of readLines(child.stdout)) {
@@ -171,7 +175,7 @@ async function driveProcess(
         child.kill('SIGKILL');
         continue;
       }
-      send(message.marker === 'signal-parked' ? { type: 'cancel' } : { type: 'proceed' });
+      await send(message.marker === 'signal-parked' ? { type: 'cancel' } : { type: 'proceed' });
       continue;
     }
     if (message.type === 'observation') {
@@ -208,24 +212,24 @@ async function spawnFixture(
   });
 }
 
-/** Best-effort: reports `true` only when a `pgrep` scan of `pid`'s process group finds nothing alive. */
-async function processGroupIsClean(pid: number): Promise<boolean> {
+/**
+ * `true` only when `pid`'s process group has nothing alive left in it.
+ * `pid` was spawned with `detached: true`, so its process group id equals
+ * its own pid — signaling `-pid` targets the whole group. `process.kill`
+ * with signal `0` sends nothing; it only probes existence, throwing
+ * `ESRCH` when no process (or, for a negative pid, no process GROUP)
+ * matches. This needs no external binary (no `pgrep` dependency, portable
+ * across platforms and minimal CI/dev images) and reads the exact
+ * guarantee `detached: true` provides directly, rather than inferring it
+ * from a scan tool's own exit code.
+ */
+function processGroupIsClean(pid: number): boolean {
   try {
-    const check = Bun.spawnSync({
-      cmd: ['pgrep', '-g', String(pid)],
-      stdout: 'pipe',
-      stderr: 'pipe',
-    });
-    // `pgrep` exits 1 when nothing matches — that is the clean case. Any
-    // match (including `pid` itself, if the OS has not yet reaped it) means
-    // the group is not clean YET; a caller that just awaited `exited`
-    // should not observe the exited process itself here, but a defensive
-    // `false` is preferable to a false "clean" reading either way.
-    return check.exitCode === 1;
-  } catch {
-    // `pgrep` unavailable on this platform — cannot prove cleanliness, so
-    // don't claim it.
+    process.kill(-pid, 0);
+    // No throw: at least one process in the group is still alive.
     return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ESRCH';
   }
 }
 
@@ -290,10 +294,8 @@ export async function runCrashScenario(
       ...(secondDrive.fatal ? { fatal: secondDrive.fatal } : {}),
     };
 
-    const [firstClean, secondClean] = await Promise.all([
-      processGroupIsClean(firstProcess.pid),
-      processGroupIsClean(secondProcess.pid),
-    ]);
+    const firstClean = processGroupIsClean(firstProcess.pid);
+    const secondClean = processGroupIsClean(secondProcess.pid);
 
     return {
       storagePath,

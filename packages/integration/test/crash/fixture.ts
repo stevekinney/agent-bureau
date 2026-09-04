@@ -406,28 +406,28 @@ async function main(): Promise<void> {
   // `createBureauTestHarness` below resolves and populates the ref.
   let currentRootRunId = existingRootRunId ?? '';
   const deps: { current?: FixtureToolDeps } = {};
+  // Every forwarded callback below fails fast — the SAME behavior for all
+  // six — rather than some throwing and others silently no-opping when
+  // called before `deps.current` is populated. A silent no-op here (e.g.
+  // `registerDurableRun` dropping a run on the floor) would mask an
+  // initialization-order bug as a missing quiescence registration instead
+  // of a loud, immediate error.
+  function requireDeps(): FixtureToolDeps {
+    if (!deps.current) throw new Error('crash fixture: toolbox invoked before bureau was ready');
+    return deps.current;
+  }
   const fixtureToolbox = createFixtureToolbox({
     get rootRunId() {
       return currentRootRunId;
     },
-    async createChildRun(message: string) {
-      if (!deps.current) throw new Error('crash fixture: toolbox invoked before bureau was ready');
-      return deps.current.createChildRun(message);
-    },
-    registerDurableRun: (runId) => deps.current?.registerDurableRun(runId),
-    kvGet: (key) => {
-      if (!deps.current) throw new Error('crash fixture: toolbox invoked before bureau was ready');
-      return deps.current.kvGet(key);
-    },
-    kvSet: (key, value) => {
-      if (!deps.current) throw new Error('crash fixture: toolbox invoked before bureau was ready');
-      return deps.current.kvSet(key, value);
-    },
+    createChildRun: (message) => requireDeps().createChildRun(message),
+    registerDurableRun: (runId) => requireDeps().registerDurableRun(runId),
+    kvGet: (key) => requireDeps().kvGet(key),
+    kvSet: (key, value) => requireDeps().kvSet(key, value),
     get toolResultCache() {
-      if (!deps.current) throw new Error('crash fixture: toolbox invoked before bureau was ready');
-      return deps.current.toolResultCache;
+      return requireDeps().toolResultCache;
     },
-    abortSelf: () => deps.current?.abortSelf(),
+    abortSelf: () => requireDeps().abortSelf(),
   });
 
   const generate = createFixtureGenerate();
