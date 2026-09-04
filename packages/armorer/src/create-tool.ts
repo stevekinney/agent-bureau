@@ -1406,8 +1406,14 @@ export function createTool<
         chunk: unknown,
         accumulator: ReturnType<typeof createStreamingAccumulator>,
       ) => {
-        emit('stream-chunk', { ...parsedDetail, chunk, index: accumulator.index });
-        emit('output-chunk', { ...parsedDetail, chunk });
+        // Only `executionId`/`ownerId` from `parsedDetail` — `stream-chunk`/
+        // `output-chunk` don't read `toolCall`/`configuration`, and this
+        // runs once per chunk, so skip copying fields the event classes
+        // discard (per-review feedback: avoid needless allocation on a
+        // high-volume streaming path).
+        const streamIdentity = { executionId: baseDetail.executionId, ownerId: baseDetail.ownerId };
+        emit('stream-chunk', { ...streamIdentity, chunk, index: accumulator.index });
+        emit('output-chunk', { ...streamIdentity, chunk });
         accumulator.chunks.push(chunk);
         if (accumulator.digest) {
           accumulator.digest.update(stableStringify(chunk));
