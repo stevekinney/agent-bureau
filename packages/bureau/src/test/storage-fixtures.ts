@@ -18,12 +18,33 @@
  * handle without deleting anything" reduces to "there is nothing this
  * fixture itself opened to close, and it deletes nothing" precisely
  * because ownership of the real connection lives with bureau, not here.
+ *
+ * `openHandles()` (AB-322) is the one exception to that "bureau owns the
+ * real handle" rule, and only for `createMemoryStorageFixture`: rather
+ * than a `{ type: 'memory' }` `StorageConfiguration` (which lets bureau
+ * mint its own, unobservable `MemoryStorage`), the memory fixture
+ * constructs and hands bureau a `Storage` INSTANCE it built itself
+ * (`BureauOptions.storage`/`persistence.store` both accept one — see
+ * `runtime-composition.ts`'s `isStorageConfiguration` discriminator) so it
+ * can wrap that exact instance with public call accounting. This is safe
+ * for memory specifically because there is no real file handle or
+ * single-writer lock to race — the concern the module doc above raises
+ * for sqlite/lmdb does not apply. `bureau.shutdown()` never disposes a
+ * caller-supplied `Storage` INSTANCE (`ownsDurableStorage` in
+ * `runtime-composition.ts` is `false` for it — only a `StorageConfiguration`
+ * bureau resolves itself sets that flag), so `openHandles()` reporting a
+ * call as still in flight is never a race against bureau's own teardown:
+ * nothing but this fixture (or a test's own release of an injected block)
+ * ever finishes that call. The sqlite/lmdb fixtures stay
+ * `StorageConfiguration`-only and their `openHandles()` always returns
+ * `[]` — they have nothing of their own to account for.
  */
 import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import type { StorageConfiguration } from '@lostgradient/weft/storage';
+import type { Storage, StorageConfiguration } from '@lostgradient/weft/storage';
+import { MemoryStorage } from '@lostgradient/weft/storage';
 import type { RuntimeServices } from 'lifecycle';
 
 /**
@@ -33,11 +54,100 @@ import type { RuntimeServices } from 'lifecycle';
  * allocated `path` itself and `dispose()` removes it; `owned: false` means
  * the caller supplied `path` and `dispose()` leaves it alone.
  */
-export interface BureauStorageFixture {
-  readonly configuration: StorageConfiguration;
+export interface BureauStorageFixture<
+  TConfiguration extends StorageConfiguration | Storage = StorageConfiguration | Storage,
+> {
+  readonly configuration: TConfiguration;
   readonly path?: string;
   readonly owned: boolean;
   dispose(): Promise<void>;
+  /**
+   * Labels of every storage call this fixture's own accounting has seen
+   * START but not yet FINISH (AB-322) — public handle accounting a test
+   * (or `assertBureauQuiescent`'s `openStorageResources` row) can read
+   * directly, with no private counter reached into from outside this
+   * module. Always `[]` for `createSqliteStorageFixture`/
+   * `createLmdbStorageFixture` — see the module doc for why only the
+   * memory fixture can account for a real handle.
+   */
+  openHandles(): readonly string[];
+}
+
+/** The verbs {@link wrapStorageWithHandleAccounting} tracks — every async `Storage` method. `capabilities()`/`scoped()` are synchronous and excluded: nothing awaits them, so there is no "in flight" window to account for. */
+const ACCOUNTED_STORAGE_VERBS = [
+  'get',
+  'put',
+  'delete',
+  'scan',
+  'batch',
+  'conditionalBatch',
+  'has',
+  'deletePrefix',
+  'deleteRange',
+  'keys',
+  'count',
+  'query',
+] as const;
+
+/**
+ * Wraps `storage` with public call accounting: every call to one of
+ * {@link ACCOUNTED_STORAGE_VERBS} is recorded the instant it is INVOKED
+ * (before whatever it delegates to has any chance to resolve or block) and
+ * removed the instant its returned `Promise` settles. `openHandles()`
+ * reads the current set — synchronously, no polling — so a caller that
+ * wraps `storage` again underneath (e.g. `createFaultEngine(...).wrapStorage`,
+ * to block a specific call deterministically) sees that call recorded as
+ * open for exactly as long as the block holds, because this wrapper's own
+ * call to the layer beneath it does not settle until the block releases.
+ */
+function wrapStorageWithHandleAccounting(storage: Storage): {
+  readonly storage: Storage;
+  openHandles(): readonly string[];
+} {
+  const open = new Map<string, true>();
+  let sequence = 0;
+
+  const handler: ProxyHandler<Storage> = {
+    get(target, property, receiver) {
+      const value: unknown = Reflect.get(target, property, receiver);
+      const isAccountedVerb =
+        typeof property === 'string' &&
+        (ACCOUNTED_STORAGE_VERBS as readonly string[]).includes(property) &&
+        typeof value === 'function';
+      if (!isAccountedVerb) {
+        return typeof value === 'function' ? value.bind(target) : value;
+      }
+
+      const verb = property;
+      return (...args: unknown[]) => {
+        sequence += 1;
+        const label = `${verb}#${sequence}`;
+        open.set(label, true);
+        const result: unknown = Reflect.apply(
+          value as (...callArgs: unknown[]) => unknown,
+          target,
+          args,
+        );
+        if (result instanceof Promise) {
+          void result.then(
+            () => open.delete(label),
+            () => open.delete(label),
+          );
+        } else {
+          // A synchronous return (none of today's `ACCOUNTED_STORAGE_VERBS`
+          // produce one, but the `Storage` interface does not guarantee
+          // it) never left this call "in flight" to begin with.
+          open.delete(label);
+        }
+        return result;
+      };
+    },
+  };
+
+  return {
+    storage: new Proxy(storage, handler),
+    openHandles: () => [...open.keys()],
+  };
 }
 
 /** Options shared by the two persistent-backend fixture factories. */
@@ -79,18 +189,46 @@ function allocateFixturePath(kind: 'sqlite' | 'lmdb', runtime: RuntimeServices):
   );
 }
 
+/** Options for {@link createMemoryStorageFixture}. */
+export interface CreateMemoryStorageFixtureOptions {
+  /**
+   * Applied to the fixture's own freshly-constructed `MemoryStorage`
+   * BEFORE this fixture's own handle-accounting wrapper wraps the result
+   * (AB-322) — so a call this returns still-pending (e.g.
+   * `createFaultEngine(...).wrapStorage`, blocking a specific call
+   * deterministically) is correctly reported as still open by
+   * `openHandles()` for exactly as long as it stays pending. Defaults to
+   * the identity function.
+   */
+  wrapStorage?: (storage: Storage) => Storage;
+}
+
 /**
- * An in-memory `BureauStorageFixture`. Always `owned: true`, but `dispose()`
- * has nothing to remove — `MemoryStorage` holds no filesystem or external
- * resource — so it is a no-op every time, safely repeatable.
+ * An in-memory `BureauStorageFixture`. Always `owned: true`. Unlike the
+ * sqlite/lmdb fixtures below, this one constructs its own `MemoryStorage`
+ * instance (see the module doc's `openHandles()` section for why that is
+ * safe here specifically) and hands bureau that INSTANCE — not a `{ type:
+ * 'memory' }` config — wrapped with public call accounting `openHandles()`
+ * reads. `dispose()` disposes that instance (`MemoryStorage` holds no
+ * filesystem or external resource, so this is a no-op in practice, but
+ * bureau itself never disposes a caller-supplied `Storage` instance — see
+ * the module doc — so this fixture must be the one that does, rather than
+ * assuming a no-op the way the pre-AB-322 `{ type: 'memory' }` form could).
  */
-export function createMemoryStorageFixture(): BureauStorageFixture {
+export function createMemoryStorageFixture(
+  options: CreateMemoryStorageFixtureOptions = {},
+): BureauStorageFixture<Storage> {
+  const rawStorage = new MemoryStorage();
+  const wrapped = options.wrapStorage?.(rawStorage) ?? rawStorage;
+  const { storage: accounted, openHandles } = wrapStorageWithHandleAccounting(wrapped);
+
   return {
-    configuration: { type: 'memory' },
+    configuration: accounted,
     owned: true,
     async dispose() {
-      // Nothing to release: in-memory storage owns no external resource.
+      rawStorage[Symbol.dispose]();
     },
+    openHandles,
   };
 }
 
@@ -106,7 +244,7 @@ export function createMemoryStorageFixture(): BureauStorageFixture {
  */
 export function createSqliteStorageFixture(
   options: CreatePersistentStorageFixtureOptions,
-): BureauStorageFixture {
+): BureauStorageFixture<StorageConfiguration> {
   const owned = options.path === undefined;
   const path = options.path ?? allocateFixturePath('sqlite', options.runtime);
 
@@ -120,6 +258,7 @@ export function createSqliteStorageFixture(
       await rm(`${path}-wal`, { force: true });
       await rm(`${path}-shm`, { force: true });
     },
+    openHandles: () => [],
   };
 }
 
@@ -133,7 +272,7 @@ export function createSqliteStorageFixture(
  */
 export function createLmdbStorageFixture(
   options: CreatePersistentStorageFixtureOptions,
-): BureauStorageFixture {
+): BureauStorageFixture<StorageConfiguration> {
   const owned = options.path === undefined;
   const path = options.path ?? allocateFixturePath('lmdb', options.runtime);
 
@@ -145,5 +284,6 @@ export function createLmdbStorageFixture(
       if (!owned) return;
       await rm(path, { recursive: true, force: true });
     },
+    openHandles: () => [],
   };
 }

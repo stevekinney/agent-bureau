@@ -21,10 +21,16 @@ async function pathExists(path: string): Promise<boolean> {
 }
 
 describe('createMemoryStorageFixture', () => {
-  it('returns an owned, memory-typed configuration with no path', () => {
+  it('returns an owned Storage instance (AB-322: not a bare configuration) with no path', () => {
     const fixture = createMemoryStorageFixture();
 
-    expect(fixture.configuration).toEqual({ type: 'memory' });
+    // AB-322: `configuration` is now a real `Storage` instance this
+    // fixture constructed itself (wrapped with handle accounting), not a
+    // bare `{ type: 'memory' }` config — `get`/`put`/`delete` are callable
+    // directly, and `capabilities()` still reports the real MemoryStorage
+    // profile.
+    expect(typeof (fixture.configuration as { get?: unknown }).get).toBe('function');
+    expect(typeof (fixture.configuration as { put?: unknown }).put).toBe('function');
     expect(fixture.path).toBeUndefined();
     expect(fixture.owned).toBe(true);
   });
@@ -34,6 +40,75 @@ describe('createMemoryStorageFixture', () => {
 
     await fixture.dispose();
     await fixture.dispose();
+  });
+
+  it('openHandles() is empty before any call and after every call settles', async () => {
+    const fixture = createMemoryStorageFixture();
+    const storage = fixture.configuration as {
+      get(key: string): Promise<Uint8Array | null>;
+      put(key: string, value: Uint8Array): Promise<void>;
+    };
+
+    expect(fixture.openHandles()).toEqual([]);
+
+    await storage.put('key', new Uint8Array([1]));
+    expect(fixture.openHandles()).toEqual([]);
+
+    await storage.get('key');
+    expect(fixture.openHandles()).toEqual([]);
+  });
+
+  it('openHandles() names a call started but not yet finished, through a caller-supplied wrapStorage', async () => {
+    let releaseGet!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      releaseGet = resolve;
+    });
+
+    const fixture = createMemoryStorageFixture({
+      wrapStorage: (storage) =>
+        new Proxy(storage, {
+          get(target, property, receiver) {
+            if (property !== 'get') return Reflect.get(target, property, receiver);
+            return async (key: string) => {
+              await blocked;
+              return target.get(key);
+            };
+          },
+        }),
+    });
+    const storage = fixture.configuration as { get(key: string): Promise<Uint8Array | null> };
+
+    const getPromise = storage.get('key');
+    expect(fixture.openHandles()).toEqual(['get#1']);
+
+    releaseGet();
+    await getPromise;
+    expect(fixture.openHandles()).toEqual([]);
+  });
+
+  it('openHandles() clears a call that REJECTS too, not only one that resolves', async () => {
+    const fixture = createMemoryStorageFixture({
+      wrapStorage: (storage) =>
+        new Proxy(storage, {
+          get(target, property, receiver) {
+            if (property !== 'get') return Reflect.get(target, property, receiver);
+            return async (): Promise<Uint8Array | null> => {
+              throw new Error('deliberate failure');
+            };
+          },
+        }),
+    });
+    const storage = fixture.configuration as { get(key: string): Promise<Uint8Array | null> };
+
+    let caught: unknown;
+    try {
+      await storage.get('key');
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toBe('deliberate failure');
+    expect(fixture.openHandles()).toEqual([]);
   });
 });
 
@@ -103,6 +178,13 @@ describe('createSqliteStorageFixture', () => {
       await rm(callerPath, { force: true });
     }
   });
+
+  it('openHandles() always returns empty — this fixture never opens its own handle (see the module doc)', () => {
+    const runtime = createManualRuntimeServices();
+    const fixture = createSqliteStorageFixture({ runtime });
+
+    expect(fixture.openHandles()).toEqual([]);
+  });
 });
 
 describe('createLmdbStorageFixture', () => {
@@ -155,5 +237,12 @@ describe('createLmdbStorageFixture', () => {
 
     await fixture.dispose();
     await fixture.dispose();
+  });
+
+  it('openHandles() always returns empty — this fixture never opens its own handle (see the module doc)', () => {
+    const runtime = createManualRuntimeServices();
+    const fixture = createLmdbStorageFixture({ runtime });
+
+    expect(fixture.openHandles()).toEqual([]);
   });
 });

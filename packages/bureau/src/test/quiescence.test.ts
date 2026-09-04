@@ -4,7 +4,8 @@ import { join } from 'node:path';
 
 import type { GenerateFunction } from '@lostgradient/operative';
 import { createAgent } from '@lostgradient/operative';
-import { waitForCondition } from '@lostgradient/operative/test';
+import { createFaultEngine, type FaultPlan, waitForCondition } from '@lostgradient/operative/test';
+import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { createTool, createToolbox } from 'armorer';
 import { file } from 'bun';
 import { afterEach, describe, expect, it } from 'bun:test';
@@ -623,5 +624,340 @@ describe('assertBureauQuiescent / BureauTestHarness.close()', () => {
     expect(error.message).toContain('scheduler "task-1" (unresolved)');
     expect(error.message).toContain('Detached');
     expect(error.message).toContain('durable-owner "detached-run-1"');
+  });
+});
+
+describe('AB-322: fault-forced leftovers populate the corresponding rows', () => {
+  it('a schedule fire blocked (createFaultEngine) past a bounded shutdown names the task in runningScheduleFires, not leaked — the "scheduler" owner is already incomplete', async () => {
+    const runtime = createManualRuntimeServices();
+    let onReachedCalled = false;
+    let releaseFire!: () => void;
+    const release = new Promise<void>((resolve) => {
+      releaseFire = resolve;
+    });
+    const plan: FaultPlan = [
+      {
+        id: 'blocked-schedule-fire',
+        boundary: 'before-work',
+        operation: 'generate',
+        occurrence: { kind: 'every' },
+        effect: {
+          kind: 'block',
+          release,
+          onReached: () => {
+            onReachedCalled = true;
+          },
+        },
+      },
+    ];
+    const engine = createFaultEngine(plan, runtime);
+
+    const storage = createMemoryStorageFixture();
+    const harness = await createBureauTestHarness({
+      agents: {},
+      generate: engine.wrapGenerate(mockGenerate()),
+      storage,
+      runtime,
+      scheduler: { enabled: true, idleDelay: 1 },
+    });
+    disposals.push(async () => {
+      releaseFire();
+      await harness.bureau.dispose();
+      await storage.dispose();
+    });
+
+    await harness.submitSchedulerTask({ priority: 'background', message: 'blocked fire' });
+    await waitForCondition(
+      () => onReachedCalled,
+      'fault engine block on the schedule fire was never reached',
+    );
+
+    const report = await harness.close({ timeoutMilliseconds: 50 });
+
+    expect(report.runningScheduleFires).toHaveLength(1);
+    const fire = report.runningScheduleFires[0]!;
+    expect(fire.identifier).toBeDefined();
+    expect(fire.discoveredVia).toBe('public-snapshot');
+    expect(report.leaked).not.toContainEqual(fire);
+    const incomplete = report.incomplete.find((entry) => entry.kind === 'scheduler');
+    expect(incomplete?.reason).toBe('unresolved');
+    expect(report.quiescent).toBe(true);
+
+    releaseFire();
+  });
+
+  it('a judge evaluation blocked (createFaultEngine.wrapStorage, on the evaluation\'s own audit-record write) past a bounded shutdown names it in activeEvaluations, not leaked — the "online-evals" owner is already incomplete', async () => {
+    // Deliberately NOT `wrapGenerate` on the judge's own model call: online
+    // evals' `evaluateRun` (`online-evals.ts`) races EVERY judge call
+    // against the same background-shutdown `AbortSignal` `bureau.shutdown()`
+    // fires — so a judge blocked on ITS OWN generate call is abandoned
+    // (untracked) the instant that signal aborts, regardless of whether the
+    // underlying call ever actually settles, and never stays observable
+    // past shutdown. `recordScore`'s `auditTrail.record()` write, right
+    // after the judge returns, is NOT raced against that signal — blocking
+    // IT (the same `storage:set` mechanism the audit-write test above
+    // uses) keeps the evaluation genuinely, observably in flight.
+    const runtime = createManualRuntimeServices();
+    let onReachedCalled = false;
+    let releaseWrite!: () => void;
+    const release = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    const plan: FaultPlan = [
+      {
+        id: 'blocked-eval-write',
+        boundary: 'before-work',
+        operation: 'storage:set',
+        occurrence: { kind: 'every' },
+        effect: {
+          kind: 'block',
+          release,
+          onReached: () => {
+            onReachedCalled = true;
+          },
+        },
+      },
+    ];
+    const engine = createFaultEngine(plan, runtime);
+    const rawStorage = new MemoryStorage();
+    const kv = textValueStore(rawStorage);
+    const wrappedKv = engine.wrapStorage(kv);
+
+    const storage = createMemoryStorageFixture();
+    const harness = await createBureauTestHarness({
+      agents: {
+        worker: createAgent({ name: 'worker', generate: mockGenerate('worker done') }),
+      },
+      generate: mockGenerate(),
+      persistence: wrappedKv,
+      storage,
+      runtime,
+      onlineEvals: {
+        judges: [
+          {
+            name: 'instant-judge',
+            async evaluate() {
+              return { pass: true, score: 1, message: 'ok' };
+            },
+          },
+        ],
+        sampleRate: 1,
+        rng: () => 0,
+      },
+    });
+    disposals.push(async () => {
+      releaseWrite();
+      await harness.bureau.dispose();
+      await storage.dispose();
+      rawStorage[Symbol.dispose]();
+    });
+
+    // `bureau.run()` catalog dispatch (`harness.startRun`) never touches
+    // the operative `Store`, so it never emits the `'action'` events
+    // `createOnlineEvalSampler` listens for (or that `audit-trail.ts`
+    // listens for, below) — only `startSession`'s
+    // `createRun`/`createRunFromRequest` path does. `maximumSteps: 1`
+    // forces `'run.completed'` on the very first step (`mockGenerate`'s
+    // empty `toolCalls` never signals completion on its own).
+    await harness.startSession({ message: 'hello', maximumSteps: 1 });
+    await waitForCondition(
+      () => onReachedCalled,
+      'fault engine block on the evaluation audit write was never reached',
+    );
+
+    const report = await harness.close({ timeoutMilliseconds: 50 });
+
+    expect(report.activeEvaluations).toHaveLength(1);
+    const evaluation = report.activeEvaluations[0]!;
+    expect(evaluation.identifier).toBeDefined();
+    expect(evaluation.discoveredVia).toBe('public-snapshot');
+    expect(report.leaked).not.toContainEqual(evaluation);
+    const incomplete = report.incomplete.find((entry) => entry.kind === 'online-evals');
+    expect(incomplete?.reason).toBe('unresolved');
+    expect(report.quiescent).toBe(true);
+
+    releaseWrite();
+  });
+
+  it('an audit write blocked (createFaultEngine.wrapStorage on the bare persistence KV) past a bounded shutdown names it in pendingAuditWrites via runtime.outstandingDeferred(), not leaked — the "audit-trail" owner is already incomplete', async () => {
+    const runtime = createManualRuntimeServices();
+    let onReachedCalled = false;
+    let releaseWrite!: () => void;
+    const release = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    const plan: FaultPlan = [
+      {
+        id: 'blocked-audit-write',
+        boundary: 'before-work',
+        operation: 'storage:set',
+        occurrence: { kind: 'nth', n: 1 },
+        effect: {
+          kind: 'block',
+          release,
+          onReached: () => {
+            onReachedCalled = true;
+          },
+        },
+      },
+    ];
+    const engine = createFaultEngine(plan, runtime);
+    const rawStorage = new MemoryStorage();
+    const kv = textValueStore(rawStorage);
+    const wrappedKv = engine.wrapStorage(kv);
+
+    const storage = createMemoryStorageFixture();
+    const harness = await createBureauTestHarness({
+      agents: {
+        worker: createAgent({ name: 'worker', generate: mockGenerate('worker done') }),
+      },
+      generate: mockGenerate(),
+      persistence: wrappedKv,
+      storage,
+      runtime,
+    });
+    disposals.push(async () => {
+      releaseWrite();
+      await harness.bureau.dispose();
+      await storage.dispose();
+      rawStorage[Symbol.dispose]();
+    });
+
+    // `harness.startRun` (catalog dispatch) never touches the operative
+    // `Store` and so never emits an action the audit trail's listener
+    // sees — only `startSession` does (see the evaluation test above for
+    // the same distinction). The write is fire-and-forget from the run's
+    // own perspective, so there is no need to wait for the session to
+    // finish — only for the fault plan to have been reached.
+    await harness.startSession({ message: 'hello', maximumSteps: 1 });
+    await waitForCondition(
+      () => onReachedCalled,
+      'fault engine block on the audit write was never reached',
+    );
+
+    const report = await harness.close({ timeoutMilliseconds: 50 });
+
+    expect(report.pendingAuditWrites).toHaveLength(1);
+    const write = report.pendingAuditWrites[0]!;
+    expect(write.identifier).toBe('audit-write#1');
+    expect(write.owner).toBe('audit-trail');
+    expect(write.discoveredVia).toBe('runtime-services-deferred');
+    expect(report.leaked).not.toContainEqual(write);
+    const incomplete = report.incomplete.find((entry) => entry.kind === 'audit-trail');
+    expect(incomplete?.reason).toBe('unresolved');
+    expect(report.quiescent).toBe(true);
+
+    releaseWrite();
+  });
+
+  it('a call blocked on the memory storage fixture\'s own instance is named by openHandles(), reported in openStorageResources, and IS folded into leaked (unlike the three rows above, nothing shadows this one under "incomplete")', async () => {
+    const runtime = createManualRuntimeServices();
+    let onReachedCalled = false;
+    let releaseGet!: () => void;
+    const release = new Promise<void>((resolve) => {
+      releaseGet = resolve;
+    });
+    const plan: FaultPlan = [
+      {
+        id: 'blocked-storage-get',
+        boundary: 'before-work',
+        operation: 'storage:get',
+        occurrence: { kind: 'nth', n: 1 },
+        effect: {
+          kind: 'block',
+          release,
+          onReached: () => {
+            onReachedCalled = true;
+          },
+        },
+      },
+    ];
+    const engine = createFaultEngine(plan, runtime);
+    // A plain `engine.wrapStorage(raw)` would block the FIRST `get#N` this
+    // instance ever sees — which, on this instance, is the session store's
+    // own bootstrap read, not the audit query below. This thin router
+    // (test-local, matching the pattern `fault-plan.ts` documents for
+    // Bureau-scoped addressing) sends only an audit-prefixed key through
+    // the fault-engine-wrapped path; every other key (session store,
+    // anything else) reaches `raw` untouched.
+    const storage = createMemoryStorageFixture({
+      wrapStorage: (raw) => {
+        const faulted = engine.wrapStorage(raw);
+        return new Proxy(raw, {
+          get(target, property, receiver) {
+            if (property !== 'get') {
+              const value: unknown = Reflect.get(target, property, receiver);
+              return typeof value === 'function' ? value.bind(target) : value;
+            }
+            return async (key: string) => {
+              if (key.startsWith('audit:v1:')) {
+                return faulted.get(key);
+              }
+              return target.get(key);
+            };
+          },
+        });
+      },
+    });
+    const harness = await createBureauTestHarness({
+      agents: {
+        worker: createAgent({ name: 'worker', generate: mockGenerate('worker done') }),
+      },
+      generate: mockGenerate(),
+      storage,
+      runtime,
+    });
+    disposals.push(async () => {
+      releaseGet();
+      await harness.bureau.dispose();
+      await storage.dispose();
+    });
+
+    // Writes the audit record `auditTrail.query()` below reads back —
+    // deliberately unblocked (only `storage:get` is faulted, and this is
+    // the run's own `storage:set`), so this session completes normally.
+    // `harness.startRun` (catalog dispatch) never touches the operative
+    // `Store` and so never produces an audit record at all — see the
+    // evaluation test above for the same distinction; `startSession` is
+    // the one dispatch path that does. Waited for via `bureau.getRun` (a
+    // pure in-memory read, never touching `storage`) rather than
+    // `auditTrail.query()` itself — polling with `query()` here would walk
+    // straight into the SAME `nth: 1` block this test means to trigger
+    // deliberately, deadlocking the wait on itself.
+    const summary = await harness.startSession({ message: 'hello', maximumSteps: 1 });
+    await waitForCondition(
+      () => harness.bureau.getRun(summary.id)?.status === 'completed',
+      'session run never completed',
+    );
+
+    // A genuinely public read: `bureau.auditTrail.query()` (AB-262 already
+    // documents `auditTrail` as public Bureau surface) lists the prefix,
+    // then `kv.get()`s each key — the second step is what the fault plan
+    // above blocks.
+    const queryPromise = harness.bureau.auditTrail?.query();
+    await waitForCondition(
+      () => onReachedCalled,
+      'fault engine block on the storage get was never reached',
+    );
+    expect(storage.openHandles()).toHaveLength(1);
+    expect(storage.openHandles()[0]).toMatch(/^get#\d+$/);
+
+    try {
+      await harness.close();
+      throw new Error('expected harness.close() to reject with BureauQuiescenceError');
+    } catch (error) {
+      expect(error).toBeInstanceOf(BureauQuiescenceError);
+      const report = (error as BureauQuiescenceError).report;
+      const resource = report.openStorageResources[0]!;
+      expect(report.openStorageResources).toHaveLength(1);
+      expect(resource.identifier).toMatch(/^get#\d+$/);
+      expect(resource.owner).toBe('storage');
+      expect(resource.discoveredVia).toBe('public-snapshot');
+      expect(report.leaked).toContainEqual(resource);
+      expect(report.quiescent).toBe(false);
+    }
+
+    releaseGet();
+    await queryPromise;
   });
 });
