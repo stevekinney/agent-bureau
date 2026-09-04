@@ -137,6 +137,7 @@ import type {
 } from './is-tool';
 import { isTool, resolveToolPolicyAllow } from './is-tool';
 import { resolveFuzzyToolName } from './resolution/index';
+import { mergeRuntimeToolContext } from './runtime-tool-context';
 import { isAsyncIterable, isPromise, isTestRuntime } from './type-guards';
 import type {
   JSONValue,
@@ -2603,40 +2604,22 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       input: configuration.input,
       async execute(params, toolContext) {
         const executeFn = await resolveExecute();
-        return executeFn(params, {
-          ...baseContext,
-          dispatchEvent,
-          emit,
-          // The full `RuntimeToolContext` this call's own `createTool`
-          // wrapper built (with `dispatch`/`progress` correctly wired to
-          // ITS execution) — forwarded through so a toolbox-registered
-          // tool's `context.dispatch`/`context.progress()` work exactly
-          // like a directly-executed tool's do, instead of silently
-          // dropping to `undefined`.
-          dispatch: toolContext.dispatch,
-          progress: toolContext.progress,
-          meta: toolContext.meta,
-          ...(toolContext.execution !== undefined ? { execution: toolContext.execution } : {}),
-          configuration: toolContext.configuration,
-          toolCall: toolContext.toolCall,
-          ...(toolContext.durableOperationKey !== undefined
-            ? { durableOperationKey: toolContext.durableOperationKey }
-            : {}),
-          ...(toolContext.requestContext ? { requestContext: toolContext.requestContext } : {}),
-          ...(toolContext.effectiveContext
-            ? { effectiveContext: toolContext.effectiveContext }
-            : {}),
-          signal: toolContext.signal,
-          timeout: toolContext.timeout,
-          stream: toolContext.stream,
-          ...(toolContext.elicit !== undefined ? { elicit: toolContext.elicit } : {}),
-          ...(toolContext.traceContext !== undefined
-            ? { traceContext: toolContext.traceContext }
-            : {}),
-          ...(toolContext.executionContext !== undefined
-            ? { executionContext: toolContext.executionContext }
-            : {}),
-        });
+        // AB-315: `toolContext` here is the exact `RuntimeToolContext`
+        // `create-tool.ts`'s own internal `execute` wrapper built for THIS
+        // call (the direct `createTool(...).execute` path) — `dispatch`
+        // and `progress` on it are already wired correctly. `mergeRuntimeToolContext`
+        // (`src/runtime-tool-context.ts`) spreads it onto `baseContext`
+        // wholesale instead of hand-listing each field, so this
+        // toolbox-registered tool's body gets the identical context shape
+        // a directly-executed tool's body would, and a future field added
+        // to `RuntimeToolContext` reaches it automatically. Manually
+        // re-listing each field here (the previous shape) is exactly how
+        // `dispatch` and `progress` were dropped in the first place — this
+        // helper closes off that class of drift.
+        return executeFn(
+          params,
+          mergeRuntimeToolContext(baseContext, toolContext, { dispatchEvent, emit }),
+        );
       },
     };
     if (configuration.tags) {

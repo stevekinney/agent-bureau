@@ -1,4 +1,4 @@
-import { createTool, createToolbox } from 'armorer';
+import { createTool, createToolbox, type ToolConfigurationInput, type ToolContext } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
 import { z } from 'zod';
@@ -565,5 +565,56 @@ describe('curated tool.* bubble events — selectTools-swapped step toolbox (AB-
 
     expect(started).toHaveLength(1);
     expect(settled).toHaveLength(1);
+  });
+});
+
+// AB-315: the tests above at line 445 drive `swappedToolbox.emit('progress',
+// ...)` directly because, before AB-315, a real tool body's
+// `context.progress()` silently no-opped for any tool executed through a
+// toolbox (armorer's `buildDefaultTool` dropped `progress`/`dispatch` off
+// the context it handed the body). This sibling test instead registers a
+// raw tool configuration — the same path `buildDefaultTool` builds, as
+// opposed to an already-built `createTool(...)` `Tool` — and drives it
+// through a real `activeRun` tool call, proving the curated `tool.progress`
+// bubble reaches the run emitter from an actual `context.progress()` call
+// inside the tool body, with no manual `toolbox.emit()` involved.
+describe('tool.progress bubble event from a real tool body executed through the toolbox (AB-315)', () => {
+  it('forwards a curated tool.progress event reported by a real tool body via context.progress', async () => {
+    const progressReportingToolConfiguration: ToolConfigurationInput = {
+      name: 'progress-reporting-tool',
+      description: 'reports progress via context.progress before resolving',
+      input: z.object({ message: z.string() }),
+      async execute(params, rawContext) {
+        const { message } = params as { message: string };
+        const context = rawContext as ToolContext;
+        context.progress({ percent: 50, message: 'halfway' });
+        return message;
+      },
+    };
+    const toolbox = createToolbox([progressReportingToolConfiguration]);
+    const conversation = new Conversation();
+    const generate = createMockGenerate([
+      toolCallResponse([{ name: 'progress-reporting-tool', arguments: { message: 'hi' } }]),
+      textResponse('Done.'),
+    ]);
+
+    const activeRun = createActiveRun({
+      generate,
+      toolbox,
+      conversation,
+      stopWhen: noToolCalls(),
+      runId: 'real-progress-run',
+      agentName: 'test-agent',
+    });
+
+    const progress: ToolProgressBubbleEvent[] = [];
+    activeRun.addEventListener('tool.progress', (e) => progress.push(e));
+
+    await activeRun.result;
+
+    expect(progress).toHaveLength(1);
+    expect(progress[0]?.toolName).toBe('progress-reporting-tool');
+    expect(progress[0]?.percent).toBe(50);
+    expect(progress[0]?.message).toBe('halfway');
   });
 });
