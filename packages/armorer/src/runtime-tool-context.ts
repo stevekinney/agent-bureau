@@ -1,20 +1,22 @@
 import type { RuntimeToolContext } from './is-tool';
 
 /**
- * The single place a `RuntimeToolContext` built for one execution (by
- * `create-tool.ts`'s internal `execute` wrapper — the "direct"
- * `createTool(...).execute` path) is merged onto a base context for a tool
- * body.
+ * Merges a `RuntimeToolContext` — the context `create-tool.ts`'s internal
+ * `execute` wrapper builds for one execution on the "direct"
+ * `createTool(...).execute` path, with `dispatch`/`progress` already wired
+ * correctly for that execution — onto a base context for a tool body.
  *
- * `create-toolbox.ts`'s `buildDefaultTool` reuses this same helper (AB-315)
- * so a toolbox-registered tool's body receives the exact same
- * `RuntimeToolContext` shape a directly-executed tool's body does — instead
- * of hand-listing each field (the shape that previously dropped `dispatch`
- * and `progress`, silently no-opping `context.progress()` for any tool
- * executed through a toolbox). Because this spreads `toolContext` wholesale
- * rather than enumerating its fields, a future field added to
- * `RuntimeToolContext` reaches both call sites automatically — the two
- * paths cannot drift apart on this again.
+ * `create-toolbox.ts`'s `buildDefaultTool` is this function's one caller
+ * today (AB-315): it passes the `RuntimeToolContext` its own `createTool()`
+ * call received as `toolContext`, so a toolbox-registered tool's body ends
+ * up with the exact same `RuntimeToolContext` shape a directly-executed
+ * tool's body would — instead of hand-listing each field (the shape that
+ * previously dropped `dispatch` and `progress`, silently no-opping
+ * `context.progress()` for any tool executed through a toolbox). Because
+ * this spreads `toolContext` wholesale rather than enumerating its fields,
+ * a future field added to `RuntimeToolContext` reaches `buildDefaultTool`'s
+ * tool bodies automatically, without a matching update here — closing off
+ * the class of drift that caused this bug.
  *
  * `extras` carries fields that exist alongside a `RuntimeToolContext` on a
  * tool body's context but are not themselves part of the

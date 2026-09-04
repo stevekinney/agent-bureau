@@ -2604,16 +2604,18 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       input: configuration.input,
       async execute(params, toolContext) {
         const executeFn = await resolveExecute();
-        // AB-315: `mergeRuntimeToolContext` (`src/runtime-tool-context.ts`)
-        // is the one place that merges a `RuntimeToolContext` onto a base
-        // context for a tool body — used here AND by the direct
-        // `createTool(...).execute` path's own internal forwarding, so a
-        // future field added to `RuntimeToolContext` reaches a
-        // toolbox-registered tool's body automatically. Manually re-listing
-        // each field here (the previous shape) is exactly how `dispatch`
-        // and `progress` were dropped in the first place — this shared
-        // helper spreads `toolContext` wholesale so that class of drift
-        // cannot recur.
+        // AB-315: `toolContext` here is the exact `RuntimeToolContext`
+        // `create-tool.ts`'s own internal `execute` wrapper built for THIS
+        // call (the direct `createTool(...).execute` path) — `dispatch`
+        // and `progress` on it are already wired correctly. `mergeRuntimeToolContext`
+        // (`src/runtime-tool-context.ts`) spreads it onto `baseContext`
+        // wholesale instead of hand-listing each field, so this
+        // toolbox-registered tool's body gets the identical context shape
+        // a directly-executed tool's body would, and a future field added
+        // to `RuntimeToolContext` reaches it automatically. Manually
+        // re-listing each field here (the previous shape) is exactly how
+        // `dispatch` and `progress` were dropped in the first place — this
+        // helper closes off that class of drift.
         return executeFn(
           params,
           mergeRuntimeToolContext(baseContext, toolContext, { dispatchEvent, emit }),
