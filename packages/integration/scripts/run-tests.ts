@@ -75,6 +75,7 @@ await run(['bun', 'test', 'test/tribunal-conformance-generality.test.ts']);
 await run(['bun', 'test', 'test/bureau-agent-definitions.test.ts']);
 await run(['bun', 'test', 'test/anthropic-interop.test.ts']);
 await run(['bun', 'test', 'test/model-selection-contract.test.ts']);
+await run(['bun', 'test', 'test/lifecycle-contract']);
 // AB-270 — process-crash recovery conformance (real OS processes, real
 // SQLite backend). Only the smoke-tagged scenario runs here, keeping this
 // suite's own wall time bounded: the full marker matrix runs via the
