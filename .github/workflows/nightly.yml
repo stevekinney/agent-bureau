@@ -79,6 +79,17 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      # `test:gateway-conformance` is a plain `bun test`, not a turbo task,
+      # so — unlike the pull-request lane, where this same command runs
+      # inside `validate` AFTER `bun run validate` has already built every
+      # workspace dependency — this standalone job must build gateway's own
+      # dependency graph first. Found and fixed via this workflow's own
+      # first manual `workflow_dispatch` run: gateway's conformance suite
+      # failed with "Cannot find module '@lostgradient/operative'" without
+      # this step.
+      - name: Build gateway dependencies
+        run: bun run turbo run build --filter=gateway
+
       - name: Gateway real-transport conformance (full)
         run: time bun run test:gateway-conformance
 
