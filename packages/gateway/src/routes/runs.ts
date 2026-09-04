@@ -317,6 +317,12 @@ export function buildRunDetailResponse(
 ): RunDetailResponse | undefined {
   const run = bureau.getRun(id);
   if (!run) return undefined;
-  const events = run.events.map((event) => projectRunEventForPrivilege(event, privileged));
+  // A privileged caller's projection is always a no-op (per-event AND, via
+  // this short-circuit, per-array) — `.map()` would otherwise still
+  // allocate a whole new array on every admin run-detail/SSR request just
+  // to hold the exact same event references back (copilot review).
+  const events = privileged
+    ? run.events
+    : run.events.map((event) => projectRunEventForPrivilege(event, privileged));
   return { ...run, events, timeline: assembleRunTimeline(events) };
 }
