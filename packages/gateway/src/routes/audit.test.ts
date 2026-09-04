@@ -28,9 +28,18 @@ const authHeaders = { authorization: `Bearer ${AUTH_TOKEN}` };
  * after `waitForRunState` resolves would otherwise race it (AB-333).
  */
 async function waitForAuditRecord(gateway: Gateway, runId: string): Promise<void> {
+  const { auditTrail } = gateway.bureau;
+  // Fail fast (copilot review on #554): every caller configures durable
+  // persistence, so a missing audit trail is a test setup bug, not a
+  // "not written yet" race — polling on optional chaining would turn that
+  // bug into a slow, indirect waitForCondition timeout instead.
+  if (!auditTrail) {
+    throw new Error('waitForAuditRecord requires a gateway configured with a durable audit trail');
+  }
+
   await waitForCondition(async () => {
-    const records = await gateway.bureau.auditTrail?.query({ runId });
-    return (records?.length ?? 0) > 0;
+    const records = await auditTrail.query({ runId });
+    return records.length > 0;
   }, `expected a durable audit trail record for run ${runId}`);
 }
 

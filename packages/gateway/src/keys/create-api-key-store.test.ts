@@ -102,7 +102,12 @@ describe('create', () => {
   });
 
   it('respects expiresAt', async () => {
-    const runtime = createManualRuntimeServices({ origin: '2030-01-01T00:00:00.000Z' });
+    const runtime = createManualRuntimeServices({
+      origin: '2030-01-01T00:00:00.000Z',
+      // Pinned (copilot review on #554) so this test never falls back to
+      // lifecycle's process-unique crypto.randomUUID()-seeded default.
+      identifierSeed: 'create-api-key-store-test',
+    });
     const clockedStore = createApiKeyStore(kv, runtime.clock);
     const expires = new Date(runtime.clock.now() + 86400000).toISOString();
     const result = await clockedStore.create({ name: 'expiring', expiresAt: expires });
@@ -194,7 +199,12 @@ describe('verify', () => {
   });
 
   it('returns null for an expired key', async () => {
-    const runtime = createManualRuntimeServices({ origin: '2030-01-01T00:00:00.000Z' });
+    const runtime = createManualRuntimeServices({
+      origin: '2030-01-01T00:00:00.000Z',
+      // Pinned (copilot review on #554) so this test never falls back to
+      // lifecycle's process-unique crypto.randomUUID()-seeded default.
+      identifierSeed: 'create-api-key-store-test',
+    });
     const clockedStore = createApiKeyStore(kv, runtime.clock);
     const expires = new Date(runtime.clock.now() - 1000).toISOString();
     const { plaintext } = await clockedStore.create({ name: 'expired', expiresAt: expires });

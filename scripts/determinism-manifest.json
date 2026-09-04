@@ -13,7 +13,6 @@
     "packages/gateway/src/routes/scheduler.ts",
     "packages/gateway/src/conformance/**",
     "packages/gateway/src/**/*.test.ts",
-    "packages/gateway/src/test/**",
     "packages/integration/test/lifecycle-contract/**",
     "packages/lifecycle/src/**",
     "packages/lifecycle/test/**",

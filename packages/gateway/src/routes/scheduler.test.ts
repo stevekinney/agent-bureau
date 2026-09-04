@@ -74,8 +74,11 @@ async function waitForSchedulerTick() {
 // Mints fake submitted-task ids for this file's fake `Scheduler` double
 // (AB-333). Not a clock assertion — module-scoped so every submission in
 // this file draws from the same injected identifier sequence rather than
-// the real `crypto.randomUUID()`.
-const fakeTaskIdRuntime = createManualRuntimeServices();
+// the real `crypto.randomUUID()`. Pins `identifierSeed` explicitly (copilot
+// review on #554) — omitting it falls back to lifecycle's process-unique
+// `crypto.randomUUID()`-seeded default, which would reintroduce exactly the
+// real-runtime read this replaces.
+const fakeTaskIdRuntime = createManualRuntimeServices({ identifierSeed: 'scheduler-test-fixture' });
 
 function createSubmitSchedulerTask(
   scheduler: Scheduler | undefined,
