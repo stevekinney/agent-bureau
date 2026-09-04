@@ -144,6 +144,50 @@ describe('sessions routes', () => {
     expect(response.status).toBe(404);
   });
 
+  it('GET /api/v1/sessions/:id returns 503 when getSession throws BureauError NOT_CONFIGURED', async () => {
+    const stubBureau = makeStubBureau({
+      getSession: async () => {
+        throw new BureauError('No session store configured', 'NOT_CONFIGURED', 'persistence');
+      },
+    });
+    const gateway = await createTestGateway(stubBureau, { authToken: AUTH_TOKEN });
+
+    const response = await requestJSON(gateway, '/api/v1/sessions/any', {
+      headers: authHeaders,
+    });
+    expect(response.status).toBe(503);
+  });
+
+  it('DELETE /api/v1/sessions/:id returns 503 when deleteSession throws BureauError NOT_CONFIGURED', async () => {
+    const stubBureau = makeStubBureau({
+      deleteSession: async () => {
+        throw new BureauError('No session store configured', 'NOT_CONFIGURED', 'persistence');
+      },
+    });
+    const gateway = await createTestGateway(stubBureau, { authToken: AUTH_TOKEN });
+
+    const response = await requestJSON(gateway, '/api/v1/sessions/any', {
+      method: 'DELETE',
+      headers: authHeaders,
+    });
+    expect(response.status).toBe(503);
+  });
+
+  it('DELETE /api/v1/sessions/:id rethrows a non-BureauError deleteSession failure', async () => {
+    const stubBureau = makeStubBureau({
+      deleteSession: async () => {
+        throw new Error('unexpected failure');
+      },
+    });
+    const gateway = await createTestGateway(stubBureau, { authToken: AUTH_TOKEN });
+
+    const response = await requestJSON(gateway, '/api/v1/sessions/any', {
+      method: 'DELETE',
+      headers: authHeaders,
+    });
+    expect(response.status).toBe(500);
+  });
+
   it('GET /api/v1/sessions/:id/events reaches bureau.eventHistory({kind: "session", id}) — AB-312 (501 over KV-only persistence, which has no durable engine)', async () => {
     const gateway = await createTestGateway({
       persistence: textValueStore(new MemoryStorage()),
@@ -189,6 +233,35 @@ describe('sessions routes', () => {
       expect(response.status).toBe(400);
     });
 
+    it('POST /api/v1/sessions/:id/signal returns 400 for unparseable JSON instead of a raw parse error', async () => {
+      const gateway = await createTestGateway({ authToken: AUTH_TOKEN });
+
+      const response = await requestJSON(gateway, '/api/v1/sessions/my-session/signal', {
+        method: 'POST',
+        headers: sessionWriteHeaders,
+        body: '{not valid json',
+      });
+
+      expect(response.status).toBe(400);
+    });
+
+    it('POST /api/v1/sessions/:id/signal rethrows a BureauError whose code is not NOT_FOUND, CONFLICT, or NOT_CONFIGURED', async () => {
+      const stubBureau = makeStubBureau({
+        signalSession: async () => {
+          throw new BureauError('rate limited', 'RATE_LIMITED');
+        },
+      });
+      const gateway = await createTestGateway(stubBureau, { authToken: AUTH_TOKEN });
+
+      const response = await requestJSON(gateway, '/api/v1/sessions/my-session/signal', {
+        method: 'POST',
+        headers: sessionWriteHeaders,
+        body: JSON.stringify({ name: 'human-response' }),
+      });
+
+      expect(response.status).toBe(500);
+    });
+
     it('POST /api/v1/sessions/:id/update returns 501 when no durable engine is configured', async () => {
       const gateway = await createTestGateway({ authToken: AUTH_TOKEN });
 
@@ -211,6 +284,35 @@ describe('sessions routes', () => {
       });
 
       expect(response.status).toBe(400);
+    });
+
+    it('POST /api/v1/sessions/:id/update returns 400 for unparseable JSON instead of a raw parse error', async () => {
+      const gateway = await createTestGateway({ authToken: AUTH_TOKEN });
+
+      const response = await requestJSON(gateway, '/api/v1/sessions/my-session/update', {
+        method: 'POST',
+        headers: sessionWriteHeaders,
+        body: '{not valid json',
+      });
+
+      expect(response.status).toBe(400);
+    });
+
+    it('POST /api/v1/sessions/:id/update rethrows a BureauError whose code is not NOT_FOUND, CONFLICT, NOT_CONFIGURED, or UNSUPPORTED_CAPABILITY', async () => {
+      const stubBureau = makeStubBureau({
+        updateSession: async () => {
+          throw new BureauError('rate limited', 'RATE_LIMITED');
+        },
+      });
+      const gateway = await createTestGateway(stubBureau, { authToken: AUTH_TOKEN });
+
+      const response = await requestJSON(gateway, '/api/v1/sessions/my-session/update', {
+        method: 'POST',
+        headers: sessionWriteHeaders,
+        body: JSON.stringify({ name: 'adjust-params' }),
+      });
+
+      expect(response.status).toBe(500);
     });
 
     it('GET /api/v1/sessions/:id/query returns 400 when name param is missing', async () => {
@@ -249,6 +351,23 @@ describe('sessions routes', () => {
       );
 
       expect(response.status).toBe(400);
+    });
+
+    it('GET /api/v1/sessions/:id/query rethrows a BureauError whose code is not NOT_FOUND, NOT_CONFIGURED, or UNSUPPORTED_CAPABILITY', async () => {
+      const stubBureau = makeStubBureau({
+        querySession: async () => {
+          throw new BureauError('rate limited', 'RATE_LIMITED');
+        },
+      });
+      const gateway = await createTestGateway(stubBureau, { authToken: AUTH_TOKEN });
+
+      const response = await requestJSON(
+        gateway,
+        '/api/v1/sessions/my-session/query?name=current-step',
+        { headers: authHeaders },
+      );
+
+      expect(response.status).toBe(500);
     });
 
     // Regression tests for PRRT_kwDORvupsc6MXEmd and PRRT_kwDORvupsc6MXEmm:

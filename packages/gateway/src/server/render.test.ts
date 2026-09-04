@@ -718,3 +718,82 @@ describe('resetAssetManifestCache', () => {
     expect(firstAgainHtml).not.toContain('/public/entry-second.js');
   });
 });
+
+// AB-92/AB-272: `isBuiltOutput` reflects where render.ts itself was loaded
+// from, which is always "source" under `bun test`. `assumeBuiltOutput`
+// (test-only) drives the built-mode manifest failure branches directly.
+describe('renderPage in built mode (assumeBuiltOutput override)', () => {
+  const createdDirectories: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(
+      createdDirectories.splice(0).map((directory) => rm(directory, { recursive: true })),
+    );
+  });
+
+  it('throws when dist/manifest.json is missing in built mode', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'gateway-render-built-missing-'));
+    createdDirectories.push(directory);
+
+    let rejection: unknown;
+    try {
+      await renderPage({
+        title: 'Test',
+        component: Fixture,
+        props: baseProps,
+        manifestDirectory: directory,
+        assumeBuiltOutput: true,
+      });
+    } catch (error) {
+      rejection = error;
+    }
+
+    expect(rejection).toBeInstanceOf(Error);
+    expect((rejection as Error).message).toContain('dist/manifest.json is missing or invalid');
+  });
+
+  it('throws when dist/manifest.json is missing a required key in built mode', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'gateway-render-built-incomplete-'));
+    createdDirectories.push(directory);
+    await writeFile(join(directory, 'manifest.json'), JSON.stringify({ 'entry.js': '/x.js' }));
+
+    let rejection: unknown;
+    try {
+      await renderPage({
+        title: 'Test',
+        component: Fixture,
+        props: baseProps,
+        manifestDirectory: directory,
+        assumeBuiltOutput: true,
+      });
+    } catch (error) {
+      rejection = error;
+    }
+
+    expect(rejection).toBeInstanceOf(Error);
+    expect((rejection as Error).message).toContain('missing required styles.css entr(y/ies)');
+  });
+
+  it('succeeds in built mode when the manifest carries every required key', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'gateway-render-built-complete-'));
+    createdDirectories.push(directory);
+    await writeFile(
+      join(directory, 'manifest.json'),
+      JSON.stringify({
+        'entry.js': '/public/entry-built.js',
+        'styles.css': '/public/styles-built.css',
+      }),
+    );
+
+    const html = await renderPage({
+      title: 'Test',
+      component: Fixture,
+      props: baseProps,
+      manifestDirectory: directory,
+      assumeBuiltOutput: true,
+    });
+
+    expect(html).toContain('/public/entry-built.js');
+    expect(html).toContain('/public/styles-built.css');
+  });
+});

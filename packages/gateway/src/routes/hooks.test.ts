@@ -1,5 +1,6 @@
 import type { GenerateFunction } from '@lostgradient/operative';
-import { describe, expect, it } from 'bun:test';
+import { describe, expect, it, spyOn } from 'bun:test';
+import { BureauError } from 'bureau';
 
 import {
   attackerRequestContextFixture,
@@ -328,5 +329,34 @@ describe('webhook ingress routes (POST /hooks/*)', () => {
     expect(first.status).toBe(202);
     expect(second.status).toBe(202);
     expect(await second.json()).toEqual(await first.json());
+  });
+
+  it('rethrows a raw BureauError from createRun (no Idempotency-Key) whose code has no mapped HTTP status', async () => {
+    const gateway = await createTestGateway({ generate: createMockGenerate() });
+    spyOn(gateway.bureau, 'createRun').mockRejectedValue(
+      new BureauError('Request authority is no longer valid', 'CONFLICT'),
+    );
+
+    const response = await requestJSON(gateway, '/hooks/event?agent=bureau', {
+      method: 'POST',
+      body: JSON.stringify({ message: 'Hello' }),
+    });
+
+    expect(response.status).toBe(500);
+  });
+
+  it('rethrows a raw BureauError from createRun (with Idempotency-Key) whose code has no mapped HTTP status', async () => {
+    const gateway = await createTestGateway({ generate: createMockGenerate() });
+    spyOn(gateway.bureau, 'createRun').mockRejectedValue(
+      new BureauError('Request authority is no longer valid', 'CONFLICT'),
+    );
+
+    const response = await requestJSON(gateway, '/hooks/event?agent=bureau', {
+      method: 'POST',
+      headers: { 'Idempotency-Key': 'unmapped-error-key' },
+      body: JSON.stringify({ message: 'Hello' }),
+    });
+
+    expect(response.status).toBe(500);
   });
 });

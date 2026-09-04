@@ -56,4 +56,23 @@ describe('route scope guards', () => {
 
     bureau.dispose();
   });
+
+  it('wires POST /api/v1/scheduler/tasks through to bureau.submitSchedulerTask', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      scheduler: { enabled: true, idleDelay: 1 },
+      toolbox: createToolbox([]),
+    });
+    const app = createRoutes({ bureau, broker: new LiveFrameBroker() });
+
+    const response = await app.request('/api/v1/scheduler/tasks', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: 'Scheduled task', agentName: 'bureau' }),
+    });
+
+    expect(response.status).toBe(202);
+    bureau.dispose();
+  });
 });

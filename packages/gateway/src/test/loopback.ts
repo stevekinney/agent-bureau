@@ -172,8 +172,13 @@ export class LoopbackTransportUnsupportedError extends Error {
  * pending push or waits for one — the same "await the next value from the
  * stream reader" shape the charter requires everywhere in this suite,
  * never a timed poll.
+ *
+ * Exported (only) so `loopback.test.ts` can exercise its abort/error-reject
+ * bookkeeping directly. This class makes no transport claims of its own —
+ * unlike `startLoopbackGateway`'s own real-socket contract, unit-testing
+ * this plumbing in isolation does not fake a server response.
  */
-class FrameQueue<T> {
+export class FrameQueue<T> {
   private readonly pending: T[] = [];
   private readonly waiters: Array<{
     resolve: (value: T | undefined) => void;
@@ -252,8 +257,14 @@ class FrameQueue<T> {
  * (blank-line-delimited, `data:`-prefixed) without depending on the
  * `EventSource` global — the whole point of this suite is a real client
  * over a real socket that is not a patched process global.
+ *
+ * Exported (only) so `loopback.test.ts` can drive `pump()`'s own
+ * body-stream-error → `queue.end(error)` branch directly against a
+ * synthetic `Response` whose body errors — every OTHER caller goes through
+ * `startLoopbackGateway`'s real fetch over a real socket, which has no way
+ * to make the OS-level connection fail mid-stream on demand (AB-316).
  */
-function readEventStream(response: Response): ServerEventStreamReader {
+export function readEventStream(response: Response): ServerEventStreamReader {
   const body = response.body;
   if (!body) {
     throw new Error('startLoopbackGateway: SSE response carried no readable body');
@@ -308,8 +319,15 @@ function readEventStream(response: Response): ServerEventStreamReader {
   };
 }
 
-/** Wraps a real `WebSocket` into the queue-based {@link LoopbackWebSocketClient} contract. */
-function wrapWebSocket(socket: WebSocket): LoopbackWebSocketClient {
+/**
+ * Wraps a real `WebSocket` into the queue-based {@link LoopbackWebSocketClient}
+ * contract. Exported (only) so `loopback.test.ts` can drive its `message`/
+ * `close`/`error` listeners directly against a minimal fake `WebSocket` —
+ * Bun and browsers always fire `close` right after `error` (see the no-op
+ * `error` listener's own comment below), so a real socket in this suite's
+ * loopback harness never exercises that branch on its own.
+ */
+export function wrapWebSocket(socket: WebSocket): LoopbackWebSocketClient {
   const queue = new FrameQueue<ServerFrame>();
   const closeQueue = new FrameQueue<{ code: number; reason: string }>();
 

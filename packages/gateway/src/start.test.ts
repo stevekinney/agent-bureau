@@ -2,9 +2,12 @@ import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { describe, expect, it } from 'bun:test';
+import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
+import { describe, expect, it, spyOn } from 'bun:test';
 
 import {
+  apiKeyFor,
+  main,
   parseStartEnvironment,
   resolveStartOptions,
   shutdownGateway,
@@ -285,5 +288,163 @@ describe('shutdownGateway', () => {
 
     expect(caught).toBe(failure);
     expect(wasDisposeCalled()).toBe(true);
+  });
+});
+
+describe('apiKeyFor', () => {
+  it('reads GEMINI_API_KEY when PROVIDER is gemini', () => {
+    const environment = parseStartEnvironment({ PROVIDER: 'gemini', GEMINI_API_KEY: 'gk' });
+    expect(apiKeyFor(environment)).toBe('gk');
+  });
+});
+
+describe('main', () => {
+  /** Snapshots and restores every env var `main()`/`parseStartEnvironment` reads. */
+  const ENV_KEYS = [
+    'PORT',
+    'GATEWAY_HOST',
+    'AUTH_TOKEN',
+    'STORAGE_TYPE',
+    'STORAGE_PATH',
+    'EVALUATION_REPORTS_DIRECTORY',
+    'PROVIDER',
+    'MODEL',
+    'SYSTEM_PROMPT',
+    'ANTHROPIC_API_KEY',
+    'OPENAI_API_KEY',
+    'GEMINI_API_KEY',
+  ] as const;
+
+  /**
+   * Sets `Bun.env[key] = value` for a defined `value`, or deletes the key
+   * entirely for `undefined` — never `Bun.env[key] = undefined`, which
+   * environment objects coerce to the literal string `"undefined"` instead
+   * of leaving the key absent (AB-316, copilot review on #522: the same bug
+   * this helper's own restore step below already guards against applies
+   * equally to applying `overrides`, since its type — `Record<string,
+   * string | undefined>` — allows a caller to explicitly override a key to
+   * unset).
+   */
+  function applyEnv(target: Record<string, string | undefined>): void {
+    for (const [key, value] of Object.entries(target)) {
+      if (value === undefined) delete Bun.env[key];
+      else Bun.env[key] = value;
+    }
+  }
+
+  function withEnv<T>(overrides: Record<string, string | undefined>, run: () => Promise<T>) {
+    const snapshot = Object.fromEntries(ENV_KEYS.map((key) => [key, Bun.env[key]]));
+    for (const key of ENV_KEYS) delete Bun.env[key];
+    applyEnv(overrides);
+    return run().finally(() => {
+      // AB-316: restore by DELETING a key that was originally unset, never
+      // by `Object.assign`-ing an `undefined` value back in — see
+      // `applyEnv`'s own comment above. See the regression test below.
+      for (const key of ENV_KEYS) delete Bun.env[key];
+      applyEnv(snapshot);
+    });
+  }
+
+  it('withEnv restores an originally-unset key to fully absent, never the literal string "undefined" (AB-316 regression)', async () => {
+    delete Bun.env['PROVIDER'];
+    await withEnv({ PROVIDER: 'gemini' }, async () => {
+      expect(Bun.env['PROVIDER']).toBe('gemini');
+    });
+    expect(Bun.env['PROVIDER']).toBeUndefined();
+    expect('PROVIDER' in Bun.env).toBe(false);
+  });
+
+  it('withEnv leaves a key fully absent when an override explicitly sets it to undefined, never the literal string "undefined" (AB-316 regression, copilot review on #522)', async () => {
+    Bun.env['PROVIDER'] = 'openai';
+    await withEnv({ PROVIDER: undefined }, async () => {
+      expect(Bun.env['PROVIDER']).toBeUndefined();
+      expect('PROVIDER' in Bun.env).toBe(false);
+    });
+    expect(Bun.env['PROVIDER']).toBe('openai');
+  });
+
+  it('boots the gateway, warns for memory storage and a missing API key, and registers shutdown handlers', async () => {
+    const databasePath = join(tmpdir(), `gateway-main-${process.pid}-${Date.now()}.sqlite`);
+    const warnings: unknown[][] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => warnings.push(args);
+
+    try {
+      const booted = await withEnv(
+        { STORAGE_TYPE: 'memory', PORT: '0', PROVIDER: 'anthropic' },
+        () => main(),
+      );
+      try {
+        expect(booted.gateway.bureau.ready).toBe(false);
+        expect(warnings.some((args) => String(args[0]).includes('STORAGE_TYPE=memory'))).toBe(true);
+        expect(warnings.some((args) => String(args[0]).includes('No API key found'))).toBe(true);
+      } finally {
+        await shutdownGateway(booted.gateway, booted.server);
+      }
+    } finally {
+      console.warn = originalWarn;
+      await rm(databasePath, { force: true });
+    }
+  });
+
+  it('boots without warning when a provider API key is configured', async () => {
+    const warnings: unknown[][] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => warnings.push(args);
+
+    try {
+      const booted = await withEnv(
+        { STORAGE_TYPE: 'memory', PORT: '0', PROVIDER: 'anthropic', ANTHROPIC_API_KEY: 'key' },
+        () => main(),
+      );
+      try {
+        expect(booted.gateway.bureau.ready).toBe(true);
+        expect(warnings.some((args) => String(args[0]).includes('No API key found'))).toBe(false);
+      } finally {
+        await shutdownGateway(booted.gateway, booted.server);
+      }
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
+  it("returns handleShutdownSignal, the exact function registered as process.on's SIGTERM/SIGINT listener, and calling it drains, disposes, and exits exactly once", async () => {
+    const booted = await withEnv(
+      { STORAGE_TYPE: 'memory', PORT: '0', PROVIDER: 'anthropic', ANTHROPIC_API_KEY: 'key' },
+      () => main(),
+    );
+
+    const exitCalls: number[] = [];
+    const exitSpy = spyOn(process, 'exit').mockImplementation((code?: number) => {
+      exitCalls.push(code ?? 0);
+      return undefined as never;
+    });
+    const logs: unknown[][] = [];
+    const originalLog = console.log;
+    console.log = (...args: unknown[]) => logs.push(args);
+
+    try {
+      // Calling `handleShutdownSignal` directly is the same function object
+      // `main()` passed to `process.on` — no real signal, no shared-process
+      // side effects. It fires the async `shutdown` and returns void, so
+      // poll (bounded) for the process.exit call it drives.
+      booted.handleShutdownSignal('SIGTERM');
+      for (let attempt = 0; attempt < 50 && exitCalls.length === 0; attempt += 1) {
+        await yieldToPortableEventLoop();
+      }
+      expect(logs.some((args) => String(args[0]).includes('received SIGTERM'))).toBe(true);
+      expect(exitCalls).toEqual([0]);
+
+      // The debounce guard: a second call (even for a different signal, and
+      // even through the async `shutdown` this time) after `shuttingDown` is
+      // already true must be a genuine no-op — no second drain log, no
+      // second process.exit call.
+      await booted.shutdown('SIGINT');
+      expect(logs.filter((args) => String(args[0]).includes('received')).length).toBe(1);
+      expect(exitCalls).toEqual([0]);
+    } finally {
+      console.log = originalLog;
+      exitSpy.mockRestore();
+    }
   });
 });

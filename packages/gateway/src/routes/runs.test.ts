@@ -3,7 +3,9 @@ import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createTool, createToolbox, type ToolRequestContext } from 'armorer';
 import { describe, expect, it, spyOn } from 'bun:test';
 import { BureauError } from 'bureau';
+import { Hono } from 'hono';
 
+import { errorHandler } from '../middleware/error-handler';
 import {
   attackerRequestContextFixture,
   createGatewayAuthorityTestApiKey,
@@ -12,10 +14,11 @@ import {
   requestJSON,
   waitForRunState,
 } from '../test';
-import type { PendingReview, PendingToolApprovalReview, RunEventRecord } from '../types';
+import type { Bureau, PendingReview, PendingToolApprovalReview, RunEventRecord } from '../types';
 import {
   assembleRunTimeline,
   classifyRunAttachment,
+  createRunsRoutes,
   findParkedReview,
   propagateDisconnectToAttachedRun,
 } from './runs';
@@ -645,5 +648,54 @@ describe('findParkedReview', () => {
     };
 
     expect(findParkedReview([toolApproval], 'run-1')).toBeUndefined();
+  });
+});
+
+describe('runs routes error mapping (stub bureau)', () => {
+  function buildApp(overrides: { abortRun?: Bureau['abortRun']; deleteRun?: Bureau['deleteRun'] }) {
+    const stubBureau = {
+      abortRun: overrides.abortRun,
+      deleteRun: overrides.deleteRun,
+    } as unknown as Bureau;
+    const app = new Hono();
+    app.route('/api/v1/runs', createRunsRoutes(stubBureau));
+    app.onError(errorHandler);
+    return app;
+  }
+
+  it('POST /api/v1/runs returns 400 for unparseable JSON instead of a raw parse error', async () => {
+    const stubBureau = {} as unknown as Bureau;
+    const app = new Hono();
+    app.route('/api/v1/runs', createRunsRoutes(stubBureau));
+    app.onError(errorHandler);
+
+    const response = await app.request('/api/v1/runs', {
+      method: 'POST',
+      body: '{not valid json',
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(response.status).toBe(400);
+  });
+
+  it('rethrows a BureauError abortRun failure whose code is not NOT_FOUND or CONFLICT', async () => {
+    const app = buildApp({
+      abortRun: () => {
+        throw new BureauError('generate not configured', 'NOT_CONFIGURED', 'generate');
+      },
+    });
+
+    const response = await app.request('/api/v1/runs/any/abort', { method: 'POST' });
+    expect(response.status).toBe(500);
+  });
+
+  it('rethrows a BureauError deleteRun failure whose code is not NOT_FOUND or CONFLICT', async () => {
+    const app = buildApp({
+      deleteRun: async () => {
+        throw new BureauError('generate not configured', 'NOT_CONFIGURED', 'generate');
+      },
+    });
+
+    const response = await app.request('/api/v1/runs/any', { method: 'DELETE' });
+    expect(response.status).toBe(500);
   });
 });

@@ -53,7 +53,10 @@ export function resetAssetManifestCache(): void {
   cachedManifest = undefined;
 }
 
-async function loadManifest(manifestDirectory: string): Promise<AssetManifest> {
+async function loadManifest(
+  manifestDirectory: string,
+  isBuilt: boolean = isBuiltOutput,
+): Promise<AssetManifest> {
   if (cachedManifest) return cachedManifest;
   let manifest: AssetManifest;
   try {
@@ -64,7 +67,7 @@ async function loadManifest(manifestDirectory: string): Promise<AssetManifest> {
     const raw = await readFile(manifestPath, 'utf-8');
     manifest = JSON.parse(raw) as AssetManifest;
   } catch (error) {
-    if (isBuiltOutput) {
+    if (isBuilt) {
       throw new Error(
         'gateway: dist/manifest.json is missing or invalid. The built server ' +
           'requires the asset manifest to resolve content-hashed client bundles; ' +
@@ -80,7 +83,7 @@ async function loadManifest(manifestDirectory: string): Promise<AssetManifest> {
   // A manifest that parses but omits a required key would otherwise fall through
   // to the unhashed `/public/*` URLs, which 404 in built mode → a 200 page with
   // dead hydration. Fail loudly instead.
-  if (isBuiltOutput) {
+  if (isBuilt) {
     const missing = REQUIRED_MANIFEST_KEYS.filter((key) => !manifest[key]);
     if (missing.length > 0) {
       throw new Error(
@@ -157,6 +160,14 @@ interface RenderPageOptions<Props extends Record<string, unknown>> {
    * different build.
    */
   manifestDirectory?: string;
+  /**
+   * Test-only override for whether this call should behave as if running
+   * from the compiled `dist/` build (see {@link isBuiltOutput}). Defaults to
+   * the real, module-level determination — production code never passes
+   * this. Exists so `render.test.ts` can exercise the built-mode manifest
+   * failure branches without actually running from a `dist/` checkout.
+   */
+  assumeBuiltOutput?: boolean;
 }
 
 /**
@@ -178,8 +189,9 @@ export async function renderPage<Props extends Record<string, unknown>>({
   props,
   data,
   manifestDirectory = currentDirectory,
+  assumeBuiltOutput,
 }: RenderPageOptions<Props>): Promise<string> {
-  const manifest = await loadManifest(manifestDirectory);
+  const manifest = await loadManifest(manifestDirectory, assumeBuiltOutput ?? isBuiltOutput);
   // In built mode loadManifest() has already thrown if the manifest is absent,
   // so these keys are present; the `??` only covers from-source dev/test where
   // the unhashed `/public/*` URLs are the real assets.

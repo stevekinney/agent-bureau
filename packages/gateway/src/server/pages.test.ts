@@ -98,6 +98,27 @@ describe('SSR pages', () => {
     expect(response.status).toBe(404);
   });
 
+  it('GET /runs/:id returns 200 HTML with the run detail for an existing run', async () => {
+    const gateway = await createTestGateway({
+      generate: async () => ({ content: 'Done.', toolCalls: [] }),
+    });
+
+    const createResponse = await gateway.app.request('/api/v1/runs', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: 'Hello' }),
+    });
+    const { id } = (await createResponse.json()) as { id: string };
+
+    const response = await gateway.app.request(`/runs/${id}`);
+    expect(response.status).toBe(200);
+
+    const html = await response.text();
+    expect(html).toContain('window.__INITIAL_DATA__');
+    const data = extractInitialData(html) as { run: { id: string } };
+    expect(data.run.id).toBe(id);
+  });
+
   it('GET /configuration returns 200 HTML with the real ConfigurationResponse', async () => {
     const gateway = await createTestGateway({
       provider: { provider: 'anthropic', model: 'claude-sonnet-4-20250514' },

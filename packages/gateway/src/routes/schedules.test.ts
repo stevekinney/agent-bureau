@@ -1,7 +1,11 @@
 import { describe, expect, it, spyOn } from 'bun:test';
-import { createRuntimeComposition } from 'bureau';
+import { BureauError, createRuntimeComposition } from 'bureau';
+import { Hono } from 'hono';
 
+import { errorHandler } from '../middleware/error-handler';
 import { createTestGateway, requestJSON } from '../test';
+import type { Bureau } from '../types';
+import { createSchedulesRoutes } from './schedules';
 
 const AUTH_TOKEN = 'test-token';
 const authHeaders = { authorization: `Bearer ${AUTH_TOKEN}` };
@@ -332,5 +336,54 @@ describe('schedules routes with durable engine (regression PRRT_kwDORvupsc6MXEmg
     } finally {
       cancelSpy.mockRestore();
     }
+  });
+
+  it('GET /schedules/:id returns 404 when a durable engine is configured but the schedule does not exist', async () => {
+    const gateway = await createTestGateway({
+      authToken: AUTH_TOKEN,
+      generate: async () => ({ content: 'ok', toolCalls: [] }),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    const response = await requestJSON(gateway, '/schedules/nonexistent', {
+      headers: authHeaders,
+    });
+    expect(response.status).toBe(404);
+    gateway.bureau.dispose();
+  });
+});
+
+describe('POST /schedules invalid JSON and unmapped createSchedule failures (stub bureau)', () => {
+  it('returns 400 for unparseable JSON instead of a raw parse error', async () => {
+    const stubBureau = {} as unknown as Bureau;
+    const app = new Hono();
+    app.route('/schedules', createSchedulesRoutes(stubBureau));
+    app.onError(errorHandler);
+
+    const response = await app.request('/schedules', {
+      method: 'POST',
+      body: '{not valid json',
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(response.status).toBe(400);
+  });
+
+  it('rethrows a createSchedule BureauError whose code is neither NOT_CONFIGURED/generate nor BAD_REQUEST', async () => {
+    const stubBureau = {
+      createSchedule: async () => {
+        throw new BureauError('schedule already exists', 'CONFLICT');
+      },
+    } as unknown as Bureau;
+    const app = new Hono();
+    app.route('/schedules', createSchedulesRoutes(stubBureau));
+    app.onError(errorHandler);
+
+    const response = await app.request('/schedules', {
+      method: 'POST',
+      body: JSON.stringify({ agentName: 'a', input: 'x', spec: '0 9 * * *' }),
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(response.status).toBe(500);
   });
 });

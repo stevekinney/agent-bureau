@@ -336,6 +336,81 @@ describe('A2A JSON-RPC endpoint (POST /a2a)', () => {
     expect(body.result.task.id).toBe(taskId);
   });
 
+  it("SendMessage's blocking resume settles via awaitTerminalOrInterrupted's re-park event branch (AB-316)", async () => {
+    // `awaitTerminalOrInterrupted` races `activeRun.result` against a
+    // 'multiagent.human-wait.parked' listener. Every OTHER test in this file
+    // either passes `returnImmediately: true` (skips the race entirely) or
+    // lets `activeRun.result` settle first (the resume test above explicitly
+    // notes a real blocking wait "would hang forever" against this fixture's
+    // never-resolving `result`). This test exercises the race's OTHER
+    // branch: the resumed run re-parks (asks a follow-up) WHILE the wait is
+    // in flight. Deterministically, not by timing — dispatching the event
+    // from inside a wrapped `addEventListener` fires it the instant
+    // `awaitTerminalOrInterrupted` subscribes, on the same synchronous call
+    // stack, rather than racing a real clock.
+    const gateway = await createTestGateway({ generate: createMockGenerate() });
+    const signalSpy = spyOn(gateway.bureau, 'signalSession').mockImplementation(async () => {});
+    const { activeRun, emitter } = createParkedActiveRun();
+    const taskId = gateway.bureau.store.register(activeRun, 'a2a-reparked-run');
+    emitter.dispatchEvent(new HumanWaitParkedEvent('human-response', taskId, 'What is your name?'));
+
+    const baseAddEventListener = activeRun.addEventListener.bind(activeRun);
+    activeRun.addEventListener = (type, listener, options) => {
+      baseAddEventListener(type, listener, options);
+      if (type === 'multiagent.human-wait.parked') {
+        emitter.dispatchEvent(
+          new HumanWaitParkedEvent('human-response', taskId, 'And your quest?'),
+        );
+      }
+    };
+
+    const { status, body } = await sendMessage(gateway.app, {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'SendMessage',
+      params: {
+        message: { messageId: 'm2', role: 'ROLE_USER', taskId, parts: [{ text: 'Ferris' }] },
+        // No `returnImmediately` — this is the blocking path, which is
+        // exactly what needs `awaitTerminalOrInterrupted` to actually settle.
+      },
+    });
+
+    expect(status).toBe(200);
+    expect(signalSpy).toHaveBeenCalledWith('', 'human-response', 'Ferris');
+    expect(body.result.task.id).toBe(taskId);
+  });
+
+  it("SendMessage's blocking resume settles via awaitTerminalOrInterrupted's swallowed activeRun.result rejection (AB-316)", async () => {
+    // The race's OTHER branch: `activeRun.result.catch(() => undefined)`.
+    // This only runs when `result` itself rejects — every other test's fixed
+    // `result` either never settles or (via the real bureau path) resolves
+    // with a RunResult that encodes failure as DATA (`finishReason: 'error'`)
+    // rather than a promise rejection, so nothing else in this file reaches
+    // it. Here `result` is a genuinely rejected promise the fixture never
+    // otherwise produces.
+    const gateway = await createTestGateway({ generate: createMockGenerate() });
+    const signalSpy = spyOn(gateway.bureau, 'signalSession').mockImplementation(async () => {});
+    const { activeRun, emitter } = createParkedActiveRun();
+    activeRun.result = Promise.reject(
+      new Error('synthetic activeRun.result rejection (AB-316 coverage)'),
+    );
+    const taskId = gateway.bureau.store.register(activeRun, 'a2a-rejecting-run');
+    emitter.dispatchEvent(new HumanWaitParkedEvent('human-response', taskId, 'What is your name?'));
+
+    const { status, body } = await sendMessage(gateway.app, {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'SendMessage',
+      params: {
+        message: { messageId: 'm2', role: 'ROLE_USER', taskId, parts: [{ text: 'Ferris' }] },
+      },
+    });
+
+    expect(status).toBe(200);
+    expect(signalSpy).toHaveBeenCalledWith('', 'human-response', 'Ferris');
+    expect(body.result.task.id).toBe(taskId);
+  });
+
   // ── GetTask ──────────────────────────────────────────────────────────────
 
   it('GetTask returns TaskNotFoundError for an unknown id', async () => {

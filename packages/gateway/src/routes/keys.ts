@@ -27,10 +27,8 @@ export function createKeysRoutes(apiKeyStore: ApiKeyStore) {
     try {
       scopes = body.scopes === undefined ? undefined : normalizeApiKeyScopes(body.scopes);
     } catch (error) {
-      if (error instanceof Error) {
-        throw new HTTPException(400, { message: error.message });
-      }
-      throw error;
+      const message = error instanceof Error ? error.message : String(error);
+      throw new HTTPException(400, { message });
     }
 
     const result = await apiKeyStore.create({
