@@ -4,8 +4,11 @@ import { createManualRuntimeServices } from 'lifecycle';
 import { applyTemporalDecay, computeTemporalDecay } from '../src/temporal-decay';
 
 const ONE_HOUR = 60 * 60 * 1000;
-// Fixed reference instant: every test below passes it explicitly as `referenceTime`, so its
-// value only needs to be a stable epoch millisecond number, never the real clock.
+// Fixed reference instant used by the tests below that assign it to `now`: each of those
+// passes it explicitly as `referenceTime`, so its value only needs to be a stable epoch
+// millisecond number, never the real clock. (The runtime-injection and empty-input tests
+// further down don't use this constant at all — they derive their own time from a manual
+// RuntimeServices, or need no time input.)
 const FIXED_NOW = Date.parse('2026-01-01T00:00:00.000Z');
 
 describe('computeTemporalDecay', () => {

@@ -3,8 +3,9 @@ import { describe, expect, it } from 'bun:test';
 import type { HybridSearchCandidate, VectorSearchResult } from '../src/hybrid-search';
 import { mergeHybridResults } from '../src/hybrid-search';
 
-// Fixed instant standing in for a candidate's createdAt — mergeHybridResults never reads the
-// value, so a stable constant is all these fixtures need.
+// Fixed instant standing in for a candidate's createdAt — mergeHybridResults forwards it
+// unchanged into the merged result but never reads it to compute a score or ordering, so a
+// stable constant is all these fixtures need.
 const FIXED_NOW = Date.parse('2026-01-01T00:00:00.000Z');
 
 function makeCandidate(id: string, content: string): HybridSearchCandidate {
