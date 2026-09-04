@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test';
+import { createManualRuntimeServices } from 'lifecycle';
 
 import { createStaticIdentityProvider } from '../../src/identity/create-static-provider';
 import type { SoulItem } from '../../src/identity/types';
@@ -46,6 +47,15 @@ describe('createStaticIdentityProvider', () => {
     expect(history).toHaveLength(1);
     expect(history[0]!.version).toBe(1);
     expect(history[0]!.items[0]!.content).toBe('V1');
+  });
+
+  it('derives the archived history timestamp from an injected manual runtime rather than the real clock', async () => {
+    const runtime = createManualRuntimeServices({ origin: '2026-03-15T00:00:00.000Z' });
+    const provider = createStaticIdentityProvider({ soul: [makeSoulItem('1', 'V1')] }, runtime);
+    await provider.saveSoul([makeSoulItem('2', 'V2')]);
+
+    const history = await provider.loadSoulHistory();
+    expect(history[0]!.timestamp).toBe('2026-03-15T00:00:00.000Z');
   });
 
   it('listPersonas returns empty when none registered', async () => {

@@ -1,4 +1,5 @@
 import type { Embedder, EmbeddingVector } from 'interoperability';
+import type { RuntimeServices } from 'lifecycle';
 
 import type {
   MemoryRecord,
@@ -80,8 +81,10 @@ export interface MemorySearchOptions {
    * Requires `CreateMemoryOptions.temporalValidity`:
    * epoch-millisecond timestamp to answer an "as of" query. `recall()` filters
    * out records that were not valid at this instant — i.e. `validFrom > asOf`
-   * or `invalidatedAt <= asOf`. Defaults to `Date.now()` when the flag is
-   * enabled and `asOf` is omitted, so recall shows only currently-valid facts.
+   * or `invalidatedAt <= asOf`. Defaults to `CreateMemoryOptions.runtime`'s
+   * `clock.now()` (the real clock unless a manual runtime was configured)
+   * when the flag is enabled and `asOf` is omitted, so recall shows only
+   * currently-valid facts.
    */
   asOf?: number;
 }
@@ -175,10 +178,19 @@ export interface CreateMemoryOptions {
    * - `remember(content, { supersedes: id, ... })` stamps `supersededBy` and
    *   `invalidatedAt` onto the record at `id` once the new record is stored.
    * - `recall()` filters results to those valid at `options.asOf` (defaulting
-   *   to `Date.now()`), running before temporal decay and MMR.
+   *   to the configured `runtime`'s `clock.now()`), running before temporal
+   *   decay and MMR.
    * Default `false` — temporal validity remains explicitly opt-in.
    */
   temporalValidity?: boolean;
+  /**
+   * Runtime services to read wall time and identifiers from (record ids,
+   * `createdAt`/`updatedAt`, and the temporal-validity `asOf` default).
+   * Defaults to the real implementation (`createDefaultRuntimeServices()`).
+   * A test composes its own via `createManualRuntimeServices()` from
+   * `lifecycle`.
+   */
+  runtime?: RuntimeServices;
 }
 
 /**

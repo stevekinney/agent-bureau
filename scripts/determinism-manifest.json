@@ -9,6 +9,7 @@
     "packages/armorer/src/**",
     "packages/skills/src/**",
     "packages/evaluation/src/**",
+    "packages/memory/src/**",
     "packages/armorer/test/agent-sdk-anthropic.test.ts",
     "packages/armorer/test/agent-sdk-openai.test.ts",
     "packages/armorer/test/approval-binding.test.ts",

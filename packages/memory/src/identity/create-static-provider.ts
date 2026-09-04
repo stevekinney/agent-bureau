@@ -1,3 +1,5 @@
+import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
+
 import type {
   AgentIdentity,
   IdentityProvider,
@@ -13,7 +15,10 @@ import type {
  * savePersona, etc.) that update in-memory state. Useful for testing
  * and for programmatic configuration where identity is constructed in code.
  */
-export function createStaticIdentityProvider(initial?: Partial<AgentIdentity>): IdentityProvider {
+export function createStaticIdentityProvider(
+  initial?: Partial<AgentIdentity>,
+  runtime: RuntimeServices = createDefaultRuntimeServices(),
+): IdentityProvider {
   const souls = new Map<string, SoulItem[]>();
   const personas = new Map<string, { descriptor?: PersonaDescriptor; text?: string }>();
   const pendingUpdates = new Map<string, SoulItem[]>();
@@ -54,7 +59,7 @@ export function createStaticIdentityProvider(initial?: Partial<AgentIdentity>): 
         entries.push({
           version: nextVersion,
           items: [...current],
-          timestamp: new Date().toISOString(),
+          timestamp: runtime.clock.nowISO(),
         });
         history.set(key, entries);
       }

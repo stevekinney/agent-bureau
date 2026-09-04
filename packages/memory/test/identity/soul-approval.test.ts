@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test';
+import { createManualRuntimeServices } from 'lifecycle';
 
 import { createStaticIdentityProvider } from '../../src/identity/create-static-provider';
 import {
@@ -210,5 +211,20 @@ describe('pinSoulItem / unpinSoulItem', () => {
     // Should be a recent timestamp
     const updated = new Date(soul[0]!.updatedAt);
     expect(updated.getTime()).toBeGreaterThan(Date.now() - 5000);
+  });
+
+  it('derives updatedAt from an injected manual runtime rather than the real clock', async () => {
+    const provider = createStaticIdentityProvider({
+      soul: [makeSoulItem('1', 'Item', { pinned: false, updatedAt: '2020-01-01T00:00:00Z' })],
+    });
+    const runtime = createManualRuntimeServices({ origin: '2026-09-09T00:00:00.000Z' });
+
+    await pinSoulItem(provider, '1', undefined, runtime);
+    let soul = await provider.loadSoul();
+    expect(soul[0]!.updatedAt).toBe('2026-09-09T00:00:00.000Z');
+
+    await unpinSoulItem(provider, '1', undefined, runtime);
+    soul = await provider.loadSoul();
+    expect(soul[0]!.updatedAt).toBe('2026-09-09T00:00:00.000Z');
   });
 });

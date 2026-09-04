@@ -1,14 +1,27 @@
 import { readdir, readFile } from 'node:fs/promises';
 import { extname, join, relative } from 'node:path';
 
+import {
+  createDefaultRuntimeServices,
+  type RuntimeServices,
+  type RuntimeTimeoutHandle,
+} from 'lifecycle';
+
 import type { ChunkingOptions } from './chunking';
 import { sha256Hex } from './hash';
 import { ingest } from './ingest';
 import type { Memory, MemoryMetadata } from './types';
 
-export type IntervalHandle = unknown;
-export type ScheduleInterval = (callback: () => void, milliseconds?: number) => IntervalHandle;
-export type ClearScheduledInterval = (handle: IntervalHandle) => void;
+/**
+ * Aliases of `RuntimeServices`'s timer seam (AB-252, AB-324/AB-326), kept
+ * under their pre-existing exported names so no consumer's import breaks.
+ * `setIntervalFunction`/`clearIntervalFunction` default to the resolved
+ * `runtime.timers.setInterval`/`clearInterval` rather than to
+ * `globalThis.setInterval`/`clearInterval` directly.
+ */
+export type IntervalHandle = RuntimeTimeoutHandle;
+export type ScheduleInterval = RuntimeServices['timers']['setInterval'];
+export type ClearScheduledInterval = RuntimeServices['timers']['clearInterval'];
 
 export interface FileSynchronizerOptions {
   memory: Memory;
@@ -22,10 +35,24 @@ export interface FileSynchronizerOptions {
   metadata?: Partial<MemoryMetadata>;
   /** Polling interval in milliseconds. Default: 5000 */
   pollingInterval?: number;
-  /** Injectable interval function for deterministic tests. */
+  /**
+   * Injectable interval function. Defaults to the resolved `runtime`'s
+   * `timers.setInterval`; still overridable directly for a caller that wants
+   * an interval seam independent of `runtime`.
+   */
   setIntervalFunction?: ScheduleInterval;
-  /** Injectable interval cleanup function for deterministic tests. */
+  /**
+   * Injectable interval cleanup function. Defaults to the resolved
+   * `runtime`'s `timers.clearInterval`.
+   */
   clearIntervalFunction?: ClearScheduledInterval;
+  /**
+   * Runtime services `setIntervalFunction`/`clearIntervalFunction` default
+   * to. Defaults to the real implementation
+   * (`createDefaultRuntimeServices()`). A test composes its own via
+   * `createManualRuntimeServices()` from `lifecycle`.
+   */
+  runtime?: RuntimeServices;
 }
 
 export interface SynchronizeResult {
@@ -78,6 +105,7 @@ async function walkDirectory(directory: string, extensions: string[]): Promise<s
  * file contents into memory, keeping the index in sync with disk.
  */
 export function createFileSynchronizer(options: FileSynchronizerOptions): FileSynchronizer {
+  const runtime = options.runtime ?? createDefaultRuntimeServices();
   const {
     memory,
     directory,
@@ -85,8 +113,8 @@ export function createFileSynchronizer(options: FileSynchronizerOptions): FileSy
     chunking,
     metadata,
     pollingInterval = 5000,
-    setIntervalFunction = (callback, milliseconds) => setInterval(callback, milliseconds),
-    clearIntervalFunction = (handle) => clearInterval(handle as ReturnType<typeof setInterval>),
+    setIntervalFunction = runtime.timers.setInterval,
+    clearIntervalFunction = runtime.timers.clearInterval,
   } = options;
 
   // Tracks known files: relative path → content hash.

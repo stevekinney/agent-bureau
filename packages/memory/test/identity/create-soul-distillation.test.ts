@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test';
+import { createManualRuntimeServices } from 'lifecycle';
 
 import { createMemory } from '../../src/create-memory';
 import type { SoulDistillationState } from '../../src/identity/create-soul-distillation';
@@ -209,6 +210,38 @@ describe('createSoulDistillationTask', () => {
     // The current soul should still be the original
     const soul = await provider.loadSoul();
     expect(soul[0]!.content).toBe('Existing soul item');
+
+    await memory.close();
+  });
+
+  it('derives graduated item id and updatedAt from an injected manual runtime rather than the real clock', async () => {
+    const memory = createTestMemory();
+    await memory.init();
+
+    await memory.remember('Important principle', {
+      confidence: 0.95,
+      reinforcementCount: 5,
+    });
+
+    const provider = createStaticIdentityProvider();
+    const runtime = createManualRuntimeServices({ origin: '2026-08-01T00:00:00.000Z' });
+
+    const task = createSoulDistillationTask({
+      memory,
+      provider,
+      budget: defaultBudget,
+      distill: async (_soul, candidates) => candidates.map((c) => c.content).join('\n'),
+      runtime,
+    });
+
+    await processAllChunks(task.processChunk, task.initialState);
+
+    const pending = await provider.loadPendingSoulUpdate();
+    expect(pending).toBeDefined();
+    const graduated = pending!.find((item) => item.source === 'graduated');
+    expect(graduated).toBeDefined();
+    expect(graduated!.id).toBe(`graduated-${runtime.clock.now()}-0`);
+    expect(graduated!.updatedAt).toBe('2026-08-01T00:00:00.000Z');
 
     await memory.close();
   });

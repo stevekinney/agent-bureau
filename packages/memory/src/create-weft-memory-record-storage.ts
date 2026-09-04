@@ -7,6 +7,7 @@ import {
   WEFT_RESERVED_KEY_PREFIXES,
 } from '@lostgradient/weft/storage/interface';
 import { cosineSimilarity, type EmbeddingVectorLike } from 'interoperability';
+import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
 import { z } from 'zod';
 
 import type {
@@ -40,6 +41,13 @@ export interface CreateWeftMemoryRecordStorageOptions {
    * a Weft engine, and tearing that down here would be incorrect.
    */
   disposeUnderlyingStorage?: boolean;
+  /**
+   * Runtime services to read wall time from for `update()`'s `updatedAt`
+   * stamp. Defaults to the real implementation
+   * (`createDefaultRuntimeServices()`). A test composes its own via
+   * `createManualRuntimeServices()` from `lifecycle`.
+   */
+  runtime?: RuntimeServices;
 }
 
 /**
@@ -120,6 +128,7 @@ export function createWeftMemoryRecordStorage(
 ): MemoryRecordStorage {
   const keyPrefix = options?.keyPrefix ?? DEFAULT_MEMORY_KEY_PREFIX;
   const disposeUnderlyingStorage = options?.disposeUnderlyingStorage ?? false;
+  const runtime = options?.runtime ?? createDefaultRuntimeServices();
 
   // The key prefix is public and documented "must not collide with Weft's
   // reserved prefixes" — but the backend is explicitly meant to share one
@@ -434,7 +443,7 @@ export function createWeftMemoryRecordStorage(
         content: patch.content ?? existing.content,
         vector: patch.vector ? new Float32Array(patch.vector) : existing.vector,
         metadata: patch.metadata ?? existing.metadata,
-        updatedAt: Date.now(),
+        updatedAt: runtime.clock.now(),
         version: existing.version + 1,
       };
       const oldDedupeKey = recordDedupeKey(existing);

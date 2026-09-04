@@ -1,3 +1,5 @@
+import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
+
 import type { IdentityProvider, SoulItem } from './types';
 
 /**
@@ -119,6 +121,7 @@ export async function pinSoulItem(
   provider: IdentityProvider,
   itemId: string,
   agentId?: string,
+  runtime: RuntimeServices = createDefaultRuntimeServices(),
 ): Promise<boolean> {
   const soul = await provider.loadSoul(agentId);
   const index = soul.findIndex((i) => i.id === itemId);
@@ -127,7 +130,7 @@ export async function pinSoulItem(
   // Clone the array and the target item to avoid mutating the provider's
   // internal state before saveSoul archives the current version in history.
   const updatedSoul = soul.map((item, i) =>
-    i === index ? { ...item, pinned: true, updatedAt: new Date().toISOString() } : item,
+    i === index ? { ...item, pinned: true, updatedAt: runtime.clock.nowISO() } : item,
   );
 
   await provider.saveSoul(updatedSoul, agentId);
@@ -141,6 +144,7 @@ export async function unpinSoulItem(
   provider: IdentityProvider,
   itemId: string,
   agentId?: string,
+  runtime: RuntimeServices = createDefaultRuntimeServices(),
 ): Promise<boolean> {
   const soul = await provider.loadSoul(agentId);
   const index = soul.findIndex((i) => i.id === itemId);
@@ -149,7 +153,7 @@ export async function unpinSoulItem(
   // Clone the array and the target item to avoid mutating the provider's
   // internal state before saveSoul archives the current version in history.
   const updatedSoul = soul.map((item, i) =>
-    i === index ? { ...item, pinned: false, updatedAt: new Date().toISOString() } : item,
+    i === index ? { ...item, pinned: false, updatedAt: runtime.clock.nowISO() } : item,
   );
 
   await provider.saveSoul(updatedSoul, agentId);

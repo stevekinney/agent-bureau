@@ -1,5 +1,6 @@
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { describe, expect, it } from 'bun:test';
+import { createManualRuntimeServices } from 'lifecycle';
 
 import { createStorageIdentityProvider } from '../../src/identity/create-storage-provider';
 import type { SoulItem } from '../../src/identity/types';
@@ -151,6 +152,18 @@ describe('createStorageIdentityProvider', () => {
     expect(history2).toHaveLength(2);
     expect(history2[1]!.version).toBe(2);
     expect(history2[1]!.items[0]!.content).toBe('Version 2');
+  });
+
+  it('derives the archived history timestamp from an injected manual runtime rather than the real clock', async () => {
+    const adapter = textValueStore(new MemoryStorage());
+    const runtime = createManualRuntimeServices({ origin: '2026-05-05T00:00:00.000Z' });
+    const provider = createStorageIdentityProvider(adapter, runtime);
+
+    await provider.saveSoul([makeSoulItem('1', 'Version 1')]);
+    await provider.saveSoul([makeSoulItem('2', 'Version 2')]);
+
+    const history = await provider.loadSoulHistory();
+    expect(history[0]!.timestamp).toBe('2026-05-05T00:00:00.000Z');
   });
 
   it('pending update lifecycle', async () => {

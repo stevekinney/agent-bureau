@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test';
+import { createManualRuntimeServices } from 'lifecycle';
 
 import { createSoulSeed } from '../../src/identity/create-seed';
 
@@ -96,5 +97,17 @@ describe('createSoulSeed', () => {
       const date = new Date(item.updatedAt);
       expect(date.toISOString()).toBe(item.updatedAt);
     }
+  });
+
+  it('derives id and updatedAt from an injected manual runtime rather than the real clock', () => {
+    const runtime = createManualRuntimeServices({ origin: '2026-07-04T00:00:00.000Z' });
+
+    const items = createSoulSeed({ name: 'Aria', traits: ['Curious'], runtime });
+
+    expect(items).toHaveLength(2);
+    expect(items[0]!.id).toBe('seed-seed-1');
+    expect(items[0]!.updatedAt).toBe('2026-07-04T00:00:00.000Z');
+    expect(items[1]!.id).toBe('seed-seed-2');
+    expect(items[1]!.updatedAt).toBe('2026-07-04T00:00:00.000Z');
   });
 });
