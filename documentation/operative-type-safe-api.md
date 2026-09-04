@@ -718,7 +718,7 @@ for the `run`/`createRun` swap above:
 - **Run operations** — `listRuns`, `getRun`, `getRunReport`, `abortRun`, `deleteRun`.
 - **Durable-run operations** — `getDurableRun`, `listDurableRuns`, `runDurableMaintenance`.
 - **Session operations** — `listSessions`, `getSession`, `deleteSession`, `signalSession`, `updateSession`, `querySession`.
-- **Review operations** — `listPendingReviews`, `resolveReview` (AB-46/AB-344 widens `resolveReview`'s `decision` to `'approve' | 'deny' | 'reject'` and adds `getReview` and `sweepExpiredReviews`; no longer unchanged in shape as of this record).
+- **Review operations** — `listPendingReviews`, `resolveReview`, `getReview`, `sweepExpiredReviews`. No longer unchanged in shape as of AB-46/AB-344: `resolveReview`'s `decision` widens to `'approve' | 'deny' | 'reject'`, and `getReview`/`sweepExpiredReviews` are new.
 - **Schedule operations** — `createSchedule`, `getSchedule`, `listSchedules`, `pauseSchedule`, `resumeSchedule`, `cancelSchedule`.
 - **Configuration and tool operations** — `getConfiguration`, `getTools`.
 - **Live-frame operations** — `subscribeLiveFrames`.

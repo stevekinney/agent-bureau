@@ -9173,6 +9173,55 @@ describe('createBureau review lifecycle (AB-46)', () => {
         bureau.dispose();
       }
     });
+
+    it("decodes a 'review.tool-approval.superseded' audit record's status as 'superseded'", async () => {
+      // No code path in this record writes a `review.*.superseded` audit
+      // entry yet (AB-46 scopes that write to a future re-gate change) —
+      // this writes one directly through the same public `auditTrail.record`
+      // seam `recordReviewStatusTransition` uses, to prove `getReview`
+      // decodes it correctly rather than silently falling through to
+      // `'denied'` when that write lands.
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+        persistence: textValueStore(new MemoryStorage()),
+      });
+
+      try {
+        const runId = 'run-superseded-review';
+        const reviewId = `approval:${runId}:call-superseded`;
+        await bureau.auditTrail!.record({
+          runId,
+          type: 'review.tool-approval.superseded',
+          detail: {
+            review: {
+              kind: 'tool-approval',
+              id: reviewId,
+              runId,
+              sessionId: 'session-superseded',
+              agentName: 'bureau',
+              approval: {
+                callId: 'call-superseded',
+                toolName: 'charge-card',
+                arguments: { cents: 100 },
+                action: { message: 'Approve charge' },
+              },
+              requestedAt: 0,
+              ageMilliseconds: 0,
+              status: 'superseded',
+            },
+            status: 'superseded',
+          },
+          principal: 'system:supersession',
+        });
+
+        const resolved = await bureau.getReview(reviewId);
+        expect(resolved?.status).toBe('superseded');
+      } finally {
+        bureau.dispose();
+      }
+    });
   });
 
   it('listPendingReviews excludes a tool-approval review past its binding expiresAt, and sweepExpiredReviews transitions it to expired', async () => {

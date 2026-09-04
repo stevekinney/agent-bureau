@@ -5223,11 +5223,12 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   /**
    * Derives a {@link ReviewStatus} from a `review.*` audit record's `type`
    * suffix (AB-46). `getReview` uses this to reconstruct a resolved review's
-   * status from the chronologically-last matching audit entry. `'superseded'`
-   * is a valid {@link ReviewStatus} value but no code path in this record
-   * writes a `review.*.superseded` audit entry yet (AB-46's own decision
-   * record scopes that to a future re-gate audit write, out of this issue's
-   * boundary) — nothing decodes into it here for the same reason.
+   * status from the chronologically-last matching audit entry. No code path
+   * in this record writes a `review.*.superseded` audit entry yet (AB-46's
+   * own decision record scopes that write to a future re-gate change, out of
+   * this issue's boundary) — the case is still handled explicitly here so a
+   * future, or externally-produced, `review.*.superseded` record decodes
+   * correctly instead of silently falling through to `'denied'`.
    */
   function reviewStatusFromAuditType(type: string): ReviewStatus {
     switch (type.split('.').pop()) {
@@ -5241,6 +5242,8 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         return 'revoked';
       case 'canceled':
         return 'canceled';
+      case 'superseded':
+        return 'superseded';
       case 'denied':
       default:
         return 'denied';
@@ -5253,7 +5256,13 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
    * reject) — namely `sweepExpiredReviews`'s `'expired'` transition and
    * `revokePendingApprovalsForRun`'s `'canceled'`/`'revoked'` transitions
    * (AB-46). A no-op when no audit trail is configured, matching
-   * `recordReviewDecision`.
+   * `recordReviewDecision`. `review` is embedded in `detail.review` with its
+   * own `status` field forced to `status` — every caller passes a review
+   * whose `status` still reads `'pending'` (it came from a live scan of
+   * `listPendingReviews()`), and embedding that stale value verbatim would
+   * make `detail.review.status` disagree with both the audit `type` and the
+   * top-level `detail.status`, exactly the inconsistency `getReview`'s
+   * audit-trail reconstruction and any other audit consumer must not see.
    */
   async function recordReviewStatusTransition(
     review: PendingReview,
@@ -5263,7 +5272,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     await auditTrailInstance?.record({
       runId: review.runId,
       type: `review.${review.kind}.${status}`,
-      detail: { review, status },
+      detail: { review: { ...review, status }, status },
       principal,
     });
   }
