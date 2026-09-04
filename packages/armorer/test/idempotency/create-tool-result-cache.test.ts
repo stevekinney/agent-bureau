@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from 'bun:test';
+import { createManualRuntimeServices, type ManualRuntimeServices } from 'lifecycle';
 
 import { createToolResultCache } from '../../src/idempotency/create-tool-result-cache';
 import type { CachedToolResult, ToolResultCache } from '../../src/idempotency/types';
@@ -24,10 +25,12 @@ function createTestStore() {
 describe('createToolResultCache', () => {
   let store: ReturnType<typeof createTestStore>;
   let cache: ToolResultCache;
+  let runtime: ManualRuntimeServices;
 
   beforeEach(() => {
     store = createTestStore();
-    cache = createToolResultCache({ store, defaultTTL: 60_000 });
+    runtime = createManualRuntimeServices();
+    cache = createToolResultCache({ store, defaultTTL: 60_000, now: runtime.clock.now });
   });
 
   describe('set and get', () => {
@@ -35,7 +38,7 @@ describe('createToolResultCache', () => {
       const result: CachedToolResult = {
         result: { answer: 42 },
         toolName: 'calculator',
-        executedAt: Date.now(),
+        executedAt: runtime.clock.now(),
         ttl: 60_000,
       };
 
@@ -75,7 +78,7 @@ describe('createToolResultCache', () => {
       const result: CachedToolResult = {
         result: undefined,
         toolName: 'no-output-tool',
-        executedAt: Date.now(),
+        executedAt: runtime.clock.now(),
         ttl: 60_000,
       };
 
@@ -114,7 +117,7 @@ describe('createToolResultCache', () => {
       const result: CachedToolResult = {
         result: 'fresh',
         toolName: 'new-tool',
-        executedAt: Date.now() - 10_000, // 10 seconds ago
+        executedAt: runtime.clock.now() - 10_000, // 10 seconds ago
         ttl: 60_000, // 1 minute TTL
       };
 
@@ -130,12 +133,13 @@ describe('createToolResultCache', () => {
       const namespacedCache = createToolResultCache({
         store,
         namespace: 'test-ns',
+        now: runtime.clock.now,
       });
 
       const result: CachedToolResult = {
         result: 'namespaced',
         toolName: 'tool',
-        executedAt: Date.now(),
+        executedAt: runtime.clock.now(),
         ttl: 60_000,
       };
 
@@ -160,7 +164,7 @@ describe('createToolResultCache', () => {
       const result: CachedToolResult = {
         result: 'doomed',
         toolName: 'tool',
-        executedAt: Date.now(),
+        executedAt: runtime.clock.now(),
         ttl: 60_000,
       };
 
@@ -177,7 +181,7 @@ describe('createToolResultCache', () => {
       const result: CachedToolResult = {
         result: 'value',
         toolName: 'tool',
-        executedAt: Date.now(),
+        executedAt: runtime.clock.now(),
         ttl: 60_000,
       };
 
@@ -196,7 +200,7 @@ describe('createToolResultCache', () => {
       await cache.claimStarted('started-key', {
         status: 'started',
         toolName: 'charge-card',
-        startedAt: Date.now(),
+        startedAt: runtime.clock.now(),
         ttl: 60_000,
       });
 
@@ -213,7 +217,7 @@ describe('createToolResultCache', () => {
       const completed: CachedToolResult = {
         result: { ok: true },
         toolName: 'charge-card',
-        executedAt: Date.now(),
+        executedAt: runtime.clock.now(),
         ttl: 60_000,
       };
       await cache.set('completed-key', completed);
@@ -222,7 +226,7 @@ describe('createToolResultCache', () => {
         await cache.claimStarted!('completed-key', {
           status: 'started',
           toolName: 'charge-card',
-          startedAt: Date.now(),
+          startedAt: runtime.clock.now(),
           ttl: 60_000,
         }),
       ).toMatchObject({ outcome: 'existing', entry: { ...completed, status: 'completed' } });
@@ -232,13 +236,13 @@ describe('createToolResultCache', () => {
       const firstClaim = cache.claimStarted!('racing-key', {
         status: 'started',
         toolName: 'charge-card',
-        startedAt: Date.now(),
+        startedAt: runtime.clock.now(),
         ttl: 60_000,
       });
       const secondClaim = cache.claimStarted!('racing-key', {
         status: 'started',
         toolName: 'charge-card',
-        startedAt: Date.now(),
+        startedAt: runtime.clock.now(),
         ttl: 60_000,
       });
 
@@ -274,18 +278,19 @@ describe('createToolResultCache', () => {
             [...map.keys()].filter((key) => key.startsWith(prefix)).sort(),
         },
         defaultTTL: 60_000,
+        now: runtime.clock.now,
       });
 
       const firstClaim = failingCache.claimStarted!('recover-key', {
         status: 'started',
         toolName: 'charge-card',
-        startedAt: Date.now(),
+        startedAt: runtime.clock.now(),
         ttl: 60_000,
       }).catch((error: unknown) => (error instanceof Error ? error.message : String(error)));
       const secondClaim = failingCache.claimStarted!('recover-key', {
         status: 'started',
         toolName: 'charge-card',
-        startedAt: Date.now(),
+        startedAt: runtime.clock.now(),
         ttl: 60_000,
       });
 
@@ -303,7 +308,7 @@ describe('createToolResultCache', () => {
       await cache.claimStarted('expired-started-key', {
         status: 'started',
         toolName: 'charge-card',
-        startedAt: Date.now() - 120_000,
+        startedAt: runtime.clock.now() - 120_000,
         ttl: 60_000,
       });
 
@@ -319,7 +324,7 @@ describe('createToolResultCache', () => {
         JSON.stringify({
           result: 'legacy-result',
           toolName: 'legacy-tool',
-          executedAt: Date.now(),
+          executedAt: runtime.clock.now(),
           ttl: 60_000,
         }),
       );
@@ -496,11 +501,11 @@ describe('createToolResultCache', () => {
 
   describe('defaultTTL', () => {
     it('returns an entry whose TTL has not yet expired', async () => {
-      const defaultCache = createToolResultCache({ store });
+      const defaultCache = createToolResultCache({ store, now: runtime.clock.now });
       const result: CachedToolResult = {
         result: 'still-valid',
         toolName: 'tool',
-        executedAt: Date.now() - 200_000, // 200 seconds ago, within 300s default
+        executedAt: runtime.clock.now() - 200_000, // 200 seconds ago, within 300s default
         ttl: 300_000,
       };
 
@@ -527,12 +532,12 @@ describe('createToolResultCache', () => {
   });
 
   it('shares claim fencing across independent cache instances using one store', async () => {
-    const first = createToolResultCache({ store });
-    const second = createToolResultCache({ store });
+    const first = createToolResultCache({ store, now: runtime.clock.now });
+    const second = createToolResultCache({ store, now: runtime.clock.now });
     const execution = {
       status: 'started' as const,
       toolName: 'charge',
-      startedAt: Date.now(),
+      startedAt: runtime.clock.now(),
       ttl: 60_000,
       attemptId: 'attempt-1',
     };
@@ -546,12 +551,12 @@ describe('createToolResultCache', () => {
   });
 
   it('shares claim fencing by resolved backing key across namespaces', async () => {
-    const namespaced = createToolResultCache({ store, namespace: 'a' });
-    const unnamespaced = createToolResultCache({ store });
+    const namespaced = createToolResultCache({ store, namespace: 'a', now: runtime.clock.now });
+    const unnamespaced = createToolResultCache({ store, now: runtime.clock.now });
     const execution = {
       status: 'started' as const,
       toolName: 'charge',
-      startedAt: Date.now(),
+      startedAt: runtime.clock.now(),
       ttl: 60_000,
     };
 
@@ -570,22 +575,32 @@ describe('createToolResultCache', () => {
     await cache.claimStarted!('fenced', {
       status: 'started',
       toolName: 'charge',
-      startedAt: Date.now(),
+      startedAt: runtime.clock.now(),
       ttl: 60_000,
       attemptId: 'current',
-      absoluteDeadline: Date.now() + 60_000,
+      absoluteDeadline: runtime.clock.now() + 60_000,
     });
-    expect(await cache.renewStarted!('fenced', 'stale', Date.now() + 30_000, Date.now())).toBe(
-      false,
-    );
-    expect(await cache.renewStarted!('fenced', 'current', Date.now() + 30_000, Date.now())).toBe(
-      true,
-    );
+    expect(
+      await cache.renewStarted!(
+        'fenced',
+        'stale',
+        runtime.clock.now() + 30_000,
+        runtime.clock.now(),
+      ),
+    ).toBe(false);
+    expect(
+      await cache.renewStarted!(
+        'fenced',
+        'current',
+        runtime.clock.now() + 30_000,
+        runtime.clock.now(),
+      ),
+    ).toBe(true);
     expect(
       await cache.completeStarted!('fenced', 'stale', {
         result: 'late',
         toolName: 'charge',
-        executedAt: Date.now(),
+        executedAt: runtime.clock.now(),
         ttl: 60_000,
       }),
     ).toBe(false);
@@ -593,7 +608,7 @@ describe('createToolResultCache', () => {
       await cache.completeStarted!('fenced', 'current', {
         result: 'ok',
         toolName: 'charge',
-        executedAt: Date.now(),
+        executedAt: runtime.clock.now(),
         ttl: 60_000,
       }),
     ).toBe(true);
@@ -634,20 +649,25 @@ describe('createToolResultCache', () => {
     await cache.claimStarted('expired-fence', {
       status: 'started',
       toolName: 'charge',
-      startedAt: Date.now() - 100,
+      startedAt: runtime.clock.now() - 100,
       ttl: 60_000,
       attemptId: 'expired-attempt',
-      leaseExpiresAt: Date.now() - 50,
-      absoluteDeadline: Date.now() - 1,
+      leaseExpiresAt: runtime.clock.now() - 50,
+      absoluteDeadline: runtime.clock.now() - 1,
     });
     await expect(
-      cache.renewStarted('expired-fence', 'expired-attempt', Date.now() + 100, Date.now()),
+      cache.renewStarted(
+        'expired-fence',
+        'expired-attempt',
+        runtime.clock.now() + 100,
+        runtime.clock.now(),
+      ),
     ).resolves.toBe(false);
     await expect(
       cache.completeStarted('expired-fence', 'expired-attempt', {
         result: 'late',
         toolName: 'charge',
-        executedAt: Date.now(),
+        executedAt: runtime.clock.now(),
         ttl: 60_000,
       }),
     ).resolves.toBe(false);
@@ -655,18 +675,23 @@ describe('createToolResultCache', () => {
     await cache.claimStarted('bounded-renewal', {
       status: 'started',
       toolName: 'charge',
-      startedAt: Date.now(),
+      startedAt: runtime.clock.now(),
       ttl: 60_000,
       attemptId: 'bounded-attempt',
-      absoluteDeadline: Date.now() + 10_000,
+      absoluteDeadline: runtime.clock.now() + 10_000,
     });
     await expect(
-      cache.renewStarted('bounded-renewal', 'bounded-attempt', Date.now() + 20_000, Date.now()),
+      cache.renewStarted(
+        'bounded-renewal',
+        'bounded-attempt',
+        runtime.clock.now() + 20_000,
+        runtime.clock.now(),
+      ),
     ).resolves.toBe(true);
     const boundedRenewal = await cache.getState('bounded-renewal');
     expect(
       boundedRenewal?.status === 'started' ? boundedRenewal.leaseExpiresAt : undefined,
-    ).toBeLessThanOrEqual(Date.now() + 10_000);
+    ).toBeLessThanOrEqual(runtime.clock.now() + 10_000);
 
     await expect(cache.deleteStarted('bounded-renewal', 'stale-attempt')).resolves.toBe(false);
     await expect(
@@ -676,11 +701,11 @@ describe('createToolResultCache', () => {
         {
           status: 'started',
           toolName: 'charge',
-          startedAt: Date.now(),
+          startedAt: runtime.clock.now(),
           ttl: 60_000,
           attemptId: 'replacement-attempt',
         },
-        Date.now(),
+        runtime.clock.now(),
       ),
     ).resolves.toBe(false);
     await expect(cache.deleteStarted('bounded-renewal', 'bounded-attempt')).resolves.toBe(true);
@@ -693,11 +718,11 @@ describe('createToolResultCache', () => {
         {
           status: 'started',
           toolName: 'charge',
-          startedAt: Date.now(),
+          startedAt: runtime.clock.now(),
           ttl: 60_000,
           attemptId: 'replacement',
         },
-        Date.now(),
+        runtime.clock.now(),
       ),
     ).resolves.toBe(false);
   });
