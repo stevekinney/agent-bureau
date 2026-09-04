@@ -1,4 +1,4 @@
-import type { ConversationEnvironment } from '../environment';
+import { type ConversationEnvironment, defaultConversationRuntime } from '../environment';
 import { Conversation } from '../history';
 import type { ToMarkdownOptions } from '../types';
 import {
@@ -40,6 +40,6 @@ export function conversationFromMarkdown(
   markdown: string,
   environment?: Partial<ConversationEnvironment>,
 ): Conversation {
-  const conversation = fromMarkdown(markdown);
+  const conversation = fromMarkdown(markdown, environment?.runtime ?? defaultConversationRuntime);
   return new Conversation(conversation, environment);
 }
