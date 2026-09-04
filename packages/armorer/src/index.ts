@@ -112,11 +112,14 @@ export type { CreateToolOptions, WithContext } from './create-tool';
 export { createTool, createToolCall, lazy, withContext } from './create-tool';
 export type {
   AnyToolbox,
+  GrantListFilter,
+  GrantUsedDetail,
   ImportedToolboxOptions,
   ImportedToolConfiguration,
   LoopDetectionOptions,
   LoopDetectionResult,
   LoopDetectorInstance,
+  ReusableApprovalGrantInput,
   SerializedToolbox,
   SerializedToolboxJSONSchema,
   Toolbox,
@@ -190,6 +193,7 @@ export {
   ToolboxExecuteErrorEvent,
   ToolboxExecuteStartEvent,
   ToolboxExecuteSuccessEvent,
+  ToolboxGrantUsedEvent,
   ToolboxLogEvent,
   ToolboxLoopBlockedEvent,
   ToolboxLoopWarningEvent,

@@ -443,7 +443,45 @@ await grantStore.decrementUse(signed.id); // { usesRemaining: 4 }
 await grantStore.revoke(signed.id); // idempotent; never throws on an unknown or already-revoked id
 ```
 
-`signGrant` and `verifyGrantSignature` use the same HMAC primitive as `signPendingApproval`, applied to every grant field except `signature` itself. `createProcessLocalGrantStateStore()` is process-local, in-memory storage: `issue` always initializes `usesRemaining` to `maxUses` regardless of what the caller passed, and `decrementUse` is the only method that ever changes `usesRemaining`, floored at `0`. This module only owns the grant type, storage, and signing primitives — matching a grant against an incoming tool call ahead of policy evaluation, and the Bureau-layer `issueGrant`/`revokeGrant`/`listGrants` wiring, are out of scope here.
+`signGrant` and `verifyGrantSignature` use the same HMAC primitive as `signPendingApproval`, applied to every grant field except `signature` itself. `createProcessLocalGrantStateStore()` is process-local, in-memory storage: `issue` always initializes `usesRemaining` to `maxUses` regardless of what the caller passed, and `decrementUse` is the only method that ever changes `usesRemaining`, floored at `0`.
+
+#### Matching a grant against an incoming call
+
+A toolbox constructed with both `approvalSecret` and a `grantStateStore` (defaulted to a process-local store whenever `approvalSecret` is configured, exactly like `approvalStateStore`) matches reusable approval grants inside its policy pipeline, ahead of the two-axis capability approval policy's `ask` outcome:
+
+```ts
+const toolbox = createToolbox([readFileTool], {
+  approvalSecret: grantSigningSecret,
+  approvalPolicy: { mode: 'always' },
+  grantStateStore: grantStore, // omit to default to createProcessLocalGrantStateStore()
+});
+
+const grant = await toolbox.issueGrant({
+  principalId: 'principal-1',
+  tenantId: 'tenant-1',
+  ownerId: 'owner-1',
+  agentId: 'agent-1',
+  toolName: 'read-file',
+  resourcePattern: 'reports/*',
+  scope: 'session',
+  expiresAt: Date.now() + 60 * 60 * 1000,
+  maxUses: 5,
+  delegationBehavior: 'does-not-propagate',
+}); // mints id/issuedAt/usesRemaining/policyRevision and signs the result
+
+// A call whose requestContext.authority reauthorizes the grant's principal,
+// tenant, and owner, and whose `resource` argument matches the pattern,
+// executes without prompting for approval:
+await toolbox.execute(
+  { id: 'call-1', name: 'read-file', arguments: { resource: 'reports/q1' } },
+  { requestContext },
+);
+
+await toolbox.listGrants({ principalId: 'principal-1' });
+await toolbox.revokeGrant(grant.id); // idempotent
+```
+
+A match decrements `usesRemaining` by one and emits a `'grant.used'` toolbox event carrying the grant id, the matched tool call, the deciding principal, and the grant's remaining uses — the audit entry the decision record calls for. A grant failing any check (no match, expired, revoked, exhausted, a stale `policyRevision`, or a signature that no longer verifies) is treated as absent, never an implicit deny or approve — the ordinary `ask` pipeline runs unchanged, and a capability `deny` is never overridden by a grant. `resourcePattern` is a glob-style match (`*` wildcard) against a caller-declared `resource` field in the call's arguments; `argumentConstraints` is plain JSON data (never a live Zod schema instance — a grant's signature is computed over its JSON-serialized fields) matched by deep equality per declared key.
 
 ### Request Authority and Execution Projections
 

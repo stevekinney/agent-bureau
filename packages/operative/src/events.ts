@@ -1721,6 +1721,7 @@ const TOOLBOX_EVENT_KEYS = [
   'name-resolved',
   'loop-warning',
   'loop-blocked',
+  'grant.used',
 ] as const satisfies readonly ToolboxEventKey[];
 
 const CONVERSATION_ACTION_TYPES = [

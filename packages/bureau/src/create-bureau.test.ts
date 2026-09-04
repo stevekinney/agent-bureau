@@ -11880,3 +11880,116 @@ describe('AB-260: BureauOptions.runtime composition', () => {
     }
   });
 });
+
+describe('Bureau.issueGrant / revokeGrant / listGrants (AB-46, AB-346)', () => {
+  it('issueGrant delegates to the base toolbox and returns a signed grant', async () => {
+    const toolbox = createToolbox([], { approvalSecret: 'grant-secret' });
+    const bureau = await createBureau({ agents: {}, toolbox });
+
+    try {
+      const grant = await bureau.issueGrant({
+        principalId: 'principal-1',
+        tenantId: 'tenant-1',
+        ownerId: 'owner-1',
+        agentId: 'agent-1',
+        toolName: 'read-file',
+        scope: 'session',
+        expiresAt: Number.MAX_SAFE_INTEGER,
+        maxUses: 3,
+        delegationBehavior: 'does-not-propagate',
+      });
+
+      expect(grant.id).toMatch(/^grant:/);
+      expect(grant.usesRemaining).toBe(3);
+      expect(await toolbox.listGrants()).toEqual([grant]);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('revokeGrant delegates to the base toolbox and is idempotent', async () => {
+    const toolbox = createToolbox([], { approvalSecret: 'grant-secret' });
+    const bureau = await createBureau({ agents: {}, toolbox });
+
+    try {
+      const grant = await bureau.issueGrant({
+        principalId: 'principal-1',
+        tenantId: 'tenant-1',
+        ownerId: 'owner-1',
+        agentId: 'agent-1',
+        toolName: 'read-file',
+        scope: 'session',
+        expiresAt: Number.MAX_SAFE_INTEGER,
+        maxUses: 1,
+        delegationBehavior: 'does-not-propagate',
+      });
+
+      await bureau.revokeGrant(grant.id);
+      await bureau.revokeGrant(grant.id);
+      await bureau.revokeGrant('unknown-grant-id');
+
+      const [stored] = await toolbox.listGrants();
+      expect(stored?.revoked).toBe(true);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('listGrants delegates to the base toolbox with an optional filter', async () => {
+    const toolbox = createToolbox([], { approvalSecret: 'grant-secret' });
+    const bureau = await createBureau({ agents: {}, toolbox });
+
+    try {
+      const matching = await bureau.issueGrant({
+        principalId: 'principal-a',
+        tenantId: 'tenant-1',
+        ownerId: 'owner-1',
+        agentId: 'agent-1',
+        toolName: 'read-file',
+        scope: 'session',
+        expiresAt: Number.MAX_SAFE_INTEGER,
+        maxUses: 1,
+        delegationBehavior: 'does-not-propagate',
+      });
+      await bureau.issueGrant({
+        principalId: 'principal-b',
+        tenantId: 'tenant-1',
+        ownerId: 'owner-1',
+        agentId: 'agent-1',
+        toolName: 'read-file',
+        scope: 'session',
+        expiresAt: Number.MAX_SAFE_INTEGER,
+        maxUses: 1,
+        delegationBehavior: 'does-not-propagate',
+      });
+
+      expect(await bureau.listGrants({ principalId: 'principal-a' })).toEqual([matching]);
+      expect(await bureau.listGrants()).toHaveLength(2);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('propagates the toolbox error when no approvalSecret is configured', async () => {
+    const toolbox = createToolbox([]);
+    const bureau = await createBureau({ agents: {}, toolbox });
+
+    try {
+      expect(
+        bureau.issueGrant({
+          principalId: 'principal-1',
+          tenantId: 'tenant-1',
+          ownerId: 'owner-1',
+          agentId: 'agent-1',
+          toolName: 'read-file',
+          scope: 'session',
+          expiresAt: Number.MAX_SAFE_INTEGER,
+          maxUses: 1,
+          delegationBehavior: 'does-not-propagate',
+        }),
+      ).rejects.toThrow('approvalSecret is required');
+    } finally {
+      await bureau.dispose();
+    }
+  });
+});

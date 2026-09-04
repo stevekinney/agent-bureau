@@ -77,7 +77,13 @@ import {
   type WorkflowState,
 } from '@lostgradient/weft';
 import { KEYS } from '@lostgradient/weft/storage';
-import { type SignedPendingToolApproval, type ToolRequestContext } from 'armorer';
+import {
+  type GrantListFilter,
+  type ReusableApprovalGrant,
+  type ReusableApprovalGrantInput,
+  type SignedPendingToolApproval,
+  type ToolRequestContext,
+} from 'armorer';
 import {
   Conversation,
   type ConversationHistory,
@@ -5200,6 +5206,26 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     };
   }
 
+  // ── Reusable approval grants (AB-46, AB-346) ───────────────────────
+  //
+  // `issueGrant`/`revokeGrant`/`listGrants` delegate straight to the base
+  // toolbox's own methods — the same pattern `resolveReview`'s
+  // `tool-approval` branch already uses for `resumeApproval`/`revokeApproval`
+  // above. Grant matching itself lives entirely in armorer's `mergePolicies`
+  // (AB-346); the bureau owns no grant state of its own.
+
+  async function issueGrant(input: ReusableApprovalGrantInput): Promise<ReusableApprovalGrant> {
+    return runtime.baseToolbox.issueGrant(input);
+  }
+
+  async function revokeGrant(id: string): Promise<void> {
+    await runtime.baseToolbox.revokeGrant(id);
+  }
+
+  async function listGrants(filter?: GrantListFilter): Promise<ReusableApprovalGrant[]> {
+    return runtime.baseToolbox.listGrants(filter);
+  }
+
   async function recordReviewDecision(
     review: PendingReview,
     decision: 'approve' | 'deny' | 'reject',
@@ -6074,6 +6100,9 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     getReview,
     resolveReview,
     sweepExpiredReviews,
+    issueGrant,
+    revokeGrant,
+    listGrants,
     setRequestAuthorityValidator(validator) {
       requestAuthorityValidator = validator;
       runtime.setRequestAuthorityValidator(validator);

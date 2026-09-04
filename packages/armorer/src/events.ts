@@ -821,6 +821,45 @@ export class ToolboxPolicyDeniedEvent extends Event {
   }
 }
 
+/**
+ * A reusable approval grant (AB-46, AB-346) matched an incoming tool call
+ * ahead of `evaluateCapabilityApproval`'s `ask` outcome: the call executed
+ * without prompting for approval, `usesRemaining` was decremented by one,
+ * and this event is the audit entry the decision record calls for —
+ * `grantId`, the matched tool call, the deciding principal, and the grant's
+ * remaining uses after this consumption.
+ */
+export class ToolboxGrantUsedEvent extends Event {
+  static readonly type = 'grant.used' as const;
+  readonly grantId: string;
+  readonly toolName: string;
+  readonly call: ToolCall;
+  readonly principalId: string;
+  readonly usesRemaining: number;
+  /** The consuming call's `requestContext.runId`, when supplied. */
+  readonly runId?: string;
+  /** The consuming call's `requestContext.agentId`, when supplied. */
+  readonly agentId?: string;
+  constructor(detail: {
+    grantId: string;
+    toolName: string;
+    call: ToolCall;
+    principalId: string;
+    usesRemaining: number;
+    runId?: string;
+    agentId?: string;
+  }) {
+    super(ToolboxGrantUsedEvent.type);
+    this.grantId = detail.grantId;
+    this.toolName = detail.toolName;
+    this.call = detail.call;
+    this.principalId = detail.principalId;
+    this.usesRemaining = detail.usesRemaining;
+    this.runId = detail.runId;
+    this.agentId = detail.agentId;
+  }
+}
+
 export class ToolboxToolStartedEvent extends Event {
   static readonly type = 'tool.started' as const;
   readonly tool: Tool;
@@ -1228,4 +1267,5 @@ export interface ToolboxEventMap {
   'name-resolved': ToolboxNameResolvedEvent;
   'loop-warning': ToolboxLoopWarningEvent;
   'loop-blocked': ToolboxLoopBlockedEvent;
+  'grant.used': ToolboxGrantUsedEvent;
 }
