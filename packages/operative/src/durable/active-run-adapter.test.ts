@@ -4160,3 +4160,164 @@ describe('B6 — abort-into-generate load-bearing abort', () => {
     expect(result.finishReason).toBe('aborted');
   });
 });
+
+// AB-317: `active-run-adapter.ts`'s toolbox listeners (`execute-start`/
+// `settled`/`progress`/`policy-denied`) must be removed on the same
+// settle-aware boundary the in-memory path uses (create-run.ts's `complete()`,
+// which runs once `result` settles) — never on the abort signal alone. Binding
+// them to `abortController.signal` would remove them synchronously, on the
+// SAME tick as `abort()`, before armorer's own asynchronous cancellation-race
+// `settled` event for an in-flight call can arrive on a later microtask — so
+// the adapter would never observe that settlement: `onSettled` (whose very
+// first statement is `liveness.endToolCall()`, immediately followed by
+// scheduling the deferred `inFlightTools` decrement against
+// `e.callbackCompletion`) would simply never run for that call. These tests
+// pin the fix for both drivers by proving the late `settled` event is still
+// delivered — the observable evidence that `onSettled` (and therefore
+// `endToolCall()` and the in-flight decrement) actually ran.
+describe('AB-317: durable toolbox listeners survive abort() until the settle-aware boundary', () => {
+  it("the fresh-start driver still delivers a stubborn in-flight tool call's settled event after abort()", async () => {
+    const context = await buildContext();
+    try {
+      let notifyToolStarted: (() => void) | undefined;
+      const toolStarted = new Promise<void>((resolve) => {
+        notifyToolStarted = resolve;
+      });
+      let releaseStubbornTool: ((value: string) => void) | undefined;
+      const stubbornToolGate = new Promise<string>((resolve) => {
+        releaseStubbornTool = resolve;
+      });
+      const stubbornTool = createTool({
+        name: 'stubborn_tool',
+        description: 'Ignores cancellation; keeps running until the test releases it',
+        input: z.object({}),
+        execute: async () => {
+          notifyToolStarted?.();
+          return stubbornToolGate;
+        },
+      });
+      const toolbox = createToolbox([stubbornTool]) as unknown as RunOptions['toolbox'];
+      const generate = createMockGenerate([
+        { content: '', toolCalls: [{ name: 'stubborn_tool', arguments: {} }] },
+      ]);
+
+      const activeRun = createDurableActiveRun(context, {
+        runId: 'ab-317-fresh-post-abort-settled',
+        sessionId: 'ab-317-fresh-post-abort-settled',
+        options: {
+          generate,
+          toolbox,
+          conversation: createConversationHistory(),
+          stopWhen: stopWhen.noToolCalls(),
+        },
+        prompt: 'Hello',
+      });
+
+      const settled: ToolSettledBubbleEvent[] = [];
+      activeRun.addEventListener('tool.settled', (event) => settled.push(event));
+
+      // Wait until the tool's own execute() has actually started (not just a
+      // fixed tick count) before aborting, so the run is genuinely aborted
+      // while a real call is in flight rather than before it was dispatched.
+      await toolStarted;
+
+      activeRun.abort('stop');
+
+      // The run's own `result` settles (aborted) while the stubborn callback
+      // is still running — armorer resolves the cancellation race promptly,
+      // without waiting for the callback's own promise. If the toolbox
+      // listeners had been torn down synchronously on `abort()` alone, this
+      // `settled` event — which arrives on a LATER microtask than the
+      // synchronous `abort()` call — would have been missed entirely.
+      const result = await activeRun.result;
+      expect(result.finishReason).toBe('aborted');
+      expect(settled).toHaveLength(1);
+      expect(settled[0]).toBeInstanceOf(ToolSettledBubbleEvent);
+      expect(settled[0]?.toolName).toBe('stubborn_tool');
+
+      // The callback keeps running after `result` has settled; releasing it
+      // must not throw or corrupt the adapter's bookkeeping — the deferred
+      // `inFlightTools` decrement (scheduled against `e.callbackCompletion`
+      // inside `onSettled`) resolves quietly in the background.
+      releaseStubbornTool?.('done');
+      await yieldToPortableEventLoop();
+      expect(await activeRun.closed()).toEqual({ status: 'completed' });
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it("the reattached driver still delivers a settled event on the ActiveRun's own emitter after abort()", async () => {
+    const context = await buildContext();
+    try {
+      const runId = 'ab-317-reattach-post-abort-settled';
+      const tool = createTool({
+        name: 'stubborn_tool',
+        description: 'Stands in as a settled-after-abort event source',
+        input: z.object({}),
+        execute: async () => 'ok',
+      });
+      const toolbox = createToolbox([tool]);
+      const options = {
+        ...runOptions(async () => ({ content: 'unused', toolCalls: [] })),
+        toolbox: toolbox as unknown as RunOptions['toolbox'],
+      };
+      const services = { options, toolbox };
+      // `createRecoveredRunEventSurface` is the toolbox → emitter forwarder
+      // `reattachDurableActiveRun` relies on for a recovered run — see its
+      // `attachToolboxCuratedListeners` (mirroring the fresh-start driver's,
+      // per its own AB-290 comment).
+      const surface = createRecoveredRunEventSurface(services, runId, 'reattach-agent');
+
+      const cancelled: string[] = [];
+      const engine = {
+        cancel: async (id: string) => {
+          cancelled.push(id);
+        },
+      } as unknown as RegistryAgnosticEngine;
+      // `result()` never settles during this test — isolates the assertion
+      // to "does `abort()` alone tear down the toolbox listeners", not
+      // whatever `complete()` does once the run's own result settles.
+      const handle = {
+        id: runId,
+        result: () => new Promise<unknown>(() => {}),
+      };
+
+      const recoveredRun = reattachDurableActiveRun(
+        { engine, checkpointStore: context.checkpointStore },
+        {
+          runId,
+          handle,
+          emitter: surface.emitter,
+          stopToolboxForward: surface.stopToolboxForward,
+          abort: surface.abort,
+        },
+      );
+
+      const settled: ToolSettledBubbleEvent[] = [];
+      recoveredRun.addEventListener('tool.settled', (event) => settled.push(event));
+
+      const call = { id: 'stubborn-call-id', name: tool.name, arguments: {} };
+      toolbox.dispatchEvent(
+        new ToolboxExecuteStartEvent({ tool, call, params: {}, ownerId: runId }),
+      );
+
+      // Let the deferred-microtask `drive()` start (wiring `abortCancelled`)
+      // before aborting.
+      await Promise.resolve();
+      recoveredRun.abort();
+
+      // Dispatched AFTER `abort()` — mirrors armorer's real cancellation-race
+      // `settled` event arriving on a later microtask than the synchronous
+      // `abort()` call.
+      toolbox.dispatchEvent(new ToolboxSettledEvent({ tool, call, result: 'ok', ownerId: runId }));
+
+      expect(cancelled).toEqual([runId]);
+      expect(settled).toHaveLength(1);
+      expect(settled[0]).toBeInstanceOf(ToolSettledBubbleEvent);
+      expect(settled[0]?.toolName).toBe(tool.name);
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+});
