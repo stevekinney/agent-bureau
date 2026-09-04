@@ -55,6 +55,13 @@ jobs:
       - name: Gateway real-transport conformance (AB-98)
         run: bun run test:gateway-conformance
 
+      # AB-267 — replays the committed reproduction-artifact fixture through
+      # the one-command replay path on every pull request, so the replay
+      # path is exercised continuously rather than only when someone
+      # remembers to run it by hand.
+      - name: Reproduction-artifact replay (AB-267)
+        run: bun run test:replay-artifact -- packages/integration/test/fixtures/reproduction/baseline.json
+
   coverage-and-package-shape:
     runs-on: ubuntu-latest
     steps:

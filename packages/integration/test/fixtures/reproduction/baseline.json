@@ -1,0 +1,55 @@
+{
+  "sourceRevision": "baseline-fixture",
+  "packageVersions": {
+    "@lostgradient/operative": "baseline-fixture"
+  },
+  "effectiveModel": {
+    "provider": "baseline-fixture",
+    "model": "baseline-fixture"
+  },
+  "clockOrigin": "2020-01-01T00:00:00.000Z",
+  "identifierSeed": "ab-267-baseline-fixture",
+  "randomSeed": "ab-267-baseline-fixture",
+  "scriptedOutcomes": [],
+  "firedFaults": [
+    {
+      "plan": "reject-first-get",
+      "boundary": "before-work",
+      "occurrence": 1,
+      "firedAt": "2020-01-01T00:00:00.000Z"
+    }
+  ],
+  "causalTrace": [
+    {
+      "resource": "barrier:checkpoint",
+      "revision": 0,
+      "event": "barrier.reached",
+      "result": {
+        "name": "checkpoint",
+        "arrivals": 1,
+        "isTrusted": false,
+        "capturedAtOffsetMs": 0
+      }
+    },
+    {
+      "resource": "barrier:checkpoint",
+      "revision": 1,
+      "event": "barrier.released",
+      "result": {
+        "name": "checkpoint",
+        "released": 1,
+        "isTrusted": false,
+        "capturedAtOffsetMs": 0
+      },
+      "causedBy": ["barrier:checkpoint#0"]
+    }
+  ],
+  "terminalResult": {
+    "firstGetError": "baseline-fixture-fault",
+    "secondGetValue": "value",
+    "keys": ["key"]
+  },
+  "cleanupReport": {
+    "status": "not-required"
+  }
+}

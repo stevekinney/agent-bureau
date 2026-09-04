@@ -9,6 +9,7 @@
         "@changesets/parse": "1.0.0",
         "@eslint/compat": "^2.1.0",
         "@eslint/js": "^10.0.1",
+        "@lostgradient/operative": "workspace:*",
         "eslint": "^10.8.1",
         "eslint-config-prettier": "^10.1.8",
         "eslint-plugin-eslint-comments": "^3.2.0",
