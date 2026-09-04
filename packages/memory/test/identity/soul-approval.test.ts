@@ -203,14 +203,13 @@ describe('pinSoulItem / unpinSoulItem', () => {
     const provider = createStaticIdentityProvider({
       soul: [makeSoulItem('1', 'Item', { updatedAt: '2020-01-01T00:00:00Z' })],
     });
+    const runtime = createManualRuntimeServices({ origin: '2026-06-15T12:00:00.000Z' });
 
-    await pinSoulItem(provider, '1');
+    await pinSoulItem(provider, '1', undefined, runtime);
 
     const soul = await provider.loadSoul();
     expect(soul[0]!.updatedAt).not.toBe('2020-01-01T00:00:00Z');
-    // Should be a recent timestamp
-    const updated = new Date(soul[0]!.updatedAt);
-    expect(updated.getTime()).toBeGreaterThan(Date.now() - 5000);
+    expect(soul[0]!.updatedAt).toBe('2026-06-15T12:00:00.000Z');
   });
 
   it('derives updatedAt from an injected manual runtime rather than the real clock', async () => {

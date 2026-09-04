@@ -25,9 +25,12 @@ import type { MemoryRecord, MemoryRecordScope, MemoryRecordStorage } from '../sr
  */
 
 const SCOPE: MemoryRecordScope = { namespace: 'alpha' };
+// Fixed instant used to stamp fixture records below — only a stable value is needed, never the
+// real clock.
+const FIXED_NOW = Date.parse('2026-01-01T00:00:00.000Z');
 
 function makeRecord(id: string, overrides: Partial<MemoryRecord> = {}): MemoryRecord {
-  const now = Date.now();
+  const now = FIXED_NOW;
   return {
     id,
     namespace: 'alpha',
@@ -299,7 +302,7 @@ describe('createWeftMemoryRecordStorage (Weft-specific)', () => {
     it('throws when a stored vector entry is non-finite', async () => {
       await storage.put(makeRecord('a'));
       const key = await onlyKey();
-      const now = Date.now();
+      const now = FIXED_NOW;
       await underlying.put(
         key,
         new TextEncoder().encode(

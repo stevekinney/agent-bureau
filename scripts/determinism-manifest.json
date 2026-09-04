@@ -10,6 +10,7 @@
     "packages/skills/src/**",
     "packages/evaluation/src/**",
     "packages/memory/src/**",
+    "packages/memory/test/**",
     "packages/armorer/test/**"
   ],
   "realRuntimeExemptions": [
@@ -33,7 +34,7 @@
     },
     {
       "path": "packages/gateway/src/conformance/**",
-      "reason": "AB-98's real-runtime conformance tier (AB-92's test-tier matrix): a real Bun HTTP/SSE/WebSocket loopback server bound to an operating-system-assigned ephemeral port, real fetch/WebSocket clients, and one deterministic bounded-drain read after a duplicate-subscription assertion (AbortSignal/ping-pong fenced, not a fixed sleep) \u2014 this tier exists specifically to exercise real sockets, which the deterministic tiers below it cannot.",
+      "reason": "AB-98's real-runtime conformance tier (AB-92's test-tier matrix): a real Bun HTTP/SSE/WebSocket loopback server bound to an operating-system-assigned ephemeral port, real fetch/WebSocket clients, and one deterministic bounded-drain read after a duplicate-subscription assertion (AbortSignal/ping-pong fenced, not a fixed sleep) — this tier exists specifically to exercise real sockets, which the deterministic tiers below it cannot.",
       "owner": "Agent Bureau team",
       "owningIssue": "AB-272"
     },
@@ -57,19 +58,19 @@
     },
     {
       "path": "packages/bureau/src/test/harness-lmdb-isolation.test.ts",
-      "reason": "AB-332 split this file out of harness.test.ts so this exemption covers only the one residual real wait AB-306's ruling named, not the whole harness suite \u2014 every other waitForRunCompletion call site in harness.test.ts now drives waitForRunState (event-driven, no real timer) instead. waitForRunCompletion's terminal-status poll needs a real per-iteration setTimeout delay, not the zero-delay MessageChannel macrotask loop waitForCondition (operative/test) and the rest of this codebase's polling uses. Measured directly against the lmdb storage fixture (AB-261): a 5,000-iteration zero-delay macrotask spin (~600ms of real time) left two concurrently-running LMDB-backed runs still 'running', while the identical scenario polled with a real setTimeout(5) between checks completed both well within a couple hundred milliseconds. A tight macrotask-only loop evidently starves the lmdb native library's own async completion callbacks rather than merely running out of iterations, so more zero-delay attempts does not fix it \u2014 only letting real wall-clock time elapse between checks does. Still a bounded, condition-checked poll (asserts the observed run status every iteration, fails loudly past its cap), never a fixed-duration sleep standing in for a real check. WFT-138 (Backlog) tracks the actual fix: a test-mode noSync/noMetaSync option on LMDBStorage so a write followed by a read in the same process observes the write without waiting on fsync; once it lands this file folds back into harness.test.ts.",
+      "reason": "AB-332 split this file out of harness.test.ts so this exemption covers only the one residual real wait AB-306's ruling named, not the whole harness suite — every other waitForRunCompletion call site in harness.test.ts now drives waitForRunState (event-driven, no real timer) instead. waitForRunCompletion's terminal-status poll needs a real per-iteration setTimeout delay, not the zero-delay MessageChannel macrotask loop waitForCondition (operative/test) and the rest of this codebase's polling uses. Measured directly against the lmdb storage fixture (AB-261): a 5,000-iteration zero-delay macrotask spin (~600ms of real time) left two concurrently-running LMDB-backed runs still 'running', while the identical scenario polled with a real setTimeout(5) between checks completed both well within a couple hundred milliseconds. A tight macrotask-only loop evidently starves the lmdb native library's own async completion callbacks rather than merely running out of iterations, so more zero-delay attempts does not fix it — only letting real wall-clock time elapse between checks does. Still a bounded, condition-checked poll (asserts the observed run status every iteration, fails loudly past its cap), never a fixed-duration sleep standing in for a real check. WFT-138 (Backlog) tracks the actual fix: a test-mode noSync/noMetaSync option on LMDBStorage so a write followed by a read in the same process observes the write without waiting on fsync; once it lands this file folds back into harness.test.ts.",
       "owner": "Agent Bureau team",
       "owningIssue": "WFT-138"
     },
     {
       "path": "packages/armorer/test/execution-lifecycle-default-runtime.test.ts",
-      "reason": "Deliberately verifies createExecutionLifecycle's DEFAULT runtime argument (no injected RuntimeServices) \u2014 that it schedules deadlines with the real platform timer when the caller supplies none. Injecting a manual runtime here would defeat the point of the test. Split out of execution-lifecycle.test.ts (AB-292) so the exemption covers only this one test.",
+      "reason": "Deliberately verifies createExecutionLifecycle's DEFAULT runtime argument (no injected RuntimeServices) — that it schedules deadlines with the real platform timer when the caller supplies none. Injecting a manual runtime here would defeat the point of the test. Split out of execution-lifecycle.test.ts (AB-292) so the exemption covers only this one test.",
       "owner": "Agent Bureau team",
       "owningIssue": "AB-254"
     },
     {
       "path": "packages/armorer/test/idempotency/with-idempotency-default-runtime.test.ts",
-      "reason": "Deliberately verifies withIdempotency's DEFAULT prevalidation deadline scheduler (no injected runtime or setTimeoutFunction) \u2014 that it races the deadline with the real platform timer when the caller supplies none. Injecting a manual runtime here would defeat the point of the test; confirmed empirically (doing so broke the test). Split out of with-idempotency.test.ts (AB-292) so the exemption covers only this one test.",
+      "reason": "Deliberately verifies withIdempotency's DEFAULT prevalidation deadline scheduler (no injected runtime or setTimeoutFunction) — that it races the deadline with the real platform timer when the caller supplies none. Injecting a manual runtime here would defeat the point of the test; confirmed empirically (doing so broke the test). Split out of with-idempotency.test.ts (AB-292) so the exemption covers only this one test.",
       "owner": "Agent Bureau team",
       "owningIssue": "AB-254"
     }

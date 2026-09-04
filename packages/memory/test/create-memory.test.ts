@@ -7,6 +7,9 @@ import type { TextSearchProvider } from '../src/text-search-provider';
 import type { Memory, MemoryMetadata, MemoryRecordStorage } from '../src/types';
 
 const DIMENSION = 64;
+// Fixed instant standing in for "now" when synthesizing an old timestamp below — only its
+// distance from the offset matters, never the real clock.
+const FIXED_NOW = Date.parse('2026-01-01T00:00:00.000Z');
 
 function createTestMemory(options?: { namespace?: string; deduplicationThreshold?: number }) {
   const storage = createInMemoryMemoryRecordStorage();
@@ -284,7 +287,7 @@ describe('createMemory', () => {
       // Store an entry with a very old timestamp by manually writing to storage.
       const vector = embedder(['old memory'])[0]!;
       const float32Vector = new Float32Array(vector);
-      const oldTimestamp = Date.now() - 30 * 24 * 60 * 60 * 1000; // 30 days ago
+      const oldTimestamp = FIXED_NOW - 30 * 24 * 60 * 60 * 1000; // 30 days ago
 
       await storage.put({
         id: 'old-entry',

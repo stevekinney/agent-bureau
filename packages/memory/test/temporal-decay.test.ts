@@ -4,10 +4,16 @@ import { createManualRuntimeServices } from 'lifecycle';
 import { applyTemporalDecay, computeTemporalDecay } from '../src/temporal-decay';
 
 const ONE_HOUR = 60 * 60 * 1000;
+// Fixed reference instant used by the tests below that assign it to `now`: each of those
+// passes it explicitly as `referenceTime`, so its value only needs to be a stable epoch
+// millisecond number, never the real clock. (The runtime-injection and empty-input tests
+// further down don't use this constant at all — they derive their own time from a manual
+// RuntimeServices, or need no time input.)
+const FIXED_NOW = Date.parse('2026-01-01T00:00:00.000Z');
 
 describe('computeTemporalDecay', () => {
   it('halves the score at exactly one half-life', () => {
-    const now = Date.now();
+    const now = FIXED_NOW;
     const createdAt = now - ONE_HOUR;
     const result = computeTemporalDecay(1.0, createdAt, {
       halfLifeMilliseconds: ONE_HOUR,
@@ -17,7 +23,7 @@ describe('computeTemporalDecay', () => {
   });
 
   it('quarters the score at two half-lives', () => {
-    const now = Date.now();
+    const now = FIXED_NOW;
     const createdAt = now - 2 * ONE_HOUR;
     const result = computeTemporalDecay(1.0, createdAt, {
       halfLifeMilliseconds: ONE_HOUR,
@@ -27,7 +33,7 @@ describe('computeTemporalDecay', () => {
   });
 
   it('leaves score unchanged at age 0', () => {
-    const now = Date.now();
+    const now = FIXED_NOW;
     const result = computeTemporalDecay(0.8, now, {
       halfLifeMilliseconds: ONE_HOUR,
       referenceTime: now,
@@ -36,7 +42,7 @@ describe('computeTemporalDecay', () => {
   });
 
   it('leaves score unchanged for future timestamps (negative age)', () => {
-    const now = Date.now();
+    const now = FIXED_NOW;
     const createdAt = now + ONE_HOUR; // in the future
     const result = computeTemporalDecay(0.9, createdAt, {
       halfLifeMilliseconds: ONE_HOUR,
@@ -70,7 +76,7 @@ describe('computeTemporalDecay', () => {
 
 describe('applyTemporalDecay', () => {
   it('exempts evergreen entries when evergreenExempt is true (default)', () => {
-    const now = Date.now();
+    const now = FIXED_NOW;
     const results = [
       { score: 1.0, createdAt: now - ONE_HOUR, metadata: { evergreen: true } },
       { score: 1.0, createdAt: now - ONE_HOUR, metadata: { evergreen: false } },
@@ -86,7 +92,7 @@ describe('applyTemporalDecay', () => {
   });
 
   it('does NOT exempt evergreen entries when evergreenExempt is false', () => {
-    const now = Date.now();
+    const now = FIXED_NOW;
     const results = [{ score: 1.0, createdAt: now - ONE_HOUR, metadata: { evergreen: true } }];
 
     const decayed = applyTemporalDecay(results, {
@@ -106,7 +112,7 @@ describe('applyTemporalDecay', () => {
   });
 
   it('does not mutate the original results', () => {
-    const now = Date.now();
+    const now = FIXED_NOW;
     const original = { score: 1.0, createdAt: now - ONE_HOUR, metadata: { evergreen: false } };
     const results = [original];
 

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from 'bun:test';
+import { createManualRuntimeServices, type ManualRuntimeServices } from 'lifecycle';
 
 import { createMemory } from '../src/create-memory';
 import { createInMemoryMemoryRecordStorage, createMockEmbedder } from '../src/test/index';
@@ -6,7 +7,10 @@ import type { Memory, MemoryRecordStorage } from '../src/types';
 
 const DIMENSION = 64;
 
-function createTestMemory(options?: { temporalValidity?: boolean }) {
+function createTestMemory(options?: {
+  temporalValidity?: boolean;
+  runtime?: ManualRuntimeServices;
+}) {
   const storage = createInMemoryMemoryRecordStorage();
   const embedder = createMockEmbedder(DIMENSION);
   const memory = createMemory({
@@ -14,6 +18,7 @@ function createTestMemory(options?: { temporalValidity?: boolean }) {
     storage,
     dimension: DIMENSION,
     temporalValidity: options?.temporalValidity ?? true,
+    runtime: options?.runtime,
   });
   return { memory, storage, embedder };
 }
@@ -107,9 +112,11 @@ describe('temporal fact-validity', () => {
 
   describe('as-of recall', () => {
     let memory: Memory;
+    let runtime: ManualRuntimeServices;
 
     beforeEach(async () => {
-      const test = createTestMemory();
+      runtime = createManualRuntimeServices({ origin: '2026-01-01T00:00:00.000Z' });
+      const test = createTestMemory({ runtime });
       memory = test.memory;
       await memory.init();
     });
@@ -129,9 +136,9 @@ describe('temporal fact-validity', () => {
 
     it('recall() with asOf before the supersession returns the original fact', async () => {
       const first = await memory.remember('The team lead is Alex');
-      await new Promise((resolve) => setTimeout(resolve, 5));
-      const asOfBeforeSupersession = Date.now();
-      await new Promise((resolve) => setTimeout(resolve, 5));
+      await runtime.advance(5);
+      const asOfBeforeSupersession = runtime.clock.now();
+      await runtime.advance(5);
 
       await memory.remember('The team lead is Jordan', { supersedes: first.id });
 
@@ -147,17 +154,17 @@ describe('temporal fact-validity', () => {
 
     it('walks a supersession chain: asOf resolves to whichever link was valid at that instant', async () => {
       const first = await memory.remember('The team lead is Alex');
-      await new Promise((resolve) => setTimeout(resolve, 5));
-      const asOfFirst = Date.now();
-      await new Promise((resolve) => setTimeout(resolve, 5));
+      await runtime.advance(5);
+      const asOfFirst = runtime.clock.now();
+      await runtime.advance(5);
 
       const second = await memory.remember('The team lead is Jordan', { supersedes: first.id });
-      await new Promise((resolve) => setTimeout(resolve, 5));
-      const asOfSecond = Date.now();
-      await new Promise((resolve) => setTimeout(resolve, 5));
+      await runtime.advance(5);
+      const asOfSecond = runtime.clock.now();
+      await runtime.advance(5);
 
       const third = await memory.remember('The team lead is Priya', { supersedes: second.id });
-      const asOfThird = Date.now();
+      const asOfThird = runtime.clock.now();
 
       const atFirst = await memory.recall('team lead', {
         vectorOnly: true,
@@ -195,18 +202,18 @@ describe('temporal fact-validity', () => {
 
     it('honors an explicit validFrom that backdates a fact ahead of its creation', async () => {
       const backdated = await memory.remember('The contract renewed on schedule', {
-        validFrom: Date.now() - 10_000,
+        validFrom: runtime.clock.now() - 10_000,
       });
 
       const beforeBackdate = await memory.recall('contract renewed', {
         vectorOnly: true,
         threshold: 0,
-        asOf: Date.now() - 20_000,
+        asOf: runtime.clock.now() - 20_000,
       });
       const afterBackdate = await memory.recall('contract renewed', {
         vectorOnly: true,
         threshold: 0,
-        asOf: Date.now(),
+        asOf: runtime.clock.now(),
       });
 
       expect(beforeBackdate.map((r) => r.id)).not.toContain(backdated.id);
