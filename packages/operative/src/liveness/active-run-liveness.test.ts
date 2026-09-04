@@ -346,6 +346,25 @@ describe('createActiveRunLiveness', () => {
     expect(liveness.snapshot().revision).toBe(terminalRevision);
   });
 
+  it('beginWait is a no-op when a park races an abort (PR #535 review) — does not yank status back to waiting', () => {
+    const clock = createManualClock();
+    const liveness = createActiveRunLiveness({ id: 'run-1', durability: 'process-local', clock });
+
+    // A HumanWaitParkedEvent racing an abort — the tool call committed and
+    // dispatched the event the same tick `setStatus('aborting')` fired, so
+    // `beginWait` observes `status === 'aborting'`, not `'running'`.
+    liveness.setStatus('aborting');
+    const abortingRevision = liveness.snapshot().revision;
+    liveness.beginWait({ reason: 'signal', wakeCondition: 'signal:human-response' });
+
+    const after = liveness.snapshot();
+    expect(after.status).toBe('aborting');
+    expect(after.declaredWait).toBeUndefined();
+    expect(after.revision).toBe(abortingRevision);
+
+    liveness.dispose();
+  });
+
   it('settle attaches the result to the snapshot and transitions to terminal atomically', () => {
     const clock = createManualClock();
     const liveness = createActiveRunLiveness({ id: 'run-1', durability: 'process-local', clock });

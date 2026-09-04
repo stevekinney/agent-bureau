@@ -499,7 +499,18 @@ export function createActiveRunLiveness(options: ActiveRunLivenessOptions): Acti
     },
 
     beginWait(wait: Omit<DeclaredWait, 'startedAt'>): void {
-      if (status === 'terminal') return;
+      // Copilot review (PR #535): only a genuinely running run can begin a
+      // declared wait — a `HumanWaitParkedEvent` racing an abort (e.g. the
+      // tool call committed and dispatched the event in the same tick
+      // `setStatus('aborting')` fired) must not overwrite `'aborting'`/
+      // `'cleaning-up'`/`'terminal'` back to `'waiting'` and hide the
+      // in-progress abort. `'waiting'` itself is excluded too: a second
+      // park while already waiting (should not happen — `pendingHumanWait`/
+      // `pendingWakeup` are consumed before a run can re-park — but this
+      // guard makes the impossible case a no-op rather than silently
+      // discarding the first wait's `declaredWait` without an `endWait()`
+      // in between) is also refused.
+      if (status !== 'running') return;
       status = 'waiting';
       declaredWait = { ...wait, startedAt: clock.now() };
       lastTransitionAt = new Date().toISOString();
