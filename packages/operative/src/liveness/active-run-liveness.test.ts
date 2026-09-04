@@ -123,6 +123,25 @@ describe('createActiveRunLiveness (default real clock)', () => {
     liveness.dispose();
   });
 
+  it('beginWait and endWait stamp lastTransitionAt from a manual RuntimeServices, not the real clock (AB-325)', async () => {
+    const runtime = createManualRuntimeServices();
+    const liveness = createActiveRunLiveness({
+      id: 'run-manual-runtime-wait',
+      durability: 'process-local',
+      runtime,
+    });
+
+    await runtime.advance(5_000);
+    liveness.beginWait({ reason: 'signal', wakeCondition: 'signal:human-response' });
+    expect(liveness.snapshot().lastTransitionAt).toBe(runtime.clock.nowISO());
+
+    await runtime.advance(5_000);
+    liveness.endWait();
+    expect(liveness.snapshot().lastTransitionAt).toBe(runtime.clock.nowISO());
+
+    liveness.dispose();
+  });
+
   it('also drives the watchdog observedAt from runtime.monotonic when options.clock is not supplied', async () => {
     const runtime = createManualRuntimeServices();
     const liveness = createActiveRunLiveness({
