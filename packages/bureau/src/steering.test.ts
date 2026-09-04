@@ -691,7 +691,7 @@ describe('createSteeringGate', () => {
 
     it("promoteForNewRun's default `now` (AB-327) reads the injected RuntimeServices clock, not the real wall clock", () => {
       const runtime = createManualRuntimeServices({ origin: NOW });
-      const gate = createSteeringGate('session-1', new Map(), runtime.clock);
+      const gate = createSteeringGate('session-1', createSteeringCommandLedger(), runtime.clock);
       const identity = gate.admit(
         {
           id: 'identity-1',
