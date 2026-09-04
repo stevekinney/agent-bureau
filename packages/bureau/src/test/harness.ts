@@ -19,18 +19,33 @@
  * tests; this harness reaches the same guarantees through `Bureau` and
  * started-work handles only.
  *
- * Out of scope here (AB-261's stated boundary): the quiescence report and
- * `harness.close()`'s shutdown delegation (AB-262/tst-03c), the
- * reproduction-artifact assembler and Bureau-scoped fault selectors
- * (AB-263/tst-03d), and the packed-consumer extension (AB-264/tst-03e).
- * Drivers for product surfaces that do not exist yet on this baseline
- * (managed goals — AB-101/AB-102 — and settled scheduler-task retrieval —
- * AB-180) are named as unsupported through `supports()` and a typed throw,
- * never silently stubbed out.
+ * `close()` (AB-262) delegates to `Bureau.shutdown()` (AB-207) via
+ * `assertBureauQuiescent` (`./quiescence.ts`) rather than reimplementing
+ * shutdown-awaiting or leak detection here: this module's only quiescence
+ * responsibility is exposing the PUBLIC bookkeeping `assertBureauQuiescent`
+ * reads from — the `scope` every `startRun` root registers onto, and the
+ * `childRegistry` every `startChild` dispatch registers into by default.
+ *
+ * Out of scope here (AB-261's original boundary, now narrowed by AB-262
+ * landing the quiescence report): the reproduction-artifact assembler and
+ * Bureau-scoped fault selectors (AB-263/tst-03d), and the packed-consumer
+ * extension (AB-264/tst-03e). Drivers for product surfaces that do not
+ * exist yet on this baseline (managed goals — AB-101/AB-102 — and settled
+ * scheduler-task retrieval — AB-180) are named as unsupported through
+ * `supports()` and a typed throw, never silently stubbed out.
  */
-import type { AgentInput, ChildRunHandle, DispatchChildRunOptions } from '@lostgradient/operative';
-import { dispatchChildRun } from '@lostgradient/operative';
-import { waitForCondition } from '@lostgradient/operative/test';
+import type {
+  AgentInput,
+  ChildRunHandle,
+  DispatchChildRunOptions,
+  MutableChildRunRegistry,
+} from '@lostgradient/operative';
+import { createChildRunRegistry, dispatchChildRun } from '@lostgradient/operative';
+import {
+  createResourceScope,
+  type ResourceScope,
+  waitForCondition,
+} from '@lostgradient/operative/test';
 import type { ScheduleSummary, WorkflowState } from '@lostgradient/weft';
 import type { ManualRuntimeServices } from 'lifecycle';
 import { createManualRuntimeServices } from 'lifecycle';
@@ -49,7 +64,23 @@ import type {
   SubmitSchedulerTaskRequest,
   SubmitSchedulerTaskResponse,
 } from '../types';
+import type { BureauQuiescenceReport } from './quiescence';
+import { assertBureauQuiescent, BureauQuiescenceError } from './quiescence';
 import type { BureauStorageFixture } from './storage-fixtures';
+
+/**
+ * A durable run this harness was told to track for quiescence purposes
+ * (AB-262), keyed by `bureau.getDurableRun`'s own `runId` — never a
+ * process-local handle. `detached: true` means the test deliberately
+ * abandoned this run's cleanup (per AB-34's detachment vocabulary): a real,
+ * recorded outcome `assertBureauQuiescent` reports under `detached` rather
+ * than a leak, NOT a way to hide one — the run must still resolve through
+ * `bureau.getDurableRun` after the harness closes for the record to count.
+ */
+export interface DurableRunRegistration {
+  readonly runId: string;
+  readonly detached: boolean;
+}
 
 /**
  * Product surfaces this harness cannot drive because Bureau has no shipped
@@ -114,6 +145,52 @@ export interface BureauTestHarness<D extends AgentDefinitions = AgentDefinitions
   readonly bureau: Bureau<D>;
   readonly runtime: ManualRuntimeServices;
   readonly storage: BureauStorageFixture;
+
+  /**
+   * The `ResourceScope` (operative's test kit, AB-256) every `startRun`
+   * root registers onto as it is dispatched. Exposed PUBLICLY so a test can
+   * also register a timer or listener directly (`scope.register({kind:
+   * 'timer', ... })`) to exercise a deliberate leak — `assertBureauQuiescent`
+   * reads this scope, never a private registration list.
+   */
+  readonly scope: ResourceScope;
+
+  /**
+   * The `MutableChildRunRegistry` (AB-50) every `startChild` dispatch
+   * registers into by default (a caller-supplied `options.registry`
+   * overrides this per call). `assertBureauQuiescent`'s `activeDescendants`
+   * row reads this registry's own public `children()` listing.
+   */
+  readonly childRegistry: MutableChildRunRegistry;
+
+  /**
+   * Durable runs this harness has been told to track for quiescence
+   * (AB-262) — see `registerDurableRun`. A public, read-only snapshot;
+   * never a private `Map`.
+   */
+  readonly durableRegistrations: readonly DurableRunRegistration[];
+
+  /**
+   * Records a durable run id for `assertBureauQuiescent`'s `durableAttempts`
+   * row to check via `bureau.getDurableRun` once the harness closes. Pass
+   * `detached: true` to record this run as a deliberate detachment (AB-34)
+   * rather than a leak — `assertBureauQuiescent` never abandons tracking it
+   * silently either way; a detached run must still resolve through
+   * `bureau.getDurableRun` after `close()` for the detachment to count as a
+   * real, recorded outcome.
+   */
+  registerDurableRun(runId: string, options?: { readonly detached?: boolean }): void;
+
+  /**
+   * Delegates to `bureau.shutdown()` (AB-207) via `assertBureauQuiescent`,
+   * then disposes the storage fixture, then resolves with the report — or
+   * rejects with a {@link BureauQuiescenceError} carrying it when anything
+   * Bureau owns was not quiescent. Never calls `bureau.dispose()` as a
+   * substitute for `shutdown()`, and never resolves before the shutdown
+   * report does. Idempotent: a second call returns (or rethrows) the exact
+   * same outcome without shutting down twice.
+   */
+  close(): Promise<BureauQuiescenceReport>;
 
   /** Thin wrapper over `Bureau.run` — catalog-agent dispatch. */
   startRun<TName extends AgentNames<D>>(
@@ -249,13 +326,44 @@ export async function createBureauTestHarness<D extends AgentDefinitions = Agent
   // assigns it before any throw, or the catch block rethrows first.
   const readyBureau = bureau;
 
+  const scope = createResourceScope('bureau-harness', runtime);
+  const childRegistry = createChildRunRegistry();
+  const durableRegistrations: DurableRunRegistration[] = [];
+  let closePromise: Promise<BureauQuiescenceReport> | undefined;
+
   const harness: BureauTestHarness<D> = {
     bureau: readyBureau,
     runtime,
     storage,
+    scope,
+    childRegistry,
+
+    get durableRegistrations() {
+      return durableRegistrations;
+    },
+
+    registerDurableRun(runId, registerOptions) {
+      durableRegistrations.push({ runId, detached: registerOptions?.detached ?? false });
+    },
+
+    close() {
+      if (!closePromise) {
+        closePromise = (async () => {
+          const report = await assertBureauQuiescent(harness);
+          await storage.dispose();
+          if (!report.quiescent) {
+            throw new BureauQuiescenceError(report);
+          }
+          return report;
+        })();
+      }
+      return closePromise;
+    },
 
     startRun(name, input, runOptions) {
-      return readyBureau.run(name, input, runOptions);
+      const run = readyBureau.run(name, input, runOptions);
+      scope.register({ kind: 'run', identifier: run.snapshot().id, run });
+      return run;
     },
 
     startSession(request) {
@@ -268,6 +376,7 @@ export async function createBureauTestHarness<D extends AgentDefinitions = Agent
         throw new Error(`Bureau test harness: unknown agent "${agentName}" for startChild`);
       }
       return dispatchChildRun(agent, input, {
+        registry: childRegistry,
         ...dispatchOptions,
         agentName,
         parentRunId,
