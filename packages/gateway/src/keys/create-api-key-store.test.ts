@@ -1,5 +1,5 @@
 import { MemoryStorage, type TextValueStore, textValueStore } from '@lostgradient/weft/storage';
-import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
+import { beforeEach, describe, expect, it, spyOn } from 'bun:test';
 
 import { createApiKeyStore } from './create-api-key-store';
 import type { ApiKeyStore } from './types';
@@ -108,10 +108,13 @@ describe('create', () => {
 });
 
 describe('create id collisions and corrupted records', () => {
-  afterEach(() => {
-    spyOn(crypto, 'getRandomValues').mockRestore();
-  });
-
+  // No blanket `afterEach` spy-restore here (copilot review on #522): only
+  // the one test below actually installs a `crypto.getRandomValues` spy,
+  // and it restores its own `randomSpy` handle directly at the end. A
+  // shared `afterEach` calling `spyOn(...).mockRestore()` unconditionally
+  // would install a NEW spy (patching the global) for the other three tests
+  // in this block purely to immediately restore it — unnecessary global
+  // patching those tests never asked for.
   it('throws on a key ID collision instead of silently overwriting the existing key', async () => {
     const fixedBytes = new Uint8Array(32).fill(7);
     const randomSpy = spyOn(crypto, 'getRandomValues').mockImplementation(

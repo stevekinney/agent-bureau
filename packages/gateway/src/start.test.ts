@@ -315,21 +315,33 @@ describe('main', () => {
     'GEMINI_API_KEY',
   ] as const;
 
+  /**
+   * Sets `Bun.env[key] = value` for a defined `value`, or deletes the key
+   * entirely for `undefined` — never `Bun.env[key] = undefined`, which
+   * environment objects coerce to the literal string `"undefined"` instead
+   * of leaving the key absent (AB-316, copilot review on #522: the same bug
+   * this helper's own restore step below already guards against applies
+   * equally to applying `overrides`, since its type — `Record<string,
+   * string | undefined>` — allows a caller to explicitly override a key to
+   * unset).
+   */
+  function applyEnv(target: Record<string, string | undefined>): void {
+    for (const [key, value] of Object.entries(target)) {
+      if (value === undefined) delete Bun.env[key];
+      else Bun.env[key] = value;
+    }
+  }
+
   function withEnv<T>(overrides: Record<string, string | undefined>, run: () => Promise<T>) {
     const snapshot = Object.fromEntries(ENV_KEYS.map((key) => [key, Bun.env[key]]));
     for (const key of ENV_KEYS) delete Bun.env[key];
-    Object.assign(Bun.env, overrides);
+    applyEnv(overrides);
     return run().finally(() => {
       // AB-316: restore by DELETING a key that was originally unset, never
-      // by `Object.assign`-ing an `undefined` value back in — environment
-      // objects coerce assigned values to strings, so `Bun.env.KEY =
-      // undefined` leaves the literal string `"undefined"` behind instead
-      // of an absent key. See the regression test below.
+      // by `Object.assign`-ing an `undefined` value back in — see
+      // `applyEnv`'s own comment above. See the regression test below.
       for (const key of ENV_KEYS) delete Bun.env[key];
-      for (const key of ENV_KEYS) {
-        const value = snapshot[key];
-        if (value !== undefined) Bun.env[key] = value;
-      }
+      applyEnv(snapshot);
     });
   }
 
@@ -340,6 +352,15 @@ describe('main', () => {
     });
     expect(Bun.env['PROVIDER']).toBeUndefined();
     expect('PROVIDER' in Bun.env).toBe(false);
+  });
+
+  it('withEnv leaves a key fully absent when an override explicitly sets it to undefined, never the literal string "undefined" (AB-316 regression, copilot review on #522)', async () => {
+    Bun.env['PROVIDER'] = 'openai';
+    await withEnv({ PROVIDER: undefined }, async () => {
+      expect(Bun.env['PROVIDER']).toBeUndefined();
+      expect('PROVIDER' in Bun.env).toBe(false);
+    });
+    expect(Bun.env['PROVIDER']).toBe('openai');
   });
 
   it('boots the gateway, warns for memory storage and a missing API key, and registers shutdown handlers', async () => {
