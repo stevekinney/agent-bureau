@@ -118,15 +118,17 @@ async function driveDurableSequential(
     attachLeg(recorder, run, id, events);
     if (abort) run.abort('lifecycle-contract: targeted abort');
     const result = await run.result();
-    // Await this scenario's OWN cleanup acknowledgment before returning —
-    // required for a durable run specifically (verified: without it, the
-    // harness-level `close()` that runs afterward reads the same run's
-    // `closed()` too early and reports a false `activeRoots` leak). The
-    // in-memory adapter's identical `driveBureauSequential` never needed
-    // this extra call — that helper is unmodified and still passes — but
-    // this file did not isolate WHY the durable path differs; treat the
-    // extra `closed()` call here as a verified fix, not an explained one.
-    await run.closed();
+    // AB-339: no longer required. The false `activeRoots` leak this used to
+    // work around was `createDurableActiveRun`'s deferred `drive()` still
+    // durably launching a workflow (`context.engine.start`) even when
+    // `abort()` had already fired before that microtask ran — racing
+    // `Bureau.shutdown()`'s own engine disposal and misclassifying the run
+    // `unresolved`/`unreachable`. Fixed at the source: `drive()` now
+    // captures whether the run was already aborted, in the same
+    // synchronous step `driveStarted` flips true, and skips the engine
+    // entirely when it was — so `harness.close()` (via `ResourceScope
+    // .close()`, per AB-256) reports quiescent without this scenario
+    // needing to await `closed()` itself first.
     return {
       finishReason: result.finishReason,
       hasError: result.error !== undefined,

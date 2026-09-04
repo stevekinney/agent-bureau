@@ -625,7 +625,34 @@ export function createDurableActiveRun(
   // rejection this observes is likewise invisible on the public `result`.
   const reachability = { unreachable: false };
 
-  function drive(): Promise<RunResult> {
+  // AB-339: an `abort()` that lands before `driveStarted` ever flips true
+  // — i.e. before the deferred microtask below has even run — must not
+  // still let `driveDurableRun` call `context.engine.start(...)`. `abort()`
+  // itself already treats this exact window as "the workflow doesn't exist
+  // and engine.cancel() is a no-op" (see its own comment below); but
+  // nothing previously acted on that observation once the deferred
+  // microtask actually fired, so `driveDurableRun` durably launched the
+  // workflow anyway — purely so it could immediately race
+  // `Bureau.shutdown()`'s own (policy-'abort', by design
+  // unbounded-wait-free — AB-207) engine disposal. If that disposal wins,
+  // `handle.result()` rejects with `EngineDisposedError`,
+  // `reachability.unreachable` flips true, and `resolveDurableOutcome`
+  // reports a real `unresolved`/`unreachable` leak for a run that never
+  // did anything durable at all.
+  //
+  // Deliberately NOT a live `combinedSignal.aborted` re-check inside
+  // `driveDurableRun`: an `abort()` that arrives AFTER `driveStarted` has
+  // already flipped true (the ordinary "abort while `driveDurableRun` is
+  // still inside its own `startRunLifecycle` await" case every other test
+  // in this file exercises) already fires `engine.cancel()` via `abort()`'s
+  // `if (driveStarted)` branch below — that in-flight cancel must still
+  // resolve against a workflow `engine.start` actually launches. Only the
+  // synchronous snapshot taken in the SAME microtask `driveStarted` flips
+  // in — captured once, before `drive()` runs — tells the two cases apart.
+  const neverLaunched = { value: false };
+
+  function drive(abortedBeforeDrive: boolean): Promise<RunResult> {
+    neverLaunched.value = abortedBeforeDrive;
     return driveDurableRun(
       context,
       runId,
@@ -638,6 +665,7 @@ export function createDurableActiveRun(
       durableRun.prompt,
       durableRun.onServices,
       reachability,
+      abortedBeforeDrive,
       (toolbox) => toolboxForwarder.onStepToolbox(toolbox),
       runtime,
       hookTracker,
@@ -672,8 +700,12 @@ export function createDurableActiveRun(
   // Deferred-microtask start so callers attach listeners first (createRun contract).
   const result = Promise.resolve()
     .then(() => {
+      // AB-339: snapshot taken in the SAME synchronous step `driveStarted`
+      // flips in — see `drive()`'s own doc comment for why this can't be a
+      // later, live re-check.
+      const abortedBeforeDrive = combinedSignal.aborted;
       driveStarted = true;
-      return drive();
+      return drive(abortedBeforeDrive);
     })
     .then(
       (runResult) => {
@@ -830,10 +862,32 @@ export function createDurableActiveRun(
       ]);
       return { status: 'completed' };
     }
-    // abort() may have been called before `driveStarted` — the workflow did
-    // not exist yet, so it never fired engine.cancel(). By the time `result`
-    // has settled the workflow certainly exists, so fire it here instead.
-    await (cancelSettled ?? context.engine.cancel(runId).catch(() => undefined));
+    // AB-339: `driveDurableRun` saw `signal.aborted` before ever calling
+    // `context.engine.start` — no durable workflow was launched at all, so
+    // there is no record for `engine.cancel`/`engine.get` to confirm (a
+    // `cancel` against an unknown id, or a `get` returning `null`, would
+    // otherwise misclassify this `unresolved`/`persistence-failed`). The
+    // cancellation IS acknowledged: cleanup consisted of never starting.
+    if (neverLaunched.value) {
+      await Promise.all([
+        Promise.allSettled(pendingHookPromises),
+        childRegistry?.awaitChildrenClosed() ?? Promise.resolve(),
+      ]);
+      return { status: 'completed' };
+    }
+    // `cancelSettled` is always set by this point. `neverLaunched` above
+    // has already returned for the one case that used to leave it unset —
+    // `abort()` (direct or signal-triggered) firing before `driveStarted`
+    // flipped true, when the workflow did not exist yet and `abort()`'s own
+    // `if (driveStarted)` guard skipped `engine.cancel()`. Every other way
+    // to reach this line — `cancelRequested` or `combinedSignal.aborted`
+    // becoming true — only happens through that same `abort()` function
+    // (there is no other writer), and by the time `result` has settled
+    // `driveDurableRun` has certainly already reached the deferred
+    // microtask, so `driveStarted` was already true when `abort()` ran and
+    // its `cancelSettled ??= context.engine.cancel(...)` assignment above
+    // already fired.
+    await cancelSettled;
     try {
       const state = await context.engine.get(runId);
       // `engine.cancel` resolving void is not proof the cancellation record
@@ -1634,6 +1688,16 @@ async function driveDurableRun(
   prompt: string | undefined,
   onServices: ((services: DurableRunDeps) => void) | undefined,
   reachability: { unreachable: boolean },
+  // AB-339: true when `abort()` was called before this run's deferred
+  // microtask even fired — captured, once, as a synchronous snapshot in
+  // that SAME microtask (see `drive()`'s call site for why a live
+  // `signal.aborted` re-check here would be wrong: an abort that arrives
+  // AFTER the microtask starts, while this function is still inside its
+  // own `startRunLifecycle` await, already fires `engine.cancel()` via
+  // `abort()`'s own `if (driveStarted)` branch, and that in-flight cancel
+  // must still resolve against a workflow `engine.start` actually
+  // launches).
+  abortedBeforeDrive: boolean,
   onStepToolbox: ((toolbox: AnyToolbox) => void) | undefined,
   runtime: RuntimeServices,
   hookTracker: (promise: Promise<unknown>) => void,
@@ -1645,7 +1709,9 @@ async function driveDurableRun(
     terminalErrorFromEvent = event.error;
   });
 
-  // RunStartedEvent + onRunStart (an onRunStart error aborts the run).
+  // RunStartedEvent + onRunStart (an onRunStart error aborts the run) —
+  // fired identically whether or not this run was already aborted before
+  // dispatch: a caller listening for these events must still see them.
   const startError = await startRunLifecycle(options, conversation, emitter);
   if (startError !== undefined) {
     return makeErrorResult(
@@ -1658,6 +1724,28 @@ async function driveDurableRun(
       undefined,
       hookTracker,
     );
+  }
+
+  // AB-339: an already-doomed run never durably launches at all — no
+  // `context.engine.start` call, so nothing to cancel and nothing for a
+  // later `Bureau.shutdown()` to race. Settles straight to an aborted
+  // `RunResult` through the SAME `finalizeRunResult` helper every other
+  // terminal branch below uses, so `run.aborted` fires (and, per AC1,
+  // `onRunAbort`) exactly as it would for an ordinary abort.
+  if (abortedBeforeDrive) {
+    return finalizeRunResult({
+      finishReason: 'aborted',
+      runState: emptyRunState(),
+      conversation,
+      hooks,
+      emitter,
+      runStartTime,
+      runtime,
+      abortReason: typeof signal.reason === 'string' ? signal.reason : undefined,
+      costEstimation: options.costEstimation,
+      terminalError: terminalErrorFromEvent,
+      hookTracker,
+    });
   }
 
   // Pin the Weft workflow id to `runId` so `handle.id === runId`. This makes the
