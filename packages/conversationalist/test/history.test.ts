@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test';
+import { createManualRuntimeServices } from 'lifecycle';
 
 import type { TruncateOptions } from '../src/context';
 import { estimateConversationTokens, truncateToTokenLimit } from '../src/context';
@@ -49,6 +50,37 @@ describe('Conversation', () => {
     expect(history.current.ids).toHaveLength(0);
     expect(history.current.status).toBe('active');
     expect(history.canUndo).toBe(false);
+  });
+
+  it('mints the default conversation through a supplied runtime, not the real globals (AB-321)', () => {
+    const runtime = createManualRuntimeServices({ origin: '2030-03-01T00:00:00.000Z' });
+
+    // No `initial` argument at all — the exact shape every operative call
+    // site (`new Conversation()`) uses. Before AB-321 the constructor's
+    // default parameter minted the initial history with a bare, unseeded
+    // environment, so a caller-supplied `environment` was silently ignored
+    // for the id and timestamps.
+    const history = new ConversationHistory(undefined, { runtime });
+
+    expect(history.current.id).toBe('conversation-1');
+    expect(history.current.createdAt).toBe('2030-03-01T00:00:00.000Z');
+  });
+
+  it('produces byte-identical default conversation ids from two independently constructed runtimes with the same seeds (AB-321)', () => {
+    const runtimeA = createManualRuntimeServices({
+      origin: '2030-03-01T00:00:00.000Z',
+      identifierSeed: 'shared-seed',
+    });
+    const runtimeB = createManualRuntimeServices({
+      origin: '2030-03-01T00:00:00.000Z',
+      identifierSeed: 'shared-seed',
+    });
+
+    const historyA = new ConversationHistory(undefined, { runtime: runtimeA });
+    const historyB = new ConversationHistory(undefined, { runtime: runtimeB });
+
+    expect(historyA.current.id).toBe(historyB.current.id);
+    expect(historyA.current.createdAt).toBe(historyB.current.createdAt);
   });
 
   it('should support undo and redo', () => {

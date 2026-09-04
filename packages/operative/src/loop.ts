@@ -130,7 +130,13 @@ export async function executeLoop(
 
   const conversation = isConversation(options.conversation)
     ? options.conversation
-    : new Conversation(options.conversation);
+    : // AB-321: `createActiveRun` already resolves and snapshots
+      // `options.runtime` exactly once (see `buildStepDeps`'s identical
+      // fallback above) — this only re-derives a default for an
+      // out-of-scope caller that built its own `RunOptions` directly.
+      new Conversation(options.conversation, {
+        runtime: options.runtime ?? createDefaultRuntimeServices(),
+      });
 
   const deps = { ...buildStepDeps(options), hookTracker, onStepToolbox };
   // AB-199 cross-run dedupe: a brand-new run seeds its dedupe cursor from

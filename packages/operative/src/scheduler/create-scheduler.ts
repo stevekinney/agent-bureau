@@ -710,6 +710,9 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
             generate: runOptions.generate ?? generate,
             toolbox: runOptions.toolbox ?? toolbox,
             signal: combinedSignal,
+            // AB-321: forward the scheduler's own composed runtime, unless
+            // this task's run options already pinned one.
+            runtime: runOptions.runtime ?? runtime,
             // `SchedulerRunOptions` omits `runId` (see its doc comment) —
             // stamp the same derived id this dispatch already pinned the
             // Weft workflow to, so a `RunOptions` with `steering` set is
@@ -734,6 +737,10 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
         generate: runOptions.generate ?? generate,
         toolbox: runOptions.toolbox ?? toolbox,
         signal: combinedSignal,
+        // AB-321: forward the scheduler's own composed runtime, unless this
+        // task's run options already pinned one — matching the durable
+        // branch above.
+        runtime: runOptions.runtime ?? runtime,
         // `SchedulerRunOptions` omits `runId` (see its doc comment) — the
         // in-memory path has no durable workflow id to reuse, so derive a
         // stable per-dispatch id. `task.id` alone is NOT enough: a
@@ -882,6 +889,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     return resumeDurableRunResult(
       { engine: durableContext.engine, checkpointStore: durableContext.checkpointStore },
       runId,
+      runtime,
     );
   }
 

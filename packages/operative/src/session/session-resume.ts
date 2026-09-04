@@ -1,6 +1,8 @@
 import type { Conversation as ConversationType } from 'conversationalist';
 import { Conversation, createConversationHistory } from 'conversationalist';
 import type { JSONValue } from 'interoperability';
+import type { RuntimeServices } from 'lifecycle';
+import { createDefaultRuntimeServices } from 'lifecycle';
 
 import type { AgentSession } from '../agent-session';
 import { createAgentSession } from '../agent-session';
@@ -12,6 +14,13 @@ import type { SessionStore } from './types';
 export interface ResumeSessionOptions {
   agentName: string;
   metadata?: Record<string, JSONValue>;
+  /**
+   * AB-92/AB-252/AB-321 — the injectable runtime-service seam. Defaults to
+   * the real implementation ({@link createDefaultRuntimeServices}). A test
+   * composes its own deterministic instance from
+   * `@lostgradient/operative/test`'s `createManualRuntimeServices`.
+   */
+  runtime?: RuntimeServices;
 }
 
 /**
@@ -35,10 +44,11 @@ export async function resumeSession(
   sessionId: string,
   options: ResumeSessionOptions,
 ): Promise<ResumeSessionResult> {
+  const runtime = options.runtime ?? createDefaultRuntimeServices();
   const existing = await store.load(sessionId);
 
   if (existing) {
-    const conversation = new Conversation(existing.conversationHistory);
+    const conversation = new Conversation(existing.conversationHistory, { runtime });
     return {
       session: existing,
       conversation,
@@ -50,12 +60,13 @@ export async function resumeSession(
   // Create a fresh session.
   const session = createAgentSession({
     agentName: options.agentName,
-    conversationHistory: createConversationHistory(),
+    conversationHistory: createConversationHistory(undefined, { runtime }),
     id: sessionId,
     metadata: options.metadata,
+    runtime,
   });
 
-  const conversation = new Conversation(session.conversationHistory);
+  const conversation = new Conversation(session.conversationHistory, { runtime });
 
   return {
     session,

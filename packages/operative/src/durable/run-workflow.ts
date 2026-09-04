@@ -448,7 +448,11 @@ export function createRunWorkflow(
           const options = runDepsFrom(ctx.services).options;
           const seeded = isConversation(options.conversation)
             ? options.conversation
-            : new Conversation(options.conversation);
+            : // AB-321: forwards the resolved runtime into the seeded
+              // Conversation's own environment seam.
+              new Conversation(options.conversation, {
+                runtime: options.runtime ?? createDefaultRuntimeServices(),
+              });
           // Only a normal run appends `input.prompt` here; a scheduled fire's
           // prompt is already seeded into `options.conversation` by the resolver
           // (and ScheduledAgentRunInput has no `prompt` field), so appending again

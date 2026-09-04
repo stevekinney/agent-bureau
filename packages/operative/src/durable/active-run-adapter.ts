@@ -181,13 +181,17 @@ export interface DurableActiveRunOptions {
 async function loadRunStateFromCheckpoint(
   context: DurableActiveRunContext,
   runId: string,
+  runtime: RuntimeServices,
 ): Promise<{ runState: RunState; conversation: Conversation }> {
   try {
     const checkpoint = await context.checkpointStore.loadCheckpoint(runId);
     const conversation =
       checkpoint.conversation !== null
         ? Conversation.from(checkpoint.conversation)
-        : new Conversation();
+        : // AB-321: only reached when no checkpoint conversation was ever
+          // persisted — everywhere a checkpoint exists, its serialized id
+          // is preserved by `Conversation.from` instead.
+          new Conversation(undefined, { runtime });
 
     const runState = createRunState();
     runState.totalUsage = { ...checkpoint.cursor.totalUsage };
@@ -208,7 +212,7 @@ async function loadRunStateFromCheckpoint(
 
     return { runState, conversation };
   } catch {
-    return { runState: createRunState(), conversation: new Conversation() };
+    return { runState: createRunState(), conversation: new Conversation(undefined, { runtime }) };
   }
 }
 
@@ -226,8 +230,9 @@ async function reconstructRunResult(
   context: DurableActiveRunContext,
   runId: string,
   summary: AgentRunWorkflowResult,
+  runtime: RuntimeServices,
 ): Promise<{ result: RunResult; runState: RunState; conversation: Conversation }> {
-  const { runState, conversation } = await loadRunStateFromCheckpoint(context, runId);
+  const { runState, conversation } = await loadRunStateFromCheckpoint(context, runId, runtime);
   const terminalError = reconstructTerminalRunError({
     finishReason: summary.finishReason,
     steps: summary.steps,
@@ -374,7 +379,9 @@ export function createDurableActiveRun(
 
   const conversation = isConversation(options.conversation)
     ? options.conversation
-    : new Conversation(options.conversation);
+    : // AB-321: forwards the resolved runtime into the Conversation's own
+      // environment seam, matching `create-run.ts`'s in-memory path.
+      new Conversation(options.conversation, { runtime });
 
   const liveness = createActiveRunLiveness({
     id: runId,
@@ -1366,10 +1373,15 @@ export function reattachDurableActiveRun(
 export async function resumeDurableRunResult(
   context: DurableActiveRunContext,
   runId: string,
+  // AB-321: optional — a caller that already resolved a `RuntimeServices`
+  // (e.g. the scheduler's own composed instance) forwards it here so a
+  // reconstructed fallback conversation reads through the SAME runtime
+  // rather than a fresh default; omitting it preserves prior behavior.
+  runtime: RuntimeServices = createDefaultRuntimeServices(),
 ): Promise<RunResult> {
   const handle = await context.engine.resume(runId);
   const summary = normalizeAgentRunWorkflowResult(await (handle as RecoveredRunHandle).result());
-  const { result } = await reconstructRunResult(context, runId, summary);
+  const { result } = await reconstructRunResult(context, runId, summary, runtime);
   return result;
 }
 
@@ -1428,6 +1440,9 @@ export async function startDurableRunResult(
   const { runId, sessionId, options, prompt, signal, tags } = durableRun;
   // F2: resolve agentName for durable input — explicit > RunOptions.agentName > ''.
   const agentName = durableRun.agentName ?? options.agentName ?? '';
+  // AB-321: resolved exactly once here, matching every other durable entry
+  // point's own `options.runtime ?? createDefaultRuntimeServices()`.
+  const runtime = options.runtime ?? createDefaultRuntimeServices();
 
   // 'start-new' is a DATA-LOSS policy (it purges a prior terminal run under the
   // same id) and must be scoped to runs that legitimately reuse an id — i.e.
@@ -1448,7 +1463,11 @@ export async function startDurableRunResult(
       ...(tags ? { tags } : {}),
       ...(isSchedulerOrigin ? { onTerminalConflict: 'start-new' as const } : {}),
       services: {
-        options: { ...options, signal },
+        // AB-321: snapshots the SAME resolved `runtime` this function reads
+        // for `reconstructRunResult` below, so the workflow-side run and this
+        // reconstruction agree on one runtime instance rather than each
+        // independently defaulting to its own.
+        options: { ...options, signal, runtime },
         toolbox: options.toolbox,
         // No emitter: a preemptable scheduler run has no run-level event surface
         // (the scheduler drives Task*Events itself). Step events simply do not
@@ -1458,7 +1477,7 @@ export async function startDurableRunResult(
     },
   );
   const summary = normalizeAgentRunWorkflowResult(await (handle as RecoveredRunHandle).result());
-  const { result } = await reconstructRunResult(context, runId, summary);
+  const { result } = await reconstructRunResult(context, runId, summary, runtime);
   return result;
 }
 
@@ -1503,7 +1522,7 @@ async function driveReattachedRun(
       // failed/absent checkpoint by falling back to an empty run state +
       // conversation, satisfying the "must NOT suppress the abort lifecycle"
       // requirement (committee round-3 finding 2).
-      const { runState, conversation } = await loadRunStateFromCheckpoint(context, runId);
+      const { runState, conversation } = await loadRunStateFromCheckpoint(context, runId, runtime);
       const lastStep = runState.steps[runState.steps.length - 1];
       return makeAbortResult(
         runState,
@@ -1534,7 +1553,7 @@ async function driveReattachedRun(
       // Same checkpointed-usage reconstruction as the abort branch above — a
       // circuit-breaker/deadline timeout after prior checkpointed steps must not
       // under-report the run's accumulated usage.
-      const { runState, conversation } = await loadRunStateFromCheckpoint(context, runId);
+      const { runState, conversation } = await loadRunStateFromCheckpoint(context, runId, runtime);
       return finalizeRunResult({
         finishReason: 'error',
         runState,
@@ -1563,14 +1582,14 @@ async function driveReattachedRun(
         }`,
       );
     }
-    return makeInterruptedRunResult(new Conversation());
+    return makeInterruptedRunResult(new Conversation(undefined, { runtime }));
   }
 
   const {
     result,
     runState,
     conversation: durableConversation,
-  } = await reconstructRunResult(context, runId, summary);
+  } = await reconstructRunResult(context, runId, summary, runtime);
 
   // `hooks: undefined` — the recovered run's `onRunComplete`/etc. hooks are
   // non-serializable run behavior; they were rebuilt by the resolver into
@@ -1725,13 +1744,18 @@ async function driveDurableRun(
       let cancelledRunState = emptyRunState();
       let cancelledConversation = conversation;
       try {
-        const reconstructed = await reconstructRunResult(context, runId, {
-          schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
+        const reconstructed = await reconstructRunResult(
+          context,
           runId,
-          steps: 0,
-          content: '',
-          finishReason: 'aborted',
-        });
+          {
+            schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
+            runId,
+            steps: 0,
+            content: '',
+            finishReason: 'aborted',
+          },
+          runtime,
+        );
         cancelledRunState = reconstructed.runState;
         cancelledConversation = reconstructed.conversation;
       } catch {
@@ -1788,7 +1812,7 @@ async function driveDurableRun(
     result,
     runState,
     conversation: durableConversation,
-  } = await reconstructRunResult(context, runId, summary);
+  } = await reconstructRunResult(context, runId, summary, runtime);
 
   // Fire the completion lifecycle from the SAME functions the loop uses, keyed
   // on the durable run's finishReason. These run in-process on the launching

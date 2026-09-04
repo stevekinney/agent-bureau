@@ -460,8 +460,14 @@ export function deriveRunId(sessionId: string, sequence: number): string {
  * Parse a partial `ConversationHistory` into a `ConversationHistory`. The session
  * stores a full `ConversationHistory`; a brand-new session starts empty.
  */
-function historyOrEmpty(history: ConversationHistory | undefined): ConversationHistory {
-  return history ?? createConversationHistory();
+function historyOrEmpty(
+  history: ConversationHistory | undefined,
+  runtime: RuntimeServices,
+): ConversationHistory {
+  // AB-321: forwards the resolved runtime into the fresh history's own
+  // environment seam — only relevant on the `undefined` branch, since an
+  // existing `history`'s id is untouched either way.
+  return history ?? createConversationHistory(undefined, { runtime });
 }
 
 function messagesAreEqual(
@@ -1053,14 +1059,23 @@ export function createSessionHandle(
             existing ??
             createAgentSession({
               agentName,
-              conversationHistory: createConversationHistory(),
+              // AB-321: forwards the resolved runtime into the seeded
+              // ConversationHistory's own environment seam.
+              conversationHistory: createConversationHistory(undefined, { runtime }),
               id: sessionId,
               runtime,
             });
           const sequence = session.runs.length;
           const runId = deriveRunId(sessionId, sequence);
           const baseConversationHistory = session.conversationHistory;
-          const seededConversation = new Conversation(historyOrEmpty(session.conversationHistory));
+          // AB-321: forwards the resolved runtime — only relevant when
+          // `session.conversationHistory` is genuinely empty and this
+          // constructor mints a fresh default; otherwise `historyOrEmpty`'s
+          // existing history's id is preserved either way.
+          const seededConversation = new Conversation(
+            historyOrEmpty(session.conversationHistory, runtime),
+            { runtime },
+          );
           seededConversation.appendUserMessage(input);
           const runningRef: RunRef = {
             runId,
@@ -1550,7 +1565,10 @@ export function createSessionHandle(
       // Copy the conversation history. The session's stored conversationHistory
       // is the authoritative snapshot of all completed runs. When throughRun is
       // at (or after) the last run, this is exactly the right history to copy.
-      const forkedHistory: ConversationHistory = historyOrEmpty(session.conversationHistory);
+      const forkedHistory: ConversationHistory = historyOrEmpty(
+        session.conversationHistory,
+        runtime,
+      );
 
       // Create the forked session with a new id and empty runs[].
       const newSessionId = runtime.identifiers.next('session');

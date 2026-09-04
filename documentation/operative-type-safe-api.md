@@ -324,6 +324,23 @@ bag the identical way, and `createActiveRun` resolves
 `options.runtime ?? createDefaultRuntimeServices()` exactly once, at
 construction, snapshotting the resolved instance into the run.
 
+**`conversationalist`'s own runtime seam (`AB-321`).** `conversationalist` was
+the one remaining nondeterminism `AB-92`'s reproduction guarantee didn't
+cover: a `Conversation`'s id and message timestamps minted through
+`crypto.randomUUID()`/`Date.now()` directly, with no way to route them
+through the resolved `RuntimeServices`. `ConversationEnvironment` (from
+`conversationalist`) now carries an optional `runtime?: Pick<RuntimeServices,
+'clock' | 'identifiers'>` field that `createConversationHistory` and the
+`Conversation` class read `now`/`randomId` through when supplied, defaulting
+to the real implementation. `createAgent`, `createRun`'s in-memory and
+durable paths, the durable adapter's checkpoint-reconstruction fallbacks, the
+scheduler's dispatch, session resume/fork, and the retry mutators that build
+a fresh `Conversation` (schema-error, overflow/compaction, and
+temperature-escalation) all forward the run's resolved `runtime` this way, so
+`run.result().conversation`'s id is now byte-identical across two runs driven
+by identically-seeded manual runtimes — the same guarantee `AB-92` already
+gave every other part of the trace.
+
 **Armorer's `createToolbox` (`AB-92`/`AB-254`).** `ToolboxOptions` gains the
 identical optional `runtime?: RuntimeServices` field. `createToolbox` resolves
 `options.runtime ?? createDefaultRuntimeServices()` exactly once, at

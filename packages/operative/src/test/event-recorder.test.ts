@@ -6,6 +6,7 @@ import { z } from 'zod';
 
 import { createAgentRun } from '../agent-run';
 import { noToolCalls } from '../conditions/predicates';
+import { createAgent } from '../create-agent';
 import { createActiveRun } from '../create-run';
 import type { CombinedOperativeEventClassMap } from '../events';
 import type { GenerateResponse } from '../types';
@@ -156,6 +157,58 @@ describe('EventRecorder', () => {
 
       expect(traceA.length).toBeGreaterThan(0);
       expect(JSON.stringify(traceA)).toBe(JSON.stringify(traceB));
+    });
+
+    it('produces a byte-identical conversation id in the terminal RunResult across two independently constructed manual runtimes with the same seeds (AB-321)', async () => {
+      // AB-263's own reproduction-artifact test (`packages/bureau/src/test/
+      // reproduction-artifact.test.ts`) documented this exact gap:
+      // conversationalist's `randomId` environment seam was not wired to
+      // AB-92's `RuntimeServices`, so `run.result().conversation`'s id
+      // differed run to run even under two identically-seeded manual
+      // runtimes. AB-321 closes it — `createAgent` now forwards its
+      // resolved `runtime` into every `Conversation` it constructs.
+      async function runScriptedCase(runtime: ReturnType<typeof createManualRuntimeServices>) {
+        const agent = createAgent({
+          name: 'scripted-agent',
+          generate: createMockGenerate([textResponse('Done.')]),
+          toolbox: createToolbox([]),
+          stopWhen: noToolCalls(),
+          runtime,
+        });
+        const recorder = createEventRecorder(runtime);
+        const run = agent.run('hello');
+        recorder.attachIterable(run, { kind: 'run', id: 'scripted' });
+        const result = await run.result();
+        await runtime.deferred.drain();
+        return { trace: recorder.normalize(), result };
+      }
+
+      const seeds = { origin: '2030-01-01T00:00:00.000Z', identifierSeed: 'shared-seed' };
+      const caseA = await runScriptedCase(createManualRuntimeServices(seeds));
+      const caseB = await runScriptedCase(createManualRuntimeServices(seeds));
+
+      expect(caseA.result.conversation.current.id).toBe(caseB.result.conversation.current.id);
+      expect(JSON.stringify(caseA.trace)).toBe(JSON.stringify(caseB.trace));
+      // `RunResult.conversation` and every `StepResult.conversation` are
+      // live `Conversation` instances (not JSON-safe — each carries an
+      // internal event target), so compare the terminal result's own
+      // plain, serializable fields plus the conversation's serializable
+      // `ConversationHistory` snapshot instead of the whole object graph.
+      expect(
+        JSON.stringify({
+          content: caseA.result.content,
+          finishReason: caseA.result.finishReason,
+          usage: caseA.result.usage,
+          conversation: caseA.result.conversation.current,
+        }),
+      ).toBe(
+        JSON.stringify({
+          content: caseB.result.content,
+          finishReason: caseB.result.finishReason,
+          usage: caseB.result.usage,
+          conversation: caseB.result.conversation.current,
+        }),
+      );
     });
 
     it('never surfaces an absolute wall-clock value — only an offset from the runtime clock origin', async () => {
