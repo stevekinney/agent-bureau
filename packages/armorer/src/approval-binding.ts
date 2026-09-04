@@ -391,6 +391,10 @@ export function verifyGrantSignature(grant: ReusableApprovalGrant, secret: strin
   }
 }
 
+function cloneGrant(grant: ReusableApprovalGrant): ReusableApprovalGrant {
+  return structuredClone(grant);
+}
+
 /** Process-local, in-memory reusable-grant storage. Grant matching (AB-346) is layered on top of this. */
 export function createProcessLocalGrantStateStore(): GrantStateStore {
   const grants = new Map<string, ReusableApprovalGrant>();
@@ -398,21 +402,27 @@ export function createProcessLocalGrantStateStore(): GrantStateStore {
   return {
     issue(grant) {
       return Promise.resolve().then(() => {
-        grants.set(grant.id, { ...grant, usesRemaining: grant.maxUses });
+        // Store a deep clone so a caller mutating the object it passed to
+        // `issue()` after the call (or an object returned from `get`/`list`)
+        // can never reach or change this store's internal state.
+        grants.set(grant.id, cloneGrant({ ...grant, usesRemaining: grant.maxUses }));
       });
     },
     revoke(id) {
       return Promise.resolve().then(() => {
         const grant = grants.get(id);
         if (!grant) return;
-        grants.set(id, { ...grant, revoked: true });
+        grants.set(id, cloneGrant({ ...grant, revoked: true }));
       });
     },
     get(id) {
-      return Promise.resolve().then(() => grants.get(id));
+      return Promise.resolve().then(() => {
+        const grant = grants.get(id);
+        return grant === undefined ? undefined : cloneGrant(grant);
+      });
     },
     list() {
-      return Promise.resolve().then(() => Array.from(grants.values()));
+      return Promise.resolve().then(() => Array.from(grants.values(), cloneGrant));
     },
     decrementUse(id) {
       return Promise.resolve().then(() => {
@@ -421,7 +431,7 @@ export function createProcessLocalGrantStateStore(): GrantStateStore {
           throw new GrantError('Reusable approval grant was not found.', 'not-found');
         }
         const usesRemaining = Math.max(0, grant.usesRemaining - 1);
-        grants.set(id, { ...grant, usesRemaining });
+        grants.set(id, cloneGrant({ ...grant, usesRemaining }));
         return { usesRemaining };
       });
     },

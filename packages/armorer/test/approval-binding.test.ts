@@ -317,6 +317,35 @@ describe('reusable approval grant state', () => {
     const fetched = await store.get(grant.id);
     expect(fetched?.usesRemaining).toBe(4);
   });
+
+  it('is not affected by mutating the object passed to issue after the call', async () => {
+    const store = createProcessLocalGrantStateStore();
+    const grant = buildGrant({ argumentConstraints: { path: 'string' } });
+    const mutableConstraints = grant.argumentConstraints as Record<string, unknown>;
+    await store.issue(grant);
+    mutableConstraints['path'] = 'tampered';
+
+    const fetched = await store.get(grant.id);
+    expect(fetched?.argumentConstraints).toEqual({ path: 'string' });
+  });
+
+  it('is not affected by mutating an object returned from get or list', async () => {
+    const store = createProcessLocalGrantStateStore();
+    const grant = buildGrant({ argumentConstraints: { path: 'string' } });
+    await store.issue(grant);
+
+    const fetched = await store.get(grant.id);
+    (fetched as { usesRemaining: number }).usesRemaining = 999;
+    (fetched?.argumentConstraints as Record<string, unknown>)['path'] = 'tampered';
+
+    const listed = await store.list();
+    const fromList = listed[0] as { usesRemaining: number };
+    fromList.usesRemaining = 999;
+
+    const refetched = await store.get(grant.id);
+    expect(refetched?.usesRemaining).toBe(grant.maxUses);
+    expect(refetched?.argumentConstraints).toEqual({ path: 'string' });
+  });
 });
 
 describe('reusable approval grant signing', () => {

@@ -412,6 +412,10 @@ import {
 } from 'armorer';
 
 const grantStore = createProcessLocalGrantStateStore();
+// Reuses the same secret configured as the toolbox's `approvalSecret` (see
+// "Approval Flows" above) — grant signing shares `signPendingApproval`'s HMAC
+// primitive, not a separate secret.
+const grantSigningSecret = process.env.ARMORER_APPROVAL_SECRET!;
 
 const grant: ReusableApprovalGrant = {
   version: GRANT_VERSION,
@@ -431,10 +435,10 @@ const grant: ReusableApprovalGrant = {
   delegationBehavior: 'does-not-propagate',
   signature: '',
 };
-const signed = { ...grant, signature: signGrant(grant, approvalSecret) };
+const signed = { ...grant, signature: signGrant(grant, grantSigningSecret) };
 
 await grantStore.issue(signed);
-verifyGrantSignature(await grantStore.get(signed.id)!, approvalSecret); // throws GrantError on tamper
+verifyGrantSignature(await grantStore.get(signed.id)!, grantSigningSecret); // throws GrantError on tamper
 await grantStore.decrementUse(signed.id); // { usesRemaining: 4 }
 await grantStore.revoke(signed.id); // idempotent; never throws on an unknown or already-revoked id
 ```
