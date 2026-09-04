@@ -215,7 +215,7 @@ async function waitForRunCompletion(bureau: Bureau, runId: string) {
 async function pollUntil(check: () => boolean | Promise<boolean>, attempts = 20): Promise<boolean> {
   for (let i = 0; i < attempts; i++) {
     if (await check()) return true;
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await yieldToPortableEventLoop();
   }
   return check();
 }
@@ -455,7 +455,8 @@ describe('create-bureau helper coverage', () => {
 
 describe('createBureau', () => {
   it('rebuilds only valid persisted request authority for recovered runs', () => {
-    const now = () => Date.now();
+    const fixedNow = 1_700_000_000_000;
+    const now = () => fixedNow;
     expect(
       recoveredRequestContextFromMetadata(
         {
@@ -543,7 +544,7 @@ describe('createBureau', () => {
       ),
     ).toBeUndefined();
 
-    const futureDeadline = Date.now() + 60_000;
+    const futureDeadline = fixedNow + 60_000;
     expect(
       recoveredRequestContextFromMetadata(
         {
@@ -573,7 +574,7 @@ describe('createBureau', () => {
               ownerId: 'owner-1',
               capabilities: ['tools:execute'],
               authorizationRevision: 'authorization-7',
-              deadline: Date.now() - 1,
+              deadline: fixedNow - 1,
             },
           },
         },
@@ -1022,8 +1023,8 @@ describe('createBureau', () => {
       runs: [],
       metadata: {},
       revision: 0,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+      createdAt: '2030-01-01T00:00:00.000Z',
+      updatedAt: '2030-01-01T00:00:00.000Z',
     });
 
     const bureau = await createBureau({
@@ -2253,10 +2254,13 @@ describe('createBureau', () => {
           { id: runId, services },
         );
         void handle.result().catch(() => {});
-        // Weft 0.10+ native marker shape: an object, not a bare string.
+        // Weft 0.10+ native marker shape: an object, not a bare string. A
+        // fixed literal occurrence marker — this test only asserts the
+        // recovered run reaches 'running', never compares this value against
+        // real time.
         await firstRuntime.durable!.engine.storage.put(
           KEYS.scheduleRun(runId),
-          encode({ id: scheduleId, occurrence: Date.now() }),
+          encode({ id: scheduleId, occurrence: 1_700_000_000_000 }),
         );
 
         const running = await pollUntil(async () => {
@@ -7341,7 +7345,10 @@ describe('createBureau review queue (AB-20)', () => {
               ownerId: 'terminal-agent',
               capabilities: ['tools:execute'],
               authorizationRevision: 'bureau:1',
-              deadline: Date.now() - 1,
+              // A fixed, unambiguously-past deadline rather than
+              // `Date.now() - 1` — this only needs to be less than whatever
+              // real clock the pruning check compares against.
+              deadline: Date.parse('2020-01-01T00:00:00.000Z'),
             },
           },
           pendingApprovalOverrides: {
@@ -8168,7 +8175,15 @@ describe('createBureau review queue (AB-20)', () => {
           ],
           {
             approvalSecret,
-            approvalNow: () => Date.now() + 10 * 60_000,
+            // bureauA signed its approval binding at the REAL clock's
+            // current time (default runtime, unconverted); bureauB's
+            // validation must land past that binding's expiry to exercise
+            // the "permanently invalid" recovery path this test asserts. A
+            // fixed literal comfortably past any real wall-clock "now" for
+            // the foreseeable future reproduces that skew deterministically
+            // — unlike `Date.now() + 10 * 60_000`, it never depends on
+            // reading the real clock at all.
+            approvalNow: () => Date.parse('2099-01-01T00:00:00.000Z'),
             policy: {
               beforeExecute() {
                 return {
@@ -9591,7 +9606,7 @@ describe('createBureau scheduleWakeup wiring (AB-201)', () => {
       // scheduler (`Engine.runMaintenance` calls `internals.scheduler.tick(now)`
       // internally) — the deterministic seam `engine.scheduler.tick(deadline)`
       // exercises directly at the operative layer.
-      const deadline = Date.now() + 6 * 60 * 60 * 1000 + 60_000;
+      const deadline = Date.parse('2099-01-01T00:00:00.000Z');
       const completed = await pollUntil(async () => {
         await bureau.runDurableMaintenance(deadline);
         return bureau.getRun(run.id)?.status === 'completed';
@@ -9684,7 +9699,7 @@ describe('createBureau scheduleWakeup wiring (AB-201)', () => {
 
         // Drive the rebooted engine's scheduler directly past the deadline —
         // no real wall-clock wait for the fire.
-        const deadline = Date.now() + 6 * 60 * 60 * 1000 + 60_000;
+        const deadline = Date.parse('2099-01-01T00:00:00.000Z');
         const completed = await pollUntil(async () => {
           await bureauB.runDurableMaintenance(deadline);
           return bureauB.getRun(run.id)?.status === 'completed';
@@ -9720,7 +9735,7 @@ describe('Bureau.modelCatalog (AB-246)', () => {
 
       const handle = bureau.modelCatalog.refresh({
         id: 'default-refresh',
-        requestedAt: new Date().toISOString(),
+        requestedAt: '2030-01-01T00:00:00.000Z',
       });
       const result = await handle.result();
 

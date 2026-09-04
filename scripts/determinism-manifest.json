@@ -1,7 +1,24 @@
 {
   "deterministicDirectories": [
     "packages/*/src/test/**",
-    "packages/bureau/src/test/**",
+    "packages/bureau/src/agent-catalog.test.ts",
+    "packages/bureau/src/audit-trail.test.ts",
+    "packages/bureau/src/bureau-run.test.ts",
+    "packages/bureau/src/create-agent-discovery-tool.test.ts",
+    "packages/bureau/src/create-bureau.test.ts",
+    "packages/bureau/src/create-supervisor.test.ts",
+    "packages/bureau/src/dist-bundling.test.ts",
+    "packages/bureau/src/durable-event-history.test.ts",
+    "packages/bureau/src/liveness-projection.test.ts",
+    "packages/bureau/src/model-catalog-refresh.test.ts",
+    "packages/bureau/src/model-policy.test.ts",
+    "packages/bureau/src/online-evals.test.ts",
+    "packages/bureau/src/run-envelope.test.ts",
+    "packages/bureau/src/runtime-composition.test.ts",
+    "packages/bureau/src/serialization.test.ts",
+    "packages/bureau/src/steering.test.ts",
+    "packages/bureau/src/webhook-notifier.test.ts",
+    "packages/bureau/src/websocket-frames.test.ts",
     "packages/gateway/src/conformance/**",
     "packages/integration/test/lifecycle-contract/**",
     "packages/lifecycle/src/**",
@@ -104,10 +121,10 @@
       "owningIssue": "AB-286"
     },
     {
-      "path": "packages/bureau/src/test/harness.test.ts",
-      "reason": "waitForRunCompletion's terminal-status poll needs a real per-iteration setTimeout delay, not the zero-delay MessageChannel macrotask loop waitForCondition (operative/test) and the rest of this codebase's polling uses. Measured directly against the new lmdb storage fixture (AB-261): a 5,000-iteration zero-delay macrotask spin (~600ms of real time) left two concurrently-running LMDB-backed runs still 'running', while the identical scenario polled with a real setTimeout(5) between checks completed both well within a couple hundred milliseconds. A tight macrotask-only loop evidently starves the lmdb native library's own async completion callbacks rather than merely running out of iterations, so more zero-delay attempts does not fix it \u2014 only letting real wall-clock time elapse between checks does. Still a bounded, condition-checked poll (asserts the observed run status every iteration, fails loudly past its cap), never a fixed-duration sleep standing in for a real check.",
+      "path": "packages/bureau/src/test/harness-lmdb-isolation.test.ts",
+      "reason": "AB-332 split this file out of harness.test.ts so this exemption covers only the one residual real wait AB-306's ruling named, not the whole harness suite \u2014 every other waitForRunCompletion call site in harness.test.ts now drives waitForRunState (event-driven, no real timer) instead. waitForRunCompletion's terminal-status poll needs a real per-iteration setTimeout delay, not the zero-delay MessageChannel macrotask loop waitForCondition (operative/test) and the rest of this codebase's polling uses. Measured directly against the lmdb storage fixture (AB-261): a 5,000-iteration zero-delay macrotask spin (~600ms of real time) left two concurrently-running LMDB-backed runs still 'running', while the identical scenario polled with a real setTimeout(5) between checks completed both well within a couple hundred milliseconds. A tight macrotask-only loop evidently starves the lmdb native library's own async completion callbacks rather than merely running out of iterations, so more zero-delay attempts does not fix it \u2014 only letting real wall-clock time elapse between checks does. Still a bounded, condition-checked poll (asserts the observed run status every iteration, fails loudly past its cap), never a fixed-duration sleep standing in for a real check. WFT-138 (Backlog) tracks the actual fix: a test-mode noSync/noMetaSync option on LMDBStorage so a write followed by a read in the same process observes the write without waiting on fsync; once it lands this file folds back into harness.test.ts.",
       "owner": "Agent Bureau team",
-      "owningIssue": "AB-261"
+      "owningIssue": "WFT-138"
     },
     {
       "path": "packages/armorer/test/execution-lifecycle-default-runtime.test.ts",

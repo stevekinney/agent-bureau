@@ -102,10 +102,12 @@ function createStubWebhookNotifier(): {
   const noOpSnapshot: WebhookDeliveryLivenessSnapshot = {
     id: 'stub-webhook-notifier',
     kind: 'webhook-delivery',
-    startedAt: new Date().toISOString(),
+    // Fixed literal, not `new Date().toISOString()` — this stub's timestamps
+    // are inert test data nothing in the suite compares against real time.
+    startedAt: '2030-01-01T00:00:00.000Z',
     revision: 0,
     status: 'terminal',
-    lastTransitionAt: new Date().toISOString(),
+    lastTransitionAt: '2030-01-01T00:00:00.000Z',
     projection: 'redacted',
     ownership: 'independent',
     detached: false,

@@ -6,6 +6,7 @@
  */
 import type { Action } from '@lostgradient/operative/store';
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
+import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
 
 import { type AuditRecord, createAuditTrail } from './audit-trail';
@@ -253,7 +254,7 @@ describe('createAuditTrail', () => {
     emit(new ActionEvent(action));
 
     // Write is fire-and-forget; yield to let the microtask queue settle.
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await yieldToPortableEventLoop();
 
     const records = await trail.query({ runId: 'run-sink' });
     expect(records).toHaveLength(1);
@@ -280,7 +281,7 @@ describe('createAuditTrail', () => {
     };
 
     emit(new ActionEvent(action));
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await yieldToPortableEventLoop();
 
     const records = await trail.query({ runId: 'run-tripwire' });
     expect(records).toHaveLength(1);
@@ -303,7 +304,7 @@ describe('createAuditTrail', () => {
     };
 
     emit(new ActionEvent(action));
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await yieldToPortableEventLoop();
 
     expect(await trail.query()).toHaveLength(0);
     trail.dispose();
@@ -352,7 +353,7 @@ describe('createAuditTrail', () => {
     emit(new ActionEvent(secondLifetimeAction));
 
     // Both writes are fire-and-forget; yield to let the microtask queue settle.
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await yieldToPortableEventLoop();
 
     const records = await trail.query();
     // Both records must be stored — no silent overwrite.
@@ -378,7 +379,7 @@ describe('createAuditTrail', () => {
     };
 
     emit(new ActionEvent(action));
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await yieldToPortableEventLoop();
 
     // No records should have been written after dispose
     expect(await trail.query()).toHaveLength(0);
@@ -441,7 +442,7 @@ describe('createAuditTrail', () => {
     // landing in the same millisecond, must both survive — proving the
     // manual-record sequence counter (AB-20) never collides with a real
     // action's sequence.
-    const now = Date.now();
+    const now = 1_700_000_000_000;
     emit(
       new ActionEvent({
         type: 'run.completed',
@@ -514,7 +515,7 @@ describe('createAuditTrail', () => {
       );
 
       // The failing write is fire-and-forget; yield for the rejection to settle.
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await yieldToPortableEventLoop();
 
       expect(received).toHaveLength(1);
       expect(received[0]).toMatchObject({ level: 'error', scope: 'audit-trail' });
@@ -537,7 +538,7 @@ describe('createAuditTrail', () => {
         }),
       );
 
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await yieldToPortableEventLoop();
 
       expect(errorSpy).toHaveBeenCalled();
       trail.dispose();
@@ -614,7 +615,7 @@ describe('createAuditTrail', () => {
       // Pin the clock so both `record()` calls land in the exact same
       // millisecond — the only condition under which the manual-sequence
       // counter's direction (up vs down) actually matters for ordering.
-      const fixedNow = Date.now();
+      const fixedNow = 1_700_000_000_000;
       spyOn(Date, 'now').mockReturnValue(fixedNow);
 
       await trail.record({
