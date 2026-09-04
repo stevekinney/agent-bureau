@@ -5687,12 +5687,24 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     }
 
     if (owner.kind === 'run' && principal !== undefined) {
-      const runState = store.getRun(owner.id);
-      if (runState) {
-        const runPrincipal = runAttribution.get(owner.id)?.principal;
-        if (runPrincipal !== undefined && runPrincipal !== principal) {
-          return { outcome: 'not-found' };
-        }
+      // AB-313 — fail CLOSED whenever this run's ownership cannot be
+      // verified against `runAttribution` (`request.principal`, AB-54's
+      // best-effort, in-memory-only attribution map), rather than treating
+      // an absent entry as open. `runAttribution` is cleared by
+      // `deleteRun` and never durably persisted for a recovered run (see
+      // `RunAttribution`'s own doc comment — "undefined when unresolved
+      // ... a durably recovered run whose in-memory attribution was lost
+      // to a process restart"), so a deleted or recovered run reads
+      // identically to one that legitimately never had a principal — the
+      // two cases cannot be told apart from this map alone. Failing open
+      // for either would let an unauthenticated caller retrieve durable
+      // history for a run they never owned, including through the
+      // deleted-aggregate 200 path (copilot review, PR #551). Omitting
+      // `principal` entirely still skips this check (an internal/trusted
+      // caller), matching every other owner kind's convention.
+      const runPrincipal = runAttribution.get(owner.id)?.principal;
+      if (runPrincipal !== principal) {
+        return { outcome: 'not-found' };
       }
     }
 

@@ -353,16 +353,16 @@ export function createDurableEventHistory(
     let hasMore = false;
     for await (const envelope of feed.replay(since === undefined ? {} : { fromCursor: since })) {
       if (envelope.workflowId !== targetWorkflowId) continue;
-      if (events.length >= limit) {
-        hasMore = true;
-        break;
-      }
-      // AB-313 (AC2): a corrupt record (unparseable payload, or a
-      // recognized-shape record carrying a `schemaVersion` this build does
-      // not know) is skipped with a diagnostic — it never aborts or
-      // corrupts the read of the rest of the page. It also never consumes
-      // a `limit` slot, so `hasMore` is never a false positive/negative
-      // because of a record that was skipped rather than returned.
+      // AB-313 (AC2): decode BEFORE checking `limit` — a corrupt record
+      // (unparseable payload, or a recognized-shape record carrying a
+      // `schemaVersion` this build does not know) is skipped with a
+      // diagnostic and never consumes a `limit` slot, but it must not be
+      // allowed to set `hasMore: true` either: checking `events.length >=
+      // limit` before decode would report an additional page for a
+      // candidate that turns out to be corrupt-and-skipped, when the next
+      // page could in fact be empty (Copilot review, PR #551). Decoding
+      // first means `hasMore` only ever reflects a genuine, valid
+      // additional record.
       let decoded: DurableEventEnvelope;
       try {
         decoded = toDurableEventEnvelope(envelope, owner);
@@ -374,6 +374,10 @@ export function createDurableEventHistory(
           cause: error,
         });
         continue;
+      }
+      if (events.length >= limit) {
+        hasMore = true;
+        break;
       }
       events.push(decoded);
     }

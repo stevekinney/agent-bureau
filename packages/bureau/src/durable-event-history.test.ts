@@ -500,6 +500,56 @@ describe('createDurableEventHistory', () => {
 
       await history.dispose();
     });
+
+    it('never reports hasMore: true because of a corrupt record sitting at the limit boundary with nothing valid after it (copilot review, PR #551)', async () => {
+      const storage = await createMemoryStorage();
+      const runtime = createManualRuntimeServices();
+      const history = createDurableEventHistory(storage, runtime);
+      const owner = { kind: 'run' as const, id: 'run-1' };
+
+      const good1 = await history.record(owner, 'run.started', {});
+
+      const rawFeed: FleetEventFeed = createFleetEventFeed(storage);
+      await rawFeed.append({
+        kind: 'legacy.kind',
+        workflowId: 'run:run-1',
+        emittedAtMs: 0,
+        payload: 'not-a-wrapper',
+      });
+      rawFeed.dispose();
+
+      // limit: 1 — exactly `good1`'s count. The only record after it is
+      // corrupt and skipped, so there is genuinely nothing more to page to.
+      const page = await history.page(owner, { limit: 1 });
+      expect(page).toEqual({ events: [good1], hasMore: false, nextCursor: good1.cursor });
+
+      await history.dispose();
+    });
+
+    it('reports hasMore: true when a genuine valid record follows a corrupt one at the limit boundary', async () => {
+      const storage = await createMemoryStorage();
+      const runtime = createManualRuntimeServices();
+      const history = createDurableEventHistory(storage, runtime);
+      const owner = { kind: 'run' as const, id: 'run-1' };
+
+      const good1 = await history.record(owner, 'run.started', {});
+
+      const rawFeed: FleetEventFeed = createFleetEventFeed(storage);
+      await rawFeed.append({
+        kind: 'legacy.kind',
+        workflowId: 'run:run-1',
+        emittedAtMs: 0,
+        payload: 'not-a-wrapper',
+      });
+      rawFeed.dispose();
+
+      await history.record(owner, 'run.completed', {}); // a real record beyond the limit
+
+      const page = await history.page(owner, { limit: 1 });
+      expect(page).toEqual({ events: [good1], hasMore: true, nextCursor: good1.cursor });
+
+      await history.dispose();
+    });
   });
 
   describe('dispose()', () => {
