@@ -42,9 +42,12 @@ export function createSchemaErrorMutator(): RetryMutator {
 
     const message = `Your previous response failed schema validation: ${error.message}${issueDetails}\n\nPlease correct your response to match the required schema.`;
 
-    // Create a new conversation with the error feedback appended
+    // Create a new conversation with the error feedback appended. AB-321:
+    // forwards the source conversation's own environment (carrying its
+    // resolved runtime) so the feedback message this mutator appends mints
+    // its id/timestamp through the same seam as the rest of the run.
     const snapshot = context.conversation.getSnapshot().conversation;
-    const newConversation = new Conversation(snapshot);
+    const newConversation = new Conversation(snapshot, context.conversation.env);
     newConversation.appendUserMessage(message);
 
     return {

@@ -579,7 +579,10 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknow
       typeof input === 'string'
         ? (() => {
             // Build a fresh Conversation for each run (ephemeral — no session state).
-            const fresh = new Conversation();
+            // AB-321: the same resolved `runtime` this function forwards into
+            // `RunOptions` below, so the fresh conversation's id/timestamps
+            // read through the identical seam.
+            const fresh = new Conversation(undefined, { runtime });
             if (instructions) {
               fresh.appendSystemMessage(instructions);
             }
@@ -599,7 +602,7 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknow
           // never affect this in-flight run, and this run never mutates the
           // caller's object (`ConversationHistory` is a structuredClone-safe
           // tree — see `durable/types.ts`).
-          new Conversation(structuredClone(input.conversation));
+          new Conversation(structuredClone(input.conversation), { runtime });
 
     return {
       generate,

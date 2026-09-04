@@ -1,3 +1,5 @@
+import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
+
 import type {
   ConversationHistory,
   Message,
@@ -32,6 +34,15 @@ export function toSessionInfo(conversation: ConversationHistory): SessionInfo {
 }
 
 /**
+ * The slice of {@link RuntimeServices} (lifecycle's AB-92/AB-252 seam)
+ * conversationalist's environment reads through: identifiers and the clock.
+ * A caller passes a full `RuntimeServices` instance here — the extra
+ * members (`monotonic`, `timers`, `random`, `deferred`) are ignored, not
+ * rejected, because `RuntimeServices` structurally satisfies this `Pick`.
+ */
+export type ConversationRuntime = Pick<RuntimeServices, 'clock' | 'identifiers'>;
+
+/**
  * Environment functions for conversation operations.
  * Allows dependency injection for testing and custom ID generation.
  */
@@ -42,6 +53,14 @@ export interface ConversationEnvironment {
   plugins: MessagePlugin[];
   /** Maximum depth of the undo/redo history tree. When exceeded, the oldest ancestor is pruned. */
   maxHistoryDepth?: number;
+  /**
+   * AB-321: the identifier and clock seam a conversation mints ids and
+   * timestamps through. Defaults to the real implementation
+   * ({@link createDefaultRuntimeServices}). Explicit `now`/`randomId`
+   * overrides still win when supplied directly, for backward
+   * compatibility with environments that customize only one function.
+   */
+  runtime?: ConversationRuntime;
 }
 
 export function getMessagePluginIdentity(
@@ -126,27 +145,51 @@ export function simpleTokenEstimator(message: Message): number {
 }
 
 /**
- * Default environment using Date.toISOString(), crypto.randomUUID(), and simple token estimation.
+ * The real-globals `RuntimeServices` instance conversationalist falls back
+ * to when neither an explicit `runtime` nor explicit `now`/`randomId`
+ * overrides are supplied. A module-level singleton, matching the pattern
+ * every other real-implementation default in this package already follows
+ * (one shared instance, not a fresh one per resolution).
+ */
+const defaultConversationRuntime: ConversationRuntime = createDefaultRuntimeServices();
+
+/**
+ * Default environment reading through {@link defaultConversationRuntime}
+ * (AB-321), the real implementation of the AB-92/AB-252 `RuntimeServices`
+ * seam, plus simple token estimation.
  */
 export const defaultConversationEnvironment: ConversationEnvironment = {
-  now: () => new Date().toISOString(),
-  randomId: () => crypto.randomUUID(),
+  now: () => defaultConversationRuntime.clock.nowISO(),
+  randomId: () => defaultConversationRuntime.identifiers.next('conversation'),
   estimateTokens: simpleTokenEstimator,
   plugins: [],
+  runtime: defaultConversationRuntime,
 };
 
 /**
  * Merges a partial environment with defaults.
  * Returns a complete environment with all required functions.
+ *
+ * Precedence for `now`/`randomId`: an explicit override on `environment`
+ * wins outright; otherwise an explicit `environment.runtime` is read
+ * through; otherwise the real-globals default runtime is read through.
  */
 export function resolveConversationEnvironment(
   environment?: Partial<ConversationEnvironment>,
 ): ConversationEnvironment {
+  const runtime = environment?.runtime;
   return {
-    now: environment?.now ?? defaultConversationEnvironment.now,
-    randomId: environment?.randomId ?? defaultConversationEnvironment.randomId,
+    now:
+      environment?.now ??
+      (runtime ? () => runtime.clock.nowISO() : defaultConversationEnvironment.now),
+    randomId:
+      environment?.randomId ??
+      (runtime
+        ? () => runtime.identifiers.next('conversation')
+        : defaultConversationEnvironment.randomId),
     estimateTokens: environment?.estimateTokens ?? defaultConversationEnvironment.estimateTokens,
     plugins: [...(environment?.plugins ?? defaultConversationEnvironment.plugins)],
+    runtime: runtime ?? defaultConversationRuntime,
     ...(environment?.maxHistoryDepth !== undefined
       ? { maxHistoryDepth: environment.maxHistoryDepth }
       : {}),
@@ -164,12 +207,19 @@ export function isConversationEnvironmentParameter(
   if ('role' in (value as Record<string, unknown>)) return false;
 
   const candidate = value as Record<string, unknown>;
+  const runtime = candidate['runtime'];
+  const hasRuntime =
+    !!runtime &&
+    typeof runtime === 'object' &&
+    typeof (runtime as Record<string, unknown>)['clock'] === 'object' &&
+    typeof (runtime as Record<string, unknown>)['identifiers'] === 'object';
   return (
     typeof candidate['now'] === 'function' ||
     typeof candidate['randomId'] === 'function' ||
     typeof candidate['estimateTokens'] === 'function' ||
     (Array.isArray(candidate['plugins']) && candidate['plugins'].length > 0) ||
-    typeof candidate['maxHistoryDepth'] === 'number'
+    typeof candidate['maxHistoryDepth'] === 'number' ||
+    hasRuntime
   );
 }
 

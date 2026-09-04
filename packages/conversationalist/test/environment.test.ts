@@ -1,10 +1,15 @@
 import { describe, expect, it } from 'bun:test';
+import { createManualRuntimeServices } from 'lifecycle';
 
 import {
   createConversationHistory as createConversation,
   withEnvironment,
 } from '../src/conversation';
-import { simpleTokenEstimator } from '../src/environment';
+import {
+  isConversationEnvironmentParameter,
+  resolveConversationEnvironment,
+  simpleTokenEstimator,
+} from '../src/environment';
 
 describe('withEnvironment', () => {
   it('should bind environment to createConversation', () => {
@@ -31,6 +36,68 @@ describe('withEnvironment', () => {
 
     const result = boundMockFn('hello', 42);
     expect(result).toEqual({ a: 'hello', b: 42, id: 'fixed-id' });
+  });
+});
+
+describe('resolveConversationEnvironment runtime seam (AB-321)', () => {
+  it('reads now/randomId through an explicit runtime when none of now/randomId are overridden', () => {
+    const runtime = createManualRuntimeServices({ origin: '2030-01-01T00:00:00.000Z' });
+
+    const environment = resolveConversationEnvironment({ runtime });
+
+    expect(environment.now()).toBe('2030-01-01T00:00:00.000Z');
+    expect(environment.randomId()).toBe(`${runtime.identifierPrefix}-conversation-1`);
+    expect(environment.randomId()).toBe(`${runtime.identifierPrefix}-conversation-2`);
+  });
+
+  it('lets an explicit now/randomId override win over a supplied runtime', () => {
+    const runtime = createManualRuntimeServices({ origin: '2030-01-01T00:00:00.000Z' });
+
+    const environment = resolveConversationEnvironment({
+      runtime,
+      now: () => 'explicit-now',
+      randomId: () => 'explicit-id',
+    });
+
+    expect(environment.now()).toBe('explicit-now');
+    expect(environment.randomId()).toBe('explicit-id');
+  });
+
+  it('produces byte-identical ids and timestamps from two independently seeded runtimes with the same seeds', () => {
+    const runtimeA = createManualRuntimeServices({
+      origin: '2030-06-15T12:00:00.000Z',
+      identifierSeed: 'seed-a',
+    });
+    const runtimeB = createManualRuntimeServices({
+      origin: '2030-06-15T12:00:00.000Z',
+      identifierSeed: 'seed-a',
+    });
+
+    const environmentA = resolveConversationEnvironment({ runtime: runtimeA });
+    const environmentB = resolveConversationEnvironment({ runtime: runtimeB });
+
+    expect(environmentA.randomId()).toBe(environmentB.randomId());
+    expect(environmentA.now()).toBe(environmentB.now());
+  });
+
+  it('defaults to a real-globals runtime when no runtime and no now/randomId are supplied', () => {
+    const environment = resolveConversationEnvironment();
+
+    expect(typeof environment.now()).toBe('string');
+    expect(typeof environment.randomId()).toBe('string');
+    expect(environment.randomId()).not.toBe(environment.randomId());
+  });
+});
+
+describe('isConversationEnvironmentParameter runtime recognition (AB-321)', () => {
+  it('recognizes a runtime-only partial environment', () => {
+    const runtime = createManualRuntimeServices();
+
+    expect(isConversationEnvironmentParameter({ runtime })).toBe(true);
+  });
+
+  it('does not mistake an unrelated object carrying a "runtime" key for an environment', () => {
+    expect(isConversationEnvironmentParameter({ runtime: 'production' })).toBe(false);
   });
 });
 

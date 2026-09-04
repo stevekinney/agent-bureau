@@ -48,7 +48,10 @@ export function createTemperatureEscalationMutator(
 
     return {
       ...context,
-      conversation: new Conversation(updatedHistory),
+      // AB-321: forwards the source conversation's own environment, so any
+      // later append on this mutated conversation stays on the same runtime
+      // seam as the rest of the run.
+      conversation: new Conversation(updatedHistory, context.conversation.env),
     };
   };
 }

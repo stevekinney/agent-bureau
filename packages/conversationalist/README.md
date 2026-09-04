@@ -98,6 +98,22 @@ const openAIRequest = await conversation.toProvider('openai');
 - **`Message`**: ordered conversation entry with roles such as `user`, `assistant`, `system`, `developer`, `tool-call`, `tool-result`, and `snapshot`.
 - **`ToolCall`** and **`ToolResult`**: canonical, JSON-safe tool interaction payloads shared with `armorer` through `interoperability`.
 
+## Identifiers and Timestamps
+
+Every function that mints a conversation id or timestamp — `createConversationHistory`, `createConversationHistoryUnsafe`, `buildMessage`, and the `Conversation` class — reads them through a `ConversationEnvironment`. By default, that environment reads through `runtime`, an injectable `RuntimeServices` seam (`lifecycle`'s AB-92/AB-252 contract, exposing `clock` and `identifiers`) that defaults to a real-globals implementation. Pass a manual runtime — for example `lifecycle`'s `createManualRuntimeServices()` — to make a conversation's id and timestamps reproducible across two identically-seeded runs:
+
+```typescript
+import { createConversationHistory } from 'conversationalist';
+import { createManualRuntimeServices } from 'lifecycle';
+
+const runtime = createManualRuntimeServices({ origin: '2030-01-01T00:00:00.000Z' });
+const conversation = createConversationHistory(undefined, { runtime });
+// conversation.id === 'conversation-1'
+// conversation.createdAt === '2030-01-01T00:00:00.000Z'
+```
+
+An explicit `now`/`randomId` override on the environment still wins over `runtime` when both are supplied — the seam generalizes the existing override mechanism rather than replacing it, so a test double that customizes only one function keeps working unchanged.
+
 ## Updating a Transcript
 
 Use the immutable mutation helpers when a user edits a message, a row leaves the transcript, visibility changes, or a pending tool approval resolves. Each helper returns a validated `ConversationHistory`; the history and messages you pass in stay untouched.

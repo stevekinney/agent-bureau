@@ -275,10 +275,7 @@ export class Conversation {
   private readonly sourcePlugins: readonly MessagePlugin[];
   private readonly pendingPluginActivations: MessagePluginIdentity[] = [];
 
-  constructor(
-    initial: ConversationHistory = createConversationHistory(),
-    environment?: Partial<ConversationEnvironment>,
-  ) {
+  constructor(initial?: ConversationHistory, environment?: Partial<ConversationEnvironment>) {
     this.environment = resolveConversationEnvironment(environment);
     this.sourcePlugins = Object.freeze([...this.environment.plugins]);
     this.pluginIdentityList = Object.freeze(
@@ -343,7 +340,12 @@ export class Conversation {
         );
       }),
     };
-    const safeInitial = ensureConversationSafe(structuredClone(initial));
+    // AB-321: minted through `this.environment`, never the bare
+    // `createConversationHistory()` default — a default parameter value is
+    // evaluated before `this.environment` exists, so it would always read
+    // the real globals regardless of what `environment` the caller passed.
+    const resolvedInitial = initial ?? createConversationHistory(undefined, this.environment);
+    const safeInitial = ensureConversationSafe(structuredClone(resolvedInitial));
     this.currentNode = {
       id: `${safeInitial.id}:0`,
       revision: 0,

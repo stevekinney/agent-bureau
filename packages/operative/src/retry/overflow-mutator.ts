@@ -70,8 +70,11 @@ export function createOverflowMutator(options: OverflowMutatorOptions): RetryMut
 
     const summary = await summarize(olderMessages);
 
-    // Build a fresh conversation with the summary and retained messages
-    const compacted = new Conversation();
+    // Build a fresh conversation with the summary and retained messages.
+    // AB-321: forwards the source conversation's own environment (carrying
+    // its resolved runtime), so this compaction output's id/timestamps mint
+    // through the same seam as the rest of the run.
+    const compacted = new Conversation(undefined, context.conversation.env);
     compacted.appendSystemMessage(`Previous conversation summary: ${summary}`);
 
     for (const message of recentMessages) {

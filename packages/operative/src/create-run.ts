@@ -210,7 +210,13 @@ export function createActiveRun(
       // stateless host that mutates its stored history after this returns would
       // otherwise corrupt the in-flight run. `ConversationHistory` is a
       // structuredClone-safe tree — see `durable/types.ts`.
-      new Conversation(structuredClone(options.conversation));
+      //
+      // AB-321: the resolved `runtime` (never `options.runtime` directly —
+      // that would skip the `createDefaultRuntimeServices()` fallback above)
+      // forwards into the Conversation's own environment seam, so its id and
+      // timestamps are minted through the same runtime the rest of the run
+      // reads from.
+      new Conversation(structuredClone(options.conversation), { runtime });
 
   // AB-88's Amendment 1, rebound by AB-252 (per AB-214's coordinator-ruling
   // promise) onto `RuntimeServices.identifiers`: mint a process-local id for
