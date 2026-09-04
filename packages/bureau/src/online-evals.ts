@@ -403,10 +403,10 @@ export function createOnlineEvalSampler<D extends AgentDefinitions = AgentDefini
     const noOpSnapshot: EvaluationLivenessSnapshot = Object.freeze({
       id: AGGREGATE_EVALUATION_ID,
       kind: 'background-evaluation',
-      startedAt: new Date().toISOString(),
+      startedAt: runtime.clock.nowISO(),
       revision: 0,
       status: 'terminal',
-      lastTransitionAt: new Date().toISOString(),
+      lastTransitionAt: runtime.clock.nowISO(),
       projection: 'redacted',
       ownership: 'independent',
       detached: false,
@@ -514,7 +514,7 @@ export function createOnlineEvalSampler<D extends AgentDefinitions = AgentDefini
     });
   }
 
-  const aggregateStartedAt = new Date().toISOString();
+  const aggregateStartedAt = runtime.clock.nowISO();
   let aggregateRevision = 0;
   let cachedAggregate: EvaluationLivenessSnapshot | undefined;
   let cachedAggregateRevision = -1;
@@ -585,7 +585,7 @@ export function createOnlineEvalSampler<D extends AgentDefinitions = AgentDefini
   function beginTrackedEvaluation(): TrackedEvaluation {
     const id = evaluationIds.next();
     const watchdog = createStallWatchdog(BACKGROUND_EVALUATION_POLICY, clock);
-    const tracked: TrackedEvaluation = { id, watchdog, startedAt: new Date().toISOString() };
+    const tracked: TrackedEvaluation = { id, watchdog, startedAt: runtime.clock.nowISO() };
     trackedEvaluations.set(id, tracked);
     advanceAggregate();
     return tracked;

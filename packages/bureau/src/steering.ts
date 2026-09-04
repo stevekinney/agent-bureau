@@ -1152,7 +1152,7 @@ export function createSteeringGate(
       }
     },
 
-    promoteForNewRun(runId: string, now: string = new Date().toISOString()): void {
+    promoteForNewRun(runId: string, now: string = clock.nowISO()): void {
       // A still-`accepted` pending identity command whose deadline already
       // passed by `now` must be REJECTED, never promoted — its effect is
       // genuinely deferred until this exact moment, so a deadline that

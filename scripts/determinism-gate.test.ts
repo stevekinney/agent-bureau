@@ -100,6 +100,24 @@ describe('determinism/no-real-runtime-call', () => {
     );
     expect(ruleIds).toEqual(['determinism/no-real-runtime-call']);
   });
+
+  test('flags a zero-argument `new Date()` construction inside a deterministic test directory', async () => {
+    const source = await readFixture('real-date-construction.ts');
+    const ruleIds = lintFixture(
+      source,
+      `${FIXTURE_REPO_ROOT}/packages/fixture-package/src/test/real-date-construction.ts`,
+    );
+    expect(ruleIds).toEqual(['determinism/no-real-runtime-call']);
+  });
+
+  test('does not flag `new Date(value)` — constructing from a supplied value is not a clock read', async () => {
+    const source = await readFixture('date-construction-from-value.ts');
+    const ruleIds = lintFixture(
+      source,
+      `${FIXTURE_REPO_ROOT}/packages/fixture-package/src/test/date-construction-from-value.ts`,
+    );
+    expect(ruleIds).toEqual([]);
+  });
 });
 
 describe('determinism/no-global-transport-mutation', () => {
