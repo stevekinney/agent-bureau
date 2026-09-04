@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { createManualRuntimeServices } from 'lifecycle';
 
 import type { Message } from '../src/types';
 import {
@@ -11,7 +12,12 @@ import {
   messageToString,
 } from '../src/utilities';
 
-function base(now = new Date().toISOString()): Message {
+// Manual runtime standing in for the real clock (AB-321/AB-329) — this file never asserts
+// anything about a specific instant, only about message shape, so one shared runtime for every
+// timestamp read below is sufficient.
+const runtime = createManualRuntimeServices();
+
+function base(now = runtime.clock.nowISO()): Message {
   return {
     id: 'm1',
     role: 'user',
@@ -36,7 +42,7 @@ describe('message helpers', () => {
       role: 'assistant',
       content: 'Done',
       position: 0,
-      createdAt: new Date().toISOString(),
+      createdAt: runtime.clock.nowISO(),
       metadata: {},
       hidden: false,
       goalCompleted: true,
@@ -47,7 +53,7 @@ describe('message helpers', () => {
   });
 
   test('parts/text/hasImages/toString with multimodal content', () => {
-    const now = new Date().toISOString();
+    const now = runtime.clock.nowISO();
     const message: Message = {
       id: 'm2',
       role: 'assistant',
@@ -80,7 +86,7 @@ describe('message helpers', () => {
         },
       ],
       position: 0,
-      createdAt: new Date().toISOString(),
+      createdAt: runtime.clock.nowISO(),
       metadata: {},
       hidden: false,
     });
@@ -104,7 +110,7 @@ describe('message helpers', () => {
         { type: 'text', text: 'B' },
       ],
       position: 0,
-      createdAt: new Date().toISOString(),
+      createdAt: runtime.clock.nowISO(),
       metadata: {},
       hidden: false,
     });
@@ -123,7 +129,7 @@ describe('message helpers', () => {
       role: 'user',
       content: '',
       position: 0,
-      createdAt: new Date().toISOString(),
+      createdAt: runtime.clock.nowISO(),
       metadata: {},
       hidden: false,
     });
@@ -145,7 +151,7 @@ describe('message helpers', () => {
       role: 'tool-call',
       content: multiModalParts,
       position: 0,
-      createdAt: new Date().toISOString(),
+      createdAt: runtime.clock.nowISO(),
       metadata: {},
       hidden: false,
       toolCall: { id: 'tc-1', name: 'search', arguments: toolCallArgs },
@@ -176,7 +182,7 @@ describe('message helpers', () => {
       role: 'assistant',
       content: 'Done',
       position: 0,
-      createdAt: new Date().toISOString(),
+      createdAt: runtime.clock.nowISO(),
       metadata: {},
       hidden: false,
     });

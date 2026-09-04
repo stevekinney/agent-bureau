@@ -14,7 +14,8 @@
     "packages/memory/test/**",
     "packages/armorer/test/**",
     "packages/interoperability/src/**",
-    "packages/conversationalist/src/**"
+    "packages/conversationalist/src/**",
+    "packages/conversationalist/test/**"
   ],
   "realRuntimeExemptions": [
     {

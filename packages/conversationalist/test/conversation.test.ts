@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { createManualRuntimeServices } from 'lifecycle';
 
 import {
   appendAssistantMessage,
@@ -29,6 +30,10 @@ import { ConversationalistError } from '../src/errors';
 import { messageSchema } from '../src/schemas';
 import type { AssistantMessage, ConversationHistory, JSONValue } from '../src/types';
 import { getOrderedMessages } from '../src/utilities/message-store';
+
+// Manual runtime standing in for the real clock (AB-321/AB-329) — this file never asserts
+// anything about a specific instant, only about conversation/message shape and validation.
+const runtime = createManualRuntimeServices();
 
 describe('conversation (functional)', () => {
   test('create, append, statistics and encode', () => {
@@ -176,7 +181,7 @@ describe('conversation (functional)', () => {
       appendMessages(c, {
         role: 'user',
         content: 'hello',
-        metadata: { when: new Date() as unknown as JSONValue },
+        metadata: { when: new Date(runtime.clock.now()) as unknown as JSONValue },
       }),
     ).toThrow(ConversationalistError);
   });
@@ -245,7 +250,7 @@ describe('conversation (functional)', () => {
   });
 
   test('deserialize validation: position contiguity and tool references', () => {
-    const now = new Date().toISOString();
+    const now = runtime.clock.nowISO();
     // Position mismatch
     const badPos = {
       schemaVersion: 1,
@@ -299,7 +304,7 @@ describe('conversation (functional)', () => {
   });
 
   test('deserialize rejects missing messages and unlisted messages', () => {
-    const now = new Date().toISOString();
+    const now = runtime.clock.nowISO();
     const missingMessage = {
       schemaVersion: 1,
       id: 'c3',
@@ -349,7 +354,7 @@ describe('conversation (functional)', () => {
   });
 
   test('deserialize migrates legacy tool-use payloads', () => {
-    const now = new Date().toISOString();
+    const now = runtime.clock.nowISO();
     const legacy = {
       schemaVersion: 3,
       id: 'legacy',
@@ -393,7 +398,7 @@ describe('conversation (functional)', () => {
   test('deserialize rejects non-object roots and malformed message entries', () => {
     expect(() => deserializeConversation(null)).toThrow(ConversationalistError);
 
-    const now = new Date().toISOString();
+    const now = runtime.clock.nowISO();
     const malformed = {
       schemaVersion: 5,
       id: 'malformed',
@@ -447,7 +452,7 @@ describe('conversation (functional)', () => {
         toolCall: {
           id: 'call-1',
           name: 'tool',
-          arguments: new Date() as unknown as JSONValue,
+          arguments: new Date(runtime.clock.now()) as unknown as JSONValue,
         },
       }),
     ).toThrow(ConversationalistError);
@@ -465,7 +470,7 @@ describe('conversation (functional)', () => {
           toolResult: {
             callId: 'call-2',
             outcome: 'success',
-            content: new Date() as unknown as JSONValue,
+            content: new Date(runtime.clock.now()) as unknown as JSONValue,
           },
         },
       ),

@@ -1,7 +1,12 @@
 import { describe, expect, test } from 'bun:test';
+import { createManualRuntimeServices } from 'lifecycle';
 
 import type { Message } from '../../src/types';
 import { pairToolCallsWithResults } from '../../src/utilities/tool-calls';
+
+// Manual runtime standing in for the real clock (AB-321/AB-329) — this file never asserts
+// anything about a specific instant, only about tool-call pairing.
+const runtime = createManualRuntimeServices();
 
 describe('tool call pairing', () => {
   const createMessage = (overrides: Partial<Message>): Message => ({
@@ -9,7 +14,7 @@ describe('tool call pairing', () => {
     role: 'user',
     content: '',
     position: 0,
-    createdAt: new Date().toISOString(),
+    createdAt: runtime.clock.nowISO(),
     metadata: {},
     hidden: false,
     ...overrides,

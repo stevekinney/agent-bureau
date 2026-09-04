@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { createManualRuntimeServices } from 'lifecycle';
 import { z } from 'zod';
 
 import {
@@ -15,6 +16,11 @@ import {
   toolResultSchema,
 } from '../src/schemas';
 import { CURRENT_SCHEMA_VERSION } from '../src/versioning';
+
+// Manual runtime standing in for the real clock (AB-321/AB-329) — this file never asserts
+// anything about a specific instant, only about schema shape, so one shared runtime for every
+// timestamp read below is sufficient.
+const runtime = createManualRuntimeServices();
 
 describe('schemas', () => {
   test('messageRoleSchema accepts tool-call literal', () => {
@@ -71,7 +77,7 @@ describe('schemas', () => {
   });
 
   test('jsonValueSchema rejects non-JSON values', () => {
-    expect(jsonValueSchema.safeParse(new Date()).success).toBeFalse();
+    expect(jsonValueSchema.safeParse(new Date(runtime.clock.now())).success).toBeFalse();
     expect(jsonValueSchema.safeParse(Number.POSITIVE_INFINITY).success).toBeFalse();
   });
 
@@ -98,7 +104,7 @@ describe('schemas', () => {
       role: 'user',
       content: 'hi',
       position: 0,
-      createdAt: new Date().toISOString(),
+      createdAt: runtime.clock.nowISO(),
       metadata: {},
       hidden: false,
     } as const;
@@ -107,7 +113,7 @@ describe('schemas', () => {
   });
 
   test('conversationSchema basic shape', () => {
-    const now = new Date().toISOString();
+    const now = runtime.clock.nowISO();
     const c = {
       schemaVersion: CURRENT_SCHEMA_VERSION,
       id: 'c1',
@@ -149,7 +155,7 @@ describe('schemas', () => {
     const schemaFromShape = z.object(conversationShape);
     expect(schemaFromShape).toBeDefined();
 
-    const now = new Date().toISOString();
+    const now = runtime.clock.nowISO();
     const testData = {
       schemaVersion: CURRENT_SCHEMA_VERSION,
       id: 'test-id',
@@ -214,7 +220,7 @@ describe('schemas', () => {
 
     const schema = z.object(enhancedShape);
 
-    const now = new Date().toISOString();
+    const now = runtime.clock.nowISO();
     const testData = {
       schemaVersion: CURRENT_SCHEMA_VERSION,
       id: 'original-id',
@@ -265,8 +271,8 @@ describe('Standard Schema compliance', () => {
       metadata: {},
       ids: [],
       messages: {},
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+      createdAt: runtime.clock.nowISO(),
+      updatedAt: runtime.clock.nowISO(),
     };
 
     const result = await conversationSchema['~standard'].validate(validConversation);
