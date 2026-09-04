@@ -172,8 +172,13 @@ export class LoopbackTransportUnsupportedError extends Error {
  * pending push or waits for one — the same "await the next value from the
  * stream reader" shape the charter requires everywhere in this suite,
  * never a timed poll.
+ *
+ * Exported (only) so `loopback.test.ts` can exercise its abort/error-reject
+ * bookkeeping directly. This class makes no transport claims of its own —
+ * unlike `startLoopbackGateway`'s own real-socket contract, unit-testing
+ * this plumbing in isolation does not fake a server response.
  */
-class FrameQueue<T> {
+export class FrameQueue<T> {
   private readonly pending: T[] = [];
   private readonly waiters: Array<{
     resolve: (value: T | undefined) => void;
