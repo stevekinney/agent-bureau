@@ -21,7 +21,7 @@ let nextProposalId = 0;
 
 function makeProposal(overrides: Partial<Proposal> = {}): Proposal {
   return {
-    id: `test-proposal-${nextProposalId++}`,
+    id: overrides.id ?? `test-proposal-${nextProposalId++}`,
     type: 'skill',
     summary: 'Test proposal',
     content: '---\nname: test-skill\ndescription: A test skill\n---\n\nDo the thing.',
