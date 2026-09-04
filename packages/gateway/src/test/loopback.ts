@@ -450,10 +450,18 @@ export async function startLoopbackGateway(
     gateway: GatewayShutdownReport;
     bureau: BureauShutdownReport;
   }> {
-    const gatewayReport = await running.stop();
-    const bureauReport = await harness.bureau.shutdown();
-    await storage.dispose();
-    return { gateway: gatewayReport, bureau: bureauReport };
+    // `storage.dispose()` must always run, even if `running.stop()` or
+    // `bureau.shutdown()` throws — otherwise a failure partway through
+    // teardown leaks the storage fixture and can make an unrelated,
+    // later test flaky (copilot review, PR #497). `finally` re-throws the
+    // original failure unchanged; it only guarantees disposal runs too.
+    try {
+      const gatewayReport = await running.stop();
+      const bureauReport = await harness.bureau.shutdown();
+      return { gateway: gatewayReport, bureau: bureauReport };
+    } finally {
+      await storage.dispose();
+    }
   }
 
   return {

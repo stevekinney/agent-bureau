@@ -2,11 +2,14 @@
  * Real Gateway backpressure conformance (AB-274 / AB-98's tst-07d slice).
  *
  * There is no dedicated gateway-level backpressure policy beyond the
- * declared per-run replay buffer bound `live-events.ts` already ships
- * (`RUN_FRAME_BUFFER_LIMIT = 2000`, private to that module — this suite
- * reads it back only through the public wire contract, never the private
- * constant). This suite asserts exactly that production policy, never one
- * invented for the test:
+ * declared per-run replay buffer bound `live-events.ts` already ships:
+ * `RUN_FRAME_BUFFER_LIMIT = 2000`, private to that module, so this suite
+ * pins the same value as a local constant (below) rather than importing it
+ * — deliberately, to enforce the production policy's actual number, not to
+ * invent a different one. Every ASSERTION against that bound is made
+ * through the public wire contract only (a full replay's frame count),
+ * never a private field read. This suite asserts exactly that production
+ * policy, never one invented for the test:
  *
  * - The buffer accounting for a run that emits far more than the declared
  *   bound stays within it — a full replay opened only after the run has
