@@ -11,7 +11,12 @@ import { COMBINED_OPERATIVE_EVENT_TYPES } from '../events';
 import type { GenerateFunction, GenerateResponse, StepResult } from '../types';
 import { createEventRecorder } from './event-recorder';
 
-export type { BaselineReplayResult, ReproductionArtifact, ScriptedOutcome } from './artifact-io';
+export type {
+  BaselineReplayResult,
+  ReproductionArtifact,
+  ReproductionCleanupReport,
+  ScriptedOutcome,
+} from './artifact-io';
 export {
   assembleBaselineArtifact,
   InvalidReproductionArtifactError,

@@ -1,24 +1,25 @@
 // ---------------------------------------------------------------------------
 // AB-267 — the reproduction-artifact writer, reader, and replay core (AB-95's
-// tst-04c slice, AB-92's testability contract). `bureau/src/test/
-// reproduction-artifact.ts` (AB-263) already owns the CANONICAL
-// `ReproductionArtifact` — assembled from a full Bureau harness run — but
-// `bureau` depends on `@lostgradient/operative`, never the other way
-// around, so this file cannot import that type. `ReproductionArtifact`
-// below is operative's own declaration of AB-92 AC8's shape: field-for-field
-// identical to bureau's, deliberately loosened at `terminalResult` and
-// `cleanupReport` (both `unknown` here, exactly as AB-263's own assembler
-// options type already treats them before redaction) so that a bureau
-// artifact — a structural subtype — is assignable into `writeReproductionArtifact`
-// without a cast. Unifying the two declarations into one shared location is
-// tracked as a follow-up (see the pull request body); this slice's own
-// delivery boundary is `artifact-io.ts`/`artifact-io.test.ts` and the two
-// files it touches in `index.ts`, not a cross-package type move.
+// tst-04c slice, AB-92's testability contract). AB-334 moved the CANONICAL
+// `ReproductionArtifact` declaration down here from `bureau/src/test/
+// reproduction-artifact.ts` (AB-263): `bureau` depends on
+// `@lostgradient/operative`, never the other way around, so the shared
+// declaration has to live at the lower layer for bureau to import it.
+// AB-263's narrowness at `cleanupReport` (a real union, not `unknown`)
+// survives the move as a type parameter, `TCleanupReport`, because its
+// widest member — `BureauShutdownReport` — is Bureau-owned and unreachable
+// from this package: operative can express and default the parameter, but
+// only bureau can supply the argument that includes its own type. Bureau's
+// `ReproductionArtifact` (see `packages/bureau/src/test/
+// reproduction-artifact.ts`) is now `ReproductionArtifact<ReproductionCleanupReport
+// | BureauShutdownReport>` — an instantiation of this declaration, not a
+// second one.
 // ---------------------------------------------------------------------------
 
-import type { RuntimeServices } from 'lifecycle';
+import type { DeferredDrainReport, RuntimeServices } from 'lifecycle';
 import { createManualRuntimeServices } from 'lifecycle';
 
+import type { CleanupAcknowledgement } from '../types';
 import { createBarrierRegistry } from './barriers';
 import type { CausalTraceEntry, EventRecorder } from './event-recorder';
 import { createEventRecorder } from './event-recorder';
@@ -33,11 +34,24 @@ export interface ScriptedOutcome {
 }
 
 /**
- * AB-92 AC8's `ReproductionArtifact`, declared independently of bureau's
- * (see the module doc above for why). Field ORDER here is the serialization
- * contract `writeReproductionArtifact` relies on for byte stability.
+ * The default `cleanupReport` union for a run with no Bureau-specific
+ * cleanup shape: a bare `Agent`/`ActiveRun`'s own `CleanupAcknowledgement`,
+ * or `RuntimeServices.deferred.drain()`'s `DeferredDrainReport`. Exported by
+ * name so a package that widens `ReproductionArtifact`'s `TCleanupReport`
+ * (bureau, adding `BureauShutdownReport`) composes onto this union instead
+ * of repeating its two members.
  */
-export interface ReproductionArtifact {
+export type ReproductionCleanupReport = CleanupAcknowledgement | DeferredDrainReport;
+
+/**
+ * AB-92 AC8's `ReproductionArtifact` — the ONE declaration in the
+ * repository (AB-334). Field ORDER here is the serialization contract
+ * `writeReproductionArtifact` relies on for byte stability. `TCleanupReport`
+ * defaults to {@link ReproductionCleanupReport} for a caller with no wider
+ * cleanup-report shape of its own; bureau instantiates it with its own
+ * union instead (see the module doc above).
+ */
+export interface ReproductionArtifact<TCleanupReport = ReproductionCleanupReport> {
   readonly sourceRevision: string;
   readonly packageVersions: Readonly<Record<string, string>>;
   readonly effectiveModel: {
@@ -52,7 +66,7 @@ export interface ReproductionArtifact {
   readonly firedFaults: readonly FiredFault[];
   readonly causalTrace: readonly CausalTraceEntry[];
   readonly terminalResult: unknown;
-  readonly cleanupReport: unknown;
+  readonly cleanupReport: TCleanupReport;
 }
 
 /** Thrown by {@link readReproductionArtifact} when the file at `path` is not a well-formed `ReproductionArtifact`. */
@@ -83,7 +97,9 @@ export class ReproductionArtifactMismatchError extends Error {
  * `packageVersions`' own keys are sorted too, so filesystem/Map enumeration
  * order upstream can never leak into the written bytes.
  */
-function canonicalize(artifact: ReproductionArtifact): ReproductionArtifact {
+function canonicalize<TCleanupReport>(
+  artifact: ReproductionArtifact<TCleanupReport>,
+): ReproductionArtifact<TCleanupReport> {
   const sortedPackageVersions = Object.fromEntries(
     Object.entries(artifact.packageVersions).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
   );
@@ -116,8 +132,8 @@ function canonicalize(artifact: ReproductionArtifact): ReproductionArtifact {
  * what makes a committed fixture a meaningful regression target rather
  * than a moving one.
  */
-export async function writeReproductionArtifact(
-  artifact: ReproductionArtifact,
+export async function writeReproductionArtifact<TCleanupReport>(
+  artifact: ReproductionArtifact<TCleanupReport>,
   path: string,
 ): Promise<void> {
   const json = `${JSON.stringify(canonicalize(artifact), null, 2)}\n`;
@@ -175,14 +191,39 @@ function requireArray(value: unknown, field: string, path: string): readonly unk
 }
 
 /**
+ * Asserts `field` is a present OWN key of `raw` — not merely that
+ * `raw[field]` is not `undefined`, since a JSON object can hold an
+ * explicit `null` for either of these two fields but never omit the key
+ * entirely. `terminalResult`/`cleanupReport` are the two fields this file
+ * cannot validate the SHAPE of (the former is `unknown` by design; the
+ * latter is a caller-supplied `TCleanupReport` this function has no way to
+ * narrow generically — see {@link readReproductionArtifact}'s own doc
+ * comment) — but a missing key is still a corrupted artifact, not a valid
+ * one with an absent field, and `raw[field]` alone cannot tell the two
+ * apart.
+ */
+function requirePresentKey(raw: Record<string, unknown>, field: string, path: string): void {
+  if (!(field in raw)) {
+    throw new InvalidReproductionArtifactError(path, `"${field}" is required`);
+  }
+}
+
+/**
  * Reads and structurally validates the `ReproductionArtifact` at `path`.
  * Hand-written guards rather than a schema library: `src/test/` ships in
  * `@lostgradient/operative`'s published `./test` subpath, and `zod` is only
  * a devDependency of this package — adding a runtime dependency here for
  * one file's validation is a bigger footprint change than this slice's
- * delivery boundary covers.
+ * delivery boundary covers. Returns `ReproductionArtifact<unknown>`: this
+ * function validates every field's SHAPE except `cleanupReport`, which is
+ * passed through as whatever the JSON held — narrowing it to a caller's own
+ * `TCleanupReport` union would need a guard this file has no way to write
+ * generically, and every consumer (`replayReproductionArtifact` included)
+ * only round-trips the field, never inspects it.
  */
-export async function readReproductionArtifact(path: string): Promise<ReproductionArtifact> {
+export async function readReproductionArtifact(
+  path: string,
+): Promise<ReproductionArtifact<unknown>> {
   let raw: unknown;
   try {
     raw = await Bun.file(path).json();
@@ -199,6 +240,8 @@ export async function readReproductionArtifact(path: string): Promise<Reproducti
   if (!isRecord(raw)) {
     throw new InvalidReproductionArtifactError(path, 'top-level value must be an object');
   }
+  requirePresentKey(raw, 'terminalResult', path);
+  requirePresentKey(raw, 'cleanupReport', path);
 
   return {
     sourceRevision: requireString(raw['sourceRevision'], 'sourceRevision', path),
@@ -397,7 +440,9 @@ function sortKeysDeep(value: unknown): unknown {
  * naming the first mismatching entry's index and identity. Uses no random
  * source of its own — every value comes from `artifact`.
  */
-export async function replayReproductionArtifact(artifact: ReproductionArtifact): Promise<void> {
+export async function replayReproductionArtifact<TCleanupReport>(
+  artifact: ReproductionArtifact<TCleanupReport>,
+): Promise<void> {
   const runtime = createManualRuntimeServices({
     origin: artifact.clockOrigin,
     identifierSeed: artifact.identifierSeed,

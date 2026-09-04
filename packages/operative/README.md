@@ -2674,6 +2674,23 @@ When `recorder` (an `EventRecorder`) is supplied, every arrival, release, and re
 
 **Exported types:** `Barrier`, `BarrierRegistry`, `BarrierState`.
 
+#### The reproduction artifact (AB-92/AB-334)
+
+`ReproductionArtifact<TCleanupReport>` is AB-92 AC8's normalized reproduction shape — `sourceRevision`, `packageVersions`, `effectiveModel`, `clockOrigin`/`identifierSeed`/`randomSeed`, `scriptedOutcomes`, `firedFaults`, `causalTrace`, `terminalResult`, and `cleanupReport` — written and read by `writeReproductionArtifact`/`readReproductionArtifact` (AB-267) as stable, fixed-key-order JSON. It is the ONE declaration of the shape in the repository: `cleanupReport` is a type parameter (defaulting to `ReproductionCleanupReport`, i.e. `CleanupAcknowledgement | DeferredDrainReport`) rather than a fixed union, so a downstream package with its own cleanup-report shape — `bureau/test`'s `ReproductionArtifact` adds `BureauShutdownReport` — instantiates this declaration instead of redeclaring it (`bureau` depends on `@lostgradient/operative`, never the reverse, so the canonical shape has to live here for that to work).
+
+```typescript
+import type { ReproductionArtifact, ReproductionCleanupReport } from '@lostgradient/operative/test';
+
+// A caller with no wider cleanup-report shape of its own uses the default:
+type MyArtifact = ReproductionArtifact; // cleanupReport: ReproductionCleanupReport
+
+// A caller that widens it composes onto the named union instead of
+// repeating its members:
+type MyWiderArtifact = ReproductionArtifact<ReproductionCleanupReport | { readonly custom: true }>;
+```
+
+**Exported types:** `ReproductionArtifact<TCleanupReport>`, `ReproductionCleanupReport`, `ScriptedOutcome`, `BaselineReplayResult`.
+
 ---
 
 ## Development

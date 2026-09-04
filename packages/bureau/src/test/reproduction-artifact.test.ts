@@ -2,11 +2,17 @@ import { tmpdir } from 'node:os';
 
 import type { GenerateFunction } from '@lostgradient/operative';
 import { createAgent } from '@lostgradient/operative';
-import { createEventRecorder, type EventRecorder } from '@lostgradient/operative/test';
+import {
+  createEventRecorder,
+  type EventRecorder,
+  readReproductionArtifact,
+  writeReproductionArtifact,
+} from '@lostgradient/operative/test';
 import { createToolbox } from 'armorer';
 import { afterEach, describe, expect, it } from 'bun:test';
 import { createManualRuntimeServices } from 'lifecycle';
 
+import type { BureauShutdownReport } from '../types';
 import type { BureauTestHarness } from './harness';
 import { createBureauTestHarness } from './harness';
 import {
@@ -111,6 +117,7 @@ async function runScriptedCase(
  */
 async function assembleDeterministicCase(
   overrides: Partial<Parameters<typeof createBureauTestHarness>[0]> = {},
+  cleanupReport: ReproductionArtifact['cleanupReport'] = { status: 'completed' },
 ): Promise<ReproductionArtifact> {
   const storage = createMemoryStorageFixture();
   const harness = await createBureauTestHarness({
@@ -134,7 +141,7 @@ async function assembleDeterministicCase(
   const recorder = createEventRecorder(harness.runtime);
   return assembleReproductionArtifact(harness, recorder, {
     terminalResult: { output: 'ok', usage: { totalTokens: 12 } },
-    cleanupReport: { status: 'completed' },
+    cleanupReport,
   });
 }
 
@@ -296,6 +303,41 @@ describe('assembleReproductionArtifact', () => {
       'explicit-package-one': '1.2.3',
       'explicit-package-two': '4.5.6',
     });
+  });
+});
+
+describe('ReproductionArtifact — cross-package shape (AB-334)', () => {
+  it('round-trips a Bureau-assembled artifact through operative’s writer/reader without a cast', async () => {
+    // The whole point of AB-334: bureau's `ReproductionArtifact` is an
+    // instantiation of operative's canonical declaration, not a second
+    // one, so a bureau-assembled artifact — `cleanupReport` a
+    // `BureauShutdownReport` in particular, the member only bureau's
+    // instantiation admits — passes through operative's
+    // `writeReproductionArtifact`/`readReproductionArtifact` with no cast
+    // at either end. If the two declarations ever drifted back apart, this
+    // would be a `check-types` failure, not a runtime one.
+    const shutdownReport: BureauShutdownReport = {
+      admissionClosed: true,
+      policy: 'drain',
+      requested: 1,
+      completed: 1,
+      failed: 0,
+      unresolved: 0,
+      notRequired: 0,
+      owners: [],
+    };
+    const artifact = await assembleDeterministicCase({}, shutdownReport);
+
+    const path = `${tmpdir()}/ab-334-cross-package-roundtrip-${Bun.randomUUIDv7()}.json`;
+    try {
+      await writeReproductionArtifact(artifact, path);
+      const read = await readReproductionArtifact(path);
+
+      expect(read.cleanupReport).toEqual(shutdownReport);
+      expect(read).toEqual(artifact);
+    } finally {
+      await Bun.file(path).delete?.();
+    }
   });
 });
 

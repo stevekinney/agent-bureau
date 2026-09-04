@@ -20,56 +20,43 @@
  * revision, the installed package manifests — is read from something that
  * cannot differ between two runs of the same scripted case against the
  * same repository checkout.
+ *
+ * The `ReproductionArtifact` shape itself is NOT declared here (AB-334):
+ * it is `@lostgradient/operative/test`'s canonical declaration, moved there
+ * because `bureau` can import from `operative` but never the reverse.
+ * `ReproductionArtifact` below is that declaration instantiated with
+ * Bureau's own widened `cleanupReport` union — the "Bureau-specific
+ * construction" this file adds on top of the shared shape, not a second
+ * declaration of it.
  */
 import { dirname, join } from 'node:path';
 
-import type { CleanupAcknowledgement } from '@lostgradient/operative';
 import { summarizeToolInput } from '@lostgradient/operative';
-import type { CausalTraceEntry, EventRecorder, FiredFault } from '@lostgradient/operative/test';
-import type { DeferredDrainReport } from 'lifecycle';
+import type {
+  EventRecorder,
+  FiredFault,
+  ReproductionArtifact as OperativeReproductionArtifact,
+  ReproductionCleanupReport,
+  ScriptedOutcome,
+} from '@lostgradient/operative/test';
 
 import type { AgentDefinitions } from '../agent-catalog';
 import type { BureauShutdownReport } from '../types';
 import type { BureauTestHarness } from './harness';
 
-/**
- * One scripted double's recorded outcome (AB-92 AC8), matched field for
- * field. Always an empty list on this slice's own artifacts — nothing
- * populates it until AB-95's fault engine exists — but the shape is fixed
- * here because `ReproductionArtifact.scriptedOutcomes` needs it and this is
- * the file that owns the artifact shape.
- */
-export interface ScriptedOutcome {
-  readonly boundary: string;
-  readonly sequenceNumber: number;
-  readonly outcome: unknown;
-}
+export type { ScriptedOutcome } from '@lostgradient/operative/test';
 
 /**
- * AB-92 AC8's `ReproductionArtifact`, matched field for field. Field order
- * here IS the serialization contract: `assembleReproductionArtifact` always
- * constructs the returned object with these keys in this order, which is
- * what makes `JSON.stringify` byte-identical across two runs of the same
- * scripted case.
+ * AB-92 AC8's `ReproductionArtifact`, instantiated with Bureau's own
+ * `cleanupReport` union (operative's `ReproductionCleanupReport` widened
+ * with `BureauShutdownReport`, the shape only a full Bureau shutdown can
+ * produce). Field order is fixed by the shared declaration: the
+ * serialization contract `assembleReproductionArtifact` relies on for byte
+ * stability lives there, not here.
  */
-export interface ReproductionArtifact {
-  readonly sourceRevision: string;
-  readonly packageVersions: Readonly<Record<string, string>>;
-  readonly effectiveModel: {
-    readonly provider: string;
-    readonly model: string;
-    readonly effort?: string;
-  };
-  readonly clockOrigin: string;
-  readonly identifierSeed: string;
-  readonly randomSeed: string;
-  readonly scriptedOutcomes: readonly ScriptedOutcome[];
-  readonly firedFaults: readonly FiredFault[];
-  readonly causalTrace: readonly CausalTraceEntry[];
-  /** Redacted per the projection already in force for the run — see `summarizeToolInput` below. */
-  readonly terminalResult: unknown;
-  readonly cleanupReport: CleanupAcknowledgement | DeferredDrainReport | BureauShutdownReport;
-}
+export type ReproductionArtifact = OperativeReproductionArtifact<
+  ReproductionCleanupReport | BureauShutdownReport
+>;
 
 /**
  * Options for {@link assembleReproductionArtifact}. Both fields are
