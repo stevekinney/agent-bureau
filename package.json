@@ -6,6 +6,7 @@
     "build": "turbo run build",
     "check-changesets": "bun run scripts/check-changesets.ts",
     "check-determinism": "bun run scripts/check-determinism.ts",
+    "check-mutation": "bun run scripts/check-mutation.ts",
     "check-runtime-matrix": "bun run scripts/check-runtime-matrix.ts",
     "check-skip-manifest": "bun run scripts/check-skip-manifest.ts",
     "check-types": "turbo run check-types",
@@ -30,7 +31,8 @@
     "changeset": "changeset",
     "version": "changeset version",
     "release": "bun run scripts/release.ts",
-    "check-package-shape": "bun run scripts/check-package-shape.ts armorer conversationalist operative"
+    "check-package-shape": "bun run scripts/check-package-shape.ts armorer conversationalist operative",
+    "mutation:baseline": "bun run scripts/check-mutation.ts --write-baseline"
   },
   "devDependencies": {
     "@changesets/cli": "3.0.0",

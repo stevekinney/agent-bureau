@@ -1,0 +1,79 @@
+{
+  "operators": [
+    "negate-boolean-condition",
+    "swap-comparison-operator",
+    "replace-returned-literal-with-default",
+    "remove-statement"
+  ],
+  "targetSets": [
+    {
+      "name": "lifecycle-transition-tables",
+      "description": "AB-92 AC1/AC2's armorer ExecutionHandle transition guards: the state checks that decide whether an execution may move from one ExecutionState to another. An unasserted branch here would let a caller drive an impossible transition (e.g. aborting an already-terminal execution) with no test catching it.",
+      "targets": [
+        {
+          "file": "packages/armorer/src/execution-lifecycle.ts",
+          "symbol": "abort",
+          "occurrence": 1,
+          "why": "Gates every ExecutionState transition abort() is allowed to cause: refuses from terminal/unknown-effect/cleanup-pending, refuses a second abort-requested, otherwise transitions to abort-requested and forwards the AbortController signal. occurrence 1 selects the per-execution closure (line ~335) over the file's unrelated bulk abort(selector, ...) method (line ~482), which shares the name but fans out to the per-execution one rather than gating a transition itself."
+        }
+      ],
+      "tests": [
+        { "path": "packages/armorer/test/execution-lifecycle.test.ts" },
+        { "path": "packages/armorer/test/execution-lifecycle-default-runtime.test.ts" }
+      ]
+    },
+    {
+      "name": "cancellation-propagation",
+      "description": "AB-92 AC3's Bureau-level cancellation boundary: Bureau.abortRun's fan-out from the public API call into the owned ActiveRun's own abort(), the one path AB-268's contract matrix drives through its 'targeted-abort' and 'root-subtree-abort' scenarios.",
+      "targets": [
+        {
+          "file": "packages/bureau/src/create-bureau.ts",
+          "symbol": "abortRun",
+          "why": "Idempotency guard (repeat call or already-settled run returns the current summary instead of re-aborting) plus the once-only abortingRunIds admission that actually calls activeRun.abort()."
+        }
+      ],
+      "tests": [
+        {
+          "path": "packages/bureau/src/create-bureau.test.ts",
+          "testNamePattern": "abortRun|aborts a running run|deleteSession aborts every run"
+        },
+        {
+          "path": "packages/integration/test/lifecycle-contract/contract.test.ts",
+          "rebuild": ["@lostgradient/operative", "bureau", "integration"]
+        }
+      ]
+    },
+    {
+      "name": "terminal-event-uniqueness",
+      "description": "AB-92 AC1's ActiveRunLiveness terminal-once guards (AB-214 review PRRT_kwDORvupsc6esZSx): status must reach 'terminal' exactly once, and settle() must attach its result and flip status atomically. A survived mutant here means a caller could observe a second terminal snapshot or a result overwritten after settlement with nothing failing.",
+      "targets": [
+        {
+          "file": "packages/operative/src/liveness/active-run-liveness.ts",
+          "symbol": "setStatus",
+          "why": "The only place LivenessLifecycleStatus advances; its own-status-unchanged short-circuit and its terminal-once guard are both load-bearing for 'no event after an acknowledged cleanup' (AB-268's structural invariant)."
+        },
+        {
+          "file": "packages/operative/src/liveness/active-run-liveness.ts",
+          "symbol": "settle",
+          "why": "Atomically attaches the terminal result and flips status in one revision; its terminal-once guard is the one thing standing between a single terminal snapshot and a caller observing settle() overwrite an already-settled result."
+        }
+      ],
+      "tests": [{ "path": "packages/operative/src/liveness/active-run-liveness.test.ts" }]
+    },
+    {
+      "name": "cleanup-ownership-resolution",
+      "description": "AB-92 AC3's armorer cleanup-acknowledgement boundary: finish() decides whether an execution's cleanup resolved (state: 'terminal') or is left unresolved for its owner to reconcile (state: 'unknown-effect'), which is the one branch ResourceScope.assertQuiescent() (AB-92 AC4) depends on to tell a leaked resource from an acknowledged one.",
+      "targets": [
+        {
+          "file": "packages/armorer/src/execution-lifecycle.ts",
+          "symbol": "finish",
+          "why": "Chooses 'unknown-effect' vs 'terminal' from the reported CleanupOutcome, retains the privileged context only on a genuinely terminal transition, and resolves the settled promise exactly once (terminal-state short-circuit at the top)."
+        }
+      ],
+      "tests": [
+        { "path": "packages/armorer/test/execution-lifecycle.test.ts" },
+        { "path": "packages/armorer/test/execution-lifecycle-default-runtime.test.ts" }
+      ]
+    }
+  ]
+}
