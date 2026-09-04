@@ -2,12 +2,13 @@
   import { Callout } from '@lostgradient/cinder/callout';
   import { PageHeader } from '@lostgradient/cinder/page-header';
   import { Chat } from '@lostgradient/chat';
-  import type { ChatSubmitEvent, MultiModalContent } from '@lostgradient/chat';
+  import type { ChatSubmitEvent } from '@lostgradient/chat';
   import { SectionHeading } from '@lostgradient/cinder/section-heading';
 
   import ReviewRow from '../components/review-row.svelte';
   import type { ChatStore } from '../hooks/use-chat.svelte';
   import type { ReviewsStore } from '../hooks/use-reviews.svelte';
+  import { extractChatMessageText } from './chat-message-text';
   import { announcePendingReviews } from './chat-review-announcements';
 
   /**
@@ -44,17 +45,8 @@
     announcePendingReviews(chat.runId, pendingReviews, announcedReviewKeys, chatComponent.announce);
   });
 
-  /** Extracts plain text from a submitted message's content. */
-  function extractText(content: string | MultiModalContent[]): string {
-    if (typeof content === 'string') return content;
-    return content
-      .filter((part) => part.type === 'text')
-      .map((part) => part.text)
-      .join('\n');
-  }
-
   function handleSubmit(event: ChatSubmitEvent): void {
-    const text = extractText(event.message.content).trim();
+    const text = extractChatMessageText(event.message.content).trim();
     if (!text) return;
     void chat.send(text);
   }

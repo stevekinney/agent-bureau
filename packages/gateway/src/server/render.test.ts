@@ -13,7 +13,10 @@ import {
 import type { UsageGroupTotals, UsageResponse } from '../routes/usage';
 import type { PendingReview, RunSummary } from '../types';
 import { createBrowserClientEnvironment } from '../ui/client-environment';
+import type { ChatStore } from '../ui/hooks/use-chat.svelte';
+import type { ReviewsStore } from '../ui/hooks/use-reviews.svelte';
 import { createReviewsStore } from '../ui/hooks/use-reviews.svelte';
+import ChatPage from '../ui/pages/chat.svelte';
 import DashboardPage from '../ui/pages/dashboard.svelte';
 import RunDetailPage from '../ui/pages/run-detail.svelte';
 import UsagePage from '../ui/pages/usage.svelte';
@@ -923,5 +926,109 @@ describe('dashboard page (Table of RunRow, and RunRow/StatusBadge by extension)'
     ]) {
       expect(rootMarkup).toContain(`>${status}<`);
     }
+  });
+});
+
+function makeChatStore(overrides: Partial<ChatStore> = {}): ChatStore {
+  return {
+    conversation: createConversationHistory({ id: 'conversation-1' }),
+    runId: undefined,
+    sending: false,
+    error: undefined,
+    sessionId: undefined,
+    streamingAssistantContent: '',
+    toolActivity: [],
+    send: async () => {},
+    handleMessage: () => {},
+    ...overrides,
+  };
+}
+
+function makeReviewsStore(overrides: Partial<ReviewsStore> = {}): ReviewsStore {
+  return {
+    reviews: [],
+    loading: false,
+    pendingId: undefined,
+    error: undefined,
+    refresh: async () => {},
+    approve: async () => {},
+    deny: async () => {},
+    ...overrides,
+  };
+}
+
+describe('chat page (every {#if} branch: errors, pending-review inline surface, tool activity)', () => {
+  it('renders no error callouts, no pending-review section, and no tool-activity section when everything is idle', async () => {
+    const chat = makeChatStore();
+    const reviews = makeReviewsStore();
+
+    const html = await renderPage({
+      title: 'Chat',
+      component: ChatPage,
+      props: { initialData: { chat, reviews }, pathname: '/', chat, reviews },
+    });
+    const rootMarkup = extractRootMarkup(html);
+
+    expect(rootMarkup).not.toContain('Chat error');
+    expect(rootMarkup).not.toContain('Review error');
+    expect(rootMarkup).not.toContain('Needs your input');
+    expect(rootMarkup).not.toContain('Tool Activity');
+  });
+
+  it('renders the chat error callout, the review error callout, an inline ReviewRow scoped to the active run, and the tool-activity log', async () => {
+    const chat = makeChatStore({
+      runId: 'run-1',
+      error: 'The provider timed out.',
+      toolActivity: ['read_file → completed', 'write_file → completed'],
+    });
+    const reviews = makeReviewsStore({
+      error: 'Could not refresh reviews.',
+      reviews: [
+        // Belongs to the active run — must render inline in the chat.
+        {
+          kind: 'human-wait',
+          id: 'review-1',
+          runId: 'run-1',
+          sessionId: 'session-1',
+          agentName: 'bureau',
+          signalName: 'human-response',
+          prompt: 'What is your name?',
+          requestedAt: 0,
+          ageMilliseconds: 0,
+        },
+        // Belongs to a DIFFERENT run — must be filtered out of the inline surface.
+        {
+          kind: 'human-wait',
+          id: 'review-2',
+          runId: 'run-2',
+          sessionId: 'session-2',
+          agentName: 'bureau',
+          signalName: 'human-response',
+          prompt: 'Unrelated question',
+          requestedAt: 0,
+          ageMilliseconds: 0,
+        },
+      ] satisfies PendingReview[],
+    });
+
+    const html = await renderPage({
+      title: 'Chat',
+      component: ChatPage,
+      props: { initialData: { chat, reviews }, pathname: '/', chat, reviews },
+    });
+    const rootMarkup = extractRootMarkup(html);
+
+    expect(rootMarkup).toContain('Chat error');
+    expect(rootMarkup).toContain('The provider timed out.');
+    expect(rootMarkup).toContain('Review error');
+    expect(rootMarkup).toContain('Could not refresh reviews.');
+
+    expect(rootMarkup).toContain('Needs your input');
+    expect(rootMarkup).toContain('What is your name?');
+    expect(rootMarkup).not.toContain('Unrelated question');
+
+    expect(rootMarkup).toContain('Tool Activity');
+    expect(rootMarkup).toContain('read_file → completed');
+    expect(rootMarkup).toContain('write_file → completed');
   });
 });
