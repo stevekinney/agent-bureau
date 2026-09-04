@@ -12,6 +12,8 @@ import {
   type SignedPendingToolApproval,
   type ToolConfiguration,
   type ToolConfigurationInput,
+  type ToolContext,
+  ToolStatusUpdateEvent,
 } from '../src';
 import { toAnthropicTools } from '../src/adapters/anthropic';
 import { toGeminiTools } from '../src/adapters/gemini';
@@ -7439,5 +7441,85 @@ describe('toolbox execute-start/progress/settled carry execution identity (AB-29
     expect(seenByOwner['run-a']).toHaveLength(1);
     expect(seenByOwner['run-b']).toHaveLength(1);
     expect(seenByOwner['run-a']![0]!.executionId).not.toBe(seenByOwner['run-b']![0]!.executionId);
+  });
+});
+
+// AB-315: `buildDefaultTool` (the path a toolbox uses to turn a raw
+// `ToolConfiguration` — as opposed to an already-built `Tool` from
+// `createTool()` — into a `Tool`) used to spread a context onto the tool
+// body that omitted `progress`/`dispatch`, so `context.progress()` inside a
+// tool registered as plain configuration silently no-opped. These tests
+// register a raw configuration (not a `createTool()`-built `Tool`, which
+// bypasses `buildDefaultTool` entirely) so they actually exercise that
+// path, matching how the direct `createTool(...).execute` path behaves.
+describe('buildDefaultTool forwards progress and dispatch to the tool body (AB-315)', () => {
+  it('reports progress from a real tool body registered as raw configuration, carrying execution identity', async () => {
+    const toolbox = createToolbox([
+      makeConfiguration({
+        name: 'buildDefaultTool-progress',
+        description: 'reports progress once then settles',
+        input: z.object({}),
+        // `ToolConfiguration['execute']` types `context` as `unknown` (see
+        // `is-tool.ts`) to stay compatible with every tool signature; a raw
+        // configuration registered on a toolbox always receives the full
+        // `RuntimeToolContext` at runtime, which this test asserts.
+        async execute(_params, rawContext) {
+          const context = rawContext as ToolContext;
+          context.progress({ percent: 50, message: 'halfway' });
+          return 'done';
+        },
+      }),
+    ]);
+
+    const seen: { percent?: number; message?: string; executionId?: string; ownerId?: string }[] =
+      [];
+    toolbox.addEventListener('progress', (event: any) => {
+      seen.push({
+        percent: event.percent,
+        message: event.message,
+        executionId: event.executionId,
+        ownerId: event.ownerId,
+      });
+    });
+
+    await toolbox.execute(
+      { id: 'build-default-tool-progress-call', name: 'buildDefaultTool-progress', arguments: {} },
+      { ownerId: 'run-progress' },
+    );
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({ percent: 50, message: 'halfway', ownerId: 'run-progress' });
+    expect(seen[0]?.executionId).toBeTruthy();
+  });
+
+  it('gives a real tool body registered as raw configuration a working dispatch that reaches the toolbox', async () => {
+    const toolbox = createToolbox([
+      makeConfiguration({
+        name: 'buildDefaultTool-dispatch',
+        description: 'dispatches a status update directly via context.dispatch',
+        input: z.object({}),
+        async execute(_params, rawContext) {
+          const context = rawContext as ToolContext;
+          expect(typeof context.dispatch).toBe('function');
+          const dispatched = context.dispatch(new ToolStatusUpdateEvent({ status: 'working' }));
+          expect(dispatched).toBe(true);
+          return 'done';
+        },
+      }),
+    ]);
+
+    const seen: { status?: string }[] = [];
+    toolbox.addEventListener('status:update', (event: any) => {
+      seen.push({ status: event.status });
+    });
+
+    await toolbox.execute({
+      id: 'build-default-tool-dispatch-call',
+      name: 'buildDefaultTool-dispatch',
+      arguments: {},
+    });
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.status).toBe('working');
   });
 });
