@@ -1,5 +1,5 @@
 import { MemoryStorage, type TextValueStore, textValueStore } from '@lostgradient/weft/storage';
-import { beforeEach, describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
 
 import { createApiKeyStore } from './create-api-key-store';
 import type { ApiKeyStore } from './types';
@@ -48,6 +48,28 @@ describe('create', () => {
     expect((rejection as Error).message).toBe('API key scope entries must be non-blank strings');
   });
 
+  it('rejects a non-array scopes value instead of silently coercing it', async () => {
+    let rejection: unknown;
+    try {
+      await store.create({ name: 'bad-scopes', scopes: 'runs:read' as unknown as string[] });
+    } catch (error) {
+      rejection = error;
+    }
+    expect(rejection).toBeInstanceOf(Error);
+    expect((rejection as Error).message).toBe('API key scopes must be an array of strings');
+  });
+
+  it('rejects a non-string scope entry instead of creating an admin key', async () => {
+    let rejection: unknown;
+    try {
+      await store.create({ name: 'non-string-scoped', scopes: [42 as unknown as string] });
+    } catch (error) {
+      rejection = error;
+    }
+    expect(rejection).toBeInstanceOf(Error);
+    expect((rejection as Error).message).toBe('API key scope entries must be non-blank strings');
+  });
+
   it('rejects delimiter-bearing scope entries instead of splitting them downstream', async () => {
     let rejection: unknown;
     try {
@@ -82,6 +104,62 @@ describe('create', () => {
     const expires = new Date(Date.now() + 86400000).toISOString();
     const result = await store.create({ name: 'expiring', expiresAt: expires });
     expect(result.key.expiresAt).toBe(expires);
+  });
+});
+
+describe('create id collisions and corrupted records', () => {
+  afterEach(() => {
+    spyOn(crypto, 'getRandomValues').mockRestore();
+  });
+
+  it('throws on a key ID collision instead of silently overwriting the existing key', async () => {
+    const fixedBytes = new Uint8Array(32).fill(7);
+    const randomSpy = spyOn(crypto, 'getRandomValues').mockImplementation(
+      (array: ArrayBufferView | null) => {
+        const view = array as Uint8Array;
+        view.set(fixedBytes.subarray(0, view.length));
+        return array;
+      },
+    );
+
+    await store.create({ name: 'first' });
+
+    let rejection: unknown;
+    try {
+      await store.create({ name: 'second' });
+    } catch (error) {
+      rejection = error;
+    }
+
+    expect(rejection).toBeInstanceOf(Error);
+    expect((rejection as Error).message).toMatch(/API key ID collision detected/);
+    randomSpy.mockRestore();
+  });
+
+  it('skips a record with unparseable JSON when listing keys', async () => {
+    await store.create({ name: 'valid-key' });
+    await kv.set('api-key:corrupted', 'not valid json');
+    const keys = await store.list();
+    expect(keys.map((key) => key.name)).toEqual(['valid-key']);
+  });
+
+  it('skips a record that is valid JSON but missing the required shape when listing keys', async () => {
+    await store.create({ name: 'valid-key-2' });
+    await kv.set('api-key:malshaped', JSON.stringify({ foo: 'bar' }));
+    const keys = await store.list();
+    expect(keys.map((key) => key.name)).toEqual(['valid-key-2']);
+  });
+
+  it('throws when rotating a key whose stored record is corrupted', async () => {
+    await kv.set('api-key:corrupted-rotate', '{"id":"corrupted-rotate"}');
+    let rejection: unknown;
+    try {
+      await store.rotate('corrupted-rotate');
+    } catch (error) {
+      rejection = error;
+    }
+    expect(rejection).toBeInstanceOf(Error);
+    expect((rejection as Error).message).toBe('API key data corrupted: corrupted-rotate');
   });
 });
 

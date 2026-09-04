@@ -182,5 +182,17 @@ describe('key management routes', () => {
       });
       expect(response.status).toBe(404);
     });
+
+    it('propagates a non-"not found" rotate failure instead of masking it as 404', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const store = createApiKeyStore(kv);
+      await kv.set('api-key:corrupted-rotate', '{"id":"corrupted-rotate"}');
+      const { app } = createApp(store);
+
+      const response = await app.request('/api/v1/keys/corrupted-rotate/rotate', {
+        method: 'POST',
+      });
+      expect(response.status).toBe(500);
+    });
   });
 });

@@ -9,11 +9,12 @@
  */
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { describe, expect, it } from 'bun:test';
+import { BureauError } from 'bureau';
 import { Hono } from 'hono';
 
 import { createTestGateway, requestJSON, waitForRunState } from '../test';
 import type { AuditRecord, AuditTrail, Bureau } from '../types';
-import { createAuditRoutes } from './audit';
+import { createAuditRoutes, createConversationRoutes, createMemoryRoutes } from './audit';
 
 const AUTH_TOKEN = 'test-token';
 const authHeaders = { authorization: `Bearer ${AUTH_TOKEN}` };
@@ -110,6 +111,105 @@ describe('GET /api/v1/memory/:namespace', () => {
     // Without memory, 503 fires before the limit validation. This is acceptable
     // — the important behavior is the route exists.
     expect([400, 503]).toContain(response.status);
+  });
+});
+
+// ── Layer A: memory namespace listing, direct route stubs ──────────
+//
+// createTestGateway's memory backend requires an embedder, so the success
+// and validation-error paths below are exercised directly against
+// createMemoryRoutes with a minimal stub `memory.list`.
+
+describe('GET /api/v1/memory/:namespace (stub memory backend)', () => {
+  function buildApp(
+    list: (options: { namespace: string; limit: number; offset: number }) => Promise<unknown[]>,
+  ) {
+    const stubBureau = { memory: { list } } as unknown as Bureau;
+    const app = new Hono();
+    app.route('/api/v1/memory', createMemoryRoutes(stubBureau));
+    return app;
+  }
+
+  it('lists records with default pagination', async () => {
+    const calls: Array<{ namespace: string; limit: number; offset: number }> = [];
+    const app = buildApp(async (options) => {
+      calls.push(options);
+      return [{ id: 'record-1' }];
+    });
+
+    const response = await app.request('/api/v1/memory/default');
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual([{ id: 'record-1' }]);
+    expect(calls).toEqual([{ namespace: 'default', limit: 100, offset: 0 }]);
+  });
+
+  it('respects explicit limit and offset query parameters', async () => {
+    const calls: Array<{ namespace: string; limit: number; offset: number }> = [];
+    const app = buildApp(async (options) => {
+      calls.push(options);
+      return [];
+    });
+
+    const response = await app.request('/api/v1/memory/default?limit=10&offset=5');
+    expect(response.status).toBe(200);
+    expect(calls).toEqual([{ namespace: 'default', limit: 10, offset: 5 }]);
+  });
+
+  it('returns 400 when limit is not a positive integer', async () => {
+    const app = buildApp(async () => []);
+    const response = await app.request('/api/v1/memory/default?limit=0');
+    expect(response.status).toBe(400);
+  });
+
+  it('returns 400 when limit is not numeric', async () => {
+    const app = buildApp(async () => []);
+    const response = await app.request('/api/v1/memory/default?limit=nope');
+    expect(response.status).toBe(400);
+  });
+
+  it('returns 400 when offset is negative', async () => {
+    const app = buildApp(async () => []);
+    const response = await app.request('/api/v1/memory/default?offset=-1');
+    expect(response.status).toBe(400);
+  });
+
+  it('returns 400 when offset is not numeric', async () => {
+    const app = buildApp(async () => []);
+    const response = await app.request('/api/v1/memory/default?offset=nope');
+    expect(response.status).toBe(400);
+  });
+});
+
+// ── Layer A: session conversation history, NOT_CONFIGURED path ─────
+
+describe('GET /api/v1/sessions/:id/conversation (stub bureau)', () => {
+  it('returns 503 when getSession throws BureauError NOT_CONFIGURED', async () => {
+    const stubBureau = {
+      getSession: async () => {
+        throw new BureauError('No session store configured', 'NOT_CONFIGURED', 'persistence');
+      },
+    } as unknown as Bureau;
+
+    const app = new Hono();
+    app.route('/api/v1/sessions', createConversationRoutes(stubBureau));
+
+    const response = await app.request('/api/v1/sessions/any/conversation');
+    expect(response.status).toBe(503);
+  });
+
+  it('rethrows a non-BureauError, non-HTTPException error from getSession', async () => {
+    const stubBureau = {
+      getSession: async () => {
+        throw new Error('boom');
+      },
+    } as unknown as Bureau;
+
+    const app = new Hono();
+    app.route('/api/v1/sessions', createConversationRoutes(stubBureau));
+    app.onError((error, context) => context.json({ error: String(error) }, 500));
+
+    const response = await app.request('/api/v1/sessions/any/conversation');
+    expect(response.status).toBe(500);
   });
 });
 

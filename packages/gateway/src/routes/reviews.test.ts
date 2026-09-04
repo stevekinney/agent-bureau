@@ -8,11 +8,15 @@ import { HumanWaitParkedEvent, stopWhen } from '@lostgradient/operative';
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { createTool, createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
-import { createBureau } from 'bureau';
+import { BureauError, createBureau } from 'bureau';
+import { Hono } from 'hono';
 import { CompletableEventTarget } from 'lifecycle';
 import { z } from 'zod';
 
+import { errorHandler } from '../middleware/error-handler';
 import { createTestGateway, requestJSON, waitForRunState } from '../test';
+import type { Bureau } from '../types';
+import { createReviewsRoutes } from './reviews';
 
 function createMockGenerate(): GenerateFunction {
   return async () => ({ content: 'Done.', toolCalls: [] });
@@ -303,5 +307,74 @@ describe('reviews routes', () => {
       body: '[]',
     });
     expect(response.status).toBe(400);
+  });
+
+  it('POST /api/v1/reviews/:id/approve returns 400 for unparseable JSON instead of a raw parse error', async () => {
+    const gateway = await createTestGateway({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    const response = await requestJSON(gateway, '/api/v1/reviews/nope/approve', {
+      method: 'POST',
+      body: '{not valid json',
+    });
+    expect(response.status).toBe(400);
+  });
+});
+
+describe('reviews routes error mapping (stub bureau)', () => {
+  function buildApp(resolveReview: Bureau['resolveReview']) {
+    const stubBureau = {
+      listPendingReviews: () => [],
+      resolveReview,
+    } as unknown as Bureau;
+    const app = new Hono();
+    app.route('/api/v1/reviews', createReviewsRoutes(stubBureau));
+    app.onError(errorHandler);
+    return app;
+  }
+
+  it('maps BureauError NOT_CONFIGURED to 503', async () => {
+    const app = buildApp(async () => {
+      throw new BureauError('No approval secret configured', 'NOT_CONFIGURED', 'approval');
+    });
+    const response = await app.request('/api/v1/reviews/any/approve', { method: 'POST' });
+    expect(response.status).toBe(503);
+  });
+
+  it('maps BureauError BAD_REQUEST to 400', async () => {
+    const app = buildApp(async () => {
+      throw new BureauError('Malformed review decision', 'BAD_REQUEST');
+    });
+    const response = await app.request('/api/v1/reviews/any/approve', { method: 'POST' });
+    expect(response.status).toBe(400);
+  });
+
+  it('maps BureauError CONFLICT to 409', async () => {
+    const app = buildApp(async () => {
+      throw new BureauError('Review already resolved', 'CONFLICT');
+    });
+    const response = await app.request('/api/v1/reviews/any/approve', { method: 'POST' });
+    expect(response.status).toBe(409);
+  });
+
+  it('maps a non-BureauError Error to 500 with its message', async () => {
+    const app = buildApp(async () => {
+      throw new Error('unexpected failure');
+    });
+    const response = await app.request('/api/v1/reviews/any/deny', { method: 'POST' });
+    expect(response.status).toBe(500);
+  });
+
+  it('maps a thrown non-Error value to 500 with its stringified form', async () => {
+    const app = buildApp(async () => {
+      // eslint-disable-next-line @typescript-eslint/only-throw-error -- exercising the toHttpException fallback for a non-Error throw
+      throw 'plain string failure';
+    });
+    const response = await app.request('/api/v1/reviews/any/deny', { method: 'POST' });
+    expect(response.status).toBe(500);
+    const body = (await response.json()) as { error: { message: string } };
+    expect(body.error.message).toBe('plain string failure');
   });
 });

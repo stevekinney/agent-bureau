@@ -274,4 +274,33 @@ describe('rate limiter', () => {
     expect(stored.timestamps).toHaveLength(1);
     expect(stored.timestamps[0]!).toBeGreaterThan(now - 1_000);
   });
+
+  it('prunes stale in-memory windows every 1000th request', async () => {
+    let now = 0;
+    const app = createApp({ limit: 1_000_000, now: () => now, windowMs: 100 });
+
+    for (let index = 0; index < 999; index += 1) {
+      const response = await app.request('/test', {
+        headers: { 'x-auth-principal': `api-key:pruning-${index}` },
+      });
+      expect(response.status).toBe(200);
+    }
+
+    now = 1_000;
+    const response = await app.request('/test', {
+      headers: { 'x-auth-principal': 'api-key:pruning-final' },
+    });
+    expect(response.status).toBe(200);
+  });
+
+  it('falls back to an empty window when a store-backed record is corrupted JSON', async () => {
+    const store = textValueStore(new MemoryStorage());
+    const headers = { 'x-auth-principal': 'api-key:corrupted-window' };
+    await store.set('gateway:rate-limit:api-key:corrupted-window', 'not valid json');
+
+    const app = createApp({ limit: 1, store, windowMs: 60_000 });
+    const response = await app.request('/test', { headers });
+
+    expect(response.status).toBe(200);
+  });
 });
