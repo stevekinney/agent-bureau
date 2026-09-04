@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.2.0
+
+### Minor Changes
+
+- 7d7ae0d: Adds AB-70's ratified portable-content and modality vocabulary — `Modality`, `MimeFamily`, `MediaLimitScope`, `MediaLimits`, `ContentSource`, and `ModalityMatrix` — to `conversationalist`'s `multi-modal` module and root export surface. These six names are additive and type-only; nothing already exported from `multi-modal.ts` is renamed, reshaped, or removed.
+
+  `@lostgradient/operative` gains AB-64's ratified `BackendDescriptor`/`ModelCatalog` surface (`packages/operative/src/providers/model-catalog.ts`, exported from `./providers` and re-exported from `./providers/index.ts`): `BackendLifecycleState`, `ModelAlias`, `EffortSupport`, `GeneratedAssetBehavior`, `BackendDescriptor`, `ModelCatalog`, `CatalogProjection`, and the synchronous, side-effect-free `createModelCatalog()` factory. The seed catalog covers every model already named by the shipped provider tables (`ANTHROPIC_EFFORT_SUPPORT`, the three `*_MODEL_ALIASES` tables, `OPENAI_REASONING_MODELS`, `GEMINI_THINKING_MODELS`, and `defaultPricingTable`), computed rather than hand-copied.
+
+  `getProviderCapabilities` is now implemented as a projection over `createModelCatalog`, with an unchanged public signature and bit-for-bit identical answers for every `(provider, baseURL, OPENAI_BASE_URL)` combination it previously reported on — this closes out the three surfaces AB-64's decision record named as provisional.
+
+- dd2ffbc: Raises the declared minimum Node.js version to `>=22` (AB-283). CI has only ever installed and exercised Node 22 — the previous declarations (`armorer`'s `^20.16.0 || >=22.3.0`, `conversationalist`'s `^20.19.0 || ^22.12.0 || >=24`, `operative`'s `>=20.19.0`) claimed lower floors nothing in this repository's CI ever proved. `scripts/check-runtime-matrix.ts` is a new gate, wired into `bun run validate`, that reads every workspace manifest's `engines` field and fails if a declared floor is not exercised by a job in `.github/workflows/ci.yml`; it caught exactly this gap. A consumer already on Node 22 or newer is unaffected; a consumer on Node 20 or 21 that was relying on the unproven lower floor should upgrade to Node 22.
+
+  The Bun floor (`>=1.4.0`) is unchanged on all three packages.
+
+- 9c34d1b: `fromMarkdown` (and `conversationFromMarkdown`) gain an optional `runtime` parameter — the AB-92/AB-252 `RuntimeServices` identifier and clock seam (AB-325). When markdown carries no frontmatter, `fromMarkdown` used to mint the conversation id, every message id, and the shared timestamp through `crypto.randomUUID()`/`new Date()` directly; it now reads them through `runtime.identifiers`/`runtime.clock`, defaulting to the real implementation (`createDefaultRuntimeServices` from `lifecycle`). The default identifier _shape_ changes as a result — `${kind}-${n}-${crypto.randomUUID()}` instead of a bare UUID — but every existing behavioral guarantee still holds unchanged: ids remain unique per call, both `conv.id` and each message `id` are still populated, and no caller inspects the literal id format. `conversationFromMarkdown` forwards `environment?.runtime` into `fromMarkdown` so a manual runtime supplied for the returned `Conversation` also controls the raw parse, closing the last non-deterministic read in conversationalist's markdown round-trip.
+- 574fc87: Add a `runtime` field to `ConversationEnvironment` (AB-321) carrying the AB-92/AB-252 `RuntimeServices` seam's `clock` and `identifiers`. `createConversationHistory`, `createConversationHistoryUnsafe`, `buildMessage`, and the `Conversation` class all read a conversation's id and timestamps through it when supplied, defaulting to a real-globals implementation (`createDefaultRuntimeServices` from `lifecycle`) when omitted — matching the pre-existing default behavior exactly. Explicit `now`/`randomId` overrides on `ConversationEnvironment` still take precedence over `runtime` when both are supplied, so no existing test double needs to change.
+
+  Also fixes a bug where `new Conversation()` (no `initial` argument) always minted its default conversation through the real globals, even when the caller supplied a custom `environment` — the constructor's default parameter value was evaluated before the environment was resolved. `new Conversation(undefined, { runtime })` now mints through the supplied runtime, which is what makes conversation ids and timestamps reproducible across two identically-seeded manual runtimes (AB-92's byte-identical reproduction guarantee).
+
 ## 1.1.0
 
 ### Minor Changes

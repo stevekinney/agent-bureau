@@ -1,5 +1,0 @@
----
-'@lostgradient/operative': minor
----
-
-Add `ResourceScope`, `QuiescenceReport`, and `createResourceScope(label, runtime)` to `@lostgradient/operative/test` (AB-92/AB-256). A `ResourceScope` registers runs, subscriptions, timers, deferred-queue items, and `ChildRunRegistry` instances a test expects to become quiescent, then proves it: `assertQuiescent()` probes the live state without aborting anything, and `close()` aborts every registered run, awaits each one's `closed()` cleanup acknowledgement (AB-204), and rejects with a `QuiescenceError` naming every resource still live — kind, identifier, owner, and how it was discovered — if anything leaked. Every leak is found through a surface a production caller can also read (`RuntimeServices`' own timer/deferred tracking, `ActiveRun.closed()`/`AgentRun.closed()`, or `ChildRunRegistry.children()`), never a private counter. Nested scopes (`scope.child(label)`) report a leak at whichever ancestor's `close()`/`assertQuiescent()` is called, with the child scope's label as that leak's owner. A deliberately detached resource is recorded under `QuiescenceReport.detached` and never counted as a leak.
