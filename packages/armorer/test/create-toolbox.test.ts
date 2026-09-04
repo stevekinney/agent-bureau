@@ -6482,9 +6482,7 @@ describe('createToolbox', () => {
       { id: 'cancel-stalled-issuance', name: 'cancel-stalled-issuance', arguments: {} },
       { ...approvalExecutionOptions, signal: controller.signal },
     );
-    for (let attempt = 0; attempt < 10 && issuanceCalls === 0; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
+    await waitUntil(() => issuanceCalls > 0, 'approval issuance to start');
     expect(issuanceCalls).toBe(1);
     controller.abort('operator cancelled');
     const cancelled = await pending;
@@ -6492,7 +6490,7 @@ describe('createToolbox', () => {
     expect(cancelled.outcome).toBe('error');
     expect(cancelled.errorCategory).toBe('cancelled');
     releaseIssuance();
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await waitUntil(() => revocations >= 3, 'all three revocation attempts to run');
     expect(revocations).toBe(3);
   });
 
@@ -6550,9 +6548,7 @@ describe('createToolbox', () => {
         ...timing.options,
       },
     );
-    for (let attempt = 0; attempt < 10 && issuanceCalls === 0; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
+    await waitUntil(() => issuanceCalls > 0, 'approval issuance to start');
     expect(issuanceCalls).toBe(1);
     timing.setNow(5);
     timing.fireLastDeadline();
@@ -6562,7 +6558,7 @@ describe('createToolbox', () => {
 
     expect(timedOut.errorCategory).toBe('timeout');
     releaseIssuance();
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await waitUntil(() => revocations >= 1, 'the late revocation attempt to run');
     expect(revocations).toBe(1);
   });
 
@@ -6609,6 +6605,7 @@ describe('createToolbox', () => {
       releaseFailedIssuance = resolve;
     });
     let failedIssuanceCalls = 0;
+    let failedIssuanceSettled = false;
     const failingToolbox = createToolbox(
       [
         createTool({
@@ -6628,6 +6625,7 @@ describe('createToolbox', () => {
           async issue() {
             failedIssuanceCalls += 1;
             await failedIssuanceGate;
+            failedIssuanceSettled = true;
             throw new Error('approval issuance unavailable');
           },
         },
@@ -6644,15 +6642,16 @@ describe('createToolbox', () => {
       { id: 'controlled-issuance-failure', name: 'controlled-issuance-failure', arguments: {} },
       { ...approvalExecutionOptions, signal: failingController.signal },
     );
-    for (let attempt = 0; attempt < 10 && failedIssuanceCalls === 0; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
+    await waitUntil(() => failedIssuanceCalls > 0, 'approval issuance to start');
     expect(failedIssuanceCalls).toBe(1);
     failingController.abort('operator cancelled');
     const failed = await failedPending;
     expect(failed.errorCategory).toBe('cancelled');
     releaseFailedIssuance();
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await waitUntil(
+      () => failedIssuanceSettled,
+      'the late issuance rejection to settle before the test ends',
+    );
   });
 
   describe('status-only policy decisions', () => {
@@ -6663,11 +6662,15 @@ describe('createToolbox', () => {
         releaseReplacementIssuance = resolve;
       });
       let issuanceCalls = 0;
+      let replacementIssuanceSettled = false;
       const approvalStateStore: typeof baseApprovalStateStore = {
         ...baseApprovalStateStore,
         async issue(binding) {
           issuanceCalls += 1;
-          if (issuanceCalls === 2) await replacementIssuanceGate;
+          if (issuanceCalls === 2) {
+            await replacementIssuanceGate;
+            replacementIssuanceSettled = true;
+          }
           await baseApprovalStateStore.issue(binding);
         },
       };
@@ -6714,9 +6717,7 @@ describe('createToolbox', () => {
         ...approvalExecutionOptions,
         signal: controller.signal,
       });
-      for (let attempt = 0; attempt < 10 && issuanceCalls < 2; attempt += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      }
+      await waitUntil(() => issuanceCalls >= 2, 'the replacement approval issuance to start');
       expect(issuanceCalls).toBe(2);
       controller.abort('operator cancelled');
       const cancelled = await pendingReplacement;
@@ -6724,7 +6725,10 @@ describe('createToolbox', () => {
       expect(cancelled.errorCategory).toBe('cancelled');
       expect(await approvalStateStore.state(initialApproval.approvalBinding!)).toBe('issued');
       releaseReplacementIssuance();
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await waitUntil(
+        () => replacementIssuanceSettled,
+        'the late replacement issuance to settle before the test ends',
+      );
     });
 
     it('requires distinct registry and tool pauses to be satisfied in policy order', async () => {

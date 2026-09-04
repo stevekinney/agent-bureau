@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from 'bun:test';
+import { createManualRuntimeServices } from 'lifecycle';
 import { z } from 'zod';
 
 import type { ToolRequestContext } from '../../src';
@@ -65,6 +66,20 @@ function createTestStore() {
   };
 }
 
+/**
+ * Polls a microtask-only predicate to completion, capped so a regression
+ * that never satisfies it fails the test fast instead of hanging CI in an
+ * unbounded busy-wait loop.
+ */
+async function waitUntil(predicate: () => boolean, description: string): Promise<void> {
+  const maximumAttempts = 1_000;
+  for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
+    if (predicate()) return;
+    await Promise.resolve();
+  }
+  throw new Error(`waitUntil timed out after ${maximumAttempts} microtask ticks: ${description}`);
+}
+
 describe('withToolboxIdempotency', () => {
   let cache: ToolResultCache;
   let addCallCount: number;
@@ -73,9 +88,15 @@ describe('withToolboxIdempotency', () => {
   beforeEach(() => {
     addCallCount = 0;
     mulCallCount = 0;
+    // A constant `now` keeps this shared cache's own TTL bookkeeping
+    // (`isExpired`, `expiresAt`) off the real clock. The one test that
+    // exercises TTL expiration ("uses the cache wall clock for TTL
+    // expiration...") builds its own dedicated cache with an explicit
+    // crafted clock rather than using this shared one.
     cache = createToolResultCache({
       store: createTestStore(),
       defaultTTL: 60_000,
+      now: () => 0,
     });
   });
 
@@ -330,7 +351,7 @@ describe('withToolboxIdempotency', () => {
     const legacyCompleted: CachedToolResult = {
       result: 99,
       toolName: 'add',
-      executedAt: Date.now(),
+      executedAt: createManualRuntimeServices().clock.now(),
       ttl: 60_000,
     };
     await cache.set(key, legacyCompleted);
@@ -357,7 +378,7 @@ describe('withToolboxIdempotency', () => {
     await cache.set(key, {
       result: 99,
       toolName: 'add',
-      executedAt: Date.now(),
+      executedAt: createManualRuntimeServices().clock.now(),
       ttl: 60_000,
       policyRevision: 'policy:1',
       input: '{invalid',
@@ -383,7 +404,7 @@ describe('withToolboxIdempotency', () => {
     await cache.set(key, {
       result: 99,
       toolName: 'add',
-      executedAt: Date.now(),
+      executedAt: createManualRuntimeServices().clock.now(),
       ttl: 60_000,
       policyRevision: 'policy:1',
     });
@@ -619,7 +640,7 @@ describe('withToolboxIdempotency', () => {
   it('returns unknown-outcome when a key was started without a recorded result', async () => {
     const toolbox = createToolbox([createToolWithKey()]);
     const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
-    const startedAt = Date.now();
+    const startedAt = createManualRuntimeServices().clock.now();
 
     await cache.claimStarted(expectedCacheKey('tenant-a', 'default:add', 'add:started-key'), {
       status: 'started',
@@ -969,7 +990,7 @@ describe('withToolboxIdempotency', () => {
       {
         status: 'started',
         toolName: 'add',
-        startedAt: Date.now(),
+        startedAt: createManualRuntimeServices().clock.now(),
         ttl: 60_000,
         attemptId: 'original-attempt',
         inputDigest: fullInputKey({ a: 1, b: 2 }),
@@ -1001,7 +1022,7 @@ describe('withToolboxIdempotency', () => {
           toolRevision: 'default:add',
           decision: 'retry',
           evidence: 'Operator confirmed the original side effect did not occur.',
-          authorizedAt: Date.now(),
+          authorizedAt: createManualRuntimeServices().clock.now(),
           authorizedBy: 'operator-1',
           nonce: 'receipt-1',
           authorization: 'authorized-signature',
@@ -1785,7 +1806,7 @@ describe('withToolboxIdempotency', () => {
 
     const callerKey = 'orchestrator-tool-call-id-abc123';
     const cacheKey = expectedCacheKey('tenant-a', 'default:charge', `charge:${callerKey}`);
-    const startedAt = Date.now();
+    const startedAt = createManualRuntimeServices().clock.now();
 
     // Simulate a previous attempt that claimed the started entry and then died
     // before recording any result — the orphaned "started" state.
@@ -1901,7 +1922,7 @@ describe('withToolboxIdempotency', () => {
     const completed = {
       result: 99,
       toolName: 'add',
-      executedAt: Date.now(),
+      executedAt: createManualRuntimeServices().clock.now(),
       ttl: 60_000,
       policyRevision: 'policy:1',
       input: JSON.stringify({ a: 1, b: 2 }),
@@ -1955,18 +1976,28 @@ describe('withToolboxIdempotency', () => {
     expect(executions).toBe(0);
   });
 
-  it('renews active leases and stops completion after losing a fence', async () => {
-    let renewals = 0;
-    const slowTool = createTool({
-      name: 'slow-add',
-      description: 'Waits before adding',
+  function createDeferredTool(name: string) {
+    let release!: (value: number) => void;
+    const gate = new Promise<number>((resolve) => {
+      release = resolve;
+    });
+    const tool = createTool({
+      name,
+      description: 'Waits before adding, driven by a manually-released deferred',
       input: z.object({ value: z.number() }),
       idempotencyKey: (input: unknown) => fullInputKey(input),
       async execute({ value }) {
-        await new Promise((resolve) => setTimeout(resolve, 12));
+        await gate;
         return value + 1;
       },
     });
+    return { tool, release };
+  }
+
+  it('renews active leases entirely through ManualRuntimeServices.advance, with no real timer', async () => {
+    const runtime = createManualRuntimeServices();
+    let renewals = 0;
+    const { tool: slowTool, release } = createDeferredTool('slow-add');
     const renewingCache: ToolResultCache = {
       ...cache,
       async renewStarted(key, attemptId, leaseExpiresAt, observedAt) {
@@ -1974,34 +2005,61 @@ describe('withToolboxIdempotency', () => {
         return cache.renewStarted(key, attemptId, leaseExpiresAt, observedAt);
       },
     };
-    const result = await withToolboxIdempotency(createToolbox([slowTool]), {
+    const execution = withToolboxIdempotency(createToolbox([slowTool]), {
       cache: renewingCache,
       tenantId: 'tenant-a',
       leaseDurationMs: 4,
       maximumExecutionDurationMs: 100,
+      runtime,
     }).execute({ name: 'slow-add', arguments: { value: 1 } });
-    expect(result.result).toBe(2);
+
+    // The renewal timer is armed at half the lease duration (2ms) — wait for
+    // it to appear on the manual runtime's own bookkeeping rather than a
+    // real timer.
+    await waitUntil(
+      () => runtime.pendingTimers().length > 0,
+      'lease-renewal timer armed on the manual runtime',
+    );
+    await runtime.advance(2);
     expect(renewals).toBeGreaterThan(0);
 
-    const deadlineTool = createTool({
-      name: 'deadline-renewal',
-      description: 'deadline renewal',
-      input: z.object({}),
-      idempotencyKey: () => 'deadline-renewal',
-      async execute() {
-        await new Promise((resolve) => setTimeout(resolve, 20));
-        return 'done';
-      },
+    release(1);
+    const result = await execution;
+    expect(result.result).toBe(2);
+  });
+
+  it('fences completion once the deadline elapses while the tool is still running', async () => {
+    const runtime = createManualRuntimeServices();
+    const deadlineCache = createToolResultCache({
+      store: createTestStore(),
+      defaultTTL: 60_000,
+      now: runtime.clock.now,
     });
-    const deadlineResult = await withToolboxIdempotency(createToolbox([deadlineTool]), {
-      cache,
+    const { tool: deadlineTool, release } = createDeferredTool('deadline-renewal');
+    const execution = withToolboxIdempotency(createToolbox([deadlineTool]), {
+      cache: deadlineCache,
       tenantId: 'tenant-a',
       leaseDurationMs: 10,
       maximumExecutionDurationMs: 5,
-    }).execute({ name: deadlineTool.name, arguments: {} });
+      runtime,
+    }).execute({ name: deadlineTool.name, arguments: { value: 0 } });
+
+    await waitUntil(
+      () => runtime.pendingTimers().length > 0,
+      'lease-renewal and deadline-cancel timers armed on the manual runtime',
+    );
+    // Advance past the absolute deadline (5ms) while the tool is still
+    // waiting on its deferred — the deadline-cancel timer only stops
+    // renewal, it never aborts the in-flight execute.
+    await runtime.advance(5);
+
+    release(0);
+    const deadlineResult = await execution;
     expect(deadlineResult.outcome).toBe('action_required');
     expect(deadlineResult.idempotency?.outcome).toBe('unknown-outcome');
+  });
 
+  it('reports unknown outcome when the completion fence or the initial/scheduled renewal is lost', async () => {
     const lostFenceCache: ToolResultCache = {
       ...cache,
       completeStarted: async () => false,
@@ -2025,19 +2083,24 @@ describe('withToolboxIdempotency', () => {
     expect(unknown.outcome).toBe('action_required');
     expect(addCallCount).toBe(1);
 
+    // The initial renewal fails before the tool is ever invoked, so this
+    // needs no timer or deferred at all.
+    const { tool: neverInvokedTool } = createDeferredTool('slow-add-never-invoked');
     const failedRenewalCache: ToolResultCache = {
       ...cache,
       renewStarted: async () => false,
     };
-    const lostInitialFence = await withToolboxIdempotency(createToolbox([slowTool]), {
+    const lostInitialFence = await withToolboxIdempotency(createToolbox([neverInvokedTool]), {
       cache: failedRenewalCache,
       tenantId: 'tenant-c',
       leaseDurationMs: 4,
       maximumExecutionDurationMs: 100,
-    }).execute({ name: 'slow-add', arguments: { value: 2 } });
+    }).execute({ name: 'slow-add-never-invoked', arguments: { value: 2 } });
     expect(lostInitialFence.outcome).toBe('action_required');
     expect(lostInitialFence.idempotency?.outcome).toBe('unknown-outcome');
 
+    const runtime = createManualRuntimeServices();
+    const { tool: renewalFailureTool, release } = createDeferredTool('slow-add-renewal-failure');
     let renewalCalls = 0;
     const rejectedScheduledRenewalCache: ToolResultCache = {
       ...cache,
@@ -2047,12 +2110,25 @@ describe('withToolboxIdempotency', () => {
         throw new Error('lease storage unavailable');
       },
     };
-    const renewalFailure = await withToolboxIdempotency(createToolbox([slowTool]), {
+    const execution = withToolboxIdempotency(createToolbox([renewalFailureTool]), {
       cache: rejectedScheduledRenewalCache,
       tenantId: 'tenant-d',
       leaseDurationMs: 4,
       maximumExecutionDurationMs: 100,
-    }).execute({ name: 'slow-add', arguments: { value: 2 } });
+      runtime,
+    }).execute({ name: 'slow-add-renewal-failure', arguments: { value: 2 } });
+
+    await waitUntil(
+      () => runtime.pendingTimers().length > 0,
+      'lease-renewal timer armed on the manual runtime',
+    );
+    // Advance past the renewal interval so the mock's second call — the one
+    // that throws — actually runs before the tool's work "completes".
+    await runtime.advance(2);
+    await waitUntil(() => renewalCalls >= 2, 'second renewStarted call to have run and thrown');
+
+    release(2);
+    const renewalFailure = await execution;
     expect(renewalFailure.outcome).toBe('action_required');
     expect(renewalFailure.idempotency?.outcome).toBe('unknown-outcome');
   });
@@ -2106,15 +2182,19 @@ describe('withToolboxIdempotency', () => {
     await renewalStarted;
     controller.abort('cancel pending renewal');
     releaseTool();
-    expect(
-      await Promise.race([
-        execution.then(
-          () => 'settled',
-          () => 'settled',
-        ),
-        new Promise<'blocked'>((resolve) => setTimeout(() => resolve('blocked'), 50)),
-      ]),
-    ).toBe('settled');
+    // Proves settlement without waiting for the in-flight renewal: a bounded
+    // microtask poll (waitUntil throws loudly on its own cap rather than
+    // silently reporting "blocked") replaces racing a real timer.
+    let settled = false;
+    void execution.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await waitUntil(() => settled, 'execution to settle without waiting for pending renewal');
     releaseRenewal();
     await renewalReleased;
     await Promise.resolve();
@@ -2201,39 +2281,38 @@ describe('withToolboxIdempotency', () => {
   });
 
   it('checks the deadline before starting a queued renewal', async () => {
+    const runtime = createManualRuntimeServices();
     let renewals = 0;
-    let clockIndex = 0;
-    let releaseFirstRenewal!: () => void;
-    const firstRenewalReleased = new Promise<void>((resolve) => {
-      releaseFirstRenewal = resolve;
-    });
-    const slowTool = createTool({
-      name: 'queued-renewal',
-      description: 'Waits for queued lease renewal',
-      input: z.object({ value: z.number() }),
-      idempotencyKey: (input: unknown) => fullInputKey(input),
-      async execute({ value }) {
-        await new Promise((resolve) => setTimeout(resolve, 8));
-        releaseFirstRenewal();
-        return value;
-      },
-    });
+    const { tool: slowTool, release } = createDeferredTool('queued-renewal');
     const renewalCache: ToolResultCache = {
       ...cache,
       async renewStarted(key, attemptId, leaseExpiresAt, observedAt) {
         renewals += 1;
-        if (renewals === 2) await firstRenewalReleased;
         return cache.renewStarted(key, attemptId, leaseExpiresAt, observedAt);
       },
     };
 
-    const result = await withToolboxIdempotency(createToolbox([slowTool]), {
+    const execution = withToolboxIdempotency(createToolbox([slowTool]), {
       cache: renewalCache,
       tenantId: 'tenant-a',
+      // The renewal interval (floor(4 / 2) = 2ms) lands exactly at the
+      // absolute deadline (2ms), so the scheduled renewal's own deadline
+      // check must stop it before it ever calls cache.renewStarted a
+      // second time — proving the check runs before the queued renewal
+      // starts, not after.
       leaseDurationMs: 4,
-      maximumExecutionDurationMs: 10,
-      now: () => [0, 0, 100][clockIndex++] ?? 100,
+      maximumExecutionDurationMs: 2,
+      runtime,
     }).execute({ name: 'queued-renewal', arguments: { value: 7 } });
+
+    await waitUntil(
+      () => runtime.pendingTimers().length > 0,
+      'lease-renewal and deadline-cancel timers armed on the manual runtime',
+    );
+    await runtime.advance(2);
+
+    release(7);
+    const result = await execution;
 
     expect(result.outcome).toBe('action_required');
     expect(result.idempotency?.outcome).toBe('unknown-outcome');
@@ -2246,7 +2325,7 @@ describe('withToolboxIdempotency', () => {
     const started = {
       status: 'started' as const,
       toolName: 'add',
-      startedAt: Date.now(),
+      startedAt: createManualRuntimeServices().clock.now(),
       ttl: 60_000,
       attemptId: 'original-attempt',
       inputDigest: fullInputKey({ a: 1, b: 2 }),
@@ -2255,7 +2334,7 @@ describe('withToolboxIdempotency', () => {
       status: 'completed' as const,
       result: 42,
       toolName: 'add',
-      executedAt: Date.now(),
+      executedAt: createManualRuntimeServices().clock.now(),
       ttl: 60_000,
       policyRevision: 'policy:1',
       input: JSON.stringify({ a: 1, b: 2 }),
@@ -2285,7 +2364,7 @@ describe('withToolboxIdempotency', () => {
           toolRevision: 'default:add',
           decision: 'retry',
           evidence: 'Provider ledger proves no side effect occurred.',
-          authorizedAt: Date.now(),
+          authorizedAt: createManualRuntimeServices().clock.now(),
           authorizedBy: 'operator-a',
           nonce: 'receipt-race',
           authorization: 'signed-receipt',
@@ -2318,7 +2397,7 @@ describe('withToolboxIdempotency', () => {
           toolRevision: 'default:add',
           decision: 'retry',
           evidence: 'Provider ledger proves no side effect occurred.',
-          authorizedAt: Date.now(),
+          authorizedAt: createManualRuntimeServices().clock.now(),
           authorizedBy: 'operator-a',
           nonce: 'receipt-race-2',
           authorization: 'signed-receipt',
@@ -2354,7 +2433,7 @@ describe('withToolboxIdempotency', () => {
           toolRevision: 'default:add',
           decision: 'retry',
           evidence: 'Provider ledger proves no side effect occurred.',
-          authorizedAt: Date.now(),
+          authorizedAt: createManualRuntimeServices().clock.now(),
           authorizedBy: 'operator-a',
           nonce: 'receipt-race-3',
           authorization: 'signed-receipt',
@@ -2491,8 +2570,9 @@ describe('withToolboxIdempotency', () => {
       {
         requestContext: {
           ...createTestRequestContext('tenant-a'),
-          deadline: Date.now() + 1_000,
+          deadline: 1_000,
         },
+        now: () => 0,
       },
     );
     expect(completedBeforeDeadline.result).toBe(9);
@@ -2522,7 +2602,7 @@ describe('withToolboxIdempotency', () => {
     await cache.claimStarted(key, {
       status: 'started',
       toolName: 'add',
-      startedAt: Date.now(),
+      startedAt: createManualRuntimeServices().clock.now(),
       ttl: 60_000,
       attemptId: 'digest-attempt',
       inputDigest: fullInputKey({ a: 1, b: 2 }),
@@ -2544,7 +2624,7 @@ describe('withToolboxIdempotency', () => {
           toolRevision: 'default:add',
           decision: 'retry',
           evidence: 'operator checked the original arguments',
-          authorizedAt: Date.now(),
+          authorizedAt: createManualRuntimeServices().clock.now(),
           authorizedBy: 'operator-a',
           nonce: 'digest-nonce',
           authorization: 'signed',
@@ -2642,7 +2722,7 @@ describe('withToolboxIdempotency', () => {
     const started = {
       status: 'started' as const,
       toolName: 'add',
-      startedAt: Date.now(),
+      startedAt: createManualRuntimeServices().clock.now(),
       ttl: 60_000,
       attemptId: 'control-attempt',
       inputDigest: fullInputKey(call.arguments),
@@ -2658,7 +2738,7 @@ describe('withToolboxIdempotency', () => {
       toolRevision: 'default:add',
       decision: 'retry' as const,
       evidence: 'operator checked the side effect',
-      authorizedAt: Date.now(),
+      authorizedAt: createManualRuntimeServices().clock.now(),
       authorizedBy: 'operator-a',
       nonce: 'control-nonce',
       authorization: 'signed',
@@ -2685,7 +2765,7 @@ describe('withToolboxIdempotency', () => {
       toolRevision: 'default:add',
       decision: 'retry' as const,
       evidence: 'operator verified the original attempt',
-      authorizedAt: Date.now(),
+      authorizedAt: createManualRuntimeServices().clock.now(),
       authorizedBy: 'operator-a',
       nonce: `deferred-${attemptId}`,
       authorization: 'signed',
