@@ -2494,8 +2494,8 @@ const result = await activeRun.result;
 
 **Session-input admission types:** `SessionInputDeliveryMode`, `UserAdmissibleContent`, `SessionInputPayload`, `SessionInputRecord`, `SessionInputAdmissionRequest`, `SessionInputReceipt`, `SessionInputConflict`, `SessionInputAdmissionOutcome`, `SessionInputState`, `SessionInputPromotion`, `SessionInputFailure`.
 
-> [!NOTE] Durable event history types (AB-91's `ab91-01` slice, AB-310)
-> `@lostgradient/operative/durable` also exports `DurableEventOwnerKind` (`'run' | 'session'`), `DurableEventOwner`, `DurableEventEnvelope`, `DurableEventPage`, and `DurableEventGap` — the wire types Bureau's `durable-event-history.ts` store and `Bureau.eventHistory(owner, options?)` read/return. `DurableEventEnvelope` is a redacted, owner-scoped projection of Weft's own `FleetEventEnvelope`, carrying a new `schemaVersion` field Weft's envelope does not have. `DurableEventGap` is returned instead of a `DurableEventPage` when a caller's `since` cursor predates the store's retention floor — distinguishable from an ordinary empty page.
+> [!NOTE] Durable event history types (AB-91's `ab91-01` slice, AB-310; widened by AB-320)
+> `@lostgradient/operative/durable` also exports `DurableEventOwnerKind` (`'run' | 'session' | 'schedule'` — `'schedule'` added by AB-320, owning a schedule's four definition events only; a scheduled fire stays on the `'run'` owner), `DurableEventOwner`, `DurableEventEnvelope`, `DurableEventPage`, and `DurableEventGap` — the wire types Bureau's `durable-event-history.ts` store and `Bureau.eventHistory(owner, options?)` read/return. `DurableEventEnvelope` is a redacted, owner-scoped projection of Weft's own `FleetEventEnvelope`, carrying a new `schemaVersion` field Weft's envelope does not have. `DurableEventGap` is returned instead of a `DurableEventPage` when a caller's `since` cursor predates the store's retention floor — distinguishable from an ordinary empty page.
 
 **Durable event history types:** `DurableEventOwnerKind`, `DurableEventOwner`, `DurableEventEnvelope`, `DurableEventPage`, `DurableEventGap`.
 
