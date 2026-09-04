@@ -929,7 +929,7 @@ describe('createLazyAgent', () => {
     const snapshot = run.snapshot();
 
     expect(snapshot.startedAt).toBe(runtime.clock.nowISO());
-    expect(snapshot.observedAt).toBe(runtime.clock.now());
+    expect(snapshot.observedAt).toBe(runtime.monotonic.now());
   });
 
   it('AB-88/AB-214: snapshot()/subscribeSnapshot() read a synthetic created snapshot before resolution and delegate once resolved', async () => {

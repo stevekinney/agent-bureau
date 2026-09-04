@@ -293,9 +293,9 @@ export interface SelectOptions {
   readonly agent?: AgentPreferences;
   readonly delegated?: DelegatedAuthority;
   readonly user?: UserModelConfiguration;
-  /** Defaults to the wall clock; inject in tests for byte-stable plans. */
+  /** Defaults to `runtime.clock.nowISO()` (the real implementation when `runtime` is also omitted); inject in tests for byte-stable plans. */
   readonly now?: () => string;
-  /** Defaults to `crypto.randomUUID`; inject in tests for byte-stable plans. */
+  /** Defaults to `runtime.identifiers.next('selection-plan')` (the real implementation when `runtime` is also omitted); inject in tests for byte-stable plans. */
   readonly newPlanId?: () => string;
   /**
    * The AB-92/AB-252 `RuntimeServices` seam (AB-325) backing the default

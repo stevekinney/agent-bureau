@@ -435,7 +435,7 @@ export function createDeferredAgentRun<O, H extends boolean>(
       reachability: syntheticTerminal ? 'not-applicable' : 'unknown',
       progress: syntheticTerminal ? 'not-applicable' : 'unknown',
       assessment: syntheticTerminal ? 'terminal' : 'healthy',
-      observedAt: runtime.clock.now(),
+      observedAt: runtime.monotonic.now(),
       missedPulseCount: 0,
       policyVersion: LIVENESS_POLICY_VERSION,
       evidence: [],
