@@ -90,13 +90,25 @@ describe('GET .../:id/events — durable event history paging', () => {
     expect(body.error.code).toBe('UNSUPPORTED_CAPABILITY');
   });
 
-  it('maps a thrown error (malformed cursor/limit) to 400', async () => {
+  it('maps a bureau validation error (its own "Durable event history:" prefix) to 400', async () => {
     const app = buildApp(async () => {
       throw new Error('Durable event history: invalid cursor "not-a-cursor".');
     });
 
     const response = await app.request('/run-1/events?since=not-a-cursor');
     expect(response.status).toBe(400);
+  });
+
+  it('maps a non-validation error (e.g. a storage I/O failure) to 500, without leaking its message', async () => {
+    const app = buildApp(async () => {
+      throw new Error('sqlite: disk I/O error');
+    });
+
+    const response = await app.request('/run-1/events');
+    expect(response.status).toBe(500);
+    const text = await response.text();
+    expect(text).not.toContain('sqlite');
+    expect(text).not.toContain('disk I/O');
   });
 
   it('rejects a non-integer "limit" with 400 before ever calling bureau.eventHistory', async () => {

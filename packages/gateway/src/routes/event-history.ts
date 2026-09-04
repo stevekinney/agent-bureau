@@ -18,6 +18,17 @@ import { projectDurableEventForPrivilege } from '../live-events';
 import { isPrivilegedGatewayConnection } from '../middleware/authentication';
 import type { Bureau, EventHistoryUnsupportedOutcome } from '../types';
 
+/**
+ * `packages/bureau/src/durable-event-history.ts`'s own validation-error
+ * message prefix (`decodeSincePosition`'s bad-cursor `Error`, `page()`'s
+ * bad-limit `RangeError`) — the only thrown errors this route may safely
+ * report as a 400. Anything else (a storage I/O failure inside
+ * `snapshotRetentionFloor()`/`replay()`, say) is a server-side failure,
+ * not a caller mistake, and must not be reported — or have its message
+ * leaked — as one (copilot review, PR #505).
+ */
+const DURABLE_EVENT_HISTORY_VALIDATION_ERROR_PREFIX = 'Durable event history:';
+
 /** Parses and validates the `limit` query parameter. Throws a 400 `HTTPException` for anything malformed. */
 function parseLimit(raw: string | undefined): number | undefined {
   if (raw === undefined) {
@@ -63,8 +74,11 @@ function isUnsupported(
  * persistent storage backend configured) → 501, matching the existing
  * `NOT_CONFIGURED`/`UNSUPPORTED_CAPABILITY` convention `sessions.ts`
  * already uses for the same missing-durable-backend case; a malformed
- * `since` cursor or `limit` (caught from `bureau.eventHistory`'s own thrown
- * `Error`/`RangeError`, or from this module's own `limit` parsing) → 400.
+ * `since` cursor or `limit` — this module's own `limit` parsing, or a
+ * `bureau.eventHistory` rejection whose message carries the store's own
+ * `"Durable event history:"` validation prefix — → 400. Any OTHER thrown
+ * error (a storage I/O failure, say) is a server-side fault → 500, with a
+ * generic message rather than the raw error leaked to the caller.
  */
 export async function respondWithEventHistoryPage(
   context: Context,
@@ -82,8 +96,15 @@ export async function respondWithEventHistoryPage(
       ...(limit !== undefined ? { limit } : {}),
     });
   } catch (error) {
-    throw new HTTPException(400, {
-      message: error instanceof Error ? error.message : 'Invalid "since" cursor or "limit"',
+    if (
+      error instanceof Error &&
+      error.message.startsWith(DURABLE_EVENT_HISTORY_VALIDATION_ERROR_PREFIX)
+    ) {
+      throw new HTTPException(400, { message: error.message });
+    }
+    throw new HTTPException(500, {
+      message: 'Durable event history lookup failed.',
+      cause: error,
     });
   }
 

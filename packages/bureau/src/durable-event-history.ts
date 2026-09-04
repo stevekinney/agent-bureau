@@ -473,8 +473,15 @@ const RUN_DURABLE_ACTION_TYPES = new Set<string>([
  * would double-deliver the same terminal fact. Exported here, rather than
  * re-declared as a second literal list in `packages/gateway`, so the two
  * packages can never drift out of sync on which kinds this applies to.
+ *
+ * A DEFENSIVE COPY, never the same `Set` instance as
+ * {@link RUN_DURABLE_ACTION_TYPES} — a `Set` is mutable at runtime
+ * regardless of its `ReadonlySet` type, so exporting the internal instance
+ * directly would let a downstream mutation (accidental or otherwise) also
+ * corrupt this module's own `createDurableEventProducer` classification
+ * (copilot review, PR #505).
  */
-export const RUN_DURABLE_EVENT_TYPES: ReadonlySet<string> = RUN_DURABLE_ACTION_TYPES;
+export const RUN_DURABLE_EVENT_TYPES: ReadonlySet<string> = new Set(RUN_DURABLE_ACTION_TYPES);
 
 /**
  * `session.*` action types AB-87's matrix classifies as durable — the
