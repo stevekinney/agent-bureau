@@ -205,10 +205,12 @@ async function readProbeEnvironment(): Promise<{
     const manifestPath = join(root, 'packages', directoryName, 'package.json');
     if (!(await Bun.file(manifestPath).exists())) continue;
     const manifest = JSON.parse(await Bun.file(manifestPath).text()) as {
-      name?: string;
-      version?: string;
+      name?: unknown;
+      version?: unknown;
     };
-    if (manifest.name && manifest.version) entries.push([manifest.name, manifest.version]);
+    if (typeof manifest.name === 'string' && typeof manifest.version === 'string') {
+      entries.push([manifest.name, manifest.version]);
+    }
   }
   entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
   return { sourceRevision, packageVersions: Object.fromEntries(entries) };
@@ -310,7 +312,7 @@ export async function runHarnessProbe(): Promise<HarnessProbeOutcome> {
       \`harness probe: artifact.sourceRevision did not come from the explicit environment argument\`,
     );
   }
-  if (artifact.packageVersions !== packageVersions) {
+  if (JSON.stringify(artifact.packageVersions) !== JSON.stringify(packageVersions)) {
     throw new Error(
       \`harness probe: artifact.packageVersions did not come from the explicit environment argument\`,
     );
