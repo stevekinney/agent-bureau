@@ -1,7 +1,7 @@
 import { createTool, createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
-import { createManualRuntimeServices } from 'lifecycle';
+import { createDefaultRuntimeServices, createManualRuntimeServices } from 'lifecycle';
 import { z } from 'zod';
 
 import { createAgentRun } from '../agent-run';
@@ -200,6 +200,33 @@ describe('EventRecorder', () => {
       expect(resultOne.runId).toBe('identifier-1');
       expect(resultTwo.runId).toBe('identifier-2');
       expect(resultOne.runId).not.toBe(first.runId);
+    });
+
+    it("rewrites the default runtime's `${kind}-${n}-${uuid}` identifiers too, not only the manual runtime's shape", () => {
+      const runtime = createDefaultRuntimeServices();
+      const recorder = createEventRecorder(runtime);
+      const target = new EventTarget();
+
+      interface IdEventMap {
+        'id.seen': Event & { readonly runId: string };
+      }
+
+      recorder.attach<IdEventMap>(target, { kind: 'local', id: 't' }, ['id.seen']);
+
+      const first = new Event('id.seen') as Event & { runId: string };
+      first.runId = runtime.identifiers.next('run');
+      const second = new Event('id.seen') as Event & { runId: string };
+      second.runId = runtime.identifiers.next('run');
+
+      target.dispatchEvent(first);
+      target.dispatchEvent(second);
+
+      const [entryOne, entryTwo] = recorder.normalize();
+      const resultOne = entryOne?.result as { runId: string };
+      const resultTwo = entryTwo?.result as { runId: string };
+
+      expect(resultOne.runId).toBe('identifier-1');
+      expect(resultTwo.runId).toBe('identifier-2');
     });
 
     it('projects array-valued and identifier-array-valued fields on a captured event', async () => {

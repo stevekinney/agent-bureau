@@ -44,9 +44,9 @@ export interface ManualRuntimeServices extends RuntimeServices {
   readonly identifierSeed: string;
   /**
    * The short, stable prefix {@link deriveIdentifierPrefix} derived from
-   * {@link identifierSeed} and embeds on every identifier
-   * {@link ManualRuntimeServices.identifiers}`.next(kind)` mints. Exposed
-   * so a test can derive an expected identifier
+   * {@link identifierSeed} and embedded on every identifier this
+   * instance's `identifiers.next(kind)` mints. Exposed so a test can
+   * derive an expected identifier
    * (`` `${runtime.identifierPrefix}-${kind}-${n}` ``) instead of pinning a
    * literal string that would drift with the seed.
    */
@@ -91,8 +91,9 @@ export interface CreateManualRuntimeServicesOptions {
    * `` `${prefix}-${kind}-${n}` ``, where `prefix` is
    * {@link deriveIdentifierPrefix}`(identifierSeed)` and `n` is a per-`kind`
    * counter starting at 1 — so two instances constructed with different
-   * seeds can never mint the same identifier, while two instances
-   * constructed with the same seed still mint byte-identical sequences
+   * seeds are, barring a hash collision, extremely unlikely to mint the
+   * same identifier, while two instances constructed with the same seed
+   * still mint byte-identical sequences
    * (AB-92). Omit it to get a generated, process-unique seed instead (see
    * {@link ManualRuntimeServices.identifierSeed}); pass an explicit value
    * for a reproducible sequence.

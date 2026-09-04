@@ -420,9 +420,9 @@ console.log(result); // 'https://example.com/api?plugin=true'
 
 **Signature:** `function createManualRuntimeServices(options?: CreateManualRuntimeServicesOptions): ManualRuntimeServices`
 
-`createManualRuntimeServices()` is the deterministic, injectable implementation of the `RuntimeServices` contract — a test or a durable-recovery path swaps it in for `createDefaultRuntimeServices()`'s real-globals implementation. Every identifier its `identifiers.next(kind)` mints has the shape `` `${identifierPrefix}-${kind}-${n}` ``, where `n` is a per-`kind` counter starting at 1 and `identifierPrefix` is a short, stable derivation of the instance's `identifierSeed` (Coordinator ruling on AB-337).
+`createManualRuntimeServices()` is the deterministic, injectable implementation of the `RuntimeServices` contract — a test or a durable-recovery path swaps it in for `createDefaultRuntimeServices()`'s real-globals implementation. Every identifier its `identifiers.next(kind)` mints has the shape `` `${identifierPrefix}-${kind}-${n}` ``, where `n` is a per-`kind` counter starting at 1 and `identifierPrefix` is a short, stable hash-derivation of the instance's `identifierSeed` (Coordinator ruling on AB-337).
 
-This means two `ManualRuntimeServices` instances constructed with **different** `identifierSeed`s can never mint the same identifier — their prefixes differ, so their identifier sets are disjoint — while two instances constructed with the **same** `identifierSeed` still mint byte-identical sequences (AB-92's reproduction guarantee is unchanged).
+This means two `ManualRuntimeServices` instances constructed with **different** `identifierSeed`s are, barring a hash collision, extremely unlikely to mint the same identifier — their prefixes almost certainly differ, so their identifier sets are practically disjoint — while two instances constructed with the **same** `identifierSeed` still mint byte-identical sequences (AB-92's reproduction guarantee is unchanged).
 
 ```typescript
 import { createManualRuntimeServices } from 'lifecycle';
@@ -431,7 +431,7 @@ const a = createManualRuntimeServices({ identifierSeed: 'runtime-a' });
 const b = createManualRuntimeServices({ identifierSeed: 'runtime-b' });
 
 a.identifiers.next('conversation'); // `${a.identifierPrefix}-conversation-1`
-b.identifiers.next('conversation'); // `${b.identifierPrefix}-conversation-1` — never collides with a's
+b.identifiers.next('conversation'); // `${b.identifierPrefix}-conversation-1` — practically never collides with a's
 
 const c = createManualRuntimeServices({ identifierSeed: 'runtime-a' });
 c.identifiers.next('conversation'); // identical to a's own first `conversation` id

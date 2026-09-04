@@ -129,15 +129,19 @@ function projectEvent(event: { type: string }): Record<string, unknown> {
 }
 
 /**
- * A UUID (`crypto.randomUUID()`) or a `RuntimeIdentifiers.next(kind)` value
- * — the two shapes `RuntimeServices.identifiers` ever produces. The manual
- * runtime's own shape is `${identifierPrefix}-${kind}-${n}` (Coordinator
- * ruling on AB-337): `identifierPrefix` is an alphanumeric base-36
- * derivation of the seed, so it (like `kind` and `n`) may contain digits —
- * the middle segment allows both, not just letters.
+ * Every shape `RuntimeServices.identifiers` produces:
+ *
+ * - a bare UUID (`crypto.randomUUID()`, used directly at some call sites);
+ * - `createDefaultRuntimeServices()`'s own `identifiers.next(kind)` value,
+ *   `` `${kind}-${n}-${crypto.randomUUID()}` `` (`runtime-services.ts`);
+ * - the manual runtime's own `identifiers.next(kind)` value,
+ *   `` `${identifierPrefix}-${kind}-${n}` `` (Coordinator ruling on
+ *   AB-337) — `identifierPrefix` is an alphanumeric base-36 derivation of
+ *   the seed, so it (like `kind` and `n`) may contain digits, hence the
+ *   middle segment allows both, not just letters.
  */
 const IDENTIFIER_SHAPE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$|^[a-z0-9][a-zA-Z0-9-]*-\d+$/;
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$|^[a-z0-9][a-zA-Z0-9-]*-\d+-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$|^[a-z0-9][a-zA-Z0-9-]*-\d+$/;
 
 /**
  * Rewrites every string produced by `RuntimeServices.identifiers` to its
