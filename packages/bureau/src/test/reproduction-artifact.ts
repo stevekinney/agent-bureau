@@ -85,6 +85,23 @@ export interface AssembleReproductionArtifactOptions {
   readonly cleanupReport: unknown;
 }
 
+/**
+ * Explicit `sourceRevision`/`packageVersions` values that, when supplied,
+ * replace `assembleReproductionArtifact`'s own filesystem discovery
+ * (`git rev-parse HEAD` and a `packages/*` manifest glob rooted at
+ * `turbo.json`). Neither is reachable inside a packed-and-path-installed
+ * tarball consumer (AB-264): no `.git` directory and no `turbo.json`
+ * exist there, so a caller that already knows both — a verifier that just
+ * ran `bun pm pack` against a real checkout, for instance — passes them
+ * here instead of letting discovery throw. Omitting a field (or the whole
+ * argument) leaves today's discovery for that field unchanged, so every
+ * existing caller inside this repository keeps working with no changes.
+ */
+export interface ReproductionArtifactEnvironment {
+  readonly sourceRevision?: string;
+  readonly packageVersions?: Readonly<Record<string, string>>;
+}
+
 const EMPTY_SCRIPTED_OUTCOMES: readonly ScriptedOutcome[] = Object.freeze([]);
 const EMPTY_FIRED_FAULTS: readonly FiredFault[] = Object.freeze([]);
 
@@ -210,15 +227,22 @@ function resolveEffectiveModel<D extends AgentDefinitions>(
  * signature — AB-263's own acceptance criteria — leaves no room for a
  * narrower parameter type here), so the cast below only restates that
  * caller-side guarantee at the type level.
+ *
+ * `environment` (optional, AB-264) supplies `sourceRevision` and/or
+ * `packageVersions` explicitly, bypassing this function's own filesystem
+ * discovery for whichever field is supplied — see
+ * {@link ReproductionArtifactEnvironment}. Omitted fields still discover
+ * normally.
  */
 export async function assembleReproductionArtifact<D extends AgentDefinitions = AgentDefinitions>(
   harness: BureauTestHarness<D>,
   recorder: EventRecorder,
   options: AssembleReproductionArtifactOptions,
+  environment?: ReproductionArtifactEnvironment,
 ): Promise<ReproductionArtifact> {
   const [sourceRevision, packageVersions] = await Promise.all([
-    readSourceRevision(),
-    readPackageVersions(),
+    environment?.sourceRevision ?? readSourceRevision(),
+    environment?.packageVersions ?? readPackageVersions(),
   ]);
 
   return Object.freeze({

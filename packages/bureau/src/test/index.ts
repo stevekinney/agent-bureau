@@ -29,6 +29,7 @@ export { assertBureauQuiescent, BureauQuiescenceError } from './quiescence';
 export type {
   AssembleReproductionArtifactOptions,
   ReproductionArtifact,
+  ReproductionArtifactEnvironment,
   ScriptedOutcome,
 } from './reproduction-artifact';
 export { assembleReproductionArtifact, locateWorkspaceRoot } from './reproduction-artifact';
