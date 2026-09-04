@@ -1,6 +1,7 @@
 import { BureauError } from 'bureau';
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
+import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
 import { z } from 'zod';
 
 import { resolvePrincipal, resolveTrustedRequestContext } from '../middleware/authentication';
@@ -79,11 +80,15 @@ function messagesToPrompt(messages: ChatMessage[]): { message: string; systemPro
 /**
  * Format a completed run result as an OpenAI-compat chat completion response.
  */
-function formatChatCompletion(model: string, content: string): Record<string, unknown> {
+function formatChatCompletion(
+  model: string,
+  content: string,
+  runtime: RuntimeServices,
+): Record<string, unknown> {
   return {
-    id: `chatcmpl-${crypto.randomUUID()}`,
+    id: `chatcmpl-${runtime.identifiers.next('completion')}`,
     object: 'chat.completion',
-    created: Math.floor(Date.now() / 1000),
+    created: Math.floor(runtime.clock.now() / 1000),
     model,
     choices: [
       {
@@ -105,11 +110,16 @@ function formatChatCompletion(model: string, content: string): Record<string, un
  * (the sentinel chunk that closes the assistant turn). When false, `content`
  * is the assistant text and `finish_reason` is `null`.
  */
-function formatSseChunk(model: string, content: string, isLast: boolean): string {
+function formatSseChunk(
+  model: string,
+  content: string,
+  isLast: boolean,
+  runtime: RuntimeServices,
+): string {
   const chunk = {
-    id: `chatcmpl-${crypto.randomUUID()}`,
+    id: `chatcmpl-${runtime.identifiers.next('completion')}`,
     object: 'chat.completion.chunk',
-    created: Math.floor(Date.now() / 1000),
+    created: Math.floor(runtime.clock.now() / 1000),
     model,
     choices: [
       {
@@ -130,11 +140,11 @@ function formatSseChunk(model: string, content: string, isLast: boolean): string
  * on the streaming path to arrive as `{"error":{...}}` SSE events — this
  * matches the wire format used by the OpenAI API itself.
  */
-function formatSseErrorChunk(model: string, message: string): string {
+function formatSseErrorChunk(model: string, message: string, runtime: RuntimeServices): string {
   const chunk = {
-    id: `chatcmpl-${crypto.randomUUID()}`,
+    id: `chatcmpl-${runtime.identifiers.next('completion')}`,
     object: 'chat.completion.chunk',
-    created: Math.floor(Date.now() / 1000),
+    created: Math.floor(runtime.clock.now() / 1000),
     model,
     error: { message, type: 'server_error' },
     choices: [],
@@ -199,6 +209,16 @@ const SSE_HEARTBEAT_INTERVAL_MS = 8_000;
 export function createOpenAICompatRoutes(
   bureau: Bureau,
   heartbeatIntervalMs: number = SSE_HEARTBEAT_INTERVAL_MS,
+  // AB-327: defaults to the real-globals implementation (AB-252) so every
+  // pre-existing caller (including this package's own test suite) is
+  // unaffected. `createRoutes` always forwards `createGateway`'s single
+  // resolved instance. The `chatcmpl-` id shape changes from a plain UUID
+  // (`chatcmpl-<uuid>`) to `chatcmpl-completion-<n>-<uuid>` in production —
+  // `RuntimeServices.identifiers` has no bare-UUID member, only the
+  // namespaced `next(kind)` every other module in this codebase already
+  // uses, and no OpenAI-compatible client parses this id beyond treating it
+  // as an opaque string. `created` is unchanged: still Unix epoch seconds.
+  runtime: RuntimeServices = createDefaultRuntimeServices(),
 ) {
   const app = new Hono();
 
@@ -326,7 +346,7 @@ export function createOpenAICompatRoutes(
           // reverse proxies and HTTP clients do not close the connection during
           // long silences (e.g. slow tool calls, parked human-in-the-loop runs).
           // SSE comment lines (`:<text>\n\n`) are ignored by compliant clients.
-          const heartbeatId = setInterval(() => {
+          const heartbeatId = runtime.timers.setInterval(() => {
             try {
               enqueue(': heartbeat\n\n');
             } catch {
@@ -342,14 +362,14 @@ export function createOpenAICompatRoutes(
           // a no-op the way `detachRunListeners` intentionally is NOT
           // reassigned defensively either.
           stopHeartbeat = (): void => {
-            clearInterval(heartbeatId);
+            runtime.timers.clearInterval(heartbeatId);
           };
 
           if (!runState) {
             // No active run state — run may have already settled synchronously.
             // Emit a single empty content chunk and close.
-            enqueue(formatSseChunk(agentName, '', false));
-            enqueue(formatSseChunk(agentName, '', true));
+            enqueue(formatSseChunk(agentName, '', false, runtime));
+            enqueue(formatSseChunk(agentName, '', true, runtime));
             enqueue('data: [DONE]\n\n');
             close();
             return;
@@ -371,12 +391,12 @@ export function createOpenAICompatRoutes(
             if (settled) return;
             settled = true;
             if (outcome.kind === 'success') {
-              enqueue(formatSseChunk(agentName, outcome.content, false));
-              enqueue(formatSseChunk(agentName, '', true));
+              enqueue(formatSseChunk(agentName, outcome.content, false, runtime));
+              enqueue(formatSseChunk(agentName, '', true, runtime));
             } else if (outcome.kind === 'error') {
-              enqueue(formatSseErrorChunk(agentName, outcome.message));
+              enqueue(formatSseErrorChunk(agentName, outcome.message, runtime));
             } else {
-              enqueue(formatSseErrorChunk(agentName, outcome.message));
+              enqueue(formatSseErrorChunk(agentName, outcome.message, runtime));
             }
             enqueue('data: [DONE]\n\n');
             close();
@@ -544,7 +564,7 @@ export function createOpenAICompatRoutes(
     const lastStep = runDetail.stepDetails.at(-1);
     const textContent = lastStep?.content ?? '';
 
-    return context.json(formatChatCompletion(agentName, textContent), 200);
+    return context.json(formatChatCompletion(agentName, textContent, runtime), 200);
   });
 
   return app;

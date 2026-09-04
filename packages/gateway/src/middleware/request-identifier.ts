@@ -1,5 +1,5 @@
 import { createMiddleware } from 'hono/factory';
-import type { RuntimeServices } from 'lifecycle';
+import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
 
 /**
  * Builds the `x-request-id` middleware over an injected
@@ -20,16 +20,21 @@ export function createRequestIdentifier(identifiers: Pick<RuntimeServices['ident
 }
 
 /**
- * Adds an `x-request-id` header to every response, minting a fresh UUID via
- * `crypto.randomUUID()` when the request carries none. This is
- * {@link createRequestIdentifier} bound directly to the real global.
+ * Adds an `x-request-id` header to every response, minting a fresh
+ * identifier via the real-globals {@link RuntimeServices} (AB-252, AB-327)
+ * when the request carries none. This is {@link createRequestIdentifier}
+ * bound directly to `createDefaultRuntimeServices().identifiers` — the one
+ * sanctioned real-globals implementation of the `RuntimeServices` contract
+ * — rather than a bespoke `crypto.randomUUID()` binding, so it mints the
+ * same `request-<n>-<uuid>`-shaped identifier `createGateway` itself would
+ * produce with an unconfigured runtime.
  *
  * `createGateway` does NOT use this export (AB-303): it always calls
- * `createRequestIdentifier(runtimeServices.identifiers)` itself, so with
- * the default (unconfigured) `RuntimeServices` it gets a `request-<n>-
- * <uuid>`-shaped identifier from `createDefaultRuntimeServices()`'s
- * `identifiers.next('request')` — not the plain UUID this export produces.
- * This standalone export exists for callers that want the `x-request-id`
- * middleware directly, outside gateway construction.
+ * `createRequestIdentifier(runtimeServices.identifiers)` itself over its
+ * own resolved runtime. This standalone export exists for callers that
+ * want the `x-request-id` middleware directly, outside gateway
+ * construction.
  */
-export const requestIdentifier = createRequestIdentifier({ next: () => crypto.randomUUID() });
+export const requestIdentifier = createRequestIdentifier(
+  createDefaultRuntimeServices().identifiers,
+);

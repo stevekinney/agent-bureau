@@ -3,6 +3,7 @@ import type { Context } from 'hono';
 import { createMiddleware } from 'hono/factory';
 import { HTTPException } from 'hono/http-exception';
 import { hmacSha256HexSync } from 'interoperability';
+import { createDefaultRuntimeServices } from 'lifecycle';
 
 import { normalizeApiKeyScopes } from '../keys/create-api-key-store';
 import type { ApiKeyStore } from '../keys/types';
@@ -12,7 +13,29 @@ const DEFAULT_BUREAU_AGENT_NAME = 'bureau';
 const TOOL_EXECUTION_CAPABILITY = 'tools:execute';
 const UNRESTRICTED_CAPABILITY = '*';
 const AUTHORIZATION_REVISION_HEADER = 'x-auth-authorization-revision';
-const PROCESS_STATIC_TOKEN_REVISION_SECRET = crypto.randomUUID();
+
+// AB-327: lazily memoized rather than a top-level `crypto.randomUUID()`
+// call, so the one real-globals read this fallback needs goes through the
+// composed RuntimeServices (AB-252's sanctioned real implementation) —
+// `runtime.identifiers.next(...)` — instead of a direct global reference.
+// Still computed exactly once per process: `staticTokenAuthorizationRevision`
+// and `createAuthentication` each default independently to this same
+// accessor, and both must agree on the same secret for a caller relying on
+// neither's explicit override (see authentication.test.ts's "the injected
+// x-auth-authorization-revision header matches staticTokenAuthorizationRevision(token)"
+// assertion) — a fresh value per call would break that agreement. This
+// fallback only matters for a direct caller of either function that
+// bypasses `createGateway` entirely: `createGateway` always resolves its
+// own `staticTokenRevisionSecret` from the KV-persisted value via
+// `resolveStaticTokenRevisionSecret` (create-gateway.ts) and passes it
+// through explicitly.
+let cachedProcessStaticTokenRevisionSecret: string | undefined;
+function defaultStaticTokenRevisionSecret(): string {
+  cachedProcessStaticTokenRevisionSecret ??= createDefaultRuntimeServices().identifiers.next(
+    'static-token-revision-secret',
+  );
+  return cachedProcessStaticTokenRevisionSecret;
+}
 
 function gatewayAuthorityOwnerId(agentName: string | undefined): string {
   const trimmed = agentName?.trim();
@@ -60,7 +83,7 @@ export function gatewayAuthorizationRevisionForApiKey(apiKeyId: string): string 
 
 export function staticTokenAuthorizationRevision(
   authToken: string,
-  revisionSecret: string = PROCESS_STATIC_TOKEN_REVISION_SECRET,
+  revisionSecret: string = defaultStaticTokenRevisionSecret(),
 ): string {
   return `gateway:static-token:${hmacSha256HexSync(revisionSecret, authToken).slice(0, 32)}`;
 }
@@ -128,7 +151,7 @@ export function resolveTrustedRequestContext(
 export function createAuthentication(
   authToken: string | undefined,
   apiKeyStore?: ApiKeyStore,
-  staticTokenRevisionSecret: string = PROCESS_STATIC_TOKEN_REVISION_SECRET,
+  staticTokenRevisionSecret: string = defaultStaticTokenRevisionSecret(),
 ) {
   return createMiddleware(async (context, next) => {
     // Strip any client-injected scope/key headers to prevent spoofing.

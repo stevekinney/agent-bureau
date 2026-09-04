@@ -8,6 +8,7 @@ import { createTool, createToolbox } from 'armorer';
 import { describe, expect, it, spyOn } from 'bun:test';
 import { BureauError } from 'bureau';
 import { Hono } from 'hono';
+import { createManualRuntimeServices } from 'lifecycle';
 import { z } from 'zod';
 
 import {
@@ -156,6 +157,19 @@ describe('OpenAI-compat route (POST /v1/chat/completions)', () => {
     expect(body.choices[0].message.role).toBe('assistant');
     expect(body.id).toBeString();
     expect(body.created).toBeNumber();
+  });
+
+  it("the response's `id` and `created` (AB-327) follow the injected RuntimeServices, not the real wall clock or crypto.randomUUID()", async () => {
+    const runtime = createManualRuntimeServices({ origin: '2030-01-01T00:00:00.000Z' });
+    const gateway = await createTestGateway({ generate: createMockGenerate(), runtime });
+    const response = await requestJSON(gateway, '/v1/chat/completions', {
+      method: 'POST',
+      body: minimalRequest('bureau', 'What is 2 + 2?'),
+    });
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.created).toBe(Math.floor(Date.parse('2030-01-01T00:00:00.000Z') / 1000));
+    expect(body.id).toStartWith(`chatcmpl-${runtime.identifierPrefix}-completion-`);
   });
 
   it('derives request authority from the verified API key and ignores caller context', async () => {

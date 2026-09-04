@@ -79,6 +79,7 @@
 import type { ToolRequestContext } from 'armorer';
 import { BureauError } from 'bureau';
 import { Hono } from 'hono';
+import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
 import { z } from 'zod';
 
 import { resolvePrincipal, resolveTrustedRequestContext } from '../middleware/authentication';
@@ -237,9 +238,9 @@ function parseParams<TSchema extends z.ZodTypeAny>(
 
 // ── Run → Task mapping ────────────────────────────────────────────────────
 
-function agentStatusMessage(text: string): A2AMessage {
+function agentStatusMessage(text: string, runtime: RuntimeServices): A2AMessage {
   return {
-    messageId: crypto.randomUUID(),
+    messageId: runtime.identifiers.next('a2a-message'),
     role: 'ROLE_AGENT',
     parts: [{ text }],
   };
@@ -253,6 +254,7 @@ function flattenMessageText(message: { parts: { text: string }[] }): string {
 function deriveTaskState(
   bureau: Bureau,
   detail: RunDetail,
+  runtime: RuntimeServices,
 ): { state: A2ATaskState; statusMessage?: A2AMessage } {
   // `'aborting'` (AB-205/AB-37) is the transitional status `Bureau.abortRun`
   // reports while cleanup is still in flight — before its own terminal
@@ -272,7 +274,10 @@ function deriveTaskState(
     if (parked) {
       return {
         state: 'TASK_STATE_INPUT_REQUIRED',
-        statusMessage: agentStatusMessage(parked.prompt ?? 'Additional input is required.'),
+        statusMessage: agentStatusMessage(
+          parked.prompt ?? 'Additional input is required.',
+          runtime,
+        ),
       };
     }
     return {
@@ -285,7 +290,7 @@ function deriveTaskState(
   if (isRunFailure(detail)) {
     const message =
       typeof detail.error === 'string' ? detail.error : (detail.finishReason ?? 'Task failed.');
-    return { state: 'TASK_STATE_FAILED', statusMessage: agentStatusMessage(message) };
+    return { state: 'TASK_STATE_FAILED', statusMessage: agentStatusMessage(message, runtime) };
   }
   return { state: 'TASK_STATE_COMPLETED' };
 }
@@ -307,11 +312,12 @@ function buildHistory(detail: RunDetail, historyLength: number | undefined): A2A
 function buildTask(
   bureau: Bureau,
   detail: RunDetail,
+  runtime: RuntimeServices,
   options?: { historyLength?: number },
 ): A2ATask {
-  const { state, statusMessage } = deriveTaskState(bureau, detail);
+  const { state, statusMessage } = deriveTaskState(bureau, detail, runtime);
   const timestamp = new Date(
-    detail.events.at(-1)?.timestamp ?? detail.startedAt ?? Date.now(),
+    detail.events.at(-1)?.timestamp ?? detail.startedAt ?? runtime.clock.now(),
   ).toISOString();
 
   const task: A2ATask = {
@@ -354,6 +360,7 @@ async function handleSendMessage(
   params: unknown,
   principal: string,
   requestContext: ToolRequestContext | undefined,
+  runtime: RuntimeServices,
 ): Promise<{ task: A2ATask }> {
   const { message, configuration } = parseParams(params, SendMessageParamsSchema);
   const text = flattenMessageText(message);
@@ -388,7 +395,9 @@ async function handleSendMessage(
     }
     const resumed = bureau.getRun(message.taskId);
     if (!resumed) throw new A2AError(TASK_NOT_FOUND);
-    return { task: buildTask(bureau, resumed, { historyLength: configuration?.historyLength }) };
+    return {
+      task: buildTask(bureau, resumed, runtime, { historyLength: configuration?.historyLength }),
+    };
   }
 
   const request: CreateRunRequest = {
@@ -409,17 +418,27 @@ async function handleSendMessage(
   }
   const detail = bureau.getRun(summary.id);
   if (!detail) throw new A2AError(INTERNAL_ERROR);
-  return { task: buildTask(bureau, detail, { historyLength: configuration?.historyLength }) };
+  return {
+    task: buildTask(bureau, detail, runtime, { historyLength: configuration?.historyLength }),
+  };
 }
 
-function handleGetTask(bureau: Bureau, params: unknown): { task: A2ATask } {
+function handleGetTask(
+  bureau: Bureau,
+  params: unknown,
+  runtime: RuntimeServices,
+): { task: A2ATask } {
   const { id, historyLength } = parseParams(params, GetTaskParamsSchema);
   const detail = bureau.getRun(id);
   if (!detail) throw new A2AError(TASK_NOT_FOUND);
-  return { task: buildTask(bureau, detail, { historyLength }) };
+  return { task: buildTask(bureau, detail, runtime, { historyLength }) };
 }
 
-function handleCancelTask(bureau: Bureau, params: unknown): { task: A2ATask } {
+function handleCancelTask(
+  bureau: Bureau,
+  params: unknown,
+  runtime: RuntimeServices,
+): { task: A2ATask } {
   const { id } = parseParams(params, CancelTaskParamsSchema);
   let summary;
   try {
@@ -443,7 +462,7 @@ function handleCancelTask(bureau: Bureau, params: unknown): { task: A2ATask } {
   // only once the underlying run loop's abort signal has actually
   // propagated, which is not necessarily synchronous with this call
   // returning.
-  return { task: buildTask(bureau, { ...detail, status: summary.status }) };
+  return { task: buildTask(bureau, { ...detail, status: summary.status }, runtime) };
 }
 
 async function dispatch(
@@ -452,14 +471,15 @@ async function dispatch(
   params: unknown,
   principal: string,
   requestContext: ToolRequestContext | undefined,
+  runtime: RuntimeServices,
 ): Promise<unknown> {
   switch (method) {
     case 'SendMessage':
-      return handleSendMessage(bureau, params, principal, requestContext);
+      return handleSendMessage(bureau, params, principal, requestContext, runtime);
     case 'GetTask':
-      return handleGetTask(bureau, params);
+      return handleGetTask(bureau, params, runtime);
     case 'CancelTask':
-      return handleCancelTask(bureau, params);
+      return handleCancelTask(bureau, params, runtime);
     // Recognized but unsupported (streaming — see the header comment's
     // "Deferred" section). Section 8.5 of the spec: "If AgentCard.
     // capabilities.streaming is false or not present, attempts to use
@@ -477,7 +497,17 @@ async function dispatch(
   }
 }
 
-export function createA2ARoutes(bureau: Bureau) {
+export function createA2ARoutes(
+  bureau: Bureau,
+  // AB-327: defaults to the real-globals implementation (AB-252) so every
+  // pre-existing caller (including this package's own test suite) is
+  // unaffected. `createRoutes` always forwards `createGateway`'s single
+  // resolved instance. `messageId`'s shape changes from a plain UUID to
+  // `a2a-message-<n>-<uuid>` in production — `RuntimeServices.identifiers`
+  // has no bare-UUID member, and the A2A spec treats `messageId` as an
+  // opaque unique string, not a UUID-shaped one.
+  runtime: RuntimeServices = createDefaultRuntimeServices(),
+) {
   const app = new Hono();
 
   app.post('/', async (context) => {
@@ -508,6 +538,7 @@ export function createA2ARoutes(bureau: Bureau) {
         params,
         resolvePrincipal(context),
         resolveTrustedRequestContext(context, undefined),
+        runtime,
       );
       return context.json(jsonRpcResult(id, result), 200);
     } catch (error) {

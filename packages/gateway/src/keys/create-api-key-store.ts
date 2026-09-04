@@ -1,5 +1,5 @@
 import type { TextValueStore } from '@lostgradient/weft/storage';
-import type { RuntimeServices } from 'lifecycle';
+import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
 
 import { extractKeyId, generateApiKey, hashApiKey, verifyApiKey } from './key-utilities';
 import type { ApiKey, ApiKeyStore, CreateApiKeyOptions } from './types';
@@ -7,11 +7,10 @@ import type { ApiKey, ApiKeyStore, CreateApiKeyOptions } from './types';
 /**
  * The real-globals default for {@link createApiKeyStore}'s `clock`
  * parameter — unconfigured production behavior is unchanged (AB-303).
+ * AB-327: sourced from the composed RuntimeServices real implementation
+ * (AB-252) rather than reaching `Date.now`/`new Date` directly.
  */
-const realClock: RuntimeServices['clock'] = {
-  now: () => Date.now(),
-  nowISO: () => new Date().toISOString(),
-};
+const realClock: RuntimeServices['clock'] = createDefaultRuntimeServices().clock;
 
 const KEY_PREFIX = 'api-key:';
 const INVALID_SCOPE_ENTRY_MESSAGE = 'API key scope entries must be non-blank strings';

@@ -17,6 +17,7 @@ import {
 } from '@lostgradient/operative/liveness';
 import type { RunEventRecord } from 'bureau';
 import { RUN_DURABLE_EVENT_TYPES } from 'bureau';
+import { createDefaultRuntimeServices } from 'lifecycle';
 
 import type { ServerFrame } from './types';
 
@@ -75,13 +76,21 @@ export interface LiveFrameBrokerClock extends StallWatchdogClock {
   clearInterval(handle: unknown): void;
 }
 
+// AB-327: built from the composed RuntimeServices real implementation
+// (AB-252) rather than reaching `performance.now`/`new Date`/`setTimeout`/
+// `setInterval` directly — the exact same member mapping `createGateway`
+// uses when it builds this seam from its own resolved `RuntimeServices`
+// instance (see this interface's doc comment above), so a direct
+// `new LiveFrameBroker()` caller with no injected clock gets identical
+// real-time behavior to before.
+const defaultRuntimeServices = createDefaultRuntimeServices();
 const realClock: LiveFrameBrokerClock = {
-  now: () => performance.now(),
-  nowISO: () => new Date().toISOString(),
-  setTimeout: (callback, ms) => setTimeout(callback, ms),
-  clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
-  setInterval: (callback, ms) => setInterval(callback, ms),
-  clearInterval: (handle) => clearInterval(handle as ReturnType<typeof setInterval>),
+  now: () => defaultRuntimeServices.monotonic.now(),
+  nowISO: () => defaultRuntimeServices.clock.nowISO(),
+  setTimeout: (callback, ms) => defaultRuntimeServices.timers.setTimeout(callback, ms),
+  clearTimeout: (handle) => defaultRuntimeServices.timers.clearTimeout(handle),
+  setInterval: (callback, ms) => defaultRuntimeServices.timers.setInterval(callback, ms),
+  clearInterval: (handle) => defaultRuntimeServices.timers.clearInterval(handle),
 };
 
 /**

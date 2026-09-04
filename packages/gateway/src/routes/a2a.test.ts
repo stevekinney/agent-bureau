@@ -6,7 +6,7 @@ import type {
 import { HumanWaitParkedEvent } from '@lostgradient/operative';
 import { describe, expect, it, spyOn } from 'bun:test';
 import type { Bureau } from 'bureau';
-import { CompletableEventTarget } from 'lifecycle';
+import { CompletableEventTarget, createManualRuntimeServices } from 'lifecycle';
 
 import {
   attackerRequestContextFixture,
@@ -183,6 +183,24 @@ describe('A2A JSON-RPC endpoint (POST /a2a)', () => {
       { artifactId: `${task.id}:result`, name: 'Result', parts: [{ text: 'Done.' }] },
     ]);
     expect(task.contextId).toBeTruthy();
+  });
+
+  it("a parked task's status.message.messageId (AB-327) follows the injected RuntimeServices identifiers, not crypto.randomUUID()", async () => {
+    const runtime = createManualRuntimeServices();
+    const gateway = await createTestGateway({ generate: createMockGenerate(), runtime });
+    const taskId = registerParkedRun(gateway.bureau, 'a2a-parked-run', 'What is your name?');
+
+    const { body } = await sendMessage(gateway.app, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'GetTask',
+      params: { id: taskId },
+    });
+
+    expect(body.result.task.status.state).toBe('TASK_STATE_INPUT_REQUIRED');
+    expect(body.result.task.status.message.messageId).toStartWith(
+      `${runtime.identifierPrefix}-a2a-message-`,
+    );
   });
 
   it('SendMessage derives request authority from the verified API key and ignores caller context', async () => {
