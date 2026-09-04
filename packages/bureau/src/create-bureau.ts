@@ -167,6 +167,7 @@ import type {
   PendingReview,
   ResolveReviewInput,
   ResolveReviewResult,
+  ReviewStatus,
   RunSummary,
   ServerFrame,
   SubmitSchedulerTaskRequest,
@@ -1461,7 +1462,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       sessionId: string;
       runId: string;
       kind: PendingReview['kind'];
-      decision: 'approve' | 'deny';
+      decision: 'approve' | 'deny' | 'reject';
       review: PendingReview;
       principal: string;
       reason?: string;
@@ -4289,6 +4290,14 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           abortingRunIds.delete(id);
         }),
       );
+      // AB-46: `abortRun` carries no principal, so every still-pending review
+      // (both kinds) scoped to this run is attributed to the synthetic
+      // principal `'system:run-abort'`. `abortRun` itself stays synchronous
+      // (its `RunSummary` return predates this record), so this is a
+      // best-effort detached continuation, matching the pattern above.
+      detachBestEffortPromise(
+        revokePendingApprovalsForRun(id, { status: 'canceled', principal: 'system:run-abort' }),
+      );
     }
 
     return {
@@ -4297,26 +4306,72 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     };
   }
 
-  async function revokePendingApprovalsForRun(runId: string): Promise<void> {
+  /**
+   * The single owner of review cancellation (AB-46 coordinator ruling):
+   * transitions every still-pending review — BOTH kinds — scoped to `runId`
+   * to `outcome.status`, attributed to `outcome.principal`. `deleteRun` and
+   * `deleteSession` pass `{ status: 'revoked', principal: 'system:run-deletion'
+   * | 'system:session-deletion' }`; `abortRun` and `cancelDurableRun` pass
+   * `{ status: 'canceled', principal: 'system:run-abort' }`. A `tool-approval`
+   * review additionally has its binding revoked (unchanged from before this
+   * record); a `human-wait` review has nothing to revoke — it is simply
+   * marked resolved, so it stops appearing in `listPendingReviews()` and a
+   * later `resolveReview` against its id throws `NOT_FOUND`.
+   */
+  async function revokePendingApprovalsForRun(
+    runId: string,
+    outcome: { status: 'canceled' | 'revoked'; principal: string },
+  ): Promise<void> {
     const approvalToolbox = runToolboxesByRunId.get(runId) ?? runtime.baseToolbox;
-    const approvals = new Map<string, SignedPendingToolApproval>();
+    const runState = store.getRun(runId);
+    const sessionId = runState ? getRunSessionIdentifier(runState) : '';
+    const agentName = runState ? findRunAgentName(runState) : undefined;
+
+    const toolApprovalReviews = new Map<
+      string,
+      Extract<PendingReview, { kind: 'tool-approval' }>
+    >();
     for (const review of listPendingReviews()) {
       if (review.kind === 'tool-approval' && review.runId === runId) {
-        approvals.set(review.id, review.approval as SignedPendingToolApproval);
+        toolApprovalReviews.set(review.id, review);
       }
     }
     for (const [reviewId, approval] of pendingApprovalOverrides) {
-      if (reviewId.startsWith(`approval:${runId}:`)) {
-        approvals.set(reviewId, approval as SignedPendingToolApproval);
-      }
+      if (!reviewId.startsWith(`approval:${runId}:`)) continue;
+      // Unconditional overwrite (never skipped when already present from the
+      // scan above) — matches the pre-AB-46 behavior of this same merge, so
+      // an override always reflects the LATEST approval object even when a
+      // step-scan-sourced entry for the same id also exists.
+      toolApprovalReviews.set(reviewId, {
+        kind: 'tool-approval',
+        id: reviewId,
+        runId,
+        sessionId,
+        agentName,
+        approval,
+        requestedAt: 0,
+        ageMilliseconds: 0,
+        status: 'pending',
+      });
     }
-    for (const approval of approvals.values()) {
-      if (!approval.approvalBinding || approval.approvalToken === undefined) continue;
-      try {
-        await approvalToolbox.revokeApproval(approval);
-      } catch (error) {
-        if (!isTerminalApprovalBindingError(error)) throw error;
+
+    for (const review of toolApprovalReviews.values()) {
+      const approval = review.approval;
+      if (approval.approvalBinding && approval.approvalToken !== undefined) {
+        try {
+          await approvalToolbox.revokeApproval(approval as SignedPendingToolApproval);
+        } catch (error) {
+          if (!isTerminalApprovalBindingError(error)) throw error;
+        }
       }
+      resolvedReviewIds.add(review.id);
+      await recordReviewStatusTransition(review, outcome.status, outcome.principal);
+    }
+
+    for (const review of listPendingReviews()) {
+      if (review.kind !== 'human-wait' || review.runId !== runId) continue;
+      resolvedReviewIds.add(review.id);
+      await recordReviewStatusTransition(review, outcome.status, outcome.principal);
     }
   }
 
@@ -4330,7 +4385,10 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       throw new BureauError('Cannot delete a running run', 'CONFLICT');
     }
 
-    await revokePendingApprovalsForRun(id);
+    await revokePendingApprovalsForRun(id, {
+      status: 'revoked',
+      principal: 'system:run-deletion',
+    });
     const sessionId = getRunSessionIdentifier(runState);
     runSessionIdentifiers.delete(runState.activeRun);
     runAttribution.delete(id);
@@ -4375,10 +4433,24 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
    * real `getDurableRun`/`engine.cancel` dependencies.
    */
   async function cancelDurableRun(runId: string): Promise<CancelDurableRunOutcome> {
-    return resolveCancelDurableRun(runId, {
+    const outcome = await resolveCancelDurableRun(runId, {
       getDurableRun,
       cancel: (id) => runtime.durable!.engine.cancel(id),
     });
+    // AB-46: only an ACTUALLY-committed cancellation ('requested') terminates
+    // the run — 'already-terminal'/'not-found'/'failed'/'unsupported-capability'
+    // must not transition reviews that belong to a run cancelDurableRun never
+    // genuinely touched. `cancelDurableRun` carries no principal, so this is
+    // attributed to the synthetic principal `'system:run-abort'`, the same one
+    // `abortRun` uses — both are the same "run cancellation" outcome from the
+    // review lifecycle's perspective.
+    if (outcome.status === 'requested') {
+      await revokePendingApprovalsForRun(runId, {
+        status: 'canceled',
+        principal: 'system:run-abort',
+      });
+    }
+    return outcome;
   }
 
   /**
@@ -4409,7 +4481,10 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     const session = await sessionStore.load(id);
     if (session) {
       for (const runId of persistedApprovalRunIds(session.metadata)) {
-        await revokePendingApprovalsForRun(runId);
+        await revokePendingApprovalsForRun(runId, {
+          status: 'revoked',
+          principal: 'system:session-deletion',
+        });
         for (const reviewId of pendingApprovalOverrides.keys()) {
           if (reviewId.startsWith(`approval:${runId}:`)) pendingApprovalOverrides.delete(reviewId);
         }
@@ -4751,6 +4826,14 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           if (result.outcome !== 'action_required' || !result.pendingApproval) continue;
           const id = `approval:${runId}:${result.pendingApproval.callId}`;
           if (resolvedReviewIds.has(id) || invalidApprovalReviewIds.has(id)) continue;
+          const approval = pendingApprovalOverrides.get(id) ?? result.pendingApproval;
+          // AB-46 read-time filter: a tool-approval review past its binding's
+          // `expiresAt` is excluded here with no write — `sweepExpiredReviews`
+          // performs the write that transitions it to `'expired'`. An
+          // unsigned approval (no `approvalBinding`) never expires this way.
+          if (approval.approvalBinding !== undefined && approval.approvalBinding.expiresAt <= now) {
+            continue;
+          }
           const requestedAt = stepCompletedTimestamps[stepIndex] ?? now;
           reviews.push({
             kind: 'tool-approval',
@@ -4758,9 +4841,10 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
             runId,
             sessionId,
             agentName,
-            approval: pendingApprovalOverrides.get(id) ?? result.pendingApproval,
+            approval,
             requestedAt,
             ageMilliseconds: now - requestedAt,
+            status: 'pending',
           });
         }
       }
@@ -4812,6 +4896,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
               prompt,
               requestedAt: parkedAction.timestamp,
               ageMilliseconds: now - parkedAction.timestamp,
+              status: 'pending',
             });
           }
         }
@@ -4823,6 +4908,9 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         if (!reviewId.startsWith(`approval:${runId}:`)) continue;
         if (resolvedReviewIds.has(reviewId) || invalidApprovalReviewIds.has(reviewId)) continue;
         if (reviews.some((review) => review.id === reviewId)) continue;
+        if (approval.approvalBinding !== undefined && approval.approvalBinding.expiresAt <= now) {
+          continue;
+        }
         reviews.push({
           kind: 'tool-approval',
           id: reviewId,
@@ -4832,6 +4920,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           approval,
           requestedAt: terminalReview.requestedAt,
           ageMilliseconds: now - terminalReview.requestedAt,
+          status: 'pending',
         });
       }
     }
@@ -4851,6 +4940,13 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   }
 
   async function resolveReview(input: ResolveReviewInput): Promise<ResolveReviewResult> {
+    // AB-46: `reject` requires a non-empty `reason` for BOTH review kinds —
+    // `resolveReview` is the validation boundary, so this throws before any
+    // state change (before even finding the review), matching the gateway's
+    // `POST /:id/reject` 400-on-missing-reason contract.
+    if (input.decision === 'reject' && (input.reason === undefined || input.reason.trim() === '')) {
+      throw new BureauError('reject requires a reason', 'BAD_REQUEST');
+    }
     const review = listPendingReviews().find((candidate) => candidate.id === input.id);
     if (!review) {
       const cleanup = reviewResolutionCleanupPending.get(input.id);
@@ -4880,7 +4976,14 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
             cleanup.principal,
             cleanup.reason,
           );
-          return { id: input.id, kind: cleanup.kind, decision: cleanup.decision };
+          return {
+            id: input.id,
+            kind: cleanup.kind,
+            decision: cleanup.decision,
+            ...(cleanup.kind === 'tool-approval' && cleanup.decision === 'reject'
+              ? { feedback: cleanup.reason }
+              : {}),
+          };
         } finally {
           resolvingReviewIds.delete(input.id);
         }
@@ -5029,6 +5132,19 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         // caller could make directly — one seam, not two ways to do the same
         // thing.
         await bureau.signalSession(review.sessionId, review.signalName, input.payload);
+      } else {
+        // AB-46: `input.decision` is `'deny'` or `'reject'`. A `human-wait`
+        // park is a genuine durable park (`ctx.waitForSignal`) — unlike
+        // tool-approval, where "deny" has no run to continue, denying or
+        // rejecting a human-wait review must still deliver SOMETHING on
+        // `review.signalName` or the parked run stays `running` forever
+        // (the exact defect this record fixes). Both sentinels are
+        // delivered on the identical channel `approve` already uses.
+        const denialPayload: Record<string, unknown> =
+          input.decision === 'reject'
+            ? { __abRejected: true, reason: input.reason }
+            : { __abDenied: true, ...(input.reason !== undefined ? { reason: input.reason } : {}) };
+        await bureau.signalSession(review.sessionId, review.signalName, denialPayload);
       }
     } catch (error) {
       resolvingReviewIds.delete(review.id);
@@ -5073,23 +5189,26 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
 
     await recordReviewDecision(review, input.decision, input.principal, input.reason);
 
-    return { id: review.id, kind: review.kind, decision: input.decision, result };
+    return {
+      id: review.id,
+      kind: review.kind,
+      decision: input.decision,
+      result,
+      ...(review.kind === 'tool-approval' && input.decision === 'reject'
+        ? { feedback: input.reason }
+        : {}),
+    };
   }
 
   async function recordReviewDecision(
     review: PendingReview,
-    decision: 'approve' | 'deny',
+    decision: 'approve' | 'deny' | 'reject',
     principal: string,
     reason?: string,
   ): Promise<void> {
-    const decisionType =
-      review.kind === 'tool-approval'
-        ? decision === 'approve'
-          ? 'review.tool-approval.approved'
-          : 'review.tool-approval.denied'
-        : decision === 'approve'
-          ? 'review.human-wait.approved'
-          : 'review.human-wait.denied';
+    const decisionSuffix =
+      decision === 'approve' ? 'approved' : decision === 'reject' ? 'rejected' : 'denied';
+    const decisionType = `review.${review.kind}.${decisionSuffix}`;
 
     await auditTrailInstance?.record({
       runId: review.runId,
@@ -5101,6 +5220,145 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       },
       principal,
     });
+  }
+
+  /**
+   * Derives a {@link ReviewStatus} from a `review.*` audit record's `type`
+   * suffix (AB-46). `getReview` uses this to reconstruct a resolved review's
+   * status from the chronologically-last matching audit entry. No code path
+   * in this record writes a `review.*.superseded` audit entry yet (AB-46's
+   * own decision record scopes that write to a future re-gate change, out of
+   * this issue's boundary) — the case is still handled explicitly here so a
+   * future, or externally-produced, `review.*.superseded` record decodes
+   * correctly instead of silently falling through to `'denied'`.
+   */
+  function reviewStatusFromAuditType(type: string): ReviewStatus {
+    switch (type.split('.').pop()) {
+      case 'approved':
+        return 'approved';
+      case 'rejected':
+        return 'rejected';
+      case 'expired':
+        return 'expired';
+      case 'revoked':
+        return 'revoked';
+      case 'canceled':
+        return 'canceled';
+      case 'superseded':
+        return 'superseded';
+      case 'denied':
+      default:
+        return 'denied';
+    }
+  }
+
+  /**
+   * Writes a `review.<kind>.<status>` audit entry for a status transition
+   * that is NOT one of `resolveReview`'s decision outcomes (approve/deny/
+   * reject) — namely `sweepExpiredReviews`'s `'expired'` transition and
+   * `revokePendingApprovalsForRun`'s `'canceled'`/`'revoked'` transitions
+   * (AB-46). A no-op when no audit trail is configured, matching
+   * `recordReviewDecision`. `review` is embedded in `detail.review` with its
+   * own `status` field forced to `status` — every caller passes a review
+   * whose `status` still reads `'pending'` (it came from a live scan of
+   * `listPendingReviews()`), and embedding that stale value verbatim would
+   * make `detail.review.status` disagree with both the audit `type` and the
+   * top-level `detail.status`, exactly the inconsistency `getReview`'s
+   * audit-trail reconstruction and any other audit consumer must not see.
+   */
+  async function recordReviewStatusTransition(
+    review: PendingReview,
+    status: Exclude<ReviewStatus, 'pending'>,
+    principal: string,
+  ): Promise<void> {
+    await auditTrailInstance?.record({
+      runId: review.runId,
+      type: `review.${review.kind}.${status}`,
+      detail: { review: { ...review, status }, status },
+      principal,
+    });
+  }
+
+  /**
+   * Look up one review by id, live or resolved (AB-46). See the
+   * {@link Bureau.getReview} doc comment.
+   */
+  async function getReview(
+    id: string,
+  ): Promise<(PendingReview & { status: ReviewStatus }) | undefined> {
+    const pending = listPendingReviews().find((candidate) => candidate.id === id);
+    if (pending) return pending;
+    if (!auditTrailInstance) return undefined;
+
+    // Ids are `approval:${runId}:${callId}` / `human-wait:${runId}:${signalName}`
+    // — the run id is always the second colon-delimited segment.
+    const [, runId] = id.split(':');
+    if (!runId) return undefined;
+
+    const records = await auditTrailInstance.query({ runId });
+    let match: (typeof records)[number] | undefined;
+    for (const record of records) {
+      if (!record.type.startsWith('review.')) continue;
+      const detail = record.detail;
+      if (detail === null || typeof detail !== 'object') continue;
+      const reviewDetail = (detail as Record<string, unknown>)['review'];
+      if (reviewDetail === null || typeof reviewDetail !== 'object') continue;
+      if ((reviewDetail as Record<string, unknown>)['id'] !== id) continue;
+      // `query()` returns chronological (oldest-first) order — the last
+      // match found in iteration order IS the chronologically-last one.
+      match = record;
+    }
+    if (!match) return undefined;
+
+    const reviewDetail = (match.detail as Record<string, unknown>)['review'] as PendingReview;
+    return { ...reviewDetail, status: reviewStatusFromAuditType(match.type) };
+  }
+
+  /**
+   * Host-driven expiry sweep (AB-46). See the {@link Bureau.sweepExpiredReviews}
+   * doc comment.
+   */
+  async function sweepExpiredReviews(now?: number): Promise<number> {
+    const effectiveNow = now ?? runtimeServices.clock.now();
+    let sweptCount = 0;
+    const { runs } = store.getState();
+
+    for (const [runId, runState] of runs) {
+      const sessionId = getRunSessionIdentifier(runState);
+      const agentName = findRunAgentName(runState);
+      const stepCompletedTimestamps = runState.actions
+        .filter((action) => action.type === 'step.completed')
+        .map((action) => action.timestamp);
+
+      for (const [stepIndex, step] of runState.steps.entries()) {
+        for (const result of step.results) {
+          if (result.outcome !== 'action_required' || !result.pendingApproval) continue;
+          const id = `approval:${runId}:${result.pendingApproval.callId}`;
+          if (resolvedReviewIds.has(id) || invalidApprovalReviewIds.has(id)) continue;
+          const approval = pendingApprovalOverrides.get(id) ?? result.pendingApproval;
+          if (approval.approvalBinding === undefined) continue;
+          if (approval.approvalBinding.expiresAt > effectiveNow) continue;
+
+          resolvedReviewIds.add(id);
+          sweptCount += 1;
+          const requestedAt = stepCompletedTimestamps[stepIndex] ?? effectiveNow;
+          const review: PendingReview = {
+            kind: 'tool-approval',
+            id,
+            runId,
+            sessionId,
+            agentName,
+            approval,
+            requestedAt,
+            ageMilliseconds: effectiveNow - requestedAt,
+            status: 'expired',
+          };
+          await recordReviewStatusTransition(review, 'expired', 'system:expiry-sweep');
+        }
+      }
+    }
+
+    return sweptCount;
   }
 
   async function createSchedule(
@@ -5813,7 +6071,9 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // configuration. `signal` has a real delivery path (`signalSession`).
     sessionVerbCapabilities: { signal: true, update: false, query: false },
     listPendingReviews,
+    getReview,
     resolveReview,
+    sweepExpiredReviews,
     setRequestAuthorityValidator(validator) {
       requestAuthorityValidator = validator;
       runtime.setRequestAuthorityValidator(validator);

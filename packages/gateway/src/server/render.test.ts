@@ -446,6 +446,7 @@ describe('renderPage with a populated run-detail page', () => {
       prompt: 'Approve the refund?',
       requestedAt: 0,
       ageMilliseconds: 5000,
+      status: 'pending',
     };
     const reviews = createReviewsStore([parkedReview], createBrowserClientEnvironment());
 
@@ -476,6 +477,7 @@ describe('renderPage with a populated run-detail page', () => {
       prompt: 'Approve the refund?',
       requestedAt: 0,
       ageMilliseconds: 5000,
+      status: 'pending',
     };
     const reviews = createReviewsStore([otherRunReview], createBrowserClientEnvironment());
 
@@ -998,6 +1000,7 @@ describe('chat page (every {#if} branch: errors, pending-review inline surface, 
           prompt: 'What is your name?',
           requestedAt: 0,
           ageMilliseconds: 0,
+          status: 'pending',
         },
         // Belongs to a DIFFERENT run — must be filtered out of the inline surface.
         {
@@ -1010,6 +1013,7 @@ describe('chat page (every {#if} branch: errors, pending-review inline surface, 
           prompt: 'Unrelated question',
           requestedAt: 0,
           ageMilliseconds: 0,
+          status: 'pending',
         },
       ] satisfies PendingReview[],
     });
@@ -1070,6 +1074,7 @@ describe('reviews page (Card list of ReviewRow, and ReviewRow by extension)', ()
           },
           requestedAt: 0,
           ageMilliseconds: 65_000,
+          status: 'pending',
         },
         {
           kind: 'human-wait',
@@ -1081,6 +1086,7 @@ describe('reviews page (Card list of ReviewRow, and ReviewRow by extension)', ()
           prompt: 'What is your name?',
           requestedAt: 0,
           ageMilliseconds: 500,
+          status: 'pending',
         },
       ] satisfies PendingReview[],
     });
