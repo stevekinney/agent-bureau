@@ -19,23 +19,16 @@ const packageRoot = join(import.meta.dir, '..');
  * Extracts the registered test path from each `await run([...])` call in `run-tests.ts`. Each
  * call's command array is either `['bun', 'test', '<path>', ...]` or
  * `[nodeBinary, '--test', '<path>']` (the `nodeBinary` variable, for the one Node-runner
- * registration) — in both shapes the registered path is the first single-quoted string literal
- * that is not `'bun'`, `'test'`, or `'--test'`.
+ * registration), so the registered path is captured directly as the string literal that
+ * immediately follows the `'test'`/`'--test'` argument — rather than "the first quoted literal
+ * that isn't a known keyword" over the whole bracketed argument list, which would mis-parse a
+ * call whose LATER argument also contains a literal `]` (e.g. `test/crash/sqlite.test.ts`'s own
+ * `'--test-name-pattern', '\\[smoke\\]'` arguments), since a naive `[^\]]+` capture would treat
+ * that embedded `]` as the end of the array.
  */
 function extractRegisteredTestPaths(runTestsSource: string): string[] {
-  const paths: string[] = [];
-  const callPattern = /await run\(\[([^\]]+)\]/g;
-
-  for (const match of runTestsSource.matchAll(callPattern)) {
-    const argumentsList = match[1] ?? '';
-    const literals = [...argumentsList.matchAll(/'([^']+)'/g)].map((literal) => literal[1]);
-    const registeredPath = literals.find(
-      (literal) => literal !== 'bun' && literal !== 'test' && literal !== '--test',
-    );
-    if (registeredPath) paths.push(registeredPath);
-  }
-
-  return paths;
+  const callPattern = /await run\(\[(?:'bun',\s*'test'|\w+,\s*'--test'),\s*'([^']+)'/g;
+  return [...runTestsSource.matchAll(callPattern)].map((match) => match[1] ?? '');
 }
 
 /**
@@ -52,6 +45,60 @@ function extractReadmeTablePaths(readmeSource: string): string[] {
   const rowPattern = /^\|\s*`(test\/[^`]+)`[^|]*\|/gm;
   return [...readmeSource.matchAll(rowPattern)].map((row) => (row[1] ?? '').replace(/\/$/, ''));
 }
+
+describe('extractRegisteredTestPaths', () => {
+  it('extracts the path from a plain bun-test registration', () => {
+    expect(extractRegisteredTestPaths(`await run(['bun', 'test', 'test/foo.test.ts']);`)).toEqual([
+      'test/foo.test.ts',
+    ]);
+  });
+
+  it('extracts the path from a Node-runner registration using the nodeBinary variable', () => {
+    const source = `await run([nodeBinary, '--test', 'test/runtime.test.mjs'], nodeEnvironment);`;
+    expect(extractRegisteredTestPaths(source)).toEqual(['test/runtime.test.mjs']);
+  });
+
+  it('extracts the correct path from a call whose later argument itself contains a literal "]"', () => {
+    // The regression this guards: a naive "first quoted literal, scanning up to the first ]"
+    // parse would stop inside '\\[smoke\\]' and either mis-capture or miss the real path.
+    const source = `await run(['bun', 'test', 'test/crash/sqlite.test.ts', '--test-name-pattern', '\\\\[smoke\\\\]']);`;
+    expect(extractRegisteredTestPaths(source)).toEqual(['test/crash/sqlite.test.ts']);
+  });
+
+  it('extracts every registration from a multi-line source in order', () => {
+    const source = [
+      `await run(['bun', 'test', 'test/a.test.ts']);`,
+      `await run(['bun', 'test', 'test/b.test.ts']);`,
+      `await run([nodeBinary, '--test', 'test/c.test.mjs'], nodeEnvironment);`,
+    ].join('\n');
+
+    expect(extractRegisteredTestPaths(source)).toEqual([
+      'test/a.test.ts',
+      'test/b.test.ts',
+      'test/c.test.mjs',
+    ]);
+  });
+});
+
+describe('extractReadmeTablePaths', () => {
+  it('normalizes a directory row by stripping the trailing slash', () => {
+    expect(
+      extractReadmeTablePaths('| `test/lifecycle-contract/` | Bun | some description |'),
+    ).toEqual(['test/lifecycle-contract']);
+  });
+
+  it('extracts a path cell with trailing parenthetical text before the next pipe', () => {
+    expect(
+      extractReadmeTablePaths(
+        '| `test/crash/sqlite.test.ts` (smoke scenario)   | Bun     | some description |',
+      ),
+    ).toEqual(['test/crash/sqlite.test.ts']);
+  });
+
+  it('returns an empty array for a table with no test/ rows', () => {
+    expect(extractReadmeTablePaths('| File | Runner |\n| --- | --- |')).toEqual([]);
+  });
+});
 
 describe('README test-sequencing table', () => {
   it('has a row for every test file or directory scripts/run-tests.ts registers', async () => {

@@ -99,6 +99,36 @@ describe('parseExercisedVersions', () => {
     expect(exercised.node.size).toBe(0);
     expect(exercised.bun.size).toBe(0);
   });
+
+  test('ignores a node-version mention inside a YAML comment', () => {
+    // Regression: this repository's own ci.yml carries explanatory comments that mention
+    // `node-version: current` in prose. A comment must never count as an exercised version — only
+    // a real `with:` input does.
+    const exercised = parseExercisedVersions(
+      [
+        '# See node-version: current for context.',
+        'jobs:',
+        '  validate:',
+        '    steps:',
+        '      - node-version: 22',
+      ].join('\n'),
+    );
+
+    expect(exercised.node).toEqual(new Set(['22']));
+  });
+
+  test('ignores a bun-version mention inside a YAML comment', () => {
+    const exercised = parseExercisedVersions(
+      ['# bun-version: 9.9.9 is not actually installed anywhere.', 'bun-version: 1.4.0'].join('\n'),
+    );
+
+    expect(exercised.bun).toEqual(new Set(['1.4.0']));
+  });
+
+  test('still reads a real key on a line whose comment portion also mentions a key', () => {
+    const exercised = parseExercisedVersions('node-version: 22 # not node-version: 99');
+    expect(exercised.node).toEqual(new Set(['22']));
+  });
 });
 
 describe('findRuntimeMatrixErrors', () => {

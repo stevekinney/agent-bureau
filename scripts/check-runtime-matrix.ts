@@ -17,15 +17,18 @@
  * one floor version per clause via the first numeric run in the clause; `findRuntimeMatrixErrors`
  * checks every floor independently.
  *
- * HOW AN "EXERCISED VERSION" IS READ. `parseExercisedVersions` regex-scans
- * `.github/workflows/ci.yml` for every `node-version:`/`bun-version:` key, in both the plain
- * scalar form (`node-version: 22`) and the bracketed matrix-strategy form
- * (`node-version: [22, current]`), and collects the tokens (quotes stripped). A regex is enough
- * here — unlike `scripts/check-skip-manifest.ts`'s AST-based scan of test *code* (where a matching
- * substring inside an unrelated string or comment is a real false-positive risk), a
- * `node-version:`/`bun-version:` key only ever appears as an actual `actions/setup-node`/
- * `oven-sh/setup-bun` `with:` input in this repository's own workflow files, not inside string
- * literals or comments the gate would otherwise need to filter out.
+ * HOW AN "EXERCISED VERSION" IS READ. `parseExercisedVersions` first strips every YAML `#`
+ * comment (`stripYamlComments` — a workflow's own explanatory comments, this file's included, can
+ * legitimately mention a version number in prose without that being a real exercised runtime; see
+ * that function's doc for why line-based stripping is safe here), then regex-scans what remains
+ * for every `node-version:`/`bun-version:` key, in both the plain scalar form
+ * (`node-version: 22`) and the bracketed matrix-strategy form (`node-version: [22, current]`), and
+ * collects the tokens (quotes stripped). A regex over the comment-stripped text is enough here —
+ * unlike `scripts/check-skip-manifest.ts`'s AST-based scan of test *code* (where a matching
+ * substring inside an unrelated string is a real false-positive risk it must filter out with a
+ * full parse), a `node-version:`/`bun-version:` key only ever appears as an actual
+ * `actions/setup-node`/`oven-sh/setup-bun` `with:` input in this repository's own workflow files'
+ * non-comment lines.
  *
  * HOW A FLOOR IS MATCHED AGAINST AN EXERCISED VERSION. `floorIsExercised` compares dotted-numeric
  * components (major, then minor, then patch) up to however many components the SHORTER of the two
@@ -143,18 +146,37 @@ function collectVersionTokens(raw: string, target: Set<string>): void {
 }
 
 /**
+ * Strips a YAML `#` comment from each line (everything from the first `#` onward). None of this
+ * repository's real `node-version:`/`bun-version:` value lines contain a literal `#`, so this is
+ * a safe, cheap way to keep an explanatory comment mentioning a version number (this file's own
+ * job comments do exactly that) from being mistaken for a real exercised version — see the module
+ * doc.
+ */
+function stripYamlComments(workflowText: string): string {
+  return workflowText
+    .split('\n')
+    .map((line) => {
+      const hashIndex = line.indexOf('#');
+      return hashIndex === -1 ? line : line.slice(0, hashIndex);
+    })
+    .join('\n');
+}
+
+/**
  * Regex-scans a workflow file's text for every `node-version:`/`bun-version:` key (scalar or
- * bracketed matrix-strategy list) and returns the distinct version tokens for each. See the
- * module doc for why a regex, rather than a full YAML parse, is sufficient here.
+ * bracketed matrix-strategy list) and returns the distinct version tokens for each. Comment lines
+ * are stripped first (see `stripYamlComments`). See the module doc for why a regex, rather than a
+ * full YAML parse, is sufficient here.
  */
 export function parseExercisedVersions(workflowText: string): ExercisedVersions {
   const node = new Set<string>();
   const bun = new Set<string>();
+  const codeOnly = stripYamlComments(workflowText);
 
-  for (const match of workflowText.matchAll(/node-version:\s*(\[[^\]]*\]|\S+)/g)) {
+  for (const match of codeOnly.matchAll(/node-version:\s*(\[[^\]]*\]|\S+)/g)) {
     collectVersionTokens(match[1] ?? '', node);
   }
-  for (const match of workflowText.matchAll(/bun-version:\s*(\[[^\]]*\]|\S+)/g)) {
+  for (const match of codeOnly.matchAll(/bun-version:\s*(\[[^\]]*\]|\S+)/g)) {
     collectVersionTokens(match[1] ?? '', bun);
   }
 
