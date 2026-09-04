@@ -447,10 +447,10 @@ export function createWebhookNotifier<D extends AgentDefinitions = AgentDefiniti
     const noOpSnapshot: WebhookDeliveryLivenessSnapshot = Object.freeze({
       id: AGGREGATE_DELIVERY_ID,
       kind: 'webhook-delivery',
-      startedAt: new Date().toISOString(),
+      startedAt: runtime.clock.nowISO(),
       revision: 0,
       status: 'terminal',
-      lastTransitionAt: new Date().toISOString(),
+      lastTransitionAt: runtime.clock.nowISO(),
       projection: 'redacted',
       ownership: 'independent',
       detached: false,
@@ -575,7 +575,7 @@ export function createWebhookNotifier<D extends AgentDefinitions = AgentDefiniti
     });
   }
 
-  const aggregateStartedAt = new Date().toISOString();
+  const aggregateStartedAt = runtime.clock.nowISO();
   let aggregateRevision = 0;
   let cachedAggregate: WebhookDeliveryLivenessSnapshot | undefined;
   let cachedAggregateRevision = -1;
@@ -650,7 +650,7 @@ export function createWebhookNotifier<D extends AgentDefinitions = AgentDefiniti
       id,
       runId,
       watchdog,
-      startedAt: new Date().toISOString(),
+      startedAt: runtime.clock.nowISO(),
       deadlineAt,
     };
     trackedDeliveries.set(id, tracked);

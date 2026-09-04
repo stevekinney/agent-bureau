@@ -1,7 +1,7 @@
 {
   "deterministicDirectories": [
     "packages/*/src/test/**",
-    "packages/bureau/src/**/*.test.ts",
+    "packages/bureau/src/**",
     "packages/gateway/src/conformance/**",
     "packages/integration/test/lifecycle-contract/**",
     "packages/lifecycle/src/**",

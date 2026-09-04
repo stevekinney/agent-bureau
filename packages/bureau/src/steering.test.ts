@@ -10,6 +10,7 @@
  * `ImplementedSteeringCommand`'s doc comment in `steering.ts`).
  */
 import { describe, expect, it } from 'bun:test';
+import { createManualRuntimeServices } from 'lifecycle';
 
 import {
   createSteeringCommandLedger,
@@ -686,6 +687,52 @@ describe('createSteeringGate', () => {
           failure: { failedAt: promotionNow, reason: 'deadline-passed' },
         }),
       });
+    });
+
+    it("promoteForNewRun's default `now` (AB-327) reads the injected RuntimeServices clock, not the real wall clock", () => {
+      const runtime = createManualRuntimeServices({ origin: NOW });
+      const gate = createSteeringGate('session-1', createSteeringCommandLedger(), runtime.clock);
+      const identity = gate.admit(
+        {
+          id: 'identity-1',
+          idOrigin: 'caller',
+          sessionId: 'session-1',
+          principal: 'alice',
+          requestedValue: { target: 'agent-identity', override: 'reviewer' },
+          requestedAt: NOW,
+          deadline: '2026-09-02T00:00:02.000Z',
+        },
+        { liveRunIds: [], now: NOW }, // before the deadline
+      );
+      expect(identity.outcome).toBe('accepted');
+
+      // Called with no explicit `now` — the default must read the manual
+      // runtime's pinned clock (still before the deadline), not the real,
+      // unpinned wall clock. A real Date() here would run this test long
+      // after the fixed deadline above and always reject.
+      gate.promoteForNewRun('run-1');
+      expect(gate.forRun('run-1').getDesiredState().agentName).toBe('reviewer');
+
+      // Advancing the manual clock past the deadline and promoting a
+      // second run (with no explicit `now` again) must now reject —
+      // proving the default genuinely re-reads the clock each call rather
+      // than capturing a value once.
+      runtime.setTime(Date.parse('2026-09-02T00:00:05.000Z'));
+      const replay = gate.admit(
+        {
+          id: 'identity-2',
+          idOrigin: 'caller',
+          sessionId: 'session-1',
+          principal: 'alice',
+          requestedValue: { target: 'agent-identity', override: 'auditor' },
+          requestedAt: NOW,
+          deadline: '2026-09-02T00:00:02.000Z',
+        },
+        { liveRunIds: ['run-1'], now: NOW },
+      );
+      expect(replay.outcome).toBe('accepted');
+      gate.promoteForNewRun('run-2');
+      expect(gate.forRun('run-2').getDesiredState().agentName).toBeUndefined();
     });
 
     it('promotes normally, with no deadline set on the pending identity', () => {
