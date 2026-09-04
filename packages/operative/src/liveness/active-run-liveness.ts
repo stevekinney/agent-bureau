@@ -513,7 +513,7 @@ export function createActiveRunLiveness(options: ActiveRunLivenessOptions): Acti
       if (status !== 'running') return;
       status = 'waiting';
       declaredWait = { ...wait, startedAt: clock.now() };
-      lastTransitionAt = new Date().toISOString();
+      lastTransitionAt = runtime.clock.nowISO();
       advance();
     },
 
@@ -522,7 +522,7 @@ export function createActiveRunLiveness(options: ActiveRunLivenessOptions): Acti
       declaredWait = undefined;
       if (status === 'waiting') {
         status = 'running';
-        lastTransitionAt = new Date().toISOString();
+        lastTransitionAt = runtime.clock.nowISO();
       }
       advance();
     },

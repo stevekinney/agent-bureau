@@ -25,8 +25,7 @@
     "packages/conversationalist/src/**",
     "packages/conversationalist/test/**",
     "packages/operative/test/**",
-    "packages/operative/src/**/*.test.ts",
-    "packages/operative/src/providers/routing/strategies/test-helpers.ts"
+    "packages/operative/src/**"
   ],
   "realRuntimeExemptions": [
     {
