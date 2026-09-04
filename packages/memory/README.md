@@ -112,6 +112,7 @@ interface CreateMemoryOptions {
   textSearchProvider?: TextSearchProvider;
   requireNamespace?: boolean; // default: false
   temporalValidity?: boolean; // default: false
+  runtime?: RuntimeServices; // from `lifecycle`; defaults to the real clock/identifiers
 }
 
 type OnConflictHandler = (
@@ -408,6 +409,7 @@ function createWeftMemoryRecordStorage(
 interface CreateWeftMemoryRecordStorageOptions {
   keyPrefix?: string;
   disposeUnderlyingStorage?: boolean; // default: false
+  runtime?: RuntimeServices; // from `lifecycle`; controls update()'s updatedAt stamp, defaults to the real clock
 }
 ```
 
@@ -721,6 +723,8 @@ interface IngestOptions extends ChunkingOptions {
   onProgress?: (progress: { completed: number; total: number }) => void;
   /** Loader that turns `content` into chunks. Defaults to `chunkMarkdown`. */
   chunk?: (document: string, options?: ChunkingOptions) => ContentChunk[] | Promise<ContentChunk[]>;
+  /** Controls the default `sourceIdentifier` when omitted. From `lifecycle`; defaults to the real clock/identifiers. */
+  runtime?: RuntimeServices;
 }
 
 interface IngestResult {
@@ -760,8 +764,9 @@ interface FileSynchronizerOptions {
   chunking?: ChunkingOptions;
   metadata?: Partial<MemoryMetadata>;
   pollingInterval?: number; // default: 5000 ms
-  setIntervalFunction?: ScheduleInterval;
-  clearIntervalFunction?: ClearScheduledInterval;
+  setIntervalFunction?: ScheduleInterval; // default: runtime.timers.setInterval
+  clearIntervalFunction?: ClearScheduledInterval; // default: runtime.timers.clearInterval
+  runtime?: RuntimeServices; // from `lifecycle`; defaults to the real clock/timers
 }
 
 interface FileSynchronizer {
@@ -876,8 +881,9 @@ function computeTemporalDecay(
 
 interface TemporalDecayOptions {
   halfLifeMilliseconds: number;
-  referenceTime?: number; // default: Date.now()
+  referenceTime?: number; // default: runtime.clock.now()
   evergreenExempt?: boolean; // default: true
+  runtime?: RuntimeServices; // from `lifecycle`; controls the default referenceTime, defaults to the real clock
 }
 ```
 
@@ -973,7 +979,10 @@ interface AgentIdentity {
 Persistent identity backed by a `TextValueStore` (e.g., a Weft-backed store). Archives every `saveSoul` call to history before overwriting.
 
 ```typescript
-function createStorageIdentityProvider(adapter: TextValueStore): IdentityProvider;
+function createStorageIdentityProvider(
+  adapter: TextValueStore,
+  runtime?: RuntimeServices, // from `lifecycle`; defaults to the real clock
+): IdentityProvider;
 ```
 
 ### `createStaticIdentityProvider(initial?)`
@@ -981,7 +990,10 @@ function createStorageIdentityProvider(adapter: TextValueStore): IdentityProvide
 In-memory identity for tests or single-session use.
 
 ```typescript
-function createStaticIdentityProvider(initial?: Partial<AgentIdentity>): IdentityProvider;
+function createStaticIdentityProvider(
+  initial?: Partial<AgentIdentity>,
+  runtime?: RuntimeServices, // from `lifecycle`; defaults to the real clock
+): IdentityProvider;
 ```
 
 ### `createSoulSeed(options?)`
@@ -997,6 +1009,7 @@ interface CreateSoulSeedOptions {
   values?: string[];
   style?: string[];
   additional?: string;
+  runtime?: RuntimeServices; // from `lifecycle`; defaults to the real clock/identifiers
 }
 ```
 
@@ -1040,11 +1053,13 @@ function pinSoulItem(
   provider: IdentityProvider,
   itemId: string,
   agentId?: string,
+  runtime?: RuntimeServices, // from `lifecycle`; defaults to the real clock
 ): Promise<boolean>;
 function unpinSoulItem(
   provider: IdentityProvider,
   itemId: string,
   agentId?: string,
+  runtime?: RuntimeServices, // from `lifecycle`; defaults to the real clock
 ): Promise<boolean>;
 
 interface SoulDiff {
@@ -1080,6 +1095,7 @@ interface CreateSoulDistillationOptions {
   ) => Promise<string>;
   safetyFilter?: (item: string) => Promise<boolean>;
   chunkSize?: number; // default: 50
+  runtime?: RuntimeServices; // from `lifecycle`; defaults to the real clock/identifiers
 }
 ```
 

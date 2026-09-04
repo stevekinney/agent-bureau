@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from 'bun:test';
+import { createManualRuntimeServices } from 'lifecycle';
 
 import { chunkText } from '../src/chunking';
 import { createMemory } from '../src/create-memory';
@@ -63,6 +64,14 @@ describe('ingest', () => {
     expect(result.sourceIdentifier).toBeDefined();
     expect(typeof result.sourceIdentifier).toBe('string');
     expect(result.sourceIdentifier.length).toBeGreaterThan(0);
+  });
+
+  it('derives the default source identifier from an injected manual runtime rather than crypto.randomUUID', async () => {
+    const runtime = createManualRuntimeServices({ identifierSeed: 'ingest-seed' });
+
+    const result = await ingest(memory, 'Some content', { runtime });
+
+    expect(result.sourceIdentifier).toBe('source-document-1');
   });
 
   it('attaches additional metadata to each chunk', async () => {

@@ -295,6 +295,7 @@
         "@lostgradient/weft": "^0.23.1",
         "armorer": "workspace:*",
         "interoperability": "workspace:*",
+        "lifecycle": "workspace:*",
         "zod": "^4.4.3",
       },
       "devDependencies": {

@@ -4,6 +4,7 @@ import {
   WEFT_RESERVED_KEY_PREFIXES,
 } from '@lostgradient/weft/storage/interface';
 import { beforeEach, describe, expect, it } from 'bun:test';
+import { createManualRuntimeServices } from 'lifecycle';
 
 import {
   createWeftMemoryRecordStorage,
@@ -319,6 +320,19 @@ describe('createWeftMemoryRecordStorage (Weft-specific)', () => {
       );
 
       await expect(storage.get('a', SCOPE)).rejects.toThrow();
+    });
+  });
+
+  describe('runtime injection', () => {
+    it('derives update() updatedAt from an injected manual runtime rather than the real clock', async () => {
+      const underlying = new MemoryStorage();
+      const runtime = createManualRuntimeServices({ origin: '2026-06-01T00:00:00.000Z' });
+      const runtimeStorage = createWeftMemoryRecordStorage(underlying, { runtime });
+
+      await runtimeStorage.put(makeRecord('a', { updatedAt: 0 }));
+      const updated = await runtimeStorage.update('a', SCOPE, { content: 'new content' });
+
+      expect(updated?.updatedAt).toBe(Date.parse('2026-06-01T00:00:00.000Z'));
     });
   });
 });

@@ -1,4 +1,5 @@
 import { cosineSimilarity, type EmbeddingVectorLike } from 'interoperability';
+import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
 
 import type { HybridSearchCandidate, VectorSearchResult } from './hybrid-search';
 import { mergeHybridResults } from './hybrid-search';
@@ -41,8 +42,8 @@ function rankRecordsByVector(
     .sort((left, right) => right.score - left.score);
 }
 
-function generateId(): string {
-  return crypto.randomUUID();
+function generateId(runtime: RuntimeServices): string {
+  return runtime.identifiers.next('memory');
 }
 
 /**
@@ -109,6 +110,7 @@ export function createMemory(options: CreateMemoryOptions): Memory {
     onConflict,
     temporalValidity = false,
   } = options;
+  const runtime = options.runtime ?? createDefaultRuntimeServices();
 
   if (conflictThreshold !== undefined && conflictThreshold >= deduplicationThreshold) {
     throw new Error(
@@ -237,8 +239,8 @@ export function createMemory(options: CreateMemoryOptions): Memory {
         // 'keep-both' — fall through to normal insert.
       }
 
-      const id = generateId();
-      const now = Date.now();
+      const id = generateId(runtime);
+      const now = runtime.clock.now();
       const record: MemoryRecord = {
         id,
         namespace,
@@ -304,9 +306,9 @@ export function createMemory(options: CreateMemoryOptions): Memory {
       }
 
       const vector = await embed(content);
-      const now = Date.now();
+      const now = runtime.clock.now();
       const record: MemoryRecord = {
-        id: generateId(),
+        id: generateId(runtime),
         namespace,
         content,
         vector: new Float32Array(vector),
@@ -342,7 +344,7 @@ export function createMemory(options: CreateMemoryOptions): Memory {
 
       // Resolve once so both search branches filter to the same instant. Only
       // active when the flag is set — otherwise `asOf` is inert.
-      const asOf = temporalValidity ? (mergedOptions.asOf ?? Date.now()) : undefined;
+      const asOf = temporalValidity ? (mergedOptions.asOf ?? runtime.clock.now()) : undefined;
 
       // When vectorOnly is set, skip BM25 and return pure cosine similarity
       // scores filtered by the (cosine-semantics) threshold.
@@ -376,6 +378,7 @@ export function createMemory(options: CreateMemoryOptions): Memory {
           results = applyTemporalDecay(results, {
             halfLifeMilliseconds: mergedOptions.temporalDecay.halfLifeMilliseconds,
             evergreenExempt: mergedOptions.temporalDecay.evergreenExempt ?? true,
+            runtime,
           });
         }
 
@@ -477,6 +480,7 @@ export function createMemory(options: CreateMemoryOptions): Memory {
         results = applyTemporalDecay(results, {
           halfLifeMilliseconds: mergedOptions.temporalDecay.halfLifeMilliseconds,
           evergreenExempt: mergedOptions.temporalDecay.evergreenExempt ?? true,
+          runtime,
         });
       }
 

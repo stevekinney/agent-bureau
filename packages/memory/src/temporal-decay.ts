@@ -1,7 +1,16 @@
+import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
+
 export interface TemporalDecayOptions {
   halfLifeMilliseconds: number;
-  referenceTime?: number; // defaults to Date.now()
+  referenceTime?: number; // defaults to runtime.clock.now()
   evergreenExempt?: boolean; // defaults to true
+  /**
+   * Runtime services to read the default `referenceTime` from when it is
+   * omitted. Defaults to the real implementation
+   * (`createDefaultRuntimeServices()`). A test composes its own via
+   * `createManualRuntimeServices()` from `lifecycle`.
+   */
+  runtime?: RuntimeServices;
 }
 
 /**
@@ -15,7 +24,8 @@ export function computeTemporalDecay(
   createdAt: number,
   options: TemporalDecayOptions,
 ): number {
-  const referenceTime = options.referenceTime ?? Date.now();
+  const referenceTime =
+    options.referenceTime ?? (options.runtime ?? createDefaultRuntimeServices()).clock.now();
   const age = referenceTime - createdAt;
 
   // Do not decay items from the future

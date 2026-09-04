@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test';
+import { createManualRuntimeServices } from 'lifecycle';
 
 import { applyTemporalDecay, computeTemporalDecay } from '../src/temporal-decay';
 
@@ -51,6 +52,18 @@ describe('computeTemporalDecay', () => {
       halfLifeMilliseconds: ONE_HOUR,
       referenceTime,
     });
+    expect(result).toBeCloseTo(0.5, 10);
+  });
+
+  it('derives the default referenceTime from an injected manual runtime rather than the real clock, when referenceTime is omitted', () => {
+    const runtime = createManualRuntimeServices({ origin: '2026-04-10T00:00:00.000Z' });
+    const createdAt = runtime.clock.now() - ONE_HOUR;
+
+    const result = computeTemporalDecay(1.0, createdAt, {
+      halfLifeMilliseconds: ONE_HOUR,
+      runtime,
+    });
+
     expect(result).toBeCloseTo(0.5, 10);
   });
 });

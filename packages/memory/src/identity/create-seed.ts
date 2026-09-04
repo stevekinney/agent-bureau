@@ -1,3 +1,5 @@
+import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
+
 import type { SoulItem } from './types';
 
 /**
@@ -14,16 +16,22 @@ export interface CreateSoulSeedOptions {
   style?: string[];
   /** Any additional seed content. */
   additional?: string;
+  /**
+   * Runtime services to read identifiers and wall time from. Defaults to
+   * the real implementation (`createDefaultRuntimeServices()`). A test
+   * composes its own via `createManualRuntimeServices()` from `lifecycle`.
+   */
+  runtime?: RuntimeServices;
 }
 
-function createSeedItem(content: string, topic?: string): SoulItem {
+function createSeedItem(content: string, runtime: RuntimeServices, topic?: string): SoulItem {
   return {
-    id: `seed-${crypto.randomUUID()}`,
+    id: `seed-${runtime.identifiers.next('seed')}`,
     content,
     source: 'seed',
     pinned: true,
     topic,
-    updatedAt: new Date().toISOString(),
+    updatedAt: runtime.clock.nowISO(),
     reinforcementCount: 0,
   };
 }
@@ -38,35 +46,37 @@ function createSeedItem(content: string, topic?: string): SoulItem {
  * a single "You are a helpful assistant." item.
  */
 export function createSoulSeed(options?: CreateSoulSeedOptions): SoulItem[] {
+  const runtime = options?.runtime ?? createDefaultRuntimeServices();
+
   if (!options) {
-    return [createSeedItem('You are a helpful assistant.')];
+    return [createSeedItem('You are a helpful assistant.', runtime)];
   }
 
   const items: SoulItem[] = [];
 
   if (options.name) {
-    items.push(createSeedItem(`Your name is ${options.name}.`, 'identity'));
+    items.push(createSeedItem(`Your name is ${options.name}.`, runtime, 'identity'));
   }
 
   for (const trait of options.traits ?? []) {
-    items.push(createSeedItem(trait, 'trait'));
+    items.push(createSeedItem(trait, runtime, 'trait'));
   }
 
   for (const value of options.values ?? []) {
-    items.push(createSeedItem(value, 'value'));
+    items.push(createSeedItem(value, runtime, 'value'));
   }
 
   for (const style of options.style ?? []) {
-    items.push(createSeedItem(style, 'style'));
+    items.push(createSeedItem(style, runtime, 'style'));
   }
 
   if (options.additional) {
-    items.push(createSeedItem(options.additional));
+    items.push(createSeedItem(options.additional, runtime));
   }
 
   // If all arrays were empty and no name/additional, return default seed
   if (items.length === 0) {
-    return [createSeedItem('You are a helpful assistant.')];
+    return [createSeedItem('You are a helpful assistant.', runtime)];
   }
 
   return items;

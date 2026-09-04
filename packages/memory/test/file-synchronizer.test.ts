@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { createManualRuntimeServices } from 'lifecycle';
 
 import { createMemory } from '../src/create-memory';
 import type { IntervalHandle } from '../src/file-synchronizer';
@@ -333,5 +334,39 @@ describe('createFileSynchronizer', () => {
     const second = await synchronizer.synchronize();
     expect(second.added).toBe(0);
     expect(second.updated).toBe(0);
+  });
+
+  it('polls on an injected manual runtime clock rather than a real timer, when no explicit interval functions are given', async () => {
+    const runtime = createManualRuntimeServices();
+    await writeFile(join(tempDir, 'initial.md'), 'Initial content.');
+
+    const synchronizer = createFileSynchronizer({
+      memory,
+      directory: tempDir,
+      pollingInterval: 1000,
+      runtime,
+    });
+
+    await synchronizer.start();
+    const countAfterStart = await memory.count();
+    expect(countAfterStart).toBeGreaterThan(0);
+
+    // No real timer is running — advancing real wall-clock time (nothing to
+    // advance here, since only the manual runtime's clock moves) does not
+    // trigger a poll. Only advancing the injected runtime does. The poll's
+    // synchronize() does real filesystem I/O on macrotasks (same as the
+    // "swallows polling errors" test above), so poll bounded for the count
+    // to change rather than assuming microtask draining alone is enough.
+    await writeFile(join(tempDir, 'polled.md'), 'Polled content.');
+    await runtime.advance(1000);
+    let attempts = 0;
+    while ((await memory.count()) <= countAfterStart && attempts < 50) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      attempts++;
+    }
+
+    expect(await memory.count()).toBeGreaterThan(countAfterStart);
+
+    await synchronizer.stop();
   });
 });

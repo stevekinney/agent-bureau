@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from 'bun:test';
+import { createManualRuntimeServices } from 'lifecycle';
 
 import { createMemory } from '../src/create-memory';
 import { createInMemoryMemoryRecordStorage, createMockEmbedder } from '../src/test/index';
@@ -44,6 +45,20 @@ describe('createMemory', () => {
       expect(entry.metadata.source).toBe('manual');
       expect(entry.createdAt).toBeTypeOf('number');
       expect(entry.updatedAt).toBeTypeOf('number');
+    });
+
+    it('derives id, createdAt, and updatedAt from an injected manual runtime rather than the real clock', async () => {
+      const runtime = createManualRuntimeServices({ origin: '2026-02-02T00:00:00.000Z' });
+      const storage = createInMemoryMemoryRecordStorage();
+      const embedder = createMockEmbedder(DIMENSION);
+      const runtimeMemory = createMemory({ embedder, storage, dimension: DIMENSION, runtime });
+      await runtimeMemory.init();
+
+      const entry = await runtimeMemory.remember('Runtime-controlled entry');
+
+      expect(entry.id).toBe('memory-1');
+      expect(entry.createdAt).toBe(Date.parse('2026-02-02T00:00:00.000Z'));
+      expect(entry.updatedAt).toBe(Date.parse('2026-02-02T00:00:00.000Z'));
     });
 
     it('stores the entry in the underlying storage', async () => {

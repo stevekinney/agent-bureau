@@ -1,3 +1,5 @@
+import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
+
 import type { Memory, MemorySearchResult } from '../types';
 import type { IdentityProvider, SoulBudget, SoulItem } from './types';
 
@@ -41,6 +43,13 @@ export interface CreateSoulDistillationOptions {
    * Number of entries to process per chunk. Default: 50.
    */
   chunkSize?: number;
+  /**
+   * Runtime services to read wall time and identifiers from when minting a
+   * graduated soul item. Defaults to the real implementation
+   * (`createDefaultRuntimeServices()`). A test composes its own via
+   * `createManualRuntimeServices()` from `lifecycle`.
+   */
+  runtime?: RuntimeServices;
 }
 
 /**
@@ -122,6 +131,7 @@ export function createSoulDistillationTask(
     safetyFilter,
     chunkSize = 50,
   } = options;
+  const runtime = options.runtime ?? createDefaultRuntimeServices();
 
   return {
     name: 'soul-distillation',
@@ -305,12 +315,12 @@ export function createSoulDistillationTask(
         .map((line) => line.trim())
         .filter((line) => line.length > 0)
         .map((line, index) => ({
-          id: `graduated-${Date.now()}-${index}`,
+          id: `graduated-${runtime.clock.now()}-${index}`,
           content: line,
           source: 'graduated' as const,
           sourceEntryIds: safeCandidates.map((c) => c.entryId),
           pinned: false,
-          updatedAt: new Date().toISOString(),
+          updatedAt: runtime.clock.nowISO(),
           reinforcementCount: Math.max(...safeCandidates.map((c) => c.reinforcementCount)),
         }));
 

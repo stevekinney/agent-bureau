@@ -1,4 +1,5 @@
 import type { TextValueStore } from '@lostgradient/weft/storage';
+import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
 
 import type { IdentityProvider, PersonaDescriptor, SoulHistoryEntry, SoulItem } from './types';
 
@@ -35,7 +36,10 @@ const USER_CONTEXT_KEY = 'identity:user-context';
  * - `identity:pending:{agentId}` — pending soul update
  * - `identity:history:{agentId}:{version}` — soul version history
  */
-export function createStorageIdentityProvider(adapter: TextValueStore): IdentityProvider {
+export function createStorageIdentityProvider(
+  adapter: TextValueStore,
+  runtime: RuntimeServices = createDefaultRuntimeServices(),
+): IdentityProvider {
   async function loadJson<T>(key: string): Promise<T | undefined> {
     const raw = await adapter.get(key);
     if (raw === null) return undefined;
@@ -75,7 +79,7 @@ export function createStorageIdentityProvider(adapter: TextValueStore): Identity
         const entry: SoulHistoryEntry = {
           version: nextVersion,
           items: current,
-          timestamp: new Date().toISOString(),
+          timestamp: runtime.clock.nowISO(),
         };
         await saveJson(historyKey(agentId, nextVersion), entry);
       }
