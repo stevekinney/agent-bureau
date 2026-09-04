@@ -3,6 +3,7 @@ import type {
   GenerateFunction,
   RunnableAgent,
   RunResult,
+  RuntimeServices,
 } from '@lostgradient/operative';
 import type { AnyToolbox } from 'armorer';
 
@@ -121,6 +122,13 @@ export type PromoteRunToCaseOptions = {
    * buggy output as the expectation would lock the bug in as "correct".
    */
   expectedOutput?: string | SemanticMatcher;
+  /**
+   * Runtime services to read the `promotedAt` provenance timestamp from.
+   * Defaults to the real implementation (`createDefaultRuntimeServices()`).
+   * A test composes its own via `createManualRuntimeServices()` from
+   * `@lostgradient/operative/test`.
+   */
+  runtime?: RuntimeServices;
 };
 
 /**
@@ -283,6 +291,13 @@ export type CreateAgentEvaluationOptions = {
   concurrency?: number;
   /** Embedder function for semantic matching. */
   embedder?: EmbedderFunction;
+  /**
+   * Runtime services to read wall time, monotonic time, and timers from.
+   * Defaults to the real implementation (`createDefaultRuntimeServices()`).
+   * A test composes its own via `createManualRuntimeServices()` from
+   * `@lostgradient/operative/test`.
+   */
+  runtime?: RuntimeServices;
 };
 
 /**
@@ -434,6 +449,13 @@ export type EvaluationSuiteOptions = {
   concurrency?: number;
   /** Embedder function for semantic matching. */
   embedder?: EmbedderFunction;
+  /**
+   * Runtime services to read wall time, monotonic time, and timers from.
+   * Defaults to the real implementation (`createDefaultRuntimeServices()`).
+   * A test composes its own via `createManualRuntimeServices()` from
+   * `@lostgradient/operative/test`.
+   */
+  runtime?: RuntimeServices;
 };
 
 /**

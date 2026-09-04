@@ -1,5 +1,5 @@
 import type { GenerateResponse, JSONValue, RunResult, StepResult } from '@lostgradient/operative';
-import { createMockGenerate } from '@lostgradient/operative/test';
+import { createManualRuntimeServices, createMockGenerate } from '@lostgradient/operative/test';
 import { createMockTool, createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 
@@ -173,7 +173,6 @@ describe('promoteRunToCase', () => {
 
   it('records provenance — origin, runId, sourceCaseName, finishReason, and promotedAt', () => {
     const runResult = createMockRunResult({ content: 'ok', finishReason: 'stop-condition' });
-    const before = new Date().toISOString();
 
     const promoted = promoteRunToCase({
       sourceCase,
@@ -182,8 +181,6 @@ describe('promoteRunToCase', () => {
       runId: 'run-42',
     });
 
-    const after = new Date().toISOString();
-
     expect(promoted.provenance).toBeDefined();
     expect(promoted.provenance?.origin).toBe('production-failure');
     expect(promoted.provenance?.runId).toBe('run-42');
@@ -191,8 +188,22 @@ describe('promoteRunToCase', () => {
     expect(promoted.provenance?.finishReason).toBe('stop-condition');
     const promotedAt = promoted.provenance?.promotedAt;
     expect(promotedAt).toBeDefined();
-    expect(promotedAt! >= before).toBe(true);
-    expect(promotedAt! <= after).toBe(true);
+    expect(new Date(promotedAt!).getTime()).not.toBeNaN();
+  });
+
+  it('derives promotedAt from an injected manual runtime rather than the real clock', () => {
+    const runResult = createMockRunResult({ content: 'ok', finishReason: 'stop-condition' });
+    const runtime = createManualRuntimeServices({ origin: '2026-02-14T08:00:00.000Z' });
+
+    const promoted = promoteRunToCase({
+      sourceCase,
+      runResult,
+      origin: 'production-failure',
+      runId: 'run-42',
+      runtime,
+    });
+
+    expect(promoted.provenance?.promotedAt).toBe('2026-02-14T08:00:00.000Z');
   });
 
   it('yields a runnable case: re-running the promoted case against the same behavior passes', async () => {

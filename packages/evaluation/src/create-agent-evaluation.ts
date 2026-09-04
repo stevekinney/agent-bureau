@@ -1,5 +1,5 @@
-import type { RunResult } from '@lostgradient/operative';
-import { createActiveRun, stopWhen } from '@lostgradient/operative';
+import type { RunResult, RuntimeServices } from '@lostgradient/operative';
+import { createActiveRun, createDefaultRuntimeServices, stopWhen } from '@lostgradient/operative';
 import { Conversation } from 'conversationalist';
 
 import { matchOutput } from './matchers';
@@ -40,12 +40,20 @@ class EvaluationTimeoutError extends Error {
  * `EvaluationCase.timeout`. This guarantees the await returns within
  * `timeoutMs` even for an uncooperative agent (PRRT_kwDORvupsc6MlG1u).
  */
-function runWithTimeout<T>(promise: Promise<T>, timeoutMs: number, caseName: string): Promise<T> {
-  let timer: ReturnType<typeof setTimeout>;
+function runWithTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  caseName: string,
+  runtime: RuntimeServices,
+): Promise<T> {
+  let timer: ReturnType<RuntimeServices['timers']['setTimeout']>;
   const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(new EvaluationTimeoutError(caseName, timeoutMs)), timeoutMs);
+    timer = runtime.timers.setTimeout(
+      () => reject(new EvaluationTimeoutError(caseName, timeoutMs)),
+      timeoutMs,
+    );
   });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+  return Promise.race([promise, timeout]).finally(() => runtime.timers.clearTimeout(timer));
 }
 
 /** All known {@link RunResult.finishReason} values — the validation gate below. */
@@ -85,14 +93,15 @@ function isRunResult(value: unknown): value is RunResult {
 async function runCase(
   evaluationCase: EvaluationCase,
   options: CreateAgentEvaluationOptions,
+  runtime: RuntimeServices,
 ): Promise<EvaluationCaseResult> {
-  const startTime = performance.now();
+  const startTime = runtime.monotonic.now();
   const tags = evaluationCase.tags ?? [];
 
   try {
     const timeout = evaluationCase.timeout ?? 30_000;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeout);
+    const timer = runtime.timers.setTimeout(() => controller.abort(), timeout);
 
     let runResult: RunResult;
     try {
@@ -142,7 +151,12 @@ async function runCase(
         const agentRun = options.agent.run(evaluationCase.input, { signal: controller.signal });
         let agentResult: RunResult;
         try {
-          agentResult = await runWithTimeout(agentRun.result(), timeout, evaluationCase.name);
+          agentResult = await runWithTimeout(
+            agentRun.result(),
+            timeout,
+            evaluationCase.name,
+            runtime,
+          );
         } catch (raceError) {
           // `runWithTimeout` racing `agentRun.result()` returns as soon as
           // the timeout wins — it never tells the LOSING side to stop.
@@ -186,10 +200,10 @@ async function runCase(
         runResult = agentResult;
       }
     } finally {
-      clearTimeout(timer);
+      runtime.timers.clearTimeout(timer);
     }
 
-    const duration = performance.now() - startTime;
+    const duration = runtime.monotonic.now() - startTime;
     const usage = extractTokenUsage(runResult);
     const steps = extractStepCount(runResult);
 
@@ -249,7 +263,7 @@ async function runCase(
       },
     };
   } catch (error: unknown) {
-    const duration = performance.now() - startTime;
+    const duration = runtime.monotonic.now() - startTime;
     const message = error instanceof Error ? error.message : String(error);
 
     return {
@@ -278,6 +292,7 @@ async function runCasesWithConcurrency(
   cases: EvaluationCase[],
   options: CreateAgentEvaluationOptions,
   concurrency: number,
+  runtime: RuntimeServices,
 ): Promise<EvaluationCaseResult[]> {
   const results = new Array<EvaluationCaseResult>(cases.length);
   let nextIndex = 0;
@@ -287,7 +302,7 @@ async function runCasesWithConcurrency(
       const index = nextIndex++;
       const evaluationCase = cases[index];
       if (!evaluationCase) break;
-      results[index] = await runCase(evaluationCase, options);
+      results[index] = await runCase(evaluationCase, options, runtime);
     }
   }
 
@@ -347,13 +362,19 @@ export function createAgentEvaluation(options: CreateAgentEvaluationOptions): {
   run: () => Promise<EvaluationReport>;
 } {
   const concurrency = Math.max(1, options.concurrency ?? 1);
+  const runtime = options.runtime ?? createDefaultRuntimeServices();
 
   return {
     async run(): Promise<EvaluationReport> {
-      const caseResults = await runCasesWithConcurrency(options.cases, options, concurrency);
+      const caseResults = await runCasesWithConcurrency(
+        options.cases,
+        options,
+        concurrency,
+        runtime,
+      );
 
       return {
-        timestamp: new Date().toISOString(),
+        timestamp: runtime.clock.nowISO(),
         cases: caseResults,
         summary: computeSummary(caseResults),
       };

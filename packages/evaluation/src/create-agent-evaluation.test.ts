@@ -7,7 +7,7 @@ import type {
 } from '@lostgradient/operative';
 import type { AgentRunLivenessSnapshot } from '@lostgradient/operative/liveness';
 import { LIVENESS_POLICY_VERSION } from '@lostgradient/operative/liveness';
-import { createMockGenerate } from '@lostgradient/operative/test';
+import { createManualRuntimeServices, createMockGenerate } from '@lostgradient/operative/test';
 import { createMockTool, createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 
@@ -96,6 +96,28 @@ describe('createAgentEvaluation', () => {
     expect(report.cases[0]!.pass).toBe(true);
     expect(report.cases[0]!.score).toBe(1);
     expect(report.cases[0]!.metrics.outputMatch).toBe(true);
+  });
+
+  it('derives the report timestamp from an injected manual runtime rather than the real clock', async () => {
+    const generate = createMockGenerate([singleResponse('Hello, world!')]);
+    const toolbox = createTestToolbox([]);
+    const runtime = createManualRuntimeServices({ origin: '2026-04-01T12:00:00.000Z' });
+
+    const evaluationCase: EvaluationCase = {
+      name: 'greeting',
+      input: 'Say hello',
+      expectedOutput: 'Hello, world!',
+    };
+
+    const evaluation = createAgentEvaluation({
+      cases: [evaluationCase],
+      agent: { generate, toolbox },
+      runtime,
+    });
+
+    const report = await evaluation.run();
+
+    expect(report.timestamp).toBe('2026-04-01T12:00:00.000Z');
   });
 
   it('runs a single case that fails when output does not match', async () => {

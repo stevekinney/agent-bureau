@@ -2,7 +2,7 @@ import { existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
 import type { GenerateResponse } from '@lostgradient/operative';
-import { createMockGenerate } from '@lostgradient/operative/test';
+import { createManualRuntimeServices, createMockGenerate } from '@lostgradient/operative/test';
 import { createTestToolbox } from 'armorer/test';
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 
@@ -95,6 +95,20 @@ describe('runEvaluationSuite', () => {
     expect(written).toHaveProperty('summary');
   });
 
+  it('derives the report timestamp from an injected manual runtime rather than the real clock', async () => {
+    const generate = createMockGenerate([singleResponse('Hello!'), singleResponse('Goodbye!')]);
+    const toolbox = createTestToolbox([]);
+    const runtime = createManualRuntimeServices({ origin: '2026-05-20T09:30:00.000Z' });
+
+    const result = await runEvaluationSuite({
+      datasets: fixturePath('suite-cases.json'),
+      agent: { generate, toolbox },
+      runtime,
+    });
+
+    expect(result.report.timestamp).toBe('2026-05-20T09:30:00.000Z');
+  });
+
   it('returns exit code 0 when no regressions are detected', async () => {
     const generate = createMockGenerate([singleResponse('Hello!'), singleResponse('Goodbye!')]);
     const toolbox = createTestToolbox([]);
@@ -110,7 +124,8 @@ describe('runEvaluationSuite', () => {
   it('returns exit code 1 when a regression is detected against the baseline', async () => {
     // Baseline: both cases pass
     const baselineReport: EvaluationReport = {
-      timestamp: new Date().toISOString(),
+      // Fixture data — the exact value is never asserted on.
+      timestamp: '2026-01-01T00:00:00.000Z',
       cases: [
         {
           name: 'case-1',
@@ -186,7 +201,8 @@ describe('runEvaluationSuite', () => {
   it('compares against baseline and reports improvements', async () => {
     // Baseline: second case fails
     const baselineReport: EvaluationReport = {
-      timestamp: new Date().toISOString(),
+      // Fixture data — the exact value is never asserted on.
+      timestamp: '2026-01-01T00:00:00.000Z',
       cases: [
         {
           name: 'case-1',

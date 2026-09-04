@@ -64,6 +64,7 @@ const evaluation = createAgentEvaluation({
   agent: { generate, toolbox }, // or an AgentDefinition
   concurrency: 4, // default: 1
   embedder: myEmbedFunction, // required for SemanticMatcher cases
+  runtime: myRuntimeServices, // optional; defaults to the real clock/timers
 });
 
 const report: EvaluationReport = await evaluation.run();
@@ -84,6 +85,7 @@ const { report, comparison, exitCode } = await runEvaluationSuite({
   thresholds: { passRateDrop: 0.1 }, // optional; default: 5% drop
   concurrency: 2,
   embedder: myEmbedFunction,
+  runtime: myRuntimeServices, // optional; defaults to the real clock/timers
 });
 
 process.exit(exitCode);
@@ -117,7 +119,7 @@ Dataset files must be JSON arrays where every object has at least `name` (string
 
 Datasets are versioned artifacts, and regression cases can be minted directly from a recorded run instead of hand-written. This is the loop: an evaluation (or production) run fails or behaves correctly → `promoteRunToCase()` snapshots that run into a case with `provenance` → `saveDataset()` commits it to disk with a bumped `version`.
 
-**`promoteRunToCase(options)`:** Turns a `RunResult` into a runnable `EvaluationCase`. By default it snapshots the run's actual `content` and ordered tool-call trajectory as the golden expectation (characterization testing—"this is what it did, keep doing this"). Pass `expectedOutput` to set the _desired_ output instead when promoting a failure, so the bug isn't locked in as the expectation. Records `provenance`: which run produced the case, from where (`evaluation-run` or `production-failure`), and when.
+**`promoteRunToCase(options)`:** Turns a `RunResult` into a runnable `EvaluationCase`. By default it snapshots the run's actual `content` and ordered tool-call trajectory as the golden expectation (characterization testing—"this is what it did, keep doing this"). Pass `expectedOutput` to set the _desired_ output instead when promoting a failure, so the bug isn't locked in as the expectation. Records `provenance`: which run produced the case, from where (`evaluation-run` or `production-failure`), and when—`options.runtime` (a `RuntimeServices`) controls the clock `promotedAt` is read from; defaults to the real clock.
 
 ```typescript
 import { promoteRunToCase, saveDataset } from 'evaluation';
