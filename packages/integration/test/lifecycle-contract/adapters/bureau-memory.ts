@@ -171,5 +171,6 @@ export function createBureauMemoryAdapter(): LifecycleContractAdapter {
           return { status: acknowledgement.status };
         },
       ),
+    durableReconstruction: () => Promise.resolve(unsupported('durable-reconstruction')),
   };
 }

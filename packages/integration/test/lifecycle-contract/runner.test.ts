@@ -19,6 +19,7 @@ import type {
   ConcurrentScenarioOutcome,
   DeliveryOutcome,
   DetachmentOutcome,
+  DurableReconstructionOutcome,
   EqualityOutcome,
   LifecycleCapability,
   LifecycleContractAdapter,
@@ -235,6 +236,11 @@ function createBaselineAdapter(
 
     async awaitableCleanup(): Promise<ClosedOutcome> {
       return { status: 'completed' };
+    },
+
+    async durableReconstruction(): Promise<DurableReconstructionOutcome> {
+      const runId = freshId('run');
+      return { runId, immediateStatus: 'running', reconstructedStatus: 'completed' };
     },
   };
 
@@ -576,6 +582,19 @@ it('fails only awaitableCleanup when closed() never settles to a terminal status
     }),
   );
   expectOnlyCaseFailed(results, 'awaitableCleanup');
+});
+
+it('fails only durableReconstruction when the run id is empty', async () => {
+  const results = await runCapturingly(
+    createBaselineAdapter({
+      durableReconstruction: async () => ({
+        runId: '',
+        immediateStatus: 'running',
+        reconstructedStatus: 'completed',
+      }),
+    }),
+  );
+  expectOnlyCaseFailed(results, 'durableReconstruction');
 });
 
 // ---------------------------------------------------------------------------

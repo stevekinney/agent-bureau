@@ -191,5 +191,6 @@ export function createDirectRunAdapter(): LifecycleContractAdapter {
           return { status: acknowledgement.status };
         },
       ),
+    durableReconstruction: () => Promise.resolve(unsupported('durable-reconstruction')),
   };
 }

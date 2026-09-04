@@ -130,6 +130,21 @@ export interface ClosedOutcome {
   readonly status: string;
 }
 
+/**
+ * `'durable-reconstruction'` (AB-269): the two halves AB-96 requires — the
+ * immediate public state observed right after the operation (through
+ * whichever live handle the mode used to drive it), and the reconstructed
+ * state read back through `bureau.getDurableRun` once that owning handle is
+ * gone. A mode that gets the first right and the second wrong (or vice
+ * versa) fails this scenario — `immediateStatus`/`reconstructedStatus` are
+ * asserted independently below, never collapsed into one boolean.
+ */
+export interface DurableReconstructionOutcome {
+  readonly runId: string;
+  readonly immediateStatus: string;
+  readonly reconstructedStatus: string;
+}
+
 // ---------------------------------------------------------------------------
 // The adapter contract
 // ---------------------------------------------------------------------------
@@ -166,6 +181,7 @@ export interface LifecycleContractAdapter {
   signalDelivery(): Promise<DeliveryOutcome | UnsupportedCapabilityOutcome>;
   recovery(): Promise<RecoveryOutcome | UnsupportedCapabilityOutcome>;
   awaitableCleanup(): Promise<ClosedOutcome | UnsupportedCapabilityOutcome>;
+  durableReconstruction(): Promise<DurableReconstructionOutcome | UnsupportedCapabilityOutcome>;
 }
 
 // ---------------------------------------------------------------------------
@@ -470,6 +486,18 @@ export function runLifecycleContractSuite(
       }
       const result = assertSupportedOutcome(outcome, 'awaitable-cleanup', mode);
       expect(['completed', 'not-required']).toContain(result.status);
+    });
+
+    testRunner.it('durableReconstruction', async () => {
+      const outcome = await adapter.durableReconstruction();
+      if (!adapter.supports('durable-reconstruction')) {
+        assertUnsupportedOutcome(outcome, 'durable-reconstruction', mode);
+        return;
+      }
+      const result = assertSupportedOutcome(outcome, 'durable-reconstruction', mode);
+      expect(result.runId.length).toBeGreaterThan(0);
+      expect(result.immediateStatus.length).toBeGreaterThan(0);
+      expect(result.reconstructedStatus.length).toBeGreaterThan(0);
     });
   });
 }
