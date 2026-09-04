@@ -994,6 +994,72 @@ describe('Gateway transport conformance — Node runtime', () => {
       },
     );
   });
+
+  it('AB-274: serving a Node-adapter request never clobbers the process-wide Request/Response globals a later Bun-adapter gateway depends on', async () => {
+    // `@hono/node-server`'s `serve()` defaults `overrideGlobalObjects` to
+    // `true`: the first request it handles replaces `globalThis.Request`
+    // and `globalThis.Response` with its own lightweight classes via
+    // `Object.defineProperty(global, ...)` — a PROCESS-WIDE mutation, not
+    // scoped to this one server. `node-adapter.ts` now passes
+    // `overrideGlobalObjects: false` explicitly (see its own doc comment)
+    // specifically to prevent this. Pinned here because it is otherwise
+    // invisible within this file alone: `transport.test.ts`'s own
+    // post-Node Bun-runtime scenarios (the "bounded reads" describe below)
+    // are WebSocket-only, which never goes through `Hono`'s
+    // `context.json()`/`Response` construction path the way a JSON POST
+    // response does — so the regression would resurface silently unless a
+    // real Node-adapter request is served, then a real Bun-adapter one, in
+    // that order, in the same process.
+    const nativeResponse = globalThis.Response;
+    const nativeRequest = globalThis.Request;
+
+    await withGateway(
+      () =>
+        startLoopbackGateway({
+          agents: { echo: createAgent({ name: 'echo', generate: immediateGenerate() }) },
+          generate: immediateGenerate(),
+          serverRuntime: 'node',
+        }),
+      async (nodeGateway) => {
+        const nodeResponse = await nodeGateway.fetch('/api/v1/runs', {
+          method: 'POST',
+          headers: { ...authHeader(nodeGateway), 'content-type': 'application/json' },
+          body: JSON.stringify({ message: 'go' }),
+        });
+        expect(nodeResponse.status).toBe(201);
+
+        // The invariant itself: serving that request must not have swapped
+        // the process-wide globals out from under anything else running in
+        // this process.
+        expect(globalThis.Response).toBe(nativeResponse);
+        expect(globalThis.Request).toBe(nativeRequest);
+      },
+    );
+
+    // The user-visible symptom, proven directly: a Bun-adapter gateway
+    // started AFTER the Node-adapter request above still returns its real
+    // JSON response — not Bun's generic "Welcome to Bun!" fallback page,
+    // which is what a clobbered `Response` global produces (`Bun.serve()`
+    // no longer recognizes Hono's constructed response as `instanceof
+    // Response`).
+    await withGateway(
+      () =>
+        startLoopbackGateway({
+          agents: { echo: createAgent({ name: 'echo', generate: immediateGenerate() }) },
+          generate: immediateGenerate(),
+        }),
+      async (bunGateway) => {
+        const bunResponse = await bunGateway.fetch('/api/v1/runs', {
+          method: 'POST',
+          headers: { ...authHeader(bunGateway), 'content-type': 'application/json' },
+          body: JSON.stringify({ message: 'go' }),
+        });
+        expect(bunResponse.status).toBe(201);
+        const run = (await bunResponse.json()) as { id: string; status: string };
+        expect(run.status).toBe('running');
+      },
+    );
+  });
 });
 
 describe('Gateway transport conformance — bounded reads over a real socket', () => {

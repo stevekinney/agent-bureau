@@ -35,6 +35,7 @@ import type {
   A2AAgentCardOptions,
   ClientFrame,
   GatewayShutdownOptions,
+  GatewayShutdownReport,
   ServerFrame,
 } from '../types';
 
@@ -127,10 +128,17 @@ export interface LoopbackGateway {
   readonly supportsWebSocket: boolean;
   /**
    * Stops the gateway's real listener, shuts the bureau down, and disposes
-   * the storage fixture. Resolves only once every step has settled —
-   * never a fire-and-forget teardown.
+   * the storage fixture. Resolves only once every step has settled — never
+   * a fire-and-forget teardown. Returns both teardown reports (AB-274):
+   * `gateway` is the adapter's own `GatewayShutdownReport` (AB-235's bounded
+   * drain/force-close outcome), and `bureau` is `Bureau.shutdown()`'s
+   * `BureauShutdownReport` (AB-256's per-owner drain outcome) — so a caller
+   * can assert on both AFTER `stop()` has actually resolved, rather than
+   * reaching for a second, separately-timed `bureau.shutdown()` call (whose
+   * own idempotent second call can return an empty `owners` list once
+   * everything already settled on the first).
    */
-  stop(): Promise<void>;
+  stop(): Promise<{ gateway: GatewayShutdownReport; bureau: BureauShutdownReport }>;
 }
 
 /** Fixed default so a caller who doesn't care about auth doesn't have to invent one. */
@@ -438,10 +446,22 @@ export async function startLoopbackGateway(
     return wrapWebSocket(socket);
   }
 
-  async function stop(): Promise<void> {
-    await running.stop();
-    await harness.bureau.shutdown();
-    await storage.dispose();
+  async function stop(): Promise<{
+    gateway: GatewayShutdownReport;
+    bureau: BureauShutdownReport;
+  }> {
+    // `storage.dispose()` must always run, even if `running.stop()` or
+    // `bureau.shutdown()` throws — otherwise a failure partway through
+    // teardown leaks the storage fixture and can make an unrelated,
+    // later test flaky (copilot review, PR #497). `finally` re-throws the
+    // original failure unchanged; it only guarantees disposal runs too.
+    try {
+      const gatewayReport = await running.stop();
+      const bureauReport = await harness.bureau.shutdown();
+      return { gateway: gatewayReport, bureau: bureauReport };
+    } finally {
+      await storage.dispose();
+    }
   }
 
   return {

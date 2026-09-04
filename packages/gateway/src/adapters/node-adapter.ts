@@ -102,6 +102,25 @@ export type NodeServeFunction = (options: {
   fetch: Hono['fetch'];
   port: number;
   hostname?: string;
+  /**
+   * `@hono/node-server` defaults this to `true`: the first request it
+   * serves replaces `globalThis.Request`/`globalThis.Response` with its own
+   * lightweight classes via `Object.defineProperty(global, ...)` — a
+   * PROCESS-WIDE mutation, not scoped to this server. That is exactly the
+   * process-global patch this repository's own constraints forbid in code
+   * this project writes (`documentation/operative-type-safe-api.md` /
+   * AB-274's testing plan: "no process-global patches"), and it is a real,
+   * user-visible defect: once serving one Node-adapter request, EVERY
+   * subsequent Bun-adapter `Hono` app in the same process constructs
+   * responses `Bun.serve()` no longer recognizes as `instanceof Response`,
+   * which Bun then reports as its generic "Welcome to Bun!" fallback page
+   * instead of the real response body (AB-274's `node-then-bun` regression
+   * test in `transport.test.ts` pins this). `false` here keeps the Node
+   * adapter's own request handling correct — `@hono/node-server` still
+   * works against the real global `Request`/`Response` — without ever
+   * touching global identity for the rest of the process.
+   */
+  overrideGlobalObjects?: boolean;
 }) => CloseableServer;
 
 /**
@@ -168,7 +187,15 @@ export function createNodeAdapter(dependencies: CreateNodeAdapterDependencies = 
       }
 
       const serve = await loadServe();
-      const server = serve({ fetch: app.fetch, port, hostname });
+      const server = serve({
+        fetch: app.fetch,
+        port,
+        hostname,
+        // AB-274: never let this adapter clobber the process-wide
+        // `Request`/`Response` globals — see `NodeServeFunction`'s own doc
+        // comment for the defect this fixes.
+        overrideGlobalObjects: false,
+      });
       // AB-272: wait for the real bind before reporting the port, so a
       // caller that requested an ephemeral port (0) can read the real one
       // back immediately rather than racing the underlying listen().
