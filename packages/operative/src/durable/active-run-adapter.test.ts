@@ -34,6 +34,7 @@ import {
   GenerateErrorEvent,
   GenerateRetryEvent,
   GenerateStartedEvent,
+  HumanWaitParkedEvent,
   RunCompletedEvent,
   StepStartedEvent,
   ToolErrorBubbleEvent,
@@ -644,6 +645,70 @@ describe('createRun with durable routing', () => {
       );
       expect(received.length).toBeGreaterThan(0);
       subscription.unsubscribe();
+
+      await activeRun.result;
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('AB-336: a HumanWaitParkedEvent moves liveness into a declared signal wait, cleared by the next StepStartedEvent', async () => {
+    const context = await buildContext();
+    try {
+      const emitter = new CompletableEventTarget<CombinedOperativeEventMap>();
+      const activeRun = createDurableActiveRun(context, {
+        runId: 'durable-liveness-human-wait',
+        sessionId: 'durable-liveness-human-wait',
+        options: runOptions(async () => ({ content: 'done', toolCalls: [] })),
+        emitter,
+      });
+
+      emitter.dispatchEvent(
+        new HumanWaitParkedEvent('human-response', 'durable-liveness-human-wait'),
+      );
+
+      const parked = activeRun.snapshot();
+      expect(parked.status).toBe('waiting');
+      expect(parked.assessment).toBe('legitimately-waiting');
+      expect(parked.declaredWait?.reason).toBe('signal');
+      expect(parked.declaredWait?.dependency).toBe('human-response');
+      expect(parked.declaredWait?.wakeCondition).toBe('signal:human-response');
+      expect(typeof parked.declaredWait?.startedAt).toBe('number');
+
+      emitter.dispatchEvent(new StepStartedEvent(new Conversation(), 1));
+
+      const resumed = activeRun.snapshot();
+      expect(resumed.status).toBe('running');
+      expect(resumed.declaredWait).toBeUndefined();
+      expect(resumed.assessment).not.toBe('legitimately-waiting');
+
+      await activeRun.result;
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('AB-336/AB-88: a HumanWaitParkedEvent carrying a prompt declares reason "review", not "signal"', async () => {
+    const context = await buildContext();
+    try {
+      const emitter = new CompletableEventTarget<CombinedOperativeEventMap>();
+      const activeRun = createDurableActiveRun(context, {
+        runId: 'durable-liveness-human-review',
+        sessionId: 'durable-liveness-human-review',
+        options: runOptions(async () => ({ content: 'done', toolCalls: [] })),
+        emitter,
+      });
+
+      emitter.dispatchEvent(
+        new HumanWaitParkedEvent(
+          'human-response',
+          'durable-liveness-human-review',
+          'Approve this refund?',
+        ),
+      );
+
+      const parked = activeRun.snapshot();
+      expect(parked.declaredWait?.reason).toBe('review');
 
       await activeRun.result;
     } finally {

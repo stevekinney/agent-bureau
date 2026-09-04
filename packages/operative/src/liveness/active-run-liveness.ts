@@ -7,6 +7,7 @@ import {
   TOOL_CALL_POLICY,
 } from './policies';
 import type {
+  DeclaredWait,
   LivenessAssessment,
   LivenessEvidenceEntry,
   LivenessEvidenceSource,
@@ -125,7 +126,39 @@ export interface ActiveRunLiveness extends LivenessObservable<AgentRunLivenessSn
   beginToolCall(): void;
   /** Stops (disposes) the tool watchdog once no tool call remains in flight. */
   endToolCall(): void;
-  setStatus(status: LivenessLifecycleStatus): void;
+  /**
+   * `'waiting'` is excluded here on purpose (AB-336): AC1 makes `'waiting'`
+   * legal ONLY paired with a `DeclaredWait` — `setStatus('waiting')` alone
+   * would produce exactly the illegal combination AC1 forbids. Use
+   * {@link beginWait}/{@link endWait} instead, which manage `status` and
+   * `declaredWait` as one atomic pair so that combination is unreachable
+   * through this interface.
+   */
+  setStatus(status: Exclude<LivenessLifecycleStatus, 'waiting'>): void;
+  /**
+   * Enters a declared wait (AB-336): sets `status` to `'waiting'` and
+   * attaches `wait` as `LivenessSnapshot.declaredWait` in the SAME revision
+   * (AC1's pairing requirement — no intermediate snapshot has one without
+   * the other). A no-op once `status` is `'terminal'`, matching every other
+   * transition here.
+   */
+  /**
+   * `startedAt` is stamped internally from this module's own clock (the
+   * same one every other cadence/evidence timestamp here uses) rather than
+   * accepted from the caller — a park's caller (e.g. `create-run.ts`'s
+   * `HumanWaitParkedEvent` listener) has no reason to own a second clock
+   * reading of its own.
+   */
+  beginWait(wait: Omit<DeclaredWait, 'startedAt'>): void;
+  /**
+   * Leaves a declared wait: clears `declaredWait` and returns `status` to
+   * `'running'` — but ONLY when `status` is still `'waiting'`. A run that
+   * moved to `'aborting'`/`'cleaning-up'`/`'terminal'` while waiting (e.g. an
+   * abort raced the park) must not be yanked back to `'running'` by a
+   * continuation that resolves afterward; `declaredWait` itself is still
+   * cleared unconditionally, since the wait is over either way.
+   */
+  endWait(): void;
   /**
    * Atomically attaches the terminal `result` and transitions `status` to
    * `'terminal'` as ONE revision (AB-214 review PRRT_kwDORvupsc6esZSx) — a
@@ -227,6 +260,9 @@ export function createActiveRunLiveness(options: ActiveRunLivenessOptions): Acti
   let revision = 0;
   let status: LivenessLifecycleStatus = 'running';
   let lastTransitionAt = startedAt;
+  // AB-336 — paired with `status === 'waiting'` exclusively through
+  // `beginWait`/`endWait`; see `ActiveRunLiveness`'s doc comments.
+  let declaredWait: DeclaredWait | undefined;
   let result: unknown;
   let hasResult = false;
   let disposed = false;
@@ -338,6 +374,7 @@ export function createActiveRunLiveness(options: ActiveRunLivenessOptions): Acti
       ...(lastActivityAt !== undefined ? { lastActivityAt } : {}),
       ...(lastProgressAt !== undefined ? { lastProgressAt } : {}),
       missedPulseCount,
+      ...(declaredWait !== undefined ? { declaredWait } : {}),
       policyVersion: LIVENESS_POLICY_VERSION,
       evidence,
       ...(worstChildAssessmentValue !== undefined
@@ -441,9 +478,18 @@ export function createActiveRunLiveness(options: ActiveRunLivenessOptions): Acti
       }
     },
 
-    setStatus(next: LivenessLifecycleStatus): void {
+    setStatus(next: Exclude<LivenessLifecycleStatus, 'waiting'>): void {
       if (status === 'terminal') return;
       if (status === next) return;
+      // AB-336: `declaredWait` is documented "present iff `status` is
+      // `'waiting'`" — a status transition AWAY from `'waiting'` through
+      // this method (e.g. an abort racing the park) must clear it in the
+      // SAME revision, or a subscriber could observe `status: 'aborting'`
+      // with a stale `declaredWait` still attached until `endWait()`
+      // eventually runs.
+      if (status === 'waiting') {
+        declaredWait = undefined;
+      }
       status = next;
       lastTransitionAt = runtime.clock.nowISO();
       if (next === 'terminal') {
@@ -452,10 +498,43 @@ export function createActiveRunLiveness(options: ActiveRunLivenessOptions): Acti
       advance();
     },
 
+    beginWait(wait: Omit<DeclaredWait, 'startedAt'>): void {
+      // Copilot review (PR #535): only a genuinely running run can begin a
+      // declared wait — a `HumanWaitParkedEvent` racing an abort (e.g. the
+      // tool call committed and dispatched the event in the same tick
+      // `setStatus('aborting')` fired) must not overwrite `'aborting'`/
+      // `'cleaning-up'`/`'terminal'` back to `'waiting'` and hide the
+      // in-progress abort. `'waiting'` itself is excluded too: a second
+      // park while already waiting (should not happen — `pendingHumanWait`/
+      // `pendingWakeup` are consumed before a run can re-park — but this
+      // guard makes the impossible case a no-op rather than silently
+      // discarding the first wait's `declaredWait` without an `endWait()`
+      // in between) is also refused.
+      if (status !== 'running') return;
+      status = 'waiting';
+      declaredWait = { ...wait, startedAt: clock.now() };
+      lastTransitionAt = new Date().toISOString();
+      advance();
+    },
+
+    endWait(): void {
+      if (declaredWait === undefined && status !== 'waiting') return;
+      declaredWait = undefined;
+      if (status === 'waiting') {
+        status = 'running';
+        lastTransitionAt = new Date().toISOString();
+      }
+      advance();
+    },
+
     settle(value: unknown): void {
       if (status === 'terminal') return;
       result = value;
       hasResult = true;
+      // AB-336: same "present iff `status` is `'waiting'`" invariant
+      // `setStatus` enforces — a run settling directly out of a declared
+      // wait must not leave a stale `declaredWait` on the terminal snapshot.
+      declaredWait = undefined;
       status = 'terminal';
       lastTransitionAt = runtime.clock.nowISO();
       disposeWatchdogs();

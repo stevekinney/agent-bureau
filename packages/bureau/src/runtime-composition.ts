@@ -7,8 +7,12 @@ import type {
   JSONValue,
   OnStepHook,
   PrepareStepHook,
+  RequestHumanInputContext,
+  RequestHumanInputInput,
   RunOptions,
   Scheduler,
+  ScheduleWakeupContext,
+  ScheduleWakeupInput,
   SessionStore,
   SessionSummary,
   StreamEventMap,
@@ -20,7 +24,9 @@ import {
   createIdentityHook,
   createOutputPIIValidator,
   createPromptInjectionDetector,
+  createRequestHumanInputTool,
   createScheduler,
+  createScheduleWakeupTool,
   createSessionStore,
   DEFAULT_MAXIMUM_STEPS,
   DEFAULT_PROMPT_INJECTION_TRIPWIRE_THRESHOLD,
@@ -123,6 +129,176 @@ import type {
 } from './types';
 
 export type BureauToolbox = AnyToolbox;
+
+export function createHumanWaitContext(
+  servicesRef: { current?: DurableRunDeps },
+  runId: string,
+): RequestHumanInputContext {
+  return {
+    get pendingHumanWait() {
+      return servicesRef.current?.pendingHumanWait;
+    },
+    set pendingHumanWait(value) {
+      if (servicesRef.current) {
+        servicesRef.current.pendingHumanWait = value;
+      }
+    },
+    runId,
+    // Only ever constructed inside the `options.humanInput && runtime.durable`
+    // guard below, so this context always backs a real durable run
+    // (AB-41 / AB-43 — the durability signal threaded into the tool's context).
+    durable: true,
+  };
+}
+
+/**
+ * AB-201 — the `scheduleWakeup` analog of {@link createHumanWaitContext}: forwards
+ * reads/writes onto the run's REAL `ctx.services` object (via the same
+ * `servicesRef` capture) rather than spreading it, so the tool's `pendingWakeup`
+ * writes land where the durable `agentRun` workflow actually reads them.
+ * `ScheduleWakeupContext` carries no `runId` field (unlike
+ * `RequestHumanInputContext`), so this takes only the shared `servicesRef`.
+ */
+export function createWakeupContext(servicesRef: {
+  current?: DurableRunDeps;
+}): ScheduleWakeupContext {
+  return {
+    get pendingWakeup() {
+      return servicesRef.current?.pendingWakeup;
+    },
+    set pendingWakeup(value) {
+      if (servicesRef.current) {
+        servicesRef.current.pendingWakeup = value;
+      }
+    },
+    // Only ever constructed inside the `options.wakeup && runtime.durable`
+    // guard (below, in `createBureau`'s run composition — same placement as
+    // `createHumanWaitContext`'s own guard), so this context always backs a
+    // real durable run (AB-41 / AB-43 — the durability signal threaded into
+    // the tool's context).
+    durable: true,
+  };
+}
+
+/**
+ * The narrow surface `requestHumanInput` needs to dispatch its
+ * `HumanWaitParkedEvent` (matches `create-request-human-input-tool.ts`'s own
+ * private `HumanInputEventDispatcher` structurally, without importing it).
+ */
+export interface HumanWaitEventDispatcher {
+  dispatchEvent(event: Event): boolean;
+}
+
+/**
+ * Type guard, not a cast: `DurableRunDeps.emitter`'s own `EventDispatcher`
+ * type declares only `dispatch`, never the DOM-style `dispatchEvent` every
+ * real emitter (a `CompletableEventTarget`) also carries — see
+ * `buildRunDepsFromSession`'s lazy `humanInputEmitter` forwarder.
+ */
+export function hasDispatchEvent(value: unknown): value is HumanWaitEventDispatcher {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as { dispatchEvent?: unknown }).dispatchEvent === 'function'
+  );
+}
+
+export interface WireDurableOptInToolsOptions {
+  /** Wires `requestHumanInput` in when true (AB-13/AB-41/AB-43). */
+  readonly humanInput?: boolean;
+  /** Wires `scheduleWakeup` in when true (AB-201). */
+  readonly wakeup?: boolean;
+  readonly runId: string;
+  /**
+   * Where `requestHumanInput`'s `HumanWaitParkedEvent` dispatches. Ignored
+   * when `humanInput` is falsy. A caller whose real emitter is not yet
+   * assigned at wiring time (AB-336 — recovery's `services.emitter` is set
+   * by `createRecoveredRunEventSurface` AFTER `buildRunDepsFromSession`
+   * returns, but this wiring happens INSIDE it) passes a lazy forwarder
+   * instead of the emitter itself; the tool only calls `dispatchEvent` at
+   * actual tool-call time, by which point a lazy forwarder's target has
+   * settled.
+   */
+  readonly humanInputEmitter?: HumanWaitEventDispatcher;
+}
+
+/**
+ * AB-336 — the ONE place both the fresh-dispatch (`createRunFromRequest`)
+ * and recovery (`buildRunDepsFromSession`) paths wire `requestHumanInput`/
+ * `scheduleWakeup` into a run's toolbox, per the repository's No Duplicated
+ * Code rule. Root cause this closes: `buildRunDepsFromSession` used to
+ * return `runRuntime.toolbox` bare — the opt-in durable-park tools existed
+ * ONLY on the fresh path. A run recovered mid-step whose replay reached a
+ * `requestHumanInput` call found no such tool: armorer settled the call
+ * with a tool-not-found error result, `pendingHumanWait` never got set, the
+ * durable park never fired, and the step loop simply continued to the next
+ * step — the exact "looped instead of parking" symptom this issue names,
+ * observable only on a RECOVERED run whose replay reaches the call (a run
+ * killed AFTER the call's step already committed is a different case,
+ * covered by `create-bureau.ts`'s `reconstructHumanWaitReviewIfParked`).
+ *
+ * `servicesRef` is supplied by the caller, not created here: the tools'
+ * mutable `pendingHumanWait`/`pendingWakeup` slots must be the EXACT
+ * `ctx.services` object Weft hands back, and each caller has a different
+ * point at which that object becomes available (a later `onServices` hook
+ * for a fresh run; the object under construction, synchronously, for a
+ * recovered one) — see each call site's own comment.
+ */
+export function wireDurableOptInTools(
+  baseToolbox: BureauToolbox,
+  servicesRef: { current?: DurableRunDeps },
+  options: WireDurableOptInToolsOptions,
+): BureauToolbox {
+  let toolbox = baseToolbox;
+
+  if (options.humanInput) {
+    const humanWaitContext = createHumanWaitContext(servicesRef, options.runId);
+    const rawHumanInputTool = createRequestHumanInputTool({
+      context: humanWaitContext,
+      ...(options.humanInputEmitter ? { emitter: options.humanInputEmitter } : {}),
+    });
+    const humanInputToolbox = createToolbox([
+      createTool({
+        ...rawHumanInputTool,
+        // armorer's `execute` contract is async; the raw tool factory's
+        // `execute` is synchronous (it only mutates `context` and returns a
+        // plain result), so wrap it rather than changing its public shape.
+        // Must stay `async` so a synchronous throw from `execute` is
+        // converted into a rejected Promise instead of escaping
+        // synchronously (Copilot review PRRT_kwDORvupsc6P7_8H) — awaiting
+        // `Promise.resolve(...)` (a genuine thenable) keeps both
+        // require-await and await-thenable satisfied.
+        execute: async (input: RequestHumanInputInput) =>
+          await Promise.resolve(rawHumanInputTool.execute(input)),
+      }),
+    ]);
+    toolbox = combineToolboxes(toolbox, humanInputToolbox);
+  }
+
+  if (options.wakeup) {
+    // Unlike `requestHumanInput`, `scheduleWakeup` dispatches no event on
+    // park — `ctx.sleep` is itself the durable checkpoint, and recovery
+    // re-arms it with no live wiring needed (AB-41's decision record) — so
+    // no emitter is threaded here.
+    const wakeupContext = createWakeupContext(servicesRef);
+    const rawWakeupTool = createScheduleWakeupTool({ context: wakeupContext });
+    const wakeupToolbox = createToolbox([
+      createTool({
+        ...rawWakeupTool,
+        // Same async-wrap rationale as `requestHumanInput` above: the raw
+        // tool's `execute` is synchronous and can throw synchronously
+        // (`DurableCapabilityUnavailableError`); armorer's contract is
+        // async, so wrapping converts a synchronous throw into a rejected
+        // Promise instead of letting it escape synchronously.
+        execute: async (input: ScheduleWakeupInput) =>
+          await Promise.resolve(rawWakeupTool.execute(input)),
+      }),
+    ]);
+    toolbox = combineToolboxes(toolbox, wakeupToolbox);
+  }
+
+  return toolbox;
+}
 
 const requestAuthorityMetadataKey = 'lastRequestAuthority';
 const requestAuthoritiesMetadataKey = 'lastRequestAuthorities';
@@ -2055,14 +2231,56 @@ export async function createRuntimeComposition(
       },
       { liveStreaming: false, initialActiveSkills },
     );
-    return {
-      toolbox: runRuntime.toolbox,
+
+    // AB-336: wire `requestHumanInput`/`scheduleWakeup` in on the RECOVERY
+    // path too — see `wireDurableOptInTools`'s own doc comment for the root
+    // cause this closes. `servicesRef.current` is assigned to `services`
+    // itself, synchronously, below (no `onServices` hook needed here: unlike
+    // `createRunFromRequest`'s fresh dispatch, this function already holds
+    // the exact object Weft will hand back as `ctx.services` — it's what
+    // this function returns).
+    let runToolbox: BureauToolbox = runRuntime.toolbox;
+    const servicesRef: { current?: DurableRunDeps } = {};
+    const wantsHumanInput = options.humanInput === true && runId !== undefined;
+    const wantsWakeup = options.wakeup === true && runId !== undefined;
+    if (wantsHumanInput || wantsWakeup) {
+      runToolbox = wireDurableOptInTools(runRuntime.toolbox, servicesRef, {
+        humanInput: wantsHumanInput,
+        wakeup: wantsWakeup,
+        // `runId` is non-undefined here (both `wantsHumanInput`/`wantsWakeup`
+        // require it); `?? ''` only satisfies the type checker.
+        runId: runId ?? '',
+        ...(wantsHumanInput
+          ? {
+              // `DurableRunDeps.emitter` isn't assigned until AFTER this
+              // function returns — `createRecoveredRunEventSurface` sets it
+              // on the SAME `services` object this closure is about to
+              // construct and hand back (see `onRecoveredWorkflow` in
+              // `create-bureau.ts`). This forwarder reads it lazily, at
+              // actual tool-call time, by which point it has settled;
+              // `hasDispatchEvent` narrows without a cast, since
+              // `DurableRunDeps.emitter`'s own `EventDispatcher` type
+              // declares only `dispatch`, not the DOM-style `dispatchEvent`
+              // every real emitter (a `CompletableEventTarget`) also has.
+              humanInputEmitter: {
+                dispatchEvent: (event: Event) => {
+                  const target = servicesRef.current?.emitter;
+                  return hasDispatchEvent(target) ? target.dispatchEvent(event) : false;
+                },
+              },
+            }
+          : {}),
+      });
+    }
+
+    const services: DurableRunDeps = {
+      toolbox: runToolbox,
       getStepMetadata: () => ({
         [activeSkillsStepMetadataKey]: activeSkillsStepMetadata(runRuntime.getActiveSkillEntries()),
       }),
       options: {
         generate: runRuntime.generate,
-        toolbox: runRuntime.toolbox,
+        toolbox: runToolbox,
         conversation: new Conversation(session.conversationHistory),
         maximumSteps: recoveredMaximumSteps,
         stopWhen: options.stopWhen,
@@ -2084,6 +2302,10 @@ export async function createRuntimeComposition(
         ...(maximumTokens !== undefined ? { maximumTokens } : {}),
       },
     };
+    if (wantsHumanInput || wantsWakeup) {
+      servicesRef.current = services;
+    }
+    return services;
   }
 
   /**

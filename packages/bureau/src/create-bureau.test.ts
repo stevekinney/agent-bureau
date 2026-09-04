@@ -67,8 +67,6 @@ import {
   classifyRecoveredRunDetailed,
   createBureau,
   createDefaultSessionPersistenceSleep,
-  createHumanWaitContext,
-  createWakeupContext,
   detachBestEffortPromise,
   emptyRecoveredStepMetadata,
   hasRecoverableTransportAuthority,
@@ -93,7 +91,12 @@ import type {
   ModelCatalogService,
 } from './model-catalog-refresh';
 import { createModelCatalogService } from './model-catalog-refresh';
-import { createMemoryPersistHook, createRuntimeComposition } from './runtime-composition';
+import {
+  createHumanWaitContext,
+  createMemoryPersistHook,
+  createRuntimeComposition,
+  createWakeupContext,
+} from './runtime-composition';
 import { waitForCondition, waitForRunState } from './test';
 import {
   type Bureau,

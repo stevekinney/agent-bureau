@@ -12,18 +12,15 @@ import {
   createAgentSession,
   createDeferredAgentRun,
   createFlowController,
-  createRequestHumanInputTool,
   createRunFinishedFrame,
   createRunStartedFrame,
-  createScheduleWakeupTool,
   type DefinitionResolvingAgent,
   type FlowController,
   HumanWaitParkedEvent,
   type JSONValue,
   OPERATIVE_RESOLVE_RUN_OPTIONS,
   readGenerationProfile,
-  type RequestHumanInputContext,
-  type RequestHumanInputInput,
+  type RequestHumanInputResult,
   type RunnableAgent,
   type RunOptions,
   type RunReport,
@@ -34,8 +31,6 @@ import {
   ScheduleResumedEvent,
   SchedulerTaskCompletedEvent,
   SchedulerTaskFailedEvent,
-  type ScheduleWakeupContext,
-  type ScheduleWakeupInput,
   type SessionListOptions,
   type SessionStore,
   type SessionSummary,
@@ -62,6 +57,7 @@ import {
   SCHEDULER_RUN_ID_PREFIX,
   type SessionInputAdmissionOutcome,
   type SessionInputAdmissionRequest,
+  type StepRecord,
 } from '@lostgradient/operative/durable';
 import type { LivenessSnapshot, Subscription } from '@lostgradient/operative/liveness';
 import { createModelCatalog } from '@lostgradient/operative/providers';
@@ -81,13 +77,7 @@ import {
   type WorkflowState,
 } from '@lostgradient/weft';
 import { KEYS } from '@lostgradient/weft/storage';
-import {
-  combineToolboxes,
-  createTool,
-  createToolbox,
-  type SignedPendingToolApproval,
-  type ToolRequestContext,
-} from 'armorer';
+import { type SignedPendingToolApproval, type ToolRequestContext } from 'armorer';
 import {
   Conversation,
   type ConversationHistory,
@@ -139,6 +129,7 @@ import {
   createSchedulerServiceRequestContext,
   decodeScheduleRunMarker,
   isRunFailureFinishReason,
+  wireDurableOptInTools,
 } from './runtime-composition';
 import {
   findRunAgentName,
@@ -1175,56 +1166,6 @@ export function wireStreamEventTargetFrames(
     for (const dispose of disposers.splice(0)) {
       dispose();
     }
-  };
-}
-
-export function createHumanWaitContext(
-  servicesRef: { current?: DurableRunDeps },
-  runId: string,
-): RequestHumanInputContext {
-  return {
-    get pendingHumanWait() {
-      return servicesRef.current?.pendingHumanWait;
-    },
-    set pendingHumanWait(value) {
-      if (servicesRef.current) {
-        servicesRef.current.pendingHumanWait = value;
-      }
-    },
-    runId,
-    // Only ever constructed inside the `options.humanInput && runtime.durable`
-    // guard below, so this context always backs a real durable run
-    // (AB-41 / AB-43 — the durability signal threaded into the tool's context).
-    durable: true,
-  };
-}
-
-/**
- * AB-201 — the `scheduleWakeup` analog of {@link createHumanWaitContext}: forwards
- * reads/writes onto the run's REAL `ctx.services` object (via the same
- * `servicesRef` capture) rather than spreading it, so the tool's `pendingWakeup`
- * writes land where the durable `agentRun` workflow actually reads them.
- * `ScheduleWakeupContext` carries no `runId` field (unlike
- * `RequestHumanInputContext`), so this takes only the shared `servicesRef`.
- */
-export function createWakeupContext(servicesRef: {
-  current?: DurableRunDeps;
-}): ScheduleWakeupContext {
-  return {
-    get pendingWakeup() {
-      return servicesRef.current?.pendingWakeup;
-    },
-    set pendingWakeup(value) {
-      if (servicesRef.current) {
-        servicesRef.current.pendingWakeup = value;
-      }
-    },
-    // Only ever constructed inside the `options.wakeup && runtime.durable`
-    // guard (below, in `createBureau`'s run composition — same placement as
-    // `createHumanWaitContext`'s own guard), so this context always backs a
-    // real durable run (AB-41 / AB-43 — the durability signal threaded into
-    // the tool's context).
-    durable: true,
   };
 }
 
@@ -3059,87 +3000,36 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // HumanWaitParkedEvent.type, …)` listener below (AB-13 `markParked`)
       // and `store`'s action log (AB-20 `listPendingReviews`).
       let humanInputEmitter: CompletableEventTarget<CombinedOperativeEventMap> | undefined;
-      let runToolbox: BureauToolbox = runRuntime.toolbox;
       // Shared `ctx.services` capture for BOTH durable-only opt-in tools this
-      // run may wire (`requestHumanInput` and, as of this issue, `scheduleWakeup`):
-      // Weft's durable adapter fires exactly one `onServices` hook per run
-      // (`DurableActiveRunOptions.onServices`, immediately before `engine.start`),
-      // so a SINGLE ref/hook is captured here and handed to whichever context(s)
-      // below need it — two separate hooks would have the later one clobber the
-      // earlier one's `onServices` property in the `createActiveRun` options
-      // object literal, silently breaking whichever tool composed first.
+      // run may wire (`requestHumanInput` and `scheduleWakeup`): Weft's
+      // durable adapter fires exactly one `onServices` hook per run
+      // (`DurableActiveRunOptions.onServices`, immediately before
+      // `engine.start`), so a SINGLE ref/hook is captured here and handed to
+      // whichever context(s) `wireDurableOptInTools` wires below need it —
+      // two separate hooks would have the later one clobber the earlier
+      // one's `onServices` property in the `createActiveRun` options object
+      // literal, silently breaking whichever tool composed first.
       const servicesRef: { current?: DurableRunDeps } = {};
-      let needsServicesHook = false;
-      if (options.humanInput && runtime.durable) {
-        needsServicesHook = true;
+      const wantsHumanInput = !!(options.humanInput && runtime.durable);
+      const wantsWakeup = !!(options.wakeup && runtime.durable);
+      if (wantsHumanInput) {
         humanInputEmitter = new CompletableEventTarget<CombinedOperativeEventMap>();
-        const humanWaitContext = createHumanWaitContext(servicesRef, runId);
-        const rawHumanInputTool = createRequestHumanInputTool({
-          context: humanWaitContext,
-          emitter: humanInputEmitter,
-        });
-        const humanInputToolbox = createToolbox([
-          createTool({
-            ...rawHumanInputTool,
-            // armorer's `execute` contract is async; the raw tool factory's
-            // `execute` is synchronous (it only mutates `context` and returns a
-            // plain result), so wrap it rather than changing its public shape.
-            // Must stay `async` so a synchronous throw from `execute` is
-            // converted into a rejected Promise instead of escaping
-            // synchronously (Copilot review PRRT_kwDORvupsc6P7_8H) — awaiting
-            // `Promise.resolve(...)` (a genuine thenable) keeps both
-            // require-await and await-thenable satisfied.
-            // AB-234: `input` is annotated explicitly — `RunnableAgent.run`
-            // moving to a property-typed function (contravariant checking)
-            // elsewhere in this file changes how much the checker infers
-            // structurally at this unrelated call site, so `createTool`'s
-            // schema-based overload no longer gets inferred from the
-            // `...rawHumanInputTool` spread without this annotation pinning
-            // it directly to `execute`'s real parameter type.
-            execute: async (input: RequestHumanInputInput) =>
-              await Promise.resolve(rawHumanInputTool.execute(input)),
-          }),
-        ]);
-        runToolbox = combineToolboxes(runRuntime.toolbox, humanInputToolbox);
       }
-
-      // AB-201 — opt-in `scheduleWakeup` wiring for a REAL durable run
-      // (`options.wakeup`), mirroring `requestHumanInput`'s wiring immediately
-      // above: the tool's mutable `pendingWakeup` slot must be the EXACT
-      // `ctx.services` object Weft hands back, forwarded via the SAME
-      // `servicesRef`/`onServices` capture the human-input block sets up (see
-      // the comment above `servicesRef`). Unlike `requestHumanInput`,
-      // `scheduleWakeup` dispatches no event on park — `ctx.sleep` is itself
-      // the durable checkpoint, and recovery re-arms it with no live wiring
-      // needed (AB-41's decision record) — so no emitter is threaded here.
-      if (options.wakeup && runtime.durable) {
-        needsServicesHook = true;
-        const wakeupContext = createWakeupContext(servicesRef);
-        const rawWakeupTool = createScheduleWakeupTool({ context: wakeupContext });
-        const wakeupToolbox = createToolbox([
-          createTool({
-            ...rawWakeupTool,
-            // Same async-wrap rationale as `requestHumanInput` above: the raw
-            // tool's `execute` is synchronous and can throw synchronously
-            // (`DurableCapabilityUnavailableError`); armorer's contract is
-            // async, so wrapping converts a synchronous throw into a rejected
-            // Promise instead of letting it escape synchronously.
-            // AB-234: same contravariant-checking annotation as the
-            // `requestHumanInput` wiring above — `RunnableAgent.run`'s
-            // property-typed function signature changes how much this
-            // unrelated call site's `execute` parameter gets inferred
-            // structurally, so it's pinned explicitly.
-            execute: async (input: ScheduleWakeupInput) =>
-              await Promise.resolve(rawWakeupTool.execute(input)),
-          }),
-        ]);
-        runToolbox = combineToolboxes(runToolbox, wakeupToolbox);
-      }
-      const durableServicesOnServices = needsServicesHook
-        ? (services: DurableRunDeps) => {
-            servicesRef.current = services;
-          }
-        : undefined;
+      // AB-336: `wireDurableOptInTools` is the ONE place this wiring lives —
+      // shared with `buildRunDepsFromSession`'s recovery path
+      // (`runtime-composition.ts`), which used to omit it entirely.
+      const runToolbox: BureauToolbox = wireDurableOptInTools(runRuntime.toolbox, servicesRef, {
+        humanInput: wantsHumanInput,
+        wakeup: wantsWakeup,
+        runId,
+        ...(humanInputEmitter ? { humanInputEmitter } : {}),
+      });
+      const durableServicesOnServices =
+        wantsHumanInput || wantsWakeup
+          ? (services: DurableRunDeps) => {
+              servicesRef.current = services;
+            }
+          : undefined;
 
       // AB-67/AB-199 — steering is scoped to in-memory (process-local)
       // sessions only: a durably-configured bureau's `submitSteeringCommand`
@@ -3426,6 +3316,84 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       runRequestContexts.delete(runId);
       runAttribution.delete(runId);
       throw error;
+    }
+  }
+
+  /**
+   * Type guard for a `requestHumanInput` tool result whose park was never
+   * consumed (AB-336) — narrows `ToolExecutionResult.result` (`unknown`)
+   * rather than casting, since the value round-tripped through a persisted
+   * checkpoint's JSON serialization.
+   */
+  function isParkedRequestHumanInputResult(value: unknown): value is RequestHumanInputResult {
+    if (typeof value !== 'object' || value === null) return false;
+    const candidate = value as { parked?: unknown; signalName?: unknown };
+    return candidate.parked === true && typeof candidate.signalName === 'string';
+  }
+
+  /**
+   * AB-336 — reconstructs the `human-wait` pending review for a run
+   * recovered mid-park.
+   *
+   * Root cause: `listPendingReviews()`'s human-wait branch derives entirely
+   * from the LIVE in-memory action log (`store`'s per-run `actions`,
+   * populated only by events an `ActiveRun` actually dispatches — see that
+   * function's own doc comment). `store.register()` gives a recovered run a
+   * brand-new, EMPTY action log; nothing replays the `HumanWaitParkedEvent`
+   * a since-dead process dispatched. So a run genuinely still parked on
+   * `ctx.waitForSignal` (the durable park itself is intact — AB-44/AB-45's
+   * `stepResult.pendingHumanWait` loop-break and the workflow's own
+   * checkpointed park both already work on a fresh dispatch) was invisible
+   * to `listPendingReviews()`/`getRun(...).liveness` the moment a process
+   * restarted mid-park: the park was never lost from the durable engine,
+   * only from bureau's OWN observability surface for it.
+   *
+   * The fix reads the run's persisted checkpoint (`requestHumanInput`'s tool
+   * RESULT — `{ parked: true, signalName, prompt? }` — is written into the
+   * checkpointed `StepRecord.results` by the durable workflow's per-step
+   * memo, independent of any live event) and, if the LAST persisted step was
+   * a still-unconsumed `requestHumanInput` park, synthesizes the same action
+   * `store` would have recorded had the live event survived — so
+   * `listPendingReviews()` needs no other change to pick it up.
+   *
+   * Only the LAST step is ever inspected: if the run resumed past its park
+   * (signal delivered and consumed, then a further step committed) before
+   * THIS crash, the last persisted step is no longer the `requestHumanInput`
+   * step and nothing is synthesized — matching the "already resumed" case
+   * the live path's own `status === 'running'` guard excludes.
+   *
+   * Called from inside the AWAITED `onRecoveredWorkflow` hook, strictly
+   * before the recovered generator is allowed to advance (see that
+   * function), so this checkpoint read races nothing: the checkpoint cannot
+   * change out from under it before this resolves.
+   */
+  async function reconstructHumanWaitReviewIfParked(runId: string): Promise<void> {
+    if (!runtime.durable) return;
+    let steps: StepRecord[];
+    try {
+      steps = await runtime.durable.checkpointStore.loadSteps(runId);
+    } catch (error) {
+      diagnose({
+        level: 'error',
+        scope: 'recovery',
+        message:
+          `[bureau] Could not read checkpoint steps for recovered run "${runId}" while ` +
+          `reconstructing a human-wait review; it may stay invisible to ` +
+          `listPendingReviews() until it next progresses: ${serializeUnknownError(error)}`,
+      });
+      return;
+    }
+    const lastStep = steps[steps.length - 1];
+    if (!lastStep) return;
+    for (const result of lastStep.results) {
+      if (result.toolName !== 'requestHumanInput') continue;
+      if (!isParkedRequestHumanInputResult(result.result)) continue;
+      store.recordAction(runId, HumanWaitParkedEvent.type, {
+        signalName: result.result.signalName,
+        runId,
+        ...(result.result.prompt !== undefined ? { prompt: result.result.prompt } : {}),
+      });
+      return;
     }
   }
 
@@ -3857,6 +3825,10 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       info.services as DurableRunDeps,
       sessionLoad.session,
     );
+    // AB-336 — see this function's own doc comment: a run recovered still
+    // genuinely parked on `requestHumanInput` has no live action log to
+    // derive its pending review from until this runs.
+    await reconstructHumanWaitReviewIfParked(info.workflowId);
   }
 
   async function recoverDurableRuns(): Promise<void> {
@@ -4093,6 +4065,12 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           recoveredServices,
           sessionLoad.ok ? sessionLoad.session : null,
         );
+        // AB-336 — same reconstruction as the primary reattach path above
+        // (`onRecoveredWorkflow`); this post-recovery classification pass
+        // reattaches runs whose live services were rebuilt from config
+        // rather than captured before the crash, but the checkpoint gap
+        // this closes is identical either way.
+        await reconstructHumanWaitReviewIfParked(handle.id);
       } else if (verdict === 'monitor') {
         // Scheduled fires have no ActiveRun surface, but the recovered Weft handle
         // still needs a detached result monitor so failures are visible.

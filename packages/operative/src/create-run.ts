@@ -317,6 +317,13 @@ export function createActiveRun(
     });
   }
 
+  // AB-336 — `requestHumanInput` (and therefore its liveness `'waiting'`
+  // wiring, `wireHumanWaitLiveness` in `durable/active-run-adapter.ts`) is
+  // durable-only: it throws `DurableCapabilityUnavailableError` rather than
+  // parking when `context.durable` is `false` (see its own doc comment), and
+  // this in-memory path never has a durable engine. No corresponding wiring
+  // belongs here — see `createDurableActiveRun`/`reattachDurableActiveRun`.
+
   // C3 — curated tool.* bubble events stamped with {agentName, runId, step}.
   // We track the current step by listening to StepStartedEvent (which fires at
   // the start of each step). The agentName comes from RunOptions (optional —
