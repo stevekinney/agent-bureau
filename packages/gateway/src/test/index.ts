@@ -217,7 +217,14 @@ export async function createTestGateway(
     ...bureauOptions
   } = bureauOrOptions;
 
-  const bureau = await createBureau({ agents: {}, ...bureauOptions });
+  // AB-303/AB-333: forward the same `runtime` instance to the Bureau this
+  // helper constructs, not only to the gateway layer below — otherwise a
+  // caller-injected manual runtime drives the gateway's own timers and
+  // identifiers while everything the Bureau owns internally (the audit
+  // trail's clock included) keeps reading the real one, silently breaking
+  // the single-shared-runtime invariant this combined-options convenience
+  // form exists to preserve.
+  const bureau = await createBureau({ agents: {}, ...bureauOptions, runtime });
   return createGateway(bureau, {
     port,
     hostname,

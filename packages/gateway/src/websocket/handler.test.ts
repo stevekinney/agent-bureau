@@ -65,7 +65,7 @@ describe('createWebSocketHandler — message routing', () => {
       detail: { content: 'Done.' },
       sequence: 1,
       runSeq: 1,
-      timestamp: Date.now(),
+      timestamp: 1_700_000_000_000,
     });
 
     expect(sent).toHaveLength(1);
@@ -95,7 +95,7 @@ describe('createWebSocketHandler — message routing', () => {
       detail: { content: 'Done.' },
       sequence: 1,
       runSeq: 1,
-      timestamp: Date.now(),
+      timestamp: 1_700_000_000_000,
     });
     const handler = createWebSocketHandler({ broker });
     const { ws, sent } = createFakeWebSocket();
@@ -169,7 +169,7 @@ describe('createWebSocketHandler — AB-305 response.validated privilege', () =>
       },
       sequence: 1,
       runSeq: 1,
-      timestamp: Date.now(),
+      timestamp: 1_700_000_000_000,
     };
   }
 

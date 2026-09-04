@@ -571,7 +571,7 @@ describe('buildWsAuthenticate', () => {
       name: 'test',
       keyHash: 'hash',
       scopes,
-      createdAt: new Date().toISOString(),
+      createdAt: new Date(1_700_000_000_000).toISOString(),
       active: true,
     };
   }
@@ -674,7 +674,7 @@ describe('buildRequestAuthorityValidator', () => {
       name: 'test',
       keyHash: 'hash',
       scopes: ['runs:write'],
-      createdAt: new Date().toISOString(),
+      createdAt: new Date(1_700_000_000_000).toISOString(),
       active: true,
       ...overrides,
     };
