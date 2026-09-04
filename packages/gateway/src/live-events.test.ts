@@ -2,11 +2,12 @@ import type { GenerateFunction } from '@lostgradient/operative';
 import type { DurableEventEnvelope, DurableEventOwner } from '@lostgradient/operative/durable';
 import { LIVENESS_POLICY_VERSION, type Subscription } from '@lostgradient/operative/liveness';
 import { describe, expect, it } from 'bun:test';
+import type { RunEventRecord } from 'bureau';
 import { createBureau } from 'bureau';
 import { waitForRunState } from 'bureau/test';
 
 import type { LiveFrameBrokerDurableEventHistory } from './live-events';
-import { LiveFrameBroker } from './live-events';
+import { LiveFrameBroker, projectRunEventForPrivilege } from './live-events';
 import { createManualLiveFrameBrokerClock } from './test';
 import type { ServerFrame } from './types';
 import { createWebSocketHandler } from './websocket/handler';
@@ -448,6 +449,52 @@ describe('LiveFrameBroker — AB-305 response.validated wire projection', () => 
       expect(text).toContain(RAW_SECRET);
       await privilegedReader.cancel();
     }
+  });
+});
+
+describe('projectRunEventForPrivilege — AB-323 REST run-detail projection', () => {
+  function createRunEventRecord(overrides: Partial<RunEventRecord> = {}): RunEventRecord {
+    return {
+      sequence: 1,
+      runId: 'run-1',
+      event: 'response.validated',
+      detail: { step: 0, original: { content: RAW_SECRET, toolCalls: [] }, validated: {} },
+      timestamp: Date.now(),
+      ...overrides,
+    };
+  }
+
+  it('replaces "original" with the redaction marker for a non-privileged caller', () => {
+    const projected = projectRunEventForPrivilege(createRunEventRecord(), false);
+
+    expect(JSON.stringify(projected)).not.toContain(RAW_SECRET);
+    expect(projected.detail).toEqual({
+      step: 0,
+      original: { content: '[redacted]', toolCalls: [] },
+      validated: {},
+    });
+  });
+
+  it('leaves "original" unredacted for a privileged caller', () => {
+    const event = createRunEventRecord();
+    const projected = projectRunEventForPrivilege(event, true);
+
+    expect(projected).toBe(event);
+    expect(JSON.stringify(projected)).toContain(RAW_SECRET);
+  });
+
+  it('leaves a non-"response.validated" event untouched regardless of privilege', () => {
+    const event = createRunEventRecord({ event: 'run.completed', detail: { ok: true } });
+
+    expect(projectRunEventForPrivilege(event, false)).toBe(event);
+    expect(projectRunEventForPrivilege(event, true)).toBe(event);
+  });
+
+  it('leaves a "response.validated" event with a malformed detail untouched rather than throwing', () => {
+    const event = createRunEventRecord({ detail: 'not an object' });
+
+    expect(() => projectRunEventForPrivilege(event, false)).not.toThrow();
+    expect(projectRunEventForPrivilege(event, false)).toBe(event);
   });
 });
 

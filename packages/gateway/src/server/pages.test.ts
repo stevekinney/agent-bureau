@@ -1,12 +1,13 @@
 import { rmSync } from 'node:fs';
 import { join } from 'node:path';
 
+import type { OutputValidator } from '@lostgradient/operative';
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { afterEach, describe, expect, it } from 'bun:test';
 import { createBureau } from 'bureau';
 
 import { createApiKeyStore } from '../keys/create-api-key-store';
-import { createTestGateway } from '../test';
+import { createTestGateway, waitForRunState } from '../test';
 import { extractRootMarkup, stripHydrationMarkers } from './test-utilities';
 
 const evaluationsFixturesDirectory = join(import.meta.dir, '__evaluations-fixtures__');
@@ -117,6 +118,77 @@ describe('SSR pages', () => {
     expect(html).toContain('window.__INITIAL_DATA__');
     const data = extractInitialData(html) as { run: { id: string } };
     expect(data.run.id).toBe(id);
+  });
+
+  // AB-323: `buildRunDetailResponse` is shared by `GET /api/v1/runs/:id`
+  // and this SSR page, embedding the same `RunDetail.events` into
+  // `window.__INITIAL_DATA__` — a non-privileged (scoped) key must not be
+  // able to read `response.validated`'s raw pre-guardrail `original` here
+  // just because it arrives through the SSR hydration payload rather than
+  // the JSON API.
+  it('GET /runs/:id redacts response.validated.original for a runs:read-scoped (non-privileged) key', async () => {
+    const RAW_SECRET = 'sk-real-secret-do-not-leak-ab323-ssr';
+    const secretValidator: OutputValidator = {
+      name: 'secret-detector',
+      validate: async (output) => ({
+        valid: !output.includes(RAW_SECRET),
+        category: 'secret',
+        confidence: 1,
+        redacted: '[redacted]',
+      }),
+    };
+
+    const kv = textValueStore(new MemoryStorage());
+    const apiKeyStore = createApiKeyStore(kv);
+    // Configuring an `ApiKeyStore` at all (via `persistence`) requires every
+    // request to authenticate — there is no "no auth configured" bypass once
+    // it exists — so both the admin and the scoped comparison here are real
+    // managed keys: an admin key carries no scope restrictions (`scopes:
+    // []`), exactly `isPrivilegedGatewayConnection`'s "empty scopes list"
+    // case, same as `createScopedKey`'s admin comparison in the loopback
+    // conformance suite.
+    const { plaintext: adminToken } = await apiKeyStore.create({ name: 'admin', scopes: [] });
+    const { plaintext: scopedToken } = await apiKeyStore.create({
+      name: 'scoped',
+      scopes: ['runs:read'],
+    });
+
+    const bureau = await createBureau({
+      agents: {},
+      persistence: kv,
+      generate: async () => ({ content: `Contact us at ${RAW_SECRET} for help.`, toolCalls: [] }),
+      guardrails: { output: { validators: [secretValidator], action: 'redact' } },
+    });
+    const gateway = await createTestGateway(bureau);
+
+    const createResponse = await gateway.app.request('/api/v1/runs', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ message: 'leak it' }),
+    });
+    const { id } = (await createResponse.json()) as { id: string };
+    await waitForRunState(bureau, id);
+
+    const scopedResponse = await gateway.app.request(`/runs/${id}`, {
+      headers: { authorization: `Bearer ${scopedToken}` },
+    });
+    expect(scopedResponse.status).toBe(200);
+    const scopedHtml = await scopedResponse.text();
+    expect(scopedHtml).not.toContain(RAW_SECRET);
+    const scopedData = extractInitialData(scopedHtml) as {
+      run: { events: { event: string; detail: unknown }[] };
+    };
+    const scopedEvent = scopedData.run.events.find((event) => event.event === 'response.validated');
+    expect((scopedEvent?.detail as { original?: { content?: string } }).original?.content).toBe(
+      '[redacted]',
+    );
+
+    const adminResponse = await gateway.app.request(`/runs/${id}`, {
+      headers: { authorization: `Bearer ${adminToken}` },
+    });
+    expect(adminResponse.status).toBe(200);
+    const adminHtml = await adminResponse.text();
+    expect(adminHtml).toContain(RAW_SECRET);
   });
 
   it('GET /configuration returns 200 HTML with the real ConfigurationResponse', async () => {

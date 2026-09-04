@@ -5,7 +5,12 @@ import { BureauError } from 'bureau';
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 
-import { resolvePrincipal, resolveTrustedRequestContext } from '../middleware/authentication';
+import { projectRunEventForPrivilege } from '../live-events';
+import {
+  isPrivilegedGatewayConnection,
+  resolvePrincipal,
+  resolveTrustedRequestContext,
+} from '../middleware/authentication';
 import { assembleRunTimeline } from '../timeline';
 import type { Bureau, CreateRunRequest, PendingReview, RunDetail } from '../types';
 import { respondWithEventHistoryPage } from './event-history';
@@ -193,7 +198,12 @@ export function createRunsRoutes(bureau: Bureau) {
   });
 
   app.get('/:id', (context) => {
-    const detail = buildRunDetailResponse(bureau, context.req.param('id'));
+    // AB-323: the same "admin key" privilege definition the live wire and
+    // the durable-history paging routes already apply
+    // (`isPrivilegedGatewayConnection`) — never a new flag, never a second
+    // check that could drift from theirs.
+    const privileged = isPrivilegedGatewayConnection(context.req.header('x-api-key-scopes'));
+    const detail = buildRunDetailResponse(bureau, context.req.param('id'), privileged);
     if (!detail) throw new HTTPException(404, { message: 'Run not found' });
     return context.json(detail, 200);
   });
@@ -286,9 +296,33 @@ export function findParkedReview(
  * timeline — shared by `GET /api/v1/runs/:id` and the SSR `/runs/:id` page
  * (`server/pages.ts`) so both surfaces agree on shape. `undefined` when the
  * run does not exist.
+ *
+ * `privileged` (AB-323) is applied to every event in `run.events` via
+ * {@link projectRunEventForPrivilege} BEFORE the timeline is assembled from
+ * them, so a non-privileged caller's timeline is built from the SAME
+ * projected events its `events` array carries — never a raw
+ * `response.validated.original` reconstructed from an unprojected source.
+ * `bureau.getRun` itself (the action log this reads from) always returns
+ * the full, unprojected record; the audit trail this ultimately traces
+ * back to stays complete per AB-323's ruling. Required, not defaulted: the
+ * rollback trigger this issue names is "an admin operator losing the diff
+ * on the REST path" — a silently-redacting default would hide a future
+ * call site that forgot to resolve and pass its own connection's
+ * privilege, exactly the failure a compile error should catch instead.
  */
-export function buildRunDetailResponse(bureau: Bureau, id: string): RunDetailResponse | undefined {
+export function buildRunDetailResponse(
+  bureau: Bureau,
+  id: string,
+  privileged: boolean,
+): RunDetailResponse | undefined {
   const run = bureau.getRun(id);
   if (!run) return undefined;
-  return { ...run, timeline: assembleRunTimeline(run.events) };
+  // A privileged caller's projection is always a no-op (per-event AND, via
+  // this short-circuit, per-array) — `.map()` would otherwise still
+  // allocate a whole new array on every admin run-detail/SSR request just
+  // to hold the exact same event references back (copilot review).
+  const events = privileged
+    ? run.events
+    : run.events.map((event) => projectRunEventForPrivilege(event, privileged));
+  return { ...run, events, timeline: assembleRunTimeline(events) };
 }

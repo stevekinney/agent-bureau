@@ -1,6 +1,7 @@
 import { listEvaluationReports } from 'evaluation';
 import { Hono } from 'hono';
 
+import { isPrivilegedGatewayConnection } from '../middleware/authentication';
 import { createScopeGuard } from '../middleware/scope-guard';
 import { buildRunDetailResponse, type RunDetailResponse } from '../routes/runs';
 import { buildUsageResponse, type UsageResponse } from '../routes/usage';
@@ -93,7 +94,13 @@ export function createPages(dependencies: PageDependencies) {
 
   app.get('/runs/:id', async (context) => {
     const id = context.req.param('id');
-    const run = buildRunDetailResponse(dependencies.bureau, id);
+    // AB-323: this SSR page embeds the same `RunDetailResponse` JSON the
+    // REST route serves (into `window.__INITIAL_DATA__`) — the same
+    // privilege projection applies here, or a non-privileged caller could
+    // read `response.validated`'s raw `original` from this page's markup
+    // even though `GET /api/v1/runs/:id` redacts it.
+    const privileged = isPrivilegedGatewayConnection(context.req.header('x-api-key-scopes'));
+    const run = buildRunDetailResponse(dependencies.bureau, id, privileged);
     if (!run) {
       return context.text('Run not found', 404);
     }
