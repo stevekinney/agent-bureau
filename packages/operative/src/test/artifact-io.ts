@@ -191,6 +191,24 @@ function requireArray(value: unknown, field: string, path: string): readonly unk
 }
 
 /**
+ * Asserts `field` is a present OWN key of `raw` — not merely that
+ * `raw[field]` is not `undefined`, since a JSON object can hold an
+ * explicit `null` for either of these two fields but never omit the key
+ * entirely. `terminalResult`/`cleanupReport` are the two fields this file
+ * cannot validate the SHAPE of (the former is `unknown` by design; the
+ * latter is a caller-supplied `TCleanupReport` this function has no way to
+ * narrow generically — see {@link readReproductionArtifact}'s own doc
+ * comment) — but a missing key is still a corrupted artifact, not a valid
+ * one with an absent field, and `raw[field]` alone cannot tell the two
+ * apart.
+ */
+function requirePresentKey(raw: Record<string, unknown>, field: string, path: string): void {
+  if (!(field in raw)) {
+    throw new InvalidReproductionArtifactError(path, `"${field}" is required`);
+  }
+}
+
+/**
  * Reads and structurally validates the `ReproductionArtifact` at `path`.
  * Hand-written guards rather than a schema library: `src/test/` ships in
  * `@lostgradient/operative`'s published `./test` subpath, and `zod` is only
@@ -222,6 +240,8 @@ export async function readReproductionArtifact(
   if (!isRecord(raw)) {
     throw new InvalidReproductionArtifactError(path, 'top-level value must be an object');
   }
+  requirePresentKey(raw, 'terminalResult', path);
+  requirePresentKey(raw, 'cleanupReport', path);
 
   return {
     sourceRevision: requireString(raw['sourceRevision'], 'sourceRevision', path),

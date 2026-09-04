@@ -179,6 +179,38 @@ describe('readReproductionArtifact — validation', () => {
 
     expect(readReproductionArtifact(path)).rejects.toThrow(/"causalTrace" must be an array/);
   });
+
+  it('rejects an artifact missing the terminalResult key entirely', async () => {
+    const artifact = await assembleBaselineArtifact({ randomSeed: 'missing-terminal-result' });
+    const { terminalResult: _terminalResult, ...withoutTerminalResult } = artifact;
+    const path = scratchPath('missing-terminal-result');
+    await Bun.write(path, JSON.stringify(withoutTerminalResult));
+
+    expect(readReproductionArtifact(path)).rejects.toThrow(/"terminalResult" is required/);
+  });
+
+  it('rejects an artifact missing the cleanupReport key entirely', async () => {
+    const artifact = await assembleBaselineArtifact({ randomSeed: 'missing-cleanup-report' });
+    const { cleanupReport: _cleanupReport, ...withoutCleanupReport } = artifact;
+    const path = scratchPath('missing-cleanup-report');
+    await Bun.write(path, JSON.stringify(withoutCleanupReport));
+
+    expect(readReproductionArtifact(path)).rejects.toThrow(/"cleanupReport" is required/);
+  });
+
+  it('accepts an explicit null terminalResult/cleanupReport — present, just null, not missing', async () => {
+    const artifact = await assembleBaselineArtifact({ randomSeed: 'explicit-null-fields' });
+    const path = scratchPath('explicit-null-fields');
+    await Bun.write(
+      path,
+      JSON.stringify({ ...artifact, terminalResult: null, cleanupReport: null }),
+    );
+
+    const read = await readReproductionArtifact(path);
+
+    expect(read.terminalResult).toBeNull();
+    expect(read.cleanupReport).toBeNull();
+  });
 });
 
 describe('replayReproductionArtifact', () => {
