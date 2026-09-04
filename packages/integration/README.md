@@ -77,23 +77,30 @@ bun run integration
 
 The Node.js binary is located automatically—`$NODE_BINARY`, `$NODE`, `Bun.which('node')`, and common install paths are all tried. The suite fails loudly if no Node binary is found.
 
-## Process-Crash Recovery Conformance (AB-270)
+## Process-Crash Recovery Conformance (AB-270, LMDB backend AB-335)
 
 `test/crash/` launches `fixture.ts` as a real, separate OS process against a
-unique temporary SQLite backend, `SIGKILL`s it at a named marker
-(`test/crash/protocol.ts`'s `CrashMarker`), and launches a fresh process over
-the same backend path to prove recovery, fencing, event continuity,
-idempotency, and final resource release — the crash-recovery tier AB-92's
-test-tier matrix assigns its own command:
+unique temporary persistent backend — SQLite or LMDB, `runCrashScenario`'s
+`backend` option — `SIGKILL`s it at a named marker (`test/crash/protocol.ts`'s
+`CrashMarker`), and launches a fresh process over the same backend path to
+prove recovery, fencing, event continuity, idempotency, and final resource
+release — the crash-recovery tier AB-92's test-tier matrix assigns its own
+command:
 
 ```bash
-# Full marker matrix (8 scenarios, ~5s) — the stable root command
+# Full matrix (SQLite's 7-scenario marker matrix in sqlite.test.ts, plus
+# LMDB's 1-scenario lmdb.test.ts) — the stable root command
 bun run test:crash-conformance
 
-# Smoke-only (1 scenario) — what `bun run test` here and CI's
+# Smoke-only (1 SQLite scenario) — what `bun run test` here and CI's
 # pull-request lane both run; the full matrix runs at tst-09e's cadence
 bun test test/crash/sqlite.test.ts --test-name-pattern smoke
 ```
+
+`test/crash/lmdb.test.ts` (AB-335) covers only the one scenario that exposed
+an LMDB-specific defect ("killed at child-registered") — extracting a shared
+scenario list so every marker in the matrix runs over both backends is
+AB-271's scope.
 
 `test/crash/harness.ts` exports `runCrashScenario` (the parent driver) and
 `test/crash/fixture.ts` is the child-process entry point; neither is part of

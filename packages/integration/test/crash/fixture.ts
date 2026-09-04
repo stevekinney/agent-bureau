@@ -413,45 +413,6 @@ function realDelayYield(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 5));
 }
 
-/**
- * AB-271/AB-335: reads `bureau.getDurableRun(runId)` right after THIS SAME
- * process minted or reattached `runId`. Over LMDB, retries with a real
- * per-iteration delay until the record is visible — this run was just
- * created or reattached one line above, in this same process, so a
- * genuinely absent record here is not a modeled outcome; it is riding out
- * lmdb-js's own batched-write-visibility delay (`claimStarted`'s write for a
- * tool call resolves once "the next batched transaction commits", per
- * `@lostgradient/weft/storage/lmdb.ts`'s own doc comment — the FIRST read of
- * a just-minted record can land before that batch's visibility settles).
- * Every other read of `getDurableRun` in this file reads exactly once and
- * returns whatever it sees — including `null`/`undefined` — as a genuine
- * observation, never silently retried.
- */
-async function readDurableRunWithRetry(
-  bureau: { getDurableRun(runId: string): Promise<{ status: string } | null | undefined> },
-  runId: string,
-  backend: FixtureBackend,
-  mode: FixtureMode,
-): Promise<{ status: string } | null | undefined> {
-  // Only primary mode rides out the same-process visibility race: a
-  // recovery-mode miss is reading a DIFFERENT process's write, so it is
-  // either a genuine recovery gap or evidence the write itself was never
-  // durable before the kill — never silently retried.
-  if (backend !== 'lmdb' || mode !== 'primary') return bureau.getDurableRun(runId);
-
-  let last: { status: string } | null | undefined;
-  await waitForCondition(
-    async () => {
-      last = await bureau.getDurableRun(runId);
-      return last !== null && last !== undefined;
-    },
-    `crash fixture: run "${runId}" was never visible through bureau.getDurableRun immediately after being minted in this same process`,
-    200,
-    realDelayYield,
-  );
-  return last;
-}
-
 type FixtureMode = 'primary' | 'recovery';
 type FixtureBackend = 'sqlite' | 'lmdb';
 
@@ -589,10 +550,16 @@ async function main(): Promise<void> {
     reportObservation('resumed-root-run-id', null);
   }
 
-  const rootState = currentRootRunId
-    ? await readDurableRunWithRetry(bureau, currentRootRunId, backend, mode)
-    : null;
-  let rootIsNonTerminal = !!rootState && NON_TERMINAL_STATUSES.has(rootState.status);
+  // AB-335: no retry here, per the coordinator ruling. In primary mode the
+  // root run was minted one line above, in THIS process, and this fixture's
+  // own `generate` always returns a tool call at step 0 — `stopWhen` cannot
+  // have stopped it yet, so it is known non-terminal without a storage read
+  // at all. Recovery mode reads exactly once and returns whatever it
+  // observes, including `null`/`undefined`, as a genuine observation.
+  const rootState =
+    mode === 'recovery' && currentRootRunId ? await bureau.getDurableRun(currentRootRunId) : null;
+  let rootIsNonTerminal =
+    mode === 'primary' ? true : !!rootState && NON_TERMINAL_STATUSES.has(rootState.status);
 
   if (rootIsNonTerminal) {
     // AB-336: `requestHumanInput`'s `execute()` returns synchronously — the
