@@ -74,4 +74,17 @@ describe('reduceToolActivity', () => {
 
     expect(state).toEqual(INITIAL_TOOL_ACTIVITY_STATE);
   });
+
+  it('appends a new entry and skips block-index cleanup when a block completes without a prior start or update', () => {
+    let state = INITIAL_TOOL_ACTIVITY_STATE;
+
+    state = reduceToolActivity(state, {
+      type: 'complete',
+      blockId: 'block-unseen',
+      message: 'search completed {"query":"agent"}',
+    });
+
+    expect(state.entries).toEqual(['search completed {"query":"agent"}']);
+    expect(state.blockIndices).toEqual({});
+  });
 });

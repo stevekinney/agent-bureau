@@ -319,6 +319,41 @@ describe('createWebSocket', () => {
     store.stop();
   });
 
+  it('replays each run from its own last-seen cursor when the event stream reopens', () => {
+    const store = createWebSocket({
+      url: '/ws',
+      eventStreamUrl: '/api/v1/events',
+      environment: createEnvironment(),
+    });
+    store.start();
+    store.subscribe('run-1');
+
+    // Socket never opened — falls to the SSE fallback immediately.
+    lastSocket().fireClose();
+    lastSource().open();
+
+    lastSource().emit('message', {
+      data: JSON.stringify({
+        type: 'event',
+        runId: 'run-1',
+        event: 'run.completed',
+        detail: {},
+        sequence: 1,
+        runSeq: 7,
+        timestamp: Date.now(),
+      }),
+    });
+
+    // The event stream drops; re-subscribing while still in fallback mode
+    // reopens it, and the reopened URL should carry the run's last-seen
+    // cursor so the door replays only what was missed.
+    lastSource().emit('error');
+    store.subscribe('run-1');
+
+    expect(lastSource().url).toBe('http://localhost/api/v1/events?runId=run-1&since=run-1%3A7');
+    store.stop();
+  });
+
   it('schedules a reconnect after an established socket closes, driven deterministically by the injected timers', () => {
     const { timers, fireScheduledTimeout, scheduledDelay, scheduledCount } =
       createControllableTimers();

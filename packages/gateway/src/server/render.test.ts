@@ -12,6 +12,7 @@ import {
 } from '../routes/runs';
 import type { UsageGroupTotals, UsageResponse } from '../routes/usage';
 import type { ConfigurationResponse, PendingReview, RunSummary } from '../types';
+import App from '../ui/app.svelte';
 import { createBrowserClientEnvironment } from '../ui/client-environment';
 import type { ChatStore } from '../ui/hooks/use-chat.svelte';
 import type { ReviewsStore } from '../ui/hooks/use-reviews.svelte';
@@ -1168,5 +1169,18 @@ describe('configuration page (purely presentational — every {#if} branch)', ()
     expect(rootMarkup).toContain('Reads a file from disk.');
     expect(rootMarkup).toContain('write_file');
     expect(rootMarkup).toContain('Writes a file to disk.');
+  });
+});
+
+describe('App root shell', () => {
+  it('renders "Page not found." for a pathname none of the six routes match', async () => {
+    const html = await renderPage({
+      title: 'Not Found',
+      component: App,
+      props: { initialData: {}, pathname: '/nonexistent-route' },
+    });
+    const rootMarkup = extractRootMarkup(html);
+
+    expect(rootMarkup).toContain('Page not found.');
   });
 });
