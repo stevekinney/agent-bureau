@@ -8,6 +8,7 @@
  * timers, no network, no wall-clock read.
  */
 import { describe, expect, it } from 'bun:test';
+import { createManualRuntimeServices } from 'lifecycle';
 
 import { type BackendDescriptor, createModelCatalog, type ModelCatalog } from './model-catalog.ts';
 import type { UserModelConfiguration } from './policy.ts';
@@ -652,12 +653,27 @@ describe('select: configurationRevision and selectorRevision', () => {
 });
 
 describe('select: default now and newPlanId', () => {
-  it('uses the wall clock and crypto.randomUUID when now/newPlanId are not injected', () => {
+  it('uses the real RuntimeServices when now/newPlanId/runtime are not injected', () => {
     const plan = select(baseRequest(), { catalog: catalogOf([anthropic]) });
     expect(typeof plan.createdAt).toBe('string');
     expect(new Date(plan.createdAt).toString()).not.toBe('Invalid Date');
     expect(typeof plan.planId).toBe('string');
     expect(plan.planId.length).toBeGreaterThan(0);
+  });
+
+  it('a manual RuntimeServices controls createdAt and planId when now/newPlanId are not injected (AB-325)', async () => {
+    const seed = 'selection-runtime-test';
+    const runtime = createManualRuntimeServices({ identifierSeed: seed });
+    await runtime.advance(7_000);
+    // A second, identically-seeded runtime (AB-337: same seed mints the same sequence) computes
+    // the expected planId independently, without reading the instance `select` itself consumed.
+    const expectedRuntime = createManualRuntimeServices({ identifierSeed: seed });
+    await expectedRuntime.advance(7_000);
+
+    const plan = select(baseRequest(), { catalog: catalogOf([anthropic]), runtime });
+
+    expect(plan.createdAt).toBe(expectedRuntime.clock.nowISO());
+    expect(plan.planId).toBe(expectedRuntime.identifiers.next('selection-plan'));
   });
 });
 

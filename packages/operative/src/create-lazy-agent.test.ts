@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
+import { createManualRuntimeServices } from 'lifecycle';
 
 import type { AgentRun, RunEvent } from './agent-run';
 import { CompletedRunIterationError } from './agent-run';
@@ -912,6 +913,23 @@ describe('createLazyAgent', () => {
     await run.result();
 
     expect(fake.abortChildCalls).toEqual([{ childId: 'child-1', reason: 'now resolved' }]);
+  });
+
+  it('a manual RuntimeServices controls the synthetic snapshot startedAt/observedAt (AB-325)', () => {
+    const fake = createFakeAgentRun();
+    const agent: RunnableAgent<string, false> = {
+      name: 'fake',
+      hasOutput: false,
+      run: () => fake.handle,
+    };
+    const runtime = createManualRuntimeServices();
+    const lazy = createLazyAgent(() => agent, { label: 'lazy-manual-runtime', runtime });
+
+    const run = lazy.run('hello');
+    const snapshot = run.snapshot();
+
+    expect(snapshot.startedAt).toBe(runtime.clock.nowISO());
+    expect(snapshot.observedAt).toBe(runtime.monotonic.now());
   });
 
   it('AB-88/AB-214: snapshot()/subscribeSnapshot() read a synthetic created snapshot before resolution and delegate once resolved', async () => {

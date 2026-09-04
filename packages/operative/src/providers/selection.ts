@@ -119,6 +119,8 @@
  *   compare against.
  */
 
+import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
+
 import type { SteeringRequestedValue } from '../durable/types.ts';
 import type { BackendDescriptor, ModelCatalog } from './model-catalog.ts';
 import {
@@ -291,10 +293,17 @@ export interface SelectOptions {
   readonly agent?: AgentPreferences;
   readonly delegated?: DelegatedAuthority;
   readonly user?: UserModelConfiguration;
-  /** Defaults to the wall clock; inject in tests for byte-stable plans. */
+  /** Defaults to `runtime.clock.nowISO()` (the real implementation when `runtime` is also omitted); inject in tests for byte-stable plans. */
   readonly now?: () => string;
-  /** Defaults to `crypto.randomUUID`; inject in tests for byte-stable plans. */
+  /** Defaults to `runtime.identifiers.next('selection-plan')` (the real implementation when `runtime` is also omitted); inject in tests for byte-stable plans. */
   readonly newPlanId?: () => string;
+  /**
+   * The AB-92/AB-252 `RuntimeServices` seam (AB-325) backing the default
+   * `now`/`newPlanId` when those are not supplied. Defaults to the real
+   * implementation; explicit `now`/`newPlanId` still take precedence over
+   * `runtime` when both are supplied, for backward compatibility.
+   */
+  readonly runtime?: RuntimeServices;
   /** Defaults to `1`. */
   readonly selectorRevision?: number;
   readonly configurationRevision?: number;
@@ -581,8 +590,9 @@ function findPriorCandidate(
  * inputs. See this module's top-level documentation for the full design.
  */
 export function select(request: SelectionRequest, options: SelectOptions): SelectionPlan {
-  const now = options.now ?? (() => new Date().toISOString());
-  const newPlanId = options.newPlanId ?? (() => crypto.randomUUID());
+  const runtime = options.runtime ?? createDefaultRuntimeServices();
+  const now = options.now ?? (() => runtime.clock.nowISO());
+  const newPlanId = options.newPlanId ?? (() => runtime.identifiers.next('selection-plan'));
   const selectorRevision = options.selectorRevision ?? 1;
   const createdAt = now();
   const planId = newPlanId();

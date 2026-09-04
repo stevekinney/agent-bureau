@@ -675,7 +675,7 @@ export async function runStep(
           ...state,
           appliedAtStep: step,
           appliedAtRunId: deps.runId,
-          appliedAt: new Date().toISOString(),
+          appliedAt: deps.runtime.clock.nowISO(),
         }),
       );
     }

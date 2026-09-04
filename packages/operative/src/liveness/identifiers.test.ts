@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test';
+import { createManualRuntimeServices } from 'lifecycle';
 
 import { createDefaultRunIdentifierSeam, defaultRunIdentifierSeam } from './identifiers';
 
@@ -18,6 +19,17 @@ describe('createDefaultRunIdentifierSeam', () => {
     const seamB = createDefaultRunIdentifierSeam();
 
     expect(seamA.next()).not.toBe(seamB.next());
+  });
+
+  it('a manual RuntimeServices controls minted ids (AB-325)', () => {
+    const seed = 'identifiers-seam-test';
+    const runtime = createManualRuntimeServices({ identifierSeed: seed });
+    const expectedRuntime = createManualRuntimeServices({ identifierSeed: seed });
+
+    const seam = createDefaultRunIdentifierSeam(runtime);
+
+    expect(seam.next()).toBe(expectedRuntime.identifiers.next('run'));
+    expect(seam.next()).toBe(expectedRuntime.identifiers.next('run'));
   });
 });
 
