@@ -58,12 +58,15 @@
  *     An alias from any other module is deliberately not resolved — a same-named import from an
  *     unrelated package is not a test declaration just because it shares a name.
  *   - A callback passed by reference — `it('case', someNamedFunction)` — is now inspected at
- *     `someNamedFunction`'s own declaration site. `collectFunctionBindings` walks the entire file
- *     once, before any test-call matching, recording every named `function someNamedFunction() {}`
- *     declaration and every `const someNamedFunction = () => {}` / `= function () {}` variable
- *     initializer found anywhere in the tree, by name. `resolveCallback` then accepts a test
- *     call's callback argument either directly (an inline arrow/function expression, at any
- *     argument index, as before) or, when the argument at index 1 or later is a bare `Identifier`,
+ *     `someNamedFunction`'s own declaration site. `collectFunctionBindings` scans the TOP LEVEL
+ *     of the file once, before any test-call matching, recording every named
+ *     `function someNamedFunction() {}` declaration and every `const someNamedFunction = () => {}`
+ *     / `= function () {}` variable initializer that is a direct top-level statement, by name —
+ *     deliberately not a full-tree walk, so a same-named function nested in an unrelated closure
+ *     can never shadow the real top-level binding (module top level cannot itself contain two
+ *     same-named bindings, so this is unambiguous). `resolveCallback` then accepts a test call's
+ *     callback argument either directly (an inline arrow/function expression, at any argument
+ *     index, as before) or, when the argument at index 1 or later is a bare `Identifier`,
  *     by looking that name up in the bindings map — the resolved function-like node is then the
  *     one `hasConditionalEarlyReturn` inspects and the one whose presence makes the call a genuine
  *     declaration (`.each`-style factory calls with no callback at all still are not). By-reference
@@ -180,31 +183,41 @@ function collectTestImportAliases(sourceFile: ts.SourceFile): ReadonlyMap<string
 }
 
 /**
- * Maps every named, function-like declaration reachable anywhere in the file — a
+ * Maps every named, function-like declaration at the TOP LEVEL of the file — a
  * `function someName() {}` declaration or a `const someName = () => {}` / `= function () {}`
- * variable initializer — to its declaration node, so a callback passed by reference
- * (`it('case', someName)`) can be resolved to the place its body actually lives.
+ * variable initializer, as a direct statement of the source file — to its declaration node, so a
+ * callback passed by reference (`it('case', someName)`) can be resolved to the place its body
+ * actually lives.
+ *
+ * Deliberately restricted to the top level, not a full-tree walk: this is a lexical AST walk, not
+ * a scope-aware binder, so a full-tree walk would let a same-named function nested in an unrelated
+ * block or closure shadow — and silently mis-resolve — the real top-level binding a call actually
+ * references. Top-level module scope has no such hazard: JavaScript and TypeScript both reject two
+ * bindings of the same name at the same top level (`SyntaxError: Identifier 'x' has already been
+ * declared`), so a name found here is unambiguous.
  */
 function collectFunctionBindings(
   sourceFile: ts.SourceFile,
 ): ReadonlyMap<string, FunctionLikeDeclaration> {
   const bindings = new Map<string, FunctionLikeDeclaration>();
 
-  function visit(node: ts.Node): void {
-    if (ts.isFunctionDeclaration(node) && node.name) {
-      bindings.set(node.name.text, node);
-    } else if (
-      ts.isVariableDeclaration(node) &&
-      ts.isIdentifier(node.name) &&
-      node.initializer &&
-      isFunctionLike(node.initializer)
-    ) {
-      bindings.set(node.name.text, node.initializer);
+  for (const statement of sourceFile.statements) {
+    if (ts.isFunctionDeclaration(statement) && statement.name) {
+      bindings.set(statement.name.text, statement);
+      continue;
     }
-    node.forEachChild(visit);
+    if (!ts.isVariableStatement(statement)) continue;
+    for (const declaration of statement.declarationList.declarations) {
+      if (
+        ts.isIdentifier(declaration.name) &&
+        declaration.initializer &&
+        isFunctionLike(declaration.initializer)
+      ) {
+        bindings.set(declaration.name.text, declaration.initializer);
+      }
+    }
   }
 
-  visit(sourceFile);
   return bindings;
 }
 

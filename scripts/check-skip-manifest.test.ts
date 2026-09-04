@@ -361,6 +361,54 @@ describe('findSkipFindingsInSource', () => {
     expect(findings).toEqual([]);
   });
 
+  it('resolves a by-reference callback to its top-level declaration, not a same-named function nested in an unrelated scope (regression: PR #498 review)', () => {
+    const filePath = 'inline.ts';
+    const sourceText = `
+      import { it } from 'bun:test';
+      function shadowed() {
+        if (Bun.env['ONLY_THE_TOP_LEVEL_VERSION_HAS_THIS_BRANCH']) {
+          return;
+        }
+      }
+      function unrelatedWrapper() {
+        function shadowed() {
+          // A different, same-named function nested in an unrelated closure. Resolving to this
+          // one instead of the top-level declaration would report no finding at all.
+        }
+        return shadowed;
+      }
+      it('references the top-level shadowed, not the nested one', shadowed);
+    `;
+    const { findings } = findSkipFindingsInSource(filePath, sourceText);
+    expect(findings).toEqual([
+      {
+        filePath,
+        testIdentifier: `${filePath} > references the top-level shadowed, not the nested one`,
+        kind: 'conditional-early-return',
+        line: 15,
+      },
+    ]);
+  });
+
+  it('does not resolve a by-reference callback declared only inside a nested scope, never at the top level', () => {
+    const filePath = 'inline.ts';
+    const sourceText = `
+      import { it } from 'bun:test';
+      function outerHelper() {
+        function innerHelper() {
+          if (Bun.env['NEVER']) {
+            return;
+          }
+        }
+        return innerHelper;
+      }
+      it('references a callback with no top-level declaration', innerHelper);
+    `;
+    const { findings, allTestIdentifiers } = findSkipFindingsInSource(filePath, sourceText);
+    expect(findings).toEqual([]);
+    expect([...allTestIdentifiers]).toEqual([]);
+  });
+
   it('does not record a phantom identifier when a callback identifier resolves to no known function', () => {
     const filePath = 'inline.ts';
     const sourceText = `
