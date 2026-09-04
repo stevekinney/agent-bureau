@@ -24,7 +24,8 @@
     },
     "integration": {
       "dependsOn": ["^build"],
-      "outputs": []
+      "outputs": [],
+      "passThroughEnv": ["REPRODUCTION_ARTIFACT_DIR"]
     },
     "test": {
       "dependsOn": ["^build", "build"],
