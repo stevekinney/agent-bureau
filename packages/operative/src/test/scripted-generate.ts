@@ -41,9 +41,20 @@ export class BarrierCoordinator {
    * block point. Delegates to `Barrier.arrive()`, whose side effects
    * (incrementing `arrivals`, resolving `reached()`) run synchronously
    * before this returns; the settlement promise is retained so a later
-   * `awaitRelease(name)` call can await it.
+   * `awaitRelease(name)` call can await it. Throws if a previous arrival at
+   * `name` is still awaiting its release — two in-flight calls sharing one
+   * `block` barrier name would otherwise silently overwrite each other's
+   * entry, leaving the first `awaitRelease(name)` awaiting the SECOND
+   * arrival's promise instead of its own (a subtle deadlock: it would hang
+   * until an extra, unmatched `release()` happened to unblock it).
    */
   arrive(name: string): void {
+    if (this.arrivals.has(name)) {
+      throw new Error(
+        `BarrierCoordinator: arrive("${name}") called while a previous arrival at "${name}" ` +
+          'is still awaiting release — concurrent calls cannot share one block barrier name.',
+      );
+    }
     this.arrivals.set(name, this.registry.barrier(name).arrive());
   }
 
@@ -57,7 +68,12 @@ export class BarrierCoordinator {
     this.registry.barrier(name).release();
   }
 
-  /** Resolves once the named barrier has been released. */
+  /**
+   * Resolves once the named barrier has been released, then clears the
+   * retained arrival so the same name can be used again by a later,
+   * non-concurrent `arrive`/`awaitRelease` pair (e.g. a script that reuses
+   * a barrier name across sequential calls).
+   */
   async awaitRelease(name: string): Promise<void> {
     const arrival = this.arrivals.get(name);
     if (!arrival) {
@@ -65,7 +81,11 @@ export class BarrierCoordinator {
         `BarrierCoordinator: awaitRelease("${name}") called before arrive("${name}")`,
       );
     }
-    await arrival;
+    try {
+      await arrival;
+    } finally {
+      this.arrivals.delete(name);
+    }
   }
 }
 
