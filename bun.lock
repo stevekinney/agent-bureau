@@ -247,6 +247,7 @@
       "name": "integration",
       "dependencies": {
         "@lostgradient/operative": "workspace:*",
+        "@lostgradient/weft": "^0.23.1",
         "armorer": "workspace:*",
         "bureau": "workspace:*",
         "conversationalist": "workspace:*",
