@@ -15,10 +15,17 @@
  * `since`), the same discipline Weft's own `Cursor` type documents.
  */
 
-/** The two aggregate kinds a durable event can be scoped to. */
-export type DurableEventOwnerKind = 'run' | 'session';
+/**
+ * The three aggregate kinds a durable event can be scoped to. `'schedule'`
+ * (AB-320, widening AB-310's original `'run' | 'session'`) owns a
+ * schedule's four DEFINITION events (`schedule.created`/`paused`/`resumed`/
+ * `cancelled`, AB-298/AB-223) only — a scheduled FIRE stays on the fired
+ * run's own `'run'` owner ("a schedule fire is an ordinary run", AB-87's
+ * coordinator ruling), never on `'schedule'`.
+ */
+export type DurableEventOwnerKind = 'run' | 'session' | 'schedule';
 
-/** Identifies the run or session a durable event belongs to. */
+/** Identifies the run, session, or schedule a durable event belongs to. */
 export interface DurableEventOwner {
   readonly kind: DurableEventOwnerKind;
   readonly id: string;

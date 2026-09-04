@@ -10,7 +10,14 @@
  * storage-fixture code — and never sleep: every ordering assertion relies
  * on `createManualRuntimeServices()`'s manual clock.
  */
-import { ScheduleCompletedEvent, ScheduleFailedEvent } from '@lostgradient/operative';
+import {
+  AgentScheduledEvent,
+  ScheduleCancelledEvent,
+  ScheduleCompletedEvent,
+  ScheduleFailedEvent,
+  SchedulePausedEvent,
+  ScheduleResumedEvent,
+} from '@lostgradient/operative';
 import type { DurableEventEnvelope, DurableEventOwner } from '@lostgradient/operative/durable';
 import type { Subscription } from '@lostgradient/operative/liveness';
 import type { Action } from '@lostgradient/operative/store';
@@ -482,6 +489,37 @@ describe('createDurableEventHistory', () => {
       }
     });
 
+    it('survives reopening the same SQLite backend across two independently constructed instances for a schedule owner (AB-320)', async () => {
+      const runtime = createManualRuntimeServices();
+      const fixture = createSqliteStorageFixture({ runtime });
+      const owner = { kind: 'schedule' as const, id: 'sched-1' };
+
+      try {
+        const storage1 = await resolveStorage(fixture.configuration);
+        const history1 = createDurableEventHistory(storage1, runtime);
+        await history1.record(owner, 'schedule.created', { scheduleId: 'sched-1' });
+        await history1.record(owner, 'schedule.paused', { scheduleId: 'sched-1' });
+        await history1.dispose();
+        storage1[Symbol.dispose]();
+
+        const storage2 = await resolveStorage(fixture.configuration);
+        const history2 = createDurableEventHistory(storage2, runtime);
+        const page = await history2.page(owner);
+        if ('outcome' in page) throw new Error('expected a page, got a gap');
+
+        expect(page.events.map((event) => event.kind)).toEqual([
+          'schedule.created',
+          'schedule.paused',
+        ]);
+        expect(page.events.map((event) => event.sequence)).toEqual([0, 1]);
+
+        await history2.dispose();
+        storage2[Symbol.dispose]();
+      } finally {
+        await fixture.dispose();
+      }
+    });
+
     it('survives reopening the same LMDB backend across two independently constructed instances', async () => {
       const runtime = createManualRuntimeServices();
       const fixture = createLmdbStorageFixture({ runtime });
@@ -923,6 +961,10 @@ function createFakeBureauEventSurface(): {
   dispatchAction(action: Action): void;
   dispatchScheduleCompleted(event: ScheduleCompletedEvent): void;
   dispatchScheduleFailed(event: ScheduleFailedEvent): void;
+  dispatchScheduleCreated(event: AgentScheduledEvent): void;
+  dispatchSchedulePaused(event: SchedulePausedEvent): void;
+  dispatchScheduleResumed(event: ScheduleResumedEvent): void;
+  dispatchScheduleCancelled(event: ScheduleCancelledEvent): void;
 } {
   const target = new CompletableEventTarget<BureauEventMap>();
   const bureau = {
@@ -939,6 +981,18 @@ function createFakeBureauEventSurface(): {
       target.dispatch(event);
     },
     dispatchScheduleFailed: (event) => {
+      target.dispatch(event);
+    },
+    dispatchScheduleCreated: (event) => {
+      target.dispatch(event);
+    },
+    dispatchSchedulePaused: (event) => {
+      target.dispatch(event);
+    },
+    dispatchScheduleResumed: (event) => {
+      target.dispatch(event);
+    },
+    dispatchScheduleCancelled: (event) => {
       target.dispatch(event);
     },
   };
@@ -1119,6 +1173,194 @@ describe('createDurableEventProducer()', () => {
     await producer.dispose();
   });
 
+  it('records schedule.created under the schedule owner (AB-320)', async () => {
+    const runtime = createManualRuntimeServices();
+    const { bureau, dispatchScheduleCreated } = createFakeBureauEventSurface();
+    const { history, calls } = createRecordingHistory();
+    const producer = createDurableEventProducer(bureau, history, runtime);
+
+    dispatchScheduleCreated(
+      new AgentScheduledEvent({
+        agentName: 'triage',
+        scheduleId: 'sched-1',
+        spec: { cron: '* * * * *' },
+        sessionId: 'sess-1',
+      }),
+    );
+    await runtime.deferred.drain();
+
+    expect(calls).toEqual([
+      {
+        owner: { kind: 'schedule', id: 'sched-1' },
+        kind: 'schedule.created',
+        payload: {
+          scheduleId: 'sched-1',
+          agentName: 'triage',
+          spec: { cron: '* * * * *' },
+          sessionId: 'sess-1',
+        },
+      },
+    ]);
+
+    await producer.dispose();
+  });
+
+  it('records schedule.created with no sessionId key when the event carries none (AB-320)', async () => {
+    const runtime = createManualRuntimeServices();
+    const { bureau, dispatchScheduleCreated } = createFakeBureauEventSurface();
+    const { history, calls } = createRecordingHistory();
+    const producer = createDurableEventProducer(bureau, history, runtime);
+
+    dispatchScheduleCreated(
+      new AgentScheduledEvent({
+        agentName: 'triage',
+        scheduleId: 'sched-1',
+        spec: { every: '5m' },
+      }),
+    );
+    await runtime.deferred.drain();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual({
+      owner: { kind: 'schedule', id: 'sched-1' },
+      kind: 'schedule.created',
+      payload: { scheduleId: 'sched-1', agentName: 'triage', spec: { every: '5m' } },
+    });
+    expect(calls[0]?.payload).not.toHaveProperty('sessionId');
+
+    await producer.dispose();
+  });
+
+  it('records schedule.paused under the schedule owner (AB-320)', async () => {
+    const runtime = createManualRuntimeServices();
+    const { bureau, dispatchSchedulePaused } = createFakeBureauEventSurface();
+    const { history, calls } = createRecordingHistory();
+    const producer = createDurableEventProducer(bureau, history, runtime);
+
+    dispatchSchedulePaused(new SchedulePausedEvent('sched-1'));
+    await runtime.deferred.drain();
+
+    expect(calls).toEqual([
+      {
+        owner: { kind: 'schedule', id: 'sched-1' },
+        kind: 'schedule.paused',
+        payload: { scheduleId: 'sched-1' },
+      },
+    ]);
+
+    await producer.dispose();
+  });
+
+  it('records schedule.resumed under the schedule owner (AB-320)', async () => {
+    const runtime = createManualRuntimeServices();
+    const { bureau, dispatchScheduleResumed } = createFakeBureauEventSurface();
+    const { history, calls } = createRecordingHistory();
+    const producer = createDurableEventProducer(bureau, history, runtime);
+
+    dispatchScheduleResumed(new ScheduleResumedEvent('sched-1'));
+    await runtime.deferred.drain();
+
+    expect(calls).toEqual([
+      {
+        owner: { kind: 'schedule', id: 'sched-1' },
+        kind: 'schedule.resumed',
+        payload: { scheduleId: 'sched-1' },
+      },
+    ]);
+
+    await producer.dispose();
+  });
+
+  it('records schedule.cancelled under the schedule owner (AB-320)', async () => {
+    const runtime = createManualRuntimeServices();
+    const { bureau, dispatchScheduleCancelled } = createFakeBureauEventSurface();
+    const { history, calls } = createRecordingHistory();
+    const producer = createDurableEventProducer(bureau, history, runtime);
+
+    dispatchScheduleCancelled(new ScheduleCancelledEvent('sched-1'));
+    await runtime.deferred.drain();
+
+    expect(calls).toEqual([
+      {
+        owner: { kind: 'schedule', id: 'sched-1' },
+        kind: 'schedule.cancelled',
+        payload: { scheduleId: 'sched-1' },
+      },
+    ]);
+
+    await producer.dispose();
+  });
+
+  it('the schedule page excludes fires, and the fired run page excludes definition events (AB-320)', async () => {
+    const runtime = createManualRuntimeServices();
+    const storage = await createMemoryStorage();
+    const history = createDurableEventHistory(storage, runtime);
+    const {
+      bureau,
+      dispatchScheduleCreated,
+      dispatchSchedulePaused,
+      dispatchScheduleResumed,
+      dispatchScheduleCancelled,
+      dispatchScheduleCompleted,
+    } = createFakeBureauEventSurface();
+    const producer = createDurableEventProducer(bureau, history, runtime);
+
+    dispatchScheduleCreated(
+      new AgentScheduledEvent({ agentName: 'triage', scheduleId: 'sched-1', spec: { cron: '*' } }),
+    );
+    dispatchSchedulePaused(new SchedulePausedEvent('sched-1'));
+    dispatchScheduleCompleted(new ScheduleCompletedEvent('sched-1', 'run-1'));
+    dispatchScheduleResumed(new ScheduleResumedEvent('sched-1'));
+    dispatchScheduleCancelled(new ScheduleCancelledEvent('sched-1'));
+    await runtime.deferred.drain();
+
+    const schedulePage = await history.page({ kind: 'schedule', id: 'sched-1' });
+    if ('outcome' in schedulePage) throw new Error('expected a page, got a gap');
+    expect(schedulePage.events.map((event) => event.kind)).toEqual([
+      'schedule.created',
+      'schedule.paused',
+      'schedule.resumed',
+      'schedule.cancelled',
+    ]);
+
+    const runPage = await history.page({ kind: 'run', id: 'run-1' });
+    if ('outcome' in runPage) throw new Error('expected a page, got a gap');
+    expect(runPage.events.map((event) => event.kind)).toEqual(['schedule.completed']);
+
+    await producer.dispose();
+    await history.dispose();
+  });
+
+  it('subscribeEventHistory tails a schedule owner, delivering definition events live and never a fire (AB-320)', async () => {
+    const runtime = createManualRuntimeServices();
+    const storage = await createMemoryStorage();
+    const history = createDurableEventHistory(storage, runtime);
+    const { bureau, dispatchSchedulePaused, dispatchScheduleResumed, dispatchScheduleCompleted } =
+      createFakeBureauEventSurface();
+    const producer = createDurableEventProducer(bureau, history, runtime);
+    const collector = createCollector();
+
+    const subscription = history.subscribeEventHistory(
+      { kind: 'schedule', id: 'sched-1' },
+      collector.push,
+    );
+
+    dispatchSchedulePaused(new SchedulePausedEvent('sched-1'));
+    dispatchScheduleCompleted(new ScheduleCompletedEvent('sched-1', 'run-1'));
+    dispatchScheduleResumed(new ScheduleResumedEvent('sched-1'));
+    await runtime.deferred.drain();
+    await collector.waitForCount(2);
+
+    expect(collector.events.map((event) => event.kind)).toEqual([
+      'schedule.paused',
+      'schedule.resumed',
+    ]);
+
+    subscription.unsubscribe();
+    await producer.dispose();
+    await history.dispose();
+  });
+
   it('diagnoses (never throws) when a record() write rejects', async () => {
     const runtime = createManualRuntimeServices();
     const { bureau, dispatchAction } = createFakeBureauEventSurface();
@@ -1146,7 +1388,7 @@ describe('createDurableEventProducer()', () => {
 
   it('refuses to start a new record once the owner-issued signal aborts, but still awaits a write already in flight', async () => {
     const runtime = createManualRuntimeServices();
-    const { bureau, dispatchAction } = createFakeBureauEventSurface();
+    const { bureau, dispatchAction, dispatchScheduleCreated } = createFakeBureauEventSurface();
     let releaseWrite: (() => void) | undefined;
     const writeGate = new Promise<void>((resolve) => {
       releaseWrite = resolve;
@@ -1162,6 +1404,9 @@ describe('createDurableEventProducer()', () => {
     dispatchAction(createAction({ type: 'run.completed', runId: 'run-1' }));
     controller.abort();
     dispatchAction(createAction({ type: 'run.error', runId: 'run-2' }));
+    dispatchScheduleCreated(
+      new AgentScheduledEvent({ agentName: 'triage', scheduleId: 'sched-1', spec: { cron: '*' } }),
+    );
 
     releaseWrite?.();
     await producer.dispose();
@@ -1171,8 +1416,16 @@ describe('createDurableEventProducer()', () => {
 
   it('dispose() removes every listener — a subsequent event on the same bureau records nothing', async () => {
     const runtime = createManualRuntimeServices();
-    const { bureau, dispatchAction, dispatchScheduleCompleted, dispatchScheduleFailed } =
-      createFakeBureauEventSurface();
+    const {
+      bureau,
+      dispatchAction,
+      dispatchScheduleCompleted,
+      dispatchScheduleFailed,
+      dispatchScheduleCreated,
+      dispatchSchedulePaused,
+      dispatchScheduleResumed,
+      dispatchScheduleCancelled,
+    } = createFakeBureauEventSurface();
     const { history, calls } = createRecordingHistory();
     const producer = createDurableEventProducer(bureau, history, runtime);
 
@@ -1182,6 +1435,12 @@ describe('createDurableEventProducer()', () => {
     dispatchAction(createAction({ type: 'run.completed' }));
     dispatchScheduleCompleted(new ScheduleCompletedEvent('sched-1', 'run-1'));
     dispatchScheduleFailed(new ScheduleFailedEvent('sched-2', 'run-2'));
+    dispatchScheduleCreated(
+      new AgentScheduledEvent({ agentName: 'triage', scheduleId: 'sched-1', spec: { cron: '*' } }),
+    );
+    dispatchSchedulePaused(new SchedulePausedEvent('sched-1'));
+    dispatchScheduleResumed(new ScheduleResumedEvent('sched-1'));
+    dispatchScheduleCancelled(new ScheduleCancelledEvent('sched-1'));
     await runtime.deferred.drain();
 
     expect(calls).toEqual([]);

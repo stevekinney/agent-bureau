@@ -753,28 +753,38 @@ the same locator vocabulary `cancelDurableRun`/`submitSessionInput`/
 `submitSteeringCommand` already use for a missing durable backend.
 
 Every returned `DurableEventEnvelope` carries `owner` (`{ kind: 'run' |
-'session'; id: string }`, encoded into Weft's `workflowId` as
-`${owner.kind}:${owner.id}` — no prior `FleetEventFeed` writer existed in
-`packages/bureau` to conflict with), `sequence`/`cursor` (Weft's own
-fleet-global sequence, never re-derived), `emittedAtMs`, `payload`, and a
-new `schemaVersion` field Weft's own envelope does not carry.
-`page()` returns events in strictly increasing sequence order for one
-owner with an EXCLUSIVE `since` cursor and a bounded `limit`
+'session' | 'schedule'; id: string }` — `'schedule'` added by AB-320,
+widening AB-310's original `'run' | 'session'` — encoded into Weft's
+`workflowId` as `${owner.kind}:${owner.id}` — no prior `FleetEventFeed`
+writer existed in `packages/bureau` to conflict with), `sequence`/`cursor`
+(Weft's own fleet-global sequence, never re-derived), `emittedAtMs`,
+`payload`, and a new `schemaVersion` field Weft's own envelope does not
+carry. `page()` returns events in strictly increasing sequence order for
+one owner with an EXCLUSIVE `since` cursor and a bounded `limit`
 (`hasMore`/`nextCursor` for continuation), or a typed `DurableEventGap`
 (`{ outcome: 'gap'; requestedCursor; firstRetainedSequence }`) —
 distinguishable from an ordinary empty page — when `since` predates the
 store's own `snapshotRetentionFloor()`. Restart durability (reopening the
 same SQLite/LMDB storage across two independently constructed store
-instances) is proven in `durable-event-history.test.ts`.
+instances, over each of the three owner kinds) is proven in
+`durable-event-history.test.ts`.
 
-`bureau.eventHistory()` is a READ surface only in this slice: nothing on
-`Bureau` writes to the store automatically. Wiring bureau's own action
-stream (`tool.*`, `run.*`, `step.completed`, and the rest of AB-87's
-already-dispatched `run.*`/`session.*`/`schedule.*` durable set) into
-`record()` the way `createAuditTrail` sinks them into the KV-based trail —
-and the race-free replay-then-tail live subscription (AB-91's `ab91-02`)
-and the Gateway paging/SSE/WebSocket projection (`ab91-03`) — remain
-separate, not-yet-built slices.
+`createDurableEventProducer` (AB-311, widened by AB-320) sinks bureau's
+own action stream into `record()`: `run.completed`/`error`/`aborted`/
+`tripwire` (owner: the action's `runId`) and the durable `session.*`
+lifecycle rows (owner: the action detail's `sessionId`) — the same path
+`createAuditTrail` subscribes through. `schedule.completed`/`schedule.failed`
+never traverse that action stream, so the producer separately listens for
+them on the bureau's own event surface and records them under the fired
+run's own `{ kind: 'run', id: runId }` owner ("a schedule fire is an
+ordinary run" per AB-87). AB-320 adds a third listener group for the
+schedule DEFINITION lifecycle — `schedule.created`/`paused`/`resumed`/
+`cancelled` — recorded under `{ kind: 'schedule', id: scheduleId }`: a
+schedule's own durable page carries its four definition events only, never
+a fire; the fired run's own page carries the fire only, never a definition
+event. The Gateway paging/SSE/WebSocket projection over this store (AB-91's
+`ab91-03`) remains a separate, not-yet-built slice; AB-312 tracks widening
+it to accept the `'schedule'` owner kind.
 
 ### Session update/query capability
 

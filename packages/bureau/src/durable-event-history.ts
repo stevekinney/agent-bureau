@@ -29,20 +29,29 @@
  * `FleetEventFeed` writer/reader in the package, so there was no existing
  * convention to adopt instead.
  *
- * Producer wiring (AB-311's coordinator amendment, 2026-09-03):
- * `createDurableEventProducer` below sinks the run/session/schedule-fire
- * durability rows AB-87's matrix classifies as durable into `record()`, from
- * the same `bureau.addEventListener('action', ...)` path `createAuditTrail`
- * subscribes through (plus `schedule.completed`/`schedule.failed`, which
- * never traverse the `'action'` stream — see that function's own doc
- * comment for exactly why). `DurableEventOwnerKind` is `'run' | 'session'`
- * only; a schedule DEFINITION event (`schedule.created`/`paused`/`resumed`/
- * `cancelled`) has no run or session to own it and is not recorded here —
- * widening that union is an `@lostgradient/operative` (published-package)
- * change outside this slice's delivery boundary. A schedule FIRE is "an
- * ordinary run" per AB-87, so `schedule.completed`/`schedule.failed` are
- * recorded under the fired run's own `{ kind: 'run', id: runId }` owner.
+ * Producer wiring (AB-311's coordinator amendment, 2026-09-03; widened by
+ * AB-320, 2026-09-03): `createDurableEventProducer` below sinks the
+ * run/session/schedule-fire durability rows AB-87's matrix classifies as
+ * durable into `record()`, from the same `bureau.addEventListener('action',
+ * ...)` path `createAuditTrail` subscribes through (plus
+ * `schedule.completed`/`schedule.failed`, which never traverse the
+ * `'action'` stream — see that function's own doc comment for exactly why).
+ * `DurableEventOwnerKind` is now `'run' | 'session' | 'schedule'`
+ * (`@lostgradient/operative`, AB-320): a schedule's four DEFINITION events
+ * (`schedule.created`/`paused`/`resumed`/`cancelled`, AB-298/AB-223) are
+ * recorded under `{ kind: 'schedule', id: scheduleId }`, from their own
+ * bureau-level listeners (they too never traverse the `'action'` stream —
+ * see `BureauEventMap`'s own doc comment). A schedule FIRE is "an ordinary
+ * run" per AB-87, so `schedule.completed`/`schedule.failed` stay recorded
+ * under the fired run's own `{ kind: 'run', id: runId }` owner — never
+ * under `'schedule'`, so a schedule's own durable page never carries a fire.
  */
+import type {
+  AgentScheduledEvent,
+  ScheduleCancelledEvent,
+  SchedulePausedEvent,
+  ScheduleResumedEvent,
+} from '@lostgradient/operative';
 import type {
   DurableEventEnvelope,
   DurableEventGap,
@@ -492,7 +501,7 @@ function extractSessionId(detail: unknown): string | undefined {
  * `page()` with nothing calling `record()` in production, so the store was
  * empty until this producer existed.
  *
- * Two independent event sources, both required because `schedule.*`
+ * Three independent event sources, all required because `schedule.*`
  * lifecycle events never traverse the bureau's `'action'` stream —
  * `events.ts`'s own `BureauEventMap` doc comment: they are dispatched
  * directly onto the bureau-level emitter, not through a per-run
@@ -509,11 +518,15 @@ function extractSessionId(detail: unknown): string | undefined {
  * - `bureau.addEventListener('schedule.completed'|'schedule.failed', ...)`
  *   — a scheduled fire's terminal outcome. AB-87: "Schedule fire: an
  *   ordinary run (same rows as AgentRun)" — so these are recorded under
- *   the fired run's own `{ kind: 'run', id: runId }` owner, not a
- *   `'schedule'` owner kind (which `DurableEventOwnerKind` does not have —
- *   see this module's top-of-file doc comment). `schedule.created`/
- *   `paused`/`resumed`/`cancelled` carry only a `scheduleId`, with no run
- *   or session to own them; they are not recorded by this slice.
+ *   the fired run's own `{ kind: 'run', id: runId }` owner, never under
+ *   `'schedule'`.
+ * - `bureau.addEventListener('schedule.created'|'paused'|'resumed'|
+ *   'cancelled', ...)` (AB-320) — a schedule's DEFINITION lifecycle,
+ *   recorded exactly once each under `{ kind: 'schedule', id: scheduleId }`
+ *   — the owner kind AB-310 originally shipped without (see this module's
+ *   top-of-file doc comment). `schedule.completed`/`failed` never reach
+ *   this owner: a schedule's own durable page carries its four definition
+ *   events only, never a fire.
  */
 export function createDurableEventProducer<D extends AgentDefinitions = AgentDefinitions>(
   bureau: Bureau<D>,
@@ -603,11 +616,49 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
   bureau.addEventListener('schedule.completed', scheduleCompletedListener);
   bureau.addEventListener('schedule.failed', scheduleFailedListener);
 
+  // Schedule DEFINITION lifecycle (AB-320) — recorded under
+  // `{ kind: 'schedule', id: scheduleId }`, never under `'run'`/`'session'`.
+  const scheduleCreatedListener = (event: AgentScheduledEvent): void => {
+    if (signal?.aborted) return;
+    sink({ kind: 'schedule', id: event.scheduleId }, 'schedule.created', {
+      scheduleId: event.scheduleId,
+      agentName: event.agentName,
+      spec: event.spec,
+      ...(event.sessionId !== undefined ? { sessionId: event.sessionId } : {}),
+    });
+  };
+  const schedulePausedListener = (event: SchedulePausedEvent): void => {
+    if (signal?.aborted) return;
+    sink({ kind: 'schedule', id: event.scheduleId }, 'schedule.paused', {
+      scheduleId: event.scheduleId,
+    });
+  };
+  const scheduleResumedListener = (event: ScheduleResumedEvent): void => {
+    if (signal?.aborted) return;
+    sink({ kind: 'schedule', id: event.scheduleId }, 'schedule.resumed', {
+      scheduleId: event.scheduleId,
+    });
+  };
+  const scheduleCancelledListener = (event: ScheduleCancelledEvent): void => {
+    if (signal?.aborted) return;
+    sink({ kind: 'schedule', id: event.scheduleId }, 'schedule.cancelled', {
+      scheduleId: event.scheduleId,
+    });
+  };
+  bureau.addEventListener('schedule.created', scheduleCreatedListener);
+  bureau.addEventListener('schedule.paused', schedulePausedListener);
+  bureau.addEventListener('schedule.resumed', scheduleResumedListener);
+  bureau.addEventListener('schedule.cancelled', scheduleCancelledListener);
+
   return {
     async dispose(): Promise<void> {
       bureau.removeEventListener('action', actionListener);
       bureau.removeEventListener('schedule.completed', scheduleCompletedListener);
       bureau.removeEventListener('schedule.failed', scheduleFailedListener);
+      bureau.removeEventListener('schedule.created', scheduleCreatedListener);
+      bureau.removeEventListener('schedule.paused', schedulePausedListener);
+      bureau.removeEventListener('schedule.resumed', scheduleResumedListener);
+      bureau.removeEventListener('schedule.cancelled', scheduleCancelledListener);
       await Promise.allSettled([...activeWrites]);
     },
   };
