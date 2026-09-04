@@ -718,7 +718,7 @@ for the `run`/`createRun` swap above:
 - **Run operations** — `listRuns`, `getRun`, `getRunReport`, `abortRun`, `deleteRun`.
 - **Durable-run operations** — `getDurableRun`, `listDurableRuns`, `runDurableMaintenance`.
 - **Session operations** — `listSessions`, `getSession`, `deleteSession`, `signalSession`, `updateSession`, `querySession`.
-- **Review operations** — `listPendingReviews`, `resolveReview`, `getReview`, `sweepExpiredReviews`. No longer unchanged in shape as of AB-46/AB-344: `resolveReview`'s `decision` widens to `'approve' | 'deny' | 'reject'`, and `getReview`/`sweepExpiredReviews` are new.
+- **Review operations** — `listPendingReviews`, `resolveReview`, `getReview`, `sweepExpiredReviews`. No longer unchanged in shape as of AB-46/AB-344: `resolveReview`'s `decision` widens to `'approve' | 'deny' | 'reject'`, and `getReview`/`sweepExpiredReviews` are new. AB-224 (`packages/bureau/src/events.ts`) adds the typed `review.*` live event family AB-87's event matrix named "not built" — `review.approved`/`denied`/`rejected`/`expired`/`revoked`/`canceled`/`superseded`, one per non-`'pending'` `ReviewStatus` value, dispatched on the bureau's own emitter alongside the existing durable audit write and recorded into `Bureau.eventHistory` under the reviewed run's owner. Each event carries only `reviewId`/`runId`/`principal`/`kind` — actor and decision content (approval arguments, human-wait payloads, rejection reasons) stays privileged to the durable audit trail per AB-87's redaction column.
 - **Schedule operations** — `createSchedule`, `getSchedule`, `listSchedules`, `pauseSchedule`, `resumeSchedule`, `cancelSchedule`.
 - **Configuration and tool operations** — `getConfiguration`, `getTools`.
 - **Live-frame operations** — `subscribeLiveFrames`.

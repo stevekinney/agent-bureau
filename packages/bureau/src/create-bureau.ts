@@ -110,6 +110,13 @@ import {
   RecoveryLeaseReleasedEvent,
   RecoveryRejectedEvent,
   type RecoveryRejectionReason,
+  ReviewApprovedEvent,
+  ReviewCanceledEvent,
+  ReviewDeniedEvent,
+  ReviewExpiredEvent,
+  ReviewRejectedEvent,
+  ReviewRevokedEvent,
+  ReviewSupersededEvent,
   RunRegisteredEvent,
   RunRemovedEvent,
 } from './events';
@@ -4338,6 +4345,17 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     }
     for (const [reviewId, approval] of pendingApprovalOverrides) {
       if (!reviewId.startsWith(`approval:${runId}:`)) continue;
+      // AB-224: skip an override left behind for a review THIS FUNCTION (or
+      // `sweepExpiredReviews`/`resolveReview`) already resolved on an
+      // earlier call — `pendingApprovalOverrides` is only ever cleared by
+      // `deleteRun` or a successful `resolveReview`, so a review canceled by
+      // `abortRun` and later revoked by `deleteRun` (or expired by
+      // `sweepExpiredReviews` and later canceled by `abortRun`) would
+      // otherwise still be found here and re-transitioned, dispatching a
+      // second, duplicate `review.*` live event/audit entry for an id that
+      // is no longer pending — exactly the duplicate-event failure this
+      // issue's rollback trigger names.
+      if (resolvedReviewIds.has(reviewId) || invalidApprovalReviewIds.has(reviewId)) continue;
       // Unconditional overwrite (never skipped when already present from the
       // scan above) — matches the pre-AB-46 behavior of this same merge, so
       // an override always reflects the LATEST approval object even when a
@@ -5074,6 +5092,14 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
                 review.id,
                 replacementApproval,
               );
+              // AB-46/AB-224: the re-gate produced a genuinely new
+              // `pendingApproval` for the same `callId` — the ORIGINAL
+              // review is superseded, attributed to the synthetic principal
+              // `'system:supersession'`, while the replacement takes over
+              // the same review id as a fresh `'pending'` entry (read live
+              // from `pendingApprovalOverrides` by `listPendingReviews()`,
+              // not written here).
+              await recordReviewStatusTransition(review, 'superseded', 'system:supersession');
             }
             keepPending = true;
           } else if (
@@ -5220,17 +5246,30 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       },
       principal,
     });
+
+    // AB-224: the live counterpart of the durable write above — dispatched
+    // alongside it, never instead of it, closing the live-side gap AB-87's
+    // matrix named ("a typed review.*... family not built"). Carries only
+    // id/runId/principal/kind; actor/decision content (arguments, reasons)
+    // stays privileged to the durable audit trail per AB-87's redaction
+    // column.
+    if (decision === 'approve') {
+      emitter.dispatch(new ReviewApprovedEvent(review.id, review.runId, principal, review.kind));
+    } else if (decision === 'reject') {
+      emitter.dispatch(new ReviewRejectedEvent(review.id, review.runId, principal, review.kind));
+    } else {
+      emitter.dispatch(new ReviewDeniedEvent(review.id, review.runId, principal, review.kind));
+    }
   }
 
   /**
    * Derives a {@link ReviewStatus} from a `review.*` audit record's `type`
    * suffix (AB-46). `getReview` uses this to reconstruct a resolved review's
-   * status from the chronologically-last matching audit entry. No code path
-   * in this record writes a `review.*.superseded` audit entry yet (AB-46's
-   * own decision record scopes that write to a future re-gate change, out of
-   * this issue's boundary) — the case is still handled explicitly here so a
-   * future, or externally-produced, `review.*.superseded` record decodes
-   * correctly instead of silently falling through to `'denied'`.
+   * status from the chronologically-last matching audit entry. `resolveReview`
+   * writes a `review.*.superseded` audit entry from `resumeApproval`'s
+   * re-gate branch (AB-224, see `recordReviewStatusTransition` below) — the
+   * case is handled explicitly here (rather than falling through to
+   * `'denied'`) both for that write and for any externally-produced record.
    */
   function reviewStatusFromAuditType(type: string): ReviewStatus {
     switch (type.split('.').pop()) {
@@ -5253,12 +5292,15 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   }
 
   /**
-   * Writes a `review.<kind>.<status>` audit entry for a status transition
-   * that is NOT one of `resolveReview`'s decision outcomes (approve/deny/
-   * reject) — namely `sweepExpiredReviews`'s `'expired'` transition and
-   * `revokePendingApprovalsForRun`'s `'canceled'`/`'revoked'` transitions
-   * (AB-46). A no-op when no audit trail is configured, matching
-   * `recordReviewDecision`. `review` is embedded in `detail.review` with its
+   * Writes a `review.<kind>.<status>` audit entry, and dispatches the live
+   * `review.*` counterpart (AB-224), for a status transition that is NOT one
+   * of `resolveReview`'s decision outcomes (approve/deny/reject) — namely
+   * `sweepExpiredReviews`'s `'expired'` transition,
+   * `revokePendingApprovalsForRun`'s `'canceled'`/`'revoked'` transitions,
+   * and `resolveReview`'s own `resumeApproval` re-gate branch's `'superseded'`
+   * transition (AB-46/AB-224). The durable write is a no-op when no audit
+   * trail is configured, matching `recordReviewDecision`; the live dispatch
+   * always fires regardless. `review` is embedded in `detail.review` with its
    * own `status` field forced to `status` — every caller passes a review
    * whose `status` still reads `'pending'` (it came from a live scan of
    * `listPendingReviews()`), and embedding that stale value verbatim would
@@ -5268,7 +5310,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
    */
   async function recordReviewStatusTransition(
     review: PendingReview,
-    status: Exclude<ReviewStatus, 'pending'>,
+    status: Exclude<ReviewStatus, 'pending' | 'approved' | 'denied' | 'rejected'>,
     principal: string,
   ): Promise<void> {
     await auditTrailInstance?.record({
@@ -5277,6 +5319,27 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       detail: { review: { ...review, status }, status },
       principal,
     });
+
+    // AB-224: live counterpart, same rationale as `recordReviewDecision`
+    // above. `approve`/`deny`/`reject` never reach this function — they
+    // dispatch from `recordReviewDecision` instead — so the switch below is
+    // exhaustive over exactly `expired | revoked | canceled | superseded`.
+    switch (status) {
+      case 'expired':
+        emitter.dispatch(new ReviewExpiredEvent(review.id, review.runId, principal, review.kind));
+        break;
+      case 'revoked':
+        emitter.dispatch(new ReviewRevokedEvent(review.id, review.runId, principal, review.kind));
+        break;
+      case 'canceled':
+        emitter.dispatch(new ReviewCanceledEvent(review.id, review.runId, principal, review.kind));
+        break;
+      case 'superseded':
+        emitter.dispatch(
+          new ReviewSupersededEvent(review.id, review.runId, principal, review.kind),
+        );
+        break;
+    }
   }
 
   /**

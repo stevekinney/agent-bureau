@@ -152,6 +152,149 @@ export class RecoveryLeaseReleasedEvent extends Event {
 }
 
 /**
+ * The two {@link PendingReview} kinds a `review.*` event may report on.
+ * Declared locally rather than imported from `./types` (which itself
+ * imports {@link BureauEventMap} from this module) so this file stays free
+ * of a type-only import cycle — the same reason {@link RecoveredRunVerdict}
+ * above is a local literal union rather than re-exported from `types.ts`.
+ */
+export type ReviewEventKind = 'tool-approval' | 'human-wait';
+
+/**
+ * Base of AB-224's `review.*` lifecycle event family (implementing AB-87's
+ * event matrix and AB-46's `ReviewStatus` vocabulary). Carries only
+ * `reviewId`, `runId`, `principal`, and `kind` — never the review's own
+ * `approval`/`signalName`/`prompt`/decision `reason`, which stay privileged
+ * per AB-87's redaction column and surface only through the durable audit
+ * trail (`recordReviewDecision`/`recordReviewStatusTransition` in
+ * `create-bureau.ts`), a separately-redacted surface.
+ *
+ * One event per non-`'pending'` `ReviewStatus` value; `pending` itself
+ * dispatches nothing — per AB-87, "pending is the resting state before any
+ * armorer signal fires":
+ *
+ * | `ReviewStatus` | Event                |
+ * | -------------- | --------------------- |
+ * | `pending`      | none — resting state  |
+ * | `approved`     | `review.approved`     |
+ * | `denied`       | `review.denied`       |
+ * | `rejected`     | `review.rejected`     |
+ * | `expired`      | `review.expired`      |
+ * | `revoked`      | `review.revoked`      |
+ * | `canceled`     | `review.canceled`     |
+ * | `superseded`   | `review.superseded`   |
+ */
+class ReviewLifecycleEvent extends Event {
+  readonly reviewId: string;
+  readonly runId: string;
+  readonly principal: string;
+  readonly kind: ReviewEventKind;
+
+  constructor(
+    type: string,
+    reviewId: string,
+    runId: string,
+    principal: string,
+    kind: ReviewEventKind,
+  ) {
+    super(type);
+    this.reviewId = reviewId;
+    this.runId = runId;
+    this.principal = principal;
+    this.kind = kind;
+  }
+}
+
+/** Fired when `resolveReview({ decision: 'approve' })` settles a review (AB-224). */
+export class ReviewApprovedEvent extends ReviewLifecycleEvent {
+  static readonly type = 'review.approved' as const;
+
+  constructor(reviewId: string, runId: string, principal: string, kind: ReviewEventKind) {
+    super(ReviewApprovedEvent.type, reviewId, runId, principal, kind);
+  }
+}
+
+/** Fired when `resolveReview({ decision: 'deny' })` settles a review (AB-224). */
+export class ReviewDeniedEvent extends ReviewLifecycleEvent {
+  static readonly type = 'review.denied' as const;
+
+  constructor(reviewId: string, runId: string, principal: string, kind: ReviewEventKind) {
+    super(ReviewDeniedEvent.type, reviewId, runId, principal, kind);
+  }
+}
+
+/**
+ * Fired when `resolveReview({ decision: 'reject' })` settles a review
+ * (AB-224). Distinct from {@link ReviewDeniedEvent} — `reject` is AB-46's
+ * new verb, never dispatched by the plain `deny` path.
+ */
+export class ReviewRejectedEvent extends ReviewLifecycleEvent {
+  static readonly type = 'review.rejected' as const;
+
+  constructor(reviewId: string, runId: string, principal: string, kind: ReviewEventKind) {
+    super(ReviewRejectedEvent.type, reviewId, runId, principal, kind);
+  }
+}
+
+/**
+ * Fired when `Bureau.sweepExpiredReviews` transitions a tool-approval
+ * review past its binding's `expiresAt` (AB-224). Always attributed to the
+ * synthetic principal `'system:expiry-sweep'`.
+ */
+export class ReviewExpiredEvent extends ReviewLifecycleEvent {
+  static readonly type = 'review.expired' as const;
+
+  constructor(reviewId: string, runId: string, principal: string, kind: ReviewEventKind) {
+    super(ReviewExpiredEvent.type, reviewId, runId, principal, kind);
+  }
+}
+
+/**
+ * Fired when `deleteRun`/`deleteSession` revoke a still-pending review via
+ * `revokePendingApprovalsForRun` (AB-224). Attributed to
+ * `'system:run-deletion'` or `'system:session-deletion'`. Distinct from
+ * {@link ReviewCanceledEvent} — revoked fires only from explicit run/session
+ * deletion, never from run abort.
+ */
+export class ReviewRevokedEvent extends ReviewLifecycleEvent {
+  static readonly type = 'review.revoked' as const;
+
+  constructor(reviewId: string, runId: string, principal: string, kind: ReviewEventKind) {
+    super(ReviewRevokedEvent.type, reviewId, runId, principal, kind);
+  }
+}
+
+/**
+ * Fired when `abortRun`/`cancelDurableRun` cancel a still-pending review via
+ * `revokePendingApprovalsForRun` (AB-224). Always attributed to the
+ * synthetic principal `'system:run-abort'`. Distinct from
+ * {@link ReviewRevokedEvent} — canceled fires only from run abort, never
+ * from explicit run/session deletion.
+ */
+export class ReviewCanceledEvent extends ReviewLifecycleEvent {
+  static readonly type = 'review.canceled' as const;
+
+  constructor(reviewId: string, runId: string, principal: string, kind: ReviewEventKind) {
+    super(ReviewCanceledEvent.type, reviewId, runId, principal, kind);
+  }
+}
+
+/**
+ * Fired when `resumeApproval`'s re-gate produces a new `pendingApproval` for
+ * the same `callId` (AB-224): the ORIGINAL tool-approval review is marked
+ * `superseded` while a fresh `'pending'` review sharing the same id takes
+ * its place. Always attributed to the synthetic principal
+ * `'system:supersession'`.
+ */
+export class ReviewSupersededEvent extends ReviewLifecycleEvent {
+  static readonly type = 'review.superseded' as const;
+
+  constructor(reviewId: string, runId: string, principal: string, kind: ReviewEventKind) {
+    super(ReviewSupersededEvent.type, reviewId, runId, principal, kind);
+  }
+}
+
+/**
  * Maps event type strings to their corresponding Event subclasses.
  *
  * `schedule.created`/`paused`/`resumed`/`cancelled`/`failed`/`completed`
@@ -181,4 +324,11 @@ export interface BureauEventMap extends EventMap {
   'schedule.cancelled': ScheduleCancelledEvent;
   'schedule.failed': ScheduleFailedEvent;
   'schedule.completed': ScheduleCompletedEvent;
+  [ReviewApprovedEvent.type]: ReviewApprovedEvent;
+  [ReviewDeniedEvent.type]: ReviewDeniedEvent;
+  [ReviewRejectedEvent.type]: ReviewRejectedEvent;
+  [ReviewExpiredEvent.type]: ReviewExpiredEvent;
+  [ReviewRevokedEvent.type]: ReviewRevokedEvent;
+  [ReviewCanceledEvent.type]: ReviewCanceledEvent;
+  [ReviewSupersededEvent.type]: ReviewSupersededEvent;
 }

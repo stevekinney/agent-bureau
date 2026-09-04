@@ -45,6 +45,17 @@
  * run" per AB-87, so `schedule.completed`/`schedule.failed` stay recorded
  * under the fired run's own `{ kind: 'run', id: runId }` owner — never
  * under `'schedule'`, so a schedule's own durable page never carries a fire.
+ *
+ * Widened again by AB-224, 2026-09-04: the seven `review.*` lifecycle
+ * events (`approved`/`denied`/`rejected`/`expired`/`revoked`/`canceled`/
+ * `superseded`, AB-87/AB-46's `ReviewStatus` vocabulary minus the
+ * no-event `'pending'` resting state) are a fourth bureau-level-emitter
+ * source, same reasoning as `schedule.*` — dispatched directly by
+ * `create-bureau.ts`'s `recordReviewDecision`/`recordReviewStatusTransition`,
+ * never through `'action'`. Every review belongs to a run, so all seven are
+ * recorded under the fired review's own `{ kind: 'run', id: runId }` owner —
+ * never a distinct `'review'` owner kind, which `DurableEventOwnerKind` does
+ * not define.
  */
 import type {
   AgentScheduledEvent,
@@ -68,7 +79,17 @@ import type { Storage } from '@lostgradient/weft/storage';
 import type { RuntimeServices } from 'lifecycle';
 
 import type { AgentDefinitions } from './agent-catalog';
-import type { ActionEvent, RunRemovedEvent } from './events';
+import type {
+  ActionEvent,
+  ReviewApprovedEvent,
+  ReviewCanceledEvent,
+  ReviewDeniedEvent,
+  ReviewExpiredEvent,
+  ReviewRejectedEvent,
+  ReviewRevokedEvent,
+  ReviewSupersededEvent,
+  RunRemovedEvent,
+} from './events';
 import { resolveDiagnosticSink, serializeActionDetail } from './serialization';
 import type { Bureau, DiagnosticSink } from './types';
 
@@ -580,13 +601,15 @@ function extractSessionId(detail: unknown): string | undefined {
  * `page()` with nothing calling `record()` in production, so the store was
  * empty until this producer existed.
  *
- * Three independent event sources, all required because `schedule.*`
- * lifecycle events never traverse the bureau's `'action'` stream —
- * `events.ts`'s own `BureauEventMap` doc comment: they are dispatched
- * directly onto the bureau-level emitter, not through a per-run
+ * Four independent event sources, all required because `schedule.*` and
+ * `review.*` lifecycle events never traverse the bureau's `'action'`
+ * stream — `events.ts`'s own `BureauEventMap` doc comment: they are
+ * dispatched directly onto the bureau-level emitter, not through a per-run
  * `CombinedOperativeEventMap` the way `run.*`/`session.*` action types are
- * (a schedule create/pause/resume/cancel/fire-outcome is a bureau-level
- * fact with no owning per-run surface):
+ * (a schedule create/pause/resume/cancel/fire-outcome, or a review
+ * decision/expiry/revocation/cancellation/supersession, is a bureau-level
+ * fact recorded from `create-bureau.ts` directly rather than surfaced by
+ * an in-progress run's own event stream):
  *
  * - `bureau.addEventListener('action', ...)` — the SAME path
  *   `createAuditTrail` subscribes through — for `run.*` (owner: the
@@ -606,6 +629,12 @@ function extractSessionId(detail: unknown): string | undefined {
  *   top-of-file doc comment). `schedule.completed`/`failed` never reach
  *   this owner: a schedule's own durable page carries its four definition
  *   events only, never a fire.
+ * - `bureau.addEventListener('review.approved'|'denied'|'rejected'|
+ *   'expired'|'revoked'|'canceled'|'superseded', ...)` (AB-224) — the
+ *   review lifecycle family, all seven recorded under the fired review's
+ *   own `{ kind: 'run', id: runId }` owner with a minimal, privileged
+ *   payload (`reviewId`/`runId`/`principal`/`kind`) — see this module's
+ *   top-of-file doc comment.
  */
 export function createDurableEventProducer<D extends AgentDefinitions = AgentDefinitions>(
   bureau: Bureau<D>,
@@ -741,6 +770,72 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
   };
   bureau.addEventListener('run.removed', runRemovedListener);
 
+  // AB-224's `review.*` lifecycle family (AB-87/AB-46) — like `schedule.*`
+  // above, these are dispatched directly onto the bureau-level emitter
+  // (`create-bureau.ts`'s `recordReviewDecision`/`recordReviewStatusTransition`),
+  // never through the `'action'` stream, so they need their own listeners
+  // here to reach `Bureau.eventHistory` at all. Every review belongs to a
+  // run (both `PendingToolApprovalReview` and `PendingHumanWaitReview` carry
+  // `runId`), so all seven are recorded under the SAME `{ kind: 'run', id:
+  // event.runId }` owner `run.*`/`session.*` use — never a distinct
+  // `'review'` owner kind, which `DurableEventOwnerKind` does not define.
+  // The payload mirrors the live event's own minimal, privileged shape
+  // (`reviewId`/`runId`/`principal`/`kind`) — no approval arguments,
+  // signal payloads, or decision reasons, matching AB-87's redaction
+  // column for this surface.
+  function reviewPayload(
+    event:
+      | ReviewApprovedEvent
+      | ReviewCanceledEvent
+      | ReviewDeniedEvent
+      | ReviewExpiredEvent
+      | ReviewRejectedEvent
+      | ReviewRevokedEvent
+      | ReviewSupersededEvent,
+  ): { reviewId: string; runId: string; principal: string; kind: string } {
+    return {
+      reviewId: event.reviewId,
+      runId: event.runId,
+      principal: event.principal,
+      kind: event.kind,
+    };
+  }
+  const reviewApprovedListener = (event: ReviewApprovedEvent): void => {
+    if (signal?.aborted) return;
+    sink({ kind: 'run', id: event.runId }, 'review.approved', reviewPayload(event));
+  };
+  const reviewDeniedListener = (event: ReviewDeniedEvent): void => {
+    if (signal?.aborted) return;
+    sink({ kind: 'run', id: event.runId }, 'review.denied', reviewPayload(event));
+  };
+  const reviewRejectedListener = (event: ReviewRejectedEvent): void => {
+    if (signal?.aborted) return;
+    sink({ kind: 'run', id: event.runId }, 'review.rejected', reviewPayload(event));
+  };
+  const reviewExpiredListener = (event: ReviewExpiredEvent): void => {
+    if (signal?.aborted) return;
+    sink({ kind: 'run', id: event.runId }, 'review.expired', reviewPayload(event));
+  };
+  const reviewRevokedListener = (event: ReviewRevokedEvent): void => {
+    if (signal?.aborted) return;
+    sink({ kind: 'run', id: event.runId }, 'review.revoked', reviewPayload(event));
+  };
+  const reviewCanceledListener = (event: ReviewCanceledEvent): void => {
+    if (signal?.aborted) return;
+    sink({ kind: 'run', id: event.runId }, 'review.canceled', reviewPayload(event));
+  };
+  const reviewSupersededListener = (event: ReviewSupersededEvent): void => {
+    if (signal?.aborted) return;
+    sink({ kind: 'run', id: event.runId }, 'review.superseded', reviewPayload(event));
+  };
+  bureau.addEventListener('review.approved', reviewApprovedListener);
+  bureau.addEventListener('review.denied', reviewDeniedListener);
+  bureau.addEventListener('review.rejected', reviewRejectedListener);
+  bureau.addEventListener('review.expired', reviewExpiredListener);
+  bureau.addEventListener('review.revoked', reviewRevokedListener);
+  bureau.addEventListener('review.canceled', reviewCanceledListener);
+  bureau.addEventListener('review.superseded', reviewSupersededListener);
+
   return {
     async dispose(): Promise<void> {
       bureau.removeEventListener('action', actionListener);
@@ -751,6 +846,13 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
       bureau.removeEventListener('schedule.resumed', scheduleResumedListener);
       bureau.removeEventListener('schedule.cancelled', scheduleCancelledListener);
       bureau.removeEventListener('run.removed', runRemovedListener);
+      bureau.removeEventListener('review.approved', reviewApprovedListener);
+      bureau.removeEventListener('review.denied', reviewDeniedListener);
+      bureau.removeEventListener('review.rejected', reviewRejectedListener);
+      bureau.removeEventListener('review.expired', reviewExpiredListener);
+      bureau.removeEventListener('review.revoked', reviewRevokedListener);
+      bureau.removeEventListener('review.canceled', reviewCanceledListener);
+      bureau.removeEventListener('review.superseded', reviewSupersededListener);
       await Promise.allSettled([...activeWrites]);
     },
   };
