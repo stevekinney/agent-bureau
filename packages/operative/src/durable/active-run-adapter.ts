@@ -18,6 +18,7 @@ import {
 } from '../errors';
 import type { CombinedOperativeEventMap, OperativeEventEmitter } from '../events';
 import {
+  HumanWaitParkedEvent,
   StepStartedEvent,
   ToolErrorBubbleEvent,
   ToolPolicyDeniedBubbleEvent,
@@ -25,7 +26,7 @@ import {
   ToolSettledBubbleEvent,
   ToolStartedBubbleEvent,
 } from '../events';
-import type { StallWatchdogClock } from '../liveness';
+import type { ActiveRunLiveness, StallWatchdogClock } from '../liveness';
 import { createActiveRunLiveness } from '../liveness';
 import { createRunState } from '../loop';
 import { UnsupportedRunResultVersionError } from '../run-envelope';
@@ -352,6 +353,41 @@ function reconstructSchemaValidation(
  * protected by `ctx.memo` wrapping the whole step in run-workflow.ts — see its
  * "#11 hook side-effect-ness on resume" remark for the full resolution.
  */
+/**
+ * AB-336 — wires a `requestHumanInput` park into `liveness`'s declared-wait
+ * dimension: the durable park mechanism itself was already correct
+ * (AB-44/AB-45's loop-break and `ctx.waitForSignal`), but nothing moved
+ * `LivenessSnapshot.status` off `'running'` for it, leaving
+ * `deriveAssessment`'s `'waiting'` branch unreachable. Shared by
+ * `createDurableActiveRun` and {@link reattachDurableActiveRun}'s
+ * {@link createRecoveredRunEventSurface} (per the repository's No Duplicated
+ * Code rule) — both construct their own `ActiveRunLiveness` over their own
+ * emitter, and both need the identical pairing: `HumanWaitParkedEvent` opens
+ * the wait, and the run's OWN next `StepStartedEvent` — exactly the AB-44
+ * continuation the workflow promises once the signal is delivered — closes
+ * it. `endWait()` no-ops when no wait is active, so listening on every step
+ * start (not only a resumed one) is safe. Returns the matching cleanup.
+ */
+function wireHumanWaitLiveness(
+  emitter: OperativeEventEmitter,
+  liveness: ActiveRunLiveness,
+): () => void {
+  const onHumanWaitParked = (event: HumanWaitParkedEvent) => {
+    liveness.beginWait({
+      reason: 'signal',
+      dependency: event.signalName,
+      wakeCondition: `signal:${event.signalName}`,
+    });
+  };
+  const onStepStartedEndWait = () => liveness.endWait();
+  emitter.addEventListener(HumanWaitParkedEvent.type, onHumanWaitParked);
+  emitter.addEventListener(StepStartedEvent.type, onStepStartedEndWait);
+  return () => {
+    emitter.removeEventListener(HumanWaitParkedEvent.type, onHumanWaitParked);
+    emitter.removeEventListener(StepStartedEvent.type, onStepStartedEndWait);
+  };
+}
+
 export function createDurableActiveRun(
   context: DurableActiveRunContext,
   durableRun: DurableActiveRunOptions,
@@ -404,6 +440,7 @@ export function createDurableActiveRun(
   // inert (no events ever fire). Durable per-step conversation streaming is
   // TODO(weft-integration): #10 (in-process streaming progress).
   const cleanups: (() => void)[] = [];
+  cleanups.push(wireHumanWaitLiveness(emitter, liveness));
   // closed()'s not-required fast path (coordinator ruling, AB-204) — see the
   // identical counter in `create-run.ts`.
   let inFlightTools = 0;
@@ -1247,6 +1284,12 @@ export function reattachDurableActiveRun(
   emitter.addEventListener(ToolProgressBubbleEvent.type, onToolProgressBubble);
   emitter.addEventListener(ToolStartedBubbleEvent.type, onToolStartedBubble);
   emitter.addEventListener(ToolSettledBubbleEvent.type, onToolSettledBubble);
+  // AB-336 — see `wireHumanWaitLiveness`'s doc comment. A reattached run
+  // whose park predates THIS process (the common recovery case) starts its
+  // liveness fresh at `'running'` — nothing here retroactively reconstructs
+  // a wait from the checkpoint — but this still covers a reattached run
+  // that calls `requestHumanInput` again during its own remaining lifetime.
+  const stopHumanWaitLiveness = wireHumanWaitLiveness(emitter, liveness);
 
   // The awaited recovery hook already forwards toolbox actions into `emitter`.
   // Reattach owns the teardown so the subscription stops on completion, plus
@@ -1260,6 +1303,7 @@ export function reattachDurableActiveRun(
     emitter.removeEventListener(ToolProgressBubbleEvent.type, onToolProgressBubble);
     emitter.removeEventListener(ToolStartedBubbleEvent.type, onToolStartedBubble);
     emitter.removeEventListener(ToolSettledBubbleEvent.type, onToolSettledBubble);
+    stopHumanWaitLiveness();
   }
 
   // Resolves `true` only when an adapter-initiated `engine.cancel` SUCCEEDS for

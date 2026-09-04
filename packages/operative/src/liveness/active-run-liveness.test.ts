@@ -250,6 +250,102 @@ describe('createActiveRunLiveness', () => {
     expect(liveness.snapshot().revision).toBe(terminalRevision);
   });
 
+  // AB-336 — `beginWait`/`endWait` are the only way `status` legally becomes
+  // `'waiting'`: AC1 requires a `DeclaredWait` accompany it in the SAME
+  // snapshot, never as two separate transitions a subscriber could observe
+  // between.
+  it('beginWait moves status to waiting and attaches declaredWait in one revision', () => {
+    const clock = createManualClock();
+    const liveness = createActiveRunLiveness({ id: 'run-1', durability: 'process-local', clock });
+
+    const before = liveness.snapshot();
+    liveness.beginWait({
+      reason: 'signal',
+      dependency: 'human-response',
+      wakeCondition: 'signal:human-response',
+    });
+    const parked = liveness.snapshot();
+
+    expect(parked.status).toBe('waiting');
+    expect(parked.assessment).toBe('legitimately-waiting');
+    expect(parked.declaredWait).toEqual({
+      reason: 'signal',
+      dependency: 'human-response',
+      wakeCondition: 'signal:human-response',
+      startedAt: clock.now(),
+    });
+    expect(parked.revision).toBeGreaterThan(before.revision);
+
+    liveness.dispose();
+  });
+
+  it('endWait clears declaredWait and returns status to running only when status was waiting', () => {
+    const clock = createManualClock();
+    const liveness = createActiveRunLiveness({ id: 'run-1', durability: 'process-local', clock });
+
+    liveness.beginWait({ reason: 'signal', wakeCondition: 'signal:human-response' });
+    expect(liveness.snapshot().status).toBe('waiting');
+
+    liveness.endWait();
+    const resumed = liveness.snapshot();
+    expect(resumed.status).toBe('running');
+    expect(resumed.declaredWait).toBeUndefined();
+    expect(resumed.assessment).not.toBe('legitimately-waiting');
+
+    liveness.dispose();
+  });
+
+  it('endWait is a no-op when no wait is active (no wasted revision)', () => {
+    const clock = createManualClock();
+    const liveness = createActiveRunLiveness({ id: 'run-1', durability: 'process-local', clock });
+
+    const before = liveness.snapshot();
+    liveness.endWait();
+
+    expect(liveness.snapshot().revision).toBe(before.revision);
+    expect(liveness.snapshot().status).toBe('running');
+
+    liveness.dispose();
+  });
+
+  it('endWait does not yank status back to running when it moved to aborting while waiting', () => {
+    const clock = createManualClock();
+    const liveness = createActiveRunLiveness({ id: 'run-1', durability: 'process-local', clock });
+
+    liveness.beginWait({ reason: 'signal', wakeCondition: 'signal:human-response' });
+    liveness.setStatus('aborting');
+
+    // AC1/AB-336: `declaredWait` is documented "present iff `status` is
+    // `'waiting'`" — `setStatus` must already have cleared it here, before
+    // `endWait()` ever runs, or a subscriber observing this exact
+    // intermediate snapshot would see `status: 'aborting'` with a stale
+    // `declaredWait` still attached.
+    const duringAbort = liveness.snapshot();
+    expect(duringAbort.status).toBe('aborting');
+    expect(duringAbort.declaredWait).toBeUndefined();
+
+    liveness.endWait();
+
+    const after = liveness.snapshot();
+    expect(after.status).toBe('aborting');
+    expect(after.declaredWait).toBeUndefined();
+
+    liveness.dispose();
+  });
+
+  it('beginWait is a no-op once already terminal', () => {
+    const clock = createManualClock();
+    const liveness = createActiveRunLiveness({ id: 'run-1', durability: 'process-local', clock });
+
+    liveness.setStatus('terminal');
+    const terminalRevision = liveness.snapshot().revision;
+    liveness.beginWait({ reason: 'signal', wakeCondition: 'signal:human-response' });
+
+    expect(liveness.snapshot().status).toBe('terminal');
+    expect(liveness.snapshot().declaredWait).toBeUndefined();
+    expect(liveness.snapshot().revision).toBe(terminalRevision);
+  });
+
   it('settle attaches the result to the snapshot and transitions to terminal atomically', () => {
     const clock = createManualClock();
     const liveness = createActiveRunLiveness({ id: 'run-1', durability: 'process-local', clock });

@@ -22,6 +22,23 @@
  * naturally re-invokes this file's own `generate`/tool callbacks and causes
  * them to re-report whatever marker they were interrupted at — there is no
  * separate "recovery mode" branch to keep in sync with the first-run path.
+ *
+ * AB-336: the `'signal-parked'` marker drives the REAL `requestHumanInput`
+ * durable-park path (`BureauOptions.humanInput: true`), not a bespoke
+ * blocking tool — AB-336 fixed the two things that made
+ * `requestHumanInput` unusable here: the durable park itself was already
+ * correct, but nothing surfaced it on the public liveness surface, and a
+ * process recovered while still parked never reconstructed the pending
+ * review from its checkpoint. Unlike the old `await-decision` tool, whose
+ * `execute()` itself WAS the IPC block, `requestHumanInput`'s `execute()`
+ * returns synchronously and the park happens afterward (post-loop) — so the
+ * marker report and parent round-trip happen at the DRIVER level in
+ * `main()`, not inside a tool, watching `bureau.listPendingReviews()` for
+ * the human-wait review this run's park produces. That surface is exactly
+ * what AB-336 made recovery-safe: a process that reattaches a run already
+ * parked when this fixture killed the prior one sees the SAME review,
+ * reconstructed from the checkpoint rather than lost with the dead
+ * process's in-memory action log.
  */
 import type {
   AnyToolbox,
@@ -32,6 +49,7 @@ import type {
 import { stopWhen } from '@lostgradient/operative';
 import { createManualRuntimeServices, waitForCondition } from '@lostgradient/operative/test';
 import { createTool, createToolbox, createToolResultCache, type ToolResultCache } from 'armorer';
+import type { PendingReview } from 'bureau';
 import { createBureauTestHarness, createSqliteStorageFixture } from 'bureau/test';
 import { z } from 'zod';
 
@@ -45,6 +63,8 @@ import {
 } from './protocol';
 
 const CHILD_MESSAGE_PREFIX = 'crash-fixture-child-of:';
+/** The signal name every `requestHumanInput` call in this fixture parks on. */
+const CRASH_DECISION_SIGNAL_NAME = 'crash-fixture-decision';
 
 function childKvKey(rootRunId: string): string {
   return `crash-fixture:child:${rootRunId}`;
@@ -188,17 +208,27 @@ function createFixtureGenerate(): GenerateFunction {
         // advance, once everything inside it, generate call and tool
         // execution alike, has completed and been persisted).
         await reportMarker('checkpoint-committed', { step: context.step });
+        // AB-336: the REAL durable-park tool, wired in automatically by
+        // `BureauOptions.humanInput: true` — `execute()` returns
+        // synchronously (it only records the park request; the actual
+        // `ctx.waitForSignal` park happens post-loop), so `signal-parked`
+        // is reported and resolved from `main()`'s own driver loop, not
+        // from inside this tool. See this file's top comment.
         return {
           content: '',
           toolCalls: [
-            { id: 'crash-fixture-call-await-decision', name: 'await-decision', arguments: {} },
+            {
+              id: 'crash-fixture-call-request-human-input',
+              name: 'requestHumanInput',
+              arguments: { signalName: CRASH_DECISION_SIGNAL_NAME },
+            },
           ],
         };
       }
       default:
-        // Reached only if `await-decision` ever answered `proceed` — this
-        // scenario always cancels instead, so this branch is a defensive
-        // fallback, never exercised by `sqlite.test.ts`.
+        // Reached only if the parent's decision ever resolved `proceed` —
+        // this scenario always cancels instead, so this branch is a
+        // defensive fallback, never exercised by `sqlite.test.ts`.
         return { content: 'crash-fixture done', toolCalls: [] };
     }
   };
@@ -211,15 +241,6 @@ interface FixtureToolDeps {
   readonly kvGet: (key: string) => Promise<string | null>;
   readonly kvSet: (key: string, value: string) => Promise<void>;
   readonly toolResultCache: ToolResultCache;
-  /**
-   * Aborts the currently-running root run from WITHIN one of its own tool
-   * calls. Fire-and-forget by design: `bureau.abortRun` is synchronous and
-   * this tool call is itself part of the step being aborted, so waiting
-   * HERE for the run to reach a terminal status would deadlock against its
-   * own unwinding. `main()`'s own top-level poll (not this tool) is what
-   * observes the terminal transition and reports `cancellation-recorded`.
-   */
-  readonly abortSelf: () => void;
 }
 
 function createFixtureToolbox(deps: FixtureToolDeps): AnyToolbox {
@@ -349,27 +370,11 @@ function createFixtureToolbox(deps: FixtureToolDeps): AnyToolbox {
     },
   });
 
-  // `signal-parked`/`cancellation-recorded`: this tool call itself IS the
-  // park — it blocks (one IPC round trip) exactly like every other marker
-  // report, with no dependency on Weft's own workflow-suspend machinery.
-  // Only ever answered `{ type: 'cancel' }` in `sqlite.test.ts` — this
-  // scenario always drives the run to cancellation.
-  const awaitDecision = createTool({
-    name: 'await-decision',
-    version: '1.0.0',
-    description: 'Blocks until the parent harness decides whether to proceed or cancel this run.',
-    input: z.object({}),
-    async execute() {
-      const command = await reportMarker('signal-parked', { runId: deps.rootRunId });
-      if (command.type === 'cancel') {
-        deps.abortSelf();
-        return { decision: 'cancel' };
-      }
-      return { decision: 'proceed' };
-    },
-  });
-
-  return createToolbox([registerChild, performEffect, awaitDecision]);
+  // AB-336: `signal-parked` is now the REAL `requestHumanInput` durable
+  // park (`BureauOptions.humanInput: true` wires that tool in
+  // automatically) — no bespoke blocking tool needed here. See this file's
+  // top comment and the park-wait block in `main()` below.
+  return createToolbox([registerChild, performEffect]);
 }
 
 // ---------------------------------------------------------------------------
@@ -427,7 +432,6 @@ async function main(): Promise<void> {
     get toolResultCache() {
       return requireDeps().toolResultCache;
     },
-    abortSelf: () => requireDeps().abortSelf(),
   });
 
   const generate = createFixtureGenerate();
@@ -439,10 +443,17 @@ async function main(): Promise<void> {
     // Without an explicit `stopWhen`, the low-level session/durable-run
     // loop (`createRun`, unlike `createAgent`) has NO default stop
     // condition and keeps calling `generate` until `maximumSteps` even
-    // when a response carries no tool calls.
+    // when a response carries no tool calls. Deliberately NOT
+    // `stopWhen.toolCalled('requestHumanInput')` — the durable park itself
+    // (AB-44/AB-45) must break the step loop on its own; a `stopWhen` that
+    // matched the call would mask whether it does.
     stopWhen: stopWhen.noToolCalls(),
     generate,
     toolbox: fixtureToolbox,
+    // AB-336: wires the real `requestHumanInput` tool into every run this
+    // bureau starts (durable-only; a no-op guard inside bureau itself for
+    // any non-durable run, none of which this fixture ever creates).
+    humanInput: true,
   });
 
   const { bureau } = harness;
@@ -461,9 +472,6 @@ async function main(): Promise<void> {
     kvGet: (key) => kv.get(key),
     kvSet: (key, value) => kv.set(key, value),
     toolResultCache,
-    abortSelf: () => {
-      if (currentRootRunId) bureau.abortRun(currentRootRunId);
-    },
   };
 
   await reportMarker('ready');
@@ -485,14 +493,63 @@ async function main(): Promise<void> {
   }
 
   const rootState = currentRootRunId ? await bureau.getDurableRun(currentRootRunId) : null;
-  const rootIsNonTerminal = !!rootState && NON_TERMINAL_STATUSES.has(rootState.status);
+  let rootIsNonTerminal = !!rootState && NON_TERMINAL_STATUSES.has(rootState.status);
 
   if (rootIsNonTerminal) {
-    // `signal-parked` and the cancellation it triggers both happen INSIDE
-    // the `await-decision` tool call above (`createFixtureToolbox`) — this
-    // is purely a bounded, macrotask-driven wait (never a real timer) for
-    // that in-flight work to reach a terminal status before this driver
-    // reports the outcome and moves on.
+    // AB-336: `requestHumanInput`'s `execute()` returns synchronously — the
+    // actual `ctx.waitForSignal` park happens post-loop, so unlike the old
+    // `await-decision` tool (whose `execute()` itself WAS the IPC block),
+    // the marker report and parent round-trip happen HERE, driver-side,
+    // watching for the human-wait review the park produces. This bounded,
+    // macrotask-driven wait (never a real timer) also covers the run
+    // settling to terminal without ever parking — not reachable through
+    // this fixture's own linear flow, but never assumed away.
+    //
+    // `listPendingReviews()` is exactly what AB-336 made recovery-safe: a
+    // process that reattaches this run already parked when the prior one
+    // was killed sees the SAME review, reconstructed from the checkpoint —
+    // not lost with the dead process's in-memory action log.
+    let humanWaitReview: PendingReview | undefined;
+    await waitForCondition(
+      async () => {
+        humanWaitReview = bureau
+          .listPendingReviews()
+          .find((review) => review.runId === currentRootRunId && review.kind === 'human-wait');
+        if (humanWaitReview) return true;
+        const state = await bureau.getDurableRun(currentRootRunId);
+        return !state || !NON_TERMINAL_STATUSES.has(state.status);
+      },
+      `crash fixture: run "${currentRootRunId}" neither parked on requestHumanInput nor reached a terminal status`,
+      5000,
+    );
+
+    if (humanWaitReview) {
+      // Only ever answered `{ type: 'cancel' }` in `sqlite.test.ts` — this
+      // scenario always drives the run to cancellation — except for the
+      // scenario configured to kill exactly at this marker, which never
+      // reaches this `if`: the harness SIGKILLs the moment the marker line
+      // is written, with no answer sent (see `harness.ts`).
+      const command = await reportMarker('signal-parked', { runId: currentRootRunId });
+      if (command.type === 'cancel') {
+        bureau.abortRun(currentRootRunId);
+      } else {
+        // AB-44: approving continues the SAME run with one more generation
+        // step — never a bare unpark. `createFixtureGenerate`'s `default`
+        // branch is what that continuation step reaches.
+        await bureau.resolveReview({
+          id: humanWaitReview.id,
+          decision: 'approve',
+          principal: 'crash-fixture',
+        });
+      }
+
+      const stateAfterDecision = await bureau.getDurableRun(currentRootRunId);
+      rootIsNonTerminal =
+        !!stateAfterDecision && NON_TERMINAL_STATUSES.has(stateAfterDecision.status);
+    }
+  }
+
+  if (rootIsNonTerminal) {
     await waitForCondition(
       async () => {
         const state = await bureau.getDurableRun(currentRootRunId);
