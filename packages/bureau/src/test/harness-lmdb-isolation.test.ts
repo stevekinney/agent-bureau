@@ -81,10 +81,15 @@ describe('waitForRunCompletion (this file’s own test helper)', () => {
     });
 
     try {
-      // Not awaited: `expect(...).rejects.toThrow(...)` isn't typed as a
-      // Promise in this codebase's bun-types version — `await` here trips
-      // `@typescript-eslint/await-thenable` — and this matches the repo's
-      // own established pattern elsewhere (e.g. create-supervisor.test.ts).
+      // Not awaited: bun:test types `expect(...).rejects.toThrow()` as
+      // `void`, not `Promise<void>` — `await` here trips
+      // `@typescript-eslint/await-thenable` — matching the repo's own
+      // established pattern elsewhere (e.g. create-supervisor.test.ts). The
+      // assertion's rejection lands asynchronously, after `finally` below
+      // disposes the harness; that's fine here because a disposed bureau's
+      // `getRun` keeps returning `undefined` forever, so the poll still
+      // exhausts its attempts and rejects with the expected message
+      // regardless of dispose timing.
       expect(waitForRunCompletion(harness.bureau, 'no-such-run')).rejects.toThrow(
         /never observed/i,
       );
