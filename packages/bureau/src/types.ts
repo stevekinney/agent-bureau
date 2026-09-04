@@ -709,6 +709,19 @@ export interface BureauShutdownOptions {
   /**
    * Bounds `shutdown()`'s WAIT only — see {@link Bureau.shutdown}. Omit to
    * wait indefinitely.
+   *
+   * The wait itself sleeps on `BureauOptions.shutdownTimeoutSleep`, which
+   * defaults to a sleep driven by this bureau's own resolved
+   * `RuntimeServices.timers` (AB-260's deterministic contract) — never a
+   * real timer, even under a real-globals bureau. Under a
+   * `ManualRuntimeServices`, that means nothing advances this wait on its
+   * own: the CALLER owns advancing the clock
+   * (`runtime.advance(timeoutMilliseconds)`) far enough for it to elapse,
+   * exactly as for any other timer-driven behavior. `bureau/test`'s
+   * `BureauTestHarness.close(shutdownOptions)` is the one exception — it
+   * owns that advance itself once `shutdown()` has armed the timer, so a
+   * test built on the harness never needs to (Coordinator ruling on
+   * AB-338).
    */
   readonly timeoutMilliseconds?: number;
 }
@@ -1190,7 +1203,13 @@ export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
    * and every still-outstanding owner reported `'unresolved'` — the
    * underlying teardown keeps running to completion in the background, it is
    * never abandoned. Omitting it waits indefinitely, matching today's
-   * `dispose()`.
+   * `dispose()`. That wait sleeps on the RESOLVED runtime
+   * (`RuntimeServices.timers`, never a real timer directly — see
+   * {@link BureauShutdownOptions.timeoutMilliseconds}), so under a manual
+   * runtime the caller owns advancing the clock far enough for a bounded
+   * wait to elapse — `bureau/test`'s `BureauTestHarness.close()` is the one
+   * built-in exception, owning that advance itself (Coordinator ruling on
+   * AB-338).
    *
    * Calling `shutdown()` (or `dispose()`) more than once is idempotent: every
    * call after the first returns the same cached report promise, regardless

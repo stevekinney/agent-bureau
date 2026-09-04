@@ -51,11 +51,12 @@ import type { ManualRuntimeServices } from 'lifecycle';
 import { createManualRuntimeServices } from 'lifecycle';
 
 import type { AgentDefinitions, AgentNames, AgentRunForName } from '../agent-catalog';
-import { createBureau } from '../create-bureau';
+import { createBureau, detachBestEffortPromise } from '../create-bureau';
 import type {
   Bureau,
   BureauOptions,
   BureauRunOptions,
+  BureauShutdownOptions,
   CreateRunRequest,
   DurableScheduleDefinition,
   ResolveReviewInput,
@@ -182,15 +183,29 @@ export interface BureauTestHarness<D extends AgentDefinitions = AgentDefinitions
   registerDurableRun(runId: string, options?: { readonly detached?: boolean }): void;
 
   /**
-   * Delegates to `bureau.shutdown()` (AB-207) via `assertBureauQuiescent`,
-   * then disposes the storage fixture, then resolves with the report — or
-   * rejects with a {@link BureauQuiescenceError} carrying it when anything
-   * Bureau owns was not quiescent. Never calls `bureau.dispose()` as a
-   * substitute for `shutdown()`, and never resolves before the shutdown
-   * report does. Idempotent: a second call returns (or rethrows) the exact
-   * same outcome without shutting down twice.
+   * Delegates to `bureau.shutdown(shutdownOptions)` (AB-207) via
+   * `assertBureauQuiescent`, then disposes the storage fixture, then
+   * resolves with the report — or rejects with a {@link
+   * BureauQuiescenceError} carrying it when anything Bureau owns was not
+   * quiescent. Never calls `bureau.dispose()` as a substitute for
+   * `shutdown()`, and never resolves before the shutdown report does.
+   * Idempotent: a second call returns (or rethrows) the exact same outcome
+   * without shutting down twice (a second call's own `shutdownOptions`
+   * argument, if any, is ignored — matching `Bureau.shutdown()`'s own
+   * idempotency contract, where the FIRST call's options are what actually
+   * ran).
+   *
+   * When `shutdownOptions.timeoutMilliseconds` is set (a bounded policy),
+   * this ALSO owns advancing this harness's `ManualRuntimeServices` by
+   * exactly that many milliseconds (Coordinator ruling on AB-338):
+   * `BureauOptions.shutdownTimeoutSleep` stays driven by the resolved
+   * runtime — the deterministic contract AB-260 established — but a
+   * `ManualRuntimeServices` never advances on its own, so nothing would
+   * ever fire that sleep's timer, and a bounded `shutdown()` would hang
+   * forever, unless something here does. A caller never needs to advance
+   * the clock itself to observe a bounded drain resolve.
    */
-  close(): Promise<BureauQuiescenceReport>;
+  close(shutdownOptions?: BureauShutdownOptions): Promise<BureauQuiescenceReport>;
 
   /** Thin wrapper over `Bureau.run` — catalog-agent dispatch. */
   startRun<TName extends AgentNames<D>>(
@@ -346,10 +361,79 @@ export async function createBureauTestHarness<D extends AgentDefinitions = Agent
       durableRegistrations.push({ runId, detached: registerOptions?.detached ?? false });
     },
 
-    close() {
+    close(shutdownOptions) {
       if (!closePromise) {
         closePromise = (async () => {
-          const report = await assertBureauQuiescent(harness);
+          // Snapshotted BEFORE `assertBureauQuiescent` starts, so a timer
+          // some OTHER composed subsystem already had armed (e.g. an
+          // `idleDelay` that happens to equal `timeoutMilliseconds`) can
+          // never be mistaken below for the timeout timer `shutdown()` is
+          // about to arm.
+          const preexistingTimerHandles = new Set(
+            runtime.pendingTimers().map((timer) => timer.handle),
+          );
+          const reportPromise = assertBureauQuiescent(harness, shutdownOptions);
+
+          const timeoutMilliseconds = shutdownOptions?.timeoutMilliseconds;
+          if (timeoutMilliseconds !== undefined) {
+            // AB-338: `bureau.shutdown()` arms its bounded-wait timer
+            // synchronously, on THIS SAME runtime, the moment
+            // `assertBureauQuiescent` calls it — but only after its own
+            // pre-shutdown reads (webhook deliveries, durable
+            // registrations) resolve, so the timer is not necessarily
+            // armed yet on the very next tick. `pendingTimers()` never
+            // drifts on its own under a `ManualRuntimeServices` (time only
+            // moves via `advance()`/`setTime()`), so the exact `dueAt`
+            // that timer will be armed with is computable up front —
+            // waiting for a NEW timer at that PRECISE deadline (rather
+            // than merely "any new timer") avoids a false match against an
+            // unrelated timer some other composed subsystem arms in the
+            // same window. `waitForCondition` yields via a real
+            // `setTimeout(0)` macrotask between polls, never a wall-clock
+            // wait tied to `timeoutMilliseconds` itself.
+            //
+            // A shutdown that never actually hangs settles this same
+            // `reportPromise` entirely on microtasks, well within that
+            // gap — and `shutdown()`'s own `chain.finally()` clears its
+            // timeout timer the instant `chain` wins the race, so the
+            // timer this loop is waiting for may never appear at all.
+            // `reportSettled` is the other way out: once the report has
+            // already resolved, there is nothing left to advance the
+            // clock for, so this stops waiting for a timer that was
+            // legitimately cleared rather than mistaking that for one
+            // that was simply slow to arm.
+            let reportSettled = false;
+            // `detachBestEffortPromise` over a bare `void ... .finally(...)`
+            // (same rationale as `create-bureau.ts`'s own uses of it): the
+            // `.finally()` callback marks the flag on either outcome, and
+            // wrapping the derived promise this way means a rejection
+            // (`assertBureauQuiescent` is documented never to produce one,
+            // but nothing here should rely on that to avoid an unhandled
+            // rejection) is swallowed rather than surfaced twice — the
+            // `await reportPromise` below is what actually re-observes it.
+            detachBestEffortPromise(
+              reportPromise.finally(() => {
+                reportSettled = true;
+              }),
+            );
+            const expectedDueAt = runtime.monotonic.now() + timeoutMilliseconds;
+            await waitForCondition(
+              () =>
+                reportSettled ||
+                runtime
+                  .pendingTimers()
+                  .some(
+                    (timer) =>
+                      timer.dueAt === expectedDueAt && !preexistingTimerHandles.has(timer.handle),
+                  ),
+              'BureauTestHarness.close(): the bounded shutdown timeout was never armed on the manual runtime',
+            );
+            if (!reportSettled) {
+              await runtime.advance(timeoutMilliseconds);
+            }
+          }
+
+          const report = await reportPromise;
           await storage.dispose();
           if (!report.quiescent) {
             throw new BureauQuiescenceError(report);

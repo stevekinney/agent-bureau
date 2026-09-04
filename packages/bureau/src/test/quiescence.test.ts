@@ -493,6 +493,64 @@ describe('assertBureauQuiescent / BureauTestHarness.close()', () => {
     expect(report.quiescent).toBe(true);
   });
 
+  it('AB-338: BureauTestHarness.close() with a bounded drain resolves a hung run as incomplete under the manual runtime, with no wall-clock wait and no manual clock advance in the test body', async () => {
+    // Deliberately the REAL default `shutdownTimeoutSleep`
+    // (`createDefaultShutdownTimeoutSleep`, driven by `runtime.timers` —
+    // AB-260's deterministic contract), not an injected fake as the
+    // preceding test uses: this test's whole point is that
+    // `BureauTestHarness.close()` itself, not the test body, is what
+    // advances a `ManualRuntimeServices` far enough for that real sleep to
+    // ever resolve. Before AB-338, this `close()` call hung forever —
+    // nothing in the harness or this test advanced the clock, so the
+    // default sleep's timer never fired.
+    const storage = createMemoryStorageFixture();
+    const harness = await createBureauTestHarness({
+      agents: {},
+      generate: hungGenerate(),
+      storage,
+      scheduler: { enabled: true, idleDelay: 1 },
+    });
+    disposals.push(async () => {
+      await harness.bureau.dispose();
+      await storage.dispose();
+    });
+
+    // The hung run: a scheduler-dispatched background task whose generate
+    // call never resolves and is never aborted under a 'drain' policy —
+    // `scheduler.stop()` awaits it directly, so it is what makes the
+    // 'scheduler' owner unresolved when the bounded wait elapses.
+    await harness.submitSchedulerTask({ priority: 'background', message: 'never finishes' });
+    await waitForCondition(
+      () => harness.bureau.scheduler?.getState().activeTask !== undefined,
+      'scheduler task never started running',
+    );
+
+    const report = await harness.close({ policy: 'drain', timeoutMilliseconds: 50 });
+
+    const schedulerIncomplete = report.incomplete.find((entry) => entry.kind === 'scheduler');
+    expect(schedulerIncomplete?.reason).toBe('unresolved');
+    expect(report.quiescent).toBe(true);
+  });
+
+  it('AB-338: BureauTestHarness.close() with a bounded timeout against an already-quiescent bureau resolves cleanly, without waiting on a shutdown timer that was cleared before it ever appeared', async () => {
+    // The counterpart to the preceding test: nothing here hangs, so
+    // `bureau.shutdown()`'s own `chain` wins its race against the
+    // timeout sleep and clears that sleep's timer before `close()`'s
+    // internal poll loop ever has a chance to see it armed. `close()`
+    // must recognize the report already settled and skip the advance
+    // entirely, rather than waiting out `waitForCondition`'s full budget
+    // for a timer that will never appear.
+    const harness = await harnessWithMemoryStorage();
+    const run = harness.startRun('worker', 'hello');
+    await run.result();
+
+    const report = await harness.close({ timeoutMilliseconds: 50 });
+
+    expect(report.quiescent).toBe(true);
+    expect(report.incomplete).toEqual([]);
+    expect(report.shutdownReport.unresolved).toBe(0);
+  });
+
   it('BureauQuiescenceError renders the incomplete and detached rows too, when a report carries both alongside a real leak', () => {
     const report: BureauQuiescenceReport = {
       scope: 'unit-test',
