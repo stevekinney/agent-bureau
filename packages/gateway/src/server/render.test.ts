@@ -1113,7 +1113,8 @@ describe('reviews page (Card list of ReviewRow, and ReviewRow by extension)', ()
     ).toEqual(['bureau']);
 
     expect(rootMarkup).toContain('1m ago');
-    expect(rootMarkup).toContain('just now ago');
+    expect(rootMarkup).toContain('just now');
+    expect(rootMarkup).not.toContain('just now ago');
   });
 });
 

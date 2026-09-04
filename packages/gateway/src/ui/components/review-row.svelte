@@ -45,7 +45,9 @@
       <h3 class="review-row-title">
         {review.kind === 'tool-approval' ? review.approval.toolName : review.signalName}
       </h3>
-      <span class="review-row-age">{formatAge(review.ageMilliseconds)} ago</span>
+      <span class="review-row-age"
+        >{formatAge(review.ageMilliseconds)}{review.ageMilliseconds < 1000 ? '' : ' ago'}</span
+      >
     </div>
     <div class="review-row-meta">
       <Link href={`/runs/${review.runId}`}>{review.runId}</Link>
