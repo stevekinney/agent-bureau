@@ -19,6 +19,7 @@ import { createActiveRun, stopWhen } from '@lostgradient/operative';
 import type { AnthropicMessageResponse } from '@lostgradient/operative/anthropic';
 import { createAnthropicProvider } from '@lostgradient/operative/anthropic';
 import { createMockAnthropicClient } from '@lostgradient/operative/providers/test';
+import { waitForCondition } from '@lostgradient/operative/test';
 import { createTool, createToolbox } from 'armorer';
 import { createCodingToolbox } from 'armorer/coding';
 import { createTestToolbox } from 'armorer/test';
@@ -188,14 +189,10 @@ describe('AB-99 Tribunal conformance — SIGTERM partial result (AB-96)', () => 
     try {
       const run = await bureau.createRun({ message: 'Review the changed files.' });
 
-      await new Promise<void>((resolve) => {
-        const check = () => {
-          const runState = bureau.store.getRun(run.id);
-          if (runState && runState.steps.length > 0) resolve();
-          else setTimeout(check, 0);
-        };
-        check();
-      });
+      await waitForCondition(
+        () => (bureau.store.getRun(run.id)?.steps.length ?? 0) > 0,
+        'expected the run to record at least one step before aborting',
+      );
 
       bureau.abortRun(run.id);
       // NO await — this is the synchronous graceful-shutdown call a real

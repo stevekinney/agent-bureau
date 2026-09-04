@@ -13,7 +13,7 @@
     "packages/gateway/src/routes/scheduler.ts",
     "packages/gateway/src/conformance/**",
     "packages/gateway/src/**/*.test.ts",
-    "packages/integration/test/lifecycle-contract/**",
+    "packages/integration/test/**",
     "packages/lifecycle/src/**",
     "packages/lifecycle/test/**",
     "packages/armorer/src/**",
@@ -95,6 +95,18 @@
       "reason": "AB-98's real-runtime conformance tier (AB-92's test-tier matrix): a real Bun HTTP/SSE/WebSocket loopback server bound to an operating-system-assigned ephemeral port, real fetch/WebSocket clients, and one deterministic bounded-drain read after a duplicate-subscription assertion (AbortSignal/ping-pong fenced, not a fixed sleep) — this tier exists specifically to exercise real sockets, which the deterministic tiers below it cannot.",
       "owner": "Agent Bureau team",
       "owningIssue": "AB-272"
+    },
+    {
+      "path": "packages/integration/test/crash/fixture.ts",
+      "reason": "AB-333, applying AB-270's own carve-out: this file IS the crash-conformance child-process entry point (AB-270, extended to LMDB by AB-335) — launched by harness.ts via Bun.spawn as a genuinely separate OS process, re-launched over the same backend path after a SIGKILL. No RuntimeServices instance crosses that process boundary, so its idempotency-cache timestamps (Date.now()) and attempt identifiers (crypto.randomUUID()) are necessarily real per-process reads, not something an injected manual runtime could substitute for across a kill. The one setTimeout (realDelayYield, line 413) is a bounded, condition-checked real-delay poll already root-caused and exempted for the identical reason in packages/bureau/src/test/harness-lmdb-isolation.test.ts (WFT-138): a zero-delay macrotask loop starves lmdb's native write-completion callback, so only a real elapsed gap between checks observes the write.",
+      "owner": "Agent Bureau team",
+      "owningIssue": "AB-270"
+    },
+    {
+      "path": "packages/integration/test/sandbox-embedding.test.ts",
+      "reason": "AB-333: the four performance.now() reads measure real elapsed wall-clock time around a real `bun build` subprocess and a real spawned child-process cold start (Bun.spawn, not an injected runtime) — diagnostic footprint numbers logged for documentation/deployment.md's AB-97 slot, explicitly \"NOT enforced ... a sanity ceiling only, not a regression gate\" (see the test's own comment). Same real-elapsed-latency shape as the AB-330 exemptions for active-run-adapter-abort-latency.test.ts and create-scheduler-idle-delay.test.ts: nothing here is manually advanced, so a manual clock could not produce the real gap being measured.",
+      "owner": "Agent Bureau team",
+      "owningIssue": "AB-333"
     },
     {
       "path": "packages/gateway/src/ui/**",
