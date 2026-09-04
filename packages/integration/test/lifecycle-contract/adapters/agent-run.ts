@@ -177,5 +177,6 @@ export function createAgentRunAdapter(): LifecycleContractAdapter {
           return { status: acknowledgement.status };
         },
       ),
+    durableReconstruction: () => Promise.resolve(unsupported('durable-reconstruction')),
   };
 }
