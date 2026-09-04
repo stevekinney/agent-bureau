@@ -46,6 +46,25 @@ const DEFAULT_HEARTBEAT_INTERVAL_MS = 8_000;
  * resume from the oldest frame still held; anything older than that is
  * unrecoverable from the live-frame layer and the client should fall back
  * to `GET /api/v1/runs/:id` for the durable record.
+ *
+ * **AB-313 (AC5) — the declared backpressure bound for the Gateway live
+ * transport, closing AB-87's "buffer bound unspecified (gap)" row.** This
+ * IS the bound: once a run's buffer exceeds it, the oldest frames are
+ * evicted (below) rather than the buffer growing without limit, and a
+ * reconnecting client whose cursor has fallen outside the retained window
+ * degrades to the durable-history fallback (AB-312, `startDurableFallback`)
+ * or a best-effort partial replay when no durable backend is configured.
+ * There is no separate application-layer policy that actively CLOSES a
+ * slow consumer's connection: `broadcast()`/`sendFrame` write synchronously
+ * to the transport (SSE `controller.enqueue`, WebSocket `send`) with no
+ * per-subscriber depth cap of its own, so a subscriber that stays connected
+ * — however slowly it drains — still receives every frame it was
+ * subscribed for, in order, with no drop (verified in
+ * `conformance/backpressure.test.ts`). The SAME policy — this one bound,
+ * this same no-drop-for-an-open-connection behavior — applies uniformly to
+ * BOTH the live-only path and the durable-history reconnect/replay path
+ * (`startDurableFallback` below, `Bureau.subscribeEventHistory`): neither
+ * invents a second, competing bound.
  */
 const RUN_FRAME_BUFFER_LIMIT = 2_000;
 

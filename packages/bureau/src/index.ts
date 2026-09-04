@@ -64,6 +64,7 @@ export {
   createDurableEventProducer,
   DEFAULT_PAGE_LIMIT,
   RUN_DURABLE_EVENT_TYPES,
+  UnsupportedDurableEventSchemaVersionError,
 } from './durable-event-history';
 export type { BureauEventMap, RecoveredRunVerdict, RecoveryRejectionReason } from './events';
 export {
@@ -151,6 +152,8 @@ export type {
   CreateRunRequest,
   DurableGuardrailsConfiguration,
   DurableScheduleDefinition,
+  EventHistoryDeletedAggregateOutcome,
+  EventHistoryNotFoundOutcome,
   EventHistoryUnsupportedOutcome,
   FlowControlPolicy,
   GenerateProviderName,

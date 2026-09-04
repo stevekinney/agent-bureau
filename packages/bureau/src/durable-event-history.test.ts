@@ -427,10 +427,16 @@ describe('createDurableEventHistory', () => {
       await history.dispose();
     });
 
-    it('throws when a fleet event payload is not the stored-wrapper shape', async () => {
+    it('skips a fleet event whose payload is not the stored-wrapper shape, diagnosing rather than aborting the page (AB-313)', async () => {
       const storage = await createMemoryStorage();
       const runtime = createManualRuntimeServices();
-      const history = createDurableEventHistory(storage, runtime);
+      const diagnostics: BureauDiagnostic[] = [];
+      const history = createDurableEventHistory(storage, runtime, (diagnostic) => {
+        diagnostics.push(diagnostic);
+      });
+      const owner = { kind: 'run' as const, id: 'run-1' };
+
+      const good1 = await history.record(owner, 'run.started', {});
 
       const rawFeed: FleetEventFeed = createFleetEventFeed(storage);
       await rawFeed.append({
@@ -441,9 +447,106 @@ describe('createDurableEventHistory', () => {
       });
       rawFeed.dispose();
 
-      expect(history.page({ kind: 'run', id: 'run-1' })).rejects.toThrow(
-        /does not carry a recognized stored payload/,
-      );
+      const good2 = await history.record(owner, 'run.completed', {});
+
+      const page = await history.page(owner);
+      expect(page).toEqual({
+        events: [good1, good2],
+        hasMore: false,
+        nextCursor: good2.cursor,
+      });
+      expect(
+        diagnostics.some((diagnostic) =>
+          diagnostic.message.includes('Skipped corrupt durable record'),
+        ),
+      ).toBe(true);
+
+      await history.dispose();
+    });
+
+    it('skips a stored record with an unrecognized schemaVersion, diagnosing rather than aborting the page (AB-313)', async () => {
+      const storage = await createMemoryStorage();
+      const runtime = createManualRuntimeServices();
+      const diagnostics: BureauDiagnostic[] = [];
+      const history = createDurableEventHistory(storage, runtime, (diagnostic) => {
+        diagnostics.push(diagnostic);
+      });
+      const owner = { kind: 'run' as const, id: 'run-1' };
+
+      const good1 = await history.record(owner, 'run.started', {});
+
+      const rawFeed: FleetEventFeed = createFleetEventFeed(storage);
+      await rawFeed.append({
+        kind: 'run.error',
+        workflowId: 'run:run-1',
+        emittedAtMs: 0,
+        payload: { schemaVersion: 999, payload: { bogus: true } },
+      });
+      rawFeed.dispose();
+
+      const good2 = await history.record(owner, 'run.completed', {});
+
+      const page = await history.page(owner);
+      expect(page).toEqual({
+        events: [good1, good2],
+        hasMore: false,
+        nextCursor: good2.cursor,
+      });
+      expect(
+        diagnostics.some((diagnostic) =>
+          diagnostic.message.includes('Skipped corrupt durable record'),
+        ),
+      ).toBe(true);
+
+      await history.dispose();
+    });
+
+    it('never reports hasMore: true because of a corrupt record sitting at the limit boundary with nothing valid after it (copilot review, PR #551)', async () => {
+      const storage = await createMemoryStorage();
+      const runtime = createManualRuntimeServices();
+      const history = createDurableEventHistory(storage, runtime);
+      const owner = { kind: 'run' as const, id: 'run-1' };
+
+      const good1 = await history.record(owner, 'run.started', {});
+
+      const rawFeed: FleetEventFeed = createFleetEventFeed(storage);
+      await rawFeed.append({
+        kind: 'legacy.kind',
+        workflowId: 'run:run-1',
+        emittedAtMs: 0,
+        payload: 'not-a-wrapper',
+      });
+      rawFeed.dispose();
+
+      // limit: 1 — exactly `good1`'s count. The only record after it is
+      // corrupt and skipped, so there is genuinely nothing more to page to.
+      const page = await history.page(owner, { limit: 1 });
+      expect(page).toEqual({ events: [good1], hasMore: false, nextCursor: good1.cursor });
+
+      await history.dispose();
+    });
+
+    it('reports hasMore: true when a genuine valid record follows a corrupt one at the limit boundary', async () => {
+      const storage = await createMemoryStorage();
+      const runtime = createManualRuntimeServices();
+      const history = createDurableEventHistory(storage, runtime);
+      const owner = { kind: 'run' as const, id: 'run-1' };
+
+      const good1 = await history.record(owner, 'run.started', {});
+
+      const rawFeed: FleetEventFeed = createFleetEventFeed(storage);
+      await rawFeed.append({
+        kind: 'legacy.kind',
+        workflowId: 'run:run-1',
+        emittedAtMs: 0,
+        payload: 'not-a-wrapper',
+      });
+      rawFeed.dispose();
+
+      await history.record(owner, 'run.completed', {}); // a real record beyond the limit
+
+      const page = await history.page(owner, { limit: 1 });
+      expect(page).toEqual({ events: [good1], hasMore: true, nextCursor: good1.cursor });
 
       await history.dispose();
     });

@@ -68,7 +68,7 @@ import type { Storage } from '@lostgradient/weft/storage';
 import type { RuntimeServices } from 'lifecycle';
 
 import type { AgentDefinitions } from './agent-catalog';
-import type { ActionEvent } from './events';
+import type { ActionEvent, RunRemovedEvent } from './events';
 import { resolveDiagnosticSink, serializeActionDetail } from './serialization';
 import type { Bureau, DiagnosticSink } from './types';
 
@@ -80,6 +80,16 @@ export interface DurableEventHistoryPageOptions {
   since?: string;
   /** Maximum events to return. Defaults to {@link DEFAULT_PAGE_LIMIT}. Must be a positive integer. */
   limit?: number;
+  /**
+   * AB-313 — the authenticated caller's principal, consulted by
+   * `Bureau.eventHistory`'s authorization and deleted-aggregate checks
+   * (see that method's own doc comment). `page()` itself (this store's
+   * lower-level primitive) does not read or use this field at all — it is
+   * carried here purely so `Bureau.eventHistory` can accept one options
+   * bag for both the store's own paging options and its own
+   * authorization concern, rather than a second parameter.
+   */
+  principal?: string;
 }
 
 /** Options for {@link DurableEventHistory.subscribeEventHistory}. */
@@ -177,6 +187,30 @@ interface StoredDurableEventPayload {
 /** The only schema version this slice ever writes. */
 const CURRENT_SCHEMA_VERSION = 1;
 
+/**
+ * Thrown when a stored durable event record carries a `schemaVersion` this
+ * build does not recognize (AB-313, mirroring
+ * `UnsupportedRunResultVersionError` — `packages/operative/src/run-envelope.ts`).
+ * A record fails closed per record: `toDurableEventEnvelope` throws this for
+ * exactly the one offending record, and every caller that decodes more than
+ * one record ({@link DurableEventHistory.page}) catches it, reports it to
+ * the {@link DiagnosticSink}, and skips only that record — it never aborts
+ * or corrupts the read of the rest of the page. Exported so a caller
+ * decoding a single envelope directly can distinguish this from the
+ * unrelated "not the stored-wrapper shape at all" corrupt-record case.
+ */
+export class UnsupportedDurableEventSchemaVersionError extends Error {
+  readonly version: unknown;
+
+  constructor(version: unknown) {
+    super(
+      `Unsupported durable event schema version ${String(version)}; expected ${CURRENT_SCHEMA_VERSION}`,
+    );
+    this.name = 'UnsupportedDurableEventSchemaVersionError';
+    this.version = version;
+  }
+}
+
 function encodeOwner(owner: DurableEventOwner): string {
   return `${owner.kind}:${owner.id}`;
 }
@@ -212,6 +246,9 @@ function toDurableEventEnvelope(
     throw new Error(
       `Durable event history: fleet event at sequence ${envelope.sequence} does not carry a recognized stored payload.`,
     );
+  }
+  if (envelope.payload.schemaVersion !== CURRENT_SCHEMA_VERSION) {
+    throw new UnsupportedDurableEventSchemaVersionError(envelope.payload.schemaVersion);
   }
   return {
     kind: envelope.kind,
@@ -316,11 +353,33 @@ export function createDurableEventHistory(
     let hasMore = false;
     for await (const envelope of feed.replay(since === undefined ? {} : { fromCursor: since })) {
       if (envelope.workflowId !== targetWorkflowId) continue;
+      // AB-313 (AC2): decode BEFORE checking `limit` — a corrupt record
+      // (unparseable payload, or a recognized-shape record carrying a
+      // `schemaVersion` this build does not know) is skipped with a
+      // diagnostic and never consumes a `limit` slot, but it must not be
+      // allowed to set `hasMore: true` either: checking `events.length >=
+      // limit` before decode would report an additional page for a
+      // candidate that turns out to be corrupt-and-skipped, when the next
+      // page could in fact be empty (Copilot review, PR #551). Decoding
+      // first means `hasMore` only ever reflects a genuine, valid
+      // additional record.
+      let decoded: DurableEventEnvelope;
+      try {
+        decoded = toDurableEventEnvelope(envelope, owner);
+      } catch (error) {
+        diagnose({
+          level: 'error',
+          scope: 'durable-event-history',
+          message: `[durable-event-history] Skipped corrupt durable record at sequence ${envelope.sequence} for ${owner.kind}:${owner.id}:`,
+          cause: error,
+        });
+        continue;
+      }
       if (events.length >= limit) {
         hasMore = true;
         break;
       }
-      events.push(toDurableEventEnvelope(envelope, owner));
+      events.push(decoded);
     }
 
     const lastEvent = events.at(-1);
@@ -670,6 +729,18 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
   bureau.addEventListener('schedule.resumed', scheduleResumedListener);
   bureau.addEventListener('schedule.cancelled', scheduleCancelledListener);
 
+  // AB-313 — a run's explicit removal (`Bureau.deleteRun`) is the
+  // "Bureau-level record was removed" evidence `bureau.eventHistory`'s
+  // deleted-aggregate detection looks for inside a run's own durable page.
+  // Recorded under the removed run's own `{ kind: 'run', id: runId }`
+  // owner, same as every other run-durable kind — never as a distinct
+  // owner, since the run itself is what was removed.
+  const runRemovedListener = (event: RunRemovedEvent): void => {
+    if (signal?.aborted) return;
+    sink({ kind: 'run', id: event.runId }, 'run.removed', { runId: event.runId });
+  };
+  bureau.addEventListener('run.removed', runRemovedListener);
+
   return {
     async dispose(): Promise<void> {
       bureau.removeEventListener('action', actionListener);
@@ -679,6 +750,7 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
       bureau.removeEventListener('schedule.paused', schedulePausedListener);
       bureau.removeEventListener('schedule.resumed', scheduleResumedListener);
       bureau.removeEventListener('schedule.cancelled', scheduleCancelledListener);
+      bureau.removeEventListener('run.removed', runRemovedListener);
       await Promise.allSettled([...activeWrites]);
     },
   };

@@ -24,10 +24,27 @@
  *   "closed with a typed reason" is not this suite's branch: this is the
  *   "receives every frame" branch, read from the actual delivery code
  *   rather than assumed.
+ * - AB-313 (AC5): the SAME "receives every frame it was subscribed for, no
+ *   drop for an open connection" policy applies to the durable-history
+ *   reconnect/replay path (`startDurableFallback`, AB-312) — a WebSocket
+ *   subscriber engaged in durable fallback (its in-memory buffer holds
+ *   nothing for the run, forcing every frame through
+ *   `Bureau.subscribeEventHistory`'s replay-then-tail) that does not read
+ *   until well after every durable event for that run has committed still
+ *   receives all of them, in order, once it drains — `live-events.ts`
+ *   documents this as the one unified policy, closing AB-87's "buffer
+ *   bound unspecified" gap for both paths at once rather than inventing a
+ *   second, competing bound for the durable case.
  */
+import { rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { stopWhen } from '@lostgradient/operative';
 import { createTool, createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
+import { createSqliteStorageFixture, waitForRunState } from 'bureau/test';
+import { createManualRuntimeServices } from 'lifecycle';
 import { z } from 'zod';
 
 import type { LoopbackGateway, LoopbackWebSocketClient } from '../test/loopback';
@@ -254,6 +271,115 @@ describe('Gateway backpressure conformance — read from the production buffer p
       expect(sortedSeqs).toEqual(groundTruthSeqs.sort((a, b) => a - b));
     } finally {
       await gateway.stop();
+    }
+  });
+
+  it('AB-313 (AC5): a WebSocket subscriber engaged in durable fallback that does not read for a while still receives every durable event, no gap or duplicate, once it drains', async () => {
+    const path = join(
+      tmpdir(),
+      `ab-313-durable-backpressure-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const gatewayA = await startLoopbackGateway({
+        agents: {},
+        generate: async () => ({ content: 'done', toolCalls: [] }),
+        stopWhen: stopWhen.noToolCalls(),
+        storage: createSqliteStorageFixture({ runtime, path }),
+      });
+
+      let runId!: string;
+      try {
+        const runResponse = await gatewayA.fetch('/api/v1/runs', {
+          method: 'POST',
+          headers: { ...authHeader(gatewayA), 'content-type': 'application/json' },
+          body: JSON.stringify({ message: 'go' }),
+        });
+        const run = (await runResponse.json()) as { id: string };
+        runId = run.id;
+        await waitForRunState(gatewayA.bureau, runId);
+
+        // Synthesize additional run-owned durable events beyond the run's
+        // one real terminal transition — `bureau.store.recordAction` is
+        // the same supported synthesizer `durable-event-history.test.ts`
+        // and `durable-history.test.ts` already use to exercise more than
+        // one committed event per owner; `run.error` is a real member of
+        // `RUN_DURABLE_ACTION_TYPES`, so each recording produces one more
+        // committed durable event under this same run's owner.
+        for (let i = 0; i < 24; i++) {
+          gatewayA.bureau.store.recordAction(runId, 'run.error', { synthetic: i });
+        }
+        await runtime.deferred.drain();
+      } finally {
+        await gatewayA.stop();
+      }
+
+      // A fresh Bureau/Gateway over the SAME durable storage: its own
+      // in-memory `runFrameBuffers` holds nothing for `runId`, so a
+      // reconnect is forced through the durable fallback for every frame.
+      const gatewayB = await startLoopbackGateway({
+        agents: {},
+        generate: async () => ({ content: 'unused', toolCalls: [] }),
+        storage: createSqliteStorageFixture({ runtime, path }),
+      });
+
+      try {
+        const groundTruth = await gatewayB.bureau.eventHistory({ kind: 'run', id: runId });
+        if ('outcome' in groundTruth)
+          throw new Error(`expected a page, got ${groundTruth.outcome}`);
+        expect(groundTruth.events.length).toBe(25); // 1 real run.completed + 24 synthetic run.error
+
+        const ws = await gatewayB.openWebSocket(`/ws?token=${gatewayB.authToken}`);
+        ws.send({ type: 'subscribe', runId, since: 0 });
+
+        // The "slow consumer": subscribed, engaging the durable fallback
+        // (proven below by the frames actually being `durable-event`
+        // frames), but this test does not call `ws.next()` again until
+        // AFTER every durable event for this owner has already committed
+        // — the real-socket equivalent of a consumer that reads far more
+        // slowly than the feed commits.
+        await runtime.deferred.drain();
+
+        // Stop once every durable event has arrived (25 total: the 1 real
+        // run.completed plus 24 synthetic run.error) — never on the FIRST
+        // matching frame, since replay delivers all 24 `run.error` events
+        // in order and stopping early would under-count them.
+        let durableCount = 0;
+        const drainedRaw = await wsReadUntil(
+          ws,
+          (frame) => {
+            if (frame.type === 'durable-event') durableCount += 1;
+            return durableCount >= 25;
+          },
+          200,
+        );
+        ws.close();
+        await ws.waitForClose();
+
+        const durableFrames = drainedRaw.filter((frame) => frame.type === 'durable-event');
+        expect(durableFrames.length).toBe(25);
+        expect(durableFrames.filter((frame) => frame.event === 'run.completed')).toHaveLength(1);
+        expect(durableFrames.filter((frame) => frame.event === 'run.error')).toHaveLength(24);
+        // No duplicate: every one of the 24 synthetic markers appears exactly once.
+        const syntheticIndices = durableFrames
+          .filter(
+            (frame): frame is Extract<ServerFrame, { type: 'durable-event' }> =>
+              frame.type === 'durable-event' && frame.event === 'run.error',
+          )
+          .map((frame) => (frame.detail as { synthetic?: number }).synthetic)
+          .filter((value): value is number => value !== undefined);
+        expect(new Set(syntheticIndices).size).toBe(24);
+        expect([...syntheticIndices].sort((a, b) => a - b)).toEqual(
+          Array.from({ length: 24 }, (_, index) => index),
+        );
+      } finally {
+        await gatewayB.stop();
+      }
+    } finally {
+      await rm(path, { force: true });
+      await rm(`${path}-wal`, { force: true });
+      await rm(`${path}-shm`, { force: true });
     }
   });
 });
