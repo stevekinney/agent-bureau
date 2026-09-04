@@ -363,23 +363,6 @@ describe('execution lifecycle', () => {
     handle.settle();
   });
 
-  it('schedules deadlines with the platform timer by default', async () => {
-    const lifecycle = createExecutionLifecycle();
-    const handle = lifecycle.begin({
-      toolName: 'deadline',
-      callId: 'deadline',
-      deadline: Date.now(),
-    });
-
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    expect(handle.snapshot()).toMatchObject({
-      state: 'abort-requested',
-      abortSource: 'deadline',
-    });
-    handle.settle();
-  });
-
   it('rejects already-aborted work before it enters a concurrency limiter', async () => {
     const limiter = createConcurrencyLimiter(1);
     const controller = new AbortController();

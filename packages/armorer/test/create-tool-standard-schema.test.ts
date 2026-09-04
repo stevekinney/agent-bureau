@@ -117,7 +117,7 @@ describe('createTool with a non-Zod Standard Schema input', () => {
         name: 'greet-bad-schema',
         description: 'Greets by name',
         input: greetingSchema(),
-        inputSchema: { type: 'object', createdAt: new Date() } as unknown as JsonObject,
+        inputSchema: { type: 'object', createdAt: new Date(0) } as unknown as JsonObject,
         execute: async (params: { name: string }) => `hello, ${params.name}`,
       }),
     ).toThrow();

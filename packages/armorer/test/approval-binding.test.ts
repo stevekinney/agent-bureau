@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test';
+import { createManualRuntimeServices } from 'lifecycle';
 
 import {
   APPROVAL_BINDING_VERSION,
@@ -163,8 +164,9 @@ describe('approval binding state', () => {
   });
 
   it('evicts expired issued and terminal records', async () => {
-    const store = createProcessLocalApprovalStateStore();
-    const now = Date.now();
+    const runtime = createManualRuntimeServices();
+    const store = createProcessLocalApprovalStateStore(runtime.clock.now);
+    const now = runtime.clock.now();
     const expiringBinding = {
       ...binding,
       issuedAt: now - 1,
@@ -173,13 +175,13 @@ describe('approval binding state', () => {
     };
     await store.issue(expiringBinding);
     await store.consume(expiringBinding, undefined, now);
-    await new Promise((resolve) => setTimeout(resolve, 12));
+    await runtime.advance(12);
     await expect(store.state(expiringBinding)).resolves.toBeUndefined();
 
     const replacement = {
       ...expiringBinding,
-      issuedAt: Date.now(),
-      expiresAt: Date.now() + 1_000,
+      issuedAt: runtime.clock.now(),
+      expiresAt: runtime.clock.now() + 1_000,
     };
     await expect(store.issue(replacement)).resolves.toBeUndefined();
   });

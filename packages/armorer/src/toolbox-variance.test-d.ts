@@ -53,7 +53,7 @@ const clockTool = createTool({
   name: 'get_time',
   description: 'Return the current time.',
   input: z.object({}),
-  execute: () => Promise.resolve({ iso: new Date().toISOString() }),
+  execute: () => Promise.resolve({ iso: new Date(0).toISOString() }),
 });
 
 const multiToolToolbox = createToolbox([weatherTool, clockTool]);

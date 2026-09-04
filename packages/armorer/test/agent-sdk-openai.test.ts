@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { MCPServerStdio, MCPServerStreamableHttp } from '@openai/agents';
 import { describe, expect, it } from 'bun:test';
+import { createManualRuntimeServices } from 'lifecycle';
 import { z } from 'zod';
 
 import { createTool } from '../src/create-tool';
@@ -47,8 +48,9 @@ describe('OpenAI Agents SDK MCP integration', () => {
     const mcp = await createMCP(toolbox, {
       serverInfo: { name: 'toolbox-tools', version: '0.1.0' },
     });
+    const runtime = createManualRuntimeServices();
     const transport = new WebStandardStreamableHTTPServerTransport({
-      sessionIdGenerator: () => crypto.randomUUID(),
+      sessionIdGenerator: () => runtime.identifiers.next('mcp-session'),
     });
     await mcp.connect(transport);
 

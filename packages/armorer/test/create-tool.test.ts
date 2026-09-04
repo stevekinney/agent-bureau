@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import { describe, expect, it } from 'bun:test';
+import { createManualRuntimeServices } from 'lifecycle';
 import { z } from 'zod';
 
 import type {
@@ -2304,6 +2305,7 @@ describe('isTool', () => {
   });
 
   it('starts a relative execution timeout after queued admission', async () => {
+    const runtime = createManualRuntimeServices();
     let releaseFirst!: () => void;
     let executions = 0;
     const tool = createTool({
@@ -2324,8 +2326,11 @@ describe('isTool', () => {
       params: {},
       callId: 'relative-timeout-queued',
       timeout: 10,
+      now: runtime.clock.now,
+      setTimeoutFunction: runtime.timers.setTimeout,
+      clearTimeoutFunction: runtime.timers.clearTimeout,
     });
-    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    await runtime.advance(25);
     releaseFirst();
 
     await expect(first).resolves.toMatchObject({ outcome: 'success' });

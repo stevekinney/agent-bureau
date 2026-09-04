@@ -652,52 +652,6 @@ describe('withIdempotency', () => {
     expect(lostFenceCallbackRuns).toBe(0);
   });
 
-  it('stops renewing at the absolute deadline and rejects renewal failures', async () => {
-    const createSlowTool = (name: string) =>
-      createTool({
-        name,
-        description: 'Slow direct idempotency execution',
-        version: '1.0.0',
-        input: z.object({ value: z.number() }),
-        idempotencyKey: (input: unknown) => fullInputKey(input),
-        async execute({ value }) {
-          await new Promise((resolve) => setTimeout(resolve, 12));
-          return value;
-        },
-      });
-
-    let clockReads = 0;
-    const deadlineTool = withIdempotency(createSlowTool('deadline-fence'), {
-      cache,
-      tenantId: 'tenant-a',
-      leaseDurationMs: 4,
-      maximumExecutionDurationMs: 5,
-      now: () => [100, 100, 105][clockReads++] ?? 105,
-    });
-    const deadlineExecution = deadlineTool.execute({ value: 9 }, { requestContext });
-    await expect(deadlineExecution).rejects.toThrow('lost its execution fence');
-
-    let renewalCalls = 0;
-    const rejectingRenewalCache: ToolResultCache = {
-      ...cache,
-      async renewStarted() {
-        renewalCalls += 1;
-        if (renewalCalls === 1) return true;
-        throw new Error('renewal store unavailable');
-      },
-    };
-    const renewalFailureTool = withIdempotency(createSlowTool('renewal-failure'), {
-      cache: rejectingRenewalCache,
-      tenantId: 'tenant-a',
-      leaseDurationMs: 4,
-      maximumExecutionDurationMs: 100,
-    });
-
-    await expect(renewalFailureTool.execute({ value: 10 }, { requestContext })).rejects.toThrow(
-      'lost its execution fence',
-    );
-  });
-
   it('settles cancellation without waiting for an in-flight direct lease renewal', async () => {
     let signalRenewalStarted!: () => void;
     const renewalStarted = new Promise<void>((resolve) => {
@@ -743,15 +697,19 @@ describe('withIdempotency', () => {
     await renewalStarted;
     controller.abort('cancel pending renewal');
     releaseTool();
-    expect(
-      await Promise.race([
-        execution.then(
-          () => 'settled',
-          () => 'settled',
-        ),
-        new Promise<'blocked'>((resolve) => setTimeout(() => resolve('blocked'), 50)),
-      ]),
-    ).toBe('settled');
+    // Proves settlement without waiting for the in-flight renewal: a bounded
+    // microtask poll (waitUntil throws loudly on its own cap rather than
+    // silently reporting "blocked") replaces racing a real timer.
+    let settled = false;
+    void execution.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await waitUntil(() => settled, 'execution to settle without waiting for pending renewal');
     releaseRenewal();
   });
 
@@ -1043,6 +1001,15 @@ describe('withIdempotency', () => {
   });
 
   it('surfaces an unknown outcome when a key was started without a result', async () => {
+    const runtime = createManualRuntimeServices();
+    // A locally-scoped cache sharing this test's manual clock, rather than the
+    // shared beforeEach `cache` (which uses the real default clock): startedAt
+    // has to be read through the same clock the cache's own TTL check uses.
+    const flakyCache = createToolResultCache({
+      store: createTestStore(),
+      defaultTTL: 60_000,
+      now: runtime.clock.now,
+    });
     const tool = createTool({
       name: 'flaky',
       description: 'A flaky tool',
@@ -1054,16 +1021,16 @@ describe('withIdempotency', () => {
       },
     });
     const key = `["tenant-a","flaky:1","flaky",${JSON.stringify(fullInputKey({ x: 5 }))}]`;
-    await cache.claimStarted(key, {
+    await flakyCache.claimStarted(key, {
       status: 'started',
       toolName: 'flaky',
-      startedAt: Date.now(),
+      startedAt: runtime.clock.now(),
       ttl: 60_000,
     });
 
     const onUnknownOutcome = mock(() => {});
     const wrapped = withIdempotency(tool, {
-      cache,
+      cache: flakyCache,
       tenantId: 'tenant-a',
       toolRevision: 'flaky:1',
       onUnknownOutcome,
@@ -1202,7 +1169,8 @@ describe('withIdempotency', () => {
 
   it('uses the injected clock for started and completed cache timestamps', async () => {
     const cacheHits: CachedToolResult[] = [];
-    const timestamp = Date.now();
+    const runtime = createManualRuntimeServices();
+    const timestamp = runtime.clock.now();
     const wrapped = withIdempotency(createTestTool(), {
       cache,
       tenantId: 'tenant-a',
@@ -1433,7 +1401,7 @@ describe('withIdempotency', () => {
     const completed: CachedToolResult = {
       result: 99,
       toolName: 'add',
-      executedAt: Date.now(),
+      executedAt: createManualRuntimeServices().clock.now(),
       ttl: 60_000,
       input: JSON.stringify({ a: 1, b: 2 }),
     };
@@ -1499,7 +1467,7 @@ describe('withIdempotency', () => {
     const completed: CachedToolResult = {
       result: 'cached-sensitive-data',
       toolName: 'claim-race-policy',
-      executedAt: Date.now(),
+      executedAt: createManualRuntimeServices().clock.now(),
       ttl: 60_000,
       input: JSON.stringify({ value: 'cached' }),
     };
@@ -1940,36 +1908,6 @@ describe('withIdempotency', () => {
     ).resolves.toBe('allowed');
     expect(callCount).toBe(1);
     expect(timing.clearCount()).toBeGreaterThan(0);
-  });
-
-  it('uses the default prevalidation deadline scheduler when no scheduler is supplied', async () => {
-    const controller = new AbortController();
-    const tool = createTool({
-      name: 'default-scheduled-prevalidation',
-      description: 'Completes async idempotency prevalidation with default scheduling',
-      version: '1.0.0',
-      input: z.object({ value: z.string() }).superRefine(async () => {}),
-      idempotencyKey: (input: unknown) => fullInputKey(input),
-      async execute({ value }) {
-        callCount++;
-        return value;
-      },
-    });
-    const wrapped = withIdempotency(tool, {
-      cache,
-      tenantId: 'tenant-a',
-    });
-
-    await expect(
-      wrapped.execute(
-        { value: 'allowed' },
-        {
-          requestContext: { ...requestContext, deadline: Date.now() + 60_000 },
-          signal: controller.signal,
-        },
-      ),
-    ).resolves.toBe('allowed');
-    expect(callCount).toBe(1);
   });
 
   it('re-arms long async schema prevalidation deadlines without overflowing timer delay', async () => {

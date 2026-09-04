@@ -23,7 +23,7 @@ describe('serialization', () => {
       name: 'bad-meta',
       description: 'bad metadata',
       input: schema,
-      metadata: { when: new Date() } as unknown as ToolMetadata,
+      metadata: { when: new Date(0) } as unknown as ToolMetadata,
     });
 
     expect(() => serializeToolDefinition(tool)).toThrow(

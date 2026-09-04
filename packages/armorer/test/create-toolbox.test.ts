@@ -1,5 +1,6 @@
 import { describe, expect, expectTypeOf, it } from 'bun:test';
 import { hmacSha256HexSync } from 'interoperability';
+import { createManualRuntimeServices } from 'lifecycle';
 import { z } from 'zod';
 
 import {
@@ -24,6 +25,20 @@ import { internalToolboxTestUtilities } from '../src/create-toolbox';
 import { createTruncatingAsyncIterable } from '../src/truncation/index';
 import type { ToolExecutionResult } from '../src/types';
 import { createMutableToolbox } from './helpers/mutable-toolbox';
+
+/**
+ * Polls a microtask-only predicate to completion, capped so a regression
+ * that never satisfies it fails the test fast instead of hanging CI in an
+ * unbounded busy-wait loop.
+ */
+async function waitUntil(predicate: () => boolean, description: string): Promise<void> {
+  const maximumAttempts = 1_000;
+  for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
+    if (predicate()) return;
+    await Promise.resolve();
+  }
+  throw new Error(`waitUntil timed out after ${maximumAttempts} microtask ticks: ${description}`);
+}
 
 // AB-308: `createToolbox()` accepts the friendly configuration shorthand
 // (`ToolConfigurationInput`) directly — `identity`/`id`/`display` are
@@ -212,6 +227,11 @@ describe('createToolbox', () => {
   });
 
   it('starts relative timeouts when sequential child execution is admitted', async () => {
+    const runtime = createManualRuntimeServices();
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
     let secondExecuted = false;
     const toolbox = createToolbox([
       createTool({
@@ -219,7 +239,7 @@ describe('createToolbox', () => {
         description: 'slow first',
         input: z.object({}),
         async execute() {
-          await new Promise((resolve) => setTimeout(resolve, 20));
+          await firstBlocked;
           return 'first';
         },
       }),
@@ -234,13 +254,22 @@ describe('createToolbox', () => {
       }),
     ]);
 
-    const results = await toolbox.execute(
+    const resultsPromise = toolbox.execute(
       [
         { id: 'first', name: 'slow-first', arguments: {} },
         { id: 'second', name: 'fast-second', arguments: {} },
       ],
-      { mode: 'sequential', timeout: 10 },
+      {
+        mode: 'sequential',
+        timeout: 10,
+        now: runtime.clock.now,
+        setTimeoutFunction: runtime.timers.setTimeout,
+        clearTimeoutFunction: runtime.timers.clearTimeout,
+      },
     );
+    await runtime.advance(20);
+    releaseFirst();
+    const results = await resultsPromise;
 
     expect(results).toHaveLength(2);
     expect(results[1]).toMatchObject({ outcome: 'success', result: 'second' });
@@ -1029,15 +1058,26 @@ describe('createToolbox', () => {
         now: () => 10,
       }),
     ).resolves.toMatchObject({ outcome: 'error', errorCategory: 'timeout' });
-    await expect(
-      resumeToolbox.resumeApproval(approval, {
-        ...approvalExecutionOptions,
-        requestContext: {
-          ...approvalExecutionOptions.requestContext,
-          deadline: Date.now() + 5,
-        },
-      }),
-    ).resolves.toMatchObject({ outcome: 'error', errorCategory: 'timeout' });
+    const scheduledDeadlineRuntime = createManualRuntimeServices();
+    const scheduledDeadlineResult = resumeToolbox.resumeApproval(approval, {
+      ...approvalExecutionOptions,
+      requestContext: {
+        ...approvalExecutionOptions.requestContext,
+        deadline: scheduledDeadlineRuntime.clock.now() + 5,
+      },
+      now: scheduledDeadlineRuntime.clock.now,
+      setTimeoutFunction: scheduledDeadlineRuntime.timers.setTimeout,
+      clearTimeoutFunction: scheduledDeadlineRuntime.timers.clearTimeout,
+    });
+    await waitUntil(
+      () => scheduledDeadlineRuntime.pendingTimers().length > 0,
+      'scheduled deadline timer armed',
+    );
+    await scheduledDeadlineRuntime.advance(5);
+    await expect(scheduledDeadlineResult).resolves.toMatchObject({
+      outcome: 'error',
+      errorCategory: 'timeout',
+    });
     const controller = new AbortController();
     const pending = resumeToolbox.resumeApproval(approval, {
       ...approvalExecutionOptions,
@@ -1470,7 +1510,7 @@ describe('createToolbox', () => {
       paused.pendingApproval as SignedPendingToolApproval,
       {
         ...approvalExecutionOptions,
-        requestContext: { ...approvalRequestContext, deadline: Date.now() + 60_000 },
+        requestContext: { ...approvalRequestContext, deadline: Number.MAX_SAFE_INTEGER },
       },
     );
 
@@ -3936,6 +3976,7 @@ describe('createToolbox', () => {
   });
 
   it('settles a deadline-aborted parent after a cancellation-ignoring callback returns', async () => {
+    const runtime = createManualRuntimeServices();
     let release!: () => void;
     const toolbox = createMutableToolbox([
       createTool({
@@ -3952,9 +3993,15 @@ describe('createToolbox', () => {
     ]);
     const execution = toolbox.execute(
       { id: 'ignore-deadline-call', name: 'ignore-deadline-abort', arguments: {} },
-      { requestContext: { ...approvalRequestContext, deadline: Date.now() + 5 } },
+      {
+        requestContext: { ...approvalRequestContext, deadline: runtime.clock.now() + 5 },
+        now: runtime.clock.now,
+        setTimeoutFunction: runtime.timers.setTimeout,
+        clearTimeoutFunction: runtime.timers.clearTimeout,
+      },
     );
     while (!release) await Promise.resolve();
+    await runtime.advance(5);
     await expect(execution).resolves.toMatchObject({
       outcome: 'error',
       errorMessage: 'Execution deadline exceeded',
@@ -6550,7 +6597,7 @@ describe('createToolbox', () => {
       { id: 'controlled-issuance-success', name: 'controlled-issuance-success', arguments: {} },
       {
         ...approvalExecutionOptions,
-        requestContext: { ...approvalRequestContext, deadline: Date.now() + 1_000 },
+        requestContext: { ...approvalRequestContext, deadline: Number.MAX_SAFE_INTEGER },
         signal: successfulController.signal,
       },
     );

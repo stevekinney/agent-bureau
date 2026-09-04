@@ -1,5 +1,6 @@
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { createManualRuntimeServices } from 'lifecycle';
 import { z } from 'zod';
 
 import { createTool } from '../src/create-tool';
@@ -32,6 +33,11 @@ import {
  * - The actual MCP resource (Streamable HTTP), gated on a bearer token
  */
 function createMockOAuthMcpServer() {
+  // Mints client ids, authorization codes, and tokens for this in-process
+  // mock server's own bookkeeping (Map keys the real client never inspects
+  // for format) — a manual runtime's sequential identifiers and clock serve
+  // exactly as well as real randomness/wall-clock time here, deterministically.
+  const runtime = createManualRuntimeServices();
   const registeredClients = new Map<string, { client_id: string; redirect_uris: string[] }>();
   const issuedCodes = new Map<
     string,
@@ -85,12 +91,12 @@ function createMockOAuthMcpServer() {
 
       if (url.pathname === '/register' && request.method === 'POST') {
         const body = (await request.json()) as { redirect_uris: string[] };
-        const clientId = `client-${crypto.randomUUID()}`;
+        const clientId = `client-${runtime.identifiers.next('client')}`;
         registeredClients.set(clientId, { client_id: clientId, redirect_uris: body.redirect_uris });
         return Response.json({
           ...body,
           client_id: clientId,
-          client_id_issued_at: Math.floor(Date.now() / 1000),
+          client_id_issued_at: Math.floor(runtime.clock.now() / 1000),
         });
       }
 
@@ -107,7 +113,7 @@ function createMockOAuthMcpServer() {
           return new Response('invalid_request', { status: 400 });
         }
 
-        const code = `code-${crypto.randomUUID()}`;
+        const code = `code-${runtime.identifiers.next('code')}`;
         issuedCodes.set(code, {
           clientId: client.client_id,
           codeChallenge,
@@ -140,8 +146,8 @@ function createMockOAuthMcpServer() {
             return Response.json({ error: 'invalid_grant' }, { status: 400 });
           }
           issuedCodes.delete(code as string);
-          const accessToken = `access-${crypto.randomUUID()}`;
-          const refreshToken = `refresh-${crypto.randomUUID()}`;
+          const accessToken = `access-${runtime.identifiers.next('access-token')}`;
+          const refreshToken = `refresh-${runtime.identifiers.next('refresh-token')}`;
           accessTokens.set(accessToken, { clientId: entry.clientId });
           refreshTokens.set(refreshToken, { clientId: entry.clientId });
           return Response.json({
@@ -159,7 +165,7 @@ function createMockOAuthMcpServer() {
           if (!entry) {
             return Response.json({ error: 'invalid_grant' }, { status: 400 });
           }
-          const accessToken = `access-${crypto.randomUUID()}`;
+          const accessToken = `access-${runtime.identifiers.next('access-token')}`;
           accessTokens.set(accessToken, { clientId: entry.clientId });
           return Response.json({
             access_token: accessToken,
