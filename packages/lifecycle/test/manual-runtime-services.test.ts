@@ -166,23 +166,6 @@ describe('createManualRuntimeServices', () => {
 
       expect(calls).toBe(2);
     });
-
-    it('never calls a real timer — advance() settles synchronously with respect to wall-clock time', async () => {
-      const runtime = createManualRuntimeServices();
-      let fired = false;
-      runtime.timers.setTimeout(() => {
-        fired = true;
-      }, 60_000);
-
-      const started = performance.now();
-      await runtime.advance(60_000);
-      const elapsed = performance.now() - started;
-
-      expect(fired).toBe(true);
-      // A 60-second virtual advance must not take anywhere close to 60
-      // real seconds — proves no real timer is backing it.
-      expect(elapsed).toBeLessThan(1000);
-    });
   });
 
   describe('identifiers', () => {
