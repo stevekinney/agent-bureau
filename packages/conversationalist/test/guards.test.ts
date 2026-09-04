@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { createManualRuntimeServices } from 'lifecycle';
 
 import {
   isConversation,
@@ -16,8 +17,12 @@ import {
 import { Conversation } from '../src/history';
 import { CURRENT_SCHEMA_VERSION } from '../src/versioning';
 
+// Manual runtime standing in for the real clock (AB-321/AB-329) — this file never asserts
+// anything about a specific instant, only about guard behavior.
+const runtime = createManualRuntimeServices();
+
 describe('type guards', () => {
-  const now = new Date().toISOString();
+  const now = runtime.clock.nowISO();
   const message = {
     id: 'msg-1',
     role: 'user',

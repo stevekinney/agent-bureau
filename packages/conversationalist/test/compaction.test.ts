@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { createManualRuntimeServices } from 'lifecycle';
 
 import {
   calculateChunkSize,
@@ -25,6 +26,10 @@ const summarizingMock: Summarizer = async (messages) => {
 };
 
 const fixedEstimator = () => 10;
+
+// Manual runtime standing in for the real clock (AB-321/AB-329) — this file never asserts
+// anything about a specific instant, only about compaction behavior over literal messages.
+const runtime = createManualRuntimeServices();
 
 describe('summarizer-based compaction', () => {
   describe('partitionMessages', () => {
@@ -141,7 +146,7 @@ describe('summarizer-based compaction', () => {
         role: 'user' as const,
         content: `msg ${i}`,
         position: i,
-        createdAt: new Date().toISOString(),
+        createdAt: runtime.clock.nowISO(),
         metadata: {},
         hidden: false,
       }));
@@ -162,7 +167,7 @@ describe('summarizer-based compaction', () => {
           role: 'user',
           content: 'hi',
           position: 0,
-          createdAt: new Date().toISOString(),
+          createdAt: runtime.clock.nowISO(),
           metadata: {},
           hidden: false,
         },
@@ -171,7 +176,7 @@ describe('summarizer-based compaction', () => {
           role: 'tool-call',
           content: '',
           position: 1,
-          createdAt: new Date().toISOString(),
+          createdAt: runtime.clock.nowISO(),
           metadata: {},
           hidden: false,
           toolCall: { id: 'tc-1', name: 'tool', arguments: {} },
@@ -181,7 +186,7 @@ describe('summarizer-based compaction', () => {
           role: 'tool-result',
           content: 'result',
           position: 2,
-          createdAt: new Date().toISOString(),
+          createdAt: runtime.clock.nowISO(),
           metadata: {},
           hidden: false,
           toolResult: { callId: 'tc-1', outcome: 'success', content: 'data' },
@@ -191,7 +196,7 @@ describe('summarizer-based compaction', () => {
           role: 'user',
           content: 'follow up',
           position: 3,
-          createdAt: new Date().toISOString(),
+          createdAt: runtime.clock.nowISO(),
           metadata: {},
           hidden: false,
         },
@@ -217,7 +222,7 @@ describe('summarizer-based compaction', () => {
           role: 'user',
           content: 'big message',
           position: 0,
-          createdAt: new Date().toISOString(),
+          createdAt: runtime.clock.nowISO(),
           metadata: {},
           hidden: false,
         },
@@ -244,7 +249,7 @@ describe('summarizer-based compaction', () => {
           role: 'user',
           content: 'hi',
           position: 0,
-          createdAt: new Date().toISOString(),
+          createdAt: runtime.clock.nowISO(),
           metadata: {},
           hidden: false,
         },
@@ -253,7 +258,7 @@ describe('summarizer-based compaction', () => {
           role: 'tool-result',
           content: 'original data',
           position: 1,
-          createdAt: new Date().toISOString(),
+          createdAt: runtime.clock.nowISO(),
           metadata: {},
           hidden: false,
           toolResult: { callId: 'tc-1', outcome: 'success', content: { key: 'value' } },
@@ -275,7 +280,7 @@ describe('summarizer-based compaction', () => {
           role: 'assistant',
           content: 'response',
           position: 0,
-          createdAt: new Date().toISOString(),
+          createdAt: runtime.clock.nowISO(),
           metadata: {},
           hidden: false,
         },
@@ -299,7 +304,7 @@ describe('summarizer-based compaction', () => {
             },
           ],
           position: 0,
-          createdAt: new Date().toISOString(),
+          createdAt: runtime.clock.nowISO(),
           metadata: {},
           hidden: false,
         },
@@ -331,7 +336,7 @@ describe('summarizer-based compaction', () => {
             { type: 'container_upload', file_id: 'file-1' },
           ],
           position: 0,
-          createdAt: new Date().toISOString(),
+          createdAt: runtime.clock.nowISO(),
           metadata: {},
           hidden: false,
         },
@@ -361,7 +366,7 @@ describe('summarizer-based compaction', () => {
             },
           ],
           position: 0,
-          createdAt: new Date().toISOString(),
+          createdAt: runtime.clock.nowISO(),
           metadata: {},
           hidden: false,
         },
@@ -397,7 +402,7 @@ describe('summarizer-based compaction', () => {
             },
           ],
           position: 0,
-          createdAt: new Date().toISOString(),
+          createdAt: runtime.clock.nowISO(),
           metadata: {},
           hidden: false,
         },
@@ -427,7 +432,7 @@ describe('summarizer-based compaction', () => {
             { type: 'text', text: 'Final answer.' },
           ],
           position: 0,
-          createdAt: new Date().toISOString(),
+          createdAt: runtime.clock.nowISO(),
           metadata: {},
           hidden: false,
         },

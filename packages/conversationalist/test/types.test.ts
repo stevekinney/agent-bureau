@@ -1,4 +1,5 @@
 import { describe, expectTypeOf, it } from 'bun:test';
+import { createManualRuntimeServices } from 'lifecycle';
 
 import { Conversation } from '../src/history';
 import type { MultiModalContent } from '../src/multi-modal';
@@ -15,6 +16,10 @@ import type {
   ToolCall,
   ToolResult,
 } from '../src/types';
+
+// Manual runtime standing in for the real clock (AB-321/AB-329) — this file asserts only type
+// shapes, so one shared runtime for every timestamp read below is sufficient.
+const runtime = createManualRuntimeServices();
 
 describe('conversationalist types Type Inference', () => {
   describe('Conversation', () => {
@@ -65,7 +70,7 @@ describe('conversationalist types Type Inference', () => {
         callId: 'call-1',
         outcome: 'success',
         // @ts-expect-error - Date is not JSONValue
-        content: new Date(),
+        content: new Date(runtime.clock.now()),
       };
       void badResult;
     });
@@ -194,8 +199,8 @@ describe('conversationalist types Type Inference', () => {
         metadata: {},
         ids: [],
         messages: {},
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
+        createdAt: runtime.clock.nowISO(),
+        updatedAt: runtime.clock.nowISO(),
       };
 
       // @ts-expect-error - ids is readonly
