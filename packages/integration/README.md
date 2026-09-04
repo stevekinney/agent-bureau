@@ -107,6 +107,22 @@ AB-271's scope.
 this package's own suite sequencing described above beyond the one smoke
 scenario `scripts/run-tests.ts` includes.
 
+`fixture.ts` also accepts an optional `--gateway` flag (AB-275): it starts a
+real `Gateway` (a real `Bun.serve` loopback listener on an OS-assigned
+ephemeral port) over the same bureau, sharing this fixture's own
+`ManualRuntimeServices`, and reports the bound port as `detail.gatewayPort`
+on its `'ready'` marker. `runCrashScenario`'s own `CrashScenarioOptions`
+carries a matching `gateway?: boolean` to launch both processes with the
+flag, and an `onMarker` hook — invoked for every marker either process
+reports, before the harness decides how to answer it — so a caller can drive
+out-of-band work (a real HTTP/SSE/WebSocket client against the fixture's
+gateway) bracketed around one marker without re-implementing this file's own
+stdin/stdout pacing loop. `packages/gateway/src/conformance/restart.test.ts`
+(AB-275) is the one consumer today: it reaches these exports via a relative
+import rather than a workspace dependency, since `gateway` depending on
+`integration` would be circular (`integration` already depends on `gateway`
+to start the fixture's own gateway).
+
 ## Project Role
 
 Most packages prove their own behavior with unit tests. `integration` proves the larger Agent Bureau package graph: `armorer`, `conversationalist`, `operative`, and `@lostgradient/operative/store` must remain usable together after build output and runtime boundaries are involved.

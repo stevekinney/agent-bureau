@@ -23,6 +23,16 @@ export const CRASH_MARKERS = [
 
 export type CrashMarker = (typeof CRASH_MARKERS)[number];
 
+/**
+ * The fixed bearer token the optional gateway (AB-275, `fixture.ts`'s
+ * `--gateway` flag) is started with. Lives here — a pure data module with
+ * no top-level side effects — rather than in `fixture.ts` itself, so
+ * `packages/gateway/src/conformance/restart.test.ts` can import it without
+ * also importing (and thereby executing) `fixture.ts`'s own `main()`,
+ * which runs unconditionally at that module's top level.
+ */
+export const CRASH_FIXTURE_GATEWAY_AUTH_TOKEN = 'crash-fixture-gateway-test-token';
+
 const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
   z.union([
     z.string(),

@@ -19,6 +19,7 @@
     "armorer": "workspace:*",
     "bureau": "workspace:*",
     "conversationalist": "workspace:*",
+    "gateway": "workspace:*",
     "zod": "^4.4.3"
   },
   "devDependencies": {

@@ -2,7 +2,15 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "tsBuildInfoFile": "node_modules/.cache/tsconfig.tsbuildinfo",
-    "rootDir": ".",
+    // AB-275: no explicit `rootDir` here (unlike `tsconfig.build.json`,
+    // which fixes it to `./src` for the real declaration/emit pass) — this
+    // config is `noEmit` only (inherited from `tsconfig.base.json`), so
+    // nothing depends on rootDir-derived output paths. `restart.test.ts`
+    // reaches `packages/integration/test/crash/harness.ts` via a relative
+    // import (a normal workspace dependency there would be circular:
+    // `integration` already depends on `gateway`), which sits outside this
+    // package entirely — an explicit `rootDir: "."` would reject that as
+    // TS6059 ("not under rootDir") even though nothing is emitted from it.
     "paths": { "@/*": ["./src/*"] },
     "typeRoots": ["node_modules/@types"],
     "types": ["bun"]
