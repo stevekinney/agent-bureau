@@ -1,9 +1,0 @@
----
-'@lostgradient/operative': minor
----
-
-Adds the `'general'`/`'privileged'` model catalog projection (AB-64's Catalog discipline, AC8, implemented by AB-247/mod-02e).
-
-`packages/operative/src/providers/model-catalog-projection.ts` is new and exports `projectDescriptor(descriptor, projection)`, `projectCatalog(catalog, projection)`, and `GENERAL_PROJECTION_REDACTED_KEYS`. Both functions are synchronous, pure, and return deeply frozen values, reading neither the environment nor the clock. `'privileged'` returns a structural copy of the input, dropping nothing. `'general'` redacts exactly what AC8 names: `pricing` is omitted entirely; `endpoint` is reduced to its bare operation name with any host or origin detail stripped; `endpointAmbiguous` is omitted, because it discloses that a custom base URL or proxy is configured; and any account-level quota field is omitted (`BackendDescriptor` has none today — `GENERAL_PROJECTION_REDACTED_KEYS` is the guard a future addition must clear). `availability`, `health`, `source`, and `freshness` are retained, so a caller can still tell an unavailable backend from an available one.
-
-`packages/bureau`'s `BureauAgentCatalog<D>` gains `generationProfile(name: string): AgentGenerationProfile | undefined` — the `'general'`-projection form of the named agent's generation profile, `projection: 'general'` stamped on the result, or `undefined` for an unknown name. `createAgentCatalog(agents, options?)` gains a `CreateAgentCatalogOptions.selectorAvailable?: boolean` parameter (default `false`); when `true`, a `'selectable'` agent's catalog-read profile reports `selector: 'available'`. The read is computed once at `createAgentCatalog` call time, cached, and side-effect-free: repeated reads for the same name return the identical object by reference. `bureau` is a private package and carries no changeset of its own.
