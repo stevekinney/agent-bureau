@@ -11,6 +11,16 @@ import { COMBINED_OPERATIVE_EVENT_TYPES } from '../events';
 import type { GenerateFunction, GenerateResponse, StepResult } from '../types';
 import { createEventRecorder } from './event-recorder';
 
+export type { BaselineReplayResult, ReproductionArtifact, ScriptedOutcome } from './artifact-io';
+export {
+  assembleBaselineArtifact,
+  InvalidReproductionArtifactError,
+  readReproductionArtifact,
+  replayReproductionArtifact,
+  ReproductionArtifactMismatchError,
+  runBaselineReplayCase,
+  writeReproductionArtifact,
+} from './artifact-io';
 export type { Barrier, BarrierRegistry, BarrierState } from './barriers';
 export { createBarrierRegistry } from './barriers';
 export {
@@ -74,6 +84,14 @@ export type {
   ResourceScope,
 } from './resource-scope';
 export { createResourceScope, QuiescenceError } from './resource-scope';
+export type { BoundedScheduleOptions, BoundedScheduleReport, Schedule } from './schedule-runner';
+export {
+  DuplicatePartyNameError,
+  InvalidMaximumSchedulesError,
+  InvalidPartyCountError,
+  runBoundedSchedules,
+  UnsupportedScenarioError,
+} from './schedule-runner';
 export type {
   ScriptedGenerate,
   ScriptedGenerateCall,
