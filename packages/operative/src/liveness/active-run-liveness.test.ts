@@ -114,7 +114,10 @@ describe('createActiveRunLiveness (default real clock)', () => {
 
     expect(liveness.snapshot().startedAt).toBe(runtime.clock.nowISO());
 
-    liveness.setStatus('waiting');
+    // AB-336: `setStatus`'s parameter type now excludes `'waiting'` —
+    // `'aborting'` exercises the identical `lastTransitionAt` behavior this
+    // test targets (any non-`'waiting'` transition does).
+    liveness.setStatus('aborting');
     expect(liveness.snapshot().lastTransitionAt).toBe(runtime.clock.nowISO());
 
     liveness.dispose();
