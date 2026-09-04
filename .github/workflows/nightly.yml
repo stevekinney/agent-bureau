@@ -1,0 +1,104 @@
+name: Nightly
+
+# AB-282/tst-09e — the slower-cadence lanes AB-100 says must not run on
+# every pull request: the full process-crash marker matrix (every marker,
+# both persistent backends once AB-271 lands — SQLite only until then), the
+# full Gateway conformance lane, and the Cloudflare real-runtime lane. Each
+# already runs on the pull-request lane in reduced or absent form (the crash
+# lane as a single smoke scenario in `ci.yml`'s `crash-conformance-smoke`
+# job; gateway conformance already runs in full on every pull request via
+# `validate`'s own step — this job re-runs it nightly so a flake surfaces on
+# a schedule too, independent of pull-request volume; cloudflare
+# conformance is not wired into `ci.yml` at all, so this is its only lane).
+#
+# Schedule: 09:00 UTC. The most recent 100 `ci.yml` runs, checked when this
+# workflow was added, cluster between 19:00 and 02:00 UTC with zero runs
+# anywhere in the 03:00-18:00 UTC band — 09:00 UTC sits well inside that
+# quiet gap, so the nightly lanes never contend with pull-request-lane
+# runners for the shared Actions concurrency budget and a red run shows up
+# on its own, not buried in same-hour pull-request noise. `workflow_dispatch`
+# lets a release reviewer trigger the same three lanes on demand instead of
+# waiting for the schedule — see `documentation/testing-cadence.md` for why
+# a green nightly is required release evidence.
+on:
+  schedule:
+    - cron: '0 9 * * *'
+  workflow_dispatch: {}
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # No job below retries a failed step and none raises a timeout relative to
+  # the pull-request lane's own jobs (none of which sets `timeout-minutes`
+  # either) — a flake here is a defect to root-cause, not a limit to widen
+  # (AB-100). This workflow opens no issue on failure; a red run is visible
+  # on the repository's Actions page and named in
+  # `documentation/testing-cadence.md` as required release evidence, so a
+  # release must not proceed while the most recent scheduled run is red.
+
+  crash-conformance-full:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build crash-conformance dependencies
+        run: bun run turbo run build --filter=integration
+
+      # Every marker in the matrix, over every backend the harness supports
+      # today (SQLite; LMDB joins when AB-271 lands — see
+      # `documentation/testing-cadence.md`). No `--test-name-pattern`, unlike
+      # the pull-request lane's single smoke scenario.
+      - name: Crash-conformance full matrix
+        run: time bun run test:crash-conformance
+
+  gateway-conformance-full:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Gateway real-transport conformance (full)
+        run: time bun run test:gateway-conformance
+
+  cloudflare-conformance:
+    # AB-99/AB-276's own verification step: this lane is Linux-only.
+    # `ubuntu-latest` already satisfies that; the constraint is stated
+    # explicitly here rather than left implicit, per this issue's own
+    # acceptance criterion.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Cloudflare real-runtime conformance (workerd/Miniflare)
+        run: time bun run test:cloudflare-conformance

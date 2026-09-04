@@ -96,8 +96,70 @@ jobs:
       - name: Bureau tarball-boundary verification (AB-23)
         run: bun run verify:bureau:tarball-boundary
 
+  # AB-282/tst-05a — the fast black-box lifecycle contract matrix (AB-268).
+  # `bun run integration` runs `turbo run integration --filter=integration`,
+  # which runs the `integration` package's own `bun run validate` — its
+  # format/lint/types/test pipeline, including
+  # `test/lifecycle-contract/contract.test.ts` (the registered matrix) and
+  # every adapter suite under `test/lifecycle-contract/adapters/`. This is a
+  # separate job from `validate` above (which already runs each package's
+  # own `test` task through Turborepo) so a contract-matrix failure is its
+  # own reported check, not buried inside the aggregate `validate` job.
+  lifecycle-contract:
+    runs-on: ubuntu-latest
+    env:
+      # The reproduction-artifact contract documented in
+      # `documentation/testing-cadence.md`: a scenario that wants a failure
+      # reproducible from the run page writes its assembled artifact (via
+      # `writeReproductionArtifact`, AB-267's `@lostgradient/operative/test`)
+      # to this directory. The upload step below picks up whatever lands
+      # there.
+      REPRODUCTION_ARTIFACT_DIR: ${{ runner.temp }}/reproduction-artifacts
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Lifecycle contract matrix (AB-268, tst-05a)
+        run: time bun run integration
+
+      # A failing lifecycle fixture prints the full `QuiescenceReport`
+      # (`BureauQuiescenceError`'s message, from `packages/bureau/src/test/quiescence.ts`)
+      # straight into this step's own output — no extra wiring needed for the
+      # ownership-tree text. This step separately picks up any reproduction
+      # artifact a failing scenario wrote to the shared
+      # `${{ runner.temp }}/reproduction-artifacts/` directory (the contract
+      # documented in `documentation/testing-cadence.md`) so it survives past
+      # the ephemeral runner. No suite writes there today — `if-no-files-found:
+      # ignore` keeps this a no-op until one does — but the writer
+      # (`writeReproductionArtifact`, AB-267's `@lostgradient/operative/test`)
+      # already exists, so a failing scenario can start writing to it without
+      # a workflow change.
+      - name: Upload reproduction artifact (if generated)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reproduction-artifacts-lifecycle-contract
+          path: ${{ runner.temp }}/reproduction-artifacts/
+          if-no-files-found: ignore
+          retention-days: 14
+
   crash-conformance-smoke:
     runs-on: ubuntu-latest
+    env:
+      REPRODUCTION_ARTIFACT_DIR: ${{ runner.temp }}/reproduction-artifacts
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -113,9 +175,26 @@ jobs:
       - name: Build crash-conformance dependencies
         run: bun run turbo run build --filter=integration
 
-      # AB-270 — real process-kill recovery conformance over SQLite. Only
-      # the smoke-tagged scenario runs on the pull-request lane; the full
-      # marker matrix (`bun run test:crash-conformance`) runs at tst-09e's
-      # slower cadence.
-      - name: Crash-conformance smoke scenario
-        run: time bun test packages/integration/test/crash/sqlite.test.ts --test-name-pattern smoke
+      # AB-270/AB-282 — real process-kill recovery conformance over SQLite.
+      # Only the single `[smoke]`-tagged scenario (a kill-vs-control honesty
+      # pair: killing at the 'checkpoint-committed' marker recovers a
+      # committed effect; a 'run-started' control killed before that marker
+      # never reaches it) runs on the pull-request lane. The selection
+      # mechanism is the `--test-name-pattern smoke` argument below, passed
+      # through the stable `test:crash-conformance` root command rather than
+      # invoking `bun test` directly, so the pull-request lane and the full
+      # nightly matrix (`bun run test:crash-conformance` with no pattern —
+      # every marker, both backends once AB-271 lands) share one root
+      # command. AB-100 rules out running every crash permutation on every
+      # pull request; the full matrix runs at `nightly.yml`'s cadence.
+      - name: Crash-conformance smoke scenario (checkpoint-committed vs. run-started)
+        run: time bun run test:crash-conformance -- --test-name-pattern smoke
+
+      - name: Upload reproduction artifact (if generated)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reproduction-artifacts-crash-smoke
+          path: ${{ runner.temp }}/reproduction-artifacts/
+          if-no-files-found: ignore
+          retention-days: 14
