@@ -14,7 +14,7 @@ import type { RunCursor } from '../durable/types';
 import type { OperativeHookMap } from '../hooks';
 import { createSessionStore } from '../session/create-session-store';
 import type { GenerateResponse } from '../types';
-import { type Barrier, createBarrierRegistry } from './barriers';
+import { createBarrierRegistry } from './barriers';
 import { createManualCheckpointStore } from './durable-engine';
 import { createEventRecorder } from './event-recorder';
 import { createMockGenerate } from './index';
@@ -23,26 +23,6 @@ import { createScriptedHook, createScriptedTool } from './scripted-tool';
 
 function textResponse(content: string): GenerateResponse {
   return { content, toolCalls: [] };
-}
-
-/**
- * Bridges a scripted double's own `{ kind: 'block' }` barrier to a
- * `BarrierRegistry`-managed `Barrier`, for the three coordination points
- * whose public placement surface IS the scripted double's `reached`/
- * `release` pair (model call, tool call, hook phase). The scripted double
- * remains the actual suspension point; the registry's barrier is the gate
- * between the double's arrival and its release — so the registry's own
- * `inspect()`/CausalTraceEntry recording genuinely observes this
- * coordination point, not a second, disconnected barrier.
- */
-async function bridgeScriptedBlock(
-  scripted: { reached(name: string): Promise<void>; release(name: string): void },
-  scriptedBarrierName: string,
-  barrier: Barrier,
-): Promise<void> {
-  await scripted.reached(scriptedBarrierName);
-  await barrier.arrive();
-  scripted.release(scriptedBarrierName);
 }
 
 const RUN_CURSOR: RunCursor = {
@@ -290,12 +270,10 @@ describe('createBarrierRegistry — CausalTraceEntry recording', () => {
 describe("createBarrierRegistry — placement at AB-95's nine coordination points", () => {
   it('a model call, through a scripted generate block step (tst-02f)', async () => {
     const runtime = createManualRuntimeServices();
-    const registry = createBarrierRegistry();
     const generate = createScriptedGenerate([
       { kind: 'block', barrier: 'model' },
       { kind: 'respond', response: textResponse('done') },
     ]);
-    const barrier = registry.barrier('model-call');
     const order: string[] = [];
 
     const activeRun = createActiveRun({
@@ -307,15 +285,14 @@ describe("createBarrierRegistry — placement at AB-95's nine coordination point
     });
     void activeRun.result.then(() => order.push('run-completed'));
 
-    const bridgeDone = bridgeScriptedBlock(generate, 'model', barrier).then(() =>
-      order.push('barrier-released'),
-    );
-    await barrier.reached();
-    expect(barrier.inspect().pending).toBe(true);
+    await generate.reached('model');
+    // The block step arrives at and releases through the SAME named
+    // Barrier a test obtains from `generate.barriers` — no separate bridge.
+    expect(generate.barriers.barrier('model').inspect().pending).toBe(true);
     expect(order).toEqual([]);
 
-    barrier.release();
-    await bridgeDone;
+    order.push('barrier-released');
+    generate.release('model');
     await activeRun.result;
 
     expect(order).toEqual(['barrier-released', 'run-completed']);
@@ -323,12 +300,10 @@ describe("createBarrierRegistry — placement at AB-95's nine coordination point
 
   it('a tool call, through a scripted tool block step (tst-02f)', async () => {
     const runtime = createManualRuntimeServices();
-    const registry = createBarrierRegistry();
     const tool = createScriptedTool('search', [
       { kind: 'block', barrier: 'tool' },
       { kind: 'resolve', result: 'ok' },
     ]);
-    const barrier = registry.barrier('tool-call');
     const order: string[] = [];
 
     const activeRun = createActiveRun({
@@ -343,15 +318,12 @@ describe("createBarrierRegistry — placement at AB-95's nine coordination point
     });
     void activeRun.result.then(() => order.push('run-completed'));
 
-    const bridgeDone = bridgeScriptedBlock(tool, 'tool', barrier).then(() =>
-      order.push('barrier-released'),
-    );
-    await barrier.reached();
-    expect(barrier.inspect().pending).toBe(true);
+    await tool.reached('tool');
+    expect(tool.barriers.barrier('tool').inspect().pending).toBe(true);
     expect(order).toEqual([]);
 
-    barrier.release();
-    await bridgeDone;
+    order.push('barrier-released');
+    tool.release('tool');
     await activeRun.result;
 
     expect(order).toEqual(['barrier-released', 'run-completed']);
@@ -359,12 +331,10 @@ describe("createBarrierRegistry — placement at AB-95's nine coordination point
 
   it('a hook phase, through a scripted hook block step (tst-02f)', async () => {
     const runtime = createManualRuntimeServices();
-    const registry = createBarrierRegistry();
     const hook = createScriptedHook('after-tool', [
       { kind: 'block', barrier: 'hook' },
       { kind: 'resolve', value: undefined },
     ]);
-    const barrier = registry.barrier('hook-phase');
     const order: string[] = [];
 
     const hooks = new HookRegistry<OperativeHookMap>();
@@ -384,15 +354,12 @@ describe("createBarrierRegistry — placement at AB-95's nine coordination point
     });
     void activeRun.result.then(() => order.push('run-completed'));
 
-    const bridgeDone = bridgeScriptedBlock(hook, 'hook', barrier).then(() =>
-      order.push('barrier-released'),
-    );
-    await barrier.reached();
-    expect(barrier.inspect().pending).toBe(true);
+    await hook.reached('hook');
+    expect(hook.barriers.barrier('hook').inspect().pending).toBe(true);
     expect(order).toEqual([]);
 
-    barrier.release();
-    await bridgeDone;
+    order.push('barrier-released');
+    hook.release('hook');
     await activeRun.result;
 
     expect(order).toEqual(['barrier-released', 'run-completed']);
@@ -460,8 +427,6 @@ describe("createBarrierRegistry — placement at AB-95's nine coordination point
   });
 
   it('a child registration, through dispatchChildRun + ChildRunRegistry (AB-50)', async () => {
-    const registry = createBarrierRegistry();
-    const barrier = registry.barrier('child-registration');
     const order: string[] = [];
 
     const generate = createScriptedGenerate([
@@ -488,15 +453,12 @@ describe("createBarrierRegistry — placement at AB-95's nine coordination point
     expect(childRegistry.children()).toHaveLength(1);
     expect(childRegistry.children()[0]?.status).toBe('running');
 
-    const bridgeDone = bridgeScriptedBlock(generate, 'child', barrier).then(() =>
-      order.push('barrier-released'),
-    );
-    await barrier.reached();
-    expect(barrier.inspect().pending).toBe(true);
+    await generate.reached('child');
+    expect(generate.barriers.barrier('child').inspect().pending).toBe(true);
     expect(childRegistry.children()[0]?.status).toBe('running');
 
-    barrier.release();
-    await bridgeDone;
+    order.push('barrier-released');
+    generate.release('child');
     await handle.result();
     // Let the registry's own result().then(settle) callback run.
     await Promise.resolve();
@@ -574,12 +536,10 @@ describe("createBarrierRegistry — placement at AB-95's nine coordination point
 
   it('a cleanup boundary, through ActiveRun.closed()', async () => {
     const runtime = createManualRuntimeServices();
-    const registry = createBarrierRegistry();
     const tool = createScriptedTool('search', [
       { kind: 'block', barrier: 'cleanup' },
       { kind: 'resolve', result: 'ok' },
     ]);
-    const barrier = registry.barrier('cleanup-boundary');
     const order: string[] = [];
 
     const activeRun = createActiveRun({
@@ -594,15 +554,12 @@ describe("createBarrierRegistry — placement at AB-95's nine coordination point
     });
     void activeRun.closed().then(() => order.push('closed'));
 
-    const bridgeDone = bridgeScriptedBlock(tool, 'cleanup', barrier).then(() =>
-      order.push('barrier-released'),
-    );
-    await barrier.reached();
-    expect(barrier.inspect().pending).toBe(true);
+    await tool.reached('cleanup');
+    expect(tool.barriers.barrier('cleanup').inspect().pending).toBe(true);
     expect(order).toEqual([]);
 
-    barrier.release();
-    await bridgeDone;
+    order.push('barrier-released');
+    tool.release('cleanup');
     await activeRun.result;
     await activeRun.closed();
 
