@@ -5,7 +5,13 @@ import {
   APPROVAL_BINDING_VERSION,
   ApprovalBindingError,
   createProcessLocalApprovalStateStore,
+  createProcessLocalGrantStateStore,
+  GRANT_VERSION,
+  GrantError,
+  type ReusableApprovalGrant,
+  signGrant,
   validateApprovalBinding,
+  verifyGrantSignature,
 } from '../src/approval-binding';
 
 const binding = {
@@ -184,5 +190,158 @@ describe('approval binding state', () => {
       expiresAt: runtime.clock.now() + 1_000,
     };
     await expect(store.issue(replacement)).resolves.toBeUndefined();
+  });
+});
+
+const grantSecret = 'grant-secret';
+
+function buildGrant(overrides: Partial<ReusableApprovalGrant> = {}): ReusableApprovalGrant {
+  const base: ReusableApprovalGrant = {
+    version: GRANT_VERSION,
+    id: 'grant:nonce-1',
+    principalId: 'principal',
+    tenantId: 'tenant',
+    ownerId: 'owner',
+    agentId: 'agent',
+    toolName: 'tool',
+    resourcePattern: 'resource:*',
+    argumentConstraints: { path: 'string' },
+    scope: 'run',
+    issuedAt: 10_000_000_000_000,
+    expiresAt: 10_000_000_000_200,
+    maxUses: 3,
+    usesRemaining: 3,
+    policyRevision: 'policy-1',
+    revoked: false,
+    delegationBehavior: 'does-not-propagate',
+    signature: '',
+    ...overrides,
+  };
+  return { ...base, signature: overrides.signature ?? signGrant(base, grantSecret) };
+}
+
+describe('reusable approval grant state', () => {
+  it('exports GRANT_VERSION as 1', () => {
+    expect(GRANT_VERSION).toBe(1);
+  });
+
+  it('issues a grant, initializing usesRemaining to maxUses', async () => {
+    const store = createProcessLocalGrantStateStore();
+    const grant = buildGrant({ maxUses: 5, usesRemaining: 5 });
+    await store.issue(grant);
+    await expect(store.get(grant.id)).resolves.toEqual(grant);
+  });
+
+  it('initializes usesRemaining to maxUses even if a different value is supplied on issue', async () => {
+    const store = createProcessLocalGrantStateStore();
+    const grant = buildGrant({ maxUses: 5, usesRemaining: 5 });
+    const tampered = { ...grant, usesRemaining: 999 };
+    await store.issue(tampered);
+    await expect(store.get(grant.id)).resolves.toEqual({ ...grant, usesRemaining: 5 });
+  });
+
+  it('lists every issued grant', async () => {
+    const store = createProcessLocalGrantStateStore();
+    const first = buildGrant({ id: 'grant:first' });
+    const second = buildGrant({ id: 'grant:second' });
+    await store.issue(first);
+    await store.issue(second);
+    await expect(store.list()).resolves.toEqual(expect.arrayContaining([first, second]));
+    await expect(store.list()).resolves.toHaveLength(2);
+  });
+
+  it('returns undefined from get for an unknown grant id', async () => {
+    const store = createProcessLocalGrantStateStore();
+    await expect(store.get('grant:unknown')).resolves.toBeUndefined();
+  });
+
+  it('revokes a grant, setting revoked to true', async () => {
+    const store = createProcessLocalGrantStateStore();
+    const grant = buildGrant();
+    await store.issue(grant);
+    await store.revoke(grant.id);
+    const revoked = await store.get(grant.id);
+    expect(revoked?.revoked).toBe(true);
+  });
+
+  it('revoking an already-revoked grant is idempotent and does not throw', async () => {
+    const store = createProcessLocalGrantStateStore();
+    const grant = buildGrant();
+    await store.issue(grant);
+    await store.revoke(grant.id);
+    await expect(store.revoke(grant.id)).resolves.toBeUndefined();
+    const revoked = await store.get(grant.id);
+    expect(revoked?.revoked).toBe(true);
+  });
+
+  it('revoking an unknown grant does not throw', async () => {
+    const store = createProcessLocalGrantStateStore();
+    await expect(store.revoke('grant:unknown')).resolves.toBeUndefined();
+  });
+
+  it('decrements usesRemaining and returns the new value', async () => {
+    const store = createProcessLocalGrantStateStore();
+    const grant = buildGrant({ maxUses: 2, usesRemaining: 2 });
+    await store.issue(grant);
+    await expect(store.decrementUse(grant.id)).resolves.toEqual({ usesRemaining: 1 });
+    await expect(store.decrementUse(grant.id)).resolves.toEqual({ usesRemaining: 0 });
+    const decremented = await store.get(grant.id);
+    expect(decremented?.usesRemaining).toBe(0);
+  });
+
+  it('never decrements usesRemaining below zero', async () => {
+    const store = createProcessLocalGrantStateStore();
+    const grant = buildGrant({ maxUses: 1, usesRemaining: 1 });
+    await store.issue(grant);
+    await store.decrementUse(grant.id);
+    await expect(store.decrementUse(grant.id)).resolves.toEqual({ usesRemaining: 0 });
+    await expect(store.decrementUse(grant.id)).resolves.toEqual({ usesRemaining: 0 });
+  });
+
+  it('throws GrantError with code not-found when decrementing an unknown grant', async () => {
+    const store = createProcessLocalGrantStateStore();
+    await expect(store.decrementUse('grant:unknown')).rejects.toThrow(GrantError);
+    await expect(store.decrementUse('grant:unknown')).rejects.toMatchObject({
+      code: 'not-found',
+    });
+  });
+
+  it('only decrementUse mutates usesRemaining; issue, get, list, and revoke never touch it', async () => {
+    const store = createProcessLocalGrantStateStore();
+    const grant = buildGrant({ maxUses: 4, usesRemaining: 4 });
+    await store.issue(grant);
+    await store.revoke(grant.id);
+    const listed = await store.list();
+    const fromList = listed.find((entry) => entry.id === grant.id);
+    expect(fromList?.usesRemaining).toBe(4);
+    const fetched = await store.get(grant.id);
+    expect(fetched?.usesRemaining).toBe(4);
+  });
+});
+
+describe('reusable approval grant signing', () => {
+  it('produces a signature that verifies against the grant it was signed for', () => {
+    const grant = buildGrant();
+    expect(() => verifyGrantSignature(grant, grantSecret)).not.toThrow();
+  });
+
+  it('rejects a grant whose signature does not match its current field values', () => {
+    const grant = buildGrant();
+    const tampered = { ...grant, usesRemaining: grant.usesRemaining - 1 };
+    expect(() => verifyGrantSignature(tampered, grantSecret)).toThrow(GrantError);
+    expect(() => verifyGrantSignature(tampered, grantSecret)).toThrow(
+      'Reusable approval grant signature is invalid.',
+    );
+  });
+
+  it('rejects a grant signed with a different secret', () => {
+    const grant = buildGrant();
+    expect(() => verifyGrantSignature(grant, 'a-different-secret')).toThrow(GrantError);
+  });
+
+  it('produces a different signature for a tampered maxUses field, even if usesRemaining matches', () => {
+    const grant = buildGrant({ maxUses: 3, usesRemaining: 3 });
+    const tampered = { ...grant, maxUses: 30 };
+    expect(signGrant(tampered, grantSecret)).not.toBe(grant.signature);
   });
 });

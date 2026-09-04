@@ -398,6 +398,49 @@ A complete `ApprovalStateStore` implementation must implement every method used 
 - `revoke(binding)`: atomically move an issued binding to `revoked`; revoking an already consumed binding must fail, and revoking an already revoked binding may be idempotent.
 - `state(binding)`: return `issued`, `consumed`, `revoked`, or `undefined` for the binding key; recovery uses this to restore missing issued bindings without reviving consumed or revoked approvals.
 
+### Reusable Approval Grants
+
+A `ReusableApprovalGrant` lets a matching future tool call skip human review entirely, bounded by principal, agent, tool, resource pattern, argument constraints, scope, expiry, use count, policy revision, revocation, and delegation behavior:
+
+```ts
+import {
+  createProcessLocalGrantStateStore,
+  GRANT_VERSION,
+  signGrant,
+  verifyGrantSignature,
+  type ReusableApprovalGrant,
+} from 'armorer';
+
+const grantStore = createProcessLocalGrantStateStore();
+
+const grant: ReusableApprovalGrant = {
+  version: GRANT_VERSION,
+  id: 'grant:nonce-1',
+  principalId: 'principal-1',
+  tenantId: 'tenant-1',
+  ownerId: 'owner-1',
+  agentId: 'agent-1',
+  toolName: 'read-file',
+  scope: 'session',
+  issuedAt: Date.now(),
+  expiresAt: Date.now() + 60 * 60 * 1000,
+  maxUses: 5,
+  usesRemaining: 5,
+  policyRevision: 'policy-1',
+  revoked: false,
+  delegationBehavior: 'does-not-propagate',
+  signature: '',
+};
+const signed = { ...grant, signature: signGrant(grant, approvalSecret) };
+
+await grantStore.issue(signed);
+verifyGrantSignature(await grantStore.get(signed.id)!, approvalSecret); // throws GrantError on tamper
+await grantStore.decrementUse(signed.id); // { usesRemaining: 4 }
+await grantStore.revoke(signed.id); // idempotent; never throws on an unknown or already-revoked id
+```
+
+`signGrant` and `verifyGrantSignature` use the same HMAC primitive as `signPendingApproval`, applied to every grant field except `signature` itself. `createProcessLocalGrantStateStore()` is process-local, in-memory storage: `issue` always initializes `usesRemaining` to `maxUses` regardless of what the caller passed, and `decrementUse` is the only method that ever changes `usesRemaining`, floored at `0`. This module only owns the grant type, storage, and signing primitives — matching a grant against an incoming tool call ahead of policy evaluation, and the Bureau-layer `issueGrant`/`revokeGrant`/`listGrants` wiring, are out of scope here.
+
 ### Request Authority and Execution Projections
 
 A toolbox is a tenant-neutral catalog. Authority belongs to each `execute()` call through `requestContext`; do not bake principals, tenant credentials, or authorization decisions into a reusable toolbox. Armorer freezes the host identity before policy evaluation. A policy decision may return a `capabilities` subset to narrow authority, but it cannot grant capabilities the host did not provide.

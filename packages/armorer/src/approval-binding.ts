@@ -1,5 +1,7 @@
+import { hmacSha256HexSync, timingSafeEqualHex } from 'interoperability';
 import { createDefaultRuntimeServices } from 'lifecycle';
 
+import type { JsonValue } from './core/serialization/json';
 import { stableStringifyJson } from './core/serialization/json';
 import type { ToolRequestContext } from './execution-context';
 
@@ -304,6 +306,123 @@ export function createProcessLocalApprovalStateStore(
         purgeExpired(now);
         const key = keyOf(binding);
         return issued.has(key) ? 'issued' : terminal.get(key)?.state;
+      });
+    },
+  };
+}
+
+// Reusable approval grants (AB-46, AB-345). A grant lets a matching future
+// tool call skip human review entirely; grant *matching* and issuance
+// wiring belong to AB-346, this module only owns the type, storage, and
+// signing primitives.
+
+export const GRANT_VERSION = 1 as const;
+
+export interface ReusableApprovalGrant {
+  readonly version: typeof GRANT_VERSION;
+  readonly id: string; // `grant:${nonce}`
+  readonly principalId: string;
+  readonly tenantId: string;
+  readonly ownerId: string;
+  /** The agent definition this grant applies to; '*' matches any agent under the same principal. */
+  readonly agentId: string;
+  /** Tool name or a named operation family; exact match only. Pattern matching is scoped to `resourcePattern`. */
+  readonly toolName: string;
+  /** Glob-style pattern checked against a caller-declared resource field in the tool's arguments; absent means any resource. */
+  readonly resourcePattern?: string;
+  /** Zod-schema-shaped constraints checked against the resumed arguments using the same validation `resumeApproval` performs. */
+  readonly argumentConstraints?: Record<string, unknown>;
+  readonly scope: 'run' | 'session' | 'principal';
+  readonly issuedAt: number;
+  readonly expiresAt: number;
+  readonly maxUses: number;
+  readonly usesRemaining: number;
+  readonly policyRevision: string; // reuses armorer's existing policyRevision
+  readonly revoked: boolean;
+  /** Whether this grant's authority is visible to a delegated child run. AB-52 owns the attenuation arithmetic. */
+  readonly delegationBehavior: 'inherits-to-children' | 'does-not-propagate';
+  readonly signature: string; // HMAC, same primitive as `signPendingApproval` (`create-toolbox.ts`)
+}
+
+export class GrantError extends Error {
+  constructor(
+    message: string,
+    readonly code: 'not-found' | 'invalid-signature',
+  ) {
+    super(message);
+    this.name = 'GrantError';
+  }
+}
+
+export interface GrantStateStore {
+  issue(grant: ReusableApprovalGrant): Promise<void>;
+  revoke(id: string): Promise<void>;
+  get(id: string): Promise<ReusableApprovalGrant | undefined>;
+  list(): Promise<ReusableApprovalGrant[]>;
+  decrementUse(id: string): Promise<{ usesRemaining: number }>;
+}
+
+function grantSignaturePayload(
+  grant: ReusableApprovalGrant,
+): Omit<ReusableApprovalGrant, 'signature'> {
+  const { signature: _signature, ...payload } = grant;
+  return payload;
+}
+
+function normalizeGrantSignaturePayload(
+  payload: Omit<ReusableApprovalGrant, 'signature'>,
+): JsonValue {
+  const serialized = JSON.stringify(payload);
+  return JSON.parse(serialized) as JsonValue;
+}
+
+/** Signs a grant's canonical fields (every field but `signature`) with the same HMAC primitive `signPendingApproval` uses. */
+export function signGrant(grant: ReusableApprovalGrant, secret: string): string {
+  return hmacSha256HexSync(
+    secret,
+    stableStringifyJson(normalizeGrantSignaturePayload(grantSignaturePayload(grant))),
+  );
+}
+
+/** Verifies a grant's signature against its current field values; throws `GrantError` with code `invalid-signature` on mismatch. */
+export function verifyGrantSignature(grant: ReusableApprovalGrant, secret: string): void {
+  if (!timingSafeEqualHex(grant.signature, signGrant(grant, secret))) {
+    throw new GrantError('Reusable approval grant signature is invalid.', 'invalid-signature');
+  }
+}
+
+/** Process-local, in-memory reusable-grant storage. Grant matching (AB-346) is layered on top of this. */
+export function createProcessLocalGrantStateStore(): GrantStateStore {
+  const grants = new Map<string, ReusableApprovalGrant>();
+
+  return {
+    issue(grant) {
+      return Promise.resolve().then(() => {
+        grants.set(grant.id, { ...grant, usesRemaining: grant.maxUses });
+      });
+    },
+    revoke(id) {
+      return Promise.resolve().then(() => {
+        const grant = grants.get(id);
+        if (!grant) return;
+        grants.set(id, { ...grant, revoked: true });
+      });
+    },
+    get(id) {
+      return Promise.resolve().then(() => grants.get(id));
+    },
+    list() {
+      return Promise.resolve().then(() => Array.from(grants.values()));
+    },
+    decrementUse(id) {
+      return Promise.resolve().then(() => {
+        const grant = grants.get(id);
+        if (!grant) {
+          throw new GrantError('Reusable approval grant was not found.', 'not-found');
+        }
+        const usesRemaining = Math.max(0, grant.usesRemaining - 1);
+        grants.set(id, { ...grant, usesRemaining });
+        return { usesRemaining };
       });
     },
   };
