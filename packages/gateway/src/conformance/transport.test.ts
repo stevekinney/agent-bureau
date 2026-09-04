@@ -18,6 +18,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import type { OutputValidator } from '@lostgradient/operative';
 import { createAgent } from '@lostgradient/operative';
 import { describe, expect, it } from 'bun:test';
+import { waitForRunState } from 'bureau/test';
 
 import type { LoopbackGateway } from '../test/loopback';
 import { LoopbackTransportUnsupportedError, startLoopbackGateway } from '../test/loopback';
@@ -582,6 +583,71 @@ describe('Gateway transport conformance — Bun runtime', () => {
           await privilegedWs.waitForClose();
           await nonPrivilegedWs.waitForClose();
         }
+      },
+    );
+  });
+
+  it('AB-323: a runs:read (non-privileged) key reading GET /api/v1/runs/:id never sees response.validated.original, while an admin key does', async () => {
+    const secret = 'sk-real-secret-do-not-leak-ab323-run-detail';
+    const redactedText = '[redacted]';
+    const secretValidator: OutputValidator = {
+      name: 'secret-detector',
+      validate: async (output) => ({
+        valid: !output.includes(secret),
+        category: 'secret',
+        confidence: 1,
+        redacted: redactedText,
+      }),
+    };
+
+    await withGateway(
+      () =>
+        startLoopbackGateway({
+          agents: {},
+          generate: immediateGenerate(`Contact us at ${secret} for help.`),
+          guardrails: { output: { validators: [secretValidator], action: 'redact' } },
+        }),
+      async (gateway) => {
+        const scopedToken = await createScopedKey(gateway, [SCOPE.RUNS_READ]);
+
+        const runResponse = await gateway.fetch('/api/v1/runs', {
+          method: 'POST',
+          headers: { ...authHeader(gateway), 'content-type': 'application/json' },
+          body: JSON.stringify({ message: 'leak it' }),
+        });
+        expect(runResponse.status).toBe(201);
+        const run = (await runResponse.json()) as { id: string };
+        await waitForRunState(gateway.bureau, run.id);
+
+        function findResponseValidated(body: { events: { event: string; detail: unknown }[] }) {
+          return body.events.find((event) => event.event === 'response.validated');
+        }
+
+        const adminResponse = await gateway.fetch(`/api/v1/runs/${run.id}`, {
+          headers: authHeader(gateway),
+        });
+        expect(adminResponse.status).toBe(200);
+        const adminBody = (await adminResponse.json()) as {
+          events: { event: string; detail: unknown }[];
+        };
+        expect(JSON.stringify(adminBody)).toContain(secret);
+        const adminDetail = findResponseValidated(adminBody)?.detail as {
+          original?: { content?: string };
+        };
+        expect(adminDetail.original?.content).toBe(`Contact us at ${secret} for help.`);
+
+        const scopedResponse = await gateway.fetch(`/api/v1/runs/${run.id}`, {
+          headers: { authorization: `Bearer ${scopedToken}` },
+        });
+        expect(scopedResponse.status).toBe(200);
+        const scopedBody = (await scopedResponse.json()) as {
+          events: { event: string; detail: unknown }[];
+        };
+        expect(JSON.stringify(scopedBody)).not.toContain(secret);
+        const scopedDetail = findResponseValidated(scopedBody)?.detail as {
+          original?: { content?: string };
+        };
+        expect(scopedDetail.original?.content).toBe(redactedText);
       },
     );
   });

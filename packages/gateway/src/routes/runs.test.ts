@@ -1,8 +1,8 @@
-import type { GenerateFunction, Toolbox } from '@lostgradient/operative';
+import type { GenerateFunction, OutputValidator, Toolbox } from '@lostgradient/operative';
 import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createTool, createToolbox, type ToolRequestContext } from 'armorer';
 import { describe, expect, it, spyOn } from 'bun:test';
-import { BureauError } from 'bureau';
+import { BureauError, createBureau } from 'bureau';
 import { Hono } from 'hono';
 
 import { errorHandler } from '../middleware/error-handler';
@@ -17,6 +17,7 @@ import {
 import type { Bureau, PendingReview, PendingToolApprovalReview, RunEventRecord } from '../types';
 import {
   assembleRunTimeline,
+  buildRunDetailResponse,
   classifyRunAttachment,
   createRunsRoutes,
   findParkedReview,
@@ -697,5 +698,118 @@ describe('runs routes error mapping (stub bureau)', () => {
 
     const response = await app.request('/api/v1/runs/any', { method: 'DELETE' });
     expect(response.status).toBe(500);
+  });
+});
+
+// ── AB-323: GET /api/v1/runs/:id's response.validated privilege projection ──
+//
+// AB-305 redacted `response.validated`'s pre-guardrail `original` on the
+// live SSE/WebSocket wire only, leaving this REST run-detail route serving
+// the bureau's action log directly under the same `runs:read` scope guard —
+// a scoped, non-privileged key could still read the raw pre-guardrail
+// content here. The coordinator's AB-323 ruling: the projection is a
+// property of the principal, not the transport, so this route applies the
+// exact same `projectRunEventForPrivilege` (`../live-events`) the live wire
+// and the AB-312 durable-history paging routes already apply.
+describe('GET /api/v1/runs/:id — AB-323 response.validated privilege projection', () => {
+  const RAW_SECRET = 'sk-real-secret-do-not-leak-ab323';
+  const REDACTED_TEXT = '[redacted]';
+
+  function createSecretValidator(): OutputValidator {
+    return {
+      name: 'secret-detector',
+      validate: async (output) => ({
+        valid: !output.includes(RAW_SECRET),
+        category: 'secret',
+        confidence: 1,
+        redacted: REDACTED_TEXT,
+      }),
+    };
+  }
+
+  async function buildRunWithSecret() {
+    const bureau = await createBureau({
+      agents: {},
+      generate: async () => ({
+        content: `Contact us at ${RAW_SECRET} for help.`,
+        toolCalls: [],
+      }),
+      guardrails: { output: { validators: [createSecretValidator()], action: 'redact' } },
+    });
+    const app = new Hono();
+    app.route('/api/v1/runs', createRunsRoutes(bureau));
+
+    const createResponse = await app.request('/api/v1/runs', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: 'leak it' }),
+    });
+    const { id } = (await createResponse.json()) as { id: string };
+    await waitForRunState(bureau, id);
+    return { bureau, app, id };
+  }
+
+  function findResponseValidated(events: RunEventRecord[]): RunEventRecord | undefined {
+    return events.find((event) => event.event === 'response.validated');
+  }
+
+  it('redacts response.validated.original for a runs:read-scoped (non-privileged) key', async () => {
+    const { app, id } = await buildRunWithSecret();
+
+    const response = await app.request(`/api/v1/runs/${id}`, {
+      headers: { 'x-api-key-scopes': 'runs:read' },
+    });
+    expect(response.status).toBe(200);
+
+    const body = (await response.json()) as { events: RunEventRecord[]; timeline: unknown };
+    expect(JSON.stringify(body)).not.toContain(RAW_SECRET);
+
+    const validatedEvent = findResponseValidated(body.events);
+    expect(validatedEvent).toBeDefined();
+    const detail = validatedEvent?.detail as { original?: { content?: string } };
+    expect(detail.original?.content).toBe(REDACTED_TEXT);
+  });
+
+  it('delivers response.validated.original unredacted for an admin (empty-scope) key', async () => {
+    const { app, id } = await buildRunWithSecret();
+
+    const response = await app.request(`/api/v1/runs/${id}`, {
+      headers: { 'x-api-key-scopes': '' },
+    });
+    expect(response.status).toBe(200);
+
+    const body = (await response.json()) as { events: RunEventRecord[] };
+    expect(JSON.stringify(body)).toContain(RAW_SECRET);
+
+    const validatedEvent = findResponseValidated(body.events);
+    const detail = validatedEvent?.detail as { original?: { content?: string } };
+    expect(detail.original?.content).toBe(`Contact us at ${RAW_SECRET} for help.`);
+  });
+
+  it('delivers response.validated.original unredacted for a missing x-api-key-scopes header (static token / unauthenticated)', async () => {
+    const { app, id } = await buildRunWithSecret();
+
+    const response = await app.request(`/api/v1/runs/${id}`);
+    expect(response.status).toBe(200);
+
+    const body = await response.json();
+    expect(JSON.stringify(body)).toContain(RAW_SECRET);
+  });
+
+  it('assembles the timeline from the SAME projected events — never a raw reconstruction from the unprojected action log', async () => {
+    const { app, id } = await buildRunWithSecret();
+
+    const response = await app.request(`/api/v1/runs/${id}`, {
+      headers: { 'x-api-key-scopes': 'runs:read' },
+    });
+    const body = await response.json();
+    expect(JSON.stringify(body.timeline)).not.toContain(RAW_SECRET);
+  });
+
+  it('buildRunDetailResponse applies the redacted projection when called directly with privileged: false', async () => {
+    const { bureau, id } = await buildRunWithSecret();
+
+    const detail = buildRunDetailResponse(bureau, id, false);
+    expect(JSON.stringify(detail)).not.toContain(RAW_SECRET);
   });
 });

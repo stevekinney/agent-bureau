@@ -1001,13 +1001,47 @@ asking, decided once at the delivery boundary rather than left to every
 consumer to reason about. Every other event type passes through this
 projection unchanged — this is the only wire type it touches today.
 
-This decision is scoped to the live SSE/WebSocket wire only. A caller with
-`runs:read` (but not admin) can still read a run's full, unprojected
-`response.validated.original` through `GET /api/v1/runs/:id`'s assembled
-timeline, which serves the bureau's action log directly — the REST surface
-carries the same scope guard as `/api/v1/events` but was not part of
-AB-305's delivery boundary. Whether that REST path needs the same
-projection is a separate, not-yet-made decision.
+### The projection is a property of the principal, not the transport (AB-323)
+
+AB-305's own scope was the live SSE/WebSocket wire only, which left a gap:
+a caller with `runs:read` (but not admin) could still read a run's full,
+unprojected `response.validated.original` through `GET /api/v1/runs/:id`'s
+assembled timeline, which serves the bureau's action log directly — the
+REST surface carried the same scope guard as `/api/v1/events` but was not
+part of AB-305's delivery boundary. AB-323's coordinator ruling closes it:
+the projection decision belongs to the connection's principal, never to
+which transport happens to be carrying the event, so every gateway surface
+that returns a recorded or live event to a caller applies the exact same
+projection.
+
+`packages/gateway/src/live-events.ts` factors the actual redaction decision
+into one function, `projectResponseValidatedPayload` (module-private —
+every caller reaches it only through one of three thin, shape-specific
+adapters, so the decision itself cannot fork):
+
+- `projectFrameForPrivilege` — the live wire's `ServerFrame` (unchanged
+  from AB-305, now delegating to the shared core).
+- `projectDurableEventForPrivilege` — the durable-history `DurableEventEnvelope`
+  AB-312's `GET .../:id/events` paging routes already apply (unchanged from
+  AB-312, now delegating to the shared core).
+- `projectRunEventForPrivilege` (new) — the REST run-detail `RunEventRecord`.
+  `routes/runs.ts`'s `buildRunDetailResponse` — shared by `GET
+/api/v1/runs/:id` and the SSR `/runs/:id` page, so both surfaces embed
+  the same projected `RunDetail.events` — maps every event through it
+  before `assembleRunTimeline` builds the timeline from them, so a
+  non-privileged caller's timeline is derived from the SAME projected
+  events its `events` array carries, never a raw reconstruction from the
+  unprojected action log underneath.
+
+Nothing about `response.validated`'s in-process contract or the durable
+audit trail changes: `event.original`/`event.validated` both stay full,
+pre/post-guardrail values in process, and `GET /api/v1/audit` (guarded by
+`sessions:read`, not `runs:read`) still serves the bureau's action log
+directly, unprojected, by design — the audit trail is the one place a
+privileged-enough reader is deliberately meant to see the complete,
+unredacted record. The projection applies to every OTHER surface that
+returns a recorded or live event to a caller, so the REST paths and the
+live wire cannot drift apart from each other again.
 
 ## Started-work control contract
 

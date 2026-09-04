@@ -15,6 +15,7 @@ import {
   GATEWAY_CONNECTION_POLICY,
   LIVENESS_POLICY_VERSION,
 } from '@lostgradient/operative/liveness';
+import type { RunEventRecord } from 'bureau';
 import { RUN_DURABLE_EVENT_TYPES } from 'bureau';
 
 import type { ServerFrame } from './types';
@@ -373,18 +374,45 @@ function isResponseValidatedDetail(detail: unknown): detail is ResponseValidated
  * the in-memory replay buffer (and the durable audit trail, which reads
  * the bureau's own action log directly, never through this broker) always
  * holds the full, unprojected frame.
+ *
+ * A thin adapter over {@link projectResponseValidatedPayload} — see that
+ * function's doc comment for why the actual redaction decision lives there
+ * and nowhere else.
  */
 function projectFrameForPrivilege(frame: ServerFrame, privileged: boolean): ServerFrame {
-  if (privileged) return frame;
-  if (frame.type !== 'event' || frame.event !== RESPONSE_VALIDATED_EVENT_TYPE) return frame;
-  if (!isResponseValidatedDetail(frame.detail)) return frame;
+  if (frame.type !== 'event') return frame;
+  const projectedDetail = projectResponseValidatedPayload(frame.event, frame.detail, privileged);
+  if (projectedDetail === frame.detail) return frame;
+
+  return { ...frame, detail: projectedDetail };
+}
+
+/**
+ * The ONE shared AB-305/AB-323 projection decision, factored out so every
+ * representation of a recorded or live event — a live `ServerFrame`
+ * (`projectFrameForPrivilege`), a `DurableEventEnvelope`
+ * (`projectDurableEventForPrivilege`), and a REST run-detail
+ * `RunEventRecord` (`projectRunEventForPrivilege`, `routes/runs.ts`) — makes
+ * the SAME call. AB-323's coordinator ruling: "the projection is a
+ * property of the principal, not the transport" — every gateway surface
+ * that returns recorded or live events to a caller applies this function,
+ * so the REST paths and the live wire cannot drift apart. A no-op for
+ * every event type except `response.validated`, and a no-op there too for
+ * a privileged caller (see {@link RESPONSE_VALIDATED_REDACTION_MARKER}'s
+ * doc comment for what a non-privileged caller sees instead).
+ */
+function projectResponseValidatedPayload(
+  eventType: string,
+  payload: unknown,
+  privileged: boolean,
+): unknown {
+  if (privileged) return payload;
+  if (eventType !== RESPONSE_VALIDATED_EVENT_TYPE) return payload;
+  if (!isResponseValidatedDetail(payload)) return payload;
 
   return {
-    ...frame,
-    detail: {
-      ...frame.detail,
-      original: RESPONSE_VALIDATED_REDACTION_MARKER,
-    },
+    ...payload,
+    original: RESPONSE_VALIDATED_REDACTION_MARKER,
   };
 }
 
@@ -400,22 +428,43 @@ function projectFrameForPrivilege(frame: ServerFrame, privileged: boolean): Serv
  * is a no-op today for every event actually flowing through the store —
  * the SAME redaction guard exists here regardless, so a future durable
  * kind that DOES carry this shape is covered without a second review.
+ *
+ * A thin adapter over {@link projectResponseValidatedPayload}.
  */
 export function projectDurableEventForPrivilege(
   envelope: DurableEventEnvelope,
   privileged: boolean,
 ): DurableEventEnvelope {
-  if (privileged) return envelope;
-  if (envelope.kind !== RESPONSE_VALIDATED_EVENT_TYPE) return envelope;
-  if (!isResponseValidatedDetail(envelope.payload)) return envelope;
+  const projectedPayload = projectResponseValidatedPayload(
+    envelope.kind,
+    envelope.payload,
+    privileged,
+  );
+  if (projectedPayload === envelope.payload) return envelope;
 
-  return {
-    ...envelope,
-    payload: {
-      ...envelope.payload,
-      original: RESPONSE_VALIDATED_REDACTION_MARKER,
-    },
-  };
+  return { ...envelope, payload: projectedPayload };
+}
+
+/**
+ * The REST run-detail analog of {@link projectFrameForPrivilege} (AB-323):
+ * applied to each `RunEventRecord` in `RunDetail.events` before
+ * `GET /api/v1/runs/:id` (and the matching SSR `/runs/:id` page) serve
+ * them — the coordinator's AB-323 ruling closes the gap AB-305's own
+ * subsection left open: a `runs:read`-scoped, non-privileged key must not
+ * be able to read `response.validated`'s raw pre-guardrail `original` here
+ * just because this REST path serves the bureau's action log directly
+ * rather than going through the live wire's `LiveFrameBroker`.
+ *
+ * A thin adapter over {@link projectResponseValidatedPayload}.
+ */
+export function projectRunEventForPrivilege(
+  event: RunEventRecord,
+  privileged: boolean,
+): RunEventRecord {
+  const projectedDetail = projectResponseValidatedPayload(event.event, event.detail, privileged);
+  if (projectedDetail === event.detail) return event;
+
+  return { ...event, detail: projectedDetail };
 }
 
 /**
