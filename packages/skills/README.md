@@ -272,7 +272,7 @@ import {
 - **`rejectProposal(store, id, options?)`**: Records the proposal's content hash as rejected so duplicates are blocked.
 - **`listProposals(store, options?)`**: Returns all stored proposals.
 - **`getProposal(store, id)`**: Returns a single `Proposal` by ID, or `undefined`.
-- **`clearProposals(store)`**: Removes all proposals from storage.
+- **`clearProposals(store, options?)`**: Removes all proposals from storage. `options.runtime` (a `RuntimeServices` from `lifecycle`) controls the clock used for `options.olderThanMs` age comparisons; defaults to the real clock.
 - **`isRejectedPattern(store, content)`**: Returns `true` if the content hash matches a previously rejected proposal.
 
 ---

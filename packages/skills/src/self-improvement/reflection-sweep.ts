@@ -1,4 +1,6 @@
 import type { TextValueStore } from '@lostgradient/weft/storage';
+import type { RuntimeServices } from 'lifecycle';
+import { createDefaultRuntimeServices } from 'lifecycle';
 
 import type { MemoryLike, StepResultLike } from '../skill-memory';
 import type { SkillProvider } from '../types';
@@ -102,6 +104,12 @@ export interface ReflectionSweepOptions {
    * When omitted, a default is derived from the run's final content.
    */
   proposalSummary?: (runSummary: string, content: string) => string;
+
+  /**
+   * Runtime services to read time and identifiers from when creating a
+   * proposal. Defaults to the real clock and randomness.
+   */
+  runtime?: RuntimeServices;
 }
 
 // ── Run Summary ──────────────────────────────────────────────────────────────
@@ -173,7 +181,8 @@ async function routeToProposal(
   content: string,
   agentId: string | undefined,
   result: StepResultLike,
-  proposalSummary?: (runSummary: string, content: string) => string,
+  proposalSummary: ((runSummary: string, content: string) => string) | undefined,
+  runtime: RuntimeServices,
 ): Promise<void> {
   // Do not resurrect proposals the human has already rejected.
   // rejectProposal() records the content hash precisely to prevent this.
@@ -185,13 +194,13 @@ async function routeToProposal(
     : `${type} proposal from run on step ${result.step + 1}: ${content.slice(0, 80)}`;
 
   await saveProposal(storage, {
-    id: crypto.randomUUID(),
+    id: runtime.identifiers.next(type),
     type,
     summary: defaultSummary,
     content,
     agentId,
     sourceEntryIds: [],
-    createdAt: new Date().toISOString(),
+    createdAt: runtime.clock.nowISO(),
     status: 'pending',
   });
 }
@@ -238,6 +247,7 @@ export function reflectionSweep(options: ReflectionSweepOptions): {
   onStep: (result: StepResultLike) => Promise<void>;
 } {
   const { sink, reflect, shouldReflect, proposalSummary } = options;
+  const runtime = options.runtime ?? createDefaultRuntimeServices();
 
   return {
     async onStep(result: StepResultLike): Promise<void> {
@@ -261,6 +271,7 @@ export function reflectionSweep(options: ReflectionSweepOptions): {
             sink.agentId,
             result,
             proposalSummary,
+            runtime,
           );
           return;
         }
@@ -273,6 +284,7 @@ export function reflectionSweep(options: ReflectionSweepOptions): {
             sink.agentId,
             result,
             proposalSummary,
+            runtime,
           );
           return;
         }
@@ -285,6 +297,7 @@ export function reflectionSweep(options: ReflectionSweepOptions): {
             sink.agentId,
             result,
             proposalSummary,
+            runtime,
           );
           return;
         }

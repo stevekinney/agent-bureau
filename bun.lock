@@ -358,6 +358,7 @@
         "armorer": "workspace:*",
         "gray-matter": "^4.0.3",
         "interoperability": "workspace:*",
+        "lifecycle": "workspace:*",
         "zod": "^4.4.3",
       },
       "devDependencies": {
