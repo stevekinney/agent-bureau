@@ -3,9 +3,13 @@ import { describe, expect, it } from 'bun:test';
 import type { FlowControlTrigger } from '../../src/scheduler/create-flow-controller';
 import { createFlowController } from '../../src/scheduler/create-flow-controller';
 
+// AB-330: a plain per-process counter instead of Math.random() — these ids
+// only need to be distinct within a test run, not unpredictable.
+let nextTriggerId = 0;
+
 function trigger(overrides: Partial<FlowControlTrigger> = {}): FlowControlTrigger {
   return {
-    runId: `run-${Math.random().toString(36).slice(2)}`,
+    runId: `run-${(nextTriggerId++).toString(36)}`,
     agentName: 'support-agent',
     source: 'api',
     message: 'hello',

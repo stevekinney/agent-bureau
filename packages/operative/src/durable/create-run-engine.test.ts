@@ -13,7 +13,7 @@ import { afterEach, describe, expect, it, spyOn } from 'bun:test';
 
 import { WorkflowVersionMismatchEvent } from '../events';
 import { createCheckpointStore } from './checkpoint-store';
-import { createRunEngine, type RegistryAgnosticEngine } from './create-run-engine';
+import { createRunEngine } from './create-run-engine';
 
 // A run is "parked" — not finished — when its status is neither completed nor a
 // failure terminal. Asserting non-terminal (rather than a specific intermediate
@@ -90,22 +90,21 @@ function makeRecoverableServicesWorkflow(sleepMilliseconds: number) {
 // so an armed poller drives the run to completion promptly; they await `result()`,
 // so a starved poller delays the test rather than failing it falsely.
 const DURABLE_SLEEP_MILLISECONDS = 50;
-// Sleep duration used by the negative (unarmed-poller) tests: short enough that
-// a real-time poller WOULD fire it within POLLER_DETECTION_WINDOW_MS, making those
-// tests falsifiable — they fail if createRunEngine accidentally arms the scheduler.
+// Sleep duration used by the negative (unarmed-poller) test below and the
+// (AB-330-split) poller-unarmed proof tests in
+// create-run-engine-poller-unarmed.test.ts — short enough that a real-time
+// poller would fire it quickly, making those tests falsifiable.
 const PARKED_SLEEP_MILLISECONDS = DURABLE_SLEEP_MILLISECONDS;
 // Scheduler poll interval injected into negative-test engines so that an
-// accidentally armed poller fires expired timers within a few milliseconds,
-// well inside POLLER_DETECTION_WINDOW_MS.
+// accidentally armed poller fires expired timers within a few milliseconds.
 const DETECTION_SCHEDULER_POLL_INTERVAL_MS = 1;
-// Window (ms) to wait after the run parks before asserting it is still
-// non-terminal. Must be > PARKED_SLEEP_MILLISECONDS + several
-// DETECTION_SCHEDULER_POLL_INTERVAL_MS cycles so a misfiring poller would have
-// fired the now-expired timer before the assertion runs.
-const POLLER_DETECTION_WINDOW_MS = PARKED_SLEEP_MILLISECONDS * 3 + 50;
-// Margin added past a parked timer's deadline when ticking the scheduler manually,
-// so the now-due timer is unambiguously expired regardless of small clock drift.
-const TICK_DEADLINE_MARGIN_MILLISECONDS = 60_000;
+// Fixed, arbitrarily far-future epoch millisecond value used to drive
+// maintenance/scheduler ticks unambiguously past a parked timer's deadline.
+// Not derived from the real clock (AB-330): the deadline itself is computed
+// from Weft's real getNow() when ctx.sleep() ran, bounded by whenever the
+// test executes — far short of this constant — so any sufficiently distant
+// future instant works just as well as `Date.now() + margin`.
+const FAR_FUTURE_EPOCH_MILLISECONDS = 4_102_444_800_000; // 2100-01-01T00:00:00.000Z
 
 // Logged by makeSleepingWorkflow on the step BEFORE ctx.sleep. Observing it via
 // the onLog sink is positive proof the generator actually reached the sleep —
@@ -141,65 +140,6 @@ async function pollUntil(predicate: () => boolean | Promise<boolean>): Promise<v
     await yieldToPortableEventLoop();
   }
   throw new Error('pollUntil exceeded its attempt bound before the condition held');
-}
-
-/**
- * Assert a run parks on its durable `ctx.sleep` because nothing drives the
- * scheduler, then fires the moment the scheduler is driven explicitly. Falsifiable
- * and deterministic — it asserts scheduler STATE in three steps:
- *  1. Poll the inline launch until the pre-sleep marker arrives AND the run is
- *     `running` (proof the generator reached the sleep and the durable timer is
- *     persisted, not that the run merely never started) — generously bounded so
- *     inline-launch starvation under full bun-test concurrency cannot turn it red.
- *  2. Wait a real-time detection window ({@link POLLER_DETECTION_WINDOW_MS}) and
- *     then assert the run is non-terminal. The caller must create the engine with
- *     `schedulerPollIntervalMs: DETECTION_SCHEDULER_POLL_INTERVAL_MS` (1ms) and
- *     `PARKED_SLEEP_MILLISECONDS` sleep so that an accidentally-armed poller fires
- *     the now-expired timer well before the window closes — making the test fail
- *     when `createRunEngine` inadvertently enables the scheduler.
- *  3. Tick the scheduler directly past the deadline (the deterministic seam the
- *     durable-heartbeat tests use) and assert the now-due timer fires the run to
- *     `completed` — proof the run was genuinely parked on the durable timer and
- *     only advances when the scheduler runs, never on its own while unarmed.
- * `result()` is never awaited, so engine disposal has no pending promise to reject.
- */
-async function assertRunStaysParkedWhenPollerUnarmed(
-  engine: RegistryAgnosticEngine,
-  reachedSleepMarkers: readonly WorkflowLogRecord[],
-) {
-  const handle = await engine.start('agentRun', { value: 21 });
-  // Drive the deferred inline launch until the generator has provably reached
-  // ctx.sleep (its pre-sleep marker logged) and parked (`running`, so the durable
-  // timer is persisted and tickable below).
-  await pollUntil(async () => {
-    if (reachedSleepMarkers.length < 1) return false;
-    const snapshot = await handle.snapshot();
-    return snapshot !== null && !TERMINAL_STATUSES.has(snapshot.status);
-  });
-  expect(reachedSleepMarkers.length).toBe(1);
-  // Give a real-time poller adequate opportunity to fire the due timer. The
-  // engine under test uses DETECTION_SCHEDULER_POLL_INTERVAL_MS (1ms), so if
-  // startScheduler is accidentally enabled, the poller fires many times and the
-  // now-expired sleep completes the run before this window closes. Asserting
-  // non-terminal here is the falsifiable gate: it fails when the poller misfires.
-  await new Promise<void>((resolve) => setTimeout(resolve, POLLER_DETECTION_WINDOW_MS));
-  const parkedSnapshot = await handle.snapshot();
-  expect(parkedSnapshot).not.toBeNull();
-  expect(TERMINAL_STATUSES.has(parkedSnapshot!.status)).toBe(false);
-  // Drive the scheduler directly past the timer's deadline. The durable sleep is
-  // real, so the now-due timer fires and the run completes — proving it was parked
-  // on the timer (not stalled for another reason) and only advances when the
-  // scheduler runs, which never happened on its own while the poller was unarmed.
-  await engine.scheduler.tick(
-    Date.now() + PARKED_SLEEP_MILLISECONDS + TICK_DEADLINE_MARGIN_MILLISECONDS,
-  );
-  await pollUntil(async () => {
-    const snapshot = await handle.snapshot();
-    return snapshot !== null && TERMINAL_STATUSES.has(snapshot.status);
-  });
-  const firedSnapshot = await handle.snapshot();
-  expect(firedSnapshot).not.toBeNull();
-  expect(firedSnapshot!.status).toBe('completed');
 }
 
 describe('createRunEngine', () => {
@@ -722,75 +662,12 @@ describe('createRunEngine', () => {
     }
   });
 
-  it('leaves durable ctx.sleep timers parked under recover:false without startScheduler (#590)', async () => {
-    // The inverse: with the poller unarmed (the recover:false default), nothing
-    // drives the durable sleep, so the run parks on the timer. Falsifiable and
-    // deterministic: the run reaches the sleep (pre-sleep marker arrives), stays
-    // non-terminal through the POLLER_DETECTION_WINDOW_MS window (an accidentally-
-    // armed poller with DETECTION_SCHEDULER_POLL_INTERVAL_MS interval would fire the
-    // now-expired PARKED_SLEEP_MILLISECONDS sleep before the window closes), then
-    // only completes when the scheduler is ticked explicitly.
-    //
-    // The spy is placed BEFORE engine creation so any accidental Scheduler.start()
-    // call inside Engine.create is captured — directly proving the poller is never
-    // armed, not merely that it hasn't fired yet.
-    const schedulerStartSpy = spyOn(Scheduler.prototype, 'start');
-    const reachedSleep: WorkflowLogRecord[] = [];
-    const { engine } = await createRunEngine({
-      storage: new MemoryStorage(),
-      runWorkflow: makeSleepingWorkflow(PARKED_SLEEP_MILLISECONDS),
-      recover: false,
-      schedulerPollIntervalMs: DETECTION_SCHEDULER_POLL_INTERVAL_MS,
-      onLog: (record) => {
-        if (record.message === REACHED_SLEEP_MARKER) reachedSleep.push(record);
-      },
-    });
-
-    try {
-      // Direct proof: recover:false with no startScheduler must never call
-      // Scheduler.start(), so the real-time polling interval is never set up.
-      expect(schedulerStartSpy).not.toHaveBeenCalled();
-      await assertRunStaysParkedWhenPollerUnarmed(engine, reachedSleep);
-    } finally {
-      schedulerStartSpy.mockRestore();
-      engine[Symbol.dispose]();
-    }
-  });
-
-  it('does not arm the scheduler when startScheduler:false overrides recover:true (#590)', async () => {
-    // The full cross-product: startScheduler:false suppresses the poller even
-    // though recovery runs (recover:true). This exercises the branch where the
-    // option is explicitly forwarded to override Weft's `recover !== false`
-    // default, so the durable sleep stays parked. Same falsifiable proof as the
-    // recover:false case (reached-sleep marker, non-terminal through detection
-    // window, then fires on an explicit scheduler tick).
-    //
-    // The spy is placed BEFORE engine creation so any accidental Scheduler.start()
-    // call inside Engine.create is captured — directly proving the poller is never
-    // armed even when recovery itself runs.
-    const schedulerStartSpy = spyOn(Scheduler.prototype, 'start');
-    const reachedSleep: WorkflowLogRecord[] = [];
-    const { engine } = await createRunEngine({
-      storage: new MemoryStorage(),
-      runWorkflow: makeSleepingWorkflow(PARKED_SLEEP_MILLISECONDS),
-      recover: true,
-      startScheduler: false,
-      schedulerPollIntervalMs: DETECTION_SCHEDULER_POLL_INTERVAL_MS,
-      onLog: (record) => {
-        if (record.message === REACHED_SLEEP_MARKER) reachedSleep.push(record);
-      },
-    });
-
-    try {
-      // Direct proof: startScheduler:false must suppress the call even when
-      // recover:true — Scheduler.start() must never be invoked.
-      expect(schedulerStartSpy).not.toHaveBeenCalled();
-      await assertRunStaysParkedWhenPollerUnarmed(engine, reachedSleep);
-    } finally {
-      schedulerStartSpy.mockRestore();
-      engine[Symbol.dispose]();
-    }
-  });
+  // AB-330: the two "poller stays unarmed" negative-proof tests
+  // (recover:false without startScheduler, and startScheduler:false
+  // overriding recover:true) moved to
+  // `create-run-engine-poller-unarmed.test.ts` — they need a real detection
+  // window (see that file's header comment), which is a real-runtime
+  // exemption, so they're isolated from this otherwise-deterministic file.
 
   it('supports host-driven maintenance without starting background intervals', async () => {
     const schedulerStartSpy = spyOn(Scheduler.prototype, 'start');
@@ -813,9 +690,7 @@ describe('createRunEngine', () => {
         return snapshot !== null && !TERMINAL_STATUSES.has(snapshot.status);
       });
 
-      await engine.runMaintenance(
-        Date.now() + PARKED_SLEEP_MILLISECONDS + TICK_DEADLINE_MARGIN_MILLISECONDS,
-      );
+      await engine.runMaintenance(FAR_FUTURE_EPOCH_MILLISECONDS);
       await pollUntil(async () => {
         const snapshot = await handle.snapshot();
         return snapshot?.status === 'completed';
@@ -942,61 +817,11 @@ describe('createRunEngine ownership (AB-178)', () => {
     }
   });
 
-  it("lets a surviving engine adopt a workflow after the crashed holder's claim lapses (crash-and-adopt)", async () => {
-    const storage = new MemoryStorage();
-    // A short claim TTL/renewal so the test does not wait out Weft's real 30s
-    // default; `backgroundTasks: 'manual'` on both engines means the TTL only
-    // lapses on the wall clock — nothing here silently arms a background
-    // renewal loop that could mask the crash.
-    const claimTtlMs = 30;
-    const a = await createRunEngine({
-      storage,
-      runWorkflow: makeParkingWorkflow(),
-      recover: false,
-      ownership: 'workflow-lease',
-      workflowClaimTtlMs: claimTtlMs,
-      workflowClaimRenewIntervalMs: 10,
-      backgroundTasks: 'manual',
-    });
-
-    const handle = await a.engine.start('agentRun', { value: 5 });
-    await pollUntil(() => isParkedRunning(handle));
-
-    // Simulate a crash: A is never disposed and never renews its claim again
-    // (backgroundTasks: 'manual' means nothing renews it automatically). The
-    // claim's expiry is a genuine wall-clock quantity inside weft (its
-    // `getNow` is not injectable through the public `Engine.create` surface),
-    // so waiting it out needs a real timer — bounded to a small multiple of
-    // the (already tiny) configured TTL, covering both the TTL itself and
-    // weft's own takeover-eligibility grace window on top of it
-    // (`WORKFLOW_CLAIM_TAKEOVER_GRACE_MULTIPLIER`), not a tuned guess.
-    await new Promise((resolve) => setTimeout(resolve, claimTtlMs * 10));
-
-    const b = await createRunEngine({
-      storage,
-      runWorkflow: makeParkingWorkflow(),
-      recover: false,
-      ownership: 'workflow-lease',
-      workflowClaimTtlMs: claimTtlMs,
-      workflowClaimRenewIntervalMs: 10,
-      backgroundTasks: 'manual',
-    });
-
-    try {
-      // Driving B's maintenance once runs its claim-renewal task, which scans
-      // for reclaimable (expired-claim) workflows and takes them over — the
-      // same mechanism a real host's periodic maintenance call would trigger.
-      await b.engine.runMaintenance(Date.now());
-
-      const bHandle = await b.engine.resume(handle.id);
-      expect(bHandle).toBeDefined();
-      await b.engine.signal(handle.id, 'proceed');
-      expect(await bHandle.result()).toEqual({ doubled: 10 });
-    } finally {
-      a.engine[Symbol.dispose]();
-      b.engine[Symbol.dispose]();
-    }
-  });
+  // AB-330: the crash-and-adopt test (waits out a real workflow-lease claim
+  // TTL — weft's getNow is not injectable, so this needs a genuine
+  // real-clock wait) moved to `create-run-engine-crash-and-adopt.test.ts`,
+  // isolating the real-runtime exemption from this otherwise-deterministic
+  // file.
 
   /**
    * Tripwire for a weft 0.23.1 defect (see `CreateRunEngineOptions.ownership`'s

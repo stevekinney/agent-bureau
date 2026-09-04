@@ -26,6 +26,7 @@ import type {
   OpenAIRequestOptions,
   OpenAIStreamingClient,
 } from '../src/providers/types.ts';
+import { waitForCondition } from '../src/test/index';
 import type { GenerateContext, StreamingHandle } from '../src/types.ts';
 
 function makeContext(signal?: AbortSignal): GenerateContext {
@@ -140,14 +141,25 @@ describe('run.abort() while the streaming OpenAI provider is blocked on the next
     });
     const run = createAgentRun(activeRun);
 
-    setTimeout(() => run.abort('user cancelled'), 20);
+    // Wait for the streaming request to actually start (the client has
+    // observed a `chat.completions.create` call) rather than a single
+    // event-loop yield, which risks aborting before the request begins on a
+    // loaded host.
+    await waitForCondition(() => client.bodySignals.length > 0, 'streaming request never started');
+    run.abort('user cancelled');
 
-    const result = await Promise.race([
-      run.result(),
-      new Promise<never>((_resolve, reject) =>
-        setTimeout(() => reject(new Error('result() hung after abort')), 1_000),
-      ),
-    ]);
+    const resultPromise = run.result();
+    let settled = false;
+    void resultPromise.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await waitForCondition(() => settled, 'result() hung after abort');
+    const result = await resultPromise;
 
     expect(result.finishReason).toBe('aborted');
     expect(result.error).toBeInstanceOf(AbortAgentRunError);

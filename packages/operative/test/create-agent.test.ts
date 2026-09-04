@@ -27,6 +27,7 @@ import { withBackendDescriptors } from '../src/providers/backend-descriptor-atta
 import { createModelCatalog } from '../src/providers/model-catalog';
 import type { ProviderName } from '../src/providers/types';
 import { OPERATIVE_RESOLVE_RUN_OPTIONS } from '../src/runnable-agent';
+import { waitForCondition } from '../src/test/index';
 import type { ConversationHistory, GenerateFunction, GenerateResponse } from '../src/types';
 
 // ---------------------------------------------------------------------------
@@ -560,7 +561,10 @@ describe('createAgent — concurrent run toolbox isolation', () => {
     })();
 
     // Give both runs time to reach their blocked tool calls.
-    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    await waitForCondition(
+      () => run1Events.includes('tool.started') && run2Events.includes('tool.started'),
+      'both runs did not reach their blocked tool call',
+    );
 
     // Release both tools simultaneously — they're now provably in-flight together.
     releaseGate();

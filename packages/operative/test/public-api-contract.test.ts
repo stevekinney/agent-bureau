@@ -37,6 +37,7 @@ import {
   createRunEngine,
   createRunWorkflow,
 } from '@lostgradient/operative/durable';
+import { waitForCondition } from '@lostgradient/operative/test';
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createTool, createToolbox } from 'armorer';
@@ -395,7 +396,10 @@ describe('step-level recovery re-attach — a recovered run resumes from its che
     aRun.result.catch(() => {});
 
     // Let step 0 commit its checkpoint, then hang at step 1
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await waitForCondition(async () => {
+      const checkpoint = await a.checkpointStore.loadCheckpoint(runId);
+      return checkpoint.steps.length >= 1;
+    }, 'step 0 did not checkpoint');
 
     // Verify step 0 was checkpointed
     const afterStep0 = await a.checkpointStore.loadCheckpoint(runId);
@@ -561,7 +565,10 @@ describe('at-least-once tool re-execution on simulated crash — a crashed mid-s
     aRun.result.catch(() => {});
 
     // Let step 0's tool execute and checkpoint
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await waitForCondition(async () => {
+      const checkpoint = await a.checkpointStore.loadCheckpoint(runId);
+      return checkpoint.steps.length >= 1;
+    }, 'step 0 did not checkpoint');
 
     // Step 0's tool must have run once on engine A
     const step0ExecutionsOnA = toolExecutions.filter((e) => e === 'step-0').length;
@@ -643,7 +650,7 @@ describe('at-least-once tool re-execution on simulated crash — a crashed mid-s
     );
     aRun.result.catch(() => {});
 
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await waitForCondition(() => generateCallsByStep.includes(0), 'step 0 was not called');
 
     // Step 0 should have been called exactly once on engine A
     const step0CallsOnA = generateCallsByStep.filter((s) => s === 0).length;

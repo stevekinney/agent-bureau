@@ -1,3 +1,4 @@
+import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createTool } from 'armorer';
 import { createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
@@ -146,7 +147,7 @@ describe('loop helper coverage', () => {
     const controller = new AbortController();
     let calls = 0;
 
-    setTimeout(() => controller.abort('cancel default retry'), 0);
+    void yieldToPortableEventLoop().then(() => controller.abort('cancel default retry'));
 
     const result = await executeLoop({
       generate: async () => {
@@ -192,7 +193,7 @@ describe('loop helper coverage', () => {
   it('covers the default backpressure delay abort path directly', async () => {
     const controller = new AbortController();
 
-    setTimeout(() => controller.abort('cancel default backpressure'), 0);
+    void yieldToPortableEventLoop().then(() => controller.abort('cancel default backpressure'));
 
     const result = await executeLoop({
       generate: async () => textResponse('unused'),

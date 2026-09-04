@@ -10,6 +10,7 @@
 import { createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
+import { createManualRuntimeServices } from 'lifecycle';
 
 import { createContextAssembler } from '../src/context/assembly.ts';
 import { createTokenBudget } from '../src/context/token-budget.ts';
@@ -19,6 +20,10 @@ import {
 } from '../src/providers/anthropic.ts';
 import { createMockAnthropicClient } from '../src/providers/test/mock-clients.ts';
 import type { GenerateContext, StreamingHandle } from '../src/types.ts';
+
+// AB-330: an incidental message timestamp reads through a manual runtime
+// instead of the real clock.
+const runtime = createManualRuntimeServices();
 
 function makeContext(conversation: Conversation): GenerateContext {
   return { conversation, step: 0, toolbox: createToolbox([]) };
@@ -88,7 +93,7 @@ describe('Anthropic provider cache-aware context assembly', () => {
           role: 'user',
           content: 'Pinned reference content',
           position: 0,
-          createdAt: new Date().toISOString(),
+          createdAt: runtime.clock.nowISO(),
           metadata: {},
           hidden: false,
         },

@@ -30,6 +30,7 @@
 import { createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import { Conversation, type Message } from 'conversationalist';
+import { createManualRuntimeServices } from 'lifecycle';
 
 import { createContextAssembler } from '../src/context/assembly.ts';
 import { createTokenBudget } from '../src/context/token-budget.ts';
@@ -83,10 +84,18 @@ interface FakeCacheOutcome {
 
 const DEFAULT_CACHE_NAME = 'cachedContents/abc123';
 
+// AB-330: fixed, arbitrarily far dates instead of `Date.now() +/- offset` —
+// the production expiry check compares against the real clock regardless (no
+// injectable runtime here), so any date clearly past or future works just as
+// well without reading the real clock in the test itself.
 /** A timestamp far enough out that no test run reaches it. */
-const FAR_FUTURE = new Date(Date.now() + 3_600_000).toISOString();
+const FAR_FUTURE = '2099-01-01T00:00:00.000Z';
 /** A timestamp already past when the entry is created. */
-const ALREADY_PAST = new Date(Date.now() - 1_000).toISOString();
+const ALREADY_PAST = '2000-01-01T00:00:00.000Z';
+
+// AB-330: an incidental message timestamp reads through a manual runtime
+// instead of the real clock.
+const runtime = createManualRuntimeServices();
 
 /**
  * A `caches` namespace that records what it was asked to create. Built here
@@ -172,7 +181,7 @@ function pinnedMessage(content: string): Message {
     role: 'user',
     content,
     position: 0,
-    createdAt: new Date().toISOString(),
+    createdAt: runtime.clock.nowISO(),
     metadata: {},
     hidden: false,
   };

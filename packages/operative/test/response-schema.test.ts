@@ -375,11 +375,11 @@ describe('validateOutputValue — the recursive JSONValue contract on an already
     expect(!result.success && result.error).toBeInstanceOf(NonJsonOutputError);
   });
 
-  it('rejects a Date instance as NonJsonOutputError, even against a permissive z.unknown() schema', async () => {
-    const result = await validateOutputValue(z.unknown(), new Date());
-    expect(result.success).toBe(false);
-    expect(!result.success && result.error).toBeInstanceOf(NonJsonOutputError);
-  });
+  // AB-330: "rejects a Date instance..." moved to
+  // response-schema-date-rejection.test.ts — it needs an actual `Date`
+  // instance as the rejected VALUE (not a real-clock read), and the
+  // determinism rule flags any `new Date(...)` construction regardless of
+  // whether the timestamp itself matters.
 
   it('accepts a null-prototype object', async () => {
     const nullProto = Object.assign(Object.create(null), { answer: 'hi' });

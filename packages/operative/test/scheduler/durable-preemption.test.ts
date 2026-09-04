@@ -759,8 +759,8 @@ describe('durable scheduler preemption (suspend/resume)', () => {
     const checkpointStore = createManualCheckpointStore();
     const failedTaskIds: string[] = [];
     engine.cancel = () => {
-      return new Promise((_resolve, reject) => {
-        setTimeout(() => reject(new Error('queued stop cancel failed')), 0);
+      return yieldToPortableEventLoop().then(() => {
+        throw new Error('queued stop cancel failed');
       });
     };
     const immediateBlock = createStepwiseBlockingGenerate();

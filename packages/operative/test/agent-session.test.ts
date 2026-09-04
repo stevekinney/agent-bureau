@@ -1,6 +1,7 @@
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { describe, expect, it } from 'bun:test';
 import { createConversationHistory } from 'conversationalist';
+import { createManualRuntimeServices } from 'lifecycle';
 
 import { createAgentSession, loadAgentSession, saveAgentSession } from '../src/agent-session';
 
@@ -31,21 +32,20 @@ describe('createAgentSession', () => {
     expect(session.id).toBe('custom-id-123');
   });
 
-  it('sets createdAt and updatedAt timestamps', () => {
+  it('sets createdAt and updatedAt timestamps from the injected runtime clock', () => {
+    // AB-330: pin the clock via a manual runtime instead of bounding against
+    // real Date reads taken before/after the call.
+    const runtime = createManualRuntimeServices();
     const history = createConversationHistory();
-    const before = new Date().toISOString();
     const session = createAgentSession({
       agentName: 'test-agent',
       conversationHistory: history,
+      runtime,
     });
-    const after = new Date().toISOString();
+    const expected = runtime.clock.nowISO();
 
-    expect(session.createdAt).toBeDefined();
-    expect(session.updatedAt).toBeDefined();
-    expect(session.createdAt >= before).toBe(true);
-    expect(session.createdAt <= after).toBe(true);
-    expect(session.updatedAt >= before).toBe(true);
-    expect(session.updatedAt <= after).toBe(true);
+    expect(session.createdAt).toBe(expected);
+    expect(session.updatedAt).toBe(expected);
   });
 
   it('defaults metadata to an empty object', () => {
