@@ -324,13 +324,31 @@ await harness.bureau.dispose();
 await storage.dispose();
 ```
 
-The harness exposes `bureau`, `runtime`, and `storage` directly, plus thin lifecycle drivers over the corresponding public `Bureau` method — `startRun` (`Bureau.run`), `startSession` (`Bureau.createRun`), `startChild` (dispatches through `bureau.agents` and operative's public `dispatchChildRun`, correlated to a caller-supplied `parentRunId`), `submitSchedulerTask`, `createRecurringSchedule` (`Bureau.createSchedule`), `resolveReview`, `deliverSignal` (`Bureau.signalSession`), and `reattachDurable` (`Bureau.getDurableRun`). None of them reach a private map or a raw Weft workflow handle.
+The harness exposes `bureau`, `runtime`, `storage`, `scope`, and `childRegistry` directly, plus thin lifecycle drivers over the corresponding public `Bureau` method — `startRun` (`Bureau.run`, and registers the returned root onto `scope`), `startSession` (`Bureau.createRun`), `startChild` (dispatches through `bureau.agents` and operative's public `dispatchChildRun`, correlated to a caller-supplied `parentRunId`, registering into `childRegistry` by default unless `options.registry` overrides it), `submitSchedulerTask`, `createRecurringSchedule` (`Bureau.createSchedule`), `resolveReview`, `deliverSignal` (`Bureau.signalSession`), and `reattachDurable` (`Bureau.getDurableRun`). None of them reach a private map or a raw Weft workflow handle.
 
 `harness.supports(capability)` reports `false` for `'managed-goal'` and `'scheduler-task-result'` — product surfaces that don't exist on this baseline yet (AB-101/AB-102 and AB-180, respectively). Calling `harness.startManagedGoal()` or `harness.getSchedulerTaskResult()` throws a typed `BureauHarnessUnsupportedError` naming the owning issue(s) rather than silently no-oping.
 
 Two harnesses constructed independently in one process — each with its own `runtime`/`storage` — share no state: their clocks, timers, identifier sequences, storage paths, and events are fully isolated.
 
-Out of scope for this harness: the quiescence report and a `close()` that delegates to `Bureau.shutdown()` (AB-262), and packed-consumer tarball verification (AB-264).
+`harness.registerDurableRun(runId, { detached? })` and `harness.close()` are AB-262's slice — see "Quiescence report and `close()`" below. Out of scope for this harness: packed-consumer tarball verification (AB-264).
+
+### Quiescence report and `close()` (AB-262)
+
+```typescript
+import { assertBureauQuiescent, BureauQuiescenceError } from 'bureau/test';
+```
+
+`harness.close(): Promise<BureauQuiescenceReport>` calls `bureau.shutdown()` (AB-207) — via `assertBureauQuiescent(harness)` — disposes `harness.storage`, then resolves with the report, or rejects with a `BureauQuiescenceError` (its `.report` carries the full structured detail) when anything Bureau owns was not quiescent. It never substitutes `bureau.dispose()` for `shutdown()`, and it is idempotent: a second call returns the exact same settled outcome without shutting down twice.
+
+`BureauQuiescenceReport` extends `@lostgradient/operative/test`'s `QuiescenceReport` (`scope`, `quiescent`, `leaked`, `detached`) with ten Bureau-owned rows, each a `readonly LeakedResource[]`: `activeRoots`/`activeDescendants` (from `harness.scope`/`harness.childRegistry`), `pendingWebhookDeliveries` (`webhookNotifier.listDeliveries()`, status `'pending'`), `durableAttempts` (`bureau.getDurableRun` for every id registered via `harness.registerDurableRun`, when non-terminal and not detached), and six rows — `runningScheduleFires`, `parkedWaits`, `pendingHookEffects`, `pendingAuditWrites`, `activeEvaluations`, `openStorageResources` — that stay empty on this baseline, each for a reason documented in `quiescence.ts`'s module doc (no public surface exists yet, or `bureau.shutdown()` itself already awaits that owner's drain so nothing genuinely in-flight can survive an unbounded `shutdown()` call to be read as a leftover). `incomplete` carries any owner `bureau.shutdown({ timeoutMilliseconds })` itself classified `'unresolved'` — reported distinctly from `leaked`, never promoted into it.
+
+```typescript
+harness.registerDurableRun(summary.id, { detached: true });
+const report = await harness.close();
+report.detached; // [{ kind: 'durable-owner', id: summary.id }] — not a leak
+```
+
+A durable run registered with `detached: true` is recorded under `detached`, never under a leak row — a deliberate, recorded outcome (AB-34), not a way to hide a leak.
 
 ### `assembleReproductionArtifact(harness, recorder, options)` (AB-263)
 
