@@ -88,9 +88,15 @@ describe('withToolboxIdempotency', () => {
   beforeEach(() => {
     addCallCount = 0;
     mulCallCount = 0;
+    // A constant `now` keeps this shared cache's own TTL bookkeeping
+    // (`isExpired`, `expiresAt`) off the real clock. The one test that
+    // exercises TTL expiration ("uses the cache wall clock for TTL
+    // expiration...") builds its own dedicated cache with an explicit
+    // crafted clock rather than using this shared one.
     cache = createToolResultCache({
       store: createTestStore(),
       defaultTTL: 60_000,
+      now: () => 0,
     });
   });
 

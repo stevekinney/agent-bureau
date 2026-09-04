@@ -72,9 +72,15 @@ describe('withIdempotency: deadline-fenced completion (manual runtime)', () => {
   let cache: ToolResultCache;
 
   beforeEach(() => {
+    // A constant `now` — not tied to any single test's manual runtime, since
+    // this cache is shared across tests that each construct their own
+    // runtime — keeps the cache's own TTL bookkeeping (`isExpired`,
+    // `expiresAt`) off the real clock too. None of these tests exercises
+    // TTL expiration, so the exact value is never asserted on.
     cache = createToolResultCache({
       store: createTestStore(),
       defaultTTL: 60_000,
+      now: () => 0,
     });
   });
 
