@@ -586,15 +586,19 @@ function createFixtureToolbox(getDeps: () => Promise<FixtureToolDeps>): AnyToolb
     },
   });
 
-  // AB-271: registers the recurring schedule definition (proving it
-  // survives a crash, read back via `bureau.getSchedule` in `main()`
-  // below), then performs the SAME idempotency-guarded effect
-  // `perform-effect` uses — scoped to the schedule's own key rather than
-  // the plain root key — standing in for "the fire's own effect", per this
-  // scenario's documented one-shot-fire-path fallback (WFT-141: the
-  // recurring poller cannot be driven deterministically through any public
-  // Bureau surface — verified directly, `bureau.runDurableMaintenance`
-  // does not fire a `createSchedule`-registered schedule).
+  // AB-271: registers the recurring schedule definition ONLY — this tool
+  // does not drive a fire, and does not perform any effect of its own. Its
+  // one job is proving the DEFINITION survives a crash, read back via
+  // `bureau.getSchedule` in `main()` below. The root run's separate
+  // `perform-effect` step (unrelated to this schedule) is what re-proves
+  // the existing exactly-once idempotency guarantee for this scenario;
+  // this comment used to (incorrectly) describe that step as belonging to
+  // "the fire's own effect" — there is no fire here. Bureau's recurring
+  // poller cannot be driven deterministically through any public surface
+  // (WFT-141 — verified directly: `bureau.runDurableMaintenance` does not
+  // fire a `createSchedule`-registered schedule), so this scenario proves
+  // only definition-survival, not fire-recovery; see `scenarios.ts`'s
+  // matching scenario for the honest scope of what this covers.
   const registerSchedule = createTool({
     name: 'register-schedule',
     version: '1.0.0',
@@ -783,10 +787,15 @@ async function main(): Promise<void> {
   // AB-271 recovery-failure scenario: the catalog agent exists ONLY in
   // primary mode. The second process's `agents` map deliberately omits it —
   // the exact "an agent definition deliberately absent from its catalog"
-  // shape the acceptance criteria names — so `resolveRunServices`'s catalog
-  // branch (`runtime-composition.ts`) returns `{ status: 'missing-agent' }`
-  // on reattach, which is AB-29's own class of observable recovery failure,
-  // never a bare `null`.
+  // shape the acceptance criteria names. Internally, `resolveRunServices`'s
+  // catalog branch (`runtime-composition.ts`'s `resolveCatalogAgentRunServices`)
+  // classifies this as `{ status: 'missing-agent' }`, but that classification
+  // is never surfaced outward on its own — what's actually observable
+  // (through `bureau.getDurableRun`, read in `main()`'s recovery branch
+  // below) is the workflow-level failure that classification produces:
+  // `{ status: 'unavailable', reason: 'run <id>: catalog agent "..." is no
+  // longer in the catalog' }`, which is AB-29's own class of observable
+  // recovery failure, never a bare `null`.
   const agents: AgentDefinitions =
     kind === 'recovery-failure' && mode === 'primary'
       ? {

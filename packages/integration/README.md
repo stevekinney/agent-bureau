@@ -107,12 +107,18 @@ matrices. Seven scenarios are AB-270's original matrix (the `[smoke]` pair,
 `cancellation-recorded`, `cleanup-completed`); four are AB-271's own scope —
 nested children (two live children, cascade-aborted through this fixture's
 own explicit `abortRun` loop, since Bureau exposes no native durable
-parent→child cancellation), a running schedule fire (the schedule
-DEFINITION's crash survival is proven through `bureau.getSchedule`; the
-FIRE's own crash-recovery correctness reuses the base scenario's
-idempotent-effect proof, since Bureau's recurring poller cannot be driven
-deterministically through any public surface — WFT-141), a signal-parked
-resume with a pre-kill signal delivery (proving no double-delivery), and the
+parent→child cancellation), a schedule definition surviving a crash (the
+schedule is registered via `bureau.createSchedule`, and its crash survival
+is proven through `bureau.getSchedule` post-recovery; the root run's own
+`perform-effect` step, unrelated to the schedule, separately re-proves the
+existing exactly-once guarantee. This scenario does NOT drive an actual
+schedule fire — Bureau's recurring poller cannot be driven deterministically
+through any public surface — WFT-141, verified directly: a throwaway probe
+repeatedly calling `bureau.runDurableMaintenance` against a registered
+schedule never fired it. AB-97's "running schedule fire" acceptance
+criterion is therefore only partially covered here; see the scenario's own
+comment in `scenarios.ts` for the honest scope), a signal-parked resume with
+a pre-kill signal delivery (proving no double-delivery), and the
 AB-29 recovery-failure scenario (a second process missing the catalog agent
 its recovered `bureau.run()` dispatch needs, observed failing through
 `bureau.getDurableRun`'s `error`/`failureCategory` fields — never a bare

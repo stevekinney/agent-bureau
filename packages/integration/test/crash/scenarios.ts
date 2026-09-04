@@ -17,9 +17,11 @@
  * `ready`/`child-registered`/`effect-attempted`/`signal-parked`/
  * `cancellation-recorded`/`cleanup-completed`) are AB-270's original matrix,
  * extracted here unchanged. The remaining four are AB-271's own scope:
- * `nested children`, `running schedule fire`, `signal-parked resume with a
- * pre-kill signal`, and the AB-29 `recovery failure`. AB-271's own
- * "cancellation" acceptance criterion — "crashes at the
+ * `nested children`, a schedule DEFINITION surviving a crash during
+ * registration (see that scenario's own comment for why it does not drive
+ * an actual fire), `signal-parked resume with a pre-kill signal`, and the
+ * AB-29 `recovery failure`. AB-271's own "cancellation" acceptance
+ * criterion — "crashes at the
  * `'cancellation-recorded'` marker and asserts the recovered process
  * observes the cancellation as recorded rather than replaying the run" — is
  * satisfied by the pre-existing `killed at cancellation-recorded` scenario
@@ -318,7 +320,19 @@ export const CRASH_SCENARIOS: readonly CrashScenario[] = [
     },
   },
   {
-    name: 'running schedule fire: crashed mid-fire, and recovery sees the schedule definition intact with no duplicate fire for the same scheduled instant',
+    // Honest scope (per copilot review on PR #555): this scenario does NOT
+    // drive an actual schedule fire — Bureau's recurring poller cannot be
+    // driven deterministically through any public surface (WFT-141,
+    // verified directly: a throwaway probe repeatedly calling
+    // `bureau.runDurableMaintenance` against a registered schedule never
+    // fired it). It crashes DURING SCHEDULE REGISTRATION instead, and
+    // proves two things unrelated to any fire: the schedule DEFINITION
+    // survives the crash (`bureau.getSchedule`), and the root run's own
+    // `perform-effect` step still keeps its existing exactly-once guarantee
+    // while that schedule exists. AB-97's "running schedule fire"
+    // acceptance criterion is therefore only partially covered by this
+    // scenario — see `packages/integration/README.md`'s matching note.
+    name: "schedule definition survives a crash during registration, with the root run's own exactly-once effect unaffected",
     timeoutMs: 30_000,
     async run(backend) {
       const runtime = createManualRuntimeServices();
@@ -339,13 +353,10 @@ export const CRASH_SCENARIOS: readonly CrashScenario[] = [
       } | null;
       expect(scheduleSummary?.id).toBeDefined();
 
-      // The fire's own idempotency-guarded effect never duplicates —
-      // exactly-once, the same guarantee `effect-attempted` proves for the
-      // base linear scenario, now scoped to a run that also owns a live
-      // schedule (this is the "one-shot fire path" AB-271's ruling
-      // names as the fallback: Bureau's recurring poller cannot be driven
-      // deterministically through any public surface — see `fixture.ts`'s
-      // `register-schedule` tool doc comment).
+      // The root run's own `perform-effect` step — unrelated to the
+      // schedule above — never duplicates: the same exactly-once guarantee
+      // `effect-attempted` proves for the base linear scenario, now merely
+      // co-located with a run that also registered a schedule.
       expect(observation(report.second, 'effect-count')).toBe('1');
 
       const recoveredState = observation(report.second, 'final-root-workflow-state') as {
