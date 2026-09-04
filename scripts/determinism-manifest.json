@@ -31,46 +31,10 @@
   ],
   "realRuntimeExemptions": [
     {
-      "path": "packages/operative/src/durable/create-run-engine-poller-unarmed.test.ts",
-      "reason": "Split out of create-run-engine.test.ts (AB-330). These two tests deliberately prove Weft's durable-timer poller stays UNARMED (Scheduler.prototype.start never called, and the run stays non-terminal through a real detection window) when createRunEngine is configured with recover:false or startScheduler:false — a real-time ABSENCE proof that a manual/injected clock cannot substitute for, since the point is observing that nothing drives the timer over actual wall-clock time. createRunEngine's public options carry no getNow/clock passthrough to Weft's Engine.create (unlike run-workflow.test.ts's buildEngine helper, which calls Engine.create directly); adding one is a production API surface change out of this test-only issue's scope (no changeset). Mirrors the split-out pattern armorer's execution-lifecycle-default-runtime.test.ts and with-idempotency-default-runtime.test.ts use for AB-254.",
-      "owner": "Agent Bureau team",
-      "owningIssue": "AB-348"
-    },
-    {
       "path": "packages/operative/src/durable/create-run-engine-crash-and-adopt.test.ts",
-      "reason": "Split out of create-run-engine.test.ts's AB-178 ownership suite (AB-330). This crash-and-adopt scenario waits out a real workflow-lease claim TTL on Weft's own real wall clock — its getNow is not injectable through the public Engine.create surface, and createRunEngine's options carry no clock passthrough (adding one is a production API surface change out of this test-only issue's scope, no changeset).",
+      "reason": "Split out of create-run-engine.test.ts's AB-178 ownership suite (AB-330); investigated under AB-348 (2026-09-04), which confirmed empirically there is no honest deterministic replacement today. Weft 0.23.1's workflow-claim registry binds its getNow ONCE at Engine.create() time as options?.getNow ?? Date.now — an internal property with NO field on the public EngineOptions .d.ts surface (verified: grep -n \"getNow\" across dist/core/engine/index.d.ts and dist/core/types/*.d.ts finds zero matches), so createRunEngine has no type-safe way to inject a clock into it. Engine#runMaintenance(now)'s now argument reaches ONLY internals.scheduler.tick(now) (dist/core/engine/index.js:772) — never internals.workflowClaimRenewalTask.runOnce(), which always calls the construction-time real getNow with no per-call override — so a far-future now cannot make claim-expiry evaluation deterministic. Weft also enforces workflowClaimTtl >= 3x workflowClaimRenewInterval and takeover eligibility at expiresAt + 2x workflowClaimRenewInterval < now (workflow-claim-transitions.js), so even the smallest values Weft accepts still require a few milliseconds of REAL time to elapse between claim creation and the reclaim check; relying on ordinary async overhead to clear that margin without an explicit wait passed 40/40 in isolation but failed under full-suite concurrent load — a hidden real-time dependency, not a deterministic proof, and strictly worse than this file's explicit, honest wait. AB-92's decision record assigns \"Weft's own internal clock and scheduling\" to WFT-30/WFT-32 as an external integration boundary, not something agent-bureau injects. Filed upstream as WFT-143 (Backlog) to expose a typed clock seam for the workflow-claim registry (or a public forced-adopt operation) so claim renewal and adoption can be driven deterministically; each wait here is this file's original explicit, bounded real-time wait, never a fixed sleep standing in for a check. Removing this exemption is AB-358's consumer follow-up, natively blocked by WFT-143.",
       "owner": "Agent Bureau team",
-      "owningIssue": "AB-348"
-    },
-    {
-      "path": "packages/operative/src/durable/active-run-adapter-abort-latency.test.ts",
-      "reason": "Split out of active-run-adapter.test.ts's 'B6 — abort-into-generate load-bearing abort' describe block (AB-330). These two tests measure real elapsed wall-clock time (performance.now() before/after abort()), asserting settlement within ~1 second — a genuine property of a real, unmocked async chain (the durable engine's actual drive/cancel path, or the in-memory path's actual generate/abort race). A manual clock cannot substitute because nothing here is manually advanced; the assertion IS that the real wall clock barely moves.",
-      "owner": "Agent Bureau team",
-      "owningIssue": "AB-348"
-    },
-    {
-      "path": "packages/operative/test/scheduler/create-scheduler-idle-delay.test.ts",
-      "reason": "Split out of create-scheduler.test.ts (AB-330). This test measures a real inter-dispatch gap in milliseconds (performance.now() before/after two task dispatches), asserting the scheduler's idleDelay actually elapses between them — a genuine real-clock latency property of the scheduler's actual async processing loop. A manual clock only advances when told to, so it cannot prove a real gap emerged from real waiting.",
-      "owner": "Agent Bureau team",
-      "owningIssue": "AB-348"
-    },
-    {
-      "path": "packages/operative/test/response-schema-date-rejection.test.ts",
-      "reason": "Split out of response-schema.test.ts (AB-330). This test needs an actual Date INSTANCE as the value it feeds validateOutputValue and asserts gets rejected; the specific timestamp is irrelevant, but the determinism rule flags any new Date(...) construction regardless of whether the value it reads matters. No injected RuntimeServices can substitute — the point is the VALUE's runtime type, not a clock read.",
-      "owner": "Agent Bureau team",
-      "owningIssue": "AB-348"
-    },
-    {
-      "path": "packages/operative/src/session/session-handle-sleep-default-runtime.test.ts",
-      "reason": "Split out of session-handle.test.ts (AB-330). These two tests deliberately verify handle.sleep()'s DEFAULT runtime argument (no injected RuntimeServices): that it resolves after real elapsed milliseconds have actually passed, measured against the real clock. Injecting a manual runtime here would defeat the point of the test — same reasoning armorer's execution-lifecycle-default-runtime.test.ts and with-idempotency-default-runtime.test.ts use for AB-254.",
-      "owner": "Agent Bureau team",
-      "owningIssue": "AB-348"
-    },
-    {
-      "path": "packages/operative/src/session/session-handle-real-engine-recovery.test.ts",
-      "reason": "Split out of session-handle.test.ts (AB-330). This test drives a REAL Weft engine's startScheduler:true background poller to fire a durable ctx.sleep, then polls engine.get() with a real per-iteration setTimeout delay until the recovered run settles. createRunEngine's public options carry no getNow/clock passthrough to Weft's Engine.create, so nothing here can be driven by a manual clock; adding a passthrough is a production API surface change out of this test-only issue's scope (no changeset).",
-      "owner": "Agent Bureau team",
-      "owningIssue": "AB-330"
+      "owningIssue": "AB-358"
     },
     {
       "path": "packages/lifecycle/src/runtime-services.ts",
