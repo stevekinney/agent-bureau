@@ -114,7 +114,7 @@ jobs:
       # `writeReproductionArtifact`, AB-267's `@lostgradient/operative/test`)
       # to this directory. The upload step below picks up whatever lands
       # there.
-      REPRODUCTION_ARTIFACT_DIR: ${{ runner.temp }}/reproduction-artifacts
+      REPRODUCTION_ARTIFACT_DIR: ${{ github.workspace }}/reproduction-artifacts
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -140,7 +140,7 @@ jobs:
       # straight into this step's own output — no extra wiring needed for the
       # ownership-tree text. This step separately picks up any reproduction
       # artifact a failing scenario wrote to the shared
-      # `${{ runner.temp }}/reproduction-artifacts/` directory (the contract
+      # `${{ github.workspace }}/reproduction-artifacts/` directory (the contract
       # documented in `documentation/testing-cadence.md`) so it survives past
       # the ephemeral runner. No suite writes there today — `if-no-files-found:
       # ignore` keeps this a no-op until one does — but the writer
@@ -152,14 +152,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: reproduction-artifacts-lifecycle-contract
-          path: ${{ runner.temp }}/reproduction-artifacts/
+          path: ${{ github.workspace }}/reproduction-artifacts/
           if-no-files-found: ignore
           retention-days: 14
 
   crash-conformance-smoke:
     runs-on: ubuntu-latest
     env:
-      REPRODUCTION_ARTIFACT_DIR: ${{ runner.temp }}/reproduction-artifacts
+      REPRODUCTION_ARTIFACT_DIR: ${{ github.workspace }}/reproduction-artifacts
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -195,6 +195,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: reproduction-artifacts-crash-smoke
-          path: ${{ runner.temp }}/reproduction-artifacts/
+          path: ${{ github.workspace }}/reproduction-artifacts/
           if-no-files-found: ignore
           retention-days: 14
