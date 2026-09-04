@@ -23,9 +23,11 @@ export function materializeToolCall(
   toolCall: ToolCallInput,
   options: MaterializeToolCallOptions = {},
 ): ToolCall {
-  const runtime = options.runtime ?? createDefaultRuntimeServices();
   return {
-    id: toolCall.id ?? options.generateId?.() ?? runtime.identifiers.next('tool-call'),
+    id:
+      toolCall.id ??
+      options.generateId?.() ??
+      (options.runtime ?? createDefaultRuntimeServices()).identifiers.next('tool-call'),
     name: toolCall.name,
     arguments: normalizeJSONValue(toolCall.arguments ?? {}),
   };
