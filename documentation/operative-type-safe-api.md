@@ -840,6 +840,103 @@ subscription already owns delivering it exactly once, as a new
 Ephemeral, non-cursor-advancing deltas are unaffected: they remain
 live-only, as before, and this reconnect path never recovers them.
 
+#### AB-87's per-surface table, updated
+
+AB-87's own per-surface delivery-surface table (retention/ordering/replay/
+redaction/compatibility/truncation/pagination/cursor, across the seven
+delivery surfaces) originally carried these two rows for the surfaces AB-91
+closes:
+
+- **Durable audit trail** (`Bureau.auditTrail`) — Cursor: "None; the
+  sharpest gap, exactly what AB-91 closes."
+- **Weft fleet feed** (`FleetEventFeed`) — Cursor: "the authoritative
+  aggregate sequence once AB-91 wires Bureau through it."
+
+Both are stale now that `ab91-01` through `ab91-04` have shipped. The
+durable audit trail (`Bureau.auditTrail`, `AUDIT_EVENT_TYPES`-only, no
+cursor, no retention floor, no schema version) is UNCHANGED by AB-91 and
+remains exactly the gap it was — AB-91 does not extend it, it adds a
+THIRD, separate durable layer beside it (`bureau.eventHistory`/
+`bureau.subscribeEventHistory`, described above), which is the row that
+now actually has a cursor: `DurableEventEnvelope.cursor`, an opaque string
+round-tripped from Weft's own `FleetEventEnvelope.cursor`, exclusive on
+`page()`'s `since` and on `subscribeEventHistory()`'s `since`, with a
+typed `DurableEventGap` distinguishing "history was compacted past this
+cursor" from an ordinary empty page. The Weft fleet feed row's own cursor
+was never in question — Weft's `Cursor` type was always the authoritative
+aggregate sequence — what AB-87 flagged as pending was Bureau actually
+being _wired through it_; `createDurableEventHistory` and
+`createDurableEventProducer` (`packages/bureau/src/durable-event-history.ts`)
+are that wiring, sharing `runtime.durable.engine.storage` — the same
+backend the durable-run engine already persists to — rather than a second
+durable log.
+
+#### Extending durable event history with a new event kind (AB-91's `ab91-05` child, AB-314)
+
+AB-90's remaining event slices (`schedule.*`, `review.*`, `child.*`,
+`session-input.*`) will each need to decide whether, and how, their new
+event types plug into this durable store. Four rules carry over from
+`ab91-01` through `ab91-04` and apply to every future slice:
+
+- **Owner scoping (run vs. session vs. schedule).** Pick the
+  `DurableEventOwner` whose lifecycle the event is really about, not
+  necessarily the surface that emitted it. A schedule FIRE is recorded
+  under the fired run's own `{ kind: 'run', id: runId }` — never
+  `{ kind: 'schedule', ... }` — because AB-87 classifies "a schedule fire"
+  as an ordinary run; only a schedule's four DEFINITION events
+  (`schedule.created`/`paused`/`resumed`/`cancelled`) are recorded under
+  `{ kind: 'schedule', id: scheduleId }`. A new `review.*`/`child.*`
+  family should ask the same question — "whose durable page does a caller
+  actually want this event to show up on?" — before picking an owner kind,
+  rather than defaulting to whichever object happened to dispatch the
+  event.
+- **Exclusive-cursor semantics.** Both `page(owner, { since })` and
+  `subscribeEventHistory(owner, listener, { since })` treat `since` as
+  EXCLUSIVE: the event AT `since` is never returned again. Passing the
+  last event's own `cursor` back as the next call's `since` always
+  resumes cleanly, with no duplicate and no gap at the boundary — a new
+  consumer polling this store should never subtract or otherwise adjust a
+  cursor before resubmitting it.
+- **The gap-vs-empty-page distinction.** An ordinary empty page
+  (`{ events: [], hasMore: false }`) means "caller is fully caught up, or
+  nothing has ever been recorded for this owner" — not a problem. A
+  `DurableEventGap` (`{ outcome: 'gap', requestedCursor,
+firstRetainedSequence }`) means the requested `since` predates the
+  store's own `snapshotRetentionFloor()` — history may have been
+  compacted away, and the caller must re-baseline (typically: fall back
+  to a full page from the beginning, or surface a "history unavailable
+  before X" condition) rather than treating it as "nothing new." A new
+  event-slice implementer's own consumer must branch on `'outcome' in
+result`, never assume every non-throwing call returns a page.
+- **The ephemeral-delta exclusion list.** Not every event AB-87 classifies
+  belongs in this store. Live-only and explicitly non-cursor-advancing
+  kinds are deliberately excluded from `createDurableEventProducer`'s
+  listener sets and must stay excluded from any new slice's own sink too:
+  streaming deltas (`stream:text-delta` and siblings), per-tool-call
+  progress (`tool.progress`, `tools.executing`/`tools.executed`),
+  `usage.accumulated`, `context.compacted`/`context-budget.warning`,
+  `budget.threshold`, `session.monitor.tick`/`session.monitor.done`, and
+  `child.progress` (carries `SemanticProgress`, itself explicitly
+  non-cursor-advancing per AB-88/AB-214). A future slice sinks only the
+  TERMINAL/durable-classified members of its own family — mirroring
+  `RUN_DURABLE_ACTION_TYPES`/`SESSION_DURABLE_ACTION_TYPES`
+  (`durable-event-history.ts`) as the pattern to extend, not a parallel
+  mechanism to invent — and leaves every ephemeral member of that same
+  family live-only, exactly as `run.*`/`session.*` already do today.
+
+`packages/bureau/src/test/durable-event-history-fixture.ts` (AB-314)
+exports `createDurableEventHistoryFixture` — a known, versioned sequence
+of `DurableEventEnvelope` records seeded across a real SQLite or LMDB
+backend through this module's own `record()` — and
+`seedSchemaVersionMismatchRecord`, which proves a deliberately
+older/malformed-shaped stored record is rejected exactly as
+`UnsupportedDurableEventSchemaVersionError` specifies rather than silently
+coerced. Both exist so a consumer building a real restart proof on top of
+this store (most directly AB-275, "Add Gateway restart and
+durable-history replay conformance") — or a future AB-90 slice writing its
+own compatibility test — has a pre-populated, known-shape fixture to build
+against rather than re-deriving one from scratch.
+
 ### Session update/query capability
 
 AB-41's scheduling-and-wait-semantics decision record classified

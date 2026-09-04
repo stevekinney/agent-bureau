@@ -1,6 +1,16 @@
 export { createBureau } from '../create-bureau';
 export type { Bureau, BureauOptions } from '../types';
 export type {
+  DurableEventHistoryFixture,
+  DurableEventHistoryFixtureOptions,
+  DurableEventHistoryFixtureRecord,
+} from './durable-event-history-fixture';
+export {
+  createDurableEventHistoryFixture,
+  DURABLE_EVENT_HISTORY_FIXTURE_SEQUENCE,
+  seedSchemaVersionMismatchRecord,
+} from './durable-event-history-fixture';
+export type {
   BureauFaultOperation,
   BureauFaultPlan,
   BureauFaultPlanEntry,
