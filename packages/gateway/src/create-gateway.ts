@@ -106,9 +106,15 @@ export async function raceDrainTimeout(
   drainTimeoutMs: number,
   dependencies: Pick<CreateGatewayDependencies, 'setTimeoutFn' | 'clearTimeoutFn'> = {},
 ): Promise<boolean> {
+  // Both defaults come from ONE RuntimeServices instance — never two
+  // separately constructed ones — so `clearTimeoutFn` is guaranteed to
+  // match `setTimeoutFn`'s own handle semantics rather than merely
+  // happening to today because both delegate to the same host globals
+  // (review finding, PR #548).
+  const defaultRuntimeTimers = createDefaultRuntimeServices().timers;
   const {
-    setTimeoutFn = createDefaultRuntimeServices().timers.setTimeout,
-    clearTimeoutFn = createDefaultRuntimeServices().timers.clearTimeout,
+    setTimeoutFn = defaultRuntimeTimers.setTimeout,
+    clearTimeoutFn = defaultRuntimeTimers.clearTimeout,
   } = dependencies;
   let timer: unknown;
   const timedOut = new Promise<'timed-out'>((resolve) => {
