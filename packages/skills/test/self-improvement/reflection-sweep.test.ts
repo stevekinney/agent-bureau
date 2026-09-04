@@ -591,7 +591,7 @@ describe('reflectionSweep — proposal field integrity', () => {
 
     const proposals = await listProposals(storage);
     const proposal = proposals[0]!;
-    expect(proposal.id).toBe('skill-1');
+    expect(proposal.id).toBe(`${runtime.identifierPrefix}-skill-1`);
     expect(proposal.createdAt).toBe('2026-03-01T00:00:00.000Z');
   });
 });

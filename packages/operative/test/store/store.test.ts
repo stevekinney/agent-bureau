@@ -78,15 +78,16 @@ describe('createStore', () => {
   });
 
   it('register auto-generates sequential ids', async () => {
-    const store = createStore({ runtime: createManualRuntimeServices() });
+    const runtime = createManualRuntimeServices();
+    const store = createStore({ runtime });
     const activeRunA = makeTestRun();
     const activeRunB = makeTestRun();
 
     const idA = store.register(activeRunA);
     const idB = store.register(activeRunB);
 
-    expect(idA).toBe('run-1');
-    expect(idB).toBe('run-2');
+    expect(idA).toBe(`${runtime.identifierPrefix}-run-1`);
+    expect(idB).toBe(`${runtime.identifierPrefix}-run-2`);
 
     await Promise.all([activeRunA.result, activeRunB.result]);
     store.dispose();

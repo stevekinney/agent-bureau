@@ -1,3 +1,8 @@
+import {
+  deriveIdentifierPrefix,
+  generateProcessUniqueIdentifierSeed,
+  hashSeed,
+} from './identifier-seed';
 import type {
   DeferredDrainReport,
   RuntimeServices,
@@ -11,7 +16,13 @@ import type {
  * randomness are all driven from explicit, seedable state rather than any
  * real global. No member of this module — including {@link
  * createManualRuntimeServices} itself — reaches a real timer, a real clock,
- * or `Math.random`.
+ * or `Math.random`. The one narrow exception is the process-unique
+ * `identifierSeed` this instance falls back to when a caller omits one
+ * (Coordinator ruling on AB-337): that fallback's own `crypto.randomUUID()`
+ * call lives in `./identifier-seed.ts`, not here, and is used only to seed
+ * this instance's minted identifiers — never its clock, timers, or
+ * `random.next()` sequence, all of which stay exactly as deterministic as
+ * before.
  */
 export interface ManualRuntimeServices extends RuntimeServices {
   /**
@@ -23,13 +34,23 @@ export interface ManualRuntimeServices extends RuntimeServices {
    */
   readonly clockOrigin: string;
   /**
-   * The identifier seed this instance was constructed with (or the default
-   * when omitted). Reserved for future per-instance identifier
-   * disambiguation (see {@link CreateManualRuntimeServicesOptions.identifierSeed}) —
-   * exposed here so a reproduction artifact always records the seed in
-   * effect, even though it does not currently affect minted identifiers.
+   * The identifier seed this instance was constructed with, or a generated,
+   * process-unique value when {@link CreateManualRuntimeServicesOptions.identifierSeed}
+   * was omitted (Coordinator ruling on AB-337). Exposed so a reproduction
+   * artifact always records the exact seed in effect (AB-263) — replaying
+   * that artifact re-supplies this value explicitly, so an unpinned
+   * default's non-reproducibility across processes never affects replay.
    */
   readonly identifierSeed: string;
+  /**
+   * The short, stable prefix {@link deriveIdentifierPrefix} derived from
+   * {@link identifierSeed} and embedded on every identifier this
+   * instance's `identifiers.next(kind)` mints. Exposed so a test can
+   * derive an expected identifier
+   * (`` `${runtime.identifierPrefix}-${kind}-${n}` ``) instead of pinning a
+   * literal string that would drift with the seed.
+   */
+  readonly identifierPrefix: string;
   /**
    * The random seed this instance was constructed with (or the default when
    * omitted) — the exact seed `random.next()`'s sequence is deterministic
@@ -65,12 +86,17 @@ export interface CreateManualRuntimeServicesOptions {
   /** The virtual wall clock's starting value, as an ISO-8601 string. Defaults to a fixed epoch. */
   origin?: string;
   /**
-   * Reserved for future per-instance identifier disambiguation. AB-252's
-   * ratified `identifiers.next(kind)` format (`` `${kind}-${n}` ``, `n` a
-   * per-`kind` counter starting at 1) is fully determined by call order
-   * alone, so this seed does not currently affect minted identifiers —
-   * accepted here only so a caller constructing a
-   * `ManualRuntimeServices` doesn't have to omit it conditionally.
+   * Disambiguates the identifiers this instance mints (Coordinator ruling
+   * on AB-337, amending AB-252). `identifiers.next(kind)` returns
+   * `` `${prefix}-${kind}-${n}` ``, where `prefix` is
+   * {@link deriveIdentifierPrefix}`(identifierSeed)` and `n` is a per-`kind`
+   * counter starting at 1 — so two instances constructed with different
+   * seeds are, barring a hash collision, extremely unlikely to mint the
+   * same identifier, while two instances constructed with the same seed
+   * still mint byte-identical sequences
+   * (AB-92). Omit it to get a generated, process-unique seed instead (see
+   * {@link ManualRuntimeServices.identifierSeed}); pass an explicit value
+   * for a reproducible sequence.
    */
   identifierSeed?: string;
   /** Seeds the deterministic pseudo-random generator backing `random.next()`. */
@@ -79,17 +105,6 @@ export interface CreateManualRuntimeServicesOptions {
 
 const DEFAULT_ORIGIN = '2020-01-01T00:00:00.000Z';
 const DEFAULT_RANDOM_SEED = 'manual-runtime-services';
-const DEFAULT_IDENTIFIER_SEED = 'manual-runtime-services';
-
-/** FNV-1a — a small, dependency-free string hash, used only to seed the PRNG below. */
-function hashSeed(seed: string): number {
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < seed.length; index++) {
-    hash ^= seed.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return hash >>> 0;
-}
 
 /**
  * mulberry32 — a small, dependency-free deterministic PRNG. Two generators
@@ -150,7 +165,8 @@ export function createManualRuntimeServices(
   let wallClockOffsetMilliseconds = originEpochMilliseconds;
 
   const randomSeed = options.randomSeed ?? DEFAULT_RANDOM_SEED;
-  const identifierSeed = options.identifierSeed ?? DEFAULT_IDENTIFIER_SEED;
+  const identifierSeed = options.identifierSeed ?? generateProcessUniqueIdentifierSeed();
+  const identifierPrefix = deriveIdentifierPrefix(identifierSeed);
   const random = createSeededRandom(randomSeed);
 
   const identifierCounters = new Map<string, number>();
@@ -216,6 +232,7 @@ export function createManualRuntimeServices(
   const services: ManualRuntimeServices = {
     clockOrigin,
     identifierSeed,
+    identifierPrefix,
     randomSeed,
     clock: {
       now: () => wallClockOffsetMilliseconds + monotonicMilliseconds,
@@ -235,7 +252,7 @@ export function createManualRuntimeServices(
       next: (kind) => {
         const next = (identifierCounters.get(kind) ?? 0) + 1;
         identifierCounters.set(kind, next);
-        return `${kind}-${next}`;
+        return `${identifierPrefix}-${kind}-${next}`;
       },
     },
     random: {

@@ -227,8 +227,8 @@ describe('two concurrent harnesses are fully isolated', () => {
     });
 
     it('mints identifiers independently', () => {
-      expect(runA.id).toBe('run-1');
-      expect(runB.id).toBe('run-1');
+      expect(runA.id).toBe(`${runtimeA.identifierPrefix}-run-1`);
+      expect(runB.id).toBe(`${runtimeB.identifierPrefix}-run-1`);
     });
 
     it('never fires the other runtime when advancing timers', async () => {

@@ -16,12 +16,21 @@ describe('createManualRuntimeServices', () => {
       expect(runtime.randomSeed).toBe('custom-random-seed');
     });
 
-    it('exposes the default clockOrigin, identifierSeed, and randomSeed when none are supplied', () => {
+    it('exposes the default clockOrigin and randomSeed when none are supplied', () => {
       const runtime = createManualRuntimeServices();
 
       expect(runtime.clockOrigin).toBe('2020-01-01T00:00:00.000Z');
-      expect(runtime.identifierSeed).toBe('manual-runtime-services');
       expect(runtime.randomSeed).toBe('manual-runtime-services');
+    });
+
+    it('generates a non-empty, process-unique identifierSeed when none is supplied (Coordinator ruling on AB-337)', () => {
+      const a = createManualRuntimeServices();
+      const b = createManualRuntimeServices();
+
+      expect(a.identifierSeed.length).toBeGreaterThan(0);
+      expect(b.identifierSeed.length).toBeGreaterThan(0);
+      expect(a.identifierSeed).not.toBe(b.identifierSeed);
+      expect(a.identifierPrefix).not.toBe(b.identifierPrefix);
     });
   });
 
@@ -169,19 +178,51 @@ describe('createManualRuntimeServices', () => {
   });
 
   describe('identifiers', () => {
-    it('returns `${kind}-${n}` with a per-kind counter starting at 1', () => {
-      const runtime = createManualRuntimeServices();
-      expect(runtime.identifiers.next('run')).toBe('run-1');
-      expect(runtime.identifiers.next('run')).toBe('run-2');
-      expect(runtime.identifiers.next('session')).toBe('session-1');
+    it('returns `${identifierPrefix}-${kind}-${n}` with a per-kind counter starting at 1', () => {
+      const runtime = createManualRuntimeServices({ identifierSeed: 'fixed-seed' });
+      const prefix = runtime.identifierPrefix;
+      expect(runtime.identifiers.next('run')).toBe(`${prefix}-run-1`);
+      expect(runtime.identifiers.next('run')).toBe(`${prefix}-run-2`);
+      expect(runtime.identifiers.next('session')).toBe(`${prefix}-session-1`);
     });
 
-    it('produces byte-identical identifiers across two runs of the same scripted case', () => {
+    it('produces byte-identical identifiers across two runs of the same scripted case given the same identifierSeed (AB-92)', () => {
       const runFirst = () => {
-        const runtime = createManualRuntimeServices();
+        const runtime = createManualRuntimeServices({ identifierSeed: 'scripted-case-seed' });
         return [runtime.identifiers.next('run'), runtime.identifiers.next('child')];
       };
       expect(runFirst()).toEqual(runFirst());
+    });
+
+    it('two runtimes with distinct identifierSeeds produce disjoint identifier sets (Coordinator ruling on AB-337)', () => {
+      const a = createManualRuntimeServices({ identifierSeed: 'seed-one' });
+      const b = createManualRuntimeServices({ identifierSeed: 'seed-two' });
+
+      const idsA = new Set([
+        a.identifiers.next('conversation'),
+        a.identifiers.next('conversation'),
+        a.identifiers.next('run'),
+      ]);
+      const idsB = new Set([
+        b.identifiers.next('conversation'),
+        b.identifiers.next('conversation'),
+        b.identifiers.next('run'),
+      ]);
+
+      expect(a.identifierPrefix).not.toBe(b.identifierPrefix);
+      for (const id of idsA) {
+        expect(idsB.has(id)).toBe(false);
+      }
+    });
+
+    it('two runtimes with the same identifierSeed mint identical sequences (AB-92)', () => {
+      const a = createManualRuntimeServices({ identifierSeed: 'shared-seed' });
+      const b = createManualRuntimeServices({ identifierSeed: 'shared-seed' });
+
+      expect(a.identifierPrefix).toBe(b.identifierPrefix);
+      expect(a.identifiers.next('conversation')).toBe(b.identifiers.next('conversation'));
+      expect(a.identifiers.next('conversation')).toBe(b.identifiers.next('conversation'));
+      expect(a.identifiers.next('run')).toBe(b.identifiers.next('run'));
     });
   });
 
@@ -260,9 +301,9 @@ describe('createManualRuntimeServices', () => {
       expect(firedA).toBe(true);
       expect(firedB).toBe(false);
 
-      expect(runtimeA.identifiers.next('run')).toBe('run-1');
-      expect(runtimeA.identifiers.next('run')).toBe('run-2');
-      expect(runtimeB.identifiers.next('run')).toBe('run-1');
+      expect(runtimeA.identifiers.next('run')).toBe(`${runtimeA.identifierPrefix}-run-1`);
+      expect(runtimeA.identifiers.next('run')).toBe(`${runtimeA.identifierPrefix}-run-2`);
+      expect(runtimeB.identifiers.next('run')).toBe(`${runtimeB.identifierPrefix}-run-1`);
     });
 
     it('drives two concurrent createActiveRun-shaped consumers independently via two instances', async () => {
@@ -286,8 +327,8 @@ describe('createManualRuntimeServices', () => {
       const runA = startFakeRun(runtimeA);
       const runB = startFakeRun(runtimeB);
 
-      expect(runA.runId).toBe('run-1');
-      expect(runB.runId).toBe('run-1');
+      expect(runA.runId).toBe(`${runtimeA.identifierPrefix}-run-1`);
+      expect(runB.runId).toBe(`${runtimeB.identifierPrefix}-run-1`);
 
       await runtimeA.advance(1000);
 

@@ -105,9 +105,9 @@ describe('createSoulSeed', () => {
     const items = createSoulSeed({ name: 'Aria', traits: ['Curious'], runtime });
 
     expect(items).toHaveLength(2);
-    expect(items[0]!.id).toBe('seed-seed-1');
+    expect(items[0]!.id).toBe(`seed-${runtime.identifierPrefix}-seed-1`);
     expect(items[0]!.updatedAt).toBe('2026-07-04T00:00:00.000Z');
-    expect(items[1]!.id).toBe('seed-seed-2');
+    expect(items[1]!.id).toBe(`seed-${runtime.identifierPrefix}-seed-2`);
     expect(items[1]!.updatedAt).toBe('2026-07-04T00:00:00.000Z');
   });
 });

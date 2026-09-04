@@ -1067,8 +1067,8 @@ describe('createActiveRun: AB-92/AB-252 RuntimeServices resolution', () => {
     });
     await second.result;
 
-    expect(first.snapshot().id).toBe('run-1');
-    expect(second.snapshot().id).toBe('run-2');
+    expect(first.snapshot().id).toBe(`${runtime.identifierPrefix}-run-1`);
+    expect(second.snapshot().id).toBe(`${runtime.identifierPrefix}-run-2`);
   });
 
   it('a caller-supplied runId is always used as-is and never consumes the runtime identifier seam', async () => {
@@ -1087,7 +1087,7 @@ describe('createActiveRun: AB-92/AB-252 RuntimeServices resolution', () => {
     expect(activeRun.snapshot().id).toBe('caller-supplied-run-id');
     // The `run` kind counter was never advanced — proves the identifier
     // seam was never reached for a caller-supplied id.
-    expect(runtime.identifiers.next('run')).toBe('run-1');
+    expect(runtime.identifiers.next('run')).toBe(`${runtime.identifierPrefix}-run-1`);
   });
 
   it('every existing call site that omits runtime behaves exactly as it did on the baseline: it still resolves a working default instance', async () => {

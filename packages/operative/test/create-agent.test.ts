@@ -1226,8 +1226,8 @@ describe('createAgent: AB-92/AB-252 RuntimeServices resolution', () => {
     // A single shared identifier counter, advanced once per run — proves
     // both runs consulted the SAME resolved `RuntimeServices` instance
     // rather than each resolving (or being handed) its own.
-    expect(firstRun.snapshot().id).toBe('run-1');
-    expect(secondRun.snapshot().id).toBe('run-2');
+    expect(firstRun.snapshot().id).toBe(`${runtime.identifierPrefix}-run-1`);
+    expect(secondRun.snapshot().id).toBe(`${runtime.identifierPrefix}-run-2`);
   });
 
   it('two different createAgent() calls with no runtime option never share a clock: each resolves its own independent default instance', async () => {

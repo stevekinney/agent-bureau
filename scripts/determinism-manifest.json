@@ -46,6 +46,12 @@
       "owningIssue": "AB-273"
     },
     {
+      "path": "packages/lifecycle/src/identifier-seed.ts",
+      "reason": "Coordinator ruling on AB-337: createManualRuntimeServices()'s default (unpinned) identifierSeed must be generated and unique per runtime instance, so two manual runtimes constructed with no explicit seed never mint colliding identifiers — concretely, the crash-conformance fixture (AB-270) re-launched as a fresh OS process after a SIGKILL (AB-321) must derive a different identifier prefix than the process it replaced. No purely deterministic function of in-process state (a module-level counter, a fixed literal) can differ across a process boundary the way this must, so this one function calls crypto.randomUUID(). A caller that needs a reproducible sequence still passes an explicit identifierSeed (AB-92, AB-263's reproduction artifact); this exemption backs only the unpinned default. Split into its own file so this exemption does not cover manual-runtime-services.ts's clock/timer/random logic, which must stay real-globals-free.",
+      "owner": "Agent Bureau team",
+      "owningIssue": "AB-337"
+    },
+    {
       "path": "packages/cloudflare/src/test/runtime-lane.ts",
       "reason": "Names a Bun.build glue entry temp file with crypto.randomUUID() so two concurrent agent-validation processes bundling the real Durable Object worker at once never write/read/race-delete the same file. No caller-injected options.identifiers value is safe here: a caller's identifier source is not guaranteed process-unique (test/cloudflare-backend-contract.test.ts uses a plain per-process counter), and this module ships as part of src/ (tsconfig.build.json rootDir is ./src), so it cannot import a default from outside src/test/ the way the *.test.ts files (excluded from the build) do.",
       "owner": "Agent Bureau team",

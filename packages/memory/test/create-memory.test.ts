@@ -59,7 +59,7 @@ describe('createMemory', () => {
 
       const entry = await runtimeMemory.remember('Runtime-controlled entry');
 
-      expect(entry.id).toBe('memory-1');
+      expect(entry.id).toBe(`${runtime.identifierPrefix}-memory-1`);
       expect(entry.createdAt).toBe(Date.parse('2026-02-02T00:00:00.000Z'));
       expect(entry.updatedAt).toBe(Date.parse('2026-02-02T00:00:00.000Z'));
     });
