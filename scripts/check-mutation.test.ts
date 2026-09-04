@@ -4,9 +4,11 @@ import { describe, expect, it } from 'bun:test';
 
 import {
   applyMutation,
+  assertOperatorsMatch,
   collectMutationCandidates,
   compareToBaseline,
   findSymbolBody,
+  MUTATION_OPERATORS,
   realFileSystem as fs,
   type MutationTargetSet,
   runTargetSet,
@@ -177,6 +179,28 @@ describe('spawnCommand', () => {
   });
 });
 
+describe('assertOperatorsMatch', () => {
+  it('does not throw when the declared operators exactly match the fixed set, in any order', () => {
+    expect(() => assertOperatorsMatch([...MUTATION_OPERATORS])).not.toThrow();
+    expect(() => assertOperatorsMatch([...MUTATION_OPERATORS].reverse())).not.toThrow();
+  });
+
+  it('throws when a declared operator is missing', () => {
+    const missingOne = MUTATION_OPERATORS.filter((op) => op !== 'remove-statement');
+    expect(() => assertOperatorsMatch(missingOne)).toThrow(/Missing: remove-statement/);
+  });
+
+  it('throws when an unrecognized operator is declared', () => {
+    expect(() => assertOperatorsMatch([...MUTATION_OPERATORS, 'delete-random-line'])).toThrow(
+      /Unrecognized: delete-random-line/,
+    );
+  });
+
+  it('throws when the array is empty', () => {
+    expect(() => assertOperatorsMatch([])).toThrow(/Missing:/);
+  });
+});
+
 describe('compareToBaseline', () => {
   it('reports no regression when survivors equal the recorded baseline', () => {
     const comparison = compareToBaseline('set-a', 2, { 'set-a': 2 });
@@ -324,15 +348,20 @@ describe('runTargetSet against the real classify fixture (proves the check itsel
 
   it('counts a rebuild failure on a mutant as killed, not as a thrown error', async () => {
     const text = await Bun.file(FIXTURE_FILE).text();
+    const candidateCount = collectMutationCandidates(text, FIXTURE_FILE, 'classify').length;
     let buildCalls = 0;
     const fakeRunCommand = (command: readonly string[]) => {
       if (command.includes('build')) {
         buildCalls += 1;
-        // First build call is the pre-mutation sanity pass — must succeed, or `runTargetSet`
-        // throws before any mutant runs. Every later build call simulates a mutation that
-        // broke the type-check (e.g. defeated a narrowing guard elsewhere in the file) —
-        // this must count as the mutant being KILLED, not crash the whole check.
-        return buildCalls === 1
+        // Call 1 is the pre-mutation sanity pass and must succeed, or `runTargetSet` throws
+        // before any mutant runs. Calls 2..candidateCount+1 are one per mutant, and simulate a
+        // mutation that broke the type-check (e.g. defeated a narrowing guard elsewhere in the
+        // file) — this must count as the mutant being KILLED, not crash the whole check. The
+        // FINAL call is `runTargetSet`'s own post-restore cleanup rebuild (restores `dist/` to
+        // match the already-restored `src/`) and must also succeed, or that legitimate
+        // (Copilot-review-driven) fail-fast throws and this test would be indistinguishable from
+        // a real infrastructure failure.
+        return buildCalls === 1 || buildCalls > candidateCount + 1
           ? { exitCode: 0, stdout: '', stderr: '' }
           : { exitCode: 1, stdout: '', stderr: 'type error' };
       }
@@ -360,6 +389,44 @@ describe('runTargetSet against the real classify fixture (proves the check itsel
       expect(result.survived).toEqual([]);
       expect(result.killedCount).toBeGreaterThan(0);
     } finally {
+      expect(await Bun.file(FIXTURE_FILE).text()).toBe(text);
+    }
+  }, 30_000);
+
+  it('throws (fails fast) when the post-restore cleanup rebuild itself fails', async () => {
+    const text = await Bun.file(FIXTURE_FILE).text();
+    const candidateCount = collectMutationCandidates(text, FIXTURE_FILE, 'classify').length;
+    let buildCalls = 0;
+    // Every build call succeeds — sanity (call 1) and one per mutant (calls 2..candidateCount+1)
+    // — EXCEPT the final call: `runTargetSet`'s own post-restore cleanup rebuild. That failure
+    // must surface as a thrown error, never be silently swallowed (a Copilot-review-driven fix: a
+    // swallowed failure here would leave `dist/` built from a mutant's `src/` while the
+    // repository's own `src/` is already restored).
+    const fakeRunCommand = (command: readonly string[]) => {
+      if (command.includes('build')) {
+        buildCalls += 1;
+        return buildCalls > candidateCount + 1
+          ? { exitCode: 1, stdout: '', stderr: 'build infra failure' }
+          : { exitCode: 0, stdout: '', stderr: '' };
+      }
+      return spawn(command, REPO_ROOT);
+    };
+
+    const set: MutationTargetSet = {
+      name: 'fixture-final-rebuild-failure',
+      description: 'every rebuild fails, including the final cleanup one',
+      targets: [{ file: relativeToRoot(FIXTURE_FILE), symbol: 'classify', why: 'fixture' }],
+      tests: [{ path: relativeToRoot(KILLED_TEST), rebuild: ['fixture-package'] }],
+    };
+
+    try {
+      expect(() =>
+        runTargetSet({ repoRoot: REPO_ROOT, runCommand: fakeRunCommand, fileSystem: fs }, set),
+      ).toThrow(/failed to rebuild package "fixture-package" after restoring source/);
+    } finally {
+      // The source file itself is still restored even though the cleanup rebuild threw — the
+      // per-mutant `finally` (not the target-set-level one that does the rebuild) already
+      // wrote it back before the throw ever happens.
       expect(await Bun.file(FIXTURE_FILE).text()).toBe(text);
     }
   }, 30_000);

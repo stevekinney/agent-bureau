@@ -116,11 +116,17 @@ export type MutationBaseline = Readonly<Record<string, number>>;
 // Mutation candidates
 // ---------------------------------------------------------------------------
 
-export type MutationOperator =
-  | 'negate-boolean-condition'
-  | 'swap-comparison-operator'
-  | 'replace-returned-literal-with-default'
-  | 'remove-statement';
+// The single source of truth for the fixed operator set — `loadTargets` validates
+// `mutation-targets.json`'s own `operators` array against this at load time, so the config's
+// documentation of what the script does can never silently drift from what it actually does.
+export const MUTATION_OPERATORS = [
+  'negate-boolean-condition',
+  'swap-comparison-operator',
+  'replace-returned-literal-with-default',
+  'remove-statement',
+] as const;
+
+export type MutationOperator = (typeof MUTATION_OPERATORS)[number];
 
 export interface MutationCandidate {
   readonly operator: MutationOperator;
@@ -589,25 +595,61 @@ export function runTargetSet(options: RunOptions, set: MutationTargetSet): Targe
     // Every mutant restores its own file before the next one, and rebuild-declaring tests
     // rebuild fresh before they run — but the LAST mutant to touch a rebuilt package leaves
     // `dist/` built from that mutant's source. One final rebuild after the whole target set
-    // restores `dist/` to match the now fully-restored `src/`.
+    // restores `dist/` to match the now fully-restored `src/`. A failure here is surfaced, not
+    // swallowed: silently continuing would leave `dist/` built from a mutant's `src/` while the
+    // repository's own `src/` is already restored — exactly the stale-dist mismatch this
+    // script's own doc comment (and `.claude/rules/monorepo-workflow.md`) warns about, and it
+    // would invalidate every LATER target set's pre-mutation sanity pass. `originalText` is
+    // already back on disk (the loop's own `finally` above ran unconditionally), so the source
+    // tree itself is never left mutated even when this throws.
     for (const pkg of rebuildPackages) {
-      options.runCommand(
+      const build = options.runCommand(
         ['bun', 'run', 'turbo', 'run', 'build', `--filter=${pkg}`],
         options.repoRoot,
       );
+      if (build.exitCode !== 0) {
+        throw new Error(
+          `Target set "${set.name}": failed to rebuild package "${pkg}" after restoring source — dist/ may not match the restored src/:\n${build.stderr}`,
+        );
+      }
     }
   }
 
   return { setName: set.name, survived, killedCount };
 }
 
-function gitIsClean(filePath: string): boolean {
+export function gitIsClean(filePath: string): boolean {
   const result = spawnCommand(['git', 'status', '--porcelain', '--', filePath], REPO_ROOT);
+  // A non-zero exit (a bad pathspec, `git` not on PATH, any other `git status` failure) is NOT
+  // "clean" — it means the check could not determine cleanliness at all, and failing safe here
+  // means refusing to mutate rather than silently trusting an empty (error-routed-to-stderr)
+  // stdout.
+  if (result.exitCode !== 0) return false;
   return result.stdout.trim().length === 0;
 }
 
+/** Throws if `declaredOperators` (from `mutation-targets.json`'s own `operators` field) is not
+ *  exactly the fixed operator set — order-independent, but no missing and no extra entries.
+ *  Prevents the config's documentation of what the script does from drifting from what it
+ *  actually does. */
+export function assertOperatorsMatch(declaredOperators: readonly string[]): void {
+  const declared = new Set(declaredOperators);
+  const actual = new Set<string>(MUTATION_OPERATORS);
+  const missing = MUTATION_OPERATORS.filter((op) => !declared.has(op));
+  const extra = declaredOperators.filter((op) => !actual.has(op));
+  if (missing.length > 0 || extra.length > 0) {
+    throw new Error(
+      `scripts/mutation-targets.json's "operators" array does not match check-mutation.ts's fixed operator set.` +
+        (missing.length > 0 ? ` Missing: ${missing.join(', ')}.` : '') +
+        (extra.length > 0 ? ` Unrecognized: ${extra.join(', ')}.` : ''),
+    );
+  }
+}
+
 function loadTargets(): MutationTargetsFile {
-  return JSON.parse(readFileSync(TARGETS_PATH, 'utf8')) as MutationTargetsFile;
+  const targetsFile = JSON.parse(readFileSync(TARGETS_PATH, 'utf8')) as MutationTargetsFile;
+  assertOperatorsMatch(targetsFile.operators);
+  return targetsFile;
 }
 
 function loadBaseline(): MutationBaseline {
