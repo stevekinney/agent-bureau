@@ -34,12 +34,13 @@ describe('E3: skills package graph position', () => {
     const deps = Object.keys(packageJson.dependencies ?? {});
 
     // Forbidden workspace dependencies — these would break the layer contract.
-    // Skills is at the memory layer: deps are armorer and interoperability only.
+    // Skills is at the memory layer: deps are armorer, interoperability, and
+    // lifecycle (the RuntimeServices seam every layer routes reads through
+    // per AB-324/AB-326 — same relationship bureau has with lifecycle).
     const forbiddenWorkspaceDeps = [
       'operative', // skills is ABOVE operative's layer
       'memory', // same layer — no intra-layer import
       'conversationalist', // skills is above conversationalist
-      'lifecycle', // transitively available via armorer; not needed directly
       'bureau', // bureau is above skills
       'gateway', // gateway is above skills
       'sentinel', // unrelated
@@ -52,7 +53,7 @@ describe('E3: skills package graph position', () => {
     }
   });
 
-  it('depends on armorer (same layer — tools/seams) and interoperability (zero-dep primitive)', async () => {
+  it('depends on armorer (same layer — tools/seams), interoperability (zero-dep primitive), and lifecycle (RuntimeServices seam)', async () => {
     const packageJson = (await import('../package.json')) as {
       dependencies?: Record<string, string>;
     };
@@ -62,6 +63,7 @@ describe('E3: skills package graph position', () => {
     // These are the ALLOWED workspace deps for this layer.
     expect(deps).toContain('armorer');
     expect(deps).toContain('interoperability');
+    expect(deps).toContain('lifecycle');
   });
 });
 

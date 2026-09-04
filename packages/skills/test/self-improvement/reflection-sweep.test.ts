@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { createManualRuntimeServices } from 'lifecycle';
 
 import type { IdentityProviderLike } from '../../src/self-improvement/proposals';
 import { getProposal, listProposals, rejectProposal } from '../../src/self-improvement/proposals';
@@ -569,5 +570,28 @@ describe('reflectionSweep — proposal field integrity', () => {
 
     expect(retrieved).toBeDefined();
     expect(retrieved!.content).toBe('skill proposal content');
+  });
+
+  it('derives id and createdAt from an injected manual runtime', async () => {
+    const storage = createMockKeyValueStore();
+    const skillProvider = createMockSkillProvider();
+    const reflect = mock(async () => 'skill content');
+    const runtime = createManualRuntimeServices({
+      origin: '2026-03-01T00:00:00.000Z',
+      identifierSeed: 'proposal-seed',
+    });
+
+    const { onStep } = reflectionSweep({
+      sink: { type: 'skill', storage, skillProvider },
+      reflect,
+      runtime,
+    });
+
+    await onStep(createStepResult());
+
+    const proposals = await listProposals(storage);
+    const proposal = proposals[0]!;
+    expect(proposal.id).toBe('skill-1');
+    expect(proposal.createdAt).toBe('2026-03-01T00:00:00.000Z');
   });
 });

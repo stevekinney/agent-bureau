@@ -1,5 +1,7 @@
 import type { TextValueStore } from '@lostgradient/weft/storage';
 import { sha256HexSync } from 'interoperability';
+import type { RuntimeServices } from 'lifecycle';
+import { createDefaultRuntimeServices } from 'lifecycle';
 import { z } from 'zod';
 
 import { parseSkillMarkdown } from '../parse-skill-markdown';
@@ -260,8 +262,14 @@ export async function isRejectedPattern(
  */
 export async function clearProposals(
   storage: TextValueStore,
-  options?: { status?: 'accepted' | 'rejected'; olderThanMs?: number },
+  options?: {
+    status?: 'accepted' | 'rejected';
+    olderThanMs?: number;
+    /** Runtime to read the current time from. Defaults to the real clock. */
+    runtime?: RuntimeServices;
+  },
 ): Promise<number> {
+  const runtime = options?.runtime ?? createDefaultRuntimeServices();
   const keys = await storage.list(PROPOSAL_PREFIX);
   let removed = 0;
 
@@ -284,7 +292,7 @@ export async function clearProposals(
     }
 
     if (options?.olderThanMs) {
-      const age = Date.now() - new Date(proposal.createdAt).getTime();
+      const age = runtime.clock.now() - new Date(proposal.createdAt).getTime();
       if (age < options.olderThanMs) continue;
     }
 

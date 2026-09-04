@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test';
+import { createManualRuntimeServices } from 'lifecycle';
 
 import type { IdentityProviderLike } from '../../src/self-improvement/proposals';
 import {
@@ -437,6 +438,36 @@ describe('proposals', () => {
       const removed = await clearProposals(storage, {
         status: 'accepted',
         olderThanMs: 24 * 60 * 60 * 1000,
+      });
+
+      expect(removed).toBe(1);
+      expect(await getProposal(storage, 'old')).toBeUndefined();
+      expect(await getProposal(storage, 'recent')).toBeDefined();
+    });
+
+    it("uses the injected runtime's clock rather than the real clock for age comparisons", async () => {
+      const storage = createMockKeyValueStore();
+      const runtime = createManualRuntimeServices({ origin: '2026-01-10T00:00:00.000Z' });
+
+      const oldDate = '2026-01-01T00:00:00.000Z';
+      const recentDate = '2026-01-09T12:00:00.000Z';
+
+      await saveProposal(
+        storage,
+        makeProposal({ id: 'old', status: 'accepted', createdAt: oldDate }),
+      );
+      await saveProposal(
+        storage,
+        makeProposal({ id: 'recent', status: 'accepted', createdAt: recentDate }),
+      );
+
+      // Relative to the manual runtime's pinned origin (2026-01-10), "old" is
+      // more than 24h stale and "recent" is not — a real clock (2026-09-04)
+      // would treat both as ancient and remove both.
+      const removed = await clearProposals(storage, {
+        status: 'accepted',
+        olderThanMs: 24 * 60 * 60 * 1000,
+        runtime,
       });
 
       expect(removed).toBe(1);
