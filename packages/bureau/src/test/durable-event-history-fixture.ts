@@ -207,7 +207,15 @@ export async function createDurableEventHistoryFixture(
       dispose: () => storageFixture.dispose(),
     };
   } catch (error) {
-    await storageFixture.dispose();
+    // Best-effort cleanup, mirroring `createBureauTestHarness`'s own
+    // `disposeQuietly` (`./harness.ts`): a failure while cleaning up after
+    // the ORIGINAL seeding error must never replace it — the caller needs
+    // to see why seeding failed, not why disposal also failed.
+    try {
+      await storageFixture.dispose();
+    } catch {
+      // Swallowed deliberately — see the comment above.
+    }
     throw error;
   } finally {
     storage?.[Symbol.dispose]();

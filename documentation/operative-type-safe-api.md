@@ -900,14 +900,15 @@ event types plug into this durable store. Four rules carry over from
 - **The gap-vs-empty-page distinction.** An ordinary empty page
   (`{ events: [], hasMore: false }`) means "caller is fully caught up, or
   nothing has ever been recorded for this owner" — not a problem. A
-  `DurableEventGap` (`{ outcome: 'gap', requestedCursor,
-firstRetainedSequence }`) means the requested `since` predates the
-  store's own `snapshotRetentionFloor()` — history may have been
-  compacted away, and the caller must re-baseline (typically: fall back
-  to a full page from the beginning, or surface a "history unavailable
-  before X" condition) rather than treating it as "nothing new." A new
-  event-slice implementer's own consumer must branch on `'outcome' in
-result`, never assume every non-throwing call returns a page.
+  `DurableEventGap`
+  (`{ outcome: 'gap', requestedCursor, firstRetainedSequence }`) means the
+  requested `since` predates the store's own `snapshotRetentionFloor()` —
+  history may have been compacted away, and the caller must re-baseline
+  (typically: fall back to a full page from the beginning, or surface a
+  "history unavailable before X" condition) rather than treating it as
+  "nothing new." A new event-slice implementer's own consumer must branch
+  on `'outcome' in result`, never assume every non-throwing call returns a
+  page.
 - **The ephemeral-delta exclusion list.** Not every event AB-87 classifies
   belongs in this store. Live-only and explicitly non-cursor-advancing
   kinds are deliberately excluded from `createDurableEventProducer`'s
