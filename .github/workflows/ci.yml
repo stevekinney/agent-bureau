@@ -152,7 +152,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: reproduction-artifacts-lifecycle-contract
-          path: ${{ github.workspace }}/reproduction-artifacts/
+          path: ${{ env.REPRODUCTION_ARTIFACT_DIR }}/
           if-no-files-found: ignore
           retention-days: 14
 
@@ -195,6 +195,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: reproduction-artifacts-crash-smoke
-          path: ${{ github.workspace }}/reproduction-artifacts/
+          path: ${{ env.REPRODUCTION_ARTIFACT_DIR }}/
           if-no-files-found: ignore
           retention-days: 14
