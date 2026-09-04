@@ -14,6 +14,7 @@ import { SteeringAppliedEvent } from '../events';
 import type { OperativeHookMap } from '../hooks';
 import type { EventDispatcher } from '../run-step';
 import type { GenerateContext, GenerateFunction, SteeringGate } from '../types';
+import type { CheckpointStore } from './checkpoint-store';
 import { createCheckpointStore } from './checkpoint-store';
 import {
   createRunWorkflow,
@@ -41,24 +42,112 @@ function continuingToolbox(): RegistryToolbox {
 }
 
 /**
+ * AB-296 — a controllable clock for `Engine.create({ getNow })`. Threading a
+ * frozen/manually-advanced clock into Weft's durable-timer deadline check
+ * (`processSleepOperation`'s `scheduledFireAt <= getNow()`) removes the
+ * ordering dependency a real, short `ctx.sleep` has on wall-clock scheduling:
+ * on a cold-started engine (the first `Engine.create` in an isolated `bun
+ * test -t` run), just REACHING the `ctx.sleep` call can take longer than the
+ * sleep's own short duration, making the deadline already-passed and racing
+ * or entirely skipping the "genuinely parked" observation the test relies on.
+ * A frozen clock never reaches the deadline on its own; the test advances it
+ * explicitly and fires one `engine.runMaintenance(now)` scheduler tick
+ * instead of relying on a real background poller.
+ */
+function createManualClock(startTime = 0) {
+  let now = startTime;
+  return {
+    getNow: () => now,
+    /** Advances the clock and returns the new value, for `runMaintenance(now)`. */
+    advance: (milliseconds: number) => {
+      now += milliseconds;
+      return now;
+    },
+  };
+}
+type ManualClock = ReturnType<typeof createManualClock>;
+
+/**
+ * AB-296 — wraps a {@link CheckpointStore} so a test can `await` the exact
+ * moment a given run's Nth step commits, instead of polling
+ * `handle.snapshot()` a fixed number of times. `run-workflow.ts` calls
+ * `saveCursor` exactly once per completed step, immediately before it checks
+ * `pendingWakeup`/`pendingHumanWait` and (maybe) parks — so the Nth
+ * `saveCursor` call for a runId is the precise, event-driven settle point
+ * "step N-1 has durably committed," with no dependency on how many event-loop
+ * turns that took.
+ *
+ * Wraps at the `CheckpointStore` level — not the `saveCursor` weft activity —
+ * because `createRunWorkflow` builds its OWN activities internally from the
+ * `CheckpointStore` it is given (`storage.saveCursor` in its `.activities({})`
+ * call); a wrapped activity handed only to `Engine.create`'s top-level
+ * `activities` map is never the one the workflow actually invokes.
+ */
+function createCursorSaveSignal(checkpointStore: CheckpointStore) {
+  const counts = new Map<string, number>();
+  // Each runId keeps its own list of independently-targeted waiters — a
+  // waiter registered for target=1 must resolve at count 1 even if a LATER
+  // waiter for the same runId asks for target=3; coalescing every waiter for
+  // a runId onto one shared `target` (the earlier design) would have forced
+  // the target=1 waiter to wait until count 3 as well.
+  const waiters = new Map<string, Array<{ target: number; resolve: () => void }>>();
+  const wrapped: CheckpointStore = {
+    ...checkpointStore,
+    saveCursor: async (runId, cursor) => {
+      await checkpointStore.saveCursor(runId, cursor);
+      const next = (counts.get(runId) ?? 0) + 1;
+      counts.set(runId, next);
+      const pending = waiters.get(runId);
+      if (pending === undefined) return;
+      const [ready, stillWaiting] = [
+        pending.filter((waiter) => next >= waiter.target),
+        pending.filter((waiter) => next < waiter.target),
+      ];
+      if (stillWaiting.length === 0) {
+        waiters.delete(runId);
+      } else {
+        waiters.set(runId, stillWaiting);
+      }
+      for (const waiter of ready) waiter.resolve();
+    },
+  };
+  const waitForCursorSave = (runId: string, target = 1): Promise<void> => {
+    if ((counts.get(runId) ?? 0) >= target) return Promise.resolve();
+    return new Promise((resolve) => {
+      const existing = waiters.get(runId) ?? [];
+      existing.push({ target, resolve });
+      waiters.set(runId, existing);
+    });
+  };
+  return { checkpointStore: wrapped, waitForCursorSave };
+}
+
+/**
  * Build an engine + checkpoint store over a given backend. Pass
  * `resolveWorkflowServices` to re-provide a recovered run's services on a fresh
- * engine (the cross-process recovery path).
+ * engine (the cross-process recovery path). Pass `clock` (AB-296) to drive the
+ * engine's `getNow` from a {@link createManualClock} instance instead of the
+ * real wall clock. Returns `waitForCursorSave` ({@link createCursorSaveSignal})
+ * alongside `engine`/`checkpointStore` for tests that need to observe a
+ * step's commit without polling.
  */
 async function buildEngine(
   storage: Storage,
   recover: boolean,
   resolveWorkflowServices?: ServicesResolver,
   version?: string,
+  clock?: ManualClock,
 ) {
-  const checkpointStore = createCheckpointStore(
+  const rawCheckpointStore = createCheckpointStore(
     textValueStore(storage, { disposeUnderlyingStorage: false }),
   );
+  const { checkpointStore, waitForCursorSave } = createCursorSaveSignal(rawCheckpointStore);
   const runWorkflow = createRunWorkflow(checkpointStore, { version });
   const activities = createStorageActivities(checkpointStore);
   const engine = await Engine.create({
     storage,
     recover,
+    ...(clock ? { getNow: clock.getNow } : {}),
     ...(resolveWorkflowServices ? { resolveWorkflowServices } : {}),
     workflows: { agentRun: runWorkflow },
     activities: {
@@ -67,7 +156,7 @@ async function buildEngine(
       recordStep: activities.recordStep,
     },
   });
-  return { engine, checkpointStore };
+  return { engine, checkpointStore, waitForCursorSave };
 }
 
 /**
@@ -79,22 +168,33 @@ async function buildEngine(
  * only auto-starts it when `recover !== false`, which every crash-simulation
  * test in this file relies on to keep a "hung" run genuinely parked with no
  * background activity).
+ *
+ * AB-296: pass `clock` (a {@link createManualClock} instance) to drive the
+ * durable timer from a manual clock instead — this switches the engine to
+ * `backgroundTasks: 'manual'` (no real poller at all) and the caller fires
+ * due timers explicitly via `engine.runMaintenance`. Omitting `clock`
+ * preserves the original real-poller behavior for every other call site in
+ * this file. Returns `waitForCursorSave` alongside `engine`/`checkpointStore`,
+ * same as {@link buildEngine}.
  */
 async function buildWakeupEngine(
   storage: Storage,
   recover: boolean,
   resolveWorkflowServices?: ServicesResolver,
+  clock?: ManualClock,
 ) {
-  const checkpointStore = createCheckpointStore(
+  const rawCheckpointStore = createCheckpointStore(
     textValueStore(storage, { disposeUnderlyingStorage: false }),
   );
+  const { checkpointStore, waitForCursorSave } = createCursorSaveSignal(rawCheckpointStore);
   const runWorkflow = createRunWorkflow(checkpointStore, {});
   const activities = createStorageActivities(checkpointStore);
   const engine = await Engine.create({
     storage,
     recover,
-    startScheduler: true,
-    schedulerPollIntervalMs: 10,
+    ...(clock
+      ? { getNow: clock.getNow, backgroundTasks: 'manual' as const }
+      : { startScheduler: true, schedulerPollIntervalMs: 10 }),
     ...(resolveWorkflowServices ? { resolveWorkflowServices } : {}),
     workflows: { agentRun: runWorkflow },
     activities: {
@@ -103,7 +203,7 @@ async function buildWakeupEngine(
       recordStep: activities.recordStep,
     },
   });
-  return { engine, checkpointStore };
+  return { engine, checkpointStore, waitForCursorSave };
 }
 
 /**
@@ -2118,17 +2218,26 @@ describe('durable agentRun workflow', () => {
      * `[wakeup] Resumed after sleeping ...` conversation message AB-45 owns —
      * never merely delaying terminal completion.
      *
-     * Uses a short REAL duration (not the huge 999_999_999 placeholder the
+     * Uses a short duration (not the huge 999_999_999 placeholder the
      * park-only tests above use) because these tests need the timer to
-     * actually fire: `ctx.sleep` is Weft's own durable timer over the real
-     * clock under `Engine.create` (no fake-clock `TestEngine` is used
-     * elsewhere in this file), so a short wall-clock wait is the deterministic
-     * choice available here — bounded by `await handle.result()` with no
-     * poll cap, since the durable timer itself (not the test) owns the wait.
+     * actually fire. AB-296: the "parks via ctx.sleep..." and "a late timer
+     * ..." cases below drive that duration off a {@link createManualClock}
+     * instance passed to `buildEngine`/`buildWakeupEngine` (via `getNow` and
+     * `engine.runMaintenance`) rather than a real wall-clock wait — a real
+     * short `ctx.sleep` on a cold-started engine could resolve before the
+     * test ever observed the park, or race the real 10ms scheduler poller
+     * under host load. The other two cases in this block still use a real
+     * timer (unaffected — out of AB-296's three named targets).
      */
     it('parks via ctx.sleep before another generation call runs, then resumes reasoning after the timer fires', async () => {
       const storage = new MemoryStorage();
-      const { engine, checkpointStore } = await buildWakeupEngine(storage, false);
+      const clock = createManualClock();
+      const { engine, checkpointStore, waitForCursorSave } = await buildWakeupEngine(
+        storage,
+        false,
+        undefined,
+        clock,
+      );
 
       const depsContainer: { ref: DurableRunDeps | undefined } = { ref: undefined };
       const wakeupTool = createTool({
@@ -2187,24 +2296,30 @@ describe('durable agentRun workflow', () => {
           { id: 'wakeup-run', services },
         );
 
-        // Let the workflow run the first step and reach ctx.sleep.
-        let parked = false;
-        for (let i = 0; i < 50; i++) {
-          await yieldToPortableEventLoop();
-          const snap = await handle.snapshot();
-          if (snap?.status === 'running' && depsContainer.ref?.pendingWakeup !== undefined) {
-            parked = true;
-            break;
-          }
-        }
-
-        expect(parked).toBe(true);
+        // AB-296: an explicit, event-driven settle signal — step 0's cursor
+        // commits right before the workflow evaluates pendingWakeup and
+        // parks — instead of polling `handle.snapshot()` a fixed number of
+        // times.
+        await waitForCursorSave('wakeup-run', 1);
+        const parkedSnap = await handle.snapshot();
+        const parkedCheckpoint = await checkpointStore.loadCheckpoint('wakeup-run');
+        expect(parkedSnap?.status).toBe('running');
+        expect(parkedCheckpoint.steps).toHaveLength(1);
         // AB-45 — the fix: exactly one generate call happened before the
         // park. Without the fix, a second (immediate, pre-sleep) generate
-        // call would already have run by now.
+        // call would already have run by now. This holds unconditionally
+        // here — `saveCursor` for step 0 cannot commit before its own step's
+        // `generate` call resolves, and step 1's `generate` cannot run before
+        // the still-frozen clock lets `ctx.sleep` resolve.
         expect(stepCallCount).toBe(1);
 
-        // Wait for the 20ms timer to fire and the continuation step to run.
+        // AB-296: fire the 20ms timer explicitly via the manual clock instead
+        // of waiting on a real background poller. One `yieldToPortableEventLoop`
+        // drains the microtask chain from `saveCursor`'s settle through
+        // `ctx.sleep`'s own `scheduler.schedule()` durable-storage write, so a
+        // single `runMaintenance` tick finds the timer already registered.
+        await yieldToPortableEventLoop();
+        await engine.runMaintenance(clock.advance(20));
         const result = await handle.result();
         expect(result.finishReason).toBe('stop-condition');
         // The continuation step actually ran (not just the pre-park step).
@@ -2383,10 +2498,20 @@ describe('durable agentRun workflow', () => {
     it('a late timer (recovered after the deadline has already passed) still continues the run exactly once', async () => {
       // AB-41's decision record: "Missed-fire: not applicable; a durable
       // sleep fires as soon as the process observes its deadline has passed
-      // on recovery." Crash while parked on a short sleep, wait past the
-      // deadline in wall-clock time, then recover on a fresh engine — the
+      // on recovery." Crash while parked on a short sleep, then recover on a
+      // fresh engine whose manual clock is already past the deadline — the
       // recovered run must observe the already-passed deadline and continue
       // exactly once, not duplicate the resumed step or hang.
+      //
+      // AB-296: engine A's clock is frozen (never advanced), so its ctx.sleep
+      // can never resolve on its own — this removes the prior real-wall-clock
+      // race where a cold-started engine A could take longer than the sleep's
+      // own duration just to reach ctx.sleep, making the deadline already
+      // passed and skipping the "genuinely parked" observation below. Engine
+      // B's clock starts already past the 20ms deadline A scheduled, so
+      // `processSleepOperation`'s own already-due check resolves the
+      // recovered sleep immediately — the same "deadline already passed"
+      // behavior AB-41 describes, with no real wall-clock wait needed.
       const storage = new MemoryStorage();
       const runId = 'late-wakeup-run';
 
@@ -2425,7 +2550,8 @@ describe('durable agentRun workflow', () => {
       };
       depsA.ref = servicesA;
 
-      const a = await buildEngine(storage, false);
+      const clockA = createManualClock();
+      const a = await buildEngine(storage, false, undefined, undefined, clockA);
       const handleA = await a.engine.start(
         'agentRun',
         { runId, sessionId: runId, agentName: 'wakeup-agent', prompt: 'start', maximumSteps: 5 },
@@ -2433,46 +2559,47 @@ describe('durable agentRun workflow', () => {
       );
       void handleA.result().catch(() => {});
 
-      let parkedOnA = false;
-      for (let i = 0; i < 100; i++) {
-        await yieldToPortableEventLoop();
-        const snap = await handleA.snapshot();
-        if (snap?.status === 'running') {
-          const cp = await a.checkpointStore.loadCheckpoint(runId);
-          if (cp.steps.length >= 1) {
-            parkedOnA = true;
-            break;
-          }
-        }
-      }
-      expect(parkedOnA).toBe(true);
+      // AB-296: an explicit, event-driven settle signal instead of polling
+      // `handle.snapshot()` a fixed number of times — see the identical
+      // reasoning on the "parks via ctx.sleep..." test above.
+      await a.waitForCursorSave(runId, 1);
+      const parkedSnap = await handleA.snapshot();
+      const parkedCheckpoint = await a.checkpointStore.loadCheckpoint(runId);
+      expect(parkedSnap?.status).toBe('running');
+      expect(parkedCheckpoint.steps).toHaveLength(1);
 
-      // Simulate crash, and let the 20ms deadline pass in real wall-clock
-      // time BEFORE recovery starts, proving the deadline is observed as
-      // already-passed rather than re-armed from zero.
+      // Simulate crash. AB-296: engine B's manual clock starts already past
+      // the 20ms deadline A scheduled (see the note above), so recovery
+      // observes the deadline as already-passed without a real wall-clock
+      // wait.
       a.engine[Symbol.dispose]();
-      await new Promise((resolve) => setTimeout(resolve, 40));
 
       let generateCallCountB = 0;
-      const b = await buildWakeupEngine(storage, false, (_info) => ({
-        status: 'available',
-        services: (() => {
-          const freshToolbox = createToolbox([wakeupTool]) as unknown as RegistryToolbox;
-          const freshServices: DurableRunDeps = {
-            options: {
-              generate: async () => {
-                generateCallCountB++;
-                return { content: 'done-on-b', toolCalls: [] };
+      const clockB = createManualClock(1_000);
+      const b = await buildWakeupEngine(
+        storage,
+        false,
+        (_info) => ({
+          status: 'available',
+          services: (() => {
+            const freshToolbox = createToolbox([wakeupTool]) as unknown as RegistryToolbox;
+            const freshServices: DurableRunDeps = {
+              options: {
+                generate: async () => {
+                  generateCallCountB++;
+                  return { content: 'done-on-b', toolCalls: [] };
+                },
+                toolbox: freshToolbox,
+                conversation: createConversationHistory(),
+                stopWhen: noToolCalls(),
               },
               toolbox: freshToolbox,
-              conversation: createConversationHistory(),
-              stopWhen: noToolCalls(),
-            },
-            toolbox: freshToolbox,
-          };
-          return freshServices;
-        })(),
-      }));
+            };
+            return freshServices;
+          })(),
+        }),
+        clockB,
+      );
 
       try {
         const handles = await b.engine.recoverAll();
