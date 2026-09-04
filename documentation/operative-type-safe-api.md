@@ -498,6 +498,8 @@ declare function createDeferredAgentRun<O, H extends boolean>(
 ): AgentRun<O, H>;
 ```
 
+The real exported signature also takes the underlying `resolveAgent`/`rawInput`/`rawContext`/`label` (`packages/operative/src/create-lazy-agent.ts`) plus, since AB-325, an optional fifth `runtime?: RuntimeServices` parameter — the AB-92/AB-252 seam backing the synthetic liveness snapshot's `startedAt`/`observedAt` for the window before the underlying agent resolves. Defaults to the real implementation; `bureau`'s pre-existing call sites are unaffected since the parameter is additive. `createLazyAgent`'s own `CreateLazyAgentOptions` gains the same `runtime?: RuntimeServices` option and forwards it here.
+
 ## `AgentDefinitions` and the agent catalog
 
 ```ts
@@ -2025,7 +2027,7 @@ export interface ModelCatalog {
 export type CatalogProjection = 'general' | 'privileged'; // the vault brief's own vocabulary for this catalog
 ```
 
-`voyage` and `ollama` are embedding-only and get no descriptor row. `getProviderCapabilities` (`packages/operative/src/providers/capabilities.ts`) is now a projection over `createModelCatalog`'s descriptor rows, with an identical public signature and bit-for-bit identical answers to its pre-AB-64 behavior — the ambiguous-`baseURL` rule is sourced from `descriptor.endpointAmbiguous`. `createModelCatalog` is synchronous, side-effect-free, performs no network input or output, and returns a deeply frozen catalog at `revision: 1`; `now` is the only clock it reads, defaulting to the wall clock and injectable in tests.
+`voyage` and `ollama` are embedding-only and get no descriptor row. `getProviderCapabilities` (`packages/operative/src/providers/capabilities.ts`) is now a projection over `createModelCatalog`'s descriptor rows, with an identical public signature and bit-for-bit identical answers to its pre-AB-64 behavior — the ambiguous-`baseURL` rule is sourced from `descriptor.endpointAmbiguous`. `createModelCatalog` is synchronous, side-effect-free, performs no network input or output, and returns a deeply frozen catalog at `revision: 1`; `now` is the only clock it reads, defaulting (AB-325) to `options.runtime.clock.nowISO()` — itself defaulting to the real `RuntimeServices` implementation from `lifecycle` — and injectable directly via `now` in tests.
 
 The deterministic selector and `SelectionPlan` ship in [The deterministic backend selector and `SelectionPlan`](#the-deterministic-backend-selector-and-selectionplan) below (AB-249); the five-layer policy precedence itself is covered next (AB-248). The `'general'`/`'privileged'` catalog projection ships here (AB-247/mod-02e, `packages/operative/src/providers/model-catalog-projection.ts`): `projectDescriptor(descriptor, projection)` and `projectCatalog(catalog, projection)` are synchronous, pure functions that read neither the environment nor the clock and return deeply frozen values. `'privileged'` returns a structural copy — nothing dropped. `'general'` redacts exactly what AB-64's `## Catalog discipline (AC8)` names: `pricing` omitted entirely; `endpoint` reduced to its bare operation name with any host or origin detail stripped; `endpointAmbiguous` omitted, because it discloses that a custom base URL or proxy is configured; and any account-level quota field omitted (`BackendDescriptor` has none today). `availability`, `health`, `source`, and `freshness` are retained, so a caller can still tell an unavailable backend from an available one. `GENERAL_PROJECTION_REDACTED_KEYS`, exported from the same module, is what `model-catalog-projection.test.ts`'s exhaustive key-enumeration test checks every `BackendDescriptor` key against — present in the `'general'` projection, or named here — so a field added to the descriptor later without a redaction decision fails that test instead of silently being exposed.
 
@@ -2214,11 +2216,12 @@ export interface SelectOptions {
   readonly agent?: AgentPreferences;
   readonly delegated?: DelegatedAuthority;
   readonly user?: UserModelConfiguration;
-  readonly now?: () => string; // defaults to the wall clock
-  readonly newPlanId?: () => string; // defaults to crypto.randomUUID
+  readonly now?: () => string; // defaults to runtime.clock.nowISO()
+  readonly newPlanId?: () => string; // defaults to runtime.identifiers.next('selection-plan')
   readonly selectorRevision?: number; // defaults to 1
   readonly configurationRevision?: number;
   readonly revalidate?: RevalidationInput;
+  readonly runtime?: RuntimeServices; // AB-92/AB-252/AB-325; defaults to the real implementation; now/newPlanId still take precedence when supplied
 }
 
 declare function select(request: SelectionRequest, options: SelectOptions): SelectionPlan;

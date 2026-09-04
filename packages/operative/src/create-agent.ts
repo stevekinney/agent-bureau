@@ -538,7 +538,7 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknow
       ? { preferences: freezeGenerationPreferences(generationPreferences) }
       : {}),
     ...(allowedCandidates ? { allowedCandidates: freezeAllowedCandidates(allowedCandidates) } : {}),
-    freshness: new Date().toISOString(),
+    freshness: runtime.clock.nowISO(),
     selector: 'unavailable',
   });
 

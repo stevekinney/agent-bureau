@@ -234,6 +234,7 @@ export function createActiveRun(
     id: runId,
     durability: 'process-local',
     clock: dependencies?.clock,
+    runtime,
     owner: dependencies?.owner,
     // AB-216 — backs `LivenessSnapshot.worstChildAssessment`. Opt-in: a run
     // started without `options.childRegistry` never populates the field,

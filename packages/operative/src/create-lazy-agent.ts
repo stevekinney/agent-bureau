@@ -19,7 +19,8 @@
  */
 
 import { Conversation } from 'conversationalist';
-import type { Subscription } from 'lifecycle';
+import type { RuntimeServices, Subscription } from 'lifecycle';
+import { createDefaultRuntimeServices } from 'lifecycle';
 
 import type { AgentRun, RunEvent, UnwrappedValue } from './agent-run';
 import { CompletedRunIterationError } from './agent-run';
@@ -95,6 +96,14 @@ export interface CreateLazyAgentOptions<H extends boolean = false> {
    * (`readGenerationProfile`'s default fallback).
    */
   generationProfile?: AgentGenerationProfile;
+
+  /**
+   * AB-92/AB-252 (AB-325): the clock the synthetic liveness snapshot reads
+   * through for the window before the underlying agent resolves (see
+   * {@link createDeferredAgentRun}). Defaults to the real implementation
+   * (`createDefaultRuntimeServices` from `lifecycle`).
+   */
+  runtime?: RuntimeServices;
 }
 
 // A fresh object per call — never a shared module-level singleton. `RunResult.usage`
@@ -340,6 +349,12 @@ export function createDeferredAgentRun<O, H extends boolean>(
   rawInput: AgentInput,
   rawContext: AgentRunContext | undefined,
   label: string,
+  // AB-92/AB-252 (AB-325): the clock the synthetic liveness snapshot
+  // (`syntheticSnapshot`, below — the window before the underlying agent
+  // resolves) reads its timestamps through. Optional and additive so
+  // `bureau`'s existing call sites keep working unchanged; defaults to the
+  // real implementation.
+  runtime: RuntimeServices = createDefaultRuntimeServices(),
 ): AgentRun<O, H> {
   // Snapshot a `{ conversation }` input synchronously, at `run()` call time —
   // matching `createAgent`'s snapshot-at-`run()` semantics. Without this, the
@@ -403,7 +418,7 @@ export function createDeferredAgentRun<O, H extends boolean>(
   const pendingSnapshotObservers = new Set<PendingSnapshotRecord>();
 
   function syntheticSnapshot(): AgentRunLivenessSnapshot {
-    const now = new Date().toISOString();
+    const now = runtime.clock.nowISO();
     return {
       id: label,
       kind: 'agent-run',
@@ -420,7 +435,7 @@ export function createDeferredAgentRun<O, H extends boolean>(
       reachability: syntheticTerminal ? 'not-applicable' : 'unknown',
       progress: syntheticTerminal ? 'not-applicable' : 'unknown',
       assessment: syntheticTerminal ? 'terminal' : 'healthy',
-      observedAt: Date.now(),
+      observedAt: runtime.clock.now(),
       missedPulseCount: 0,
       policyVersion: LIVENESS_POLICY_VERSION,
       evidence: [],
@@ -1122,7 +1137,13 @@ export function createLazyAgent<O = never, H extends boolean = false>(
       return options.hasOutput ?? false;
     },
     run(input: AgentInput, context?: AgentRunContext): AgentRun<O, H> {
-      return createDeferredAgentRun(resolve, input, context, label);
+      return createDeferredAgentRun(
+        resolve,
+        input,
+        context,
+        label,
+        options.runtime ?? createDefaultRuntimeServices(),
+      );
     },
     [OPERATIVE_RESOLVE_RUN_OPTIONS]: resolveRunOptions,
   };

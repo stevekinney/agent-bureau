@@ -1,4 +1,4 @@
-import type { Subscription } from 'lifecycle';
+import { createDefaultRuntimeServices, type RuntimeServices, type Subscription } from 'lifecycle';
 
 import type { ChildRunDescriptor, ChildRunRegistry } from '../child-run';
 import {
@@ -24,6 +24,16 @@ export interface ActiveRunLivenessOptions {
   readonly id: string;
   readonly durability: 'process-local' | 'durable';
   readonly clock?: StallWatchdogClock;
+  /**
+   * The AB-92/AB-252 `RuntimeServices` seam (AB-325) — its `monotonic` and
+   * `timers` back the default `StallWatchdogClock` when `options.clock` is
+   * not supplied, and its `clock.nowISO()` backs `startedAt`/
+   * `lastTransitionAt`. Defaults to the real implementation. `options.clock`
+   * still takes precedence over `runtime` for the watchdog seam when both
+   * are supplied, for backward compatibility with a caller that customizes
+   * only the monotonic/timer seam.
+   */
+  readonly runtime?: RuntimeServices;
   /**
    * The authenticated principal or Bureau identifier that owns this run
    * (AC4's `owner` field) — absent for a standalone (non-Bureau) run, per
@@ -177,20 +187,23 @@ function deriveAssessment(
 }
 
 /**
- * The default production clock. `now()` uses `performance.now()` — a
- * monotonic source, unaffected by a wall-clock adjustment — rather than
- * `Date.now()` (AB-214 review PRRT_kwDORvupsc6esZS3): every cadence/grace/
- * jitter/suspension computation this module performs assumes a
- * monotonically increasing clock, and a backward wall-clock step could
+ * Adapts a `RuntimeServices` instance (AB-92/AB-252/AB-325) into a
+ * `StallWatchdogClock`. `now()` reads `runtime.monotonic` — a monotonic
+ * source, unaffected by a wall-clock adjustment — rather than
+ * `runtime.clock` (AB-214 review PRRT_kwDORvupsc6esZS3): every
+ * cadence/grace/jitter/suspension computation this module performs assumes
+ * a monotonically increasing clock, and a backward wall-clock step could
  * otherwise make a fresh pulse compare as older than a stale one. Wall-clock
- * ISO timestamps (`startedAt`, `lastTransitionAt`) stay on `Date`
+ * ISO timestamps (`startedAt`, `lastTransitionAt`) stay on `runtime.clock`
  * separately — they are for display, never for cadence math.
  */
-const realClock: StallWatchdogClock = {
-  now: () => performance.now(),
-  setTimeout: (callback, ms) => setTimeout(callback, ms),
-  clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
-};
+function stallWatchdogClockFromRuntime(runtime: RuntimeServices): StallWatchdogClock {
+  return {
+    now: () => runtime.monotonic.now(),
+    setTimeout: (callback, ms) => runtime.timers.setTimeout(callback, ms),
+    clearTimeout: (handle) => runtime.timers.clearTimeout(handle),
+  };
+}
 
 interface SubscriberRecord {
   readonly observer: (snapshot: AgentRunLivenessSnapshot) => void;
@@ -207,9 +220,10 @@ interface SubscriberRecord {
 }
 
 export function createActiveRunLiveness(options: ActiveRunLivenessOptions): ActiveRunLiveness {
-  const clock = options.clock ?? realClock;
+  const runtime = options.runtime ?? createDefaultRuntimeServices();
+  const clock = options.clock ?? stallWatchdogClockFromRuntime(runtime);
 
-  const startedAt = new Date().toISOString();
+  const startedAt = runtime.clock.nowISO();
   let revision = 0;
   let status: LivenessLifecycleStatus = 'running';
   let lastTransitionAt = startedAt;
@@ -431,7 +445,7 @@ export function createActiveRunLiveness(options: ActiveRunLivenessOptions): Acti
       if (status === 'terminal') return;
       if (status === next) return;
       status = next;
-      lastTransitionAt = new Date().toISOString();
+      lastTransitionAt = runtime.clock.nowISO();
       if (next === 'terminal') {
         disposeWatchdogs();
       }
@@ -443,7 +457,7 @@ export function createActiveRunLiveness(options: ActiveRunLivenessOptions): Acti
       result = value;
       hasResult = true;
       status = 'terminal';
-      lastTransitionAt = new Date().toISOString();
+      lastTransitionAt = runtime.clock.nowISO();
       disposeWatchdogs();
       advance();
     },

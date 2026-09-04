@@ -1241,6 +1241,33 @@ describe('runStep/executeLoop: AB-92/AB-252 RuntimeServices migration boundary',
     expect(result.finishReason).not.toBe('error');
     expect(result.content).toBe('recovered');
   });
+
+  it('the steering.applied event stamps appliedAt from runtime.clock, not the real wall clock (AB-325)', async () => {
+    const runtime = createManualRuntimeServices();
+    await runtime.advance(9_876);
+    const recorder = createEventRecorder();
+    const gate = createTestSteeringGate({ paused: false, configVersion: 1, model: 'real-model' });
+
+    await executeLoop(
+      {
+        generate: async () => textResponse('done'),
+        toolbox: createTestToolbox([]),
+        conversation: new Conversation(),
+        stopWhen: noToolCalls(),
+        steering: gate,
+        runId: 'run-1',
+        runtime,
+      },
+      recorder,
+    );
+
+    const applied = recorder.events.filter(
+      (event): event is SteeringAppliedEvent => event instanceof SteeringAppliedEvent,
+    );
+    const [event] = applied;
+    if (!event) throw new Error('expected a steering.applied event');
+    expect(event.effective.appliedAt).toBe(runtime.clock.nowISO());
+  });
 });
 
 describe('runStep: AB-302 generate.completed carries post-guardrail content', () => {

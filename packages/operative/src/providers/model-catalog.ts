@@ -1,4 +1,5 @@
 import type { MediaLimits, MimeFamily, Modality, ModalityMatrix } from 'conversationalist';
+import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
 
 import { getModelPricing } from '../cost-estimation.ts';
 import {
@@ -612,17 +613,26 @@ function readOpenAIBaseUrlOverride(): string | undefined {
 export interface CreateModelCatalogOptions {
   readonly openAIBaseURL?: string;
   readonly now?: () => string;
+  /**
+   * The AB-92/AB-252 `RuntimeServices` seam (AB-325) backing the default
+   * `now` when `options.now` is not supplied. Defaults to the real
+   * implementation; `options.now` still takes precedence over `runtime`
+   * when both are supplied, for backward compatibility.
+   */
+  readonly runtime?: RuntimeServices;
 }
 
 /**
  * Builds the static `ModelCatalog` seed: synchronous, side-effect-free, no
  * network input or output, no timer, no `queueMicrotask`, and no background
- * work. `now` defaults to the wall clock and is the only clock this module
- * reads — inject it in tests. Returns a deeply frozen catalog whose initial
- * `revision` is `1`.
+ * work. `now` defaults to `options.runtime.clock.nowISO()` (the real
+ * implementation when `runtime` is omitted) and is the only clock this
+ * module reads — inject `now` or a manual `runtime` in tests. Returns a
+ * deeply frozen catalog whose initial `revision` is `1`.
  */
 export function createModelCatalog(options?: CreateModelCatalogOptions): ModelCatalog {
-  const now = options?.now ?? (() => new Date().toISOString());
+  const runtime = options?.runtime ?? createDefaultRuntimeServices();
+  const now = options?.now ?? (() => runtime.clock.nowISO());
   const freshness = now();
   const endpointAmbiguous = Boolean(options?.openAIBaseURL || readOpenAIBaseUrlOverride());
 

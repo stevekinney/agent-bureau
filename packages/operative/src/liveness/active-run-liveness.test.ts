@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import type { Subscription } from 'lifecycle';
+import { createManualRuntimeServices, type Subscription } from 'lifecycle';
 
 import type { ChildRunDescriptor, ChildRunRegistry } from '../child-run';
 import { createActiveRunLiveness } from './active-run-liveness';
@@ -100,6 +100,40 @@ describe('createActiveRunLiveness (default real clock)', () => {
     const snapshot = liveness.snapshot();
     expect(snapshot.id).toBe('run-real');
     expect(snapshot.observedAt).toBeGreaterThan(0);
+
+    liveness.dispose();
+  });
+
+  it('a manual RuntimeServices controls startedAt and lastTransitionAt (AB-325)', () => {
+    const runtime = createManualRuntimeServices();
+    const liveness = createActiveRunLiveness({
+      id: 'run-manual-runtime',
+      durability: 'process-local',
+      runtime,
+    });
+
+    expect(liveness.snapshot().startedAt).toBe(runtime.clock.nowISO());
+
+    liveness.setStatus('waiting');
+    expect(liveness.snapshot().lastTransitionAt).toBe(runtime.clock.nowISO());
+
+    liveness.dispose();
+  });
+
+  it('also drives the watchdog observedAt from runtime.monotonic when options.clock is not supplied', async () => {
+    const runtime = createManualRuntimeServices();
+    const liveness = createActiveRunLiveness({
+      id: 'run-manual-runtime-watchdog',
+      durability: 'process-local',
+      runtime,
+    });
+
+    const before = liveness.snapshot().observedAt;
+    expect(before).toBe(runtime.monotonic.now());
+    await runtime.advance(TOOL_CHECK_INTERVAL_MS);
+    liveness.recordProviderPulse();
+    expect(liveness.snapshot().observedAt).toBe(runtime.monotonic.now());
+    expect(liveness.snapshot().observedAt).toBeGreaterThan(before);
 
     liveness.dispose();
   });

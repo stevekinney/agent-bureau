@@ -329,6 +329,8 @@ const result = await run.result(); // the module loads on first run(), then is c
 const plugin = createLazyAgent(() => import('./agents/plugin'));
 ```
 
+`createLazyAgent`'s `options` also accepts `runtime?: RuntimeServices` (AB-92/AB-252/AB-325) — the clock the synthetic liveness snapshot reads through for the window before the underlying agent resolves (`startedAt`/`observedAt`), forwarded into `createDeferredAgentRun`. Defaults to the real implementation.
+
 `createLazyAgent`'s return value is an ordinary `RunnableAgent<O, H>` — the same shape `createAgent` produces — so it slots into an `AgentDefinitions` map without unwrapping. The first successful load is cached and shared across concurrent `run()` calls; a load failure clears only that pending load, so a later `run()` retries.
 
 Because this return value is synchronous — built before the loader has ever run — `hasOutput` is a live getter, not a value frozen at construction (AB-234). Before the loader resolves it falls back to `options.hasOutput` (typed as `H` itself, so it cannot disagree with the call's own type argument — pass `{ hasOutput: true }` for a schema-backed agent; defaults to `false`, matching `H`'s own default); once resolved, it switches to reading the _loaded_ agent's own `hasOutput` directly, regardless of what (or whether) `options.hasOutput` said — so an omitted or inaccurate provisional value can never leave a permanently wrong witness once loading completes.
@@ -1465,7 +1467,7 @@ const monitor = createCostBudgetMonitor({
 
 #### Model Catalog (AB-64)
 
-`createModelCatalog` (`@lostgradient/operative/providers`) builds a static, synchronous, side-effect-free `ModelCatalog` — one `BackendDescriptor` row per `(provider, endpoint, model)` this package ships a generate function for. Each descriptor names its `modalities` (an AB-70 `ModalityMatrix`, re-exported from `conversationalist`), context/output limits, effort support and degradation, parameter compatibility, pricing (derived from `defaultPricingTable`, never fabricated), and availability/health. `voyage` and `ollama` are embedding-only and get no row.
+`createModelCatalog` (`@lostgradient/operative/providers`) builds a static, synchronous, side-effect-free `ModelCatalog` — one `BackendDescriptor` row per `(provider, endpoint, model)` this package ships a generate function for. Each descriptor names its `modalities` (an AB-70 `ModalityMatrix`, re-exported from `conversationalist`), context/output limits, effort support and degradation, parameter compatibility, pricing (derived from `defaultPricingTable`, never fabricated), and availability/health. `voyage` and `ollama` are embedding-only and get no row. `CreateModelCatalogOptions.runtime?: RuntimeServices` (AB-325) backs the default `now` when `options.now` is not supplied — defaults to the real implementation; an explicit `now` still takes precedence over `runtime` when both are given.
 
 ```typescript
 import { createModelCatalog } from '@lostgradient/operative/providers';
@@ -1564,7 +1566,7 @@ Ranking, tie-breaking, the deterministic selector, and the `SelectionPlan` itsel
 
 #### Deterministic Backend Selector and Selection Plan (AB-64, AB-249)
 
-`select(request, options)` (`@lostgradient/operative/providers`) is a pure, synchronous function: no input or output, no clock read except the injected `options.now`. It calls `composePolicy` internally for hard-constraint filtering, applies effort compatibility within the eligible set, then ranks by `costPreference`/`latencyPreference`/`preferredProviders`/`preferredModels`, breaking ties by `(provider, model)` lexicographic order. Two calls with the same recorded input produce deeply equal plans.
+`select(request, options)` (`@lostgradient/operative/providers`) is a pure, synchronous function: no input or output, no clock read except the injected `options.now`/`options.runtime`. It calls `composePolicy` internally for hard-constraint filtering, applies effort compatibility within the eligible set, then ranks by `costPreference`/`latencyPreference`/`preferredProviders`/`preferredModels`, breaking ties by `(provider, model)` lexicographic order. Two calls with the same recorded input produce deeply equal plans. `SelectOptions.runtime?: RuntimeServices` (AB-325) backs the default `now`/`newPlanId` when those are not supplied, defaulting to the real implementation; explicit `now`/`newPlanId` still take precedence over `runtime` when both are given.
 
 ```typescript
 import { composePolicy, createModelCatalog, select } from '@lostgradient/operative/providers';
@@ -2046,7 +2048,9 @@ watchdog's current attempt is discarded, never merged. Every
 magnitude larger than `cadenceMs + graceMs` (a suspected process/laptop
 suspension, not real silence).
 
-**Exported functions:** `createStallWatchdog`, `createDefaultRunIdentifierSeam`, `sessionMonitorPolicy`, `toolCallPolicy`.
+**Exported functions:** `createStallWatchdog`, `createDefaultRunIdentifierSeam(runtime?: RuntimeServices)`, `sessionMonitorPolicy`, `toolCallPolicy`.
+
+`createDefaultRunIdentifierSeam` (AB-325) reads through a `RuntimeServices` instance (`options.runtime`, defaulting to `createDefaultRuntimeServices()` from `lifecycle`) rather than a bare `crypto.randomUUID()` call, so a manual runtime controls its minted ids in tests. `createActiveRunLiveness`'s `ActiveRunLivenessOptions` gains the same `runtime?: RuntimeServices` option (AB-325), backing `startedAt`/`lastTransitionAt` and — when `options.clock` is not separately supplied — the watchdog's monotonic/timer seam too; `options.clock` still takes precedence over `runtime` for that seam when both are supplied.
 
 **Exported constants:** `LIVENESS_POLICY_VERSION`, `defaultRunIdentifierSeam`, `AGENT_RUN_PROVIDER_TURN_POLICY`, `TOOL_CALL_POLICY`, `SCHEDULER_TASK_POLICY`, `GATEWAY_CONNECTION_POLICY`, `BACKGROUND_EVALUATION_POLICY`, `WEBHOOK_DELIVERY_POLICY`, `WEFT_ACTIVITY_POLICY`, `WEFT_WORKER_POLICY`, `WEFT_TASK_POLICY`, `WEFT_STREAM_POLICY`.
 
@@ -2069,15 +2073,18 @@ stalled or unreachable child never changes the parent's own
 `worstChildAssessment` stays permanently absent, matching `children()`'s
 own opt-in default.
 
-**Standalone-run identity (AB-88's Amendment 1, corrected by AB-214).** A
-standalone (non-Bureau) run mints a process-local id at `ActiveRun`
-construction through `RunIdentifierSeam` — never `RuntimeServices.identifiers`,
-which does not exist in this repository — whenever `RunOptions.runId` is
-absent. The minted id populates `LivenessSnapshot.id` and stamps curated
-`tool.*` bubble events and `createSubagentTool`'s per-call `parentRunId`; it
-is never registered with Bureau's `Store` and confers no locator or
-reattachment capability. A Bureau- or caller-supplied `runId` is always used
-as-is.
+**Standalone-run identity (AB-88's Amendment 1, corrected by AB-214, migrated
+onto `RuntimeServices` by AB-325).** A standalone (non-Bureau) run mints a
+process-local id at `ActiveRun` construction from `createActiveRun`'s own
+resolved `RuntimeServices.identifiers` directly whenever `RunOptions.runId`
+and `CreateActiveRunDependencies.identifiers` are both absent —
+`RunIdentifierSeam` (`createDefaultRunIdentifierSeam`, itself now backed by a
+`RuntimeServices` instance) remains only as that explicit-override escape
+hatch and as public API on the `@lostgradient/operative/liveness` subpath.
+The minted id populates `LivenessSnapshot.id` and stamps curated `tool.*`
+bubble events and `createSubagentTool`'s per-call `parentRunId`; it is never
+registered with Bureau's `Store` and confers no locator or reattachment
+capability. A Bureau- or caller-supplied `runId` is always used as-is.
 
 ---
 

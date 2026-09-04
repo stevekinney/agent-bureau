@@ -389,6 +389,7 @@ export function createDurableActiveRun(
     id: runId,
     durability: 'durable',
     clock: durableRun.livenessClock,
+    runtime,
     owner: durableRun.livenessOwner,
   });
 
@@ -1213,6 +1214,7 @@ export function reattachDurableActiveRun(
     id: runId,
     durability: 'durable',
     clock: reattach.livenessClock,
+    runtime,
   });
 
   const onGenerateStarted = () => liveness.recordProviderPulse({ phase: 'started' });

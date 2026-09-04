@@ -1278,4 +1278,13 @@ describe('createAgent: AB-92/AB-252 RuntimeServices resolution', () => {
     expect(runOptions.runtime).toBeDefined();
     expect(typeof runOptions.runtime?.clock.now()).toBe('number');
   });
+
+  it('generationProfile.freshness reads the resolved runtime.clock, not the real wall clock (AB-325)', () => {
+    const runtime = createManualRuntimeServices();
+    const generate: GenerateFunction = async () => textResponse('done');
+
+    const agent = createAgent({ generate, runtime });
+
+    expect(agent.generationProfile.freshness).toBe(runtime.clock.nowISO());
+  });
 });

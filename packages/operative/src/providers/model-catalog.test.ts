@@ -7,6 +7,7 @@
  * any of those tables without a matching descriptor row fails here.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { createManualRuntimeServices } from 'lifecycle';
 
 import { defaultPricingTable } from '../cost-estimation.ts';
 import { getProviderCapabilities, type ProviderCapabilities } from './capabilities.ts';
@@ -330,6 +331,25 @@ describe('createModelCatalog: catalog invariants', () => {
     for (const row of catalog.descriptors) {
       expect(row.freshness).toBe(catalog.generatedAt);
     }
+  });
+
+  it('a manual RuntimeServices controls generatedAt and every descriptor freshness when now is not injected (AB-325)', async () => {
+    const runtime = createManualRuntimeServices();
+    await runtime.advance(54_321);
+
+    const catalog = createModelCatalog({ runtime });
+
+    expect(catalog.generatedAt).toBe(runtime.clock.nowISO());
+    for (const row of catalog.descriptors) {
+      expect(row.freshness).toBe(catalog.generatedAt);
+    }
+  });
+
+  it('an explicit now still takes precedence over runtime when both are supplied', () => {
+    const runtime = createManualRuntimeServices();
+    const catalog = createModelCatalog({ now: fixedNow, runtime });
+
+    expect(catalog.generatedAt).toBe(FIXED_NOW);
   });
 });
 
