@@ -86,6 +86,8 @@ export type {
 export { createResourceScope, QuiescenceError } from './resource-scope';
 export type { BoundedScheduleOptions, BoundedScheduleReport, Schedule } from './schedule-runner';
 export {
+  DuplicatePartyNameError,
+  InvalidMaximumSchedulesError,
   InvalidPartyCountError,
   runBoundedSchedules,
   UnsupportedScenarioError,

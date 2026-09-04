@@ -81,6 +81,33 @@ export class InvalidPartyCountError extends Error {
   }
 }
 
+/** Thrown when `maximumSchedules` is not a positive integer. */
+export class InvalidMaximumSchedulesError extends Error {
+  readonly maximumSchedules: number;
+  constructor(maximumSchedules: number) {
+    super(
+      `runBoundedSchedules: maximumSchedules must be a positive integer, got ${maximumSchedules}. ` +
+        'There is no unbounded mode — a schedule count must always be named.',
+    );
+    this.name = 'InvalidMaximumSchedulesError';
+    this.maximumSchedules = maximumSchedules;
+  }
+}
+
+/** Thrown when two or more entries in `parties` are the same name. */
+export class DuplicatePartyNameError extends Error {
+  readonly partyName: string;
+  constructor(partyName: string) {
+    super(
+      `runBoundedSchedules: parties must be unique, got a repeated name "${partyName}". ` +
+        'A duplicate name would collide on the same per-schedule barrier and collapse ' +
+        'distinct permutations into equivalent orderings.',
+    );
+    this.name = 'DuplicatePartyNameError';
+    this.partyName = partyName;
+  }
+}
+
 /**
  * Thrown by a `scenario` (never by the runner itself) to declare that its
  * lifecycle surface does not exist on this baseline. `runBoundedSchedules`
@@ -193,6 +220,16 @@ export async function runBoundedSchedules(
 
   if (parties.length !== 2 && parties.length !== 3) {
     throw new InvalidPartyCountError(parties.length);
+  }
+  if (!Number.isInteger(maximumSchedules) || maximumSchedules < 1) {
+    throw new InvalidMaximumSchedulesError(maximumSchedules);
+  }
+  const seenParties = new Set<string>();
+  for (const party of parties) {
+    if (seenParties.has(party)) {
+      throw new DuplicatePartyNameError(party);
+    }
+    seenParties.add(party);
   }
 
   const orderings = deterministicOrder(permutations(parties), seed).slice(0, maximumSchedules);

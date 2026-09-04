@@ -183,7 +183,19 @@ function requireArray(value: unknown, field: string, path: string): readonly unk
  * delivery boundary covers.
  */
 export async function readReproductionArtifact(path: string): Promise<ReproductionArtifact> {
-  const raw: unknown = await Bun.file(path).json();
+  let raw: unknown;
+  try {
+    raw = await Bun.file(path).json();
+  } catch (error) {
+    // Malformed JSON, a missing file, or any other read/parse failure —
+    // surfaced as the same typed error the shape-validation guards below
+    // throw, so a caller (the CLI included) never has to distinguish "not
+    // valid JSON" from "valid JSON but not a ReproductionArtifact".
+    throw new InvalidReproductionArtifactError(
+      path,
+      `could not be read as JSON: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   if (!isRecord(raw)) {
     throw new InvalidReproductionArtifactError(path, 'top-level value must be an object');
   }
@@ -348,8 +360,30 @@ export async function assembleBaselineArtifact(
   };
 }
 
+/**
+ * A key-order-independent `JSON.stringify`: object keys are sorted
+ * recursively at every level before serializing, so two values that are
+ * semantically identical but were built with different property insertion
+ * order (e.g. an artifact assembled by another package, or reconstructed
+ * from a plain object literal in a test) compare equal here even though
+ * plain `JSON.stringify` would not. Array element order is preserved —
+ * only object key order is normalized.
+ */
 function stableStringify(value: unknown): string {
-  return JSON.stringify(value);
+  return JSON.stringify(sortKeysDeep(value));
+}
+
+function sortKeysDeep(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(sortKeysDeep);
+  }
+  if (isRecord(value)) {
+    const sortedEntries = Object.entries(value)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([key, entryValue]) => [key, sortKeysDeep(entryValue)] as const);
+    return Object.fromEntries(sortedEntries);
+  }
+  return value;
 }
 
 /**

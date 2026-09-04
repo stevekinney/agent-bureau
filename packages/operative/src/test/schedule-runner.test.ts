@@ -9,6 +9,8 @@ import type { OperativeHookMap } from '../hooks';
 import { createBarrierRegistry } from './barriers';
 import type { Schedule } from './schedule-runner';
 import {
+  DuplicatePartyNameError,
+  InvalidMaximumSchedulesError,
   InvalidPartyCountError,
   runBoundedSchedules,
   UnsupportedScenarioError,
@@ -163,6 +165,33 @@ describe('runBoundedSchedules — bound behavior', () => {
     expect(attempt(['only-one'])).rejects.toBeInstanceOf(InvalidPartyCountError);
     expect(attempt(['a', 'b', 'c', 'd'])).rejects.toBeInstanceOf(InvalidPartyCountError);
     expect(attempt([])).rejects.toBeInstanceOf(InvalidPartyCountError);
+  });
+
+  it('throws InvalidMaximumSchedulesError for a non-positive or non-integer bound', async () => {
+    const attempt = (maximumSchedules: number) =>
+      runBoundedSchedules({
+        barriers: createBarrierRegistry(),
+        parties: ['a', 'b'],
+        scenario: async () => {},
+        maximumSchedules,
+        seed: 'maximum-schedules',
+      });
+
+    expect(attempt(0)).rejects.toBeInstanceOf(InvalidMaximumSchedulesError);
+    expect(attempt(-1)).rejects.toBeInstanceOf(InvalidMaximumSchedulesError);
+    expect(attempt(1.5)).rejects.toBeInstanceOf(InvalidMaximumSchedulesError);
+  });
+
+  it('throws DuplicatePartyNameError when two parties share a name', async () => {
+    const attempt = runBoundedSchedules({
+      barriers: createBarrierRegistry(),
+      parties: ['a', 'a'],
+      scenario: async () => {},
+      maximumSchedules: 2,
+      seed: 'duplicate-party',
+    });
+
+    expect(attempt).rejects.toBeInstanceOf(DuplicatePartyNameError);
   });
 
   it('propagates UnsupportedScenarioError immediately instead of recording it as a failing schedule', async () => {
