@@ -776,12 +776,38 @@ interface FileSynchronizer {
   // before resolving — an in-flight synchronization is drained, not abandoned.
   stop(): Promise<void>;
   synchronize(): Promise<SynchronizeResult>;
+  // Poll-cycle completion event (below) — TypedEventTarget-style surface
+  // from `lifecycle`'s `CompletableEventTarget`.
+  addEventListener(
+    type: 'poll-cycle.completed',
+    listener: (event: PollCycleCompletedEvent) => void,
+    options?: boolean | AddEventListenerOptions,
+  ): void;
+  removeEventListener(
+    type: 'poll-cycle.completed',
+    listener: (event: PollCycleCompletedEvent) => void,
+    options?: boolean | EventListenerOptions,
+  ): void;
+  once(type: 'poll-cycle.completed', listener: (event: PollCycleCompletedEvent) => void): void;
+  on(type: 'poll-cycle.completed'): ObservableLike<PollCycleCompletedEvent>;
 }
 
 interface SynchronizeResult {
   added: number;
   updated: number;
   removed: number;
+}
+
+// Dispatched once a poll-triggered synchronize() pass settles, success or
+// failure — exactly one of `result`/`error` is set. Fires only after the
+// polling loop's internal lock has already been released, so a listener
+// that immediately schedules another poll tick on hearing this event is
+// safe. Not dispatched for the initial start()-triggered sync or a direct
+// synchronize() call — only for poll-tick-triggered passes.
+class PollCycleCompletedEvent extends Event {
+  static readonly type: 'poll-cycle.completed';
+  readonly result?: SynchronizeResult;
+  readonly error?: unknown;
 }
 ```
 
@@ -796,6 +822,16 @@ const synchronizer = createFileSynchronizer({
 });
 
 await synchronizer.start(); // Begin polling
+
+// Observe when a poll-triggered sync pass finishes (event-driven, no
+// polling of a side effect or a fixed timeout — see AB-341):
+synchronizer.once('poll-cycle.completed', (event) => {
+  if (event.error) {
+    console.error('poll cycle failed', event.error);
+  } else {
+    console.log('poll cycle synced', event.result);
+  }
+});
 
 // Or trigger a one-shot sync:
 const result = await synchronizer.synchronize();

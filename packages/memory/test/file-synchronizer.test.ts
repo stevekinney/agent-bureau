@@ -2,12 +2,15 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { createManualRuntimeServices } from 'lifecycle';
 
 import { createMemory } from '../src/create-memory';
-import type { IntervalHandle } from '../src/file-synchronizer';
+import type {
+  FileSynchronizer,
+  IntervalHandle,
+  PollCycleCompletedEvent,
+} from '../src/file-synchronizer';
 import { createFileSynchronizer } from '../src/file-synchronizer';
 import { createInMemoryMemoryRecordStorage, createMockEmbedder } from '../src/test/index';
 import type { Memory } from '../src/types';
@@ -21,22 +24,19 @@ async function drainMicrotasks(turns = 10): Promise<void> {
 }
 
 /**
- * Polls `condition` up to `maximumAttempts` times, yielding one real macrotask turn
- * (`yieldToPortableEventLoop`, a zero-delay `MessageChannel` post — not a wall-clock timer)
- * between tries. The synchronizer under test performs real filesystem I/O on macrotasks, so a
- * microtask-only drain never observes its completion; this still needs a real event-loop turn,
- * never a fixed-duration sleep. Bounded, never an unbounded spin.
+ * Awaits the synchronizer's next poll-cycle completion event (AB-341) — the
+ * event-driven signal the coordinator ruling calls for, in place of a
+ * bounded yield-count poll of a side effect. Register this before
+ * triggering the poll (calling the injected `poll` callback, or advancing
+ * a manual runtime's clock) so the listener is in place before the event
+ * can fire; the returned promise resolves only once the pass has actually
+ * settled, filesystem I/O included, with the synchronizing lock already
+ * released.
  */
-async function waitForCondition(
-  condition: () => boolean | Promise<boolean>,
-  failureMessage: string,
-  maximumAttempts = 200,
-): Promise<void> {
-  for (let attempt = 0; attempt < maximumAttempts; attempt++) {
-    if (await condition()) return;
-    await yieldToPortableEventLoop();
-  }
-  throw new Error(failureMessage);
+function waitForPollCycle(synchronizer: FileSynchronizer): Promise<PollCycleCompletedEvent> {
+  return new Promise((resolve) => {
+    synchronizer.once('poll-cycle.completed', resolve);
+  });
 }
 
 describe('createFileSynchronizer', () => {
@@ -259,10 +259,8 @@ describe('createFileSynchronizer', () => {
 
     const originalRememberOnce = memory.rememberOnce.bind(memory);
     let failing = true;
-    let rememberCalls = 0;
     Object.assign(memory, {
       rememberOnce: async (...args: Parameters<Memory['rememberOnce']>) => {
-        rememberCalls += 1;
         if (failing) {
           throw new Error('poll failure');
         }
@@ -270,33 +268,30 @@ describe('createFileSynchronizer', () => {
       },
     });
 
-    // Change the file so the next poll re-ingests it, then fire the poll. The
-    // synchronize() running inside the interval performs real filesystem I/O on
-    // macrotasks, so we must wait until rememberOnce() has actually been invoked
-    // (and thrown) before proceeding — otherwise flipping `failing` below could
-    // race ahead of the in-flight sync and let it succeed, never exercising the
-    // polling error-swallow path.
+    // Change the file so the next poll re-ingests it, register the
+    // poll-cycle completion listener, then fire the poll. Awaiting the
+    // event (rather than polling a side effect like rememberOnce's call
+    // count) is the event-driven observation the coordinator ruling on
+    // AB-341 calls for: the synchronizer performs real filesystem I/O on
+    // macrotasks, and the event fires only once that pass has fully
+    // settled and the synchronizing lock has already been released — no
+    // separate microtask drain is needed afterward.
     await writeFile(filePath, 'Updated once.');
+    const firstCycle = waitForPollCycle(synchronizer);
     poll?.();
-    await waitForCondition(
-      () => rememberCalls > 0,
-      'expected rememberOnce to be invoked after the first poll',
-    );
-    // Flush the ingest → synchronize rejection through the interval's .catch
-    // (swallow) and .finally (lock release).
-    await drainMicrotasks();
+    const firstEvent = await firstCycle;
+    expect(firstEvent.error).toBeDefined();
+    expect(firstEvent.result).toBeUndefined();
 
     // The failing tick must not leave the synchronizing lock stuck: a follow-up
     // poll, now succeeding, should still ingest content.
     failing = false;
-    const callsBeforeRecovery = rememberCalls;
     await writeFile(filePath, 'Updated twice.');
+    const secondCycle = waitForPollCycle(synchronizer);
     poll?.();
-    await waitForCondition(
-      () => rememberCalls > callsBeforeRecovery,
-      'expected rememberOnce to be invoked again after the recovery poll',
-    );
-    await drainMicrotasks();
+    const secondEvent = await secondCycle;
+    expect(secondEvent.error).toBeUndefined();
+    expect(secondEvent.result).toBeDefined();
 
     await synchronizer.stop();
     expect(await memory.count()).toBeGreaterThan(0);
@@ -375,16 +370,19 @@ describe('createFileSynchronizer', () => {
 
     // No real timer is running — advancing real wall-clock time (nothing to
     // advance here, since only the manual runtime's clock moves) does not
-    // trigger a poll. Only advancing the injected runtime does. The poll's
-    // synchronize() does real filesystem I/O on macrotasks (same as the
-    // "swallows polling errors" test above), so poll bounded for the count
-    // to change rather than assuming microtask draining alone is enough.
+    // trigger a poll. Only advancing the injected runtime does. `advance()`
+    // itself only awaits the microtask queue between fired timer callbacks
+    // (see `ManualRuntimeServices.advance`'s own doc comment) — it settles
+    // before the poll's synchronize() has finished its real filesystem I/O,
+    // which happens on macrotasks. Awaiting the poll-cycle completion event
+    // (AB-341) observes that completion directly and event-drivenly,
+    // rather than polling memory.count() for a side effect to appear.
+    const pollCycle = waitForPollCycle(synchronizer);
     await writeFile(join(tempDir, 'polled.md'), 'Polled content.');
     await runtime.advance(1000);
-    await waitForCondition(
-      async () => (await memory.count()) > countAfterStart,
-      'expected memory.count() to increase after the polled sync',
-    );
+    const event = await pollCycle;
+    expect(event.error).toBeUndefined();
+    expect(event.result).toBeDefined();
 
     expect(await memory.count()).toBeGreaterThan(countAfterStart);
 
