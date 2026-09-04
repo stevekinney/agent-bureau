@@ -5,7 +5,7 @@ import type { Toolbox } from 'armorer';
 import { createTool, createToolbox } from 'armorer';
 import { afterEach, describe, expect, it, mock } from 'bun:test';
 import { Conversation, createConversationHistory } from 'conversationalist';
-import { TypedEventTarget } from 'lifecycle';
+import { createManualRuntimeServices, TypedEventTarget } from 'lifecycle';
 import { z } from 'zod';
 
 import { createAgentSession } from '../agent-session';
@@ -46,6 +46,11 @@ import type { SessionStore } from './types';
 afterEach(async () => {
   await yieldToPortableEventLoop();
 });
+
+// AB-330: incidental fixture timestamps (a directly-constructed RunRef's
+// `startedAt`, never compared against another clock) read through a shared
+// manual runtime instead of the real clock.
+const fixtureRuntime = createManualRuntimeServices();
 
 // ---------------------------------------------------------------------------
 // Shared fixtures
@@ -328,7 +333,7 @@ describe('session.run()', () => {
     const result = await run.result();
 
     // Give the persistence callback a tick to run.
-    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await yieldToPortableEventLoop();
 
     const session = await store.load(handle.id);
     expect(session).toBeDefined();
@@ -346,7 +351,7 @@ describe('session.run()', () => {
     await handle.run('say something').result();
 
     // Give the persistence callback a tick to run.
-    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await yieldToPortableEventLoop();
 
     const session = await store.load(handle.id);
     expect(session!.runs[0]!.agentName).toBe('test-agent');
@@ -357,9 +362,9 @@ describe('session.run()', () => {
 
     await handle.run('first').result();
     // Flush persistence callbacks.
-    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await yieldToPortableEventLoop();
     await handle.run('second').result();
-    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await yieldToPortableEventLoop();
 
     const session = await store.load(handle.id);
     expect(session!.runs).toHaveLength(2);
@@ -386,7 +391,7 @@ describe('session.run()', () => {
       firstHandle.run('first concurrent message').result(),
       secondHandle.run('second concurrent message').result(),
     ]);
-    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await yieldToPortableEventLoop();
 
     const session = await store.load('concurrent-run-session');
     expect(session).toBeDefined();
@@ -433,7 +438,7 @@ describe('session.run()', () => {
       redactingHandle.run('redact request').result(),
       appendingHandle.run('append request').result(),
     ]);
-    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await yieldToPortableEventLoop();
 
     const session = await store.load(sessionId);
     expect(session).toBeDefined();
@@ -449,7 +454,7 @@ describe('session.run()', () => {
     const { handle, store } = createSessionHandleFixture();
 
     await handle.run('hello world').result();
-    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await yieldToPortableEventLoop();
 
     const session = await store.load(handle.id);
     // The conversation history should contain at least the user message.
@@ -482,11 +487,11 @@ describe('session.run()', () => {
 
     // First run: generate sees only the initial user message.
     await h.run('first message').result();
-    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await yieldToPortableEventLoop();
 
     // Second run: generate must see the first run's messages PLUS the new one.
     await h.run('second message').result();
-    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await yieldToPortableEventLoop();
 
     // First call: 1 user message seeded.
     expect(historyLengths[0]).toBeGreaterThanOrEqual(1);
@@ -543,7 +548,7 @@ describe('session.run()', () => {
     // Resolve the generate so the run can finish.
     resolveGenerate();
     await run.result();
-    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await yieldToPortableEventLoop();
 
     // After completion, the ref must be updated to a terminal status in-place
     // (still only 1 RunRef — not appended).
@@ -689,7 +694,7 @@ describe('session.run()', () => {
     // so the result promise will reject too — we swallow that).
     const run = h.run('durable please');
     await run.result().catch(() => {});
-    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await yieldToPortableEventLoop();
 
     // The durable engine's start() must have been called with the derived id
     // in `${sessionId}:${sequence}` format.
@@ -840,7 +845,7 @@ describe('session.recover()', () => {
     expect(recovered).toBe(run);
 
     // Yield a tick so the run loop starts and resolveGenerate is assigned.
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await yieldToPortableEventLoop();
 
     // Clean up: resolve the blocking generate so the run can finish.
     resolveGenerate?.({ content: 'done', toolCalls: [] });
@@ -853,7 +858,7 @@ describe('session.recover()', () => {
     const run = handle.run('quick run');
     await run.result();
     // Allow the `.finally()` callback to clear currentRun.
-    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await yieldToPortableEventLoop();
 
     expect(await handle.recover()).toBeNull();
   });
@@ -950,7 +955,7 @@ describe('session.cancel()', () => {
           runId: 'durable-session:0',
           sequence: 0,
           status: 'running',
-          startedAt: new Date().toISOString(),
+          startedAt: fixtureRuntime.clock.nowISO(),
           agentName: '',
         },
       ],
@@ -1065,7 +1070,7 @@ describe('session.cancel()', () => {
           runId: 'pending-reservation-cancel-session:0',
           sequence: 0,
           status: 'running',
-          startedAt: new Date().toISOString(),
+          startedAt: fixtureRuntime.clock.nowISO(),
           agentName: 'agent',
         },
       ],
@@ -1117,7 +1122,7 @@ describe('session.fork()', () => {
     });
 
     await h.run('first run').result();
-    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await yieldToPortableEventLoop();
 
     const forked = await h.fork();
     const forkedSession = await forked.getSession();
@@ -1136,7 +1141,7 @@ describe('session.fork()', () => {
     });
 
     await h.run('something').result();
-    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await yieldToPortableEventLoop();
 
     const sourceSession = await store.load('fork-history-source');
     const forked = await h.fork();
@@ -1171,9 +1176,9 @@ describe('session.fork()', () => {
 
     // Complete two runs so that run 0 is followed by run 1 (last index = 1).
     await h.run('first run').result();
-    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await yieldToPortableEventLoop();
     await h.run('second run').result();
-    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await yieldToPortableEventLoop();
 
     // fork({ throughRun: 0 }) would branch before run 1, but the full history
     // includes run 1's messages — silently contaminating the branch. Must throw.
@@ -1198,9 +1203,9 @@ describe('session.fork()', () => {
     });
 
     await h.run('first run').result();
-    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await yieldToPortableEventLoop();
     await h.run('second run').result();
-    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await yieldToPortableEventLoop();
 
     // throughRun: 1 is the last run index — no later runs exist, so the full
     // history is correct for this fork point.
@@ -1221,9 +1226,9 @@ describe('session.fork()', () => {
     });
 
     await h.run('first run').result();
-    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await yieldToPortableEventLoop();
     await h.run('second run').result();
-    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await yieldToPortableEventLoop();
 
     // Default fork (no throughRun) always copies full history — no guard needed.
     const forked = await h.fork();
@@ -1329,21 +1334,10 @@ describe('session.sleep()', () => {
     expect(clearedTimers).toEqual([timerToken]);
   });
 
-  it('resolves after the specified milliseconds (in-memory path)', async () => {
-    const { handle } = createSessionHandleFixture();
-    const start = Date.now();
-    await handle.sleep(10);
-    const elapsed = Date.now() - start;
-    expect(elapsed).toBeGreaterThanOrEqual(9);
-  });
-
-  it('parses ISO-8601 PT duration strings', async () => {
-    const { handle } = createSessionHandleFixture();
-    const start = Date.now();
-    await handle.sleep('PT0.01S'); // 10ms
-    const elapsed = Date.now() - start;
-    expect(elapsed).toBeGreaterThanOrEqual(9);
-  });
+  // AB-330: the two default-(real)-runtime timing proofs ("resolves after
+  // the specified milliseconds...", "parses ISO-8601 PT duration strings")
+  // moved to `session-handle-sleep-default-runtime.test.ts` — see that
+  // file's header comment.
 
   // Regression: PRRT_kwDORvupsc6Mc3gS — sleep() must reject non-ISO-8601
   // duration strings the same way monitor({ every }) does. parseDuration()
@@ -1390,7 +1384,7 @@ describe('session.signal()', () => {
           runId: 'signal-no-engine:0',
           sequence: 0,
           status: 'running',
-          startedAt: new Date().toISOString(),
+          startedAt: fixtureRuntime.clock.nowISO(),
           agentName: '',
         },
       ],
@@ -1429,7 +1423,7 @@ describe('session.signal()', () => {
           runId: 'signal-terminal:0',
           sequence: 0,
           status: 'completed',
-          startedAt: new Date().toISOString(),
+          startedAt: fixtureRuntime.clock.nowISO(),
           agentName: '',
         },
       ],
@@ -1481,7 +1475,7 @@ describe('session.signal()', () => {
           runId: 'signal-running:0',
           sequence: 0,
           status: 'running',
-          startedAt: new Date().toISOString(),
+          startedAt: fixtureRuntime.clock.nowISO(),
           agentName: '',
         },
       ],
@@ -1528,14 +1522,14 @@ describe('session.signal()', () => {
           runId: 'signal-newest-running:0',
           sequence: 0,
           status: 'running',
-          startedAt: new Date().toISOString(),
+          startedAt: fixtureRuntime.clock.nowISO(),
           agentName: '',
         },
         {
           runId: 'signal-newest-running:1',
           sequence: 1,
           status: 'completed',
-          startedAt: new Date().toISOString(),
+          startedAt: fixtureRuntime.clock.nowISO(),
           agentName: '',
         },
       ],
@@ -1582,7 +1576,7 @@ describe('session.update()', () => {
           runId: 'update-no-engine:0',
           sequence: 0,
           status: 'running',
-          startedAt: new Date().toISOString(),
+          startedAt: fixtureRuntime.clock.nowISO(),
           agentName: '',
         },
       ],
@@ -1625,7 +1619,7 @@ describe('session.update()', () => {
           runId: 'update-running:0',
           sequence: 0,
           status: 'running',
-          startedAt: new Date().toISOString(),
+          startedAt: fixtureRuntime.clock.nowISO(),
           agentName: '',
         },
       ],
@@ -1746,7 +1740,7 @@ describe('session.update()', () => {
           runId: 'pending-reservation-hitl-session:0',
           sequence: 0,
           status: 'running',
-          startedAt: new Date().toISOString(),
+          startedAt: fixtureRuntime.clock.nowISO(),
           agentName: 'agent',
         },
       ],
@@ -1802,7 +1796,7 @@ describe('session.query()', () => {
           runId: 'query-no-engine:0',
           sequence: 0,
           status: 'running',
-          startedAt: new Date().toISOString(),
+          startedAt: fixtureRuntime.clock.nowISO(),
           agentName: '',
         },
       ],
@@ -1880,7 +1874,7 @@ describe('session.query()', () => {
           runId: 'query-live:0',
           sequence: 0,
           status: 'running',
-          startedAt: new Date().toISOString(),
+          startedAt: fixtureRuntime.clock.nowISO(),
           agentName: '',
         },
       ],
@@ -1918,7 +1912,7 @@ describe('session.query()', () => {
           runId: 'query-terminal:0',
           sequence: 0,
           status: 'completed', // terminal — not running
-          startedAt: new Date().toISOString(),
+          startedAt: fixtureRuntime.clock.nowISO(),
           agentName: '',
         },
       ],
@@ -1996,11 +1990,11 @@ describe('RunRef sequence invariant', () => {
     const { handle, store } = createSessionHandleFixture({ sessionId: 'seq-test' });
 
     await handle.run('run 0').result();
-    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await yieldToPortableEventLoop();
     await handle.run('run 1').result();
-    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await yieldToPortableEventLoop();
     await handle.run('run 2').result();
-    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await yieldToPortableEventLoop();
 
     const session = await store.load('seq-test');
     expect(session!.runs).toHaveLength(3);
@@ -2013,9 +2007,9 @@ describe('RunRef sequence invariant', () => {
     const { handle, store } = createSessionHandleFixture({ sessionId: 'monotonic-test' });
 
     await handle.run('a').result();
-    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await yieldToPortableEventLoop();
     await handle.run('b').result();
-    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await yieldToPortableEventLoop();
 
     const session = await store.load('monotonic-test');
     const sequences = session!.runs.map((r) => r.sequence);
@@ -2142,7 +2136,7 @@ describe('session verb event dispatch (C3 completeness rule)', () => {
           runId: 'signal-event-session:0',
           sequence: 0,
           status: 'running',
-          startedAt: new Date().toISOString(),
+          startedAt: fixtureRuntime.clock.nowISO(),
           agentName: '',
         },
       ],
@@ -2187,7 +2181,7 @@ describe('session verb event dispatch (C3 completeness rule)', () => {
           runId: 'update-event-session:0',
           sequence: 0,
           status: 'running',
-          startedAt: new Date().toISOString(),
+          startedAt: fixtureRuntime.clock.nowISO(),
           agentName: '',
         },
       ],
@@ -2232,7 +2226,7 @@ describe('session verb event dispatch (C3 completeness rule)', () => {
           runId: 'query-event-session:0',
           sequence: 0,
           status: 'running',
-          startedAt: new Date().toISOString(),
+          startedAt: fixtureRuntime.clock.nowISO(),
           agentName: '',
         },
       ],
@@ -2378,7 +2372,7 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
             runId: 'completed-run-session:0',
             sequence: 0,
             status: 'completed',
-            startedAt: new Date().toISOString(),
+            startedAt: fixtureRuntime.clock.nowISO(),
             agentName: '',
           },
         ],
@@ -2429,14 +2423,14 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
           runId: 'earlier-running-session:0',
           sequence: 0,
           status: 'running',
-          startedAt: new Date().toISOString(),
+          startedAt: fixtureRuntime.clock.nowISO(),
           agentName: '',
         },
         {
           runId: 'earlier-running-session:1',
           sequence: 1,
           status: 'completed',
-          startedAt: new Date().toISOString(),
+          startedAt: fixtureRuntime.clock.nowISO(),
           agentName: '',
         },
       ],
@@ -2491,14 +2485,14 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
           runId: 'fallback-running-session:0',
           sequence: 0,
           status: 'running',
-          startedAt: new Date().toISOString(),
+          startedAt: fixtureRuntime.clock.nowISO(),
           agentName: '',
         },
         {
           runId: 'fallback-running-session:1',
           sequence: 1,
           status: 'running',
-          startedAt: new Date().toISOString(),
+          startedAt: fixtureRuntime.clock.nowISO(),
           agentName: '',
         },
       ],
@@ -2560,7 +2554,7 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
           runId,
           sequence: 0,
           status: 'running',
-          startedAt: new Date().toISOString(),
+          startedAt: fixtureRuntime.clock.nowISO(),
           agentName: '',
         },
       ],
@@ -2654,7 +2648,7 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
           runId,
           sequence: 0,
           status: 'running',
-          startedAt: new Date().toISOString(),
+          startedAt: fixtureRuntime.clock.nowISO(),
           agentName: '',
         },
       ],
@@ -2739,14 +2733,14 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
             runId: olderRunId,
             sequence: 0,
             status: 'running',
-            startedAt: new Date().toISOString(),
+            startedAt: fixtureRuntime.clock.nowISO(),
             agentName: '',
           },
           {
             runId: newerRunId,
             sequence: 1,
             status: 'running',
-            startedAt: new Date().toISOString(),
+            startedAt: fixtureRuntime.clock.nowISO(),
             agentName: '',
           },
         ],
@@ -2828,7 +2822,7 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
           runId: `${sessionId}:0`,
           sequence: 0,
           status: 'running',
-          startedAt: new Date().toISOString(),
+          startedAt: fixtureRuntime.clock.nowISO(),
           agentName: '',
         },
       ],
@@ -2903,7 +2897,7 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
             runId,
             sequence: 0,
             status: 'running',
-            startedAt: new Date().toISOString(),
+            startedAt: fixtureRuntime.clock.nowISO(),
             agentName: '',
           },
         ],
@@ -3019,14 +3013,14 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
             runId: olderRunId,
             sequence: 0,
             status: 'running',
-            startedAt: new Date().toISOString(),
+            startedAt: fixtureRuntime.clock.nowISO(),
             agentName: '',
           },
           {
             runId: newerRunId,
             sequence: 1,
             status: 'running',
-            startedAt: new Date().toISOString(),
+            startedAt: fixtureRuntime.clock.nowISO(),
             agentName: '',
           },
         ],
@@ -3089,7 +3083,7 @@ describe('AB-28: recover() reconciles a RunRef whose recovered run is already te
           runId,
           sequence: 0,
           status: 'running',
-          startedAt: new Date().toISOString(),
+          startedAt: fixtureRuntime.clock.nowISO(),
           agentName: '',
         },
       ],
@@ -3444,98 +3438,10 @@ describe('AB-28: recover() reconciles a RunRef whose recovered run is already te
     expect(getCalls).toBe(1);
   });
 
-  it('reconciles the RunRef against a REAL Weft engine when the recovered run settles before recover() is called', async () => {
-    // The reproduction from the issue (CHR-15): process A crashes mid-run,
-    // process B resumes it on boot, and it settles to terminal BEFORE the
-    // host calls session.recover(). The fake-engine tests above assume a
-    // particular shape for engine.get()'s `.result` on a completed workflow
-    // — this test exercises the REAL Weft engine to prove that assumption.
-    const SLEEP_MS = 20;
-    const storage = new MemoryStorage();
-    const sessionId = 'ab-28-real-engine-session';
-    const runId = `${sessionId}:0`;
-
-    const firstKv = textValueStore(storage, { disposeUnderlyingStorage: false });
-    const firstStore = createSessionStore(firstKv);
-    const { engine: engine1 } = await createRunEngine({
-      storage,
-      runWorkflow: makeParkingWorkflow(SLEEP_MS),
-      recover: false,
-      startScheduler: false,
-    });
-
-    const session = createAgentSession({
-      agentName: 'agent',
-      conversationHistory: createConversationHistory(),
-      id: sessionId,
-      runs: [
-        {
-          runId,
-          sequence: 0,
-          status: 'running',
-          startedAt: new Date().toISOString(),
-          agentName: '',
-        },
-      ],
-    });
-    await firstStore.save(session);
-
-    const firstHandle = await engine1.start('agentRun', {}, { id: runId });
-    for (let i = 0; i < 10; i++) await yieldToPortableEventLoop();
-    engine1[Symbol.dispose]();
-    void firstHandle.result().catch(() => {});
-
-    const secondKv = textValueStore(storage, { disposeUnderlyingStorage: false });
-    const secondStore = createSessionStore(secondKv);
-    const secondCheckpointStore = createCheckpointStore(
-      textValueStore(storage, { disposeUnderlyingStorage: false }),
-    );
-    // Default recover:true resumes the parked workflow synchronously during
-    // creation; startScheduler:true (with a short poll interval) arms the
-    // timer so its ctx.sleep actually fires within this test's window.
-    const { engine: engine2 } = await createRunEngine({
-      storage,
-      runWorkflow: makeParkingWorkflow(SLEEP_MS),
-      startScheduler: true,
-      schedulerPollIntervalMs: 5,
-    });
-
-    try {
-      // Poll engine.get() until the recovered run settles to terminal BEFORE
-      // calling recover() — the exact race the issue describes. Capped at 5
-      // attempts per this repo's polling-loop convention.
-      let state: Awaited<ReturnType<typeof engine2.get>> = null;
-      for (let attempt = 0; attempt < 5; attempt++) {
-        state = await engine2.get(runId);
-        if (state && state.status !== 'running' && state.status !== 'pending') break;
-        await new Promise((resolve) => setTimeout(resolve, SLEEP_MS * 2));
-      }
-
-      expect(state?.status).toBe('completed');
-      // The real shape engine.get() returns .result in — this is exactly
-      // what readTerminalRunOutcome() reads to derive the RunRef status.
-      const summary = state?.result as { finishReason?: string } | undefined;
-      expect(summary?.finishReason).toBe('stop-condition');
-
-      const h = createSessionHandle(sessionId, {
-        store: secondStore,
-        agentName: 'agent',
-        engine: engine2,
-        checkpointStore: secondCheckpointStore,
-        runOptions: createTestRunOptions(),
-      });
-
-      // recover() must still return null for a terminal run — reconciliation
-      // is a side effect, not a resurrection into a live AgentRun.
-      const reattached = await h.recover();
-      expect(reattached).toBeNull();
-
-      const persisted = await secondStore.load(sessionId);
-      expect(persisted?.runs.find((r) => r.runId === runId)?.status).toBe('completed');
-    } finally {
-      engine2[Symbol.dispose]();
-    }
-  });
+  // AB-330: "reconciles the RunRef against a REAL Weft engine..." moved to
+  // `session-handle-real-engine-recovery.test.ts` — it drives a real
+  // background scheduler poller and a real per-iteration setTimeout poll,
+  // which createRunEngine has no clock-injection seam for.
 });
 
 // session.monitor() — process-local conditional watch loop
@@ -3974,7 +3880,7 @@ describe('session.monitor()', () => {
     });
 
     // Give persistence callbacks a moment to flush.
-    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    await yieldToPortableEventLoop();
 
     const session = await store.load('monitor-runs-session');
     // 2 ticks × 1 run each.
@@ -4201,7 +4107,7 @@ describe('regression: cancel() only persists aborted status when engine.cancel()
           runId: 'cancel-throws-session:0',
           sequence: 0,
           status: 'running',
-          startedAt: new Date().toISOString(),
+          startedAt: fixtureRuntime.clock.nowISO(),
           agentName: 'durable-agent',
         },
       ],
@@ -4639,7 +4545,7 @@ describe('regression: recover() persists terminal state after recovered run sett
           runId,
           sequence: 0,
           status: 'running',
-          startedAt: new Date().toISOString(),
+          startedAt: fixtureRuntime.clock.nowISO(),
           agentName: 'agent',
         },
       ],

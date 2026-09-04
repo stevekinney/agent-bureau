@@ -162,7 +162,6 @@ describe('retry with mutation integration', () => {
 
   it('applies jitter to retry delay', async () => {
     let callCount = 0;
-    const startTime = performance.now();
 
     const generate = async () => {
       callCount++;

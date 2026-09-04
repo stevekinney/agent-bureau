@@ -48,7 +48,7 @@ import { type StallWatchdogClock, TOOL_CALL_POLICY } from '../liveness';
 import { UnsupportedRunResultVersionError } from '../run-envelope';
 import type { RunnableAgent } from '../runnable-agent';
 import { createManualDurableEngine, spyEngine } from '../test/durable-engine';
-import { createManualCheckpointStore, createMockGenerate } from '../test/index';
+import { createManualCheckpointStore, createMockGenerate, waitForCondition } from '../test/index';
 import type { RunOptions, RunResult } from '../types';
 import {
   createDurableActiveRun,
@@ -460,7 +460,7 @@ describe('createRun with durable routing', () => {
       });
 
       // Abort after the deferred-microtask start has begun the run.
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await yieldToPortableEventLoop();
       activeRun.abort('user requested stop');
 
       const result = await activeRun.result;
@@ -507,8 +507,11 @@ describe('createRun with durable routing', () => {
         { ...context, runId: 'abort-cost-run', prompt: 'Hello' },
       );
 
-      // Let the first step complete before aborting.
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      // Let the first step's checkpoint durably commit before aborting.
+      await waitForCondition(async () => {
+        const checkpoint = await context.checkpointStore.loadCheckpoint('abort-cost-run');
+        return checkpoint.steps.length >= 1;
+      }, 'step 0 did not commit before the abort');
       activeRun.abort('user requested stop');
 
       const result = await activeRun.result;
@@ -550,7 +553,7 @@ describe('createRun with durable routing', () => {
         { ...context, runId: 'cancel-rejects-run', prompt: 'Hello' },
       );
 
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await yieldToPortableEventLoop();
       activeRun.abort('cancel can fail independently');
 
       const result = await activeRun.result;
@@ -2491,7 +2494,7 @@ describe('createDurableActiveRun.closed()', () => {
       // propagates the abort reason" above); a real engine's inline launch
       // is scheduled via a macrotask, so a bare microtask flush is not
       // enough.
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await yieldToPortableEventLoop();
       controller.abort('shared signal aborted');
 
       await live.result;
@@ -4035,57 +4038,11 @@ describe('B6 — abort-into-generate load-bearing abort', () => {
     return { generate, abortFired, receivedSignal };
   }
 
-  it('abort() fires the generate AbortSignal immediately and calls engine.cancel in parallel (durable path)', async () => {
-    const context = await buildContext();
-    const spy = spyEngine(context.engine);
-    const { generate, abortFired, receivedSignal } = makeBlockingGenerate();
-
-    const runId = 'b6-abort-durable';
-    const activeRun = createDurableActiveRun(
-      { engine: spy.engine, checkpointStore: context.checkpointStore },
-      {
-        runId,
-        sessionId: runId,
-        options: {
-          generate,
-          toolbox: createToolbox([]),
-          conversation: createConversationHistory(),
-          stopWhen: stopWhen.noToolCalls(),
-        },
-        prompt: 'Hello',
-      },
-    );
-
-    // Wait for the deferred-microtask drive() to start and the workflow to
-    // register with the engine, then enter the blocking generate call.
-    await new Promise((resolve) => setTimeout(resolve, 10));
-
-    const abortStart = performance.now();
-    activeRun.abort('cancel during streaming');
-
-    const result = await activeRun.result;
-    const elapsed = performance.now() - abortStart;
-
-    // ACCEPTANCE criterion 1: the generate AbortSignal fired — proving the
-    // signal reaches the in-flight provider call and drops the connection.
-    expect(abortFired.value).toBe(true);
-
-    // ACCEPTANCE criterion 2: spy.cancels has the run id — proving engine.cancel
-    // was called in parallel with the AbortController abort (not sequentially).
-    expect(spy.cancels).toContain(runId);
-
-    // ACCEPTANCE criterion 3: the run settled within ~1 second — proving the
-    // abort is load-bearing (not waiting for Weft's yield* boundary).
-    expect(elapsed).toBeLessThan(1000);
-
-    // The generate AbortSignal was correctly threaded end-to-end.
-    expect(receivedSignal.value).toBeInstanceOf(AbortSignal);
-
-    // Sanity: the run finished as aborted.
-    expect(result.finishReason).toBe('aborted');
-
-    context.engine[Symbol.dispose]();
-  });
+  // AB-330: the real-elapsed-time proof ("abort() fires the generate
+  // AbortSignal immediately... within ~1 second") moved to
+  // `active-run-adapter-abort-latency.test.ts` — it measures a real async
+  // chain's actual wall-clock latency, which a manual clock cannot
+  // substitute for.
 
   // AB-339: previously the only assertion here was "settles cleanly, never
   // calls generate()" — true, but only because `runStep`'s OWN internal
@@ -4197,33 +4154,10 @@ describe('B6 — abort-into-generate load-bearing abort', () => {
     context.engine[Symbol.dispose]();
   });
 
-  it('abort() on the in-memory path fires the generate AbortSignal and settles within ~1s', async () => {
-    // Proves the signal seam works on the in-memory (non-durable) path too.
-    // Both paths share the same AbortController → combined signal → generate()
-    // channel, so this test documents the seam is wired on both paths.
-    const { generate, abortFired, receivedSignal } = makeBlockingGenerate();
-
-    const activeRun = createRun({
-      generate,
-      toolbox: createToolbox([]),
-      conversation: createConversationHistory(),
-      stopWhen: stopWhen.noToolCalls(),
-    });
-
-    // Let the deferred-microtask start fire and the generate call begin.
-    await new Promise((resolve) => setTimeout(resolve, 10));
-
-    const abortStart = performance.now();
-    activeRun.abort('cancel during streaming in-memory');
-
-    const result = await activeRun.result;
-    const elapsed = performance.now() - abortStart;
-
-    expect(abortFired.value).toBe(true);
-    expect(receivedSignal.value).toBeInstanceOf(AbortSignal);
-    expect(elapsed).toBeLessThan(1000);
-    expect(result.finishReason).toBe('aborted');
-  });
+  // AB-330: the in-memory-path counterpart ("abort() on the in-memory path
+  // fires the generate AbortSignal and settles within ~1s") also moved to
+  // `active-run-adapter-abort-latency.test.ts`, alongside the durable-path
+  // proof above.
 });
 
 // AB-317: `active-run-adapter.ts`'s toolbox listeners (`execute-start`/

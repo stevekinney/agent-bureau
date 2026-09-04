@@ -1,5 +1,11 @@
+import { createManualRuntimeServices } from 'lifecycle';
+
 import type { GenerateContext } from '../../types.ts';
 import type { ModelRoute } from '../types.ts';
+
+// AB-330: incidental message timestamp reads through a manual runtime instead
+// of the real clock so this test helper's real-runtime read is deterministic.
+const runtime = createManualRuntimeServices();
 
 /**
  * Creates a minimal GenerateContext stub for routing strategy tests.
@@ -35,7 +41,7 @@ export function makeContextWithMessages(
       role: messages[i]!.role,
       content: messages[i]!.content,
       position: i,
-      createdAt: new Date().toISOString(),
+      createdAt: runtime.clock.nowISO(),
       metadata: {},
       hidden: false,
     };

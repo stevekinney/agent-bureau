@@ -1,9 +1,14 @@
 import { describe, expect, it } from 'bun:test';
 import type { JSONValue } from 'conversationalist';
 import { Conversation } from 'conversationalist';
+import { createManualRuntimeServices } from 'lifecycle';
 
 import { createContextAssembler } from './assembly';
 import { createTokenBudget } from './token-budget';
+
+// AB-330: incidental message timestamps read through a manual runtime instead
+// of the real clock so this file's real-runtime reads are deterministic.
+const runtime = createManualRuntimeServices();
 
 function buildConversation(
   messages: Array<{
@@ -185,7 +190,7 @@ describe('createContextAssembler', () => {
         role: 'user' as const,
         content: 'Retrieved context',
         position: 0,
-        createdAt: new Date().toISOString(),
+        createdAt: runtime.clock.nowISO(),
         metadata: {},
         hidden: false,
       },
@@ -298,7 +303,7 @@ describe('createContextAssembler stable-prefix mode', () => {
         role: 'user' as const,
         content: 'Pinned reference doc 1',
         position: 0,
-        createdAt: new Date().toISOString(),
+        createdAt: runtime.clock.nowISO(),
         metadata: {},
         hidden: false,
       },
@@ -307,7 +312,7 @@ describe('createContextAssembler stable-prefix mode', () => {
         role: 'user' as const,
         content: 'Pinned reference doc 2',
         position: 1,
-        createdAt: new Date().toISOString(),
+        createdAt: runtime.clock.nowISO(),
         metadata: {},
         hidden: false,
       },
@@ -364,7 +369,7 @@ describe('createContextAssembler stable-prefix mode', () => {
         role: 'user' as const,
         content: 'Available tools: search, calculator.',
         position: 0,
-        createdAt: new Date().toISOString(),
+        createdAt: runtime.clock.nowISO(),
         metadata: {},
         hidden: false,
       },
@@ -418,7 +423,7 @@ describe('createContextAssembler stable-prefix mode', () => {
           role: 'user',
           content: 'Retrieved A',
           position: 0,
-          createdAt: new Date().toISOString(),
+          createdAt: runtime.clock.nowISO(),
           metadata: {},
           hidden: false,
         },
@@ -435,7 +440,7 @@ describe('createContextAssembler stable-prefix mode', () => {
           role: 'user',
           content: 'Retrieved B',
           position: 0,
-          createdAt: new Date().toISOString(),
+          createdAt: runtime.clock.nowISO(),
           metadata: {},
           hidden: false,
         },

@@ -777,8 +777,8 @@ describe('durable agentRun workflow', () => {
       const a = await buildEngine(storage, false);
       const handle = await startRun(a.engine, { runId: aRunId, prompt: 'Start' }, servicesA);
       void handle.result().catch(() => {}); // never settles; keep it off the chain
-      // Let step 0 commit and step 1 reach its hanging generate.
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      // AB-330: wait for step 0's cursor commit instead of a fixed real-time sleep.
+      await a.waitForCursorSave(aRunId, 1);
 
       const afterCrash = await a.checkpointStore.loadCheckpoint(aRunId);
       expect(afterCrash.steps).toHaveLength(1);
@@ -847,7 +847,8 @@ describe('durable agentRun workflow', () => {
       const a = await buildEngine(storage, false);
       const handle = await startRun(a.engine, { runId, prompt: 'Start' }, servicesA);
       void handle.result().catch(() => {});
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      // AB-330: wait for step 0's cursor commit instead of a fixed real-time sleep.
+      await a.waitForCursorSave(runId, 1);
 
       // Confirm step 0 actually COMMITTED (its ctx.memo resolved and checkpointed)
       // before "crashing" — otherwise a hook firing ahead of the checkpoint write
@@ -902,7 +903,8 @@ describe('durable agentRun workflow', () => {
       const a = await buildEngine(storage, false);
       const handle = await startRun(a.engine, { runId, prompt: 'Start' }, servicesA);
       void handle.result().catch(() => {});
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      // AB-330: wait for step 0's cursor commit instead of a fixed real-time sleep.
+      await a.waitForCursorSave(runId, 1);
       a.engine[Symbol.dispose]();
 
       // Fresh process whose resolver reports the run's services unavailable: Weft
@@ -2870,7 +2872,16 @@ describe('durable agentRun workflow', () => {
       };
       depsContainer.ref = services;
 
-      const { engine } = await buildWakeupEngine(storage, false);
+      // AB-330: drive the wakeup off a manual clock and `waitForCursorSave`
+      // (AB-296's pattern above) instead of polling `handle.snapshot()`
+      // against `buildWakeupEngine`'s real background scheduler poller.
+      const clock = createManualClock();
+      const { engine, waitForCursorSave } = await buildWakeupEngine(
+        storage,
+        false,
+        undefined,
+        clock,
+      );
       try {
         const handle = await engine.start(
           'agentRun',
@@ -2878,24 +2889,19 @@ describe('durable agentRun workflow', () => {
           { id: runId, services },
         );
 
-        // First park: ctx.sleep(20ms) fires on its own; poll until the
-        // SECOND park (ctx.waitForSignal, after step 1 commits) is reached.
-        // A real (not microtask-only) wait per iteration is needed here — the
-        // wakeup fires off `buildWakeupEngine`'s REAL background scheduler
-        // poll interval, so `yieldToPortableEventLoop()` alone (a same-tick
-        // microtask flush) can complete 200 iterations well inside one 10ms
-        // poll cycle without ever observing the fired state.
-        let parked = false;
-        for (let i = 0; i < 200; i++) {
-          await new Promise((resolve) => setTimeout(resolve, 5));
-          const snap = await handle.snapshot();
-          if (snap?.status === 'running' && call >= 2) {
-            parked = true;
-            break;
-          }
-          if (snap?.status === 'completed' || snap?.status === 'failed') break;
-        }
-        expect(parked).toBe(true);
+        // Step 0 commits (schedules the wakeup), then fire its 20ms timer
+        // explicitly via the manual clock.
+        await waitForCursorSave(runId, 1);
+        await yieldToPortableEventLoop();
+        await engine.runMaintenance(clock.advance(20));
+
+        // Step 1 (the continuation) commits: it sets both a new wakeup and a
+        // human-input request, and the human-input request wins — the run
+        // parks on ctx.waitForSignal.
+        await waitForCursorSave(runId, 2);
+        const snap = await handle.snapshot();
+        expect(snap?.status).toBe('running');
+        expect(call).toBeGreaterThanOrEqual(2);
 
         await engine.signal(runId, signalName, { approved: true });
 

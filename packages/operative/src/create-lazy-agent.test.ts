@@ -1,3 +1,4 @@
+import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
 import { createManualRuntimeServices } from 'lifecycle';
@@ -27,10 +28,11 @@ function stubLivenessSnapshot(id: string): AgentRunLivenessSnapshot {
   return {
     id,
     kind: 'agent-run',
-    startedAt: new Date(0).toISOString(),
+    // Fixed epoch literal, not a real-clock read.
+    startedAt: '1970-01-01T00:00:00.000Z',
     revision: 0,
     status: 'running',
-    lastTransitionAt: new Date(0).toISOString(),
+    lastTransitionAt: '1970-01-01T00:00:00.000Z',
     projection: 'redacted',
     ownership: 'independent',
     detached: false,
@@ -181,7 +183,7 @@ function successResult(content: string): RunResult<string, false> {
  * than a flaky assertion.
  */
 function flushMicrotasks(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 0));
+  return yieldToPortableEventLoop();
 }
 
 async function drain(run: AgentRun<unknown, boolean>): Promise<RunEvent[]> {

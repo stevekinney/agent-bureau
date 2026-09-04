@@ -1,6 +1,7 @@
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { describe, expect, it } from 'bun:test';
 import { Conversation, createConversationHistory } from 'conversationalist';
+import { createManualRuntimeServices } from 'lifecycle';
 
 import { createAgentSession } from '../agent-session';
 import { createSessionStore, SessionConflictError } from './create-session-store';
@@ -1094,7 +1095,10 @@ describe('createSessionStore', () => {
     for (let i = 0; i < 5; i++) {
       const s = makeSession({
         id: `s-${i}`,
-        updatedAt: new Date(2025, 0, i + 1).toISOString(),
+        // Distinct, ordered timestamps only — the assertion below is about
+        // pagination, not wall-clock time, so a fixed literal per index is
+        // sufficient and avoids a real-clock read.
+        updatedAt: `2025-01-${String(i + 1).padStart(2, '0')}T00:00:00.000Z`,
       });
       await store.save(s);
     }
@@ -1165,7 +1169,12 @@ describe('createSessionStore', () => {
 
   it('cleanup deletes old sessions and returns count', async () => {
     const rawStore = textValueStore(new MemoryStorage());
-    const store = createSessionStore(rawStore);
+    // AB-330: share one manual runtime between the store's cleanup cutoff and
+    // the "recent" session's timestamp so both read the same deterministic
+    // clock instead of the real one. Origin sits after `old`'s timestamp so
+    // the cutoff (now - 1 day) falls after it too.
+    const runtime = createManualRuntimeServices({ origin: '2024-01-03T00:00:00.000Z' });
+    const store = createSessionStore(rawStore, { runtime });
 
     const old = makeSession({
       id: 'old-session',
@@ -1173,7 +1182,7 @@ describe('createSessionStore', () => {
     });
     const recent = makeSession({
       id: 'recent-session',
-      updatedAt: new Date().toISOString(),
+      updatedAt: runtime.clock.nowISO(),
     });
 
     await seedStoredSession(rawStore, old);
@@ -1218,9 +1227,14 @@ describe('createSessionStore', () => {
 
   it('cleanup retains a logical session when either body representation is fresh', async () => {
     const rawStore = textValueStore(new MemoryStorage());
-    const store = createSessionStore(rawStore);
+    // AB-330: share one manual runtime between the store's cleanup cutoff and
+    // the fresh session's timestamp so both read the same deterministic
+    // clock instead of the real one. Origin sits after `expired`'s timestamp
+    // so the cutoff (now - 1 day) falls after it too.
+    const runtime = createManualRuntimeServices({ origin: '2024-01-03T00:00:00.000Z' });
+    const store = createSessionStore(rawStore, { runtime });
     const id = 'dual';
-    const fresh = makeSession({ id, updatedAt: new Date().toISOString() });
+    const fresh = makeSession({ id, updatedAt: runtime.clock.nowISO() });
     const expired = makeSession({ id, updatedAt: '2024-01-01T00:00:00.000Z' });
     await store.save(fresh);
     await rawStore.set(`agent-session:${id}`, JSON.stringify(expired));

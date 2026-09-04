@@ -43,11 +43,15 @@ function createBlockingGenerate(): {
   return { generate, resolve: resolver! };
 }
 
+// AB-330: a plain per-process counter instead of Math.random() — these ids
+// only need to be distinct within a test run, not unpredictable.
+let nextTaskId = 0;
+
 function makeTask(
   overrides: Partial<SchedulerTask> & { priority: SchedulerPriority },
 ): SchedulerTask {
   return {
-    id: `task-${Math.random().toString(36).slice(2, 8)}`,
+    id: `task-${(nextTaskId++).toString(36)}`,
     createRun: () => ({
       generate: createMockGenerate([textResponse('done')]),
       toolbox: createTestToolbox([]),
@@ -705,43 +709,9 @@ describe('createScheduler', () => {
     await scheduler.stop();
   });
 
-  it('idleDelay is respected between task completions', async () => {
-    const dispatchTimes: number[] = [];
-
-    const scheduler = createMinimalScheduler({ idleDelay: 30 });
-
-    const results: Promise<unknown>[] = [];
-
-    for (const name of ['first', 'second']) {
-      results.push(
-        scheduler.submit(
-          makeTask({
-            priority: 'background',
-            id: name,
-            createRun: () => {
-              dispatchTimes.push(performance.now());
-              return {
-                generate: createMockGenerate([textResponse(name)]),
-                toolbox: createTestToolbox([]),
-                conversation: new Conversation(),
-                maximumSteps: 1,
-              };
-            },
-          }),
-        ),
-      );
-    }
-
-    scheduler.start();
-    await Promise.all(results);
-
-    expect(dispatchTimes).toHaveLength(2);
-    const gap = dispatchTimes[1]! - dispatchTimes[0]!;
-    // The idle delay should enforce a gap of at least ~30ms between dispatches
-    expect(gap).toBeGreaterThanOrEqual(20);
-
-    await scheduler.stop();
-  });
+  // AB-330: "idleDelay is respected between task completions" moved to
+  // create-scheduler-idle-delay.test.ts — it measures a real inter-dispatch
+  // gap in milliseconds, a genuine real-clock latency property.
 
   it('stop() resolves queued tasks with null before they are started', async () => {
     const blocking = createBlockingGenerate();

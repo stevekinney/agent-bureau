@@ -7,6 +7,7 @@
  *   (c) the async iterator is independent of result-resolution state
  *   (d) a second `for await` on a completed run errors or replays predictably, never hangs
  */
+import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createMockTool, createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
@@ -23,7 +24,7 @@ import { type ActiveRun, createActiveRun as createRun } from '../src/create-run'
 import { AbortAgentRunError, MaximumStepsExceededError } from '../src/errors';
 import { TOOL_CALL_POLICY } from '../src/liveness';
 import type { RunnableAgent } from '../src/runnable-agent';
-import { createBarrierRegistry, createMockGenerate } from '../src/test/index';
+import { createBarrierRegistry, createMockGenerate, waitForCondition } from '../src/test/index';
 import type {
   CleanupAcknowledgement,
   ClosedOptions,
@@ -33,6 +34,26 @@ import type {
 
 function textResponse(content: string): GenerateResponse {
   return { content, toolCalls: [] };
+}
+
+/**
+ * AB-330: a deterministic hang guard — bounded macrotask polling instead of a
+ * real `setTimeout` deadline race. Resolves/rejects exactly as `promise`
+ * does once it settles; throws `message` if it never settles within the
+ * bound (a genuine hang, not a tuned real-time budget).
+ */
+async function withHangGuard<T>(promise: Promise<T>, message: string): Promise<T> {
+  let settled = false;
+  void promise.then(
+    () => {
+      settled = true;
+    },
+    () => {
+      settled = true;
+    },
+  );
+  await waitForCondition(() => settled, message);
+  return promise;
 }
 
 function makeRun(responses: GenerateResponse[] = [textResponse('Hello')]) {
@@ -783,18 +804,15 @@ describe('AgentRun[Symbol.asyncIterator]()', () => {
 
     // Now try to iterate — must throw immediately, never hang.
     let threw = false;
-    const deadline = new Promise<void>((_resolve, reject) =>
-      setTimeout(() => reject(new Error('iteration hung — did not complete within 1s')), 1000),
-    );
     try {
-      await Promise.race([
+      await withHangGuard(
         (async () => {
           for await (const _ of run) {
             /* should not reach */
           }
         })(),
-        deadline,
-      ]);
+        'iteration hung — did not complete',
+      );
     } catch (error) {
       threw = true;
       if (error instanceof CompletedRunIterationError) {
@@ -837,19 +855,18 @@ describe('AgentRun.abort()', () => {
     const run = createAgentRun(activeRun);
 
     // Abort after a brief wait to let generate start.
-    setTimeout(() => run.abort('user cancelled'), 10);
+    await yieldToPortableEventLoop();
+    run.abort('user cancelled');
 
     // The result() promise should settle (either resolve with finishReason='aborted'
     // or reject — either is acceptable as long as it doesn't hang).
-    const settled = await Promise.race([
+    const settled = await withHangGuard(
       run.result().then(
         () => 'resolved',
         () => 'rejected',
       ),
-      new Promise<string>((_resolve, reject) =>
-        setTimeout(() => reject(new Error('result() hung after abort')), 500),
-      ),
-    ]);
+      'result() hung after abort',
+    );
     expect(['resolved', 'rejected']).toContain(settled);
     expect(abortSignal?.aborted).toBe(true);
   });
@@ -878,7 +895,8 @@ describe('AgentRun.abort()', () => {
     });
     const run = createAgentRun(activeRun);
 
-    setTimeout(() => run.abort('user cancelled'), 10);
+    await yieldToPortableEventLoop();
+    run.abort('user cancelled');
 
     const result = await run.result();
 
@@ -925,17 +943,16 @@ describe('AgentRun[Symbol.dispose]()', () => {
     });
     const run = createAgentRun(activeRun);
 
-    setTimeout(() => run[Symbol.dispose](), 10);
+    await yieldToPortableEventLoop();
+    run[Symbol.dispose]();
 
-    await Promise.race([
+    await withHangGuard(
       run.result().then(
         () => undefined,
         () => undefined,
       ),
-      new Promise<void>((_resolve, reject) =>
-        setTimeout(() => reject(new Error('dispose did not abort the run within 500ms')), 500),
-      ),
-    ]);
+      'dispose did not abort the run',
+    );
 
     expect(signalSeen?.aborted).toBe(true);
   });
