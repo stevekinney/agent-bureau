@@ -35,9 +35,11 @@ export interface SignalContinuationInput<TPayload = unknown> {
    * non-deterministic across replay — the caller obtains it through a
    * checkpointed `ctx.memo` (or `ctx.run`) and passes it in. Carried on this
    * type per AB-41's ratified shape even though the fixed rendered message
-   * does not include it (the rendering is keyed on `signalName`/`payload`/
-   * `denied` only) — it is metadata for a caller inspecting the structured
-   * input, not the transcript text.
+   * does not include it (the rendering is keyed on `signalName` plus
+   * `rejected`/`rejectionReason`, `denied`/`denialReason`, or `payload` when
+   * none of those apply — see {@link renderSignalContinuation}) — it is
+   * metadata for a caller inspecting the structured input, not the
+   * transcript text.
    */
   readonly deliveredAt: string;
   /**
@@ -50,6 +52,16 @@ export interface SignalContinuationInput<TPayload = unknown> {
   readonly denied: boolean;
   /** Present only when `denied` is `true` and the sentinel carried a `reason`. */
   readonly denialReason?: string;
+  /**
+   * `true` when `payload` is the AB-46-ratified `human-wait` `reject`
+   * sentinel (`{ __abRejected: true, reason: string }`) — see
+   * {@link isRejectedSignalPayload}. Unlike `deny`, AB-46's decision requires
+   * a `reject` to always carry a reason, so `rejectionReason` is set
+   * whenever `rejected` is `true`.
+   */
+  readonly rejected: boolean;
+  /** Present only when `rejected` is `true`. */
+  readonly rejectionReason?: string;
 }
 
 /**
@@ -81,6 +93,35 @@ export function isDeniedSignalPayload(value: unknown): value is DeniedSignalSent
 }
 
 /**
+ * The AB-46-ratified `human-wait` `reject` sentinel shape. `resolveReview({
+ * decision: 'reject' })` against a `human-wait` review delivers this payload
+ * on the same channel the workflow is parked on, per AB-46's decision
+ * record. Unlike {@link DeniedSignalSentinel}, `reason` is REQUIRED — AB-46's
+ * decision is explicit that a `reject` always carries caller-supplied
+ * feedback. Bureau owns actually sending it (ab46-01); this module owns
+ * detecting it so the continuation renders `rejected` text instead of the
+ * payload's raw JSON.
+ */
+interface RejectedSignalSentinel {
+  readonly __abRejected: true;
+  readonly reason: string;
+}
+
+/**
+ * Type guard for {@link RejectedSignalSentinel}. Like
+ * {@link isDeniedSignalPayload}, this narrows an `unknown` signal payload
+ * defensively rather than casting — but unlike the deny sentinel, `reason`
+ * must be present and a string, per AB-46's decision that a `reject` always
+ * carries a required reason.
+ */
+export function isRejectedSignalPayload(value: unknown): value is RejectedSignalSentinel {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  if (candidate['__abRejected'] !== true) return false;
+  return typeof candidate['reason'] === 'string';
+}
+
+/**
  * Build a {@link SignalContinuationInput} from a signal's raw delivered
  * payload. Detects the denial sentinel via {@link isDeniedSignalPayload} so
  * callers do not need to special-case it. `deliveredAt` must already be a
@@ -92,6 +133,17 @@ export function buildSignalContinuationInput<TPayload = unknown>(
   payload: TPayload,
   deliveredAt: string,
 ): SignalContinuationInput<TPayload> {
+  if (isRejectedSignalPayload(payload)) {
+    return {
+      kind: 'signal',
+      signalName,
+      payload,
+      deliveredAt,
+      denied: false,
+      rejected: true,
+      rejectionReason: payload.reason,
+    };
+  }
   if (isDeniedSignalPayload(payload)) {
     return {
       kind: 'signal',
@@ -100,6 +152,7 @@ export function buildSignalContinuationInput<TPayload = unknown>(
       deliveredAt,
       denied: true,
       ...(payload.reason !== undefined ? { denialReason: payload.reason } : {}),
+      rejected: false,
     };
   }
   return {
@@ -108,6 +161,7 @@ export function buildSignalContinuationInput<TPayload = unknown>(
     payload,
     deliveredAt,
     denied: false,
+    rejected: false,
   };
 }
 
@@ -194,6 +248,15 @@ export function renderWakeupContinuation(input: WakeupContinuationInput): string
  *  rather than a thrown error inside the workflow body. */
 const UNSERIALIZABLE_PAYLOAD_PLACEHOLDER = '[unserializable payload]';
 
+/** The fixed placeholder rendered in place of a missing {@link SignalContinuationInput.rejectionReason}.
+ *  `rejected: true` is contractually always paired with a `rejectionReason` (AB-46's decision requires
+ *  `reject` to always carry a reason, and {@link isRejectedSignalPayload} enforces this when building the
+ *  input via {@link buildSignalContinuationInput}), so this branch should be unreachable in practice. It
+ *  exists only as a defensive fallback for a `SignalContinuationInput` a caller constructs directly with
+ *  an inconsistent `rejected`/`rejectionReason` pair — rendering deterministic text here rather than the
+ *  literal word `undefined` keeps the workflow-safe rendering contract intact even for a malformed input. */
+const MISSING_REJECTION_REASON_PLACEHOLDER = '[missing reason]';
+
 /**
  * Render a {@link SignalContinuationInput} into the fixed, parseable text AB-41's
  * decision record specifies, appended to the conversation as a single synthetic
@@ -201,6 +264,7 @@ const UNSERIALIZABLE_PAYLOAD_PLACEHOLDER = '[unserializable payload]';
  * at `run-workflow.ts`'s `onMaximumSteps` tail).
  *
  * - Ordinary delivery: `[signal:{signalName}] {JSON.stringify(payload)}`
+ * - Rejection: `[signal:{signalName}] rejected: {rejectionReason}`
  * - Denial with a reason: `[signal:{signalName}] denied: {denialReason}`
  * - Denial with no reason: `[signal:{signalName}] denied`
  *
@@ -211,6 +275,13 @@ const UNSERIALIZABLE_PAYLOAD_PLACEHOLDER = '[unserializable payload]';
  * only a throw falls back to the placeholder) never crashes the workflow body.
  */
 export function renderSignalContinuation(input: SignalContinuationInput): string {
+  if (input.rejected) {
+    return `[signal:${input.signalName}] rejected: ${
+      input.rejectionReason !== undefined
+        ? input.rejectionReason
+        : MISSING_REJECTION_REASON_PLACEHOLDER
+    }`;
+  }
   if (input.denied) {
     return `[signal:${input.signalName}] denied${
       input.denialReason !== undefined ? `: ${input.denialReason}` : ''

@@ -20,6 +20,7 @@ export {
   buildSignalContinuationInput,
   buildWakeupContinuationInput,
   isDeniedSignalPayload,
+  isRejectedSignalPayload,
   renderDurationLabel,
   renderSignalContinuation,
   renderWakeupContinuation,
