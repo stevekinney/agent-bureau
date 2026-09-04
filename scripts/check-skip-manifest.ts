@@ -10,8 +10,8 @@
  * already establishes why: a call inside a string literal or a comment reads identically to real
  * code under a regular expression, and a hand-rolled matcher for nested member access and
  * argument lists accumulates false positives one edge case at a time. The TypeScript compiler is
- * already a root devDependency, so parsing every `*.test.ts` file into a real AST costs nothing
- * and removes the class of bug entirely.
+ * already a root devDependency, so parsing every `*.test.ts`, `*.test.mjs`, and `*.test.js` file
+ * into a real AST costs nothing and removes the class of bug entirely.
  *
  * AST SHAPES MATCHED (also recorded in the pull request body per AB-279's acceptance criteria):
  *
@@ -36,23 +36,50 @@
  *   false "orphan" if it is ever named in the manifest) — it just never resolves to a `skip`/
  *   `todo`/`only` finding, because `skipIf`/`todoIf` are not in `SKIP_LIKE_PROPERTIES`. Recorded
  *   as a follow-up in the pull request body rather than silently expanding this issue's scope.
- * - Also out of scope: `*.test.mjs` files (e.g. `packages/integration/test/runtime.test.mjs`,
- *   run through `node --test`, not `bun:test`). The acceptance criteria's scan glob is literally
- *   `*.test.ts`; `node:test`'s API is close enough to `bun:test`'s that a `.mjs` scan is a
- *   plausible future extension, but a different module system and potentially different AST
- *   shapes make it a real, separate slice rather than a one-line glob change.
- * - Also out of scope, both requiring symbol/import binding resolution this script deliberately
- *   does not do (a lexical AST walk, not a type-checker): a callback passed by reference —
- *   `it('case', someNamedFunction)` — is not followed to `someNamedFunction`'s body, so a
- *   conditional early return inside it is invisible to `hasConditionalEarlyReturn`; and an
- *   aliased import — `import { it as spec } from 'bun:test'; spec.skip(...)` — is not resolved
- *   back to `bun:test`'s `it`, so `spec` does not match `TEST_CALL_NAMES`. Neither pattern
- *   appears anywhere in the repository today (checked with
- *   `git grep -nE "\\b(it|test)\\.(skip|todo|only)?\\(?['"][^'"]*['"]\\s*,\\s*[A-Za-z_][A-Za-z0-9_]*\\s*\\)"`
- *   and `git grep -nE "import \\{[^}]*\\b(it|test|describe) as \\w+"` against
- *   `packages/**\/*.test.ts` and `scripts/*.test.ts` — both zero hits), so this is a real
- *   boundary, not a live gap, and full symbol resolution is a materially larger change than this
- *   issue's scope.
+ * - AB-293 extended the scan glob to `*.test.mjs` and `*.test.js` under `packages/` and
+ *   `scripts/` (e.g. `packages/integration/test/runtime.test.mjs`, run through `node --test`).
+ *   `node:test`'s `describe`/`it`/`test`/`.skip`/`.todo`/`.only` surface is lexically identical
+ *   to `bun:test`'s, so the same AST matcher applies; the only difference is the parser's
+ *   `ScriptKind` (`JS` for `.mjs`/`.js`, `TS` for `.ts` — see `scriptKindForFilePath`), since a
+ *   `.mjs`/`.js` file is never itself TypeScript syntax.
+ * - AB-293 also resolved two patterns that used to be out of scope, both against real fixtures
+ *   under `scripts/fixtures/skip-manifest/`, because the repository-wide `git grep` re-run at
+ *   that issue's start still showed zero live hits for either (checked with
+ *   `git grep -nE "\\b(it|test)\\(['"][^'"]*['"]\\s*,\\s*[A-Za-z_][A-Za-z0-9_]*\\s*\\)"` and
+ *   `git grep -nE "import \\{[^}]*\\b(it|test|describe) as \\w+"`, each run separately against
+ *   `packages/**\/*.test.ts`, `packages/**\/*.test.mjs`, `packages/**\/*.test.js`,
+ *   `scripts/*.test.ts`, `scripts/*.test.mjs`, and `scripts/*.test.js` — every combination zero
+ *   hits, so this closed a real boundary rather than a live gap):
+ *   - An aliased import — `import { it as spec } from 'bun:test'` (or `'node:test'`) —
+ *     `spec.skip(...)` now resolves back to `it`. `collectTestImportAliases` builds a
+ *     local-name → canonical-name map from every top-level `ImportDeclaration` whose module
+ *     specifier is exactly `'bun:test'` or `'node:test'`, for `describe`/`it`/`test` import
+ *     specifiers only; `resolveTestRoot` consults it before falling back to `TEST_CALL_NAMES`.
+ *     An alias from any other module is deliberately not resolved — a same-named import from an
+ *     unrelated package is not a test declaration just because it shares a name.
+ *   - A callback passed by reference — `it('case', someNamedFunction)` — is now inspected at
+ *     `someNamedFunction`'s own declaration site. `collectFunctionBindings` walks the entire file
+ *     once, before any test-call matching, recording every named `function someNamedFunction() {}`
+ *     declaration and every `const someNamedFunction = () => {}` / `= function () {}` variable
+ *     initializer found anywhere in the tree, by name. `resolveCallback` then accepts a test
+ *     call's callback argument either directly (an inline arrow/function expression, at any
+ *     argument index, as before) or, when the argument at index 1 or later is a bare `Identifier`,
+ *     by looking that name up in the bindings map — the resolved function-like node is then the
+ *     one `hasConditionalEarlyReturn` inspects and the one whose presence makes the call a genuine
+ *     declaration (`.each`-style factory calls with no callback at all still are not). By-reference
+ *     resolution is deliberately withheld from argument index 0 — the title slot in a genuine
+ *     declaration, but also the sole argument of an intermediate factory call like
+ *     `it.skipIf(shouldSkip)` — so that factory call's own by-reference argument is never
+ *     mistaken for the test's callback; see the comment on `resolveCallback` for the concrete
+ *     false-positive this closes. A callback that is a `PropertyAccessExpression` (`obj.method`)
+ *     or otherwise not a bare identifier is still not resolved — narrowly matching the acceptance
+ *     criteria's stated shape (`it('case', someNamedFunction)`) rather than reaching for full
+ *     symbol resolution. Known limitation: `describe('suite', suiteBody)` — a `describe` callback
+ *     passed by reference — resolves `suiteBody` for the purposes of counting it as a genuine
+ *     declaration, but `findSkipFindings`'s `describeChain` is built by walking the call node's
+ *     own children, not the resolved declaration's, so any `it`/`test` nested inside `suiteBody`
+ *     does not get that describe title prefixed onto its identifier. Outside this issue's stated
+ *     shape (`it('case', someNamedFunction)`), so not fixed here.
  * - A conditional early return is a `ReturnStatement` that is either the first statement of an
  *   `IfStatement`'s `then` branch, or the first statement of a block that is that `then` branch,
  *   where the `IfStatement` itself is the first statement of an `it`/`test` (not `describe`)
@@ -107,11 +134,79 @@ export interface SkipManifestGateResult extends SkipManifestCheckResult {
 }
 
 const TEST_CALL_NAMES = new Set(['describe', 'it', 'test']);
+const TEST_MODULE_SPECIFIERS = new Set(['bun:test', 'node:test']);
 const SKIP_LIKE_PROPERTIES: Readonly<Record<string, SkipKind>> = {
   skip: 'skip',
   todo: 'todo',
   only: 'only',
 };
+
+/** Every `describe`/`it`/`test`-shaped callback declared by name, keyed by its local identifier. */
+type FunctionLikeDeclaration = ts.ArrowFunction | ts.FunctionExpression | ts.FunctionDeclaration;
+
+function isFunctionLike(node: ts.Node): node is FunctionLikeDeclaration {
+  return (
+    ts.isArrowFunction(node) || ts.isFunctionExpression(node) || ts.isFunctionDeclaration(node)
+  );
+}
+
+/**
+ * Maps a local import binding back to the canonical `describe`/`it`/`test` name it aliases, for
+ * every `import { it as spec } from 'bun:test'`-shaped specifier at the top level of the file.
+ * Only `bun:test` and `node:test` module specifiers are consulted, and only for
+ * `describe`/`it`/`test` specifiers — an alias of a same-named import from an unrelated module is
+ * deliberately not resolved.
+ */
+function collectTestImportAliases(sourceFile: ts.SourceFile): ReadonlyMap<string, string> {
+  const aliases = new Map<string, string>();
+
+  for (const statement of sourceFile.statements) {
+    if (!ts.isImportDeclaration(statement)) continue;
+    if (!ts.isStringLiteral(statement.moduleSpecifier)) continue;
+    if (!TEST_MODULE_SPECIFIERS.has(statement.moduleSpecifier.text)) continue;
+
+    const namedBindings = statement.importClause?.namedBindings;
+    if (!namedBindings || !ts.isNamedImports(namedBindings)) continue;
+
+    for (const specifier of namedBindings.elements) {
+      if (!specifier.propertyName) continue; // not aliased
+      const canonicalName = specifier.propertyName.text;
+      if (!TEST_CALL_NAMES.has(canonicalName)) continue;
+      aliases.set(specifier.name.text, canonicalName);
+    }
+  }
+
+  return aliases;
+}
+
+/**
+ * Maps every named, function-like declaration reachable anywhere in the file — a
+ * `function someName() {}` declaration or a `const someName = () => {}` / `= function () {}`
+ * variable initializer — to its declaration node, so a callback passed by reference
+ * (`it('case', someName)`) can be resolved to the place its body actually lives.
+ */
+function collectFunctionBindings(
+  sourceFile: ts.SourceFile,
+): ReadonlyMap<string, FunctionLikeDeclaration> {
+  const bindings = new Map<string, FunctionLikeDeclaration>();
+
+  function visit(node: ts.Node): void {
+    if (ts.isFunctionDeclaration(node) && node.name) {
+      bindings.set(node.name.text, node);
+    } else if (
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      node.initializer &&
+      isFunctionLike(node.initializer)
+    ) {
+      bindings.set(node.name.text, node.initializer);
+    }
+    node.forEachChild(visit);
+  }
+
+  visit(sourceFile);
+  return bindings;
+}
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
@@ -152,19 +247,23 @@ interface TestRoot {
  * the callee of the outer `it.each(data)('title', fn)`). Returns `undefined` for anything that
  * does not bottom out at `describe`/`it`/`test`.
  */
-function resolveTestRoot(expression: ts.Expression): TestRoot | undefined {
+function resolveTestRoot(
+  expression: ts.Expression,
+  importAliases: ReadonlyMap<string, string>,
+): TestRoot | undefined {
   if (ts.isIdentifier(expression)) {
-    return TEST_CALL_NAMES.has(expression.text)
-      ? { rootName: expression.text, modifiers: [] }
+    const canonicalName = importAliases.get(expression.text) ?? expression.text;
+    return TEST_CALL_NAMES.has(canonicalName)
+      ? { rootName: canonicalName, modifiers: [] }
       : undefined;
   }
   if (ts.isPropertyAccessExpression(expression) && ts.isIdentifier(expression.name)) {
-    const base = resolveTestRoot(expression.expression);
+    const base = resolveTestRoot(expression.expression, importAliases);
     if (!base) return undefined;
     return { rootName: base.rootName, modifiers: [...base.modifiers, expression.name.text] };
   }
   if (ts.isCallExpression(expression)) {
-    return resolveTestRoot(expression.expression);
+    return resolveTestRoot(expression.expression, importAliases);
   }
   return undefined;
 }
@@ -172,24 +271,60 @@ function resolveTestRoot(expression: ts.Expression): TestRoot | undefined {
 interface TestCallInfo {
   readonly rootName: string;
   readonly skipKind: SkipKind | undefined;
+  /** The resolved callback body — inline, or looked up by reference. */
+  readonly callback: FunctionLikeDeclaration;
+}
+
+/**
+ * Resolves a test call's callback argument to the function-like node whose body should actually
+ * be inspected: an inline arrow/function expression argument, as before, or — when the argument
+ * is a bare `Identifier` — that name looked up in `functionBindings`, resolving a callback passed
+ * by reference (`it('case', someName)`) to `someName`'s own declaration site. Anything else (a
+ * property access, a call expression, …) is not resolved.
+ */
+function resolveCallback(
+  node: ts.CallExpression,
+  functionBindings: ReadonlyMap<string, FunctionLikeDeclaration>,
+): FunctionLikeDeclaration | undefined {
+  for (const [index, argument] of node.arguments.entries()) {
+    if (isFunctionLike(argument)) return argument;
+    // By-reference resolution is deliberately restricted to argument index >= 1 (after the title
+    // slot in a real `it('title', callback)`/`it.each(data)('title', callback)` declaration).
+    // Without this bound, an *intermediate* factory call such as `it.skipIf(shouldSkip)` — whose
+    // sole argument at index 0 is itself a by-reference identifier, not a title — would resolve
+    // `shouldSkip` as if it were the test's callback and misreport a false conditional-early-return
+    // finding for `shouldSkip`'s own body, on a call node that is not a genuine test declaration at
+    // all (confirmed with `it.skipIf(shouldSkip)('real title', () => {...})` before this guard).
+    if (index >= 1 && ts.isIdentifier(argument)) {
+      const bound = functionBindings.get(argument.text);
+      if (bound) return bound;
+    }
+  }
+  return undefined;
 }
 
 /**
  * A `CallExpression` counts as a genuine test declaration — not merely a `.each`/`.skipIf`
  * factory call that has not been invoked with a callback yet — only once it both resolves to a
- * `describe`/`it`/`test` root and carries a function-like argument. That second condition is what
- * tells `it.each(data)('title', fn)` (a declaration) apart from `it.each(data)` alone (not one).
+ * `describe`/`it`/`test` root and carries a resolvable callback (inline or by reference). That
+ * second condition is what tells `it.each(data)('title', fn)` (a declaration) apart from
+ * `it.each(data)` alone (not one).
  */
-function getTestCallInfo(node: ts.CallExpression): TestCallInfo | undefined {
-  const root = resolveTestRoot(node.expression);
+function getTestCallInfo(
+  node: ts.CallExpression,
+  importAliases: ReadonlyMap<string, string>,
+  functionBindings: ReadonlyMap<string, FunctionLikeDeclaration>,
+): TestCallInfo | undefined {
+  const root = resolveTestRoot(node.expression, importAliases);
   if (!root) return undefined;
-  if (!node.arguments.some(isFunctionLike)) return undefined;
+  const callback = resolveCallback(node, functionBindings);
+  if (!callback) return undefined;
 
   const skipKinds = root.modifiers
     .map((modifier) => SKIP_LIKE_PROPERTIES[modifier])
     .filter((kind): kind is SkipKind => kind !== undefined);
 
-  return { rootName: root.rootName, skipKind: skipKinds[0] };
+  return { rootName: root.rootName, skipKind: skipKinds[0], callback };
 }
 
 function getTitleArgument(node: ts.CallExpression, sourceFile: ts.SourceFile): string {
@@ -197,10 +332,6 @@ function getTitleArgument(node: ts.CallExpression, sourceFile: ts.SourceFile): s
   if (titleArgument && ts.isStringLiteralLike(titleArgument)) return titleArgument.text;
   const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
   return `<unnamed:${line}>`;
-}
-
-function isFunctionLike(node: ts.Node): node is ts.ArrowFunction | ts.FunctionExpression {
-  return ts.isArrowFunction(node) || ts.isFunctionExpression(node);
 }
 
 /** The first `ReturnStatement` of an `IfStatement`'s `then` branch, direct or one block deep. */
@@ -214,10 +345,13 @@ function ifThenStartsWithReturn(ifStatement: ts.IfStatement): boolean {
   return false;
 }
 
-/** A test callback whose body's first statement is an `IfStatement` starting with a return. */
-function hasConditionalEarlyReturn(node: ts.CallExpression): boolean {
-  const callback = node.arguments.find(isFunctionLike);
-  if (!callback || !callback.body || !ts.isBlock(callback.body)) return false;
+/**
+ * A resolved callback whose body's first statement is an `IfStatement` starting with a return.
+ * `callback` is already resolved by {@link resolveCallback} — inline or by reference — so this is
+ * agnostic to which of those two shapes produced it.
+ */
+function hasConditionalEarlyReturn(callback: FunctionLikeDeclaration): boolean {
+  if (!callback.body || !ts.isBlock(callback.body)) return false;
   const first = callback.body.statements[0];
   return first !== undefined && ts.isIfStatement(first) && ifThenStartsWithReturn(first);
 }
@@ -233,10 +367,12 @@ export function findSkipFindings(
 ): { findings: SkipFinding[]; allTestIdentifiers: Set<string> } {
   const findings: SkipFinding[] = [];
   const allTestIdentifiers = new Set<string>();
+  const importAliases = collectTestImportAliases(sourceFile);
+  const functionBindings = collectFunctionBindings(sourceFile);
 
   function visit(node: ts.Node, describeChain: readonly string[]): void {
     if (ts.isCallExpression(node)) {
-      const callInfo = getTestCallInfo(node);
+      const callInfo = getTestCallInfo(node, importAliases, functionBindings);
       if (callInfo) {
         const title = getTitleArgument(node, sourceFile);
         const fullChain = [...describeChain, title];
@@ -249,7 +385,7 @@ export function findSkipFindings(
           findings.push({ filePath, testIdentifier, kind: callInfo.skipKind, line });
         } else if (
           (callInfo.rootName === 'it' || callInfo.rootName === 'test') &&
-          hasConditionalEarlyReturn(node)
+          hasConditionalEarlyReturn(callInfo.callback)
         ) {
           findings.push({ filePath, testIdentifier, kind: 'conditional-early-return', line });
         }
@@ -266,6 +402,18 @@ export function findSkipFindings(
   return { findings, allTestIdentifiers };
 }
 
+/**
+ * A `.mjs`/`.js` file is plain JavaScript, never TypeScript syntax; a `.ts` file (including a
+ * fixture with no real extension in its own name, loaded here under a `.ts` `filePath`, as
+ * `scripts/check-skip-manifest.test.ts` does) is parsed as TypeScript. Anything else defaults to
+ * `TS`, matching this script's own historical behavior before AB-293 introduced the JS glob.
+ */
+function scriptKindForFilePath(filePath: string): ts.ScriptKind {
+  return filePath.endsWith('.mjs') || filePath.endsWith('.js')
+    ? ts.ScriptKind.JS
+    : ts.ScriptKind.TS;
+}
+
 /** Convenience wrapper around {@link findSkipFindings} that parses source text first. */
 export function findSkipFindingsInSource(
   filePath: string,
@@ -276,7 +424,7 @@ export function findSkipFindingsInSource(
     sourceText,
     ts.ScriptTarget.Latest,
     true,
-    ts.ScriptKind.TS,
+    scriptKindForFilePath(filePath),
   );
   return findSkipFindings(filePath, sourceFile);
 }
@@ -336,16 +484,29 @@ async function readTestFiles(repositoryRoot: string, glob: string): Promise<stri
   return relativePaths.sort();
 }
 
-/** End-to-end check for a repository root: scans every `*.test.ts` and evaluates the manifest. */
+/**
+ * Every glob this gate scans, relative to the repository root. `*.test.mjs` and `*.test.js` were
+ * added by AB-293 alongside the pre-existing `*.test.ts`, so a `node:test` suite such as
+ * `packages/integration/test/runtime.test.mjs` is no longer invisible to the gate.
+ */
+const TEST_FILE_GLOBS: readonly string[] = [
+  'packages/**/*.test.ts',
+  'packages/**/*.test.mjs',
+  'packages/**/*.test.js',
+  'scripts/**/*.test.ts',
+  'scripts/**/*.test.mjs',
+  'scripts/**/*.test.js',
+];
+
+/** End-to-end check for a repository root: scans every test file glob and evaluates the manifest. */
 export async function checkSkipManifest(repositoryRoot: string): Promise<SkipManifestGateResult> {
-  const [packageTestFiles, scriptTestFiles, rawManifest] = await Promise.all([
-    readTestFiles(repositoryRoot, 'packages/**/*.test.ts'),
-    readTestFiles(repositoryRoot, 'scripts/**/*.test.ts'),
+  const [fileListsByGlob, rawManifest] = await Promise.all([
+    Promise.all(TEST_FILE_GLOBS.map((glob) => readTestFiles(repositoryRoot, glob))),
     Bun.file(resolve(repositoryRoot, 'scripts/skip-manifest.json')).json(),
   ]);
 
   const manifest = parseSkipManifest(rawManifest);
-  const scannedFiles = [...packageTestFiles, ...scriptTestFiles].sort();
+  const scannedFiles = [...new Set(fileListsByGlob.flat())].sort();
 
   const allFindings: SkipFinding[] = [];
   const allTestIdentifiers = new Set<string>();

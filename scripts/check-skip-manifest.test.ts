@@ -250,6 +250,127 @@ describe('findSkipFindingsInSource', () => {
       `${filePath} > <unnamed:8>`,
     ]);
   });
+
+  it('flags a hidden test.skip in a node:test .mjs suite (AB-293)', async () => {
+    const { filePath, sourceText } = await loadFixture('hidden-skip-in-node-test-suite.mjs');
+    const { findings } = findSkipFindingsInSource(filePath, sourceText);
+
+    expect(findings).toEqual([
+      {
+        filePath,
+        testIdentifier: `${filePath} > a node:test suite with a hidden skip > is skipped without a manifest entry`,
+        kind: 'skip',
+        line: 16,
+      },
+    ]);
+  });
+
+  it('parses a node:test-shaped .mjs suite end to end (scriptKindForFilePath routing)', () => {
+    const filePath = 'inline.mjs';
+    const sourceText = `
+      import { it } from 'node:test';
+      it('runs a plain JS callback', () => {});
+    `;
+    const { findings, allTestIdentifiers } = findSkipFindingsInSource(filePath, sourceText);
+    expect(findings).toEqual([]);
+    expect([...allTestIdentifiers]).toEqual([`${filePath} > runs a plain JS callback`]);
+  });
+
+  it('flags a skip declared through an aliased bun:test import (AB-293)', async () => {
+    const { filePath, sourceText } = await loadFixture('aliased-import-skip.ts');
+    const { findings } = findSkipFindingsInSource(filePath, sourceText);
+
+    expect(findings).toEqual([
+      {
+        filePath,
+        testIdentifier: `${filePath} > is skipped through an aliased import with no manifest entry`,
+        kind: 'skip',
+        line: 15,
+      },
+    ]);
+  });
+
+  it('does not resolve an alias imported from a module other than bun:test or node:test', () => {
+    const filePath = 'inline.ts';
+    const sourceText = `
+      import { it as spec } from 'some-unrelated-package';
+      spec.skip('looks like a skip but spec is not a test import', () => {});
+    `;
+    const { findings, allTestIdentifiers } = findSkipFindingsInSource(filePath, sourceText);
+    expect(findings).toEqual([]);
+    expect([...allTestIdentifiers]).toEqual([]);
+  });
+
+  it('flags a conditional early return inside a callback passed by reference (AB-293)', async () => {
+    const { filePath, sourceText } = await loadFixture('by-reference-conditional-return.ts');
+    const { findings } = findSkipFindingsInSource(filePath, sourceText);
+
+    expect(findings).toEqual([
+      {
+        filePath,
+        testIdentifier: `${filePath} > bails out early through a callback passed by reference`,
+        kind: 'conditional-early-return',
+        line: 16,
+      },
+    ]);
+  });
+
+  it('resolves a by-reference callback bound with a const arrow function too', () => {
+    const filePath = 'inline.ts';
+    const sourceText = `
+      import { expect, it } from 'bun:test';
+      const bailsOutEarly = () => {
+        if (Bun.env['NEVER'] === 'set') {
+          return;
+        }
+        expect(true).toBe(true);
+      };
+      it('bails out early via a const-bound callback', bailsOutEarly);
+    `;
+    const { findings } = findSkipFindingsInSource(filePath, sourceText);
+    expect(findings).toEqual([
+      {
+        filePath,
+        testIdentifier: `${filePath} > bails out early via a const-bound callback`,
+        kind: 'conditional-early-return',
+        line: 9,
+      },
+    ]);
+  });
+
+  it('does not misread an intermediate factory call whose sole argument is a by-reference identifier as the test declaration itself (regression)', () => {
+    const filePath = 'inline.ts';
+    const sourceText = `
+      import { expect, it } from 'bun:test';
+      function shouldSkip() {
+        if (Bun.env['CI']) {
+          return true;
+        }
+        return false;
+      }
+      it.skipIf(shouldSkip)('real title', () => {
+        expect(1).toBe(1);
+      });
+    `;
+    const { findings, allTestIdentifiers } = findSkipFindingsInSource(filePath, sourceText);
+    // Before this guard, the inner `it.skipIf(shouldSkip)` call resolved `shouldSkip` as a
+    // by-reference callback at argument index 0 (the factory-call slot, not a title), producing a
+    // false `conditional-early-return` finding under a phantom `<unnamed:N>` identifier for a test
+    // that was never actually declared, let alone conditionally skipped.
+    expect([...allTestIdentifiers]).toEqual([`${filePath} > real title`]);
+    expect(findings).toEqual([]);
+  });
+
+  it('does not record a phantom identifier when a callback identifier resolves to no known function', () => {
+    const filePath = 'inline.ts';
+    const sourceText = `
+      import { it } from 'bun:test';
+      it('references a callback that was never declared in this file', someUndeclaredFunction);
+    `;
+    const { findings, allTestIdentifiers } = findSkipFindingsInSource(filePath, sourceText);
+    expect(findings).toEqual([]);
+    expect([...allTestIdentifiers]).toEqual([]);
+  });
 });
 
 describe('evaluateSkipManifest', () => {
@@ -392,6 +513,11 @@ describe('checkSkipManifest against the real repository', () => {
     expect(result.scannedFiles.some((filePath) => filePath.startsWith('packages/'))).toBe(true);
     expect(result.scannedFiles.every((filePath) => !filePath.includes('node_modules/'))).toBe(true);
     expect(result.scannedFiles.length).toBeGreaterThan(100);
+  });
+
+  it('walks the node:test .mjs suite too, proving the widened glob is live (AB-293)', async () => {
+    const result = await checkSkipManifest(repositoryRoot);
+    expect(result.scannedFiles).toContain('packages/integration/test/runtime.test.mjs');
   });
 
   it('flags a hidden skip introduced under packages/, proving the gate actually runs (AB-100 method)', async () => {
