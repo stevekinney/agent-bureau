@@ -11,12 +11,13 @@ import {
   type RunDetailResponse,
 } from '../routes/runs';
 import type { UsageGroupTotals, UsageResponse } from '../routes/usage';
-import type { PendingReview, RunSummary } from '../types';
+import type { ConfigurationResponse, PendingReview, RunSummary } from '../types';
 import { createBrowserClientEnvironment } from '../ui/client-environment';
 import type { ChatStore } from '../ui/hooks/use-chat.svelte';
 import type { ReviewsStore } from '../ui/hooks/use-reviews.svelte';
 import { createReviewsStore } from '../ui/hooks/use-reviews.svelte';
 import ChatPage from '../ui/pages/chat.svelte';
+import ConfigurationPage from '../ui/pages/configuration.svelte';
 import DashboardPage from '../ui/pages/dashboard.svelte';
 import ReviewsPage from '../ui/pages/reviews.svelte';
 import RunDetailPage from '../ui/pages/run-detail.svelte';
@@ -1112,5 +1113,60 @@ describe('reviews page (Card list of ReviewRow, and ReviewRow by extension)', ()
 
     expect(rootMarkup).toContain('1m ago');
     expect(rootMarkup).toContain('just now ago');
+  });
+});
+
+describe('configuration page (purely presentational — every {#if} branch)', () => {
+  it('renders the no-provider empty state, "None" for an unset system prompt, and no Tools section when there are no tools', async () => {
+    const config: ConfigurationResponse = {
+      provider: undefined,
+      providers: [],
+      maximumSteps: 25,
+      systemPrompt: undefined,
+      tools: [],
+    };
+
+    const html = await renderPage({
+      title: 'Configuration',
+      component: ConfigurationPage,
+      props: { initialData: { config }, pathname: '/configuration', config },
+    });
+    const rootMarkup = extractRootMarkup(html);
+
+    expect(rootMarkup).toContain('No provider configured.');
+    expect(rootMarkup).toContain('25');
+    expect(rootMarkup).toContain('None');
+    expect(rootMarkup).not.toContain('Tools (');
+  });
+
+  it('renders the provider description list, the configured system prompt, and the tools list with names and descriptions', async () => {
+    const config: ConfigurationResponse = {
+      provider: { provider: 'anthropic', model: 'claude-opus-4-5' },
+      providers: [],
+      maximumSteps: 40,
+      systemPrompt: 'You are a helpful assistant.',
+      tools: [
+        { name: 'read_file', description: 'Reads a file from disk.' },
+        { name: 'write_file', description: 'Writes a file to disk.' },
+      ],
+    };
+
+    const html = await renderPage({
+      title: 'Configuration',
+      component: ConfigurationPage,
+      props: { initialData: { config }, pathname: '/configuration', config },
+    });
+    const rootMarkup = extractRootMarkup(html);
+
+    expect(rootMarkup).not.toContain('No provider configured.');
+    expect(rootMarkup).toContain('anthropic');
+    expect(rootMarkup).toContain('claude-opus-4-5');
+    expect(rootMarkup).toContain('40');
+    expect(rootMarkup).toContain('You are a helpful assistant.');
+    expect(rootMarkup).toContain('Tools (2)');
+    expect(rootMarkup).toContain('read_file');
+    expect(rootMarkup).toContain('Reads a file from disk.');
+    expect(rootMarkup).toContain('write_file');
+    expect(rootMarkup).toContain('Writes a file to disk.');
   });
 });

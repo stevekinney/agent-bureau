@@ -56,14 +56,14 @@
   {#if config.tools.length > 0}
     <section>
       <SectionHeading level={2} title={`Tools (${config.tools.length})`} />
-      <DataList items={config.tools} key={(tool: ToolSummary) => tool.name}>
-        {#snippet children(tool: ToolSummary)}
-          <StackedListItem>
-            {#snippet title()}{tool.name}{/snippet}
-            {#snippet description()}{tool.description}{/snippet}
-          </StackedListItem>
-        {/snippet}
-      </DataList>
+      <DataList items={config.tools} key={(tool) => tool.name} children={toolRow} />
     </section>
   {/if}
 </main>
+
+{#snippet toolRow(tool: ToolSummary)}
+  <StackedListItem>
+    {#snippet title()}{tool.name}{/snippet}
+    {#snippet description()}{tool.description}{/snippet}
+  </StackedListItem>
+{/snippet}
