@@ -4,6 +4,7 @@ import {
   buildSignalContinuationInput,
   buildWakeupContinuationInput,
   isDeniedSignalPayload,
+  isRejectedSignalPayload,
   renderDurationLabel,
   renderSignalContinuation,
   renderWakeupContinuation,
@@ -27,6 +28,29 @@ describe('isDeniedSignalPayload', () => {
   });
 });
 
+describe('isRejectedSignalPayload', () => {
+  it('recognizes the AB-46-ratified reject sentinel with a required reason', () => {
+    expect(isRejectedSignalPayload({ __abRejected: true, reason: 'not authorized' })).toBe(true);
+  });
+
+  it('rejects a sentinel with a missing reason', () => {
+    expect(isRejectedSignalPayload({ __abRejected: true })).toBe(false);
+  });
+
+  it('rejects a sentinel with a non-string reason', () => {
+    expect(isRejectedSignalPayload({ __abRejected: true, reason: 42 })).toBe(false);
+  });
+
+  it('rejects payloads that are not the reject sentinel', () => {
+    expect(isRejectedSignalPayload({ approved: true })).toBe(false);
+    expect(isRejectedSignalPayload({ __abRejected: false, reason: 'x' })).toBe(false);
+    expect(isRejectedSignalPayload(undefined)).toBe(false);
+    expect(isRejectedSignalPayload(null)).toBe(false);
+    expect(isRejectedSignalPayload('a string')).toBe(false);
+    expect(isRejectedSignalPayload(42)).toBe(false);
+  });
+});
+
 describe('renderSignalContinuation', () => {
   it('renders an ordinary delivered payload as fixed, parseable text', () => {
     const input: SignalContinuationInput = {
@@ -35,6 +59,7 @@ describe('renderSignalContinuation', () => {
       payload: { approved: true },
       deliveredAt: '2026-09-02T10:00:00.000Z',
       denied: false,
+      rejected: false,
     };
     expect(renderSignalContinuation(input)).toBe('[signal:human-response] {"approved":true}');
   });
@@ -46,6 +71,7 @@ describe('renderSignalContinuation', () => {
       payload: { __abDenied: true, reason: 'budget exceeded' },
       deliveredAt: '2026-09-02T10:00:00.000Z',
       denied: true,
+      rejected: false,
       denialReason: 'budget exceeded',
     };
     expect(renderSignalContinuation(input)).toBe('[signal:human-response] denied: budget exceeded');
@@ -58,6 +84,7 @@ describe('renderSignalContinuation', () => {
       payload: { __abDenied: true },
       deliveredAt: '2026-09-02T10:00:00.000Z',
       denied: true,
+      rejected: false,
     };
     expect(renderSignalContinuation(input)).toBe('[signal:human-response] denied');
   });
@@ -71,6 +98,7 @@ describe('renderSignalContinuation', () => {
       payload: circular,
       deliveredAt: '2026-09-02T10:00:00.000Z',
       denied: false,
+      rejected: false,
     };
     expect(renderSignalContinuation(input)).toBe(
       '[signal:human-response] [unserializable payload]',
@@ -84,6 +112,7 @@ describe('renderSignalContinuation', () => {
       payload: undefined,
       deliveredAt: '2026-09-02T10:00:00.000Z',
       denied: false,
+      rejected: false,
     };
     // JSON.stringify(undefined) is the JS value `undefined`, not a string —
     // rendered as the literal word so the message stays deterministic text.
@@ -97,8 +126,40 @@ describe('renderSignalContinuation', () => {
       payload: 10n,
       deliveredAt: '2026-09-02T10:00:00.000Z',
       denied: false,
+      rejected: false,
     };
     expect(renderSignalContinuation(input)).toBe('[signal:ping] [unserializable payload]');
+  });
+
+  it('renders a rejection with its reason, checked before the denied branch', () => {
+    const input: SignalContinuationInput = {
+      kind: 'signal',
+      signalName: 'human-response',
+      payload: { __abRejected: true, reason: 'needs more detail' },
+      deliveredAt: '2026-09-02T10:00:00.000Z',
+      denied: false,
+      rejected: true,
+      rejectionReason: 'needs more detail',
+    };
+    expect(renderSignalContinuation(input)).toBe(
+      '[signal:human-response] rejected: needs more detail',
+    );
+  });
+
+  it('renders the rejected branch even when denied is also true, proving reject is checked first', () => {
+    const input: SignalContinuationInput = {
+      kind: 'signal',
+      signalName: 'human-response',
+      payload: { __abRejected: true, reason: 'needs more detail' },
+      deliveredAt: '2026-09-02T10:00:00.000Z',
+      denied: true,
+      denialReason: 'ignored because rejected wins',
+      rejected: true,
+      rejectionReason: 'needs more detail',
+    };
+    expect(renderSignalContinuation(input)).toBe(
+      '[signal:human-response] rejected: needs more detail',
+    );
   });
 });
 
@@ -115,6 +176,7 @@ describe('buildSignalContinuationInput', () => {
       payload: { approved: true },
       deliveredAt: '2026-09-02T10:00:00.000Z',
       denied: false,
+      rejected: false,
     });
   });
 
@@ -130,7 +192,46 @@ describe('buildSignalContinuationInput', () => {
       payload: { __abDenied: true, reason: 'budget exceeded' },
       deliveredAt: '2026-09-02T10:00:00.000Z',
       denied: true,
+      rejected: false,
       denialReason: 'budget exceeded',
+    });
+  });
+
+  it('threads deliveredAt through for a rejected payload, checked before the denied sentinel', () => {
+    const input = buildSignalContinuationInput(
+      'human-response',
+      { __abRejected: true, reason: 'needs more detail' },
+      '2026-09-02T10:00:00.000Z',
+    );
+    expect(input).toEqual({
+      kind: 'signal',
+      signalName: 'human-response',
+      payload: { __abRejected: true, reason: 'needs more detail' },
+      deliveredAt: '2026-09-02T10:00:00.000Z',
+      denied: false,
+      rejected: true,
+      rejectionReason: 'needs more detail',
+    });
+  });
+
+  it('takes the reject branch over the deny branch when a payload matches both sentinels', () => {
+    // isDeniedSignalPayload only requires __abDenied: true (reason optional), so a
+    // payload carrying both sentinel markers would also satisfy it — proving
+    // buildSignalContinuationInput actually checks isRejectedSignalPayload first,
+    // not merely that a reject-only payload happens to skip the deny branch.
+    const input = buildSignalContinuationInput(
+      'human-response',
+      { __abRejected: true, __abDenied: true, reason: 'needs more detail' },
+      '2026-09-02T10:00:00.000Z',
+    );
+    expect(input).toEqual({
+      kind: 'signal',
+      signalName: 'human-response',
+      payload: { __abRejected: true, __abDenied: true, reason: 'needs more detail' },
+      deliveredAt: '2026-09-02T10:00:00.000Z',
+      denied: false,
+      rejected: true,
+      rejectionReason: 'needs more detail',
     });
   });
 });
