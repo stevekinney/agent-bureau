@@ -135,6 +135,13 @@ jobs:
       - name: Lifecycle contract matrix (AB-268, tst-05a)
         run: time bun run integration
 
+      - name: DEBUG list reproduction-artifact dir
+        if: always()
+        run: |
+          echo "REPRODUCTION_ARTIFACT_DIR=$REPRODUCTION_ARTIFACT_DIR"
+          ls -la "$REPRODUCTION_ARTIFACT_DIR" || echo "(directory does not exist)"
+          find "$GITHUB_WORKSPACE" -name 'ab-282-proof.json' 2>/dev/null || true
+
       # A failing lifecycle fixture prints the full `QuiescenceReport`
       # (`BureauQuiescenceError`'s message, from `packages/bureau/src/test/quiescence.ts`)
       # straight into this step's own output — no extra wiring needed for the
