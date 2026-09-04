@@ -29,6 +29,37 @@ import {
 /** The persistent backends the crash-conformance harness can exercise. */
 export type CrashBackend = 'sqlite' | 'lmdb';
 
+/**
+ * Selects which scripted scenario `fixture.ts` drives (AB-271). `'linear'`
+ * (the default) is AB-270's original single-root, single-child scenario;
+ * the other three are AB-271's harder scenarios, each with its own
+ * generate/toolbox branch inside `fixture.ts`.
+ */
+export type CrashScenarioKind = 'linear' | 'nested-children' | 'schedule-fire' | 'recovery-failure';
+
+/**
+ * Thrown, before any process is spawned, when a scenario names a backend
+ * behavior that backend genuinely cannot support (AB-271: "A backend-specific
+ * behavior that genuinely cannot be supported fails before starting work
+ * with a typed error naming the unsupported behavior"). Never thrown for a
+ * behavior that is merely unimplemented — reserved for a real capability gap
+ * in the backend itself. No scenario in this matrix currently trips it
+ * (AB-335 closed the one known LMDB gap); it stays exported so a future
+ * scenario has a typed escape hatch instead of silently narrowing the
+ * matrix for one backend.
+ */
+export class CrashHarnessUnsupportedBehaviorError extends Error {
+  readonly backend: CrashBackend;
+  readonly behavior: string;
+
+  constructor(backend: CrashBackend, behavior: string) {
+    super(`Crash-conformance harness: backend "${backend}" does not support "${behavior}".`);
+    this.name = 'CrashHarnessUnsupportedBehaviorError';
+    this.backend = backend;
+    this.behavior = behavior;
+  }
+}
+
 /** Which fixture process generation a marker was observed on — the first (killed) process or the second (recovered) one. */
 export type CrashProcessGeneration = 1 | 2;
 
@@ -66,6 +97,20 @@ export interface CrashScenarioOptions {
   readonly runtime: ManualRuntimeServices;
   /** `'sqlite'` (default) or `'lmdb'` (AB-271/AB-335). */
   readonly backend?: CrashBackend;
+  /** Which scripted scenario `fixture.ts` runs. Defaults to `'linear'`. */
+  readonly kind?: CrashScenarioKind;
+  /**
+   * Answers `signal-parked` with `{ type: 'proceed' }` (resume) instead of
+   * the default `{ type: 'cancel' }` — used by the signal-resume scenario.
+   */
+  readonly resumeOnSignalParked?: boolean;
+  /**
+   * Sends `{ type: 'proceed' }` to the FIRST process at `killAtMarker`
+   * before killing it, simulating a signal that was in-flight (written to
+   * the child's stdin) at the instant the process died — used to prove a
+   * signal delivered right before a crash is never double-delivered.
+   */
+  readonly deliverSignalBeforeKill?: boolean;
   /**
    * When `true` (AB-275), BOTH fixture processes are launched with
    * `--gateway`: each starts a real Gateway loopback listener over the
@@ -143,17 +188,32 @@ interface DriveResult {
   killedAt?: CrashMarker;
 }
 
+interface DriveProcessOptions {
+  readonly killAtMarker: CrashMarker | undefined;
+  readonly generation: CrashProcessGeneration;
+  /** See {@link CrashMarkerHook}. */
+  readonly onMarker: CrashMarkerHook | undefined;
+  /** Answers `signal-parked` with `{ type: 'proceed' }` instead of `{ type: 'cancel' }`. */
+  readonly resumeOnSignalParked?: boolean;
+  /**
+   * Sends `{ type: 'proceed' }` at `killAtMarker` before killing — simulates
+   * a signal delivered to the process at the instant it died.
+   */
+  readonly deliverSignalBeforeKill?: boolean;
+}
+
 /**
  * Consumes one fixture process's stdout line-by-line and answers every
  * marker report:
  *
  * - When `killAtMarker` is reported, the process is killed immediately
- *   (`SIGKILL`, no acknowledgement sent) and this returns as soon as the
- *   line loop itself ends (the pipe closes once the kill lands).
- * - Otherwise every marker is acknowledged with `{ type: 'proceed' }`,
- *   except `'signal-parked'`, which is always answered `{ type: 'cancel' }`
- *   — this harness's one linear scenario always drives the run to
- *   cancellation rather than delivering the human-input signal.
+ *   (`SIGKILL`, no acknowledgement sent, no `onMarker` call) and this
+ *   returns as soon as the line loop itself ends (the pipe closes once the
+ *   kill lands).
+ * - Otherwise `onMarker` (if given) is awaited first, then the marker is
+ *   acknowledged with `{ type: 'proceed' }`, except `'signal-parked'`,
+ *   which is answered `{ type: 'cancel' }` unless `resumeOnSignalParked` is
+ *   set.
  *
  * A stdout line that fails to decode as a `CrashFixtureMessage` is forwarded
  * to the parent's own stderr as a diagnostic and otherwise ignored, rather
@@ -170,10 +230,15 @@ async function driveProcess(
     };
     kill(signal?: number | NodeJS.Signals): void;
   },
-  killAtMarker: CrashMarker | undefined,
-  generation: CrashProcessGeneration,
-  onMarker: CrashMarkerHook | undefined,
+  options: DriveProcessOptions,
 ): Promise<DriveResult> {
+  const {
+    killAtMarker,
+    generation,
+    onMarker,
+    resumeOnSignalParked = false,
+    deliverSignalBeforeKill = false,
+  } = options;
   const result: DriveResult = { markers: [], observations: [] };
 
   async function send(command: CrashParentCommand): Promise<void> {
@@ -205,7 +270,11 @@ async function driveProcess(
         // scenario is about to abruptly end, and would slow the kill down
         // by however long the hook takes — never done for the kill marker,
         // whether or not a hook is configured (copilot review, PR #553).
+        // `deliverSignalBeforeKill` is the one thing that still happens
+        // here: a bare `proceed` write, simulating a signal that was
+        // in-flight at the instant the process died (AB-271).
         result.killedAt = message.marker;
+        if (deliverSignalBeforeKill) await send({ type: 'proceed' });
         child.kill('SIGKILL');
         continue;
       }
@@ -217,7 +286,11 @@ async function driveProcess(
           detail: message.detail,
         });
       }
-      await send(message.marker === 'signal-parked' ? { type: 'cancel' } : { type: 'proceed' });
+      const answer =
+        message.marker === 'signal-parked' && !resumeOnSignalParked
+          ? ({ type: 'cancel' } as const)
+          : ({ type: 'proceed' } as const);
+      await send(answer);
       continue;
     }
     if (message.type === 'observation') {
@@ -243,6 +316,7 @@ async function spawnFixture(
   storagePath: string,
   backend: CrashBackend,
   mode: 'primary' | 'recovery',
+  kind: CrashScenarioKind,
   rootRunId: string | undefined,
   gateway: boolean,
 ): Promise<Bun.Subprocess<'pipe', 'pipe', 'inherit'>> {
@@ -251,6 +325,7 @@ async function spawnFixture(
     storagePath,
     backend,
     mode,
+    kind,
     ...(rootRunId ? [rootRunId] : []),
     ...(gateway ? ['--gateway'] : []),
   ];
@@ -284,9 +359,15 @@ function processGroupIsClean(pid: number): boolean {
   }
 }
 
+/**
+ * Both `'run-started'` (every kind except `recovery-failure`) and
+ * `'catalog-run-started'` (`recovery-failure` only) carry the durable
+ * `runId` the second process needs to reattach — whichever this scenario's
+ * primary process reported.
+ */
 function findRootRunId(markers: readonly CrashMarkerObservation[]): string | undefined {
   for (const entry of markers) {
-    if (entry.marker === 'run-started') {
+    if (entry.marker === 'run-started' || entry.marker === 'catalog-run-started') {
       const runId = entry.detail?.['runId'];
       return typeof runId === 'string' ? runId : undefined;
     }
@@ -306,6 +387,13 @@ export async function runCrashScenario(
   options: CrashScenarioOptions,
 ): Promise<CrashScenarioReport> {
   const backend = options.backend ?? 'sqlite';
+  const kind = options.kind ?? 'linear';
+  const gateway = options.gateway ?? false;
+  const driveOptions = {
+    onMarker: options.onMarker,
+    resumeOnSignalParked: options.resumeOnSignalParked ?? false,
+    deliverSignalBeforeKill: options.deliverSignalBeforeKill ?? false,
+  };
 
   const storage =
     backend === 'lmdb'
@@ -317,9 +405,19 @@ export async function runCrashScenario(
   }
 
   try {
-    const gateway = options.gateway ?? false;
-    const firstProcess = await spawnFixture(storagePath, backend, 'primary', undefined, gateway);
-    const firstDrive = await driveProcess(firstProcess, options.killAtMarker, 1, options.onMarker);
+    const firstProcess = await spawnFixture(
+      storagePath,
+      backend,
+      'primary',
+      kind,
+      undefined,
+      gateway,
+    );
+    const firstDrive = await driveProcess(firstProcess, {
+      killAtMarker: options.killAtMarker,
+      generation: 1,
+      ...driveOptions,
+    });
     const firstExitCode = await firstProcess.exited;
 
     const first: CrashProcessOutcome = {
@@ -333,8 +431,19 @@ export async function runCrashScenario(
 
     const rootRunId = findRootRunId(firstDrive.markers);
 
-    const secondProcess = await spawnFixture(storagePath, backend, 'recovery', rootRunId, gateway);
-    const secondDrive = await driveProcess(secondProcess, undefined, 2, options.onMarker);
+    const secondProcess = await spawnFixture(
+      storagePath,
+      backend,
+      'recovery',
+      kind,
+      rootRunId,
+      gateway,
+    );
+    const secondDrive = await driveProcess(secondProcess, {
+      killAtMarker: undefined,
+      generation: 2,
+      ...driveOptions,
+    });
     const secondExitCode = await secondProcess.exited;
 
     const second: CrashProcessOutcome = {

@@ -77,7 +77,7 @@ bun run integration
 
 The Node.js binary is located automatically—`$NODE_BINARY`, `$NODE`, `Bun.which('node')`, and common install paths are all tried. The suite fails loudly if no Node binary is found.
 
-## Process-Crash Recovery Conformance (AB-270, LMDB backend AB-335)
+## Process-Crash Recovery Conformance (AB-270, extended to LMDB and the harder scenarios by AB-271)
 
 `test/crash/` launches `fixture.ts` as a real, separate OS process against a
 unique temporary persistent backend — SQLite or LMDB, `runCrashScenario`'s
@@ -88,24 +88,49 @@ release — the crash-recovery tier AB-92's test-tier matrix assigns its own
 command:
 
 ```bash
-# Full matrix (SQLite's 7-scenario marker matrix in sqlite.test.ts, plus
-# LMDB's 1-scenario lmdb.test.ts) — the stable root command
+# Full matrix (eleven scenarios, defined once in test/crash/scenarios.ts and
+# driven identically against SQLite (sqlite.test.ts) and LMDB
+# (lmdb.test.ts)) — the stable root command
 bun run test:crash-conformance
 
-# Smoke-only (1 SQLite scenario) — what `bun run test` here and CI's
-# pull-request lane both run; the full matrix runs at tst-09e's cadence
-bun test test/crash/sqlite.test.ts --test-name-pattern smoke
+# Smoke-only (the kill-vs-control honesty pair, over BOTH backends) — what
+# `bun run test` here and CI's pull-request lane both run; the full matrix
+# runs at tst-09e's cadence
+bun test test/crash --test-name-pattern smoke
 ```
 
-`test/crash/lmdb.test.ts` (AB-335) covers only the one scenario that exposed
-an LMDB-specific defect ("killed at child-registered") — extracting a shared
-scenario list so every marker in the matrix runs over both backends is
-AB-271's scope.
+`test/crash/scenarios.ts` (AB-271) is the shared scenario list both backend
+files consume — `sqlite.test.ts` and `lmdb.test.ts` are now thin `for`-loops
+over it, so the two backends can never silently drift onto different marker
+matrices. Seven scenarios are AB-270's original matrix (the `[smoke]` pair,
+`ready`, `child-registered`, `effect-attempted`, `signal-parked`,
+`cancellation-recorded`, `cleanup-completed`); four are AB-271's own scope —
+nested children (two live children, cascade-aborted through this fixture's
+own explicit `abortRun` loop, since Bureau exposes no native durable
+parent→child cancellation), a schedule definition surviving a crash (the
+schedule is registered via `bureau.createSchedule`, and its crash survival
+is proven through `bureau.getSchedule` post-recovery; the root run's own
+`perform-effect` step, unrelated to the schedule, separately re-proves the
+existing exactly-once guarantee. This scenario does NOT drive an actual
+schedule fire — Bureau's recurring poller cannot be driven deterministically
+through any public surface — WFT-141, verified directly: a throwaway probe
+repeatedly calling `bureau.runDurableMaintenance` against a registered
+schedule never fired it. AB-97's "running schedule fire" acceptance
+criterion is therefore only partially covered here; see the scenario's own
+comment in `scenarios.ts` for the honest scope), a signal-parked resume with
+a pre-kill signal delivery (proving no double-delivery), and the
+AB-29 recovery-failure scenario (a second process missing the catalog agent
+its recovered `bureau.run()` dispatch needs, observed failing through
+`bureau.getDurableRun`'s `error`/`failureCategory` fields — never a bare
+`null`). No LMDB-specific incapability was found for any of the eleven; the
+full matrix runs unmodified on both backends. `harness.ts`'s
+`CrashHarnessUnsupportedBehaviorError` stays exported as a typed escape
+hatch for a future gap.
 
 `test/crash/harness.ts` exports `runCrashScenario` (the parent driver) and
 `test/crash/fixture.ts` is the child-process entry point; neither is part of
-this package's own suite sequencing described above beyond the one smoke
-scenario `scripts/run-tests.ts` includes.
+this package's own suite sequencing described above beyond the smoke
+scenarios `scripts/run-tests.ts` includes.
 
 `fixture.ts` also accepts an optional `--gateway` flag (AB-275): it starts a
 real `Gateway` (a real `Bun.serve` loopback listener on an OS-assigned

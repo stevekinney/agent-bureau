@@ -7,10 +7,16 @@
  * line this file itself wants to leave for a human goes to stderr instead,
  * so stdout stays pure protocol.
  *
- * The fixture drives exactly one linear, deterministic scenario: a durable
- * root run registers a durable child run, performs one idempotency-guarded
- * external effect, parks awaiting the parent's decision, is cancelled, and
- * the bureau shuts down cleanly. Every `CrashMarker` (see `protocol.ts`) is
+ * The fixture drives one of four scripted, deterministic scenarios, named
+ * by `argv[4]` (`CrashScenarioKind`, see `harness.ts`): `'linear'` (AB-270's
+ * original) — a durable root run registers a durable child run, performs
+ * one idempotency-guarded external effect, parks awaiting the parent's
+ * decision, is cancelled, and the bureau shuts down cleanly; AB-271's three
+ * harder scripts (`'nested-children'`, `'schedule-fire'`, and
+ * `'recovery-failure'`) replace or extend individual steps of that same
+ * shape — see `createFixtureGenerate`'s per-kind branches and `main()`'s
+ * `kind === 'recovery-failure'` branch for the one kind with a genuinely
+ * different driver path. Every `CrashMarker` (see `protocol.ts`) is
  * reported the instant its state transition happens, and the fixture BLOCKS
  * — awaiting exactly one line on stdin — after every marker, so the parent
  * controls pacing entirely: no marker here is ever inferred from timing, and
@@ -58,10 +64,10 @@ import type {
   GenerateFunction,
   GenerateResponse,
 } from '@lostgradient/operative';
-import { stopWhen } from '@lostgradient/operative';
+import { createAgent, stopWhen } from '@lostgradient/operative';
 import { createManualRuntimeServices, waitForCondition } from '@lostgradient/operative/test';
 import { createTool, createToolbox, createToolResultCache, type ToolResultCache } from 'armorer';
-import type { PendingReview } from 'bureau';
+import type { AgentDefinitions, PendingReview } from 'bureau';
 import {
   createBureauTestHarness,
   createLmdbStorageFixture,
@@ -70,6 +76,7 @@ import {
 import { createGateway, type Gateway } from 'gateway';
 import { z } from 'zod';
 
+import type { CrashScenarioKind } from './harness';
 import {
   CRASH_FIXTURE_GATEWAY_AUTH_TOKEN,
   type CrashFixtureMessage,
@@ -81,6 +88,9 @@ import {
 } from './protocol';
 
 const CHILD_MESSAGE_PREFIX = 'crash-fixture-child-of:';
+/** The name recorded in `agents` for the AB-29 recovery-failure scenario's catalog run — present only in primary mode. */
+const GHOST_AGENT_NAME = 'crash-fixture-ghost-agent';
+
 /** The signal name every `requestHumanInput` call in this fixture parks on. */
 const CRASH_DECISION_SIGNAL_NAME = 'crash-fixture-decision';
 
@@ -92,6 +102,13 @@ function effectKvKey(rootRunId: string): string {
 }
 function effectCountKvKey(rootRunId: string): string {
   return `crash-fixture:effect-count:${rootRunId}`;
+}
+/** One record per nested child (index 0 or 1) — same shape as `childKvKey`'s single-child record. */
+function nestedChildKvKey(rootRunId: string, index: number): string {
+  return `crash-fixture:nested-child:${rootRunId}:${index}`;
+}
+function scheduleKvKey(rootRunId: string): string {
+  return `crash-fixture:schedule:${rootRunId}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -196,14 +213,97 @@ function toJson(value: unknown): JsonValue {
  * user message (`isChildRun`), never by process-local state (state would
  * not survive replay).
  */
-function createFixtureGenerate(): GenerateFunction {
+/** AB-336's real durable-park tool call — shared by every kind's final step. */
+function requestHumanInputStep(): GenerateResponse {
+  return {
+    content: '',
+    toolCalls: [
+      {
+        id: 'crash-fixture-call-request-human-input',
+        name: 'requestHumanInput',
+        arguments: { signalName: CRASH_DECISION_SIGNAL_NAME },
+      },
+    ],
+  };
+}
+
+/**
+ * The bureau-level `generate` function for BOTH the root run and every child
+ * run this fixture starts, branched by `kind` (AB-271). `'linear'` is
+ * AB-270's original script; the other kinds each replace or extend one step
+ * while reusing the same final requestHumanInput/cancel tail so the existing
+ * signal-parked/cancellation-recorded marker matrix (and `main()`'s driver
+ * loop below) keeps working unmodified for every kind.
+ */
+function createFixtureGenerate(kind: CrashScenarioKind): GenerateFunction {
   return async (context: GenerateContext): Promise<GenerateResponse> => {
     if (isChildRun(context)) {
-      // The child run has one job: finish immediately, with no tool calls,
-      // so `register-child`'s dispatch settles fast and durably.
+      if (kind === 'nested-children') {
+        // A nested child must still be LIVE (non-terminal) at the parent's
+        // kill point, so it parks on the SAME durable requestHumanInput
+        // primitive the root uses, rather than finishing immediately —
+        // nothing in this fixture ever resolves a child's own review; the
+        // cascade-abort path in `main()` terminates it instead.
+        if (context.step === 0) return requestHumanInputStep();
+        return { content: 'crash-fixture child done', toolCalls: [] };
+      }
+      // Every other kind's child has one job: finish immediately, with no
+      // tool calls, so `register-child`'s dispatch settles fast and durably.
       return { content: 'crash-fixture child done', toolCalls: [] };
     }
 
+    if (kind === 'nested-children') {
+      switch (context.step) {
+        case 0:
+          return {
+            content: '',
+            toolCalls: [
+              {
+                id: 'crash-fixture-call-register-children',
+                name: 'register-children',
+                arguments: {},
+              },
+            ],
+          };
+        case 1:
+          return requestHumanInputStep();
+        default:
+          return { content: 'crash-fixture done', toolCalls: [] };
+      }
+    }
+
+    if (kind === 'schedule-fire') {
+      switch (context.step) {
+        case 0:
+          return {
+            content: '',
+            toolCalls: [
+              {
+                id: 'crash-fixture-call-register-schedule',
+                name: 'register-schedule',
+                arguments: {},
+              },
+            ],
+          };
+        case 1:
+          return {
+            content: '',
+            toolCalls: [
+              { id: 'crash-fixture-call-perform-effect', name: 'perform-effect', arguments: {} },
+            ],
+          };
+        case 2:
+          await reportMarker('checkpoint-committed', { step: context.step });
+          return requestHumanInputStep();
+        default:
+          return { content: 'crash-fixture done', toolCalls: [] };
+      }
+    }
+
+    // 'linear' (AB-270's original scenario) and the bureau-level generate
+    // 'recovery-failure' composes but never actually drives (that kind
+    // dispatches through `harness.startRun`'s catalog path instead — see
+    // `main()`).
     switch (context.step) {
       case 0:
         return {
@@ -232,21 +332,12 @@ function createFixtureGenerate(): GenerateFunction {
         // `ctx.waitForSignal` park happens post-loop), so `signal-parked`
         // is reported and resolved from `main()`'s own driver loop, not
         // from inside this tool. See this file's top comment.
-        return {
-          content: '',
-          toolCalls: [
-            {
-              id: 'crash-fixture-call-request-human-input',
-              name: 'requestHumanInput',
-              arguments: { signalName: CRASH_DECISION_SIGNAL_NAME },
-            },
-          ],
-        };
+        return requestHumanInputStep();
       }
       default:
-        // Reached only if the parent's decision ever resolved `proceed` —
-        // this scenario always cancels instead, so this branch is a
-        // defensive fallback, never exercised by `sqlite.test.ts`.
+        // Reached only when the parent's decision resolves `proceed`
+        // (the signal-resume scenario) — the base linear scenario always
+        // cancels instead, so this branch is exercised only by that one.
         return { content: 'crash-fixture done', toolCalls: [] };
     }
   };
@@ -259,6 +350,8 @@ interface FixtureToolDeps {
   readonly kvGet: (key: string) => Promise<string | null>;
   readonly kvSet: (key: string, value: string) => Promise<void>;
   readonly toolResultCache: ToolResultCache;
+  /** AB-271 schedule-fire scenario only: `bureau.createSchedule`, bound with a fixed definition. */
+  readonly createSchedule: () => Promise<{ id: string }>;
 }
 
 function createFixtureToolbox(getDeps: () => Promise<FixtureToolDeps>): AnyToolbox {
@@ -395,11 +488,179 @@ function createFixtureToolbox(getDeps: () => Promise<FixtureToolDeps>): AnyToolb
     },
   });
 
+  // AB-271: `register-children` is `register-child` generalized to TWO
+  // children, each guarded by its own idempotency-cache entry
+  // (`nestedChildKvKey(rootRunId, index)`) — a kill mid-registration
+  // replays the step and recovers each slot independently, exactly the
+  // same single-child mechanism `register-child` above already proves,
+  // just applied twice so neither child is ever silently dropped nor
+  // double-dispatched.
+  const registerChildren = createTool({
+    name: 'register-children',
+    version: '1.0.0',
+    description:
+      'Dispatches two durable child runs and records their identities, exactly once each.',
+    input: z.object({}),
+    async execute() {
+      const deps = await getDeps();
+      // Two passes, like `register-child`'s single dispatch: everything that
+      // must be idempotency-guarded (claim, dispatch, KV write) happens
+      // FIRST, the marker is reported ONLY AFTER both children are
+      // dispatched (so `killAtMarker: 'children-registered'` always lands
+      // with the idempotency-cache entries still `'started'`, never
+      // `'completed'`), and `completeStarted` runs LAST — mirroring
+      // `register-child`'s own dispatch → report → complete ordering so a
+      // kill at this marker replays into "existing, started" on every slot
+      // that had already dispatched, never "existing, completed".
+      const pending: Array<{
+        index: number;
+        childRunId: string;
+        duplicateAttempt: boolean;
+        cacheKey?: string;
+        attemptId?: string;
+      }> = [];
+      for (let index = 0; index < 2; index += 1) {
+        const key = nestedChildKvKey(deps.rootRunId, index);
+        const attemptId = `attempt-${crypto.randomUUID()}`;
+        const cacheKey = `register-children:${key}`;
+        const claim = await deps.toolResultCache.claimStarted(cacheKey, {
+          status: 'started',
+          toolName: 'register-children',
+          startedAt: Date.now(),
+          ttl: 0,
+          attemptId,
+        });
+
+        if (claim.outcome === 'existing') {
+          const entry = claim.entry;
+          if (entry.status !== 'started') {
+            throw new Error(
+              'crash fixture: register-children observed an already-completed idempotency ' +
+                'entry on what should be its first live attempt this process generation',
+            );
+          }
+          const raw = await deps.kvGet(key);
+          const record = raw ? (JSON.parse(raw) as { childRunId: string }) : undefined;
+          pending.push({ index, childRunId: record?.childRunId ?? '', duplicateAttempt: true });
+          continue;
+        }
+
+        const child = await deps.createChildRun(
+          `${CHILD_MESSAGE_PREFIX}${deps.rootRunId}:${index}`,
+        );
+        deps.registerDurableRun(child.id);
+        await deps.kvSet(
+          key,
+          JSON.stringify({ childRunId: child.id, parentRunId: deps.rootRunId, index }),
+        );
+        pending.push({ index, childRunId: child.id, duplicateAttempt: false, cacheKey, attemptId });
+      }
+
+      // Only ever `{ type: 'proceed' }` in `scenarios.ts` — this scenario
+      // never kills exactly here twice, so the command is never observed.
+      await reportMarker('children-registered', {
+        children: pending.map(({ index, childRunId, duplicateAttempt }) => ({
+          index,
+          childRunId,
+          duplicateAttempt,
+        })),
+      });
+
+      for (const entry of pending) {
+        if (!entry.cacheKey || !entry.attemptId) continue; // a duplicate-attempt slot has nothing to complete
+        await deps.toolResultCache.completeStarted(
+          entry.cacheKey,
+          entry.attemptId,
+          {
+            status: 'completed',
+            result: { childRunId: entry.childRunId },
+            toolName: 'register-children',
+            executedAt: Date.now(),
+            ttl: 0,
+          },
+          0,
+        );
+      }
+
+      return { registered: true, children: pending };
+    },
+  });
+
+  // AB-271: registers the recurring schedule definition ONLY — this tool
+  // does not drive a fire, and does not perform any effect of its own. Its
+  // one job is proving the DEFINITION survives a crash, read back via
+  // `bureau.getSchedule` in `main()` below. The root run's separate
+  // `perform-effect` step (unrelated to this schedule) is what re-proves
+  // the existing exactly-once idempotency guarantee for this scenario;
+  // this comment used to (incorrectly) describe that step as belonging to
+  // "the fire's own effect" — there is no fire here. Bureau's recurring
+  // poller cannot be driven deterministically through any public surface
+  // (WFT-141 — verified directly: `bureau.runDurableMaintenance` does not
+  // fire a `createSchedule`-registered schedule), so this scenario proves
+  // only definition-survival, not fire-recovery; see `scenarios.ts`'s
+  // matching scenario for the honest scope of what this covers.
+  const registerSchedule = createTool({
+    name: 'register-schedule',
+    version: '1.0.0',
+    description:
+      'Registers the recurring schedule definition this scenario proves survives a crash.',
+    input: z.object({}),
+    async execute() {
+      const deps = await getDeps();
+      const key = scheduleKvKey(deps.rootRunId);
+      const attemptId = `attempt-${crypto.randomUUID()}`;
+      const cacheKey = `register-schedule:${key}`;
+      const claim = await deps.toolResultCache.claimStarted(cacheKey, {
+        status: 'started',
+        toolName: 'register-schedule',
+        startedAt: Date.now(),
+        ttl: 0,
+        attemptId,
+      });
+
+      if (claim.outcome === 'existing') {
+        const entry = claim.entry;
+        if (entry.status !== 'started') {
+          throw new Error(
+            'crash fixture: register-schedule observed an already-completed idempotency ' +
+              'entry on what should be its first live attempt this process generation',
+          );
+        }
+        const raw = await deps.kvGet(key);
+        const scheduleId = raw ? (JSON.parse(raw) as { scheduleId: string }).scheduleId : null;
+        await reportMarker('schedule-registered', {
+          duplicateAttempt: true,
+          scheduleId,
+        });
+        return { status: 'unresolved-prior-attempt', scheduleId };
+      }
+
+      const schedule = await deps.createSchedule();
+      await deps.kvSet(key, JSON.stringify({ scheduleId: schedule.id }));
+
+      await reportMarker('schedule-registered', { scheduleId: schedule.id });
+
+      await deps.toolResultCache.completeStarted(
+        cacheKey,
+        attemptId,
+        {
+          status: 'completed',
+          result: { scheduleId: schedule.id },
+          toolName: 'register-schedule',
+          executedAt: Date.now(),
+          ttl: 0,
+        },
+        0,
+      );
+      return { status: 'completed', scheduleId: schedule.id };
+    },
+  });
+
   // AB-336: `signal-parked` is now the REAL `requestHumanInput` durable
   // park (`BureauOptions.humanInput: true` wires that tool in
   // automatically) — no bespoke blocking tool needed here. See this file's
   // top comment and the park-wait block in `main()` below.
-  return createToolbox([registerChild, performEffect]);
+  return createToolbox([registerChild, performEffect, registerChildren, registerSchedule]);
 }
 
 // ---------------------------------------------------------------------------
@@ -428,9 +689,11 @@ function realDelayYield(): Promise<void> {
 
 type FixtureMode = 'primary' | 'recovery';
 type FixtureBackend = 'sqlite' | 'lmdb';
+const FIXTURE_KINDS = ['linear', 'nested-children', 'schedule-fire', 'recovery-failure'] as const;
 
 const USAGE =
-  'crash fixture: usage: fixture.ts <storage-path> <sqlite|lmdb> <primary|recovery> [rootRunId] [--gateway]';
+  'crash fixture: usage: fixture.ts <storage-path> <sqlite|lmdb> <primary|recovery> ' +
+  '<linear|nested-children|schedule-fire|recovery-failure> [rootRunId] [--gateway]';
 
 function parseMode(value: string | undefined): FixtureMode {
   if (value === 'primary' || value === 'recovery') return value;
@@ -442,20 +705,26 @@ function parseBackend(value: string | undefined): FixtureBackend {
   throw new Error(USAGE);
 }
 
+function parseKind(value: string | undefined): CrashScenarioKind {
+  if ((FIXTURE_KINDS as readonly string[]).includes(value ?? '')) return value as CrashScenarioKind;
+  throw new Error(USAGE);
+}
+
 async function main(): Promise<void> {
   const rawArguments = process.argv.slice(2);
   // `--gateway` (AB-275) is a trailing flag, not a positional — strip it out
-  // first so the existing `<sqlite|lmdb>`/`<primary|recovery>`/`[rootRunId]`
-  // positional parsing below is unaffected whether or not it is present.
+  // first so the existing
+  // `<sqlite|lmdb>`/`<primary|recovery>`/`<kind>`/`[rootRunId]` positional
+  // parsing below is unaffected whether or not it is present.
   const enableGateway = rawArguments.includes('--gateway');
-  const [storagePath, backendArgument, modeArgument, existingRootRunId] = rawArguments.filter(
-    (argument) => argument !== '--gateway',
-  );
+  const [storagePath, backendArgument, modeArgument, kindArgument, existingRootRunId] =
+    rawArguments.filter((argument) => argument !== '--gateway');
   if (!storagePath) {
     throw new Error(USAGE);
   }
   const backend = parseBackend(backendArgument);
   const mode = parseMode(modeArgument);
+  const kind = parseKind(kindArgument);
 
   const runtime = createManualRuntimeServices();
   const storage =
@@ -513,10 +782,61 @@ async function main(): Promise<void> {
   }
   const fixtureToolbox = createFixtureToolbox(getDeps);
 
-  const generate = createFixtureGenerate();
+  const generate = createFixtureGenerate(kind);
+
+  // AB-271 recovery-failure scenario: the catalog agent exists ONLY in
+  // primary mode. The second process's `agents` map deliberately omits it —
+  // the exact "an agent definition deliberately absent from its catalog"
+  // shape the acceptance criteria names. Internally, `resolveRunServices`'s
+  // catalog branch (`runtime-composition.ts`'s `resolveCatalogAgentRunServices`)
+  // classifies this as `{ status: 'missing-agent' }`, but that classification
+  // is never surfaced outward on its own — what's actually observable
+  // (through `bureau.getDurableRun`, read in `main()`'s recovery branch
+  // below) is the workflow-level failure that classification produces:
+  // `{ status: 'unavailable', reason: 'run <id>: catalog agent "..." is no
+  // longer in the catalog' }`, which is AB-29's own class of observable
+  // recovery failure, never a bare `null`.
+  const agents: AgentDefinitions =
+    kind === 'recovery-failure' && mode === 'primary'
+      ? {
+          [GHOST_AGENT_NAME]: createAgent({
+            // Step 0 dispatches a trivial tool call so its own step commits
+            // durably (Weft's per-step memo only resolves once the tool
+            // itself has settled); step 1's `generate` call then NEVER
+            // resolves — mirroring `create-bureau.test.ts`'s own
+            // `bureauA`/`bureauB` catalog-recovery test ("the 'process'
+            // dies here") — so this run is GENUINELY non-terminal
+            // (`status: 'running'`) at the instant the harness kills the
+            // process, never a race against a single-step run that could
+            // complete before the kill lands.
+            generate: async ({ step }) => {
+              if (step === 0) {
+                return {
+                  content: '',
+                  toolCalls: [{ id: 'crash-fixture-ghost-noop', name: 'noop', arguments: {} }],
+                };
+              }
+              return new Promise<never>(() => {});
+            },
+            toolbox: createToolbox([
+              createTool({
+                name: 'noop',
+                version: '1.0.0',
+                description:
+                  'Does nothing; exists only to give the ghost agent a real, committed step 0.',
+                input: z.object({}),
+                async execute() {
+                  return { ok: true };
+                },
+              }),
+            ]),
+            stopWhen: stopWhen.noToolCalls(),
+          }),
+        }
+      : {};
 
   const harness = await createBureauTestHarness({
-    agents: {},
+    agents,
     runtime,
     storage,
     // Without an explicit `stopWhen`, the low-level session/durable-run
@@ -550,6 +870,19 @@ async function main(): Promise<void> {
     kvGet: (key) => kv.get(key),
     kvSet: (key, value) => kv.set(key, value),
     toolResultCache,
+    async createSchedule() {
+      const summary = await bureau.createSchedule({
+        agentName: 'crash-fixture-schedule-agent',
+        input: 'crash-fixture scheduled tick',
+        spec: '1h',
+      });
+      if (!summary) {
+        throw new Error(
+          'crash fixture: bureau.createSchedule returned undefined — no durable engine composed',
+        );
+      }
+      return { id: summary.id };
+    },
   });
 
   // AB-275: started BEFORE the 'ready' marker fires, over the SAME
@@ -572,7 +905,69 @@ async function main(): Promise<void> {
 
   await reportMarker('ready', gatewayPort !== undefined ? { gatewayPort } : undefined);
 
-  if (mode === 'primary') {
+  // AB-271 recovery-failure scenario: an entirely separate driver path —
+  // catalog dispatch (`bureau.run`/`harness.startRun`) rather than the
+  // session/durable-execution root every other kind uses, and no
+  // signal-park/cancel life cycle at all. Falls through to the shared
+  // close/cleanup tail below like every other kind.
+  if (kind === 'recovery-failure') {
+    if (mode === 'primary') {
+      harness.startRun(GHOST_AGENT_NAME, 'go');
+      // `AgentRun.snapshot().id` on a catalog dispatch is the CATALOG NAME,
+      // not the minted durable workflow id — read the real id back off the
+      // engine's own listing (AB-240's own test does the same). This kind
+      // never dispatches a `bureau.createRun` root, so the catalog run is
+      // the only entry `listDurableRuns()` ever returns for this process.
+      let catalogRunId: string | undefined;
+      await waitForCondition(
+        async () => {
+          const listed = await bureau.listDurableRuns();
+          catalogRunId = listed?.items[0]?.id;
+          return !!catalogRunId;
+        },
+        'crash fixture: catalog run never became discoverable via listDurableRuns',
+        backend === 'lmdb' ? 400 : 5000,
+        backend === 'lmdb' ? realDelayYield : undefined,
+      );
+      currentRootRunId = catalogRunId ?? '';
+      harness.registerDurableRun(currentRootRunId);
+      await reportMarker('catalog-run-started', {
+        runId: currentRootRunId,
+        agentName: GHOST_AGENT_NAME,
+      });
+    } else {
+      // Recovery: `GHOST_AGENT_NAME` is absent from THIS process's `agents`
+      // map (see its construction above) — `resolveRunServices`'s catalog
+      // branch (`runtime-composition.ts`'s `resolveCatalogAgentRunServices`)
+      // returns `{ status: 'unavailable', reason: '... is no longer in the
+      // catalog' }`, and Weft fails the workflow with that reason as its
+      // `error`/`errorStack` and a `failureCategory` — never leaving it
+      // `null` or silently non-terminal. `bureau.getDurableRun` is the SAME
+      // public surface every other scenario in this matrix already reads
+      // `final-root-workflow-state` through (never a durable-store read),
+      // so this scenario proves the AB-29-class failure detail is
+      // observable there too, not only via `SessionHandle.recover()`.
+      harness.registerDurableRun(currentRootRunId);
+      await waitForCondition(
+        async () => {
+          const state = await bureau.getDurableRun(currentRootRunId);
+          return !!state && state.status === 'failed';
+        },
+        `crash fixture: catalog run "${currentRootRunId}" never reached a failed status on recovery`,
+        backend === 'lmdb' ? 400 : 5000,
+        backend === 'lmdb' ? realDelayYield : undefined,
+      );
+      const failedState = await bureau.getDurableRun(currentRootRunId);
+      reportObservation(
+        'recovery-failure-detail',
+        toJson({
+          status: failedState?.status ?? null,
+          error: failedState?.error ?? null,
+          failureCategory: failedState?.failureCategory ?? null,
+        }),
+      );
+    }
+  } else if (mode === 'primary') {
     const summary = await bureau.createRun({ message: 'crash-fixture-root' });
     currentRootRunId = summary.id;
     harness.registerDurableRun(summary.id);
@@ -588,90 +983,143 @@ async function main(): Promise<void> {
     reportObservation('resumed-root-run-id', null);
   }
 
-  // AB-335: no retry here, per the coordinator ruling. In primary mode the
-  // root run was minted one line above, in THIS process, and this fixture's
-  // own `generate` always returns a tool call at step 0 — `stopWhen` cannot
-  // have stopped it yet, so it is known non-terminal without a storage read
-  // at all. Recovery mode reads exactly once and returns whatever it
-  // observes, including `null`/`undefined`, as a genuine observation.
-  const rootState =
-    mode === 'recovery' && currentRootRunId ? await bureau.getDurableRun(currentRootRunId) : null;
-  let rootIsNonTerminal =
-    mode === 'primary' ? true : !!rootState && NON_TERMINAL_STATUSES.has(rootState.status);
+  // AB-271: the recovery-failure scenario's catalog run never goes through
+  // this fixture's own park/cancel life cycle at all — it settles (or, on
+  // recovery, fails) entirely on its own, observed above instead. Every
+  // other kind drives the shared signal-parked/cancellation-recorded flow
+  // below unchanged.
+  if (kind !== 'recovery-failure') {
+    // AB-335: no retry here, per the coordinator ruling. In primary mode the
+    // root run was minted one line above, in THIS process, and this fixture's
+    // own `generate` always returns a tool call at step 0 — `stopWhen` cannot
+    // have stopped it yet, so it is known non-terminal without a storage read
+    // at all. Recovery mode reads exactly once and returns whatever it
+    // observes, including `null`/`undefined`, as a genuine observation.
+    const rootState =
+      mode === 'recovery' && currentRootRunId ? await bureau.getDurableRun(currentRootRunId) : null;
+    let rootIsNonTerminal =
+      mode === 'primary' ? true : !!rootState && NON_TERMINAL_STATUSES.has(rootState.status);
 
-  if (rootIsNonTerminal) {
-    // AB-336: `requestHumanInput`'s `execute()` returns synchronously — the
-    // actual `ctx.waitForSignal` park happens post-loop, so unlike the old
-    // `await-decision` tool (whose `execute()` itself WAS the IPC block),
-    // the marker report and parent round-trip happen HERE, driver-side,
-    // watching for the human-wait review the park produces. This bounded,
-    // macrotask-driven wait (never a real timer) also covers the run
-    // settling to terminal without ever parking — not reachable through
-    // this fixture's own linear flow, but never assumed away.
-    //
-    // `listPendingReviews()` is exactly what AB-336 made recovery-safe: a
-    // process that reattaches this run already parked when the prior one
-    // was killed sees the SAME review, reconstructed from the checkpoint —
-    // not lost with the dead process's in-memory action log.
-    let humanWaitReview: PendingReview | undefined;
-    await waitForCondition(
-      async () => {
-        humanWaitReview = bureau
-          .listPendingReviews()
-          .find((review) => review.runId === currentRootRunId && review.kind === 'human-wait');
-        if (humanWaitReview) return true;
-        const state = await bureau.getDurableRun(currentRootRunId);
-        return !state || !NON_TERMINAL_STATUSES.has(state.status);
-      },
-      `crash fixture: run "${currentRootRunId}" neither parked on requestHumanInput nor reached a terminal status`,
-      backend === 'lmdb' ? 400 : 5000,
-      backend === 'lmdb' ? realDelayYield : undefined,
-    );
+    if (rootIsNonTerminal) {
+      // AB-336: `requestHumanInput`'s `execute()` returns synchronously — the
+      // actual `ctx.waitForSignal` park happens post-loop, so unlike the old
+      // `await-decision` tool (whose `execute()` itself WAS the IPC block),
+      // the marker report and parent round-trip happen HERE, driver-side,
+      // watching for the human-wait review the park produces. This bounded,
+      // macrotask-driven wait (never a real timer) also covers the run
+      // settling to terminal without ever parking — not reachable through
+      // this fixture's own linear flow, but never assumed away.
+      //
+      // `listPendingReviews()` is exactly what AB-336 made recovery-safe: a
+      // process that reattaches this run already parked when the prior one
+      // was killed sees the SAME review, reconstructed from the checkpoint —
+      // not lost with the dead process's in-memory action log.
+      let humanWaitReview: PendingReview | undefined;
+      await waitForCondition(
+        async () => {
+          humanWaitReview = bureau
+            .listPendingReviews()
+            .find((review) => review.runId === currentRootRunId && review.kind === 'human-wait');
+          if (humanWaitReview) return true;
+          const state = await bureau.getDurableRun(currentRootRunId);
+          return !state || !NON_TERMINAL_STATUSES.has(state.status);
+        },
+        `crash fixture: run "${currentRootRunId}" neither parked on requestHumanInput nor reached a terminal status`,
+        backend === 'lmdb' ? 400 : 5000,
+        backend === 'lmdb' ? realDelayYield : undefined,
+      );
 
-    if (humanWaitReview) {
-      // Only ever answered `{ type: 'cancel' }` in `sqlite.test.ts` — this
-      // scenario always drives the run to cancellation — except for the
-      // scenario configured to kill exactly at this marker, which never
-      // reaches this `if`: the harness SIGKILLs the moment the marker line
-      // is written, with no answer sent (see `harness.ts`).
-      const command = await reportMarker('signal-parked', { runId: currentRootRunId });
-      if (command.type === 'cancel') {
-        bureau.abortRun(currentRootRunId);
-      } else {
-        // AB-44: approving continues the SAME run with one more generation
-        // step — never a bare unpark. `createFixtureGenerate`'s `default`
-        // branch is what that continuation step reaches.
-        await bureau.resolveReview({
-          id: humanWaitReview.id,
-          decision: 'approve',
-          principal: 'crash-fixture',
-        });
+      if (humanWaitReview) {
+        // Only ever answered `{ type: 'cancel' }` in `sqlite.test.ts` — this
+        // scenario always drives the run to cancellation — except for the
+        // scenario configured to kill exactly at this marker, which never
+        // reaches this `if`: the harness SIGKILLs the moment the marker line
+        // is written, with no answer sent (see `harness.ts`).
+        const command = await reportMarker('signal-parked', { runId: currentRootRunId });
+        if (command.type === 'cancel') {
+          bureau.abortRun(currentRootRunId);
+          if (kind === 'nested-children') {
+            // AB-271: Bureau exposes no native parent→child cancellation
+            // cascade for a durable run (AB-92's decision record: "child
+            // runs — no standalone locator by design") — this fixture's own
+            // driver performs the cascade explicitly, through the SAME
+            // public `abortRun` every other cancellation in this file uses,
+            // reading each child's identity back from the durable KV record
+            // `register-children` wrote before the kill.
+            for (let index = 0; index < 2; index += 1) {
+              const raw = await kv.get(nestedChildKvKey(currentRootRunId, index));
+              const childRunId = raw
+                ? (JSON.parse(raw) as { childRunId: string }).childRunId
+                : undefined;
+              if (childRunId) bureau.abortRun(childRunId);
+            }
+          }
+        } else {
+          // AB-44: approving continues the SAME run with one more generation
+          // step — never a bare unpark. `createFixtureGenerate`'s `default`
+          // branch is what that continuation step reaches.
+          await bureau.resolveReview({
+            id: humanWaitReview.id,
+            decision: 'approve',
+            principal: 'crash-fixture',
+          });
+        }
+
+        const stateAfterDecision = await bureau.getDurableRun(currentRootRunId);
+        rootIsNonTerminal =
+          !!stateAfterDecision && NON_TERMINAL_STATUSES.has(stateAfterDecision.status);
       }
-
-      const stateAfterDecision = await bureau.getDurableRun(currentRootRunId);
-      rootIsNonTerminal =
-        !!stateAfterDecision && NON_TERMINAL_STATUSES.has(stateAfterDecision.status);
     }
-  }
 
-  if (rootIsNonTerminal) {
-    await waitForCondition(
-      async () => {
-        const state = await bureau.getDurableRun(currentRootRunId);
-        return !!state && !NON_TERMINAL_STATUSES.has(state.status);
-      },
-      `crash fixture: run "${currentRootRunId}" never reached a terminal status`,
-      backend === 'lmdb' ? 400 : 5000,
-      backend === 'lmdb' ? realDelayYield : undefined,
-    );
-    await reportMarker('cancellation-recorded', { runId: currentRootRunId });
-  }
+    if (rootIsNonTerminal) {
+      await waitForCondition(
+        async () => {
+          const state = await bureau.getDurableRun(currentRootRunId);
+          return !!state && !NON_TERMINAL_STATUSES.has(state.status);
+        },
+        `crash fixture: run "${currentRootRunId}" never reached a terminal status`,
+        backend === 'lmdb' ? 400 : 5000,
+        backend === 'lmdb' ? realDelayYield : undefined,
+      );
+      await reportMarker('cancellation-recorded', { runId: currentRootRunId });
+    }
+  } // kind !== 'recovery-failure'
 
   const finalRootState = currentRootRunId ? await bureau.getDurableRun(currentRootRunId) : null;
   reportObservation('final-root-workflow-state', toJson(finalRootState));
 
   const childRaw = currentRootRunId ? await kv.get(childKvKey(currentRootRunId)) : null;
   reportObservation('child-record', childRaw ? toJson(JSON.parse(childRaw)) : null);
+
+  if (kind === 'nested-children' && currentRootRunId) {
+    // Both children's identity records (durable KV, written before any
+    // kill point in this scenario) plus their post-cascade-abort terminal
+    // states — the two positive assertions the AC names: identity survives
+    // recovery, and aborting the recovered root aborted both children.
+    const nestedChildren: JsonValue[] = [];
+    for (let index = 0; index < 2; index += 1) {
+      const raw = await kv.get(nestedChildKvKey(currentRootRunId, index));
+      const record = raw ? (JSON.parse(raw) as { childRunId: string; parentRunId: string }) : null;
+      const childState = record ? await bureau.getDurableRun(record.childRunId) : null;
+      nestedChildren.push(
+        toJson({
+          index,
+          record,
+          status: childState && typeof childState === 'object' ? (childState.status ?? null) : null,
+        }),
+      );
+    }
+    reportObservation('nested-children', nestedChildren);
+  }
+
+  if (kind === 'schedule-fire' && currentRootRunId) {
+    const scheduleRaw = await kv.get(scheduleKvKey(currentRootRunId));
+    const scheduleId = scheduleRaw
+      ? (JSON.parse(scheduleRaw) as { scheduleId: string }).scheduleId
+      : null;
+    const scheduleSummary = scheduleId ? await bureau.getSchedule(scheduleId) : null;
+    reportObservation('schedule-summary', toJson(scheduleSummary ?? null));
+  }
 
   // Read through the SAME `ToolResultCache` API the tool itself uses
   // (`toolResultCache.getState`), not a raw `kv.get` — the cache applies
