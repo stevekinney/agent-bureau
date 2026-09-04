@@ -299,4 +299,4 @@ bun run dev
 
 When type-aware linting reports broad unsafe-import errors after workspace changes, rebuild the workspace from the repository root with `bun run build` before retrying package-local validation.
 
-`bun run coverage:check` (this package's own script, and now also `--filter=gateway` in the root `coverage:check`, so CI's coverage gate covers it too) requires 100 percent line and function coverage, with a twelve-file per-file exclusion for Svelte UI files that are untestable in Bun's runner, listed with reasons in `scripts/check-coverage.ts` (AB-309, AB-316).
+`bun run coverage:check` (this package's own script, and now also `--filter=gateway` in the root `coverage:check`, so CI's coverage gate covers it too) requires 100 percent line and function coverage. Twelve Svelte UI files that are untestable in Bun's runner are excluded, each listed with its reason in the repository root's `scripts/check-coverage.ts` (AB-309, AB-316).
