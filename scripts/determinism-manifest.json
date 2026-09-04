@@ -8,6 +8,7 @@
     "packages/lifecycle/test/**",
     "packages/armorer/src/**",
     "packages/skills/src/**",
+    "packages/skills/test/**",
     "packages/evaluation/src/**",
     "packages/memory/src/**",
     "packages/memory/test/**",

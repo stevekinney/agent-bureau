@@ -1,4 +1,4 @@
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -41,11 +41,9 @@ describe('scanDirectory', () => {
   let tempDirectory: string;
 
   beforeEach(async () => {
-    tempDirectory = join(
-      tmpdir(),
-      `scan-directory-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-    );
-    await mkdir(tempDirectory, { recursive: true });
+    // mkdtemp asks the OS for a unique directory name, so this needs no real clock or
+    // random-number read to avoid colliding with a concurrently-running test.
+    tempDirectory = await mkdtemp(join(tmpdir(), 'scan-directory-test-'));
   });
 
   afterEach(async () => {
