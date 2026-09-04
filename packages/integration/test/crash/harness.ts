@@ -33,15 +33,19 @@ export type CrashBackend = 'sqlite' | 'lmdb';
 export type CrashProcessGeneration = 1 | 2;
 
 /**
- * AB-275: invoked once for every marker EITHER process reports, awaited
- * before the harness decides how to answer it (kill, or the default
- * `proceed`/`cancel` acknowledgement) — so a caller can drive out-of-band
+ * AB-275: invoked once for every marker EITHER process reports EXCEPT the
+ * one `killAtMarker` names, awaited before the harness sends its default
+ * `proceed`/`cancel` acknowledgement — so a caller can drive out-of-band
  * work (e.g. a real HTTP/SSE/WebSocket client against a fixture-started
  * gateway) exactly bracketed around one marker, without re-implementing
  * `driveProcess`'s own stdin/stdout pacing loop (the crash-fixture reuse
- * requirement this issue's delivery boundary names). Never called for the
- * kill marker AFTER the kill itself — only before, in the same position an
- * acknowledgement would otherwise be sent.
+ * requirement this issue's delivery boundary names). NEVER called for the
+ * kill marker, before or after: this function's own contract is that the
+ * process dies the INSTANT that marker is observed, with no acknowledgement
+ * and no other work in between — an `onMarker` call there would both delay
+ * the kill by however long the hook takes and let the hook's own work
+ * observe (or race) a process that is about to be abruptly torn down
+ * (copilot review, PR #553).
  */
 export type CrashMarkerHook = (context: {
   readonly generation: CrashProcessGeneration;
@@ -192,6 +196,19 @@ async function driveProcess(
 
     if (message.type === 'marker') {
       result.markers.push(observation(message));
+      if (killAtMarker && message.marker === killAtMarker) {
+        // Kill FIRST, still with no `onMarker` call and no acknowledgement
+        // sent — matching this function's own contract (see its doc
+        // comment above): the process is killed the INSTANT this marker is
+        // reported. An `onMarker` hook that did out-of-band work before the
+        // kill here would let that work observe (or race) a process this
+        // scenario is about to abruptly end, and would slow the kill down
+        // by however long the hook takes — never done for the kill marker,
+        // whether or not a hook is configured (copilot review, PR #553).
+        result.killedAt = message.marker;
+        child.kill('SIGKILL');
+        continue;
+      }
       if (onMarker) {
         await onMarker({
           generation,
@@ -199,11 +216,6 @@ async function driveProcess(
           marker: message.marker,
           detail: message.detail,
         });
-      }
-      if (killAtMarker && message.marker === killAtMarker) {
-        result.killedAt = message.marker;
-        child.kill('SIGKILL');
-        continue;
       }
       await send(message.marker === 'signal-parked' ? { type: 'cancel' } : { type: 'proceed' });
       continue;

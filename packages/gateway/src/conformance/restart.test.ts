@@ -259,20 +259,25 @@ describe('Gateway restart and durable-history replay conformance (AB-275)', () =
         }
 
         if (generation === 2 && marker === 'cancellation-recorded') {
-          if (!sseTail || !wsTail || !runId) {
+          if (!sseTail || !wsTail || !runId || gen2Port === undefined) {
             throw new Error('restart conformance: cancellation-recorded before tails opened');
           }
-          const bound = AbortSignal.timeout(TAIL_READ_BOUND_MS);
 
+          // A FRESH bound per wait — never one `AbortSignal.timeout()`
+          // instance shared across several sequential waits: the first
+          // wait could otherwise consume most (or all) of the budget,
+          // making a later wait fail immediately against an already-
+          // aborted signal rather than genuinely being given its own
+          // full allowance (copilot review, PR #553).
           sseFramesSeen = await readTailUntil(
             (signal) => sseTail?.next(signal) ?? Promise.resolve(undefined),
             (frame) => frame.type === 'durable-event',
-            bound,
+            AbortSignal.timeout(TAIL_READ_BOUND_MS),
           );
           wsFramesSeen = await readTailUntil(
             (signal) => wsTail?.next(signal) ?? Promise.resolve(undefined),
             (frame) => frame.type === 'durable-event',
-            bound,
+            AbortSignal.timeout(TAIL_READ_BOUND_MS),
           );
 
           // Closed BEFORE this hook returns (and therefore before the
@@ -283,13 +288,13 @@ describe('Gateway restart and durable-history replay conformance (AB-275)', () =
           // rather than drain.
           await sseTail.close();
           wsTail.close();
-          await wsTail.waitForClose(bound);
+          await wsTail.waitForClose(AbortSignal.timeout(TAIL_READ_BOUND_MS));
 
           // The negative half, written first per this issue's own
           // testing plan: re-page from the SAME cursor NOW, after the
           // tails already delivered `run.aborted` — the paging boundary
           // shifted one event too late.
-          const client = connectFixtureGateway(gen2Port as number);
+          const client = connectFixtureGateway(gen2Port);
           pageAfterCancel = await client.page(runId, cursorObservedByFirstClient);
           expect(pageAfterCancel.events.length).toBeGreaterThan(0);
         }
