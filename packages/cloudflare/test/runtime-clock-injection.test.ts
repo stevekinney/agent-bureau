@@ -61,8 +61,9 @@ describe('createCloudflareMemoryRecordStorage runtime injection', () => {
   });
 
   it('defaults to the real-globals RuntimeServices implementation when no runtime is injected', async () => {
+    const sql = createSqliteDouble();
     const store = createCloudflareMemoryRecordStorage({
-      sql: createSqliteDouble(),
+      sql,
       vectorize: createFakeVectorize(),
     });
     await store.init();
@@ -71,11 +72,22 @@ describe('createCloudflareMemoryRecordStorage runtime injection', () => {
     const deleted = await store.delete('record-1', SCOPE);
     const after = Date.now();
     expect(deleted).toBe(true);
-    // No direct assertion on the tombstoned row's timestamp is possible
-    // without reaching into internals a real caller can't — this exists to
-    // prove construction with no `runtime` option still succeeds and
-    // completes within the real-time window, i.e. the default genuinely
-    // resolves to a working real clock rather than throwing or hanging.
-    expect(after).toBeGreaterThanOrEqual(before);
+
+    // Review finding (Copilot, PR #549): `after >= before` alone passes even
+    // if delete() never wrote a timestamp at all. Query the tombstoned row
+    // directly and assert its updated_at genuinely falls inside the real
+    // [before, after] window — proving the default resolves to a working
+    // real clock, not merely that the two Date.now() calls above ordered
+    // correctly.
+    const rows = sql
+      .exec<{ updated_at: number }>(
+        `SELECT updated_at FROM memory_records WHERE tenant_id = ? AND namespace = ? AND id = ?`,
+        TENANT,
+        NAMESPACE,
+        'record-1',
+      )
+      .toArray();
+    expect(rows[0]?.updated_at).toBeGreaterThanOrEqual(before);
+    expect(rows[0]?.updated_at).toBeLessThanOrEqual(after);
   });
 });
