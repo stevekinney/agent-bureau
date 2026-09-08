@@ -1630,6 +1630,16 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // `RuntimeTimeoutHandle` is itself `unknown`, and a union with `unknown`
   // is flagged as redundant by `@typescript-eslint/no-redundant-type-constituents`.
   let durableMaintenanceInterval: { readonly handle: RuntimeTimeoutHandle } | undefined;
+  // AB-374: the CURRENT tick's `pruneStaleRunOwnership()` attempt, set by
+  // `fireDurableMaintenanceTick` and cleared once it settles. `shutdown()`
+  // awaits this (alongside its other owner drains) before the unconditional
+  // backend teardown disposes storage — `stopDurableMaintenanceInterval()`
+  // alone only stops FUTURE ticks; without also awaiting an ALREADY-FIRED
+  // one, a tick's `sessionStore.update()` (which can retry through a real,
+  // un-injected backoff on an optimistic-concurrency conflict) could still
+  // be mid-flight when storage closes underneath it — exactly the "a
+  // pruning pass observed after shutdown" rollback trigger this issue names.
+  let inFlightMaintenanceTick: Promise<void> | undefined;
   let durableRecoveryBarrier: Promise<BureauRecoveryReport> = Promise.resolve({
     outcome: 'clean',
     perRunFailures: [],
@@ -5128,25 +5138,33 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       });
     });
     runtimeServices.deferred.track(attempt, 'durable-maintenance-tick');
+    // Tracked separately from (never replacing) the `deferred` registration
+    // above — this is what `shutdown()` itself awaits so an already-fired
+    // tick finishes before storage is disposed; see `inFlightMaintenanceTick`'s
+    // own doc comment.
+    inFlightMaintenanceTick = attempt.finally(() => {
+      inFlightMaintenanceTick = undefined;
+    });
   }
 
   /**
    * AB-374: starts the automatic-profile stale-run-ownership pruning
    * interval, at {@link DURABLE_MAINTENANCE_INTERVAL_MILLISECONDS} —
    * mirroring weft's own retention-maintenance cadence. Called only after
-   * boot recovery has settled (both the eager and the deferred-on-authority-
-   * validator recovery paths funnel through `durableRecoveryBarrier`,
-   * exactly the callers below). Idempotent: a second call is a no-op,
-   * whether because the interval is already running or because `shutdown()`
-   * has already been requested — the latter check closes the race where
-   * recovery is still deferred (no request-authority validator attached
-   * yet) when a caller shuts the bureau down; without it, a validator
-   * attached after that point would still start a brand-new interval this
-   * shutdown's own `stopDurableMaintenanceInterval()` call already ran past,
-   * leaking a timer past a supposedly-quiescent bureau.
+   * boot recovery has settled: both the eager path (`await
+   * durableRecoveryBarrier;` then a direct call) and the deferred-on-
+   * authority-validator path (`durableRecoveryBarrier.finally(...)`) below
+   * call this exactly once, from mutually exclusive branches of the SAME
+   * `if (hasDeferredGatewayAuthority)` — so there is no "already started"
+   * case to guard against here. The one guard this DOES need is
+   * `shutdown()`: recovery can still be sitting in the deferred branch
+   * (no request-authority validator attached yet) when a caller shuts the
+   * bureau down, and a validator attached after that point must not start a
+   * brand-new interval past `shutdown()`'s own
+   * `stopDurableMaintenanceInterval()` call — that would leak a timer past
+   * a supposedly-quiescent bureau.
    */
   function startDurableMaintenanceInterval(): void {
-    if (durableMaintenanceInterval !== undefined) return;
     if (shutdownPromise) return;
     durableMaintenanceInterval = {
       handle: runtimeServices.timers.setInterval(
@@ -6598,6 +6616,15 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           // cleanly (the webhook notifier also abandons in-flight backoff
           // waits so a disposed bureau never fires a webhook late).
           const ownerDrains: Array<Promise<void>> = [];
+          // AB-374: an already-fired automatic-profile maintenance tick is
+          // awaited here too — `stopDurableMaintenanceInterval()` (called at
+          // the very top of `shutdown()`) only prevents FUTURE ticks; this is
+          // what keeps an in-flight one from writing after storage is
+          // disposed below. Already caught internally (see
+          // `fireDurableMaintenanceTick`), so this can never reject the
+          // `Promise.allSettled` it joins. Not a `settleOwner` row: the
+          // AB-374 ruling names no shutdown-report owner for it.
+          if (inFlightMaintenanceTick) ownerDrains.push(inFlightMaintenanceTick);
           if (runtime.scheduler) {
             const scheduler = runtime.scheduler;
             // AB-260: registered with the composed `RuntimeServices.deferred`

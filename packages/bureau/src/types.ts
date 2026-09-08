@@ -384,6 +384,17 @@ export interface BureauOptions<D extends AgentDefinitions = AgentDefinitions> {
    * default `'automatic'` profile uses in-process intervals. Cloudflare
    * Durable Objects and other serverless hosts should use `'manual'`, then
    * call {@link Bureau.runDurableMaintenance} from each alarm or Cron wake-up.
+   *
+   * Under `'automatic'` (AB-374), Bureau owns a SECOND, independent
+   * interval — separate from weft's own in-process retention timer, which
+   * has no external hook — that calls `pruneStaleRunOwnership()` on its own
+   * `lastRunOwningPrincipals` session metadata, at the same cadence weft
+   * uses for its own retention sweep. Started only after boot recovery
+   * settles, stopped by {@link Bureau.shutdown}/dispose before either
+   * resolves. `'manual'` hosts already drive this same pruning as part of
+   * every {@link Bureau.runDurableMaintenance} call and get no second
+   * interval. See `packages/bureau/README.md`'s "Durable Event History
+   * Store" section for the full cadence and profile-difference writeup.
    */
   durableBackgroundTasks?: 'automatic' | 'manual';
   memory?: CreateMemoryOptions | Memory;

@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it } from 'bun:test';
 import { createManualRuntimeServices } from 'lifecycle';
 import { z } from 'zod';
 
+import { DURABLE_MAINTENANCE_INTERVAL_MILLISECONDS } from '../create-bureau';
 import {
   type BureauTestHarness,
   type BureauTestHarnessOptions,
@@ -224,6 +225,31 @@ describe('assertBureauQuiescent / BureauTestHarness.close()', () => {
       } finally {
         harness.runtime.timers.clearTimeout(handle);
       }
+    });
+
+    it('AB-374: the automatic-profile durable-maintenance interval is not reported as a leaked timer, because shutdown() already stopped it before this scope check runs', async () => {
+      const harness = await harnessWithMemoryStorage({ durableExecution: true });
+
+      // Registered the SAME way the "leftover timer" test above proves a
+      // genuine leak — the only difference is WHEN this handle is checked:
+      // `harness.close()` calls `bureau.shutdown()` first (AB-207), which
+      // stops this issue's interval (AB-374) before `harness.scope`'s own
+      // pending-timer check ever runs, so registering it here must NOT
+      // reproduce that leak.
+      const intervalEntry = harness.runtime
+        .pendingTimers()
+        .find((entry) => entry.dueAt === DURABLE_MAINTENANCE_INTERVAL_MILLISECONDS);
+      expect(intervalEntry).toBeDefined();
+      harness.scope.register({
+        kind: 'timer',
+        identifier: 'durable-maintenance-interval',
+        handle: intervalEntry!.handle,
+      });
+
+      const report = await harness.close();
+
+      expect(report.quiescent).toBe(true);
+      expect(report.leaked.some((entry) => entry.kind === 'timer')).toBe(false);
     });
 
     it('names an event subscription never disposed (kind "listener", discovered via public-child-discovery)', async () => {

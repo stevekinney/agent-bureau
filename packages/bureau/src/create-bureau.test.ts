@@ -14163,7 +14163,10 @@ describe('bureau owns an automatic-profile durable-maintenance interval (AB-374)
   // constructs and verifies pruneStaleRunOwnership() against directly. Here
   // the only variable under test is WHAT drives the pass: an automatic
   // interval tick versus nothing at all.
-  async function createStaleOwnerFixture(databasePath: string) {
+  async function createStaleOwnerFixture(
+    databasePath: string,
+    overrides: { onDiagnostic?: (diagnostic: { message: string }) => void } = {},
+  ) {
     const runtime = createManualRuntimeServices();
     const bureau = await createBureau({
       agents: {},
@@ -14171,6 +14174,7 @@ describe('bureau owns an automatic-profile durable-maintenance interval (AB-374)
       toolbox: createEmptyToolbox(),
       storage: { type: 'sqlite', path: databasePath },
       runtime,
+      ...overrides,
     });
 
     const run = await bureau.createRun({ message: 'stale owner', principal: 'alice' });
@@ -14235,6 +14239,16 @@ describe('bureau owns an automatic-profile durable-maintenance interval (AB-374)
 
         const after = await bureau.getSession(sessionId);
         expect(after?.metadata['lastRunOwningPrincipals']).toBeUndefined();
+
+        // "Exactly one" pass, made concrete rather than resting on the
+        // manual clock's own re-arming semantics alone: exactly one
+        // `durable-maintenance-tick` settled, and it resolved (the prune
+        // itself never threw).
+        const drainReport = await runtime.deferred.drain();
+        const ticks = drainReport.settled.filter(
+          (entry) => entry.label === 'durable-maintenance-tick',
+        );
+        expect(ticks).toEqual([{ label: 'durable-maintenance-tick', outcome: 'resolved' }]);
       } finally {
         await bureau.shutdown();
       }
@@ -14243,6 +14257,121 @@ describe('bureau owns an automatic-profile durable-maintenance interval (AB-374)
       await rm(`${databasePath}-wal`, { force: true });
       await rm(`${databasePath}-shm`, { force: true });
     }
+  });
+
+  it('diagnoses and swallows a failing pruning pass rather than throwing into the interval machinery', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-maintenance-interval-failure-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+    const diagnostics: string[] = [];
+    const injectedFailure = new Error('injected pruning storage failure (AB-374 test)');
+
+    try {
+      const realStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
+      // Gate ONLY the fleet feed's retention-watermark read — the one
+      // storage call `retainedRunOwnerIds()` (and so every automatic-
+      // profile pruning tick) makes that ordinary run dispatch/completion
+      // never touches, so this fails the tick specifically without
+      // breaking `createRun` itself.
+      const gatedStorage = new Proxy(realStorage, {
+        get(target, property, receiver) {
+          if (property === 'get') {
+            return async (key: string) => {
+              if (key === 'fleet-event-watermark') throw injectedFailure;
+              return target.get(key);
+            };
+          }
+          const value: unknown = Reflect.get(target, property, receiver);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: gatedStorage,
+        durableExecution: true,
+        runtime,
+        onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.message),
+      });
+
+      try {
+        await runtime.advance(DURABLE_MAINTENANCE_INTERVAL_MILLISECONDS + 1);
+        const diagnosed = await pollUntil(() =>
+          diagnostics.some((message) =>
+            message.includes('Error during automatic stale-run-ownership pruning'),
+          ),
+        );
+        expect(diagnosed).toBe(true);
+        expect(diagnostics.some((message) => message.includes(injectedFailure.message))).toBe(true);
+
+        // The interval itself is unharmed by the failed pass — still
+        // pending for its next tick, not torn down by the error.
+        expect(runtime.pendingTimers().length).toBeGreaterThan(0);
+      } finally {
+        await bureau.shutdown();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('shutdown() called while recovery is still deferred (no request-authority validator attached) means the validator attaching afterward never starts the interval', async () => {
+    const storage = new MemoryStorage();
+    const sessionStore = createSessionStore(textValueStore(storage));
+    await sessionStore.save(
+      createAgentSession({
+        id: 'ab-374-deferred-shutdown-race',
+        agentName: 'bureau',
+        conversationHistory: createConversationHistory({ id: 'ab-374-deferred-shutdown-race' }),
+        metadata: {
+          lastRunId: 'run-ab-374-deferred',
+          lastRunStatus: 'running',
+          lastRequestAuthorities: {
+            'run-ab-374-deferred': {
+              principalId: 'api-key:ab-374',
+              tenantId: 'bureau',
+              ownerId: 'bureau',
+              capabilities: ['tools:execute'],
+              authorizationRevision: 'gateway:api-key:ab-374',
+            },
+          },
+        },
+      }),
+    );
+
+    const runtime = createManualRuntimeServices();
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('Done.'),
+      toolbox: createEmptyToolbox(),
+      storage,
+      durableExecution: true,
+      runtime,
+    });
+
+    // A transport-issued authority with no validator configured defers
+    // recovery — and with it, this issue's interval — until a validator is
+    // attached. Nothing has started yet.
+    expect(runtime.pendingTimers()).toEqual([]);
+
+    await bureau.shutdown();
+    expect(runtime.pendingTimers()).toEqual([]);
+
+    // Attaching the validator now finally lets the deferred recovery run —
+    // AFTER shutdown already ran. Without `startDurableMaintenanceInterval`'s
+    // own `shutdownPromise` guard, THIS is where a brand-new interval would
+    // leak past an already-quiescent bureau.
+    bureau.setRequestAuthorityValidator(() => true);
+    await bureau.waitForRecovery?.();
+    await runtime.deferred.drain();
+
+    expect(runtime.pendingTimers()).toEqual([]);
   });
 
   it("under durableBackgroundTasks: 'manual', advancing the manual clock past the same cadence triggers no pruning pass", async () => {
@@ -14299,6 +14428,58 @@ describe('bureau owns an automatic-profile durable-maintenance interval (AB-374)
         expect(after?.metadata['lastRunOwningPrincipals']).toEqual({ [run.id]: 'alice' });
       } finally {
         await bureau.shutdown();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('shutdown() awaits an already-fired pruning pass rather than disposing storage out from under it', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-maintenance-interval-inflight-shutdown-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const diagnostics: string[] = [];
+
+    try {
+      const { runtime, bureau } = await createStaleOwnerFixture(databasePath, {
+        onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.message),
+      });
+
+      try {
+        // Fire the tick, then shut down IMMEDIATELY — deliberately never
+        // polling/draining first, so the tick's `sessionStore.update()`
+        // (which can retry through a real, un-injected backoff on an
+        // optimistic-concurrency conflict) is still genuinely in flight
+        // when `shutdown()` is called. `stopDurableMaintenanceInterval()`
+        // alone only stops FUTURE ticks; without ALSO awaiting this
+        // already-fired one (`inFlightMaintenanceTick`, joined into
+        // `shutdown()`'s own `ownerDrains`), the unconditional backend
+        // teardown below would dispose storage while this write is still
+        // outstanding — this issue's own named rollback trigger, "a
+        // pruning pass observed after shutdown" (and exactly the
+        // `Cannot use a closed database`/`Statement has finalized` failure
+        // this fix closes).
+        await runtime.advance(DURABLE_MAINTENANCE_INTERVAL_MILLISECONDS + 1);
+        await bureau.shutdown();
+
+        // The tick fully settled as part of `shutdown()` itself — nothing
+        // left outstanding once it returns.
+        expect(runtime.outstandingDeferred()).not.toContain('durable-maintenance-tick');
+        // No closed-database/finalized-statement failure landed — the
+        // pass was awaited to completion before teardown, not raced past it.
+        expect(
+          diagnostics.some(
+            (message) => message.includes('closed database') || message.includes('finalized'),
+          ),
+        ).toBe(false);
+      } catch (error) {
+        // Ensure teardown still happens even if an assertion above throws,
+        // without double-disposing (shutdown() is idempotent either way).
+        await bureau.shutdown();
+        throw error;
       }
     } finally {
       await rm(databasePath, { force: true });
