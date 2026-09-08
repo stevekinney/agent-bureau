@@ -88,7 +88,7 @@ release — the crash-recovery tier AB-92's test-tier matrix assigns its own
 command:
 
 ```bash
-# Full matrix (eleven scenarios, defined once in test/crash/scenarios.ts and
+# Full matrix (twelve scenarios, defined once in test/crash/scenarios.ts and
 # driven identically against SQLite (sqlite.test.ts) and LMDB
 # (lmdb.test.ts)) — the stable root command
 bun run test:crash-conformance
@@ -122,10 +122,50 @@ a pre-kill signal delivery (proving no double-delivery), and the
 AB-29 recovery-failure scenario (a second process missing the catalog agent
 its recovered `bureau.run()` dispatch needs, observed failing through
 `bureau.getDurableRun`'s `error`/`failureCategory` fields — never a bare
-`null`). No LMDB-specific incapability was found for any of the eleven; the
-full matrix runs unmodified on both backends. `harness.ts`'s
-`CrashHarnessUnsupportedBehaviorError` stays exported as a typed escape
-hatch for a future gap.
+`null`). The twelfth, `killed at run-started` (AB-361), is a positive
+recovery scenario rather than a control: once `bureau.createRun`'s durable
+branch resolves only after the engine's initial workflow record commits, a
+kill at `run-started` always has a durable record to recover, so it proves
+the SAME run resumes and its effect happens exactly once rather than
+proving nothing durable exists. No LMDB-specific incapability was found for
+any of the twelve; the full matrix runs unmodified on both backends.
+`harness.ts`'s `CrashHarnessUnsupportedBehaviorError` stays exported as a
+typed escape hatch for a future gap.
+
+### Deterministic kill points: the parent→child hold (AB-354)
+
+A `CrashMarker` kill point is only a fixed point in the child's execution if
+the child cannot advance past it while the parent's `SIGKILL` is still in
+flight. `child.kill('SIGKILL')` has real delivery latency under CPU
+contention, and a fast child that keeps running after reporting a marker can
+race ahead of a signal that has not yet landed — this is exactly how the
+`[smoke]` pair's control scenario used to flake (AB-335 measured it at ~2 in
+30 runs): the killed control sometimes showed progress past its kill marker
+because the SIGKILL simply arrived late, not because anything was wrong with
+recovery.
+
+The fix holds the child at the marker instead of racing the signal.
+`fixture.ts`'s `reportMarker` writes the marker line to stdout and then
+`await`s the parent's next command on stdin before returning — the fixture's
+own control flow cannot proceed past a marker without that acknowledgement.
+`harness.ts`'s `driveProcess` acknowledges every marker before
+`killAtMarker` with `{ type: 'proceed' }` (or `{ type: 'cancel' }` for
+`signal-parked`, unless resuming), but for the `killAtMarker` marker itself
+it sends no acknowledgement at all and issues `SIGKILL` immediately: the
+child is left parked on its own `await stdin.nextCommand()` with nothing
+ever arriving to resolve it, so it cannot execute one more line of its own
+logic before the kill lands. The control proves nothing happened past the
+marker because the child was physically held there — not because the signal
+happened to win a race.
+
+This hold is what makes `pre-dispatch` (AB-361) a valid control point: it is
+a marker `fixture.ts` reports immediately after `ready` and strictly before
+`bureau.createRun` is ever called, for every scenario kind that dispatches a
+root run. A child held at `pre-dispatch` cannot have called `createRun` —
+there is no path to reach the call after the marker report returns, because
+the hold never lets that report return before the kill. Killing there is
+therefore a genuine "nothing durable can exist" control, independent of how
+fast or slow `SIGKILL` is actually delivered.
 
 `test/crash/harness.ts` exports `runCrashScenario` (the parent driver) and
 `test/crash/fixture.ts` is the child-process entry point; neither is part of
