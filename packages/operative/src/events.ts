@@ -426,6 +426,15 @@ export class BudgetThresholdEvent extends Event {
   }
 }
 
+/**
+ * @deprecated AB-231 settled budget-exceeded accounting through
+ * `RunCompletedEvent`'s `finishReason: 'budget-exceeded'` rather than a
+ * dispatched event. Nothing in `packages/operative/src` constructs or
+ * dispatches this event, so a subscriber never receives it. Read
+ * `event.finishReason === 'budget-exceeded'` on `run.completed` instead.
+ * This class and its `OperativeEventClassMap` entry are removed in the
+ * next major.
+ */
 export class BudgetExceededEvent extends Event {
   static readonly type = 'budget.exceeded' as const;
   readonly currentCost: number;
@@ -1501,6 +1510,11 @@ export interface OperativeEventClassMap {
   [BackpressureReleasedEvent.type]: BackpressureReleasedEvent;
   [UsageAccumulatedEvent.type]: UsageAccumulatedEvent;
   [BudgetThresholdEvent.type]: BudgetThresholdEvent;
+  /**
+   * @deprecated See {@link BudgetExceededEvent}'s own `@deprecated` notice —
+   * AB-231 folds budget-exceeded accounting into `run.completed`'s
+   * `finishReason: 'budget-exceeded'` instead.
+   */
   [BudgetExceededEvent.type]: BudgetExceededEvent;
   [SessionSavedEvent.type]: SessionSavedEvent;
   [SessionLoadedEvent.type]: SessionLoadedEvent;

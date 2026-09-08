@@ -1059,6 +1059,21 @@ code should prefer `event.result.output` because it shares the same
 consumers can keep reading the flattened fields. There is no
 `event.structuredOutput` field.
 
+### `BudgetExceededEvent` is deprecated (AB-231, AB-365)
+
+`BudgetExceededEvent` (`budget.exceeded`) and its `OperativeEventClassMap`
+entry are `@deprecated`. AB-231 settled budget-exceeded accounting through
+`RunCompletedEvent`'s `finishReason: 'budget-exceeded'` rather than a
+dispatched event, so `BudgetExceededEvent` has never had a production
+dispatch site in `packages/operative/src` — a subscriber cannot observe it.
+The class and its map entry stay exported for this minor to avoid a breaking
+removal; they are removed in the next major. New code should read
+`RunCompletedEvent.finishReason === 'budget-exceeded'` (or the equivalent
+field on `RunResult`) instead of listening for `budget.exceeded`. This does
+not affect armorer's distinct `ToolboxBudgetExceededEvent`
+(`toolbox.budget-exceeded`), which has its own real production emitter and
+is unrelated to this deprecation.
+
 ### `generate.completed` carries post-guardrail content (AB-302)
 
 `GenerateCompletedEvent` is dispatched AFTER both output-guardrail validation
