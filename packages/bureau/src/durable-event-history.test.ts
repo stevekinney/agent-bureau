@@ -1373,6 +1373,109 @@ describe('createDurableEventProducer()', () => {
     });
   });
 
+  describe('waitForActiveWrites() (AB-372)', () => {
+    it('resolves immediately for an owner with no write in flight', async () => {
+      const runtime = createManualRuntimeServices();
+      const { bureau } = createFakeBureauEventSurface();
+      const { history } = createRecordingHistory();
+      const producer = createDurableEventProducer(bureau, history, runtime);
+
+      await producer.waitForActiveWrites({ kind: 'run', id: 'never-dispatched' });
+
+      await producer.dispose();
+    });
+
+    it('awaits a write already in flight for the owner, and resolves once it settles', async () => {
+      const runtime = createManualRuntimeServices();
+      const { bureau, dispatchAction } = createFakeBureauEventSurface();
+      let releaseWrite!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        releaseWrite = resolve;
+      });
+      const { history } = createRecordingHistory(async () => {
+        await gate;
+      });
+      const producer = createDurableEventProducer(bureau, history, runtime);
+      const owner = { kind: 'run' as const, id: 'run-1' };
+
+      dispatchAction(createAction({ type: 'run.completed', runId: 'run-1' }));
+
+      let resolved = false;
+      const waited = producer.waitForActiveWrites(owner).then(() => {
+        resolved = true;
+      });
+
+      await Promise.resolve();
+      expect(resolved).toBe(false);
+
+      releaseWrite();
+      await waited;
+      expect(resolved).toBe(true);
+
+      await producer.dispose();
+    });
+
+    it('never waits on a write that starts AFTER the call — a snapshot, not an open-ended subscription', async () => {
+      const runtime = createManualRuntimeServices();
+      const { bureau, dispatchAction } = createFakeBureauEventSurface();
+      let releaseSecondWrite!: () => void;
+      const secondGate = new Promise<void>((resolve) => {
+        releaseSecondWrite = resolve;
+      });
+      let callIndex = 0;
+      const { history } = createRecordingHistory(async () => {
+        const index = callIndex;
+        callIndex += 1;
+        if (index === 1) await secondGate;
+      });
+      const producer = createDurableEventProducer(bureau, history, runtime);
+      const owner = { kind: 'run' as const, id: 'run-1' };
+
+      // No write in flight yet — the snapshot below is empty.
+      const waited = producer.waitForActiveWrites(owner);
+
+      // A write starts for the SAME owner right after the snapshot.
+      dispatchAction(createAction({ type: 'run.completed', runId: 'run-1' }));
+
+      await waited;
+      // The second write (still gated) is unaffected — this call never
+      // promised to wait for it.
+      expect(producer.hasActiveWrite(owner)).toBe(true);
+
+      releaseSecondWrite();
+      await runtime.deferred.drain();
+      await producer.dispose();
+    });
+
+    it('never rejects even when the awaited write itself fails', async () => {
+      const runtime = createManualRuntimeServices();
+      const { bureau, dispatchAction } = createFakeBureauEventSurface();
+      let releaseWrite!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        releaseWrite = resolve;
+      });
+      const { history } = createRecordingHistory(async () => {
+        await gate;
+        throw new Error('storage boom');
+      });
+      const diagnostics: BureauDiagnostic[] = [];
+      const producer = createDurableEventProducer(bureau, history, runtime, (diagnostic) =>
+        diagnostics.push(diagnostic),
+      );
+      const owner = { kind: 'run' as const, id: 'run-1' };
+
+      dispatchAction(createAction({ type: 'run.completed', runId: 'run-1' }));
+      const waited = producer.waitForActiveWrites(owner);
+
+      releaseWrite();
+      const result = await waited;
+      expect(result).toBeUndefined();
+      await runtime.deferred.drain();
+
+      await producer.dispose();
+    });
+  });
+
   it('ignores an action type outside the durable run/session sets — tool.* and step.completed are audit-trail-only, never durable', async () => {
     const runtime = createManualRuntimeServices();
     const { bureau, dispatchAction } = createFakeBureauEventSurface();

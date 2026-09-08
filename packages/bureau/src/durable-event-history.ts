@@ -623,6 +623,22 @@ export interface DurableEventProducer {
    */
   hasActiveWrite(owner: DurableEventOwner): boolean;
   /**
+   * Await every `owner`-scoped write currently in flight at the moment
+   * this is called — never rejects (an individual write's own failure is
+   * diagnosed by its own listener, not surfaced here), and never waits on
+   * a write that starts AFTER this call (a snapshot, not an open-ended
+   * subscription). AB-372 (Codex review finding, PR #580, "Wait for the
+   * deletion projection before serving history"): `Bureau.eventHistory`
+   * calls this before reading, so a caller that awaits `deleteSession`/
+   * `deleteRun` and immediately calls `eventHistory` for the same owner
+   * observes the deletion this producer's own listener is still writing,
+   * rather than racing an ordinary page ahead of it — mirroring
+   * `AuditTrail.query()`'s own `activeWritesByRunId`-based read-your-writes
+   * fix (AB-228, PR #566, "Wait for schedule audit writes before returning
+   * success").
+   */
+  waitForActiveWrites(owner: DurableEventOwner): Promise<void>;
+  /**
    * Stop listening to the bureau's event streams and await every write
    * already in flight before resolving. Never rejects. Idempotent.
    */
@@ -758,19 +774,33 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
   // method's own doc comment for why this closes the pruning race) and
   // decremented in the same `.finally` that already prunes `activeWrites`.
   const activeWriteCountsByOwner = new Map<string, number>();
+  // AB-372 — the SAME writes `activeWriteCountsByOwner` counts, also kept
+  // as a per-owner Set of the actual promises (not just a count) so
+  // `waitForActiveWrites()` can await exactly the writes in flight for one
+  // owner at the moment it is called, mirroring `AuditTrail`'s own
+  // `activeWritesByRunId` (AB-228, PR #566).
+  const activeWritesByOwner = new Map<string, Set<Promise<void>>>();
 
   // AB-372 — extracted out of `sink()` below so `sessionDeletedListener`'s
   // conditional write (which does not call `sink()` directly, since it
   // needs to skip the write entirely on a duplicate in-flight dispatch)
-  // still participates in the SAME `activeWrites`/`activeWriteCountsByOwner`
-  // bookkeeping every other listener's write does (Copilot review finding,
-  // PR #580).
+  // still participates in the SAME `activeWrites`/`activeWriteCountsByOwner`/
+  // `activeWritesByOwner` bookkeeping every other listener's write does
+  // (Copilot review finding, PR #580).
   function trackWrite(ownerKey: string, work: () => Promise<void>): void {
     activeWriteCountsByOwner.set(ownerKey, (activeWriteCountsByOwner.get(ownerKey) ?? 0) + 1);
     const write = work();
     activeWrites.add(write);
+    let ownerWrites = activeWritesByOwner.get(ownerKey);
+    if (!ownerWrites) {
+      ownerWrites = new Set();
+      activeWritesByOwner.set(ownerKey, ownerWrites);
+    }
+    ownerWrites.add(write);
     void write.finally(() => {
       activeWrites.delete(write);
+      ownerWrites.delete(write);
+      if (ownerWrites.size === 0) activeWritesByOwner.delete(ownerKey);
       const remaining = (activeWriteCountsByOwner.get(ownerKey) ?? 1) - 1;
       if (remaining > 0) {
         activeWriteCountsByOwner.set(ownerKey, remaining);
@@ -1094,6 +1124,16 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
   return {
     hasActiveWrite(owner: DurableEventOwner): boolean {
       return (activeWriteCountsByOwner.get(encodeOwner(owner)) ?? 0) > 0;
+    },
+    async waitForActiveWrites(owner: DurableEventOwner): Promise<void> {
+      // Snapshot the current Set before awaiting: a write that starts
+      // AFTER this call (e.g. because settling one write's listener kicks
+      // off a fresh one for the same owner) is a NEW write this call never
+      // promised to wait for, exactly like `AuditTrail.query()`'s own
+      // snapshot-then-await.
+      const ownerWrites = activeWritesByOwner.get(encodeOwner(owner));
+      if (!ownerWrites || ownerWrites.size === 0) return;
+      await Promise.allSettled([...ownerWrites]);
     },
     async dispose(): Promise<void> {
       bureau.removeEventListener('action', actionListener);

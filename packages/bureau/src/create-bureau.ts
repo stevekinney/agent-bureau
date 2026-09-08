@@ -6796,6 +6796,24 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       }
     }
 
+    // AB-372 (Codex review finding, PR #580, "Wait for the deletion
+    // projection before serving history"): every write into `history` from
+    // `createDurableEventProducer` is fire-and-forget from its own
+    // dispatching caller's perspective (`deleteSession`/`deleteRun` return
+    // as soon as the synchronous event dispatch completes, not once the
+    // durable write actually commits) — so a caller that awaits
+    // `deleteSession(id)` and immediately calls `eventHistory` for the same
+    // owner could otherwise read an ordinary page a heartbeat before the
+    // deletion's own durable write lands. Awaiting this owner's in-flight
+    // writes first (a snapshot, never an open-ended wait — see
+    // `waitForActiveWrites`'s own doc comment) closes that race, mirroring
+    // `AuditTrail.query()`'s identical `activeWritesByRunId`-based fix
+    // (AB-228, PR #566). A caller with no `durableEventProducerInstance`
+    // (no persistent storage backend) never reaches this function at all —
+    // `Bureau.eventHistory` short-circuits to `'unsupported-capability'`
+    // first — so this is always defined whenever `history` is.
+    await durableEventProducerInstance?.waitForActiveWrites(owner);
+
     const page = await history.page(owner, options);
     if ('outcome' in page) return page; // a DurableEventGap
 
