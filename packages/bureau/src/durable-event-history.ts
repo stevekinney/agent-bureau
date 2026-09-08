@@ -56,12 +56,36 @@
  * recorded under the fired review's own `{ kind: 'run', id: runId }` owner —
  * never a distinct `'review'` owner kind, which `DurableEventOwnerKind` does
  * not define.
+ *
+ * Widened again by AB-372, 2026-09-08: a fifth bureau-level-emitter source,
+ * `SessionDeletedEvent` — `deleteSession` (`create-bureau.ts`) dispatches it
+ * directly onto the bureau-level emitter, never through `'action'` (a
+ * deleted session may own zero live runs, so there is nothing for
+ * `store.recordAction` to attach it to). Before this widening,
+ * `SESSION_DURABLE_ACTION_TYPES` below listed `'session.deleted'` as a
+ * durable action type, but nothing ever dispatched it onto the `'action'`
+ * stream this producer's `actionListener` reads — the entry described what
+ * a producer WOULD forward if something dispatched it that way, not
+ * anything that actually happened (AB-228/AB-313 both documented this exact
+ * gap; see `audit-trail.ts`'s own `AUDIT_EVENT_TYPES` doc comment). The
+ * dedicated `sessionDeletedListener` below closes it, writing the same
+ * `{ kind: 'session', id: sessionId }`-owned `'session.deleted'` record
+ * `Bureau.eventHistory`'s deleted-aggregate detection (AB-313,
+ * `resolveEventHistory` in `create-bureau.ts`) already knows how to read —
+ * previously exercised only by that detection's own synthetic tests
+ * (`Store.recordAction`/`bureau.store.recordAction`), never by a real
+ * deletion. Idempotent on a duplicate dispatch of the same event: the
+ * listener first checks whether the owner's own durable page already
+ * carries a `'session.deleted'` record (the SAME evidence-based check
+ * `resolveEventHistory` performs) and skips the write when one is already
+ * present, rather than appending a second record for one logical deletion.
  */
 import type {
   AgentScheduledEvent,
   ScheduleCancelledEvent,
   SchedulePausedEvent,
   ScheduleResumedEvent,
+  SessionDeletedEvent,
 } from '@lostgradient/operative';
 import type {
   DurableEventEnvelope,
@@ -634,11 +658,16 @@ export const RUN_DURABLE_EVENT_TYPES: ReadonlySet<string> = new Set(RUN_DURABLE_
 
 /**
  * `session.*` action types AB-87's matrix classifies as durable — the
- * lifecycle and reattachment facts (`session.deleted`'s own row calls the
- * pre-AB-311 state "durable only via the generic action stream, a gap";
- * this producer closes it). `session.cancel`/`sleep`/`signal`/`update`/
- * `query` (process-local per AB-39) and `session.monitor.tick`/`done`
- * (explicitly non-cursor-advancing) are deliberately excluded.
+ * lifecycle and reattachment facts. `session.deleted` is listed here for
+ * completeness (an `'action'`-stream dispatch of that type, if one ever
+ * existed, would be forwarded the same way every other entry is), but no
+ * production code dispatches `'session.deleted'` onto the `'action'` stream
+ * — `deleteSession` dispatches a real `SessionDeletedEvent` directly onto
+ * the bureau-level emitter instead, handled by the dedicated
+ * `sessionDeletedListener` below (AB-372), not by this set.
+ * `session.cancel`/`sleep`/`signal`/`update`/`query` (process-local per
+ * AB-39) and `session.monitor.tick`/`done` (explicitly non-cursor-advancing)
+ * are deliberately excluded.
  */
 const SESSION_DURABLE_ACTION_TYPES = new Set<string>([
   'session.created',
@@ -858,6 +887,58 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
   };
   bureau.addEventListener('run.removed', runRemovedListener);
 
+  // AB-372 — `deleteSession` dispatches `SessionDeletedEvent` directly onto
+  // the bureau-level emitter (never through `'action'`; see this module's
+  // top-of-file doc comment), so it needs its own listener the same way
+  // `run.removed` above does. Recorded under the deleted session's own
+  // `{ kind: 'session', id: sessionId }` owner — the SAME owner and kind
+  // `Bureau.eventHistory`'s deleted-aggregate detection (`create-bureau.ts`'s
+  // `resolveEventHistory`) already reads.
+  //
+  // Idempotent on a duplicate dispatch: unlike every other listener in this
+  // producer, this one checks the owner's own durable page BEFORE writing —
+  // if a `'session.deleted'` record is already present, the write is
+  // skipped rather than appending a second record for one logical deletion.
+  // This matters because `deleteSession`'s own single-process coalescing
+  // (`create-bureau.ts`) does not cover every duplicate-dispatch path (its
+  // own doc comment names a documented cross-process race), and unlike
+  // `run.removed` (where `deleteRun` similarly guards against redundant
+  // dispatch), a session's deletion marker is what `resolveEventHistory`'s
+  // deleted-aggregate detection keys its entire "was this owner deleted"
+  // answer on — a second record would still evidence deletion just as
+  // correctly as the first, but this producer would rather write exactly
+  // one durable fact per logical deletion than rely on that detection being
+  // insensitive to a duplicate. A page-fetch failure propagates to the
+  // outer `.catch` below like any other write failure — it does not report
+  // a false "already recorded" (it throws, never returning a truthy
+  // page-with-matching-event).
+  const sessionDeletedListener = (event: SessionDeletedEvent): void => {
+    if (signal?.aborted) return;
+    const owner: DurableEventOwner = { kind: 'session', id: event.sessionId };
+    const write = recordSessionDeletedIfAbsent(owner, event.sessionId).catch((error: unknown) => {
+      diagnose({
+        level: 'error',
+        scope: 'durable-event-history',
+        message: `[durable-event-history] Failed to record durable event "session.deleted" for ${owner.kind}:${owner.id}:`,
+        cause: error,
+      });
+    });
+    activeWrites.add(write);
+    void write.finally(() => activeWrites.delete(write));
+    runtime.deferred.track(write, 'durable-event-record');
+  };
+  async function recordSessionDeletedIfAbsent(
+    owner: DurableEventOwner,
+    sessionId: string,
+  ): Promise<void> {
+    const existing = await history.page(owner);
+    const alreadyRecorded =
+      !('outcome' in existing) && existing.events.some((event) => event.kind === 'session.deleted');
+    if (alreadyRecorded) return;
+    await history.record(owner, 'session.deleted', { sessionId });
+  }
+  bureau.addEventListener('session.deleted', sessionDeletedListener);
+
   // AB-224's `review.*` lifecycle family (AB-87/AB-46) — like `schedule.*`
   // above, these are dispatched directly onto the bureau-level emitter
   // (`create-bureau.ts`'s `recordReviewDecision`/`recordReviewStatusTransition`),
@@ -937,6 +1018,7 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
       bureau.removeEventListener('schedule.resumed', scheduleResumedListener);
       bureau.removeEventListener('schedule.cancelled', scheduleCancelledListener);
       bureau.removeEventListener('run.removed', runRemovedListener);
+      bureau.removeEventListener('session.deleted', sessionDeletedListener);
       bureau.removeEventListener('review.approved', reviewApprovedListener);
       bureau.removeEventListener('review.denied', reviewDeniedListener);
       bureau.removeEventListener('review.rejected', reviewRejectedListener);

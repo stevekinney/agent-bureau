@@ -17,6 +17,7 @@ import {
   ScheduleFailedEvent,
   SchedulePausedEvent,
   ScheduleResumedEvent,
+  SessionDeletedEvent,
 } from '@lostgradient/operative';
 import type { DurableEventEnvelope, DurableEventOwner } from '@lostgradient/operative/durable';
 import type { Subscription } from '@lostgradient/operative/liveness';
@@ -1161,6 +1162,7 @@ function createFakeBureauEventSurface(): {
   dispatchReviewRevoked(event: ReviewRevokedEvent): void;
   dispatchReviewCanceled(event: ReviewCanceledEvent): void;
   dispatchReviewSuperseded(event: ReviewSupersededEvent): void;
+  dispatchSessionDeleted(event: SessionDeletedEvent): void;
 } {
   const target = new CompletableEventTarget<BureauEventMap>();
   const bureau = {
@@ -1210,6 +1212,9 @@ function createFakeBureauEventSurface(): {
       target.dispatch(event);
     },
     dispatchReviewSuperseded: (event) => {
+      target.dispatch(event);
+    },
+    dispatchSessionDeleted: (event) => {
       target.dispatch(event);
     },
   };
@@ -1704,6 +1709,98 @@ describe('createDurableEventProducer()', () => {
         },
       },
     ]);
+
+    await producer.dispose();
+  });
+
+  it('records session.deleted under the session owner from a directly-dispatched SessionDeletedEvent (AB-372)', async () => {
+    const runtime = createManualRuntimeServices();
+    const storage = await createMemoryStorage();
+    const history = createDurableEventHistory(storage, runtime);
+    const { bureau, dispatchSessionDeleted } = createFakeBureauEventSurface();
+    const producer = createDurableEventProducer(bureau, history, runtime);
+
+    dispatchSessionDeleted(new SessionDeletedEvent('sess-1'));
+    await runtime.deferred.drain();
+
+    const page = await history.page({ kind: 'session', id: 'sess-1' });
+    if ('outcome' in page) throw new Error('expected a page, got a gap');
+    expect(page.events.map((event) => event.kind)).toEqual(['session.deleted']);
+    expect(page.events[0]?.payload).toEqual({ sessionId: 'sess-1' });
+
+    await producer.dispose();
+    await history.dispose();
+  });
+
+  it('dispatching the same SessionDeletedEvent twice produces exactly one durable record (AB-372)', async () => {
+    const runtime = createManualRuntimeServices();
+    const storage = await createMemoryStorage();
+    const history = createDurableEventHistory(storage, runtime);
+    const { bureau, dispatchSessionDeleted } = createFakeBureauEventSurface();
+    const producer = createDurableEventProducer(bureau, history, runtime);
+
+    dispatchSessionDeleted(new SessionDeletedEvent('sess-1'));
+    await runtime.deferred.drain();
+    dispatchSessionDeleted(new SessionDeletedEvent('sess-1'));
+    await runtime.deferred.drain();
+
+    const page = await history.page({ kind: 'session', id: 'sess-1' });
+    if ('outcome' in page) throw new Error('expected a page, got a gap');
+    expect(page.events.map((event) => event.kind)).toEqual(['session.deleted']);
+
+    await producer.dispose();
+    await history.dispose();
+  });
+
+  it('diagnoses (never throws) when the session.deleted idempotency check fails to read the owner page', async () => {
+    const runtime = createManualRuntimeServices();
+    const { bureau, dispatchSessionDeleted } = createFakeBureauEventSurface();
+    const history: DurableEventHistory = {
+      record: () => {
+        throw new Error('record() should not be called when page() rejects');
+      },
+      page: () => Promise.reject(new Error('storage unavailable')),
+      subscribeEventHistory: () => {
+        throw new Error('unused by createDurableEventProducer');
+      },
+      retainedRunOwnerIds: () => {
+        throw new Error('unused by createDurableEventProducer');
+      },
+      dispose: async () => {},
+    };
+    const diagnostics: BureauDiagnostic[] = [];
+    const producer = createDurableEventProducer(bureau, history, runtime, (diagnostic) =>
+      diagnostics.push(diagnostic),
+    );
+
+    dispatchSessionDeleted(new SessionDeletedEvent('sess-1'));
+    await runtime.deferred.drain();
+
+    expect(
+      diagnostics.some(
+        (diagnostic) =>
+          diagnostic.scope === 'durable-event-history' &&
+          diagnostic.message.includes('Failed to record durable event "session.deleted"'),
+      ),
+    ).toBe(true);
+
+    await producer.dispose();
+  });
+
+  it('refuses to start a new session.deleted record once the owner-issued signal aborts', async () => {
+    const runtime = createManualRuntimeServices();
+    const { bureau, dispatchSessionDeleted } = createFakeBureauEventSurface();
+    const { history, calls } = createRecordingHistory();
+    const controller = new AbortController();
+    const producer = createDurableEventProducer(bureau, history, runtime, undefined, {
+      signal: controller.signal,
+    });
+
+    controller.abort();
+    dispatchSessionDeleted(new SessionDeletedEvent('sess-1'));
+    await runtime.deferred.drain();
+
+    expect(calls).toEqual([]);
 
     await producer.dispose();
   });

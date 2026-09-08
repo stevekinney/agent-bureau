@@ -13266,6 +13266,106 @@ describe('bureau.eventHistory authorization and deleted-aggregate (AB-313)', () 
   });
 });
 
+describe('bureau.eventHistory deleted-aggregate through a real session deletion (AB-372)', () => {
+  it('returns deleted-aggregate for a session deleted through a real bureau.deleteSession call, with no synthetic record injected', async () => {
+    // AB-313's own "returns deleted-aggregate for a session.deleted owner"
+    // test above synthesizes the deletion marker via `bureau.store.recordAction`
+    // because nothing wired a real `SessionDeletedEvent` dispatch into THIS
+    // durable store — `durable-event-history.ts`'s `createDurableEventProducer`
+    // had no listener for it (the audit trail, a separate durable layer, did).
+    // AB-372 closes that gap; this proves the real production call site
+    // (`Bureau.deleteSession`) reaches `bureau.eventHistory`'s deleted-aggregate
+    // detection with no test-only synthesis anywhere in this test.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-event-history-real-session-deletion-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        runtime,
+      });
+
+      const run = await bureau.createRun({ message: 'A session about to be really deleted' });
+      await waitForRunCompletion(bureau, run.id);
+      await runtime.deferred.drain();
+
+      await bureau.deleteSession(run.sessionId);
+      await runtime.deferred.drain();
+
+      const outcome = await bureau.eventHistory({ kind: 'session', id: run.sessionId });
+      if (!('outcome' in outcome) || outcome.outcome !== 'deleted-aggregate') {
+        throw new Error(`expected deleted-aggregate, got ${JSON.stringify(outcome)}`);
+      }
+      expect(outcome.owner).toEqual({ kind: 'session', id: run.sessionId });
+      expect(outcome.events.map((event) => event.kind)).toContain('session.deleted');
+
+      await bureau.shutdown();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it("coalesces two concurrent bureau.deleteSession calls on the same session into exactly one durable session.deleted record (mirrors the audit trail's own coalescing proof)", async () => {
+    // `deleteSession`'s own single-process coalescing (`create-bureau.ts`)
+    // means two concurrent calls for the same id dispatch `SessionDeletedEvent`
+    // exactly once already (proved against the audit trail at
+    // "dispatches session.deleted exactly once for two concurrent
+    // deleteSession(id) calls" above) — this proves the SAME real call
+    // pattern also reaches this durable store as exactly one record, not
+    // merely the audit trail. The producer's own idempotency guard (proved
+    // directly, with a genuinely duplicated dispatch, in
+    // `durable-event-history.test.ts`) is a second, independent line of
+    // defense for the documented cross-process race that coalescing cannot
+    // cover.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-event-history-real-session-deletion-dup-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        runtime,
+      });
+
+      const run = await bureau.createRun({ message: 'A session deleted concurrently' });
+      await waitForRunCompletion(bureau, run.id);
+      await runtime.deferred.drain();
+
+      await Promise.all([
+        bureau.deleteSession(run.sessionId),
+        bureau.deleteSession(run.sessionId),
+        bureau.deleteSession(run.sessionId),
+      ]);
+      await runtime.deferred.drain();
+
+      const outcome = await bureau.eventHistory({ kind: 'session', id: run.sessionId });
+      if (!('outcome' in outcome) || outcome.outcome !== 'deleted-aggregate') {
+        throw new Error(`expected deleted-aggregate, got ${JSON.stringify(outcome)}`);
+      }
+      expect(outcome.events.filter((event) => event.kind === 'session.deleted')).toHaveLength(1);
+
+      await bureau.shutdown();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+});
+
 describe('bureau.eventHistory run ownership survives a process restart (AB-359)', () => {
   // The LMDB variant of this recovery scenario lives in its own file
   // (`event-history-run-ownership-recovery-lmdb.test.ts`) — it needs a real
