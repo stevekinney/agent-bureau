@@ -156,26 +156,51 @@ immediately: the child is left parked on its own `await
 stdin.nextCommand()` with nothing ever arriving to resolve it, so it cannot
 execute one more line of its own logic before the kill lands. The one
 deliberate exception is `deliverSignalBeforeKill` (the `signal-parked
-resume` scenario, AB-271): there, `driveProcess` sends `{ type: 'proceed'
-}` at the kill marker itself, simulating a signal that was already
-in-flight when the process died, before still issuing `SIGKILL` — the hold
-is what lets that scenario prove the delivered command is never
-double-applied after recovery, not a hole in the hold's guarantee for every
-other scenario. Outside that one case, the control proves nothing happened
-past the marker because the child was physically held there — not because
-the signal happened to win a race.
+resume` scenario, AB-271): there, `driveProcess` writes and flushes
+`{ type: 'proceed' }` at the kill marker itself before still issuing
+`SIGKILL`, simulating a signal that was in flight the instant the process
+died — the harness never confirms the dying child actually read or applied
+that write before `SIGKILL` landed (`scenarios.ts`'s own comment allows for
+either outcome), so this proves the write was in flight at the moment of
+death, not that a consumed command is safe from replay. The recovery
+assertions afterward send a fresh `proceed` and check the final state, which
+covers both possibilities. Outside that one case, the control proves nothing
+happened past the marker because the child was physically held there — not
+because the signal happened to win a race.
 
-This hold is what makes `pre-dispatch` (AB-361) a valid control point: it is
-a marker `fixture.ts` reports immediately after `ready` and strictly before
+This stdin hold is sufficient for `pre-dispatch` (AB-361): it is a marker
+`fixture.ts` reports immediately after `ready` and strictly before
 `bureau.createRun` is called, for every scenario kind that dispatches its
 root run through `bureau.createRun` — which is every kind except
-`recovery-failure`, whose root run instead goes through the catalog
-dispatch path (`bureau.run()`/`harness.startRun`) and so never reports
-`pre-dispatch` at all. A child held at `pre-dispatch` cannot have called
-`createRun` — there is no path to reach the call after the marker report
-returns, because the hold never lets that report return before the kill.
-Killing there is therefore a genuine "nothing durable can exist" control,
-independent of how fast or slow `SIGKILL` is actually delivered.
+`recovery-failure`, whose root run instead goes through the catalog dispatch
+path (`bureau.run()`/`harness.startRun`) and so never reports `pre-dispatch`
+at all. A child held at `pre-dispatch` cannot have called `createRun` —
+there is no path to reach the call after the marker report returns, because
+the hold never lets that report return before the kill. Killing there is
+therefore a genuine "nothing durable can exist" control, independent of how
+fast or slow `SIGKILL` is actually delivered, because nothing but
+`main()`'s own driver loop is running yet.
+
+`killed at run-started` needs a second, narrower hold, because by that point
+something else IS running: once `bureau.createRun`'s `durablyStarted`
+settles, Weft's own durable engine can dispatch the root run's step-0
+`generate` call on its own promise chain — independent of whether `main()`
+has gotten around to reporting `'run-started'` and blocking on the stdin
+hold above. Under scheduling contention the engine can reach
+`register-child`/`register-children`/`register-schedule` (all of which run
+before the `reportLock`-serialized `child-registered` write) before
+`SIGKILL` lands, which recovery would see as a started-but-incomplete
+idempotency claim — exactly the race the 2026-09-04 coordinator ruling on
+this issue characterized once AB-361 made `run-started` itself durably
+recoverable. `createFixtureGenerate`'s `waitForRunStartedRelease` gate
+closes it from the child's side too: the root run's step-0 `generate` call
+awaits the SAME hold `main()` releases only after `'run-started'`'s own
+acknowledgement lands (or immediately, unconditionally, on every mode/kind
+that never reports that marker at all — recovery mode, and the
+`recovery-failure` kind's catalog path — so a recovered process replaying
+step 0 never parks forever). A process killed at `run-started` therefore
+keeps its engine parked before its very first tool dispatch for the rest of
+its short life, no matter how long `SIGKILL` takes to land.
 
 `test/crash/harness.ts` exports `runCrashScenario` (the parent driver) and
 `test/crash/fixture.ts` is the child-process entry point; neither is part of
