@@ -3340,6 +3340,116 @@ describe('createBureau', () => {
     bureau.dispose();
   });
 
+  it('abortRun called twice synchronously while still running revokes a pending signed tool-approval review exactly once (AB-353)', async () => {
+    // `abortRun`'s `abortingRunIds` admission set exists specifically to
+    // guard against re-entering this block (and re-calling
+    // `revokePendingApprovalsForRun`) on a same-run repeat call while still
+    // `'running'` (see the doc comment above `abortingRunIds`'s
+    // declaration). `ActiveRun.abort()` and `liveness.setStatus('aborting')`
+    // are independently idempotent (AB-37: "repeat `abort()` no-ops"), so a
+    // second call's redundant `abort()` is unobservable on its own — the
+    // guard's actually load-bearing job is preventing a second, concurrent
+    // `revokePendingApprovalsForRun` from reaching the SAME still-pending,
+    // signed tool-approval review before the first call's own revoke has
+    // recorded it as resolved, which would revoke the approval binding and
+    // write its `review.tool-approval.canceled` audit record twice.
+    let revokeCalls = 0;
+    const toolbox = createEmptyToolbox();
+    toolbox.revokeApproval = async () => {
+      revokeCalls += 1;
+      // Yield past both calls' synchronous prefixes before resolving, so a
+      // removed guard's second, concurrent call genuinely races the first
+      // rather than the test accidentally serializing them.
+      await Promise.resolve();
+    };
+
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox,
+      storage: { type: 'memory' },
+    });
+
+    try {
+      const { activeRun, emitter } = createParkedActiveRun();
+      const runId = bureau.store.register(activeRun, 'run-abort-double-revoke');
+      const approvalReviewId = `approval:${runId}:call-double-revoke`;
+
+      emitter.dispatchEvent(
+        new StepCompletedEvent({
+          step: 0,
+          conversation: new Conversation(),
+          content: '',
+          toolCalls: [],
+          results: [
+            {
+              callId: 'call-double-revoke',
+              outcome: 'action_required',
+              content: 'needs approval',
+              toolCallId: 'call-double-revoke',
+              toolName: 'charge-card',
+              result: undefined,
+              action: { type: 'approval', message: 'Approve charge' },
+              pendingApproval: {
+                callId: 'call-double-revoke',
+                toolName: 'charge-card',
+                arguments: { cents: 500 },
+                action: { type: 'approval', message: 'Approve charge' },
+                approvalToken: 'signed-token',
+                approvalBinding: {
+                  version: 1,
+                  principalId: 'principal-a',
+                  tenantId: 'bureau',
+                  ownerId: 'agent-a',
+                  authorizationRevision: 'bureau:1',
+                  capabilitiesRevision: '[]',
+                  audience: 'operator',
+                  agentId: 'agent-a',
+                  runId,
+                  toolboxRevision: 'rev-1',
+                  toolDefinitionRevision: 'tool-rev-1',
+                  policyRevision: 'policy-rev-1',
+                  approvalRevision: 'approval-rev-1',
+                  issuedAt: 0,
+                  expiresAt: Number.MAX_SAFE_INTEGER,
+                  nonce: 'nonce-double-revoke',
+                  replayScope: `bureau:${runId}`,
+                },
+              },
+            },
+          ],
+          final: true,
+        }),
+      );
+
+      expect(bureau.listPendingReviews().map((review) => review.id)).toEqual([approvalReviewId]);
+
+      // Synchronous back-to-back calls, matching the doc comment's own
+      // "same-run repeat call while it is still `'running'`" scenario — no
+      // `await` between them, so both reach `abortRun`'s guard before
+      // either's detached `revokePendingApprovalsForRun` continuation has
+      // resolved.
+      bureau.abortRun(runId);
+      bureau.abortRun(runId);
+
+      await pollUntil(() => bureau.listPendingReviews().length === 0);
+
+      expect(revokeCalls).toBe(1);
+
+      const records = await bureau.auditTrail!.query({ runId });
+      const canceledRecords = records.filter(
+        (record) =>
+          record.type === 'review.tool-approval.canceled' &&
+          record.detail !== null &&
+          typeof record.detail === 'object' &&
+          (record.detail as { review?: { id?: string } }).review?.id === approvalReviewId,
+      );
+      expect(canceledRecords).toHaveLength(1);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
   describe('cancelDurableRun (AB-205)', () => {
     it('resolves unsupported-capability when no durable engine is composed', async () => {
       const bureau = await createBureau({

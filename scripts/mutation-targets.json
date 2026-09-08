@@ -29,7 +29,13 @@
         {
           "file": "packages/bureau/src/create-bureau.ts",
           "symbol": "abortRun",
-          "why": "Idempotency guard (repeat call or already-settled run returns the current summary instead of re-aborting) plus the once-only abortingRunIds admission that actually calls activeRun.abort()."
+          "why": "Idempotency guard (repeat call or already-settled run returns the current summary instead of re-aborting) plus the once-only abortingRunIds admission that actually calls activeRun.abort().",
+          "equivalentMutants": [
+            {
+              "operator": "remove-statement",
+              "reason": "Covers every abortingRunIds.delete(id) call site (the early terminal-status branch and the closed().then() continuation) and the detachBestEffortPromise(...closed().then(...)) statement wrapping the latter — three of this target's four remove-statement candidates (AB-353). abortingRunIds.has(id) is read in exactly one place, guarded behind the earlier `if (runState.status !== 'running') return ...` branch: once a run leaves 'running' for any reason, every future abortRun(id) call is intercepted there before ever consulting the set again, so whether a given id was ever deleted from abortingRunIds cannot change any future call's behavior. Run ids are never reused (AB-337's identifier seam), so a leaked entry cannot collide with a later run either. No public API enumerates, sizes, or inspects this set (confirmed by grep: `abortingRunIds` has no reader outside abortRun itself) so it fails the AB-92 AC4 ResourceScope/QuiescenceReport discovery test for a 'leaked resource' too. The fourth remove-statement candidate at this target — abortingRunIds.add(id) itself — is NOT equivalent and is not listed here: removing it lets a second synchronous abortRun(id) call re-enter the guarded block and re-run revokePendingApprovalsForRun, observably double-revoking (and double-recording an audit entry for) a still-pending signed tool-approval review; that mutant is killed by create-bureau.test.ts's 'abortRun called twice synchronously while still running revokes a pending signed tool-approval review exactly once (AB-353)'."
+            }
+          ]
         }
       ],
       "tests": [
@@ -67,7 +73,13 @@
         {
           "file": "packages/armorer/src/execution-lifecycle.ts",
           "symbol": "finish",
-          "why": "Chooses 'unknown-effect' vs 'terminal' from the reported CleanupOutcome, retains the privileged context only on a genuinely terminal transition, and resolves the settled promise exactly once (terminal-state short-circuit at the top)."
+          "why": "Chooses 'unknown-effect' vs 'terminal' from the reported CleanupOutcome, retains the privileged context only on a genuinely terminal transition, and resolves the settled promise exactly once (terminal-state short-circuit at the top).",
+          "equivalentMutants": [
+            {
+              "operator": "remove-statement",
+              "reason": "Covers finish()'s removeAbortListeners() call (AB-353). Both listeners it detaches (onCallerAbort on options.signal, onOwnerAbort on ownerController.signal) are registered `{ once: true }`, so a listener that has already fired has already self-removed regardless of this call; a listener that has NOT fired only matters if it fires LATER, and when it does it invokes this same execution's own abort(source, reason) closure, which independently short-circuits on `record.snapshot.state === 'terminal' || ... === 'unknown-effect' || ... === 'cleanup-pending'` before doing anything observable. So whether or not removeAbortListeners() ran, a caller- or owner-abort delivered after finish() produces byte-identical ExecutionHandle state (no snapshot change, no lifecycle event) — confirmed empirically: hand-removing this statement leaves both packages/armorer/test/execution-lifecycle.test.ts and execution-lifecycle-default-runtime.test.ts fully green. Its only effect is retaining the onCallerAbort/onOwnerAbort closures (and the signals they're attached to) as long as the caller-supplied AbortSignal itself lives, which is a memory-retention concern with no public discovery surface (no ExecutionLifecycle/ExecutionHandle API enumerates or sizes registered abort listeners), not a behavioral one — outside this test-only issue's scope to fix."
+            }
+          ]
         }
       ],
       "tests": [

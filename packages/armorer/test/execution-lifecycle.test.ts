@@ -40,6 +40,37 @@ describe('execution lifecycle', () => {
     await expect(lifecycle.complete()).resolves.toBeUndefined();
   });
 
+  it('finish is idempotent: a second settle with a different result does not overwrite the first (AB-353)', () => {
+    const lifecycle = createExecutionLifecycle();
+    const handle = lifecycle.begin({ toolName: 'idempotent-finish', callId: 'idempotent-finish' });
+
+    handle.settle('first');
+    const afterFirst = handle.snapshot();
+    handle.settle('second');
+    const afterSecond = handle.snapshot();
+
+    expect(afterSecond.result).toBe('first');
+    expect(afterSecond.revision).toBe(afterFirst.revision);
+  });
+
+  it('resolves whenIdle only once the last outstanding execution finishes (AB-353)', async () => {
+    const lifecycle = createExecutionLifecycle();
+    const handle = lifecycle.begin({ toolName: 'idle-wait', callId: 'idle-wait' });
+
+    let resolved = false;
+    const idle = lifecycle.whenIdle().then(() => {
+      resolved = true;
+    });
+
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+
+    handle.settle('done');
+    await idle;
+
+    expect(resolved).toBe(true);
+  });
+
   function createPrivilegedContext(): EffectiveToolExecutionContext & {
     debugGraph: { nested: { value: string } };
   } {

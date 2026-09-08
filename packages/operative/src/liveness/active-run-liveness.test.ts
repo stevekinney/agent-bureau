@@ -272,6 +272,75 @@ describe('createActiveRunLiveness', () => {
     expect(liveness.snapshot().revision).toBe(terminalRevision);
   });
 
+  it('setStatus with the same status again is a no-op: no wasted revision and no stamped lastTransitionAt (AB-353)', async () => {
+    // Distinct from "setStatus is a no-op once already terminal" above: this
+    // targets the OTHER short-circuit in `setStatus` — `if (status ===
+    // next) return;` — which fires on a repeat call with an UNCHANGED
+    // non-terminal status, not the terminal-once guard.
+    const runtime = createManualRuntimeServices();
+    const liveness = createActiveRunLiveness({
+      id: 'run-same-status-repeat',
+      durability: 'process-local',
+      runtime,
+    });
+
+    liveness.setStatus('aborting');
+    const afterFirst = liveness.snapshot();
+
+    await runtime.advance(5_000);
+    liveness.setStatus('aborting');
+    const afterSecond = liveness.snapshot();
+
+    expect(afterSecond.revision).toBe(afterFirst.revision);
+    expect(afterSecond.lastTransitionAt).toBe(afterFirst.lastTransitionAt);
+
+    liveness.dispose();
+  });
+
+  it('setStatus stamps lastTransitionAt from the clock at the moment of a genuine transition (AB-353)', async () => {
+    // The existing "a manual RuntimeServices controls startedAt and
+    // lastTransitionAt" test never advances the clock between construction
+    // and its one `setStatus` call, so it cannot distinguish a real stamp
+    // from a `lastTransitionAt` that was simply never touched (both read as
+    // the same, still-`startedAt`, ISO string). Advancing first closes that
+    // gap.
+    const runtime = createManualRuntimeServices();
+    const liveness = createActiveRunLiveness({
+      id: 'run-transition-stamp',
+      durability: 'process-local',
+      runtime,
+    });
+
+    const before = liveness.snapshot().lastTransitionAt;
+    await runtime.advance(5_000);
+    liveness.setStatus('aborting');
+
+    expect(liveness.snapshot().lastTransitionAt).not.toBe(before);
+    expect(liveness.snapshot().lastTransitionAt).toBe(runtime.clock.nowISO());
+
+    liveness.dispose();
+  });
+
+  it('setStatus disposes the watchdogs on a terminal transition, clearing their scheduled timers (AB-353)', () => {
+    const runtime = createManualRuntimeServices();
+    const liveness = createActiveRunLiveness({
+      id: 'run-setstatus-dispose',
+      durability: 'process-local',
+      runtime,
+    });
+
+    // TOOL_CALL_POLICY is cadence-gated (unlike AGENT_RUN_PROVIDER_TURN_POLICY,
+    // which has no `cadenceMs`), so the tool watchdog schedules a real timer
+    // once a tool call begins — a public, discoverable resource per AB-92
+    // AC4's `discoveredVia: 'runtime-services-timers'`.
+    liveness.beginToolCall();
+    expect(runtime.pendingTimers().length).toBeGreaterThan(0);
+
+    liveness.setStatus('terminal');
+
+    expect(runtime.pendingTimers()).toEqual([]);
+  });
+
   // AB-336 — `beginWait`/`endWait` are the only way `status` legally becomes
   // `'waiting'`: AC1 requires a `DeclaredWait` accompany it in the SAME
   // snapshot, never as two separate transitions a subscriber could observe
@@ -396,6 +465,78 @@ describe('createActiveRunLiveness', () => {
 
     expect(liveness.snapshot().result).toEqual({ finishReason: 'stop' });
     liveness.dispose();
+  });
+
+  it('settle alone (with no prior setStatus) transitions status to terminal (AB-353)', () => {
+    // Every OTHER settle test in this file also calls `setStatus('terminal')`
+    // somewhere, which independently sets `status` and masks a `settle` that
+    // forgot to do so itself.
+    const clock = createManualClock();
+    const liveness = createActiveRunLiveness({ id: 'run-1', durability: 'process-local', clock });
+
+    expect(liveness.snapshot().status).toBe('running');
+    liveness.settle({ finishReason: 'stop' });
+
+    expect(liveness.snapshot().status).toBe('terminal');
+    expect(liveness.snapshot().cancellable).toBe(false);
+    expect(liveness.snapshot().reachability).toBe('not-applicable');
+  });
+
+  it('settle is idempotent: a second settle with a different value does not overwrite the first result (AB-353)', () => {
+    const clock = createManualClock();
+    const liveness = createActiveRunLiveness({ id: 'run-1', durability: 'process-local', clock });
+
+    liveness.settle({ finishReason: 'stop' });
+    const afterFirst = liveness.snapshot();
+    liveness.settle({ finishReason: 'error' });
+    const afterSecond = liveness.snapshot();
+
+    expect(afterSecond.result).toEqual({ finishReason: 'stop' });
+    expect(afterSecond.revision).toBe(afterFirst.revision);
+  });
+
+  it('settle stamps lastTransitionAt from the clock at the moment it settles (AB-353)', async () => {
+    const runtime = createManualRuntimeServices();
+    const liveness = createActiveRunLiveness({
+      id: 'run-settle-stamp',
+      durability: 'process-local',
+      runtime,
+    });
+
+    const before = liveness.snapshot().lastTransitionAt;
+    await runtime.advance(5_000);
+    liveness.settle({ finishReason: 'stop' });
+
+    expect(liveness.snapshot().lastTransitionAt).not.toBe(before);
+    expect(liveness.snapshot().lastTransitionAt).toBe(runtime.clock.nowISO());
+  });
+
+  it('settle clears a declaredWait present at the moment of settlement (AB-353)', () => {
+    const clock = createManualClock();
+    const liveness = createActiveRunLiveness({ id: 'run-1', durability: 'process-local', clock });
+
+    liveness.beginWait({ reason: 'signal', wakeCondition: 'signal:human-response' });
+    expect(liveness.snapshot().declaredWait).toBeDefined();
+
+    liveness.settle({ finishReason: 'stop' });
+
+    expect(liveness.snapshot().declaredWait).toBeUndefined();
+  });
+
+  it('settle disposes the watchdogs, clearing their scheduled timers (AB-353)', () => {
+    const runtime = createManualRuntimeServices();
+    const liveness = createActiveRunLiveness({
+      id: 'run-settle-dispose',
+      durability: 'process-local',
+      runtime,
+    });
+
+    liveness.beginToolCall();
+    expect(runtime.pendingTimers().length).toBeGreaterThan(0);
+
+    liveness.settle({ finishReason: 'stop' });
+
+    expect(runtime.pendingTimers()).toEqual([]);
   });
 
   it('already-terminal work delivers the terminal snapshot once and no further calls', () => {
