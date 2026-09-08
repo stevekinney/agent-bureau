@@ -269,6 +269,112 @@ describe('reviews routes', () => {
     expect(await listAfter.json()).toEqual([]);
   });
 
+  it('POST /api/v1/reviews/:id/reject with a non-empty reason returns 200 with feedback', async () => {
+    const charges: number[] = [];
+    const bureau = await createBureau({
+      agents: {},
+      generate: async (context) =>
+        context.step === 0
+          ? {
+              content: '',
+              toolCalls: [{ id: 'call-4', name: 'charge-card', arguments: { cents: 1200 } }],
+            }
+          : { content: 'ok', toolCalls: [] },
+      toolbox: createNeedsApprovalToolbox('route-test-secret-4', charges),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+    });
+    const gateway = await createTestGateway(bureau);
+
+    const createResponse = await requestJSON(gateway, '/api/v1/runs', {
+      method: 'POST',
+      body: JSON.stringify({ message: 'Charge the customer' }),
+    });
+    const createdRun = await createResponse.json();
+    await waitForRunState(gateway.bureau, createdRun.id);
+
+    const listResponse = await requestJSON(gateway, '/api/v1/reviews');
+    const [review] = (await listResponse.json()) as Array<{ id: string }>;
+
+    const rejectResponse = await requestJSON(
+      gateway,
+      `/api/v1/reviews/${encodeURIComponent(review!.id)}/reject`,
+      { method: 'POST', body: JSON.stringify({ reason: 'Duplicate charge' }) },
+    );
+    expect(rejectResponse.status).toBe(200);
+    const outcome = await rejectResponse.json();
+    expect(outcome.decision).toBe('reject');
+    expect(outcome.feedback).toBe('Duplicate charge');
+    expect(charges).toEqual([]);
+
+    const listAfter = await requestJSON(gateway, '/api/v1/reviews');
+    expect(await listAfter.json()).toEqual([]);
+  });
+
+  it('POST /api/v1/reviews/:id/reject with a missing reason returns 400', async () => {
+    const charges: number[] = [];
+    const bureau = await createBureau({
+      agents: {},
+      generate: async (context) =>
+        context.step === 0
+          ? {
+              content: '',
+              toolCalls: [{ id: 'call-5', name: 'charge-card', arguments: { cents: 1300 } }],
+            }
+          : { content: 'ok', toolCalls: [] },
+      toolbox: createNeedsApprovalToolbox('route-test-secret-5', charges),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+    });
+    const gateway = await createTestGateway(bureau);
+
+    const createResponse = await requestJSON(gateway, '/api/v1/runs', {
+      method: 'POST',
+      body: JSON.stringify({ message: 'Charge the customer' }),
+    });
+    const createdRun = await createResponse.json();
+    await waitForRunState(gateway.bureau, createdRun.id);
+
+    const listResponse = await requestJSON(gateway, '/api/v1/reviews');
+    const [review] = (await listResponse.json()) as Array<{ id: string }>;
+
+    const rejectResponse = await requestJSON(
+      gateway,
+      `/api/v1/reviews/${encodeURIComponent(review!.id)}/reject`,
+      { method: 'POST' },
+    );
+    expect(rejectResponse.status).toBe(400);
+
+    // The review is still pending — a rejected-for-missing-reason request
+    // never touched state.
+    const listAfter = await requestJSON(gateway, '/api/v1/reviews');
+    expect(await listAfter.json()).toHaveLength(1);
+  });
+
+  it('POST /api/v1/reviews/:id/reject with an empty-string reason returns 400', async () => {
+    const gateway = await createTestGateway({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    const response = await requestJSON(gateway, '/api/v1/reviews/nope/reject', {
+      method: 'POST',
+      body: JSON.stringify({ reason: '' }),
+    });
+    expect(response.status).toBe(400);
+  });
+
+  it('POST /api/v1/reviews/:id/reject returns 400 for a malformed JSON body', async () => {
+    const gateway = await createTestGateway({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    const response = await requestJSON(gateway, '/api/v1/reviews/nope/reject', {
+      method: 'POST',
+      body: '{not valid json',
+    });
+    expect(response.status).toBe(400);
+  });
+
   it('POST /api/v1/reviews/:id/approve returns 404 for an unknown review id', async () => {
     const gateway = await createTestGateway({
       generate: createMockGenerate(),

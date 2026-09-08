@@ -11,6 +11,7 @@ import { createAgentCardRoutes } from './a2a-agent-card';
 import { createAuditRoutes, createConversationRoutes, createMemoryRoutes } from './audit';
 import { createConfigurationRoutes } from './configuration';
 import { createEventsRoutes } from './events';
+import { createGrantsRoutes } from './grants';
 import { createHealthRoutes } from './health';
 import type { HookIdempotencyRegistry } from './hooks';
 import { createHookIdempotencyRegistry, createHooksRoutes } from './hooks';
@@ -117,6 +118,16 @@ export function createRoutes({
   reviewsRouter.post('*', createScopeGuard([SCOPE.REVIEWS_WRITE]));
   reviewsRouter.route('/', createReviewsRoutes(bureau));
   app.route('/api/v1/reviews', reviewsRouter);
+
+  // Reusable approval grant routes (AB-46, AB-346): a grant lets a matching
+  // future tool call skip human review entirely. Mounted alongside the
+  // review queue routes above, its own scope pair per the same rationale.
+  const grantsRouter = new Hono();
+  grantsRouter.get('*', createScopeGuard([SCOPE.GRANTS_READ]));
+  grantsRouter.post('*', createScopeGuard([SCOPE.GRANTS_WRITE]));
+  grantsRouter.delete('*', createScopeGuard([SCOPE.GRANTS_WRITE]));
+  grantsRouter.route('/', createGrantsRoutes(bureau));
+  app.route('/api/v1/grants', grantsRouter);
 
   // Key management routes (only when key store is available)
   if (apiKeyStore) {

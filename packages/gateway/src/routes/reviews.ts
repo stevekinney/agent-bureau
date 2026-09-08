@@ -7,10 +7,12 @@
  * - `POST /api/v1/reviews/:id/approve` — resume the parked run (executes the
  *   tool for a `tool-approval`, delivers the signal for a `human-wait`).
  * - `POST /api/v1/reviews/:id/deny` — record the decision without resuming.
+ * - `POST /api/v1/reviews/:id/reject` — deny plus a REQUIRED caller-supplied
+ *   `reason` (AB-46): returns `400` when `reason` is missing or empty.
  *
- * Both mutating routes attribute the decision to the authenticated principal
- * (the `x-auth-principal` header the authentication middleware injects) and
- * record it in the bureau's audit trail via `Bureau.resolveReview`.
+ * All three mutating routes attribute the decision to the authenticated
+ * principal (the `x-auth-principal` header the authentication middleware
+ * injects) and record it in the bureau's audit trail via `Bureau.resolveReview`.
  */
 import { BureauError } from 'bureau';
 import { Hono } from 'hono';
@@ -34,37 +36,54 @@ const denyBodySchema = z
   })
   .partial();
 
+const rejectBodySchema = z
+  .object({
+    reason: z.string().optional(),
+  })
+  .partial();
+
 /**
  * Parses and validates a mutating review route's JSON body against `schema`.
- * Rejects with `400` for both malformed JSON AND a syntactically valid but
+ * Rejects with `400` for malformed JSON, a syntactically valid but
  * non-object payload (e.g. `null`, `"hi"`, `[]`) — the boundary check the
  * route bodies (which dereference fields like `body.payload` directly) rely
- * on to never see a shape they can't index into.
+ * on to never see a shape they can't index into — AND a well-formed object
+ * that simply fails `schema`'s own validation (e.g. a required grant field
+ * missing). An empty request body is treated as `{}`, so a schema whose
+ * fields are all optional (the review routes' schemas) still parses; a
+ * schema with required fields (e.g. `grants.ts`'s `issueGrantBodySchema`)
+ * correctly rejects it with `400` via the same `safeParse` path below,
+ * rather than throwing an uncaught `ZodError` that would surface as a `500`.
  */
-async function parseReviewBody<TSchema extends z.ZodTypeAny>(
+export async function parseReviewBody<TSchema extends z.ZodTypeAny>(
   context: { req: { text(): Promise<string> } },
   schema: TSchema,
 ): Promise<z.infer<TSchema>> {
   const rawBody = await context.req.text();
-  if (rawBody.length === 0) {
-    return schema.parse({});
-  }
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(rawBody);
-  } catch {
-    throw new HTTPException(400, { message: 'Invalid JSON body' });
+  let parsed: unknown = {};
+  if (rawBody.length > 0) {
+    try {
+      parsed = JSON.parse(rawBody);
+    } catch {
+      throw new HTTPException(400, { message: 'Invalid JSON body' });
+    }
   }
 
   const result = schema.safeParse(parsed);
   if (!result.success) {
-    throw new HTTPException(400, { message: 'Request body must be a JSON object' });
+    const isObjectShaped = typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed);
+    const message = isObjectShaped
+      ? `Request body failed validation: ${result.error.issues
+          .map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`)
+          .join('; ')}`
+      : 'Request body must be a JSON object';
+    throw new HTTPException(400, { message });
   }
   return result.data;
 }
 
-function toHttpException(error: unknown): HTTPException {
+export function toHttpException(error: unknown): HTTPException {
   if (error instanceof BureauError) {
     if (error.code === 'NOT_FOUND') return new HTTPException(404, { message: error.message });
     // The only NOT_CONFIGURED cause reachable here is subject: 'approval' (a
@@ -118,6 +137,23 @@ export function createReviewsRoutes(bureau: Bureau) {
       const outcome = await bureau.resolveReview({
         id,
         decision: 'deny',
+        principal: resolvePrincipal(context),
+        ...(body.reason !== undefined ? { reason: body.reason } : {}),
+      });
+      return context.json(outcome, 200);
+    } catch (error) {
+      throw toHttpException(error);
+    }
+  });
+
+  app.post('/:id/reject', async (context) => {
+    const id = context.req.param('id');
+    const body = await parseReviewBody(context, rejectBodySchema);
+
+    try {
+      const outcome = await bureau.resolveReview({
+        id,
+        decision: 'reject',
         principal: resolvePrincipal(context),
         ...(body.reason !== undefined ? { reason: body.reason } : {}),
       });
