@@ -402,6 +402,18 @@ export function compareToBaseline(
   };
 }
 
+/**
+ * Every survivor lacking a matched `equivalentMutants` entry (no `equivalentReason`) — a
+ * missing assertion, or a previously-equivalent mutant whose pinned `line` drifted out of match.
+ * `compareToBaseline` alone cannot see this: a set can hold at its baseline COUNT while one
+ * classified survivor's `line` stops matching and a genuinely different, unclassified survivor
+ * takes its place at the same total, and the count comparison reports no regression at all
+ * (PR #570 review — identity, not just count, must gate the check).
+ */
+export function unclassifiedSurvivors(result: TargetSetResult): readonly SurvivedMutant[] {
+  return result.survived.filter((mutant) => mutant.equivalentReason === undefined);
+}
+
 // ---------------------------------------------------------------------------
 // Process execution (injectable for tests)
 // ---------------------------------------------------------------------------
@@ -734,6 +746,20 @@ async function main(): Promise<void> {
     // a missing assertion (or a recorded equivalent mutant) an author should be able to see
     // without first breaking the baseline.
     for (const mutant of result.survived) console.log(formatSurvivor(mutant));
+    // The count-only comparison above cannot see IDENTITY: a set can hold steady at its baseline
+    // count while a previously-equivalent mutant's `line` drifts out of match (code shifted above
+    // it) and a genuinely different, non-equivalent survivor takes its place at the same total —
+    // "N survived" stays true of the set, but which N changed. An unclassified survivor (no
+    // `equivalentReason`) is exactly that signal: either a real regression hiding behind a level
+    // count, or a stale `line` pin that needs re-verifying and re-pinning. Fail on it
+    // unconditionally, even when the count itself is within budget or improved (PR #570 review).
+    const unclassified = unclassifiedSurvivors(result);
+    if (unclassified.length > 0) {
+      failed = true;
+      console.error(
+        `\nTarget set "${result.setName}" has ${unclassified.length} unclassified surviving mutant(s) — each is either a missing assertion or a stale equivalentMutants "line" pin that no longer matches. Add a test that kills it, or fix/re-pin its equivalentMutants entry in mutation-targets.json.`,
+      );
+    }
   }
 
   if (failed) {
