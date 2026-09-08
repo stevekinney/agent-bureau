@@ -235,7 +235,28 @@ function requestHumanInputStep(): GenerateResponse {
  * signal-parked/cancellation-recorded marker matrix (and `main()`'s driver
  * loop below) keeps working unmodified for every kind.
  */
-function createFixtureGenerate(kind: CrashScenarioKind): GenerateFunction {
+/**
+ * AB-354: the parent-to-child hold for the `'run-started'` kill point.
+ * `waitForRunStartedRelease` resolves only once `main()` has genuinely
+ * finished handling this process's own root-run start — the `'run-started'`
+ * marker's acknowledgement in primary mode, or immediately in every other
+ * mode/kind, none of which ever reports that marker (see `main()`'s own
+ * comment at the call site). Weft's durable engine can invoke this
+ * function for the root run's step 0 as soon as `bureau.createRun`'s
+ * initial workflow record commits — strictly before `main()`'s own driver
+ * loop gets around to reporting `'run-started'` and blocking on its
+ * acknowledgement — so without this gate, a process killed exactly at
+ * `'run-started'` could still race the engine's own step-0 dispatch ahead
+ * of the `SIGKILL` under scheduling contention. Awaiting the SAME
+ * `runStartedHoldPromise` `main()` blocks on for `'run-started'`'s own ack
+ * closes that race from the child's side entirely: the engine cannot
+ * dispatch `register-child`/`register-children`/`register-schedule` until
+ * the parent has answered, no matter how far behind the `SIGKILL` lags.
+ */
+function createFixtureGenerate(
+  kind: CrashScenarioKind,
+  waitForRunStartedRelease: () => Promise<void>,
+): GenerateFunction {
   return async (context: GenerateContext): Promise<GenerateResponse> => {
     if (isChildRun(context)) {
       if (kind === 'nested-children') {
@@ -251,6 +272,11 @@ function createFixtureGenerate(kind: CrashScenarioKind): GenerateFunction {
       // tool calls, so `register-child`'s dispatch settles fast and durably.
       return { content: 'crash-fixture child done', toolCalls: [] };
     }
+
+    // Only the ROOT run's very first step is gated — by the time step 1
+    // runs, `run-started` has already been acknowledged (the hold has
+    // already released) on every kind that reaches step 1 at all.
+    if (context.step === 0) await waitForRunStartedRelease();
 
     if (kind === 'nested-children') {
       switch (context.step) {
@@ -782,7 +808,24 @@ async function main(): Promise<void> {
   }
   const fixtureToolbox = createFixtureToolbox(getDeps);
 
-  const generate = createFixtureGenerate(kind);
+  // AB-354: created BEFORE `bureau.createRun` is even called (below), so
+  // the root run's step-0 `generate` call — which the engine can dispatch
+  // as soon as `createRun`'s initial workflow record commits, strictly
+  // before this function gets around to reporting `'run-started'` at all —
+  // always finds a not-yet-resolved gate to await rather than racing it.
+  // Resolved exactly once, unconditionally, after this process's own
+  // root-run-start handling below: `'run-started'`'s acknowledgement in
+  // primary mode, or immediately in every other mode/kind, none of which
+  // ever reports that marker and would otherwise park forever.
+  let resolveRunStartedHold!: () => void;
+  const runStartedHoldPromise = new Promise<void>((resolve) => {
+    resolveRunStartedHold = resolve;
+  });
+  function waitForRunStartedRelease(): Promise<void> {
+    return runStartedHoldPromise;
+  }
+
+  const generate = createFixtureGenerate(kind, waitForRunStartedRelease);
 
   // AB-271 recovery-failure scenario: the catalog agent exists ONLY in
   // primary mode. The second process's `agents` map deliberately omits it —
@@ -976,6 +1019,13 @@ async function main(): Promise<void> {
     const summary = await bureau.createRun({ message: 'crash-fixture-root' });
     currentRootRunId = summary.id;
     harness.registerDurableRun(summary.id);
+    // AB-354: step 0's `generate` call is parked on `waitForRunStartedRelease`
+    // (above) until THIS marker's acknowledgement resolves — a kill here
+    // (the harness's `killAtMarker: 'run-started'` scenario) never sends
+    // one, so `resolveRunStartedHold` below is never reached and the engine
+    // stays deterministically parked before `register-child`/
+    // `register-children`/`register-schedule` for the rest of this
+    // process's short life, no matter how long the SIGKILL takes to land.
     await reportMarker('run-started', { runId: summary.id, sessionId: summary.sessionId });
   } else if (currentRootRunId) {
     harness.registerDurableRun(currentRootRunId);
@@ -987,6 +1037,14 @@ async function main(): Promise<void> {
     // empty `currentRootRunId` as "nothing to look up."
     reportObservation('resumed-root-run-id', null);
   }
+  // AB-354: recovery mode (and the recovery-failure kind, which never uses
+  // this shared `generate` at all) never reports `'run-started'` — the
+  // branches above — so the hold must release unconditionally here,
+  // otherwise a recovered process replaying step 0 (a run killed at
+  // `'ready'` or at `'run-started'` itself) would park on `generate`
+  // forever. Primary mode only reaches this line once the marker above was
+  // genuinely acknowledged (or never reaches it at all, killed first).
+  resolveRunStartedHold();
 
   // AB-271: the recovery-failure scenario's catalog run never goes through
   // this fixture's own park/cancel life cycle at all — it settles (or, on
