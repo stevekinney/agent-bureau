@@ -82,8 +82,21 @@ export interface MutationTarget {
    *  unique in the file, which `findSymbolBody` still verifies on its own. */
   readonly occurrence?: number;
   /** Present only for a mutation deliberately not counted as a follow-up: a genuinely
-   *  equivalent mutant, recorded here with its reason rather than silently excluded. */
-  readonly equivalentMutants?: readonly { readonly operator: string; readonly reason: string }[];
+   *  equivalent mutant, recorded here with its reason rather than silently excluded. Matched
+   *  against a survivor by `operator` and, when `line` is given, by that exact line too — line
+   *  is optional only for backward compatibility with an entry written before this field
+   *  existed; a new entry should always pin `line`. Without it, an operator match is entry-wide:
+   *  a LATER, genuinely non-equivalent survivor of the same operator at a different line in the
+   *  same target would silently inherit this justification instead of being reported as a
+   *  missing assertion (PR #570 review). Pinning `line` closes that gap: if the code shifts and
+   *  the line no longer matches the mutant's current position, the entry simply stops applying
+   *  and the survivor reports as an unclassified missing assertion again — a loud, safe failure
+   *  that demands the justification be re-verified and re-pinned, never a silent misattribution. */
+  readonly equivalentMutants?: readonly {
+    readonly operator: string;
+    readonly line?: number;
+    readonly reason: string;
+  }[];
 }
 
 export interface MutationTest {
@@ -573,7 +586,9 @@ export function runTargetSet(options: RunOptions, set: MutationTargetSet): Targe
         }
         if (result.allPassed) {
           const equivalent = target.equivalentMutants?.find(
-            (entry) => entry.operator === candidate.operator,
+            (entry) =>
+              entry.operator === candidate.operator &&
+              (entry.line === undefined || entry.line === candidate.line),
           );
           survived.push({
             setName: set.name,

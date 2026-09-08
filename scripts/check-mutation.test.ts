@@ -285,6 +285,55 @@ describe('runTargetSet against the real classify fixture (proves the check itsel
     }
   }, 30_000);
 
+  it('an equivalentMutants entry pinned to a line only tags that line, not every survivor sharing its operator (AB-353, PR #570 review)', async () => {
+    // Without `line`, an operator-only match would tag EVERY `remove-statement`
+    // survivor at this target — including line 17's `record('low')`, a
+    // genuinely different statement this test deliberately does NOT declare
+    // equivalent. Pinning `line: 14` (the `record('high')` call) must leave
+    // every other remove-statement survivor unclassified.
+    const before = await Bun.file(FIXTURE_FILE).text();
+    try {
+      const set: MutationTargetSet = {
+        name: 'fixture-equivalent-by-line',
+        description: 'fixture pair — a declared equivalent mutant pinned to one line',
+        targets: [
+          {
+            file: relativeToRoot(FIXTURE_FILE),
+            symbol: 'classify',
+            why: 'fixture',
+            equivalentMutants: [
+              {
+                operator: 'remove-statement',
+                line: 14,
+                reason: 'fixture: declared equivalent only for the line-14 statement',
+              },
+            ],
+          },
+        ],
+        tests: [{ path: relativeToRoot(SURVIVED_TEST) }],
+      };
+      const result = runTargetSet({ repoRoot: REPO_ROOT, runCommand: spawn, fileSystem: fs }, set);
+      const removeStatementSurvivors = result.survived.filter(
+        (mutant) => mutant.operator === 'remove-statement',
+      );
+      // At least the line-14 (tagged) and line-17 (untagged) statements both
+      // survive against this deliberately weak test.
+      expect(removeStatementSurvivors.some((mutant) => mutant.line === 14)).toBe(true);
+      expect(removeStatementSurvivors.some((mutant) => mutant.line !== 14)).toBe(true);
+      for (const mutant of removeStatementSurvivors) {
+        if (mutant.line === 14) {
+          expect(mutant.equivalentReason).toBe(
+            'fixture: declared equivalent only for the line-14 statement',
+          );
+        } else {
+          expect(mutant.equivalentReason).toBeUndefined();
+        }
+      }
+    } finally {
+      expect(await Bun.file(FIXTURE_FILE).text()).toBe(before);
+    }
+  }, 30_000);
+
   it('tags a survivor with its recorded equivalent-mutant reason, when the target declares one', async () => {
     const before = await Bun.file(FIXTURE_FILE).text();
     try {

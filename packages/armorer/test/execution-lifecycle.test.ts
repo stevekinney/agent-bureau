@@ -53,6 +53,46 @@ describe('execution lifecycle', () => {
     expect(afterSecond.revision).toBe(afterFirst.revision);
   });
 
+  it('finish() detaches both the caller and owner abort listeners even when neither has fired (AB-353)', () => {
+    // Both listeners are registered `{ once: true }`, which only self-removes
+    // on FIRING — a settle/cleanup/unknownEffect that never fires either one
+    // still leaves them attached unless `removeAbortListeners()` explicitly
+    // detaches them. `options.signal` is caller-supplied and `lifecycle.signal`
+    // is the public alias for the owner controller's signal (`execution-
+    // lifecycle.ts`'s `signal: ownerController.signal`), so both are fair
+    // game to observe directly — no private state involved.
+    const lifecycle = createExecutionLifecycle();
+    const callerController = new AbortController();
+
+    let callerRemovals = 0;
+    const originalCallerRemove = callerController.signal.removeEventListener.bind(
+      callerController.signal,
+    );
+    callerController.signal.removeEventListener = ((
+      ...args: Parameters<typeof originalCallerRemove>
+    ) => {
+      callerRemovals += 1;
+      return originalCallerRemove(...args);
+    }) as typeof callerController.signal.removeEventListener;
+
+    let ownerRemovals = 0;
+    const originalOwnerRemove = lifecycle.signal.removeEventListener.bind(lifecycle.signal);
+    lifecycle.signal.removeEventListener = ((...args: Parameters<typeof originalOwnerRemove>) => {
+      ownerRemovals += 1;
+      return originalOwnerRemove(...args);
+    }) as typeof lifecycle.signal.removeEventListener;
+
+    const handle = lifecycle.begin({
+      toolName: 'detach-listeners',
+      callId: 'detach-listeners',
+      signal: callerController.signal,
+    });
+    handle.settle('done');
+
+    expect(callerRemovals).toBeGreaterThanOrEqual(1);
+    expect(ownerRemovals).toBeGreaterThanOrEqual(1);
+  });
+
   it('resolves whenIdle only once the last outstanding execution finishes (AB-353)', async () => {
     const lifecycle = createExecutionLifecycle();
     const handle = lifecycle.begin({ toolName: 'idle-wait', callId: 'idle-wait' });
