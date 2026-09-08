@@ -4705,6 +4705,34 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // is unaffected — the map entry is cleared in `finally`, so it starts a
   // fresh `performDeleteSession` and gets the normal "already gone, no
   // session to dispatch for" behavior.
+  //
+  // KNOWN LIMITATION (Codex follow-up review finding, PR #566): this map
+  // is process-local, so it does NOT coordinate two separate BUREAU
+  // PROCESSES sharing one persistent backend under the supported
+  // `durableOwnership: { ownership: 'workflow-lease' }` configuration
+  // (`types.ts`'s own doc comment) — two processes can each observe a
+  // truthy session before either commits its deletion. The winner signal
+  // actually exists inside `SessionStore.delete`'s own `runMutation` loop
+  // (it reads whether the body was present when its write committed) —
+  // it is just not surfaced to the caller today. The honest fix is
+  // returning that signal from `SessionStore.delete()` itself, which is
+  // `@lostgradient/operative`'s own published contract, not bureau's —
+  // out of this `packages/bureau`-only child's boundary, and a real
+  // reason, not a jurisdictional one: a bureau-side workaround (e.g. a
+  // second conditional tombstone key layered over the store's own
+  // mutation) would be exactly the kind of shim this repo's conventions
+  // reject, on top of needing its own cleanup for session-id reuse. Two
+  // processes independently deleting the SAME session id at the SAME
+  // moment is an unusual operational pattern (unlike the single-process
+  // race above, which ordinary concurrent API callers can trigger
+  // routinely); until that operative-side contract exists, that specific
+  // case can still produce a duplicate durable `session.deleted` record
+  // and a duplicate notification — the session record itself is still
+  // correctly deleted either way; the duplication is confined to the
+  // dispatch and the audit rows, matching this same code path's
+  // pre-existing (not introduced by this fix) double-write of
+  // `revokePendingApprovalsForRun`'s own `review.revoked` records under
+  // the identical cross-process race.
   const inFlightSessionDeletions = new Map<string, Promise<void>>();
   async function deleteSession(id: string): Promise<void> {
     const existing = inFlightSessionDeletions.get(id);
