@@ -144,7 +144,7 @@ describe('withToolboxIdempotency', () => {
     expect(fuzzy.outcome).toBe('success');
     expect(fuzzy.result).toBe(3);
     expect(missing.outcome).toBe('error');
-    expect(missing.errorCategory).toBe('not_found');
+    expect(missing.error?.category).toBe('not_found');
   });
 
   it('rejects streaming before claiming or executing an idempotency key', async () => {
@@ -1438,7 +1438,7 @@ describe('withToolboxIdempotency', () => {
     controller.abort('cache-hit reporting cancelled');
     const cancelled = await cancelledResume;
     expect(cancelled.outcome).toBe('error');
-    expect(cancelled.errorCategory).toBe('cancelled');
+    expect(cancelled.error?.category).toBe('cancelled');
     expect(await approvalStateStore.state(approval.approvalBinding!)).toBe('issued');
     releaseAfterExecute();
 
@@ -1750,7 +1750,7 @@ describe('withToolboxIdempotency', () => {
     const result = await idempotentToolbox.execute({ name: '', arguments: { a: 1, b: 2 } });
 
     expect(result.outcome).toBe('error');
-    expect(result.errorMessage).toContain('Tool not found');
+    expect(result.error?.message).toContain('Tool not found');
     expect(addCallCount).toBe(0);
   });
 
@@ -2226,7 +2226,7 @@ describe('withToolboxIdempotency', () => {
       now: () => [0, 5][clockReads++] ?? 5,
     }).execute({ name: expiringTool.name, arguments: {} });
 
-    expect(result.errorCategory).toBe('timeout');
+    expect(result.error?.category).toBe('timeout');
     expect(callbackRuns).toBe(0);
     expect(deletes).toBe(1);
   });
@@ -2260,7 +2260,7 @@ describe('withToolboxIdempotency', () => {
     await renewalDidStart;
     controller.abort('cancel initial toolbox renewal');
     const interruptedResult = await pending;
-    expect(interruptedResult.errorCategory).toBe('cancelled');
+    expect(interruptedResult.error?.category).toBe('cancelled');
     resolveRenewal(true);
     await renewal;
     await Promise.resolve();
@@ -2541,8 +2541,8 @@ describe('withToolboxIdempotency', () => {
       { name: 'add', arguments: { a: 1, b: 2 } },
       { signal: controller.signal },
     );
-    expect(cancelled.errorCategory).toBe('cancelled');
-    expect(cancelled.errorMessage).toBe('client stopped');
+    expect(cancelled.error?.category).toBe('cancelled');
+    expect(cancelled.error?.message).toBe('client stopped');
 
     const timedOut = await toolbox.execute(
       { name: 'add', arguments: { a: 1, b: 2 } },
@@ -2551,8 +2551,8 @@ describe('withToolboxIdempotency', () => {
         now: () => 10,
       },
     );
-    expect(timedOut.errorCategory).toBe('timeout');
-    expect(timedOut.errorMessage).toBe('Execution deadline exceeded');
+    expect(timedOut.error?.category).toBe('timeout');
+    expect(timedOut.error?.message).toBe('Execution deadline exceeded');
 
     await expect(
       toolbox.execute(
@@ -2593,7 +2593,7 @@ describe('withToolboxIdempotency', () => {
     );
     controller.abort('read cancelled');
     const cancelled = await pending;
-    expect(cancelled.errorCategory).toBe('cancelled');
+    expect(cancelled.error?.category).toBe('cancelled');
     releaseRead(undefined);
 
     const key = expectedCacheKey('tenant-a', 'default:add', 'add:shared-digest');
@@ -2655,7 +2655,7 @@ describe('withToolboxIdempotency', () => {
       await Promise.resolve();
       controller.abort('operation interrupted');
       const result = await pending;
-      expect(result.errorCategory).toBe('cancelled');
+      expect(result.error?.category).toBe('cancelled');
       return result;
     };
 
@@ -2709,7 +2709,7 @@ describe('withToolboxIdempotency', () => {
     clock = 10;
     deadlineCallbacks.shift()!();
     const deadlineResult = await deadlineRead;
-    expect(deadlineResult.errorCategory).toBe('timeout');
+    expect(deadlineResult.error?.category).toBe('timeout');
     releaseDeadlineRead();
 
     await interrupt({
@@ -2802,7 +2802,7 @@ describe('withToolboxIdempotency', () => {
     await Promise.resolve();
     deadlineController.abort();
     const deadlineResult = await deadlineRead;
-    expect(deadlineResult.errorCategory).toBe('cancelled');
+    expect(deadlineResult.error?.category).toBe('cancelled');
     expect(clearCount).toBe(1);
     releaseRead();
 
@@ -2837,7 +2837,7 @@ describe('withToolboxIdempotency', () => {
       }
       controller.abort('deferred operation');
       const result = await pending;
-      expect(result.errorCategory).toBe('cancelled');
+      expect(result.error?.category).toBe('cancelled');
     };
 
     const legacyStarted = {
@@ -2882,7 +2882,7 @@ describe('withToolboxIdempotency', () => {
     }
     legacyController.abort('legacy verification');
     const legacyResult = await legacyPending;
-    expect(legacyResult.errorCategory).toBe('cancelled');
+    expect(legacyResult.error?.category).toBe('cancelled');
 
     let legacyReplacementStarted = false;
     let resolveLegacyReplacement!: (replaced: boolean) => void;
@@ -2934,7 +2934,7 @@ describe('withToolboxIdempotency', () => {
     expect(legacyReplacementStarted).toBe(true);
     legacyReplaceController.abort('legacy replacement');
     const legacyReplaceResult = await legacyReplacePending;
-    expect(legacyReplaceResult.errorCategory).toBe('cancelled');
+    expect(legacyReplaceResult.error?.category).toBe('cancelled');
     resolveLegacyReplacement(true);
     await legacyReplacement;
     await Promise.resolve();
@@ -3013,7 +3013,7 @@ describe('withToolboxIdempotency', () => {
     expect(claimStarted).toBe(true);
     claimController.abort('claim interrupted');
     const claimResult = await claimPending;
-    expect(claimResult.errorCategory).toBe('cancelled');
+    expect(claimResult.error?.category).toBe('cancelled');
     resolveClaim({ outcome: 'claimed' });
     await delayedClaim;
     await Promise.resolve();
@@ -3045,7 +3045,7 @@ describe('withToolboxIdempotency', () => {
     await lostClaimStarted;
     lostClaimController.abort('lost claim race');
     const lostClaimResult = await lostClaimPending;
-    expect(lostClaimResult.errorCategory).toBe('cancelled');
+    expect(lostClaimResult.error?.category).toBe('cancelled');
     resolveLostClaim({ outcome: 'existing', entry: started('late-existing-attempt') });
     await lostClaim;
     await Promise.resolve();
@@ -3086,7 +3086,7 @@ describe('withToolboxIdempotency', () => {
     expect(releaseRaceRead).toBeDefined();
     raceController.abort('race read interrupted');
     const raceResult = await racePending;
-    expect(raceResult.errorCategory).toBe('cancelled');
+    expect(raceResult.error?.category).toBe('cancelled');
     releaseRaceRead?.();
   });
 
@@ -3182,7 +3182,7 @@ describe('withToolboxIdempotency', () => {
     await Promise.resolve();
     controller.abort({ reason: 'not-an-error' });
     const result = await pending;
-    expect(result.errorMessage).toBe('Cancelled');
+    expect(result.error?.message).toBe('Cancelled');
     release();
   });
 

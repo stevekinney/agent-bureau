@@ -12,11 +12,7 @@ import type { ExecutionHandle, ExecutionLifecycle, ExecutionSnapshot } from './e
 import { policyPauseDecisionsSymbol, policyPauseTierSymbol } from './internal/approval-resume';
 import type { PolicyPauseTier, ToolCall, ToolExecutionResult } from './types';
 
-export type ToolParametersSchema = z.ZodTypeAny;
-/** @deprecated Use standard AddEventListenerOptions instead. */
-export type AddEventListenerOptionsLike = AddEventListenerOptions;
-/** @deprecated Use EventIteratorOptions from lifecycle instead. */
-export type AsyncIteratorOptions = EventIteratorOptions;
+export type ToolParametersSchema = z.ZodType;
 export type { EventIteratorOptions, ObservableLike, Observer, Subscription } from 'lifecycle';
 
 export type MinimalAbortSignal = AbortSignal;

@@ -179,7 +179,7 @@ export function createSchedulerRoutes(
 
     const parsedBody = SubmitSchedulerTaskRequestSchema.safeParse(requestBody);
     if (!parsedBody.success) {
-      const fieldErrors = parsedBody.error.flatten().fieldErrors;
+      const fieldErrors = z.flattenError(parsedBody.error).fieldErrors;
       const message = Object.entries(fieldErrors)
         .map(([field, errors]) => `${field}: ${errors?.join(', ') ?? 'invalid'}`)
         .join('; ');

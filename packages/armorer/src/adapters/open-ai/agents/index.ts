@@ -262,7 +262,7 @@ function isDangerous(tool: Tool): boolean {
 
 function formatToolResult(result: ToolExecutionResult): unknown {
   if (result.outcome === 'error') {
-    const message = result.error?.message ?? result.errorMessage ?? stringifyResult(result.content);
+    const message = result.error?.message ?? stringifyResult(result.content);
     throw new Error(message);
   }
 

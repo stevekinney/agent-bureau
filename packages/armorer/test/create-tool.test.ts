@@ -386,7 +386,7 @@ describe('createTool', () => {
     });
 
     expect(result.outcome).toBe('error');
-    expect(result.errorMessage).toBe('cancelled after load');
+    expect(result.error?.message).toBe('cancelled after load');
     expect(executed).toBe(false);
   });
 
@@ -412,7 +412,7 @@ describe('createTool', () => {
     });
 
     expect(result.outcome).toBe('error');
-    expect(result.errorMessage).toBe('cancelled by policy context');
+    expect(result.error?.message).toBe('cancelled by policy context');
     expect(executed).toBe(false);
   });
 
@@ -1654,7 +1654,7 @@ describe('isTool', () => {
     expect(tool.activeExecutions).toBe(1);
     await completion;
     const result = await pending;
-    expect(result.errorCategory).toBe('cancelled');
+    expect(result.error?.category).toBe('cancelled');
     expect(observedSignal?.aborted).toBe(true);
     expect(tool.activeExecutions).toBe(0);
     await tool.whenIdle();
@@ -1740,7 +1740,7 @@ describe('isTool', () => {
     });
 
     expect(result.outcome).toBe('error');
-    expect(result.errorCategory).toBe('validation');
+    expect(result.error?.category).toBe('validation');
     expect(snapshot?.snapshot.state).toBe('terminal');
     expectTerminalAuditContext(snapshot?.context);
   });
@@ -2682,7 +2682,7 @@ describe('isTool', () => {
     } as any);
 
     expect(result.outcome).toBe('error');
-    expect(result.errorMessage).toBe('authorization cancelled');
+    expect(result.error?.message).toBe('authorization cancelled');
     expect(rollbackCount).toBe(1);
   });
 
@@ -3525,7 +3525,7 @@ describe('RuntimeToolContext.progress()', () => {
     await drainMicrotasks();
     timing.fireTimeout();
     const result = await pending;
-    if (result.errorCategory === 'timeout') timedOut = true;
+    if (result.error?.category === 'timeout') timedOut = true;
 
     expect(timedOut).toBe(true);
   });

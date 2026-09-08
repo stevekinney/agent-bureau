@@ -205,7 +205,7 @@ export interface CreateToolOptions<
    *   its `~standard.validate()`. Since these have no general JSON Schema export, `inputSchema`
    *   MUST also be supplied so the tool can still be serialized for providers.
    */
-  input?: z.ZodType<TInput> | z.ZodRawShape | z.ZodTypeAny | StandardSchemaV1;
+  input?: z.ZodType<TInput> | z.ZodRawShape | z.ZodType | StandardSchemaV1;
   /**
    * JSON Schema for `input`, required when `input` is a non-Zod Standard Schema validator.
    * When `input` is a Zod schema, `z.toJSONSchema(input)` is used unless `inputSchema` is
@@ -251,7 +251,7 @@ export type AsyncToolMetadataInput<M extends ToolMetadata | undefined> =
 export type ToolMetadataInput<M extends ToolMetadata | undefined> =
   SyncToolMetadataInput<M> | AsyncToolMetadataInput<M>;
 
-type SchemaInput = z.ZodTypeAny | z.ZodRawShape;
+type SchemaInput = z.ZodType | z.ZodRawShape;
 
 type InferSchemaInput<TSchema extends SchemaInput> = TSchema extends z.ZodRawShape
   ? z.infer<z.ZodObject<TSchema>>
@@ -263,7 +263,7 @@ type InferSchemaInput<TSchema extends SchemaInput> = TSchema extends z.ZodRawSha
 
 type NamedTool<
   TName extends string,
-  TSchema extends z.ZodTypeAny,
+  TSchema extends z.ZodType,
   E extends ToolEventsMap,
   TReturn,
   M extends ToolMetadata | undefined,
@@ -276,7 +276,7 @@ type NamedTool<
 
 type CreateToolReturn<
   TName extends string,
-  TSchema extends z.ZodTypeAny,
+  TSchema extends z.ZodType,
   E extends ToolEventsMap,
   TReturn,
   M extends ToolMetadata | undefined,
@@ -856,7 +856,7 @@ export function createTool<
   const executeParams = async (params: TInput, options?: ToolExecuteOptions): Promise<TReturn> => {
     const toolCall = createToolCall(name, normalizeToolContent(params));
     const result = await executeCall(toolCall, options);
-    const errorMessage = result.error?.message ?? result.errorMessage;
+    const errorMessage = result.error?.message;
     if (errorMessage) {
       throw new Error(errorMessage);
     }
@@ -2469,7 +2469,7 @@ function createToolError(
   };
 }
 
-function serializeZodIssues(issues: z.ZodIssue[]): JsonValue {
+function serializeZodIssues(issues: z.core.$ZodIssue[]): JsonValue {
   return issues.map((issue) => ({
     code: issue.code,
     path: issue.path.map((segment) =>

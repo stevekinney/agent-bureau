@@ -418,7 +418,7 @@ export function schemaHasKeys(keys: readonly string[]): ToolPredicate {
 
 function getToolSchema(tool: ToolDefinition): ToolSchema {
   const candidate = tool as ToolDefinition & {
-    input?: z.ZodTypeAny;
+    input?: z.ZodType;
   };
   return candidate.input ?? z.object({});
 }

@@ -62,11 +62,11 @@ const storedMemoryRecordSchema = z.object({
   tenantId: z.string().optional(),
   namespace: z.string(),
   content: z.string(),
-  vector: z.array(z.number().finite()),
+  vector: z.array(z.number()),
   metadata: z.record(z.string(), z.unknown()),
-  createdAt: z.number().finite(),
-  updatedAt: z.number().finite(),
-  version: z.number().finite(),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+  version: z.number(),
   status: z.union([z.literal('active'), z.literal('deleted')]),
 });
 

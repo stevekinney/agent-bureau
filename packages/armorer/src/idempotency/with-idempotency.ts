@@ -335,7 +335,6 @@ export function withIdempotency<T extends Tool>(
         if (authorizationResult.outcome !== 'success' || authorizationResult.error) {
           throw new Error(
             authorizationResult.error?.message ??
-              authorizationResult.errorMessage ??
               authorizationResult.pendingApproval?.reason ??
               'Tool execution failed.',
           );
@@ -630,7 +629,6 @@ export function withIdempotency<T extends Tool>(
       }
       const message =
         toolExecution.error?.message ??
-        toolExecution.errorMessage ??
         toolExecution.pendingApproval?.reason ??
         'Tool execution failed.';
       throw new Error(message);

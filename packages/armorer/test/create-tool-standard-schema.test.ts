@@ -91,7 +91,7 @@ describe('createTool with a non-Zod Standard Schema input', () => {
 
     const result = await tool.execute(createToolCall('greet-invalid', { name: '' }));
     expect(result.outcome).toBe('error');
-    expect(result.errorCategory).toBe('validation');
+    expect(result.error?.category).toBe('validation');
   });
 
   it('serializes using the caller-supplied `inputSchema`, not a derived Zod schema', () => {

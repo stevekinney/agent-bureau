@@ -4583,7 +4583,6 @@ describe('AB-361: ActiveRun.durablyStarted settles with the initial workflow rec
         // flagged: a caught value of literal `undefined` must still reject
         // the gate, not be mistaken for a successful settlement.
         onServices: () => {
-          // eslint-disable-next-line @typescript-eslint/only-throw-error
           throw undefined;
         },
       },

@@ -128,7 +128,7 @@ function createManualToolboxDeadlineTiming(initialNow = 0) {
 }
 
 async function createResumeApprovalValidationFixture(options: {
-  currentInput: z.ZodTypeAny;
+  currentInput: z.ZodType;
   name: string;
   secret?: string;
 }) {
@@ -1755,7 +1755,7 @@ describe('createToolbox', () => {
     deferredReserveController.abort('aborted while reserving approval');
     resolveDeferredReserve?.();
     const deferredReserveResult = await deferredReserveResume;
-    expect(deferredReserveResult.errorCategory).toBe('cancelled');
+    expect(deferredReserveResult.error?.category).toBe('cancelled');
     deferReserve = false;
     const admittedAfterDeferredReserveAbort = await deferredReserveToolbox.resumeApproval(
       deferredReserveApproval,
@@ -1792,7 +1792,7 @@ describe('createToolbox', () => {
         now: () => currentTime,
         requestContext: { ...approvalExecutionOptions.requestContext, deadline: 10 },
       });
-      expect(deadlineResult.errorCategory).toBe('timeout');
+      expect(deadlineResult.error?.category).toBe('timeout');
       currentTime = 0;
       const admittedAfterDeadline = await deadlineToolbox.resumeApproval(
         deadlineApproval,
@@ -2328,7 +2328,7 @@ describe('createToolbox', () => {
     );
 
     expect(resumed.outcome).toBe('error');
-    expect(resumed.errorCategory).toBe('permission');
+    expect(resumed.error?.category).toBe('permission');
     expect(resumed.result).toBeUndefined();
   });
 
@@ -2888,7 +2888,7 @@ describe('createToolbox', () => {
       createTool({
         name: 'inspect-arguments',
         description: 'inspects arguments',
-        input: z.object({}).passthrough(),
+        input: z.object({}).loose(),
         async execute(parameters) {
           return parameters;
         },
@@ -3931,7 +3931,7 @@ describe('createToolbox', () => {
     expect(toolbox.activeExecutions).toBe(1);
     await completion;
     const result = await pending;
-    expect(result.errorCategory).toBe('cancelled');
+    expect(result.error?.category).toBe('cancelled');
     expect(observedSignal?.aborted).toBe(true);
     expect(toolbox.activeExecutions).toBe(0);
     expect(toolbox.completed).toBe(true);
@@ -6491,7 +6491,7 @@ describe('createToolbox', () => {
     const cancelled = await pending;
 
     expect(cancelled.outcome).toBe('error');
-    expect(cancelled.errorCategory).toBe('cancelled');
+    expect(cancelled.error?.category).toBe('cancelled');
     releaseIssuance();
     await waitUntil(() => revocations >= 3, 'all three revocation attempts to run');
     expect(revocations).toBe(3);
@@ -6559,7 +6559,7 @@ describe('createToolbox', () => {
     timing.fireLastDeadline();
     const timedOut = await pending;
 
-    expect(timedOut.errorCategory).toBe('timeout');
+    expect(timedOut.error?.category).toBe('timeout');
     releaseIssuance();
     await waitUntil(() => revocations >= 1, 'the late revocation attempt to run');
     expect(revocations).toBe(1);
@@ -6649,7 +6649,7 @@ describe('createToolbox', () => {
     expect(failedIssuanceCalls).toBe(1);
     failingController.abort('operator cancelled');
     const failed = await failedPending;
-    expect(failed.errorCategory).toBe('cancelled');
+    expect(failed.error?.category).toBe('cancelled');
     releaseFailedIssuance();
     await waitUntil(
       () => failedIssuanceSettled,
@@ -6725,7 +6725,7 @@ describe('createToolbox', () => {
       controller.abort('operator cancelled');
       const cancelled = await pendingReplacement;
 
-      expect(cancelled.errorCategory).toBe('cancelled');
+      expect(cancelled.error?.category).toBe('cancelled');
       expect(await approvalStateStore.state(initialApproval.approvalBinding!)).toBe('issued');
       releaseReplacementIssuance();
       await waitUntil(
@@ -6791,7 +6791,7 @@ describe('createToolbox', () => {
         approvalExecutionOptions,
       );
       expect(approvalIssueCount).toBe(2);
-      expect(failedTransition.errorMessage).toContain('replacement approval issue failed');
+      expect(failedTransition.error?.message).toContain('replacement approval issue failed');
       const toolPaused = await toolbox.resumeApproval(
         registryPaused.pendingApproval! as SignedPendingToolApproval,
         approvalExecutionOptions,
@@ -7323,7 +7323,7 @@ describe('toolbox settled event carries real callback completion (AB-289)', () =
     controller.abort('caller stopped');
     const result = await pending;
 
-    expect(result.errorCategory).toBe('cancelled');
+    expect(result.error?.category).toBe('cancelled');
     // Red on the baseline: `callbackCompletion` does not exist yet, so this
     // is `undefined`, not a `Promise` — every assertion below it is moot
     // until the field is added.

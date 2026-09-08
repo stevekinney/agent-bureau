@@ -39,7 +39,7 @@ describe('Adapter Type Compatibility', () => {
         content: string | Array<{ type: string }>;
       };
 
-      expectTypeOf(messages).toMatchTypeOf<AnthropicMessageParamLike[]>();
+      expectTypeOf(messages).toExtend<AnthropicMessageParamLike[]>();
       expectTypeOf(system).toExtend<AnthropicConversation['system']>();
     });
   });

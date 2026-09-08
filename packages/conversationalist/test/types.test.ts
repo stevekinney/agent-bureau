@@ -213,7 +213,7 @@ describe('conversationalist types Type Inference', () => {
       conv.metadata['key'] = 'value';
 
       // Just to verify the test compiles (the errors above are expected)
-      expectTypeOf(conv).toMatchTypeOf<ConversationHistory>();
+      expectTypeOf(conv).toExtend<ConversationHistory>();
     });
   });
 

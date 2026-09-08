@@ -33,13 +33,13 @@ describe('queryTools type inference', () => {
     type ToolboxTool = ReturnType<typeof toolbox.tools>[number];
     type Criteria = NonNullable<Parameters<typeof queryTools<ToolboxTool>>[1]>;
 
-    expectTypeOf<NonNullable<Criteria['tags']>>().toMatchTypeOf<{
+    expectTypeOf<NonNullable<Criteria['tags']>>().toExtend<{
       any?: readonly ('communication' | 'email' | 'weather' | 'read-only')[];
       all?: readonly ('communication' | 'email' | 'weather' | 'read-only')[];
       none?: readonly ('communication' | 'email' | 'weather' | 'read-only')[];
     }>();
 
-    expectTypeOf<NonNullable<Criteria['schema']>>().toMatchTypeOf<{
+    expectTypeOf<NonNullable<Criteria['schema']>>().toExtend<{
       keys?: readonly ('to' | 'body' | 'city' | 'units')[];
     }>();
 

@@ -153,7 +153,7 @@ function shouldClearStartedState(result: ToolExecutionResult): boolean {
     return true;
   }
 
-  const category = result.error?.category ?? result.errorCategory;
+  const category = result.error?.category;
   return (
     category === 'validation' ||
     category === 'permission' ||

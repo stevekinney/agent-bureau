@@ -1,5 +1,5 @@
 import { isToolboxBudgetExceededToolError } from 'armorer';
-import { ZodError, type ZodIssue } from 'zod';
+import { type core, ZodError } from 'zod';
 
 import { isToolCallParseError } from './providers/errors.ts';
 import type { SelectionPlan } from './providers/selection.ts';
@@ -235,7 +235,7 @@ export class OutputValidationError extends AgentRunError {
    * first-class field so a caller can inspect per-field failures without
    * narrowing `cause` itself.
    */
-  readonly issues: readonly ZodIssue[];
+  readonly issues: readonly core.$ZodIssue[];
 
   constructor(cause: unknown) {
     const detail = cause instanceof Error ? cause.message : String(cause);

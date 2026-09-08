@@ -66,18 +66,22 @@ const storedRowSchema = z.object({
   namespace: z.string(),
   id: z.string(),
   status: z.union([z.literal('active'), z.literal('deleted')]),
-  version: z.number().finite(),
+  version: z.number(),
   content: z.string(),
   vector: z.string(),
   metadata: z.string(),
   dedupe_key: z.string().nullable().optional(),
-  indexed_at: z.number().finite().optional(),
-  created_at: z.number().finite(),
-  updated_at: z.number().finite(),
+  indexed_at: z.number().optional(),
+  created_at: z.number(),
+  updated_at: z.number(),
 });
 
-/** Schema for the decoded JSON `vector` column: a finite number array. */
-const vectorJsonSchema = z.array(z.number().finite());
+/**
+ * Schema for the decoded JSON `vector` column: a number array. Zod v4's
+ * `z.number()` already rejects `Infinity`/`NaN` by default, so no explicit
+ * `.finite()` check is needed to keep this finite.
+ */
+const vectorJsonSchema = z.array(z.number());
 
 /** Schema for the decoded JSON `metadata` column: an arbitrary string-keyed map. */
 const metadataJsonSchema = z.record(z.string(), z.unknown());

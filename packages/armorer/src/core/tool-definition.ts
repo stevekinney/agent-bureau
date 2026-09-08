@@ -37,7 +37,7 @@ export type ToolDefinition<TInput extends object = Record<string, unknown>, TOut
   risk?: ToolRisk | undefined;
   lifecycle?: ToolLifecycle | undefined;
   availability?: ToolAvailabilityHook | undefined;
-  input: z.ZodTypeAny;
+  input: z.ZodType;
   /**
    * Caller-supplied JSON Schema for `input`, required when `input` is a
    * non-Zod Standard Schema validator (Zod's own JSON Schema generation only
@@ -66,7 +66,7 @@ export type DefineToolOptions<
   risk?: ToolRisk;
   lifecycle?: ToolLifecycle;
   availability?: ToolAvailabilityHook;
-  input?: z.ZodType<TInput> | z.ZodRawShape | z.ZodTypeAny | StandardSchemaV1;
+  input?: z.ZodType<TInput> | z.ZodRawShape | z.ZodType | StandardSchemaV1;
   inputJsonSchema?: JsonObject;
 };
 

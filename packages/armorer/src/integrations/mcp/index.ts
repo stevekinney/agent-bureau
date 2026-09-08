@@ -308,12 +308,12 @@ export function fromMcpTools(
   options: FromMCPToolsOptions = {},
 ): Tool[] {
   return tools.map((mcpTool) => {
-    const schema = resolveMcpSchema(mcpTool.inputSchema) ?? z.object({}).passthrough();
+    const schema = resolveMcpSchema(mcpTool.inputSchema) ?? z.object({}).loose();
     const metadata = metadataFromMcpTool(mcpTool);
     const createOptions: Parameters<typeof createTool>[0] = {
       name: mcpTool.name,
       description: mcpTool.description ?? mcpTool.title ?? mcpTool.name,
-      input: schema as z.ZodTypeAny,
+      input: schema as z.ZodType,
       async execute(params) {
         const callResult = await executeMcpTool(mcpTool, params, options.callTool);
         return options.formatResult
@@ -947,8 +947,7 @@ function isTextContentBlock(value: unknown): value is { type: 'text'; text: stri
 
 function toCallToolResult(result: ToolResultLike): CallToolResult {
   if (result.outcome === 'error') {
-    const message =
-      result.error?.message ?? getLegacyErrorMessage(result) ?? stringifyResult(result.content);
+    const message = result.error?.message ?? stringifyResult(result.content);
     return {
       content: toTextContent(message),
       isError: true,
@@ -988,13 +987,6 @@ function getExecutionValue(result: ToolResultLike): unknown {
     return result.result;
   }
   return result.content;
-}
-
-function getLegacyErrorMessage(result: ToolResultLike): string | undefined {
-  if ('errorMessage' in result && typeof result.errorMessage === 'string') {
-    return result.errorMessage;
-  }
-  return undefined;
 }
 
 function toStructuredContent(value: unknown): Record<string, unknown> | undefined {
@@ -1065,7 +1057,7 @@ function resolveMcpSchema(schema: unknown): AnySchema | undefined {
   return converted || undefined;
 }
 
-function isZodRawShape(value: unknown): value is Record<string, z.ZodTypeAny> {
+function isZodRawShape(value: unknown): value is Record<string, z.ZodType> {
   if (!isRecord(value)) return false;
   const entries = Object.values(value);
   return entries.length > 0 && entries.every((entry) => isZodSchema(entry));

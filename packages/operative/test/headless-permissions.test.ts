@@ -127,7 +127,7 @@ describe('headless deny-by-default permission mode (AB-94)', () => {
     expect(result.steps).toHaveLength(2);
     const deniedResult = result.steps[0].results[0];
     expect(deniedResult.outcome).toBe('error');
-    expect(deniedResult.errorMessage).toContain('escapes the jail root');
+    expect(deniedResult.error?.message).toContain('escapes the jail root');
   });
 
   it('applies deny > ask > allow precedence: a denylisted tool is denied even when also allowlisted', async () => {
@@ -144,7 +144,7 @@ describe('headless deny-by-default permission mode (AB-94)', () => {
     });
     expect(result.outcome).toBe('error');
     expect(result.error?.code).toBe('POLICY_DENIED');
-    expect(result.errorMessage).toContain('deny list');
+    expect(result.error?.message).toContain('deny list');
   });
 
   it('NEUTER: without headless ask->deny resolution, the same mutating call would park the run on needs_approval instead of denying and continuing', async () => {
