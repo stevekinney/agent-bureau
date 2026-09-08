@@ -103,6 +103,12 @@
       "owningIssue": "WFT-138"
     },
     {
+      "path": "packages/bureau/src/event-history-run-ownership-recovery-lmdb.test.ts",
+      "reason": "AB-359's LMDB run-ownership-recovery test hits the same LMDB completion-callback starvation `packages/bureau/src/test/harness-lmdb-isolation.test.ts` (WFT-138) already documents at length: a zero-delay macrotask loop can spin without ever observing the durable engine's own async write completion, so a bounded, condition-checked poll with a real per-iteration setTimeout delay is required, not a fixed sleep standing in for a check. Split into its own file (mirroring AB-332's identical split for harness-lmdb-isolation.test.ts) so this exemption covers only this one small file, not the SQLite variant of the same scenario in create-bureau.test.ts, which needs no real timer. Removing this exemption is the same WFT-138 consumer follow-up.",
+      "owner": "Agent Bureau team",
+      "owningIssue": "WFT-138"
+    },
+    {
       "path": "packages/armorer/test/execution-lifecycle-default-runtime.test.ts",
       "reason": "Deliberately verifies createExecutionLifecycle's DEFAULT runtime argument (no injected RuntimeServices) — that it schedules deadlines with the real platform timer when the caller supplies none. Injecting a manual runtime here would defeat the point of the test. Split out of execution-lifecycle.test.ts (AB-292) so the exemption covers only this one test.",
       "owner": "Agent Bureau team",

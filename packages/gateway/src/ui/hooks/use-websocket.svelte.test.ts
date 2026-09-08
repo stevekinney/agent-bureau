@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 
+import { DEFAULT_HEARTBEAT_INTERVAL_MS } from '../../heartbeat';
 import type { ServerFrame } from '../../types';
 import {
   clearScheduledInterval,
@@ -107,37 +108,44 @@ function lastSource(): FakeEventSource {
 }
 
 /**
- * Timers double that never actually schedules anything — `setTimeout` is a
- * no-op returning a sentinel handle, so tests that don't exercise the
- * reconnect-timer path never wait on anything real. Tests that do exercise
- * it build their own controllable timers with {@link createControllableTimers}.
+ * Timers double that never actually schedules anything — `setTimeout` and
+ * `setInterval` are no-ops returning a sentinel handle, so tests that don't
+ * exercise the reconnect-timer or ping-interval paths never wait on
+ * anything real. Tests that do exercise those build their own controllable
+ * timers with {@link createControllableTimers}.
  */
 function createInertTimers(): RuntimeTimers {
   return {
     setTimeout: () => 0 as unknown as TimeoutHandle,
     clearTimeout: () => {},
-    setInterval: () => {
-      throw new Error('createWebSocket does not use timers.setInterval');
-    },
+    setInterval: () => 0 as unknown as TimeoutHandle,
     clearInterval: () => {},
     now: () => 0,
   };
 }
 
 /**
- * A deterministic, fully controllable `timers.setTimeout`/`clearTimeout`
- * double for the reconnect-timing tests: no real delay is ever waited on —
- * the scheduled callback fires only when the test calls
- * {@link fireScheduledTimeout} explicitly.
+ * A deterministic, fully controllable `timers.setTimeout`/`setInterval`
+ * double for the reconnect-timing and ping-cadence (AB-299) tests: no real
+ * delay is ever waited on — a scheduled `setTimeout` callback fires only
+ * when the test calls {@link fireScheduledTimeout} explicitly, and a
+ * scheduled `setInterval` callback only when the test calls
+ * {@link fireScheduledInterval} (which, unlike a timeout, does not clear
+ * itself — matching a real interval firing repeatedly until cleared).
  */
 function createControllableTimers(): {
   timers: RuntimeTimers;
   fireScheduledTimeout: () => void;
   scheduledDelay: () => number | undefined;
   scheduledCount: () => number;
+  fireScheduledInterval: () => void;
+  scheduledIntervalDelay: () => number | undefined;
+  scheduledIntervalCount: () => number;
 } {
   let scheduled: { callback: () => void; delay: number | undefined } | undefined;
   let scheduledCount = 0;
+  let scheduledInterval: { callback: () => void; delay: number | undefined } | undefined;
+  let scheduledIntervalCount = 0;
   const timers: RuntimeTimers = {
     setTimeout: (callback, milliseconds) => {
       scheduled = { callback, delay: milliseconds };
@@ -147,10 +155,14 @@ function createControllableTimers(): {
     clearTimeout: () => {
       scheduled = undefined;
     },
-    setInterval: () => {
-      throw new Error('createWebSocket does not use timers.setInterval');
+    setInterval: (callback, milliseconds) => {
+      scheduledInterval = { callback, delay: milliseconds };
+      scheduledIntervalCount += 1;
+      return scheduledIntervalCount as unknown as TimeoutHandle;
     },
-    clearInterval: () => {},
+    clearInterval: () => {
+      scheduledInterval = undefined;
+    },
     now: () => 0,
   };
   return {
@@ -162,6 +174,11 @@ function createControllableTimers(): {
     },
     scheduledDelay: () => scheduled?.delay,
     scheduledCount: () => scheduledCount,
+    fireScheduledInterval: () => {
+      scheduledInterval?.callback();
+    },
+    scheduledIntervalDelay: () => scheduledInterval?.delay,
+    scheduledIntervalCount: () => scheduledIntervalCount,
   };
 }
 
@@ -482,6 +499,154 @@ describe('createWebSocket', () => {
     // replay exactly what was missed while disconnected.
     expect(byRunId.get('run-a')).toBe(3);
     expect(byRunId.get('run-b')).toBe(5);
+
+    store.stop();
+  });
+});
+
+describe('createWebSocket — application-level ping (AB-299)', () => {
+  it('does not ping before the socket opens', () => {
+    const { timers, scheduledIntervalCount } = createControllableTimers();
+    const store = createWebSocket({
+      url: '/ws',
+      eventStreamUrl: '/api/v1/events',
+      environment: createEnvironment(timers),
+    });
+    store.start();
+
+    expect(scheduledIntervalCount()).toBe(0);
+    expect(lastSocket().sent).toEqual([]);
+
+    store.stop();
+  });
+
+  it('sends a ping on the default heartbeat cadence once the socket opens', () => {
+    const { timers, fireScheduledInterval, scheduledIntervalDelay } = createControllableTimers();
+    const store = createWebSocket({
+      url: '/ws',
+      eventStreamUrl: '/api/v1/events',
+      environment: createEnvironment(timers),
+    });
+    store.start();
+    lastSocket().open();
+
+    expect(scheduledIntervalDelay()).toBe(DEFAULT_HEARTBEAT_INTERVAL_MS);
+
+    fireScheduledInterval();
+    expect(lastSocket().sent).toEqual([JSON.stringify({ type: 'ping' })]);
+
+    // An interval fires repeatedly, not once — a second tick sends a
+    // second ping.
+    fireScheduledInterval();
+    expect(lastSocket().sent).toEqual([
+      JSON.stringify({ type: 'ping' }),
+      JSON.stringify({ type: 'ping' }),
+    ]);
+
+    store.stop();
+  });
+
+  it('honors a custom heartbeatIntervalMs', () => {
+    const { timers, scheduledIntervalDelay } = createControllableTimers();
+    const store = createWebSocket({
+      url: '/ws',
+      eventStreamUrl: '/api/v1/events',
+      heartbeatIntervalMs: 5_000,
+      environment: createEnvironment(timers),
+    });
+    store.start();
+    lastSocket().open();
+
+    expect(scheduledIntervalDelay()).toBe(5_000);
+
+    store.stop();
+  });
+
+  it('stops pinging on stop()', () => {
+    const { timers, fireScheduledInterval, scheduledIntervalDelay } = createControllableTimers();
+    const store = createWebSocket({
+      url: '/ws',
+      eventStreamUrl: '/api/v1/events',
+      environment: createEnvironment(timers),
+    });
+    store.start();
+    lastSocket().open();
+    expect(scheduledIntervalDelay()).toBeDefined();
+
+    store.stop();
+    expect(scheduledIntervalDelay()).toBeUndefined();
+
+    // `clearInterval` already dropped the schedule, so this fires nothing —
+    // proving stop() really cleared it rather than merely being about to.
+    fireScheduledInterval();
+    expect(lastSocket().sent).toEqual([]);
+  });
+
+  it('stops pinging when the socket closes and does not resume until the reconnected socket opens', () => {
+    const { timers, fireScheduledTimeout, fireScheduledInterval, scheduledIntervalDelay } =
+      createControllableTimers();
+    const store = createWebSocket({
+      url: '/ws',
+      eventStreamUrl: '/api/v1/events',
+      reconnectInterval: 1000,
+      environment: createEnvironment(timers),
+    });
+    store.start();
+    lastSocket().open();
+    expect(scheduledIntervalDelay()).toBeDefined();
+
+    lastSocket().fireClose();
+    expect(scheduledIntervalDelay()).toBeUndefined();
+
+    fireScheduledTimeout(); // fires the reconnect timer, opening a fresh socket
+    expect(scheduledIntervalDelay()).toBeUndefined();
+
+    lastSocket().open();
+    expect(scheduledIntervalDelay()).toBe(DEFAULT_HEARTBEAT_INTERVAL_MS);
+
+    fireScheduledInterval();
+    expect(lastSocket().sent.at(-1)).toBe(JSON.stringify({ type: 'ping' }));
+
+    store.stop();
+  });
+
+  it('never pings over the SSE fallback (no client-to-server send path)', () => {
+    const { timers, scheduledIntervalCount } = createControllableTimers();
+    const store = createWebSocket({
+      url: '/ws',
+      eventStreamUrl: '/api/v1/events',
+      environment: createEnvironment(timers),
+    });
+    store.start();
+    store.subscribe('run-1');
+    // Never opened, never connected: falls straight to the SSE fallback.
+    lastSocket().fireClose();
+    lastSource().open();
+
+    expect(scheduledIntervalCount()).toBe(0);
+
+    store.stop();
+  });
+
+  it('skips a ping tick if the tracked socket is no longer open (readyState guard)', () => {
+    const { timers, fireScheduledInterval } = createControllableTimers();
+    const store = createWebSocket({
+      url: '/ws',
+      eventStreamUrl: '/api/v1/events',
+      environment: createEnvironment(timers),
+    });
+    store.start();
+    const socket = lastSocket();
+    socket.open();
+
+    // Force the tracked socket's readyState closed without going through
+    // fireClose() (which would itself clear the interval) — an interval
+    // tick landing in the gap between a state change and the `close` event
+    // firing must not throw or send on a socket that has moved on.
+    socket.readyState = 3;
+
+    expect(() => fireScheduledInterval()).not.toThrow();
+    expect(socket.sent).toEqual([]);
 
     store.stop();
   });

@@ -762,6 +762,106 @@ describe('gateway-connection watchdog (AB-219)', () => {
     expect(broker.getConnectionRegistry().get(key)?.snapshot().assessment).toBe('unreachable');
   });
 
+  it('records a host-reachability pulse via recordHostReachability, unlike a transport-keepalive pulse', () => {
+    const clock = createManualLiveFrameBrokerClock();
+    const broker = new LiveFrameBroker({ clock });
+    const key = {};
+    broker.addSubscriber(key, () => {});
+
+    broker.recordHostReachability(key);
+
+    const snapshot = broker.getConnectionRegistry().get(key)?.snapshot();
+    expect(snapshot?.evidence).toHaveLength(1);
+    expect(snapshot?.evidence[0]?.source).toBe('host-reachability');
+  });
+
+  it('is a no-op for recordHostReachability on a key that is not (or is no longer) a tracked subscriber', () => {
+    const clock = createManualLiveFrameBrokerClock();
+    const broker = new LiveFrameBroker({ clock });
+    expect(() => broker.recordHostReachability({})).not.toThrow();
+  });
+
+  it('advances revision on a fresh host-reachability pulse', () => {
+    const clock = createManualLiveFrameBrokerClock();
+    const broker = new LiveFrameBroker({ clock });
+    const key = {};
+    broker.addSubscriber(key, () => {}, { heartbeatIntervalMs: 8_000 });
+
+    const initialRevision = broker.getConnectionRegistry().get(key)?.snapshot().revision;
+    expect(initialRevision).toBe(0);
+
+    broker.recordHostReachability(key);
+    const afterPulse = broker.getConnectionRegistry().get(key)?.snapshot().revision;
+    expect(afterPulse).toBeGreaterThan(initialRevision ?? -1);
+  });
+
+  // AB-299 — this is the concrete two-scenario verification the issue
+  // names: a UI client pinging on cadence reports `reachable` (real peer
+  // evidence, never clamped to `'unknown'` the way transport-keepalive-only
+  // evidence is), and a client that stops pinging decays through `late` to
+  // `unreachable` under the exact same policy row a silent transport
+  // connection does.
+  describe('AB-299: application-level ping as host-reachability evidence', () => {
+    it('reports reachable for a connection that keeps pinging on cadence', () => {
+      const clock = createManualLiveFrameBrokerClock();
+      const broker = new LiveFrameBroker({ clock });
+      const key = {};
+      broker.addSubscriber(key, () => {}, { heartbeatIntervalMs: 8_000 });
+
+      // Three on-time application-level pings — unlike the
+      // transport-keepalive-only walk above, this evidence is never
+      // clamped: it is real proof the peer is alive and talking.
+      for (let tick = 0; tick < 3; tick += 1) {
+        clock.advance(8_000);
+        broker.recordHostReachability(key);
+      }
+
+      const snapshot = broker.getConnectionRegistry().get(key)?.snapshot();
+      expect(snapshot?.missedPulseCount).toBe(0);
+      expect(snapshot?.reachability).toBe('reachable');
+      // `progress` resolves to `'progressing'` here too — AB-219's existing
+      // clamp only ever narrows a keepalive-only stream's reachability/
+      // progress toward `'unknown'`; it never touches non-keepalive
+      // evidence like this one, so both fields pass through unclamped.
+      expect(snapshot?.progress).toBe('progressing');
+      expect(snapshot?.assessment).toBe('healthy');
+      expect(snapshot?.evidence.every((entry) => entry.source === 'host-reachability')).toBe(true);
+    });
+
+    it('decays a healthy pinging connection to late then unreachable once the client stops pinging', () => {
+      const clock = createManualLiveFrameBrokerClock();
+      const broker = new LiveFrameBroker({ clock });
+      const key = {};
+      broker.addSubscriber(key, () => {}, { heartbeatIntervalMs: 8_000 });
+
+      // Establish a healthy, reachable connection first.
+      broker.recordHostReachability(key);
+      expect(broker.getConnectionRegistry().get(key)?.snapshot().reachability).toBe('reachable');
+
+      // checkIntervalMs = 8000 + 4000 + 800 = 12800; missedPulseThreshold: 2.
+      // The watchdog's own first check (at t=12800) still sees the pulse
+      // above as fresh relative to its constructor-time window, so the
+      // connection stays reachable through it — matching the existing
+      // transport-keepalive decay test's own timing (a pulse this evidence
+      // isolation table calls "reachable" isn't retroactively erased by
+      // the watchdog's own periodic check landing right after it).
+      clock.advance(12_800);
+      expect(broker.getConnectionRegistry().get(key)?.snapshot().reachability).toBe('reachable');
+
+      // The client silently stops pinging (e.g. it disconnected without a
+      // clean close, or its own timer stopped) — no further evidence
+      // arrives, so the next two checks decay the connection exactly as
+      // the missed-transport-keepalive walk above does.
+      clock.advance(12_800);
+      expect(broker.getConnectionRegistry().get(key)?.snapshot().reachability).toBe('late');
+
+      clock.advance(12_800);
+      const finalSnapshot = broker.getConnectionRegistry().get(key)?.snapshot();
+      expect(finalSnapshot?.reachability).toBe('unreachable');
+      expect(finalSnapshot?.assessment).toBe('unreachable');
+    });
+  });
+
   it('exposes the subscribers map through getConnectionRegistry(), not a duplicate registry', () => {
     const clock = createManualLiveFrameBrokerClock();
     const broker = new LiveFrameBroker({ clock });
@@ -834,7 +934,7 @@ describe('gateway-connection watchdog (AB-219)', () => {
     expect(afterMiss).toBeGreaterThan(initialRevision ?? -1);
   });
 
-  it('records a WebSocket pong as transport-keepalive evidence via recordTransportKeepalive', () => {
+  it('records transport-keepalive evidence via recordTransportKeepalive', () => {
     const clock = createManualLiveFrameBrokerClock();
     const broker = new LiveFrameBroker({ clock });
     const key = {};

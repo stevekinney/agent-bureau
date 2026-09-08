@@ -71,10 +71,13 @@ export function createWebSocketHandler(options: WebSocketHandlerOptions): WebSoc
         break;
       }
       case 'ping': {
-        // AB-219: the existing pong response itself is unchanged; this only
-        // feeds the application-level connection watchdog the fact that
-        // the transport-level keepalive fired.
-        options.broker.recordTransportKeepalive(ws);
+        // AB-299: the UI client sends this application-level ping on a
+        // cadence derived from the negotiated heartbeat interval (see
+        // `ui/hooks/use-websocket.svelte.ts`) and stops on disconnect. It is
+        // real peer evidence — the client is provably up and talking to us
+        // — so it is recorded as `host-reachability`, not
+        // `transport-keepalive`. The pong response itself is unchanged.
+        options.broker.recordHostReachability(ws);
         const response: ServerFrame = { type: 'pong' };
         ws.send(JSON.stringify(response));
         break;

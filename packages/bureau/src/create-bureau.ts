@@ -116,6 +116,13 @@ import {
   RecoveryLeaseReleasedEvent,
   RecoveryRejectedEvent,
   type RecoveryRejectionReason,
+  ReviewApprovedEvent,
+  ReviewCanceledEvent,
+  ReviewDeniedEvent,
+  ReviewExpiredEvent,
+  ReviewRejectedEvent,
+  ReviewRevokedEvent,
+  ReviewSupersededEvent,
   RunRegisteredEvent,
   RunRemovedEvent,
 } from './events';
@@ -437,6 +444,31 @@ export function isSessionAuthorityAuthorized(
   const lookup = lookupSessionAuthority(metadata, targetRunId);
   if (!lookup.recorded) return true;
   return lookup.principalId === principal;
+}
+
+/**
+ * The owning principal persisted for `runId` in a session's
+ * `lastRunOwningPrincipals` map (AB-359), or `undefined` when nothing was
+ * recorded, the map itself is malformed, or the recorded entry for this
+ * `runId` isn't a string. Every one of those cases decodes to `undefined`
+ * on purpose: an older record written before this field existed has no
+ * `lastRunOwningPrincipals` key at all, and must decode with ownership
+ * absent rather than throw or be treated as corrupt — exactly the same
+ * schema-version-tolerant contract {@link UnsupportedDurableEventSchemaVersionError}
+ * enforces for a durable event record's own payload wrapper. `undefined`
+ * here is consumed by `reattachRecoveredRun`, which then leaves
+ * `runAttribution` for this run unset — reproducing AB-313's existing
+ * fail-closed behavior for "no principal recorded" after a restart, the
+ * same as it already does live.
+ */
+export function resolvePersistedRunOwningPrincipal(
+  metadata: Record<string, JSONValue>,
+  runId: string,
+): string | undefined {
+  const owners = metadata['lastRunOwningPrincipals'];
+  if (!isPlainAuthorityRecord(owners)) return undefined;
+  const principal = owners[runId];
+  return typeof principal === 'string' ? principal : undefined;
 }
 
 /**
@@ -1856,6 +1888,22 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
               },
             }
           : {}),
+        // AB-359 — same per-run union-merge as `lastRequestAuthorities`
+        // immediately above (never overwrite an unrelated concurrent run's
+        // entry), but this map is never pruned on terminal transition: it is
+        // the run's OWNERSHIP record for durable `eventHistory` authorization
+        // (AB-313), which must stay resolvable for the run's whole durable
+        // lifetime, not just while it is live.
+        ...(metadata['lastRunOwningPrincipals'] !== undefined
+          ? {
+              lastRunOwningPrincipals: {
+                ...(isPlainAuthorityRecord(nextSession.metadata['lastRunOwningPrincipals'])
+                  ? nextSession.metadata['lastRunOwningPrincipals']
+                  : {}),
+                ...(metadata['lastRunOwningPrincipals'] as Record<string, JSONValue>),
+              },
+            }
+          : {}),
       };
       const terminalRunId = mergedMetadata['lastRunId'];
       const terminalStatus = mergedMetadata['lastRunStatus'];
@@ -2983,6 +3031,23 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
                 : {}),
             },
           },
+          // AB-359 — persist the run's OWNING principal (`request.principal`,
+          // never `requestContext.authority.principalId`: that field always
+          // carries a value, synthesized as `run:${runId}` when the caller
+          // omitted one, per `normalizeRunRequestContext` above — using it
+          // here would make an unattributed run readable by anyone who
+          // guessed that synthesized id, and would contradict AB-313's
+          // fail-closed rule for a run with no recorded principal) so a
+          // recovered run's real owner can still authorize against durable
+          // `eventHistory` after a process restart, when `runAttribution`
+          // (AB-54's in-memory-only map) has been lost. Conditionally
+          // written, exactly like `runAttribution.set` below: an
+          // unattributed run writes no entry at all, so a restart leaves it
+          // exactly as unresolved as it was live (denied to every
+          // principal, per AB-313), never silently open.
+          ...(request.principal !== undefined
+            ? { lastRunOwningPrincipals: { [runId]: request.principal } }
+            : {}),
         },
         // Stamp the session with the dispatched agent (PRRT_kwDORvupsc6MbUsN) so it
         // is not always recorded as the house default 'bureau'.
@@ -3459,6 +3524,25 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         recoveredRunIds.add(runId);
       }
       runToolboxesByRunId.set(runId, recoveredServices.toolbox);
+    }
+    // AB-359 — rehydrate `runAttribution`'s `principal` from the durably
+    // persisted `lastRunOwningPrincipals` map so a recovered run's REAL
+    // owner can still authorize against `eventHistory` (AB-313) after a
+    // process restart wiped the in-memory map. Reading `sessionMetadata`
+    // here rather than `recoveredRequestContext.authority.principalId`
+    // (which is always populated — see the AB-359 comment at this run's
+    // dispatch site) is what keeps an unattributed run's recovery fail
+    // closed exactly like AB-313 already requires: no persisted entry
+    // means no `runAttribution` entry, identical to a run that was never
+    // dispatched with a principal at all.
+    if (sessionMetadata && typeof sessionMetadata === 'object' && !Array.isArray(sessionMetadata)) {
+      const persistedPrincipal = resolvePersistedRunOwningPrincipal(
+        sessionMetadata as Record<string, JSONValue>,
+        runId,
+      );
+      if (persistedPrincipal !== undefined) {
+        runAttribution.set(runId, { ...runAttribution.get(runId), principal: persistedPrincipal });
+      }
     }
     restoreResolvedReviewIds(sessionMetadata, runId);
     restorePendingApprovalOverrides(sessionMetadata, runId);
@@ -4344,6 +4428,17 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     }
     for (const [reviewId, approval] of pendingApprovalOverrides) {
       if (!reviewId.startsWith(`approval:${runId}:`)) continue;
+      // AB-224: skip an override left behind for a review THIS FUNCTION (or
+      // `sweepExpiredReviews`/`resolveReview`) already resolved on an
+      // earlier call — `pendingApprovalOverrides` is only ever cleared by
+      // `deleteRun` or a successful `resolveReview`, so a review canceled by
+      // `abortRun` and later revoked by `deleteRun` (or expired by
+      // `sweepExpiredReviews` and later canceled by `abortRun`) would
+      // otherwise still be found here and re-transitioned, dispatching a
+      // second, duplicate `review.*` live event/audit entry for an id that
+      // is no longer pending — exactly the duplicate-event failure this
+      // issue's rollback trigger names.
+      if (resolvedReviewIds.has(reviewId) || invalidApprovalReviewIds.has(reviewId)) continue;
       // Unconditional overwrite (never skipped when already present from the
       // scan above) — matches the pre-AB-46 behavior of this same merge, so
       // an override always reflects the LATEST approval object even when a
@@ -5080,6 +5175,14 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
                 review.id,
                 replacementApproval,
               );
+              // AB-46/AB-224: the re-gate produced a genuinely new
+              // `pendingApproval` for the same `callId` — the ORIGINAL
+              // review is superseded, attributed to the synthetic principal
+              // `'system:supersession'`, while the replacement takes over
+              // the same review id as a fresh `'pending'` entry (read live
+              // from `pendingApprovalOverrides` by `listPendingReviews()`,
+              // not written here).
+              await recordReviewStatusTransition(review, 'superseded', 'system:supersession');
             }
             keepPending = true;
           } else if (
@@ -5246,17 +5349,30 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       },
       principal,
     });
+
+    // AB-224: the live counterpart of the durable write above — dispatched
+    // alongside it, never instead of it, closing the live-side gap AB-87's
+    // matrix named ("a typed review.*... family not built"). Carries only
+    // id/runId/principal/kind; actor/decision content (arguments, reasons)
+    // stays privileged to the durable audit trail per AB-87's redaction
+    // column.
+    if (decision === 'approve') {
+      emitter.dispatch(new ReviewApprovedEvent(review.id, review.runId, principal, review.kind));
+    } else if (decision === 'reject') {
+      emitter.dispatch(new ReviewRejectedEvent(review.id, review.runId, principal, review.kind));
+    } else {
+      emitter.dispatch(new ReviewDeniedEvent(review.id, review.runId, principal, review.kind));
+    }
   }
 
   /**
    * Derives a {@link ReviewStatus} from a `review.*` audit record's `type`
    * suffix (AB-46). `getReview` uses this to reconstruct a resolved review's
-   * status from the chronologically-last matching audit entry. No code path
-   * in this record writes a `review.*.superseded` audit entry yet (AB-46's
-   * own decision record scopes that write to a future re-gate change, out of
-   * this issue's boundary) — the case is still handled explicitly here so a
-   * future, or externally-produced, `review.*.superseded` record decodes
-   * correctly instead of silently falling through to `'denied'`.
+   * status from the chronologically-last matching audit entry. `resolveReview`
+   * writes a `review.*.superseded` audit entry from `resumeApproval`'s
+   * re-gate branch (AB-224, see `recordReviewStatusTransition` below) — the
+   * case is handled explicitly here (rather than falling through to
+   * `'denied'`) both for that write and for any externally-produced record.
    */
   function reviewStatusFromAuditType(type: string): ReviewStatus {
     switch (type.split('.').pop()) {
@@ -5279,12 +5395,15 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   }
 
   /**
-   * Writes a `review.<kind>.<status>` audit entry for a status transition
-   * that is NOT one of `resolveReview`'s decision outcomes (approve/deny/
-   * reject) — namely `sweepExpiredReviews`'s `'expired'` transition and
-   * `revokePendingApprovalsForRun`'s `'canceled'`/`'revoked'` transitions
-   * (AB-46). A no-op when no audit trail is configured, matching
-   * `recordReviewDecision`. `review` is embedded in `detail.review` with its
+   * Writes a `review.<kind>.<status>` audit entry, and dispatches the live
+   * `review.*` counterpart (AB-224), for a status transition that is NOT one
+   * of `resolveReview`'s decision outcomes (approve/deny/reject) — namely
+   * `sweepExpiredReviews`'s `'expired'` transition,
+   * `revokePendingApprovalsForRun`'s `'canceled'`/`'revoked'` transitions,
+   * and `resolveReview`'s own `resumeApproval` re-gate branch's `'superseded'`
+   * transition (AB-46/AB-224). The durable write is a no-op when no audit
+   * trail is configured, matching `recordReviewDecision`; the live dispatch
+   * always fires regardless. `review` is embedded in `detail.review` with its
    * own `status` field forced to `status` — every caller passes a review
    * whose `status` still reads `'pending'` (it came from a live scan of
    * `listPendingReviews()`), and embedding that stale value verbatim would
@@ -5294,7 +5413,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
    */
   async function recordReviewStatusTransition(
     review: PendingReview,
-    status: Exclude<ReviewStatus, 'pending'>,
+    status: Exclude<ReviewStatus, 'pending' | 'approved' | 'denied' | 'rejected'>,
     principal: string,
   ): Promise<void> {
     await auditTrailInstance?.record({
@@ -5303,6 +5422,27 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       detail: { review: { ...review, status }, status },
       principal,
     });
+
+    // AB-224: live counterpart, same rationale as `recordReviewDecision`
+    // above. `approve`/`deny`/`reject` never reach this function — they
+    // dispatch from `recordReviewDecision` instead — so the switch below is
+    // exhaustive over exactly `expired | revoked | canceled | superseded`.
+    switch (status) {
+      case 'expired':
+        emitter.dispatch(new ReviewExpiredEvent(review.id, review.runId, principal, review.kind));
+        break;
+      case 'revoked':
+        emitter.dispatch(new ReviewRevokedEvent(review.id, review.runId, principal, review.kind));
+        break;
+      case 'canceled':
+        emitter.dispatch(new ReviewCanceledEvent(review.id, review.runId, principal, review.kind));
+        break;
+      case 'superseded':
+        emitter.dispatch(
+          new ReviewSupersededEvent(review.id, review.runId, principal, review.kind),
+        );
+        break;
+    }
   }
 
   /**
@@ -5973,19 +6113,23 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     if (owner.kind === 'run' && principal !== undefined) {
       // AB-313 — fail CLOSED whenever this run's ownership cannot be
       // verified against `runAttribution` (`request.principal`, AB-54's
-      // best-effort, in-memory-only attribution map), rather than treating
-      // an absent entry as open. `runAttribution` is cleared by
-      // `deleteRun` and never durably persisted for a recovered run (see
-      // `RunAttribution`'s own doc comment — "undefined when unresolved
-      // ... a durably recovered run whose in-memory attribution was lost
-      // to a process restart"), so a deleted or recovered run reads
-      // identically to one that legitimately never had a principal — the
-      // two cases cannot be told apart from this map alone. Failing open
-      // for either would let an unauthenticated caller retrieve durable
-      // history for a run they never owned, including through the
-      // deleted-aggregate 200 path (copilot review, PR #551). Omitting
-      // `principal` entirely still skips this check (an internal/trusted
-      // caller), matching every other owner kind's convention.
+      // best-effort attribution map), rather than treating an absent entry
+      // as open. `runAttribution` is cleared by `deleteRun` (never
+      // reinstated), so a deleted run reads identically to one that
+      // legitimately never had a principal — the two cases cannot be told
+      // apart from this map alone. A run recovered across a process
+      // restart is no longer in the same bucket: AB-359 rehydrates this
+      // map's `principal` from the session's durably persisted
+      // `lastRunOwningPrincipals` entry (`reattachRecoveredRun`), so a
+      // recovered run's REAL owner reads exactly as it did before the
+      // restart, and a recovered run that was genuinely never dispatched
+      // with a principal stays exactly as unresolved as it was live.
+      // Failing open for a deleted or genuinely-unattributed run would let
+      // an unauthenticated caller retrieve durable history for a run they
+      // never owned, including through the deleted-aggregate 200 path
+      // (copilot review, PR #551). Omitting `principal` entirely still
+      // skips this check (an internal/trusted caller), matching every
+      // other owner kind's convention.
       const runPrincipal = runAttribution.get(owner.id)?.principal;
       if (runPrincipal !== principal) {
         return { outcome: 'not-found' };
@@ -6259,6 +6403,30 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         const runId = session.metadata['lastRunId'];
         const status = session.metadata['lastRunStatus'];
         const metadata = session.metadata;
+        // AB-359 (chatgpt-codex-connector review, PR #564, P1) — rehydrate
+        // `runAttribution` for EVERY run this session ever dispatched with a
+        // principal, not only the one `reattachRecoveredRun` happens to
+        // reattach. `recoverAll()` only surfaces still-in-flight workflows,
+        // so a run that already reached a terminal state before the crash
+        // never reaches `reattachRecoveredRun` at all — without this, its
+        // real owner would read `not-found` from `eventHistory` after a
+        // restart despite `lastRunOwningPrincipals` having the entry,
+        // because `resolveEventHistory`'s AB-313 check consults only the
+        // in-memory map. This loop already walks every persisted session
+        // once at boot (the pending-approval/terminal-review restore
+        // above), so this rides the same pass rather than adding a second
+        // full session scan.
+        const owners = metadata['lastRunOwningPrincipals'];
+        if (isPlainAuthorityRecord(owners)) {
+          for (const [ownedRunId, ownerPrincipal] of Object.entries(owners)) {
+            if (typeof ownerPrincipal === 'string') {
+              runAttribution.set(ownedRunId, {
+                ...runAttribution.get(ownedRunId),
+                principal: ownerPrincipal,
+              });
+            }
+          }
+        }
         const restoredRunIds = persistedApprovalRunIds(metadata);
         if (typeof runId === 'string' && status === 'running') restoredRunIds.delete(runId);
         for (const restoredRunId of restoredRunIds) {
