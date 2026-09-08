@@ -1092,6 +1092,11 @@ export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
    * timers and schedules and performs Weft's cleanup, retention, and alert
    * maintenance. Intended for `durableBackgroundTasks: 'manual'` hosts.
    * Returns `undefined` when no durable engine is composed.
+   *
+   * Also prunes a session's `lastRunOwningPrincipals` entries (AB-359) once
+   * a run's entire durable event history has fallen below the fleet feed's
+   * retention floor (AB-363) — never on a run's terminal transition, and
+   * never on a count.
    */
   runDurableMaintenance(now?: number): Promise<true | undefined>;
 

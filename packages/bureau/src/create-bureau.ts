@@ -1941,10 +1941,15 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           : {}),
         // AB-359 — same per-run union-merge as `lastRequestAuthorities`
         // immediately above (never overwrite an unrelated concurrent run's
-        // entry), but this map is never pruned on terminal transition: it is
-        // the run's OWNERSHIP record for durable `eventHistory` authorization
-        // (AB-313), which must stay resolvable for the run's whole durable
-        // lifetime, not just while it is live.
+        // entry). This map is never pruned HERE, on this write path, or on
+        // a run's terminal transition, or on any count: it is the run's
+        // OWNERSHIP record for durable `eventHistory` authorization
+        // (AB-313), which must stay resolvable for as long as the run's
+        // durable history is still pageable. The ONLY pruning is AB-363's
+        // `pruneStaleRunOwnership`, run from `runDurableMaintenance`, which
+        // drops an entry once its run's entire durable history has fallen
+        // below the fleet feed's retention floor — a history that can no
+        // longer be paged needs no owner.
         ...(metadata['lastRunOwningPrincipals'] !== undefined
           ? {
               lastRunOwningPrincipals: {
@@ -4811,9 +4816,120 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     return runtime.durable.engine.list(filter, options);
   }
 
+  /**
+   * AB-363 — drops a session's `lastRunOwningPrincipals` entries whose run's
+   * ENTIRE durable event history has fallen below the fleet feed's
+   * retention floor (coordinator ruling, 2026-09-08): a history that can no
+   * longer be paged needs no owner. This is the only place that map is
+   * pruned — see the "never pruned HERE" comment on the `lastRunOwningPrincipals`
+   * write above for what this deliberately does NOT do (no pruning on
+   * terminal transition, no pruning on a count).
+   *
+   * `eventHistoryInstance.retainedRunOwnerIds()` returns `undefined` when
+   * the retention floor is still 0 (nothing retired yet); this function
+   * then does nothing at all, rather than pruning against an empty set —
+   * an empty set at floor 0 would read as "nothing survived" when in fact
+   * nothing has even been asked to retire.
+   *
+   * A run whose durable engine record is still non-terminal (`pending`,
+   * `running`, or `suspended`) — or one this process's durable engine has
+   * simply never heard of — is EXCLUDED from pruning even when the fleet
+   * feed currently shows no events for it. This is not a second pruning
+   * trigger; it is a guard against the real race the coordinator's
+   * rollback trigger names ("an owner losing access to a still-pageable
+   * run's history"): a run's `lastRunOwningPrincipals` entry is written at
+   * DISPATCH time (`createRun`, above `lastRequestAuthorities`), while its
+   * durable events are appended asynchronously off the bureau's own
+   * `'action'` stream (`createDurableEventProducer`) — a run can
+   * legitimately have an ownership entry before its first durable event has
+   * landed, or between an early event's compaction and its terminal event
+   * being recorded. Treating "not yet visible in this replay" as
+   * "permanently below the floor" for a run still in flight would prune an
+   * owner that a moment later becomes unreadable for exactly the wrong
+   * reason. `runtime.durable.engine.get` is the cross-process durable
+   * truth for this check (unlike the in-memory, process-local `store`).
+   */
+  async function pruneStaleRunOwnership(): Promise<void> {
+    const sessionStore = runtime.sessionStore;
+    if (!eventHistoryInstance || !sessionStore) return;
+
+    const retainedRunIds = await eventHistoryInstance.retainedRunOwnerIds();
+    if (retainedRunIds === undefined) return;
+
+    const pageLimit = 100;
+    let offset = 0;
+    for (;;) {
+      const page = await sessionStore.list({ limit: pageLimit, offset });
+      if (page.length === 0) break;
+
+      for (const summary of page) {
+        const owners = summary.metadata['lastRunOwningPrincipals'];
+        if (!isPlainAuthorityRecord(owners)) continue;
+
+        const candidateRunIds = Object.keys(owners).filter((runId) => !retainedRunIds.has(runId));
+        if (candidateRunIds.length === 0) continue;
+
+        const prunableRunIds: string[] = [];
+        for (const runId of candidateRunIds) {
+          const durableRun = runtime.durable ? await runtime.durable.engine.get(runId) : null;
+          if (
+            durableRun !== null &&
+            (durableRun.status === 'pending' ||
+              durableRun.status === 'running' ||
+              durableRun.status === 'suspended')
+          ) {
+            continue;
+          }
+          prunableRunIds.push(runId);
+        }
+        if (prunableRunIds.length === 0) continue;
+
+        // Read-modify-write against the FRESH session inside `update`
+        // (optimistic concurrency, same as every other write to this map),
+        // not against the `summary` snapshot above — a concurrent dispatch's
+        // union-merge (the write path this pass never touches) can add a
+        // new entry between the `list()` read and this write, and it must
+        // survive.
+        await sessionStore.update(summary.id, (session) => {
+          if (!session) return undefined;
+          const currentOwners = session.metadata['lastRunOwningPrincipals'];
+          if (!isPlainAuthorityRecord(currentOwners)) return undefined;
+
+          const nextOwners = { ...currentOwners };
+          let changed = false;
+          for (const runId of prunableRunIds) {
+            if (runId in nextOwners) {
+              delete nextOwners[runId];
+              changed = true;
+            }
+          }
+          if (!changed) return undefined;
+
+          // Rest-spread the key out entirely once emptied, rather than
+          // persisting `{}`, so a fully-pruned session reads back with NO
+          // `lastRunOwningPrincipals` key at all — the same shape a
+          // never-attributed session already has (AB-359's "no principal
+          // recorded" test).
+          const { lastRunOwningPrincipals: _pruned, ...restMetadata } = session.metadata;
+          return {
+            ...session,
+            metadata:
+              Object.keys(nextOwners).length > 0
+                ? { ...restMetadata, lastRunOwningPrincipals: nextOwners }
+                : restMetadata,
+          };
+        });
+      }
+
+      if (page.length < pageLimit) break;
+      offset += pageLimit;
+    }
+  }
+
   async function runDurableMaintenance(now?: number): Promise<true | undefined> {
     if (!runtime.durable) return undefined;
     await runtime.durable.engine.runMaintenance(now);
+    await pruneStaleRunOwnership();
     return true;
   }
 

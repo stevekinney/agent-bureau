@@ -417,6 +417,82 @@ describe('createDurableEventHistory', () => {
     });
   });
 
+  describe('retainedRunOwnerIds() (AB-363)', () => {
+    it('returns undefined when the retention floor is still 0 — nothing has been retired yet', async () => {
+      const storage = await createMemoryStorage();
+      const runtime = createManualRuntimeServices();
+      const history = createDurableEventHistory(storage, runtime);
+
+      await history.record({ kind: 'run', id: 'run-1' }, 'run.started', {});
+
+      expect(await history.retainedRunOwnerIds()).toBeUndefined();
+
+      await history.dispose();
+    });
+
+    it('reports a run owner as retained while any of its events are still pageable', async () => {
+      const storage = await createMemoryStorage();
+      const runtime = createManualRuntimeServices();
+      const history = createDurableEventHistory(storage, runtime);
+      const owner = { kind: 'run' as const, id: 'run-1' };
+
+      await history.record(owner, 'run.started', {}); // sequence 0
+      await history.record(owner, 'run.completed', {}); // sequence 1
+
+      // Retire only sequence 0 — sequence 1 is still retained, so run-1's
+      // history is NOT entirely below the floor yet.
+      const adminFeed: FleetEventFeed = createFleetEventFeed(storage);
+      await adminFeed.retain({ beforeSequence: 1 });
+      adminFeed.dispose();
+
+      const retained = await history.retainedRunOwnerIds();
+      expect(retained).toEqual(new Set(['run-1']));
+
+      await history.dispose();
+    });
+
+    it('drops a run owner once the floor has passed every one of its events', async () => {
+      const storage = await createMemoryStorage();
+      const runtime = createManualRuntimeServices();
+      const history = createDurableEventHistory(storage, runtime);
+      const stale = { kind: 'run' as const, id: 'run-stale' };
+      const survivor = { kind: 'run' as const, id: 'run-survivor' };
+
+      await history.record(stale, 'run.started', {}); // sequence 0
+      await history.record(stale, 'run.completed', {}); // sequence 1
+      await history.record(survivor, 'run.started', {}); // sequence 2
+
+      // Retire through sequence 1 (both of run-stale's events) — run-
+      // survivor's sequence 2 is untouched.
+      const adminFeed: FleetEventFeed = createFleetEventFeed(storage);
+      await adminFeed.retain({ beforeSequence: 2 });
+      adminFeed.dispose();
+
+      const retained = await history.retainedRunOwnerIds();
+      expect(retained).toEqual(new Set(['run-survivor']));
+
+      await history.dispose();
+    });
+
+    it('never includes a session or schedule owner — only run owners are candidates for pruning', async () => {
+      const storage = await createMemoryStorage();
+      const runtime = createManualRuntimeServices();
+      const history = createDurableEventHistory(storage, runtime);
+
+      await history.record({ kind: 'run', id: 'run-1' }, 'run.started', {}); // sequence 0
+      await history.record({ kind: 'session', id: 'session-1' }, 'session.created', {}); // sequence 1
+
+      const adminFeed: FleetEventFeed = createFleetEventFeed(storage);
+      await adminFeed.retain({ beforeSequence: 1 }); // retires sequence 0 only
+      adminFeed.dispose();
+
+      const retained = await history.retainedRunOwnerIds();
+      expect(retained).toEqual(new Set());
+
+      await history.dispose();
+    });
+  });
+
   describe('corrupt/unrecognized record handling', () => {
     it('never surfaces an event with no workflowId through an owner-scoped page', async () => {
       const storage = await createMemoryStorage();
@@ -1176,6 +1252,9 @@ function createRecordingHistory(
       throw new Error('unused by createDurableEventProducer');
     },
     subscribeEventHistory() {
+      throw new Error('unused by createDurableEventProducer');
+    },
+    retainedRunOwnerIds() {
       throw new Error('unused by createDurableEventProducer');
     },
     dispose: async () => {},

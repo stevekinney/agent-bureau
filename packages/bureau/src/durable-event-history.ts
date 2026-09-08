@@ -186,6 +186,28 @@ export interface DurableEventHistory {
     listener: (event: DurableEventEnvelope) => void,
     options?: DurableEventHistorySubscribeOptions,
   ): Subscription;
+  /**
+   * Snapshots the `run`-owner ids that still have at least one durable
+   * event at or above the feed's CURRENT retention floor — the primitive
+   * `Bureau.runDurableMaintenance` uses to prune a session's
+   * `lastRunOwningPrincipals` entries once a run's entire durable history
+   * has been compacted away (AB-363's coordinator ruling). A single full
+   * replay of the currently-retained window, not one `page()` call per
+   * candidate run: `feed.replay()` with no cursor already walks exactly
+   * the retained records once (Weft's own `retain()` pays the same cost),
+   * so this collects every survivor's owner in one pass rather than
+   * re-scanning the feed once per run.
+   *
+   * Returns `undefined` when the floor is still 0 — nothing has been
+   * retired yet, so nothing can be "entirely below" it, and an
+   * empty-so-far history is still fully pageable (an empty page, never a
+   * gap); reporting a real (possibly empty) set at floor 0 would
+   * indistinguishably read as "prune everything," which is wrong.
+   * `retain()` never runs on its own — nothing in this codebase calls it
+   * yet — so in practice this returns `undefined` until an operator or a
+   * future retention driver advances the floor.
+   */
+  retainedRunOwnerIds(): Promise<Set<string> | undefined>;
   /** Releases the underlying `FleetEventFeed`. Idempotent. */
   dispose(): Promise<void>;
 }
@@ -501,12 +523,36 @@ export function createDurableEventHistory(
     return subscription;
   }
 
+  async function retainedRunOwnerIds(): Promise<Set<string> | undefined> {
+    const floor = await feed.snapshotRetentionFloor();
+    if (floor === 0) return undefined;
+
+    const owners = new Set<string>();
+    // No `since`/`fromCursor`: this walks every record the feed currently
+    // retains, exactly once. A record at or before the floor never
+    // appears here (weft's own `retain()` already deleted it) — we don't
+    // decode the stored payload at all (unlike `page()`), since only the
+    // envelope's `workflowId` is needed and a corrupt/unrecognized
+    // `schemaVersion` on some OTHER owner's record must never stop this
+    // scan.
+    for await (const envelope of feed.replay()) {
+      const workflowId = envelope.workflowId;
+      if (workflowId === undefined) continue; // e.g. the internal `fleet:gap` marker
+      const separator = workflowId.indexOf(':');
+      if (separator < 0) continue;
+      const ownerKind = workflowId.slice(0, separator);
+      if (ownerKind !== 'run') continue;
+      owners.add(workflowId.slice(separator + 1));
+    }
+    return owners;
+  }
+
   function dispose(): Promise<void> {
     feed.dispose();
     return Promise.resolve();
   }
 
-  return { record, page, subscribeEventHistory, dispose };
+  return { record, page, subscribeEventHistory, retainedRunOwnerIds, dispose };
 }
 
 // ── Producer wiring (AB-311) ────────────────────────────────────────
