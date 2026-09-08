@@ -1799,50 +1799,44 @@ describe('createDurableEventProducer()', () => {
     await history.dispose();
   });
 
-  it('a session recreated and deleted again WHILE the prior incarnation\'s own session.deleted write is still in flight still gets its own record (Codex P1 review finding, PR #580, "Preserve overlapping deletions of reused session IDs")', async () => {
-    // A plain in-flight-by-owner map alone still cannot tell these two
-    // cases apart: (a) a genuine duplicate dispatch of the SAME
-    // incarnation's own deletion, and (b) a DIFFERENT, later incarnation
-    // (the id reused and deleted again) whose deletion merely happens to
-    // overlap the first incarnation's still-pending write — e.g. a slow
-    // durable append for incarnation A, during which the id is recreated
-    // as incarnation B and immediately deleted. This proves the fix: a
-    // `'session.created'` action for the id (dispatched, in production,
-    // before `deleteSession` could ever fire a SECOND `SessionDeletedEvent`
-    // for it) clears the stale in-flight entry, so incarnation B's own
-    // deletion is never mistaken for a duplicate of incarnation A's.
+  it("documents a known, accepted limitation: a second incarnation deleted WHILE the first incarnation's own write is still pending is dropped (Codex review findings, PR #580)", async () => {
+    // A plain in-flight-by-owner map cannot tell these two cases apart:
+    // (a) a genuine duplicate dispatch of the SAME incarnation's own
+    // deletion, and (b) a DIFFERENT, later incarnation (the id reused and
+    // deleted again) whose deletion merely happens to overlap the first
+    // incarnation's still-pending write. An earlier round of this change
+    // attempted to close this via an `action.type === 'session.created'`
+    // clearing hook, but that action type is never dispatched in
+    // production (see `sessionDeletedListener`'s own doc comment) — this
+    // test instead documents the CURRENT, honest behavior: the narrow
+    // overlap is not closed. `resolveEventHistory` (`create-bureau.ts`)
+    // separately guards against the WORSE failure mode this could cause
+    // (a live, recreated session misreported as deleted) by checking the
+    // session's live record before trusting a historical marker.
     const runtime = createManualRuntimeServices();
     let releaseFirstWrite!: () => void;
     const firstWriteGate = new Promise<void>((resolve) => {
       releaseFirstWrite = resolve;
     });
     let writeCount = 0;
-    const { bureau, dispatchAction, dispatchSessionDeleted } = createFakeBureauEventSurface();
+    const { bureau, dispatchSessionDeleted } = createFakeBureauEventSurface();
     const { history, calls } = createRecordingHistory(async () => {
       writeCount += 1;
       if (writeCount === 1) await firstWriteGate;
     });
     const producer = createDurableEventProducer(bureau, history, runtime);
 
-    // Incarnation A: created, then deleted — its own `record()` call is
-    // gated and does not resolve yet.
-    dispatchAction(
-      createAction({ type: 'session.created', detail: { sessionId: 'sess-1', agentName: 'x' } }),
-    );
+    // Incarnation A's deletion — its own `record()` call is gated and does
+    // not resolve yet.
     dispatchSessionDeleted(new SessionDeletedEvent('sess-1'));
-
-    // Incarnation B: the SAME id recreated while A's deletion write is
-    // still pending, then deleted too.
-    dispatchAction(
-      createAction({ type: 'session.created', detail: { sessionId: 'sess-1', agentName: 'x' } }),
-    );
+    // Incarnation B's deletion, overlapping A's still-pending write.
     dispatchSessionDeleted(new SessionDeletedEvent('sess-1'));
 
     releaseFirstWrite();
     await runtime.deferred.drain();
 
     const deletionCalls = calls.filter((call) => call.kind === 'session.deleted');
-    expect(deletionCalls).toHaveLength(2);
+    expect(deletionCalls).toHaveLength(1);
 
     await producer.dispose();
   });

@@ -13364,6 +13364,64 @@ describe('bureau.eventHistory deleted-aggregate through a real session deletion 
       await rm(`${databasePath}-shm`, { force: true });
     }
   });
+
+  it('a session id recreated after deletion reads back as an ordinary page, not deleted-aggregate, while it is live again (Codex P1 review finding, PR #580, "Ignore prior deletion markers while a reused session is live")', async () => {
+    // The durable history a recreated session shares with its deleted
+    // predecessor still carries the predecessor's own `'session.deleted'`
+    // marker (this producer does not, and cannot without a per-incarnation
+    // identity on `SessionDeletedEvent`, prune it) — `resolveEventHistory`
+    // must not let that stale marker outrank the session's CURRENT live
+    // record.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-event-history-reused-session-live-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        runtime,
+      });
+
+      const originalRun = await bureau.createRun({ message: 'the first incarnation' });
+      const sessionId = originalRun.sessionId;
+      await waitForRunCompletion(bureau, originalRun.id);
+      await runtime.deferred.drain();
+
+      await bureau.deleteSession(sessionId);
+      await runtime.deferred.drain();
+
+      // Confirm the marker is really there before recreating — otherwise
+      // this test would trivially pass for the wrong reason.
+      const deletedOutcome = await bureau.eventHistory({ kind: 'session', id: sessionId });
+      if (!('outcome' in deletedOutcome) || deletedOutcome.outcome !== 'deleted-aggregate') {
+        throw new Error(`expected deleted-aggregate, got ${JSON.stringify(deletedOutcome)}`);
+      }
+
+      // Recreate the SAME id and complete a run against it.
+      const recreatedRun = await bureau.createRun({ message: 'the second incarnation', sessionId });
+      await waitForRunCompletion(bureau, recreatedRun.id);
+      await runtime.deferred.drain();
+      expect(await bureau.getSession(sessionId)).toBeDefined();
+
+      const liveOutcome = await bureau.eventHistory({ kind: 'session', id: sessionId });
+      expect('outcome' in liveOutcome).toBe(false);
+      if ('outcome' in liveOutcome) throw new Error('unreachable');
+      // The historical marker is still visible in the page — nothing is
+      // erased, only the deleted-aggregate OUTCOME is suppressed.
+      expect(liveOutcome.events.map((event) => event.kind)).toContain('session.deleted');
+
+      await bureau.shutdown();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
 });
 
 describe('bureau.eventHistory run ownership survives a process restart (AB-359)', () => {

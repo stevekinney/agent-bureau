@@ -798,13 +798,22 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
     );
   }
 
-  // AB-372 — the session.deleted in-flight de-duplication map (declared
-  // here, ahead of both listeners that touch it, rather than down by
-  // `sessionDeletedListener` below) so `actionListener`'s `'session.created'`
-  // branch can clear a stale entry for a REUSED session id — see that
-  // branch's own doc comment, and `sessionDeletedListener`'s, for why this
-  // closes the overlapping-incarnations edge case a plain in-flight-by-id
-  // map cannot (Codex review finding, PR #580).
+  // AB-372 — the session.deleted in-flight de-duplication map, declared
+  // here so it is visible to `sessionDeletedListener` below. An earlier
+  // round of this change also cleared it from an `action.type ===
+  // 'session.created'` branch in `actionListener` below, intending to
+  // close the overlapping-incarnations edge case described on
+  // `sessionDeletedListener`'s own doc comment. That branch was DEAD CODE
+  // in production (Codex review finding, PR #580, "Clear the guard from
+  // the actual session creation path"): a repo-wide search
+  // (`grep -rn "new SessionCreatedEvent("`) finds `SessionCreatedEvent`
+  // defined and type-mapped in `@lostgradient/operative` but constructed
+  // NOWHERE — no production code path ever dispatches a `'session.created'`
+  // action onto the bureau's `'action'` stream, so the clearing branch
+  // could only ever fire from a test that synthesized the action directly.
+  // Removed rather than left in as harmless-looking dead code; see
+  // `sessionDeletedListener`'s own doc comment for the resulting known,
+  // accepted limitation.
   const pendingSessionDeletionWrites = new Map<string, Promise<void>>();
 
   const actionListener = (event: ActionEvent): void => {
@@ -829,28 +838,6 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
           message: `[durable-event-history] Dropped "${action.type}" action for run "${action.runId}": no string sessionId on its detail.`,
         });
         return;
-      }
-      if (action.type === 'session.created') {
-        // AB-372 (Codex review finding, PR #580, "Preserve overlapping
-        // deletions of reused session IDs"): a `'session.created'` action
-        // for `sessionId` marks the start of a NEW incarnation of that id.
-        // Any `pendingSessionDeletionWrites` entry for it belongs to a
-        // PRIOR incarnation's still-in-flight `session.deleted` write — a
-        // deletion of THIS new incarnation is a genuinely different event,
-        // not a duplicate of that prior one, even while the prior write has
-        // not yet settled (the exact overlap `create-bureau.test.ts`'s
-        // "does not coalesce a deleteSession call for a session RECREATED
-        // with the same id" test exercises for `deleteSession` itself).
-        // Clearing here — rather than leaving the map to self-clear only
-        // once the prior write settles — closes that overlap: from this
-        // point forward, a `'session.deleted'` dispatch for this id is
-        // never rejected on account of a deletion that belongs to a
-        // different, earlier incarnation. `'session.created'` always
-        // happens-before any later `'session.deleted'` for the SAME
-        // incarnation (a session must exist before `deleteSession` can
-        // delete it), so this never clears an entry a genuinely-in-flight
-        // duplicate of the CURRENT incarnation's own deletion still needs.
-        pendingSessionDeletionWrites.delete(encodeOwner({ kind: 'session', id: sessionId }));
       }
       sink(
         { kind: 'session', id: sessionId },
@@ -985,15 +972,31 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
   // owner for the write's full duration, exactly as it does for every
   // other listener's write (Copilot review finding, PR #580).
   //
-  // Overlapping incarnations (Codex review finding, PR #580, "Preserve
-  // overlapping deletions of reused session IDs"): a plain in-flight-by-id
-  // map alone still conflates a session id recreated and deleted again
-  // WHILE the prior incarnation's own `session.deleted` write is still
-  // pending — `actionListener`'s `'session.created'` branch above clears
-  // this map's entry for that id the moment the new incarnation's own
-  // creation is observed, so a deletion of the new incarnation is never
-  // rejected on account of the old one's still-in-flight write. See that
-  // branch's own doc comment for exactly why the ordering is safe.
+  // KNOWN, ACCEPTED LIMITATION (Codex review findings, PR #580, "Preserve
+  // overlapping deletions of reused session IDs" and the follow-up "Clear
+  // the guard from the actual session creation path" that caught an
+  // earlier attempted fix relying on a production-dead action type): this
+  // in-flight-by-owner map still conflates a session id recreated and
+  // deleted again WHILE the prior incarnation's own `session.deleted`
+  // write is still pending (e.g. a slow durable append) — the second,
+  // genuinely distinct deletion is dropped as if it were a duplicate of
+  // the first. Closing this properly needs a real signal that fires when a
+  // session is (re)created; none exists in production today
+  // (`SessionCreatedEvent`/`SessionSavedEvent` are both defined and
+  // type-mapped in `@lostgradient/operative` but never constructed
+  // anywhere — verified by `grep -rn "new Session(Created|Saved)Event("`
+  // across `packages/`), and adding one is an `@lostgradient/operative`
+  // change (this issue's delivery boundary is `packages/bureau` only), or
+  // else a per-incarnation identity on `SessionDeletedEvent` itself,
+  // equally out of this boundary. The window is extremely narrow in
+  // practice (it requires the FIRST incarnation's own durable append to
+  // still be pending at the moment the id is recreated AND deleted again),
+  // and `resolveEventHistory` (`create-bureau.ts`) already checks the
+  // session's LIVE record before trusting a historical `'session.deleted'`
+  // marker (see that function's own doc comment), so this residual gap can
+  // only ever manifest as a MISSING durable fact for the second
+  // incarnation's deletion, never a false `deleted-aggregate` report for a
+  // session that is actually still live.
   const sessionDeletedListener = (event: SessionDeletedEvent): void => {
     if (signal?.aborted) return;
     const owner: DurableEventOwner = { kind: 'session', id: event.sessionId };

@@ -6713,8 +6713,43 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
    * would be a false positive; a genuinely fresh, never-recorded id must
    * still read back as an ordinary empty page.
    *
+   * A SESSION owner adds one more override on top of that evidence (AB-372,
+   * Codex review finding, PR #580, "Ignore prior deletion markers while a
+   * reused session is live"): a session id is explicitly supported to be
+   * RECREATED after deletion (`create-bureau.test.ts`'s "does not coalesce
+   * a deleteSession call for a session RECREATED with the same id"), and
+   * `createDurableEventProducer`'s own session.deleted listener does not
+   * (and, absent a real per-incarnation identity on `SessionDeletedEvent`,
+   * cannot) prune a prior incarnation's marker from the durable history a
+   * recreated session shares with its predecessor. Evidence of a deletion
+   * that once happened is therefore not sufficient on its own once a
+   * session id has been reused — this function ALSO checks whether
+   * `owner.id` currently names a LIVE session record before reporting
+   * `deleted-aggregate`: a live record wins, and the ordinary page is
+   * returned instead (still carrying that historical marker among its
+   * events — nothing is hidden, only the deleted-aggregate OUTCOME is
+   * suppressed). A run owner has no equivalent override: run ids are freshly
+   * minted, never reused, so `run.removed` evidence is never stale in the
+   * same way.
+   *
    * Schedule owners have no ownership/authorization or deletion concept in
    * this codebase today, so they pass straight through to `page()`.
+   *
+   * KNOWN LIMITATION, not closed here (Codex review finding, PR #580,
+   * "Detect deletion markers beyond the requested page"): this function
+   * examines only the ONE page `history.page()` returns under `options`'
+   * own limit (100 by default) — a session or run with more durable events
+   * than that limit could carry its own deletion marker on a LATER page
+   * this function never inspects, reporting an ordinary page instead of
+   * `deleted-aggregate` for a genuinely deleted owner. This is a
+   * structural limitation of every `resolveEventHistory` caller (not
+   * unique to this issue's session.deleted change — it existed the moment
+   * AB-313 shipped deleted-aggregate detection over a single bounded
+   * page), and closing it needs either an unbounded page-following loop
+   * here or a dedicated "has this owner ever been deleted" query on
+   * `DurableEventHistory` itself — a bigger design change than this
+   * function's own narrow evidence-plus-liveness check, left as a
+   * follow-up rather than solved ad hoc.
    */
   async function resolveEventHistory(
     history: DurableEventHistory,
@@ -6771,6 +6806,19 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           ? 'run.removed'
           : undefined;
     if (deletionMarkerKind && page.events.some((event) => event.kind === deletionMarkerKind)) {
+      // AB-372 (Codex review finding, PR #580) — a session id can be
+      // legitimately recreated after deletion, and its durable history
+      // (shared with its predecessor incarnation) still carries the
+      // predecessor's own `'session.deleted'` marker. A currently-live
+      // session record is authoritative over that stale marker: this
+      // owner is a session, and it presently exists, so it is NOT deleted
+      // right now, regardless of what its durable history contains. Run
+      // owners have no equivalent check — run ids are never reused, so
+      // this branch is session-only.
+      if (owner.kind === 'session' && runtime.sessionStore) {
+        const liveSession = await runtime.sessionStore.load(owner.id);
+        if (liveSession) return page;
+      }
       return { outcome: 'deleted-aggregate', owner, ...page };
     }
     return page;
