@@ -968,6 +968,11 @@ async function main(): Promise<void> {
       );
     }
   } else if (mode === 'primary') {
+    // AB-361: reported strictly before `bureau.createRun` is dispatched, so
+    // nothing durable can exist yet — this is the smoke pair's control kill
+    // point (`scenarios.ts`), replacing `run-started` now that `createRun`
+    // durably commits the initial workflow record before it resolves.
+    await reportMarker('pre-dispatch');
     const summary = await bureau.createRun({ message: 'crash-fixture-root' });
     currentRootRunId = summary.id;
     harness.registerDurableRun(summary.id);

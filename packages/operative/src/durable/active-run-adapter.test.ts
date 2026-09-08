@@ -4320,3 +4320,287 @@ describe('AB-317: durable toolbox listeners survive abort() until the settle-awa
     }
   });
 });
+
+describe('AB-361: ActiveRun.durablyStarted settles with the initial workflow record write', () => {
+  it('does not settle until context.engine.start commits — a fresh run genuinely gates on the durable write, not on the deferred microtask alone', async () => {
+    const context = await buildContext();
+    let releaseStart: (() => void) | undefined;
+    const startGate = new Promise<void>((resolve) => {
+      releaseStart = resolve;
+    });
+    const startCalls: string[] = [];
+    const realStart = context.engine.start.bind(context.engine);
+    context.engine.start = async (...args: Parameters<RegistryAgnosticEngine['start']>) => {
+      startCalls.push(args[2]?.id ?? '');
+      await startGate;
+      return realStart(...args);
+    };
+
+    const runId = 'ab-361-gated-start';
+    const activeRun = createDurableActiveRun(
+      { engine: context.engine, checkpointStore: context.checkpointStore },
+      {
+        runId,
+        sessionId: runId,
+        options: runOptions(createMockGenerate([{ content: 'Done.', toolCalls: [] }])),
+        prompt: 'Hello',
+      },
+    );
+
+    let durablyStartedSettled = false;
+    void activeRun.durablyStarted?.then(() => {
+      durablyStartedSettled = true;
+    });
+
+    // Exhaust every microtask the deferred `drive()` chain and
+    // `startRunLifecycle`'s own await could possibly run on before
+    // `context.engine.start` is ever reached — proves this is a genuine
+    // gate on the write itself, not an artifact of too few ticks.
+    for (let tick = 0; tick < 20; tick += 1) {
+      await Promise.resolve();
+    }
+    expect(durablyStartedSettled).toBe(false);
+    // The call HAS been made (proving the gate is inside `engine.start`,
+    // not blocking the call from happening at all) — it just has not
+    // resolved yet.
+    expect(startCalls).toEqual([runId]);
+
+    releaseStart?.();
+    await activeRun.durablyStarted;
+    expect(durablyStartedSettled).toBe(true);
+
+    await activeRun.result;
+    context.engine[Symbol.dispose]();
+  });
+
+  it('rejects durablyStarted but resolves result with an error RunResult when context.engine.start itself rejects (PRRT_kwDORvupsc6gWc39)', async () => {
+    const context = await buildContext();
+    const startFailure = new Error('sqlite: disk full');
+    context.engine.start = async () => {
+      throw startFailure;
+    };
+
+    const runId = 'ab-361-start-rejects';
+    const activeRun = createDurableActiveRun(
+      { engine: context.engine, checkpointStore: context.checkpointStore },
+      {
+        runId,
+        sessionId: runId,
+        options: runOptions(createMockGenerate([{ content: 'Done.', toolCalls: [] }])),
+        prompt: 'Hello',
+      },
+    );
+
+    const completed: unknown[] = [];
+    activeRun.addEventListener('run.completed', (event) => completed.push(event.result));
+
+    expect(activeRun.durablyStarted).rejects.toThrow('sqlite: disk full');
+    // `result` no longer rejects raw (PRRT_kwDORvupsc6gWc39/PRRT_kwDORvupsc6gWb3a
+    // review): a bare rethrow here would leave bureau's `createRunFromRequest`
+    // — which awaits `durablyStarted`, catches its rejection, and relies on
+    // `run.completed`/`run.aborted`/`run.error` for registration cleanup and
+    // the terminal session write — with no terminal event ever dispatched,
+    // leaking the run forever. Routing through `makeErrorResult` (the SAME
+    // helper the `startError` branch above already uses) dispatches
+    // `RunCompletedEvent` synchronously instead, so `result` resolves with a
+    // `finishReason: 'error'` RunResult and that terminal event fires.
+    const result = await activeRun.result;
+    expect(result.finishReason).toBe('error');
+    expect(result.error).toBeInstanceOf(Error);
+    expect((result.error as Error).message).toBe('sqlite: disk full');
+    expect(completed).toHaveLength(1);
+  });
+
+  it('rejects durablyStarted and resolves result with an error RunResult when a caller-supplied onServices throws, never reaching engine.start (copilot PRRT_kwDORvupsc6gWb3a)', async () => {
+    const context = await buildContext();
+    const startCalls: unknown[] = [];
+    const realStart = context.engine.start.bind(context.engine);
+    context.engine.start = async (...args: Parameters<RegistryAgnosticEngine['start']>) => {
+      startCalls.push(args);
+      return realStart(...args);
+    };
+    const onServicesFailure = new Error('onServices: caller-supplied callback exploded');
+
+    const runId = 'ab-361-on-services-throws';
+    const activeRun = createDurableActiveRun(
+      { engine: context.engine, checkpointStore: context.checkpointStore },
+      {
+        runId,
+        sessionId: runId,
+        options: runOptions(createMockGenerate([{ content: 'Done.', toolCalls: [] }])),
+        prompt: 'Hello',
+        onServices: () => {
+          throw onServicesFailure;
+        },
+      },
+    );
+
+    const completed: unknown[] = [];
+    activeRun.addEventListener('run.completed', (event) => completed.push(event.result));
+
+    expect(activeRun.durablyStarted).rejects.toThrow(
+      'onServices: caller-supplied callback exploded',
+    );
+    const result = await activeRun.result;
+    expect(result.finishReason).toBe('error');
+    expect(result.error).toBeInstanceOf(Error);
+    expect((result.error as Error).message).toBe('onServices: caller-supplied callback exploded');
+    expect(completed).toHaveLength(1);
+    // The failure happened before `engine.start` was ever reached — never a
+    // durable launch to clean up, mirroring the `startError`/
+    // `abortedBeforeDrive` branches' own "never launched" guarantee.
+    expect(startCalls).toEqual([]);
+  });
+
+  it('resolves immediately when the run never durably launches at all (aborted before the deferred microtask fires, AB-339)', async () => {
+    const context = await buildContext();
+    const startCalls: unknown[] = [];
+    const realStart = context.engine.start.bind(context.engine);
+    context.engine.start = async (...args: Parameters<RegistryAgnosticEngine['start']>) => {
+      startCalls.push(args);
+      return realStart(...args);
+    };
+
+    const runId = 'ab-361-never-launched';
+    const activeRun = createDurableActiveRun(
+      { engine: context.engine, checkpointStore: context.checkpointStore },
+      {
+        runId,
+        sessionId: runId,
+        options: runOptions(createMockGenerate([{ content: 'Done.', toolCalls: [] }])),
+        prompt: 'Hello',
+      },
+    );
+
+    // Synchronous abort, before the first microtask — the AB-339 window in
+    // which `driveDurableRun` never reaches `context.engine.start` at all.
+    activeRun.abort('immediate pre-start cancel');
+
+    // Settles without ever calling engine.start — there is no durable
+    // write to await, so nothing should hang here.
+    await activeRun.durablyStarted;
+    expect(startCalls).toEqual([]);
+
+    await activeRun.result;
+    context.engine[Symbol.dispose]();
+  });
+
+  it("reattachDurableActiveRun's durablyStarted is already resolved — a recovered run's durable record predates this process", async () => {
+    const context = await buildContext();
+    try {
+      const handle = {
+        id: 'ab-361-reattached',
+        result: () =>
+          Promise.resolve({
+            schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
+            runId: 'ab-361-reattached',
+            steps: 0,
+            content: 'recovered',
+            finishReason: 'stop-condition',
+          }),
+      };
+      const recoveredRun = reattachDurableActiveRun(
+        { engine: context.engine, checkpointStore: context.checkpointStore },
+        { runId: 'ab-361-reattached', handle },
+      );
+
+      expect(recoveredRun.durablyStarted).toBeInstanceOf(Promise);
+      expect(recoveredRun.durablyStarted).resolves.toBeUndefined();
+      await recoveredRun.result;
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('rejects durablyStarted and resolves result with an error RunResult when a toObservable() subscriber throws on run.started, never reaching engine.start (codex P2 PRRT_kwDORvupsc6gXHn4)', async () => {
+    const context = await buildContext();
+    const startCalls: unknown[] = [];
+    const realStart = context.engine.start.bind(context.engine);
+    context.engine.start = async (...args: Parameters<RegistryAgnosticEngine['start']>) => {
+      startCalls.push(args);
+      return realStart(...args);
+    };
+    const subscriberFailure = new Error('observable subscriber exploded on run.started');
+
+    const runId = 'ab-361-observable-throws-on-run-started';
+    const activeRun = createDurableActiveRun(
+      { engine: context.engine, checkpointStore: context.checkpointStore },
+      {
+        runId,
+        sessionId: runId,
+        options: runOptions(createMockGenerate([{ content: 'Done.', toolCalls: [] }])),
+        prompt: 'Hello',
+      },
+    );
+
+    // `CompletableEventTarget.dispatchEvent` (packages/lifecycle/src/completable.ts)
+    // calls every `toObservable()` subscriber directly, unguarded, after the
+    // native dispatch returns — a synchronous throw here propagates straight
+    // out of `startRunLifecycle`'s own `emitter.dispatch(new
+    // RunStartedEvent(...))` call, before `driveDurableRun` ever reaches its
+    // `startError !== undefined` check.
+    activeRun.toObservable().subscribe({
+      next(event) {
+        if (event.type === 'run.started') throw subscriberFailure;
+      },
+    });
+
+    const completed: unknown[] = [];
+    activeRun.addEventListener('run.completed', (event) => completed.push(event.result));
+
+    expect(activeRun.durablyStarted).rejects.toThrow(
+      'observable subscriber exploded on run.started',
+    );
+    const result = await activeRun.result;
+    expect(result.finishReason).toBe('error');
+    expect(result.error).toBeInstanceOf(Error);
+    expect((result.error as Error).message).toBe('observable subscriber exploded on run.started');
+    expect(completed).toHaveLength(1);
+    // The failure happened before `engine.start` was ever reached — never a
+    // durable launch to clean up, mirroring the sibling `onServices`/
+    // `startError` branches' own "never launched" guarantee.
+    expect(startCalls).toEqual([]);
+  });
+
+  it('rejects durablyStarted (never resolves) when a caller-supplied onServices throws a literal undefined, never reaching engine.start (codex P2 PRRT_kwDORvupsc6gXHn8)', async () => {
+    const context = await buildContext();
+    const startCalls: unknown[] = [];
+    const realStart = context.engine.start.bind(context.engine);
+    context.engine.start = async (...args: Parameters<RegistryAgnosticEngine['start']>) => {
+      startCalls.push(args);
+      return realStart(...args);
+    };
+
+    const runId = 'ab-361-on-services-throws-undefined';
+    const activeRun = createDurableActiveRun(
+      { engine: context.engine, checkpointStore: context.checkpointStore },
+      {
+        runId,
+        sessionId: runId,
+        options: runOptions(createMockGenerate([{ content: 'Done.', toolCalls: [] }])),
+        prompt: 'Hello',
+        // Exercises exactly the discriminator gap PRRT_kwDORvupsc6gXHn8
+        // flagged: a caught value of literal `undefined` must still reject
+        // the gate, not be mistaken for a successful settlement.
+        onServices: () => {
+          // eslint-disable-next-line @typescript-eslint/only-throw-error
+          throw undefined;
+        },
+      },
+    );
+
+    const completed: unknown[] = [];
+    activeRun.addEventListener('run.completed', (event) => completed.push(event.result));
+
+    // Before the fix, `settleDurablyStarted(undefined)` treated a caught
+    // `undefined` identically to a plain no-argument success call, so this
+    // assertion is exactly the one that used to fail: `durablyStarted`
+    // resolved instead of rejecting even though no durable write happened.
+    expect(activeRun.durablyStarted).rejects.toThrow();
+    const result = await activeRun.result;
+    expect(result.finishReason).toBe('error');
+    expect(result.error).toBeInstanceOf(Error);
+    expect(completed).toHaveLength(1);
+    expect(startCalls).toEqual([]);
+  });
+});

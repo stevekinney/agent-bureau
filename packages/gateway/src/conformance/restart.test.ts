@@ -428,6 +428,7 @@ describe('Gateway restart and durable-history replay conformance (AB-275)', () =
       markers.map((entry) => entry.marker);
     expect(markerSequence(report.first.markers)).toEqual([
       'ready',
+      'pre-dispatch',
       'run-started',
       'child-registered',
       'effect-attempted',

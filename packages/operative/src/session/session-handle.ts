@@ -1240,6 +1240,12 @@ export function createSessionHandle(
       // can subscribe to events and abort the run.
       const activeRunWrapper: ActiveRun = {
         result: resultPromise,
+        // AB-361: this wrapper deliberately leaves `durablyStarted`
+        // unset. `SessionHandle` is not `createRunFromRequest`'s durable
+        // branch — no caller of this wrapper awaits it — and a forwarding
+        // getter here would need to track `activeInnerRun`'s late
+        // construction (the reservation step below assigns it) for no
+        // current consumer.
         abort(reason?: string): void {
           cancelRequested = true;
           // Always fire the outer AbortController — this cancels the in-flight

@@ -19,9 +19,21 @@ import { z } from 'zod';
  * recovery-failure scenario, fired once the `bureau.run()` catalog dispatch
  * is durably checkpointed). None of the original AB-270 markers changed
  * meaning.
+ *
+ * AB-361 adds `pre-dispatch`, fired once — immediately after `ready` and
+ * strictly before `bureau.createRun` is called — for every kind that
+ * dispatches a root run through that path (every kind except
+ * `recovery-failure`, which never calls `bureau.createRun`). Nothing
+ * durable can exist at this point by construction: it is the smoke honesty
+ * pair's control kill point (`scenarios.ts`), replacing `run-started` there
+ * now that `createRun`'s durable branch resolves only after the engine's
+ * initial workflow record commits — a kill at `run-started` therefore
+ * always has a durable record to recover, so that marker became a positive
+ * recovery scenario instead of the "nothing durable" control.
  */
 export const CRASH_MARKERS = [
   'ready',
+  'pre-dispatch',
   'run-started',
   'child-registered',
   'children-registered',

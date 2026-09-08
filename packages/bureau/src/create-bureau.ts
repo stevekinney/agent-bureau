@@ -3074,6 +3074,15 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // run by the time a caller can first call `abortRun()` — existing
     // abort-timing tests depend on that not moving. try/catch alone adds no
     // such hop, so it is the release mechanism here.
+    //
+    // AB-361 review (codex P2 PRRT_kwDORvupsc6ga0TX): distinguishes the
+    // catch block's two reachable cases below — set true the moment
+    // `store.register` succeeds, so a durable-write failure that happens
+    // AFTER registration (this run is already a terminal FAILED run other
+    // callers can see via `listRuns()`/`getRun()`) does not fall through
+    // the SAME `runAttribution.delete(runId)` cleanup a genuinely
+    // never-registered run needs.
+    let registeredForRecovery = false;
     try {
       const { session, conversation } = await loadConversation(sessionId);
       const baseConversationHistory = conversation.current;
@@ -3517,16 +3526,66 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       });
 
       store.register(activeRun, runId);
+      registeredForRecovery = true;
       runSessionIdentifiers.set(activeRun, sessionId);
+
+      // AB-361/AB-34: the started-work control contract says an
+      // acknowledged durable run is durable — a caller that holds this
+      // run's identifier must be able to recover it after a crash at any
+      // later point. `activeRun.durablyStarted` settles with the SAME write
+      // `driveDurableRun`'s `context.engine.start(...)` performs on the
+      // durable branch (`durable/active-run-adapter.ts`). Awaited here,
+      // AFTER `store.register` (so `run.started` is still the first frame
+      // any live subscriber sees — an earlier await would let the deferred
+      // `drive()` microtask run before this function's own subscription
+      // exists) and immediately before returning, so this function's own
+      // promise cannot resolve until the durable record is committed.
+      // Guarded by `runtime.durable`, not an unconditional `await
+      // activeRun.durablyStarted` — that field is `undefined` on the
+      // in-memory branch (nothing durable to await), and an unconditional
+      // `await undefined` would still cost every in-memory run one extra
+      // microtask tick it does not have today.
+      if (runtime.durable) {
+        await activeRun.durablyStarted;
+      }
 
       return serializeRunState(store.getRun(runId)!, sessionId);
     } catch (error) {
-      // The run never reached `store.register` (and therefore never fired a
-      // terminal event to settle through) — release whatever this admission
+      // Reached either because the run never got as far as `store.register`
+      // (no terminal event to settle through — the original reason this
+      // catch exists), OR because `store.register` succeeded but the
+      // AWAITED `durablyStarted` above rejected (a genuine durable-write
+      // failure — `engine.start` rejecting, or a caller-supplied
+      // `onServices` throwing; see `driveDurableRun`'s own review-fixed
+      // handling of both, PRRT_kwDORvupsc6gWc39/PRRT_kwDORvupsc6gWb3a).
+      // Either way this function is about to throw instead of returning a
+      // run identifier to its caller, so release whatever this admission
       // claimed so it does not leak a phantom concurrency/singleton hold.
+      // In the second case the run itself is already registered, but its
+      // terminal `run.completed` listener already fired SYNCHRONOUSLY,
+      // inside `makeErrorResult`'s `RunCompletedEvent` dispatch — by
+      // construction this happens before this function's own `await
+      // activeRun.durablyStarted` line can even resume (that rejection is
+      // only observed in a later microtask) — never merely "will fire"
+      // asynchronously afterward, so this cleanup is scoped to per-request
+      // bookkeeping this function itself owns, not to unregistering the
+      // run.
       flowController?.settle(runId);
       runRequestContexts.delete(runId);
-      runAttribution.delete(runId);
+      // AB-361 review (codex P2 PRRT_kwDORvupsc6ga0TX): only the
+      // never-registered case may delete `runAttribution` — a run that
+      // reached `store.register` is ALREADY a terminal FAILED run other
+      // callers can observe via `listRuns()`/`getRun()` (its
+      // `run.completed` listener fired synchronously, per the comment
+      // above), and `resolveEventHistory()`'s authorization check fails
+      // closed when this map entry is absent, locking the run's real owner
+      // out of its own event history. A normal terminal run keeps its
+      // attribution until an explicit `deleteRun`; this post-registration
+      // durable-write-failure path must match that, not the
+      // never-registered path's full cleanup.
+      if (!registeredForRecovery) {
+        runAttribution.delete(runId);
+      }
       throw error;
     }
   }

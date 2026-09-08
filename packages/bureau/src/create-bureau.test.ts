@@ -1492,6 +1492,343 @@ describe('createBureau', () => {
     }
   });
 
+  it("createRun resolves only after weft's initial durable workflow record is committed (AB-361): a fresh process over the same SQLite store always sees it", async () => {
+    // THE HONESTY PROOF: gate the SPECIFIC storage write `engine.start`
+    // performs for THIS run (a `batch` call whose first operation is
+    // `wf:<runId>` — confirmed by instrumenting a real run's storage calls;
+    // bureau's own session save is a SEPARATE `conditionalBatch` against
+    // `agent-session*` keys and is never touched by this gate) so the test
+    // can prove `bureau.createRun()`'s OWN returned promise does not
+    // resolve until that write commits — not merely that the write
+    // eventually happens before some LATER unrelated await gives it enough
+    // microtasks to sneak in first (the previous bug: `createRun` resolved
+    // once the session's `lastRunStatus: 'running'` write landed, several
+    // microtasks BEFORE `engine.start`'s own write — a race that a plain
+    // "await createRun() then reopen and check" test cannot reliably catch,
+    // since nothing here forces real I/O latency between the two writes).
+    const databasePath = join(
+      tmpdir(),
+      `bureau-durably-started-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    let releaseStart: (() => void) | undefined;
+    const startGate = new Promise<void>((resolve) => {
+      releaseStart = resolve;
+    });
+    let bureauA: Awaited<ReturnType<typeof createBureau>> | undefined;
+    let bureauB: Awaited<ReturnType<typeof createBureau>> | undefined;
+
+    try {
+      const realStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
+      let gateArmed = true;
+      // A Proxy, not an object-literal spread: `realStorage` is a real
+      // class instance (`NodeSQLiteStorage`) whose methods live on its
+      // prototype and read private fields via `this` — `{ ...realStorage }`
+      // would silently drop every method, leaving only own enumerable
+      // instance properties (there are none; the state is in `#private`
+      // fields). The proxy forwards everything except `batch` unmodified,
+      // bound to the real instance.
+      const gatedStorage = new Proxy(realStorage, {
+        get(target, property, receiver) {
+          if (property === 'batch') {
+            return async (operations: Parameters<typeof realStorage.batch>[0]) => {
+              const isWorkflowStartWrite = operations.some(
+                (operation) => operation.type === 'put' && operation.key.startsWith('wf:run-'),
+              );
+              if (isWorkflowStartWrite && gateArmed) {
+                gateArmed = false; // only THIS run's initial write is gated
+                await startGate;
+              }
+              return target.batch(operations);
+            };
+          }
+          const value: unknown = Reflect.get(target, property, receiver);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+
+      bureauA = await createBureau({
+        agents: {},
+        // Never resolves — proves this run's very first step never even
+        // begins before the assertions below run; the durable write this
+        // test is about happens entirely BEFORE any step executes.
+        generate: () => new Promise<never>(() => {}),
+        toolbox: createEmptyToolbox(),
+        storage: gatedStorage,
+        durableExecution: true,
+      });
+
+      const runPromise = bureauA.createRun({ message: 'AB-361 durable write honesty' });
+      let createRunSettled = false;
+      void runPromise.then(
+        () => {
+          createRunSettled = true;
+        },
+        () => {
+          createRunSettled = true;
+        },
+      );
+
+      // Exhaust far more microtask turns than the pre-fix code needed to
+      // resolve `createRun` (it only ever needed the session-save write,
+      // already long committed by this point) — proves resolution is
+      // genuinely gated on the STILL-PENDING workflow-record write, not
+      // merely "hasn't happened yet by coincidence".
+      for (let tick = 0; tick < 50; tick += 1) {
+        await Promise.resolve();
+      }
+      expect(createRunSettled).toBe(false);
+
+      releaseStart?.();
+      const run = await runPromise;
+      expect(createRunSettled).toBe(true);
+
+      // Fresh process: a wholly separate bureau over the SAME SQLite file
+      // (the in-process reopen pattern this issue's acceptance criterion
+      // names), with no shared in-process state — bureau A's engine is a
+      // different instance entirely.
+      bureauB = await createBureau({
+        agents: {},
+        generate: () => new Promise<never>(() => {}),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+      });
+
+      const state = await bureauB.getDurableRun(run.id);
+      expect(state).not.toBeNull();
+      expect(state).not.toBeUndefined();
+      expect(state?.id).toBe(run.id);
+    } finally {
+      // In case an assertion above threw before `releaseStart` was called —
+      // dispose() must not hang on a never-committed gate.
+      releaseStart?.();
+      await bureauB?.dispose();
+      await bureauA?.dispose();
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('the in-memory branch resolves createRun without ever awaiting a durable write (AB-361 control)', async () => {
+    // The SAME hung-generate shape as the durable proof above, but with NO
+    // storage/durableExecution configured at all — `createRun` must still
+    // resolve within a handful of microtasks, proving the in-memory
+    // branch's timing is genuinely unaffected by AB-361: it has no
+    // `durablyStarted` promise to await (see `ActiveRun.durablyStarted`'s
+    // own doc comment), and `createRunFromRequest`'s new await is gated on
+    // `runtime.durable`, which is absent here.
+    const bureau = await createBureau({
+      agents: {},
+      generate: () => new Promise<never>(() => {}),
+      toolbox: createEmptyToolbox(),
+    });
+
+    const runPromise = bureau.createRun({ message: 'in-memory, never durable' });
+    let settled = false;
+    void runPromise.then(() => {
+      settled = true;
+    });
+
+    // A handful of ticks covers every await already on the pre-fix
+    // in-memory path (session save, `store.register`). A real durable write
+    // (opening storage, an engine round-trip) could never settle this fast
+    // — so if this branch ever gained an awaited durable-write gate, it
+    // would still be unsettled here.
+    for (let tick = 0; tick < 10; tick += 1) {
+      await Promise.resolve();
+    }
+    expect(settled).toBe(true);
+
+    const run = await runPromise;
+    expect(run.id).toBeDefined();
+
+    await bureau.dispose();
+  });
+
+  it('createRun rejects, unregisters the run, and persists an errored session when the durable workflow write itself fails (AB-361 review PRRT_kwDORvupsc6gWc39)', async () => {
+    // Same gated-storage shape as the honesty proof above, but the
+    // intercepted `batch` call REJECTS instead of blocking — modelling a
+    // genuine persistence failure inside `context.engine.start`. Before the
+    // review fix, this rejection propagated out of `driveDurableRun`
+    // uncaught: `durablyStarted` rejected (correct), but `result` ALSO
+    // rejected raw with no `RunCompletedEvent`/`run.completed` ever
+    // dispatched — so `createRunFromRequest`'s catch block, which relies
+    // entirely on that event to unregister the run and persist its
+    // terminal session state, never got the chance to. This test proves
+    // the run is genuinely cleaned up (a quick, quiescent dispose()) and
+    // the session's `lastRunStatus` reflects the failure, not a permanent
+    // `'running'`.
+    const realStorage = await resolveStorage({ type: 'memory' });
+    const startFailure = new Error('AB-361 review: durable write persistence failure');
+    const gatedStorage = new Proxy(realStorage, {
+      get(target, property, receiver) {
+        if (property === 'batch') {
+          return async (operations: Parameters<typeof realStorage.batch>[0]) => {
+            const isWorkflowStartWrite = operations.some(
+              (operation) => operation.type === 'put' && operation.key.startsWith('wf:'),
+            );
+            if (isWorkflowStartWrite) {
+              throw startFailure;
+            }
+            return target.batch(operations);
+          };
+        }
+        const value: unknown = Reflect.get(target, property, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    const bureau = await createBureau({
+      agents: {},
+      generate: () => new Promise<never>(() => {}),
+      toolbox: createEmptyToolbox(),
+      storage: gatedStorage,
+      durableExecution: true,
+    });
+
+    try {
+      const sessionId = 'ab-361-review-start-rejects';
+      const error = await bureau
+        .createRun({ message: 'AB-361 review: engine.start rejects', sessionId })
+        .catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe('AB-361 review: durable write persistence failure');
+
+      // The failed run's terminal `run.completed` listener (fired
+      // synchronously inside `makeErrorResult`'s dispatch, before
+      // `driveDurableRun`'s promise even settles) already unregistered the
+      // run by the time `createRun`'s rejection reaches this line — but the
+      // session WRITE `persistSessionUpdate` triggers from inside that same
+      // listener is fire-and-forget (retried in the background, never
+      // awaited by the listener itself — see `persistSessionUpdate`'s own
+      // definition), so it can genuinely land a tick or two later.
+      await waitForCondition(async () => {
+        const session = await bureau.getSession(sessionId);
+        return session?.metadata['lastRunStatus'] === 'error';
+      }, 'errored session metadata was not persisted after the durable write failure');
+
+      const session = await bureau.getSession(sessionId);
+      expect(session?.metadata['lastRunStatus']).toBe('error');
+      expect(session?.metadata['lastRunId']).toBeDefined();
+
+      // A clean shutdown with nothing unresolved proves the run was
+      // genuinely unregistered — a leaked `activeRuns`/`runToolboxes` entry
+      // would show up as an unresolved/incomplete owner in this report
+      // instead (see `BureauShutdownReport`).
+      const report = await bureau.shutdown();
+      expect(report.unresolved).toBe(0);
+      expect(report.failed).toBe(0);
+    } finally {
+      await bureau.dispose().catch(() => {});
+    }
+  });
+
+  it('keeps runAttribution for a run whose durable workflow write failed AFTER registration — its real owner is not locked out of its own event history (AB-361 review PRRT_kwDORvupsc6ga0TX)', async () => {
+    // Same gated-storage failure shape as the sibling test above, but this
+    // one supplies a `principal` on the request and asserts on the
+    // AUTHORIZATION consequence, not just cleanup: before the review fix,
+    // `createRunFromRequest`'s catch block applied the SAME
+    // `runAttribution.delete(runId)` cleanup to this case as it does to a
+    // run that never reached `store.register` at all — but this run DID
+    // reach `store.register`, so it is already a terminal FAILED run
+    // visible via `listRuns()`/`getRun()`. Wiping its attribution made
+    // `resolveEventHistory()`'s fail-closed check indistinguishable from a
+    // deleted or genuinely-unattributed run, so the run's REAL owner
+    // (the exact principal that created it) got `not-found` for its own
+    // failed run's event history — the fail-closed check meant to protect
+    // against imposters, misapplied to lock out the legitimate owner.
+    //
+    // SQLite, not memory: `bureau.eventHistory()` only exists when
+    // `persistentDurableStorage` is set, which gates on the storage
+    // backend's own declared `capabilities().persistence !== 'ephemeral'`
+    // — the in-memory backend the sibling test above uses is ephemeral, so
+    // this test needs a genuinely persistent backend to exercise it.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-ab-361-review-attribution-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const realStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
+    const startFailure = new Error('AB-361 review: durable write persistence failure');
+    const gatedStorage = new Proxy(realStorage, {
+      get(target, property, receiver) {
+        if (property === 'batch') {
+          return async (operations: Parameters<typeof realStorage.batch>[0]) => {
+            const isWorkflowStartWrite = operations.some(
+              (operation) => operation.type === 'put' && operation.key.startsWith('wf:'),
+            );
+            if (isWorkflowStartWrite) {
+              throw startFailure;
+            }
+            return target.batch(operations);
+          };
+        }
+        const value: unknown = Reflect.get(target, property, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    const bureau = await createBureau({
+      agents: {},
+      generate: () => new Promise<never>(() => {}),
+      toolbox: createEmptyToolbox(),
+      storage: gatedStorage,
+      durableExecution: true,
+    });
+
+    try {
+      const sessionId = 'ab-361-review-attribution-preserved';
+      let runId: string | undefined;
+      const error = await bureau
+        .createRun({
+          message: 'AB-361 review: engine.start rejects, principal must survive',
+          sessionId,
+          principal: 'the-real-owner',
+        })
+        .catch((caught: unknown) => {
+          // `createRun` rejects before returning a `RunSummary`, so the
+          // run's id is recovered from the errored session metadata below
+          // instead of the (never-returned) resolved value.
+          return caught;
+        });
+      expect(error).toBeInstanceOf(Error);
+
+      await waitForCondition(async () => {
+        const session = await bureau.getSession(sessionId);
+        runId = session?.metadata['lastRunId'] as string | undefined;
+        return session?.metadata['lastRunStatus'] === 'error' && runId !== undefined;
+      }, 'errored session metadata was not persisted after the durable write failure');
+      if (runId === undefined) throw new Error('expected lastRunId on the errored session');
+
+      // The run's REAL owner, supplying the SAME principal the request
+      // used, must NOT be locked out — this is the assertion that failed
+      // before the review fix (it returned `{ outcome: 'not-found' }`).
+      const ownedOutcome = await bureau.eventHistory(
+        { kind: 'run', id: runId },
+        { principal: 'the-real-owner' },
+      );
+      expect(ownedOutcome).not.toEqual({ outcome: 'not-found' });
+
+      // An unrelated caller supplying a DIFFERENT principal is still
+      // correctly denied — this fix restores attribution, it does not
+      // disable the authorization check.
+      const strangerOutcome = await bureau.eventHistory(
+        { kind: 'run', id: runId },
+        { principal: 'someone-else' },
+      );
+      expect(strangerOutcome).toEqual({ outcome: 'not-found' });
+
+      const report = await bureau.shutdown();
+      expect(report.unresolved).toBe(0);
+      expect(report.failed).toBe(0);
+    } finally {
+      await bureau.dispose().catch(() => {});
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
   it("reattaches a catalog-dispatched bureau.run() across a process restart, rebuilding deps from the catalog agent's OWN OPERATIVE_RESOLVE_RUN_OPTIONS (AB-240)", async () => {
     // Same cross-process proof as the interactive-run recovery test above,
     // but through `bureau.run(name, input)` — a catalog dispatch, which has

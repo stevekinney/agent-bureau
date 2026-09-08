@@ -697,6 +697,51 @@ export function createDurableActiveRun(
   // in — captured once, before `drive()` runs — tells the two cases apart.
   const neverLaunched = { value: false };
 
+  // AB-361: settles `durablyStarted` (below) exactly once, from inside
+  // `driveDurableRun` — resolved the moment `context.engine.start(...)`
+  // durably commits this run's initial workflow record (or, on a path that
+  // never reaches that call at all — `startError`/`abortedBeforeDrive` —
+  // resolved immediately, since there is then no durable write to await),
+  // rejected on any failure that precedes that commit. Never called twice:
+  // each `driveDurableRun` invocation reaches exactly one of its call sites
+  // for these callbacks.
+  //
+  // AB-361 review (codex P2 PRRT_kwDORvupsc6gXHn8): split into two
+  // functions rather than one `(error?: unknown) => void` discriminated on
+  // `error !== undefined`. That discriminator resolved the gate on a
+  // rejection value of literal `undefined` (e.g. `engine.start` rejecting
+  // with no reason, or a caller's `onServices` doing `throw undefined`) —
+  // silently reporting success for a durable write that never happened.
+  // `rejectDurablyStarted` is unconditional: every call site that reaches
+  // it is, by construction, a failure.
+  let resolveDurablyStarted!: () => void;
+  let rejectDurablyStarted!: (error: unknown) => void;
+  const durablyStarted = new Promise<void>((resolve, reject) => {
+    // The Promise executor runs synchronously, so both callbacks are
+    // assigned before this constructor call returns — no dead initial value
+    // is ever needed (and, unlike a placeholder `() => {}` default, none is
+    // ever left uncalled for coverage to flag).
+    resolveDurablyStarted = resolve;
+    rejectDurablyStarted = (error: unknown) => {
+      // A caller that awaits `durablyStarted` sees exactly whatever the
+      // failing call itself rejected/threw with when it was already an
+      // `Error`; a non-`Error` value (rare — Weft always rejects with a
+      // real `Error`) is wrapped via `AgentRunError`'s own unknown-error
+      // formatter rather than a bare `String(error)`, satisfying
+      // `prefer-promise-reject-errors` without risking `[object Object]`.
+      // This wrap treats `undefined`/`null` the same as any other
+      // non-`Error` value — it does not special-case them into a resolve.
+      reject(error instanceof Error ? error : toAgentRunError(error));
+    };
+  });
+  // A caller of `createActiveRun` is not obligated to read `durablyStarted`
+  // — only `createRunFromRequest`'s durable branch does. Without this, a
+  // rejecting `engine.start` (e.g. a genuine persistence failure) would
+  // surface as an unhandled rejection for every OTHER durable caller
+  // (scheduler, session-handle, tests) that never awaits this field. A
+  // caller that DOES await it still observes the rejection normally.
+  durablyStarted.catch(() => {});
+
   function drive(abortedBeforeDrive: boolean): Promise<RunResult> {
     neverLaunched.value = abortedBeforeDrive;
     return driveDurableRun(
@@ -715,6 +760,8 @@ export function createDurableActiveRun(
       (toolbox) => toolboxForwarder.onStepToolbox(toolbox),
       runtime,
       hookTracker,
+      resolveDurablyStarted,
+      rejectDurablyStarted,
     );
   }
 
@@ -993,6 +1040,7 @@ export function createDurableActiveRun(
     result,
     abort,
     closed,
+    durablyStarted,
     addEventListener: emitter.addEventListener.bind(emitter),
     removeEventListener: emitter.removeEventListener.bind(emitter),
     on: emitter.on.bind(emitter),
@@ -1443,6 +1491,9 @@ export function reattachDurableActiveRun(
     result,
     abort,
     closed,
+    // AB-361: a reattached/recovered run's durable record was committed
+    // before this process even started — nothing left to await.
+    durablyStarted: Promise.resolve(),
     addEventListener: emitter.addEventListener.bind(emitter),
     removeEventListener: emitter.removeEventListener.bind(emitter),
     on: emitter.on.bind(emitter),
@@ -1755,6 +1806,13 @@ async function driveDurableRun(
   onStepToolbox: ((toolbox: AnyToolbox) => void) | undefined,
   runtime: RuntimeServices,
   hookTracker: (promise: Promise<unknown>) => void,
+  // AB-361: settles `ActiveRun.durablyStarted` — see that field's doc
+  // comment and `createDurableActiveRun`'s own comment on these callbacks
+  // for the call sites that reach them. Split resolve/reject (AB-361
+  // review, PRRT_kwDORvupsc6gXHn8) so no failure value — including a
+  // literal `undefined` throw/rejection — can be mistaken for success.
+  resolveDurablyStarted: () => void,
+  rejectDurablyStarted: (error: unknown) => void,
 ): Promise<RunResult> {
   const runStartTime = runtime.monotonic.now();
   const { hooks } = options;
@@ -1766,8 +1824,50 @@ async function driveDurableRun(
   // RunStartedEvent + onRunStart (an onRunStart error aborts the run) —
   // fired identically whether or not this run was already aborted before
   // dispatch: a caller listening for these events must still see them.
-  const startError = await startRunLifecycle(options, conversation, emitter);
+  //
+  // AB-361 review (codex P2 PRRT_kwDORvupsc6gXHn4): `startRunLifecycle`
+  // itself CAN reject, and the prior rationale here (that native
+  // `EventTarget` dispatch isolates a listener's throw) was wrong for this
+  // `emitter`. `emitter` is a `CompletableEventTarget`
+  // (`packages/lifecycle/src/completable.ts`), whose overridden
+  // `dispatchEvent` calls the native dispatch first (which does isolate a
+  // native `addEventListener` throw, per spec) and THEN loops every
+  // `toObservable()`/`subscribe()` subscriber directly, unguarded. A
+  // synchronous throw from one of those observable subscribers propagates
+  // straight out of `dispatch()` — and thus out of `startRunLifecycle`'s
+  // own `emitter?.dispatch(new RunStartedEvent(...))` call — before this
+  // function ever reaches its `startError !== undefined` check. No durable
+  // write is attempted on this path either, so `durablyStarted` rejects
+  // with that same error instead of hanging forever.
+  let startError: unknown;
+  try {
+    startError = await startRunLifecycle(options, conversation, emitter);
+  } catch (error) {
+    rejectDurablyStarted(error);
+    return makeErrorResult(
+      emptyRunState(),
+      conversation,
+      hooks,
+      emitter,
+      terminalErrorFromEvent ?? toAgentRunError(error),
+      options.costEstimation,
+      undefined,
+      hookTracker,
+    );
+  }
   if (startError !== undefined) {
+    // AB-361: no `context.engine.start` call is ever reached on this path —
+    // there is no durable write for `durablyStarted` to await, so resolve
+    // it immediately (success: cleanup here consisted of never durably
+    // launching at all, mirroring `abortedBeforeDrive` below). See AB-34's
+    // started-work control contract: this branch's `RunResult` (an
+    // already-terminal `finishReason: 'error'`, dispatched synchronously
+    // below via `RunCompletedEvent`, before this identifier is ever handed
+    // to a caller) settles the run completely before any identifier is
+    // returned — there is no in-flight durable work for a restart to find
+    // or fail to find. `durablyStarted` gates only on whether a durable
+    // launch was attempted, not on whether the run ultimately succeeded.
+    resolveDurablyStarted();
     return makeErrorResult(
       emptyRunState(),
       conversation,
@@ -1787,6 +1887,9 @@ async function driveDurableRun(
   // terminal branch below uses, so `run.aborted` fires (and, per AC1,
   // `onRunAbort`) exactly as it would for an ordinary abort.
   if (abortedBeforeDrive) {
+    // AB-361: same reasoning as the `startError` branch above — no durable
+    // write was ever attempted.
+    resolveDurablyStarted();
     return finalizeRunResult({
       finishReason: 'aborted',
       runState: emptyRunState(),
@@ -1825,28 +1928,80 @@ async function driveDurableRun(
     emitter,
     onStepToolbox,
   };
-  // Give the caller a live reference to the EXACT object Weft will hand back as
-  // `ctx.services` — see `DurableActiveRunOptions.onServices`. Must fire before
-  // `engine.start` so a tool the caller wired against this reference (e.g.
-  // `requestHumanInput`) can mutate it the moment `runStep` executes.
-  onServices?.(services);
+  // AB-361 review (copilot PRRT_kwDORvupsc6gWb3a, codex P2 PRRT_kwDORvupsc6gWc39):
+  // both `onServices` (a caller-supplied callback — genuinely reachable
+  // synchronous throw) and `context.engine.start` itself (a real
+  // persistence failure, e.g. disk-full) sit BEFORE the durable write
+  // `durablyStarted` gates on, and both need to settle that gate with the
+  // failure rather than leave a caller (bureau's `createRunFromRequest`)
+  // awaiting it forever. Unlike the `startError`/`abortedBeforeDrive`
+  // branches above, this failure happens AFTER `store.register` would have
+  // run on the bureau side, so it is routed through the SAME
+  // `makeErrorResult` helper those branches use — that dispatches
+  // `RunCompletedEvent` synchronously, which is what bureau's own
+  // `run.completed` listener needs to fire and clean up the run's
+  // registration and persist its terminal session state. A raw rethrow
+  // here would leave `result` rejecting with no terminal event ever
+  // dispatched, so a caller relying on event-driven cleanup (exactly what
+  // bureau's `createRunFromRequest` does) would leak the run forever.
+  //
+  // (Correction, AB-361 review PRRT_kwDORvupsc6gXHn4: an earlier version of
+  // this comment claimed `startRunLifecycle`'s own
+  // `emitter.dispatch(new RunStartedEvent(...))` could not reject, on the
+  // theory that native `EventTarget.dispatchEvent` isolates a listener's
+  // throw. That is true for a plain `EventTarget`/native `addEventListener`
+  // subscriber, but `emitter` is a `CompletableEventTarget`
+  // (`packages/lifecycle/src/completable.ts`), whose overridden
+  // `dispatchEvent` calls every `toObservable()`/`subscribe()` observable
+  // subscriber directly, unguarded, after the native dispatch returns — a
+  // throw there DOES propagate out of `dispatch()` and out of
+  // `startRunLifecycle`. See the `try`/`catch` around the
+  // `startRunLifecycle` call above, which now covers exactly that gap.)
+  let handle: Awaited<ReturnType<typeof context.engine.start>>;
+  try {
+    // Give the caller a live reference to the EXACT object Weft will hand
+    // back as `ctx.services` — see `DurableActiveRunOptions.onServices`.
+    // Must fire before `engine.start` so a tool the caller wired against
+    // this reference (e.g. `requestHumanInput`) can mutate it the moment
+    // `runStep` executes.
+    onServices?.(services);
 
-  const handle = await context.engine.start(
-    'agentRun',
-    {
-      runId,
-      sessionId,
-      // F2: thread agentName into the durable input so boot recovery can
-      // identify which agent ran this workflow without reading the session store.
-      agentName,
-      prompt,
-      maximumSteps: options.maximumSteps,
-    },
-    {
-      id: runId,
-      services,
-    },
-  );
+    // `engine.start(...)` is the write `ActiveRun.durablyStarted` exists to
+    // gate on — settled the moment this call itself settles, NOT when
+    // `handle.result()` later settles (that's the run's own completion, a
+    // wholly separate promise `result` above already tracks). A caller
+    // awaiting `durablyStarted` only ever waits for THIS commit, never for
+    // the run to finish.
+    handle = await context.engine.start(
+      'agentRun',
+      {
+        runId,
+        sessionId,
+        // F2: thread agentName into the durable input so boot recovery can
+        // identify which agent ran this workflow without reading the session store.
+        agentName,
+        prompt,
+        maximumSteps: options.maximumSteps,
+      },
+      {
+        id: runId,
+        services,
+      },
+    );
+  } catch (error) {
+    rejectDurablyStarted(error);
+    return makeErrorResult(
+      emptyRunState(),
+      conversation,
+      hooks,
+      emitter,
+      terminalErrorFromEvent ?? toAgentRunError(error),
+      options.costEstimation,
+      undefined,
+      hookTracker,
+    );
+  }
+  resolveDurablyStarted();
 
   let summary: AgentRunWorkflowResult;
   try {
