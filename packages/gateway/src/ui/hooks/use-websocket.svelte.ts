@@ -1,7 +1,10 @@
+import { DEFAULT_HEARTBEAT_INTERVAL_MS } from '../../heartbeat';
 import type { ClientFrame, ServerFrame } from '../../types';
 import {
+  clearScheduledInterval,
   clearScheduledTimeout,
   type GatewayClientEnvironment,
+  scheduleInterval,
   scheduleTimeout,
   type TimeoutHandle,
 } from '../client-environment';
@@ -14,6 +17,16 @@ export interface CreateWebSocketOptions {
   authToken?: string;
   onMessage?: (frame: ServerFrame) => void;
   reconnectInterval?: number;
+  /**
+   * Cadence, in milliseconds, for the application-level `ping` this store
+   * sends while the WebSocket is open (AB-299) — feeds the server's
+   * connection watchdog real peer-reachability evidence, which a bare
+   * transport keepalive cannot. Defaults to
+   * {@link DEFAULT_HEARTBEAT_INTERVAL_MS}, the same cadence the server's
+   * `LiveFrameBroker` defaults its own watchdog policy to, so the two sides
+   * agree on a cadence without an explicit handshake.
+   */
+  heartbeatIntervalMs?: number;
   /** Transport and timer primitives, injected rather than read off globals. */
   environment: GatewayClientEnvironment;
 }
@@ -80,6 +93,7 @@ export function createWebSocket({
   authToken,
   onMessage,
   reconnectInterval = 3000,
+  heartbeatIntervalMs = DEFAULT_HEARTBEAT_INTERVAL_MS,
   environment,
 }: CreateWebSocketOptions): WebSocketStore {
   let status = $state<ConnectionStatus>('disconnected');
@@ -88,6 +102,7 @@ export function createWebSocket({
   let ws: WebSocket | null = null;
   let eventSource: EventSource | null = null;
   let reconnectTimer: TimeoutHandle | null = null;
+  let pingTimer: TimeoutHandle | null = null;
   let active = false;
   const desiredRunIds = new Set<string>();
   let shouldUseEventStream = false;
@@ -150,12 +165,31 @@ export function createWebSocket({
   function closeWebSocket(): void {
     ws?.close();
     ws = null;
+    clearPingTimer();
   }
 
   function clearReconnectTimer(): void {
     if (reconnectTimer !== null) {
       clearScheduledTimeout(environment, reconnectTimer);
       reconnectTimer = null;
+    }
+  }
+
+  /**
+   * Stops the application-level ping this store sends while a WebSocket is
+   * open (AB-299). Cleared here on every path that ends the connection —
+   * `closeWebSocket()` (covers `stop()`), the socket's own `close` event
+   * (a remote-initiated close, which doesn't go through
+   * `closeWebSocket()`), and defensively at the top of `connect()` — so a
+   * stopped or reconnecting store never leaks a ping into a closed or
+   * about-to-be-replaced socket. Never started for the SSE fallback: SSE
+   * has no client-to-server send path, so an application-level ping isn't
+   * possible over it.
+   */
+  function clearPingTimer(): void {
+    if (pingTimer !== null) {
+      clearScheduledInterval(environment, pingTimer);
+      pingTimer = null;
     }
   }
 
@@ -207,6 +241,7 @@ export function createWebSocket({
 
   function connect(): void {
     clearReconnectTimer();
+    clearPingTimer();
 
     if (!active) {
       return;
@@ -240,6 +275,21 @@ export function createWebSocket({
         );
       }
 
+      // AB-299: application-level ping, giving the server's connection
+      // watchdog real peer-reachability evidence rather than the
+      // transport-level keepalive alone. Only while this socket stays
+      // open — a closed/replaced socket never has a stale ping fire
+      // against it, since `readyState` is checked on every tick.
+      pingTimer = scheduleInterval(
+        environment,
+        () => {
+          if (socket.readyState === environment.WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: 'ping' } satisfies ClientFrame));
+          }
+        },
+        heartbeatIntervalMs,
+      );
+
       if (active) {
         status = 'connected';
       }
@@ -261,6 +311,7 @@ export function createWebSocket({
       }
 
       ws = null;
+      clearPingTimer();
 
       if (!opened && !websocketConnected) {
         shouldUseEventStream = true;

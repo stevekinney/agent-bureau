@@ -125,8 +125,8 @@ describe('createWebSocketHandler — message routing', () => {
   });
 });
 
-describe('createWebSocketHandler — connection watchdog pulses (AB-219)', () => {
-  it('records a transport-keepalive pulse when the client sends ping', () => {
+describe('createWebSocketHandler — connection watchdog pulses (AB-219, AB-299)', () => {
+  it('records a host-reachability pulse when the client sends an application-level ping', () => {
     const broker = new LiveFrameBroker();
     const handler = createWebSocketHandler({ broker });
     const { ws, sent } = createFakeWebSocket();
@@ -141,7 +141,7 @@ describe('createWebSocketHandler — connection watchdog pulses (AB-219)', () =>
 
     const evidence = broker.getConnectionRegistry().get(key)?.snapshot().evidence;
     expect(evidence).toHaveLength(1);
-    expect(evidence?.[0]?.source).toBe('transport-keepalive');
+    expect(evidence?.[0]?.source).toBe('host-reachability');
     expect(sent).toEqual([JSON.stringify({ type: 'pong' })]);
   });
 });

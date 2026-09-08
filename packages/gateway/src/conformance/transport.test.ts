@@ -919,9 +919,10 @@ describe('Gateway transport conformance — Bun runtime', () => {
     // and records a fresh `transport-keepalive` pulse on every tick,
     // which would refresh the watchdog's activity clock as we advance
     // past it and mask exactly the thing this test wants to prove.
-    // WebSocket has no such server-driven interval — a keepalive pulse is
-    // only recorded when the client sends a `ping` frame — so a socket
-    // that never pings is a clean, timer-free surface for the watchdog's
+    // WebSocket has no such server-driven interval — a pulse is only
+    // recorded when the client sends a `ping` frame (host-reachability,
+    // AB-299) — so a socket that never pings is a clean, timer-free
+    // surface for the watchdog's
     // own check math.
     const ws = await gateway.openWebSocket(`/ws?token=${gateway.authToken}`);
     try {
