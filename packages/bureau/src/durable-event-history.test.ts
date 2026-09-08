@@ -556,6 +556,34 @@ describe('createDurableEventHistory', () => {
       await history.dispose();
     });
 
+    it('mutates the SAME underlying owner set in place rather than cloning it on every call (Codex review, PR #579, "Stop copying the full owner set on every refresh")', async () => {
+      const storage = await createMemoryStorage();
+      const runtime = createManualRuntimeServices();
+      const history = createDurableEventHistory(storage, runtime);
+
+      await history.record({ kind: 'run', id: 'sacrifice' }, 'run.started', {}); // sequence 0
+      await history.record({ kind: 'run', id: 'run-1' }, 'run.started', {}); // sequence 1
+
+      const adminFeed: FleetEventFeed = createFleetEventFeed(storage);
+      await adminFeed.retain({ beforeSequence: 1 });
+
+      const snapshot = await history.retainedRunOwnerIds();
+      if (!snapshot) throw new Error('expected a snapshot');
+
+      const firstRefresh = await history.refreshRetainedRunOwnerIds(snapshot);
+      // Referentially the SAME object as `snapshot.ownerIds` — proof the
+      // refresh mutated it in place instead of allocating a fresh `Set`
+      // copy of every retained owner on this call.
+      expect(firstRefresh.ownerIds).toBe(snapshot.ownerIds);
+
+      const secondRefresh = await history.refreshRetainedRunOwnerIds(firstRefresh);
+      expect(secondRefresh.ownerIds).toBe(firstRefresh.ownerIds);
+      expect(secondRefresh.ownerIds).toBe(snapshot.ownerIds);
+
+      adminFeed.dispose();
+      await history.dispose();
+    });
+
     it('never rescans records the prior snapshot already walked — cost tracks NEW activity, not the size of the retained window', async () => {
       const backing = await createMemoryStorage();
       const { storage, scanCalls } = createScanCountingStorage(backing);

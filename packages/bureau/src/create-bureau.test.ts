@@ -14525,6 +14525,111 @@ describe('bureau.runDurableMaintenance prunes stale run ownership (AB-363)', () 
     }
   });
 
+  it('waits for an in-flight automatic pruning pass to finish before shutdown disposes the event history and storage (Codex review, PR #579, "Await running pruning passes before backend teardown")', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-run-ownership-prune-automatic-shutdown-race-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('Done.'),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'sqlite', path: databasePath },
+      runtime,
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'A', principal: 'alice' });
+      await waitForRunCompletion(bureau, run.id);
+      await runtime.deferred.drain();
+
+      const page = await bureau.eventHistory({ kind: 'run', id: run.id });
+      if ('outcome' in page) throw new Error('expected a page for the run');
+      const lastEventBeforeDeletion = page.events.at(-1);
+      if (!lastEventBeforeDeletion) throw new Error('expected at least one durable event');
+      await bureau.deleteRun(run.id);
+      const deletedOutcome = await bureau.eventHistory(
+        { kind: 'run', id: run.id },
+        { since: lastEventBeforeDeletion.cursor },
+      );
+      if (!('outcome' in deletedOutcome) || deletedOutcome.outcome !== 'deleted-aggregate') {
+        throw new Error(
+          `expected a deleted-aggregate outcome after deletion, got ${JSON.stringify(deletedOutcome)}`,
+        );
+      }
+      const lastEvent = deletedOutcome.events.at(-1);
+      if (!lastEvent) throw new Error('expected a run.removed durable event');
+
+      const adminStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
+      const adminFeed = createFleetEventFeed(adminStorage);
+      await adminFeed.retain({ beforeSequence: lastEvent.sequence + 1 });
+      adminFeed.dispose();
+      adminStorage[Symbol.dispose]();
+
+      // Blocks the pruning pass mid-flight, inside its own
+      // `sessionStore.update()` callback — deliberately AFTER the
+      // candidate check but before the write actually lands — so
+      // `bureau.shutdown()` is called while a real write is genuinely
+      // still in progress, not merely queued.
+      let releasePass!: () => void;
+      const passGate = new Promise<void>((resolve) => {
+        releasePass = resolve;
+      });
+      const sessionStore = bureau.sessionStore;
+      if (!sessionStore) throw new Error('expected a configured session store');
+      const originalUpdate = sessionStore.update.bind(sessionStore);
+      const updateSpy = spyOn(sessionStore, 'update').mockImplementationOnce(
+        async (id: string, updater: Parameters<typeof originalUpdate>[1], opts) => {
+          await passGate;
+          return originalUpdate(id, updater, opts);
+        },
+      );
+
+      await runtime.advance(300_000);
+      await waitForCondition(
+        () => updateSpy.mock.calls.length >= 1,
+        'expected the pass to reach sessionStore.update()',
+      );
+
+      // Start shutdown WHILE the pass is blocked inside `update()`, then
+      // release the pass a macrotask later — if shutdown disposed
+      // `eventHistoryInstance`/storage before awaiting this pass, the
+      // pass's own write (or the shutdown's later teardown) would throw
+      // once released, and `shutdownPromise` would reject instead of
+      // resolving cleanly.
+      const shutdownPromise = bureau.shutdown();
+      let shutdownSettled = false;
+      void shutdownPromise.then(() => {
+        shutdownSettled = true;
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(shutdownSettled).toBe(false);
+
+      releasePass();
+      updateSpy.mockRestore();
+      await shutdownPromise;
+
+      // Read back through a FRESH store instance (bureau's own storage is
+      // disposed post-shutdown) — the write the pass was blocked inside of
+      // actually completed, proving shutdown genuinely waited for it
+      // rather than disposing around it.
+      const verifyStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
+      const verifySessionStore = createSessionStore(
+        textValueStore(verifyStorage, { disposeUnderlyingStorage: false }),
+      );
+      const session = await verifySessionStore.load(run.sessionId);
+      expect(session?.metadata['lastRunOwningPrincipals']).toBeUndefined();
+      verifyStorage[Symbol.dispose]();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
   it('never starts the automatic pruning timer under durableBackgroundTasks: "manual" — a manual host drives pruning only through its own runDurableMaintenance() calls', async () => {
     const databasePath = join(
       tmpdir(),

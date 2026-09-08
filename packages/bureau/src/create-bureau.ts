@@ -5128,17 +5128,36 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // a separate boolean tracks whether the timer was actually started.
   let automaticRunOwnershipPruneTimer: RuntimeTimeoutHandle;
   let automaticRunOwnershipPruneTimerStarted = false;
-  // Guards against overlapping passes (Copilot review, PR #579): if a pass
-  // ever takes longer than the interval — many sessions, slow storage, a
-  // conflict-retry storm — the next tick must skip rather than start a
-  // SECOND concurrent `pruneStaleRunOwnership()` call piling on extra I/O
-  // and `sessionStore.update()` contention against the first.
-  let automaticRunOwnershipPruneInFlight = false;
+  // Holds the CURRENTLY in-flight pass's own promise, or `undefined`
+  // between ticks. Serves two purposes:
+  //
+  // 1. Guards against overlapping passes (Copilot review, PR #579,
+  //    "Prevent overlapping automatic pruning passes"): if a pass ever
+  //    takes longer than the interval — many sessions, slow storage, a
+  //    conflict-retry storm — the next tick must skip rather than start a
+  //    SECOND concurrent `pruneStaleRunOwnership()` call piling on extra
+  //    I/O and `sessionStore.update()` contention against the first.
+  // 2. Lets `shutdown()` AWAIT a pass that is still running when shutdown
+  //    is admitted (Codex review, PR #579, "Await running pruning passes
+  //    before backend teardown") — `clearInterval` alone only stops
+  //    FUTURE ticks; without this, shutdown could dispose
+  //    `eventHistoryInstance` and the raw storage while this promise is
+  //    still replaying the feed or mid-`sessionStore.update()`.
+  //
+  // Deliberately NOT run through `runtimeServices.deferred.track()`
+  // (an earlier revision did): that seam's `tracked` map is only ever
+  // drained by an explicit `deferred.drain()` call, which nothing in
+  // production ever makes — every 5-minute tick would have permanently
+  // grown that map for the life of the process (Codex review, PR #579,
+  // "Bound deferred tracking for recurring passes"). This local variable
+  // gives a `createManualRuntimeServices()` test everything `drain()`
+  // would have (something to await after `runtime.advance()`) without
+  // that unbounded growth.
+  let automaticRunOwnershipPruneCurrentPass: Promise<void> | undefined;
   if (runtime.durable && options.durableBackgroundTasks !== 'manual') {
     automaticRunOwnershipPruneTimerStarted = true;
     automaticRunOwnershipPruneTimer = runtimeServices.timers.setInterval(() => {
-      if (automaticRunOwnershipPruneInFlight) return;
-      automaticRunOwnershipPruneInFlight = true;
+      if (automaticRunOwnershipPruneCurrentPass) return;
       const pass = pruneStaleRunOwnership()
         .catch((error: unknown) => {
           diagnose({
@@ -5149,16 +5168,9 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           });
         })
         .finally(() => {
-          automaticRunOwnershipPruneInFlight = false;
+          automaticRunOwnershipPruneCurrentPass = undefined;
         });
-      // Tracked (AB-260's `RuntimeServices.deferred` seam), not merely
-      // detached: a `createManualRuntimeServices()` test drives this timer
-      // via `runtime.advance(...)`, which only awaits ONE microtask tick
-      // per fired callback — nowhere near enough for this pass's real
-      // async work (storage reads, `sessionStore.update()`). Tracking lets
-      // such a test await completion deterministically with
-      // `runtime.deferred.drain()`.
-      runtimeServices.deferred.track(pass, 'automatic-run-ownership-prune');
+      automaticRunOwnershipPruneCurrentPass = pass;
       detachBestEffortPromise(pass);
     }, AUTOMATIC_RUN_OWNERSHIP_PRUNE_INTERVAL_MS);
   }
@@ -6555,11 +6567,21 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // drop the very `run.aborted`/`tool.*` records this shutdown produces).
       backgroundShutdownController.abort();
       // AB-363: stop the automatic-profile run-ownership pruning timer, if
-      // one was started — otherwise it fires against a disposed
-      // `sessionStore`/`eventHistoryInstance` for the life of the process.
+      // one was started — `clearInterval` alone only cancels FUTURE ticks,
+      // so a pass already in flight is also awaited here, before the
+      // `eventHistoryInstance`/storage disposal further down this same
+      // shutdown runs — otherwise that disposal could race an in-flight
+      // pass still replaying the feed or mid-`sessionStore.update()`
+      // (Codex review, PR #579, "Await running pruning passes before
+      // backend teardown"). `pruneStaleRunOwnership()`'s own promise chain
+      // already `.catch()`es every failure before this point, so awaiting
+      // it here never throws.
       if (automaticRunOwnershipPruneTimerStarted) {
         runtimeServices.timers.clearInterval(automaticRunOwnershipPruneTimer);
         automaticRunOwnershipPruneTimerStarted = false;
+      }
+      if (automaticRunOwnershipPruneCurrentPass) {
+        await automaticRunOwnershipPruneCurrentPass;
       }
 
       // All pre-teardown is BEST-EFFORT, and the whole body is under an OUTER

@@ -58,6 +58,7 @@ export type {
   DurableEventHistorySubscribeOptions,
   DurableEventProducer,
   DurableEventProducerOptions,
+  RetainedRunOwnerSnapshot,
 } from './durable-event-history';
 export {
   createDurableEventHistory,

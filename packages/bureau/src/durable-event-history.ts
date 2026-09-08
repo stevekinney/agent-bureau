@@ -589,10 +589,19 @@ export function createDurableEventHistory(
    * Shared scan body for both `retainedRunOwnerIds` and
    * `refreshRetainedRunOwnerIds`: resumes `feed.replay()` from
    * `fromCursor` (or the very start, when `undefined`), adding every `run`
-   * owner it walks to `owners` (mutated and returned in place — callers
-   * pass a fresh `Set` or a copy of a prior snapshot's, never the
-   * snapshot's own `ReadonlySet` reference). We don't decode the stored
-   * payload at all (unlike `page()`), since only the envelope's
+   * owner it walks to `owners`, MUTATED IN PLACE (Codex review, PR #579,
+   * "Stop copying the full owner set on every refresh") — callers pass
+   * the SAME underlying `Set` back on every refresh rather than a fresh
+   * clone of it, so the O(1)-per-new-record cost this cursor-resumed scan
+   * already achieves for storage reads is not immediately undone by an
+   * O(retained owners) clone on every call. This is safe only because
+   * every caller of `refreshRetainedRunOwnerIds` in this codebase
+   * processes ONE pruning pass at a time, sequentially, reassigning its
+   * own snapshot variable rather than comparing an old snapshot against a
+   * new one — see `pruneStaleRunOwnership`'s own doc comment
+   * (`create-bureau.ts`). Never share one `RetainedRunOwnerSnapshot`
+   * across two concurrent passes for this reason. We don't decode the
+   * stored payload at all (unlike `page()`), since only the envelope's
    * `workflowId` is needed and a corrupt/unrecognized `schemaVersion` on
    * some OTHER owner's record must never stop this scan. `cursor` is
    * captured from EVERY envelope, including one with no `workflowId`
@@ -633,7 +642,17 @@ export function createDurableEventHistory(
     // The floor is monotonically non-decreasing once above 0, so a
     // snapshot taken while it was already > 0 never needs a fresh
     // floor === 0 check here.
-    return scanRunOwnerIdsFrom(new Set(snapshot.ownerIds), snapshot.cursor);
+    //
+    // `snapshot.ownerIds` is publicly typed `ReadonlySet` so a CONSUMER of
+    // this interface cannot mutate it — but this module is the only place
+    // that ever constructs one, and it always constructs the underlying
+    // value as a real, mutable `Set` (see `scanRunOwnerIdsFrom` above and
+    // `retainedRunOwnerIds`'s `new Set()`). This cast reclaims that
+    // module-private knowledge to mutate the SAME object in place rather
+    // than cloning it — see this function's own doc comment on
+    // `scanRunOwnerIdsFrom` for why that clone would be a real cost, and
+    // why reusing it here is safe.
+    return scanRunOwnerIdsFrom(snapshot.ownerIds as Set<string>, snapshot.cursor);
   }
 
   function dispose(): Promise<void> {
