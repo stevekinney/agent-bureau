@@ -808,6 +808,38 @@ export interface BureauShutdownReport {
 }
 
 /**
+ * Returned by {@link Bureau.waitForRecovery}, modeled on
+ * {@link BureauShutdownReport}'s shape rather than a new report vocabulary
+ * (AB-242's decision record). Aggregates one boot recovery pass's outcome so
+ * a caller who wants to know whether recovery actually succeeded has a
+ * typed, awaitable answer instead of only a `scope: 'recovery'` diagnostic
+ * log line — recovery itself stays diagnostic-only: `createBureau()` never
+ * rejects on a `recoverDurableRuns()` failure, in whole or in part.
+ */
+export interface BureauRecoveryReport {
+  /**
+   * `'failed'` when {@link BureauRecoveryReport.batchFailure} is set (no
+   * handle was classified at all); otherwise `'partial'` when
+   * {@link BureauRecoveryReport.sweepFailure} is set or
+   * {@link BureauRecoveryReport.perRunFailures} is non-empty; otherwise
+   * `'clean'`. The `'skip'`, `'reattach'`, `'monitor'`, and
+   * `'reattach-version-mismatch'` per-run verdicts never change `outcome`.
+   */
+  readonly outcome: 'clean' | 'partial' | 'failed';
+  /** Set when the unconditional scheduler-residue sweep failed before `recoverAll()` ran. */
+  readonly sweepFailure?: { readonly message: string };
+  /** Set when `durable.engine.recoverAll()` itself threw, so no handle was classified at all. */
+  readonly batchFailure?: { readonly message: string };
+  /**
+   * One entry per handle whose verdict was `'cancel'` (`RecoveryRejectedEvent`),
+   * for a caller that wants the aggregate without re-deriving it from the
+   * event stream. Empty when every handle recovered, was skipped, or was
+   * monitor-only.
+   */
+  readonly perRunFailures: readonly { readonly runId: string; readonly reason: string }[];
+}
+
+/**
  * Per-call options accepted by {@link Bureau.run} — session/tracing/
  * attribution concerns that are properties of the CALL, not the agent (AB-15).
  * There is deliberately no `systemPrompt`, `maximumSteps`, or `maximumTokens`
@@ -1182,8 +1214,27 @@ export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
     validator: ((context: ToolRequestContext) => boolean | Promise<boolean>) | undefined,
   ): void;
 
-  /** Waits for any deferred durable recovery released by validator attachment. */
-  waitForRecovery?(): Promise<void>;
+  /**
+   * Waits for boot durable recovery to finish and resolves a typed
+   * {@link BureauRecoveryReport} describing its outcome.
+   *
+   * `createBureau()` returns once boot recovery has STARTED — `recoverAll()`
+   * has begun resuming recovered handles and each owned run has been
+   * registered — not once recovery, or the resumed runs themselves, have
+   * completed. A recovered run's first step can dispatch tool calls before a
+   * caller's own post-boot dependency wiring (webhook targets, event
+   * listeners, and the like) is ready. A caller who wires dependencies that
+   * a recovered run will use must either finish that wiring before calling
+   * `createBureau()`, or `await waitForRecovery()` before relying on it —
+   * awaiting the returned bureau alone is not enough.
+   *
+   * This is also the seam for deferred recovery: when a request-authority
+   * validator is attached after boot (the standard `createBureau()` then
+   * `createGateway()` sequence), recovery does not start until
+   * `setRequestAuthorityValidator()` is called, and `waitForRecovery()` is
+   * the only way to observe when that deferred pass finishes.
+   */
+  waitForRecovery?(): Promise<BureauRecoveryReport>;
 
   /**
    * Returns the current host-owned authority freshness check so transports can
