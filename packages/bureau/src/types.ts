@@ -1050,6 +1050,18 @@ export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
   deleteRun(id: string): Promise<void>;
 
   /**
+   * AB-369: every run `abortRun` has requested cancellation for but whose
+   * `activeRun.closed()` has not yet settled — the same `abortingRunIds`
+   * bookkeeping `abortRun` itself maintains, read publicly rather than
+   * inferred. `since` is the {@link RuntimeServices.clock} timestamp
+   * `abortRun` recorded when it first requested cancellation for that run.
+   * A run still listed here long after its abort should have settled is a
+   * genuine leak — {@link BureauQuiescenceReport} (`bureau/test`) surfaces
+   * it as a non-quiescent row.
+   */
+  listAbortingRuns(): readonly AbortingRun[];
+
+  /**
    * Read the durable engine's view of a run: its full {@link WorkflowState}
    * (status, step cursor, failure category, termination reason, timestamps).
    * Backed by `engine.get(runId)`. Returns `null` when the run is unknown to the
@@ -1599,6 +1611,16 @@ export interface EventHistoryDeletedAggregateOutcome extends DurableEventPage {
 }
 
 // ── API Request / Response Types ─────────────────────────────────────
+
+/**
+ * AB-369: a run `abortRun` requested cancellation for whose cleanup has not
+ * yet settled — one row per entry `abortRun`'s own `abortingRunIds`
+ * bookkeeping holds. See {@link Bureau.listAbortingRuns}.
+ */
+export interface AbortingRun {
+  readonly runId: string;
+  readonly since: number;
+}
 
 export interface RunSummary {
   id: string;

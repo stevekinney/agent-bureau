@@ -154,6 +154,7 @@ describe('assertBureauQuiescent / BureauTestHarness.close()', () => {
     expect(report.openStorageResources).toEqual([]);
     expect(report.incomplete).toEqual([]);
     expect(report.detached).toEqual([]);
+    expect(report.abortingRuns).toEqual([]);
   });
 
   it('close() is idempotent: a second call returns the exact same report without shutting down twice', async () => {
@@ -604,6 +605,7 @@ describe('assertBureauQuiescent / BureauTestHarness.close()', () => {
       pendingWebhookDeliveries: [],
       openStorageResources: [],
       durableAttempts: [],
+      abortingRuns: [{ runId: 'run-leaked-abort', since: 1_700_000_000_000 }],
       incomplete: [{ kind: 'scheduler', id: 'task-1', reason: 'unresolved' }],
       shutdownReport: {
         admissionClosed: true,
@@ -624,6 +626,53 @@ describe('assertBureauQuiescent / BureauTestHarness.close()', () => {
     expect(error.message).toContain('scheduler "task-1" (unresolved)');
     expect(error.message).toContain('Detached');
     expect(error.message).toContain('durable-owner "detached-run-1"');
+    expect(error.message).toContain('abortingRuns');
+    expect(error.message).toContain('run "run-leaked-abort"');
+  });
+
+  it('AB-369: names an aborted run whose closed() never settles, and reports non-quiescent', async () => {
+    // `bureau.createRun`/`abortRun` — not `harness.startRun` (`bureau.run`'s
+    // catalog dispatch path, tracked in `catalogRuns`, never
+    // `abortingRunIds`) — is the one path `abortRun`'s own bookkeeping
+    // covers. `generate` resolves its own `invoked` promise the instant
+    // it is actually called, then never settles and never checks its
+    // `AbortSignal` — a caller awaits `invoked` before calling `abortRun`,
+    // guaranteeing `generate` is genuinely in flight (rather than racing
+    // `abortRun` ahead of `createRun`'s own queued microtask ever reaching
+    // step 0, which would abort before `generate` is invoked at all and
+    // settle quickly instead of leaking). `closed()` awaits the same
+    // `result` the run's step loop never produces, so it never settles
+    // either, and the `abortingRunIds` entry `abortRun` recorded is never
+    // cleared.
+    let resolveInvoked: (() => void) | undefined;
+    const invoked = new Promise<void>((resolve) => {
+      resolveInvoked = resolve;
+    });
+    const harness = await harnessWithMemoryStorage({
+      generate: () => {
+        resolveInvoked?.();
+        return new Promise<never>(() => {});
+      },
+    });
+
+    const runSummary = await harness.bureau.createRun({ message: 'hello' });
+    const runId = runSummary.id;
+    await invoked;
+    harness.bureau.abortRun(runId);
+
+    try {
+      await harness.close();
+      throw new Error('expected close() to reject');
+    } catch (error) {
+      expect(error).toBeInstanceOf(BureauQuiescenceError);
+      const report = (error as BureauQuiescenceError).report;
+      expect(report.quiescent).toBe(false);
+      expect(report.abortingRuns).toHaveLength(1);
+      expect(report.abortingRuns[0]?.runId).toBe(runId);
+      expect(typeof report.abortingRuns[0]?.since).toBe('number');
+      expect((error as BureauQuiescenceError).message).toContain('abortingRuns');
+      expect((error as BureauQuiescenceError).message).toContain(`run "${runId}"`);
+    }
   });
 });
 

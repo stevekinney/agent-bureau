@@ -137,7 +137,7 @@ import {
 } from '@lostgradient/operative/test';
 
 import type { AgentDefinitions } from '../agent-catalog';
-import type { BureauShutdownOptions, BureauShutdownReport } from '../types';
+import type { AbortingRun, BureauShutdownOptions, BureauShutdownReport } from '../types';
 import type { BureauTestHarness } from './harness';
 
 /** One shutdown owner Bureau itself reported as `'unresolved'` — a bounded `timeoutMilliseconds` wait elapsed before its drain settled. */
@@ -153,8 +153,8 @@ export interface BureauIncompleteWork {
  * (`scope`, `quiescent`, `leaked`, `detached`) plus the Bureau-owned rows
  * AB-262 adds. `leaked` is the union of every row below (and whatever
  * `harness.scope` itself found leaked); `quiescent` is `true` only when
- * `leaked` is empty — `incomplete` work is reported but never promoted
- * into `leaked` (see the module doc).
+ * `leaked` is empty AND `abortingRuns` (AB-369) is empty — `incomplete`
+ * work is reported but never promoted into either (see the module doc).
  */
 export interface BureauQuiescenceReport {
   readonly scope: string;
@@ -171,6 +171,16 @@ export interface BureauQuiescenceReport {
   readonly pendingWebhookDeliveries: readonly LeakedResource[];
   readonly openStorageResources: readonly LeakedResource[];
   readonly durableAttempts: readonly LeakedResource[];
+  /**
+   * AB-369: every run `bureau.listAbortingRuns()` still names — `abortRun`
+   * requested cancellation for it, but its `activeRun.closed()` has not yet
+   * settled. Unlike `incomplete`, a non-empty row here DOES fold into
+   * `quiescent` (see below): a regression in `abortRun`'s own
+   * `abortingRunIds.delete(id)` cleanup grows this row by one entry per
+   * aborted run for the life of the process, and this is the one public
+   * surface that makes that leak observable at all.
+   */
+  readonly abortingRuns: readonly AbortingRun[];
   /** Owners `bureau.shutdown()` itself classified `'unresolved'` — see the module doc's "incomplete" distinction. */
   readonly incomplete: readonly BureauIncompleteWork[];
   /** The `BureauShutdownReport` `assertBureauQuiescent` awaited to build this report — kept for reproduction-artifact assembly (AB-263). */
@@ -221,6 +231,12 @@ function renderReport(report: BureauQuiescenceReport): string {
   if (other.length > 0) {
     lines.push('other leaked resource(s):');
     for (const leak of other) lines.push(renderLeak(leak));
+  }
+  if (report.abortingRuns.length > 0) {
+    lines.push('abortingRuns:');
+    for (const entry of report.abortingRuns) {
+      lines.push(`  - run "${entry.runId}" aborting since ${new Date(entry.since).toISOString()}`);
+    }
   }
   if (report.incomplete.length > 0) {
     lines.push(
@@ -323,6 +339,18 @@ export async function assertBureauQuiescent<D extends AgentDefinitions = AgentDe
 
   const shutdownReport = await bureau.shutdown(shutdownOptions);
 
+  // AB-369 review finding (PR #583): read AFTER `shutdown()` returns, never
+  // before. `shutdown()` aborts every still-active run directly
+  // (`activeRun.abort()`), never through `abortRun()` itself, so it never
+  // ADDS an `abortingRunIds` entry — but a well-behaved abort `abortRun`
+  // already requested CAN genuinely settle its `closed()` continuation
+  // while `shutdown()`'s own awaits (toolbox shutdown, backend teardown)
+  // are in flight. Reading before `shutdown()` would capture that entry
+  // and report a harness that settled cleanly during shutdown as
+  // non-quiescent; reading here reflects the set as it stands at the
+  // actual quiescence fence.
+  const abortingRuns: AbortingRun[] = [...bureau.listAbortingRuns()];
+
   // Read AFTER `shutdown()` returns (AB-322): a bounded call races a
   // still-draining owner's real work via `Promise.race` (`create-bureau.ts`'s
   // `shutdown()`), so the moment this call resolves is exactly when a
@@ -410,7 +438,7 @@ export async function assertBureauQuiescent<D extends AgentDefinitions = AgentDe
 
   return {
     scope: scopeReport.scope,
-    quiescent: leaked.length === 0,
+    quiescent: leaked.length === 0 && abortingRuns.length === 0,
     leaked,
     detached,
     activeRoots,
@@ -423,6 +451,7 @@ export async function assertBureauQuiescent<D extends AgentDefinitions = AgentDe
     pendingWebhookDeliveries,
     openStorageResources,
     durableAttempts,
+    abortingRuns,
     incomplete,
     shutdownReport,
   };

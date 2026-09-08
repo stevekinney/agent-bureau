@@ -1,6 +1,6 @@
 {
   "lifecycle-transition-tables": 0,
-  "cancellation-propagation": 3,
+  "cancellation-propagation": 0,
   "terminal-event-uniqueness": 0,
   "cleanup-ownership-resolution": 0
 }

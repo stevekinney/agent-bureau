@@ -1205,6 +1205,28 @@ async function main(): Promise<void> {
     reportObservation('gateway-shutdown-report', toJson(gatewayShutdownReport));
   }
 
+  // AB-369: `abortRun` (called above, on the `signal-parked`/`cancel` path)
+  // returns synchronously with the transitional `'aborting'` status — its
+  // `abortingRunIds` bookkeeping entry (now publicly readable via
+  // `listAbortingRuns()`) is not cleared until the run's `ActiveRun.closed()`
+  // continuation genuinely settles, several microtask ticks later.
+  // `harness.close()` below now observes a still-pending entry as a real,
+  // if transient, leak via `BureauQuiescenceReport.abortingRuns` — wait for
+  // every entry to clear here, at the very end of `main()`, rather than
+  // right after the `abortRun` call sites above: waiting there would delay
+  // past the point this fixture's own `stateAfterDecision`/`'cancellation-
+  // recorded'` marker logic expects the run to still read non-terminal,
+  // which the `killed at cancellation-recorded` scenario's kill point
+  // depends on (a well-behaved abort settling in-process is a real
+  // completion event, not a leak, but this fixture's protocol pacing needs
+  // it observed at the right point, not the earliest one).
+  await waitForCondition(
+    () => bureau.listAbortingRuns().length === 0,
+    'crash fixture: abortRun cleanup never settled before the quiescence check',
+    backend === 'lmdb' ? 400 : 5000,
+    backend === 'lmdb' ? realDelayYield : undefined,
+  );
+
   const report = await harness.close();
   reportObservation('shutdown-report', toJson(report.shutdownReport));
   reportObservation('quiescent', report.quiescent);
